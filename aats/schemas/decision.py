@@ -4,8 +4,12 @@ from datetime import datetime
 from typing import Literal
 
 from pydantic import Field
+from pydantic import BaseModel
 
 from aats.schemas.common import SchemaBase
+
+
+AIOperatingMode = Literal["baseline_only", "ai_advisory", "ai_blended", "ai_primary"]
 
 
 class DecisionContext(SchemaBase):
@@ -49,9 +53,46 @@ class AIMarketAssessment(SchemaBase):
     invalidation_conditions: list[str] = Field(default_factory=list)
     risk_tags: list[str] = Field(default_factory=list)
     rationale_summary: str
+    operating_mode: AIOperatingMode = "baseline_only"
+    provider_name: str = "baseline_fallback"
+    provider_request_id: str | None = None
+    provider_latency_ms: float | None = None
+    output_valid: bool = True
+    fallback_used: bool = False
+    fallback_reason: str | None = None
+    degraded: bool = False
+    calibrated_confidence: float = 0.0
+    evaluation_tags: list[str] = Field(default_factory=list)
     model_name: str
     model_version: str
     prompt_version: str
+
+
+class AIProviderAssessmentOutput(BaseModel):
+    regime: str
+    directional_edge: float
+    expected_volatility: float
+    confidence: float
+    uncertainty: float
+    expected_holding_horizon: str
+    invalidation_conditions: list[str] = Field(default_factory=list)
+    risk_tags: list[str] = Field(default_factory=list)
+    rationale_summary: str
+
+
+class AIDecisionEvaluation(SchemaBase):
+    decision_id: str
+    operating_mode: AIOperatingMode
+    provider_name: str
+    output_valid: bool
+    calibrated_confidence: float
+    fallback_used: bool = False
+    fallback_reason: str | None = None
+    degraded: bool = False
+    portfolio_snapshot_ref: str | None = None
+    reconciliation_ref: str | None = None
+    reconciliation_severity: str | None = None
+    observed_total_equity: float | None = None
 
 
 class AIActionProposal(SchemaBase):

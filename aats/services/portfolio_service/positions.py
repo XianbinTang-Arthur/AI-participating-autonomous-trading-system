@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
 
-from aats.bootstrap.logging import get_logger, log_event
+from aats.bootstrap.logging import correlation_fields, get_logger, log_event
 from aats.bootstrap.metrics import MetricsRegistry
 from aats.bus.base import EventBus
 from aats.events import topics
@@ -189,12 +189,16 @@ class PortfolioService:
         log_event(
             self.logger,
             "fill_applied",
-            decision_id=fill.decision_id,
-            fill_id=fill.fill_id,
-            symbol=fill.symbol,
-            ending_quantity=result.ending_quantity,
-            realized_pnl_delta=result.realized_pnl_delta,
-            fee_delta=result.fee_delta,
+            **correlation_fields(
+                decision_id=fill.decision_id,
+                intent_id=fill.intent_id,
+                order_id=fill.client_order_id,
+                fill_id=fill.fill_id,
+                symbol=fill.symbol,
+                ending_quantity=result.ending_quantity,
+                realized_pnl_delta=result.realized_pnl_delta,
+                fee_delta=result.fee_delta,
+            ),
         )
         snapshot = self.snapshot_builder.build(
             state=self.state,

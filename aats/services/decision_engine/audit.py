@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from aats.bootstrap.logging import get_logger, log_event
+from aats.bootstrap.logging import correlation_fields, get_logger, log_event
 from aats.bus.base import EventBus
 from aats.events import topics
 from aats.events.envelopes import parse_envelope, publish_model
@@ -142,12 +142,14 @@ class DecisionAuditService:
         log_event(
             self.logger,
             "decision_audit_updated",
-            decision_id=record.decision_id,
-            execution_plan_ref=record.execution_plan_ref,
-            order_intent_ref_count=len(record.order_intent_refs),
-            order_state_ref_count=len(record.order_state_refs),
-            fill_event_ref_count=len(record.fill_event_refs),
-            reconciliation_ref_count=len(record.reconciliation_refs),
+            **correlation_fields(
+                decision_id=record.decision_id,
+                execution_plan_ref=record.execution_plan_ref,
+                order_intent_ref_count=len(record.order_intent_refs),
+                order_state_ref_count=len(record.order_state_refs),
+                fill_event_ref_count=len(record.fill_event_refs),
+                reconciliation_ref_count=len(record.reconciliation_refs),
+            ),
         )
         await publish_model(
             bus=self.bus,

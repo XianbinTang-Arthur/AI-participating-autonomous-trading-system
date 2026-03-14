@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from aats.schemas.common import EventEnvelope
 
 
@@ -55,3 +57,20 @@ class InMemoryEventStore:
     def by_decision(self, decision_id: str) -> list[EventEnvelope]:
         event_ids = self._decision_index.get(decision_id, [])
         return [self._index[event_id] for event_id in event_ids if event_id in self._index]
+
+    def between(
+        self,
+        *,
+        start_at: datetime | None = None,
+        end_at: datetime | None = None,
+        topic: str | None = None,
+        decision_id: str | None = None,
+    ) -> list[EventEnvelope]:
+        return [
+            event
+            for event in self._events
+            if (start_at is None or event.event_timestamp >= start_at)
+            and (end_at is None or event.event_timestamp <= end_at)
+            and (topic is None or event.topic == topic)
+            and (decision_id is None or event.payload.get("decision_id") == decision_id)
+        ]

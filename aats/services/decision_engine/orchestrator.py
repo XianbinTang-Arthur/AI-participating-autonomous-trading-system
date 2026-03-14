@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from aats.bootstrap.logging import get_logger, log_event
+from aats.bootstrap.logging import correlation_fields, get_logger, log_event
 from aats.bootstrap.metrics import MetricsRegistry
 from aats.bus.base import EventBus
 from aats.events import topics
@@ -51,12 +51,14 @@ class DecisionOrchestrator:
         log_event(
             self.logger,
             "decision_cycle_started",
-            decision_id=context.decision_id,
-            symbol=symbol,
-            timeframe=timeframe,
+            **correlation_fields(
+                decision_id=context.decision_id,
+                symbol=symbol,
+                timeframe=timeframe,
+            ),
         )
         baseline = self.baseline_strategy.evaluate(context)
-        ai_assessment = self.ai_service.assess(context=context, baseline=baseline)
+        ai_assessment = await self.ai_service.assess(context=context, baseline=baseline)
         target = self.target_engine.build(context, baseline, ai_assessment)
 
         await publish_model(
@@ -92,9 +94,11 @@ class DecisionOrchestrator:
         log_event(
             self.logger,
             "decision_cycle_completed",
-            decision_id=context.decision_id,
-            symbol=symbol,
-            target_position_qty=target.target_position_qty,
-            delta_position_qty=target.delta_position_qty,
+            **correlation_fields(
+                decision_id=context.decision_id,
+                symbol=symbol,
+                target_position_qty=target.target_position_qty,
+                delta_position_qty=target.delta_position_qty,
+            ),
         )
         return target

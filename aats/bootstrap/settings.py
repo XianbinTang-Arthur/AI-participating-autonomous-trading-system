@@ -4,6 +4,7 @@ from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from aats.schemas.decision import AIOperatingMode
 
 
 RuntimeMode = Literal["backtest", "paper_live", "guarded_live", "autonomous_live"]
@@ -14,6 +15,8 @@ PersistenceMode = Literal["strict", "permissive"]
 ConfigProfile = Literal[
     "local_demo",
     "real_market_paper",
+    "guarded_simulated_submit_dry_run",
+    "guarded_simulated_submit_enabled",
     "guarded_simulated_dry_run",
     "guarded_simulated_enabled",
     "guarded_live_blocked",
@@ -63,6 +66,18 @@ class AATSSettings(BaseSettings):
     decision_min_momentum_delta: float = 0.0
     paper_taker_fee_bps: float = 5.0
     max_slippage_tolerance_bps: int = 20
+    ai_operating_mode: AIOperatingMode = "baseline_only"
+    ai_provider: Literal["disabled", "openai"] = "disabled"
+    ai_model_name: str = "gpt-4o-mini"
+    ai_prompt_version: str = "0.2.0"
+    ai_model_version: str = "1.0.0"
+    ai_timeout_seconds: float = 5.0
+    ai_max_retries: int = 0
+    ai_degrade_after_failures: int = 3
+    ai_recover_after_successes: int = 2
+    ai_primary_min_confidence: float = 0.6
+    openai_api_key: str | None = None
+    openai_base_url: str = "https://api.openai.com"
     market_data_stale_after_seconds: float = 30.0
     account_state_stale_after_seconds: float = 60.0
     reconciliation_stale_after_seconds: float = 300.0
@@ -91,3 +106,11 @@ class AATSSettings(BaseSettings):
     @property
     def okx_credentials_configured(self) -> bool:
         return all((self.okx_api_key, self.okx_api_secret, self.okx_api_passphrase))
+
+    @property
+    def ai_provider_configured(self) -> bool:
+        if self.ai_provider == "disabled":
+            return False
+        if self.ai_provider == "openai":
+            return bool(self.openai_api_key)
+        return False

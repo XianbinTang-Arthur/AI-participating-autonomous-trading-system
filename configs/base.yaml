@@ -31,6 +31,17 @@ decision_min_price_move_bps: 0.0
 decision_min_momentum_delta: 0.0
 paper_taker_fee_bps: 5.0
 max_slippage_tolerance_bps: 20
+ai_operating_mode: baseline_only
+ai_provider: disabled
+ai_model_name: gpt-4o-mini
+ai_prompt_version: 0.2.0
+ai_model_version: 1.0.0
+ai_timeout_seconds: 5.0
+ai_max_retries: 0
+ai_degrade_after_failures: 3
+ai_recover_after_successes: 2
+ai_primary_min_confidence: 0.6
+openai_base_url: https://api.openai.com
 market_data_stale_after_seconds: 30.0
 account_state_stale_after_seconds: 60.0
 reconciliation_stale_after_seconds: 300.0

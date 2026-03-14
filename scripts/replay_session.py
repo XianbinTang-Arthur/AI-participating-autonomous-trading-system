@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import sys
+from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -31,11 +32,33 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Local loop interval when bootstrapping.",
     )
+    parser.add_argument("--decision-id", type=str, default=None, help="Replay only events for one decision_id.")
+    parser.add_argument(
+        "--start-at",
+        type=str,
+        default=None,
+        help="Replay only events at or after this ISO-8601 timestamp.",
+    )
+    parser.add_argument(
+        "--end-at",
+        type=str,
+        default=None,
+        help="Replay only events at or before this ISO-8601 timestamp.",
+    )
     return parser.parse_args()
+
+
+def parse_optional_datetime(value: str | None) -> datetime | None:
+    if value is None:
+        return None
+    normalized = value.replace("Z", "+00:00")
+    return datetime.fromisoformat(normalized)
 
 
 async def main(args: argparse.Namespace) -> dict:
     settings = load_settings()
+    start_at = parse_optional_datetime(args.start_at)
+    end_at = parse_optional_datetime(args.end_at)
     runtime = None
     storage = None
     if args.bootstrap_local_loop:
@@ -59,7 +82,11 @@ async def main(args: argparse.Namespace) -> dict:
                 audit_repo=runtime.audit_repo,
                 portfolio_repo=runtime.portfolio_repo,
             )
-            result = replay_engine.replay()
+            result = replay_engine.replay(
+                decision_id=args.decision_id,
+                start_at=start_at,
+                end_at=end_at,
+            )
         finally:
             if runtime.database_runtime is not None:
                 runtime.database_runtime.dispose()
@@ -75,12 +102,19 @@ async def main(args: argparse.Namespace) -> dict:
                 audit_repo=storage.audit_repo,
                 portfolio_repo=storage.portfolio_repo,
             )
-            result = replay_engine.replay()
+            result = replay_engine.replay(
+                decision_id=args.decision_id,
+                start_at=start_at,
+                end_at=end_at,
+            )
         finally:
             if storage.database_runtime is not None:
                 storage.database_runtime.dispose()
 
     return {
+        "selected_decision_id": result.selected_decision_id,
+        "start_at": result.start_at,
+        "end_at": result.end_at,
         "replayed_event_count": result.replayed_event_count,
         "stored_snapshot_count": result.stored_snapshot_count,
         "divergence_count": result.divergence_count,

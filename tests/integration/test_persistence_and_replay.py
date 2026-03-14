@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from datetime import timedelta
 from pathlib import Path
 
 from aats.bootstrap.config import build_runtime, build_storage_backends, load_settings
@@ -11,8 +12,10 @@ from aats.events.envelopes import build_envelope, publish_model
 from aats.schemas.audit import DecisionAuditRecord
 from aats.schemas.common import utc_now
 from aats.schemas.decision import BaselineAssessment, DecisionContext, PositionTarget
-from aats.schemas.execution import OrderIntent
+from aats.schemas.execution import ExecutionPlan, FillEvent, OrderIntent, OrderState
 from aats.schemas.governance import PolicyDecision, RiskDecision
+from aats.schemas.market import MarketSnapshot
+from aats.schemas.reconciliation import ReconciliationReport
 from aats.schemas.system import HealthSnapshot
 from aats.services.portfolio_service.pnl import PortfolioPnLCalculator
 from aats.services.portfolio_service.reconstruction import PortfolioReconstructionService
@@ -153,6 +156,69 @@ class TestPersistenceAndReplay(unittest.IsolatedAsyncioTestCase):
                     runtime.database_runtime.dispose()
                 if storage is not None and storage.database_runtime is not None:
                     storage.database_runtime.dispose()
+
+    async def test_replay_can_filter_by_decision_id(self) -> None:
+        settings = load_settings()
+        runtime = await build_runtime(settings)
+        try:
+            await runtime.market_gateway.run_local_publisher(
+                symbol=settings.default_symbol,
+                iterations=4,
+                interval_seconds=0.0,
+            )
+
+            executed_record = next(record for record in runtime.audit_repo.all() if record.fill_event_refs)
+            replay = ReplayEngine(
+                event_store=runtime.event_store,
+                reconstruction_service=PortfolioReconstructionService(
+                    initial_usdt_balance=settings.initial_usdt_balance,
+                    snapshot_builder=PortfolioSnapshotBuilder(pnl_calculator=PortfolioPnLCalculator()),
+                ),
+                audit_repo=runtime.audit_repo,
+                portfolio_repo=runtime.portfolio_repo,
+            ).replay(decision_id=executed_record.decision_id)
+
+            self.assertEqual(replay.selected_decision_id, executed_record.decision_id)
+            self.assertEqual(set(replay.decision_chains.keys()), {executed_record.decision_id})
+            self.assertEqual(replay.decision_chain_issues, [])
+            self.assertEqual(replay.audit_issues, [])
+            self.assertGreater(replay.replayed_event_count, 0)
+        finally:
+            if runtime.database_runtime is not None:
+                runtime.database_runtime.dispose()
+
+    async def test_replay_can_filter_by_time_range(self) -> None:
+        settings = load_settings()
+        runtime = await build_runtime(settings)
+        try:
+            await runtime.market_gateway.run_local_publisher(
+                symbol=settings.default_symbol,
+                iterations=2,
+                interval_seconds=0.0,
+            )
+
+            decision_id = runtime.audit_repo.all()[0].decision_id
+            decision_events = runtime.event_store.by_decision(decision_id)
+            start_at = min(event.event_timestamp for event in decision_events) - timedelta(seconds=1)
+            end_at = max(event.event_timestamp for event in decision_events) + timedelta(seconds=1)
+            replay = ReplayEngine(
+                event_store=runtime.event_store,
+                reconstruction_service=PortfolioReconstructionService(
+                    initial_usdt_balance=settings.initial_usdt_balance,
+                    snapshot_builder=PortfolioSnapshotBuilder(pnl_calculator=PortfolioPnLCalculator()),
+                ),
+                audit_repo=runtime.audit_repo,
+                portfolio_repo=runtime.portfolio_repo,
+            ).replay(start_at=start_at, end_at=end_at)
+
+            self.assertEqual(replay.start_at, start_at)
+            self.assertEqual(replay.end_at, end_at)
+            self.assertGreater(replay.replayed_event_count, 0)
+            self.assertIn(decision_id, replay.decision_chains)
+            self.assertEqual(replay.divergence_count, 0)
+        finally:
+            if runtime.database_runtime is not None:
+                runtime.database_runtime.dispose()
 
     async def test_replay_detects_missing_chain_reference(self) -> None:
         event_store = InMemoryEventStore()
@@ -474,6 +540,408 @@ class TestPersistenceAndReplay(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(replay.divergence_count, 0)
         self.assertTrue(
             any("missing_execution_plan" in issue for issue in replay.decision_chain_issues)
+        )
+
+    async def test_replay_reconstructs_partial_fill_then_cancel_execution_chain(self) -> None:
+        event_store = InMemoryEventStore()
+        audit_repo = InMemoryAuditRepository()
+        decision_id = "decision_partial_cancel"
+        now = utc_now()
+        market_snapshot = MarketSnapshot(
+            symbol="BTC-USDT",
+            exchange="OKX",
+            snapshot_ts=now,
+            best_bid=67_995.0,
+            best_ask=68_005.0,
+            last_price=68_000.0,
+            bid_size=1.0,
+            ask_size=1.0,
+            volume_24h=1_000_000.0,
+            kline_15m={"open": 67_900.0, "high": 68_100.0, "low": 67_800.0, "close": 68_000.0, "volume": 100.0},
+            kline_1h={"open": 67_800.0, "high": 68_150.0, "low": 67_700.0, "close": 68_000.0, "volume": 400.0},
+            recent_trades=[],
+            orderbook_depth={"bids": [], "asks": []},
+        )
+
+        health_snapshot = HealthSnapshot(
+            decision_id=decision_id,
+            mode="guarded_live",
+            operating_state="guarded_simulated_submit_enabled",
+            status="ok",
+            halted=False,
+            blockers=[],
+            components=[],
+        )
+        context = DecisionContext(
+            decision_id=decision_id,
+            symbol="BTC-USDT",
+            timeframe="15m",
+            as_of_ts=now,
+            market_snapshot_ref="evt_market_partial_cancel",
+            feature_snapshot_ref="evt_feature_partial_cancel",
+            portfolio_snapshot_ref="evt_portfolio_partial_cancel",
+            health_snapshot_ref="",
+            mode="guarded_live",
+            current_position_qty=0.0,
+        )
+        baseline = BaselineAssessment(
+            decision_id=decision_id,
+            symbol="BTC-USDT",
+            regime="trend",
+            direction_bias="long",
+            trend_strength=0.8,
+            volatility_state="medium",
+            confidence=0.7,
+            holding_horizon="15m",
+            invalidation_conditions=[],
+            reason_codes=["test"],
+            engine_version="test",
+        )
+        target = PositionTarget(
+            decision_id=decision_id,
+            symbol="BTC-USDT",
+            current_position_qty=0.0,
+            target_position_qty=0.001,
+            delta_position_qty=0.001,
+            current_notional=0.0,
+            target_notional=68.0,
+            rebalance_reason="test_partial_cancel",
+            urgency="medium",
+            max_slippage_tolerance_bps=20,
+            source_mix={"baseline": 1.0},
+            decision_expiry_ts=now,
+        )
+        policy = PolicyDecision(
+            decision_id=decision_id,
+            mode="guarded_live",
+            allowed=True,
+            execution_allowed=True,
+            submission_allowed=True,
+            dry_run_only=False,
+            requires_human_approval=False,
+            allowed_symbols=["BTC-USDT"],
+            allowed_execution_styles=["market"],
+        )
+        risk = RiskDecision(
+            decision_id=decision_id,
+            approved=True,
+            modified=False,
+            capped_target_position_qty=0.001,
+            risk_score=0.1,
+        )
+        plan = ExecutionPlan(
+            plan_id="plan_partial_cancel",
+            decision_id=decision_id,
+            symbol="BTC-USDT",
+            current_position_qty=0.0,
+            target_position_qty=0.001,
+            approved_target_position_qty=0.001,
+            delta_qty=0.001,
+            side="buy",
+            execution_style="taker",
+            order_type="market",
+            urgency="medium",
+            max_slippage_tolerance_bps=20,
+        )
+        intent = OrderIntent(
+            intent_id="intent_partial_cancel",
+            decision_id=decision_id,
+            symbol="BTC-USDT",
+            side="buy",
+            quantity=0.001,
+            execution_style="taker",
+            order_type="market",
+            urgency="medium",
+            time_in_force="IOC",
+            idempotency_key="intent_partial_cancel",
+        )
+        created_state = OrderState(
+            decision_id=decision_id,
+            intent_id=intent.intent_id,
+            symbol="BTC-USDT",
+            client_order_id="clord_partial_cancel",
+            venue="OKX",
+            exchange_order_id="ord_partial_cancel",
+            status="CREATED",
+            submission_mode="guarded_simulated_submit",
+            exchange_status="created",
+            submitted_ts=now,
+            last_update_ts=now,
+            last_exchange_update_ts=now,
+            requested_qty=0.001,
+            filled_qty=0.0,
+            remaining_qty=0.001,
+            average_fill_price=None,
+            fees=0.0,
+            submission_payload={"instId": "BTC-USDT"},
+        )
+        submitting_state = created_state.model_copy(
+            update={
+                "status": "SUBMITTING",
+                "exchange_status": "submitting",
+                "last_update_ts": now + timedelta(milliseconds=500),
+                "last_exchange_update_ts": now + timedelta(milliseconds=500),
+            }
+        )
+        submitted_state = created_state.model_copy(
+            update={
+                "status": "SUBMITTED",
+                "exchange_status": "live",
+                "last_update_ts": now + timedelta(seconds=1),
+                "last_exchange_update_ts": now + timedelta(seconds=1),
+            }
+        )
+        partial_state = created_state.model_copy(
+            update={
+                "status": "PARTIALLY_FILLED",
+                "exchange_status": "partially_filled",
+                "last_update_ts": now + timedelta(seconds=2),
+                "last_exchange_update_ts": now + timedelta(seconds=2),
+                "filled_qty": 0.0004,
+                "remaining_qty": 0.0006,
+                "average_fill_price": 68_000.0,
+            }
+        )
+        cancel_pending_state = partial_state.model_copy(
+            update={
+                "status": "CANCEL_PENDING",
+                "exchange_status": "cancel_pending",
+                "last_update_ts": now + timedelta(seconds=3),
+                "last_exchange_update_ts": now + timedelta(seconds=3),
+            }
+        )
+        canceled_state = cancel_pending_state.model_copy(
+            update={
+                "status": "CANCELED",
+                "exchange_status": "canceled",
+                "last_update_ts": now + timedelta(seconds=4),
+                "last_exchange_update_ts": now + timedelta(seconds=4),
+                "canceled_ts": now + timedelta(seconds=4),
+            }
+        )
+        partial_fill = FillEvent(
+            fill_id="fill_partial_cancel_1",
+            decision_id=decision_id,
+            intent_id=intent.intent_id,
+            client_order_id="clord_partial_cancel",
+            exchange_order_id="ord_partial_cancel",
+            symbol="BTC-USDT",
+            venue="OKX",
+            side="buy",
+            fill_qty=0.0004,
+            fill_price=68_000.0,
+            fee_amount=0.0272,
+            liquidity_role="taker",
+            exchange_timestamp=now,
+            ingestion_timestamp=now,
+            order_status_after_fill="PARTIALLY_FILLED",
+        )
+
+        health_event = build_envelope(
+            topic=topics.HEALTH_SNAPSHOTS,
+            key="BTC-USDT",
+            payload_model=health_snapshot,
+            source_component="test",
+        )
+        context = context.model_copy(update={"health_snapshot_ref": health_event.event_id})
+        portfolio_state = PortfolioReconstructionService(
+            initial_usdt_balance=10_000.0,
+            snapshot_builder=PortfolioSnapshotBuilder(pnl_calculator=PortfolioPnLCalculator()),
+        ).rebuild_snapshot(
+            fills=[partial_fill],
+            price_provider=lambda _symbol: 68_000.0,
+        ).model_copy(
+            update={
+                "decision_id": decision_id,
+                "source_intent_id": intent.intent_id,
+                "source_fill_id": partial_fill.fill_id,
+            }
+        )
+        context_event = build_envelope(
+            topic=topics.DECISION_CONTEXTS,
+            key="BTC-USDT",
+            payload_model=context,
+            source_component="test",
+        )
+        baseline_event = build_envelope(
+            topic=topics.BASELINE_ASSESSMENTS,
+            key="BTC-USDT",
+            payload_model=baseline,
+            source_component="test",
+        )
+        target_event = build_envelope(
+            topic=topics.POSITION_TARGETS,
+            key="BTC-USDT",
+            payload_model=target,
+            source_component="test",
+        )
+        policy_event = build_envelope(
+            topic=topics.POLICY_DECISIONS,
+            key="BTC-USDT",
+            payload_model=policy,
+            source_component="test",
+        )
+        risk_event = build_envelope(
+            topic=topics.RISK_DECISIONS,
+            key="BTC-USDT",
+            payload_model=risk,
+            source_component="test",
+        )
+        plan_event = build_envelope(
+            topic=topics.EXECUTION_PLANS,
+            key="BTC-USDT",
+            payload_model=plan,
+            source_component="test",
+        )
+        intent_event = build_envelope(
+            topic=topics.ORDER_INTENTS,
+            key="BTC-USDT",
+            payload_model=intent,
+            source_component="test",
+        )
+        created_event = build_envelope(
+            topic=topics.ORDER_UPDATES,
+            key="BTC-USDT",
+            payload_model=created_state,
+            source_component="test",
+        )
+        submitting_event = build_envelope(
+            topic=topics.ORDER_UPDATES,
+            key="BTC-USDT",
+            payload_model=submitting_state,
+            source_component="test",
+        )
+        submitted_event = build_envelope(
+            topic=topics.ORDER_UPDATES,
+            key="BTC-USDT",
+            payload_model=submitted_state,
+            source_component="test",
+        )
+        partial_state_event = build_envelope(
+            topic=topics.ORDER_UPDATES,
+            key="BTC-USDT",
+            payload_model=partial_state,
+            source_component="test",
+        )
+        cancel_pending_event = build_envelope(
+            topic=topics.ORDER_UPDATES,
+            key="BTC-USDT",
+            payload_model=cancel_pending_state,
+            source_component="test",
+        )
+        canceled_state_event = build_envelope(
+            topic=topics.ORDER_UPDATES,
+            key="BTC-USDT",
+            payload_model=canceled_state,
+            source_component="test",
+        )
+        fill_event = build_envelope(
+            topic=topics.FILL_EVENTS,
+            key="BTC-USDT",
+            payload_model=partial_fill,
+            source_component="test",
+        )
+        portfolio_event = build_envelope(
+            topic=topics.PORTFOLIO_SNAPSHOTS,
+            key="portfolio",
+            payload_model=portfolio_state,
+            source_component="test",
+        )
+        reconciliation = ReconciliationReport(
+            reconciliation_id="recon_partial_cancel",
+            decision_id=decision_id,
+            portfolio_snapshot_ref=portfolio_event.event_id,
+            as_of_ts=now,
+            order_diff={},
+            fill_diff={},
+            balance_diff={},
+            position_diff={"stored": {}, "reconstructed": {}, "mismatches": {}},
+            mismatch_reasons=[],
+            safety_impacts=[],
+            severity="CLEAN",
+            remediation_action=None,
+            halt_required=False,
+        )
+        reconciliation_event = build_envelope(
+            topic=topics.RECONCILIATION_REPORTS,
+            key="BTC-USDT",
+            payload_model=reconciliation,
+            source_component="test",
+        )
+
+        record = DecisionAuditRecord(
+            decision_id=decision_id,
+            decision_context_ref=context_event.event_id,
+            baseline_assessment_ref=baseline_event.event_id,
+            position_target_ref=target_event.event_id,
+            policy_decision_ref=policy_event.event_id,
+            risk_decision_ref=risk_event.event_id,
+            execution_plan_ref=plan_event.event_id,
+            order_intent_refs=[intent_event.event_id],
+            order_state_refs=[
+                created_event.event_id,
+                submitting_event.event_id,
+                submitted_event.event_id,
+                partial_state_event.event_id,
+                cancel_pending_event.event_id,
+                canceled_state_event.event_id,
+            ],
+            fill_event_refs=[fill_event.event_id],
+            portfolio_delta_ref=portfolio_event.event_id,
+            reconciliation_refs=[reconciliation_event.event_id],
+        )
+        audit_repo.upsert(record)
+        audit_event = build_envelope(
+            topic=topics.AUDIT_RECORDS,
+            key=decision_id,
+            payload_model=record,
+            source_component="test",
+        )
+
+        for envelope in (
+            build_envelope(
+                topic=topics.MARKET_SNAPSHOTS,
+                key="BTC-USDT",
+                payload_model=market_snapshot,
+                source_component="test",
+            ),
+            health_event,
+            context_event,
+            baseline_event,
+            target_event,
+            policy_event,
+            risk_event,
+            plan_event,
+            intent_event,
+            created_event,
+            submitting_event,
+            submitted_event,
+            partial_state_event,
+            cancel_pending_event,
+            canceled_state_event,
+            fill_event,
+            portfolio_event,
+            reconciliation_event,
+            audit_event,
+        ):
+            event_store.append(envelope)
+
+        replay = ReplayEngine(
+            event_store=event_store,
+            reconstruction_service=PortfolioReconstructionService(
+                initial_usdt_balance=10_000.0,
+                snapshot_builder=PortfolioSnapshotBuilder(pnl_calculator=PortfolioPnLCalculator()),
+            ),
+            audit_repo=audit_repo,
+        ).replay()
+
+        self.assertEqual(replay.divergence_count, 0)
+        self.assertEqual(replay.execution_chain_issues, [])
+        self.assertEqual(replay.decision_chain_issues, [])
+        self.assertEqual(replay.audit_issues, [])
+        self.assertEqual(
+            self._snapshot_signature(replay.final_reconstructed_snapshot),
+            self._snapshot_signature(portfolio_state),
         )
 
     @staticmethod

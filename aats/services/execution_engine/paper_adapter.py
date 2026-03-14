@@ -90,5 +90,7 @@ class PaperExecutionAdapter(ExchangeAdapter):
             "ready": True,
             "backend": "paper",
             "execution_mode": "paper_local",
+            "exchange_submit_allowed": False,
+            "submit_blocked_reasons": ["paper_execution_has_no_exchange_submission"],
             "live_submit_enabled": False,
         }

@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Callable
 
+from aats.schemas.common import utc_now
 from aats.schemas.portfolio import PortfolioSnapshot
 from aats.schemas.execution import FillEvent
+from aats.schemas.reconciliation import ReconciliationReport
 from aats.schemas.system import RecoveryStatus
 from aats.services.governance_engine.kill_switch import KillSwitch
 from aats.services.portfolio_service.positions import PortfolioState
 from aats.services.portfolio_service.reconstruction import PortfolioReconstructionService
-from aats.storage.base import ExecutionRepository, PortfolioRepository
+from aats.storage.base import ExecutionRepository, PortfolioRepository, ReconciliationRepository
 
 
 @dataclass(slots=True)
@@ -24,26 +27,32 @@ class ExecutionRecoveryService:
         *,
         execution_repo: ExecutionRepository,
         portfolio_repo: PortfolioRepository,
+        reconciliation_repo: ReconciliationRepository,
         reconstruction_service: PortfolioReconstructionService,
         price_provider: Callable[[str], float],
         kill_switch: KillSwitch,
         bootstrap_portfolio_from_exchange: bool,
+        reconciliation_stale_after_seconds: float,
     ) -> None:
         self.execution_repo = execution_repo
         self.portfolio_repo = portfolio_repo
+        self.reconciliation_repo = reconciliation_repo
         self.reconstruction_service = reconstruction_service
         self.price_provider = price_provider
         self.kill_switch = kill_switch
         self.bootstrap_portfolio_from_exchange = bootstrap_portfolio_from_exchange
+        self.reconciliation_stale_after_seconds = reconciliation_stale_after_seconds
 
     def recover(self, *, portfolio_state: PortfolioState) -> RecoveryArtifacts:
         fills = self.execution_repo.fills()
         latest_snapshot = self.portfolio_repo.latest()
+        latest_reconciliation = self.reconciliation_repo.latest()
         open_orders = self.execution_repo.open_order_states()
         notes: list[str] = []
         rebuilt_snapshot_saved = False
         divergence_count = 0
         recovery_action: str | None = None
+        safe_startup = True
 
         if latest_snapshot is not None:
             portfolio_state.load_portfolio_snapshot(
@@ -60,13 +69,23 @@ class ExecutionRecoveryService:
                 )
                 divergence_count = self._divergence_count(latest_snapshot, rebuilt)
                 if divergence_count:
-                    self.kill_switch.halt(reason="recovery_portfolio_divergence")
+                    self._halt_for_recovery(
+                        reason="recovery_portfolio_divergence",
+                        action="halted_for_portfolio_divergence",
+                        notes=notes,
+                    )
                     recovery_action = "halted_for_portfolio_divergence"
+                    safe_startup = False
                     notes.append("stored_snapshot_differs_from_fill_reconstruction")
         elif fills:
             if self.bootstrap_portfolio_from_exchange:
-                self.kill_switch.halt(reason="recovery_snapshot_missing")
+                self._halt_for_recovery(
+                    reason="recovery_snapshot_missing",
+                    action="halted_missing_bootstrap_snapshot",
+                    notes=notes,
+                )
                 recovery_action = "halted_missing_bootstrap_snapshot"
+                safe_startup = False
                 notes.append("bootstrap_exchange_snapshot_missing")
             else:
                 rebuilt_snapshot = self.reconstruction_service.rebuild_snapshot(
@@ -84,6 +103,26 @@ class ExecutionRecoveryService:
         else:
             notes.append("cold_start_no_execution_state")
 
+        safe_startup, recovery_action = self._apply_reconciliation_safety(
+            latest_reconciliation=latest_reconciliation,
+            latest_snapshot=latest_snapshot or self.portfolio_repo.latest(),
+            fills=fills,
+            open_orders=open_orders,
+            safe_startup=safe_startup,
+            recovery_action=recovery_action,
+            notes=notes,
+        )
+
+        if open_orders:
+            self._halt_for_recovery(
+                reason="recovery_open_orders_present",
+                action="halted_open_orders_require_review",
+                notes=notes,
+            )
+            recovery_action = recovery_action or "halted_open_orders_require_review"
+            safe_startup = False
+            notes.append("open_orders_restored_require_operator_review")
+
         status = RecoveryStatus(
             status=(
                 "recovered_halted"
@@ -95,13 +134,76 @@ class ExecutionRecoveryService:
             recovered_order_count=len(self.execution_repo.order_states()),
             recovered_fill_count=len(fills),
             recovered_snapshot_available=self.portfolio_repo.latest() is not None,
+            rebuilt_snapshot_saved=rebuilt_snapshot_saved,
+            recovered_reconciliation_available=latest_reconciliation is not None,
+            latest_reconciliation_id=latest_reconciliation.reconciliation_id if latest_reconciliation else None,
+            latest_reconciliation_severity=latest_reconciliation.severity if latest_reconciliation else None,
             open_order_count=len(open_orders),
             divergence_count=divergence_count,
+            safe_startup=safe_startup and not self.kill_switch.halted,
             halted=self.kill_switch.halted,
             recovery_action=recovery_action,
-            notes=notes,
+            notes=self._dedupe_notes(notes),
         )
         return RecoveryArtifacts(status=status, rebuilt_snapshot_saved=rebuilt_snapshot_saved)
+
+    def _apply_reconciliation_safety(
+        self,
+        *,
+        latest_reconciliation: ReconciliationReport | None,
+        latest_snapshot: PortfolioSnapshot | None,
+        fills: list[FillEvent],
+        open_orders: list,
+        safe_startup: bool,
+        recovery_action: str | None,
+        notes: list[str],
+    ) -> tuple[bool, str | None]:
+        has_execution_state = bool(fills or open_orders)
+        if latest_reconciliation is None:
+            if has_execution_state and latest_snapshot is not None:
+                self._halt_for_recovery(
+                    reason="recovery_reconciliation_missing",
+                    action="halted_missing_reconciliation_context",
+                    notes=notes,
+                )
+                notes.append("reconciliation_context_missing_for_execution_state")
+                return False, recovery_action or "halted_missing_reconciliation_context"
+            return safe_startup, recovery_action
+
+        notes.append("reconciliation_context_restored")
+        age_seconds = (utc_now() - latest_reconciliation.as_of_ts).total_seconds()
+        if age_seconds > self.reconciliation_stale_after_seconds:
+            self._halt_for_recovery(
+                reason="recovery_reconciliation_stale",
+                action="halted_stale_reconciliation_context",
+                notes=notes,
+            )
+            notes.append("latest_reconciliation_is_stale")
+            return False, recovery_action or "halted_stale_reconciliation_context"
+        if latest_reconciliation.halt_required:
+            self._halt_for_recovery(
+                reason="recovery_reconciliation_halt_required",
+                action="halted_reconciliation_requires_review",
+                notes=notes,
+            )
+            notes.append("latest_reconciliation_requires_operator_review")
+            return False, recovery_action or "halted_reconciliation_requires_review"
+        return safe_startup, recovery_action
+
+    def _halt_for_recovery(self, *, reason: str, action: str, notes: list[str]) -> None:
+        self.kill_switch.halt(reason=reason)
+        notes.append(action)
+
+    @staticmethod
+    def _dedupe_notes(notes: list[str]) -> list[str]:
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for note in notes:
+            if note in seen:
+                continue
+            seen.add(note)
+            ordered.append(note)
+        return ordered
 
     def _recovery_price_provider(self, snapshot: PortfolioSnapshot) -> Callable[[str], float]:
         snapshot_marks: dict[str, float] = {}

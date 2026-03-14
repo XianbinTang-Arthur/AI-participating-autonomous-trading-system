@@ -56,6 +56,32 @@ class TestOrderStateMachine(unittest.TestCase):
         self.assertEqual(merged.filled_qty, 1.0)
         self.assertEqual(merged.remaining_qty, 0.0)
 
+    def test_cancel_pending_to_canceled_path_is_accepted(self) -> None:
+        state_machine = OrderStateMachine()
+        states = [
+            make_state(status="CREATED"),
+            make_state(status="SUBMITTING"),
+            make_state(status="SUBMITTED"),
+            make_state(status="PARTIALLY_FILLED", filled_qty=0.4, remaining_qty=0.6),
+            make_state(status="CANCEL_PENDING", filled_qty=0.4, remaining_qty=0.6),
+            make_state(status="CANCELED", filled_qty=0.4, remaining_qty=0.6),
+        ]
+
+        self.assertEqual(state_machine.validate_path(states), [])
+
+    def test_invalid_terminal_regression_is_rejected_in_path_validation(self) -> None:
+        state_machine = OrderStateMachine()
+        states = [
+            make_state(status="SUBMITTED"),
+            make_state(status="PARTIALLY_FILLED", filled_qty=0.4, remaining_qty=0.6),
+            make_state(status="FILLED", filled_qty=1.0, remaining_qty=0.0),
+            make_state(status="PARTIALLY_FILLED", filled_qty=0.4, remaining_qty=0.6),
+        ]
+
+        issues = state_machine.validate_path(states)
+
+        self.assertTrue(any("invalid_transition" in issue or "status_regression" in issue for issue in issues))
+
 
 if __name__ == "__main__":
     unittest.main()

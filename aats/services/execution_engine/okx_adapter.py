@@ -12,7 +12,9 @@ from aats.schemas.exchange import ExchangeFill, InstrumentMetadata
 from aats.services.execution_engine.exchange_adapter import ExchangeAdapter
 from aats.services.execution_engine.okx_account import OKXAccountService, datetime_from_ms
 from aats.services.execution_engine.okx_rest import OKXRESTClient
+from aats.services.governance_engine.health import SystemHealthService
 from aats.services.governance_engine.mode import RuntimeModeController
+from aats.bootstrap.logging import correlation_fields, get_logger, log_event
 
 
 class OKXOrderPayloadBuilder:
@@ -65,6 +67,7 @@ class OKXExecutionAdapter(ExchangeAdapter):
         client: OKXRESTClient,
         account_service: OKXAccountService,
         mode_controller: RuntimeModeController,
+        health_service: SystemHealthService | None = None,
         price_provider: Callable[[str], float] | None = None,
         payload_builder: OKXOrderPayloadBuilder | None = None,
     ) -> None:
@@ -72,10 +75,12 @@ class OKXExecutionAdapter(ExchangeAdapter):
         self.client = client
         self.account_service = account_service
         self.mode_controller = mode_controller
+        self.health_service = health_service
         self.price_provider = price_provider
         self.payload_builder = payload_builder or OKXOrderPayloadBuilder()
         self._last_error: str | None = None
         self._last_submission_payload: dict[str, str] | None = None
+        self.logger = get_logger("aats.okx_execution_adapter")
 
     async def submit(self, intent: OrderIntent) -> tuple[OrderState, list[FillEvent]]:
         snapshot = await self.account_service.refresh()
@@ -89,6 +94,17 @@ class OKXExecutionAdapter(ExchangeAdapter):
         gate_error = self._submission_gate_error(intent=intent)
         if gate_error is not None:
             self._last_error = gate_error
+            log_event(
+                self.logger,
+                "okx_submit_blocked",
+                level="warning",
+                **correlation_fields(
+                    decision_id=intent.decision_id,
+                    intent_id=intent.intent_id,
+                    symbol=intent.symbol,
+                    reason=gate_error,
+                ),
+            )
             return self._blocked_state(intent=intent, payload=payload, reason=gate_error), []
 
         try:
@@ -301,20 +317,30 @@ class OKXExecutionAdapter(ExchangeAdapter):
 
     def readiness(self) -> dict[str, Any]:
         account_status = self.account_service.status()
+        gate_status = self._gate_status()
         return {
             "ready": account_status["credentials_configured"] and account_status["enabled"],
             "backend": "okx",
             "mode": self.mode_controller.mode,
-            "execution_mode": "guarded_simulated_submit" if self.settings.okx_simulated_trading else "guarded_blocked",
+            "execution_mode": (
+                "guarded_simulated_submit"
+                if self.settings.okx_simulated_trading
+                else "guarded_live_blocked"
+            ),
             "live_submit_enabled": self.settings.live_submit_enabled,
             "guarded_execution_dry_run": self.settings.guarded_execution_dry_run,
             "okx_simulated_trading": self.settings.okx_simulated_trading,
+            "exchange_submit_allowed": gate_status["exchange_submit_allowed"],
+            "submit_blocked_reasons": gate_status["submit_blocked_reasons"],
+            "safety_gates": gate_status["safety_gates"],
             "last_error": self._last_error,
             "last_submission_payload": self._last_submission_payload,
             "account_status": account_status,
         }
 
     def _submission_gate_error(self, *, intent: OrderIntent) -> str | None:
+        if self.mode_controller.kill_switch.halted:
+            return "kill_switch_active"
         if self.mode_controller.mode != "guarded_live":
             return "mode_not_guarded_live"
         if self.settings.execution_backend != "okx":
@@ -335,7 +361,49 @@ class OKXExecutionAdapter(ExchangeAdapter):
         account_status = self.account_service.status()
         if not account_status.get("ready", False):
             return "account_not_ready"
+        if self.health_service is not None:
+            blockers = self.health_service.execution_blockers()
+            if blockers:
+                return blockers[0]
         return None
+
+    def _gate_status(self) -> dict[str, Any]:
+        account_status = self.account_service.status()
+        health_blockers = self.health_service.execution_blockers() if self.health_service is not None else []
+        safety_gates = {
+            "mode_is_guarded_live": self.mode_controller.mode == "guarded_live",
+            "execution_backend_is_okx": self.settings.execution_backend == "okx",
+            "simulated_trading_enabled": self.settings.okx_simulated_trading,
+            "live_submit_enabled": self.settings.live_submit_enabled,
+            "dry_run_disabled": not self.settings.guarded_execution_dry_run,
+            "halt_state_clear": not self.mode_controller.kill_switch.halted,
+            "account_ready": bool(account_status.get("ready", False)),
+            "health_checks_clear": not health_blockers,
+            "symbol_allowlist_configured": bool(self.settings.allowed_symbols),
+            "max_notional_cap_configured": self.settings.max_notional_per_symbol > 0.0,
+            "max_open_orders_configured": self.settings.max_open_orders > 0,
+        }
+        blocked_reasons: list[str] = []
+        if not safety_gates["halt_state_clear"]:
+            blocked_reasons.append("kill_switch_active")
+        if not safety_gates["mode_is_guarded_live"]:
+            blocked_reasons.append("mode_not_guarded_live")
+        if not safety_gates["execution_backend_is_okx"]:
+            blocked_reasons.append("execution_backend_not_okx")
+        if not safety_gates["simulated_trading_enabled"]:
+            blocked_reasons.append("okx_simulated_trading_required")
+        if not safety_gates["live_submit_enabled"]:
+            blocked_reasons.append("live_submit_disabled")
+        if not safety_gates["dry_run_disabled"]:
+            blocked_reasons.append("guarded_execution_dry_run")
+        if not safety_gates["account_ready"]:
+            blocked_reasons.append("account_not_ready")
+        blocked_reasons.extend([reason for reason in health_blockers if reason not in blocked_reasons])
+        return {
+            "exchange_submit_allowed": not blocked_reasons,
+            "submit_blocked_reasons": blocked_reasons,
+            "safety_gates": safety_gates,
+        }
 
     def _blocked_state(self, *, intent: OrderIntent, payload: dict[str, str], reason: str) -> OrderState:
         now = utc_now()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Protocol
 
 from aats.schemas.common import EventEnvelope
@@ -29,6 +30,16 @@ class EventStore(Protocol):
         ...
 
     def by_decision(self, decision_id: str) -> list[EventEnvelope]:
+        ...
+
+    def between(
+        self,
+        *,
+        start_at: datetime | None = None,
+        end_at: datetime | None = None,
+        topic: str | None = None,
+        decision_id: str | None = None,
+    ) -> list[EventEnvelope]:
         ...
 
 

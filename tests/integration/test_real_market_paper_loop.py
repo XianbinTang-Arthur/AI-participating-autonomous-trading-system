@@ -221,6 +221,27 @@ class TestModeAwareExecution(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(adapter, OKXExecutionAdapter)
         self.assertEqual(mode_controller.operating_state(), "guarded_live_blocked")
 
+    def test_real_market_paper_snapshot_is_explicitly_non_submitting(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "config_profile": "real_market_paper",
+                "mode": "paper_live",
+                "market_data_backend": "okx",
+                "execution_backend": "okx",
+                "account_backend": "okx",
+                "account_read_enabled": True,
+            }
+        )
+        snapshot = RuntimeModeController(settings=settings, kill_switch=KillSwitch()).snapshot()
+
+        self.assertEqual(snapshot["operating_state"], "real_market_paper")
+        self.assertEqual(snapshot["market_data_source"], "okx")
+        self.assertEqual(snapshot["account_read_source"], "okx")
+        self.assertEqual(snapshot["execution_route"], "paper_local")
+        self.assertEqual(snapshot["exchange_submit_target"], "none")
+        self.assertFalse(snapshot["exchange_submit_allowed"])
+        self.assertIn("real_market_paper_uses_local_paper_execution", snapshot["submit_blocked_reasons"])
+
 
 class TestPolicyAndRiskGating(unittest.TestCase):
     def test_paper_live_ignores_guarded_live_health_blockers(self) -> None:

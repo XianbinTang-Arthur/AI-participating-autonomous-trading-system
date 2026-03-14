@@ -4,7 +4,7 @@ import unittest
 
 from aats.schemas.common import utc_now
 from aats.schemas.execution import FillEvent, OrderState
-from aats.schemas.exchange import ExchangeAccountSnapshot, ExchangeBalance, ExchangeOpenOrder
+from aats.schemas.exchange import ExchangeAccountSnapshot, ExchangeBalance, ExchangeFill, ExchangeOpenOrder
 from aats.schemas.portfolio import PortfolioSnapshot, Position
 from aats.services.reconciliation_service.comparator import StateComparator
 
@@ -198,6 +198,191 @@ class TestReconciliationComparator(unittest.TestCase):
         self.assertFalse(report.halt_required)
         self.assertTrue(report.order_diff["exchange"])
         self.assertTrue(report.fill_diff["exchange"])
+
+    def test_compare_detects_canceled_local_order_missing_on_exchange(self) -> None:
+        comparator = StateComparator()
+        now = utc_now()
+        report = comparator.compare(
+            decision_id="decision_cancel",
+            portfolio_snapshot_ref="evt_portfolio_cancel",
+            order_states=[
+                OrderState(
+                    decision_id="decision_cancel",
+                    intent_id="intent_cancel",
+                    symbol="BTC-USDT",
+                    client_order_id="clord_cancel",
+                    venue="OKX",
+                    exchange_order_id="ord_cancel",
+                    status="CANCELED",
+                    exchange_status="canceled",
+                    submitted_ts=now,
+                    last_update_ts=now,
+                    last_exchange_update_ts=now,
+                    requested_qty=0.001,
+                    filled_qty=0.0004,
+                    remaining_qty=0.0006,
+                    average_fill_price=100.0,
+                    fees=0.01,
+                )
+            ],
+            fills=[
+                FillEvent(
+                    fill_id="trade_cancel_partial",
+                    decision_id="decision_cancel",
+                    intent_id="intent_cancel",
+                    client_order_id="clord_cancel",
+                    exchange_order_id="ord_cancel",
+                    symbol="BTC-USDT",
+                    venue="OKX",
+                    side="buy",
+                    fill_qty=0.0004,
+                    fill_price=100.0,
+                    fee_amount=0.01,
+                    liquidity_role="taker",
+                    exchange_timestamp=now,
+                    ingestion_timestamp=now,
+                )
+            ],
+            stored_snapshot=PortfolioSnapshot(
+                snapshot_ts=now,
+                balances={"USDT": 10_000.0},
+                positions=[],
+                cost_basis={},
+                realized_pnl=0.0,
+                unrealized_pnl=0.0,
+                total_equity=10_000.0,
+                gross_exposure=0.0,
+                net_exposure=0.0,
+                risk_budget_usage={},
+            ),
+            reconstructed_snapshot=PortfolioSnapshot(
+                snapshot_ts=now,
+                balances={"USDT": 10_000.0},
+                positions=[],
+                cost_basis={},
+                realized_pnl=0.0,
+                unrealized_pnl=0.0,
+                total_equity=10_000.0,
+                gross_exposure=0.0,
+                net_exposure=0.0,
+                risk_budget_usage={},
+            ),
+            exchange_snapshot=ExchangeAccountSnapshot(
+                account_source="okx",
+                fetched_at=now,
+                balances=[ExchangeBalance(currency="USDT", total=10_000.0, available=10_000.0, frozen=0.0)],
+                positions=[],
+                open_orders=[],
+                fills=[],
+                instruments=[],
+            ),
+            exchange_comparison_enabled=True,
+            compare_exchange_portfolio=False,
+        )
+
+        self.assertEqual(report.severity, "SOFT_MISMATCH")
+        self.assertFalse(report.halt_required)
+        self.assertTrue(report.fill_diff["exchange"])
+        self.assertTrue(report.mismatch_reasons)
+
+    def test_compare_reports_clean_when_local_and_exchange_state_match(self) -> None:
+        comparator = StateComparator()
+        now = utc_now()
+        report = comparator.compare(
+            decision_id="decision_clean",
+            portfolio_snapshot_ref="evt_portfolio_clean",
+            order_states=[
+                OrderState(
+                    decision_id="decision_clean",
+                    intent_id="intent_clean",
+                    symbol="BTC-USDT",
+                    client_order_id="clord_clean",
+                    venue="OKX",
+                    exchange_order_id="ord_clean",
+                    status="FILLED",
+                    exchange_status="filled",
+                    submitted_ts=now,
+                    last_update_ts=now,
+                    last_exchange_update_ts=now,
+                    requested_qty=0.001,
+                    filled_qty=0.001,
+                    remaining_qty=0.0,
+                    average_fill_price=100.0,
+                    fees=0.1,
+                )
+            ],
+            fills=[
+                FillEvent(
+                    fill_id="trade_clean",
+                    decision_id="decision_clean",
+                    intent_id="intent_clean",
+                    client_order_id="clord_clean",
+                    exchange_order_id="ord_clean",
+                    symbol="BTC-USDT",
+                    venue="OKX",
+                    side="buy",
+                    fill_qty=0.001,
+                    fill_price=100.0,
+                    fee_amount=0.1,
+                    liquidity_role="taker",
+                    exchange_timestamp=now,
+                    ingestion_timestamp=now,
+                )
+            ],
+            stored_snapshot=PortfolioSnapshot(
+                snapshot_ts=now,
+                balances={"USDT": 9_999.9},
+                positions=[],
+                cost_basis={},
+                realized_pnl=0.0,
+                unrealized_pnl=0.0,
+                total_equity=9_999.9,
+                gross_exposure=0.0,
+                net_exposure=0.0,
+                risk_budget_usage={},
+            ),
+            reconstructed_snapshot=PortfolioSnapshot(
+                snapshot_ts=now,
+                balances={"USDT": 9_999.9},
+                positions=[],
+                cost_basis={},
+                realized_pnl=0.0,
+                unrealized_pnl=0.0,
+                total_equity=9_999.9,
+                gross_exposure=0.0,
+                net_exposure=0.0,
+                risk_budget_usage={},
+            ),
+            exchange_snapshot=ExchangeAccountSnapshot(
+                account_source="okx",
+                fetched_at=now,
+                balances=[ExchangeBalance(currency="USDT", total=9_999.9, available=9_999.9, frozen=0.0)],
+                positions=[],
+                open_orders=[],
+                fills=[
+                    ExchangeFill(
+                        fill_id="trade_clean",
+                        exchange_order_id="ord_clean",
+                        client_order_id="clord_clean",
+                        instrument_id="BTC-USDT",
+                        symbol="BTC-USDT",
+                        side="buy",
+                        fill_qty=0.001,
+                        fill_price=100.0,
+                        fee_amount=0.1,
+                        fee_currency="USDT",
+                        fill_ts=now,
+                    )
+                ],
+                instruments=[],
+            ),
+            exchange_comparison_enabled=True,
+            compare_exchange_portfolio=True,
+        )
+
+        self.assertEqual(report.severity, "CLEAN")
+        self.assertFalse(report.halt_required)
+        self.assertEqual(report.mismatch_reasons, [])
 
 
 if __name__ == "__main__":

@@ -63,11 +63,26 @@ class TestMVPCycle(unittest.IsolatedAsyncioTestCase):
         app.state.runtime = runtime
         with TestClient(app) as client:
             response = client.get("/decision/latest")
+            mode_response = client.get("/system/mode")
+            risk_response = client.get("/risk/latest")
+            execution_response = client.get("/execution/result/latest")
         self.assertEqual(response.status_code, 200)
+        self.assertEqual(mode_response.status_code, 200)
+        self.assertEqual(risk_response.status_code, 200)
+        self.assertEqual(execution_response.status_code, 200)
         payload = response.json()
+        mode_payload = mode_response.json()
+        risk_payload = risk_response.json()
+        execution_payload = execution_response.json()
         decision_id = payload["decision_id"]
         self.assertIsNotNone(decision_id)
+        with TestClient(app) as client:
+            audit_response = client.get(f"/audit/{decision_id}")
+        self.assertEqual(audit_response.status_code, 200)
+        audit_payload = audit_response.json()
         self.assertEqual(payload["decision_context"]["decision_id"], decision_id)
+        self.assertEqual(payload["baseline_assessment"]["decision_id"], decision_id)
+        self.assertEqual(payload["position_target"]["decision_id"], decision_id)
         self.assertEqual(payload["policy_decision"]["decision_id"], decision_id)
         self.assertEqual(payload["risk_decision"]["decision_id"], decision_id)
         self.assertEqual(payload["audit"]["decision_id"], decision_id)
@@ -78,6 +93,38 @@ class TestMVPCycle(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(payload["latest_order_intent"]["decision_id"], decision_id)
         if payload["latest_fill_event"] is not None:
             self.assertEqual(payload["latest_fill_event"]["decision_id"], decision_id)
+        self.assertEqual(mode_payload["operating_state"], "local_demo")
+        self.assertEqual(mode_payload["market_data_source"], "demo")
+        self.assertEqual(mode_payload["account_read_source"], "disabled")
+        self.assertEqual(mode_payload["execution_route"], "paper_local")
+        self.assertFalse(mode_payload["exchange_submit_allowed"])
+        self.assertIn("local_demo_no_exchange_submission", mode_payload["submit_blocked_reasons"])
+        self.assertEqual(risk_payload["decision_id"], decision_id)
+        self.assertEqual(risk_payload["risk_decision"]["decision_id"], decision_id)
+        self.assertIsNotNone(execution_payload["latest_order"])
+        self.assertIsNotNone(execution_payload["latest_fill"])
+        self.assertEqual(
+            execution_payload["latest_order"]["decision_id"],
+            execution_payload["latest_fill"]["decision_id"],
+        )
+        self.assertEqual(audit_payload["audit"]["decision_id"], audit_payload["linked_events"]["decision_context"]["decision_id"])
+        self.assertEqual(
+            audit_payload["audit"]["risk_decision_ref"],
+            audit_payload["linked_events"]["risk_decision"]["_event_id"],
+        )
+        if audit_payload["linked_events"]["execution_plan"] is not None:
+            self.assertEqual(
+                audit_payload["audit"]["execution_plan_ref"],
+                audit_payload["linked_events"]["execution_plan"]["_event_id"],
+            )
+        self.assertEqual(
+            len(audit_payload["audit"]["order_intent_refs"]),
+            len(audit_payload["linked_events"]["order_intents"]),
+        )
+        self.assertEqual(
+            len(audit_payload["audit"]["fill_event_refs"]),
+            len(audit_payload["linked_events"]["fills"]),
+        )
 
 
 if __name__ == "__main__":

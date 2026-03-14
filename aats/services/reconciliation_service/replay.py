@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass, field
+from datetime import datetime
 
 from aats.events import topics
 from aats.schemas.audit import DecisionAuditRecord
@@ -23,6 +24,9 @@ class ReplayResult:
     replayed_event_count: int
     stored_snapshot_count: int
     divergence_count: int
+    selected_decision_id: str | None = None
+    start_at: datetime | None = None
+    end_at: datetime | None = None
     divergences: list[str] = field(default_factory=list)
     portfolio_issues: list[str] = field(default_factory=list)
     decision_chain_issues: list[str] = field(default_factory=list)
@@ -47,7 +51,13 @@ class ReplayEngine:
         self.audit_repo = audit_repo
         self.portfolio_repo = portfolio_repo
 
-    def replay(self) -> ReplayResult:
+    def replay(
+        self,
+        *,
+        decision_id: str | None = None,
+        start_at: datetime | None = None,
+        end_at: datetime | None = None,
+    ) -> ReplayResult:
         latest_prices: dict[str, float] = {}
         processed_fills: list[FillEvent] = []
         decision_chains: dict[str, DecisionAuditRecord] = {}
@@ -58,7 +68,7 @@ class ReplayEngine:
         audit_issues: list[str] = []
         stored_snapshot_count = 0
         final_stored_snapshot: PortfolioSnapshot | None = None
-        events = self.event_store.all()
+        events = self._select_events(decision_id=decision_id, start_at=start_at, end_at=end_at)
         events_by_id = {event.event_id: event for event in events}
         events_by_decision: dict[str, list[EventEnvelope]] = defaultdict(list)
         order_intents_by_intent_id: dict[str, OrderIntent] = {}
@@ -165,6 +175,7 @@ class ReplayEngine:
                 self._validate_audit_repository(
                     decision_chains=decision_chains,
                     audit_event_ids_by_decision=audit_event_ids_by_decision,
+                    selected_decision_ids=set(decision_chains),
                 )
             )
 
@@ -175,6 +186,9 @@ class ReplayEngine:
             *audit_issues,
         ]
         return ReplayResult(
+            selected_decision_id=decision_id,
+            start_at=start_at,
+            end_at=end_at,
             replayed_event_count=len(events),
             stored_snapshot_count=stored_snapshot_count,
             divergence_count=len(divergences),
@@ -187,6 +201,51 @@ class ReplayEngine:
             final_stored_snapshot=final_stored_snapshot,
             decision_chains=decision_chains,
         )
+
+    def _select_events(
+        self,
+        *,
+        decision_id: str | None,
+        start_at: datetime | None,
+        end_at: datetime | None,
+    ) -> list[EventEnvelope]:
+        if decision_id is not None:
+            events = self.event_store.by_decision(decision_id)
+            referenced_event_ids: set[str] = set()
+            for event in events:
+                if event.topic != topics.DECISION_CONTEXTS:
+                    continue
+                context = DecisionContext.model_validate(event.payload)
+                referenced_event_ids.update(
+                    {
+                        context.market_snapshot_ref,
+                        context.feature_snapshot_ref,
+                        context.portfolio_snapshot_ref,
+                        context.health_snapshot_ref,
+                    }
+                )
+            referenced_events = [
+                referenced
+                for ref in referenced_event_ids
+                for referenced in [self.event_store.get(ref)]
+                if referenced is not None
+            ]
+            filtered_events = events + [
+                event for event in referenced_events if event.event_id not in {item.event_id for item in events}
+            ]
+            filtered_events = [
+                event
+                for event in filtered_events
+                if (start_at is None or event.event_timestamp >= start_at)
+                and (end_at is None or event.event_timestamp <= end_at)
+            ]
+            return sorted(
+                filtered_events,
+                key=lambda item: (item.event_timestamp, item.created_at, item.event_id),
+            )
+        if start_at is not None or end_at is not None:
+            return self.event_store.between(start_at=start_at, end_at=end_at)
+        return self.event_store.all()
 
     def _validate_execution_chain(
         self,
@@ -651,12 +710,18 @@ class ReplayEngine:
         *,
         decision_chains: dict[str, DecisionAuditRecord],
         audit_event_ids_by_decision: dict[str, str],
+        selected_decision_ids: set[str] | None = None,
     ) -> list[str]:
         issues: list[str] = []
         if self.audit_repo is None:
             return issues
 
-        for record in self.audit_repo.all():
+        selected_ids = set(selected_decision_ids or set())
+        records = self.audit_repo.all()
+        if selected_ids:
+            records = [record for record in records if record.decision_id in selected_ids]
+
+        for record in records:
             streamed = decision_chains.get(record.decision_id)
             if streamed is None:
                 issues.append(f"audit_repository_missing_streamed_record decision_id={record.decision_id}")

@@ -66,10 +66,15 @@ from aats.schemas.system import RecoveryStatus
 def load_yaml_config(environment: str, profile: str, config_dir: str | Path = "configs") -> dict[str, Any]:
     config_path = Path(config_dir)
     merged: dict[str, Any] = {}
+    profile_aliases = {
+        "guarded_simulated_submit_dry_run": "guarded_simulated_dry_run",
+        "guarded_simulated_submit_enabled": "guarded_simulated_enabled",
+    }
     candidates = (
         config_path / "base.yaml",
         config_path / f"{environment}.yaml",
         config_path / f"{profile}.yaml",
+        config_path / f"{profile_aliases.get(profile, profile)}.yaml",
     )
     for candidate in candidates:
         if candidate.exists():
@@ -199,6 +204,7 @@ def _build_execution_adapter(
     market_gateway: MarketDataGateway,
     account_service: OKXAccountService,
     mode_controller: RuntimeModeController,
+    health_service: SystemHealthService | None = None,
 ) -> ExchangeAdapter:
     if mode_controller.mode == "guarded_live" and settings.execution_backend == "okx":
         return OKXExecutionAdapter(
@@ -206,6 +212,7 @@ def _build_execution_adapter(
             client=OKXRESTClient(settings=settings),
             account_service=account_service,
             mode_controller=mode_controller,
+            health_service=health_service,
             price_provider=market_gateway.latest_price,
         )
     return PaperExecutionAdapter(
@@ -261,10 +268,14 @@ async def build_runtime(
         execution_provider=execution_adapter,
         reconciliation_repo=storage.reconciliation_repo,
     )
+    if isinstance(execution_adapter, OKXExecutionAdapter):
+        execution_adapter.health_service = health_service
 
     snapshot_builder = PortfolioSnapshotBuilder(pnl_calculator=PortfolioPnLCalculator())
     feature_engine = FeatureEngine(bus=bus, calculator=FeatureCalculator())
     ai_service = AIInferenceService(
+        settings=runtime_settings,
+        event_store=storage.event_store,
         prompt_builder=PromptBuilder(),
         validator=AssessmentValidator(),
     )
@@ -339,6 +350,7 @@ async def build_runtime(
     recovery_service = ExecutionRecoveryService(
         execution_repo=storage.execution_repo,
         portfolio_repo=storage.portfolio_repo,
+        reconciliation_repo=storage.reconciliation_repo,
         reconstruction_service=PortfolioReconstructionService(
             initial_usdt_balance=runtime_settings.initial_usdt_balance,
             snapshot_builder=snapshot_builder,
@@ -346,6 +358,7 @@ async def build_runtime(
         price_provider=market_gateway.latest_price,
         kill_switch=kill_switch,
         bootstrap_portfolio_from_exchange=runtime_settings.bootstrap_portfolio_from_exchange,
+        reconciliation_stale_after_seconds=runtime_settings.reconciliation_stale_after_seconds,
     )
 
     await bus.subscribe(topics.MARKET_SNAPSHOTS, feature_engine.handle_market_snapshot)
@@ -363,8 +376,10 @@ async def build_runtime(
     await bus.subscribe(topics.ORDER_UPDATES, audit_service.handle_order_update)
     await bus.subscribe(topics.FILL_EVENTS, audit_service.handle_fill_event)
     await bus.subscribe(topics.FILL_EVENTS, portfolio_service.handle_fill_event)
+    await bus.subscribe(topics.PORTFOLIO_SNAPSHOTS, ai_service.handle_portfolio_snapshot)
     await bus.subscribe(topics.PORTFOLIO_SNAPSHOTS, audit_service.handle_portfolio_snapshot)
     await bus.subscribe(topics.PORTFOLIO_SNAPSHOTS, reconciliation_service.handle_portfolio_snapshot)
+    await bus.subscribe(topics.RECONCILIATION_REPORTS, ai_service.handle_reconciliation_report)
     await bus.subscribe(topics.RECONCILIATION_REPORTS, audit_service.handle_reconciliation_report)
 
     async def handle_position_target(message: dict[str, Any]) -> None:

@@ -15,13 +15,27 @@ class BaselineStrategy:
             raise RuntimeError("Feature snapshot reference is missing from the event store")
 
         features = FeatureSnapshot.model_validate(feature_event.payload)
+        analysis = features.analysis_context
         direction_bias = "flat"
         if features.momentum_score > 0.003 and features.regime_indicator in {"trend", "breakout"}:
             direction_bias = "long"
         elif features.momentum_score < -0.003 and features.regime_indicator in {"trend", "breakout"}:
             direction_bias = "short"
 
-        confidence = min(max(abs(features.momentum_score) * 40.0, 0.5), 0.9)
+        confidence = min(
+            max(
+                (abs(features.momentum_score) * 20.0)
+                + (features.regime_confidence * 0.4)
+                + (features.multi_timeframe_alignment * 0.2),
+                0.45,
+            ),
+            0.92,
+        )
+        reason_codes = ["baseline_momentum_regime", f"regime_{features.regime_indicator}"]
+        if analysis is not None:
+            reason_codes.append(f"mtf_alignment_{analysis.multi_timeframe.directional_alignment}")
+            if features.liquidity_score < 0.3:
+                reason_codes.append("liquidity_thin")
         return BaselineAssessment(
             decision_id=context.decision_id,
             symbol=context.symbol,
@@ -32,6 +46,6 @@ class BaselineStrategy:
             confidence=confidence,
             holding_horizon=context.timeframe,
             invalidation_conditions=["feature_regime_flip"],
-            reason_codes=["baseline_momentum_regime"],
-            engine_version="0.1.0",
+            reason_codes=reason_codes,
+            engine_version="0.2.0",
         )

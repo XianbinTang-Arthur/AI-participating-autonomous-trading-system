@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from sqlalchemy import Select, desc, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -80,6 +82,28 @@ class PostgresEventStore:
                 .where(EventEnvelopeModel.decision_id == decision_id)
                 .order_by(EventEnvelopeModel.sequence_id)
             ).all()
+        return [self._to_schema(row) for row in rows]
+
+    def between(
+        self,
+        *,
+        start_at: datetime | None = None,
+        end_at: datetime | None = None,
+        topic: str | None = None,
+        decision_id: str | None = None,
+    ) -> list[EventEnvelope]:
+        query: Select[tuple[EventEnvelopeModel]] = select(EventEnvelopeModel)
+        if start_at is not None:
+            query = query.where(EventEnvelopeModel.event_timestamp >= start_at)
+        if end_at is not None:
+            query = query.where(EventEnvelopeModel.event_timestamp <= end_at)
+        if topic is not None:
+            query = query.where(EventEnvelopeModel.topic == topic)
+        if decision_id is not None:
+            query = query.where(EventEnvelopeModel.decision_id == decision_id)
+        query = query.order_by(EventEnvelopeModel.sequence_id)
+        with self.session_factory() as session:
+            rows = session.scalars(query).all()
         return [self._to_schema(row) for row in rows]
 
     @staticmethod

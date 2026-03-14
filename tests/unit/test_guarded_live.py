@@ -93,6 +93,32 @@ class FakeOKXClient:
 
 
 class TestGuardedLive(unittest.IsolatedAsyncioTestCase):
+    def test_mode_snapshot_makes_guarded_simulated_boundaries_explicit(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "config_profile": "guarded_simulated_submit_dry_run",
+                "mode": "guarded_live",
+                "market_data_backend": "okx",
+                "execution_backend": "okx",
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "okx_simulated_trading": True,
+                "live_submit_enabled": False,
+                "guarded_execution_dry_run": True,
+            }
+        )
+        controller = RuntimeModeController(settings=settings, kill_switch=KillSwitch())
+
+        snapshot = controller.snapshot()
+
+        self.assertEqual(snapshot["operating_state"], "guarded_simulated_submit_dry_run")
+        self.assertEqual(snapshot["market_data_source"], "okx")
+        self.assertEqual(snapshot["account_read_source"], "okx")
+        self.assertEqual(snapshot["execution_route"], "okx_demo_guarded")
+        self.assertEqual(snapshot["exchange_submit_target"], "okx_demo")
+        self.assertFalse(snapshot["exchange_submit_allowed"])
+        self.assertIn("guarded_execution_dry_run", snapshot["submit_blocked_reasons"])
+
     async def test_okx_adapter_stays_in_dry_run_when_live_submit_disabled(self) -> None:
         settings = AATSSettings.model_validate(
             {
@@ -132,6 +158,11 @@ class TestGuardedLive(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(order_state.status, "DRY_RUN")
         self.assertEqual(order_state.venue, "OKX")
         self.assertEqual(fills, [])
+        readiness = adapter.readiness()
+        self.assertFalse(readiness["exchange_submit_allowed"])
+        self.assertIn("guarded_execution_dry_run", readiness["submit_blocked_reasons"])
+        self.assertTrue(readiness["safety_gates"]["mode_is_guarded_live"])
+        self.assertFalse(readiness["safety_gates"]["dry_run_disabled"])
 
     def test_policy_and_risk_block_unsafe_live_path(self) -> None:
         settings = AATSSettings.model_validate(

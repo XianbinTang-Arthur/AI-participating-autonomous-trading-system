@@ -65,6 +65,14 @@ class FakeAccountService:
         }
 
 
+class FakeHealthService:
+    def __init__(self, blockers: list[str] | None = None) -> None:
+        self._blockers = blockers or []
+
+    def execution_blockers(self) -> list[str]:
+        return list(self._blockers)
+
+
 class FakeOKXClient:
     def __init__(self) -> None:
         self.place_order_calls: list[dict] = []
@@ -252,6 +260,7 @@ class TestGuardedSimulatedExecution(unittest.IsolatedAsyncioTestCase):
             client=client,  # type: ignore[arg-type]
             account_service=FakeAccountService(),  # type: ignore[arg-type]
             mode_controller=mode_controller,
+            health_service=FakeHealthService(),
             price_provider=lambda _symbol: 68_000.0,
         )
 
@@ -277,6 +286,7 @@ class TestGuardedSimulatedExecution(unittest.IsolatedAsyncioTestCase):
             client=client,  # type: ignore[arg-type]
             account_service=FakeAccountService(),  # type: ignore[arg-type]
             mode_controller=mode_controller,
+            health_service=FakeHealthService(),
             price_provider=lambda _symbol: 68_000.0,
         )
 
@@ -302,6 +312,7 @@ class TestGuardedSimulatedExecution(unittest.IsolatedAsyncioTestCase):
             client=client,  # type: ignore[arg-type]
             account_service=FakeAccountService(),  # type: ignore[arg-type]
             mode_controller=mode_controller,
+            health_service=FakeHealthService(),
             price_provider=lambda _symbol: 68_000.0,
         )
 
@@ -350,6 +361,7 @@ class TestGuardedSimulatedExecution(unittest.IsolatedAsyncioTestCase):
             client=client,  # type: ignore[arg-type]
             account_service=FakeAccountService(),  # type: ignore[arg-type]
             mode_controller=mode_controller,
+            health_service=FakeHealthService(),
             price_provider=lambda _symbol: 68_000.0,
         )
 
@@ -375,6 +387,7 @@ class TestGuardedSimulatedExecution(unittest.IsolatedAsyncioTestCase):
             client=FakePartialFillOKXClient(),  # type: ignore[arg-type]
             account_service=FakeAccountService(),  # type: ignore[arg-type]
             mode_controller=mode_controller,
+            health_service=FakeHealthService(),
             price_provider=lambda _symbol: 68_000.0,
         )
         portfolio = PortfolioState(initial_usdt_balance=10_000.0)
@@ -409,6 +422,7 @@ class TestGuardedSimulatedExecution(unittest.IsolatedAsyncioTestCase):
             client=client,  # type: ignore[arg-type]
             account_service=FakeAccountService(),  # type: ignore[arg-type]
             mode_controller=mode_controller,
+            health_service=FakeHealthService(),
             price_provider=lambda _symbol: 68_000.0,
         )
 
@@ -419,6 +433,34 @@ class TestGuardedSimulatedExecution(unittest.IsolatedAsyncioTestCase):
         self.assertIn(canceled.status, {"PARTIALLY_FILLED", "CANCELED", "FILLED"})
         self.assertIsNotNone(canceled.cancellation_requested_ts)
         self.assertIsInstance(fills, list)
+
+    async def test_submit_is_blocked_when_health_freshness_is_unhealthy(self) -> None:
+        settings = make_settings(
+            {
+                "live_submit_enabled": True,
+                "guarded_execution_dry_run": False,
+            }
+        )
+        mode_controller = RuntimeModeController(settings=settings, kill_switch=KillSwitch())
+        client = FakeOKXClient()
+        adapter = OKXExecutionAdapter(
+            settings=settings,
+            client=client,  # type: ignore[arg-type]
+            account_service=FakeAccountService(),  # type: ignore[arg-type]
+            mode_controller=mode_controller,
+            health_service=FakeHealthService(["market_data_stale"]),
+            price_provider=lambda _symbol: 68_000.0,
+        )
+
+        state, fills = await adapter.submit(make_intent())
+
+        self.assertEqual(state.status, "BLOCKED")
+        self.assertEqual(state.execution_error, "market_data_stale")
+        self.assertEqual(fills, [])
+        self.assertEqual(client.place_order_calls, [])
+        readiness = adapter.readiness()
+        self.assertFalse(readiness["exchange_submit_allowed"])
+        self.assertIn("market_data_stale", readiness["submit_blocked_reasons"])
 
 
 if __name__ == "__main__":

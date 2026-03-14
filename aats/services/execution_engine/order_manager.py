@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from aats.bootstrap.logging import get_logger, log_event
+from aats.bootstrap.logging import correlation_fields, get_logger, log_event
 from aats.bus.base import EventBus
 from aats.events import topics
 from aats.events.envelopes import parse_payload, publish_model
@@ -33,10 +33,12 @@ class OrderManager:
                 self.logger,
                 "order_intent_blocked",
                 level="warning",
-                decision_id=intent.decision_id,
-                intent_id=intent.intent_id,
-                symbol=intent.symbol,
-                reason="kill_switch_active",
+                **correlation_fields(
+                    decision_id=intent.decision_id,
+                    intent_id=intent.intent_id,
+                    symbol=intent.symbol,
+                    reason="kill_switch_active",
+                ),
             )
             return
         if self.execution_repo.has_intent(intent.intent_id):
@@ -45,11 +47,13 @@ class OrderManager:
         log_event(
             self.logger,
             "order_intent_received",
-            decision_id=intent.decision_id,
-            intent_id=intent.intent_id,
-            symbol=intent.symbol,
-            side=intent.side,
-            quantity=intent.quantity,
+            **correlation_fields(
+                decision_id=intent.decision_id,
+                intent_id=intent.intent_id,
+                symbol=intent.symbol,
+                side=intent.side,
+                quantity=intent.quantity,
+            ),
         )
         created_state = OrderState(
             decision_id=intent.decision_id,
@@ -106,10 +110,12 @@ class OrderManager:
                 self.logger,
                 "order_submit_failed",
                 level="error",
-                decision_id=intent.decision_id,
-                intent_id=intent.intent_id,
-                symbol=intent.symbol,
-                error=str(exc),
+                **correlation_fields(
+                    decision_id=intent.decision_id,
+                    intent_id=intent.intent_id,
+                    symbol=intent.symbol,
+                    error=str(exc),
+                ),
             )
 
         persisted_order_state = await self._persist_order_state(order_state=order_state, key=intent.symbol)
@@ -149,11 +155,15 @@ class OrderManager:
         log_event(
             self.logger,
             "order_state_persisted",
-            decision_id=persisted.decision_id,
-            intent_id=persisted.intent_id,
-            status=persisted.status,
-            venue=persisted.venue,
-            submission_mode=persisted.submission_mode,
+            **correlation_fields(
+                decision_id=persisted.decision_id,
+                intent_id=persisted.intent_id,
+                order_id=persisted.client_order_id,
+                status=persisted.status,
+                venue=persisted.venue,
+                submission_mode=persisted.submission_mode,
+                execution_error=persisted.execution_error,
+            ),
         )
         await publish_model(
             bus=self.bus,
@@ -170,12 +180,16 @@ class OrderManager:
         log_event(
             self.logger,
             "fill_event_created",
-            decision_id=fill.decision_id,
-            fill_id=fill.fill_id,
-            symbol=fill.symbol,
-            fill_qty=fill.fill_qty,
-            fill_price=fill.fill_price,
-            venue=fill.venue,
+            **correlation_fields(
+                decision_id=fill.decision_id,
+                intent_id=fill.intent_id,
+                order_id=fill.client_order_id,
+                fill_id=fill.fill_id,
+                symbol=fill.symbol,
+                fill_qty=fill.fill_qty,
+                fill_price=fill.fill_price,
+                venue=fill.venue,
+            ),
         )
         await publish_model(
             bus=self.bus,
