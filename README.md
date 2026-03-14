@@ -5,22 +5,26 @@ Current state: event-driven AATS prototype with:
 - durable event/audit/replay path
 - OKX real market data integration
 - OKX read-only account integration
-- guarded OKX execution adapter with dry-run-by-default blocking
+- guarded OKX execution adapter with dry-run-by-default blocking and demo-environment simulated submit support
 - full-loop `real_market_paper` execution using local paper fills under real market conditions
 
 This is not production-ready live trading. Real order submission remains disabled by default.
 
 ## Modes
 
-The repository now supports four config profiles:
+The repository now supports six config profiles:
 - `local_demo`: demo market data + paper execution
 - `real_market_paper`: OKX real market data + read-only account + paper execution
+- `guarded_simulated_dry_run`: OKX real market data + read-only demo account + OKX simulated submit path selected, but exchange submission blocked and rendered as dry-run
+- `guarded_simulated_enabled`: OKX real market data + read-only demo account + explicitly enabled OKX simulated submit
 - `guarded_live_blocked`: OKX real market data + read-only account + OKX order payload/signing path, but submission blocked by default
-- `guarded_live_enabled`: same guarded-live path with explicit live submit enabled
+- `guarded_live_enabled`: reserved future real-live profile; real-money submit remains blocked in this prototype
 
 The effective operating state is exposed by `GET /system/mode` and `GET /system/health` as one of:
 - `local_demo`
 - `real_market_paper`
+- `guarded_simulated_dry_run`
+- `guarded_simulated_enabled`
 - `guarded_live_blocked`
 - `guarded_live_enabled`
 
@@ -36,6 +40,7 @@ If you use PostgreSQL-backed storage:
 ```powershell
 psql postgresql://aats:aats@localhost:5432/aats -f migrations/0001_postgres_storage.sql
 psql postgresql://aats:aats@localhost:5432/aats -f migrations/0002_execution_and_audit_correlation.sql
+psql postgresql://aats:aats@localhost:5432/aats -f migrations/0003_audit_execution_plan_refs.sql
 ```
 
 ## Local Demo Mode
@@ -92,47 +97,67 @@ The API lifespan starts:
 - local paper execution and portfolio mutation after eligible decisions
 - reconciliation after fill-driven portfolio updates
 
-## Guarded Live Blocked Mode
+## Guarded Simulated Dry-Run Mode
 
-This enables the OKX execution adapter, request signing, instrument validation, and exact dry-run payload generation, but submission remains blocked.
+This enables the OKX execution adapter against the OKX demo environment, request signing, instrument validation, and exact dry-run payload generation, but exchange submission remains blocked.
 
 ```powershell
-$env:AATS_CONFIG_PROFILE="guarded_live_blocked"
+$env:AATS_CONFIG_PROFILE="guarded_simulated_dry_run"
 .\.venv\Scripts\python.exe -m uvicorn apps.api_gateway.main:app --reload
 ```
 
 Behavior:
 - policy/risk/health still gate every execution path
-- order intents can produce `DRY_RUN` order states showing the exact payload that would be sent
-- no real order is submitted
+- order intents can produce `DRY_RUN` order states showing the exact demo-order payload that would be sent
+- no OKX order is submitted
 
 This differs from `real_market_paper`:
 - `real_market_paper` generates local paper fills and mutates the local portfolio
-- guarded-live blocked produces dry-run OKX order states only and does not create fills
+- guarded simulated dry-run produces dry-run OKX order states only and does not create fills
 
-## Guarded Live Enabled Mode
+## Guarded Simulated Enabled Mode
 
-Real submission is only allowed when all of the following are true:
-- profile or env selects `guarded_live_enabled`
+This is the only mode in the current repository that can submit orders to OKX, and it submits only to the OKX demo trading environment with `x-simulated-trading: 1`.
+
+Submission is allowed only when all of the following are true:
+- profile or env selects `guarded_simulated_enabled`
 - runtime mode is `guarded_live`
 - `AATS_EXECUTION_BACKEND=okx`
+- `AATS_OKX_SIMULATED_TRADING=true`
 - `AATS_LIVE_SUBMIT_ENABLED=true`
 - `AATS_GUARDED_EXECUTION_DRY_RUN=false`
-- OKX credentials are configured
-- policy, risk, and health checks pass
+- OKX demo credentials are configured
+- symbol is allowlisted
+- per-order notional and open-order caps pass
+- health, reconciliation, and halt gates pass
 
 Example:
 
 ```powershell
-$env:AATS_CONFIG_PROFILE="guarded_live_enabled"
+$env:AATS_CONFIG_PROFILE="guarded_simulated_enabled"
 .\.venv\Scripts\python.exe -m uvicorn apps.api_gateway.main:app --reload
 ```
 
-This path is still intentionally constrained:
+What this mode does:
+- submits the built order payload to OKX demo trading only
+- ingests exchange-backed order state on submit and during sync polling
+- ingests exchange fills when present
+- updates local portfolio from exchange fills
+- runs exchange-aware reconciliation
+- persists audit, replay, and reconciliation artifacts for the decision
+
+What this mode still does not do:
 - only OKX Spot
 - current MVP symbol universe only
+- no real-money trading
 - no cancel-all / flatten automation
 - no unrestricted autonomous live trading
+
+## Reserved Guarded Live Profiles
+
+`guarded_live_blocked` and `guarded_live_enabled` remain in the repo to preserve the profile layout, but real-money live trading is still intentionally unsupported here.
+
+If `AATS_OKX_SIMULATED_TRADING=false`, policy and adapter safeguards will block actual submission.
 
 ## Replay
 
@@ -141,6 +166,7 @@ Replay remains deterministic and validates:
 - decision-chain completeness
 - execution-chain integrity
 - audit-reference integrity
+- explicit `HealthSnapshot`, `ExecutionPlan`, `OrderState`, and `FillEvent` references inside the audit chain
 
 ```powershell
 .\.venv\Scripts\python.exe scripts/replay_session.py --bootstrap-local-loop --iterations 4
@@ -165,6 +191,9 @@ Current operator-facing endpoints:
 - `GET /orders/open`
 - `GET /reconciliation/latest`
 - `GET /decision/latest`
+- `GET /orders/latest`
+- `GET /fills/latest`
+- `GET /execution/latest`
 - `GET /audit/latest`
 - `GET /audit/{decision_id}`
 
@@ -184,7 +213,7 @@ Current operator-facing endpoints:
 - latest risk decision
 - latest execution plan
 - latest audit record
-- latest order intent and fill event for the same decision when they exist
+- latest order intent, order update, and fill event for the same decision when they exist
 - execution summary counts
 
 ## Important Safety Defaults
@@ -195,6 +224,7 @@ Defaults remain conservative:
 - `account_read_enabled=false`
 - `live_submit_enabled=false`
 - `guarded_execution_dry_run=true`
+- `okx_simulated_trading=false`
 
 Event persistence defaults to visibility-first behavior:
 - `AATS_EVENT_PERSISTENCE_MODE=strict`
@@ -209,7 +239,9 @@ Event persistence defaults to visibility-first behavior:
 - OKX read-only REST integration for balances, positions, open orders, account config, and instruments
 - full-loop `real_market_paper` path with `RiskDecision`, `OrderIntent`, paper fills, portfolio mutation, and reconciliation
 - explicit `ExecutionPlan` events between approved target positions and order intents
-- guarded OKX execution adapter with signing, payload building, validation, dry-run, and explicit live-submit gate
+- explicit `execution_plan_ref` and `order_state_refs` in `DecisionAuditRecord`
+- guarded OKX execution adapter with signing, payload building, validation, dry-run, explicit simulated-submit gates, and exchange lifecycle sync
+- exchange-aware reconciliation for OKX simulated submit mode
 - stronger mode-aware policy/risk/health blocking
 - expanded operator API surface
 
@@ -221,8 +253,9 @@ Event persistence defaults to visibility-first behavior:
 - no multi-exchange support
 - no production-grade live order lifecycle management beyond guarded submission
 - no autonomous live rollout
-- paper execution still uses local fill simulation rather than exchange-side simulated order placement
-- `DecisionAuditRecord` still does not store a dedicated `execution_plan_ref`; execution plans are currently recovered from the event store by `decision_id`
+- `real_market_paper` still uses local fill simulation rather than exchange-side simulated order placement
+- exchange reconciliation against balances/positions is only meaningful when `bootstrap_portfolio_from_exchange=true`
+- cancel/amend workflows and private websocket execution streams are not implemented yet
 
 ## Reference
 

@@ -30,6 +30,10 @@ class RuntimeModeController:
             return "local_demo"
         if self._mode == "paper_live":
             return "real_market_paper"
+        if self.settings.execution_backend == "okx" and self.settings.okx_simulated_trading:
+            if self.settings.live_submit_enabled and not self.settings.guarded_execution_dry_run:
+                return "guarded_simulated_enabled"
+            return "guarded_simulated_dry_run"
         if self.settings.live_submit_enabled and not self.settings.guarded_execution_dry_run:
             return "guarded_live_enabled"
         return "guarded_live_blocked"
@@ -38,7 +42,9 @@ class RuntimeModeController:
         return {
             "mode": self._mode,
             "operating_state": self.operating_state(),
+            "execution_backend": self.settings.execution_backend,
             "live_submit_enabled": self.settings.live_submit_enabled,
             "guarded_execution_dry_run": self.settings.guarded_execution_dry_run,
+            "okx_simulated_trading": self.settings.okx_simulated_trading,
             "halted": self.kill_switch.halted,
         }

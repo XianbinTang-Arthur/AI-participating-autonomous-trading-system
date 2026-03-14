@@ -42,18 +42,23 @@ class ExecutionPlan(SchemaBase):
 class OrderState(SchemaBase):
     decision_id: str
     intent_id: str
+    symbol: str
     client_order_id: str
     venue: str = "PAPER"
     exchange_order_id: str | None = None
     status: str
+    submission_mode: str = "paper_local"
+    exchange_status: str | None = None
     submitted_ts: datetime | None = None
     last_update_ts: datetime | None = None
+    last_exchange_update_ts: datetime | None = None
     requested_qty: float
     filled_qty: float = 0.0
     remaining_qty: float
     average_fill_price: float | None = None
     fees: float = 0.0
     cancel_reason: str | None = None
+    execution_error: str | None = None
     submission_payload: dict[str, str] = Field(default_factory=dict)
 
 
@@ -64,6 +69,7 @@ class FillEvent(SchemaBase):
     client_order_id: str
     exchange_order_id: str
     symbol: str
+    venue: str = "PAPER"
     side: Literal["buy", "sell"]
     fill_qty: float
     fill_price: float

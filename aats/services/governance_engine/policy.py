@@ -40,12 +40,15 @@ class PolicyEngine:
         if guarded_live_okx:
             health_blockers = self.health_service.execution_blockers()
             rejection_reasons.extend(health_blockers)
+            if self.settings.live_submit_enabled and not self.settings.okx_simulated_trading:
+                rejection_reasons.append("real_money_live_not_supported")
 
         allowed = not rejection_reasons
         execution_allowed = allowed
         submission_allowed = (
             execution_allowed
             and guarded_live_okx
+            and self.settings.okx_simulated_trading
             and self.settings.live_submit_enabled
             and not self.settings.guarded_execution_dry_run
         )

@@ -102,6 +102,7 @@ class TestGuardedLive(unittest.IsolatedAsyncioTestCase):
                 "account_read_enabled": True,
                 "live_submit_enabled": False,
                 "guarded_execution_dry_run": True,
+                "okx_simulated_trading": False,
             }
         )
         kill_switch = KillSwitch()
@@ -140,6 +141,7 @@ class TestGuardedLive(unittest.IsolatedAsyncioTestCase):
                 "account_backend": "okx",
                 "account_read_enabled": True,
                 "max_open_orders": 1,
+                "okx_simulated_trading": False,
             }
         )
         kill_switch = KillSwitch()
@@ -198,6 +200,7 @@ class TestGuardedLive(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(AATSSettings.model_fields["account_read_enabled"].default)
         self.assertFalse(AATSSettings.model_fields["live_submit_enabled"].default)
         self.assertTrue(AATSSettings.model_fields["guarded_execution_dry_run"].default)
+        self.assertFalse(AATSSettings.model_fields["okx_simulated_trading"].default)
 
 
 if __name__ == "__main__":

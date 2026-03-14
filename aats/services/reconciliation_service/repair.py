@@ -7,6 +7,7 @@ from aats.bus.base import EventBus
 from aats.events import topics
 from aats.events.envelopes import parse_envelope, publish_model
 from aats.schemas.execution import FillEvent, OrderState
+from aats.schemas.exchange import ExchangeAccountSnapshot
 from aats.schemas.portfolio import PortfolioSnapshot
 from aats.schemas.reconciliation import ReconciliationReport
 from aats.services.portfolio_service.reconstruction import PortfolioReconstructionService
@@ -33,6 +34,7 @@ class ReconciliationService:
         execution_repo: ExecutionRepository,
         reconstruction_service: PortfolioReconstructionService,
         price_provider: Callable[[str], float],
+        bootstrap_portfolio_from_exchange: bool = False,
         metrics: MetricsRegistry | None = None,
     ) -> None:
         self.bus = bus
@@ -43,6 +45,7 @@ class ReconciliationService:
         self.execution_repo = execution_repo
         self.reconstruction_service = reconstruction_service
         self.price_provider = price_provider
+        self.bootstrap_portfolio_from_exchange = bootstrap_portfolio_from_exchange
         self.metrics = metrics
 
     async def handle_portfolio_snapshot(self, message: dict) -> None:
@@ -50,9 +53,13 @@ class ReconciliationService:
         snapshot = PortfolioSnapshot.model_validate(envelope.payload)
         order_states: list[OrderState] = self.execution_repo.order_states()
         fills: list[FillEvent] = self.execution_repo.fills()
+        exchange_snapshot: ExchangeAccountSnapshot | None = self.fetcher.fetch_snapshot()
         reconstructed_snapshot = self.reconstruction_service.rebuild_snapshot(
             fills=fills,
             price_provider=self.price_provider,
+        )
+        exchange_comparison_enabled = any(order.venue == "OKX" for order in order_states) or any(
+            fill.venue == "OKX" for fill in fills
         )
         report = self.comparator.compare(
             decision_id=snapshot.decision_id,
@@ -61,6 +68,9 @@ class ReconciliationService:
             fills=fills,
             stored_snapshot=snapshot,
             reconstructed_snapshot=reconstructed_snapshot,
+            exchange_snapshot=exchange_snapshot,
+            exchange_comparison_enabled=exchange_comparison_enabled,
+            compare_exchange_portfolio=exchange_comparison_enabled and self.bootstrap_portfolio_from_exchange,
         )
         self.reconciliation_repo.save_report(report)
         if report.severity != "CLEAN":

@@ -95,6 +95,45 @@ class OKXRESTClient:
             require_auth=True,
         )
 
+    async def get_order(
+        self,
+        *,
+        symbol: str,
+        order_id: str | None = None,
+        client_order_id: str | None = None,
+    ) -> dict[str, Any]:
+        if order_id is None and client_order_id is None:
+            raise ValueError("order_id or client_order_id must be provided")
+        return await self.request(
+            method="GET",
+            path="/api/v5/trade/order",
+            params={
+                "instId": symbol,
+                "ordId": order_id,
+                "clOrdId": client_order_id,
+            },
+            require_auth=True,
+        )
+
+    async def get_fills(
+        self,
+        *,
+        symbol: str | None = None,
+        order_id: str | None = None,
+        limit: int | None = None,
+    ) -> dict[str, Any]:
+        return await self.request(
+            method="GET",
+            path="/api/v5/trade/fills",
+            params={
+                "instType": "SPOT",
+                "instId": symbol,
+                "ordId": order_id,
+                "limit": limit,
+            },
+            require_auth=True,
+        )
+
     def _auth_headers(self, *, method: str, request_path: str, body: str) -> dict[str, str]:
         if not self.settings.okx_credentials_configured:
             raise RuntimeError("OKX credentials are not configured")

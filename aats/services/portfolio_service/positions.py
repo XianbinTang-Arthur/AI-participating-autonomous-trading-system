@@ -9,6 +9,7 @@ from aats.bus.base import EventBus
 from aats.events import topics
 from aats.events.envelopes import parse_payload, publish_model
 from aats.schemas.execution import FillEvent
+from aats.schemas.exchange import ExchangeAccountSnapshot
 from aats.storage.base import PortfolioRepository
 from aats.services.portfolio_service.snapshots import PortfolioSnapshotBuilder
 
@@ -38,6 +39,24 @@ class PortfolioState:
 
     def has_applied_fill(self, fill_id: str) -> bool:
         return fill_id in self._applied_fill_ids
+
+    def load_exchange_snapshot(self, snapshot: ExchangeAccountSnapshot) -> None:
+        self.positions = {}
+        self.balances = {
+            balance.currency: balance.total for balance in snapshot.balances if abs(balance.total) > 1e-12
+        }
+        if "USDT" not in self.balances:
+            self.balances["USDT"] = 0.0
+        for position in snapshot.positions:
+            if abs(position.quantity) < 1e-12:
+                continue
+            self.positions[position.symbol] = PositionRecord(
+                quantity=position.quantity,
+                avg_entry_price=position.average_entry_price or 0.0,
+            )
+        self.realized_pnl = 0.0
+        self.total_fees_paid = 0.0
+        self._applied_fill_ids.clear()
 
     def apply_fill(self, fill: FillEvent) -> FillApplicationResult:
         if fill.fill_id in self._applied_fill_ids:

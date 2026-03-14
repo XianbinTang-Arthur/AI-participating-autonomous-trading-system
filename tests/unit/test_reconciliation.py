@@ -4,6 +4,7 @@ import unittest
 
 from aats.schemas.common import utc_now
 from aats.schemas.execution import FillEvent, OrderState
+from aats.schemas.exchange import ExchangeAccountSnapshot, ExchangeBalance, ExchangeOpenOrder
 from aats.schemas.portfolio import PortfolioSnapshot, Position
 from aats.services.reconciliation_service.comparator import StateComparator
 
@@ -18,6 +19,7 @@ class TestReconciliationComparator(unittest.TestCase):
                 OrderState(
                     decision_id="decision_1",
                     intent_id="intent_1",
+                    symbol="BTC-USDT",
                     client_order_id="clord_1",
                     exchange_order_id="paper_1",
                     status="FILLED",
@@ -38,6 +40,7 @@ class TestReconciliationComparator(unittest.TestCase):
                     client_order_id="clord_1",
                     exchange_order_id="paper_1",
                     symbol="BTC-USDT",
+                    venue="PAPER",
                     side="buy",
                     fill_qty=1.0,
                     fill_price=100.0,
@@ -93,8 +96,108 @@ class TestReconciliationComparator(unittest.TestCase):
         self.assertTrue(report.halt_required)
         self.assertEqual(report.decision_id, "decision_1")
         self.assertEqual(report.portfolio_snapshot_ref, "evt_portfolio_1")
-        self.assertTrue(report.balance_diff)
-        self.assertTrue(report.position_diff["mismatches"])
+        self.assertTrue(report.balance_diff["reconstructed"])
+        self.assertTrue(report.position_diff["reconstructed_mismatches"])
+
+    def test_compare_detects_exchange_order_and_fill_mismatch(self) -> None:
+        comparator = StateComparator()
+        now = utc_now()
+        report = comparator.compare(
+            decision_id="decision_2",
+            portfolio_snapshot_ref="evt_portfolio_2",
+            order_states=[
+                OrderState(
+                    decision_id="decision_2",
+                    intent_id="intent_2",
+                    symbol="BTC-USDT",
+                    client_order_id="clord_2",
+                    venue="OKX",
+                    exchange_order_id="ord_2",
+                    status="SUBMITTED",
+                    exchange_status="live",
+                    submitted_ts=now,
+                    last_update_ts=now,
+                    last_exchange_update_ts=now,
+                    requested_qty=0.001,
+                    filled_qty=0.0,
+                    remaining_qty=0.001,
+                    average_fill_price=None,
+                    fees=0.0,
+                )
+            ],
+            fills=[
+                FillEvent(
+                    fill_id="trade_1",
+                    decision_id="decision_2",
+                    intent_id="intent_2",
+                    client_order_id="clord_2",
+                    exchange_order_id="ord_2",
+                    symbol="BTC-USDT",
+                    venue="OKX",
+                    side="buy",
+                    fill_qty=0.001,
+                    fill_price=100.0,
+                    fee_amount=0.1,
+                    liquidity_role="taker",
+                    exchange_timestamp=now,
+                    ingestion_timestamp=now,
+                )
+            ],
+            stored_snapshot=PortfolioSnapshot(
+                snapshot_ts=now,
+                balances={"USDT": 10_000.0},
+                positions=[],
+                cost_basis={},
+                realized_pnl=0.0,
+                unrealized_pnl=0.0,
+                total_equity=10_000.0,
+                gross_exposure=0.0,
+                net_exposure=0.0,
+                risk_budget_usage={},
+            ),
+            reconstructed_snapshot=PortfolioSnapshot(
+                snapshot_ts=now,
+                balances={"USDT": 10_000.0},
+                positions=[],
+                cost_basis={},
+                realized_pnl=0.0,
+                unrealized_pnl=0.0,
+                total_equity=10_000.0,
+                gross_exposure=0.0,
+                net_exposure=0.0,
+                risk_budget_usage={},
+            ),
+            exchange_snapshot=ExchangeAccountSnapshot(
+                account_source="okx",
+                fetched_at=now,
+                balances=[ExchangeBalance(currency="USDT", total=10_000.0, available=10_000.0, frozen=0.0)],
+                positions=[],
+                open_orders=[
+                    ExchangeOpenOrder(
+                        instrument_id="BTC-USDT",
+                        client_order_id="clord_2",
+                        exchange_order_id="ord_2",
+                        side="buy",
+                        order_type="market",
+                        status="PARTIALLY_FILLED",
+                        quantity=0.001,
+                        filled_quantity=0.0005,
+                        price=None,
+                        created_ts=now,
+                        updated_ts=now,
+                    )
+                ],
+                fills=[],
+                instruments=[],
+            ),
+            exchange_comparison_enabled=True,
+            compare_exchange_portfolio=False,
+        )
+
+        self.assertEqual(report.severity, "SOFT_MISMATCH")
+        self.assertFalse(report.halt_required)
+        self.assertTrue(report.order_diff["exchange"])
+        self.assertTrue(report.fill_diff["exchange"])
 
 
 if __name__ == "__main__":

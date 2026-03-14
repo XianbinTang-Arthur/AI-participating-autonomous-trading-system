@@ -12,6 +12,8 @@ HealthStatus = Literal["ok", "warn", "blocked"]
 OperatingState = Literal[
     "local_demo",
     "real_market_paper",
+    "guarded_simulated_dry_run",
+    "guarded_simulated_enabled",
     "guarded_live_blocked",
     "guarded_live_enabled",
 ]
@@ -44,6 +46,8 @@ class SystemHealthSnapshot(HealthSnapshot):
 class RuntimeModeState(SchemaBase):
     mode: str
     operating_state: OperatingState
+    execution_backend: str | None = None
     live_submit_enabled: bool
     guarded_execution_dry_run: bool
+    okx_simulated_trading: bool = False
     halted: bool

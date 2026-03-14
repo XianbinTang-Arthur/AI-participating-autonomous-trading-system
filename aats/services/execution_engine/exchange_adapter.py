@@ -11,5 +11,8 @@ class ExchangeAdapter(ABC):
     async def submit(self, intent: OrderIntent) -> tuple[OrderState, list[FillEvent]]:
         raise NotImplementedError
 
+    async def sync(self, open_order_states: list[OrderState]) -> tuple[list[OrderState], list[FillEvent]]:
+        return [], []
+
     def readiness(self) -> dict[str, Any]:
         return {"ready": True, "backend": self.__class__.__name__}

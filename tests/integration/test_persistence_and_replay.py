@@ -126,22 +126,28 @@ class TestPersistenceAndReplay(unittest.IsolatedAsyncioTestCase):
                         self.assertIsNotNone(event_store.get(record.policy_decision_ref))
                     if record.risk_decision_ref is not None:
                         self.assertIsNotNone(event_store.get(record.risk_decision_ref))
+                    if record.execution_plan_ref is not None:
+                        execution_plan_event = event_store.get(record.execution_plan_ref)
+                        self.assertIsNotNone(execution_plan_event)
+                        if execution_plan_event is not None:
+                            self.assertEqual(execution_plan_event.topic, topics.EXECUTION_PLANS)
                     if record.portfolio_delta_ref is not None:
                         snapshot_event = event_store.get(record.portfolio_delta_ref)
                         self.assertIsNotNone(snapshot_event)
                         self.assertEqual(snapshot_event.payload.get("decision_id"), record.decision_id)
-                    for ref in record.order_intent_refs + record.fill_event_refs + record.reconciliation_refs:
+                    for ref in (
+                        record.order_intent_refs
+                        + record.order_state_refs
+                        + record.fill_event_refs
+                        + record.reconciliation_refs
+                    ):
                         event = event_store.get(ref)
                         self.assertIsNotNone(event)
                         if event is not None and "decision_id" in event.payload:
                             self.assertEqual(event.payload.get("decision_id"), record.decision_id)
                     if record.order_intent_refs:
-                        execution_plan_events = [
-                            event
-                            for event in event_store.by_decision(record.decision_id)
-                            if event.topic == topics.EXECUTION_PLANS
-                        ]
-                        self.assertTrue(execution_plan_events)
+                        self.assertIsNotNone(record.execution_plan_ref)
+                        self.assertTrue(record.order_state_refs)
             finally:
                 if runtime.database_runtime is not None:
                     runtime.database_runtime.dispose()

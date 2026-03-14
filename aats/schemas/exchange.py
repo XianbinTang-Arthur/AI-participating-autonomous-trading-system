@@ -39,6 +39,20 @@ class ExchangeOpenOrder(SchemaBase):
     updated_ts: datetime | None = None
 
 
+class ExchangeFill(SchemaBase):
+    fill_id: str
+    exchange_order_id: str
+    client_order_id: str | None = None
+    instrument_id: str
+    symbol: str
+    side: str
+    fill_qty: float
+    fill_price: float
+    fee_amount: float = 0.0
+    fee_currency: str | None = None
+    fill_ts: datetime | None = None
+
+
 class InstrumentMetadata(SchemaBase):
     instrument_id: str
     symbol: str
@@ -57,6 +71,7 @@ class ExchangeAccountSnapshot(SchemaBase):
     balances: list[ExchangeBalance] = Field(default_factory=list)
     positions: list[ExchangePosition] = Field(default_factory=list)
     open_orders: list[ExchangeOpenOrder] = Field(default_factory=list)
+    fills: list[ExchangeFill] = Field(default_factory=list)
     instruments: list[InstrumentMetadata] = Field(default_factory=list)
     account_mode: str | None = None
     raw: dict[str, Any] = Field(default_factory=dict)

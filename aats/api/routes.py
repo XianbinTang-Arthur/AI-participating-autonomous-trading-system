@@ -29,6 +29,20 @@ def _envelope_payload(envelope: EventEnvelope | None) -> dict[str, Any] | None:
     return envelope.payload if envelope is not None else None
 
 
+def _latest_order_state(runtime: ApplicationRuntime):
+    orders = runtime.execution_repo.order_states()
+    if not orders:
+        return None
+    return max(orders, key=lambda item: item.last_update_ts or item.created_at)
+
+
+def _latest_fill(runtime: ApplicationRuntime):
+    fills = runtime.execution_repo.fills()
+    if not fills:
+        return None
+    return max(fills, key=lambda item: item.ingestion_timestamp)
+
+
 def _latest_decision_events(runtime: ApplicationRuntime) -> tuple[str | None, dict[str, EventEnvelope]]:
     latest_audit = runtime.event_store.latest(topics.AUDIT_RECORDS)
     latest_context = runtime.event_store.latest(topics.DECISION_CONTEXTS)
@@ -192,6 +206,7 @@ async def latest_decision(request: Request) -> dict[str, Any]:
         "execution_plan": _envelope_payload(latest_by_topic.get(topics.EXECUTION_PLANS)),
         "audit": _envelope_payload(latest_by_topic.get(topics.AUDIT_RECORDS)),
         "latest_order_intent": _envelope_payload(latest_by_topic.get(topics.ORDER_INTENTS)),
+        "latest_order_update": _envelope_payload(latest_by_topic.get(topics.ORDER_UPDATES)),
         "latest_fill_event": _envelope_payload(latest_by_topic.get(topics.FILL_EVENTS)),
         "execution_summary": {
             "order_count": len(runtime.execution_repo.order_states()),
@@ -215,3 +230,40 @@ async def audit_record(request: Request, decision_id: str) -> dict[str, Any]:
     if record is None:
         raise HTTPException(status_code=404, detail=f"audit record not found for decision_id={decision_id}")
     return {"audit": record.model_dump(mode="json")}
+
+
+@router.get("/orders/latest")
+async def latest_order(request: Request) -> dict[str, Any]:
+    runtime = _runtime(request)
+    latest_order = _latest_order_state(runtime)
+    return {"order": latest_order.model_dump(mode="json") if latest_order is not None else None}
+
+
+@router.get("/fills/latest")
+async def latest_fill(request: Request) -> dict[str, Any]:
+    runtime = _runtime(request)
+    latest_local_fill = _latest_fill(runtime)
+    exchange_snapshot = runtime.account_service.latest_snapshot()
+    latest_exchange_fill = exchange_snapshot.fills[0] if exchange_snapshot and exchange_snapshot.fills else None
+    return {
+        "local_fill": latest_local_fill.model_dump(mode="json") if latest_local_fill is not None else None,
+        "exchange_fill": latest_exchange_fill.model_dump(mode="json") if latest_exchange_fill is not None else None,
+    }
+
+
+@router.get("/execution/latest")
+async def latest_execution(request: Request) -> dict[str, Any]:
+    runtime = _runtime(request)
+    readiness = runtime.execution_adapter.readiness()
+    latest_order = _latest_order_state(runtime)
+    latest_local_fill = _latest_fill(runtime)
+    latest_reconciliation = runtime.reconciliation_repo.latest()
+    return {
+        "mode": RuntimeModeState(**runtime.mode_controller.snapshot()).model_dump(mode="json"),
+        "execution": readiness,
+        "latest_order": latest_order.model_dump(mode="json") if latest_order is not None else None,
+        "latest_fill": latest_local_fill.model_dump(mode="json") if latest_local_fill is not None else None,
+        "latest_reconciliation": (
+            latest_reconciliation.model_dump(mode="json") if latest_reconciliation is not None else None
+        ),
+    }

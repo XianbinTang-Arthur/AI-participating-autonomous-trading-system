@@ -14,6 +14,8 @@ PersistenceMode = Literal["strict", "permissive"]
 ConfigProfile = Literal[
     "local_demo",
     "real_market_paper",
+    "guarded_simulated_dry_run",
+    "guarded_simulated_enabled",
     "guarded_live_blocked",
     "guarded_live_enabled",
 ]
@@ -45,6 +47,7 @@ class AATSSettings(BaseSettings):
     account_read_enabled: bool = False
     live_submit_enabled: bool = False
     guarded_execution_dry_run: bool = True
+    bootstrap_portfolio_from_exchange: bool = False
     database_url: str | None = None
     database_auto_create_schema: bool = True
     max_abs_position_qty: float = 0.01
@@ -73,6 +76,8 @@ class AATSSettings(BaseSettings):
     okx_timeout_seconds: float = 10.0
     okx_market_reconnect_delay_seconds: float = 2.0
     okx_account_refresh_interval_seconds: float = 15.0
+    okx_execution_sync_interval_seconds: float = 5.0
+    okx_fill_fetch_limit: int = 100
     api_host: str = "127.0.0.1"
     api_port: int = 8000
     log_level: str = "INFO"

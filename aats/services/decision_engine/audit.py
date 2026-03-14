@@ -53,6 +53,12 @@ class DecisionAuditService:
             ref_field="risk_decision_ref",
         )
 
+    async def handle_execution_plan(self, message: dict) -> None:
+        await self._update_decision_record(
+            message=message,
+            ref_field="execution_plan_ref",
+        )
+
     async def handle_order_intent(self, message: dict) -> None:
         envelope = parse_envelope(message)
         decision_id = str(envelope.payload["decision_id"])
@@ -62,6 +68,17 @@ class DecisionAuditService:
                 update={"order_intent_refs": [*record.order_intent_refs, envelope.event_id]},
             )
             await self._publish_record(record)
+
+    async def handle_order_update(self, message: dict) -> None:
+        envelope = parse_envelope(message)
+        decision_id = str(envelope.payload["decision_id"])
+        record = self._existing_record(decision_id)
+        if envelope.event_id in record.order_state_refs:
+            return
+        record = record.model_copy(
+            update={"order_state_refs": [*record.order_state_refs, envelope.event_id]},
+        )
+        await self._publish_record(record)
 
     async def handle_fill_event(self, message: dict) -> None:
         envelope = parse_envelope(message)
@@ -126,7 +143,9 @@ class DecisionAuditService:
             self.logger,
             "decision_audit_updated",
             decision_id=record.decision_id,
+            execution_plan_ref=record.execution_plan_ref,
             order_intent_ref_count=len(record.order_intent_refs),
+            order_state_ref_count=len(record.order_state_refs),
             fill_event_ref_count=len(record.fill_event_refs),
             reconciliation_ref_count=len(record.reconciliation_refs),
         )

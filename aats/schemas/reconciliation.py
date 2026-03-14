@@ -11,6 +11,8 @@ class ReconciliationReport(SchemaBase):
     decision_id: str | None = None
     portfolio_snapshot_ref: str | None = None
     as_of_ts: datetime
+    exchange_snapshot_ts: datetime | None = None
+    exchange_comparison_enabled: bool = False
     order_diff: dict[str, Any]
     fill_diff: dict[str, Any]
     balance_diff: dict[str, Any]

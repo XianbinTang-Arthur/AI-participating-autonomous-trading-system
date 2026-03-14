@@ -11,6 +11,7 @@ from aats.schemas.common import utc_now
 from aats.schemas.exchange import (
     ExchangeAccountSnapshot,
     ExchangeBalance,
+    ExchangeFill,
     ExchangeOpenOrder,
     ExchangePosition,
     InstrumentMetadata,
@@ -43,6 +44,10 @@ class OKXAccountService:
             try:
                 balance_payload = await self.client.get_balance()
                 open_orders_payload = await self.client.get_open_orders(symbol=self.settings.default_symbol)
+                fills_payload = await self.client.get_fills(
+                    symbol=self.settings.default_symbol,
+                    limit=self.settings.okx_fill_fetch_limit,
+                )
                 instruments_payload = await self.client.get_instruments()
                 account_config_payload = await self.client.get_account_config()
                 try:
@@ -56,12 +61,14 @@ class OKXAccountService:
                     balances=self._parse_balances(balance_payload),
                     positions=self._parse_positions(positions_payload),
                     open_orders=self._parse_open_orders(open_orders_payload),
+                    fills=self._parse_fills(fills_payload),
                     instruments=self._parse_instruments(instruments_payload),
                     account_mode=self._parse_account_mode(account_config_payload),
                     raw={
                         "balance": balance_payload,
                         "positions": positions_payload,
                         "open_orders": open_orders_payload,
+                        "fills": fills_payload,
                         "instruments": instruments_payload,
                         "account_config": account_config_payload,
                     },
@@ -74,6 +81,7 @@ class OKXAccountService:
                     balance_count=len(snapshot.balances),
                     position_count=len(snapshot.positions),
                     open_order_count=len(snapshot.open_orders),
+                    fill_count=len(snapshot.fills),
                     instrument_count=len(snapshot.instruments),
                 )
                 return snapshot
@@ -148,6 +156,14 @@ class OKXAccountService:
             "blockers": blockers,
         }
 
+    def recent_fills(self, symbol: str | None = None) -> list[ExchangeFill]:
+        snapshot = self._latest_snapshot
+        if snapshot is None:
+            return []
+        if symbol is None:
+            return list(snapshot.fills)
+        return [fill for fill in snapshot.fills if fill.symbol == symbol]
+
     @staticmethod
     def _parse_balances(payload: dict[str, Any]) -> list[ExchangeBalance]:
         rows: list[ExchangeBalance] = []
@@ -204,6 +220,31 @@ class OKXAccountService:
                     price=(float(row.get("px")) if row.get("px") not in {None, ""} else None),
                     created_ts=utc_now() if not created_ts else datetime_from_ms(str(created_ts)),
                     updated_ts=utc_now() if not updated_ts else datetime_from_ms(str(updated_ts)),
+                )
+            )
+        return rows
+
+    @staticmethod
+    def _parse_fills(payload: dict[str, Any]) -> list[ExchangeFill]:
+        rows: list[ExchangeFill] = []
+        for row in payload.get("data", []):
+            fill_ts = row.get("fillTime") or row.get("ts")
+            fill_id = str(row.get("tradeId") or row.get("billId") or row.get("fillId") or "")
+            if not fill_id:
+                fill_id = f"{row.get('ordId', 'unknown')}-{fill_ts or 'unknown'}"
+            rows.append(
+                ExchangeFill(
+                    fill_id=fill_id,
+                    exchange_order_id=str(row.get("ordId") or ""),
+                    client_order_id=str(row.get("clOrdId")) if row.get("clOrdId") else None,
+                    instrument_id=str(row.get("instId")),
+                    symbol=str(row.get("instId")),
+                    side=str(row.get("side")),
+                    fill_qty=float(row.get("fillSz", row.get("sz", 0.0)) or 0.0),
+                    fill_price=float(row.get("fillPx", row.get("px", 0.0)) or 0.0),
+                    fee_amount=abs(float(row.get("fee", 0.0) or 0.0)),
+                    fee_currency=str(row.get("feeCcy")) if row.get("feeCcy") else None,
+                    fill_ts=datetime_from_ms(str(fill_ts)) if fill_ts not in {None, ""} else None,
                 )
             )
         return rows

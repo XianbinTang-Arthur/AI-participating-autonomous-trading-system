@@ -22,12 +22,15 @@ class PaperExecutionAdapter(ExchangeAdapter):
         state = OrderState(
             decision_id=intent.decision_id,
             intent_id=intent.intent_id,
+            symbol=intent.symbol,
             client_order_id=client_order_id,
             venue="PAPER",
             exchange_order_id=exchange_order_id,
             status="FILLED",
+            submission_mode="paper_local",
             submitted_ts=now,
             last_update_ts=now,
+            last_exchange_update_ts=now,
             requested_qty=intent.quantity,
             filled_qty=intent.quantity,
             remaining_qty=0.0,
@@ -47,6 +50,7 @@ class PaperExecutionAdapter(ExchangeAdapter):
             client_order_id=client_order_id,
             exchange_order_id=exchange_order_id,
             symbol=intent.symbol,
+            venue="PAPER",
             side=intent.side,
             fill_qty=intent.quantity,
             fill_price=fill_price,
@@ -57,5 +61,14 @@ class PaperExecutionAdapter(ExchangeAdapter):
         )
         return state, [fill]
 
+    async def sync(self, open_order_states: list[OrderState]) -> tuple[list[OrderState], list[FillEvent]]:
+        _ = open_order_states
+        return [], []
+
     def readiness(self) -> dict[str, object]:
-        return {"ready": True, "backend": "paper", "live_submit_enabled": False}
+        return {
+            "ready": True,
+            "backend": "paper",
+            "execution_mode": "paper_local",
+            "live_submit_enabled": False,
+        }

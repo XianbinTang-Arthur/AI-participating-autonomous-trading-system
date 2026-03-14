@@ -15,6 +15,7 @@ account_backend: disabled
 account_read_enabled: false
 live_submit_enabled: false
 guarded_execution_dry_run: true
+bootstrap_portfolio_from_exchange: false
 database_url: postgresql+psycopg://aats:aats@localhost:5432/aats
 database_auto_create_schema: true
 max_abs_position_qty: 0.01
@@ -40,4 +41,6 @@ okx_simulated_trading: false
 okx_timeout_seconds: 10.0
 okx_market_reconnect_delay_seconds: 2.0
 okx_account_refresh_interval_seconds: 15.0
+okx_execution_sync_interval_seconds: 5.0
+okx_fill_fetch_limit: 100
 exchange_name: PAPER

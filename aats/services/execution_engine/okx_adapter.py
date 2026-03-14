@@ -1,14 +1,16 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+from datetime import datetime, timezone
 from decimal import Decimal, ROUND_DOWN
 from typing import Any
 
 from aats.bootstrap.settings import AATSSettings
 from aats.schemas.common import new_id, utc_now
 from aats.schemas.execution import FillEvent, OrderIntent, OrderState
-from aats.schemas.exchange import InstrumentMetadata
+from aats.schemas.exchange import ExchangeFill, InstrumentMetadata
 from aats.services.execution_engine.exchange_adapter import ExchangeAdapter
-from aats.services.execution_engine.okx_account import OKXAccountService
+from aats.services.execution_engine.okx_account import OKXAccountService, datetime_from_ms
 from aats.services.execution_engine.okx_rest import OKXRESTClient
 from aats.services.governance_engine.mode import RuntimeModeController
 
@@ -63,13 +65,17 @@ class OKXExecutionAdapter(ExchangeAdapter):
         client: OKXRESTClient,
         account_service: OKXAccountService,
         mode_controller: RuntimeModeController,
+        price_provider: Callable[[str], float] | None = None,
         payload_builder: OKXOrderPayloadBuilder | None = None,
     ) -> None:
         self.settings = settings
         self.client = client
         self.account_service = account_service
         self.mode_controller = mode_controller
+        self.price_provider = price_provider
         self.payload_builder = payload_builder or OKXOrderPayloadBuilder()
+        self._last_error: str | None = None
+        self._last_submission_payload: dict[str, str] | None = None
 
     async def submit(self, intent: OrderIntent) -> tuple[OrderState, list[FillEvent]]:
         snapshot = await self.account_service.refresh()
@@ -78,61 +84,127 @@ class OKXExecutionAdapter(ExchangeAdapter):
             raise RuntimeError(f"OKX instrument metadata unavailable for symbol={intent.symbol}")
 
         payload = self.payload_builder.build(intent=intent, instrument=instrument)
-        now = utc_now()
-        live_allowed = (
-            self.mode_controller.mode == "guarded_live"
-            and self.settings.execution_backend == "okx"
-            and self.settings.live_submit_enabled
-            and not self.settings.guarded_execution_dry_run
-        )
-        if not live_allowed:
+        self._last_submission_payload = dict(payload)
+        submitted_ts = utc_now()
+        gate_error = self._submission_gate_error(intent=intent)
+        if gate_error is not None:
+            self._last_error = gate_error
+            return self._blocked_state(intent=intent, payload=payload, reason=gate_error), []
+
+        try:
+            response = await self.client.place_order(payload)
+            row = self._first_row(response)
+            row_code = str(row.get("sCode") or "0")
+            row_message = str(row.get("sMsg") or "")
+            if row_code != "0":
+                self._last_error = row_message or f"submit_rejected_code_{row_code}"
+                return (
+                    self._rejected_state(
+                        intent=intent,
+                        payload=payload,
+                        submitted_ts=submitted_ts,
+                        error=row_message or row_code,
+                    ),
+                    [],
+                )
+
+            client_order_id = str(row.get("clOrdId") or payload["clOrdId"])
+            order_id = str(row.get("ordId")) if row.get("ordId") else None
+            order_detail = await self._load_order_detail(
+                symbol=intent.symbol,
+                order_id=order_id,
+                client_order_id=client_order_id,
+            )
+            if order_detail is None:
+                state = self._submitted_state(
+                    intent=intent,
+                    payload=payload,
+                    submitted_ts=submitted_ts,
+                    client_order_id=client_order_id,
+                    order_id=order_id,
+                )
+                return state, []
+
+            state = self._map_order_state(
+                intent=intent,
+                payload=payload,
+                order_row=order_detail,
+                submitted_ts=submitted_ts,
+            )
+            fills_payload = await self.client.get_fills(
+                symbol=intent.symbol,
+                order_id=state.exchange_order_id,
+                limit=self.settings.okx_fill_fetch_limit,
+            )
+            fills = self._map_fill_events(
+                intent=intent,
+                client_order_id=state.client_order_id,
+                exchange_fills=self._parse_fill_rows(fills_payload),
+            )
+            self._last_error = None
+            return state, fills
+        except Exception as exc:
+            self._last_error = str(exc)
             return (
-                OrderState(
-                    decision_id=intent.decision_id,
-                    intent_id=intent.intent_id,
-                    client_order_id=payload["clOrdId"],
-                    venue="OKX",
-                    exchange_order_id=None,
-                    status="DRY_RUN" if self.settings.guarded_execution_dry_run else "BLOCKED",
-                    submitted_ts=now,
-                    last_update_ts=now,
-                    requested_qty=intent.quantity,
-                    filled_qty=0.0,
-                    remaining_qty=intent.quantity,
-                    average_fill_price=None,
-                    fees=0.0,
-                    cancel_reason="live_submit_disabled",
-                    submission_payload={key: str(value) for key, value in payload.items()},
+                self._failed_state(
+                    intent=intent,
+                    payload=payload,
+                    submitted_ts=submitted_ts,
+                    error=str(exc),
                 ),
                 [],
             )
 
-        response = await self.client.place_order(payload)
-        data = response.get("data", [])
-        if not data:
-            raise RuntimeError("OKX place_order returned no data")
-        row = data[0]
-        order_id = str(row.get("ordId")) if row.get("ordId") else None
-        return (
-            OrderState(
-                decision_id=intent.decision_id,
-                intent_id=intent.intent_id,
-                client_order_id=payload["clOrdId"],
-                venue="OKX",
-                exchange_order_id=order_id,
-                status="LIVE" if order_id else "SUBMITTED",
-                submitted_ts=now,
-                last_update_ts=now,
-                requested_qty=intent.quantity,
-                filled_qty=0.0,
-                remaining_qty=intent.quantity,
-                average_fill_price=None,
-                fees=0.0,
-                cancel_reason=None,
-                submission_payload={key: str(value) for key, value in payload.items()},
-            ),
-            [],
-        )
+    async def sync(self, open_order_states: list[OrderState]) -> tuple[list[OrderState], list[FillEvent]]:
+        if self.mode_controller.mode != "guarded_live" or self.settings.execution_backend != "okx":
+            return [], []
+
+        refreshed_states: list[OrderState] = []
+        fills: list[FillEvent] = []
+        for state in open_order_states:
+            if state.venue != "OKX":
+                continue
+            try:
+                order_detail = await self._load_order_detail(
+                    symbol=state.symbol,
+                    order_id=state.exchange_order_id,
+                    client_order_id=state.client_order_id,
+                )
+                if order_detail is not None:
+                    intent = self._intent_from_state(state)
+                    refreshed_states.append(
+                        self._map_order_state(
+                            intent=intent,
+                            payload=state.submission_payload,
+                            order_row=order_detail,
+                            submitted_ts=state.submitted_ts or utc_now(),
+                        )
+                    )
+                fills_payload = await self.client.get_fills(
+                    symbol=state.symbol,
+                    order_id=state.exchange_order_id,
+                    limit=self.settings.okx_fill_fetch_limit,
+                )
+                fills.extend(
+                    self._map_fill_events(
+                        intent=self._intent_from_state(state),
+                        client_order_id=state.client_order_id,
+                        exchange_fills=self._parse_fill_rows(fills_payload),
+                    )
+                )
+                self._last_error = None
+            except Exception as exc:
+                self._last_error = str(exc)
+                refreshed_states.append(
+                    state.model_copy(
+                        update={
+                            "status": "FAILED",
+                            "last_update_ts": utc_now(),
+                            "execution_error": str(exc),
+                        }
+                    )
+                )
+        return refreshed_states, fills
 
     def readiness(self) -> dict[str, Any]:
         account_status = self.account_service.status()
@@ -140,7 +212,319 @@ class OKXExecutionAdapter(ExchangeAdapter):
             "ready": account_status["credentials_configured"] and account_status["enabled"],
             "backend": "okx",
             "mode": self.mode_controller.mode,
+            "execution_mode": "guarded_simulated_submit" if self.settings.okx_simulated_trading else "guarded_blocked",
             "live_submit_enabled": self.settings.live_submit_enabled,
             "guarded_execution_dry_run": self.settings.guarded_execution_dry_run,
+            "okx_simulated_trading": self.settings.okx_simulated_trading,
+            "last_error": self._last_error,
+            "last_submission_payload": self._last_submission_payload,
             "account_status": account_status,
         }
+
+    def _submission_gate_error(self, *, intent: OrderIntent) -> str | None:
+        if self.mode_controller.mode != "guarded_live":
+            return "mode_not_guarded_live"
+        if self.settings.execution_backend != "okx":
+            return "execution_backend_not_okx"
+        if self.settings.guarded_execution_dry_run:
+            return "guarded_execution_dry_run"
+        if not self.settings.live_submit_enabled:
+            return "live_submit_disabled"
+        if not self.settings.okx_simulated_trading:
+            return "okx_simulated_trading_required"
+        if intent.symbol not in self.settings.allowed_symbols:
+            return "symbol_not_allowed"
+        if self.account_service.open_order_count(symbol=intent.symbol) >= self.settings.max_open_orders:
+            return "max_open_orders_reached"
+        price = self.price_provider(intent.symbol) if self.price_provider is not None else 0.0
+        if price > 0.0 and (intent.quantity * price) > self.settings.max_notional_per_symbol:
+            return "max_notional_per_symbol_exceeded"
+        account_status = self.account_service.status()
+        if not account_status.get("ready", False):
+            return "account_not_ready"
+        return None
+
+    def _blocked_state(self, *, intent: OrderIntent, payload: dict[str, str], reason: str) -> OrderState:
+        now = utc_now()
+        status = "DRY_RUN" if reason == "guarded_execution_dry_run" else "BLOCKED"
+        return OrderState(
+            decision_id=intent.decision_id,
+            intent_id=intent.intent_id,
+            symbol=intent.symbol,
+            client_order_id=payload["clOrdId"],
+            venue="OKX",
+            exchange_order_id=None,
+            status=status,
+            submission_mode="guarded_simulated_dry_run" if status == "DRY_RUN" else "guarded_blocked",
+            submitted_ts=now,
+            last_update_ts=now,
+            last_exchange_update_ts=now,
+            requested_qty=intent.quantity,
+            filled_qty=0.0,
+            remaining_qty=intent.quantity,
+            average_fill_price=None,
+            fees=0.0,
+            cancel_reason=reason,
+            execution_error=reason,
+            submission_payload={key: str(value) for key, value in payload.items()},
+        )
+
+    def _submitted_state(
+        self,
+        *,
+        intent: OrderIntent,
+        payload: dict[str, str],
+        submitted_ts: datetime,
+        client_order_id: str,
+        order_id: str | None,
+    ) -> OrderState:
+        return OrderState(
+            decision_id=intent.decision_id,
+            intent_id=intent.intent_id,
+            symbol=intent.symbol,
+            client_order_id=client_order_id,
+            venue="OKX",
+            exchange_order_id=order_id,
+            status="SUBMITTED",
+            submission_mode="guarded_simulated_submit",
+            exchange_status="live",
+            submitted_ts=submitted_ts,
+            last_update_ts=submitted_ts,
+            last_exchange_update_ts=submitted_ts,
+            requested_qty=intent.quantity,
+            filled_qty=0.0,
+            remaining_qty=intent.quantity,
+            average_fill_price=None,
+            fees=0.0,
+            cancel_reason=None,
+            execution_error=None,
+            submission_payload={key: str(value) for key, value in payload.items()},
+        )
+
+    def _rejected_state(
+        self,
+        *,
+        intent: OrderIntent,
+        payload: dict[str, str],
+        submitted_ts: datetime,
+        error: str,
+    ) -> OrderState:
+        return OrderState(
+            decision_id=intent.decision_id,
+            intent_id=intent.intent_id,
+            symbol=intent.symbol,
+            client_order_id=payload["clOrdId"],
+            venue="OKX",
+            exchange_order_id=None,
+            status="REJECTED",
+            submission_mode="guarded_simulated_submit",
+            exchange_status="rejected",
+            submitted_ts=submitted_ts,
+            last_update_ts=submitted_ts,
+            last_exchange_update_ts=submitted_ts,
+            requested_qty=intent.quantity,
+            filled_qty=0.0,
+            remaining_qty=intent.quantity,
+            average_fill_price=None,
+            fees=0.0,
+            cancel_reason=error,
+            execution_error=error,
+            submission_payload={key: str(value) for key, value in payload.items()},
+        )
+
+    def _failed_state(
+        self,
+        *,
+        intent: OrderIntent,
+        payload: dict[str, str],
+        submitted_ts: datetime,
+        error: str,
+    ) -> OrderState:
+        return OrderState(
+            decision_id=intent.decision_id,
+            intent_id=intent.intent_id,
+            symbol=intent.symbol,
+            client_order_id=payload["clOrdId"],
+            venue="OKX",
+            exchange_order_id=None,
+            status="FAILED",
+            submission_mode="guarded_simulated_submit",
+            exchange_status="failed",
+            submitted_ts=submitted_ts,
+            last_update_ts=submitted_ts,
+            last_exchange_update_ts=submitted_ts,
+            requested_qty=intent.quantity,
+            filled_qty=0.0,
+            remaining_qty=intent.quantity,
+            average_fill_price=None,
+            fees=0.0,
+            cancel_reason=error,
+            execution_error=error,
+            submission_payload={key: str(value) for key, value in payload.items()},
+        )
+
+    async def _load_order_detail(
+        self,
+        *,
+        symbol: str,
+        order_id: str | None,
+        client_order_id: str | None,
+    ) -> dict[str, Any] | None:
+        response = await self.client.get_order(
+            symbol=symbol,
+            order_id=order_id,
+            client_order_id=client_order_id,
+        )
+        data = response.get("data", [])
+        if not data:
+            return None
+        return dict(data[0])
+
+    @staticmethod
+    def _first_row(response: dict[str, Any]) -> dict[str, Any]:
+        data = response.get("data", [])
+        if not data:
+            raise RuntimeError("OKX place_order returned no data")
+        return dict(data[0])
+
+    def _map_order_state(
+        self,
+        *,
+        intent: OrderIntent,
+        payload: dict[str, str],
+        order_row: dict[str, Any],
+        submitted_ts: datetime,
+    ) -> OrderState:
+        exchange_status = str(order_row.get("state") or "live").lower()
+        status = self._map_status(exchange_status)
+        last_update_ts = self._row_timestamp(order_row.get("uTime")) or utc_now()
+        average_fill_price = (
+            float(order_row.get("avgPx"))
+            if order_row.get("avgPx") not in {None, ""}
+            else None
+        )
+        requested_qty = float(order_row.get("sz", intent.quantity) or intent.quantity)
+        filled_qty = float(order_row.get("accFillSz", 0.0) or 0.0)
+        remaining_qty = max(requested_qty - filled_qty, 0.0)
+        fees = abs(float(order_row.get("fee", 0.0) or 0.0))
+        return OrderState(
+            decision_id=intent.decision_id,
+            intent_id=intent.intent_id,
+            symbol=intent.symbol,
+            client_order_id=str(order_row.get("clOrdId") or payload.get("clOrdId") or intent.idempotency_key),
+            venue="OKX",
+            exchange_order_id=str(order_row.get("ordId")) if order_row.get("ordId") else None,
+            status=status,
+            submission_mode="guarded_simulated_submit",
+            exchange_status=exchange_status,
+            submitted_ts=self._row_timestamp(order_row.get("cTime")) or submitted_ts,
+            last_update_ts=last_update_ts,
+            last_exchange_update_ts=last_update_ts,
+            requested_qty=requested_qty,
+            filled_qty=filled_qty,
+            remaining_qty=remaining_qty,
+            average_fill_price=average_fill_price,
+            fees=fees,
+            cancel_reason=str(order_row.get("cancelSource")) if order_row.get("cancelSource") else None,
+            execution_error=None,
+            submission_payload={key: str(value) for key, value in payload.items()},
+        )
+
+    def _map_fill_events(
+        self,
+        *,
+        intent: OrderIntent,
+        client_order_id: str,
+        exchange_fills: list[ExchangeFill],
+    ) -> list[FillEvent]:
+        fills: list[FillEvent] = []
+        for fill in exchange_fills:
+            if fill.symbol != intent.symbol:
+                continue
+            fills.append(
+                FillEvent(
+                    fill_id=fill.fill_id or new_id("okxfill"),
+                    decision_id=intent.decision_id,
+                    intent_id=intent.intent_id,
+                    client_order_id=client_order_id,
+                    exchange_order_id=fill.exchange_order_id,
+                    symbol=fill.symbol,
+                    venue="OKX",
+                    side="buy" if fill.side == "buy" else "sell",
+                    fill_qty=fill.fill_qty,
+                    fill_price=fill.fill_price,
+                    fee_amount=fill.fee_amount,
+                    liquidity_role="taker",
+                    exchange_timestamp=fill.fill_ts or utc_now(),
+                    ingestion_timestamp=utc_now(),
+                )
+            )
+        return fills
+
+    def _parse_fill_rows(self, payload: dict[str, Any]) -> list[ExchangeFill]:
+        rows: list[ExchangeFill] = []
+        for row in payload.get("data", []):
+            fill_ts = row.get("fillTime") or row.get("ts")
+            fill_id = str(row.get("tradeId") or row.get("billId") or row.get("fillId") or "")
+            if not fill_id:
+                fill_id = f"{row.get('ordId', 'unknown')}-{fill_ts or 'unknown'}"
+            rows.append(
+                ExchangeFill(
+                    fill_id=fill_id,
+                    exchange_order_id=str(row.get("ordId") or ""),
+                    client_order_id=str(row.get("clOrdId")) if row.get("clOrdId") else None,
+                    instrument_id=str(row.get("instId")),
+                    symbol=str(row.get("instId")),
+                    side=str(row.get("side")),
+                    fill_qty=float(row.get("fillSz", row.get("sz", 0.0)) or 0.0),
+                    fill_price=float(row.get("fillPx", row.get("px", 0.0)) or 0.0),
+                    fee_amount=abs(float(row.get("fee", 0.0) or 0.0)),
+                    fee_currency=str(row.get("feeCcy")) if row.get("feeCcy") else None,
+                    fill_ts=self._row_timestamp(fill_ts),
+                )
+            )
+        return rows
+
+    @staticmethod
+    def _map_status(exchange_status: str) -> str:
+        normalized = exchange_status.lower()
+        mapping = {
+            "live": "SUBMITTED",
+            "partially_filled": "PARTIALLY_FILLED",
+            "filled": "FILLED",
+            "canceled": "CANCELED",
+            "cancelled": "CANCELED",
+            "rejected": "REJECTED",
+            "failed": "FAILED",
+        }
+        return mapping.get(normalized, "SUBMITTED")
+
+    @staticmethod
+    def _row_timestamp(value: Any) -> datetime | None:
+        if value in {None, ""}:
+            return None
+        if isinstance(value, datetime):
+            return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+        return datetime_from_ms(str(value))
+
+    @staticmethod
+    def _intent_from_state(state: OrderState) -> OrderIntent:
+        payload = state.submission_payload
+        side = str(payload.get("side", "buy"))
+        order_type = str(payload.get("ordType", "market"))
+        limit_price = float(payload["px"]) if "px" in payload else None
+        return OrderIntent(
+            intent_id=state.intent_id,
+            decision_id=state.decision_id,
+            symbol=state.symbol,
+            side="buy" if side == "buy" else "sell",
+            quantity=state.requested_qty,
+            execution_style="exchange",
+            order_type="limit" if order_type == "limit" else "market",
+            limit_price=limit_price,
+            urgency="medium",
+            time_in_force="IOC",
+            reduce_only=False,
+            close_only=False,
+            idempotency_key=state.client_order_id,
+        )

@@ -128,6 +128,10 @@ class ApplicationRuntime:
             self.background_tasks.append(
                 asyncio.create_task(self._refresh_account_loop(), name="aats_okx_account_refresh")
             )
+        if self.settings.execution_backend == "okx" and self.mode_controller.mode == "guarded_live":
+            self.background_tasks.append(
+                asyncio.create_task(self._sync_execution_loop(), name="aats_okx_execution_sync")
+            )
 
     async def stop_background_tasks(self) -> None:
         for task in self.background_tasks:
@@ -149,6 +153,14 @@ class ApplicationRuntime:
             except Exception:
                 pass
             await asyncio.sleep(self.settings.okx_account_refresh_interval_seconds)
+
+    async def _sync_execution_loop(self) -> None:
+        while True:
+            try:
+                await self.order_manager.sync_exchange_state()
+            except Exception:
+                pass
+            await asyncio.sleep(self.settings.okx_execution_sync_interval_seconds)
 
 
 def build_storage_backends(settings: AATSSettings) -> StorageBackends:
@@ -191,6 +203,7 @@ def _build_execution_adapter(
             client=OKXRESTClient(settings=settings),
             account_service=account_service,
             mode_controller=mode_controller,
+            price_provider=market_gateway.latest_price,
         )
     return PaperExecutionAdapter(
         price_provider=market_gateway.latest_price,
@@ -307,7 +320,7 @@ async def build_runtime(
 
     reconciliation_service = ReconciliationService(
         bus=bus,
-        fetcher=ExchangeStateFetcher(),
+        fetcher=ExchangeStateFetcher(account_service=account_service),
         comparator=StateComparator(),
         repair_service=ReconciliationRepairService(),
         reconciliation_repo=storage.reconciliation_repo,
@@ -317,6 +330,7 @@ async def build_runtime(
             snapshot_builder=snapshot_builder,
         ),
         price_provider=market_gateway.latest_price,
+        bootstrap_portfolio_from_exchange=runtime_settings.bootstrap_portfolio_from_exchange,
         metrics=metrics,
     )
 
@@ -329,8 +343,10 @@ async def build_runtime(
     await bus.subscribe(topics.POSITION_TARGETS, audit_service.handle_position_target)
     await bus.subscribe(topics.POLICY_DECISIONS, audit_service.handle_policy_decision)
     await bus.subscribe(topics.RISK_DECISIONS, audit_service.handle_risk_decision)
+    await bus.subscribe(topics.EXECUTION_PLANS, audit_service.handle_execution_plan)
     await bus.subscribe(topics.ORDER_INTENTS, audit_service.handle_order_intent)
     await bus.subscribe(topics.ORDER_INTENTS, order_manager.handle_order_intent)
+    await bus.subscribe(topics.ORDER_UPDATES, audit_service.handle_order_update)
     await bus.subscribe(topics.FILL_EVENTS, audit_service.handle_fill_event)
     await bus.subscribe(topics.FILL_EVENTS, portfolio_service.handle_fill_event)
     await bus.subscribe(topics.PORTFOLIO_SNAPSHOTS, audit_service.handle_portfolio_snapshot)
@@ -377,7 +393,13 @@ async def build_runtime(
     await bus.subscribe(topics.POSITION_TARGETS, handle_position_target)
 
     if runtime_settings.account_backend == "okx" and runtime_settings.account_read_enabled:
-        await account_service.refresh(force=True)
+        account_snapshot = await account_service.refresh(force=True)
+        if (
+            runtime_settings.bootstrap_portfolio_from_exchange
+            and account_snapshot is not None
+            and storage.portfolio_repo.latest() is None
+        ):
+            portfolio_service.state.load_exchange_snapshot(account_snapshot)
     if bootstrap_portfolio_snapshot and storage.portfolio_repo.latest() is None:
         await portfolio_service.bootstrap_snapshot()
 

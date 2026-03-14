@@ -332,6 +332,15 @@ class ReplayEngine:
                 expected_topic=topics.RISK_DECISIONS,
                 required=True,
             )
+            execution_plan_event = self._validate_ref(
+                issues=issues,
+                decision_id=decision_id,
+                events_by_id=events_by_id,
+                ref=record.execution_plan_ref,
+                ref_name="execution_plan_ref",
+                expected_topic=topics.EXECUTION_PLANS,
+                required=bool(record.order_intent_refs),
+            )
 
             target = (
                 PositionTarget.model_validate(target_event.payload)
@@ -344,6 +353,11 @@ class ReplayEngine:
                 else None
             )
             risk = RiskDecision.model_validate(risk_event.payload) if risk_event is not None else None
+            execution_plan = (
+                ExecutionPlan.model_validate(execution_plan_event.payload)
+                if execution_plan_event is not None
+                else None
+            )
 
             intent_ids: set[str] = set()
             for ref in record.order_intent_refs:
@@ -360,6 +374,27 @@ class ReplayEngine:
                     continue
                 intent = OrderIntent.model_validate(event.payload)
                 intent_ids.add(intent.intent_id)
+
+            order_state_intent_ids: set[str] = set()
+            for ref in record.order_state_refs:
+                event = self._validate_ref(
+                    issues=issues,
+                    decision_id=decision_id,
+                    events_by_id=events_by_id,
+                    ref=ref,
+                    ref_name="order_state_refs",
+                    expected_topic=topics.ORDER_UPDATES,
+                    required=True,
+                )
+                if event is None:
+                    continue
+                order_state = OrderState.model_validate(event.payload)
+                order_state_intent_ids.add(order_state.intent_id)
+                if order_state.intent_id not in intent_ids:
+                    issues.append(
+                        "decision_chain_order_state_not_linked_to_audited_intent "
+                        f"decision_id={decision_id} intent_id={order_state.intent_id}"
+                    )
 
             fill_ids: set[str] = set()
             for ref in record.fill_event_refs:
@@ -464,32 +499,32 @@ class ReplayEngine:
             if record.order_intent_refs and not record.fill_event_refs:
                 issues.append(f"decision_chain_missing_fill_ref decision_id={decision_id}")
             if record.order_intent_refs:
-                execution_plan_events = [
-                    event
-                    for event in events_by_decision.get(decision_id, [])
-                    if event.topic == topics.EXECUTION_PLANS
-                ]
-                if not execution_plan_events:
+                if execution_plan is None:
                     issues.append(f"decision_chain_missing_execution_plan decision_id={decision_id}")
                 else:
-                    latest_plan = ExecutionPlan.model_validate(execution_plan_events[-1].payload)
-                    if parsed_context is not None and latest_plan.symbol != parsed_context.symbol:
+                    if parsed_context is not None and execution_plan.symbol != parsed_context.symbol:
                         issues.append(
                             "decision_chain_execution_plan_symbol_mismatch "
-                            f"decision_id={decision_id} execution_plan_symbol={latest_plan.symbol} "
+                            f"decision_id={decision_id} execution_plan_symbol={execution_plan.symbol} "
                             f"context_symbol={parsed_context.symbol}"
                         )
                     if (
                         risk is not None
                         and abs(
-                            latest_plan.approved_target_position_qty - risk.capped_target_position_qty
+                            execution_plan.approved_target_position_qty - risk.capped_target_position_qty
                         ) > 1e-12
                     ):
                         issues.append(
                             "decision_chain_execution_plan_risk_mismatch "
-                            f"decision_id={decision_id} approved_target_position_qty={latest_plan.approved_target_position_qty} "
+                            f"decision_id={decision_id} approved_target_position_qty={execution_plan.approved_target_position_qty} "
                             f"risk_capped_target_position_qty={risk.capped_target_position_qty}"
                         )
+                if not record.order_state_refs:
+                    issues.append(f"decision_chain_missing_order_state_ref decision_id={decision_id}")
+                elif not order_state_intent_ids.issuperset(intent_ids):
+                    issues.append(
+                        f"decision_chain_missing_order_state_for_intent decision_id={decision_id}"
+                    )
 
         return issues
 
@@ -547,6 +582,7 @@ class ReplayEngine:
                 ("position_target_ref", record.position_target_ref),
                 ("policy_decision_ref", record.policy_decision_ref),
                 ("risk_decision_ref", record.risk_decision_ref),
+                ("execution_plan_ref", record.execution_plan_ref),
                 ("portfolio_delta_ref", record.portfolio_delta_ref),
             ):
                 if ref_value is not None and ref_value not in events_by_id:
@@ -555,6 +591,7 @@ class ReplayEngine:
                     )
             for ref_name, refs in (
                 ("order_intent_refs", record.order_intent_refs),
+                ("order_state_refs", record.order_state_refs),
                 ("fill_event_refs", record.fill_event_refs),
                 ("reconciliation_refs", record.reconciliation_refs),
             ):
