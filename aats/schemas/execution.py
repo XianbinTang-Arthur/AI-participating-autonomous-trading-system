@@ -7,6 +7,21 @@ from pydantic import Field
 
 from aats.schemas.common import SchemaBase
 
+OrderLifecycleStatus = Literal[
+    "CREATED",
+    "SUBMITTING",
+    "SUBMITTED",
+    "PARTIALLY_FILLED",
+    "FILLED",
+    "CANCEL_PENDING",
+    "CANCELED",
+    "REJECTED",
+    "FAILED",
+    "BLOCKED",
+    "DRY_RUN",
+    "EXPIRED",
+]
+
 
 class OrderIntent(SchemaBase):
     intent_id: str
@@ -46,12 +61,15 @@ class OrderState(SchemaBase):
     client_order_id: str
     venue: str = "PAPER"
     exchange_order_id: str | None = None
-    status: str
+    status: OrderLifecycleStatus
     submission_mode: str = "paper_local"
     exchange_status: str | None = None
+    exchange_status_history: list[str] = Field(default_factory=list)
     submitted_ts: datetime | None = None
     last_update_ts: datetime | None = None
     last_exchange_update_ts: datetime | None = None
+    cancellation_requested_ts: datetime | None = None
+    canceled_ts: datetime | None = None
     requested_qty: float
     filled_qty: float = 0.0
     remaining_qty: float
@@ -77,3 +95,4 @@ class FillEvent(SchemaBase):
     liquidity_role: Literal["maker", "taker"]
     exchange_timestamp: datetime
     ingestion_timestamp: datetime
+    order_status_after_fill: OrderLifecycleStatus | None = None

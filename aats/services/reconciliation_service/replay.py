@@ -13,6 +13,7 @@ from aats.schemas.market import MarketSnapshot
 from aats.schemas.portfolio import PortfolioSnapshot
 from aats.schemas.reconciliation import ReconciliationReport
 from aats.schemas.system import HealthSnapshot
+from aats.services.execution_engine.state_machine import OrderStateMachine
 from aats.storage.base import AuditRepository, EventStore, PortfolioRepository
 from aats.services.portfolio_service.reconstruction import PortfolioReconstructionService
 
@@ -64,6 +65,7 @@ class ReplayEngine:
         order_states_by_intent_id: dict[str, OrderState] = {}
         fill_events_by_fill_id: dict[str, FillEvent] = {}
         fill_event_refs_by_fill_id: dict[str, list[str]] = defaultdict(list)
+        order_state_updates_by_client_order_id: dict[str, list[OrderState]] = defaultdict(list)
         audit_event_ids_by_decision: dict[str, str] = {}
 
         for envelope in events:
@@ -85,6 +87,7 @@ class ReplayEngine:
             if envelope.topic == topics.ORDER_UPDATES:
                 order_state = OrderState.model_validate(envelope.payload)
                 order_states_by_intent_id[order_state.intent_id] = order_state
+                order_state_updates_by_client_order_id[order_state.client_order_id].append(order_state)
                 continue
 
             if envelope.topic == topics.FILL_EVENTS:
@@ -130,6 +133,7 @@ class ReplayEngine:
                 order_states_by_intent_id=order_states_by_intent_id,
                 fill_events_by_fill_id=fill_events_by_fill_id,
                 fill_event_refs_by_fill_id=fill_event_refs_by_fill_id,
+                order_state_updates_by_client_order_id=order_state_updates_by_client_order_id,
             )
         )
         decision_chain_issues.extend(
@@ -191,8 +195,14 @@ class ReplayEngine:
         order_states_by_intent_id: dict[str, OrderState],
         fill_events_by_fill_id: dict[str, FillEvent],
         fill_event_refs_by_fill_id: dict[str, list[str]],
+        order_state_updates_by_client_order_id: dict[str, list[OrderState]],
     ) -> list[str]:
         issues: list[str] = []
+        state_machine = OrderStateMachine()
+        fills_by_intent_id: dict[str, list[FillEvent]] = defaultdict(list)
+        for fill in fill_events_by_fill_id.values():
+            fills_by_intent_id[fill.intent_id].append(fill)
+
         for intent_id, intent in sorted(order_intents_by_intent_id.items()):
             order_state = order_states_by_intent_id.get(intent_id)
             if order_state is None:
@@ -205,6 +215,33 @@ class ReplayEngine:
                     "execution_chain_order_state_decision_mismatch "
                     f"intent_id={intent_id} order_state_decision_id={order_state.decision_id} "
                     f"intent_decision_id={intent.decision_id}"
+                )
+                continue
+            fill_events = sorted(
+                fills_by_intent_id.get(intent_id, []),
+                key=lambda item: (item.ingestion_timestamp, item.fill_id),
+            )
+            cumulative_fill_qty = sum(fill.fill_qty for fill in fill_events)
+            if cumulative_fill_qty - order_state.requested_qty > 1e-12:
+                issues.append(
+                    f"execution_chain_overfilled_order intent_id={intent_id} cumulative_fill_qty={cumulative_fill_qty} requested_qty={order_state.requested_qty}"
+                )
+            if abs(cumulative_fill_qty - order_state.filled_qty) > 1e-12:
+                issues.append(
+                    f"execution_chain_fill_quantity_mismatch intent_id={intent_id} cumulative_fill_qty={cumulative_fill_qty} order_state_filled_qty={order_state.filled_qty}"
+                )
+            expected_remaining = max(order_state.requested_qty - cumulative_fill_qty, 0.0)
+            if abs(order_state.remaining_qty - expected_remaining) > 1e-12:
+                issues.append(
+                    f"execution_chain_remaining_quantity_mismatch intent_id={intent_id} remaining_qty={order_state.remaining_qty} expected_remaining={expected_remaining}"
+                )
+            if order_state.status == "FILLED" and abs(cumulative_fill_qty - order_state.requested_qty) > 1e-12:
+                issues.append(
+                    f"execution_chain_filled_without_complete_fill_quantity intent_id={intent_id}"
+                )
+            if order_state.status in {"SUBMITTED", "CREATED", "SUBMITTING"} and cumulative_fill_qty > 1e-12:
+                issues.append(
+                    f"execution_chain_open_state_with_fill_quantity intent_id={intent_id} status={order_state.status}"
                 )
 
         for intent_id, order_state in sorted(order_states_by_intent_id.items()):
@@ -249,6 +286,13 @@ class ReplayEngine:
                 issues.append(
                     f"execution_chain_duplicate_fill_events fill_id={fill_id} event_refs={event_refs}"
                 )
+        for client_order_id, states in sorted(order_state_updates_by_client_order_id.items()):
+            ordered_states = sorted(
+                states,
+                key=lambda item: (item.last_update_ts or item.created_at, item.created_at, item.status),
+            )
+            for issue in state_machine.validate_path(ordered_states):
+                issues.append(f"execution_chain_invalid_state_transition client_order_id={client_order_id} {issue}")
         return issues
 
     def _validate_decision_chains(

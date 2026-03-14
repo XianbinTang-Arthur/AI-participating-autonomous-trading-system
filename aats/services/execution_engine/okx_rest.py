@@ -95,6 +95,14 @@ class OKXRESTClient:
             require_auth=True,
         )
 
+    async def cancel_order(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        return await self.request(
+            method="POST",
+            path="/api/v5/trade/cancel-order",
+            json_body=payload,
+            require_auth=True,
+        )
+
     async def get_order(
         self,
         *,

@@ -21,6 +21,10 @@ class HaltRequest(BaseModel):
     reason: str = "manual_halt"
 
 
+class CancelOrderRequest(BaseModel):
+    reason: str = "operator_cancel"
+
+
 def _runtime(request: Request) -> ApplicationRuntime:
     return cast(ApplicationRuntime, request.app.state.runtime)
 
@@ -94,6 +98,7 @@ async def system_health(request: Request) -> dict[str, Any]:
         "account": runtime.account_service.status(),
         "execution": runtime.execution_adapter.readiness(),
         "latest_reconciliation": latest_reconciliation.model_dump(mode="json") if latest_reconciliation else None,
+        "recovery": runtime.recovery_status.model_dump(mode="json"),
         "execution_summary": {
             "order_count": len(runtime.execution_repo.order_states()),
             "fill_count": len(runtime.execution_repo.fills()),
@@ -190,7 +195,19 @@ async def open_orders(request: Request) -> dict[str, Any]:
 async def latest_reconciliation(request: Request) -> dict[str, Any]:
     runtime = _runtime(request)
     report = runtime.reconciliation_repo.latest()
-    return {"reconciliation": report.model_dump(mode="json") if report is not None else None}
+    return {
+        "reconciliation": report.model_dump(mode="json") if report is not None else None,
+        "mismatch_summary": None
+        if report is None
+        else {
+            "severity": report.severity,
+            "halt_required": report.halt_required,
+            "order_diff": report.order_diff,
+            "fill_diff": report.fill_diff,
+            "balance_diff": report.balance_diff,
+            "position_diff": report.position_diff,
+        },
+    }
 
 
 @router.get("/decision/latest")
@@ -239,6 +256,46 @@ async def latest_order(request: Request) -> dict[str, Any]:
     return {"order": latest_order.model_dump(mode="json") if latest_order is not None else None}
 
 
+@router.get("/orders/partial")
+async def partial_orders(request: Request) -> dict[str, Any]:
+    runtime = _runtime(request)
+    return {
+        "orders": [
+            order.model_dump(mode="json")
+            for order in runtime.execution_repo.recent_order_states(
+                limit=50,
+                statuses=("PARTIALLY_FILLED", "CANCEL_PENDING"),
+            )
+        ]
+    }
+
+
+@router.get("/orders/canceled")
+async def canceled_orders(request: Request) -> dict[str, Any]:
+    runtime = _runtime(request)
+    return {
+        "orders": [
+            order.model_dump(mode="json")
+            for order in runtime.execution_repo.recent_order_states(limit=50, statuses=("CANCELED",))
+        ]
+    }
+
+
+@router.post("/orders/{client_order_id}/cancel")
+async def cancel_order(
+    request: Request,
+    client_order_id: str,
+    payload: CancelOrderRequest | None = None,
+) -> dict[str, Any]:
+    runtime = _runtime(request)
+    _ = payload
+    try:
+        state = await runtime.order_manager.cancel_order(client_order_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"order": state.model_dump(mode="json")}
+
+
 @router.get("/fills/latest")
 async def latest_fill(request: Request) -> dict[str, Any]:
     runtime = _runtime(request)
@@ -249,6 +306,17 @@ async def latest_fill(request: Request) -> dict[str, Any]:
         "local_fill": latest_local_fill.model_dump(mode="json") if latest_local_fill is not None else None,
         "exchange_fill": latest_exchange_fill.model_dump(mode="json") if latest_exchange_fill is not None else None,
     }
+
+
+@router.get("/fills/recent")
+async def recent_fills(request: Request) -> dict[str, Any]:
+    runtime = _runtime(request)
+    fills = sorted(
+        runtime.execution_repo.fills(),
+        key=lambda item: (item.ingestion_timestamp, item.fill_id),
+        reverse=True,
+    )[:50]
+    return {"fills": [fill.model_dump(mode="json") for fill in fills]}
 
 
 @router.get("/execution/latest")
@@ -266,4 +334,18 @@ async def latest_execution(request: Request) -> dict[str, Any]:
         "latest_reconciliation": (
             latest_reconciliation.model_dump(mode="json") if latest_reconciliation is not None else None
         ),
+        "recent_failures": [
+            order.model_dump(mode="json")
+            for order in runtime.execution_repo.recent_order_states(
+                limit=20,
+                statuses=("FAILED", "REJECTED", "BLOCKED"),
+            )
+        ],
+        "recovery": runtime.recovery_status.model_dump(mode="json"),
     }
+
+
+@router.get("/system/recovery")
+async def system_recovery(request: Request) -> dict[str, Any]:
+    runtime = _runtime(request)
+    return {"recovery": runtime.recovery_status.model_dump(mode="json")}

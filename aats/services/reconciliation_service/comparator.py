@@ -54,6 +54,19 @@ class StateComparator:
             balance_diff=balance_diff,
             position_diff=position_diff,
         )
+        mismatch_reasons = self._mismatch_reasons(
+            order_diff=order_diff,
+            fill_diff=fill_diff,
+            balance_diff=balance_diff,
+            position_diff=position_diff,
+        )
+        safety_impacts = self._safety_impacts(
+            severity=severity,
+            order_diff=order_diff,
+            fill_diff=fill_diff,
+            balance_diff=balance_diff,
+            position_diff=position_diff,
+        )
         remediation_action = None if severity == "CLEAN" else "investigate_state_divergence"
         return ReconciliationReport(
             reconciliation_id=new_id("recon"),
@@ -66,6 +79,8 @@ class StateComparator:
             fill_diff=fill_diff,
             balance_diff=balance_diff,
             position_diff=position_diff,
+            mismatch_reasons=mismatch_reasons,
+            safety_impacts=safety_impacts,
             severity=severity,
             remediation_action=remediation_action,
             halt_required=severity == "HARD_MISMATCH",
@@ -261,6 +276,53 @@ class StateComparator:
         if replay_portfolio_mismatch or exchange_portfolio_mismatch:
             return "HARD_MISMATCH"
         return "SOFT_MISMATCH"
+
+    @staticmethod
+    def _mismatch_reasons(
+        *,
+        order_diff: dict[str, object],
+        fill_diff: dict[str, object],
+        balance_diff: dict[str, object],
+        position_diff: dict[str, object],
+    ) -> list[str]:
+        reasons: list[str] = []
+        if order_diff.get("reconstructed"):
+            reasons.append("local_order_state_differs_from_fill_reconstruction")
+        if order_diff.get("exchange"):
+            reasons.append("local_open_orders_diverge_from_exchange_open_orders")
+        if fill_diff.get("replayed"):
+            reasons.append("orphan_or_incomplete_local_fill_chain_detected")
+        if fill_diff.get("exchange"):
+            reasons.append("local_exchange_fill_set_diverges_from_exchange_fill_set")
+        if balance_diff.get("reconstructed"):
+            reasons.append("stored_balance_differs_from_replayed_balance")
+        if balance_diff.get("exchange"):
+            reasons.append("local_balance_differs_from_exchange_balance")
+        if position_diff.get("reconstructed_mismatches"):
+            reasons.append("stored_position_differs_from_replayed_position")
+        if position_diff.get("exchange_mismatches"):
+            reasons.append("local_position_differs_from_exchange_position")
+        return reasons
+
+    @staticmethod
+    def _safety_impacts(
+        *,
+        severity: str,
+        order_diff: dict[str, object],
+        fill_diff: dict[str, object],
+        balance_diff: dict[str, object],
+        position_diff: dict[str, object],
+    ) -> list[str]:
+        impacts: list[str] = []
+        if severity == "HARD_MISMATCH":
+            impacts.append("portfolio_state_may_be_unsafe_for_trading")
+        if order_diff.get("exchange"):
+            impacts.append("open_order_visibility_is_incomplete")
+        if fill_diff.get("exchange"):
+            impacts.append("fill_history_visibility_is_incomplete")
+        if balance_diff.get("exchange") or position_diff.get("exchange_mismatches"):
+            impacts.append("exchange_account_state_differs_from_local_state")
+        return impacts
 
     @staticmethod
     def _order_key(order: OrderState) -> str:

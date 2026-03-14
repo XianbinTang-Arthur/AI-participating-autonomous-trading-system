@@ -51,3 +51,15 @@ class RuntimeModeState(SchemaBase):
     guarded_execution_dry_run: bool
     okx_simulated_trading: bool = False
     halted: bool
+
+
+class RecoveryStatus(SchemaBase):
+    status: str
+    recovered_order_count: int = 0
+    recovered_fill_count: int = 0
+    recovered_snapshot_available: bool = False
+    open_order_count: int = 0
+    divergence_count: int = 0
+    halted: bool = False
+    recovery_action: str | None = None
+    notes: list[str] = Field(default_factory=list)

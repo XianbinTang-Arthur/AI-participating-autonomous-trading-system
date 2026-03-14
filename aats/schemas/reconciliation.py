@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+from pydantic import Field
+
 from aats.schemas.common import SchemaBase
 
 
@@ -17,6 +19,8 @@ class ReconciliationReport(SchemaBase):
     fill_diff: dict[str, Any]
     balance_diff: dict[str, Any]
     position_diff: dict[str, Any]
+    mismatch_reasons: list[str] = Field(default_factory=list)
+    safety_impacts: list[str] = Field(default_factory=list)
     severity: str
     remediation_action: str | None = None
     halt_required: bool = False

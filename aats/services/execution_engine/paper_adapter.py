@@ -28,6 +28,8 @@ class PaperExecutionAdapter(ExchangeAdapter):
             exchange_order_id=exchange_order_id,
             status="FILLED",
             submission_mode="paper_local",
+            exchange_status="filled",
+            exchange_status_history=["filled"],
             submitted_ts=now,
             last_update_ts=now,
             last_exchange_update_ts=now,
@@ -58,8 +60,26 @@ class PaperExecutionAdapter(ExchangeAdapter):
             liquidity_role="taker",
             exchange_timestamp=now,
             ingestion_timestamp=now,
+            order_status_after_fill="FILLED",
         )
         return state, [fill]
+
+    async def cancel(self, order_state: OrderState) -> tuple[OrderState, list[FillEvent]]:
+        if order_state.status == "FILLED":
+            return order_state, []
+        now = datetime.now(timezone.utc)
+        canceled = order_state.model_copy(
+            update={
+                "status": "CANCELED",
+                "exchange_status": "canceled",
+                "exchange_status_history": [*order_state.exchange_status_history, "canceled"],
+                "last_update_ts": now,
+                "last_exchange_update_ts": now,
+                "canceled_ts": now,
+                "cancel_reason": "paper_cancel",
+            }
+        )
+        return canceled, []
 
     async def sync(self, open_order_states: list[OrderState]) -> tuple[list[OrderState], list[FillEvent]]:
         _ = open_order_states

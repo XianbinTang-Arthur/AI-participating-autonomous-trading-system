@@ -145,6 +145,10 @@ What this mode does:
 - updates local portfolio from exchange fills
 - runs exchange-aware reconciliation
 - persists audit, replay, and reconciliation artifacts for the decision
+- maintains an explicit local lifecycle across `CREATED`, `SUBMITTING`, `SUBMITTED`, `PARTIALLY_FILLED`, `FILLED`, `CANCEL_PENDING`, `CANCELED`, `REJECTED`, `FAILED`, and `EXPIRED`
+- merges repeated order-state updates idempotently so exchange polling cannot regress terminal states
+- supports multi-fill partial-fill ingestion with duplicate-fill protection
+- restores persisted order/fill/portfolio state on restart and halts only when recovery detects meaningful divergence
 
 What this mode still does not do:
 - only OKX Spot
@@ -241,6 +245,7 @@ Event persistence defaults to visibility-first behavior:
 - explicit `ExecutionPlan` events between approved target positions and order intents
 - explicit `execution_plan_ref` and `order_state_refs` in `DecisionAuditRecord`
 - guarded OKX execution adapter with signing, payload building, validation, dry-run, explicit simulated-submit gates, and exchange lifecycle sync
+- hardened order lifecycle handling for partial fills, cancellations, idempotent order updates, and restart recovery
 - exchange-aware reconciliation for OKX simulated submit mode
 - stronger mode-aware policy/risk/health blocking
 - expanded operator API surface
@@ -255,7 +260,8 @@ Event persistence defaults to visibility-first behavior:
 - no autonomous live rollout
 - `real_market_paper` still uses local fill simulation rather than exchange-side simulated order placement
 - exchange reconciliation against balances/positions is only meaningful when `bootstrap_portfolio_from_exchange=true`
-- cancel/amend workflows and private websocket execution streams are not implemented yet
+- amend workflows and private websocket execution streams are not implemented yet
+- restart recovery rebuilds local state safely, but does not yet perform automated exchange-side remediation
 
 ## Reference
 

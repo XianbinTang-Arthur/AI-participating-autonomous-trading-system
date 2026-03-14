@@ -155,6 +155,99 @@ class OKXExecutionAdapter(ExchangeAdapter):
                 [],
             )
 
+    async def cancel(self, order_state: OrderState) -> tuple[OrderState, list[FillEvent]]:
+        if order_state.exchange_order_id is None:
+            return (
+                order_state.model_copy(
+                    update={
+                        "status": "FAILED",
+                        "last_update_ts": utc_now(),
+                        "execution_error": "missing_exchange_order_id_for_cancel",
+                    }
+                ),
+                [],
+            )
+        if order_state.status in {"FILLED", "CANCELED", "REJECTED", "FAILED", "EXPIRED"}:
+            return order_state, []
+
+        cancel_pending = order_state.model_copy(
+            update={
+                "status": "CANCEL_PENDING",
+                "cancellation_requested_ts": utc_now(),
+                "last_update_ts": utc_now(),
+            }
+        )
+        try:
+            response = await self.client.cancel_order(
+                {
+                    "instId": order_state.symbol,
+                    "ordId": order_state.exchange_order_id,
+                    "clOrdId": order_state.client_order_id,
+                }
+            )
+            row = self._first_row(response)
+            row_code = str(row.get("sCode") or "0")
+            row_message = str(row.get("sMsg") or "")
+            if row_code != "0":
+                self._last_error = row_message or f"cancel_rejected_code_{row_code}"
+                return (
+                    cancel_pending.model_copy(
+                        update={
+                            "status": "FAILED",
+                            "execution_error": self._last_error,
+                            "cancel_reason": self._last_error,
+                            "last_exchange_update_ts": utc_now(),
+                        }
+                    ),
+                    [],
+                )
+
+            order_detail = await self._load_order_detail(
+                symbol=order_state.symbol,
+                order_id=order_state.exchange_order_id,
+                client_order_id=order_state.client_order_id,
+            )
+            if order_detail is None:
+                return cancel_pending, []
+            intent = self._intent_from_state(order_state)
+            state = self._map_order_state(
+                intent=intent,
+                payload=order_state.submission_payload,
+                order_row=order_detail,
+                submitted_ts=order_state.submitted_ts or utc_now(),
+            )
+            state = state.model_copy(
+                update={
+                    "cancellation_requested_ts": cancel_pending.cancellation_requested_ts,
+                    "cancel_reason": state.cancel_reason or cancel_pending.cancel_reason,
+                }
+            )
+            fills_payload = await self.client.get_fills(
+                symbol=order_state.symbol,
+                order_id=order_state.exchange_order_id,
+                limit=self.settings.okx_fill_fetch_limit,
+            )
+            fills = self._map_fill_events(
+                intent=intent,
+                client_order_id=order_state.client_order_id,
+                exchange_fills=self._parse_fill_rows(fills_payload),
+            )
+            self._last_error = None
+            return state, fills
+        except Exception as exc:
+            self._last_error = str(exc)
+            return (
+                cancel_pending.model_copy(
+                    update={
+                        "status": "FAILED",
+                        "execution_error": str(exc),
+                        "cancel_reason": str(exc),
+                        "last_exchange_update_ts": utc_now(),
+                    }
+                ),
+                [],
+            )
+
     async def sync(self, open_order_states: list[OrderState]) -> tuple[list[OrderState], list[FillEvent]]:
         if self.mode_controller.mode != "guarded_live" or self.settings.execution_backend != "okx":
             return [], []
@@ -256,6 +349,8 @@ class OKXExecutionAdapter(ExchangeAdapter):
             exchange_order_id=None,
             status=status,
             submission_mode="guarded_simulated_dry_run" if status == "DRY_RUN" else "guarded_blocked",
+            exchange_status="blocked",
+            exchange_status_history=["blocked"],
             submitted_ts=now,
             last_update_ts=now,
             last_exchange_update_ts=now,
@@ -288,6 +383,7 @@ class OKXExecutionAdapter(ExchangeAdapter):
             status="SUBMITTED",
             submission_mode="guarded_simulated_submit",
             exchange_status="live",
+            exchange_status_history=["live"],
             submitted_ts=submitted_ts,
             last_update_ts=submitted_ts,
             last_exchange_update_ts=submitted_ts,
@@ -319,6 +415,7 @@ class OKXExecutionAdapter(ExchangeAdapter):
             status="REJECTED",
             submission_mode="guarded_simulated_submit",
             exchange_status="rejected",
+            exchange_status_history=["rejected"],
             submitted_ts=submitted_ts,
             last_update_ts=submitted_ts,
             last_exchange_update_ts=submitted_ts,
@@ -350,6 +447,7 @@ class OKXExecutionAdapter(ExchangeAdapter):
             status="FAILED",
             submission_mode="guarded_simulated_submit",
             exchange_status="failed",
+            exchange_status_history=["failed"],
             submitted_ts=submitted_ts,
             last_update_ts=submitted_ts,
             last_exchange_update_ts=submitted_ts,
@@ -407,6 +505,7 @@ class OKXExecutionAdapter(ExchangeAdapter):
         filled_qty = float(order_row.get("accFillSz", 0.0) or 0.0)
         remaining_qty = max(requested_qty - filled_qty, 0.0)
         fees = abs(float(order_row.get("fee", 0.0) or 0.0))
+        canceled_ts = last_update_ts if status in {"CANCELED", "EXPIRED"} else None
         return OrderState(
             decision_id=intent.decision_id,
             intent_id=intent.intent_id,
@@ -417,9 +516,16 @@ class OKXExecutionAdapter(ExchangeAdapter):
             status=status,
             submission_mode="guarded_simulated_submit",
             exchange_status=exchange_status,
+            exchange_status_history=[exchange_status],
             submitted_ts=self._row_timestamp(order_row.get("cTime")) or submitted_ts,
             last_update_ts=last_update_ts,
             last_exchange_update_ts=last_update_ts,
+            cancellation_requested_ts=(
+                submitted_ts
+                if status == "CANCEL_PENDING"
+                else None
+            ),
+            canceled_ts=canceled_ts,
             requested_qty=requested_qty,
             filled_qty=filled_qty,
             remaining_qty=remaining_qty,
@@ -438,9 +544,15 @@ class OKXExecutionAdapter(ExchangeAdapter):
         exchange_fills: list[ExchangeFill],
     ) -> list[FillEvent]:
         fills: list[FillEvent] = []
-        for fill in exchange_fills:
+        cumulative_qty = 0.0
+        sorted_fills = sorted(
+            exchange_fills,
+            key=lambda item: (item.fill_ts or datetime.fromtimestamp(0, timezone.utc), item.fill_id or ""),
+        )
+        for fill in sorted_fills:
             if fill.symbol != intent.symbol:
                 continue
+            cumulative_qty += fill.fill_qty
             fills.append(
                 FillEvent(
                     fill_id=fill.fill_id or new_id("okxfill"),
@@ -457,6 +569,11 @@ class OKXExecutionAdapter(ExchangeAdapter):
                     liquidity_role="taker",
                     exchange_timestamp=fill.fill_ts or utc_now(),
                     ingestion_timestamp=utc_now(),
+                    order_status_after_fill=(
+                        "FILLED"
+                        if abs(cumulative_qty - intent.quantity) < 1e-12
+                        else "PARTIALLY_FILLED"
+                    ),
                 )
             )
         return fills
@@ -494,8 +611,11 @@ class OKXExecutionAdapter(ExchangeAdapter):
             "filled": "FILLED",
             "canceled": "CANCELED",
             "cancelled": "CANCELED",
+            "order_failed": "FAILED",
+            "effective": "SUBMITTED",
             "rejected": "REJECTED",
             "failed": "FAILED",
+            "expired": "EXPIRED",
         }
         return mapping.get(normalized, "SUBMITTED")
 

@@ -33,7 +33,7 @@ class EventStore(Protocol):
 
 
 class ExecutionRepository(Protocol):
-    def save_order_state(self, state: OrderState) -> None:
+    def save_order_state(self, state: OrderState) -> OrderState:
         ...
 
     def has_intent(self, intent_id: str) -> bool:
@@ -45,10 +45,24 @@ class ExecutionRepository(Protocol):
     def order_states(self) -> list[OrderState]:
         ...
 
+    def get_order_state(self, client_order_id: str) -> OrderState | None:
+        ...
+
+    def recent_order_states(
+        self,
+        *,
+        limit: int = 20,
+        statuses: tuple[str, ...] | None = None,
+    ) -> list[OrderState]:
+        ...
+
     def open_order_states(self) -> list[OrderState]:
         ...
 
     def fills(self) -> list[FillEvent]:
+        ...
+
+    def fills_for_order(self, client_order_id: str) -> list[FillEvent]:
         ...
 
 

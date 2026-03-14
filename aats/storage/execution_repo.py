@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from aats.schemas.execution import FillEvent, OrderState
+from aats.services.execution_engine.state_machine import OrderStateMachine
 
 
 class InMemoryExecutionRepository:
@@ -8,10 +9,18 @@ class InMemoryExecutionRepository:
         self._order_states_by_client_order_id: dict[str, OrderState] = {}
         self._order_states_by_intent_id: dict[str, OrderState] = {}
         self._fills_by_fill_id: dict[str, FillEvent] = {}
+        self._state_machine = OrderStateMachine()
 
-    def save_order_state(self, state: OrderState) -> None:
-        self._order_states_by_client_order_id[state.client_order_id] = state
-        self._order_states_by_intent_id[state.intent_id] = state
+    def save_order_state(self, state: OrderState) -> OrderState:
+        current = self._order_states_by_client_order_id.get(state.client_order_id)
+        if current is None:
+            current = self._order_states_by_intent_id.get(state.intent_id)
+        merged = self._state_machine.merge(current=current, incoming=state)
+        if current is not None and current.client_order_id != merged.client_order_id:
+            self._order_states_by_client_order_id.pop(current.client_order_id, None)
+        self._order_states_by_client_order_id[merged.client_order_id] = merged
+        self._order_states_by_intent_id[merged.intent_id] = merged
+        return merged
 
     def has_intent(self, intent_id: str) -> bool:
         return intent_id in self._order_states_by_intent_id
@@ -25,9 +34,33 @@ class InMemoryExecutionRepository:
     def order_states(self) -> list[OrderState]:
         return list(self._order_states_by_client_order_id.values())
 
+    def get_order_state(self, client_order_id: str) -> OrderState | None:
+        return self._order_states_by_client_order_id.get(client_order_id)
+
+    def recent_order_states(
+        self,
+        *,
+        limit: int = 20,
+        statuses: tuple[str, ...] | None = None,
+    ) -> list[OrderState]:
+        rows = sorted(
+            self.order_states(),
+            key=lambda item: (item.last_update_ts or item.created_at, item.client_order_id),
+            reverse=True,
+        )
+        if statuses is not None:
+            allowed = {status.upper() for status in statuses}
+            rows = [row for row in rows if row.status.upper() in allowed]
+        return rows[:limit]
+
     def open_order_states(self) -> list[OrderState]:
-        final_statuses = {"FILLED", "CANCELED", "REJECTED", "BLOCKED", "DRY_RUN"}
-        return [state for state in self.order_states() if state.status.upper() not in final_statuses]
+        return [state for state in self.order_states() if self._state_machine.is_open(state.status)]
 
     def fills(self) -> list[FillEvent]:
         return list(self._fills_by_fill_id.values())
+
+    def fills_for_order(self, client_order_id: str) -> list[FillEvent]:
+        return sorted(
+            [fill for fill in self._fills_by_fill_id.values() if fill.client_order_id == client_order_id],
+            key=lambda item: (item.ingestion_timestamp, item.fill_id),
+        )

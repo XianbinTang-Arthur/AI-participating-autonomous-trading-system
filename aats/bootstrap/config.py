@@ -26,6 +26,7 @@ from aats.services.decision_engine.trigger_policy import DecisionTriggerPolicy
 from aats.services.execution_engine.exchange_adapter import ExchangeAdapter
 from aats.services.execution_engine.okx_account import OKXAccountService
 from aats.services.execution_engine.okx_adapter import OKXExecutionAdapter
+from aats.services.execution_engine.recovery import ExecutionRecoveryService
 from aats.services.execution_engine.okx_rest import OKXRESTClient
 from aats.services.execution_engine.order_manager import OrderManager
 from aats.services.execution_engine.paper_adapter import PaperExecutionAdapter
@@ -59,6 +60,7 @@ from aats.storage.portfolio_repo_postgres import PostgresPortfolioRepository
 from aats.storage.reconciliation_repo import InMemoryReconciliationRepository
 from aats.storage.reconciliation_repo_postgres import PostgresReconciliationRepository
 from aats.storage.session import DatabaseRuntime, create_database_runtime, create_schema
+from aats.schemas.system import RecoveryStatus
 
 
 def load_yaml_config(environment: str, profile: str, config_dir: str | Path = "configs") -> dict[str, Any]:
@@ -118,6 +120,7 @@ class ApplicationRuntime:
     portfolio_repo: PortfolioRepository
     execution_repo: ExecutionRepository
     reconciliation_repo: ReconciliationRepository
+    recovery_status: RecoveryStatus
     database_runtime: DatabaseRuntime | None = None
     background_tasks: list[asyncio.Task[Any]] = field(default_factory=list)
 
@@ -333,6 +336,17 @@ async def build_runtime(
         bootstrap_portfolio_from_exchange=runtime_settings.bootstrap_portfolio_from_exchange,
         metrics=metrics,
     )
+    recovery_service = ExecutionRecoveryService(
+        execution_repo=storage.execution_repo,
+        portfolio_repo=storage.portfolio_repo,
+        reconstruction_service=PortfolioReconstructionService(
+            initial_usdt_balance=runtime_settings.initial_usdt_balance,
+            snapshot_builder=snapshot_builder,
+        ),
+        price_provider=market_gateway.latest_price,
+        kill_switch=kill_switch,
+        bootstrap_portfolio_from_exchange=runtime_settings.bootstrap_portfolio_from_exchange,
+    )
 
     await bus.subscribe(topics.MARKET_SNAPSHOTS, feature_engine.handle_market_snapshot)
     await bus.subscribe(topics.FEATURE_SNAPSHOTS, decision_trigger.handle_feature_snapshot)
@@ -400,8 +414,18 @@ async def build_runtime(
             and storage.portfolio_repo.latest() is None
         ):
             portfolio_service.state.load_exchange_snapshot(account_snapshot)
-    if bootstrap_portfolio_snapshot and storage.portfolio_repo.latest() is None:
+    recovery_artifacts = recovery_service.recover(portfolio_state=portfolio_service.state)
+    if (
+        bootstrap_portfolio_snapshot
+        and storage.portfolio_repo.latest() is None
+        and not recovery_artifacts.rebuilt_snapshot_saved
+    ):
         await portfolio_service.bootstrap_snapshot()
+        recovery_status = recovery_artifacts.status.model_copy(
+            update={"recovered_snapshot_available": True}
+        )
+    else:
+        recovery_status = recovery_artifacts.status
 
     return ApplicationRuntime(
         settings=runtime_settings,
@@ -429,5 +453,6 @@ async def build_runtime(
         portfolio_repo=storage.portfolio_repo,
         execution_repo=storage.execution_repo,
         reconciliation_repo=storage.reconciliation_repo,
+        recovery_status=recovery_status,
         database_runtime=storage.database_runtime,
     )

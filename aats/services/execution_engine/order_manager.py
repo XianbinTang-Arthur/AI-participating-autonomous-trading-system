@@ -4,7 +4,7 @@ from aats.bootstrap.logging import get_logger, log_event
 from aats.bus.base import EventBus
 from aats.events import topics
 from aats.events.envelopes import parse_payload, publish_model
-from aats.schemas.common import utc_now
+from aats.schemas.common import new_id, utc_now
 from aats.schemas.execution import OrderIntent, OrderState
 from aats.services.execution_engine.exchange_adapter import ExchangeAdapter
 from aats.services.governance_engine.kill_switch import KillSwitch
@@ -51,6 +51,32 @@ class OrderManager:
             side=intent.side,
             quantity=intent.quantity,
         )
+        created_state = OrderState(
+            decision_id=intent.decision_id,
+            intent_id=intent.intent_id,
+            symbol=intent.symbol,
+            client_order_id=intent.idempotency_key or new_id("clord"),
+            venue="OKX" if self.adapter.readiness().get("backend") == "okx" else "PAPER",
+            exchange_order_id=None,
+            status="CREATED",
+            submission_mode="local_order_manager",
+            submitted_ts=None,
+            last_update_ts=utc_now(),
+            requested_qty=intent.quantity,
+            filled_qty=0.0,
+            remaining_qty=intent.quantity,
+            average_fill_price=None,
+            fees=0.0,
+            submission_payload={},
+        )
+        created_state = await self._persist_order_state(order_state=created_state, key=intent.symbol)
+        submitting_state = created_state.model_copy(
+            update={
+                "status": "SUBMITTING",
+                "last_update_ts": utc_now(),
+            }
+        )
+        await self._persist_order_state(order_state=submitting_state, key=intent.symbol)
 
         try:
             order_state, fills = await self.adapter.submit(intent)
@@ -86,9 +112,11 @@ class OrderManager:
                 error=str(exc),
             )
 
-        await self._persist_order_state(order_state=order_state, key=intent.symbol)
+        persisted_order_state = await self._persist_order_state(order_state=order_state, key=intent.symbol)
 
         for fill in fills:
+            if fill.client_order_id != persisted_order_state.client_order_id:
+                fill = fill.model_copy(update={"client_order_id": persisted_order_state.client_order_id})
             await self._persist_fill(fill)
 
     async def sync_exchange_state(self) -> None:
@@ -98,24 +126,43 @@ class OrderManager:
         for fill in fills:
             await self._persist_fill(fill)
 
-    async def _persist_order_state(self, *, order_state: OrderState, key: str) -> None:
-        self.execution_repo.save_order_state(order_state)
+    async def cancel_order(self, client_order_id: str) -> OrderState:
+        current = self.execution_repo.get_order_state(client_order_id)
+        if current is None:
+            raise KeyError(f"order_state_not_found client_order_id={client_order_id}")
+        cancel_pending = current.model_copy(
+            update={
+                "status": "CANCEL_PENDING",
+                "cancellation_requested_ts": utc_now(),
+                "last_update_ts": utc_now(),
+            }
+        )
+        persisted_pending = await self._persist_order_state(order_state=cancel_pending, key=current.symbol)
+        state, fills = await self.adapter.cancel(persisted_pending)
+        persisted = await self._persist_order_state(order_state=state, key=current.symbol)
+        for fill in fills:
+            await self._persist_fill(fill)
+        return persisted
+
+    async def _persist_order_state(self, *, order_state: OrderState, key: str) -> OrderState:
+        persisted = self.execution_repo.save_order_state(order_state)
         log_event(
             self.logger,
             "order_state_persisted",
-            decision_id=order_state.decision_id,
-            intent_id=order_state.intent_id,
-            status=order_state.status,
-            venue=order_state.venue,
-            submission_mode=order_state.submission_mode,
+            decision_id=persisted.decision_id,
+            intent_id=persisted.intent_id,
+            status=persisted.status,
+            venue=persisted.venue,
+            submission_mode=persisted.submission_mode,
         )
         await publish_model(
             bus=self.bus,
             topic=topics.ORDER_UPDATES,
             key=key,
-            payload_model=order_state,
+            payload_model=persisted,
             source_component="execution_engine",
         )
+        return persisted
 
     async def _persist_fill(self, fill) -> None:
         if not self.execution_repo.save_fill(fill):
