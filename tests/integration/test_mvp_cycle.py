@@ -36,7 +36,7 @@ class TestMVPCycle(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any(record.fill_event_refs for record in audited_with_execution))
         self.assertTrue(any(record.portfolio_delta_ref is not None for record in audited_with_execution))
         self.assertTrue(any(record.reconciliation_refs for record in audited_with_execution))
-        self.assertGreater(len(runtime.event_store.all()), 0)
+        self.assertGreater(runtime.event_store.count(), 0)
 
 
 if __name__ == "__main__":

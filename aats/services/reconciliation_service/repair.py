@@ -5,7 +5,7 @@ from typing import Callable
 from aats.bootstrap.metrics import MetricsRegistry
 from aats.bus.base import EventBus
 from aats.events import topics
-from aats.events.envelopes import parse_payload, publish_model
+from aats.events.envelopes import parse_envelope, publish_model
 from aats.schemas.execution import FillEvent, OrderState
 from aats.schemas.portfolio import PortfolioSnapshot
 from aats.schemas.reconciliation import ReconciliationReport
@@ -46,7 +46,8 @@ class ReconciliationService:
         self.metrics = metrics
 
     async def handle_portfolio_snapshot(self, message: dict) -> None:
-        snapshot = parse_payload(message, PortfolioSnapshot)
+        envelope = parse_envelope(message)
+        snapshot = PortfolioSnapshot.model_validate(envelope.payload)
         order_states: list[OrderState] = self.execution_repo.order_states()
         fills: list[FillEvent] = self.execution_repo.fills()
         reconstructed_snapshot = self.reconstruction_service.rebuild_snapshot(
@@ -54,6 +55,8 @@ class ReconciliationService:
             price_provider=self.price_provider,
         )
         report = self.comparator.compare(
+            decision_id=snapshot.decision_id,
+            portfolio_snapshot_ref=envelope.event_id,
             order_states=order_states,
             fills=fills,
             stored_snapshot=snapshot,

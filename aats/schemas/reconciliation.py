@@ -8,6 +8,8 @@ from aats.schemas.common import SchemaBase
 
 class ReconciliationReport(SchemaBase):
     reconciliation_id: str
+    decision_id: str | None = None
+    portfolio_snapshot_ref: str | None = None
     as_of_ts: datetime
     order_diff: dict[str, Any]
     fill_diff: dict[str, Any]
@@ -16,4 +18,3 @@ class ReconciliationReport(SchemaBase):
     severity: str
     remediation_action: str | None = None
     halt_required: bool = False
-

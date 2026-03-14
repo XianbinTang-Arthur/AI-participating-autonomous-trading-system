@@ -36,35 +36,59 @@ def parse_args() -> argparse.Namespace:
 
 async def main(args: argparse.Namespace) -> dict:
     settings = load_settings()
+    runtime = None
+    storage = None
     if args.bootstrap_local_loop:
         runtime = await build_runtime(settings)
-        await runtime.market_gateway.run_local_publisher(
-            symbol=settings.default_symbol,
-            iterations=args.iterations or settings.local_publish_iterations,
-            interval_seconds=(
-                args.interval_seconds
-                if args.interval_seconds is not None
-                else settings.local_publish_interval_seconds
-            ),
-        )
-        event_store = runtime.event_store
+        try:
+            await runtime.market_gateway.run_local_publisher(
+                symbol=settings.default_symbol,
+                iterations=args.iterations or settings.local_publish_iterations,
+                interval_seconds=(
+                    args.interval_seconds
+                    if args.interval_seconds is not None
+                    else settings.local_publish_interval_seconds
+                ),
+            )
+            replay_engine = ReplayEngine(
+                event_store=runtime.event_store,
+                reconstruction_service=PortfolioReconstructionService(
+                    initial_usdt_balance=settings.initial_usdt_balance,
+                    snapshot_builder=PortfolioSnapshotBuilder(pnl_calculator=PortfolioPnLCalculator()),
+                ),
+                audit_repo=runtime.audit_repo,
+                portfolio_repo=runtime.portfolio_repo,
+            )
+            result = replay_engine.replay()
+        finally:
+            if runtime.database_runtime is not None:
+                runtime.database_runtime.dispose()
     else:
         storage = build_storage_backends(settings)
-        event_store = storage.event_store
+        try:
+            replay_engine = ReplayEngine(
+                event_store=storage.event_store,
+                reconstruction_service=PortfolioReconstructionService(
+                    initial_usdt_balance=settings.initial_usdt_balance,
+                    snapshot_builder=PortfolioSnapshotBuilder(pnl_calculator=PortfolioPnLCalculator()),
+                ),
+                audit_repo=storage.audit_repo,
+                portfolio_repo=storage.portfolio_repo,
+            )
+            result = replay_engine.replay()
+        finally:
+            if storage.database_runtime is not None:
+                storage.database_runtime.dispose()
 
-    replay_engine = ReplayEngine(
-        event_store=event_store,
-        reconstruction_service=PortfolioReconstructionService(
-            initial_usdt_balance=settings.initial_usdt_balance,
-            snapshot_builder=PortfolioSnapshotBuilder(pnl_calculator=PortfolioPnLCalculator()),
-        ),
-    )
-    result = replay_engine.replay()
     return {
         "replayed_event_count": result.replayed_event_count,
         "stored_snapshot_count": result.stored_snapshot_count,
         "divergence_count": result.divergence_count,
         "divergences": result.divergences,
+        "portfolio_issues": result.portfolio_issues,
+        "decision_chain_issues": result.decision_chain_issues,
+        "execution_chain_issues": result.execution_chain_issues,
+        "audit_issues": result.audit_issues,
         "decision_chain_count": len(result.decision_chains),
         "final_reconstructed_snapshot": (
             result.final_reconstructed_snapshot.model_dump(mode="json")

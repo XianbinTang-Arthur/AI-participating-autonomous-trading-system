@@ -42,6 +42,7 @@ class OrderStateModel(Base):
     __tablename__ = "order_states"
 
     client_order_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    decision_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     intent_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     exchange_order_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

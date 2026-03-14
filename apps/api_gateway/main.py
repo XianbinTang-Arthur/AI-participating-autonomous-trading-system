@@ -13,10 +13,14 @@ from aats.bootstrap.logging import configure_logging
 async def lifespan(app: FastAPI):
     settings = load_settings()
     configure_logging(settings.log_level)
-    app.state.runtime = await build_runtime(settings)
-    yield
+    runtime = await build_runtime(settings)
+    await runtime.start_background_tasks()
+    app.state.runtime = runtime
+    try:
+        yield
+    finally:
+        await runtime.stop_background_tasks()
 
 
 app = FastAPI(title="AATS API Gateway", lifespan=lifespan)
 app.include_router(router)
-

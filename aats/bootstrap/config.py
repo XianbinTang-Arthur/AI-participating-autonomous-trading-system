@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import asyncio
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -21,15 +22,23 @@ from aats.services.decision_engine.context_builder import DecisionContextBuilder
 from aats.services.decision_engine.orchestrator import DecisionOrchestrator
 from aats.services.decision_engine.target_position import TargetPositionEngine
 from aats.services.decision_engine.trigger import DecisionCycleTrigger
+from aats.services.decision_engine.trigger_policy import DecisionTriggerPolicy
+from aats.services.execution_engine.exchange_adapter import ExchangeAdapter
+from aats.services.execution_engine.okx_account import OKXAccountService
+from aats.services.execution_engine.okx_adapter import OKXExecutionAdapter
+from aats.services.execution_engine.okx_rest import OKXRESTClient
 from aats.services.execution_engine.order_manager import OrderManager
 from aats.services.execution_engine.paper_adapter import PaperExecutionAdapter
 from aats.services.execution_engine.planner import ExecutionPlanner
 from aats.services.feature_engine.calculator import FeatureCalculator, FeatureEngine
+from aats.services.governance_engine.health import SystemHealthService
 from aats.services.governance_engine.kill_switch import KillSwitch
+from aats.services.governance_engine.mode import RuntimeModeController
 from aats.services.governance_engine.policy import PolicyEngine
 from aats.services.governance_engine.risk import RiskEngine
 from aats.services.market_gateway.gateway import MarketDataGateway
 from aats.services.market_gateway.normalizer import MarketSnapshotNormalizer
+from aats.services.market_gateway.okx_websocket import OKXPublicWebSocketClient
 from aats.services.market_gateway.publisher import MarketSnapshotPublisher
 from aats.services.portfolio_service.pnl import PortfolioPnLCalculator
 from aats.services.portfolio_service.positions import PortfolioService, PortfolioState
@@ -37,10 +46,7 @@ from aats.services.portfolio_service.reconstruction import PortfolioReconstructi
 from aats.services.portfolio_service.snapshots import PortfolioSnapshotBuilder
 from aats.services.reconciliation_service.comparator import StateComparator
 from aats.services.reconciliation_service.fetcher import ExchangeStateFetcher
-from aats.services.reconciliation_service.repair import (
-    ReconciliationRepairService,
-    ReconciliationService,
-)
+from aats.services.reconciliation_service.repair import ReconciliationRepairService, ReconciliationService
 from aats.storage.audit_repo import InMemoryAuditRepository
 from aats.storage.audit_repo_postgres import PostgresAuditRepository
 from aats.storage.base import AuditRepository, EventStore, ExecutionRepository, PortfolioRepository, ReconciliationRepository
@@ -55,10 +61,15 @@ from aats.storage.reconciliation_repo_postgres import PostgresReconciliationRepo
 from aats.storage.session import DatabaseRuntime, create_database_runtime, create_schema
 
 
-def load_yaml_config(environment: str, config_dir: str | Path = "configs") -> dict[str, Any]:
+def load_yaml_config(environment: str, profile: str, config_dir: str | Path = "configs") -> dict[str, Any]:
     config_path = Path(config_dir)
     merged: dict[str, Any] = {}
-    for candidate in (config_path / "base.yaml", config_path / f"{environment}.yaml"):
+    candidates = (
+        config_path / "base.yaml",
+        config_path / f"{environment}.yaml",
+        config_path / f"{profile}.yaml",
+    )
+    for candidate in candidates:
         if candidate.exists():
             merged.update(yaml.safe_load(candidate.read_text(encoding="utf-8")) or {})
     return merged
@@ -66,7 +77,7 @@ def load_yaml_config(environment: str, config_dir: str | Path = "configs") -> di
 
 def load_settings() -> AATSSettings:
     discovered = AATSSettings()
-    yaml_values = load_yaml_config(discovered.environment)
+    yaml_values = load_yaml_config(discovered.environment, discovered.config_profile)
     return AATSSettings.model_validate({**yaml_values, **discovered.model_dump()})
 
 
@@ -89,19 +100,55 @@ class ApplicationRuntime:
     feature_engine: FeatureEngine
     ai_service: AIInferenceService
     decision_engine: DecisionOrchestrator
+    decision_trigger: DecisionCycleTrigger
+    decision_trigger_policy: DecisionTriggerPolicy
     execution_planner: ExecutionPlanner
+    execution_adapter: ExchangeAdapter
     order_manager: OrderManager
     portfolio_service: PortfolioService
     reconciliation_service: ReconciliationService
     policy_engine: PolicyEngine
     risk_engine: RiskEngine
     kill_switch: KillSwitch
+    mode_controller: RuntimeModeController
+    health_service: SystemHealthService
+    account_service: OKXAccountService
     metrics: MetricsRegistry
     audit_repo: AuditRepository
     portfolio_repo: PortfolioRepository
     execution_repo: ExecutionRepository
     reconciliation_repo: ReconciliationRepository
     database_runtime: DatabaseRuntime | None = None
+    background_tasks: list[asyncio.Task[Any]] = field(default_factory=list)
+
+    async def start_background_tasks(self) -> None:
+        if self.settings.market_data_backend == "okx":
+            await self.market_gateway.start()
+        if self.settings.account_backend == "okx" and self.settings.account_read_enabled:
+            self.background_tasks.append(
+                asyncio.create_task(self._refresh_account_loop(), name="aats_okx_account_refresh")
+            )
+
+    async def stop_background_tasks(self) -> None:
+        for task in self.background_tasks:
+            task.cancel()
+        for task in self.background_tasks:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        self.background_tasks.clear()
+        await self.market_gateway.stop()
+        if self.database_runtime is not None:
+            self.database_runtime.dispose()
+
+    async def _refresh_account_loop(self) -> None:
+        while True:
+            try:
+                await self.account_service.refresh()
+            except Exception:
+                pass
+            await asyncio.sleep(self.settings.okx_account_refresh_interval_seconds)
 
 
 def build_storage_backends(settings: AATSSettings) -> StorageBackends:
@@ -131,6 +178,26 @@ def build_storage_backends(settings: AATSSettings) -> StorageBackends:
     )
 
 
+def _build_execution_adapter(
+    *,
+    settings: AATSSettings,
+    market_gateway: MarketDataGateway,
+    account_service: OKXAccountService,
+    mode_controller: RuntimeModeController,
+) -> ExchangeAdapter:
+    if settings.execution_backend == "okx":
+        return OKXExecutionAdapter(
+            settings=settings,
+            client=OKXRESTClient(settings=settings),
+            account_service=account_service,
+            mode_controller=mode_controller,
+        )
+    return PaperExecutionAdapter(
+        price_provider=market_gateway.latest_price,
+        taker_fee_bps=settings.paper_taker_fee_bps,
+    )
+
+
 async def build_runtime(
     settings: AATSSettings | None = None,
     *,
@@ -139,14 +206,44 @@ async def build_runtime(
     runtime_settings = settings or load_settings()
     storage = build_storage_backends(runtime_settings)
     metrics = MetricsRegistry()
-    bus = InMemoryEventBus(event_store=storage.event_store)
+    bus = InMemoryEventBus(
+        event_store=storage.event_store,
+        persistence_mode=runtime_settings.event_persistence_mode,
+    )
+
+    kill_switch = KillSwitch()
+    mode_controller = RuntimeModeController(settings=runtime_settings, kill_switch=kill_switch)
 
     normalizer = MarketSnapshotNormalizer(exchange_name=runtime_settings.exchange_name)
     market_publisher = MarketSnapshotPublisher(bus=bus)
+    okx_ws_client = (
+        OKXPublicWebSocketClient(settings=runtime_settings)
+        if runtime_settings.market_data_backend == "okx"
+        else None
+    )
     market_gateway = MarketDataGateway(
         settings=runtime_settings,
         normalizer=normalizer,
         publisher=market_publisher,
+        okx_ws_client=okx_ws_client,
+    )
+
+    okx_client = OKXRESTClient(settings=runtime_settings)
+    account_service = OKXAccountService(settings=runtime_settings, client=okx_client)
+    execution_adapter = _build_execution_adapter(
+        settings=runtime_settings,
+        market_gateway=market_gateway,
+        account_service=account_service,
+        mode_controller=mode_controller,
+    )
+    health_service = SystemHealthService(
+        settings=runtime_settings,
+        mode_controller=mode_controller,
+        kill_switch=kill_switch,
+        market_provider=market_gateway,
+        account_provider=account_service,
+        execution_provider=execution_adapter,
+        reconciliation_repo=storage.reconciliation_repo,
     )
 
     snapshot_builder = PortfolioSnapshotBuilder(pnl_calculator=PortfolioPnLCalculator())
@@ -155,13 +252,15 @@ async def build_runtime(
         prompt_builder=PromptBuilder(),
         validator=AssessmentValidator(),
     )
-
+    decision_trigger_policy = DecisionTriggerPolicy(settings=runtime_settings)
     decision_engine = DecisionOrchestrator(
         bus=bus,
         context_builder=DecisionContextBuilder(
             settings=runtime_settings,
             event_store=storage.event_store,
             portfolio_repo=storage.portfolio_repo,
+            mode_controller=mode_controller,
+            health_service=health_service,
         ),
         baseline_strategy=BaselineStrategy(event_store=storage.event_store),
         ai_service=ai_service,
@@ -170,21 +269,30 @@ async def build_runtime(
     )
     decision_trigger = DecisionCycleTrigger(
         orchestrator=decision_engine,
-        timeframe=runtime_settings.primary_timeframe,
+        market_gateway=market_gateway,
+        policy=decision_trigger_policy,
     )
     audit_service = DecisionAuditService(bus=bus, audit_repo=storage.audit_repo)
 
-    kill_switch = KillSwitch()
-    policy_engine = PolicyEngine(settings=runtime_settings, kill_switch=kill_switch)
-    risk_engine = RiskEngine(settings=runtime_settings)
+    policy_engine = PolicyEngine(
+        settings=runtime_settings,
+        kill_switch=kill_switch,
+        mode_controller=mode_controller,
+        health_service=health_service,
+    )
+    risk_engine = RiskEngine(
+        settings=runtime_settings,
+        account_service=account_service,
+        health_service=health_service,
+        trigger_policy=decision_trigger_policy,
+        price_provider=market_gateway.latest_price,
+    )
     execution_planner = ExecutionPlanner(settings=runtime_settings)
     order_manager = OrderManager(
         bus=bus,
-        adapter=PaperExecutionAdapter(
-            price_provider=market_gateway.latest_price,
-            taker_fee_bps=runtime_settings.paper_taker_fee_bps,
-        ),
+        adapter=execution_adapter,
         execution_repo=storage.execution_repo,
+        kill_switch=kill_switch,
     )
 
     portfolio_service = PortfolioService(
@@ -195,8 +303,6 @@ async def build_runtime(
         price_provider=market_gateway.latest_price,
         metrics=metrics,
     )
-    if bootstrap_portfolio_snapshot and storage.portfolio_repo.latest() is None:
-        await portfolio_service.bootstrap_snapshot()
 
     reconciliation_service = ReconciliationService(
         bus=bus,
@@ -227,27 +333,24 @@ async def build_runtime(
     await bus.subscribe(topics.FILL_EVENTS, audit_service.handle_fill_event)
     await bus.subscribe(topics.FILL_EVENTS, portfolio_service.handle_fill_event)
     await bus.subscribe(topics.PORTFOLIO_SNAPSHOTS, audit_service.handle_portfolio_snapshot)
-    await bus.subscribe(
-        topics.PORTFOLIO_SNAPSHOTS,
-        reconciliation_service.handle_portfolio_snapshot,
-    )
-    await bus.subscribe(
-        topics.RECONCILIATION_REPORTS,
-        audit_service.handle_reconciliation_report,
-    )
+    await bus.subscribe(topics.PORTFOLIO_SNAPSHOTS, reconciliation_service.handle_portfolio_snapshot)
+    await bus.subscribe(topics.RECONCILIATION_REPORTS, audit_service.handle_reconciliation_report)
 
     async def handle_position_target(message: dict[str, Any]) -> None:
         target = parse_payload(message, PositionTarget)
-        policy_decision = policy_engine.evaluate(mode=runtime_settings.mode, target=target)
-        await policy_engine.publish_decision(bus=bus, target=target, decision=policy_decision)
+        if runtime_settings.account_backend == "okx" and runtime_settings.account_read_enabled:
+            await account_service.refresh()
 
-        if not policy_decision.allowed:
+        policy_decision = policy_engine.evaluate(target=target)
+        await policy_engine.publish_decision(bus=bus, target=target, decision=policy_decision)
+        if not policy_decision.execution_allowed:
             return
 
         risk_decision = risk_engine.evaluate(target=target)
         await risk_engine.publish_decision(bus=bus, target=target, decision=risk_decision)
-
         if not risk_decision.approved or risk_decision.halt_required:
+            return
+        if kill_switch.halted:
             return
 
         intent = execution_planner.build_intent(
@@ -262,6 +365,11 @@ async def build_runtime(
 
     await bus.subscribe(topics.POSITION_TARGETS, handle_position_target)
 
+    if runtime_settings.account_backend == "okx" and runtime_settings.account_read_enabled:
+        await account_service.refresh(force=True)
+    if bootstrap_portfolio_snapshot and storage.portfolio_repo.latest() is None:
+        await portfolio_service.bootstrap_snapshot()
+
     return ApplicationRuntime(
         settings=runtime_settings,
         bus=bus,
@@ -270,13 +378,19 @@ async def build_runtime(
         feature_engine=feature_engine,
         ai_service=ai_service,
         decision_engine=decision_engine,
+        decision_trigger=decision_trigger,
+        decision_trigger_policy=decision_trigger_policy,
         execution_planner=execution_planner,
+        execution_adapter=execution_adapter,
         order_manager=order_manager,
         portfolio_service=portfolio_service,
         reconciliation_service=reconciliation_service,
         policy_engine=policy_engine,
         risk_engine=risk_engine,
         kill_switch=kill_switch,
+        mode_controller=mode_controller,
+        health_service=health_service,
+        account_service=account_service,
         metrics=metrics,
         audit_repo=storage.audit_repo,
         portfolio_repo=storage.portfolio_repo,

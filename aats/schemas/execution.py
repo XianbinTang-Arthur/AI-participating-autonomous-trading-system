@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
+from pydantic import Field
+
 from aats.schemas.common import SchemaBase
 
 
@@ -23,8 +25,10 @@ class OrderIntent(SchemaBase):
 
 
 class OrderState(SchemaBase):
+    decision_id: str
     intent_id: str
     client_order_id: str
+    venue: str = "PAPER"
     exchange_order_id: str | None = None
     status: str
     submitted_ts: datetime | None = None
@@ -35,6 +39,7 @@ class OrderState(SchemaBase):
     average_fill_price: float | None = None
     fees: float = 0.0
     cancel_reason: str | None = None
+    submission_payload: dict[str, str] = Field(default_factory=dict)
 
 
 class FillEvent(SchemaBase):
@@ -51,4 +56,3 @@ class FillEvent(SchemaBase):
     liquidity_role: Literal["maker", "taker"]
     exchange_timestamp: datetime
     ingestion_timestamp: datetime
-

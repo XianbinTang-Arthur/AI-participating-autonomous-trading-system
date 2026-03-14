@@ -12,8 +12,11 @@ class TestReconciliationComparator(unittest.TestCase):
     def test_compare_detects_hard_snapshot_mismatch(self) -> None:
         comparator = StateComparator()
         report = comparator.compare(
+            decision_id="decision_1",
+            portfolio_snapshot_ref="evt_portfolio_1",
             order_states=[
                 OrderState(
+                    decision_id="decision_1",
                     intent_id="intent_1",
                     client_order_id="clord_1",
                     exchange_order_id="paper_1",
@@ -88,6 +91,8 @@ class TestReconciliationComparator(unittest.TestCase):
 
         self.assertEqual(report.severity, "HARD_MISMATCH")
         self.assertTrue(report.halt_required)
+        self.assertEqual(report.decision_id, "decision_1")
+        self.assertEqual(report.portfolio_snapshot_ref, "evt_portfolio_1")
         self.assertTrue(report.balance_diff)
         self.assertTrue(report.position_diff["mismatches"])
 

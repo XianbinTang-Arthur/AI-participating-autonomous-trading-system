@@ -12,6 +12,8 @@ class StateComparator:
     def compare(
         self,
         *,
+        decision_id: str | None,
+        portfolio_snapshot_ref: str | None,
         order_states: list[OrderState],
         fills: list[FillEvent],
         stored_snapshot: PortfolioSnapshot,
@@ -37,6 +39,8 @@ class StateComparator:
         remediation_action = None if severity == "CLEAN" else "investigate_state_divergence"
         return ReconciliationReport(
             reconciliation_id=new_id("recon"),
+            decision_id=decision_id,
+            portfolio_snapshot_ref=portfolio_snapshot_ref,
             as_of_ts=utc_now(),
             order_diff=order_diff,
             fill_diff=fill_diff,

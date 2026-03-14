@@ -20,3 +20,6 @@ class InMemoryAuditRepository:
 
     def history(self, decision_id: str) -> list[DecisionAuditRecord]:
         return list(self._history_by_decision.get(decision_id, []))
+
+    def count(self) -> int:
+        return len(self._latest_by_decision)

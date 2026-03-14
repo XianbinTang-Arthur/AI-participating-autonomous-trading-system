@@ -6,6 +6,7 @@ from aats.events import topics
 from aats.events.envelopes import parse_payload, publish_model
 from aats.schemas.execution import OrderIntent
 from aats.services.execution_engine.exchange_adapter import ExchangeAdapter
+from aats.services.governance_engine.kill_switch import KillSwitch
 from aats.storage.base import ExecutionRepository
 
 
@@ -16,14 +17,27 @@ class OrderManager:
         bus: EventBus,
         adapter: ExchangeAdapter,
         execution_repo: ExecutionRepository,
+        kill_switch: KillSwitch,
     ) -> None:
         self.bus = bus
         self.adapter = adapter
         self.execution_repo = execution_repo
+        self.kill_switch = kill_switch
         self.logger = get_logger("aats.execution_engine")
 
     async def handle_order_intent(self, message: dict) -> None:
         intent = parse_payload(message, OrderIntent)
+        if self.kill_switch.halted:
+            log_event(
+                self.logger,
+                "order_intent_blocked",
+                level="warning",
+                decision_id=intent.decision_id,
+                intent_id=intent.intent_id,
+                symbol=intent.symbol,
+                reason="kill_switch_active",
+            )
+            return
         if self.execution_repo.has_intent(intent.intent_id):
             return
 
@@ -37,8 +51,16 @@ class OrderManager:
             quantity=intent.quantity,
         )
 
-        order_state, fills = self.adapter.submit(intent)
+        order_state, fills = await self.adapter.submit(intent)
         self.execution_repo.save_order_state(order_state)
+        log_event(
+            self.logger,
+            "order_state_persisted",
+            decision_id=order_state.decision_id,
+            intent_id=order_state.intent_id,
+            status=order_state.status,
+            venue=order_state.venue,
+        )
         await publish_model(
             bus=self.bus,
             topic=topics.ORDER_UPDATES,

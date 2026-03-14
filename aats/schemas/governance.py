@@ -9,6 +9,9 @@ class PolicyDecision(SchemaBase):
     decision_id: str
     mode: str
     allowed: bool
+    execution_allowed: bool = False
+    submission_allowed: bool = False
+    dry_run_only: bool = False
     requires_human_approval: bool
     allowed_symbols: list[str]
     allowed_execution_styles: list[str]
@@ -22,9 +25,10 @@ class RiskDecision(SchemaBase):
     approved: bool
     modified: bool
     capped_target_position_qty: float
+    capped_target_notional: float | None = None
+    current_open_order_count: int = 0
     constraints_applied: list[str] = Field(default_factory=list)
     risk_score: float
     flatten_required: bool = False
     halt_required: bool = False
     rejection_reasons: list[str] = Field(default_factory=list)
-

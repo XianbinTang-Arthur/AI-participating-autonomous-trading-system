@@ -20,8 +20,8 @@ dependencies = [
   "structlog>=24.4",
   "tenacity>=9.0",
   "uvicorn>=0.30",
+  "websockets>=13.0",
 ]
 
 [tool.setuptools.packages.find]
 include = ["aats*"]
-

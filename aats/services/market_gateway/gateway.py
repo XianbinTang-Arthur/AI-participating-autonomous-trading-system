@@ -1,12 +1,19 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable
 from typing import Any
 
+from aats.bootstrap.logging import get_logger, log_event
 from aats.bootstrap.settings import AATSSettings
 from aats.schemas.common import utc_now
 from aats.schemas.market import MarketSnapshot
 from aats.services.market_gateway.normalizer import MarketSnapshotNormalizer
+from aats.services.market_gateway.okx_normalizer import (
+    OKXInstrumentMarketState,
+    OKXMarketSnapshotNormalizer,
+)
+from aats.services.market_gateway.okx_websocket import OKXPublicWebSocketClient
 from aats.services.market_gateway.publisher import MarketSnapshotPublisher
 
 
@@ -19,18 +26,44 @@ class MarketDataGateway:
         settings: AATSSettings,
         normalizer: MarketSnapshotNormalizer,
         publisher: MarketSnapshotPublisher,
+        okx_normalizer: OKXMarketSnapshotNormalizer | None = None,
+        okx_ws_client: OKXPublicWebSocketClient | None = None,
     ) -> None:
         self.settings = settings
         self.normalizer = normalizer
         self.publisher = publisher
+        self.okx_normalizer = okx_normalizer or OKXMarketSnapshotNormalizer(exchange_name="OKX")
+        self.okx_ws_client = okx_ws_client
+        self.logger = get_logger("aats.market_gateway")
         self._latest_snapshots: dict[str, MarketSnapshot] = {}
         self._tick_by_symbol: dict[str, int] = {}
+        self._okx_states: dict[str, OKXInstrumentMarketState] = {}
+        self._background_task: asyncio.Task[None] | None = None
+        self._last_publish_ts = None
+        self._last_error: str | None = None
+
+    async def start(self) -> None:
+        if self.settings.market_data_backend != "okx" or self.okx_ws_client is None:
+            return
+        if self._background_task is not None and not self._background_task.done():
+            return
+        self._background_task = asyncio.create_task(self._run_okx_stream(), name="aats_okx_market_stream")
+
+    async def stop(self) -> None:
+        if self.okx_ws_client is not None:
+            await self.okx_ws_client.stop()
+        if self._background_task is not None:
+            self._background_task.cancel()
+            try:
+                await self._background_task
+            except asyncio.CancelledError:
+                pass
+            self._background_task = None
 
     async def publish_local_snapshot(self, symbol: str | None = None) -> MarketSnapshot:
         trading_symbol = symbol or self.settings.default_symbol
         snapshot = self.normalizer.normalize(self._build_local_payload(trading_symbol))
-        self._latest_snapshots[trading_symbol] = snapshot
-        await self.publisher.publish(snapshot)
+        await self._publish_snapshot(snapshot)
         return snapshot
 
     async def seed_demo_snapshot(self, symbol: str | None = None) -> MarketSnapshot:
@@ -56,6 +89,68 @@ class MarketDataGateway:
     def latest_price(self, symbol: str) -> float:
         snapshot = self._latest_snapshots.get(symbol)
         return snapshot.last_price if snapshot is not None else 0.0
+
+    def is_fresh(self, symbol: str) -> bool:
+        snapshot = self._latest_snapshots.get(symbol)
+        if snapshot is None:
+            return False
+        age_seconds = (utc_now() - snapshot.snapshot_ts).total_seconds()
+        return age_seconds <= self.settings.market_data_stale_after_seconds
+
+    def status(self) -> dict[str, Any]:
+        default_snapshot = self._latest_snapshots.get(self.settings.default_symbol)
+        connected = True
+        last_update_ts = default_snapshot.snapshot_ts if default_snapshot is not None else None
+        detail = "demo_market_data"
+        if self.settings.market_data_backend == "okx" and self.okx_ws_client is not None:
+            okx_status = self.okx_ws_client.status()
+            connected = bool(okx_status["connected"])
+            last_update_ts = okx_status.get("last_message_ts") or last_update_ts
+            detail = "okx_public_ws"
+            self._last_error = okx_status.get("last_error")
+        fresh = self.is_fresh(self.settings.default_symbol)
+        blockers: list[str] = []
+        if not connected:
+            blockers.append("market_connection_down")
+        if not fresh:
+            blockers.append("market_data_stale")
+        return {
+            "backend": self.settings.market_data_backend,
+            "connected": connected,
+            "fresh": fresh,
+            "last_update_ts": last_update_ts,
+            "last_error": self._last_error,
+            "detail": detail,
+            "blockers": blockers,
+            "ready": connected and fresh,
+        }
+
+    async def _run_okx_stream(self) -> None:
+        if self.okx_ws_client is None:
+            return
+        log_event(self.logger, "market_stream_started", backend="okx")
+        await self.okx_ws_client.run_forever(on_message=self._handle_okx_message)
+
+    async def _handle_okx_message(self, message: dict[str, Any]) -> None:
+        try:
+            snapshots = self.okx_normalizer.apply_message(message=message, states=self._okx_states)
+            for snapshot in snapshots:
+                await self._publish_snapshot(snapshot)
+        except Exception as exc:
+            self._last_error = str(exc)
+            log_event(
+                self.logger,
+                "okx_market_message_error",
+                level="error",
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            raise
+
+    async def _publish_snapshot(self, snapshot: MarketSnapshot) -> None:
+        self._latest_snapshots[snapshot.symbol] = snapshot
+        self._last_publish_ts = snapshot.snapshot_ts
+        await self.publisher.publish(snapshot)
 
     def _build_local_payload(self, symbol: str) -> dict[str, Any]:
         tick = self._tick_by_symbol.get(symbol, 0)

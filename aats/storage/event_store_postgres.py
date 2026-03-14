@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import Select, desc, select
+from sqlalchemy import Select, desc, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from aats.schemas.common import EventEnvelope
@@ -39,6 +39,16 @@ class PostgresEventStore:
         with self.session_factory() as session:
             rows = session.scalars(select(EventEnvelopeModel).order_by(EventEnvelopeModel.sequence_id)).all()
         return [self._to_schema(row) for row in rows]
+
+    def count(self, *, topic: str | None = None, decision_id: str | None = None) -> int:
+        query = select(func.count()).select_from(EventEnvelopeModel)
+        if topic is not None:
+            query = query.where(EventEnvelopeModel.topic == topic)
+        if decision_id is not None:
+            query = query.where(EventEnvelopeModel.decision_id == decision_id)
+        with self.session_factory() as session:
+            count = session.scalar(query)
+        return int(count or 0)
 
     def get(self, event_id: str) -> EventEnvelope | None:
         with self.session_factory() as session:

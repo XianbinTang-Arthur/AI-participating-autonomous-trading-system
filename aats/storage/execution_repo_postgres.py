@@ -18,6 +18,7 @@ class PostgresExecutionRepository:
             if row is None:
                 row = OrderStateModel(
                     client_order_id=state.client_order_id,
+                    decision_id=state.decision_id,
                     intent_id=state.intent_id,
                     exchange_order_id=state.exchange_order_id,
                     created_at=state.created_at,
@@ -33,6 +34,7 @@ class PostgresExecutionRepository:
                 )
                 session.add(row)
             else:
+                row.decision_id = state.decision_id
                 row.intent_id = state.intent_id
                 row.exchange_order_id = state.exchange_order_id
                 row.created_at = state.created_at
@@ -82,7 +84,17 @@ class PostgresExecutionRepository:
             rows = session.scalars(
                 select(OrderStateModel).order_by(OrderStateModel.created_at, OrderStateModel.client_order_id)
             ).all()
-        return [OrderState.model_validate(row.payload) for row in rows]
+        return [self._to_order_state(row) for row in rows]
+
+    def open_order_states(self) -> list[OrderState]:
+        final_statuses = ("FILLED", "CANCELED", "REJECTED", "BLOCKED", "DRY_RUN")
+        with self.session_factory() as session:
+            rows = session.scalars(
+                select(OrderStateModel)
+                .where(~OrderStateModel.status.in_(final_statuses))
+                .order_by(OrderStateModel.created_at, OrderStateModel.client_order_id)
+            ).all()
+        return [self._to_order_state(row) for row in rows]
 
     def fills(self) -> list[FillEvent]:
         with self.session_factory() as session:
@@ -90,3 +102,9 @@ class PostgresExecutionRepository:
                 select(FillEventModel).order_by(FillEventModel.ingestion_timestamp, FillEventModel.fill_id)
             ).all()
         return [FillEvent.model_validate(row.payload) for row in rows]
+
+    @staticmethod
+    def _to_order_state(row: OrderStateModel) -> OrderState:
+        payload = dict(row.payload)
+        payload.setdefault("decision_id", row.decision_id)
+        return OrderState.model_validate(payload)

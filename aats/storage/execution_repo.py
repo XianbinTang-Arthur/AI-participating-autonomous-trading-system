@@ -25,5 +25,9 @@ class InMemoryExecutionRepository:
     def order_states(self) -> list[OrderState]:
         return list(self._order_states_by_client_order_id.values())
 
+    def open_order_states(self) -> list[OrderState]:
+        final_statuses = {"FILLED", "CANCELED", "REJECTED", "BLOCKED", "DRY_RUN"}
+        return [state for state in self.order_states() if state.status.upper() not in final_statuses]
+
     def fills(self) -> list[FillEvent]:
         return list(self._fills_by_fill_id.values())

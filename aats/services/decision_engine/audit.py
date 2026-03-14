@@ -12,8 +12,6 @@ class DecisionAuditService:
     def __init__(self, *, bus: EventBus, audit_repo: AuditRepository) -> None:
         self.bus = bus
         self.audit_repo = audit_repo
-        self._pending_portfolio_refs: set[str] = set()
-        self._pending_reconciliation_refs: set[str] = set()
         self.logger = get_logger("aats.audit")
 
     async def handle_decision_context(self, message: dict) -> None:
@@ -73,29 +71,41 @@ class DecisionAuditService:
             record = record.model_copy(
                 update={"fill_event_refs": [*record.fill_event_refs, envelope.event_id]},
             )
-            self._pending_portfolio_refs.add(decision_id)
             await self._publish_record(record)
 
     async def handle_portfolio_snapshot(self, message: dict) -> None:
         envelope = parse_envelope(message)
-        for decision_id in sorted(self._pending_portfolio_refs):
-            record = self._existing_record(decision_id)
-            updated = record.model_copy(update={"portfolio_delta_ref": envelope.event_id})
-            self._pending_reconciliation_refs.add(decision_id)
-            await self._publish_record(updated)
-        self._pending_portfolio_refs.clear()
+        decision_id = envelope.payload.get("decision_id")
+        if not isinstance(decision_id, str):
+            return
+        record = self._existing_record(decision_id)
+        if record.portfolio_delta_ref == envelope.event_id:
+            return
+        updated = record.model_copy(update={"portfolio_delta_ref": envelope.event_id})
+        await self._publish_record(updated)
 
     async def handle_reconciliation_report(self, message: dict) -> None:
         envelope = parse_envelope(message)
-        for decision_id in sorted(self._pending_reconciliation_refs):
-            record = self._existing_record(decision_id)
-            if envelope.event_id in record.reconciliation_refs:
-                continue
-            updated = record.model_copy(
-                update={"reconciliation_refs": [*record.reconciliation_refs, envelope.event_id]},
+        decision_id = envelope.payload.get("decision_id")
+        if not isinstance(decision_id, str):
+            return
+        record = self._existing_record(decision_id)
+        report_snapshot_ref = envelope.payload.get("portfolio_snapshot_ref")
+        if (
+            isinstance(report_snapshot_ref, str)
+            and record.portfolio_delta_ref is not None
+            and report_snapshot_ref != record.portfolio_delta_ref
+        ):
+            raise RuntimeError(
+                "Reconciliation report snapshot reference does not match audit-linked portfolio snapshot "
+                f"for decision_id={decision_id}"
             )
-            await self._publish_record(updated)
-        self._pending_reconciliation_refs.clear()
+        if envelope.event_id in record.reconciliation_refs:
+            return
+        updated = record.model_copy(
+            update={"reconciliation_refs": [*record.reconciliation_refs, envelope.event_id]},
+        )
+        await self._publish_record(updated)
 
     def _existing_record(self, decision_id: str) -> DecisionAuditRecord:
         record = self.audit_repo.get(decision_id)

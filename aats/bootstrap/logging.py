@@ -18,12 +18,14 @@ def get_logger(name: str) -> logging.Logger:
 
 
 def log_event(logger: logging.Logger, event_name: str, **fields: Any) -> None:
+    level_name = str(fields.pop("level", "info")).lower()
     rendered_fields = " ".join(
         f"{key}={_render_value(value)}"
         for key, value in sorted(fields.items())
     )
     message = event_name if not rendered_fields else f"{event_name} {rendered_fields}"
-    logger.info(message)
+    log_method = getattr(logger, level_name, logger.info)
+    log_method(message)
 
 
 def _render_value(value: Any) -> str:

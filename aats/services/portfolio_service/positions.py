@@ -154,7 +154,13 @@ class PortfolioService:
             realized_pnl_delta=result.realized_pnl_delta,
             fee_delta=result.fee_delta,
         )
-        snapshot = self.snapshot_builder.build(state=self.state, price_provider=self.price_provider)
+        snapshot = self.snapshot_builder.build(
+            state=self.state,
+            price_provider=self.price_provider,
+            decision_id=fill.decision_id,
+            source_intent_id=fill.intent_id,
+            source_fill_id=fill.fill_id,
+        )
         self.portfolio_repo.save_snapshot(snapshot)
         await publish_model(
             bus=self.bus,

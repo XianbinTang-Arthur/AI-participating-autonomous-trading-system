@@ -16,6 +16,9 @@ class Position(SchemaBase):
 
 
 class PortfolioSnapshot(SchemaBase):
+    decision_id: str | None = None
+    source_intent_id: str | None = None
+    source_fill_id: str | None = None
     snapshot_ts: datetime
     balances: dict[str, float]
     positions: list[Position] = Field(default_factory=list)
@@ -26,4 +29,3 @@ class PortfolioSnapshot(SchemaBase):
     gross_exposure: float
     net_exposure: float
     risk_budget_usage: dict[str, float] = Field(default_factory=dict)
-

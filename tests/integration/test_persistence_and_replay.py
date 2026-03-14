@@ -4,13 +4,20 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from aats.bootstrap.config import build_runtime, build_storage_backends
+from aats.bootstrap.config import build_runtime, build_storage_backends, load_settings
 from aats.bootstrap.settings import AATSSettings
 from aats.events import topics
+from aats.events.envelopes import build_envelope, publish_model
+from aats.schemas.audit import DecisionAuditRecord
+from aats.schemas.common import utc_now
+from aats.schemas.decision import DecisionContext, PositionTarget
+from aats.schemas.governance import PolicyDecision, RiskDecision
 from aats.services.portfolio_service.pnl import PortfolioPnLCalculator
 from aats.services.portfolio_service.reconstruction import PortfolioReconstructionService
 from aats.services.portfolio_service.snapshots import PortfolioSnapshotBuilder
 from aats.services.reconciliation_service.replay import ReplayEngine
+from aats.storage.audit_repo import InMemoryAuditRepository
+from aats.storage.event_store import InMemoryEventStore
 
 
 class TestPersistenceAndReplay(unittest.IsolatedAsyncioTestCase):
@@ -30,12 +37,12 @@ class TestPersistenceAndReplay(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(audit_records)
 
                 event_store = runtime.event_store
-                self.assertGreater(len(event_store.all()), 0)
-                self.assertEqual(len(event_store.by_topic(topics.MARKET_SNAPSHOTS)), 4)
+                self.assertGreater(event_store.count(), 0)
+                self.assertEqual(event_store.count(topic=topics.MARKET_SNAPSHOTS), 4)
                 self.assertTrue(event_store.by_decision(audit_records[0].decision_id))
 
                 fresh_storage = build_storage_backends(settings)
-                self.assertEqual(len(fresh_storage.event_store.all()), len(event_store.all()))
+                self.assertEqual(fresh_storage.event_store.count(), event_store.count())
             finally:
                 if runtime.database_runtime is not None:
                     runtime.database_runtime.dispose()
@@ -61,9 +68,15 @@ class TestPersistenceAndReplay(unittest.IsolatedAsyncioTestCase):
                         initial_usdt_balance=settings.initial_usdt_balance,
                         snapshot_builder=PortfolioSnapshotBuilder(pnl_calculator=PortfolioPnLCalculator()),
                     ),
+                    audit_repo=storage.audit_repo,
+                    portfolio_repo=storage.portfolio_repo,
                 ).replay()
 
                 self.assertEqual(replay.divergence_count, 0)
+                self.assertEqual(replay.portfolio_issues, [])
+                self.assertEqual(replay.decision_chain_issues, [])
+                self.assertEqual(replay.execution_chain_issues, [])
+                self.assertEqual(replay.audit_issues, [])
                 self.assertIsNotNone(replay.final_reconstructed_snapshot)
                 self.assertIsNotNone(replay.final_stored_snapshot)
                 self.assertEqual(
@@ -102,13 +115,171 @@ class TestPersistenceAndReplay(unittest.IsolatedAsyncioTestCase):
                         self.assertIsNotNone(event_store.get(record.policy_decision_ref))
                     if record.risk_decision_ref is not None:
                         self.assertIsNotNone(event_store.get(record.risk_decision_ref))
+                    if record.portfolio_delta_ref is not None:
+                        snapshot_event = event_store.get(record.portfolio_delta_ref)
+                        self.assertIsNotNone(snapshot_event)
+                        self.assertEqual(snapshot_event.payload.get("decision_id"), record.decision_id)
                     for ref in record.order_intent_refs + record.fill_event_refs + record.reconciliation_refs:
-                        self.assertIsNotNone(event_store.get(ref))
+                        event = event_store.get(ref)
+                        self.assertIsNotNone(event)
+                        if event is not None and "decision_id" in event.payload:
+                            self.assertEqual(event.payload.get("decision_id"), record.decision_id)
             finally:
                 if runtime.database_runtime is not None:
                     runtime.database_runtime.dispose()
                 if storage is not None and storage.database_runtime is not None:
                     storage.database_runtime.dispose()
+
+    async def test_replay_detects_missing_chain_reference(self) -> None:
+        event_store = InMemoryEventStore()
+        audit_repo = InMemoryAuditRepository()
+        decision_id = "decision_missing_baseline"
+        context = DecisionContext(
+            decision_id=decision_id,
+            symbol="BTC-USDT",
+            timeframe="15m",
+            as_of_ts=utc_now(),
+            market_snapshot_ref="evt_market_1",
+            feature_snapshot_ref="evt_feature_1",
+            portfolio_snapshot_ref="evt_portfolio_1",
+            health_snapshot_ref="TODO_health_snapshot_ref",
+            mode="paper_live",
+            current_position_qty=0.0,
+        )
+        target = PositionTarget(
+            decision_id=decision_id,
+            symbol="BTC-USDT",
+            current_position_qty=0.0,
+            target_position_qty=0.001,
+            delta_position_qty=0.001,
+            current_notional=0.0,
+            target_notional=100.0,
+            rebalance_reason="test",
+            urgency="medium",
+            max_slippage_tolerance_bps=20,
+            source_mix={"baseline": 1.0},
+            decision_expiry_ts=utc_now(),
+        )
+        policy = PolicyDecision(
+            decision_id=decision_id,
+            mode="paper_live",
+            allowed=True,
+            requires_human_approval=False,
+            allowed_symbols=["BTC-USDT"],
+            allowed_execution_styles=["market"],
+        )
+        risk = RiskDecision(
+            decision_id=decision_id,
+            approved=True,
+            modified=False,
+            capped_target_position_qty=0.001,
+            risk_score=0.1,
+        )
+        context_event = build_envelope(
+            topic=topics.DECISION_CONTEXTS,
+            key="BTC-USDT",
+            payload_model=context,
+            source_component="test",
+        )
+        target_event = build_envelope(
+            topic=topics.POSITION_TARGETS,
+            key="BTC-USDT",
+            payload_model=target,
+            source_component="test",
+        )
+        policy_event = build_envelope(
+            topic=topics.POLICY_DECISIONS,
+            key="BTC-USDT",
+            payload_model=policy,
+            source_component="test",
+        )
+        risk_event = build_envelope(
+            topic=topics.RISK_DECISIONS,
+            key="BTC-USDT",
+            payload_model=risk,
+            source_component="test",
+        )
+        for envelope in (context_event, target_event, policy_event, risk_event):
+            event_store.append(envelope)
+
+        record = DecisionAuditRecord(
+            decision_id=decision_id,
+            decision_context_ref=context_event.event_id,
+            baseline_assessment_ref="evt_missing_baseline",
+            position_target_ref=target_event.event_id,
+            policy_decision_ref=policy_event.event_id,
+            risk_decision_ref=risk_event.event_id,
+        )
+        audit_repo.upsert(record)
+        event_store.append(
+            build_envelope(
+                topic=topics.AUDIT_RECORDS,
+                key=decision_id,
+                payload_model=record,
+                source_component="test",
+            )
+        )
+
+        replay = ReplayEngine(
+            event_store=event_store,
+            reconstruction_service=PortfolioReconstructionService(
+                initial_usdt_balance=10_000.0,
+                snapshot_builder=PortfolioSnapshotBuilder(pnl_calculator=PortfolioPnLCalculator()),
+            ),
+            audit_repo=audit_repo,
+        ).replay()
+
+        self.assertGreater(replay.divergence_count, 0)
+        self.assertTrue(
+            any("baseline_assessment_ref" in issue for issue in replay.decision_chain_issues)
+        )
+
+    async def test_duplicate_fill_does_not_mutate_portfolio_twice_and_replay_stays_reconstructable(self) -> None:
+        settings = load_settings()
+        runtime = await build_runtime(settings)
+
+        await runtime.market_gateway.run_local_publisher(
+            symbol=settings.default_symbol,
+            iterations=2,
+            interval_seconds=0.0,
+        )
+
+        original_snapshot = runtime.portfolio_repo.latest()
+        self.assertIsNotNone(original_snapshot)
+        original_fill = runtime.execution_repo.fills()[0]
+
+        await publish_model(
+            bus=runtime.bus,
+            topic=topics.FILL_EVENTS,
+            key=original_fill.symbol,
+            payload_model=original_fill,
+            source_component="test_duplicate_fill",
+        )
+
+        duplicate_snapshot = runtime.portfolio_repo.latest()
+        self.assertIsNotNone(duplicate_snapshot)
+        self.assertEqual(
+            self._snapshot_signature(duplicate_snapshot),
+            self._snapshot_signature(original_snapshot),
+        )
+
+        replay = ReplayEngine(
+            event_store=runtime.event_store,
+            reconstruction_service=PortfolioReconstructionService(
+                initial_usdt_balance=settings.initial_usdt_balance,
+                snapshot_builder=PortfolioSnapshotBuilder(pnl_calculator=PortfolioPnLCalculator()),
+            ),
+            audit_repo=runtime.audit_repo,
+            portfolio_repo=runtime.portfolio_repo,
+        ).replay()
+
+        self.assertEqual(
+            self._snapshot_signature(replay.final_stored_snapshot),
+            self._snapshot_signature(duplicate_snapshot),
+        )
+        self.assertTrue(
+            any("execution_chain_duplicate_fill_events" in issue for issue in replay.execution_chain_issues)
+        )
 
     @staticmethod
     def _sqlite_settings(temp_dir: Path) -> AATSSettings:

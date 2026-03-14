@@ -13,15 +13,17 @@ class PaperExecutionAdapter(ExchangeAdapter):
         self.price_provider = price_provider
         self.taker_fee_bps = taker_fee_bps
 
-    def submit(self, intent: OrderIntent) -> tuple[OrderState, list[FillEvent]]:
+    async def submit(self, intent: OrderIntent) -> tuple[OrderState, list[FillEvent]]:
         now = datetime.now(timezone.utc)
         client_order_id = new_id("clord")
         exchange_order_id = new_id("paper")
         fill_price = self.price_provider(intent.symbol)
         fee_amount = intent.quantity * fill_price * (self.taker_fee_bps / 10_000.0)
         state = OrderState(
+            decision_id=intent.decision_id,
             intent_id=intent.intent_id,
             client_order_id=client_order_id,
+            venue="PAPER",
             exchange_order_id=exchange_order_id,
             status="FILLED",
             submitted_ts=now,
@@ -31,6 +33,12 @@ class PaperExecutionAdapter(ExchangeAdapter):
             remaining_qty=0.0,
             average_fill_price=fill_price,
             fees=fee_amount,
+            submission_payload={
+                "instId": intent.symbol,
+                "side": intent.side,
+                "sz": str(intent.quantity),
+                "ordType": intent.order_type,
+            },
         )
         fill = FillEvent(
             fill_id=new_id("fill"),
@@ -48,3 +56,6 @@ class PaperExecutionAdapter(ExchangeAdapter):
             ingestion_timestamp=now,
         )
         return state, [fill]
+
+    def readiness(self) -> dict[str, object]:
+        return {"ready": True, "backend": "paper", "live_submit_enabled": False}

@@ -72,3 +72,8 @@ class PostgresAuditRepository:
                 .order_by(DecisionAuditRecordModel.audit_revision_id)
             ).all()
         return [DecisionAuditRecord.model_validate(row.payload) for row in rows]
+
+    def count(self) -> int:
+        with self.session_factory() as session:
+            count = session.scalar(select(func.count(func.distinct(DecisionAuditRecordModel.decision_id))))
+        return int(count or 0)

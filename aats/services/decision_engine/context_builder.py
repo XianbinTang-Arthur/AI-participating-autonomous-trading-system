@@ -5,6 +5,8 @@ from aats.events import topics
 from aats.schemas.common import new_id, utc_now
 from aats.schemas.decision import DecisionContext
 from aats.schemas.portfolio import PortfolioSnapshot
+from aats.services.governance_engine.health import SystemHealthService
+from aats.services.governance_engine.mode import RuntimeModeController
 from aats.storage.base import EventStore, PortfolioRepository
 
 
@@ -15,10 +17,14 @@ class DecisionContextBuilder:
         settings: AATSSettings,
         event_store: EventStore,
         portfolio_repo: PortfolioRepository,
+        mode_controller: RuntimeModeController,
+        health_service: SystemHealthService,
     ) -> None:
         self.settings = settings
         self.event_store = event_store
         self.portfolio_repo = portfolio_repo
+        self.mode_controller = mode_controller
+        self.health_service = health_service
 
     def build(self, symbol: str, timeframe: str) -> DecisionContext:
         if timeframe not in self.settings.supported_timeframes:
@@ -37,6 +43,7 @@ class DecisionContextBuilder:
 
         portfolio_snapshot = self.portfolio_repo.latest()
         current_position_qty = self._position_qty(portfolio_snapshot, symbol)
+        health_snapshot = self.health_service.snapshot()
         return DecisionContext(
             decision_id=new_id("decision"),
             symbol=symbol,
@@ -45,8 +52,8 @@ class DecisionContextBuilder:
             market_snapshot_ref=market_event.event_id,
             feature_snapshot_ref=feature_event.event_id,
             portfolio_snapshot_ref=portfolio_event.event_id,
-            health_snapshot_ref="TODO_health_snapshot_ref",
-            mode=self.settings.mode,
+            health_snapshot_ref=f"health_{health_snapshot.created_at.isoformat()}",
+            mode=self.mode_controller.mode,
             policy_flags=[],
             risk_budget_state={"max_abs_position_qty": self.settings.max_abs_position_qty},
             current_position_qty=current_position_qty,

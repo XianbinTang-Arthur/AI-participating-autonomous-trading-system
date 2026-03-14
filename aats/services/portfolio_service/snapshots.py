@@ -19,6 +19,9 @@ class PortfolioSnapshotBuilder:
         *,
         state: "PortfolioState",
         price_provider: Callable[[str], float],
+        decision_id: str | None = None,
+        source_intent_id: str | None = None,
+        source_fill_id: str | None = None,
     ) -> PortfolioSnapshot:
         positions: list[Position] = []
         gross_exposure = 0.0
@@ -51,6 +54,9 @@ class PortfolioSnapshotBuilder:
         balances = dict(state.balances)
         total_equity = balances.get("USDT", 0.0) + marked_value
         return PortfolioSnapshot(
+            decision_id=decision_id,
+            source_intent_id=source_intent_id,
+            source_fill_id=source_fill_id,
             snapshot_ts=utc_now(),
             balances=balances,
             positions=positions,
