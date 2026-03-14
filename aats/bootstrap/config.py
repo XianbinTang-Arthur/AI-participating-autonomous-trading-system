@@ -1,0 +1,286 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+from aats.bootstrap.metrics import MetricsRegistry
+from aats.bootstrap.settings import AATSSettings
+from aats.bus.memory_bus import InMemoryEventBus
+from aats.events import topics
+from aats.events.envelopes import parse_payload
+from aats.schemas.decision import PositionTarget
+from aats.services.ai_service.inference import AIInferenceService
+from aats.services.ai_service.prompt_builder import PromptBuilder
+from aats.services.ai_service.validator import AssessmentValidator
+from aats.services.decision_engine.audit import DecisionAuditService
+from aats.services.decision_engine.baseline import BaselineStrategy
+from aats.services.decision_engine.context_builder import DecisionContextBuilder
+from aats.services.decision_engine.orchestrator import DecisionOrchestrator
+from aats.services.decision_engine.target_position import TargetPositionEngine
+from aats.services.decision_engine.trigger import DecisionCycleTrigger
+from aats.services.execution_engine.order_manager import OrderManager
+from aats.services.execution_engine.paper_adapter import PaperExecutionAdapter
+from aats.services.execution_engine.planner import ExecutionPlanner
+from aats.services.feature_engine.calculator import FeatureCalculator, FeatureEngine
+from aats.services.governance_engine.kill_switch import KillSwitch
+from aats.services.governance_engine.policy import PolicyEngine
+from aats.services.governance_engine.risk import RiskEngine
+from aats.services.market_gateway.gateway import MarketDataGateway
+from aats.services.market_gateway.normalizer import MarketSnapshotNormalizer
+from aats.services.market_gateway.publisher import MarketSnapshotPublisher
+from aats.services.portfolio_service.pnl import PortfolioPnLCalculator
+from aats.services.portfolio_service.positions import PortfolioService, PortfolioState
+from aats.services.portfolio_service.reconstruction import PortfolioReconstructionService
+from aats.services.portfolio_service.snapshots import PortfolioSnapshotBuilder
+from aats.services.reconciliation_service.comparator import StateComparator
+from aats.services.reconciliation_service.fetcher import ExchangeStateFetcher
+from aats.services.reconciliation_service.repair import (
+    ReconciliationRepairService,
+    ReconciliationService,
+)
+from aats.storage.audit_repo import InMemoryAuditRepository
+from aats.storage.audit_repo_postgres import PostgresAuditRepository
+from aats.storage.base import AuditRepository, EventStore, ExecutionRepository, PortfolioRepository, ReconciliationRepository
+from aats.storage.event_store import InMemoryEventStore
+from aats.storage.event_store_postgres import PostgresEventStore
+from aats.storage.execution_repo import InMemoryExecutionRepository
+from aats.storage.execution_repo_postgres import PostgresExecutionRepository
+from aats.storage.portfolio_repo import InMemoryPortfolioRepository
+from aats.storage.portfolio_repo_postgres import PostgresPortfolioRepository
+from aats.storage.reconciliation_repo import InMemoryReconciliationRepository
+from aats.storage.reconciliation_repo_postgres import PostgresReconciliationRepository
+from aats.storage.session import DatabaseRuntime, create_database_runtime, create_schema
+
+
+def load_yaml_config(environment: str, config_dir: str | Path = "configs") -> dict[str, Any]:
+    config_path = Path(config_dir)
+    merged: dict[str, Any] = {}
+    for candidate in (config_path / "base.yaml", config_path / f"{environment}.yaml"):
+        if candidate.exists():
+            merged.update(yaml.safe_load(candidate.read_text(encoding="utf-8")) or {})
+    return merged
+
+
+def load_settings() -> AATSSettings:
+    discovered = AATSSettings()
+    yaml_values = load_yaml_config(discovered.environment)
+    return AATSSettings.model_validate({**yaml_values, **discovered.model_dump()})
+
+
+@dataclass(slots=True)
+class StorageBackends:
+    event_store: EventStore
+    audit_repo: AuditRepository
+    portfolio_repo: PortfolioRepository
+    execution_repo: ExecutionRepository
+    reconciliation_repo: ReconciliationRepository
+    database_runtime: DatabaseRuntime | None = None
+
+
+@dataclass(slots=True)
+class ApplicationRuntime:
+    settings: AATSSettings
+    bus: InMemoryEventBus
+    event_store: EventStore
+    market_gateway: MarketDataGateway
+    feature_engine: FeatureEngine
+    ai_service: AIInferenceService
+    decision_engine: DecisionOrchestrator
+    execution_planner: ExecutionPlanner
+    order_manager: OrderManager
+    portfolio_service: PortfolioService
+    reconciliation_service: ReconciliationService
+    policy_engine: PolicyEngine
+    risk_engine: RiskEngine
+    kill_switch: KillSwitch
+    metrics: MetricsRegistry
+    audit_repo: AuditRepository
+    portfolio_repo: PortfolioRepository
+    execution_repo: ExecutionRepository
+    reconciliation_repo: ReconciliationRepository
+    database_runtime: DatabaseRuntime | None = None
+
+
+def build_storage_backends(settings: AATSSettings) -> StorageBackends:
+    if settings.storage_mode == "memory":
+        return StorageBackends(
+            event_store=InMemoryEventStore(),
+            audit_repo=InMemoryAuditRepository(),
+            portfolio_repo=InMemoryPortfolioRepository(),
+            execution_repo=InMemoryExecutionRepository(),
+            reconciliation_repo=InMemoryReconciliationRepository(),
+        )
+
+    if not settings.database_url:
+        raise ValueError("AATS_DATABASE_URL must be configured when storage_mode=postgres")
+
+    database_runtime = create_database_runtime(settings.database_url)
+    if settings.database_auto_create_schema:
+        create_schema(database_runtime)
+
+    return StorageBackends(
+        event_store=PostgresEventStore(database_runtime.session_factory),
+        audit_repo=PostgresAuditRepository(database_runtime.session_factory),
+        portfolio_repo=PostgresPortfolioRepository(database_runtime.session_factory),
+        execution_repo=PostgresExecutionRepository(database_runtime.session_factory),
+        reconciliation_repo=PostgresReconciliationRepository(database_runtime.session_factory),
+        database_runtime=database_runtime,
+    )
+
+
+async def build_runtime(
+    settings: AATSSettings | None = None,
+    *,
+    bootstrap_portfolio_snapshot: bool = True,
+) -> ApplicationRuntime:
+    runtime_settings = settings or load_settings()
+    storage = build_storage_backends(runtime_settings)
+    metrics = MetricsRegistry()
+    bus = InMemoryEventBus(event_store=storage.event_store)
+
+    normalizer = MarketSnapshotNormalizer(exchange_name=runtime_settings.exchange_name)
+    market_publisher = MarketSnapshotPublisher(bus=bus)
+    market_gateway = MarketDataGateway(
+        settings=runtime_settings,
+        normalizer=normalizer,
+        publisher=market_publisher,
+    )
+
+    snapshot_builder = PortfolioSnapshotBuilder(pnl_calculator=PortfolioPnLCalculator())
+    feature_engine = FeatureEngine(bus=bus, calculator=FeatureCalculator())
+    ai_service = AIInferenceService(
+        prompt_builder=PromptBuilder(),
+        validator=AssessmentValidator(),
+    )
+
+    decision_engine = DecisionOrchestrator(
+        bus=bus,
+        context_builder=DecisionContextBuilder(
+            settings=runtime_settings,
+            event_store=storage.event_store,
+            portfolio_repo=storage.portfolio_repo,
+        ),
+        baseline_strategy=BaselineStrategy(event_store=storage.event_store),
+        ai_service=ai_service,
+        target_engine=TargetPositionEngine(settings=runtime_settings),
+        metrics=metrics,
+    )
+    decision_trigger = DecisionCycleTrigger(
+        orchestrator=decision_engine,
+        timeframe=runtime_settings.primary_timeframe,
+    )
+    audit_service = DecisionAuditService(bus=bus, audit_repo=storage.audit_repo)
+
+    kill_switch = KillSwitch()
+    policy_engine = PolicyEngine(settings=runtime_settings, kill_switch=kill_switch)
+    risk_engine = RiskEngine(settings=runtime_settings)
+    execution_planner = ExecutionPlanner(settings=runtime_settings)
+    order_manager = OrderManager(
+        bus=bus,
+        adapter=PaperExecutionAdapter(
+            price_provider=market_gateway.latest_price,
+            taker_fee_bps=runtime_settings.paper_taker_fee_bps,
+        ),
+        execution_repo=storage.execution_repo,
+    )
+
+    portfolio_service = PortfolioService(
+        bus=bus,
+        state=PortfolioState(initial_usdt_balance=runtime_settings.initial_usdt_balance),
+        snapshot_builder=snapshot_builder,
+        portfolio_repo=storage.portfolio_repo,
+        price_provider=market_gateway.latest_price,
+        metrics=metrics,
+    )
+    if bootstrap_portfolio_snapshot and storage.portfolio_repo.latest() is None:
+        await portfolio_service.bootstrap_snapshot()
+
+    reconciliation_service = ReconciliationService(
+        bus=bus,
+        fetcher=ExchangeStateFetcher(),
+        comparator=StateComparator(),
+        repair_service=ReconciliationRepairService(),
+        reconciliation_repo=storage.reconciliation_repo,
+        execution_repo=storage.execution_repo,
+        reconstruction_service=PortfolioReconstructionService(
+            initial_usdt_balance=runtime_settings.initial_usdt_balance,
+            snapshot_builder=snapshot_builder,
+        ),
+        price_provider=market_gateway.latest_price,
+        metrics=metrics,
+    )
+
+    await bus.subscribe(topics.MARKET_SNAPSHOTS, feature_engine.handle_market_snapshot)
+    await bus.subscribe(topics.FEATURE_SNAPSHOTS, decision_trigger.handle_feature_snapshot)
+
+    await bus.subscribe(topics.DECISION_CONTEXTS, audit_service.handle_decision_context)
+    await bus.subscribe(topics.BASELINE_ASSESSMENTS, audit_service.handle_baseline_assessment)
+    await bus.subscribe(topics.AI_ASSESSMENTS, audit_service.handle_ai_assessment)
+    await bus.subscribe(topics.POSITION_TARGETS, audit_service.handle_position_target)
+    await bus.subscribe(topics.POLICY_DECISIONS, audit_service.handle_policy_decision)
+    await bus.subscribe(topics.RISK_DECISIONS, audit_service.handle_risk_decision)
+    await bus.subscribe(topics.ORDER_INTENTS, audit_service.handle_order_intent)
+    await bus.subscribe(topics.ORDER_INTENTS, order_manager.handle_order_intent)
+    await bus.subscribe(topics.FILL_EVENTS, audit_service.handle_fill_event)
+    await bus.subscribe(topics.FILL_EVENTS, portfolio_service.handle_fill_event)
+    await bus.subscribe(topics.PORTFOLIO_SNAPSHOTS, audit_service.handle_portfolio_snapshot)
+    await bus.subscribe(
+        topics.PORTFOLIO_SNAPSHOTS,
+        reconciliation_service.handle_portfolio_snapshot,
+    )
+    await bus.subscribe(
+        topics.RECONCILIATION_REPORTS,
+        audit_service.handle_reconciliation_report,
+    )
+
+    async def handle_position_target(message: dict[str, Any]) -> None:
+        target = parse_payload(message, PositionTarget)
+        policy_decision = policy_engine.evaluate(mode=runtime_settings.mode, target=target)
+        await policy_engine.publish_decision(bus=bus, target=target, decision=policy_decision)
+
+        if not policy_decision.allowed:
+            return
+
+        risk_decision = risk_engine.evaluate(target=target)
+        await risk_engine.publish_decision(bus=bus, target=target, decision=risk_decision)
+
+        if not risk_decision.approved or risk_decision.halt_required:
+            return
+
+        intent = execution_planner.build_intent(
+            decision_id=target.decision_id,
+            symbol=target.symbol,
+            delta_qty=risk_decision.capped_target_position_qty - target.current_position_qty,
+            urgency=target.urgency,
+        )
+        if intent is not None:
+            metrics.increment("order_intents_generated")
+            await execution_planner.publish_intent(bus=bus, intent=intent)
+
+    await bus.subscribe(topics.POSITION_TARGETS, handle_position_target)
+
+    return ApplicationRuntime(
+        settings=runtime_settings,
+        bus=bus,
+        event_store=storage.event_store,
+        market_gateway=market_gateway,
+        feature_engine=feature_engine,
+        ai_service=ai_service,
+        decision_engine=decision_engine,
+        execution_planner=execution_planner,
+        order_manager=order_manager,
+        portfolio_service=portfolio_service,
+        reconciliation_service=reconciliation_service,
+        policy_engine=policy_engine,
+        risk_engine=risk_engine,
+        kill_switch=kill_switch,
+        metrics=metrics,
+        audit_repo=storage.audit_repo,
+        portfolio_repo=storage.portfolio_repo,
+        execution_repo=storage.execution_repo,
+        reconciliation_repo=storage.reconciliation_repo,
+        database_runtime=storage.database_runtime,
+    )

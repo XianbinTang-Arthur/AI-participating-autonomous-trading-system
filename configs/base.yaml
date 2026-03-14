@@ -1,0 +1,15 @@
+environment: dev
+mode: paper_live
+default_symbol: BTC-USDT
+primary_timeframe: 15m
+secondary_timeframe: 1h
+initial_usdt_balance: 10000.0
+storage_mode: memory
+database_url: postgresql+psycopg://aats:aats@localhost:5432/aats
+database_auto_create_schema: true
+max_abs_position_qty: 0.01
+default_order_qty: 0.001
+local_publish_iterations: 6
+local_publish_interval_seconds: 0.0
+paper_taker_fee_bps: 5.0
+max_slippage_tolerance_bps: 20
