@@ -1,0 +1,11 @@
+config_profile: local_demo
+mode: paper_live
+market_data_backend: demo
+execution_backend: paper
+account_backend: disabled
+account_read_enabled: false
+live_submit_enabled: false
+guarded_execution_dry_run: true
+enabled_decision_timeframes:
+  - 15m
+exchange_name: PAPER

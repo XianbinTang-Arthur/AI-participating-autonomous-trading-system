@@ -1,0 +1,16 @@
+config_profile: real_market_paper
+mode: paper_live
+market_data_backend: okx
+execution_backend: paper
+account_backend: okx
+account_read_enabled: true
+live_submit_enabled: false
+guarded_execution_dry_run: true
+enabled_decision_timeframes:
+  - 15m
+  - 1h
+decision_min_interval_seconds_15m: 30.0
+decision_min_interval_seconds_1h: 120.0
+decision_min_price_move_bps: 4.0
+decision_min_momentum_delta: 0.0005
+exchange_name: OKX
