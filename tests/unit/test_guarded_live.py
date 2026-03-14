@@ -166,6 +166,7 @@ class TestGuardedLive(unittest.IsolatedAsyncioTestCase):
             health_service=health_service,
             trigger_policy=trigger_policy,
             price_provider=lambda _symbol: 67_000.0,
+            mode_controller=mode_controller,
         )
         target = PositionTarget(
             decision_id="decision_1",
@@ -191,13 +192,12 @@ class TestGuardedLive(unittest.IsolatedAsyncioTestCase):
         self.assertIn("max_open_orders_reached", risk_decision.rejection_reasons)
 
     def test_config_safety_defaults_remain_disabled(self) -> None:
-        settings = AATSSettings()
-        self.assertEqual(settings.config_profile, "local_demo")
-        self.assertEqual(settings.market_data_backend, "demo")
-        self.assertEqual(settings.execution_backend, "paper")
-        self.assertFalse(settings.account_read_enabled)
-        self.assertFalse(settings.live_submit_enabled)
-        self.assertTrue(settings.guarded_execution_dry_run)
+        self.assertEqual(AATSSettings.model_fields["config_profile"].default, "local_demo")
+        self.assertEqual(AATSSettings.model_fields["market_data_backend"].default, "demo")
+        self.assertEqual(AATSSettings.model_fields["execution_backend"].default, "paper")
+        self.assertFalse(AATSSettings.model_fields["account_read_enabled"].default)
+        self.assertFalse(AATSSettings.model_fields["live_submit_enabled"].default)
+        self.assertTrue(AATSSettings.model_fields["guarded_execution_dry_run"].default)
 
 
 if __name__ == "__main__":

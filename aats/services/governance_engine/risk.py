@@ -11,6 +11,7 @@ from aats.schemas.governance import RiskDecision
 from aats.services.decision_engine.trigger_policy import DecisionTriggerPolicy
 from aats.services.execution_engine.okx_account import OKXAccountService
 from aats.services.governance_engine.health import SystemHealthService
+from aats.services.governance_engine.mode import RuntimeModeController
 
 
 class RiskEngine:
@@ -22,12 +23,14 @@ class RiskEngine:
         health_service: SystemHealthService,
         trigger_policy: DecisionTriggerPolicy,
         price_provider: Callable[[str], float],
+        mode_controller: RuntimeModeController,
     ) -> None:
         self.settings = settings
         self.account_service = account_service
         self.health_service = health_service
         self.trigger_policy = trigger_policy
         self.price_provider = price_provider
+        self.mode_controller = mode_controller
 
     def evaluate(self, target: PositionTarget) -> RiskDecision:
         max_abs_qty = self.settings.max_abs_position_qty
@@ -59,7 +62,7 @@ class RiskEngine:
             approved = False
             rejection_reasons.append("max_decision_frequency_reached")
 
-        if self.settings.execution_backend == "okx":
+        if self.mode_controller.mode == "guarded_live" and self.settings.execution_backend == "okx":
             health_blockers = self.health_service.execution_blockers()
             if health_blockers:
                 approved = False

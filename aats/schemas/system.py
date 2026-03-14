@@ -27,13 +27,18 @@ class ComponentHealth(SchemaBase):
     blockers: list[str] = Field(default_factory=list)
 
 
-class SystemHealthSnapshot(SchemaBase):
+class HealthSnapshot(SchemaBase):
+    decision_id: str | None = None
     mode: str
     operating_state: OperatingState
     status: HealthStatus
     halted: bool
     blockers: list[str] = Field(default_factory=list)
     components: list[ComponentHealth] = Field(default_factory=list)
+
+
+class SystemHealthSnapshot(HealthSnapshot):
+    pass
 
 
 class RuntimeModeState(SchemaBase):

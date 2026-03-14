@@ -28,7 +28,7 @@ class RuntimeModeController:
     def operating_state(self) -> OperatingState:
         if self.settings.market_data_backend == "demo":
             return "local_demo"
-        if self.settings.execution_backend == "paper":
+        if self._mode == "paper_live":
             return "real_market_paper"
         if self.settings.live_submit_enabled and not self.settings.guarded_execution_dry_run:
             return "guarded_live_enabled"

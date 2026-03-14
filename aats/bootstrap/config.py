@@ -185,7 +185,7 @@ def _build_execution_adapter(
     account_service: OKXAccountService,
     mode_controller: RuntimeModeController,
 ) -> ExchangeAdapter:
-    if settings.execution_backend == "okx":
+    if mode_controller.mode == "guarded_live" and settings.execution_backend == "okx":
         return OKXExecutionAdapter(
             settings=settings,
             client=OKXRESTClient(settings=settings),
@@ -286,6 +286,7 @@ async def build_runtime(
         health_service=health_service,
         trigger_policy=decision_trigger_policy,
         price_provider=market_gateway.latest_price,
+        mode_controller=mode_controller,
     )
     execution_planner = ExecutionPlanner(settings=runtime_settings)
     order_manager = OrderManager(
@@ -353,15 +354,25 @@ async def build_runtime(
         if kill_switch.halted:
             return
 
-        intent = execution_planner.build_intent(
+        plan = execution_planner.build_plan(
             decision_id=target.decision_id,
             symbol=target.symbol,
+            current_position_qty=target.current_position_qty,
+            target_position_qty=target.target_position_qty,
+            approved_target_position_qty=risk_decision.capped_target_position_qty,
             delta_qty=risk_decision.capped_target_position_qty - target.current_position_qty,
             urgency=target.urgency,
+            max_slippage_tolerance_bps=target.max_slippage_tolerance_bps,
         )
-        if intent is not None:
-            metrics.increment("order_intents_generated")
-            await execution_planner.publish_intent(bus=bus, intent=intent)
+        if plan is None:
+            return
+        await execution_planner.publish_plan(bus=bus, plan=plan)
+
+        intent = execution_planner.build_intent(plan=plan)
+        if intent is None:
+            return
+        metrics.increment("order_intents_generated")
+        await execution_planner.publish_intent(bus=bus, intent=intent)
 
     await bus.subscribe(topics.POSITION_TARGETS, handle_position_target)
 

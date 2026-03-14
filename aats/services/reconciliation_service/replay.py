@@ -6,12 +6,13 @@ from dataclasses import dataclass, field
 from aats.events import topics
 from aats.schemas.audit import DecisionAuditRecord
 from aats.schemas.common import EventEnvelope
-from aats.schemas.decision import PositionTarget
-from aats.schemas.execution import FillEvent, OrderIntent, OrderState
+from aats.schemas.decision import DecisionContext, PositionTarget
+from aats.schemas.execution import ExecutionPlan, FillEvent, OrderIntent, OrderState
 from aats.schemas.governance import PolicyDecision, RiskDecision
 from aats.schemas.market import MarketSnapshot
 from aats.schemas.portfolio import PortfolioSnapshot
 from aats.schemas.reconciliation import ReconciliationReport
+from aats.schemas.system import HealthSnapshot
 from aats.storage.base import AuditRepository, EventStore, PortfolioRepository
 from aats.services.portfolio_service.reconstruction import PortfolioReconstructionService
 
@@ -58,6 +59,7 @@ class ReplayEngine:
         final_stored_snapshot: PortfolioSnapshot | None = None
         events = self.event_store.all()
         events_by_id = {event.event_id: event for event in events}
+        events_by_decision: dict[str, list[EventEnvelope]] = defaultdict(list)
         order_intents_by_intent_id: dict[str, OrderIntent] = {}
         order_states_by_intent_id: dict[str, OrderState] = {}
         fill_events_by_fill_id: dict[str, FillEvent] = {}
@@ -68,6 +70,7 @@ class ReplayEngine:
             decision_id = envelope.payload.get("decision_id")
             if isinstance(decision_id, str):
                 decision_ids.add(decision_id)
+                events_by_decision[decision_id].append(envelope)
 
             if envelope.topic == topics.MARKET_SNAPSHOTS:
                 snapshot = MarketSnapshot.model_validate(envelope.payload)
@@ -134,6 +137,7 @@ class ReplayEngine:
                 decision_ids=decision_ids,
                 decision_chains=decision_chains,
                 events_by_id=events_by_id,
+                events_by_decision=events_by_decision,
                 order_states_by_intent_id=order_states_by_intent_id,
             )
         )
@@ -253,6 +257,7 @@ class ReplayEngine:
         decision_ids: set[str],
         decision_chains: dict[str, DecisionAuditRecord],
         events_by_id: dict[str, EventEnvelope],
+        events_by_decision: dict[str, list[EventEnvelope]],
         order_states_by_intent_id: dict[str, OrderState],
     ) -> list[str]:
         issues: list[str] = []
@@ -271,7 +276,16 @@ class ReplayEngine:
                 expected_topic=topics.DECISION_CONTEXTS,
                 required=True,
             )
-            _ = context
+            parsed_context = (
+                None
+                if context is None
+                else self._validate_context_health_link(
+                    issues=issues,
+                    decision_id=decision_id,
+                    context_event=context,
+                    events_by_id=events_by_id,
+                )
+            )
             self._validate_ref(
                 issues=issues,
                 decision_id=decision_id,
@@ -449,8 +463,66 @@ class ReplayEngine:
                 )
             if record.order_intent_refs and not record.fill_event_refs:
                 issues.append(f"decision_chain_missing_fill_ref decision_id={decision_id}")
+            if record.order_intent_refs:
+                execution_plan_events = [
+                    event
+                    for event in events_by_decision.get(decision_id, [])
+                    if event.topic == topics.EXECUTION_PLANS
+                ]
+                if not execution_plan_events:
+                    issues.append(f"decision_chain_missing_execution_plan decision_id={decision_id}")
+                else:
+                    latest_plan = ExecutionPlan.model_validate(execution_plan_events[-1].payload)
+                    if parsed_context is not None and latest_plan.symbol != parsed_context.symbol:
+                        issues.append(
+                            "decision_chain_execution_plan_symbol_mismatch "
+                            f"decision_id={decision_id} execution_plan_symbol={latest_plan.symbol} "
+                            f"context_symbol={parsed_context.symbol}"
+                        )
+                    if (
+                        risk is not None
+                        and abs(
+                            latest_plan.approved_target_position_qty - risk.capped_target_position_qty
+                        ) > 1e-12
+                    ):
+                        issues.append(
+                            "decision_chain_execution_plan_risk_mismatch "
+                            f"decision_id={decision_id} approved_target_position_qty={latest_plan.approved_target_position_qty} "
+                            f"risk_capped_target_position_qty={risk.capped_target_position_qty}"
+                        )
 
         return issues
+
+    def _validate_context_health_link(
+        self,
+        *,
+        issues: list[str],
+        decision_id: str,
+        context_event: EventEnvelope,
+        events_by_id: dict[str, EventEnvelope],
+    ) -> DecisionContext | None:
+        context = DecisionContext.model_validate(context_event.payload)
+        health_event = events_by_id.get(context.health_snapshot_ref)
+        if health_event is None:
+            issues.append(
+                "decision_chain_missing_health_snapshot "
+                f"decision_id={decision_id} health_snapshot_ref={context.health_snapshot_ref}"
+            )
+            return context
+        if health_event.topic != topics.HEALTH_SNAPSHOTS:
+            issues.append(
+                "decision_chain_wrong_health_snapshot_topic "
+                f"decision_id={decision_id} health_snapshot_ref={context.health_snapshot_ref} "
+                f"actual_topic={health_event.topic}"
+            )
+            return context
+        health_snapshot = HealthSnapshot.model_validate(health_event.payload)
+        if health_snapshot.decision_id != decision_id:
+            issues.append(
+                "decision_chain_health_snapshot_decision_mismatch "
+                f"decision_id={decision_id} health_snapshot_decision_id={health_snapshot.decision_id}"
+            )
+        return context
 
     def _validate_audit_integrity(
         self,

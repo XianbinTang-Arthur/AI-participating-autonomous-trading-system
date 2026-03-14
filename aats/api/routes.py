@@ -7,6 +7,7 @@ from pydantic import BaseModel
 
 from aats.bootstrap.config import ApplicationRuntime
 from aats.events import topics
+from aats.schemas.common import EventEnvelope
 from aats.schemas.system import RuntimeModeState
 
 router = APIRouter()
@@ -22,6 +23,40 @@ class HaltRequest(BaseModel):
 
 def _runtime(request: Request) -> ApplicationRuntime:
     return cast(ApplicationRuntime, request.app.state.runtime)
+
+
+def _envelope_payload(envelope: EventEnvelope | None) -> dict[str, Any] | None:
+    return envelope.payload if envelope is not None else None
+
+
+def _latest_decision_events(runtime: ApplicationRuntime) -> tuple[str | None, dict[str, EventEnvelope]]:
+    latest_audit = runtime.event_store.latest(topics.AUDIT_RECORDS)
+    latest_context = runtime.event_store.latest(topics.DECISION_CONTEXTS)
+    decision_id = None
+    for envelope in (latest_audit, latest_context):
+        if envelope is None:
+            continue
+        payload_decision_id = envelope.payload.get("decision_id")
+        if isinstance(payload_decision_id, str):
+            decision_id = payload_decision_id
+            break
+
+    if decision_id is None:
+        return None, {}
+
+    latest_by_topic: dict[str, EventEnvelope] = {}
+    for envelope in runtime.event_store.by_decision(decision_id):
+        latest_by_topic[envelope.topic] = envelope
+
+    context_envelope = latest_by_topic.get(topics.DECISION_CONTEXTS)
+    if context_envelope is not None:
+        health_snapshot_ref = context_envelope.payload.get("health_snapshot_ref")
+        if isinstance(health_snapshot_ref, str):
+            health_event = runtime.event_store.get(health_snapshot_ref)
+            if health_event is not None:
+                latest_by_topic[topics.HEALTH_SNAPSHOTS] = health_event
+
+    return decision_id, latest_by_topic
 
 
 @router.get("/system/health")
@@ -45,6 +80,13 @@ async def system_health(request: Request) -> dict[str, Any]:
         "account": runtime.account_service.status(),
         "execution": runtime.execution_adapter.readiness(),
         "latest_reconciliation": latest_reconciliation.model_dump(mode="json") if latest_reconciliation else None,
+        "execution_summary": {
+            "order_count": len(runtime.execution_repo.order_states()),
+            "fill_count": len(runtime.execution_repo.fills()),
+            "open_order_count": len(runtime.execution_repo.open_order_states()),
+            "order_intents_generated": runtime.metrics.snapshot().get("order_intents_generated", 0),
+            "fills_processed": runtime.metrics.snapshot().get("fills_processed", 0),
+        },
     }
 
 
@@ -140,12 +182,30 @@ async def latest_reconciliation(request: Request) -> dict[str, Any]:
 @router.get("/decision/latest")
 async def latest_decision(request: Request) -> dict[str, Any]:
     runtime = _runtime(request)
-    latest_context = runtime.event_store.latest(topics.DECISION_CONTEXTS)
-    latest_audit = runtime.event_store.latest(topics.AUDIT_RECORDS)
+    decision_id, latest_by_topic = _latest_decision_events(runtime)
     return {
-        "decision_context": latest_context.model_dump(mode="json") if latest_context is not None else None,
-        "audit": latest_audit.model_dump(mode="json") if latest_audit is not None else None,
+        "decision_id": decision_id,
+        "health_snapshot": _envelope_payload(latest_by_topic.get(topics.HEALTH_SNAPSHOTS)),
+        "decision_context": _envelope_payload(latest_by_topic.get(topics.DECISION_CONTEXTS)),
+        "policy_decision": _envelope_payload(latest_by_topic.get(topics.POLICY_DECISIONS)),
+        "risk_decision": _envelope_payload(latest_by_topic.get(topics.RISK_DECISIONS)),
+        "execution_plan": _envelope_payload(latest_by_topic.get(topics.EXECUTION_PLANS)),
+        "audit": _envelope_payload(latest_by_topic.get(topics.AUDIT_RECORDS)),
+        "latest_order_intent": _envelope_payload(latest_by_topic.get(topics.ORDER_INTENTS)),
+        "latest_fill_event": _envelope_payload(latest_by_topic.get(topics.FILL_EVENTS)),
+        "execution_summary": {
+            "order_count": len(runtime.execution_repo.order_states()),
+            "fill_count": len(runtime.execution_repo.fills()),
+            "open_order_count": len(runtime.execution_repo.open_order_states()),
+        },
     }
+
+
+@router.get("/audit/latest")
+async def latest_audit_record(request: Request) -> dict[str, Any]:
+    runtime = _runtime(request)
+    latest_audit = runtime.event_store.latest(topics.AUDIT_RECORDS)
+    return {"audit": _envelope_payload(latest_audit)}
 
 
 @router.get("/audit/{decision_id}")

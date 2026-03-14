@@ -24,6 +24,21 @@ class OrderIntent(SchemaBase):
     idempotency_key: str
 
 
+class ExecutionPlan(SchemaBase):
+    plan_id: str
+    decision_id: str
+    symbol: str
+    current_position_qty: float
+    target_position_qty: float
+    approved_target_position_qty: float
+    delta_qty: float
+    side: Literal["buy", "sell"]
+    execution_style: str
+    order_type: Literal["market", "limit"]
+    urgency: Literal["low", "medium", "high"]
+    max_slippage_tolerance_bps: int
+
+
 class OrderState(SchemaBase):
     decision_id: str
     intent_id: str

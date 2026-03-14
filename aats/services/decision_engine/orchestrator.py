@@ -5,6 +5,7 @@ from aats.bootstrap.metrics import MetricsRegistry
 from aats.bus.base import EventBus
 from aats.events import topics
 from aats.events.envelopes import publish_model
+from aats.schemas.common import new_id
 from aats.schemas.decision import PositionTarget
 from aats.services.ai_service.inference import AIInferenceService
 from aats.services.decision_engine.baseline import BaselineStrategy
@@ -32,7 +33,21 @@ class DecisionOrchestrator:
         self.logger = get_logger("aats.decision_engine")
 
     async def run_cycle(self, symbol: str, timeframe: str) -> PositionTarget:
-        context = self.context_builder.build(symbol=symbol, timeframe=timeframe)
+        decision_id = new_id("decision")
+        health_snapshot = self.context_builder.build_health_snapshot(decision_id=decision_id)
+        health_envelope = await publish_model(
+            bus=self.bus,
+            topic=topics.HEALTH_SNAPSHOTS,
+            key=symbol,
+            payload_model=health_snapshot,
+            source_component="governance_engine",
+        )
+        context = self.context_builder.build(
+            symbol=symbol,
+            timeframe=timeframe,
+            decision_id=decision_id,
+            health_snapshot_ref=health_envelope.event_id,
+        )
         log_event(
             self.logger,
             "decision_cycle_started",

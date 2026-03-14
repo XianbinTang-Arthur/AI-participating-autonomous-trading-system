@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from aats.bootstrap.settings import AATSSettings
 from aats.events import topics
-from aats.schemas.common import new_id, utc_now
+from aats.schemas.common import utc_now
 from aats.schemas.decision import DecisionContext
 from aats.schemas.portfolio import PortfolioSnapshot
+from aats.schemas.system import HealthSnapshot
 from aats.services.governance_engine.health import SystemHealthService
 from aats.services.governance_engine.mode import RuntimeModeController
 from aats.storage.base import EventStore, PortfolioRepository
@@ -26,7 +27,26 @@ class DecisionContextBuilder:
         self.mode_controller = mode_controller
         self.health_service = health_service
 
-    def build(self, symbol: str, timeframe: str) -> DecisionContext:
+    def build_health_snapshot(self, *, decision_id: str) -> HealthSnapshot:
+        snapshot = self.health_service.snapshot()
+        return HealthSnapshot(
+            decision_id=decision_id,
+            mode=snapshot.mode,
+            operating_state=snapshot.operating_state,
+            status=snapshot.status,
+            halted=snapshot.halted,
+            blockers=list(snapshot.blockers),
+            components=list(snapshot.components),
+        )
+
+    def build(
+        self,
+        symbol: str,
+        timeframe: str,
+        *,
+        decision_id: str,
+        health_snapshot_ref: str,
+    ) -> DecisionContext:
         if timeframe not in self.settings.supported_timeframes:
             raise ValueError(f"Unsupported timeframe: {timeframe}")
 
@@ -43,16 +63,15 @@ class DecisionContextBuilder:
 
         portfolio_snapshot = self.portfolio_repo.latest()
         current_position_qty = self._position_qty(portfolio_snapshot, symbol)
-        health_snapshot = self.health_service.snapshot()
         return DecisionContext(
-            decision_id=new_id("decision"),
+            decision_id=decision_id,
             symbol=symbol,
             timeframe=timeframe,
             as_of_ts=utc_now(),
             market_snapshot_ref=market_event.event_id,
             feature_snapshot_ref=feature_event.event_id,
             portfolio_snapshot_ref=portfolio_event.event_id,
-            health_snapshot_ref=f"health_{health_snapshot.created_at.isoformat()}",
+            health_snapshot_ref=health_snapshot_ref,
             mode=self.mode_controller.mode,
             policy_flags=[],
             risk_budget_state={"max_abs_position_qty": self.settings.max_abs_position_qty},

@@ -10,8 +10,10 @@ from aats.events import topics
 from aats.events.envelopes import build_envelope, publish_model
 from aats.schemas.audit import DecisionAuditRecord
 from aats.schemas.common import utc_now
-from aats.schemas.decision import DecisionContext, PositionTarget
+from aats.schemas.decision import BaselineAssessment, DecisionContext, PositionTarget
+from aats.schemas.execution import OrderIntent
 from aats.schemas.governance import PolicyDecision, RiskDecision
+from aats.schemas.system import HealthSnapshot
 from aats.services.portfolio_service.pnl import PortfolioPnLCalculator
 from aats.services.portfolio_service.reconstruction import PortfolioReconstructionService
 from aats.services.portfolio_service.snapshots import PortfolioSnapshotBuilder
@@ -104,7 +106,16 @@ class TestPersistenceAndReplay(unittest.IsolatedAsyncioTestCase):
                 storage = build_storage_backends(settings)
                 event_store = storage.event_store
                 for record in storage.audit_repo.all():
-                    self.assertIsNotNone(event_store.get(record.decision_context_ref))
+                    context_event = event_store.get(record.decision_context_ref)
+                    self.assertIsNotNone(context_event)
+                    if context_event is not None:
+                        health_snapshot_ref = context_event.payload.get("health_snapshot_ref")
+                        self.assertIsInstance(health_snapshot_ref, str)
+                        health_event = event_store.get(health_snapshot_ref)
+                        self.assertIsNotNone(health_event)
+                        if health_event is not None:
+                            self.assertEqual(health_event.topic, topics.HEALTH_SNAPSHOTS)
+                            self.assertEqual(health_event.payload.get("decision_id"), record.decision_id)
                     if record.baseline_assessment_ref is not None:
                         self.assertIsNotNone(event_store.get(record.baseline_assessment_ref))
                     if record.ai_market_assessment_ref is not None:
@@ -124,6 +135,13 @@ class TestPersistenceAndReplay(unittest.IsolatedAsyncioTestCase):
                         self.assertIsNotNone(event)
                         if event is not None and "decision_id" in event.payload:
                             self.assertEqual(event.payload.get("decision_id"), record.decision_id)
+                    if record.order_intent_refs:
+                        execution_plan_events = [
+                            event
+                            for event in event_store.by_decision(record.decision_id)
+                            if event.topic == topics.EXECUTION_PLANS
+                        ]
+                        self.assertTrue(execution_plan_events)
             finally:
                 if runtime.database_runtime is not None:
                     runtime.database_runtime.dispose()
@@ -233,6 +251,9 @@ class TestPersistenceAndReplay(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(
             any("baseline_assessment_ref" in issue for issue in replay.decision_chain_issues)
         )
+        self.assertTrue(
+            any("missing_health_snapshot" in issue for issue in replay.decision_chain_issues)
+        )
 
     async def test_duplicate_fill_does_not_mutate_portfolio_twice_and_replay_stays_reconstructable(self) -> None:
         settings = load_settings()
@@ -279,6 +300,174 @@ class TestPersistenceAndReplay(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(
             any("execution_chain_duplicate_fill_events" in issue for issue in replay.execution_chain_issues)
+        )
+
+    async def test_replay_detects_missing_execution_plan_for_emitted_intent(self) -> None:
+        event_store = InMemoryEventStore()
+        audit_repo = InMemoryAuditRepository()
+        decision_id = "decision_missing_execution_plan"
+        health_snapshot = HealthSnapshot(
+            decision_id=decision_id,
+            mode="paper_live",
+            operating_state="real_market_paper",
+            status="ok",
+            halted=False,
+            blockers=[],
+            components=[],
+        )
+        health_event = build_envelope(
+            topic=topics.HEALTH_SNAPSHOTS,
+            key="BTC-USDT",
+            payload_model=health_snapshot,
+            source_component="test",
+        )
+        context = DecisionContext(
+            decision_id=decision_id,
+            symbol="BTC-USDT",
+            timeframe="15m",
+            as_of_ts=utc_now(),
+            market_snapshot_ref="evt_market_1",
+            feature_snapshot_ref="evt_feature_1",
+            portfolio_snapshot_ref="evt_portfolio_1",
+            health_snapshot_ref=health_event.event_id,
+            mode="paper_live",
+            current_position_qty=0.0,
+        )
+        baseline = BaselineAssessment(
+            decision_id=decision_id,
+            symbol="BTC-USDT",
+            regime="trend",
+            direction_bias="long",
+            trend_strength=0.8,
+            volatility_state="medium",
+            confidence=0.7,
+            holding_horizon="15m",
+            invalidation_conditions=[],
+            reason_codes=["test"],
+            engine_version="test",
+        )
+        target = PositionTarget(
+            decision_id=decision_id,
+            symbol="BTC-USDT",
+            current_position_qty=0.0,
+            target_position_qty=0.001,
+            delta_position_qty=0.001,
+            current_notional=0.0,
+            target_notional=100.0,
+            rebalance_reason="test",
+            urgency="medium",
+            max_slippage_tolerance_bps=20,
+            source_mix={"baseline": 1.0},
+            decision_expiry_ts=utc_now(),
+        )
+        policy = PolicyDecision(
+            decision_id=decision_id,
+            mode="paper_live",
+            allowed=True,
+            execution_allowed=True,
+            submission_allowed=False,
+            dry_run_only=False,
+            requires_human_approval=False,
+            allowed_symbols=["BTC-USDT"],
+            allowed_execution_styles=["market"],
+        )
+        risk = RiskDecision(
+            decision_id=decision_id,
+            approved=True,
+            modified=False,
+            capped_target_position_qty=0.001,
+            risk_score=0.1,
+        )
+        intent = OrderIntent(
+            intent_id="intent_missing_plan",
+            decision_id=decision_id,
+            symbol="BTC-USDT",
+            side="buy",
+            quantity=0.001,
+            execution_style="taker",
+            order_type="market",
+            urgency="medium",
+            time_in_force="IOC",
+            idempotency_key="intent_missing_plan",
+        )
+        context_event = build_envelope(
+            topic=topics.DECISION_CONTEXTS,
+            key="BTC-USDT",
+            payload_model=context,
+            source_component="test",
+        )
+        baseline_event = build_envelope(
+            topic=topics.BASELINE_ASSESSMENTS,
+            key="BTC-USDT",
+            payload_model=baseline,
+            source_component="test",
+        )
+        target_event = build_envelope(
+            topic=topics.POSITION_TARGETS,
+            key="BTC-USDT",
+            payload_model=target,
+            source_component="test",
+        )
+        policy_event = build_envelope(
+            topic=topics.POLICY_DECISIONS,
+            key="BTC-USDT",
+            payload_model=policy,
+            source_component="test",
+        )
+        risk_event = build_envelope(
+            topic=topics.RISK_DECISIONS,
+            key="BTC-USDT",
+            payload_model=risk,
+            source_component="test",
+        )
+        intent_event = build_envelope(
+            topic=topics.ORDER_INTENTS,
+            key="BTC-USDT",
+            payload_model=intent,
+            source_component="test",
+        )
+        for envelope in (
+            health_event,
+            context_event,
+            baseline_event,
+            target_event,
+            policy_event,
+            risk_event,
+            intent_event,
+        ):
+            event_store.append(envelope)
+
+        record = DecisionAuditRecord(
+            decision_id=decision_id,
+            decision_context_ref=context_event.event_id,
+            baseline_assessment_ref=baseline_event.event_id,
+            position_target_ref=target_event.event_id,
+            policy_decision_ref=policy_event.event_id,
+            risk_decision_ref=risk_event.event_id,
+            order_intent_refs=[intent_event.event_id],
+        )
+        audit_repo.upsert(record)
+        event_store.append(
+            build_envelope(
+                topic=topics.AUDIT_RECORDS,
+                key=decision_id,
+                payload_model=record,
+                source_component="test",
+            )
+        )
+
+        replay = ReplayEngine(
+            event_store=event_store,
+            reconstruction_service=PortfolioReconstructionService(
+                initial_usdt_balance=10_000.0,
+                snapshot_builder=PortfolioSnapshotBuilder(pnl_calculator=PortfolioPnLCalculator()),
+            ),
+            audit_repo=audit_repo,
+        ).replay()
+
+        self.assertGreater(replay.divergence_count, 0)
+        self.assertTrue(
+            any("missing_execution_plan" in issue for issue in replay.decision_chain_issues)
         )
 
     @staticmethod

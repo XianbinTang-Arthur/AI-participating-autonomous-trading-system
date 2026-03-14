@@ -35,8 +35,9 @@ class PolicyEngine:
         if mode == "autonomous_live":
             rejection_reasons.append("autonomous_live_not_supported")
 
-        health_blockers = []
-        if self.settings.execution_backend == "okx":
+        health_blockers: list[str] = []
+        guarded_live_okx = mode == "guarded_live" and self.settings.execution_backend == "okx"
+        if guarded_live_okx:
             health_blockers = self.health_service.execution_blockers()
             rejection_reasons.extend(health_blockers)
 
@@ -44,16 +45,16 @@ class PolicyEngine:
         execution_allowed = allowed
         submission_allowed = (
             execution_allowed
-            and self.settings.execution_backend == "okx"
-            and mode == "guarded_live"
+            and guarded_live_okx
             and self.settings.live_submit_enabled
             and not self.settings.guarded_execution_dry_run
         )
         dry_run_only = (
             execution_allowed
-            and self.settings.execution_backend == "okx"
+            and guarded_live_okx
             and not submission_allowed
         )
+        requires_human_approval = guarded_live_okx and not submission_allowed
 
         return PolicyDecision(
             decision_id=target.decision_id,
@@ -62,7 +63,7 @@ class PolicyEngine:
             execution_allowed=execution_allowed,
             submission_allowed=submission_allowed,
             dry_run_only=dry_run_only,
-            requires_human_approval=self.settings.execution_backend == "okx" and not submission_allowed,
+            requires_human_approval=requires_human_approval,
             allowed_symbols=list(self.settings.allowed_symbols),
             allowed_execution_styles=["market", "limit"],
             max_notional_override=self.settings.max_notional_per_symbol,

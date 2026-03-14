@@ -6,6 +6,7 @@ Current state: event-driven AATS prototype with:
 - OKX real market data integration
 - OKX read-only account integration
 - guarded OKX execution adapter with dry-run-by-default blocking
+- full-loop `real_market_paper` execution using local paper fills under real market conditions
 
 This is not production-ready live trading. Real order submission remains disabled by default.
 
@@ -53,7 +54,20 @@ $env:AATS_CONFIG_PROFILE="local_demo"
 
 ## Real-Market Paper Mode
 
-This uses OKX public websocket market data and OKX read-only account REST calls, but keeps execution on the paper adapter.
+This uses OKX public websocket market data and OKX read-only account REST calls, but keeps execution on the local paper adapter.
+
+`real_market_paper` now means:
+- real OKX market data
+- real OKX demo-account read
+- local paper execution
+- local `OrderIntent -> FillEvent -> PortfolioSnapshot -> ReconciliationReport`
+- no OKX order submission
+- no OKX simulated submit
+
+Mode semantics are runtime-driven:
+- `mode=paper_live` always routes eligible intents to the local `PaperExecutionAdapter`
+- `mode=guarded_live` is required before the guarded OKX adapter is even selected
+- `live_submit_enabled=false` remains the safe default and still blocks all real submit paths
 
 Required env:
 - `AATS_CONFIG_PROFILE=real_market_paper`
@@ -74,7 +88,9 @@ $env:AATS_CONFIG_PROFILE="real_market_paper"
 The API lifespan starts:
 - OKX public websocket market stream
 - periodic OKX account refresh loop
-- in-memory event-driven feature and decision flow
+- event-driven feature and decision flow
+- local paper execution and portfolio mutation after eligible decisions
+- reconciliation after fill-driven portfolio updates
 
 ## Guarded Live Blocked Mode
 
@@ -89,6 +105,10 @@ Behavior:
 - policy/risk/health still gate every execution path
 - order intents can produce `DRY_RUN` order states showing the exact payload that would be sent
 - no real order is submitted
+
+This differs from `real_market_paper`:
+- `real_market_paper` generates local paper fills and mutates the local portfolio
+- guarded-live blocked produces dry-run OKX order states only and does not create fills
 
 ## Guarded Live Enabled Mode
 
@@ -145,6 +165,7 @@ Current operator-facing endpoints:
 - `GET /orders/open`
 - `GET /reconciliation/latest`
 - `GET /decision/latest`
+- `GET /audit/latest`
 - `GET /audit/{decision_id}`
 
 `/system/health` now reports:
@@ -153,6 +174,18 @@ Current operator-facing endpoints:
 - execution adapter readiness
 - reconciliation freshness
 - current blockers
+- execution summary counts for orders and fills
+
+`GET /decision/latest` now reports:
+- one internally consistent `decision_id` chain
+- latest health snapshot for that decision
+- latest decision context
+- latest policy decision
+- latest risk decision
+- latest execution plan
+- latest audit record
+- latest order intent and fill event for the same decision when they exist
+- execution summary counts
 
 ## Important Safety Defaults
 
@@ -172,7 +205,10 @@ Event persistence defaults to visibility-first behavior:
 - reconnecting market stream with liveness/freshness status
 - event-driven feature generation from real market snapshots
 - decision trigger gating with duplicate suppression and material-change checks
+- persisted `HealthSnapshot` events referenced by `DecisionContext.health_snapshot_ref`
 - OKX read-only REST integration for balances, positions, open orders, account config, and instruments
+- full-loop `real_market_paper` path with `RiskDecision`, `OrderIntent`, paper fills, portfolio mutation, and reconciliation
+- explicit `ExecutionPlan` events between approved target positions and order intents
 - guarded OKX execution adapter with signing, payload building, validation, dry-run, and explicit live-submit gate
 - stronger mode-aware policy/risk/health blocking
 - expanded operator API surface
@@ -185,6 +221,8 @@ Event persistence defaults to visibility-first behavior:
 - no multi-exchange support
 - no production-grade live order lifecycle management beyond guarded submission
 - no autonomous live rollout
+- paper execution still uses local fill simulation rather than exchange-side simulated order placement
+- `DecisionAuditRecord` still does not store a dedicated `execution_plan_ref`; execution plans are currently recovered from the event store by `decision_id`
 
 ## Reference
 

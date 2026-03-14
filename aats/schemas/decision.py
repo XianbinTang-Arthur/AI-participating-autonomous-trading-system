@@ -23,7 +23,6 @@ class DecisionContext(SchemaBase):
     current_position_qty: float
     current_open_orders: list[str] = Field(default_factory=list)
 
-
 class BaselineAssessment(SchemaBase):
     decision_id: str
     symbol: str
@@ -79,4 +78,3 @@ class PositionTarget(SchemaBase):
     max_slippage_tolerance_bps: int
     source_mix: dict[str, float]
     decision_expiry_ts: datetime
-
