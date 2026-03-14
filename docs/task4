@@ -1,0 +1,196 @@
+The current repository is a working local paper-trading prototype and should remain the main development line.
+
+Now perform the next implementation pass based on a code review of the actual repository.
+
+This pass is NOT about adding new product scope.
+It is about fixing the most important engineering weaknesses in the current codebase while preserving the existing architecture.
+
+Primary goals of this pass:
+
+1. Fix audit linkage correctness
+2. Improve replay and audit integrity validation
+3. Make event persistence failures visible
+4. Improve repository/event-store ergonomics
+5. Add focused tests for the reviewed risk points
+
+Important constraints:
+
+- Do NOT redesign the architecture.
+- Do NOT rename existing major modules, topics, or service boundaries unless clearly necessary.
+- Do NOT add live exchange integration.
+- Do NOT add Kafka or distributed infrastructure.
+- Do NOT add new strategy features.
+- Do NOT expand beyond the current local paper-trading / persistence / replay scope.
+- Preserve the current repository structure as much as possible.
+
+The implementation must specifically address the following reviewed issues.
+
+--------------------------------------------------
+A. Audit linkage correctness
+--------------------------------------------------
+
+The current DecisionAuditService uses pending set style linkage for portfolio snapshot refs and reconciliation refs.
+This is fragile and can mis-associate records when there are multiple decisions, symbols, or overlapping event flows.
+
+Fix this.
+
+Requirements:
+- Remove the fragile global pending-set style association logic.
+- Make portfolio snapshot and reconciliation report linkage deterministic.
+- Use explicit correlation where possible.
+- If necessary, enrich the relevant events or records with decision_id or other precise linkage metadata.
+- The resulting audit chain must remain structurally compatible with the documented design.
+
+Expected outcome:
+A DecisionAuditRecord must be linked to the correct:
+- DecisionContext
+- BaselineAssessment
+- AIMarketAssessment
+- PositionTarget
+- PolicyDecision
+- RiskDecision
+- OrderIntent(s)
+- FillEvent(s)
+- PortfolioSnapshot(s)
+- ReconciliationReport(s)
+
+Do this in a way that would still behave correctly under multiple sequential decisions.
+
+--------------------------------------------------
+B. Replay and audit integrity validation
+--------------------------------------------------
+
+The current replay flow reconstructs portfolio state, which is good, but it should do more.
+
+Upgrade replay validation to check:
+
+1. Portfolio reconstruction integrity
+- replayed portfolio snapshot should match stored snapshot
+
+2. Decision chain completeness
+For each decision_id, validate that the expected chain exists:
+- decision context
+- baseline assessment
+- position target
+- policy decision
+- risk decision
+Optional:
+- AI assessment may remain optional if the current architecture allows stub mode
+
+3. Execution chain integrity
+Validate the linkage:
+- order intent -> order state -> fill event
+- decision_id and intent_id consistency
+- duplicate fills do not create divergence
+
+4. Audit record integrity
+Validate that DecisionAuditRecord references point to records that actually exist.
+
+Implement these checks inside the replay/audit validation path.
+Be explicit in reporting missing or inconsistent references.
+
+--------------------------------------------------
+C. Event persistence visibility
+--------------------------------------------------
+
+The current in-memory bus silently ignores event envelope validation failures when persisting to the event store.
+
+Fix this.
+
+Requirements:
+- Do not silently swallow validation/persistence issues.
+- In development/test mode, prefer fail-fast behavior or explicit exception raising.
+- At minimum, emit structured error logs with enough context.
+- Make the behavior configurable if needed:
+  - strict mode
+  - permissive mode
+
+The default for local development should favor visibility over silence.
+
+--------------------------------------------------
+D. Event store and repository ergonomics
+--------------------------------------------------
+
+The current API health path appears to derive event count by loading all events and taking len(...), which is not acceptable once postgres-backed storage grows.
+
+Improve repository ergonomics.
+
+Requirements:
+- Add efficient count() methods where appropriate.
+- Add basic query helpers for:
+  - events by topic
+  - events by decision_id
+  - latest portfolio snapshot
+- Keep interfaces simple and aligned with current repositories.
+- Avoid overengineering.
+
+Update API/read paths to use these more efficient helpers.
+
+--------------------------------------------------
+E. Halt and safety consistency
+--------------------------------------------------
+
+The current halt behavior is acceptable for MVP, but make it more internally consistent.
+
+Requirements:
+- Ensure halted state is respected not only by policy evaluation but also by any relevant decision/execution path that can still proceed in-process.
+- If the current architecture has a natural choke point before order submission, enforce halt there too.
+- Do NOT implement live cancel-all-open-orders or flatten logic yet.
+- Keep this pass limited to local paper consistency.
+
+--------------------------------------------------
+F. Focused tests
+--------------------------------------------------
+
+Add or improve tests for the following reviewed risk points:
+
+1. Audit correctness under multiple decisions
+- sequential decisions should not cross-link portfolio snapshots or reconciliation reports incorrectly
+
+2. Duplicate fill handling
+- duplicate fills must not mutate the portfolio twice
+- replay should remain consistent
+
+3. Replay integrity
+- replay should detect missing references or inconsistent chains
+- replay should succeed on a valid local run
+
+4. Event persistence error visibility
+- invalid event persistence should not fail silently
+
+5. Halt consistency
+- halted state should prevent new execution path progress where expected
+
+Tests should be meaningful and directly tied to the reviewed issues.
+Do not add shallow tests that only check imports or trivial happy paths.
+
+--------------------------------------------------
+G. Documentation updates
+--------------------------------------------------
+
+Update the README or relevant developer docs to reflect:
+
+- current audit linkage behavior
+- replay validation capabilities
+- strict vs permissive persistence behavior
+- known remaining limitations
+
+Be precise and honest about what is still placeholder.
+
+--------------------------------------------------
+Output requirements
+--------------------------------------------------
+
+1. First provide the implementation plan for this pass.
+2. Then list all files you will modify and any new files you will add.
+3. Then implement the changes file by file.
+4. After implementation, explicitly summarize:
+
+- what reviewed issues were fixed
+- what remains intentionally simplified
+- what the next engineering pass should focus on
+
+Important final rule:
+
+Do not optimize for more features.
+Optimize for correctness, determinism, auditability, and maintainability of the current prototype.

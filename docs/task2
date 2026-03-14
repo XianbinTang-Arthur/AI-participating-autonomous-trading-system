@@ -1,0 +1,63 @@
+Good first pass.
+
+Now do the second implementation pass, but keep the scope tightly constrained.
+
+Important constraints:
+- Do not add live exchange integration.
+- Do not add Kafka or any external event bus yet.
+- Do not add Kubernetes, Terraform, or deployment complexity.
+- Do not expand the architecture beyond the documented MVP boundaries.
+- Do not replace existing module names, topics, or service boundaries.
+- Preserve the current repository structure unless a small correction is clearly necessary.
+
+Goal of this pass:
+Upgrade the current repository skeleton into a more credible local paper-trading MVP.
+
+Focus only on these tasks:
+
+1. Continuous local event flow
+- Replace one-shot demo seeding with a simple local market snapshot publisher loop.
+- Trigger feature generation from market snapshot events.
+- Trigger decision cycles on a deterministic local cadence or event-driven path.
+- Keep it local and in-memory.
+
+2. Decision audit chain
+- Implement DecisionAuditRecord generation.
+- Link decision_id, order intents, fill events, portfolio snapshots, and reconciliation reports.
+- Keep it simple but structurally correct.
+
+3. Portfolio accounting correctness
+- Improve position and balance mutation logic.
+- Handle buy, sell, reduce, and close behavior more explicitly.
+- Track average entry price more carefully.
+- Track realized PnL and fees in a simple but correct MVP form.
+
+4. Idempotency and event safety
+- Make fill handling idempotent.
+- Prevent duplicate portfolio mutation from repeated fill ingestion.
+- Make order/fill application safer and easier to test.
+
+5. Better tests
+Add real tests for:
+- portfolio mutation behavior
+- duplicate fill handling
+- reconciliation mismatch detection
+- halt/resume behavior
+- end-to-end local paper cycle behavior
+
+6. Developer usability
+- Improve README with exact local run steps.
+- Add a small demo command that runs one local paper cycle or a short local event loop.
+- Keep placeholders clearly marked.
+
+Output requirements:
+- First, show the implementation plan for this pass.
+- Then list exactly which files you will modify.
+- Then generate the code changes file by file.
+- Afterward, explicitly list:
+  - what is now implemented
+  - what remains stubbed
+  - what should be done in the next pass
+
+Do not optimize for breadth.
+Optimize for correctness, determinism, and extensibility.

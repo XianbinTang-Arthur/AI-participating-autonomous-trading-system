@@ -1,0 +1,261 @@
+The current repository is a working local paper-trading prototype with:
+- schemas
+- event bus abstraction
+- paper execution flow
+- portfolio mutation
+- replay/audit/persistence
+- improved audit correctness and replay integrity
+
+Now perform the next implementation pass.
+
+The goal of this pass is to move the system from a purely local prototype toward a real-market guarded-execution prototype.
+
+This pass is about real exchange connectivity and guarded execution infrastructure.
+It is NOT about full live trading rollout.
+
+Primary goals of this pass:
+
+1. Integrate real OKX market data
+2. Introduce event-driven decision triggering based on real market flow
+3. Add read-only exchange account integration
+4. Build a guarded execution path for OKX orders
+5. Strengthen live gating through policy/risk/health
+6. Expand operator-facing control APIs
+
+Important constraints:
+
+- Do NOT redesign the architecture.
+- Do NOT rename existing major modules, event topics, or service boundaries unless clearly necessary.
+- Preserve the current repository structure as much as possible.
+- Keep existing local paper mode working.
+- Do NOT expand into Kafka, Kubernetes, or distributed infrastructure yet.
+- Do NOT add multiple exchanges.
+- Keep the first real integration scope limited to OKX Spot and the current MVP symbol universe.
+- Do NOT default to real order submission. Guarded execution must be explicitly controlled.
+
+--------------------------------------------------
+A. Real OKX market data integration
+--------------------------------------------------
+
+Add real market data connectivity for OKX.
+
+Requirements:
+- integrate OKX websocket market data
+- support at least:
+  - ticker / best bid-ask or equivalent market snapshot inputs
+  - candles/kline inputs needed for current 15m / 1h logic
+- normalize raw OKX messages into the existing internal market schema/event model
+- preserve current event-driven architecture
+
+Implementation requirements:
+- add an OKX market data adapter/service under the existing market gateway domain
+- include:
+  - websocket connection management
+  - reconnect logic
+  - heartbeat / liveness handling
+  - stale data detection
+  - symbol normalization
+- keep a local/demo publisher available for development fallback
+
+Expected behavior:
+- the system should be able to run in a real-market + paper-execution mode
+- market snapshot freshness must be observable
+
+--------------------------------------------------
+B. Event-driven decision scheduling
+--------------------------------------------------
+
+Replace the current primarily local/manual decision triggering with a more realistic event-driven trigger policy.
+
+Requirements:
+- trigger feature generation from incoming market snapshot events
+- trigger decision cycles based on deterministic cadence / gating rules
+- avoid duplicated decisions for the same symbol/timeframe when nothing materially changed
+- respect staleness / expiry rules
+- support current MVP scope:
+  - BTC-USDT
+  - 15m / 1h
+
+Implementation requirements:
+- add a scheduler / trigger policy component if needed
+- preserve the existing decision engine responsibilities
+- document how decision triggering works
+
+Expected behavior:
+- decisions are driven by real market event flow rather than only one-shot local scripts
+
+--------------------------------------------------
+C. Read-only OKX account integration
+--------------------------------------------------
+
+Add read-only exchange account connectivity first.
+
+Requirements:
+- fetch balances
+- fetch positions if applicable
+- fetch open orders
+- fetch instrument metadata if useful for validation / rounding / limits
+- keep credentials/config clearly separated
+- default to safe read-only behavior
+
+Implementation requirements:
+- add an OKX account adapter/service under the existing execution or exchange integration area
+- integrate the results into the system in a way that supports:
+  - reconciliation
+  - policy/risk checks
+  - future guarded execution
+
+Expected behavior:
+- the system can observe real account state without placing real trades
+
+--------------------------------------------------
+D. Guarded execution path
+--------------------------------------------------
+
+Build the OKX execution path in stages, but keep it guarded.
+
+Stage 1:
+- order payload builder
+- request signing
+- request validation
+- dry-run mode that shows exactly what would be submitted
+
+Stage 2:
+- explicit submit path that is blocked by default
+- submission allowed only when guarded-live mode and explicit config flags permit it
+
+Requirements:
+- keep the existing paper adapter
+- introduce an OKX live adapter without making it the default
+- include precise safeguards:
+  - symbol allowlist
+  - max notional cap
+  - explicit live submit enable flag
+  - mode check
+- if the system is not in a valid guarded-live state, submission must not proceed
+
+Important:
+- do NOT implement unrestricted autonomous live trading
+- do NOT bypass existing policy/risk checks
+
+--------------------------------------------------
+E. Stronger live gating: policy / risk / health
+--------------------------------------------------
+
+Upgrade policy, risk, and health checks so they function as real guarded-live gates.
+
+Policy requirements:
+- mode-aware permission checks
+- symbol allowlist
+- dry-run enforcement
+- live submit enable flag
+- guarded-live only execution allowance
+
+Risk requirements:
+- max notional per symbol
+- max position quantity
+- max open orders
+- max decision frequency
+- reject execution when market/account/reconciliation state is stale
+
+Health requirements:
+- market data freshness
+- exchange connectivity status
+- account fetch freshness
+- reconciliation freshness
+- execution adapter readiness
+
+Expected behavior:
+- even if the execution adapter exists, unsafe conditions must prevent submission
+
+--------------------------------------------------
+F. Operator-facing API/control surface
+--------------------------------------------------
+
+Expand the API/control surface so the operator can observe and manage the system.
+
+Add or improve endpoints such as:
+- GET /system/health
+- GET /system/mode
+- POST /system/mode
+- POST /system/halt
+- POST /system/resume
+- GET /portfolio
+- GET /positions
+- GET /orders/open
+- GET /reconciliation/latest
+- GET /decision/latest
+- GET /audit/{decision_id}
+
+Requirements:
+- keep the API simple and honest
+- clearly distinguish:
+  - paper mode
+  - real-market paper mode
+  - guarded-live blocked mode
+  - guarded-live enabled mode
+
+--------------------------------------------------
+G. Configuration and safety defaults
+--------------------------------------------------
+
+Improve configuration handling for this new stage.
+
+Requirements:
+- separate config for:
+  - local demo
+  - real-market paper
+  - guarded-live blocked
+  - guarded-live enabled
+- live submission must be disabled by default
+- read-only account access should be possible without enabling live order submission
+- document required environment variables clearly
+
+--------------------------------------------------
+H. Tests
+--------------------------------------------------
+
+Add focused tests for the new real-market / guarded-execution infrastructure.
+
+At minimum add tests for:
+1. OKX message normalization
+2. stale market data detection
+3. decision trigger gating / duplicate suppression
+4. guarded execution blocking behavior
+5. policy/risk denial when unsafe
+6. config safety defaults
+
+Tests should remain practical and scoped.
+Do not write fake tests that pretend to hit the real exchange.
+Use mocks/fakes where appropriate.
+
+--------------------------------------------------
+I. Documentation updates
+--------------------------------------------------
+
+Update the README and relevant developer docs to explain:
+- how to run local demo mode
+- how to run real-market + paper mode
+- how guarded-live blocking works
+- what is implemented vs still intentionally limited
+- how live submission remains disabled by default
+
+Be precise and honest.
+Do not describe anything as production-ready unless it actually is.
+
+--------------------------------------------------
+Output requirements
+--------------------------------------------------
+
+1. First provide the implementation plan for this pass.
+2. Then list all files that will be added or modified.
+3. Then implement the changes file by file.
+4. After implementation, explicitly summarize:
+   - what is now implemented
+   - what remains intentionally blocked or simplified
+   - what the next engineering pass should focus on
+
+Final rule:
+
+Do not optimize for breadth or “impressive completeness”.
+Optimize for safe real-market integration, guarded execution discipline, and maintainable evolution toward guarded-live trading.

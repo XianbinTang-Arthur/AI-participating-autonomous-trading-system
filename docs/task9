@@ -1,0 +1,185 @@
+The repository has already progressed to a guarded simulated-execution stage.
+
+Assume the current baseline is:
+
+- real OKX market data works
+- OKX demo-account read works
+- `real_market_paper` works as a true full-loop paper mode
+- guarded simulated submit mode exists
+- under explicit guarded conditions, the system can submit real orders to the OKX demo environment
+- local order state, fill ingestion, portfolio update, reconciliation, audit, and replay all exist in a basic form
+- submit remains blocked by default and only works when safety gates are explicitly satisfied
+
+Now perform the next implementation pass.
+
+Primary goal of this pass:
+
+Harden execution lifecycle handling and exchange-aware reconciliation so the system behaves like a reliable trading engine rather than a demo submit pipeline.
+
+This pass is NOT about:
+- real-money trading
+- expanding to more exchanges
+- adding more strategy complexity
+- Kafka / Kubernetes / large infrastructure changes
+
+This pass IS about:
+- order lifecycle correctness
+- partial fill handling
+- cancellation handling
+- idempotent state transitions
+- stronger exchange-aware reconciliation
+- better replay / forensic validation
+- safer recovery behavior
+
+Target behavior of this stage:
+
+Decision
+-> Policy / Risk
+-> Guarded Simulated Submit
+-> Exchange Ack / Order State
+-> Partial / Full Fill Ingestion
+-> Portfolio Mutation
+-> Exchange-aware Reconciliation
+-> Audit / Replay Validation
+-> Safe Recovery
+
+Important constraints:
+
+- Do NOT move to real-money live trading.
+- Do NOT redesign the architecture.
+- Do NOT rename major modules, event topics, or service boundaries unless clearly necessary.
+- Preserve the current mode structure and safety defaults.
+- Preserve current `real_market_paper` behavior.
+- Preserve guarded simulated submit behavior, but make it more reliable and explainable.
+
+Tasks to complete:
+
+1. Harden local order lifecycle state machine
+Support and correctly maintain at least these states:
+- CREATED
+- SUBMITTING
+- SUBMITTED
+- PARTIALLY_FILLED
+- FILLED
+- CANCEL_PENDING
+- CANCELED
+- REJECTED
+- FAILED
+- EXPIRED if supported by current architecture
+
+Requirements:
+- map exchange responses into these local states consistently
+- prevent invalid state regressions
+- make repeated order updates idempotent
+- keep the state machine explicit and testable
+
+2. Implement robust partial fill handling
+Requirements:
+- support multiple fills per order
+- update filled quantity incrementally
+- update remaining quantity correctly
+- update average fill price correctly
+- mutate portfolio incrementally per fill
+- preserve duplicate fill protection
+- ensure replay remains deterministic for partial-fill scenarios
+
+3. Add cancellation handling
+Requirements:
+- support cancellation request flow
+- support cancel acknowledgment handling
+- update local order state correctly
+- handle cases where an order is partially filled before or during cancellation
+- ensure reconciliation remains meaningful after cancellation scenarios
+
+4. Strengthen fill ingestion idempotency
+Requirements:
+- duplicate fills must never mutate portfolio twice
+- repeated exchange callbacks or polling results must not corrupt state
+- fill identity and deduplication rules must be explicit
+- add tests for duplicate fill safety
+
+5. Upgrade exchange-aware reconciliation
+Reconciliation must now compare and explain differences across:
+- local open orders vs exchange open orders
+- local order states vs exchange order states where possible
+- local fills vs exchange fills
+- local balances vs exchange balances
+- local positions/holdings vs exchange account state where applicable
+
+Requirements:
+- classify mismatch severity clearly
+- keep mismatch reasons human-readable
+- identify whether the mismatch affects safety
+- make halt-required cases explicit
+
+6. Improve replay and forensic validation
+Replay should now support stronger validation, including:
+- reconstructing portfolio state through multi-fill order scenarios
+- validating order lifecycle completeness
+- validating fill chain completeness
+- validating audit references for execution-backed decisions
+- surfacing local vs exchange divergence clearly where relevant
+
+7. Improve recovery behavior
+Requirements:
+- define how runtime rebuild works after restart
+- restore or reconstruct known order state from persisted records
+- restore/recompute latest portfolio snapshot
+- restore reconciliation context where applicable
+- ensure the system can recover into a safe state rather than an ambiguous one
+
+8. Improve operator-facing visibility
+Add or improve operator/API visibility for:
+- latest order states
+- partially filled orders
+- recent fills
+- recent cancellations
+- latest reconciliation mismatch summary
+- latest execution failures/errors
+- latest recovery status if applicable
+
+Keep the API honest and easy to inspect manually.
+
+9. Focused tests
+Add practical tests for:
+- valid order state transitions
+- invalid or duplicate state transitions do not corrupt state
+- partial fill scenarios
+- duplicate fill handling
+- cancellation scenarios
+- reconciliation mismatch detection
+- replay reconstruction under partial fills
+- recovery after restart from persisted state
+- no regression in `real_market_paper`
+- no regression in guarded simulated submit safety gates
+
+Tests should be meaningful and execution-focused.
+Do not add shallow tests that only validate imports or trivial paths.
+
+10. Documentation
+Update README and/or developer docs to explain:
+- execution lifecycle states
+- how partial fills are handled
+- how cancellation is handled
+- what reconciliation now compares
+- what replay/forensic tooling can validate
+- what recovery guarantees currently exist
+- what still remains intentionally simplified
+
+Output requirements:
+
+1. First provide the implementation plan for this pass.
+2. Then list all files to modify or add.
+3. Then implement the changes file by file.
+4. After implementation, explicitly summarize:
+   - what execution behaviors now work reliably
+   - what reconciliation now validates
+   - what recovery/replay now supports
+   - what remains intentionally simplified
+   - what the next engineering pass should focus on
+
+Final rule:
+
+Do not add more product scope.
+Do not move toward real-money live trading in this pass.
+Only harden execution lifecycle handling, exchange-aware reconciliation, replay validation, and safe recovery behavior.

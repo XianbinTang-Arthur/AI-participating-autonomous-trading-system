@@ -1,0 +1,18 @@
+config_profile: guarded_simulated_enabled
+mode: guarded_live
+market_data_backend: okx
+execution_backend: okx
+account_backend: okx
+account_read_enabled: true
+okx_simulated_trading: true
+live_submit_enabled: true
+guarded_execution_dry_run: false
+bootstrap_portfolio_from_exchange: true
+enabled_decision_timeframes:
+  - 15m
+  - 1h
+decision_min_interval_seconds_15m: 30.0
+decision_min_interval_seconds_1h: 120.0
+decision_min_price_move_bps: 4.0
+decision_min_momentum_delta: 0.0005
+exchange_name: OKX

@@ -1,0 +1,200 @@
+The repository has already reached the following stage:
+
+Verified baseline:
+- real OKX market data works
+- OKX demo-account read works
+- `real_market_paper` works as a true full-loop paper mode
+- decision / policy / risk / order intent / paper fill / portfolio mutation / reconciliation all work in `real_market_paper`
+- audit and replay remain functional
+- no exchange-side order submission occurs in `real_market_paper`
+- guarded execution safety defaults remain in place
+
+Now perform the next implementation pass.
+
+Primary goal of this pass:
+
+Introduce a guarded simulated-exchange execution mode for OKX demo trading.
+
+This means:
+- the system must be able to place real orders to the OKX demo environment
+- but only under explicit guarded conditions
+- and this behavior must remain disabled by default
+
+This pass is NOT about real-money trading.
+This pass is NOT about unrestricted automation.
+This pass is NOT about production rollout.
+
+Target behavior of this stage:
+
+Real Market Data
+-> Demo Account Read
+-> Decision
+-> Policy
+-> Risk
+-> OrderIntent
+-> Guarded Simulated Submit
+-> Exchange Order State
+-> Fill Ingestion
+-> Portfolio Update
+-> Exchange-aware Reconciliation
+-> Audit / Replay
+
+Important constraints:
+
+- Do NOT use real-money live trading.
+- Do NOT use production trading keys.
+- Do NOT enable unrestricted order submission.
+- Do NOT redesign the architecture.
+- Do NOT rename major modules, event topics, or service boundaries unless clearly necessary.
+- Preserve current `real_market_paper` behavior.
+- All exchange-side submission must remain explicitly gated and disabled by default.
+
+Tasks to complete:
+
+1. Introduce an explicit guarded simulated execution mode
+- define a mode/profile distinction for OKX demo-environment submit
+- keep it clearly separate from:
+  - `local_demo`
+  - `real_market_paper`
+  - dry-run guarded mode
+  - future real live trading
+- default behavior must remain blocked until explicitly enabled
+
+2. Implement the OKX demo submit path
+- allow real submit only to the OKX demo trading environment
+- use the existing OKX execution adapter path if appropriate
+- ensure the demo environment assumptions are respected, including:
+  - simulated trading headers
+  - demo environment routing
+  - symbol formatting
+- do not affect `real_market_paper`
+
+3. Add strict submission safety gates
+Submission must require all of the following:
+- explicit submit-enabled flag
+- explicit demo/simulated execution mode
+- symbol allowlist
+- max notional cap per order
+- max total open order count
+- halt state = false
+- market/account/reconciliation freshness all healthy
+- policy approval
+- risk approval
+
+If any gate fails:
+- submission must not proceed
+- the denial reason must be observable
+
+4. Implement exchange-backed order lifecycle handling
+After a demo submit:
+- capture exchange acknowledgement
+- persist local order state with exchange IDs
+- read or ingest exchange order state
+- map exchange status to local order state
+- support at least:
+  - SUBMITTED
+  - PARTIALLY_FILLED
+  - FILLED
+  - CANCELED
+  - REJECTED
+  - FAILED
+
+5. Implement fill ingestion from simulated exchange execution
+- consume fill data resulting from demo submit
+- generate/update local FillEvent objects
+- preserve duplicate fill protection / idempotency
+- ensure local portfolio mutation is driven by these fills
+
+6. Upgrade portfolio updates for exchange-backed execution
+- balances
+- positions
+- average entry price
+- realized pnl
+- unrealized pnl
+- total equity
+- any supported exposure/risk budget fields
+
+Portfolio mutation should remain deterministic and replayable.
+
+7. Upgrade reconciliation to exchange-aware reconciliation
+Reconciliation must now compare:
+- local open orders vs exchange open orders
+- local fills vs exchange fills
+- local balances vs exchange balances
+- local positions / holdings vs exchange account state where applicable
+
+Reconciliation output should classify mismatches clearly and remain audit-friendly.
+
+8. Improve operator-facing control APIs
+Add or improve endpoints for:
+- current execution mode
+- whether submit is enabled or blocked
+- latest submitted exchange orders
+- latest fills
+- latest reconciliation summary
+- halt / resume
+- latest execution errors if applicable
+
+The API must clearly distinguish:
+- `real_market_paper`
+- guarded simulated submit dry-run
+- guarded simulated submit enabled
+
+9. Improve audit / replay completeness
+For simulated-exchange execution decisions, DecisionAuditRecord should include:
+- RiskDecision
+- OrderIntent refs
+- exchange-backed order state refs if supported
+- FillEvent refs
+- portfolio delta ref if supported
+- reconciliation refs if supported
+
+Replay must remain meaningful after demo submit:
+- reconstruct portfolio state
+- validate local/exchange linkage where possible
+- surface mismatches explicitly
+
+10. Add focused tests
+Add practical tests for:
+- simulated submit is blocked by default
+- submit is denied when any safety gate fails
+- submit is allowed only when all guards are satisfied
+- order payload generation is correct
+- exchange order status maps correctly to local order state
+- fill ingestion updates portfolio correctly
+- reconciliation can detect exchange/local mismatches
+- `real_market_paper` does not regress
+- no real-money/live path is used in this pass
+
+Use mocks/fakes where needed.
+Do not pretend to hit the real exchange in automated tests.
+
+11. Update documentation
+Update README and relevant developer docs so that the mode matrix is explicit:
+
+- `local_demo`
+- `real_market_paper`
+- guarded simulated submit dry-run
+- guarded simulated submit enabled
+
+Document:
+- required environment variables
+- safety defaults
+- which mode places no exchange orders
+- which mode may place demo-environment orders
+- how to verify the system is still blocked by default
+
+Output requirements:
+
+1. First provide the implementation plan for this pass.
+2. Then list all files to modify or add.
+3. Then implement the changes file by file.
+4. After implementation, explicitly summarize:
+   - what now works end-to-end
+   - what remains intentionally blocked
+   - what the next engineering pass should focus on
+
+Final rule:
+
+Do not move toward real-money live trading in this pass.
+Only implement guarded, explicitly enabled OKX demo-environment order submission with strong safety gates and exchange-aware state handling.

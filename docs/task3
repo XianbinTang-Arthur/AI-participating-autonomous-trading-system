@@ -1,0 +1,154 @@
+The current repository already contains a working local paper-trading MVP skeleton.
+
+Now perform the third implementation pass.
+
+The goal of this pass is to upgrade the system from a purely in-memory prototype to an engineering-grade prototype with durable storage, auditability, and deterministic replay.
+
+Important constraints:
+
+- Do NOT add live exchange integration yet.
+- Do NOT add Kafka or distributed infrastructure yet.
+- Do NOT redesign the architecture.
+- Preserve all existing module names, event topics, and service boundaries.
+- Extend the system without breaking the current local paper MVP.
+
+Focus only on the following engineering improvements.
+
+1. Durable event storage
+
+Introduce a minimal event store using PostgreSQL.
+
+Requirements:
+- store all published events
+- store event envelope metadata
+- include event_id, topic, key, timestamp, payload
+- allow querying events by decision_id or topic
+- keep the event schema compatible with existing EventEnvelope
+
+Implement:
+- aats/storage/event_store_postgres.py
+- SQLAlchemy models for events
+- simple append-only design
+
+The in-memory event bus should remain, but publishing should optionally persist events to the event store.
+
+2. Persistent repositories
+
+Introduce PostgreSQL-backed repositories for:
+
+- portfolio snapshots
+- order states
+- fill events
+- reconciliation reports
+- decision audit records
+
+Keep the existing in-memory repositories for dev mode.
+
+Add a configuration switch between:
+
+- memory mode
+- postgres mode
+
+3. Decision audit pipeline
+
+Fully implement DecisionAuditRecord.
+
+Each decision should persist:
+
+- DecisionContext
+- BaselineAssessment
+- AIMarketAssessment
+- PositionTarget
+- PolicyDecision
+- RiskDecision
+- OrderIntent
+- FillEvent
+- PortfolioSnapshot
+- ReconciliationReport
+
+Audit records should link these objects using IDs.
+
+Store them in a dedicated audit table.
+
+4. Replay engine
+
+Implement a deterministic replay system.
+
+Replay requirements:
+
+- load events from the event store
+- replay them in timestamp order
+- rebuild portfolio state
+- rebuild decision context chain
+
+Implement:
+
+scripts/replay_session.py
+
+The replay engine should be able to:
+
+- reconstruct portfolio state
+- verify that portfolio state matches stored snapshots
+- detect divergence
+
+5. Improved reconciliation
+
+Upgrade reconciliation logic.
+
+Instead of comparing only local state:
+
+- compare stored order records vs fill events
+- compare portfolio snapshot vs reconstructed position state
+
+Reconciliation report should include:
+
+- order mismatches
+- fill mismatches
+- portfolio mismatches
+- severity classification
+
+6. Observability improvements
+
+Add minimal but real operational visibility.
+
+Implement:
+
+- structured logging for each decision cycle
+- decision_id in all log contexts
+- basic metrics counters (in-memory)
+
+Metrics to track:
+
+- decision cycles
+- order intents generated
+- fills processed
+- reconciliation mismatches
+
+7. Tests
+
+Add real tests for:
+
+- event persistence
+- replay reconstruction
+- audit record integrity
+- reconciliation mismatch detection
+
+Tests should validate that replay produces the same portfolio state as the original execution.
+
+Output requirements:
+
+1. First provide the implementation plan for this pass.
+2. List all new files and modified files.
+3. Implement code changes file by file.
+4. Clearly mark database schema migrations.
+5. After implementation, list:
+
+- what is now implemented
+- what remains placeholder
+- what the next engineering pass should focus on
+
+Important rule:
+
+Do not expand the system scope beyond persistence, auditability, replay, and reconciliation.
+
+The goal of this pass is system reliability and traceability, not new trading features.

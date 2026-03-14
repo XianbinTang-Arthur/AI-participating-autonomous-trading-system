@@ -1,0 +1,178 @@
+The repository has already reached this verified state based on actual acceptance runs:
+
+Verified current capabilities:
+- OKX demo trading authentication works
+- real OKX market data connectivity works
+- account read/balance/open-order/instrument/config fetch works
+- API service starts successfully
+- `/system/health`, `/system/mode`, `/portfolio`, `/orders/open`, `/reconciliation/latest` work
+- decision cycles are triggered in `real_market_paper`
+- audit records are generated
+- reconciliation reports are generated
+- the system currently runs with:
+  - mode = paper_live
+  - operating_state = guarded_live_blocked
+  - live_submit_enabled = false
+  - guarded_execution_dry_run = true
+
+Observed current execution gap:
+- decision cycles complete and produce target positions
+- policy decisions are recorded
+- RiskDecision may be missing or partially wired depending on branch state
+- OrderIntent may be missing or may only persist as DRY_RUN state
+- in the current incomplete implementation, full paper-fill execution does not happen reliably
+- fill_count remains 0 in the incomplete path
+- portfolio does not change from execution
+- reconciliation remains clean only because no fill-driven state change occurs
+
+Now redo this task in one implementation pass.
+
+Primary goal of this pass:
+
+Make `real_market_paper` a true full-loop paper trading mode under real market conditions.
+
+The required target behavior is:
+
+Real Market Data
+-> Account Read
+-> Decision
+-> Policy
+-> Risk
+-> OrderIntent
+-> Paper Fill Simulation
+-> FillEvent
+-> Portfolio Mutation
+-> Reconciliation
+
+In other words, `real_market_paper` must mean:
+- real OKX market data
+- real OKX demo-account read
+- local paper execution
+- no exchange-side order submission
+
+Important constraints:
+
+- Do NOT enable real OKX order submission.
+- Do NOT enable OKX simulated submit.
+- Do NOT place any exchange order in this pass.
+- Do NOT redesign the architecture.
+- Do NOT rename major modules, event topics, or service boundaries unless clearly necessary.
+- Preserve the current repository structure as much as possible.
+- Preserve guarded-live protections for all real exchange submit paths.
+- `live_submit_enabled=false` must remain the safe default.
+- Keep dry-run / guarded-live logic for real exchange adapters intact, but do not let that block local paper execution in `real_market_paper`.
+
+Tasks to complete:
+
+1. Diagnose and fix why execution currently stops before full paper execution
+- determine whether policy is incorrectly blocking paper mode
+- determine whether risk evaluation is not being invoked or not being persisted
+- determine whether execution planner is not being reached
+- determine whether `real_market_paper` is incorrectly routed to an OKX dry-run adapter instead of the paper adapter
+- preserve guarded-live blocking for real exchange submit paths, but do not let that block paper execution in `paper_live`
+
+2. Make `paper_live` / `real_market_paper` flow through RiskDecision
+- every execution-eligible decision in `real_market_paper` should produce a RiskDecision
+- RiskDecision must be stored in audit and exposed consistently
+- `risk_decision_ref` should no longer be null for eligible paper-executed decisions
+
+3. Generate OrderIntent in `real_market_paper`
+- when policy/risk allow paper execution, generate OrderIntent
+- ensure audit records include order intent refs
+- `order_count` and `order_intents_generated` should increase appropriately
+
+4. Fix execution routing so eligible intents in `real_market_paper` go to the paper adapter
+- do not route these intents to an OKX dry-run-only persistence path
+- the paper adapter must simulate execution using current real market price context
+- no OKX submit or simulated exchange submit may occur
+
+5. Generate FillEvent for paper execution
+- every eligible executed paper intent should create FillEvent(s)
+- FillEvent must be stored, emitted, and linked in audit
+- `fill_count` should become > 0 when eligible intents are generated
+
+6. Update portfolio from paper fills
+- update balances
+- update positions
+- update avg entry price
+- update realized pnl
+- update unrealized pnl
+- update total equity
+- update any currently supported risk budget/exposure fields
+- preserve duplicate fill protection and idempotency
+
+7. Refresh reconciliation after fill-driven portfolio mutation
+- reconciliation should run against the updated local state
+- latest reconciliation should remain explainable and ideally clean
+- reconciliation should now reflect execution-driven portfolio updates, not only no-op clean state
+
+8. Improve operator visibility
+Add or improve API visibility for:
+- latest decision
+- latest policy decision
+- latest risk decision
+- latest audit record
+- execution summary if useful
+Keep the API honest and aligned with the current architecture.
+
+9. Improve audit chain completeness
+After this pass, DecisionAuditRecord for eligible executed decisions should include:
+- decision_context_ref
+- baseline_assessment_ref
+- ai_market_assessment_ref if applicable
+- position_target_ref
+- policy_decision_ref
+- risk_decision_ref
+- order_intent_refs
+- fill_event_refs
+- portfolio_delta_ref if supported
+- reconciliation_refs if supported by the current architecture
+
+10. Preserve and clarify mode semantics
+Clearly distinguish and enforce the difference between:
+- `real_market_paper`
+- guarded simulated submit dry-run
+- guarded simulated submit enabled
+- live submit disabled
+This pass must only make `real_market_paper` execution-complete using local paper execution.
+
+11. Tests
+Add or update focused tests that verify:
+- in `real_market_paper`, decision cycles can produce RiskDecision
+- OrderIntent is generated when policy/risk allow
+- eligible intents are routed to local paper execution, not OKX dry-run persistence
+- FillEvent is generated
+- portfolio changes after fills
+- reconciliation updates after paper execution
+- audit record includes fill refs
+- guarded-live blocking still prevents real exchange submit paths
+- no regression in existing health/mode/account-read behavior
+- no exchange submit path is triggered in this mode
+
+12. Documentation
+Update README and/or developer docs so the current behavior is explicit:
+- `real_market_paper` means:
+  - real market data
+  - real demo-account read
+  - local paper execution
+  - no exchange order submission
+- explain how this differs from:
+  - dry-run guarded execution
+  - guarded simulated submit
+  - live execution modes
+
+Output requirements:
+
+1. First provide the implementation plan for this pass.
+2. Then list all files you will modify or add.
+3. Then implement the changes file by file.
+4. After implementation, explicitly summarize:
+   - what now works end-to-end
+   - what remains intentionally blocked
+   - what the next engineering pass should focus on
+
+Final rule:
+
+Do not optimize for more scope.
+Do not move toward live trading in this pass.
+Only make `real_market_paper` a true full-loop local paper trading mode under real market conditions, while keeping all real exchange submission paths blocked by default.
