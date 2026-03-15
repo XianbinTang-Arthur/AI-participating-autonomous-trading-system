@@ -13,6 +13,39 @@ from aats.bootstrap.settings import AATSSettings
 from aats.schemas.common import utc_now
 
 
+class OKXRequestError(RuntimeError):
+    def __init__(
+        self,
+        *,
+        path: str,
+        code: str | None = None,
+        msg: str | None = None,
+        row_code: str | None = None,
+        row_message: str | None = None,
+        status_code: int | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        self.path = path
+        self.code = code
+        self.msg = msg
+        self.row_code = row_code
+        self.row_message = row_message
+        self.status_code = status_code
+        self.payload = payload or {}
+        detail_parts = [f"path={path}"]
+        if status_code is not None:
+            detail_parts.append(f"http_status={status_code}")
+        if code is not None:
+            detail_parts.append(f"code={code}")
+        if msg:
+            detail_parts.append(f"msg={msg}")
+        if row_code is not None:
+            detail_parts.append(f"sCode={row_code}")
+        if row_message:
+            detail_parts.append(f"sMsg={row_message}")
+        super().__init__(f"OKX request failed {' '.join(detail_parts)}")
+
+
 class OKXRESTClient:
     def __init__(self, *, settings: AATSSettings) -> None:
         self.settings = settings
@@ -44,10 +77,29 @@ class OKXRESTClient:
                 headers=headers,
                 content=body_text if body_text else None,
             )
-        response.raise_for_status()
-        payload = response.json()
+        payload = self._parse_json_payload(response)
+        if response.status_code >= 400:
+            row_code, row_message = self._extract_row_error(payload)
+            raise OKXRequestError(
+                path=path,
+                code=str(payload.get("code")) if payload else None,
+                msg=str(payload.get("msg")) if payload and payload.get("msg") else response.reason_phrase,
+                row_code=row_code,
+                row_message=row_message,
+                status_code=response.status_code,
+                payload=payload,
+            )
         if str(payload.get("code")) != "0":
-            raise RuntimeError(f"OKX request failed path={path} code={payload.get('code')} msg={payload.get('msg')}")
+            row_code, row_message = self._extract_row_error(payload)
+            raise OKXRequestError(
+                path=path,
+                code=str(payload.get("code")) if payload.get("code") is not None else None,
+                msg=str(payload.get("msg")) if payload.get("msg") else None,
+                row_code=row_code,
+                row_message=row_message,
+                status_code=response.status_code,
+                payload=payload,
+            )
         return payload
 
     async def get_balance(self) -> dict[str, Any]:
@@ -167,3 +219,28 @@ class OKXRESTClient:
         encoded = httpx.QueryParams({key: value for key, value in params.items() if value is not None})
         query = str(encoded)
         return f"{path}?{query}" if query else path
+
+    @staticmethod
+    def _parse_json_payload(response: httpx.Response) -> dict[str, Any]:
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = {}
+        return payload if isinstance(payload, dict) else {}
+
+    @staticmethod
+    def _extract_row_error(payload: Mapping[str, Any] | None) -> tuple[str | None, str | None]:
+        if not payload:
+            return None, None
+        rows = payload.get("data", [])
+        if not isinstance(rows, list) or not rows:
+            return None, None
+        first = rows[0]
+        if not isinstance(first, Mapping):
+            return None, None
+        row_code = first.get("sCode")
+        row_message = first.get("sMsg")
+        return (
+            str(row_code) if row_code not in {None, ""} else None,
+            str(row_message) if row_message not in {None, ""} else None,
+        )

@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AATS Operator Login</title>
+  <link rel="stylesheet" href="/ui/app.css">
+</head>
+<body>
+  <main class="login-shell">
+    <section class="login-panel">
+      <div class="login-head">
+        <p class="brand-kicker">AI Autonomous Trading System</p>
+        <h1>Operator Login</h1>
+        <p class="brand-copy">
+          Authenticate into the operator console with a configured viewer, operator, or admin account.
+        </p>
+      </div>
+
+      <form id="loginForm" class="login-form">
+        <label for="loginUsername" class="field-label">Username</label>
+        <input id="loginUsername" type="text" autocomplete="username" placeholder="operator username" required>
+
+        <label for="loginPassword" class="field-label">Password</label>
+        <input id="loginPassword" type="password" autocomplete="current-password" placeholder="password" required>
+
+        <button id="loginButton" type="submit" class="action-button action-primary login-button">Sign In</button>
+      </form>
+
+      <div id="loginMessage" class="alert alert-info">Enter your operator credentials to continue.</div>
+
+      <section class="panel login-info-panel">
+        <div class="panel-head">
+          <div>
+            <h3>Access Model</h3>
+            <p class="panel-copy">Browser access now uses login and session auth. API-key compatibility remains for automation only.</p>
+          </div>
+        </div>
+        <div id="loginProviders" class="panel-content"></div>
+      </section>
+    </section>
+  </main>
+
+  <script type="module" src="/ui/login.js"></script>
+</body>
+</html>

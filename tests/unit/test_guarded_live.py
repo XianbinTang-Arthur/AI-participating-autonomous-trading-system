@@ -6,7 +6,7 @@ from aats.bootstrap.settings import AATSSettings
 from aats.schemas.common import utc_now
 from aats.schemas.decision import PositionTarget
 from aats.schemas.execution import OrderIntent
-from aats.schemas.exchange import ExchangeAccountSnapshot, InstrumentMetadata
+from aats.schemas.exchange import ExchangeAccountSnapshot, ExchangeBalance, InstrumentMetadata
 from aats.schemas.governance import PolicyDecision
 from aats.services.decision_engine.trigger_policy import DecisionTriggerPolicy
 from aats.services.execution_engine.okx_adapter import OKXExecutionAdapter
@@ -18,12 +18,21 @@ from aats.services.governance_engine.risk import RiskEngine
 
 
 class FakeAccountService:
-    def __init__(self, *, open_order_count: int = 0) -> None:
+    def __init__(
+        self,
+        *,
+        open_order_count: int = 0,
+        btc_available: float = 1.0,
+        usdt_available: float = 100_000.0,
+    ) -> None:
         self._open_order_count = open_order_count
         self._snapshot = ExchangeAccountSnapshot(
             account_source="okx",
             fetched_at=utc_now(),
-            balances=[],
+            balances=[
+                ExchangeBalance(currency="BTC", total=btc_available, available=btc_available, frozen=0.0),
+                ExchangeBalance(currency="USDT", total=usdt_available, available=usdt_available, frozen=0.0),
+            ],
             positions=[],
             open_orders=[],
             instruments=[
@@ -76,6 +85,11 @@ class FakeExecutionProvider:
 class FakeMarketProvider:
     def status(self):
         return {"ready": False, "connected": True, "fresh": False, "blockers": ["market_data_stale"], "detail": "stale"}
+
+
+class FakeHealthyMarketProvider:
+    def status(self):
+        return {"ready": True, "connected": True, "fresh": True, "blockers": [], "detail": "ok"}
 
 
 class FakeReconciliationRepo:
@@ -232,6 +246,106 @@ class TestGuardedLive(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(AATSSettings.model_fields["live_submit_enabled"].default)
         self.assertTrue(AATSSettings.model_fields["guarded_execution_dry_run"].default)
         self.assertFalse(AATSSettings.model_fields["okx_simulated_trading"].default)
+
+    def test_risk_blocks_buy_when_quote_balance_is_insufficient(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "mode": "guarded_live",
+                "execution_backend": "okx",
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "okx_simulated_trading": True,
+            }
+        )
+        kill_switch = KillSwitch()
+        mode_controller = RuntimeModeController(settings=settings, kill_switch=kill_switch)
+        health_service = SystemHealthService(
+            settings=settings,
+            mode_controller=mode_controller,
+            kill_switch=kill_switch,
+            market_provider=FakeHealthyMarketProvider(),  # type: ignore[arg-type]
+            account_provider=FakeAccountService(usdt_available=10.0),  # type: ignore[arg-type]
+            execution_provider=FakeExecutionProvider(),  # type: ignore[arg-type]
+            reconciliation_repo=FakeReconciliationRepo(),  # type: ignore[arg-type]
+        )
+        risk = RiskEngine(
+            settings=settings,
+            account_service=FakeAccountService(usdt_available=10.0),  # type: ignore[arg-type]
+            health_service=health_service,
+            trigger_policy=DecisionTriggerPolicy(settings=settings),
+            price_provider=lambda _symbol: 67_000.0,
+            mode_controller=mode_controller,
+        )
+
+        decision = risk.evaluate(
+            PositionTarget(
+                decision_id="decision_buy_balance",
+                symbol="BTC-USDT",
+                current_position_qty=0.0,
+                target_position_qty=0.001,
+                delta_position_qty=0.001,
+                current_notional=0.0,
+                target_notional=67.0,
+                rebalance_reason="test",
+                urgency="medium",
+                max_slippage_tolerance_bps=20,
+                source_mix={"baseline": 1.0},
+                decision_expiry_ts=utc_now(),
+            )
+        )
+
+        self.assertFalse(decision.approved)
+        self.assertIn("insufficient_quote_balance", decision.rejection_reasons)
+
+    def test_risk_blocks_sell_when_base_balance_is_insufficient(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "mode": "guarded_live",
+                "execution_backend": "okx",
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "okx_simulated_trading": True,
+            }
+        )
+        kill_switch = KillSwitch()
+        mode_controller = RuntimeModeController(settings=settings, kill_switch=kill_switch)
+        health_service = SystemHealthService(
+            settings=settings,
+            mode_controller=mode_controller,
+            kill_switch=kill_switch,
+            market_provider=FakeHealthyMarketProvider(),  # type: ignore[arg-type]
+            account_provider=FakeAccountService(btc_available=0.0),  # type: ignore[arg-type]
+            execution_provider=FakeExecutionProvider(),  # type: ignore[arg-type]
+            reconciliation_repo=FakeReconciliationRepo(),  # type: ignore[arg-type]
+        )
+        risk = RiskEngine(
+            settings=settings,
+            account_service=FakeAccountService(btc_available=0.0),  # type: ignore[arg-type]
+            health_service=health_service,
+            trigger_policy=DecisionTriggerPolicy(settings=settings),
+            price_provider=lambda _symbol: 67_000.0,
+            mode_controller=mode_controller,
+        )
+
+        decision = risk.evaluate(
+            PositionTarget(
+                decision_id="decision_sell_balance",
+                symbol="BTC-USDT",
+                current_position_qty=0.001,
+                target_position_qty=0.0,
+                delta_position_qty=-0.001,
+                current_notional=67.0,
+                target_notional=0.0,
+                rebalance_reason="test",
+                urgency="medium",
+                max_slippage_tolerance_bps=20,
+                source_mix={"baseline": 1.0},
+                decision_expiry_ts=utc_now(),
+            )
+        )
+
+        self.assertFalse(decision.approved)
+        self.assertIn("insufficient_base_balance", decision.rejection_reasons)
 
 
 if __name__ == "__main__":

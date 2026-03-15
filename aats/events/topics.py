@@ -1,6 +1,7 @@
 MARKET_SNAPSHOTS = "market.snapshots"
 FEATURE_SNAPSHOTS = "features.snapshots"
 HEALTH_SNAPSHOTS = "system.health_snapshots"
+ACCOUNT_BASELINES = "account.baselines"
 DECISION_CONTEXTS = "strategy.decision_context"
 BASELINE_ASSESSMENTS = "strategy.baseline_assessment"
 AI_ASSESSMENTS = "strategy.ai_assessment"

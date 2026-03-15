@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from aats.api.auth_routes import auth_router
 from aats.api.routes import router
 from aats.api.ui import ui_router
 from aats.bootstrap.config import build_runtime, load_settings
@@ -24,5 +25,6 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="AATS API Gateway", lifespan=lifespan)
+app.include_router(auth_router)
 app.include_router(ui_router)
 app.include_router(router)

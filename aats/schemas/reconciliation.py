@@ -19,8 +19,11 @@ class ReconciliationReport(SchemaBase):
     fill_diff: dict[str, Any]
     balance_diff: dict[str, Any]
     position_diff: dict[str, Any]
+    mismatch_categories: list[str] = Field(default_factory=list)
     mismatch_reasons: list[str] = Field(default_factory=list)
     safety_impacts: list[str] = Field(default_factory=list)
     severity: str
+    review_required: bool = False
+    recommended_operator_action: str | None = None
     remediation_action: str | None = None
     halt_required: bool = False

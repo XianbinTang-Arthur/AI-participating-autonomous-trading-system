@@ -42,8 +42,14 @@ class OKXOrderPayloadBuilder:
 
     @staticmethod
     def _client_order_id(intent: OrderIntent) -> str:
-        rendered = intent.idempotency_key.replace("-", "")[:32]
-        return rendered if rendered else new_id("okx")[:32]
+        sanitized = "".join(
+            ch for ch in intent.idempotency_key if ch.isascii() and ch.isalnum()
+        )
+        if not sanitized:
+            sanitized = "".join(
+                ch for ch in new_id("okx") if ch.isascii() and ch.isalnum()
+            )
+        return f"cl{sanitized}"[:32]
 
     @staticmethod
     def _round_down(*, value: float, step: float) -> float:
@@ -81,6 +87,9 @@ class OKXExecutionAdapter(ExchangeAdapter):
         self._last_error: str | None = None
         self._last_submission_payload: dict[str, str] | None = None
         self.logger = get_logger("aats.okx_execution_adapter")
+
+    def preview_client_order_id(self, intent: OrderIntent) -> str | None:
+        return self.payload_builder._client_order_id(intent)
 
     async def submit(self, intent: OrderIntent) -> tuple[OrderState, list[FillEvent]]:
         snapshot = await self.account_service.refresh()

@@ -98,6 +98,17 @@ class AATSSettings(BaseSettings):
     operator_auth_enabled: bool = False
     operator_read_api_key: str | None = None
     operator_write_api_key: str | None = None
+    operator_unsafe_write_without_auth: bool = False
+    operator_session_secret: str | None = None
+    operator_session_cookie_name: str = "aats_operator_session"
+    operator_session_max_age_seconds: int = 43_200
+    operator_session_cookie_secure: bool = False
+    operator_viewer_username: str | None = None
+    operator_viewer_password: str | None = None
+    operator_operator_username: str | None = None
+    operator_operator_password: str | None = None
+    operator_admin_username: str | None = None
+    operator_admin_password: str | None = None
     log_level: str = "INFO"
     log_dir: str = "logs"
     log_rotate_max_bytes: int = 5_242_880
@@ -128,3 +139,14 @@ class AATSSettings(BaseSettings):
         if self.ai_provider == "openai":
             return bool(self.openai_api_key)
         return False
+
+    @property
+    def operator_session_configured(self) -> bool:
+        return bool(
+            self.operator_session_secret
+            and (
+                (self.operator_viewer_username and self.operator_viewer_password)
+                or (self.operator_operator_username and self.operator_operator_password)
+                or (self.operator_admin_username and self.operator_admin_password)
+            )
+        )

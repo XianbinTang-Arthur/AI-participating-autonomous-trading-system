@@ -2,12 +2,25 @@ from __future__ import annotations
 
 import unittest
 
-from aats.bootstrap.config import build_runtime, load_settings
+from aats.bootstrap.config import build_runtime
+from aats.bootstrap.settings import AATSSettings
 
 
 class TestAuditLinkage(unittest.IsolatedAsyncioTestCase):
     async def test_sequential_decisions_do_not_cross_link_snapshots_or_reconciliation(self) -> None:
-        settings = load_settings()
+        settings = AATSSettings.model_validate(
+            {
+                "config_profile": "local_demo",
+                "mode": "paper_live",
+                "market_data_backend": "demo",
+                "execution_backend": "paper",
+                "account_backend": "disabled",
+                "account_read_enabled": False,
+                "storage_mode": "memory",
+                "event_persistence_mode": "strict",
+                "enabled_decision_timeframes": ("15m",),
+            }
+        )
         runtime = await build_runtime(settings)
 
         await runtime.market_gateway.run_local_publisher(

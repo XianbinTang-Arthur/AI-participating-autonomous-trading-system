@@ -1,0 +1,149 @@
+The repository has already progressed to a classified reconciliation stage.
+
+Assume the current baseline is:
+
+- the system can import a startup account baseline
+- reconciliation can classify historical/manual/external state differences
+- severity grading exists
+- hard blocking is still used for truly unsafe divergence
+- operator APIs already expose runtime, reconciliation, audit, and control surfaces
+
+Now perform the next implementation pass.
+
+Primary goal of this pass:
+
+Implement operator-confirmed re-baselining and safe runtime resumption so the system can recover from manual intervention, historical account state, or interrupted execution without remaining permanently blocked.
+
+This pass is NOT about:
+- adding new trading strategies
+- expanding to new exchanges
+- enabling real-money live trading
+- weakening safety controls
+- redesigning the architecture
+
+This pass IS about:
+- operator-confirmed recovery
+- re-baselining
+- safe resumption
+- auditability of control actions
+- explainable recovery state transitions
+
+Target behavior of this stage:
+
+Detected Divergence / External Activity
+-> Operator Review
+-> Explicit Re-baseline / Accept Current Exchange State
+-> Local Baseline Rebuild
+-> Portfolio / Reconciliation Reset to New Trusted Baseline
+-> Safe Resume Eligibility Check
+-> Audited Runtime Continuation
+
+Important constraints:
+
+- Do NOT move toward real-money live trading in this pass.
+- Do NOT redesign the architecture.
+- Do NOT rename major modules, event topics, or service boundaries unless clearly necessary.
+- Preserve current guarded safety defaults.
+- Preserve current `real_market_paper` behavior.
+- Resume must remain conservative and must not blindly clear real safety blockers.
+
+Tasks to complete:
+
+1. Implement explicit operator-confirmed re-baselining
+Add a runtime/operator action that allows:
+- accepting the current exchange state as the new trusted baseline
+- rebuilding local portfolio / reconciliation context from that baseline
+- recording that the action was explicit and operator-approved
+
+2. Introduce recovery state transitions
+Support explicit operator-visible runtime states such as:
+- `normal_operation`
+- `review_required`
+- `rebaseline_pending`
+- `rebaseline_completed`
+- `resume_blocked`
+
+Exact names may vary, but the states must be explicit and explainable.
+
+3. Rebuild local trusted state after re-baselining
+After operator-confirmed re-baseline:
+- update local portfolio snapshot
+- update local reconciliation baseline
+- record the baseline switch point
+- ensure later replay and audit can explain why the state changed
+
+4. Preserve auditability of operator actions
+Operator actions related to re-baselining and resume must be:
+- logged
+- auditable
+- queryable through the operator surface
+
+The system should retain:
+- who/what initiated the action if supported
+- why it was done if a reason is available
+- when it happened
+- what runtime state changed as a result
+
+5. Tighten resume semantics
+- resume must not blindly clear all blockers
+- resume must re-evaluate:
+  - health
+  - freshness
+  - reconciliation severity
+  - current recovery state
+- if the system is still unsafe, resume must say so explicitly
+
+6. Improve replay / audit around baseline switches
+Replay and audit should surface:
+- where a baseline takeover occurred
+- where a re-baseline occurred
+- which state before and after the switch is trusted
+- whether local execution history alone explains current portfolio state
+
+7. Improve operator-facing visibility
+Add or improve operator/API visibility for:
+- current recovery state
+- whether review is required
+- whether re-baseline is available
+- latest re-baseline action
+- latest resume decision
+- whether the runtime is currently safe to trade after re-baselining
+
+8. Focused tests
+Add practical tests for:
+- operator-confirmed re-baseline after historical/manual account divergence
+- runtime state transition into review-required mode
+- successful re-baseline rebuilding local trusted state
+- resume re-checking blockers instead of blindly clearing them
+- audit trail creation for re-baseline and resume actions
+- replay remaining meaningful across a baseline switch
+- no regression in current guarded simulated submit and `real_market_paper` behavior
+
+Tests must be meaningful and recovery-focused.
+Do not add shallow tests that only validate importability.
+
+9. Documentation
+Update README and/or developer/operator docs to explain:
+- when re-baselining is needed
+- what operator-confirmed recovery means
+- what runtime states now exist
+- how resume behaves after review/re-baseline
+- what remains intentionally conservative
+
+Output requirements:
+
+1. First provide the implementation plan for this pass.
+2. Then list all files to modify or add.
+3. Then implement the changes file by file.
+4. After implementation, explicitly summarize:
+   - what operator recovery actions now exist
+   - what re-baselining now does
+   - what resume now checks
+   - what remains intentionally limited
+   - what the next engineering pass should focus on
+
+Final rule:
+
+Do not add more product scope in this pass.
+Do not move toward real-money live trading in this pass.
+Only implement operator-confirmed re-baselining, audited recovery, and safe resumption behavior.

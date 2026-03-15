@@ -54,6 +54,11 @@ okx_market_reconnect_delay_seconds: 2.0
 okx_account_refresh_interval_seconds: 15.0
 okx_execution_sync_interval_seconds: 5.0
 okx_fill_fetch_limit: 100
+operator_auth_enabled: false
+operator_unsafe_write_without_auth: false
+operator_session_cookie_name: aats_operator_session
+operator_session_max_age_seconds: 43200
+operator_session_cookie_secure: false
 log_level: INFO
 log_dir: logs
 log_rotate_max_bytes: 5242880

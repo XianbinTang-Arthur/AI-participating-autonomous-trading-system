@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import Field
 
-from aats.schemas.common import SchemaBase
+from aats.schemas.common import SchemaBase, new_id
 
 
 class ExchangeBalance(SchemaBase):
@@ -75,3 +75,34 @@ class ExchangeAccountSnapshot(SchemaBase):
     instruments: list[InstrumentMetadata] = Field(default_factory=list)
     account_mode: str | None = None
     raw: dict[str, Any] = Field(default_factory=dict)
+
+
+BaselineImportStatus = Literal[
+    "baseline_imported",
+    "baseline_import_requires_review",
+    "rebaseline_completed",
+]
+
+
+class AccountBaselineSnapshot(SchemaBase):
+    baseline_id: str = Field(default_factory=lambda: new_id("baseline"))
+    account_source: str
+    exchange_snapshot_ts: datetime
+    imported_at: datetime
+    baseline_status: BaselineImportStatus
+    baseline_kind: Literal["startup_import", "operator_rebaseline"] = "startup_import"
+    safe_for_automatic_continuation: bool = True
+    requires_operator_review: bool = False
+    previous_baseline_ref: str | None = None
+    operator_action_ref: str | None = None
+    trigger_reason: str | None = None
+    reason_codes: list[str] = Field(default_factory=list)
+    balance_count: int = 0
+    position_count: int = 0
+    open_order_count: int = 0
+    fill_count: int = 0
+    balances: list[ExchangeBalance] = Field(default_factory=list)
+    positions: list[ExchangePosition] = Field(default_factory=list)
+    open_orders: list[ExchangeOpenOrder] = Field(default_factory=list)
+    fills: list[ExchangeFill] = Field(default_factory=list)
+    account_mode: str | None = None

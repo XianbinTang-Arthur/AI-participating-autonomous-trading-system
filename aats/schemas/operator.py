@@ -10,7 +10,8 @@ from aats.schemas.system import OperatingState
 
 
 RuntimeState = Literal["healthy", "degraded", "blocked", "halted"]
-OperatorRole = Literal["anonymous", "read", "write"]
+OperatorRole = Literal["anonymous", "viewer", "operator", "admin"]
+AuthSource = Literal["anonymous", "session", "api_key"]
 
 
 class BlockerSnapshotRecord(SchemaBase):
@@ -48,6 +49,8 @@ class ReplayValidationSummary(SchemaBase):
     decision_chain_issues: list[str] = Field(default_factory=list)
     execution_chain_issues: list[str] = Field(default_factory=list)
     audit_issues: list[str] = Field(default_factory=list)
+    baseline_switch_count: int = 0
+    baseline_switch_issues: list[str] = Field(default_factory=list)
     healthy: bool
 
 
@@ -66,9 +69,16 @@ class ReconciliationValidationSummary(SchemaBase):
 
 class OperatorActionRecord(SchemaBase):
     action_id: str = Field(default_factory=lambda: new_id("opact"))
-    action: Literal["halt", "resume", "mode_change", "reconciliation_validate"]
+    action: Literal["halt", "resume", "mode_change", "reconciliation_validate", "rebaseline"]
     actor_role: OperatorRole
+    actor_identity: str | None = None
+    auth_source: AuthSource = "anonymous"
     reason: str
     status: str
     decision_id: str | None = None
     order_id: str | None = None
+    recovery_state_before: str | None = None
+    recovery_state_after: str | None = None
+    baseline_event_ref: str | None = None
+    reconciliation_id: str | None = None
+    details: dict[str, Any] = Field(default_factory=dict)

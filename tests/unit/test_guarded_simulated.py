@@ -6,7 +6,9 @@ from aats.bootstrap.settings import AATSSettings
 from aats.schemas.common import utc_now
 from aats.schemas.execution import FillEvent, OrderIntent
 from aats.schemas.exchange import ExchangeAccountSnapshot, InstrumentMetadata
+from aats.schemas.reconciliation import ReconciliationReport
 from aats.services.execution_engine.okx_adapter import OKXExecutionAdapter, OKXOrderPayloadBuilder
+from aats.services.execution_engine.okx_rest import OKXRequestError
 from aats.services.portfolio_service.positions import PortfolioState
 from aats.services.governance_engine.health import SystemHealthService
 from aats.services.governance_engine.kill_switch import KillSwitch
@@ -92,6 +94,26 @@ class FakeReconciliationRepo:
         return None
 
 
+class ReviewRequiredReconciliationRepo:
+    def latest(self):
+        return ReconciliationReport(
+            reconciliation_id="recon_review",
+            portfolio_snapshot_ref="evt_portfolio",
+            as_of_ts=utc_now(),
+            order_diff={},
+            fill_diff={},
+            balance_diff={},
+            position_diff={},
+            mismatch_categories=["external_manual_activity_detected"],
+            mismatch_reasons=["local_exchange_fill_set_diverges_from_exchange_fill_set"],
+            safety_impacts=["operator_review_required_before_trading"],
+            severity="REVIEW_REQUIRED",
+            review_required=True,
+            recommended_operator_action="review_and_rebaseline_if_expected",
+            halt_required=False,
+        )
+
+
 class FakeOKXClient:
     def __init__(self) -> None:
         self.place_order_calls: list[dict] = []
@@ -143,6 +165,19 @@ class FakeOKXClient:
 
     async def cancel_order(self, payload):
         return {"code": "0", "data": [{"ordId": payload["ordId"], "clOrdId": payload["clOrdId"], "sCode": "0"}]}
+
+
+class FakeRejectedOKXClient(FakeOKXClient):
+    async def place_order(self, payload):
+        raise OKXRequestError(
+            path="/api/v5/trade/order",
+            code="1",
+            msg="All operations failed",
+            row_code="51008",
+            row_message="Order amount too low",
+            status_code=200,
+            payload={"code": "1", "msg": "All operations failed", "data": [{"sCode": "51008", "sMsg": "Order amount too low"}]},
+        )
 
 
 class FakePartialFillOKXClient(FakeOKXClient):
@@ -396,6 +431,9 @@ class TestGuardedSimulatedExecution(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["side"], "buy")
         self.assertEqual(payload["ordType"], "market")
         self.assertEqual(payload["tgtCcy"], "base_ccy")
+        self.assertTrue(payload["clOrdId"].isalnum())
+        self.assertLessEqual(len(payload["clOrdId"]), 32)
+        self.assertNotIn("_", payload["clOrdId"])
 
     async def test_sync_maps_exchange_order_state_into_local_state(self) -> None:
         settings = make_settings(
@@ -511,6 +549,70 @@ class TestGuardedSimulatedExecution(unittest.IsolatedAsyncioTestCase):
         readiness = adapter.readiness()
         self.assertFalse(readiness["exchange_submit_allowed"])
         self.assertIn("market_data_stale", readiness["submit_blocked_reasons"])
+
+    async def test_submit_failure_surfaces_okx_row_error_details(self) -> None:
+        settings = make_settings(
+            {
+                "live_submit_enabled": True,
+                "guarded_execution_dry_run": False,
+                "max_notional_per_symbol": 1_000.0,
+            }
+        )
+        mode_controller = RuntimeModeController(settings=settings, kill_switch=KillSwitch())
+        adapter = OKXExecutionAdapter(
+            settings=settings,
+            client=FakeRejectedOKXClient(),  # type: ignore[arg-type]
+            account_service=FakeAccountService(),  # type: ignore[arg-type]
+            mode_controller=mode_controller,
+            health_service=FakeHealthService(),
+            price_provider=lambda _symbol: 68_000.0,
+        )
+
+        state, fills = await adapter.submit(make_intent())
+
+        self.assertEqual(state.status, "FAILED")
+        self.assertEqual(fills, [])
+        self.assertIn("code=1", state.execution_error)
+        self.assertIn("sCode=51008", state.execution_error)
+        self.assertIn("sMsg=Order amount too low", state.execution_error)
+
+    async def test_submit_is_blocked_when_reconciliation_requires_rebaseline(self) -> None:
+        settings = make_settings(
+            {
+                "live_submit_enabled": True,
+                "guarded_execution_dry_run": False,
+                "max_notional_per_symbol": 1_000.0,
+            }
+        )
+        kill_switch = KillSwitch()
+        mode_controller = RuntimeModeController(settings=settings, kill_switch=kill_switch)
+        account_service = FakeAccountService()
+        adapter = OKXExecutionAdapter(
+            settings=settings,
+            client=FakeOKXClient(),  # type: ignore[arg-type]
+            account_service=account_service,  # type: ignore[arg-type]
+            mode_controller=mode_controller,
+            health_service=None,
+            price_provider=lambda _symbol: 68_000.0,
+        )
+        health_service = SystemHealthService(
+            settings=settings,
+            mode_controller=mode_controller,
+            kill_switch=kill_switch,
+            market_provider=FakeMarketProvider(),
+            account_provider=account_service,  # type: ignore[arg-type]
+            execution_provider=adapter,
+            reconciliation_repo=ReviewRequiredReconciliationRepo(),  # type: ignore[arg-type]
+        )
+        adapter.health_service = health_service
+
+        state, fills = await adapter.submit(make_intent())
+
+        self.assertEqual(state.status, "BLOCKED")
+        self.assertEqual(state.execution_error, "operator_rebaseline_required")
+        self.assertEqual(fills, [])
+        self.assertFalse(adapter.readiness()["exchange_submit_allowed"])
+        self.assertIn("operator_rebaseline_required", adapter.readiness()["submit_blocked_reasons"])
 
 
 if __name__ == "__main__":

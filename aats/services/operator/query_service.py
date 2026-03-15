@@ -7,6 +7,7 @@ from aats.events import topics
 from aats.events.envelopes import build_envelope
 from aats.schemas.common import EventEnvelope, utc_now
 from aats.schemas.operator import (
+    AuthSource,
     BlockerSnapshotRecord,
     ExecutionErrorSummary,
     OperatorActionRecord,
@@ -14,6 +15,7 @@ from aats.schemas.operator import (
     ReconciliationValidationSummary,
     ReplayValidationSummary,
 )
+from aats.services.execution_engine.baseline_import import AccountBaselineImportService
 from aats.services.portfolio_service.reconstruction import PortfolioReconstructionService
 from aats.services.reconciliation_service.replay import ReplayEngine, ReplayResult
 
@@ -55,6 +57,10 @@ class OperatorQueryService:
         rows = self.runtime.execution_repo.fills()
         return max(rows, key=lambda item: item.ingestion_timestamp, default=None)
 
+    def latest_account_baseline(self) -> dict[str, Any] | None:
+        latest = self.runtime.event_store.latest(topics.ACCOUNT_BASELINES)
+        return latest.payload if latest is not None else None
+
     def recent_fills(self, *, limit: int = 50):
         return sorted(
             self.runtime.execution_repo.fills(),
@@ -66,9 +72,71 @@ class OperatorQueryService:
         latest = max(self.runtime.audit_repo.all(), key=lambda item: item.created_at, default=None)
         return latest.decision_id if latest is not None else None
 
+    def latest_operator_action(self, action: str) -> dict[str, Any] | None:
+        actions = [
+            item.payload
+            for item in self.runtime.event_store.by_topic(topics.OPERATOR_ACTIONS)
+            if item.payload.get("action") == action
+        ]
+        return actions[-1] if actions else None
+
+    def recovery_view(self) -> dict[str, Any]:
+        latest_reconciliation = self.runtime.reconciliation_repo.latest()
+        latest_baseline_envelope = self.runtime.event_store.latest(topics.ACCOUNT_BASELINES)
+        latest_baseline = latest_baseline_envelope.payload if latest_baseline_envelope is not None else None
+        latest_rebaseline_action = self.latest_operator_action("rebaseline")
+        latest_resume_action = self.latest_operator_action("resume")
+        base = self.runtime.recovery_status
+
+        recovery_state = base.recovery_state
+        if latest_reconciliation is not None:
+            if latest_reconciliation.halt_required:
+                recovery_state = "resume_blocked"
+            elif latest_reconciliation.review_required and recovery_state not in {"rebaseline_pending", "rebaseline_completed"}:
+                recovery_state = "review_required"
+        if base.baseline_requires_operator_review:
+            recovery_state = "review_required"
+        if recovery_state == "rebaseline_completed" and not self.runtime.kill_switch.halted:
+            recovery_state = "normal_operation"
+        elif self.runtime.kill_switch.halted and recovery_state == "normal_operation":
+            recovery_state = "resume_blocked" if latest_resume_action is not None else recovery_state
+
+        resume_check = self._resume_check(include_kill_switch=False)
+        review_required = recovery_state == "review_required"
+        rebaseline_available = (
+            self.runtime.settings.account_backend == "okx"
+            and self.runtime.settings.account_read_enabled
+            and recovery_state in {"review_required", "resume_blocked"}
+        )
+        resume_eligible = recovery_state in {"normal_operation", "rebaseline_completed"} and not resume_check["blockers"]
+        safe_to_trade = resume_eligible and not self.runtime.kill_switch.halted
+        return {
+            **base.model_dump(mode="json"),
+            "recovery_state": recovery_state,
+            "review_required": review_required,
+            "rebaseline_available": rebaseline_available,
+            "resume_eligible": resume_eligible,
+            "safe_to_trade": safe_to_trade,
+            "last_rebaseline_action": latest_rebaseline_action,
+            "last_resume_action": latest_resume_action,
+            "latest_account_baseline": latest_baseline,
+            "latest_reconciliation": latest_reconciliation.model_dump(mode="json") if latest_reconciliation is not None else None,
+            "resume_blocked_reasons": resume_check["blockers"],
+        }
+
+    def system_recovery(self) -> dict[str, Any]:
+        recovery = self.recovery_view()
+        return {
+            "recovery": recovery,
+            "latest_rebaseline_action": recovery["last_rebaseline_action"],
+            "latest_resume_action": recovery["last_resume_action"],
+            "latest_account_baseline": recovery["latest_account_baseline"],
+        }
+
     def system_mode(self) -> dict[str, Any]:
         snapshot = dict(self.runtime.mode_controller.snapshot())
         readiness = self.runtime.execution_adapter.readiness()
+        recovery = self.recovery_view()
         submit_blocked_reasons = list(
             dict.fromkeys(
                 list(snapshot.get("submit_blocked_reasons", []))
@@ -76,10 +144,11 @@ class OperatorQueryService:
             )
         )
         health_blockers = list(dict.fromkeys(self.runtime.health_service.execution_blockers()))
+        recovery_blockers = list(dict.fromkeys(recovery["resume_blocked_reasons"]))
         exchange_submit_allowed = bool(
             readiness.get("exchange_submit_allowed", snapshot.get("exchange_submit_allowed", False))
         )
-        execution_blockers = list(health_blockers)
+        execution_blockers = list(dict.fromkeys(health_blockers + recovery_blockers))
         if self.runtime.kill_switch.halted and "kill_switch_active" not in execution_blockers:
             execution_blockers.insert(0, "kill_switch_active")
 
@@ -92,17 +161,26 @@ class OperatorQueryService:
         snapshot["submit_blocked_reasons"] = submit_blocked_reasons
         snapshot["execution_blocked"] = bool(execution_blockers)
         snapshot["blocked_reason"] = execution_blockers[0] if execution_blockers else None
+        snapshot["recovery_state"] = recovery["recovery_state"]
+        snapshot["review_required"] = recovery["review_required"]
+        snapshot["rebaseline_available"] = recovery["rebaseline_available"]
         return snapshot
 
     def system_health(self) -> dict[str, Any]:
         snapshot = self.runtime.health_service.snapshot()
         mode_snapshot = self.system_mode()
+        recovery = self.recovery_view()
         market = self.runtime.market_gateway.status()
         account = self.runtime.account_service.status()
         execution = self.runtime.execution_adapter.readiness()
         latest_reconciliation = self.runtime.reconciliation_repo.latest()
         latest_portfolio = self.runtime.portfolio_repo.latest()
         blockers = self.blockers()
+        account_baseline = self.latest_account_baseline()
+        reconciliation_component = next(
+            (component for component in snapshot.components if component.component == "reconciliation"),
+            None,
+        )
         warnings = [
             {
                 "component": component.component,
@@ -142,11 +220,20 @@ class OperatorQueryService:
                 "account_state": account,
                 "execution_adapter": execution,
                 "reconciliation": {
-                    "ready": latest_reconciliation is not None and not latest_reconciliation.halt_required,
-                    "fresh": latest_reconciliation is not None,
-                    "last_update_ts": latest_reconciliation.as_of_ts if latest_reconciliation else None,
+                    "ready": reconciliation_component.status == "ok" if reconciliation_component is not None else False,
+                    "fresh": reconciliation_component.fresh if reconciliation_component is not None else False,
+                    "last_update_ts": (
+                        reconciliation_component.last_update_ts
+                        if reconciliation_component is not None
+                        else (latest_reconciliation.as_of_ts if latest_reconciliation else None)
+                    ),
                     "severity": latest_reconciliation.severity if latest_reconciliation else None,
                     "halt_required": latest_reconciliation.halt_required if latest_reconciliation else False,
+                    "blockers": (
+                        list(reconciliation_component.blockers)
+                        if reconciliation_component is not None
+                        else []
+                    ),
                 },
                 "storage": {
                     "ready": True,
@@ -167,7 +254,9 @@ class OperatorQueryService:
             "freshness": {
                 "market_fresh": market.get("fresh", False),
                 "account_fresh": account.get("fresh", False),
-                "reconciliation_fresh": latest_reconciliation is not None,
+                "reconciliation_fresh": (
+                    reconciliation_component.fresh if reconciliation_component is not None else False
+                ),
             },
             "last_success_timestamps": {
                 "market": market.get("last_update_ts"),
@@ -175,7 +264,11 @@ class OperatorQueryService:
                 "portfolio": latest_portfolio.snapshot_ts if latest_portfolio else None,
                 "reconciliation": latest_reconciliation.as_of_ts if latest_reconciliation else None,
             },
-            "recovery": self.runtime.recovery_status.model_dump(mode="json"),
+            "recovery": recovery,
+            "recovery_state": recovery["recovery_state"],
+            "review_required": recovery["review_required"],
+            "rebaseline_available": recovery["rebaseline_available"],
+            "account_baseline": account_baseline,
             "mode_contract": mode_snapshot,
         }
 
@@ -183,6 +276,8 @@ class OperatorQueryService:
         latest_decision = self.runtime.event_store.latest(topics.DECISION_CONTEXTS)
         latest_fill = self.latest_fill()
         latest_reconciliation = self.runtime.reconciliation_repo.latest()
+        account_baseline = self.latest_account_baseline()
+        recovery = self.recovery_view()
         now = utc_now()
         return {
             "symbols": [self.runtime.settings.default_symbol],
@@ -196,11 +291,43 @@ class OperatorQueryService:
             },
             "storage_mode": self.runtime.settings.storage_mode,
             "operator_auth_enabled": self.runtime.settings.operator_auth_enabled,
+            "operator_auth": {
+                "auth_enabled": self.runtime.settings.operator_auth_enabled,
+                "session_enabled": self.runtime.settings.operator_session_configured,
+                "api_key_compatibility_enabled": bool(
+                    self.runtime.settings.operator_read_api_key or self.runtime.settings.operator_write_api_key
+                ),
+                "unsafe_write_without_auth": self.runtime.settings.operator_unsafe_write_without_auth,
+            },
             "startup_timestamp": self.runtime.started_at,
             "uptime_seconds": max((now - self.runtime.started_at).total_seconds(), 0.0),
             "last_decision_timestamp": latest_decision.event_timestamp if latest_decision else None,
             "last_fill_timestamp": latest_fill.ingestion_timestamp if latest_fill else None,
             "last_reconciliation_timestamp": latest_reconciliation.as_of_ts if latest_reconciliation else None,
+            "recovery": {
+                "recovery_state": recovery["recovery_state"],
+                "review_required": recovery["review_required"],
+                "rebaseline_available": recovery["rebaseline_available"],
+                "resume_eligible": recovery["resume_eligible"],
+                "safe_to_trade": recovery["safe_to_trade"],
+            },
+            "baseline_takeover": {
+                "status": self.runtime.recovery_status.baseline_status,
+                "baseline_imported": self.runtime.recovery_status.baseline_imported,
+                "baseline_imported_at": self.runtime.recovery_status.baseline_imported_at,
+                "baseline_source": self.runtime.recovery_status.baseline_source,
+                "baseline_kind": account_baseline.get("baseline_kind") if account_baseline is not None else None,
+                "requires_operator_review": self.runtime.recovery_status.baseline_requires_operator_review,
+                "safe_for_automatic_continuation": self.runtime.recovery_status.baseline_safe_for_automatic_continuation,
+                "balance_count": self.runtime.recovery_status.baseline_balance_count,
+                "position_count": self.runtime.recovery_status.baseline_position_count,
+                "open_order_count": self.runtime.recovery_status.baseline_open_order_count,
+                "fill_count": self.runtime.recovery_status.baseline_fill_count,
+                "event_ref": self.runtime.recovery_status.baseline_event_ref,
+                "last_rebaseline_event_ref": self.runtime.recovery_status.last_rebaseline_event_ref,
+                "last_rebaseline_at": self.runtime.recovery_status.last_rebaseline_at,
+                "snapshot": account_baseline,
+            },
         }
 
     def decision_view(self, decision_id: str) -> dict[str, Any]:
@@ -304,6 +431,7 @@ class OperatorQueryService:
 
     def blockers(self) -> list[dict[str, Any]]:
         snapshot = self.runtime.health_service.snapshot()
+        recovery = self.recovery_view()
         rows: list[dict[str, Any]] = []
         seen: set[str] = set()
         for blocker in snapshot.blockers:
@@ -330,6 +458,15 @@ class OperatorQueryService:
             if blocker in {"local_demo_no_exchange_submission", "real_market_paper_uses_local_paper_execution"}:
                 subsystem = "mode"
             rows.append(self._blocker_entry(blocker=blocker, subsystem=subsystem, submit_only=True))
+            seen.add(blocker)
+        for blocker in recovery["resume_blocked_reasons"]:
+            if blocker in seen:
+                continue
+            subsystem = "recovery"
+            if blocker.startswith("reconciliation_"):
+                subsystem = "reconciliation"
+            rows.append(self._blocker_entry(blocker=blocker, subsystem=subsystem))
+            seen.add(blocker)
         return rows
 
     def blocker_history(self, *, limit: int = 20) -> dict[str, Any]:
@@ -390,6 +527,7 @@ class OperatorQueryService:
 
     def account_state(self) -> dict[str, Any]:
         status = self.runtime.account_service.status()
+        recovery = self.recovery_view()
         return {
             "backend": self.runtime.settings.account_backend,
             "read_enabled": self.runtime.settings.account_read_enabled,
@@ -401,6 +539,26 @@ class OperatorQueryService:
             "blockers": status.get("blockers", []),
             "current_blocking_reason": next(iter(status.get("blockers", [])), None),
             "detail": status.get("detail"),
+            "recovery": {
+                "recovery_state": recovery["recovery_state"],
+                "review_required": recovery["review_required"],
+                "rebaseline_available": recovery["rebaseline_available"],
+                "resume_eligible": recovery["resume_eligible"],
+                "safe_to_trade": recovery["safe_to_trade"],
+            },
+            "baseline_takeover": {
+                "status": self.runtime.recovery_status.baseline_status,
+                "baseline_imported": self.runtime.recovery_status.baseline_imported,
+                "baseline_imported_at": self.runtime.recovery_status.baseline_imported_at,
+                "baseline_source": self.runtime.recovery_status.baseline_source,
+                "requires_operator_review": self.runtime.recovery_status.baseline_requires_operator_review,
+                "safe_for_automatic_continuation": self.runtime.recovery_status.baseline_safe_for_automatic_continuation,
+                "balance_count": self.runtime.recovery_status.baseline_balance_count,
+                "position_count": self.runtime.recovery_status.baseline_position_count,
+                "open_order_count": self.runtime.recovery_status.baseline_open_order_count,
+                "fill_count": self.runtime.recovery_status.baseline_fill_count,
+                "event_ref": self.runtime.recovery_status.baseline_event_ref,
+            },
         }
 
     def account_open_orders(self) -> dict[str, Any]:
@@ -487,6 +645,7 @@ class OperatorQueryService:
             "reconciliation": report.model_dump(mode="json") if report is not None else None,
             "mismatch_summary": self._reconciliation_mismatch_summary(report),
             "latest_validation": latest_validation.payload if latest_validation is not None else None,
+            "recovery": self.recovery_view(),
         }
 
     def reconciliation_recent(self, *, limit: int = 20) -> dict[str, Any]:
@@ -512,9 +671,14 @@ class OperatorQueryService:
 
     def audit_detail(self, decision_id: str) -> dict[str, Any]:
         detail = self.decision_view(decision_id)
+        context = detail["decision_context"] or {}
         return {
             "audit": detail["audit"],
             "history_length": len(self.runtime.audit_repo.history(decision_id)),
+            "baseline_switches": self._baseline_switch_history(
+                as_of_ts=context.get("as_of_ts"),
+                limit=10,
+            ),
             "linked_events": {
                 "decision_context": detail["decision_context"],
                 "baseline_assessment": detail["baseline_assessment"],
@@ -542,6 +706,7 @@ class OperatorQueryService:
             "healthy": latest is None or latest["divergence_count"] == 0,
             "last_validation": latest,
             "recent_validations": recent,
+            "baseline_switches": self._baseline_switch_history(limit=10),
         }
 
     def replay_validate(self, *, decision_id: str) -> dict[str, Any]:
@@ -576,6 +741,8 @@ class OperatorQueryService:
         *,
         reason: str,
         actor_role: OperatorRole,
+        actor_identity: str | None = None,
+        auth_source: AuthSource = "anonymous",
     ) -> dict[str, Any]:
         report = await self.runtime.reconciliation_service.validate_now(reason=reason)
         summary = ReconciliationValidationSummary(
@@ -600,11 +767,23 @@ class OperatorQueryService:
             payload_model=OperatorActionRecord(
                 action="reconciliation_validate",
                 actor_role=actor_role,
+                actor_identity=actor_identity,
+                auth_source=auth_source,
                 reason=reason,
                 status="completed",
                 decision_id=report.decision_id,
+                recovery_state_before=self.recovery_view()["recovery_state"],
+                recovery_state_after=(
+                    "resume_blocked"
+                    if report.halt_required
+                    else "review_required"
+                    if report.review_required
+                    else self.recovery_view()["recovery_state"]
+                ),
+                reconciliation_id=report.reconciliation_id,
             ),
         )
+        self._update_recovery_status_for_report(report)
         self._persist_blocker_snapshot(
             source="reconciliation_validate",
             runtime_state=self.system_health()["runtime_state"],
@@ -616,19 +795,177 @@ class OperatorQueryService:
             "validation": summary.model_dump(mode="json"),
         }
 
-    def halt(self, *, reason: str, actor_role: OperatorRole = "anonymous") -> dict[str, Any]:
+    async def rebaseline(
+        self,
+        *,
+        reason: str,
+        actor_role: OperatorRole,
+        actor_identity: str | None = None,
+        auth_source: AuthSource = "anonymous",
+    ) -> dict[str, Any]:
+        if not self.runtime.settings.account_read_enabled or self.runtime.settings.account_backend != "okx":
+            raise ValueError("rebaseline_requires_okx_account_read")
+
+        recovery_before = self.recovery_view()["recovery_state"]
+        previous_baseline_event = self.runtime.event_store.latest(topics.ACCOUNT_BASELINES)
+        previous_baseline_ref = previous_baseline_event.event_id if previous_baseline_event is not None else None
+
+        self.runtime.kill_switch.halt(reason="operator_rebaseline_pending")
+        self.runtime.recovery_status = self.runtime.recovery_status.model_copy(
+            update={
+                "recovery_state": "rebaseline_pending",
+                "safe_to_trade": False,
+                "resume_eligible": False,
+                "review_required": False,
+                "rebaseline_available": False,
+                "halted": True,
+                "recovery_action": "operator_rebaseline_pending",
+            }
+        )
+
+        exchange_snapshot = await self.runtime.account_service.refresh(force=True)
+        if exchange_snapshot is None:
+            raise ValueError("rebaseline_requires_account_snapshot")
+
+        action_record = OperatorActionRecord(
+            action="rebaseline",
+            actor_role=actor_role,
+            actor_identity=actor_identity,
+            auth_source=auth_source,
+            reason=reason,
+            status="completed",
+            recovery_state_before=recovery_before,
+            recovery_state_after="rebaseline_pending",
+        )
+        action_envelope = self._append_event(
+            topic=topics.OPERATOR_ACTIONS,
+            key="system",
+            payload_model=action_record,
+        )
+        baseline_importer = AccountBaselineImportService(event_store=self.runtime.event_store)
+        imported = baseline_importer.rebaseline_snapshot(
+            exchange_snapshot=exchange_snapshot,
+            portfolio_state=self.runtime.portfolio_service.state,
+            previous_baseline_ref=previous_baseline_ref,
+            operator_action_ref=action_envelope.event_id,
+            trigger_reason=reason,
+        )
+        await self.runtime.portfolio_service.bootstrap_snapshot()
+        report = await self.runtime.reconciliation_service.validate_now(reason="operator_rebaseline")
+
+        recovery_state = (
+            "resume_blocked"
+            if imported.snapshot.requires_operator_review or report.halt_required
+            else "review_required"
+            if report.review_required
+            else "rebaseline_completed"
+        )
+        resume_eligible = recovery_state == "rebaseline_completed" and not self._resume_check(include_kill_switch=False)["blockers"]
+        self.runtime.recovery_status = self.runtime.recovery_status.model_copy(
+            update={
+                "status": imported.snapshot.baseline_status,
+                "recovery_state": recovery_state,
+                "safe_startup": False,
+                "safe_to_trade": False,
+                "resume_eligible": resume_eligible,
+                "review_required": recovery_state == "review_required",
+                "rebaseline_available": recovery_state in {"review_required", "resume_blocked"},
+                "halted": True,
+                "recovery_action": (
+                    "operator_rebaseline_completed"
+                    if recovery_state == "rebaseline_completed"
+                    else "operator_rebaseline_requires_review"
+                    if recovery_state == "review_required"
+                    else "operator_rebaseline_resume_blocked"
+                ),
+                "baseline_imported": True,
+                "baseline_status": imported.snapshot.baseline_status,
+                "baseline_imported_at": imported.snapshot.imported_at,
+                "baseline_event_ref": imported.event_id,
+                "baseline_source": imported.snapshot.account_source,
+                "baseline_safe_for_automatic_continuation": imported.snapshot.safe_for_automatic_continuation,
+                "baseline_requires_operator_review": imported.snapshot.requires_operator_review,
+                "baseline_balance_count": imported.snapshot.balance_count,
+                "baseline_position_count": imported.snapshot.position_count,
+                "baseline_open_order_count": imported.snapshot.open_order_count,
+                "baseline_fill_count": imported.snapshot.fill_count,
+                "last_rebaseline_at": imported.snapshot.imported_at,
+                "last_rebaseline_event_ref": imported.event_id,
+                "last_rebaseline_action_ref": action_envelope.event_id,
+                "resume_blocked_reasons": self._resume_check(include_kill_switch=False)["blockers"],
+                "notes": self.runtime.recovery_status.notes
+                + [
+                    "operator_rebaseline_confirmed",
+                    f"baseline_switch:{previous_baseline_ref or 'none'}->{imported.event_id}",
+                ],
+            }
+        )
+        self._append_event(
+            topic=topics.OPERATOR_ACTIONS,
+            key="system",
+            payload_model=action_record.model_copy(
+                update={
+                    "status": recovery_state,
+                    "recovery_state_after": recovery_state,
+                    "baseline_event_ref": imported.event_id,
+                    "reconciliation_id": report.reconciliation_id,
+                    "details": {
+                        "previous_baseline_ref": previous_baseline_ref,
+                        "resume_eligible": resume_eligible,
+                    },
+                }
+            ),
+        )
+        self._persist_blocker_snapshot(
+            source="operator_rebaseline",
+            runtime_state="halted",
+            mode_snapshot=self.system_mode(),
+            blockers=self.blockers(),
+        )
+        return {
+            "status": recovery_state,
+            "halted": True,
+            "reason": reason,
+            "baseline": imported.snapshot.model_dump(mode="json"),
+            "baseline_event_ref": imported.event_id,
+            "reconciliation": report.model_dump(mode="json"),
+            "recovery": self.recovery_view(),
+        }
+
+    def halt(
+        self,
+        *,
+        reason: str,
+        actor_role: OperatorRole = "anonymous",
+        actor_identity: str | None = None,
+        auth_source: AuthSource = "anonymous",
+    ) -> dict[str, Any]:
         was_halted = self.runtime.kill_switch.halted
+        recovery_before = self.recovery_view()["recovery_state"]
         self.runtime.kill_switch.halt(reason=reason)
         log_event(self.logger, "operator_halt", level="warning", reason=reason, already_halted=was_halted)
         status = "already_halted" if was_halted else "halted"
+        self.runtime.recovery_status = self.runtime.recovery_status.model_copy(
+            update={
+                "halted": True,
+                "safe_to_trade": False,
+                "resume_eligible": False,
+                "last_resume_status": None,
+                "last_resume_reason": None,
+            }
+        )
         self._append_event(
             topic=topics.OPERATOR_ACTIONS,
             key="system",
             payload_model=OperatorActionRecord(
                 action="halt",
                 actor_role=actor_role,
+                actor_identity=actor_identity,
+                auth_source=auth_source,
                 reason=reason,
                 status=status,
+                recovery_state_before=recovery_before,
+                recovery_state_after=self.recovery_view()["recovery_state"],
             ),
         )
         self._persist_blocker_snapshot(
@@ -639,12 +976,64 @@ class OperatorQueryService:
         )
         return {"status": status, "halted": True, "reason": reason}
 
-    def resume(self, *, reason: str, actor_role: OperatorRole = "anonymous") -> dict[str, Any]:
+    async def resume(
+        self,
+        *,
+        reason: str,
+        actor_role: OperatorRole = "anonymous",
+        actor_identity: str | None = None,
+        auth_source: AuthSource = "anonymous",
+    ) -> dict[str, Any]:
         was_halted = self.runtime.kill_switch.halted
-        self.runtime.kill_switch.resume()
+        recovery_before = self.recovery_view()["recovery_state"]
+        if self.runtime.settings.account_backend == "okx" and self.runtime.settings.account_read_enabled:
+            await self.runtime.account_service.refresh(force=True)
+        report = await self.runtime.reconciliation_service.validate_now(reason=f"resume_check:{reason}")
+        self._update_recovery_status_for_report(report)
+        resume_check = self._resume_check(include_kill_switch=False)
+        runnable = not resume_check["blockers"]
+        if runnable:
+            self.runtime.kill_switch.resume()
+            status = "already_resumed" if not was_halted else "resumed"
+            recovery_after = "normal_operation"
+            self.runtime.recovery_status = self.runtime.recovery_status.model_copy(
+                update={
+                    "recovery_state": recovery_after,
+                    "halted": False,
+                    "safe_to_trade": True,
+                    "resume_eligible": True,
+                    "review_required": False,
+                    "rebaseline_available": False,
+                    "recovery_action": "operator_resume_completed",
+                    "last_resume_status": status,
+                    "last_resume_reason": reason,
+                    "resume_blocked_reasons": [],
+                }
+            )
+        else:
+            self.runtime.kill_switch.halt(reason="resume_blocked")
+            status = "resume_blocked"
+            recovery_after = (
+                "review_required"
+                if "operator_rebaseline_required" in resume_check["blockers"]
+                else "resume_blocked"
+            )
+            self.runtime.recovery_status = self.runtime.recovery_status.model_copy(
+                update={
+                    "recovery_state": recovery_after,
+                    "halted": True,
+                    "safe_to_trade": False,
+                    "resume_eligible": False,
+                    "review_required": recovery_after == "review_required",
+                    "rebaseline_available": True,
+                    "recovery_action": "operator_resume_blocked",
+                    "last_resume_status": status,
+                    "last_resume_reason": reason,
+                    "resume_blocked_reasons": list(resume_check["blockers"]),
+                }
+            )
         mode_state = self.system_mode()
         blockers = self.blockers()
-        status = "already_resumed" if not was_halted else "resumed"
         log_event(
             self.logger,
             "operator_resume",
@@ -652,16 +1041,26 @@ class OperatorQueryService:
             reason=reason,
             was_halted=was_halted,
             blockers=[item["blocker"] for item in blockers],
+            status=status,
         )
-        self._append_event(
+        action_envelope = self._append_event(
             topic=topics.OPERATOR_ACTIONS,
             key="system",
             payload_model=OperatorActionRecord(
                 action="resume",
                 actor_role=actor_role,
+                actor_identity=actor_identity,
+                auth_source=auth_source,
                 reason=reason,
                 status=status,
+                recovery_state_before=recovery_before,
+                recovery_state_after=recovery_after,
+                reconciliation_id=report.reconciliation_id,
+                details={"runnable": runnable, "blockers": resume_check["blockers"]},
             ),
+        )
+        self.runtime.recovery_status = self.runtime.recovery_status.model_copy(
+            update={"last_resume_action_ref": action_envelope.event_id}
         )
         self._persist_blocker_snapshot(
             source="operator_resume",
@@ -671,10 +1070,12 @@ class OperatorQueryService:
         )
         return {
             "status": status,
-            "halted": False,
+            "halted": self.runtime.kill_switch.halted,
             "reason": reason,
-            "runnable": not mode_state["execution_blocked"],
+            "runnable": runnable,
             "blockers": blockers,
+            "recovery": self.recovery_view(),
+            "reconciliation": report.model_dump(mode="json"),
         }
 
     def _latest_topic_summary(self, topic: str) -> dict[str, Any]:
@@ -697,9 +1098,12 @@ class OperatorQueryService:
         return {
             "reconciliation_id": report.reconciliation_id,
             "severity": report.severity,
+            "review_required": report.review_required,
             "halt_required": report.halt_required,
+            "mismatch_categories": report.mismatch_categories,
             "mismatch_reasons": report.mismatch_reasons,
             "safety_impacts": report.safety_impacts,
+            "recommended_operator_action": report.recommended_operator_action,
             "exchange_comparison_enabled": report.exchange_comparison_enabled,
         }
 
@@ -715,10 +1119,12 @@ class OperatorQueryService:
             "decision_chain_issues": result.decision_chain_issues,
             "execution_chain_issues": result.execution_chain_issues,
             "audit_issues": result.audit_issues,
+            "baseline_switch_count": result.baseline_switch_count,
+            "baseline_switch_issues": result.baseline_switch_issues,
             "healthy": result.divergence_count == 0,
         }
 
-    def _append_event(self, *, topic: str, key: str, payload_model: Any) -> None:
+    def _append_event(self, *, topic: str, key: str, payload_model: Any) -> EventEnvelope:
         envelope = build_envelope(
             topic=topic,
             key=key,
@@ -726,6 +1132,64 @@ class OperatorQueryService:
             source_component="operator_api",
         )
         self.runtime.event_store.append(envelope)
+        return envelope
+
+    def _update_recovery_status_for_report(self, report) -> None:
+        recovery_state = self.runtime.recovery_status.recovery_state
+        if report.halt_required:
+            recovery_state = "resume_blocked"
+        elif report.review_required and recovery_state not in {"rebaseline_pending", "rebaseline_completed"}:
+            recovery_state = "review_required"
+        elif not self.runtime.kill_switch.halted and recovery_state not in {"rebaseline_pending", "rebaseline_completed"}:
+            recovery_state = "normal_operation"
+        self.runtime.recovery_status = self.runtime.recovery_status.model_copy(
+            update={
+                "latest_reconciliation_id": report.reconciliation_id,
+                "latest_reconciliation_severity": report.severity,
+                "recovered_reconciliation_available": True,
+                "recovery_state": recovery_state,
+                "review_required": report.review_required,
+                "rebaseline_available": report.review_required or report.halt_required,
+                "resume_blocked_reasons": self._resume_check(include_kill_switch=False)["blockers"],
+            }
+        )
+
+    def _resume_check(self, *, include_kill_switch: bool) -> dict[str, Any]:
+        health_snapshot = self.runtime.health_service.snapshot()
+        blockers = list(health_snapshot.blockers)
+        if not include_kill_switch:
+            blockers = [blocker for blocker in blockers if blocker != "kill_switch_active"]
+        latest_reconciliation = self.runtime.reconciliation_repo.latest()
+        if latest_reconciliation is not None:
+            if latest_reconciliation.halt_required and "reconciliation_halt_required" not in blockers:
+                blockers.append("reconciliation_halt_required")
+            if latest_reconciliation.review_required and "operator_rebaseline_required" not in blockers:
+                blockers.append("operator_rebaseline_required")
+        if self.runtime.recovery_status.recovery_state == "rebaseline_pending" and "rebaseline_in_progress" not in blockers:
+            blockers.append("rebaseline_in_progress")
+        if self.runtime.mode_controller.mode == "guarded_live":
+            blockers.extend(
+                blocker
+                for blocker in self.runtime.execution_adapter.readiness().get("submit_blocked_reasons", [])
+                if blocker not in blockers
+            )
+        return {"blockers": blockers, "runnable": not blockers}
+
+    def _baseline_switch_history(
+        self,
+        *,
+        as_of_ts: str | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        events = self.runtime.event_store.by_topic(topics.ACCOUNT_BASELINES)
+        if as_of_ts is not None:
+            events = [event for event in events if event.payload.get("imported_at") <= as_of_ts]
+        rows = []
+        for event in events[-limit:]:
+            payload = dict(event.payload)
+            payload["_event_id"] = event.event_id
+            rows.append(payload)
+        return rows
 
     def _persist_blocker_snapshot(
         self,
@@ -779,6 +1243,12 @@ class OperatorQueryService:
             recommended_action = "Enable the guarded simulated submit flags only if you intend to test demo exchange submission."
         elif blocker == "real_money_live_not_supported":
             recommended_action = "Do not attempt real-money live trading in this repository."
+        elif blocker == "operator_rebaseline_required":
+            recommended_action = "Review the exchange/local divergence and accept the current exchange state as a new baseline only if it is expected."
+        elif blocker == "rebaseline_in_progress":
+            recommended_action = "Wait for the explicit operator re-baseline action to complete before attempting to resume execution."
+        elif blocker == "resume_blocked":
+            recommended_action = "Inspect reconciliation, freshness, and recovery state before resuming execution."
         return {
             "blocker": blocker,
             "subsystem": subsystem,

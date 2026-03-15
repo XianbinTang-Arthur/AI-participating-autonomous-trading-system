@@ -7,11 +7,12 @@ from typing import Any
 
 import yaml
 
+from aats.bootstrap.logging import get_logger, log_event
 from aats.bootstrap.metrics import MetricsRegistry
 from aats.bootstrap.settings import AATSSettings
 from aats.bus.memory_bus import InMemoryEventBus
 from aats.events import topics
-from aats.events.envelopes import parse_payload
+from aats.events.envelopes import build_envelope, parse_payload
 from aats.schemas.decision import PositionTarget
 from aats.services.ai_service.inference import AIInferenceService
 from aats.services.ai_service.prompt_builder import PromptBuilder
@@ -26,6 +27,7 @@ from aats.services.decision_engine.trigger_policy import DecisionTriggerPolicy
 from aats.services.execution_engine.exchange_adapter import ExchangeAdapter
 from aats.services.execution_engine.okx_account import OKXAccountService
 from aats.services.execution_engine.okx_adapter import OKXExecutionAdapter
+from aats.services.execution_engine.baseline_import import AccountBaselineImportService
 from aats.services.execution_engine.recovery import ExecutionRecoveryService
 from aats.services.execution_engine.okx_rest import OKXRESTClient
 from aats.services.execution_engine.order_manager import OrderManager
@@ -62,6 +64,7 @@ from aats.storage.reconciliation_repo_postgres import PostgresReconciliationRepo
 from aats.storage.session import DatabaseRuntime, create_database_runtime, create_schema
 from aats.schemas.system import RecoveryStatus
 from aats.schemas.common import utc_now
+from aats.schemas.operator import ExecutionErrorSummary
 
 
 def load_yaml_config(environment: str, profile: str, config_dir: str | Path = "configs") -> dict[str, Any]:
@@ -131,10 +134,14 @@ class ApplicationRuntime:
     replay_validation_history: list[dict[str, Any]] = field(default_factory=list)
     database_runtime: DatabaseRuntime | None = None
     background_tasks: list[asyncio.Task[Any]] = field(default_factory=list)
+    logger: Any = field(default_factory=lambda: get_logger("aats.runtime"))
 
     async def start_background_tasks(self) -> None:
         if self.settings.market_data_backend == "okx":
             await self.market_gateway.start()
+        self.background_tasks.append(
+            asyncio.create_task(self._refresh_reconciliation_loop(), name="aats_reconciliation_refresh")
+        )
         if self.settings.account_backend == "okx" and self.settings.account_read_enabled:
             self.background_tasks.append(
                 asyncio.create_task(self._refresh_account_loop(), name="aats_okx_account_refresh")
@@ -161,17 +168,69 @@ class ApplicationRuntime:
         while True:
             try:
                 await self.account_service.refresh()
-            except Exception:
-                pass
+            except Exception as exc:
+                self._record_background_failure(subsystem="account_refresh", exc=exc)
             await asyncio.sleep(self.settings.okx_account_refresh_interval_seconds)
 
     async def _sync_execution_loop(self) -> None:
         while True:
             try:
                 await self.order_manager.sync_exchange_state()
-            except Exception:
-                pass
+            except Exception as exc:
+                self._record_background_failure(subsystem="execution_sync", exc=exc)
             await asyncio.sleep(self.settings.okx_execution_sync_interval_seconds)
+
+    async def _refresh_reconciliation_loop(self) -> None:
+        interval_seconds = max(
+            0.5,
+            min(self.settings.reconciliation_stale_after_seconds / 2.0, 60.0),
+        )
+        while True:
+            try:
+                await self.reconciliation_service.validate_now(reason="background_refresh")
+            except Exception as exc:
+                self._record_background_failure(subsystem="reconciliation_refresh", exc=exc)
+            await asyncio.sleep(interval_seconds)
+
+    def _record_background_failure(self, *, subsystem: str, exc: Exception) -> None:
+        message = f"{subsystem}_failed: {exc}"
+        log_event(
+            self.logger,
+            "background_loop_failed",
+            level="error",
+            subsystem=subsystem,
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+        latest = self.event_store.latest(topics.EXECUTION_ERROR_SUMMARIES)
+        if latest is not None:
+            payload = latest.payload
+            if payload.get("subsystem") == subsystem and payload.get("message") == message:
+                return
+        self.event_store.append(
+            build_envelope(
+                topic=topics.EXECUTION_ERROR_SUMMARIES,
+                key=subsystem,
+                payload_model=ExecutionErrorSummary(
+                    subsystem=subsystem,
+                    severity="error",
+                    message=message,
+                    observed_at=utc_now(),
+                ),
+                source_component="runtime",
+            )
+        )
+
+
+def _validate_runtime_settings(settings: AATSSettings) -> None:
+    guarded_simulated_submit_enabled = (
+        settings.mode == "guarded_live"
+        and settings.execution_backend == "okx"
+        and settings.live_submit_enabled
+        and not settings.guarded_execution_dry_run
+    )
+    if guarded_simulated_submit_enabled and settings.storage_mode == "memory":
+        raise ValueError("guarded_simulated_submit_requires_persistent_storage")
 
 
 def build_storage_backends(settings: AATSSettings) -> StorageBackends:
@@ -230,6 +289,7 @@ async def build_runtime(
     bootstrap_portfolio_snapshot: bool = True,
 ) -> ApplicationRuntime:
     runtime_settings = settings or load_settings()
+    _validate_runtime_settings(runtime_settings)
     storage = build_storage_backends(runtime_settings)
     metrics = MetricsRegistry()
     bus = InMemoryEventBus(
@@ -256,6 +316,7 @@ async def build_runtime(
 
     okx_client = OKXRESTClient(settings=runtime_settings)
     account_service = OKXAccountService(settings=runtime_settings, client=okx_client)
+    baseline_import_service = AccountBaselineImportService(event_store=storage.event_store)
     bootstrap_from_exchange = (
         runtime_settings.bootstrap_portfolio_from_exchange
         and runtime_settings.account_backend == "okx"
@@ -433,13 +494,27 @@ async def build_runtime(
 
     if runtime_settings.account_backend == "okx" and runtime_settings.account_read_enabled:
         account_snapshot = await account_service.refresh(force=True)
+        imported_baseline = None
+        imported_baseline_event_id = None
         if (
             bootstrap_from_exchange
             and account_snapshot is not None
             and storage.portfolio_repo.latest() is None
         ):
-            portfolio_service.state.load_exchange_snapshot(account_snapshot)
-    recovery_artifacts = recovery_service.recover(portfolio_state=portfolio_service.state)
+            imported = baseline_import_service.import_snapshot(
+                exchange_snapshot=account_snapshot,
+                portfolio_state=portfolio_service.state,
+            )
+            imported_baseline = imported.snapshot
+            imported_baseline_event_id = imported.event_id
+    else:
+        imported_baseline = None
+        imported_baseline_event_id = None
+    recovery_artifacts = recovery_service.recover(
+        portfolio_state=portfolio_service.state,
+        account_baseline=imported_baseline,
+        account_baseline_event_id=imported_baseline_event_id,
+    )
     if (
         bootstrap_portfolio_snapshot
         and storage.portfolio_repo.latest() is None

@@ -3,323 +3,438 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>AATS Flight Deck</title>
+  <title>AATS Operator Console</title>
   <link rel="stylesheet" href="/ui/app.css">
 </head>
 <body>
-  <div class="app-shell">
-    <header class="masthead">
-      <div class="masthead-copy">
-        <p class="eyebrow">AI Autonomous Trading System</p>
-        <h1>Operator Flight Deck</h1>
-        <p class="lead">
-          A focused control surface for the live runtime. Start with system posture, move into
-          decisions, then inspect execution and diagnostics only when needed.
+  <div class="console-shell">
+    <header class="console-topbar">
+      <div class="brand-block">
+        <p class="brand-kicker">AI Autonomous Trading System</p>
+        <h1>AATS Operator Console</h1>
+        <p class="brand-copy">
+          Guarded execution posture, decision observability, reconciliation visibility, and operator
+          controls in one live console.
         </p>
-        <div class="masthead-strip">
-          <span id="runtimeStateChip" class="pill pill-neutral">unknown</span>
-          <span id="operatingStateChip" class="pill pill-outline">operating state</span>
-          <span id="executionRouteChip" class="pill pill-outline">route</span>
-          <span id="submitPostureChip" class="pill pill-outline">submit posture</span>
-        </div>
       </div>
 
-      <aside class="command-dock">
-        <section class="dock-card">
-          <div class="dock-card-head">
-            <div>
-              <p class="eyebrow eyebrow-tight">Access</p>
-              <h2>Command Dock</h2>
-            </div>
-            <span id="authStateChip" class="pill pill-outline">anonymous</span>
+      <div class="topbar-side">
+        <div class="session-card">
+          <div>
+            <p class="section-kicker">Operator Session</p>
+            <h2>Control Surface</h2>
+            <p id="sessionIdentityValue" class="brand-copy">session unavailable</p>
+            <p id="sessionRoleValue" class="detail-meta">role: anonymous</p>
           </div>
-          <label for="apiKeyInput" class="label">X-AATS-API-Key</label>
-          <div class="auth-row">
-            <input id="apiKeyInput" type="password" placeholder="Load read or write key when operator auth is enabled">
-            <button id="saveApiKeyButton" class="button button-primary">Save</button>
-            <button id="clearApiKeyButton" class="button button-ghost">Clear</button>
+          <div class="session-actions">
+            <span id="authStateChip" class="status-badge status-neutral">anonymous</span>
+            <button id="logoutButton" class="action-button action-muted">Logout</button>
           </div>
-          <div class="dock-actions">
-            <button id="refreshButton" class="button button-primary">Refresh</button>
-            <button id="haltButton" class="button button-danger">Safe Halt</button>
-            <button id="resumeButton" class="button button-secondary">Resume</button>
-            <button id="reconcileButton" class="button button-ghost">Validate Reconciliation</button>
-          </div>
-          <div class="dock-footer">
-            <label class="toggle">
-              <input id="autoRefreshToggle" type="checkbox" checked>
-              <span>Auto refresh</span>
-            </label>
-            <span id="lastRefreshLabel" class="meta">Not refreshed yet</span>
-          </div>
-        </section>
-      </aside>
+        </div>
+        <div class="runtime-badges">
+          <span id="runtimeStateChip" class="status-badge status-neutral">unknown</span>
+          <span id="operatingStateChip" class="status-badge status-outline">operating state</span>
+          <span id="executionRouteChip" class="status-badge status-outline">execution route</span>
+          <span id="submitPostureChip" class="status-badge status-outline">submit posture</span>
+        </div>
+      </div>
     </header>
 
-    <section id="bannerContainer" class="banner-stack"></section>
-
-    <section class="status-ribbon">
-      <article class="status-card">
-        <span class="status-label">Runtime</span>
-        <strong id="systemCardValue">-</strong>
-        <small id="systemCardMeta">-</small>
+    <section class="runtime-strip" aria-label="Runtime posture">
+      <article class="runtime-card">
+        <p class="metric-label">Overall State</p>
+        <strong id="stripOverallValue" class="metric-value">-</strong>
+        <span id="stripOverallMeta" class="metric-meta">-</span>
       </article>
-      <article class="status-card">
-        <span class="status-label">Portfolio Equity</span>
-        <strong id="portfolioCardValue">-</strong>
-        <small id="portfolioCardMeta">-</small>
+      <article class="runtime-card">
+        <p class="metric-label">Mode</p>
+        <strong id="stripModeValue" class="metric-value">-</strong>
+        <span id="stripModeMeta" class="metric-meta">-</span>
       </article>
-      <article class="status-card">
-        <span class="status-label">Latest Decision</span>
-        <strong id="decisionCardValue">-</strong>
-        <small id="decisionCardMeta">-</small>
+      <article class="runtime-card">
+        <p class="metric-label">Execution Posture</p>
+        <strong id="stripExecutionValue" class="metric-value">-</strong>
+        <span id="stripExecutionMeta" class="metric-meta">-</span>
       </article>
-      <article class="status-card">
-        <span class="status-label">Execution Posture</span>
-        <strong id="executionCardValue">-</strong>
-        <small id="executionCardMeta">-</small>
+      <article class="runtime-card">
+        <p class="metric-label">Recovery</p>
+        <strong id="stripRecoveryValue" class="metric-value">-</strong>
+        <span id="stripRecoveryMeta" class="metric-meta">-</span>
+      </article>
+      <article class="runtime-card">
+        <p class="metric-label">Freshness</p>
+        <strong id="stripFreshnessValue" class="metric-value">-</strong>
+        <span id="stripFreshnessMeta" class="metric-meta">-</span>
+      </article>
+      <article class="runtime-card">
+        <p class="metric-label">Portfolio Equity</p>
+        <strong id="stripEquityValue" class="metric-value">-</strong>
+        <span id="stripEquityMeta" class="metric-meta">-</span>
       </article>
     </section>
 
-    <nav class="view-nav" aria-label="Primary workspace views">
-      <button class="view-tab is-active" data-view="overview">Overview</button>
-      <button class="view-tab" data-view="decisions">Decisions</button>
-      <button class="view-tab" data-view="execution">Execution</button>
-      <button class="view-tab" data-view="diagnostics">Diagnostics</button>
+    <section class="command-bar" aria-label="Operator actions">
+      <div class="command-group command-auth">
+        <div class="command-head">
+          <p class="section-kicker">Access</p>
+          <h2>Signed-In Operator</h2>
+        </div>
+        <div class="fact-grid">
+          <div class="fact-row">
+            <span class="fact-key">Identity</span>
+            <strong id="sessionCardIdentity" class="fact-value">-</strong>
+          </div>
+          <div class="fact-row">
+            <span class="fact-key">Role</span>
+            <strong id="sessionCardRole" class="fact-value">-</strong>
+          </div>
+          <div class="fact-row">
+            <span class="fact-key">Auth Source</span>
+            <strong id="sessionCardSource" class="fact-value">-</strong>
+          </div>
+        </div>
+      </div>
+
+      <div class="command-group command-actions">
+        <div class="command-head">
+          <p class="section-kicker">Runtime Actions</p>
+          <h2>Operator Commands</h2>
+        </div>
+        <div class="action-row">
+          <button id="refreshButton" class="action-button action-primary">Refresh</button>
+          <button id="reconcileButton" class="action-button action-secondary">Run Reconciliation Check</button>
+          <button id="rebaselineButton" class="action-button action-warning">Accept Current State as Baseline</button>
+          <button id="resumeButton" class="action-button action-muted">Resume</button>
+          <button id="haltButton" class="action-button action-danger">Safe Halt</button>
+        </div>
+        <span id="actionPermissionHint" class="command-meta permission-note">Evaluating control permissions.</span>
+      </div>
+
+      <div class="command-group command-runtime">
+        <div class="command-head">
+          <p class="section-kicker">Runtime Behavior</p>
+          <h2>Session Options</h2>
+        </div>
+        <label class="toggle-switch" for="autoRefreshToggle">
+          <input id="autoRefreshToggle" type="checkbox" checked>
+          <span>Auto refresh every 5 seconds</span>
+        </label>
+        <span id="lastRefreshLabel" class="command-meta">Not refreshed yet</span>
+      </div>
+    </section>
+
+    <section id="bannerContainer" class="alert-stack" aria-live="polite"></section>
+
+    <nav class="workspace-nav" aria-label="Primary console views">
+      <button class="workspace-tab is-active" data-view="overview">Overview</button>
+      <button class="workspace-tab" data-view="decisions">Decisions</button>
+      <button class="workspace-tab" data-view="execution">Execution</button>
+      <button class="workspace-tab" data-view="diagnostics">Diagnostics</button>
     </nav>
 
     <main class="workspace">
-      <section id="view-overview" class="view is-active" data-view="overview">
-        <div class="view-head">
+      <section id="view-overview" class="workspace-view is-active" data-view="overview">
+        <div class="page-head">
           <div>
-            <p class="eyebrow eyebrow-tight">Live Posture</p>
+            <p class="section-kicker">Runtime Landing</p>
             <h2>Overview</h2>
           </div>
-          <p class="meta">What state the system is in right now, whether it can execute, and what needs attention.</p>
+          <p class="page-copy">System posture, blockers, portfolio state, and the latest decision outcome.</p>
         </div>
-        <div class="view-grid view-grid-overview">
-          <section class="panel panel-emphasis">
+
+        <div class="panel-grid overview-grid">
+          <section class="panel panel-hero">
             <div class="panel-head">
               <div>
-                <h3>Flight Status</h3>
-                <p class="meta">Health, freshness, and safety posture.</p>
+                <h3>Latest Decision Spotlight</h3>
+                <p class="panel-copy">The newest decision, target posture, and whether execution can proceed.</p>
               </div>
-              <button id="inspectSystemButton" class="button button-ghost">Inspect</button>
+              <button id="inspectLatestDecisionButton" class="action-button action-muted">Inspect</button>
             </div>
-            <div id="overviewStatus" class="fact-stack"></div>
+            <div id="overviewDecisionSpotlight" class="panel-content"></div>
           </section>
 
           <section class="panel">
             <div class="panel-head">
               <div>
-                <h3>Mode Contract</h3>
-                <p class="meta">What this runtime is allowed to do.</p>
+                <h3>System Posture</h3>
+                <p class="panel-copy">Health, readiness, and execution gating.</p>
               </div>
-              <button id="inspectRuntimeButton" class="button button-ghost">Runtime</button>
+              <button id="inspectSystemButton" class="action-button action-muted">System Detail</button>
             </div>
-            <div id="overviewMode" class="fact-stack"></div>
+            <div id="overviewPosture" class="panel-content"></div>
           </section>
 
           <section class="panel">
             <div class="panel-head">
               <div>
-                <h3>Portfolio Snapshot</h3>
-                <p class="meta">Current capital and exposure.</p>
+                <h3>Portfolio Summary</h3>
+                <p class="panel-copy">Equity, exposure, balances, and current holdings.</p>
               </div>
-              <button id="inspectPortfolioButton" class="button button-ghost">Inspect</button>
+              <button id="inspectPortfolioButton" class="action-button action-muted">Portfolio Detail</button>
             </div>
-            <div id="overviewPortfolio" class="fact-stack"></div>
+            <div id="overviewPortfolio" class="panel-content"></div>
           </section>
 
           <section class="panel">
             <div class="panel-head">
               <div>
                 <h3>Current Blockers</h3>
-                <p class="meta">Only the blockers that matter now.</p>
+                <p class="panel-copy">What is stopping execution or degrading the runtime right now.</p>
               </div>
-              <span id="overviewBlockerStamp" class="meta">waiting</span>
+              <span id="overviewBlockerStamp" class="panel-stamp">waiting</span>
             </div>
-            <div id="overviewBlockers" class="signal-list"></div>
+            <div id="overviewBlockers" class="panel-content"></div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head">
+              <div>
+                <h3>Recovery Control</h3>
+                <p class="panel-copy">Baseline takeover, review posture, and whether resume is actually safe.</p>
+              </div>
+              <button id="inspectRecoveryButton" class="action-button action-muted">Recovery Detail</button>
+            </div>
+            <div id="overviewRecovery" class="panel-content"></div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head">
+              <div>
+                <h3>Operational Metrics</h3>
+                <p class="panel-copy">High-signal counts for decisions, orders, fills, and mismatches.</p>
+              </div>
+            </div>
+            <div id="overviewMetrics" class="panel-content"></div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head">
+              <div>
+                <h3>Recent Operational Timeline</h3>
+                <p class="panel-copy">Latest state changes, validations, and error signals.</p>
+              </div>
+            </div>
+            <div id="overviewTimeline" class="panel-content"></div>
           </section>
         </div>
       </section>
 
-      <section id="view-decisions" class="view" data-view="decisions">
-        <div class="view-head">
+      <section id="view-decisions" class="workspace-view" data-view="decisions">
+        <div class="page-head">
           <div>
-            <p class="eyebrow eyebrow-tight">Strategy Output</p>
+            <p class="section-kicker">Decision Investigation</p>
             <h2>Decisions</h2>
           </div>
-          <p class="meta">Latest decision summary up front, then a short rolling feed of recent decisions.</p>
+          <p class="page-copy">Trace from context and assessments through policy, risk, execution, and audit.</p>
         </div>
-        <div class="view-grid view-grid-decisions">
-          <section class="panel panel-emphasis">
+
+        <div class="panel-grid decision-grid">
+          <section class="panel panel-hero">
             <div class="panel-head">
               <div>
-                <h3>Latest Decision</h3>
-                <p class="meta">Target, policy, risk, and execution readiness in one place.</p>
+                <h3>Latest Decision Detail</h3>
+                <p class="panel-copy">Decision summary with target, policy, risk, and execution outcome.</p>
               </div>
-              <button id="inspectLatestDecisionButton" class="button button-ghost">Full Detail</button>
             </div>
-            <div id="decisionSpotlight" class="spotlight"></div>
+            <div id="decisionSpotlight" class="panel-content"></div>
           </section>
 
           <section class="panel">
+            <div class="panel-head">
+              <div>
+                <h3>Decision Lookup</h3>
+                <p class="panel-copy">Open any decision ID and inspect its full chain in the side panel.</p>
+              </div>
+            </div>
+            <label for="decisionLookupInput" class="field-label">Decision ID</label>
+            <div class="field-row field-row-compact">
+              <input id="decisionLookupInput" type="text" placeholder="decision_xxx">
+              <button id="loadDecisionButton" class="action-button action-secondary">Open Detail</button>
+            </div>
+          </section>
+
+          <section class="panel panel-wide">
             <div class="panel-head">
               <div>
                 <h3>Recent Decisions</h3>
-                <p class="meta">Short feed, newest first.</p>
+                <p class="panel-copy">Short rolling history for operator review.</p>
               </div>
             </div>
-            <div id="decisionFeed" class="feed-list"></div>
-          </section>
-
-          <section class="panel">
-            <div class="panel-head">
-              <div>
-                <h3>Inspect By Decision ID</h3>
-                <p class="meta">Jump straight to a specific audit chain.</p>
-              </div>
-            </div>
-            <label for="decisionLookupInput" class="label">Decision ID</label>
-            <div class="lookup-row">
-              <input id="decisionLookupInput" type="text" placeholder="decision_xxx">
-              <button id="loadDecisionButton" class="button button-secondary">Open</button>
-            </div>
+            <div id="decisionTable" class="panel-content"></div>
           </section>
         </div>
       </section>
 
-      <section id="view-execution" class="view" data-view="execution">
-        <div class="view-head">
+      <section id="view-execution" class="workspace-view" data-view="execution">
+        <div class="page-head">
           <div>
-            <p class="eyebrow eyebrow-tight">Orders & Fills</p>
+            <p class="section-kicker">Execution Control</p>
             <h2>Execution</h2>
           </div>
-          <p class="meta">Submit posture, latest order flow, and the most recent fills without raw dumps.</p>
+          <p class="page-copy">Inspect current execution posture, recent orders and fills, and any execution failures.</p>
         </div>
-        <div class="view-grid view-grid-execution">
-          <section class="panel panel-emphasis">
+
+        <div class="panel-grid execution-grid">
+          <section class="panel panel-hero">
             <div class="panel-head">
               <div>
                 <h3>Execution Posture</h3>
-                <p class="meta">Can the system submit, and if not, why not.</p>
+                <p class="panel-copy">Submit route, readiness, latest order, latest fill, and recovery posture.</p>
               </div>
-              <button id="inspectLatestOrderButton" class="button button-ghost">Latest Order</button>
+              <div class="inline-actions">
+                <button id="inspectLatestOrderButton" class="action-button action-muted">Latest Order</button>
+                <button id="inspectLatestFillButton" class="action-button action-muted">Latest Fill</button>
+              </div>
             </div>
-            <div id="executionSpotlight" class="spotlight"></div>
+            <div id="executionSpotlight" class="panel-content"></div>
           </section>
 
           <section class="panel">
             <div class="panel-head">
               <div>
-                <h3>Recent Orders</h3>
-                <p class="meta">Lifecycle state and venue context.</p>
-              </div>
-            </div>
-            <div id="orderFeed" class="feed-list"></div>
-          </section>
-
-          <section class="panel">
-            <div class="panel-head">
-              <div>
-                <h3>Recent Fills</h3>
-                <p class="meta">Only the newest execution confirms.</p>
-              </div>
-              <button id="inspectLatestFillButton" class="button button-ghost">Latest Fill</button>
-            </div>
-            <div id="fillFeed" class="feed-list"></div>
-          </section>
-
-          <section class="panel">
-            <div class="panel-head">
-              <div>
-                <h3>Direct Lookup</h3>
-                <p class="meta">Inspect a specific order or fill without leaving the page.</p>
+                <h3>Order Lookup</h3>
+                <p class="panel-copy">Jump directly to an order or fill by identifier.</p>
               </div>
             </div>
             <div class="lookup-stack">
-              <label for="orderLookupInput" class="label">Order ID</label>
-              <div class="lookup-row">
+              <label for="orderLookupInput" class="field-label">Order ID</label>
+              <div class="field-row field-row-compact">
                 <input id="orderLookupInput" type="text" placeholder="client_order_id">
-                <button id="loadOrderButton" class="button button-secondary">Open</button>
+                <button id="loadOrderButton" class="action-button action-secondary">Open Order</button>
               </div>
-              <label for="fillLookupInput" class="label">Fill ID</label>
-              <div class="lookup-row">
+              <label for="fillLookupInput" class="field-label">Fill ID</label>
+              <div class="field-row field-row-compact">
                 <input id="fillLookupInput" type="text" placeholder="fill_id">
-                <button id="loadFillButton" class="button button-secondary">Open</button>
+                <button id="loadFillButton" class="action-button action-secondary">Open Fill</button>
               </div>
             </div>
           </section>
-        </div>
-      </section>
 
-      <section id="view-diagnostics" class="view" data-view="diagnostics">
-        <div class="view-head">
-          <div>
-            <p class="eyebrow eyebrow-tight">Diagnostics</p>
-            <h2>Diagnostics</h2>
-          </div>
-          <p class="meta">Reconciliation, replay, runtime metrics, and execution failures.</p>
-        </div>
-        <div class="view-grid view-grid-diagnostics">
-          <section class="panel panel-emphasis">
+          <section class="panel panel-wide">
             <div class="panel-head">
               <div>
-                <h3>Reconciliation</h3>
-                <p class="meta">Latest exchange-aware reconciliation result.</p>
+                <h3>Recent Orders</h3>
+                <p class="panel-copy">Lifecycle state, venue, quantity, and linked decision context.</p>
               </div>
-              <button id="inspectReconciliationButton" class="button button-ghost">Detail</button>
             </div>
-            <div id="diagnosticReconciliation" class="spotlight"></div>
+            <div id="orderTable" class="panel-content"></div>
           </section>
 
-          <section class="panel">
+          <section class="panel panel-wide">
             <div class="panel-head">
               <div>
-                <h3>Runtime Metrics</h3>
-                <p class="meta">Compact operational counters.</p>
+                <h3>Recent Fills</h3>
+                <p class="panel-copy">Newest execution confirmations and pricing details.</p>
               </div>
             </div>
-            <div id="diagnosticMetrics" class="fact-stack"></div>
+            <div id="fillTable" class="panel-content"></div>
           </section>
 
           <section class="panel">
             <div class="panel-head">
               <div>
                 <h3>Execution Errors</h3>
-                <p class="meta">Recent failures or blocked submits.</p>
+                <p class="panel-copy">Blocked submits, rejects, and recent execution failures.</p>
               </div>
             </div>
-            <div id="diagnosticErrors" class="signal-list"></div>
+            <div id="executionErrorsPanel" class="panel-content"></div>
+          </section>
+        </div>
+      </section>
+
+      <section id="view-diagnostics" class="workspace-view" data-view="diagnostics">
+        <div class="page-head">
+          <div>
+            <p class="section-kicker">Reliability and Forensics</p>
+            <h2>Diagnostics</h2>
+          </div>
+          <p class="page-copy">Reconciliation, replay, account freshness, blockers, and runtime integrity context.</p>
+        </div>
+
+        <div class="panel-grid diagnostics-grid">
+          <section class="panel panel-hero">
+            <div class="panel-head">
+              <div>
+                <h3>Reconciliation Summary</h3>
+                <p class="panel-copy">Latest severity, mismatch summary, and validation posture.</p>
+              </div>
+              <button id="inspectReconciliationButton" class="action-button action-muted">Inspect</button>
+            </div>
+            <div id="diagnosticReconciliation" class="panel-content"></div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head">
+              <div>
+                <h3>Recovery and Baseline</h3>
+                <p class="panel-copy">Current recovery state, baseline takeover status, and operator repair posture.</p>
+              </div>
+              <button id="inspectRecoveryDiagnosticsButton" class="action-button action-muted">Inspect</button>
+            </div>
+            <div id="diagnosticRecovery" class="panel-content"></div>
           </section>
 
           <section class="panel">
             <div class="panel-head">
               <div>
                 <h3>Replay Status</h3>
-                <p class="meta">Most recent replay validation posture.</p>
+                <p class="panel-copy">Latest validation health, baseline switches, and divergence count.</p>
               </div>
             </div>
-            <div id="diagnosticReplay" class="fact-stack"></div>
+            <div id="diagnosticReplay" class="panel-content"></div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head">
+              <div>
+                <h3>Account State</h3>
+                <p class="panel-copy">Backend, freshness, readiness, and account-side blockers.</p>
+              </div>
+              <button id="inspectRuntimeButton" class="action-button action-muted">Runtime Detail</button>
+            </div>
+            <div id="diagnosticAccount" class="panel-content"></div>
+          </section>
+
+          <section class="panel panel-wide">
+            <div class="panel-head">
+              <div>
+                <h3>Blocker History</h3>
+                <p class="panel-copy">Recent blocker snapshots and their operator impact.</p>
+              </div>
+            </div>
+            <div id="diagnosticBlockers" class="panel-content"></div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head">
+              <div>
+                <h3>Runtime Metrics</h3>
+                <p class="panel-copy">Decision cadence and core runtime counters.</p>
+              </div>
+            </div>
+            <div id="diagnosticMetrics" class="panel-content"></div>
           </section>
         </div>
       </section>
     </main>
   </div>
 
-  <div id="detailDrawer" class="drawer" aria-hidden="true">
+  <div id="detailDrawer" class="detail-drawer" aria-hidden="true">
     <div id="drawerBackdrop" class="drawer-backdrop"></div>
     <aside class="drawer-panel" role="dialog" aria-modal="true" aria-labelledby="drawerTitle">
-      <div class="drawer-header">
+      <header class="drawer-header">
         <div>
-          <p class="eyebrow eyebrow-tight">Inspector</p>
-          <h2 id="drawerTitle">Detail</h2>
+          <p class="section-kicker">Detail Inspector</p>
+          <h2 id="drawerTitle">Operator Detail</h2>
         </div>
-        <button id="closeDrawerButton" class="button button-ghost">Close</button>
+        <button id="closeDrawerButton" class="action-button action-muted">Close</button>
+      </header>
+      <div id="drawerSummary" class="drawer-summary">
+        <div class="empty-state">Use a table action or lookup to inspect detail.</div>
       </div>
       <div id="drawerBody" class="drawer-body">
-        <div class="empty">Use a tab action or a direct lookup to inspect detail.</div>
+        <div class="empty-state">Raw detail is available once an item is selected.</div>
       </div>
     </aside>
   </div>

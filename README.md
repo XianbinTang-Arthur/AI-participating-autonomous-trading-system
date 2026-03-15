@@ -143,6 +143,7 @@ Submission is allowed only when all of the following are true:
 - `AATS_OKX_SIMULATED_TRADING=true`
 - `AATS_LIVE_SUBMIT_ENABLED=true`
 - `AATS_GUARDED_EXECUTION_DRY_RUN=false`
+- `AATS_STORAGE_MODE` is persistent; guarded simulated submit is rejected when `storage_mode=memory`
 - OKX demo credentials are configured
 - symbol is allowlisted
 - per-order notional and open-order caps pass
@@ -229,7 +230,8 @@ Frontend characteristics:
 - no separate Node build step
 - static HTML + CSS + vanilla JavaScript, served directly by FastAPI
 - works against the existing operator APIs
-- supports optional `X-AATS-API-Key` entry and local browser storage
+- supports operator login and authenticated browser sessions
+- preserves API-key compatibility for automation and non-browser tooling
 - graceful partial refresh: one failing panel does not blank the whole page
 - richer operator layout:
   - one minimal control page instead of many always-open panels
@@ -252,6 +254,7 @@ System and control:
 - `POST /system/mode`
 - `POST /system/halt`
 - `POST /system/resume`
+- `POST /system/rebaseline`
 
 Decision, policy, and risk visibility:
 - `GET /decision/latest`
@@ -329,16 +332,54 @@ Key operator semantics:
 - `/execution/errors` returns structured recent execution failures and rejections, backed by persisted error summaries
 - `/replay/status` and `/replay/validate/{decision_id}` expose the currently implemented replay-validation capability only; they do not claim recovery features that do not exist
 - `/reconciliation/validate` triggers an explicit reconciliation validation pass after startup or operator review, instead of relying only on the last stored report
+- reconciliation now exposes explicit mismatch categories such as:
+  - `historical_state_only`
+  - `external_manual_activity_detected`
+  - `local_fill_missing`
+  - `local_balance_divergence`
+  - `local_position_divergence`
+  - `local_open_order_divergence`
+  - `unsafe_unknown_state`
+- reconciliation severity is graded as:
+  - `CLEAN`
+  - `INFO`
+  - `SOFT_MISMATCH`
+  - `REVIEW_REQUIRED`
+  - `HARD_MISMATCH`
+- `REVIEW_REQUIRED` remains conservative and operator-visible, but is distinct from `HARD_MISMATCH`
+- truly unsafe unknown divergence and open-order divergence still trigger `halt_required`
+- `/system/recovery` now exposes explicit recovery states:
+  - `normal_operation`
+  - `review_required`
+  - `rebaseline_pending`
+  - `rebaseline_completed`
+  - `resume_blocked`
+- `POST /system/rebaseline` accepts the current exchange state as a new trusted baseline, persists that switch, and rebuilds the local portfolio baseline before any later resume
+- `POST /system/resume` now re-runs reconciliation and re-checks recovery blockers before clearing the halt; if the runtime is still unsafe it returns `resume_blocked`
 
 Operator API authentication:
+- browser users should sign in through `/login`; the operator console now uses authenticated session cookies instead of manual API-key entry
+- session auth supports explicit operator roles:
+  - `viewer`
+  - `operator`
+  - `admin`
 - header: `X-AATS-API-Key`
+- API keys remain as a compatibility path for automation and controlled non-browser access
+- when `AATS_OPERATOR_AUTH_ENABLED=false`, read endpoints remain open but write endpoints are denied unless `AATS_OPERATOR_UNSAFE_WRITE_WITHOUT_AUTH=true`
 - when `AATS_OPERATOR_AUTH_ENABLED=true`:
-  - read endpoints accept either the read key or write key
-  - write endpoints require the write key
-- config:
-  - `AATS_OPERATOR_READ_API_KEY`
-  - `AATS_OPERATOR_WRITE_API_KEY`
-- when auth is disabled, the API remains open for local development
+  - browser users authenticate through configured session login accounts plus `AATS_OPERATOR_SESSION_SECRET`
+  - read API keys map to viewer access
+  - write API keys map to admin-equivalent access
+  - session-authenticated `viewer` users can read but cannot execute control actions
+  - session-authenticated `operator` and `admin` users can execute control actions
+  - config:
+    - `AATS_OPERATOR_SESSION_SECRET`
+    - `AATS_OPERATOR_VIEWER_USERNAME` / `AATS_OPERATOR_VIEWER_PASSWORD`
+    - `AATS_OPERATOR_OPERATOR_USERNAME` / `AATS_OPERATOR_OPERATOR_PASSWORD`
+    - `AATS_OPERATOR_ADMIN_USERNAME` / `AATS_OPERATOR_ADMIN_PASSWORD`
+    - `AATS_OPERATOR_READ_API_KEY`
+    - `AATS_OPERATOR_WRITE_API_KEY`
+  - when auth is disabled, the API remains open for local development
 
 Blocked vs degraded vs halted:
 - `healthy`: no active execution blockers and no warning-only subsystem degradation
@@ -434,6 +475,53 @@ Operator persistence now records compact summaries into the existing event store
 - execution errors
 - replay validations
 - explicit reconciliation validations
+- startup account baseline imports
+
+## Startup Baseline Takeover
+
+The runtime now supports conservative startup baseline takeover for previously used exchange accounts.
+
+When all of the following are true:
+- `bootstrap_portfolio_from_exchange=true`
+- `account_backend=okx`
+- `account_read_enabled=true`
+- no trusted local portfolio snapshot is already present
+
+the runtime can:
+- read the current exchange balances, fills, positions/holdings, and open orders
+- persist an `account.baselines` startup event
+- initialize the local portfolio baseline from the imported exchange state
+- expose baseline takeover state through:
+  - `GET /system/health`
+  - `GET /system/runtime`
+  - `GET /account/state`
+  - `GET /system/recovery`
+
+Important semantics:
+- imported exchange baseline state is not treated as if it were produced by the current local decision chain
+- clean or non-empty accounts can both be imported as a startup baseline
+- imported baselines with open orders are treated conservatively and can require operator review before normal execution resumes
+
+## Operator-Confirmed Re-Baselining
+
+The runtime now supports explicit operator-confirmed re-baselining after manual intervention,
+historical-account divergence, or interrupted recovery.
+
+Operator flow:
+- detect divergence or `REVIEW_REQUIRED` / `HARD_MISMATCH`
+- keep the runtime halted
+- call `POST /system/rebaseline`
+- persist a new `account.baselines` switch point with `baseline_kind=operator_rebaseline`
+- rebuild the local portfolio baseline from the accepted exchange state
+- run reconciliation against that new trusted baseline
+- inspect `GET /system/recovery`
+- call `POST /system/resume` only after the runtime is actually resume-eligible
+
+Important semantics:
+- re-baselining is explicit and auditable; it is not an automatic repair
+- `rebaseline_completed` means the trusted baseline has been rebuilt, not that the runtime is already trading again
+- `resume_blocked` means a resume attempt re-checked freshness, reconciliation, and recovery blockers and kept the halt in place
+- baseline switch points remain visible through `GET /system/recovery`, `GET /system/runtime`, and replay validation summaries
 
 ## What Is Implemented
 

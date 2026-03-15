@@ -33,6 +33,10 @@ class ValidationRequest(BaseModel):
     reason: str = "operator_validate"
 
 
+class RebaselineRequest(BaseModel):
+    reason: str = "operator_rebaseline"
+
+
 def _runtime(request: Request) -> ApplicationRuntime:
     return cast(ApplicationRuntime, request.app.state.runtime)
 
@@ -105,7 +109,12 @@ async def halt(
     principal: OperatorPrincipal = Depends(require_write_access),
 ) -> dict[str, Any]:
     halt_reason = reason or (payload.reason if payload is not None else "manual_halt")
-    result = _query(request).halt(reason=halt_reason, actor_role=principal.role)
+    result = _query(request).halt(
+        reason=halt_reason,
+        actor_role=principal.role,
+        actor_identity=principal.identity,
+        auth_source=principal.auth_source,
+    )
     result["mode"] = RuntimeModeState(**_query(request).system_mode()).model_dump(mode="json")
     result["blockers"] = _query(request).blockers()
     return result
@@ -116,17 +125,37 @@ async def halt(
 async def resume(
     request: Request,
     payload: ResumeRequest | None = None,
-    _: OperatorPrincipal = Depends(require_write_access),
+    principal: OperatorPrincipal = Depends(require_write_access),
 ) -> dict[str, Any]:
     resume_reason = payload.reason if payload is not None else "manual_resume"
-    result = _query(request).resume(reason=resume_reason, actor_role=_.role)
+    result = await _query(request).resume(
+        reason=resume_reason,
+        actor_role=principal.role,
+        actor_identity=principal.identity,
+        auth_source=principal.auth_source,
+    )
     result["mode"] = RuntimeModeState(**_query(request).system_mode()).model_dump(mode="json")
     return result
 
 
 @router.get("/system/recovery")
 async def system_recovery(request: Request) -> dict[str, Any]:
-    return {"recovery": _runtime(request).recovery_status.model_dump(mode="json")}
+    return _query(request).system_recovery()
+
+
+@router.post("/system/rebaseline")
+async def system_rebaseline(
+    request: Request,
+    payload: RebaselineRequest | None = None,
+    principal: OperatorPrincipal = Depends(require_write_access),
+) -> dict[str, Any]:
+    reason = payload.reason if payload is not None else "operator_rebaseline"
+    return await _query(request).rebaseline(
+        reason=reason,
+        actor_role=principal.role,
+        actor_identity=principal.identity,
+        auth_source=principal.auth_source,
+    )
 
 
 @router.get("/decision/latest")
@@ -334,7 +363,12 @@ async def reconciliation_validate(
     principal: OperatorPrincipal = Depends(require_write_access),
 ) -> dict[str, Any]:
     reason = payload.reason if payload is not None else "operator_validate"
-    return await _query(request).validate_reconciliation(reason=reason, actor_role=principal.role)
+    return await _query(request).validate_reconciliation(
+        reason=reason,
+        actor_role=principal.role,
+        actor_identity=principal.identity,
+        auth_source=principal.auth_source,
+    )
 
 
 @router.get("/audit/latest")

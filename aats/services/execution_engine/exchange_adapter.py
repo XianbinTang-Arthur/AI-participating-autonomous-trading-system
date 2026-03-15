@@ -11,6 +11,9 @@ class ExchangeAdapter(ABC):
     async def submit(self, intent: OrderIntent) -> tuple[OrderState, list[FillEvent]]:
         raise NotImplementedError
 
+    def preview_client_order_id(self, intent: OrderIntent) -> str | None:
+        return None
+
     async def cancel(self, order_state: OrderState) -> tuple[OrderState, list[FillEvent]]:
         raise NotImplementedError
 

@@ -45,6 +45,41 @@ class _FailingAdapter:
         return {"backend": "okx", "exchange_submit_allowed": False, "submit_blocked_reasons": ["simulated_failure"]}
 
 
+class _PreviewingFailingAdapter(_FailingAdapter):
+    def preview_client_order_id(self, intent: OrderIntent) -> str | None:
+        return f"cl{intent.idempotency_key}"
+
+    async def submit(self, intent: OrderIntent):
+        state = OrderState(
+            decision_id=intent.decision_id,
+            intent_id=intent.intent_id,
+            symbol=intent.symbol,
+            client_order_id=f"cl{intent.idempotency_key}",
+            venue="OKX",
+            exchange_order_id=None,
+            status="FAILED",
+            submission_mode="guarded_simulated_submit",
+            submitted_ts=intent.created_at,
+            last_update_ts=intent.created_at,
+            requested_qty=intent.quantity,
+            filled_qty=0.0,
+            remaining_qty=intent.quantity,
+            average_fill_price=None,
+            fees=0.0,
+            execution_error="simulated_failure",
+            submission_payload={},
+        )
+        return state, []
+
+
+class _PreviewingExceptionAdapter(_FailingAdapter):
+    def preview_client_order_id(self, intent: OrderIntent) -> str | None:
+        return f"cl{intent.idempotency_key}"
+
+    async def submit(self, intent: OrderIntent):
+        raise RuntimeError("preview_exception")
+
+
 class TestOrderManagerExecutionErrorHistory(unittest.IsolatedAsyncioTestCase):
     async def test_failed_order_publishes_execution_error_summary(self) -> None:
         event_store = InMemoryEventStore()
@@ -86,6 +121,80 @@ class TestOrderManagerExecutionErrorHistory(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["decision_id"], "decision_error_1")
         self.assertEqual(payload["order_id"], "client_error_1")
         self.assertEqual(payload["message"], "simulated_failure")
+
+    async def test_preview_client_order_id_is_used_for_provisional_okx_states(self) -> None:
+        repo = InMemoryExecutionRepository()
+        manager = OrderManager(
+            bus=InMemoryEventBus(event_store=InMemoryEventStore(), persistence_mode="strict"),
+            adapter=_PreviewingFailingAdapter(),
+            execution_repo=repo,
+            kill_switch=KillSwitch(),
+        )
+        intent = OrderIntent(
+            intent_id="intent_error_2",
+            decision_id="decision_error_2",
+            symbol="BTC-USDT",
+            side="sell",
+            quantity=0.001,
+            execution_style="exchange",
+            order_type="market",
+            urgency="medium",
+            time_in_force="IOC",
+            reduce_only=False,
+            close_only=False,
+            idempotency_key="preview_id",
+        )
+        envelope = build_envelope(
+            topic=topics.ORDER_INTENTS,
+            key=intent.symbol,
+            payload_model=intent,
+            source_component="test",
+        )
+
+        await manager.handle_order_intent(
+            {"topic": topics.ORDER_INTENTS, "key": intent.symbol, "payload": envelope.model_dump(mode="json")}
+        )
+
+        self.assertIsNotNone(repo.get_order_state("clpreview_id"))
+        self.assertIsNone(repo.get_order_state("preview_id"))
+
+    async def test_preview_client_order_id_is_used_after_adapter_exception(self) -> None:
+        repo = InMemoryExecutionRepository()
+        manager = OrderManager(
+            bus=InMemoryEventBus(event_store=InMemoryEventStore(), persistence_mode="strict"),
+            adapter=_PreviewingExceptionAdapter(),
+            execution_repo=repo,
+            kill_switch=KillSwitch(),
+        )
+        intent = OrderIntent(
+            intent_id="intent_error_3",
+            decision_id="decision_error_3",
+            symbol="BTC-USDT",
+            side="buy",
+            quantity=0.001,
+            execution_style="exchange",
+            order_type="market",
+            urgency="medium",
+            time_in_force="IOC",
+            reduce_only=False,
+            close_only=False,
+            idempotency_key="preview_exception_id",
+        )
+        envelope = build_envelope(
+            topic=topics.ORDER_INTENTS,
+            key=intent.symbol,
+            payload_model=intent,
+            source_component="test",
+        )
+
+        await manager.handle_order_intent(
+            {"topic": topics.ORDER_INTENTS, "key": intent.symbol, "payload": envelope.model_dump(mode="json")}
+        )
+
+        persisted = repo.get_order_state("clpreview_exception_id")
+        self.assertIsNotNone(persisted)
+        self.assertEqual(persisted.status, "FAILED")
+        self.assertIsNone(repo.get_order_state("preview_exception_id"))
 
 
 if __name__ == "__main__":

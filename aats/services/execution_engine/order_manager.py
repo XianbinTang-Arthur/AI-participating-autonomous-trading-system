@@ -56,11 +56,17 @@ class OrderManager:
                 quantity=intent.quantity,
             ),
         )
+        preview_client_order_id_fn = getattr(self.adapter, "preview_client_order_id", None)
+        preview_client_order_id = (
+            preview_client_order_id_fn(intent)
+            if callable(preview_client_order_id_fn)
+            else None
+        ) or intent.idempotency_key or new_id("clord")
         created_state = OrderState(
             decision_id=intent.decision_id,
             intent_id=intent.intent_id,
             symbol=intent.symbol,
-            client_order_id=intent.idempotency_key or new_id("clord"),
+            client_order_id=preview_client_order_id,
             venue="OKX" if self.adapter.readiness().get("backend") == "okx" else "PAPER",
             exchange_order_id=None,
             status="CREATED",
@@ -90,7 +96,7 @@ class OrderManager:
                 decision_id=intent.decision_id,
                 intent_id=intent.intent_id,
                 symbol=intent.symbol,
-                client_order_id=intent.idempotency_key,
+                client_order_id=preview_client_order_id,
                 venue="OKX" if self.adapter.readiness().get("backend") == "okx" else "PAPER",
                 exchange_order_id=None,
                 status="FAILED",

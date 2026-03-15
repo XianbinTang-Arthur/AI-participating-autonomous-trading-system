@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Callable
 
 from aats.schemas.common import utc_now
+from aats.schemas.exchange import AccountBaselineSnapshot
 from aats.schemas.portfolio import PortfolioSnapshot
 from aats.schemas.execution import FillEvent
 from aats.schemas.reconciliation import ReconciliationReport
@@ -43,7 +44,13 @@ class ExecutionRecoveryService:
         self.bootstrap_portfolio_from_exchange = bootstrap_portfolio_from_exchange
         self.reconciliation_stale_after_seconds = reconciliation_stale_after_seconds
 
-    def recover(self, *, portfolio_state: PortfolioState) -> RecoveryArtifacts:
+    def recover(
+        self,
+        *,
+        portfolio_state: PortfolioState,
+        account_baseline: AccountBaselineSnapshot | None = None,
+        account_baseline_event_id: str | None = None,
+    ) -> RecoveryArtifacts:
         fills = self.execution_repo.fills()
         latest_snapshot = self.portfolio_repo.latest()
         latest_reconciliation = self.reconciliation_repo.latest()
@@ -53,6 +60,18 @@ class ExecutionRecoveryService:
         divergence_count = 0
         recovery_action: str | None = None
         safe_startup = True
+
+        if account_baseline is not None:
+            notes.append(account_baseline.baseline_status)
+            notes.extend(account_baseline.reason_codes)
+            if account_baseline.requires_operator_review:
+                self._halt_for_recovery(
+                    reason="baseline_import_requires_review",
+                    action="halted_imported_baseline_requires_review",
+                    notes=notes,
+                )
+                recovery_action = "halted_imported_baseline_requires_review"
+                safe_startup = False
 
         if latest_snapshot is not None:
             portfolio_state.load_portfolio_snapshot(
@@ -125,11 +144,19 @@ class ExecutionRecoveryService:
 
         status = RecoveryStatus(
             status=(
+                account_baseline.baseline_status
+                if account_baseline is not None
+                else
                 "recovered_halted"
                 if self.kill_switch.halted
                 else "recovered"
                 if latest_snapshot is not None or fills
                 else "cold_start"
+            ),
+            recovery_state=self._initial_recovery_state(
+                account_baseline=account_baseline,
+                halted=self.kill_switch.halted,
+                latest_reconciliation=latest_reconciliation,
             ),
             recovered_order_count=len(self.execution_repo.order_states()),
             recovered_fill_count=len(fills),
@@ -141,11 +168,67 @@ class ExecutionRecoveryService:
             open_order_count=len(open_orders),
             divergence_count=divergence_count,
             safe_startup=safe_startup and not self.kill_switch.halted,
+            safe_to_trade=safe_startup and not self.kill_switch.halted,
+            resume_eligible=safe_startup and not self.kill_switch.halted,
+            review_required=bool(
+                (account_baseline is not None and account_baseline.requires_operator_review)
+                or (latest_reconciliation is not None and latest_reconciliation.review_required)
+            ),
+            rebaseline_available=bool(
+                (account_baseline is not None and account_baseline.requires_operator_review)
+                or (latest_reconciliation is not None and latest_reconciliation.review_required)
+                or self.kill_switch.halted
+            ),
             halted=self.kill_switch.halted,
             recovery_action=recovery_action,
+            baseline_imported=account_baseline is not None,
+            baseline_status=account_baseline.baseline_status if account_baseline is not None else None,
+            baseline_imported_at=account_baseline.imported_at if account_baseline is not None else None,
+            baseline_event_ref=account_baseline_event_id,
+            baseline_source=account_baseline.account_source if account_baseline is not None else None,
+            baseline_safe_for_automatic_continuation=(
+                account_baseline.safe_for_automatic_continuation if account_baseline is not None else False
+            ),
+            baseline_requires_operator_review=(
+                account_baseline.requires_operator_review if account_baseline is not None else False
+            ),
+            baseline_balance_count=account_baseline.balance_count if account_baseline is not None else 0,
+            baseline_position_count=account_baseline.position_count if account_baseline is not None else 0,
+            baseline_open_order_count=account_baseline.open_order_count if account_baseline is not None else 0,
+            baseline_fill_count=account_baseline.fill_count if account_baseline is not None else 0,
+            last_rebaseline_at=(
+                account_baseline.imported_at
+                if account_baseline is not None and account_baseline.baseline_kind == "operator_rebaseline"
+                else None
+            ),
+            last_rebaseline_event_ref=(
+                account_baseline_event_id
+                if account_baseline is not None and account_baseline.baseline_kind == "operator_rebaseline"
+                else None
+            ),
             notes=self._dedupe_notes(notes),
         )
         return RecoveryArtifacts(status=status, rebuilt_snapshot_saved=rebuilt_snapshot_saved)
+
+    @staticmethod
+    def _initial_recovery_state(
+        *,
+        account_baseline: AccountBaselineSnapshot | None,
+        halted: bool,
+        latest_reconciliation: ReconciliationReport | None,
+    ) -> str:
+        if account_baseline is not None and account_baseline.baseline_kind == "operator_rebaseline":
+            return "rebaseline_completed" if not halted else "resume_blocked"
+        if account_baseline is not None and account_baseline.requires_operator_review:
+            return "review_required"
+        if latest_reconciliation is not None:
+            if latest_reconciliation.halt_required:
+                return "resume_blocked"
+            if latest_reconciliation.review_required:
+                return "review_required"
+        if halted:
+            return "resume_blocked"
+        return "normal_operation"
 
     def _apply_reconciliation_safety(
         self,

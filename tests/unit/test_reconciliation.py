@@ -199,8 +199,9 @@ class TestReconciliationComparator(unittest.TestCase):
             compare_exchange_portfolio=False,
         )
 
-        self.assertEqual(report.severity, "SOFT_MISMATCH")
-        self.assertFalse(report.halt_required)
+        self.assertEqual(report.severity, "HARD_MISMATCH")
+        self.assertTrue(report.halt_required)
+        self.assertIn("local_open_order_divergence", report.mismatch_categories)
         self.assertTrue(report.order_diff["exchange"])
         self.assertTrue(report.fill_diff["exchange"])
 
@@ -289,6 +290,7 @@ class TestReconciliationComparator(unittest.TestCase):
         self.assertFalse(report.halt_required)
         self.assertTrue(report.fill_diff["exchange"])
         self.assertTrue(report.mismatch_reasons)
+        self.assertEqual(report.recommended_operator_action, "investigate_state_divergence")
 
     def test_compare_reports_clean_when_local_and_exchange_state_match(self) -> None:
         comparator = StateComparator()
@@ -388,6 +390,188 @@ class TestReconciliationComparator(unittest.TestCase):
         self.assertEqual(report.severity, "CLEAN")
         self.assertFalse(report.halt_required)
         self.assertEqual(report.mismatch_reasons, [])
+
+    def test_compare_classifies_historical_exchange_state_without_local_execution_as_info(self) -> None:
+        comparator = StateComparator()
+        now = utc_now()
+        report = comparator.compare(
+            decision_id=None,
+            portfolio_snapshot_ref="evt_portfolio_hist",
+            order_states=[],
+            fills=[],
+            stored_snapshot=PortfolioSnapshot(
+                snapshot_ts=now,
+                balances={"USDT": 1000.0, "BTC": 0.01},
+                positions=[],
+                cost_basis={},
+                realized_pnl=0.0,
+                unrealized_pnl=0.0,
+                total_equity=1000.0,
+                gross_exposure=0.0,
+                net_exposure=0.0,
+                risk_budget_usage={},
+            ),
+            reconstructed_snapshot=PortfolioSnapshot(
+                snapshot_ts=now,
+                balances={"USDT": 1000.0},
+                positions=[],
+                cost_basis={},
+                realized_pnl=0.0,
+                unrealized_pnl=0.0,
+                total_equity=1000.0,
+                gross_exposure=0.0,
+                net_exposure=0.0,
+                risk_budget_usage={},
+            ),
+            exchange_snapshot=ExchangeAccountSnapshot(
+                account_source="okx",
+                fetched_at=now,
+                balances=[
+                    ExchangeBalance(currency="USDT", total=1000.0, available=1000.0, frozen=0.0),
+                    ExchangeBalance(currency="BTC", total=0.01, available=0.01, frozen=0.0),
+                ],
+                positions=[],
+                open_orders=[],
+                fills=[
+                    ExchangeFill(
+                        fill_id="hist_fill_1",
+                        exchange_order_id="ord_hist_1",
+                        client_order_id=None,
+                        instrument_id="BTC-USDT",
+                        symbol="BTC-USDT",
+                        side="buy",
+                        fill_qty=0.01,
+                        fill_price=70000.0,
+                        fee_amount=0.0,
+                        fill_ts=now,
+                    )
+                ],
+                instruments=[],
+            ),
+            exchange_comparison_enabled=True,
+            compare_exchange_portfolio=True,
+        )
+
+        self.assertEqual(report.severity, "INFO")
+        self.assertFalse(report.halt_required)
+        self.assertFalse(report.review_required)
+        self.assertIn("historical_state_only", report.mismatch_categories)
+        self.assertEqual(report.recommended_operator_action, "observe_only")
+
+    def test_compare_classifies_external_manual_activity_as_review_required(self) -> None:
+        comparator = StateComparator()
+        now = utc_now()
+        report = comparator.compare(
+            decision_id="decision_manual",
+            portfolio_snapshot_ref="evt_portfolio_manual",
+            order_states=[
+                OrderState(
+                    decision_id="decision_manual",
+                    intent_id="intent_manual",
+                    symbol="BTC-USDT",
+                    client_order_id="clord_manual",
+                    venue="OKX",
+                    exchange_order_id="ord_manual",
+                    status="FILLED",
+                    exchange_status="filled",
+                    submitted_ts=now,
+                    last_update_ts=now,
+                    last_exchange_update_ts=now,
+                    requested_qty=0.001,
+                    filled_qty=0.001,
+                    remaining_qty=0.0,
+                    average_fill_price=100.0,
+                    fees=0.1,
+                )
+            ],
+            fills=[
+                FillEvent(
+                    fill_id="local_fill_1",
+                    decision_id="decision_manual",
+                    intent_id="intent_manual",
+                    client_order_id="clord_manual",
+                    exchange_order_id="ord_manual",
+                    symbol="BTC-USDT",
+                    venue="OKX",
+                    side="buy",
+                    fill_qty=0.001,
+                    fill_price=100.0,
+                    fee_amount=0.1,
+                    liquidity_role="taker",
+                    exchange_timestamp=now,
+                    ingestion_timestamp=now,
+                )
+            ],
+            stored_snapshot=PortfolioSnapshot(
+                snapshot_ts=now,
+                balances={"USDT": 900.0, "BTC": 0.001},
+                positions=[],
+                cost_basis={},
+                realized_pnl=0.0,
+                unrealized_pnl=0.0,
+                total_equity=900.0,
+                gross_exposure=0.0,
+                net_exposure=0.0,
+                risk_budget_usage={},
+            ),
+            reconstructed_snapshot=PortfolioSnapshot(
+                snapshot_ts=now,
+                balances={"USDT": 900.0, "BTC": 0.001},
+                positions=[],
+                cost_basis={},
+                realized_pnl=0.0,
+                unrealized_pnl=0.0,
+                total_equity=900.0,
+                gross_exposure=0.0,
+                net_exposure=0.0,
+                risk_budget_usage={},
+            ),
+            exchange_snapshot=ExchangeAccountSnapshot(
+                account_source="okx",
+                fetched_at=now,
+                balances=[
+                    ExchangeBalance(currency="USDT", total=850.0, available=850.0, frozen=0.0),
+                    ExchangeBalance(currency="BTC", total=0.002, available=0.002, frozen=0.0),
+                ],
+                positions=[],
+                open_orders=[],
+                fills=[
+                    ExchangeFill(
+                        fill_id="local_fill_1",
+                        exchange_order_id="ord_manual",
+                        client_order_id="clord_manual",
+                        instrument_id="BTC-USDT",
+                        symbol="BTC-USDT",
+                        side="buy",
+                        fill_qty=0.001,
+                        fill_price=100.0,
+                        fee_amount=0.1,
+                        fill_ts=now,
+                    ),
+                    ExchangeFill(
+                        fill_id="manual_fill_2",
+                        exchange_order_id="ord_ext_2",
+                        client_order_id=None,
+                        instrument_id="BTC-USDT",
+                        symbol="BTC-USDT",
+                        side="buy",
+                        fill_qty=0.001,
+                        fill_price=101.0,
+                        fee_amount=0.1,
+                        fill_ts=now,
+                    ),
+                ],
+                instruments=[],
+            ),
+            exchange_comparison_enabled=True,
+            compare_exchange_portfolio=True,
+        )
+
+        self.assertEqual(report.severity, "REVIEW_REQUIRED")
+        self.assertFalse(report.halt_required)
+        self.assertTrue(report.review_required)
+        self.assertIn("external_manual_activity_detected", report.mismatch_categories)
+        self.assertEqual(report.recommended_operator_action, "review_and_rebaseline_if_expected")
 
     def test_service_uses_exchange_bootstrap_snapshot_as_reconstruction_baseline(self) -> None:
         now = utc_now()

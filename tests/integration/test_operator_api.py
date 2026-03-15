@@ -2,14 +2,55 @@ from __future__ import annotations
 
 import unittest
 from datetime import timedelta
+from unittest.mock import patch
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from aats.api.auth_routes import auth_router
 from aats.api.routes import router
 from aats.bootstrap.config import build_runtime
 from aats.bootstrap.settings import AATSSettings
 from aats.schemas.common import utc_now
+from aats.schemas.exchange import ExchangeAccountSnapshot, ExchangeBalance
+
+
+class FakeOperatorAccountService:
+    SNAPSHOT: ExchangeAccountSnapshot | None = None
+
+    def __init__(self, *, settings, client) -> None:
+        self.settings = settings
+        self.client = client
+        self._snapshot = self.SNAPSHOT
+
+    async def refresh(self, *, force: bool = False):
+        return self._snapshot
+
+    def latest_snapshot(self):
+        return self._snapshot
+
+    def instrument_metadata(self, symbol: str):
+        return None
+
+    def open_order_count(self, symbol: str | None = None) -> int:
+        return len(self._snapshot.open_orders) if self._snapshot is not None else 0
+
+    def recent_fills(self, symbol: str | None = None):
+        return list(self._snapshot.fills) if self._snapshot is not None else []
+
+    def status(self):
+        return {
+            "backend": "okx",
+            "enabled": True,
+            "credentials_configured": True,
+            "connected": self._snapshot is not None,
+            "fresh": self._snapshot is not None,
+            "last_update_ts": self._snapshot.fetched_at if self._snapshot is not None else None,
+            "last_error": None,
+            "ready": self._snapshot is not None,
+            "detail": "fake_operator_account",
+            "blockers": [] if self._snapshot is not None else ["account_snapshot_missing"],
+        }
 
 
 class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
@@ -51,6 +92,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(runtime_payload["symbols"], ["BTC-USDT"])
         self.assertEqual(runtime_payload["enabled_timeframes"], ["15m"])
         self.assertGreaterEqual(runtime_payload["uptime_seconds"], 0.0)
+        self.assertIn("baseline_takeover", runtime_payload)
         self.assertIn("decision_cycle_count", metrics_payload)
         self.assertIn("recent_execution_errors", metrics_payload)
         self.assertIn("exposure_summary", metrics_payload)
@@ -105,6 +147,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fill_detail["fill"]["fill_id"], latest_fill_id)
         self.assertIsNotNone(execution_latest["latest_order"])
         self.assertIsNotNone(reconciliation_latest["reconciliation"])
+        self.assertIn("mismatch_categories", reconciliation_latest["mismatch_summary"])
         self.assertTrue(reconciliation_recent["reconciliations"])
         self.assertIsInstance(reconciliation_mismatches["mismatches"], list)
         self.assertEqual(
@@ -143,6 +186,25 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         stale_blockers = [item["blocker"] for item in stale_health["blockers"]]
         self.assertIn("market_data_stale", stale_blockers)
 
+    async def test_system_health_reports_reconciliation_staleness_consistently(self) -> None:
+        runtime = await self._runtime()
+        latest_report = runtime.reconciliation_repo.latest()
+        self.assertIsNotNone(latest_report)
+        runtime.reconciliation_repo.save_report(
+            latest_report.model_copy(update={"as_of_ts": utc_now() - timedelta(seconds=601)})
+        )
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            health = client.get("/system/health").json()
+
+        blockers = [item["blocker"] for item in health["blockers"]]
+        self.assertIn("reconciliation_stale", blockers)
+        self.assertFalse(health["subsystems"]["reconciliation"]["fresh"])
+        self.assertFalse(health["subsystems"]["reconciliation"]["ready"])
+        self.assertIn("reconciliation_stale", health["subsystems"]["reconciliation"]["blockers"])
+        self.assertFalse(health["freshness"]["reconciliation_fresh"])
+
     async def test_operator_auth_enforces_read_write_split_and_reconciliation_validate(self) -> None:
         runtime = await self._runtime(
             operator_auth_enabled=True,
@@ -176,6 +238,60 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reconciliation_validate.status_code, 200)
         self.assertEqual(reconciliation_validate.json()["validation"]["trigger"], "startup_check")
 
+    async def test_session_login_enforces_viewer_and_operator_roles(self) -> None:
+        runtime = await self._runtime(
+            operator_auth_enabled=True,
+            operator_session_secret="session-secret",
+            operator_viewer_username="viewer",
+            operator_viewer_password="viewer-pass",
+            operator_operator_username="operator",
+            operator_operator_password="operator-pass",
+        )
+        app = self._app(runtime)
+        with TestClient(app) as viewer_client:
+            login = viewer_client.post("/auth/login", json={"username": "viewer", "password": "viewer-pass"})
+            health = viewer_client.get("/system/health")
+            halt_denied = viewer_client.post("/system/halt", json={"reason": "viewer_should_fail"})
+            logout = viewer_client.post("/auth/logout")
+
+        with TestClient(app) as operator_client:
+            login_operator = operator_client.post("/auth/login", json={"username": "operator", "password": "operator-pass"})
+            halt_allowed = operator_client.post("/system/halt", json={"reason": "operator_should_work"})
+            session = operator_client.get("/auth/session")
+
+        self.assertEqual(login.status_code, 200)
+        self.assertEqual(health.status_code, 200)
+        self.assertEqual(halt_denied.status_code, 403)
+        self.assertEqual(logout.status_code, 200)
+        self.assertEqual(login_operator.status_code, 200)
+        self.assertEqual(halt_allowed.status_code, 200)
+        self.assertEqual(session.status_code, 200)
+        self.assertTrue(session.json()["authenticated"])
+        self.assertEqual(session.json()["role"], "operator")
+
+    async def test_session_login_rejects_invalid_credentials(self) -> None:
+        runtime = await self._runtime(
+            operator_auth_enabled=True,
+            operator_session_secret="session-secret",
+            operator_admin_username="admin",
+            operator_admin_password="correct-pass",
+        )
+        app = self._app(runtime)
+        with TestClient(app) as client:
+            failed = client.post("/auth/login", json={"username": "admin", "password": "wrong-pass"})
+
+        self.assertEqual(failed.status_code, 401)
+        self.assertEqual(failed.json()["detail"], "operator_login_failed")
+
+    async def test_operator_write_is_denied_without_auth_by_default(self) -> None:
+        runtime = await self._runtime(operator_unsafe_write_without_auth=False)
+        app = self._app(runtime)
+        with TestClient(app) as client:
+            denied = client.post("/system/halt", json={"reason": "unauthenticated_write"})
+
+        self.assertEqual(denied.status_code, 403)
+        self.assertEqual(denied.json()["detail"], "operator_write_auth_required")
+
     async def test_operator_histories_are_persisted_for_blockers_and_replay(self) -> None:
         runtime = await self._runtime()
         app = self._app(runtime)
@@ -190,6 +306,51 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(replay_validation["decision_id"], decision_id)
         self.assertTrue(replay_recent["validations"])
 
+    async def test_system_recovery_and_rebaseline_endpoints_expose_operator_recovery_flow(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "config_profile": "local_demo",
+                "mode": "paper_live",
+                "market_data_backend": "demo",
+                "execution_backend": "paper",
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "bootstrap_portfolio_from_exchange": True,
+                "storage_mode": "memory",
+                "event_persistence_mode": "strict",
+                "operator_unsafe_write_without_auth": True,
+            }
+        )
+        FakeOperatorAccountService.SNAPSHOT = ExchangeAccountSnapshot(
+            account_source="okx",
+            fetched_at=utc_now(),
+            balances=[ExchangeBalance(currency="USDT", total=1000.0, available=1000.0, frozen=0.0)],
+            positions=[],
+            open_orders=[],
+            fills=[],
+            instruments=[],
+            account_mode="cash",
+        )
+        with patch("aats.bootstrap.config.OKXAccountService", FakeOperatorAccountService):
+            runtime = await build_runtime(settings)
+        await runtime.market_gateway.run_local_publisher(
+            symbol=settings.default_symbol,
+            iterations=2,
+            interval_seconds=0.0,
+        )
+
+        app = self._app(runtime)
+        with TestClient(app) as client:
+            recovery_before = client.get("/system/recovery").json()
+            rebaseline = client.post("/system/rebaseline", json={"reason": "accept_exchange_state"}).json()
+            recovery_after = client.get("/system/recovery").json()
+
+        self.assertIn("recovery_state", recovery_before["recovery"])
+        self.assertEqual(rebaseline["status"], "rebaseline_completed")
+        self.assertEqual(recovery_after["recovery"]["recovery_state"], "rebaseline_completed")
+        self.assertTrue(recovery_after["recovery"]["resume_eligible"])
+        self.assertIsNotNone(recovery_after["recovery"]["last_rebaseline_action"])
+
     async def _runtime(self, **overrides):
         settings = AATSSettings.model_validate(
             {
@@ -202,6 +363,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
                 "storage_mode": "memory",
                 "event_persistence_mode": "strict",
                 "enabled_decision_timeframes": ("15m",),
+                "operator_unsafe_write_without_auth": True,
                 **overrides,
             }
         )
@@ -216,6 +378,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
     @staticmethod
     def _app(runtime) -> FastAPI:
         app = FastAPI()
+        app.include_router(auth_router)
         app.include_router(router)
         app.state.runtime = runtime
         return app

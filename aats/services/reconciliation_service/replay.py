@@ -9,6 +9,7 @@ from aats.schemas.audit import DecisionAuditRecord
 from aats.schemas.common import EventEnvelope
 from aats.schemas.decision import DecisionContext, PositionTarget
 from aats.schemas.execution import ExecutionPlan, FillEvent, OrderIntent, OrderState
+from aats.schemas.exchange import AccountBaselineSnapshot
 from aats.schemas.governance import PolicyDecision, RiskDecision
 from aats.schemas.market import MarketSnapshot
 from aats.schemas.portfolio import PortfolioSnapshot
@@ -33,6 +34,8 @@ class ReplayResult:
     decision_chain_issues: list[str] = field(default_factory=list)
     execution_chain_issues: list[str] = field(default_factory=list)
     audit_issues: list[str] = field(default_factory=list)
+    baseline_switch_count: int = 0
+    baseline_switch_issues: list[str] = field(default_factory=list)
     final_reconstructed_snapshot: PortfolioSnapshot | None = None
     final_stored_snapshot: PortfolioSnapshot | None = None
     decision_chains: dict[str, DecisionAuditRecord] = field(default_factory=dict)
@@ -68,6 +71,8 @@ class ReplayEngine:
         decision_chain_issues: list[str] = []
         execution_chain_issues: list[str] = []
         audit_issues: list[str] = []
+        baseline_switch_issues: list[str] = []
+        baseline_switches: list[AccountBaselineSnapshot] = []
         stored_snapshot_count = 0
         final_stored_snapshot: PortfolioSnapshot | None = None
         baseline_snapshot: PortfolioSnapshot | None = None
@@ -116,14 +121,17 @@ class ReplayEngine:
                 audit_event_ids_by_decision[record.decision_id] = envelope.event_id
                 continue
 
+            if envelope.topic == topics.ACCOUNT_BASELINES:
+                baseline_switches.append(AccountBaselineSnapshot.model_validate(envelope.payload))
+                continue
+
             if envelope.topic == topics.PORTFOLIO_SNAPSHOTS:
                 stored_snapshot_count += 1
                 stored_snapshot = PortfolioSnapshot.model_validate(envelope.payload)
                 final_stored_snapshot = stored_snapshot
 
                 if (
-                    baseline_snapshot is None
-                    and stored_snapshot.source_fill_id is None
+                    stored_snapshot.source_fill_id is None
                     and stored_snapshot.source_intent_id is None
                 ):
                     baseline_snapshot = stored_snapshot
@@ -187,6 +195,12 @@ class ReplayEngine:
                 events_by_id=events_by_id,
             )
         )
+        baseline_switch_issues.extend(
+            self._validate_baseline_switches(
+                baseline_switches=baseline_switches,
+                events_by_id=events_by_id,
+            )
+        )
 
         if self.portfolio_repo is not None and final_stored_snapshot is not None:
             repo_latest = self.portfolio_repo.latest()
@@ -209,6 +223,7 @@ class ReplayEngine:
             *decision_chain_issues,
             *execution_chain_issues,
             *audit_issues,
+            *baseline_switch_issues,
         ]
         return ReplayResult(
             selected_decision_id=selected_decision_id,
@@ -222,6 +237,8 @@ class ReplayEngine:
             decision_chain_issues=decision_chain_issues,
             execution_chain_issues=execution_chain_issues,
             audit_issues=audit_issues,
+            baseline_switch_count=len(baseline_switches),
+            baseline_switch_issues=baseline_switch_issues,
             final_reconstructed_snapshot=final_reconstructed_snapshot,
             final_stored_snapshot=final_stored_snapshot,
             decision_chains=decision_chains,
@@ -242,12 +259,38 @@ class ReplayEngine:
 
         state = PortfolioState(initial_usdt_balance=self.reconstruction_service.initial_usdt_balance)
         state.load_portfolio_snapshot(baseline_snapshot)
+        baseline_ts = baseline_snapshot.snapshot_ts
         for fill in sorted(fills, key=lambda item: (item.ingestion_timestamp, item.fill_id)):
-            state.apply_fill(fill)
+            if fill.ingestion_timestamp >= baseline_ts:
+                state.apply_fill(fill)
         return self.reconstruction_service.snapshot_builder.build(
             state=state,
             price_provider=price_provider,
         )
+
+    @staticmethod
+    def _validate_baseline_switches(
+        *,
+        baseline_switches: list[AccountBaselineSnapshot],
+        events_by_id: dict[str, EventEnvelope],
+    ) -> list[str]:
+        issues: list[str] = []
+        seen_ids: set[str] = set()
+        for baseline in baseline_switches:
+            if baseline.baseline_id in seen_ids:
+                issues.append(f"baseline_switch_duplicate baseline_id={baseline.baseline_id}")
+            seen_ids.add(baseline.baseline_id)
+            if baseline.previous_baseline_ref is not None and baseline.previous_baseline_ref not in events_by_id:
+                issues.append(
+                    f"baseline_switch_missing_previous_ref baseline_id={baseline.baseline_id} previous_baseline_ref={baseline.previous_baseline_ref}"
+                )
+            if baseline.baseline_kind == "operator_rebaseline" and baseline.operator_action_ref is None:
+                issues.append(f"baseline_switch_missing_operator_action baseline_id={baseline.baseline_id}")
+            if baseline.operator_action_ref is not None and baseline.operator_action_ref not in events_by_id:
+                issues.append(
+                    f"baseline_switch_missing_operator_action_ref baseline_id={baseline.baseline_id} operator_action_ref={baseline.operator_action_ref}"
+                )
+        return issues
 
     @staticmethod
     def _snapshot_price_provider(

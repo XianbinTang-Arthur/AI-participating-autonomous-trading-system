@@ -1,0 +1,199 @@
+The repository already contains:
+
+- a working static operator dashboard frontend
+- operator-facing APIs for health, mode, runtime, blockers, metrics, decisions, execution, reconciliation, audit, and replay
+- halt / resume / rebaseline operator actions
+- current API-key-based operator access control
+- current write/read split using `X-AATS-API-Key`
+
+The repository has also already progressed through:
+
+- guarded simulated submit support
+- baseline takeover
+- classified reconciliation
+- operator-confirmed re-baselining and safe resume
+
+Now perform the next implementation pass.
+
+Primary goal of this pass:
+
+Replace the current operator API-key-centric browser access model with a proper operator login and session-based authorization model, while retaining API keys only as an explicit compatibility path for automation and non-browser tooling.
+
+This pass is NOT about:
+- real-money live trading
+- new exchanges
+- new strategy logic
+- replacing the static frontend with a large framework
+- external SSO integration unless needed as a future-compatible boundary only
+- changing the meaning of existing operator actions
+
+This pass IS about:
+- login UX
+- operator identity
+- session authentication
+- role-based authorization
+- safer browser access to operator controls
+- reducing dependence on raw API keys in the UI
+- preserving auditability of control actions
+
+Target behavior of this stage:
+
+Browser Request
+-> Login Page
+-> Session Authentication
+-> Role Resolution
+-> Operator Console Access
+-> Protected Read / Write API Actions
+-> Audited Operator Action
+
+Important constraints:
+
+- Do NOT redesign the backend architecture.
+- Do NOT remove useful operator APIs.
+- Do NOT remove auditability of halt / resume / rebaseline / cancel actions.
+- Do NOT break existing operator workflows without a clear replacement.
+- Keep the implementation compatible with the current static frontend approach unless a very small helper split is needed.
+- Preserve API-key support only as a secondary, explicit compatibility path.
+- Keep defaults safe.
+
+Tasks to complete:
+
+1. Introduce a real operator login flow
+- add a dedicated login page / login surface for browser users
+- authenticate operator users through explicit credentials managed by the application
+- establish a server-side authenticated session or equivalent secure browser session model
+- remove the need for normal browser users to manually type `X-AATS-API-Key`
+- ensure logout is supported
+
+2. Introduce explicit operator identity and roles
+- define a first-class operator identity model
+- support at least these roles:
+  - viewer
+  - operator
+  - admin
+- map read-only access and write/control access through roles rather than raw header values
+- keep role decisions explicit and auditable
+
+3. Move browser auth away from raw API-key entry
+- the operator dashboard should stop using manual API-key entry as its primary access pattern
+- replace the current “paste API key into the page” browser flow with:
+  - login
+  - authenticated session
+  - protected navigation into the console
+- preserve current API-key auth only for:
+  - scripts
+  - automation
+  - local emergency/debug use
+- clearly distinguish browser session auth from API-key compatibility auth
+
+4. Add protected session handling
+- implement secure session issuance and validation
+- ensure authenticated browser requests automatically carry session state
+- ensure session expiration and invalid session handling are explicit
+- if CSRF protection is appropriate for write routes, implement it clearly
+- keep write/control actions deliberate and protected
+
+5. Refactor operator authorization semantics
+- centralize authorization checks so the system answers:
+  - who is the operator
+  - what role do they have
+  - can they read
+  - can they halt
+  - can they resume
+  - can they rebaseline
+  - can they cancel orders
+- keep backend route protection explicit and testable
+- ensure session-authenticated users and API-key-authenticated clients pass through the same authorization layer
+
+6. Rework frontend operator access UX
+- add a dedicated login page or login overlay
+- remove the current raw API-key input from the primary operator console flow
+- update the operator console shell so it:
+  - redirects unauthenticated users to login
+  - shows the current authenticated identity and role
+  - exposes logout clearly
+- keep the existing operator console views and actions functional after login
+
+7. Preserve and demote API-key compatibility mode
+- preserve `X-AATS-API-Key` support for non-browser clients
+- make API-key auth explicitly secondary and compatibility-focused
+- ensure docs clearly state:
+  - browser users should use login/session auth
+  - API keys are for automation or controlled compatibility usage
+- keep unsafe anonymous write access disabled by default
+
+8. Expand operator auditability
+- operator action audit records should now capture operator identity, auth source, and role
+- distinguish whether an action came from:
+  - session-authenticated browser user
+  - API-key authenticated automation client
+- keep audit records operator-readable
+
+9. Improve runtime/operator visibility
+Add or improve endpoints/UI visibility for:
+- current authenticated operator identity
+- current authenticated role
+- auth mode used by the current session/request
+- whether API-key compatibility mode is enabled
+- whether anonymous browser access is allowed
+
+10. Safety requirements
+- write/control actions must never be available to unauthenticated browser users by default
+- read-only browser access should also require authentication unless there is an explicit local-development setting
+- local-development bypasses, if any, must be explicit and clearly marked unsafe
+- the system must not silently downgrade from authenticated mode to anonymous control mode
+
+11. Tests
+Add meaningful tests for:
+- login success
+- login failure
+- logout
+- session-protected read access
+- session-protected write access
+- role-based access:
+  - viewer can read
+  - viewer cannot write
+  - operator/admin can perform allowed control actions
+- API-key compatibility access still works where intended
+- unauthenticated browser requests are rejected or redirected appropriately
+- no regression in existing operator actions
+- no regression in audit records for halt / resume / rebaseline
+
+Tests must be meaningful.
+Do not add shallow tests that only validate route existence.
+
+12. Documentation
+Update README and relevant operator/developer docs to explain:
+- the new login flow
+- session authentication
+- operator roles
+- what API keys are still used for
+- which access path is intended for browsers
+- which access path is intended for automation
+- any local-development bypass behavior
+- how dangerous actions are protected
+
+13. Migration and compatibility expectations
+- preserve current backend/operator APIs where practical
+- avoid breaking non-browser tooling unnecessarily
+- if legacy API-key browser flow still exists temporarily, mark it clearly as deprecated
+- keep the system operational during the transition
+
+Output requirements:
+
+1. First provide the implementation plan for this pass.
+2. Then list all files to modify or add.
+3. Then implement the changes file by file.
+4. After implementation, explicitly summarize:
+   - what login/auth behavior now exists
+   - what roles and permissions now exist
+   - what browser UX changed
+   - what API-key compatibility remains
+   - what remains intentionally simplified
+   - what the next engineering pass should focus on
+
+Final rule:
+
+Do not expand trading scope in this pass.
+Do not move toward real-money live trading in this pass.
+Only implement a proper operator login/session/authorization model that replaces API-key entry as the main browser access path while preserving safe compatibility for automation.

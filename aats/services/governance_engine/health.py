@@ -121,11 +121,13 @@ class SystemHealthService:
             blockers.append("reconciliation_stale")
         if report.halt_required:
             blockers.append("reconciliation_halt_required")
+        if report.review_required:
+            blockers.append("operator_rebaseline_required")
         return {
             "connected": True,
             "fresh": fresh,
             "last_update_ts": report.as_of_ts,
             "blockers": blockers,
             "detail": report.severity,
-            "ready": fresh and not report.halt_required,
+            "ready": fresh and not report.halt_required and not report.review_required,
         }

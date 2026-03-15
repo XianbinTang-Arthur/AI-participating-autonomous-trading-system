@@ -159,7 +159,7 @@ class ReconciliationService:
         ]
         if not candidates:
             return None
-        return min(candidates, key=lambda item: (item.snapshot_ts, item.created_at))
+        return max(candidates, key=lambda item: (item.snapshot_ts, item.created_at))
 
     async def _persist_report(self, report: ReconciliationReport) -> None:
         self.reconciliation_repo.save_report(report)

@@ -1,0 +1,148 @@
+The repository has already progressed to a startup baseline-takeover stage.
+
+Assume the current baseline is:
+
+- the system can start against a non-empty exchange account
+- exchange balances / fills / open orders can be imported as a startup baseline
+- local portfolio and reconciliation state can be initialized from that baseline
+- guarded simulated submit and `real_market_paper` behavior remain intact
+- safety defaults remain conservative
+
+Now perform the next implementation pass.
+
+Primary goal of this pass:
+
+Upgrade reconciliation into a classified, operator-explainable state-difference system that can distinguish historical state, external/manual activity, and truly unsafe unknown divergence.
+
+This pass is NOT about:
+- new strategy features
+- new exchanges
+- real-money live trading
+- removing safety gates
+- redesigning the architecture
+
+This pass IS about:
+- reconciliation classification
+- manual/external activity recognition
+- mismatch severity grading
+- safer and more explainable operator decisions
+
+Target behavior of this stage:
+
+Exchange / Local State
+-> Reconciliation Comparison
+-> Difference Classification
+-> Severity Assignment
+-> Safety Impact Assessment
+-> Operator Guidance
+-> Runtime Blocking Only When Truly Necessary
+
+Important constraints:
+
+- Do NOT move toward real-money live trading in this pass.
+- Do NOT redesign the architecture.
+- Do NOT rename major modules, event topics, or service boundaries unless clearly necessary.
+- Preserve current mode semantics and safety defaults.
+- Preserve current `real_market_paper` behavior.
+- Keep guarded simulated submit conservative when truly unsafe divergence exists.
+
+Tasks to complete:
+
+1. Classify reconciliation differences
+Introduce explicit mismatch categories such as:
+- `historical_state_only`
+- `external_manual_activity_detected`
+- `local_fill_missing`
+- `local_balance_divergence`
+- `local_position_divergence`
+- `local_open_order_divergence`
+- `unsafe_unknown_state`
+
+The exact names may vary, but the categories must be explicit and operator-readable.
+
+2. Add severity grading
+Reconciliation must support graded outcomes such as:
+- `INFO`
+- `SOFT_MISMATCH`
+- `REVIEW_REQUIRED`
+- `HARD_MISMATCH`
+
+Not every difference should immediately force the same operational response.
+
+3. Distinguish history/manual activity from unsafe divergence
+- historical exchange state that predates current local execution history should not always be treated as a critical runtime fault
+- externally introduced account changes should be recognized as external/manual state changes
+- truly unsafe unknown divergence must still trigger blocking/halt-required behavior
+
+4. Improve safety impact evaluation
+Each reconciliation result should clearly state:
+- whether it affects execution safety
+- whether it affects only audit completeness
+- whether it requires operator review
+- whether it requires a hard execution halt
+
+5. Improve operator guidance
+Add structured operator guidance fields such as:
+- observe only
+- review required
+- re-baseline required
+- halt execution immediately
+
+These should be visible through operator APIs and easy to inspect manually.
+
+6. Improve reconciliation visibility
+Add or improve operator/API visibility for:
+- mismatch category
+- mismatch severity
+- safety impact
+- recommended operator action
+- whether the difference is likely:
+  - historical
+  - external/manual
+  - locally missing
+  - dangerous/unknown
+
+7. Preserve strict handling for truly unsafe cases
+- unknown local/exchange state divergence must still block execution
+- missing or inconsistent local open order state must remain high-severity
+- unexplained balance/position drift that affects safety must still halt or block execution
+
+8. Focused tests
+Add practical tests for:
+- historical-state-only differences
+- external/manual activity classification
+- balance-only differences
+- fill-chain visibility differences
+- truly unsafe unknown divergence
+- mismatch severity assignment
+- halt-required vs review-required behavior
+- no regression in current reconciliation, replay, and guarded simulated submit flows
+
+Tests must be meaningful and operator-focused.
+Do not add shallow tests that only validate importability.
+
+9. Documentation
+Update README and/or developer/operator docs to explain:
+- what reconciliation now compares
+- what the mismatch categories mean
+- what severity levels mean
+- when the system blocks automatically
+- when operator review is sufficient
+- what remains intentionally conservative
+
+Output requirements:
+
+1. First provide the implementation plan for this pass.
+2. Then list all files to modify or add.
+3. Then implement the changes file by file.
+4. After implementation, explicitly summarize:
+   - what reconciliation can now classify
+   - what runtime states are now easier to explain
+   - what still triggers hard blocking
+   - what the next engineering pass should focus on
+
+Final rule:
+
+Do not add more product scope in this pass.
+Do not move toward real-money live trading in this pass.
+Only implement classified, graded, operator-explainable reconciliation behavior.

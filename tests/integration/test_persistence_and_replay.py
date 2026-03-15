@@ -5,19 +5,22 @@ import unittest
 from datetime import timedelta
 from pathlib import Path
 
-from aats.bootstrap.config import build_runtime, build_storage_backends, load_settings
+from aats.bootstrap.config import build_runtime, build_storage_backends
 from aats.bootstrap.settings import AATSSettings
 from aats.events import topics
 from aats.events.envelopes import build_envelope, publish_model
 from aats.schemas.audit import DecisionAuditRecord
 from aats.schemas.common import utc_now
 from aats.schemas.decision import BaselineAssessment, DecisionContext, PositionTarget
+from aats.schemas.exchange import AccountBaselineSnapshot
 from aats.schemas.execution import ExecutionPlan, FillEvent, OrderIntent, OrderState
 from aats.schemas.governance import PolicyDecision, RiskDecision
 from aats.schemas.market import MarketSnapshot
+from aats.schemas.operator import OperatorActionRecord
 from aats.schemas.reconciliation import ReconciliationReport
 from aats.schemas.system import HealthSnapshot
 from aats.services.portfolio_service.pnl import PortfolioPnLCalculator
+from aats.services.portfolio_service.positions import PortfolioState
 from aats.services.portfolio_service.reconstruction import PortfolioReconstructionService
 from aats.services.portfolio_service.snapshots import PortfolioSnapshotBuilder
 from aats.services.reconciliation_service.replay import ReplayEngine
@@ -158,7 +161,7 @@ class TestPersistenceAndReplay(unittest.IsolatedAsyncioTestCase):
                     storage.database_runtime.dispose()
 
     async def test_replay_can_filter_by_decision_id(self) -> None:
-        settings = load_settings()
+        settings = self._paper_runtime_settings()
         runtime = await build_runtime(settings)
         try:
             await runtime.market_gateway.run_local_publisher(
@@ -188,7 +191,7 @@ class TestPersistenceAndReplay(unittest.IsolatedAsyncioTestCase):
                 runtime.database_runtime.dispose()
 
     async def test_replay_can_filter_by_time_range(self) -> None:
-        settings = load_settings()
+        settings = self._paper_runtime_settings()
         runtime = await build_runtime(settings)
         try:
             await runtime.market_gateway.run_local_publisher(
@@ -328,7 +331,7 @@ class TestPersistenceAndReplay(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_duplicate_fill_does_not_mutate_portfolio_twice_and_replay_stays_reconstructable(self) -> None:
-        settings = load_settings()
+        settings = self._paper_runtime_settings()
         runtime = await build_runtime(settings)
 
         await runtime.market_gateway.run_local_publisher(
@@ -944,6 +947,178 @@ class TestPersistenceAndReplay(unittest.IsolatedAsyncioTestCase):
             self._snapshot_signature(portfolio_state),
         )
 
+    async def test_replay_tracks_baseline_switches_without_false_divergence(self) -> None:
+        event_store = InMemoryEventStore()
+        audit_repo = InMemoryAuditRepository()
+        now = utc_now()
+        startup_baseline = AccountBaselineSnapshot(
+            account_source="okx",
+            exchange_snapshot_ts=now,
+            imported_at=now,
+            baseline_status="baseline_imported",
+            baseline_kind="startup_import",
+            reason_codes=["clean_account_balances_only"],
+        )
+        startup_baseline_event = build_envelope(
+            topic=topics.ACCOUNT_BASELINES,
+            key="okx",
+            payload_model=startup_baseline,
+            source_component="test",
+        )
+        startup_snapshot = self._baseline_portfolio_snapshot(snapshot_ts=now)
+        startup_snapshot_event = build_envelope(
+            topic=topics.PORTFOLIO_SNAPSHOTS,
+            key="portfolio",
+            payload_model=startup_snapshot,
+            source_component="test",
+        )
+        rebaseline_action = OperatorActionRecord(
+            action="rebaseline",
+            actor_role="admin",
+            reason="accept_exchange_state",
+            status="rebaseline_completed",
+            recovery_state_before="review_required",
+            recovery_state_after="rebaseline_completed",
+        )
+        rebaseline_action_event = build_envelope(
+            topic=topics.OPERATOR_ACTIONS,
+            key="system",
+            payload_model=rebaseline_action,
+            source_component="test",
+        )
+        switched_baseline = AccountBaselineSnapshot(
+            account_source="okx",
+            exchange_snapshot_ts=now + timedelta(seconds=10),
+            imported_at=now + timedelta(seconds=10),
+            baseline_status="rebaseline_completed",
+            baseline_kind="operator_rebaseline",
+            previous_baseline_ref=startup_baseline_event.event_id,
+            operator_action_ref=rebaseline_action_event.event_id,
+            trigger_reason="accept_exchange_state",
+            reason_codes=["operator_rebaseline_confirmed", "historical_fills_imported"],
+        )
+        switched_baseline_event = build_envelope(
+            topic=topics.ACCOUNT_BASELINES,
+            key="okx",
+            payload_model=switched_baseline,
+            source_component="test",
+        )
+        switched_snapshot = self._baseline_portfolio_snapshot(
+            snapshot_ts=now + timedelta(seconds=10),
+            balances={"USDT": 9950.0, "BTC": 0.001},
+            position_qty=0.001,
+            avg_entry_price=70000.0,
+        )
+        switched_snapshot_event = build_envelope(
+            topic=topics.PORTFOLIO_SNAPSHOTS,
+            key="portfolio",
+            payload_model=switched_snapshot,
+            source_component="test",
+        )
+        post_rebaseline_fill = FillEvent(
+            fill_id="fill_after_switch",
+            decision_id="decision_after_switch",
+            intent_id="intent_after_switch",
+            client_order_id="cl_after_switch",
+            exchange_order_id="ord_after_switch",
+            symbol="BTC-USDT",
+            venue="OKX",
+            side="buy",
+            fill_qty=0.001,
+            fill_price=71000.0,
+            fee_amount=0.1,
+            liquidity_role="taker",
+            exchange_timestamp=now + timedelta(seconds=20),
+            ingestion_timestamp=now + timedelta(seconds=20),
+            order_status_after_fill="FILLED",
+        )
+        fill_event = build_envelope(
+            topic=topics.FILL_EVENTS,
+            key="BTC-USDT",
+            payload_model=post_rebaseline_fill,
+            source_component="test",
+        )
+        state = PortfolioState(initial_usdt_balance=10_000.0)
+        state.load_portfolio_snapshot(switched_snapshot)
+        state.apply_fill(post_rebaseline_fill)
+        final_snapshot = PortfolioSnapshotBuilder(
+            pnl_calculator=PortfolioPnLCalculator()
+        ).build(
+            state=state,
+            price_provider=lambda _symbol: 70_500.0,
+        ).model_copy(
+            update={
+                "decision_id": "decision_after_switch",
+                "source_intent_id": "intent_after_switch",
+                "source_fill_id": "fill_after_switch",
+                "snapshot_ts": now + timedelta(seconds=21),
+            }
+        )
+        final_snapshot_event = build_envelope(
+            topic=topics.PORTFOLIO_SNAPSHOTS,
+            key="portfolio",
+            payload_model=final_snapshot,
+            source_component="test",
+        )
+
+        for envelope in (
+            startup_baseline_event,
+            startup_snapshot_event,
+            rebaseline_action_event,
+            switched_baseline_event,
+            switched_snapshot_event,
+            fill_event,
+            final_snapshot_event,
+        ):
+            event_store.append(envelope)
+
+        replay = ReplayEngine(
+            event_store=event_store,
+            reconstruction_service=PortfolioReconstructionService(
+                initial_usdt_balance=10_000.0,
+                snapshot_builder=PortfolioSnapshotBuilder(pnl_calculator=PortfolioPnLCalculator()),
+            ),
+            audit_repo=audit_repo,
+        ).replay()
+
+        self.assertEqual(replay.portfolio_issues, [])
+        self.assertEqual(replay.baseline_switch_count, 2)
+        self.assertEqual(replay.baseline_switch_issues, [])
+
+    @staticmethod
+    def _baseline_portfolio_snapshot(
+        *,
+        snapshot_ts,
+        balances: dict[str, float] | None = None,
+        position_qty: float = 0.0,
+        avg_entry_price: float = 0.0,
+    ):
+        from aats.schemas.portfolio import PortfolioSnapshot, Position
+
+        balances = balances or {"USDT": 10_000.0}
+        positions = []
+        if abs(position_qty) > 1e-12:
+            positions.append(
+                Position(
+                    symbol="BTC-USDT",
+                    position_qty=position_qty,
+                    position_notional=position_qty * avg_entry_price,
+                    avg_entry_price=avg_entry_price,
+                    unrealized_pnl=0.0,
+                )
+            )
+        return PortfolioSnapshot(
+            snapshot_ts=snapshot_ts,
+            balances=balances,
+            positions=positions,
+            cost_basis={"BTC-USDT": position_qty * avg_entry_price} if positions else {},
+            realized_pnl=0.0,
+            unrealized_pnl=0.0,
+            total_equity=balances.get("USDT", 0.0) + sum(position.position_notional for position in positions),
+            gross_exposure=sum(abs(position.position_notional) for position in positions),
+            net_exposure=sum(position.position_notional for position in positions),
+        )
+
     @staticmethod
     def _sqlite_settings(temp_dir: Path) -> AATSSettings:
         database_path = (temp_dir / "aats.db").resolve().as_posix()
@@ -954,6 +1129,22 @@ class TestPersistenceAndReplay(unittest.IsolatedAsyncioTestCase):
                 "database_auto_create_schema": True,
                 "local_publish_iterations": 4,
                 "local_publish_interval_seconds": 0.0,
+            }
+        )
+
+    @staticmethod
+    def _paper_runtime_settings() -> AATSSettings:
+        return AATSSettings.model_validate(
+            {
+                "config_profile": "local_demo",
+                "mode": "paper_live",
+                "market_data_backend": "demo",
+                "execution_backend": "paper",
+                "account_backend": "disabled",
+                "account_read_enabled": False,
+                "storage_mode": "memory",
+                "event_persistence_mode": "strict",
+                "enabled_decision_timeframes": ("15m",),
             }
         )
 

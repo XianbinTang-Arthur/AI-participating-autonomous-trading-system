@@ -68,6 +68,7 @@ class RuntimeModeState(SchemaBase):
 
 class RecoveryStatus(SchemaBase):
     status: str
+    recovery_state: str = "normal_operation"
     recovered_order_count: int = 0
     recovered_fill_count: int = 0
     recovered_snapshot_available: bool = False
@@ -78,6 +79,28 @@ class RecoveryStatus(SchemaBase):
     open_order_count: int = 0
     divergence_count: int = 0
     safe_startup: bool = True
+    safe_to_trade: bool = False
+    resume_eligible: bool = False
+    review_required: bool = False
+    rebaseline_available: bool = False
     halted: bool = False
     recovery_action: str | None = None
+    baseline_imported: bool = False
+    baseline_status: str | None = None
+    baseline_imported_at: datetime | None = None
+    baseline_event_ref: str | None = None
+    baseline_source: str | None = None
+    baseline_safe_for_automatic_continuation: bool = False
+    baseline_requires_operator_review: bool = False
+    baseline_balance_count: int = 0
+    baseline_position_count: int = 0
+    baseline_open_order_count: int = 0
+    baseline_fill_count: int = 0
+    last_rebaseline_at: datetime | None = None
+    last_rebaseline_event_ref: str | None = None
+    last_rebaseline_action_ref: str | None = None
+    last_resume_action_ref: str | None = None
+    last_resume_status: str | None = None
+    last_resume_reason: str | None = None
+    resume_blocked_reasons: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)

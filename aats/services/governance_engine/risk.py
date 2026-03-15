@@ -62,6 +62,28 @@ class RiskEngine:
             approved = False
             rejection_reasons.append("max_decision_frequency_reached")
 
+        if (
+            self.mode_controller.mode == "guarded_live"
+            and self.settings.execution_backend == "okx"
+            and self.settings.account_backend == "okx"
+            and self.settings.account_read_enabled
+        ):
+            delta_qty = capped_qty - target.current_position_qty
+            base_currency, quote_currency = self._symbol_currencies(target.symbol)
+            fee_multiplier = 1.0 + (self.settings.paper_taker_fee_bps / 10_000.0)
+            if delta_qty > 1e-12 and quote_currency is not None:
+                required_quote = abs(delta_qty) * mark_price * fee_multiplier
+                available_quote = self._available_balance(quote_currency)
+                if available_quote + 1e-9 < required_quote:
+                    approved = False
+                    rejection_reasons.append("insufficient_quote_balance")
+            elif delta_qty < -1e-12 and base_currency is not None:
+                required_base = abs(delta_qty)
+                available_base = self._available_balance(base_currency)
+                if available_base + 1e-9 < required_base:
+                    approved = False
+                    rejection_reasons.append("insufficient_base_balance")
+
         if self.mode_controller.mode == "guarded_live" and self.settings.execution_backend == "okx":
             health_blockers = self.health_service.execution_blockers()
             if health_blockers:
@@ -84,6 +106,23 @@ class RiskEngine:
             halt_required=halt_required,
             rejection_reasons=rejection_reasons,
         )
+
+    def _available_balance(self, currency: str) -> float:
+        snapshot_getter = getattr(self.account_service, "latest_snapshot", None)
+        snapshot = snapshot_getter() if callable(snapshot_getter) else None
+        if snapshot is None:
+            return 0.0
+        return sum(balance.available for balance in snapshot.balances if balance.currency == currency)
+
+    def _symbol_currencies(self, symbol: str) -> tuple[str | None, str | None]:
+        instrument_getter = getattr(self.account_service, "instrument_metadata", None)
+        instrument = instrument_getter(symbol) if callable(instrument_getter) else None
+        if instrument is not None:
+            return instrument.base_currency, instrument.quote_currency
+        if "-" in symbol:
+            base_currency, quote_currency = symbol.split("-", 1)
+            return base_currency, quote_currency
+        return None, None
 
     async def publish_decision(
         self,
