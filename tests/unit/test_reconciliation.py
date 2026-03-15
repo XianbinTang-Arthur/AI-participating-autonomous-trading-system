@@ -6,7 +6,12 @@ from aats.schemas.common import utc_now
 from aats.schemas.execution import FillEvent, OrderState
 from aats.schemas.exchange import ExchangeAccountSnapshot, ExchangeBalance, ExchangeFill, ExchangeOpenOrder
 from aats.schemas.portfolio import PortfolioSnapshot, Position
+from aats.services.portfolio_service.pnl import PortfolioPnLCalculator
+from aats.services.portfolio_service.snapshots import PortfolioSnapshotBuilder
+from aats.services.portfolio_service.reconstruction import PortfolioReconstructionService
 from aats.services.reconciliation_service.comparator import StateComparator
+from aats.services.reconciliation_service.fetcher import ExchangeStateFetcher
+from aats.services.reconciliation_service.repair import ReconciliationRepairService, ReconciliationService
 
 
 class TestReconciliationComparator(unittest.TestCase):
@@ -383,6 +388,64 @@ class TestReconciliationComparator(unittest.TestCase):
         self.assertEqual(report.severity, "CLEAN")
         self.assertFalse(report.halt_required)
         self.assertEqual(report.mismatch_reasons, [])
+
+    def test_service_uses_exchange_bootstrap_snapshot_as_reconstruction_baseline(self) -> None:
+        now = utc_now()
+        baseline_snapshot = PortfolioSnapshot(
+            snapshot_ts=now,
+            balances={"USDT": 75_630.13129751521, "OKB": 100.0, "ETH": 1.0, "BTC": 5.736e-9},
+            positions=[],
+            cost_basis={},
+            realized_pnl=0.0,
+            unrealized_pnl=0.0,
+            total_equity=75_630.13129751521,
+            gross_exposure=0.0,
+            net_exposure=0.0,
+            risk_budget_usage={},
+        )
+
+        class _PortfolioRepo:
+            def latest(self):
+                return baseline_snapshot
+
+            def history(self):
+                return [baseline_snapshot]
+
+            def save_snapshot(self, snapshot):
+                raise AssertionError("save_snapshot should not be called in this unit test")
+
+        class _ExecutionRepo:
+            def order_states(self):
+                return []
+
+            def fills(self):
+                return []
+
+        service = ReconciliationService(
+            bus=None,  # type: ignore[arg-type]
+            fetcher=ExchangeStateFetcher(account_service=None),
+            comparator=StateComparator(),
+            repair_service=ReconciliationRepairService(),
+            reconciliation_repo=None,  # type: ignore[arg-type]
+            execution_repo=_ExecutionRepo(),  # type: ignore[arg-type]
+            portfolio_repo=_PortfolioRepo(),  # type: ignore[arg-type]
+            event_store=None,  # type: ignore[arg-type]
+            reconstruction_service=PortfolioReconstructionService(
+                initial_usdt_balance=10_000.0,
+                snapshot_builder=PortfolioSnapshotBuilder(pnl_calculator=PortfolioPnLCalculator()),
+            ),
+            price_provider=lambda _symbol: 0.0,
+            bootstrap_portfolio_from_exchange=True,
+            metrics=None,
+        )
+
+        reconstructed = service._rebuild_snapshot_for_comparison(
+            stored_snapshot=baseline_snapshot,
+            fills=[],
+        )
+
+        self.assertEqual(reconstructed.balances, baseline_snapshot.balances)
+        self.assertEqual(reconstructed.total_equity, baseline_snapshot.total_equity)
 
 
 if __name__ == "__main__":

@@ -61,6 +61,7 @@ from aats.storage.reconciliation_repo import InMemoryReconciliationRepository
 from aats.storage.reconciliation_repo_postgres import PostgresReconciliationRepository
 from aats.storage.session import DatabaseRuntime, create_database_runtime, create_schema
 from aats.schemas.system import RecoveryStatus
+from aats.schemas.common import utc_now
 
 
 def load_yaml_config(environment: str, profile: str, config_dir: str | Path = "configs") -> dict[str, Any]:
@@ -100,6 +101,7 @@ class StorageBackends:
 
 @dataclass(slots=True)
 class ApplicationRuntime:
+    started_at: Any
     settings: AATSSettings
     bus: InMemoryEventBus
     event_store: EventStore
@@ -126,6 +128,7 @@ class ApplicationRuntime:
     execution_repo: ExecutionRepository
     reconciliation_repo: ReconciliationRepository
     recovery_status: RecoveryStatus
+    replay_validation_history: list[dict[str, Any]] = field(default_factory=list)
     database_runtime: DatabaseRuntime | None = None
     background_tasks: list[asyncio.Task[Any]] = field(default_factory=list)
 
@@ -253,6 +256,11 @@ async def build_runtime(
 
     okx_client = OKXRESTClient(settings=runtime_settings)
     account_service = OKXAccountService(settings=runtime_settings, client=okx_client)
+    bootstrap_from_exchange = (
+        runtime_settings.bootstrap_portfolio_from_exchange
+        and runtime_settings.account_backend == "okx"
+        and runtime_settings.account_read_enabled
+    )
     execution_adapter = _build_execution_adapter(
         settings=runtime_settings,
         market_gateway=market_gateway,
@@ -339,12 +347,14 @@ async def build_runtime(
         repair_service=ReconciliationRepairService(),
         reconciliation_repo=storage.reconciliation_repo,
         execution_repo=storage.execution_repo,
+        portfolio_repo=storage.portfolio_repo,
+        event_store=storage.event_store,
         reconstruction_service=PortfolioReconstructionService(
             initial_usdt_balance=runtime_settings.initial_usdt_balance,
             snapshot_builder=snapshot_builder,
         ),
         price_provider=market_gateway.latest_price,
-        bootstrap_portfolio_from_exchange=runtime_settings.bootstrap_portfolio_from_exchange,
+        bootstrap_portfolio_from_exchange=bootstrap_from_exchange,
         metrics=metrics,
     )
     recovery_service = ExecutionRecoveryService(
@@ -357,7 +367,7 @@ async def build_runtime(
         ),
         price_provider=market_gateway.latest_price,
         kill_switch=kill_switch,
-        bootstrap_portfolio_from_exchange=runtime_settings.bootstrap_portfolio_from_exchange,
+        bootstrap_portfolio_from_exchange=bootstrap_from_exchange,
         reconciliation_stale_after_seconds=runtime_settings.reconciliation_stale_after_seconds,
     )
 
@@ -424,7 +434,7 @@ async def build_runtime(
     if runtime_settings.account_backend == "okx" and runtime_settings.account_read_enabled:
         account_snapshot = await account_service.refresh(force=True)
         if (
-            runtime_settings.bootstrap_portfolio_from_exchange
+            bootstrap_from_exchange
             and account_snapshot is not None
             and storage.portfolio_repo.latest() is None
         ):
@@ -443,6 +453,7 @@ async def build_runtime(
         recovery_status = recovery_artifacts.status
 
     return ApplicationRuntime(
+        started_at=utc_now(),
         settings=runtime_settings,
         bus=bus,
         event_store=storage.event_store,

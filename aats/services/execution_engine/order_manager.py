@@ -6,6 +6,7 @@ from aats.events import topics
 from aats.events.envelopes import parse_payload, publish_model
 from aats.schemas.common import new_id, utc_now
 from aats.schemas.execution import OrderIntent, OrderState
+from aats.schemas.operator import ExecutionErrorSummary
 from aats.services.execution_engine.exchange_adapter import ExchangeAdapter
 from aats.services.governance_engine.kill_switch import KillSwitch
 from aats.storage.base import ExecutionRepository
@@ -151,6 +152,7 @@ class OrderManager:
         return persisted
 
     async def _persist_order_state(self, *, order_state: OrderState, key: str) -> OrderState:
+        previous = self.execution_repo.get_order_state(order_state.client_order_id)
         persisted = self.execution_repo.save_order_state(order_state)
         log_event(
             self.logger,
@@ -172,6 +174,7 @@ class OrderManager:
             payload_model=persisted,
             source_component="execution_engine",
         )
+        await self._publish_execution_error_summary(previous=previous, persisted=persisted)
         return persisted
 
     async def _persist_fill(self, fill) -> None:
@@ -196,5 +199,33 @@ class OrderManager:
             topic=topics.FILL_EVENTS,
             key=fill.symbol,
             payload_model=fill,
+            source_component="execution_engine",
+        )
+
+    async def _publish_execution_error_summary(
+        self,
+        *,
+        previous: OrderState | None,
+        persisted: OrderState,
+    ) -> None:
+        if persisted.status not in {"FAILED", "REJECTED", "BLOCKED"}:
+            return
+        if previous is not None and previous.status == persisted.status and previous.execution_error == persisted.execution_error:
+            return
+        summary = ExecutionErrorSummary(
+            subsystem="execution_engine",
+            severity="error" if persisted.status == "FAILED" else "warning",
+            message=persisted.execution_error or persisted.cancel_reason or persisted.status,
+            decision_id=persisted.decision_id,
+            intent_id=persisted.intent_id,
+            order_id=persisted.client_order_id,
+            status=persisted.status,
+            observed_at=persisted.last_update_ts or persisted.created_at,
+        )
+        await publish_model(
+            bus=self.bus,
+            topic=topics.EXECUTION_ERROR_SUMMARIES,
+            key=persisted.symbol,
+            payload_model=summary,
             source_component="execution_engine",
         )

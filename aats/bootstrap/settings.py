@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -81,9 +81,9 @@ class AATSSettings(BaseSettings):
     market_data_stale_after_seconds: float = 30.0
     account_state_stale_after_seconds: float = 60.0
     reconciliation_stale_after_seconds: float = 300.0
-    okx_rest_url: str = "https://us.okx.com"
-    okx_public_ws_url: str = "wss://wsus.okx.com:8443/ws/v5/public"
-    okx_business_ws_url: str = "wss://wsus.okx.com:8443/ws/v5/business"
+    okx_rest_url: str = "https://www.okx.com"
+    okx_public_ws_url: str = "wss://ws.okx.com:8443/ws/v5/public"
+    okx_business_ws_url: str = "wss://ws.okx.com:8443/ws/v5/business"
     okx_api_key: str | None = None
     okx_api_secret: str | None = None
     okx_api_passphrase: str | None = None
@@ -95,9 +95,23 @@ class AATSSettings(BaseSettings):
     okx_fill_fetch_limit: int = 100
     api_host: str = "127.0.0.1"
     api_port: int = 8000
+    operator_auth_enabled: bool = False
+    operator_read_api_key: str | None = None
+    operator_write_api_key: str | None = None
     log_level: str = "INFO"
+    log_dir: str = "logs"
+    log_rotate_max_bytes: int = 5_242_880
+    log_backup_count: int = 7
     exchange_name: str = "PAPER"
     allowed_symbols: tuple[str, ...] = Field(default=("BTC-USDT",))
+
+    @classmethod
+    def model_validate(cls, obj: Any, *args: Any, **kwargs: Any) -> "AATSSettings":
+        # BaseSettings.model_validate() will still consult .env sources. When callers
+        # pass an explicit dict, treat it as a concrete override set instead.
+        if isinstance(obj, dict):
+            return cls(_env_file=None, **obj)
+        return super().model_validate(obj, *args, **kwargs)
 
     @property
     def supported_timeframes(self) -> tuple[SupportedTimeframe, SupportedTimeframe]:

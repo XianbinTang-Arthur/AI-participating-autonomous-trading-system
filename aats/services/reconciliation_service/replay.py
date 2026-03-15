@@ -15,6 +15,7 @@ from aats.schemas.portfolio import PortfolioSnapshot
 from aats.schemas.reconciliation import ReconciliationReport
 from aats.schemas.system import HealthSnapshot
 from aats.services.execution_engine.state_machine import OrderStateMachine
+from aats.services.portfolio_service.positions import PortfolioState
 from aats.storage.base import AuditRepository, EventStore, PortfolioRepository
 from aats.services.portfolio_service.reconstruction import PortfolioReconstructionService
 
@@ -58,6 +59,7 @@ class ReplayEngine:
         start_at: datetime | None = None,
         end_at: datetime | None = None,
     ) -> ReplayResult:
+        selected_decision_id = decision_id
         latest_prices: dict[str, float] = {}
         processed_fills: list[FillEvent] = []
         decision_chains: dict[str, DecisionAuditRecord] = {}
@@ -68,6 +70,7 @@ class ReplayEngine:
         audit_issues: list[str] = []
         stored_snapshot_count = 0
         final_stored_snapshot: PortfolioSnapshot | None = None
+        baseline_snapshot: PortfolioSnapshot | None = None
         events = self._select_events(decision_id=decision_id, start_at=start_at, end_at=end_at)
         events_by_id = {event.event_id: event for event in events}
         events_by_decision: dict[str, list[EventEnvelope]] = defaultdict(list)
@@ -79,10 +82,10 @@ class ReplayEngine:
         audit_event_ids_by_decision: dict[str, str] = {}
 
         for envelope in events:
-            decision_id = envelope.payload.get("decision_id")
-            if isinstance(decision_id, str):
-                decision_ids.add(decision_id)
-                events_by_decision[decision_id].append(envelope)
+            envelope_decision_id = envelope.payload.get("decision_id")
+            if isinstance(envelope_decision_id, str):
+                decision_ids.add(envelope_decision_id)
+                events_by_decision[envelope_decision_id].append(envelope)
 
             if envelope.topic == topics.MARKET_SNAPSHOTS:
                 snapshot = MarketSnapshot.model_validate(envelope.payload)
@@ -117,9 +120,22 @@ class ReplayEngine:
                 stored_snapshot_count += 1
                 stored_snapshot = PortfolioSnapshot.model_validate(envelope.payload)
                 final_stored_snapshot = stored_snapshot
-                reconstructed_snapshot = self.reconstruction_service.rebuild_snapshot(
+
+                if (
+                    baseline_snapshot is None
+                    and stored_snapshot.source_fill_id is None
+                    and stored_snapshot.source_intent_id is None
+                ):
+                    baseline_snapshot = stored_snapshot
+                    continue
+
+                reconstructed_snapshot = self._rebuild_snapshot(
                     fills=processed_fills,
-                    price_provider=lambda symbol: latest_prices.get(symbol, 0.0),
+                    baseline_snapshot=baseline_snapshot,
+                    price_provider=self._snapshot_price_provider(
+                        stored_snapshot=stored_snapshot,
+                        latest_prices=latest_prices,
+                    ),
                 )
                 mismatch = self._snapshot_mismatch(
                     stored_snapshot=stored_snapshot,
@@ -132,9 +148,18 @@ class ReplayEngine:
 
         final_reconstructed_snapshot = None
         if stored_snapshot_count > 0 or processed_fills:
-            final_reconstructed_snapshot = self.reconstruction_service.rebuild_snapshot(
+            final_price_provider = (
+                self._snapshot_price_provider(
+                    stored_snapshot=final_stored_snapshot,
+                    latest_prices=latest_prices,
+                )
+                if final_stored_snapshot is not None
+                else lambda symbol: latest_prices.get(symbol, 0.0)
+            )
+            final_reconstructed_snapshot = self._rebuild_snapshot(
                 fills=processed_fills,
-                price_provider=lambda symbol: latest_prices.get(symbol, 0.0),
+                baseline_snapshot=baseline_snapshot,
+                price_provider=final_price_provider,
             )
 
         execution_chain_issues.extend(
@@ -186,7 +211,7 @@ class ReplayEngine:
             *audit_issues,
         ]
         return ReplayResult(
-            selected_decision_id=decision_id,
+            selected_decision_id=selected_decision_id,
             start_at=start_at,
             end_at=end_at,
             replayed_event_count=len(events),
@@ -201,6 +226,51 @@ class ReplayEngine:
             final_stored_snapshot=final_stored_snapshot,
             decision_chains=decision_chains,
         )
+
+    def _rebuild_snapshot(
+        self,
+        *,
+        fills: list[FillEvent],
+        baseline_snapshot: PortfolioSnapshot | None,
+        price_provider,
+    ) -> PortfolioSnapshot:
+        if baseline_snapshot is None:
+            return self.reconstruction_service.rebuild_snapshot(
+                fills=fills,
+                price_provider=price_provider,
+            )
+
+        state = PortfolioState(initial_usdt_balance=self.reconstruction_service.initial_usdt_balance)
+        state.load_portfolio_snapshot(baseline_snapshot)
+        for fill in sorted(fills, key=lambda item: (item.ingestion_timestamp, item.fill_id)):
+            state.apply_fill(fill)
+        return self.reconstruction_service.snapshot_builder.build(
+            state=state,
+            price_provider=price_provider,
+        )
+
+    @staticmethod
+    def _snapshot_price_provider(
+        *,
+        stored_snapshot: PortfolioSnapshot | None,
+        latest_prices: dict[str, float],
+    ):
+        snapshot_marks: dict[str, float] = {}
+        if stored_snapshot is not None:
+            for position in stored_snapshot.positions:
+                if abs(position.position_qty) > 1e-12:
+                    snapshot_marks[position.symbol] = (
+                        position.position_notional / position.position_qty
+                    )
+                elif position.avg_entry_price > 0.0:
+                    snapshot_marks[position.symbol] = position.avg_entry_price
+
+        def provider(symbol: str) -> float:
+            if symbol in snapshot_marks:
+                return snapshot_marks[symbol]
+            return latest_prices.get(symbol, 0.0)
+
+        return provider
 
     def _select_events(
         self,

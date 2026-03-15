@@ -50,10 +50,10 @@ class OKXAccountService:
                 )
                 instruments_payload = await self.client.get_instruments()
                 account_config_payload = await self.client.get_account_config()
-                try:
-                    positions_payload = await self.client.get_positions()
-                except Exception:
-                    positions_payload = {"data": []}
+                # OKX spot accounts expose holdings through balances. The positions
+                # endpoint is not consistently available for spot and can return 400s,
+                # which would otherwise spam the refresh loop logs.
+                positions_payload = {"data": []}
 
                 snapshot = ExchangeAccountSnapshot(
                     account_source="okx",

@@ -8,6 +8,7 @@ from aats.schemas.execution import FillEvent, OrderIntent
 from aats.schemas.exchange import ExchangeAccountSnapshot, InstrumentMetadata
 from aats.services.execution_engine.okx_adapter import OKXExecutionAdapter, OKXOrderPayloadBuilder
 from aats.services.portfolio_service.positions import PortfolioState
+from aats.services.governance_engine.health import SystemHealthService
 from aats.services.governance_engine.kill_switch import KillSwitch
 from aats.services.governance_engine.mode import RuntimeModeController
 
@@ -71,6 +72,24 @@ class FakeHealthService:
 
     def execution_blockers(self) -> list[str]:
         return list(self._blockers)
+
+
+class FakeMarketProvider:
+    def status(self):
+        return {
+            "connected": True,
+            "fresh": True,
+            "last_update_ts": utc_now(),
+            "last_error": None,
+            "ready": True,
+            "detail": "test_market",
+            "blockers": [],
+        }
+
+
+class FakeReconciliationRepo:
+    def latest(self):
+        return None
 
 
 class FakeOKXClient:
@@ -325,6 +344,37 @@ class TestGuardedSimulatedExecution(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(fills), 1)
         self.assertEqual(fills[0].venue, "OKX")
         self.assertEqual(fills[0].fill_id, "trade_1")
+
+    def test_readiness_does_not_recurse_through_health_service(self) -> None:
+        settings = make_settings()
+        kill_switch = KillSwitch()
+        mode_controller = RuntimeModeController(settings=settings, kill_switch=kill_switch)
+        account_service = FakeAccountService()
+        adapter = OKXExecutionAdapter(
+            settings=settings,
+            client=FakeOKXClient(),  # type: ignore[arg-type]
+            account_service=account_service,  # type: ignore[arg-type]
+            mode_controller=mode_controller,
+            health_service=None,
+            price_provider=lambda _symbol: 68_000.0,
+        )
+        health_service = SystemHealthService(
+            settings=settings,
+            mode_controller=mode_controller,
+            kill_switch=kill_switch,
+            market_provider=FakeMarketProvider(),
+            account_provider=account_service,  # type: ignore[arg-type]
+            execution_provider=adapter,
+            reconciliation_repo=FakeReconciliationRepo(),  # type: ignore[arg-type]
+        )
+        adapter.health_service = health_service
+
+        readiness = adapter.readiness()
+        snapshot = health_service.snapshot()
+
+        self.assertIn("submit_blocked_reasons", readiness)
+        self.assertIsInstance(snapshot.blockers, list)
+        self.assertIn("reconciliation_missing", snapshot.blockers)
 
     def test_order_payload_generation_is_okx_compatible(self) -> None:
         payload = OKXOrderPayloadBuilder().build(

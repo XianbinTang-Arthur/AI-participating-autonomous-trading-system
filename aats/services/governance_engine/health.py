@@ -47,20 +47,13 @@ class SystemHealthService:
         self.reconciliation_repo = reconciliation_repo
 
     def snapshot(self) -> SystemHealthSnapshot:
-        market_status = self.market_provider.status()
-        account_status = self.account_provider.status()
+        base_components = self._base_components()
         execution_status = self.execution_provider.readiness()
-        reconciliation_status = self._reconciliation_status(self.reconciliation_repo.latest())
-
         components = [
-            self._component_from_status("market_data", market_status),
-            self._component_from_status("account_state", account_status),
+            *base_components,
             self._component_from_status("execution_adapter", execution_status),
-            self._component_from_status("reconciliation", reconciliation_status),
         ]
         blockers = [blocker for component in components for blocker in component.blockers]
-        if self.kill_switch.halted:
-            blockers.append("kill_switch_active")
 
         status = "ok"
         if blockers:
@@ -78,8 +71,23 @@ class SystemHealthService:
         )
 
     def execution_blockers(self) -> list[str]:
-        snapshot = self.snapshot()
-        return list(snapshot.blockers)
+        return list(dict.fromkeys(self._base_blockers()))
+
+    def _base_components(self) -> list[ComponentHealth]:
+        market_status = self.market_provider.status()
+        account_status = self.account_provider.status()
+        reconciliation_status = self._reconciliation_status(self.reconciliation_repo.latest())
+        return [
+            self._component_from_status("market_data", market_status),
+            self._component_from_status("account_state", account_status),
+            self._component_from_status("reconciliation", reconciliation_status),
+        ]
+
+    def _base_blockers(self) -> list[str]:
+        blockers = [blocker for component in self._base_components() for blocker in component.blockers]
+        if self.kill_switch.halted:
+            blockers.append("kill_switch_active")
+        return blockers
 
     @staticmethod
     def _component_from_status(component: str, status: dict[str, Any]) -> ComponentHealth:

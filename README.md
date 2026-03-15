@@ -9,7 +9,16 @@ Current state: event-driven AATS prototype with:
 - full-loop `real_market_paper` execution using local paper fills under real market conditions
 - governed AI integration with strict structured-output validation and fallback modes
 
-This is not production-ready live trading. Real order submission remains disabled by default.
+This is not production-ready real-money live trading.
+
+Current real-money live status:
+- supported: `local_demo`, `real_market_paper`, guarded OKX demo simulated submit
+- intentionally unsupported: any real-money OKX live trading path
+- default behavior: exchange submission blocked unless guarded demo-submit gates are explicitly enabled
+
+The code currently blocks real-money live trading in policy and mode handling:
+- `autonomous_live` is rejected by the runtime mode controller
+- non-simulated guarded live submit is blocked with `real_money_live_not_supported`
 
 ## Modes
 
@@ -84,6 +93,13 @@ Required env:
 - `AATS_OKX_API_SECRET`
 - `AATS_OKX_API_PASSPHRASE`
 
+Default OKX endpoint behavior:
+- defaults target the OKX global endpoints:
+  - `AATS_OKX_REST_URL=https://www.okx.com`
+  - `AATS_OKX_PUBLIC_WS_URL=wss://ws.okx.com:8443/ws/v5/public`
+  - `AATS_OKX_BUSINESS_WS_URL=wss://ws.okx.com:8443/ws/v5/business`
+- if you use a different regional OKX environment, override these three values explicitly in `.env`
+
 Run the API runtime:
 
 ```powershell
@@ -154,6 +170,12 @@ What this mode does:
 - restores the latest reconciliation context when available
 - enters a safe halted startup state if recovery finds divergence, missing reconciliation context for recovered execution state, stale reconciliation context, or recovered open orders that require operator review
 
+Environment note:
+- guarded simulated submit expects OKX demo-trading credentials
+- the runtime adds `x-simulated-trading: 1` automatically when `AATS_OKX_SIMULATED_TRADING=true`
+- if you use the OKX global account environment, keep the default `www.okx.com` and `ws.okx.com` endpoints
+- if you use a regional OKX environment, override the REST and websocket URLs in `.env`
+
 What this mode still does not do:
 - only OKX Spot
 - current MVP symbol universe only
@@ -193,57 +215,165 @@ Replay output includes:
 - `execution_chain_issues`
 - `audit_issues`
 
-## API Surface
+## Operator API Surface
 
-Current operator-facing endpoints:
+The repository now exposes a practical operator-facing JSON control surface. These endpoints are intended to be usable without reading source code.
+
+## Lightweight Operator Frontend
+
+The API gateway now also serves a lightweight operator frontend:
+- `GET /`
+- `GET /ui`
+
+Frontend characteristics:
+- no separate Node build step
+- static HTML + CSS + vanilla JavaScript, served directly by FastAPI
+- works against the existing operator APIs
+- supports optional `X-AATS-API-Key` entry and local browser storage
+- graceful partial refresh: one failing panel does not blank the whole page
+- richer operator layout:
+  - top-level navigation split into `System`, `Trading`, `Execution`, and `Diagnostics`
+  - per-page secondary navigation for quick section jumps
+  - system overview and runtime metrics separated from trading and execution views
+  - sticky side inspector for decision/order/fill drill-down across pages
+- safe manual actions:
+  - halt
+  - resume
+  - active reconciliation validation
+
+The frontend is intentionally lightweight. It is meant to be operator-usable and resilient, not a large SPA.
+
+System and control:
 - `GET /system/health`
 - `GET /system/mode`
+- `GET /system/runtime`
+- `GET /system/blockers`
+- `GET /system/metrics`
+- `GET /system/recovery`
 - `POST /system/mode`
 - `POST /system/halt`
 - `POST /system/resume`
-- `GET /portfolio`
-- `GET /positions`
-- `GET /orders/open`
-- `GET /reconciliation/latest`
+
+Decision, policy, and risk visibility:
 - `GET /decision/latest`
+- `GET /decision/recent`
+- `GET /decision/{decision_id}`
+- `GET /policy/latest`
+- `GET /policy/recent`
 - `GET /risk/latest`
+- `GET /risk/recent`
+
+Portfolio and account visibility:
+- `GET /portfolio`
+- `GET /portfolio/latest`
+- `GET /portfolio/history`
+- `GET /balances`
+- `GET /positions`
+- `GET /account/state`
+- `GET /account/open-orders`
+- `GET /account/recent-fills`
+
+Execution visibility and manual intervention:
+- `GET /orders/open`
 - `GET /orders/latest`
+- `GET /orders/recent`
+- `GET /orders/partial`
+- `GET /orders/canceled`
+- `GET /orders/{client_order_id}`
+- `POST /orders/{client_order_id}/cancel`
 - `GET /fills/latest`
+- `GET /fills/recent`
+- `GET /fills/{fill_id}`
 - `GET /execution/latest`
 - `GET /execution/result/latest`
+- `GET /execution/errors`
+
+Reconciliation and audit:
+- `GET /reconciliation/latest`
+- `GET /reconciliation/recent`
+- `GET /reconciliation/mismatches`
+- `GET /reconciliation/{reconciliation_id}`
+- `POST /reconciliation/validate`
 - `GET /audit/latest`
 - `GET /audit/{decision_id}`
+- `GET /replay/status`
+- `GET /replay/recent-validations`
+- `POST /replay/validate/{decision_id}`
 
-`/system/health` now reports:
-- market data connectivity and freshness
-- account connectivity and freshness
-- execution adapter readiness
-- reconciliation freshness
-- current blockers
-- execution summary counts for orders and fills
+Key operator semantics:
+- `/system/health` exposes overall status, runtime state, blockers, warnings, subsystem freshness, execution summary, and recovery status
+- `/system/mode` exposes the effective mode contract, including:
+  - config profile
+  - current mode
+  - operating state
+  - execution, account, and market-data backends
+  - AI operating mode
+  - whether exchange submit is allowed
+  - whether submit is blocked only for safety or by mode design
+- `/system/blockers` classifies blockers into:
+  - execution-affecting blockers
+  - account-sync blockers
+  - submit-only blockers
+  - recommended operator action
+  - recent persisted blocker history
+- `/decision/{decision_id}` returns an operator-usable linked chain for:
+  - health snapshot
+  - decision context
+  - baseline and AI assessments
+  - target, policy, and risk decisions
+  - execution plan
+  - order intents and order-state updates
+  - fills
+  - portfolio snapshot
+  - reconciliations
+- `/audit/{decision_id}` returns the latest `DecisionAuditRecord` plus linked objects for the full decision chain
+- `/execution/errors` returns structured recent execution failures and rejections, backed by persisted error summaries
+- `/replay/status` and `/replay/validate/{decision_id}` expose the currently implemented replay-validation capability only; they do not claim recovery features that do not exist
+- `/reconciliation/validate` triggers an explicit reconciliation validation pass after startup or operator review, instead of relying only on the last stored report
 
-`GET /decision/latest` now reports:
-- one internally consistent `decision_id` chain
-- latest health snapshot for that decision
-- latest decision context
-- latest baseline assessment and position target
-- latest policy decision
-- latest risk decision
-- latest execution plan
-- latest audit record
-- latest order intent, order update, and fill event for the same decision when they exist
-- execution-backed linked objects for that decision
+Operator API authentication:
+- header: `X-AATS-API-Key`
+- when `AATS_OPERATOR_AUTH_ENABLED=true`:
+  - read endpoints accept either the read key or write key
+  - write endpoints require the write key
+- config:
+  - `AATS_OPERATOR_READ_API_KEY`
+  - `AATS_OPERATOR_WRITE_API_KEY`
+- when auth is disabled, the API remains open for local development
 
-`GET /audit/{decision_id}` now returns:
-- the latest `DecisionAuditRecord`
-- revision count for that decision
-- linked event payloads for context, assessments, target, policy, risk, execution plan, intents, order updates, fills, portfolio snapshot, and reconciliations
+Blocked vs degraded vs halted:
+- `healthy`: no active execution blockers and no warning-only subsystem degradation
+- `degraded`: warning-level subsystem issues are present, but execution is not blocked
+- `blocked`: execution blockers are present
+- `halted`: the operator kill switch is active
+
+Mode semantics are explicit:
+- `local_demo`: local demo market plus local paper execution; exchange submit intentionally unavailable
+- `real_market_paper`: real OKX market data plus read-only account and local paper execution; exchange submit intentionally unavailable
+- `guarded_simulated_submit_dry_run`: OKX demo submit path selected, but submit intentionally blocked and rendered as dry-run
+- `guarded_simulated_submit_enabled`: OKX demo submit allowed only when all configured gates pass
+- `guarded_live_blocked` and `guarded_live_enabled`: reserved future real-money profile shapes; real-money submit remains unsupported
 
 Structured logs now standardize the main correlation fields when available:
 - `decision_id`
 - `intent_id`
 - `order_id`
 - `fill_id`
+
+Startup now also creates a local rotating file-log layout under `logs/`:
+- `logs/runtime/aats.log`: full runtime stream at or above `AATS_LOG_LEVEL`
+- `logs/debug/debug.log`: debug-only events when `AATS_LOG_LEVEL=DEBUG`
+- `logs/info/info.log`: info-level events
+- `logs/warning/warning.log`: warning-level events
+- `logs/error/error.log`: error and critical events
+
+Logging config:
+- `AATS_LOG_LEVEL`
+- `AATS_LOG_DIR`
+- `AATS_LOG_ROTATE_MAX_BYTES`
+- `AATS_LOG_BACKUP_COUNT`
+
+This keeps console logs for active debugging while making backend service logs inspectable after restart.
 
 ## AI Modes
 
@@ -294,9 +424,17 @@ Defaults remain conservative:
 - `live_submit_enabled=false`
 - `guarded_execution_dry_run=true`
 - `okx_simulated_trading=false`
+- `operator_auth_enabled=false`
 
 Event persistence defaults to visibility-first behavior:
 - `AATS_EVENT_PERSISTENCE_MODE=strict`
+
+Operator persistence now records compact summaries into the existing event store for:
+- blocker snapshots
+- operator halt/resume actions
+- execution errors
+- replay validations
+- explicit reconciliation validations
 
 ## What Is Implemented
 
@@ -315,15 +453,18 @@ Event persistence defaults to visibility-first behavior:
 - stronger mode-aware policy/risk/health blocking
 - expanded operator API surface
 - explicit recovery status visibility via `GET /system/health`, `GET /execution/latest`, and `GET /system/recovery`
+- structured operator blocker summaries, runtime metrics, and replay validation status
+- read/write operator API auth hooks and persisted operator-history summaries
 
 ## What Remains Intentionally Limited
 
-- AI inference is still a deterministic stub
+- AI integration is provider-backed and audited, but still intentionally conservative and governance-bound
 - reconciliation repair remains a TODO
 - no Kafka or distributed runtime
 - no multi-exchange support
 - no production-grade live order lifecycle management beyond guarded submission
 - no autonomous live rollout
+- no real-money live trading support
 - `real_market_paper` still uses local fill simulation rather than exchange-side simulated order placement
 - exchange reconciliation against balances/positions is only meaningful when `bootstrap_portfolio_from_exchange=true`
 - amend workflows and private websocket execution streams are not implemented yet

@@ -47,11 +47,20 @@ class RuntimeModeController:
             "operating_state": operating_state,
             "market_data_source": mode_behavior["market_data_source"],
             "account_read_source": mode_behavior["account_read_source"],
+            "market_data_backend": self.settings.market_data_backend,
+            "account_backend": self.settings.account_backend,
             "execution_backend": self.settings.execution_backend,
+            "ai_operating_mode": self.settings.ai_operating_mode,
             "execution_route": mode_behavior["execution_route"],
             "exchange_submit_target": mode_behavior["exchange_submit_target"],
             "exchange_submit_allowed": mode_behavior["exchange_submit_allowed"],
             "submit_blocked_reasons": mode_behavior["submit_blocked_reasons"],
+            "execution_blocked": not mode_behavior["exchange_submit_allowed"],
+            "blocked_reason": (
+                mode_behavior["submit_blocked_reasons"][0]
+                if mode_behavior["submit_blocked_reasons"]
+                else None
+            ),
             "live_submit_enabled": self.settings.live_submit_enabled,
             "guarded_execution_dry_run": self.settings.guarded_execution_dry_run,
             "okx_simulated_trading": self.settings.okx_simulated_trading,

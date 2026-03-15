@@ -3,12 +3,12 @@ from __future__ import annotations
 import asyncio
 
 from aats.bootstrap.config import build_runtime, load_settings
-from aats.bootstrap.logging import configure_logging, get_logger
+from aats.bootstrap.logging import configure_logging_for_settings, get_logger
 
 
 async def main(*, iterations: int | None = None, interval_seconds: float | None = None) -> dict:
     settings = load_settings()
-    configure_logging(settings.log_level)
+    configure_logging_for_settings(settings)
     logger = get_logger("apps.decision_engine")
 
     runtime = await build_runtime(settings)

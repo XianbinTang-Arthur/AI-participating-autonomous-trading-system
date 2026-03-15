@@ -21,6 +21,7 @@ dist/
 .ruff_cache/
 
 *.log
+logs/
 *.sqlite
 *.sqlite3
 *.db

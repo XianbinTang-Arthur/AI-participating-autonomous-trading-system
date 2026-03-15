@@ -49,11 +49,17 @@ class RuntimeModeState(SchemaBase):
     operating_state: OperatingState
     market_data_source: str
     account_read_source: str
+    market_data_backend: str | None = None
+    account_backend: str | None = None
     execution_backend: str | None = None
+    ai_operating_mode: str | None = None
     execution_route: str
     exchange_submit_target: str
     exchange_submit_allowed: bool
+    submit_blocked: bool = False
     submit_blocked_reasons: list[str] = Field(default_factory=list)
+    execution_blocked: bool = False
+    blocked_reason: str | None = None
     live_submit_enabled: bool
     guarded_execution_dry_run: bool
     okx_simulated_trading: bool = False
