@@ -232,10 +232,9 @@ Frontend characteristics:
 - supports optional `X-AATS-API-Key` entry and local browser storage
 - graceful partial refresh: one failing panel does not blank the whole page
 - richer operator layout:
-  - top-level navigation split into `System`, `Trading`, `Execution`, and `Diagnostics`
-  - per-page secondary navigation for quick section jumps
-  - system overview and runtime metrics separated from trading and execution views
-  - sticky side inspector for decision/order/fill drill-down across pages
+  - one minimal control page instead of many always-open panels
+  - compact summary strip for system, portfolio, decision, and execution state
+  - on-demand inspector drawer for decision/order/fill/reconciliation detail
 - safe manual actions:
   - halt
   - resume

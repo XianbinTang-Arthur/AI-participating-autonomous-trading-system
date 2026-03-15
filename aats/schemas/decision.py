@@ -35,6 +35,10 @@ class BaselineAssessment(SchemaBase):
     trend_strength: float
     volatility_state: str
     confidence: float
+    composite_alpha_score: float = 0.0
+    suggested_position_scale: float = 0.0
+    volatility_target_scale: float = 1.0
+    factor_scores: dict[str, float] = Field(default_factory=dict)
     holding_horizon: str
     invalidation_conditions: list[str] = Field(default_factory=list)
     reason_codes: list[str] = Field(default_factory=list)

@@ -38,6 +38,13 @@ class TestFeatureEngine(unittest.TestCase):
         self.assertEqual(analysis.timeframe_features["1h"].close_price, snapshot.kline_1h["close"])
         self.assertEqual(features.liquidity_score, analysis.liquidity.liquidity_score)
         self.assertEqual(features.regime_indicator, analysis.regime_indicator)
+        self.assertGreaterEqual(analysis.alpha_factors.composite_alpha_score, -1.0)
+        self.assertLessEqual(analysis.alpha_factors.composite_alpha_score, 1.0)
+        self.assertGreaterEqual(analysis.position_sizing.suggested_position_scale, 0.0)
+        self.assertLessEqual(analysis.position_sizing.suggested_position_scale, 1.0)
+        self.assertEqual(features.composite_alpha_score, analysis.alpha_factors.composite_alpha_score)
+        self.assertEqual(features.suggested_position_scale, analysis.position_sizing.suggested_position_scale)
+        self.assertEqual(features.volatility_target_scale, analysis.position_sizing.volatility_target_scale)
 
     def test_feature_engine_publishes_audit_friendly_market_snapshot_ref(self) -> None:
         snapshot = self._snapshot()
@@ -64,6 +71,14 @@ class TestFeatureEngine(unittest.TestCase):
         if feature_event is not None:
             self.assertEqual(feature_event.payload["market_snapshot_ref"], market_envelope.event_id)
 
+    def test_high_volatility_reduces_suggested_position_scale(self) -> None:
+        calculator = FeatureCalculator()
+        low_vol = calculator.calculate(self._snapshot(), market_snapshot_ref="evt_market_1")
+        high_vol = calculator.calculate(self._high_vol_snapshot(), market_snapshot_ref="evt_market_2")
+
+        self.assertLess(high_vol.volatility_target_scale, low_vol.volatility_target_scale)
+        self.assertLess(high_vol.suggested_position_scale, low_vol.suggested_position_scale)
+
     @staticmethod
     def _snapshot() -> MarketSnapshot:
         now = utc_now()
@@ -83,6 +98,28 @@ class TestFeatureEngine(unittest.TestCase):
             orderbook_depth={
                 "bids": [{"price": 67_000.0, "size": 5.0}, {"price": 66_999.0, "size": 6.0}],
                 "asks": [{"price": 67_001.0, "size": 4.0}, {"price": 67_002.0, "size": 4.5}],
+            },
+        )
+
+    @staticmethod
+    def _high_vol_snapshot() -> MarketSnapshot:
+        now = utc_now()
+        return MarketSnapshot(
+            created_at=now,
+            symbol="BTC-USDT",
+            exchange="OKX",
+            snapshot_ts=now,
+            best_bid=67_000.0,
+            best_ask=67_015.0,
+            last_price=67_007.5,
+            bid_size=1.5,
+            ask_size=1.2,
+            volume_24h=800.0,
+            kline_15m={"open": 66_000.0, "high": 68_500.0, "low": 65_500.0, "close": 67_800.0},
+            kline_1h={"open": 64_000.0, "high": 69_000.0, "low": 63_500.0, "close": 67_800.0},
+            orderbook_depth={
+                "bids": [{"price": 67_000.0, "size": 1.0}, {"price": 66_995.0, "size": 1.1}],
+                "asks": [{"price": 67_015.0, "size": 0.9}, {"price": 67_020.0, "size": 1.0}],
             },
         )
 

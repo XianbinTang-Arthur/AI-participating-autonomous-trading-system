@@ -34,6 +34,23 @@ class LiquidityFeatureSet(SchemaBase):
     liquidity_score: float
 
 
+class AlphaFactorSet(SchemaBase):
+    momentum_alpha: float
+    trend_alpha: float
+    regime_alpha: float
+    multi_timeframe_alpha: float
+    liquidity_scale: float
+    composite_alpha_score: float
+    conviction_score: float
+
+
+class PositionSizingContext(SchemaBase):
+    volatility_target_scale: float
+    liquidity_scale: float
+    conviction_scale: float
+    suggested_position_scale: float
+
+
 class MultiTimeframeContext(SchemaBase):
     primary_timeframe: Literal["15m"] = "15m"
     higher_timeframe: Literal["1h"] = "1h"
@@ -55,6 +72,8 @@ class AnalysisContext(SchemaBase):
     timeframe_features: dict[str, TimeframeFeatureSet] = Field(default_factory=dict)
     liquidity: LiquidityFeatureSet
     multi_timeframe: MultiTimeframeContext
+    alpha_factors: AlphaFactorSet
+    position_sizing: PositionSizingContext
 
 
 class FeatureSnapshot(SchemaBase):
@@ -69,5 +88,8 @@ class FeatureSnapshot(SchemaBase):
     regime_indicator: RegimeIndicator
     regime_confidence: float = 0.0
     multi_timeframe_alignment: float = 0.0
+    composite_alpha_score: float = 0.0
+    suggested_position_scale: float = 0.0
+    volatility_target_scale: float = 1.0
     feature_version: str
     analysis_context: AnalysisContext | None = None

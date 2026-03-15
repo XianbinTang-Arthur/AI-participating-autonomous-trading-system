@@ -4,9 +4,11 @@ from aats.bus.base import EventBus
 from aats.events import topics
 from aats.events.envelopes import parse_envelope, publish_model
 from aats.schemas.features import (
+    AlphaFactorSet,
     AnalysisContext,
     FeatureSnapshot,
     MultiTimeframeContext,
+    PositionSizingContext,
     TimeframeFeatureSet,
 )
 from aats.schemas.market import MarketSnapshot
@@ -49,6 +51,20 @@ class FeatureCalculator:
             features_1h=features_1h,
             regime_alignment_score=regime.regime_alignment_score,
         )
+        alpha_factors = self._alpha_factors(
+            features_15m=features_15m,
+            features_1h=features_1h,
+            multi_timeframe=multi_timeframe_context,
+            liquidity_score=liquidity.liquidity_score,
+            regime_indicator=regime.regime_indicator,
+            regime_confidence=regime.regime_confidence,
+            regime_bias=regime.trend_bias,
+        )
+        position_sizing = self._position_sizing_context(
+            alpha_factors=alpha_factors,
+            volatility_state=features_15m.volatility_state,
+            volatility_value=features_15m.volatility_value,
+        )
         analysis_context = AnalysisContext(
             created_at=snapshot.snapshot_ts,
             symbol=snapshot.symbol,
@@ -65,6 +81,8 @@ class FeatureCalculator:
             },
             liquidity=liquidity,
             multi_timeframe=multi_timeframe_context,
+            alpha_factors=alpha_factors,
+            position_sizing=position_sizing,
         )
         return FeatureSnapshot(
             created_at=snapshot.snapshot_ts,
@@ -79,6 +97,9 @@ class FeatureCalculator:
             regime_indicator=regime.regime_indicator,  # type: ignore[arg-type]
             regime_confidence=regime.regime_confidence,
             multi_timeframe_alignment=multi_timeframe_context.regime_alignment_score,
+            composite_alpha_score=alpha_factors.composite_alpha_score,
+            suggested_position_scale=position_sizing.suggested_position_scale,
+            volatility_target_scale=position_sizing.volatility_target_scale,
             feature_version="0.2.0",
             analysis_context=analysis_context,
         )
@@ -148,6 +169,127 @@ class FeatureCalculator:
         if momentum < 0.0:
             return "short"
         return "flat"
+
+    @staticmethod
+    def _alpha_factors(
+        *,
+        features_15m: TimeframeFeatureSet,
+        features_1h: TimeframeFeatureSet,
+        multi_timeframe: MultiTimeframeContext,
+        liquidity_score: float,
+        regime_indicator: str,
+        regime_confidence: float,
+        regime_bias: str,
+    ) -> AlphaFactorSet:
+        momentum_alpha = FeatureCalculator._clamp(
+            (features_15m.momentum_score * 140.0 * 0.65) + (features_1h.momentum_score * 90.0 * 0.35),
+            -1.0,
+            1.0,
+        )
+        trend_alpha = FeatureCalculator._clamp(
+            (
+                FeatureCalculator._direction_sign(features_15m.momentum_score) * features_15m.trend_strength * 0.65
+                + FeatureCalculator._direction_sign(features_1h.momentum_score) * features_1h.trend_strength * 0.35
+            ),
+            -1.0,
+            1.0,
+        )
+        regime_weight = 1.0 if regime_indicator in {"trend", "breakout"} else 0.35 if regime_indicator == "uncertain" else 0.0
+        regime_alpha = FeatureCalculator._clamp(
+            FeatureCalculator._direction_sign_from_bias(regime_bias) * regime_confidence * regime_weight,
+            -1.0,
+            1.0,
+        )
+        multi_timeframe_alpha = FeatureCalculator._clamp(
+            FeatureCalculator._direction_sign_from_bias(multi_timeframe.directional_alignment)
+            * multi_timeframe.momentum_alignment_score
+            * multi_timeframe.regime_alignment_score,
+            -1.0,
+            1.0,
+        )
+        liquidity_scale = FeatureCalculator._clamp(0.45 + (liquidity_score * 0.55), 0.25, 1.0)
+        composite_alpha_score = FeatureCalculator._clamp(
+            (
+                momentum_alpha * 0.4
+                + trend_alpha * 0.25
+                + regime_alpha * 0.2
+                + multi_timeframe_alpha * 0.15
+            )
+            * liquidity_scale,
+            -1.0,
+            1.0,
+        )
+        conviction_score = FeatureCalculator._clamp(
+            (abs(composite_alpha_score) * 0.7)
+            + (regime_confidence * 0.2)
+            + (multi_timeframe.regime_alignment_score * 0.1),
+            0.0,
+            1.0,
+        )
+        return AlphaFactorSet(
+            created_at=features_15m.created_at,
+            momentum_alpha=momentum_alpha,
+            trend_alpha=trend_alpha,
+            regime_alpha=regime_alpha,
+            multi_timeframe_alpha=multi_timeframe_alpha,
+            liquidity_scale=liquidity_scale,
+            composite_alpha_score=composite_alpha_score,
+            conviction_score=conviction_score,
+        )
+
+    @staticmethod
+    def _position_sizing_context(
+        *,
+        alpha_factors: AlphaFactorSet,
+        volatility_state: str,
+        volatility_value: float,
+    ) -> PositionSizingContext:
+        volatility_target_scale = {
+            "low": 1.1,
+            "medium": 1.0,
+            "high": 0.65,
+        }.get(volatility_state, 0.85)
+        if volatility_value > 0.04:
+            volatility_target_scale *= 0.85
+        elif volatility_value < 0.01:
+            volatility_target_scale *= 1.05
+        volatility_target_scale = FeatureCalculator._clamp(volatility_target_scale, 0.45, 1.2)
+        suggested_position_scale = FeatureCalculator._clamp(
+            alpha_factors.conviction_score
+            * alpha_factors.liquidity_scale
+            * volatility_target_scale,
+            0.0,
+            1.0,
+        )
+        if abs(alpha_factors.composite_alpha_score) >= 0.18:
+            suggested_position_scale = max(suggested_position_scale, 0.2)
+        return PositionSizingContext(
+            created_at=alpha_factors.created_at,
+            volatility_target_scale=volatility_target_scale,
+            liquidity_scale=alpha_factors.liquidity_scale,
+            conviction_scale=alpha_factors.conviction_score,
+            suggested_position_scale=suggested_position_scale,
+        )
+
+    @staticmethod
+    def _direction_sign(momentum: float) -> float:
+        if momentum > 0.0:
+            return 1.0
+        if momentum < 0.0:
+            return -1.0
+        return 0.0
+
+    @staticmethod
+    def _direction_sign_from_bias(direction_bias: str) -> float:
+        if direction_bias == "long":
+            return 1.0
+        if direction_bias == "short":
+            return -1.0
+        return 0.0
+
+    @staticmethod
+    def _clamp(value: float, lower: float, upper: float) -> float:
+        return max(lower, min(value, upper))
 
 
 class FeatureEngine:
