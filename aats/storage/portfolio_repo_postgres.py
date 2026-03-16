@@ -4,6 +4,7 @@ from sqlalchemy import desc, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from aats.schemas.portfolio import PortfolioSnapshot
+from aats.storage.scope_metadata import portfolio_scope_metadata
 from aats.storage.sqlalchemy_models import PortfolioSnapshotModel
 
 
@@ -12,6 +13,7 @@ class PostgresPortfolioRepository:
         self.session_factory = session_factory
 
     def save_snapshot(self, snapshot: PortfolioSnapshot) -> None:
+        scope = portfolio_scope_metadata(snapshot)
         with self.session_factory() as session:
             session.add(
                 PortfolioSnapshotModel(
@@ -20,6 +22,9 @@ class PostgresPortfolioRepository:
                     total_equity=snapshot.total_equity,
                     realized_pnl=snapshot.realized_pnl,
                     unrealized_pnl=snapshot.unrealized_pnl,
+                    product_type=scope["product_type"] or snapshot.product_type,
+                    margin_mode=scope["margin_mode"] or snapshot.margin_mode,
+                    primary_symbol=scope["primary_symbol"],
                     payload=snapshot.model_dump(mode="json"),
                 )
             )
@@ -38,3 +43,12 @@ class PostgresPortfolioRepository:
                 select(PortfolioSnapshotModel).order_by(PortfolioSnapshotModel.sequence_id)
             ).all()
         return [PortfolioSnapshot.model_validate(row.payload) for row in rows]
+
+    def recent_history(self, *, limit: int) -> list[PortfolioSnapshot]:
+        with self.session_factory() as session:
+            rows = session.scalars(
+                select(PortfolioSnapshotModel)
+                .order_by(desc(PortfolioSnapshotModel.sequence_id))
+                .limit(limit)
+            ).all()
+        return [PortfolioSnapshot.model_validate(row.payload) for row in reversed(rows)]

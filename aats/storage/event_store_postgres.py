@@ -6,6 +6,7 @@ from sqlalchemy import Select, desc, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from aats.schemas.common import EventEnvelope
+from aats.storage.scope_metadata import envelope_scope_metadata
 from aats.storage.sqlalchemy_models import EventEnvelopeModel
 
 
@@ -32,6 +33,10 @@ class PostgresEventStore:
                     topic=envelope.topic,
                     event_key=envelope.key,
                     decision_id=self._decision_id(envelope),
+                    symbol=envelope_scope_metadata(envelope)["symbol"],
+                    timeframe=envelope_scope_metadata(envelope)["timeframe"],
+                    product_type=envelope_scope_metadata(envelope)["product_type"],
+                    margin_mode=envelope_scope_metadata(envelope)["margin_mode"],
                     payload=envelope.payload,
                 )
             )

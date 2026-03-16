@@ -1,0 +1,153 @@
+Task 20: Database Refactor For Trading Scope Isolation
+
+Goal
+- Strengthen the storage layer so spot and derivatives do not keep colliding through loosely structured JSON-only persistence.
+- Keep the current event-sourced shape, but add explicit relational scope keys that make later partitioning practical.
+- Improve queryability, recovery safety, and operator diagnostics without forcing a full storage rewrite in one pass.
+
+Why This Is Needed
+- The current database is not "too small" because it has too few tables; it is weak because too much important routing data lives only inside JSON payloads.
+- The biggest current storage smell is that runtime scope is reconstructed in Python after loading whole histories.
+- That design causes three kinds of problems:
+  - spot and derivatives data are easier to mix accidentally
+  - recovery/bootstrap logic has to scan and interpret payloads repeatedly
+  - future partitioning is hard because tables do not carry stable partition keys
+
+Professional Recommendation
+- Do not jump straight to physical split tables per product mode.
+- First introduce explicit storage scope columns and indexes.
+- Then migrate hot-path reads to use those columns.
+- Only after the query model is stable should we decide whether to:
+  - keep one logical table with composite indexes
+  - use PostgreSQL partitioning by `product_type`, time, or both
+  - split archival tables from hot operational tables
+
+Database Design Recommendations
+
+1. Keep these logical domains separated
+- Event stream:
+  - `event_store`
+- Execution state:
+  - `order_states`
+  - `fill_events`
+- Portfolio state:
+  - `portfolio_snapshots`
+- Reconciliation and recovery:
+  - `reconciliation_reports`
+- Audit:
+  - `decision_audit_records`
+- Operator and auth:
+  - `operator_users`
+
+2. Add explicit scope keys to hot operational tables
+- Required keys:
+  - `product_type`
+  - `margin_mode`
+  - `symbol` where applicable
+  - `timeframe` where applicable
+- These should not live only inside JSON payload anymore.
+
+3. Treat portfolio snapshots as account-wide state
+- A spot portfolio snapshot may contain `BTC-USDT`, `ETH-USDT`, `OKB-USDT` at the same time.
+- The runtime should not reject that snapshot just because the active trading symbol is only `BTC-USDT`.
+- Therefore the portfolio scope match should be:
+  - same `product_type`
+  - same `margin_mode`
+  - not "only contains allowed symbols"
+
+4. Partitioning strategy recommendation
+- Phase 1:
+  - keep current tables
+  - add structured scope columns and indexes
+- Phase 2:
+  - move hot reads to indexed scope columns
+- Phase 3:
+  - evaluate PostgreSQL partitioning:
+    - `event_store`: partition by month, optional subpartition by `product_type`
+    - `fill_events`: partition by month and `product_type`
+    - `portfolio_snapshots`: likely keep single table with scope indexes unless volume becomes large
+    - `reconciliation_reports`: likely single table with scope indexes is sufficient
+
+5. What Not To Do
+- Do not create separate application-level schemas for spot and derivatives immediately.
+- Do not duplicate repository code into two nearly identical storage stacks.
+- Do not make auth/operator tables part of the trading partition problem.
+
+Current Refactor Scope
+- This implementation covers phase 1 only:
+  - add structured scope columns
+  - add indexes
+  - persist those columns from code
+  - correct account-wide portfolio scope matching
+  - add a stable startup path that honors the current `.env` posture
+
+Code Changes Required
+
+1. Structured scope metadata
+- Add a helper that extracts relational scope metadata from:
+  - `EventEnvelope`
+  - `PortfolioSnapshot`
+  - `OrderState`
+  - `FillEvent`
+  - `ReconciliationReport`
+
+2. Core table upgrades
+- `event_store`
+  - add `symbol`, `timeframe`, `product_type`, `margin_mode`
+- `portfolio_snapshots`
+  - add `product_type`, `margin_mode`, `primary_symbol`
+- `order_states`
+  - add `symbol`, `product_type`, `margin_mode`, `position_intent`
+- `fill_events`
+  - add `product_type`, `margin_mode`, `position_intent`
+- `reconciliation_reports`
+  - add `decision_id`, `product_type`, `margin_mode`, `primary_symbol`
+
+3. Indexes
+- `event_store(topic, symbol, sequence_id)`
+- `event_store(topic, product_type, margin_mode, sequence_id)`
+- `portfolio_snapshots(product_type, margin_mode, sequence_id)`
+- `order_states(product_type, margin_mode, status)`
+- `order_states(product_type, margin_mode, symbol, last_update_ts)`
+- `fill_events(product_type, margin_mode, symbol, ingestion_timestamp)`
+- `reconciliation_reports(product_type, margin_mode, as_of_ts)`
+
+4. Startup and recovery behavior
+- If the repository already contains a scope-matching portfolio snapshot, the runtime should republish it into the bus when needed.
+- Downstream decision failures must not kill the market transport loop.
+
+5. Repository cleanup
+- Fill missing repository methods already declared in storage protocols:
+  - `fills_since`
+  - `recent_history`
+
+Impact Assessment
+
+Upstream impact
+- None on strategy semantics.
+- Small migration impact on PostgreSQL deployments.
+
+Runtime impact
+- Startup recovery becomes more robust.
+- Spot and derivatives no longer rely solely on JSON payload scans for scope isolation.
+
+Operator/UI impact
+- No breaking UI changes in phase 1.
+- Later UI and diagnostics can become more precise because scope is now first-class in storage.
+
+Rollout Steps
+1. Apply migration `migrations/0005_storage_scope_columns.sql`
+2. Restart service
+3. Verify:
+  - startup succeeds
+  - spot mode emits fresh decision events
+  - derivatives mode still isolates correctly
+4. Later phase:
+  - migrate heavy history queries to indexed scope-column reads
+  - then reconsider physical partitioning
+
+Acceptance Criteria
+- Full test suite passes.
+- Startup no longer stalls because a valid account-wide portfolio snapshot is ignored.
+- Market transport does not die when a downstream consumer throws.
+- New PostgreSQL rows persist structured scope columns in addition to JSON payloads.

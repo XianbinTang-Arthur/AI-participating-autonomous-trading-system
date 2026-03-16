@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from aats.schemas.execution import FillEvent, OrderState
 from aats.services.execution_engine.state_machine import OrderStateMachine
 
@@ -64,3 +66,19 @@ class InMemoryExecutionRepository:
             [fill for fill in self._fills_by_fill_id.values() if fill.client_order_id == client_order_id],
             key=lambda item: (item.ingestion_timestamp, item.fill_id),
         )
+
+    def fills_since(
+        self,
+        *,
+        since: datetime | None = None,
+        limit: int | None = None,
+    ) -> list[FillEvent]:
+        rows = sorted(
+            self._fills_by_fill_id.values(),
+            key=lambda item: (item.ingestion_timestamp, item.fill_id),
+        )
+        if since is not None:
+            rows = [fill for fill in rows if fill.ingestion_timestamp >= since]
+        if limit is not None:
+            rows = rows[-limit:]
+        return rows

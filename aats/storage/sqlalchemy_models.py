@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, Integer, String
+from sqlalchemy import JSON, Boolean, DateTime, Float, Index, Integer, String
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -12,6 +12,10 @@ class Base(DeclarativeBase):
 
 class EventEnvelopeModel(Base):
     __tablename__ = "event_store"
+    __table_args__ = (
+        Index("ix_event_store_topic_symbol_seq", "topic", "symbol", "sequence_id"),
+        Index("ix_event_store_topic_scope_seq", "topic", "product_type", "margin_mode", "sequence_id"),
+    )
 
     sequence_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     event_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
@@ -23,11 +27,18 @@ class EventEnvelopeModel(Base):
     topic: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     event_key: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     decision_id: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True)
+    symbol: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    timeframe: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
+    product_type: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
+    margin_mode: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
     payload: Mapped[dict] = mapped_column(JSON, nullable=False)
 
 
 class PortfolioSnapshotModel(Base):
     __tablename__ = "portfolio_snapshots"
+    __table_args__ = (
+        Index("ix_portfolio_snapshots_scope_seq", "product_type", "margin_mode", "sequence_id"),
+    )
 
     sequence_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     snapshot_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
@@ -35,15 +46,23 @@ class PortfolioSnapshotModel(Base):
     total_equity: Mapped[float] = mapped_column(Float, nullable=False)
     realized_pnl: Mapped[float] = mapped_column(Float, nullable=False)
     unrealized_pnl: Mapped[float] = mapped_column(Float, nullable=False)
+    product_type: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    margin_mode: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    primary_symbol: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     payload: Mapped[dict] = mapped_column(JSON, nullable=False)
 
 
 class OrderStateModel(Base):
     __tablename__ = "order_states"
+    __table_args__ = (
+        Index("ix_order_states_scope_status", "product_type", "margin_mode", "status"),
+        Index("ix_order_states_scope_symbol_update", "product_type", "margin_mode", "symbol", "last_update_ts"),
+    )
 
     client_order_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     decision_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     intent_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     exchange_order_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     status: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
@@ -54,11 +73,17 @@ class OrderStateModel(Base):
     remaining_qty: Mapped[float] = mapped_column(Float, nullable=False)
     average_fill_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     fees: Mapped[float] = mapped_column(Float, nullable=False)
+    product_type: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
+    margin_mode: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
+    position_intent: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     payload: Mapped[dict] = mapped_column(JSON, nullable=False)
 
 
 class FillEventModel(Base):
     __tablename__ = "fill_events"
+    __table_args__ = (
+        Index("ix_fill_events_scope_symbol_ts", "product_type", "margin_mode", "symbol", "ingestion_timestamp"),
+    )
 
     fill_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     decision_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
@@ -70,6 +95,9 @@ class FillEventModel(Base):
     fill_qty: Mapped[float] = mapped_column(Float, nullable=False)
     fill_price: Mapped[float] = mapped_column(Float, nullable=False)
     fee_amount: Mapped[float] = mapped_column(Float, nullable=False)
+    product_type: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
+    margin_mode: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
+    position_intent: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     exchange_timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     ingestion_timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -78,12 +106,19 @@ class FillEventModel(Base):
 
 class ReconciliationReportModel(Base):
     __tablename__ = "reconciliation_reports"
+    __table_args__ = (
+        Index("ix_reconciliation_reports_scope_ts", "product_type", "margin_mode", "as_of_ts"),
+    )
 
     reconciliation_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    decision_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     as_of_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     severity: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     halt_required: Mapped[bool] = mapped_column(nullable=False)
+    product_type: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
+    margin_mode: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
+    primary_symbol: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     payload: Mapped[dict] = mapped_column(JSON, nullable=False)
 
 

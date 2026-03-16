@@ -15,3 +15,8 @@ class InMemoryReconciliationRepository:
 
     def history(self) -> list[ReconciliationReport]:
         return list(self._reports)
+
+    def recent_history(self, *, limit: int) -> list[ReconciliationReport]:
+        if limit <= 0:
+            return []
+        return list(self._reports[-limit:])

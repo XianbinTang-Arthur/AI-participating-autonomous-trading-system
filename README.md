@@ -131,6 +131,7 @@ psql postgresql://aats:aats@localhost:5432/aats -f migrations/0001_postgres_stor
 psql postgresql://aats:aats@localhost:5432/aats -f migrations/0002_execution_and_audit_correlation.sql
 psql postgresql://aats:aats@localhost:5432/aats -f migrations/0003_audit_execution_plan_refs.sql
 psql postgresql://aats:aats@localhost:5432/aats -f migrations/0004_operator_users.sql
+psql postgresql://aats:aats@localhost:5432/aats -f migrations/0005_storage_scope_columns.sql
 ```
 
 ## Local Demo Mode

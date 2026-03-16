@@ -15,3 +15,8 @@ class InMemoryPortfolioRepository:
 
     def history(self) -> list[PortfolioSnapshot]:
         return list(self._snapshots)
+
+    def recent_history(self, *, limit: int) -> list[PortfolioSnapshot]:
+        if limit <= 0:
+            return []
+        return list(self._snapshots[-limit:])

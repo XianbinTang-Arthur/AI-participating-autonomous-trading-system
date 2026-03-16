@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from sqlalchemy import desc, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from aats.schemas.execution import FillEvent, OrderState
 from aats.services.execution_engine.state_machine import OrderStateMachine
+from aats.storage.scope_metadata import fill_scope_metadata, order_scope_metadata
 from aats.storage.sqlalchemy_models import FillEventModel, OrderStateModel
 
 
@@ -23,11 +26,13 @@ class PostgresExecutionRepository:
             current = self._to_order_state(row) if row is not None else None
             merged = self.state_machine.merge(current=current, incoming=state)
             payload = merged.model_dump(mode="json")
+            scope = order_scope_metadata(merged)
             if row is None:
                 row = OrderStateModel(
                     client_order_id=merged.client_order_id,
                     decision_id=merged.decision_id,
                     intent_id=merged.intent_id,
+                    symbol=merged.symbol,
                     exchange_order_id=merged.exchange_order_id,
                     created_at=merged.created_at,
                     status=merged.status,
@@ -38,6 +43,9 @@ class PostgresExecutionRepository:
                     remaining_qty=merged.remaining_qty,
                     average_fill_price=merged.average_fill_price,
                     fees=merged.fees,
+                    product_type=scope["product_type"],
+                    margin_mode=scope["margin_mode"],
+                    position_intent=scope["position_intent"],
                     payload=payload,
                 )
                 session.add(row)
@@ -49,6 +57,7 @@ class PostgresExecutionRepository:
                     session.add(row)
                 row.decision_id = merged.decision_id
                 row.intent_id = merged.intent_id
+                row.symbol = merged.symbol
                 row.exchange_order_id = merged.exchange_order_id
                 row.created_at = merged.created_at
                 row.status = merged.status
@@ -59,6 +68,9 @@ class PostgresExecutionRepository:
                 row.remaining_qty = merged.remaining_qty
                 row.average_fill_price = merged.average_fill_price
                 row.fees = merged.fees
+                row.product_type = scope["product_type"]
+                row.margin_mode = scope["margin_mode"]
+                row.position_intent = scope["position_intent"]
                 row.payload = payload
             session.commit()
             return merged
@@ -68,6 +80,7 @@ class PostgresExecutionRepository:
             return session.scalar(select(OrderStateModel.intent_id).where(OrderStateModel.intent_id == intent_id)) is not None
 
     def save_fill(self, fill: FillEvent) -> bool:
+        scope = fill_scope_metadata(fill)
         with self.session_factory() as session:
             if session.get(FillEventModel, fill.fill_id) is not None:
                 return False
@@ -84,6 +97,9 @@ class PostgresExecutionRepository:
                     fill_qty=fill.fill_qty,
                     fill_price=fill.fill_price,
                     fee_amount=fill.fee_amount,
+                    product_type=scope["product_type"],
+                    margin_mode=scope["margin_mode"],
+                    position_intent=scope["position_intent"],
                     exchange_timestamp=fill.exchange_timestamp,
                     ingestion_timestamp=fill.ingestion_timestamp,
                     created_at=fill.created_at,
@@ -144,6 +160,22 @@ class PostgresExecutionRepository:
                 .where(FillEventModel.client_order_id == client_order_id)
                 .order_by(FillEventModel.ingestion_timestamp, FillEventModel.fill_id)
             ).all()
+        return [FillEvent.model_validate(row.payload) for row in rows]
+
+    def fills_since(
+        self,
+        *,
+        since: datetime | None = None,
+        limit: int | None = None,
+    ) -> list[FillEvent]:
+        query = select(FillEventModel)
+        if since is not None:
+            query = query.where(FillEventModel.ingestion_timestamp >= since)
+        query = query.order_by(FillEventModel.ingestion_timestamp, FillEventModel.fill_id)
+        if limit is not None:
+            query = query.limit(limit)
+        with self.session_factory() as session:
+            rows = session.scalars(query).all()
         return [FillEvent.model_validate(row.payload) for row in rows]
 
     @staticmethod
