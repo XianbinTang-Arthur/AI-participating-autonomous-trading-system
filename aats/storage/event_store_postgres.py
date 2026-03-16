@@ -6,6 +6,7 @@ from sqlalchemy import Select, desc, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from aats.schemas.common import EventEnvelope
+from aats.services.runtime_scope import RuntimeStateScope
 from aats.storage.scope_metadata import envelope_scope_metadata
 from aats.storage.sqlalchemy_models import EventEnvelopeModel
 
@@ -80,6 +81,46 @@ class PostgresEventStore:
             ).all()
         return [self._to_schema(row) for row in rows]
 
+    def recent_by_topic(self, topic: str, *, limit: int) -> list[EventEnvelope]:
+        with self.session_factory() as session:
+            rows = session.scalars(
+                select(EventEnvelopeModel)
+                .where(EventEnvelopeModel.topic == topic)
+                .order_by(desc(EventEnvelopeModel.sequence_id))
+                .limit(limit)
+            ).all()
+        return [self._to_schema(row) for row in reversed(rows)]
+
+    def by_topic_scoped(
+        self,
+        topic: str,
+        *,
+        scope: RuntimeStateScope,
+        limit: int | None = None,
+    ) -> list[EventEnvelope]:
+        query = self._scope_query(select(EventEnvelopeModel).where(EventEnvelopeModel.topic == topic), scope)
+        query = query.order_by(EventEnvelopeModel.sequence_id)
+        if limit is not None:
+            query = query.limit(limit)
+        with self.session_factory() as session:
+            rows = session.scalars(query).all()
+        return [self._to_schema(row) for row in rows]
+
+    def latest_by_topic_scoped(
+        self,
+        topic: str,
+        *,
+        scope: RuntimeStateScope,
+        key: str | None = None,
+    ) -> EventEnvelope | None:
+        query = select(EventEnvelopeModel).where(EventEnvelopeModel.topic == topic)
+        if key is not None:
+            query = query.where(EventEnvelopeModel.event_key == key)
+        query = self._scope_query(query, scope).order_by(desc(EventEnvelopeModel.sequence_id)).limit(1)
+        with self.session_factory() as session:
+            row = session.scalar(query)
+        return self._to_schema(row) if row is not None else None
+
     def by_decision(self, decision_id: str) -> list[EventEnvelope]:
         with self.session_factory() as session:
             rows = session.scalars(
@@ -110,6 +151,19 @@ class PostgresEventStore:
         with self.session_factory() as session:
             rows = session.scalars(query).all()
         return [self._to_schema(row) for row in rows]
+
+    @staticmethod
+    def _scope_query(query: Select[tuple[EventEnvelopeModel]], scope: RuntimeStateScope) -> Select[tuple[EventEnvelopeModel]]:
+        query = query.where(
+            (EventEnvelopeModel.product_type.is_(None)) | (EventEnvelopeModel.product_type == scope.product_type)
+        ).where(
+            (EventEnvelopeModel.margin_mode.is_(None)) | (EventEnvelopeModel.margin_mode == scope.margin_mode)
+        )
+        if scope.allowed_symbols:
+            query = query.where(
+                EventEnvelopeModel.symbol.is_(None) | EventEnvelopeModel.symbol.in_(tuple(scope.allowed_symbols))
+            )
+        return query
 
     @staticmethod
     def _decision_id(envelope: EventEnvelope) -> str | None:

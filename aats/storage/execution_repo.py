@@ -4,6 +4,7 @@ from datetime import datetime
 
 from aats.schemas.execution import FillEvent, OrderState
 from aats.services.execution_engine.state_machine import OrderStateMachine
+from aats.services.runtime_scope import RuntimeStateScope, filter_fills, filter_order_states
 
 
 class InMemoryExecutionRepository:
@@ -79,6 +80,39 @@ class InMemoryExecutionRepository:
         )
         if since is not None:
             rows = [fill for fill in rows if fill.ingestion_timestamp >= since]
+        if limit is not None:
+            rows = rows[-limit:]
+        return rows
+
+    def order_states_for_scope(
+        self,
+        *,
+        scope: RuntimeStateScope,
+        statuses: tuple[str, ...] | None = None,
+        limit: int | None = None,
+        open_only: bool = False,
+    ) -> list[OrderState]:
+        rows = self.open_order_states() if open_only else self.order_states()
+        rows = filter_order_states(rows, scope)
+        if statuses is not None:
+            allowed = {status.upper() for status in statuses}
+            rows = [row for row in rows if row.status.upper() in allowed]
+        rows = sorted(
+            rows,
+            key=lambda item: (item.last_update_ts or item.created_at, item.client_order_id),
+        )
+        if limit is not None:
+            rows = rows[-limit:]
+        return rows
+
+    def fills_for_scope(
+        self,
+        *,
+        scope: RuntimeStateScope,
+        since: datetime | None = None,
+        limit: int | None = None,
+    ) -> list[FillEvent]:
+        rows = filter_fills(self.fills_since(since=since), scope)
         if limit is not None:
             rows = rows[-limit:]
         return rows

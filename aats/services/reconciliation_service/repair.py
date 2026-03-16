@@ -20,12 +20,12 @@ from aats.storage.base import EventStore
 from aats.storage.base import ExecutionRepository, ReconciliationRepository
 from aats.schemas.common import utc_now
 from aats.services.runtime_scope import (
-    filter_fills,
-    filter_order_states,
-    filter_snapshots,
-    latest_matching_snapshot,
+    fills_for_scope,
+    latest_snapshot_for_scope,
+    latest_topic_event_for_scope,
+    order_states_for_scope,
+    snapshots_for_scope,
     runtime_state_scope,
-    scoped_portfolio_event,
 )
 from aats.storage.base import PortfolioRepository
 
@@ -82,15 +82,16 @@ class ReconciliationService:
         await self._persist_report(report)
 
     async def validate_now(self, *, reason: str = "operator_validate") -> ReconciliationReport:
-        latest_snapshot = latest_matching_snapshot(self.portfolio_repo.history(), self.runtime_scope)
-        latest_snapshot_event = scoped_portfolio_event(
-            self.event_store.by_topic(topics.PORTFOLIO_SNAPSHOTS),
+        latest_snapshot = latest_snapshot_for_scope(self.portfolio_repo, self.runtime_scope)
+        latest_snapshot_event = latest_topic_event_for_scope(
+            self.event_store,
+            topics.PORTFOLIO_SNAPSHOTS,
             self.runtime_scope,
         )
-        scoped_order_states = filter_order_states(self.execution_repo.order_states(), self.runtime_scope)
+        scoped_order_states = order_states_for_scope(self.execution_repo, self.runtime_scope)
         if latest_snapshot is None:
             latest_snapshot = self.reconstruction_service.rebuild_snapshot(
-                fills=filter_fills(self.execution_repo.fills(), self.runtime_scope),
+                fills=fills_for_scope(self.execution_repo, self.runtime_scope),
                 price_provider=self.price_provider,
             ).model_copy(
                 update={
@@ -123,8 +124,8 @@ class ReconciliationService:
         portfolio_snapshot_ref: str,
         stored_snapshot: PortfolioSnapshot,
     ) -> ReconciliationReport:
-        order_states = filter_order_states(self.execution_repo.order_states(), self.runtime_scope)
-        fills = filter_fills(self.execution_repo.fills(), self.runtime_scope)
+        order_states = order_states_for_scope(self.execution_repo, self.runtime_scope)
+        fills = fills_for_scope(self.execution_repo, self.runtime_scope)
         exchange_snapshot: ExchangeAccountSnapshot | None = self.fetcher.fetch_snapshot()
         baseline_snapshot = self._bootstrap_baseline_snapshot()
         trusted_exchange_portfolio_baseline = (
@@ -209,7 +210,7 @@ class ReconciliationService:
     def _bootstrap_baseline_snapshot(self) -> PortfolioSnapshot | None:
         candidates = [
             snapshot
-            for snapshot in filter_snapshots(self.portfolio_repo.history(), self.runtime_scope)
+            for snapshot in snapshots_for_scope(self.portfolio_repo, self.runtime_scope)
             if snapshot.source_fill_id is None and snapshot.source_intent_id is None
         ]
         if not candidates:

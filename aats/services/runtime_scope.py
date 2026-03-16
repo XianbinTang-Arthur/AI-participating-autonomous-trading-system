@@ -52,6 +52,26 @@ def latest_matching_snapshot(
     return None
 
 
+def snapshots_for_scope(
+    repo,
+    scope: RuntimeStateScope,
+    *,
+    limit: int | None = None,
+) -> list[PortfolioSnapshot]:
+    if hasattr(repo, "history_for_scope"):
+        return repo.history_for_scope(scope=scope, limit=limit)
+    rows = filter_snapshots(repo.history(), scope)
+    if limit is not None:
+        rows = rows[-limit:]
+    return rows
+
+
+def latest_snapshot_for_scope(repo, scope: RuntimeStateScope) -> PortfolioSnapshot | None:
+    if hasattr(repo, "latest_for_scope"):
+        return repo.latest_for_scope(scope=scope)
+    return latest_matching_snapshot(repo.history(), scope)
+
+
 def filter_snapshots(
     snapshots: list[PortfolioSnapshot],
     scope: RuntimeStateScope,
@@ -67,6 +87,26 @@ def latest_matching_reconciliation(
         if reconciliation_report_matches_scope(report, scope):
             return report
     return None
+
+
+def reconciliation_reports_for_scope(
+    repo,
+    scope: RuntimeStateScope,
+    *,
+    limit: int | None = None,
+) -> list[ReconciliationReport]:
+    if hasattr(repo, "history_for_scope"):
+        return repo.history_for_scope(scope=scope, limit=limit)
+    rows = [report for report in repo.history() if reconciliation_report_matches_scope(report, scope)]
+    if limit is not None:
+        rows = rows[-limit:]
+    return rows
+
+
+def latest_reconciliation_for_scope(repo, scope: RuntimeStateScope) -> ReconciliationReport | None:
+    if hasattr(repo, "latest_for_scope"):
+        return repo.latest_for_scope(scope=scope)
+    return latest_matching_reconciliation(repo.history(), scope)
 
 
 def portfolio_snapshot_matches_scope(
@@ -109,6 +149,31 @@ def order_state_matches_scope(
     return inferred_order_state_margin_mode(order) == scope.margin_mode
 
 
+def order_states_for_scope(
+    repo,
+    scope: RuntimeStateScope,
+    *,
+    statuses: tuple[str, ...] | None = None,
+    limit: int | None = None,
+    open_only: bool = False,
+) -> list[OrderState]:
+    if hasattr(repo, "order_states_for_scope"):
+        return repo.order_states_for_scope(
+            scope=scope,
+            statuses=statuses,
+            limit=limit,
+            open_only=open_only,
+        )
+    rows = repo.open_order_states() if open_only else repo.order_states()
+    rows = filter_order_states(rows, scope)
+    if statuses is not None:
+        allowed = {status.upper() for status in statuses}
+        rows = [row for row in rows if row.status.upper() in allowed]
+    if limit is not None:
+        rows = rows[-limit:]
+    return rows
+
+
 def fill_event_matches_scope(
     fill: FillEvent,
     scope: RuntimeStateScope,
@@ -118,6 +183,22 @@ def fill_event_matches_scope(
     if fill.product_type != scope.product_type:
         return False
     return fill.margin_mode == scope.margin_mode
+
+
+def fills_for_scope(
+    repo,
+    scope: RuntimeStateScope,
+    *,
+    since=None,
+    limit: int | None = None,
+) -> list[FillEvent]:
+    if hasattr(repo, "fills_for_scope"):
+        return repo.fills_for_scope(scope=scope, since=since, limit=limit)
+    rows = repo.fills_since(since=since) if since is not None else repo.fills()
+    rows = filter_fills(rows, scope)
+    if limit is not None:
+        rows = rows[-limit:]
+    return rows
 
 
 def inferred_order_state_product_type(order: OrderState) -> ProductType:
@@ -177,3 +258,51 @@ def scoped_portfolio_event(events: list[Any], scope: RuntimeStateScope) -> Any |
         if portfolio_snapshot_matches_scope(snapshot, scope):
             return event
     return None
+
+
+def topic_events_for_scope(
+    event_store,
+    topic: str,
+    scope: RuntimeStateScope,
+    *,
+    limit: int | None = None,
+) -> list[Any]:
+    if hasattr(event_store, "by_topic_scoped"):
+        return event_store.by_topic_scoped(topic, scope=scope, limit=limit)
+    rows = event_store.by_topic(topic)
+    rows = [event for event in rows if _event_matches_scope(event, scope)]
+    if limit is not None:
+        rows = rows[-limit:]
+    return rows
+
+
+def latest_topic_event_for_scope(event_store, topic: str, scope: RuntimeStateScope, *, key: str | None = None):
+    if hasattr(event_store, "latest_by_topic_scoped"):
+        return event_store.latest_by_topic_scoped(topic, scope=scope, key=key)
+    rows = topic_events_for_scope(event_store, topic, scope)
+    if key is not None:
+        rows = [event for event in rows if event.key == key]
+    return rows[-1] if rows else None
+
+
+def _event_matches_scope(event: Any, scope: RuntimeStateScope) -> bool:
+    payload = getattr(event, "payload", None)
+    if not isinstance(payload, dict):
+        return False
+    symbol = payload.get("symbol")
+    allowed_symbols = payload.get("allowed_symbols")
+    product_type = payload.get("product_type")
+    margin_mode = payload.get("margin_mode")
+    if product_type is None and isinstance(symbol, str):
+        product_type = infer_product_type_from_symbol(symbol)
+    if margin_mode is None and product_type == "spot":
+        margin_mode = "cash"
+    if product_type is not None and product_type != scope.product_type:
+        return False
+    if margin_mode is not None and margin_mode != scope.margin_mode:
+        return False
+    if isinstance(symbol, str):
+        return scope.symbol_allowed(symbol)
+    if isinstance(allowed_symbols, list) and allowed_symbols:
+        return all(isinstance(item, str) and scope.symbol_allowed(item) for item in allowed_symbols)
+    return True

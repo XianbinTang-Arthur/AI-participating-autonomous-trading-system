@@ -5,6 +5,17 @@ Goal
 - Keep the current event-sourced shape, but add explicit relational scope keys that make later partitioning practical.
 - Improve queryability, recovery safety, and operator diagnostics without forcing a full storage rewrite in one pass.
 
+Current Delivery Status
+- Phase 1 is complete:
+  - structured scope columns
+  - PostgreSQL indexes
+  - scope metadata persistence
+- Phase 2 is complete for the hottest read paths:
+  - recovery startup and reconciliation validation read scope-matching rows directly
+  - operator query endpoints use scoped repository/event-store reads for portfolio, execution, and reconciliation hot paths
+  - replay validation reads scoped event histories instead of loading the full event stream first
+- Remaining future work is physical partitioning and broader cold-path query cleanup, not basic scope isolation.
+
 Why This Is Needed
 - The current database is not "too small" because it has too few tables; it is weak because too much important routing data lives only inside JSON payloads.
 - The biggest current storage smell is that runtime scope is reconstructed in Python after loading whole histories.
@@ -142,8 +153,9 @@ Rollout Steps
   - startup succeeds
   - spot mode emits fresh decision events
   - derivatives mode still isolates correctly
+  - recovery and replay no longer need full-history scans for current runtime posture
 4. Later phase:
-  - migrate heavy history queries to indexed scope-column reads
+  - migrate more cold-path history queries to indexed scope-column reads
   - then reconsider physical partitioning
 
 Acceptance Criteria

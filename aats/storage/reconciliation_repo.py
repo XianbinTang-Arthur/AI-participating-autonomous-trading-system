@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from aats.schemas.reconciliation import ReconciliationReport
+from aats.services.runtime_scope import RuntimeStateScope, latest_matching_reconciliation, reconciliation_report_matches_scope
 
 
 class InMemoryReconciliationRepository:
@@ -20,3 +21,17 @@ class InMemoryReconciliationRepository:
         if limit <= 0:
             return []
         return list(self._reports[-limit:])
+
+    def history_for_scope(
+        self,
+        *,
+        scope: RuntimeStateScope,
+        limit: int | None = None,
+    ) -> list[ReconciliationReport]:
+        rows = [report for report in self._reports if reconciliation_report_matches_scope(report, scope)]
+        if limit is not None:
+            rows = rows[-limit:]
+        return rows
+
+    def latest_for_scope(self, *, scope: RuntimeStateScope) -> ReconciliationReport | None:
+        return latest_matching_reconciliation(self._reports, scope)

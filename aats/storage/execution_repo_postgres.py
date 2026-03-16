@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from aats.schemas.execution import FillEvent, OrderState
 from aats.services.execution_engine.state_machine import OrderStateMachine
+from aats.services.runtime_scope import RuntimeStateScope
 from aats.storage.scope_metadata import fill_scope_metadata, order_scope_metadata
 from aats.storage.sqlalchemy_models import FillEventModel, OrderStateModel
 
@@ -169,6 +170,56 @@ class PostgresExecutionRepository:
         limit: int | None = None,
     ) -> list[FillEvent]:
         query = select(FillEventModel)
+        if since is not None:
+            query = query.where(FillEventModel.ingestion_timestamp >= since)
+        query = query.order_by(FillEventModel.ingestion_timestamp, FillEventModel.fill_id)
+        if limit is not None:
+            query = query.limit(limit)
+        with self.session_factory() as session:
+            rows = session.scalars(query).all()
+        return [FillEvent.model_validate(row.payload) for row in rows]
+
+    def order_states_for_scope(
+        self,
+        *,
+        scope: RuntimeStateScope,
+        statuses: tuple[str, ...] | None = None,
+        limit: int | None = None,
+        open_only: bool = False,
+    ) -> list[OrderState]:
+        query = (
+            select(OrderStateModel)
+            .where(OrderStateModel.product_type == scope.product_type)
+            .where(OrderStateModel.margin_mode == scope.margin_mode)
+        )
+        if scope.allowed_symbols:
+            query = query.where(OrderStateModel.symbol.in_(tuple(scope.allowed_symbols)))
+        if open_only:
+            final_statuses = ("FILLED", "CANCELED", "REJECTED", "BLOCKED", "DRY_RUN", "FAILED", "EXPIRED")
+            query = query.where(~OrderStateModel.status.in_(final_statuses))
+        if statuses is not None:
+            query = query.where(OrderStateModel.status.in_(tuple(statuses)))
+        query = query.order_by(OrderStateModel.created_at, OrderStateModel.client_order_id)
+        if limit is not None:
+            query = query.limit(limit)
+        with self.session_factory() as session:
+            rows = session.scalars(query).all()
+        return [self._to_order_state(row) for row in rows]
+
+    def fills_for_scope(
+        self,
+        *,
+        scope: RuntimeStateScope,
+        since: datetime | None = None,
+        limit: int | None = None,
+    ) -> list[FillEvent]:
+        query = (
+            select(FillEventModel)
+            .where(FillEventModel.product_type == scope.product_type)
+            .where(FillEventModel.margin_mode == scope.margin_mode)
+        )
+        if scope.allowed_symbols:
+            query = query.where(FillEventModel.symbol.in_(tuple(scope.allowed_symbols)))
         if since is not None:
             query = query.where(FillEventModel.ingestion_timestamp >= since)
         query = query.order_by(FillEventModel.ingestion_timestamp, FillEventModel.fill_id)

@@ -19,6 +19,11 @@ from aats.services.execution_engine.state_machine import OrderStateMachine
 from aats.services.portfolio_service.positions import PortfolioState
 from aats.storage.base import AuditRepository, EventStore, PortfolioRepository
 from aats.services.portfolio_service.reconstruction import PortfolioReconstructionService
+from aats.services.runtime_scope import (
+    RuntimeStateScope,
+    latest_snapshot_for_scope,
+    topic_events_for_scope,
+)
 
 
 @dataclass(slots=True)
@@ -42,6 +47,26 @@ class ReplayResult:
 
 
 class ReplayEngine:
+    _SCOPED_TOPICS: tuple[str, ...] = (
+        topics.MARKET_SNAPSHOTS,
+        topics.FEATURE_SNAPSHOTS,
+        topics.HEALTH_SNAPSHOTS,
+        topics.ACCOUNT_BASELINES,
+        topics.DECISION_CONTEXTS,
+        topics.BASELINE_ASSESSMENTS,
+        topics.AI_ASSESSMENTS,
+        topics.POSITION_TARGETS,
+        topics.POLICY_DECISIONS,
+        topics.RISK_DECISIONS,
+        topics.EXECUTION_PLANS,
+        topics.ORDER_INTENTS,
+        topics.ORDER_UPDATES,
+        topics.FILL_EVENTS,
+        topics.PORTFOLIO_SNAPSHOTS,
+        topics.RECONCILIATION_REPORTS,
+        topics.AUDIT_RECORDS,
+    )
+
     def __init__(
         self,
         *,
@@ -49,11 +74,13 @@ class ReplayEngine:
         reconstruction_service: PortfolioReconstructionService,
         audit_repo: AuditRepository | None = None,
         portfolio_repo: PortfolioRepository | None = None,
+        scope: RuntimeStateScope | None = None,
     ) -> None:
         self.event_store = event_store
         self.reconstruction_service = reconstruction_service
         self.audit_repo = audit_repo
         self.portfolio_repo = portfolio_repo
+        self.scope = scope
 
     def replay(
         self,
@@ -203,7 +230,11 @@ class ReplayEngine:
         )
 
         if self.portfolio_repo is not None and final_stored_snapshot is not None:
-            repo_latest = self.portfolio_repo.latest()
+            repo_latest = (
+                latest_snapshot_for_scope(self.portfolio_repo, self.scope)
+                if self.scope is not None
+                else self.portfolio_repo.latest()
+            )
             if repo_latest is None:
                 portfolio_issues.append("portfolio_repository_missing_latest_snapshot")
             elif self._snapshot_signature(repo_latest) != self._snapshot_signature(final_stored_snapshot):
@@ -354,6 +385,18 @@ class ReplayEngine:
             ]
             return sorted(
                 filtered_events,
+                key=lambda item: (item.event_timestamp, item.created_at, item.event_id),
+            )
+        if self.scope is not None:
+            events = [
+                event
+                for topic in self._SCOPED_TOPICS
+                for event in topic_events_for_scope(self.event_store, topic, self.scope)
+                if (start_at is None or event.event_timestamp >= start_at)
+                and (end_at is None or event.event_timestamp <= end_at)
+            ]
+            return sorted(
+                events,
                 key=lambda item: (item.event_timestamp, item.created_at, item.event_id),
             )
         if start_at is not None or end_at is not None:

@@ -16,10 +16,10 @@ from aats.services.governance_engine.runtime_layers import RecoveryPolicy
 from aats.services.portfolio_service.positions import PortfolioState
 from aats.services.portfolio_service.reconstruction import PortfolioReconstructionService
 from aats.services.runtime_scope import (
-    filter_fills,
-    filter_order_states,
-    latest_matching_reconciliation,
-    latest_matching_snapshot,
+    fills_for_scope,
+    latest_reconciliation_for_scope,
+    latest_snapshot_for_scope,
+    order_states_for_scope,
     runtime_state_scope,
 )
 from aats.storage.base import ExecutionRepository, PortfolioRepository, ReconciliationRepository
@@ -73,13 +73,10 @@ class ExecutionRecoveryService:
         account_baseline: AccountBaselineSnapshot | None = None,
         account_baseline_event_id: str | None = None,
     ) -> RecoveryArtifacts:
-        fills = filter_fills(self.execution_repo.fills(), self.runtime_scope)
-        latest_snapshot = latest_matching_snapshot(self.portfolio_repo.history(), self.runtime_scope)
-        latest_reconciliation = latest_matching_reconciliation(
-            self.reconciliation_repo.history(),
-            self.runtime_scope,
-        )
-        open_orders = filter_order_states(self.execution_repo.open_order_states(), self.runtime_scope)
+        fills = fills_for_scope(self.execution_repo, self.runtime_scope)
+        latest_snapshot = latest_snapshot_for_scope(self.portfolio_repo, self.runtime_scope)
+        latest_reconciliation = latest_reconciliation_for_scope(self.reconciliation_repo, self.runtime_scope)
+        open_orders = order_states_for_scope(self.execution_repo, self.runtime_scope, open_only=True)
         notes: list[str] = []
         rebuilt_snapshot_saved = False
         divergence_count = 0
@@ -159,7 +156,7 @@ class ExecutionRecoveryService:
 
         safe_startup, recovery_action = self._apply_reconciliation_safety(
             latest_reconciliation=latest_reconciliation,
-            latest_snapshot=latest_snapshot or latest_matching_snapshot(self.portfolio_repo.history(), self.runtime_scope),
+            latest_snapshot=latest_snapshot or latest_snapshot_for_scope(self.portfolio_repo, self.runtime_scope),
             fills=fills,
             open_orders=open_orders,
             safe_startup=safe_startup,
@@ -193,9 +190,9 @@ class ExecutionRecoveryService:
                 halted=self.kill_switch.halted,
                 latest_reconciliation=latest_reconciliation,
             ),
-            recovered_order_count=len(filter_order_states(self.execution_repo.order_states(), self.runtime_scope)),
+            recovered_order_count=len(order_states_for_scope(self.execution_repo, self.runtime_scope)),
             recovered_fill_count=len(fills),
-            recovered_snapshot_available=latest_matching_snapshot(self.portfolio_repo.history(), self.runtime_scope) is not None,
+            recovered_snapshot_available=latest_snapshot_for_scope(self.portfolio_repo, self.runtime_scope) is not None,
             rebuilt_snapshot_saved=rebuilt_snapshot_saved,
             recovered_reconciliation_available=latest_reconciliation is not None,
             latest_reconciliation_id=latest_reconciliation.reconciliation_id if latest_reconciliation else None,

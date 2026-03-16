@@ -4,6 +4,7 @@ from sqlalchemy import desc, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from aats.schemas.reconciliation import ReconciliationReport
+from aats.services.runtime_scope import RuntimeStateScope
 from aats.storage.scope_metadata import reconciliation_scope_metadata
 from aats.storage.sqlalchemy_models import ReconciliationReportModel
 
@@ -58,3 +59,32 @@ class PostgresReconciliationRepository:
                 .limit(limit)
             ).all()
         return [ReconciliationReport.model_validate(row.payload) for row in reversed(rows)]
+
+    def history_for_scope(
+        self,
+        *,
+        scope: RuntimeStateScope,
+        limit: int | None = None,
+    ) -> list[ReconciliationReport]:
+        query = (
+            select(ReconciliationReportModel)
+            .where(ReconciliationReportModel.product_type == scope.product_type)
+            .where(ReconciliationReportModel.margin_mode == scope.margin_mode)
+            .order_by(ReconciliationReportModel.as_of_ts, ReconciliationReportModel.reconciliation_id)
+        )
+        if limit is not None:
+            query = query.limit(limit)
+        with self.session_factory() as session:
+            rows = session.scalars(query).all()
+        return [ReconciliationReport.model_validate(row.payload) for row in rows]
+
+    def latest_for_scope(self, *, scope: RuntimeStateScope) -> ReconciliationReport | None:
+        with self.session_factory() as session:
+            row = session.scalar(
+                select(ReconciliationReportModel)
+                .where(ReconciliationReportModel.product_type == scope.product_type)
+                .where(ReconciliationReportModel.margin_mode == scope.margin_mode)
+                .order_by(desc(ReconciliationReportModel.as_of_ts), desc(ReconciliationReportModel.reconciliation_id))
+                .limit(1)
+            )
+        return ReconciliationReport.model_validate(row.payload) if row is not None else None

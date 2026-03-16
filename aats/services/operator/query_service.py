@@ -29,15 +29,14 @@ from aats.services.operator.runtime_profiles import RuntimeProfileControlService
 from aats.services.portfolio_service.reconstruction import PortfolioReconstructionService
 from aats.services.reconciliation_service.replay import ReplayEngine, ReplayResult
 from aats.services.runtime_scope import (
-    filter_fills,
-    filter_order_states,
-    filter_snapshots,
-    latest_matching_reconciliation,
-    latest_matching_snapshot,
-    order_state_matches_scope,
-    reconciliation_report_matches_scope as report_matches_scope,
+    fills_for_scope,
+    latest_reconciliation_for_scope,
+    latest_snapshot_for_scope,
+    order_states_for_scope,
+    reconciliation_reports_for_scope,
+    snapshots_for_scope,
     runtime_state_scope,
-    scoped_portfolio_event,
+    latest_topic_event_for_scope,
 )
 
 if TYPE_CHECKING:
@@ -58,16 +57,16 @@ class OperatorQueryService:
         )
 
     def _scoped_order_states(self):
-        return filter_order_states(self.runtime.execution_repo.order_states(), self.state_scope)
+        return order_states_for_scope(self.runtime.execution_repo, self.state_scope)
 
     def _scoped_open_order_states(self):
-        return filter_order_states(self.runtime.execution_repo.open_order_states(), self.state_scope)
+        return order_states_for_scope(self.runtime.execution_repo, self.state_scope, open_only=True)
 
     def _scoped_fills(self):
-        return filter_fills(self.runtime.execution_repo.fills(), self.state_scope)
+        return fills_for_scope(self.runtime.execution_repo, self.state_scope)
 
     def _latest_scoped_snapshot(self):
-        return latest_matching_snapshot(self.runtime.portfolio_repo.history(), self.state_scope)
+        return latest_snapshot_for_scope(self.runtime.portfolio_repo, self.state_scope)
 
     def _current_runtime_started_at(self) -> datetime:
         return self.runtime.started_at
@@ -84,10 +83,10 @@ class OperatorQueryService:
         return value >= self._current_runtime_started_at()
 
     def _latest_scoped_reconciliation(self):
-        return latest_matching_reconciliation(self.runtime.reconciliation_repo.history(), self.state_scope)
+        return latest_reconciliation_for_scope(self.runtime.reconciliation_repo, self.state_scope)
 
     def _latest_scoped_portfolio_event(self):
-        return scoped_portfolio_event(self.runtime.event_store.by_topic(topics.PORTFOLIO_SNAPSHOTS), self.state_scope)
+        return latest_topic_event_for_scope(self.runtime.event_store, topics.PORTFOLIO_SNAPSHOTS, self.state_scope)
 
     def payload(self, envelope: EventEnvelope | None) -> dict[str, Any] | None:
         if envelope is None:
@@ -722,14 +721,12 @@ class OperatorQueryService:
             "order_intent_count": metrics.get("order_intents_generated", 0),
             "fill_count": len(self._scoped_fills()),
             "rejection_count": len(
-                [
-                    order
-                    for order in self.runtime.execution_repo.recent_order_states(
-                        limit=200,
-                        statuses=("FAILED", "REJECTED", "BLOCKED"),
-                    )
-                    if order_state_matches_scope(order, self.state_scope)
-                ]
+                order_states_for_scope(
+                    self.runtime.execution_repo,
+                    self.state_scope,
+                    statuses=("FAILED", "REJECTED", "BLOCKED"),
+                    limit=200,
+                )
             ),
             "reconciliation_mismatch_count": metrics.get("reconciliation_mismatches", 0),
             "current_open_order_count": len(self._scoped_open_order_states()),
@@ -749,10 +746,10 @@ class OperatorQueryService:
         }
 
     def portfolio_history(self, *, limit: int = 20) -> dict[str, Any]:
-        history = filter_snapshots(self.runtime.portfolio_repo.history(), self.state_scope)
+        history = snapshots_for_scope(self.runtime.portfolio_repo, self.state_scope, limit=limit)
         return {
-            "snapshots": [snapshot.model_dump(mode="json") for snapshot in history[-limit:]],
-            "total_available": len(history),
+            "snapshots": [snapshot.model_dump(mode="json") for snapshot in history],
+            "total_available": len(snapshots_for_scope(self.runtime.portfolio_repo, self.state_scope)),
         }
 
     def balances(self) -> dict[str, Any]:
@@ -825,11 +822,7 @@ class OperatorQueryService:
         return self.account_open_orders()
 
     def orders_recent(self, *, limit: int = 50) -> dict[str, Any]:
-        orders = [
-            order
-            for order in self.runtime.execution_repo.recent_order_states(limit=limit * 4)
-            if order_state_matches_scope(order, self.state_scope)
-        ][:limit]
+        orders = order_states_for_scope(self.runtime.execution_repo, self.state_scope, limit=limit)
         return {"orders": [order.model_dump(mode="json") for order in orders]}
 
     def order_detail(self, client_order_id: str) -> dict[str, Any]:
@@ -843,7 +836,13 @@ class OperatorQueryService:
             "order": order.model_dump(mode="json"),
             "fills": [
                 fill.model_dump(mode="json")
-                for fill in filter_fills(self.runtime.execution_repo.fills_for_order(client_order_id), self.state_scope)
+                for fill in [
+                    item
+                    for item in self.runtime.execution_repo.fills_for_order(client_order_id)
+                    if item.product_type == self.state_scope.product_type
+                    and item.margin_mode == self.state_scope.margin_mode
+                    and self.state_scope.symbol_allowed(item.symbol)
+                ]
             ],
         }
 
@@ -880,9 +879,12 @@ class OperatorQueryService:
         if persisted:
             return {"errors": persisted}
         errors = []
-        for order in self.runtime.execution_repo.recent_order_states(limit=20, statuses=("FAILED", "REJECTED", "BLOCKED")):
-            if not order_state_matches_scope(order, self.state_scope):
-                continue
+        for order in order_states_for_scope(
+            self.runtime.execution_repo,
+            self.state_scope,
+            statuses=("FAILED", "REJECTED", "BLOCKED"),
+            limit=20,
+        ):
             if not self._is_current_runtime_timestamp(order.last_update_ts or order.created_at):
                 continue
             errors.append(
@@ -909,18 +911,14 @@ class OperatorQueryService:
         }
 
     def reconciliation_recent(self, *, limit: int = 20) -> dict[str, Any]:
-        history = [
-            report
-            for report in self.runtime.reconciliation_repo.history()
-            if report_matches_scope(report, self.state_scope)
-        ]
-        return {"reconciliations": [report.model_dump(mode="json") for report in history[-limit:]]}
+        history = reconciliation_reports_for_scope(self.runtime.reconciliation_repo, self.state_scope, limit=limit)
+        return {"reconciliations": [report.model_dump(mode="json") for report in history]}
 
     def reconciliation_mismatches(self, *, limit: int = 20) -> dict[str, Any]:
         reports = [
             report
-            for report in self.runtime.reconciliation_repo.history()
-            if report.severity != "CLEAN" and report_matches_scope(report, self.state_scope)
+            for report in reconciliation_reports_for_scope(self.runtime.reconciliation_repo, self.state_scope, limit=limit * 4)
+            if report.severity != "CLEAN"
         ][-limit:]
         return {"mismatches": [self._reconciliation_mismatch_summary(report) for report in reports]}
 
@@ -928,8 +926,8 @@ class OperatorQueryService:
         report = next(
             (
                 item
-                for item in self.runtime.reconciliation_repo.history()
-                if item.reconciliation_id == reconciliation_id and report_matches_scope(item, self.state_scope)
+                for item in reconciliation_reports_for_scope(self.runtime.reconciliation_repo, self.state_scope)
+                if item.reconciliation_id == reconciliation_id
             ),
             None,
         )
@@ -971,11 +969,11 @@ class OperatorQueryService:
         }
 
     def replay_status(self) -> dict[str, Any]:
-        persisted = self.runtime.event_store.by_topic(topics.REPLAY_VALIDATIONS)
+        persisted = self.runtime.event_store.recent_by_topic(topics.REPLAY_VALIDATIONS, limit=10)
         latest = persisted[-1].payload if persisted else (
             self.runtime.replay_validation_history[-1] if self.runtime.replay_validation_history else None
         )
-        recent = [item.payload for item in persisted[-10:]] if persisted else list(self.runtime.replay_validation_history[-10:])
+        recent = [item.payload for item in persisted] if persisted else list(self.runtime.replay_validation_history[-10:])
         return {
             "supported": True,
             "healthy": latest is None or latest["divergence_count"] == 0,
@@ -993,6 +991,7 @@ class OperatorQueryService:
             ),
             audit_repo=self.runtime.audit_repo,
             portfolio_repo=self.runtime.portfolio_repo,
+            scope=self.state_scope,
         )
         result = engine.replay(decision_id=decision_id)
         summary = self._replay_summary(result)
@@ -1006,9 +1005,9 @@ class OperatorQueryService:
         return summary
 
     def replay_recent_validations(self) -> dict[str, Any]:
-        persisted = self.runtime.event_store.by_topic(topics.REPLAY_VALIDATIONS)
+        persisted = self.runtime.event_store.recent_by_topic(topics.REPLAY_VALIDATIONS, limit=20)
         if persisted:
-            return {"validations": [item.payload for item in persisted[-20:]]}
+            return {"validations": [item.payload for item in persisted]}
         return {"validations": list(self.runtime.replay_validation_history[-20:])}
 
     async def validate_reconciliation(
@@ -1388,7 +1387,7 @@ class OperatorQueryService:
         }
 
     def _recent_topic_summaries(self, topic: str, *, limit: int) -> list[dict[str, Any]]:
-        return [self.payload(item) for item in reversed(self.runtime.event_store.by_topic(topic)[-limit:])]
+        return [self.payload(item) for item in reversed(self.runtime.event_store.recent_by_topic(topic, limit=limit))]
 
     @staticmethod
     def _reconciliation_mismatch_summary(report) -> dict[str, Any] | None:

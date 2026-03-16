@@ -10,6 +10,7 @@ from aats.schemas.portfolio import PortfolioSnapshot
 from aats.schemas.reconciliation import ReconciliationReport
 from aats.schemas.operator import OperatorUserRecord
 from aats.schemas.runtime_profiles import RuntimeProfileActivationState, RuntimeProfileRevision
+from aats.services.runtime_scope import RuntimeStateScope
 
 
 class EventStore(Protocol):
@@ -32,6 +33,24 @@ class EventStore(Protocol):
         ...
 
     def recent_by_topic(self, topic: str, *, limit: int) -> list[EventEnvelope]:
+        ...
+
+    def by_topic_scoped(
+        self,
+        topic: str,
+        *,
+        scope: RuntimeStateScope,
+        limit: int | None = None,
+    ) -> list[EventEnvelope]:
+        ...
+
+    def latest_by_topic_scoped(
+        self,
+        topic: str,
+        *,
+        scope: RuntimeStateScope,
+        key: str | None = None,
+    ) -> EventEnvelope | None:
         ...
 
     def by_decision(self, decision_id: str) -> list[EventEnvelope]:
@@ -89,6 +108,25 @@ class ExecutionRepository(Protocol):
     def fills_for_order(self, client_order_id: str) -> list[FillEvent]:
         ...
 
+    def order_states_for_scope(
+        self,
+        *,
+        scope: RuntimeStateScope,
+        statuses: tuple[str, ...] | None = None,
+        limit: int | None = None,
+        open_only: bool = False,
+    ) -> list[OrderState]:
+        ...
+
+    def fills_for_scope(
+        self,
+        *,
+        scope: RuntimeStateScope,
+        since: datetime | None = None,
+        limit: int | None = None,
+    ) -> list[FillEvent]:
+        ...
+
 
 class PortfolioRepository(Protocol):
     def save_snapshot(self, snapshot: PortfolioSnapshot) -> None:
@@ -103,6 +141,17 @@ class PortfolioRepository(Protocol):
     def recent_history(self, *, limit: int) -> list[PortfolioSnapshot]:
         ...
 
+    def history_for_scope(
+        self,
+        *,
+        scope: RuntimeStateScope,
+        limit: int | None = None,
+    ) -> list[PortfolioSnapshot]:
+        ...
+
+    def latest_for_scope(self, *, scope: RuntimeStateScope) -> PortfolioSnapshot | None:
+        ...
+
 
 class ReconciliationRepository(Protocol):
     def save_report(self, report: ReconciliationReport) -> None:
@@ -115,6 +164,17 @@ class ReconciliationRepository(Protocol):
         ...
 
     def recent_history(self, *, limit: int) -> list[ReconciliationReport]:
+        ...
+
+    def history_for_scope(
+        self,
+        *,
+        scope: RuntimeStateScope,
+        limit: int | None = None,
+    ) -> list[ReconciliationReport]:
+        ...
+
+    def latest_for_scope(self, *, scope: RuntimeStateScope) -> ReconciliationReport | None:
         ...
 
 

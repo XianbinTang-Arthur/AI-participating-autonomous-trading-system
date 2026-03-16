@@ -4,6 +4,7 @@ from sqlalchemy import desc, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from aats.schemas.portfolio import PortfolioSnapshot
+from aats.services.runtime_scope import RuntimeStateScope
 from aats.storage.scope_metadata import portfolio_scope_metadata
 from aats.storage.sqlalchemy_models import PortfolioSnapshotModel
 
@@ -52,3 +53,32 @@ class PostgresPortfolioRepository:
                 .limit(limit)
             ).all()
         return [PortfolioSnapshot.model_validate(row.payload) for row in reversed(rows)]
+
+    def history_for_scope(
+        self,
+        *,
+        scope: RuntimeStateScope,
+        limit: int | None = None,
+    ) -> list[PortfolioSnapshot]:
+        query = (
+            select(PortfolioSnapshotModel)
+            .where(PortfolioSnapshotModel.product_type == scope.product_type)
+            .where(PortfolioSnapshotModel.margin_mode == scope.margin_mode)
+            .order_by(PortfolioSnapshotModel.sequence_id)
+        )
+        if limit is not None:
+            query = query.limit(limit)
+        with self.session_factory() as session:
+            rows = session.scalars(query).all()
+        return [PortfolioSnapshot.model_validate(row.payload) for row in rows]
+
+    def latest_for_scope(self, *, scope: RuntimeStateScope) -> PortfolioSnapshot | None:
+        with self.session_factory() as session:
+            row = session.scalar(
+                select(PortfolioSnapshotModel)
+                .where(PortfolioSnapshotModel.product_type == scope.product_type)
+                .where(PortfolioSnapshotModel.margin_mode == scope.margin_mode)
+                .order_by(desc(PortfolioSnapshotModel.sequence_id))
+                .limit(1)
+            )
+        return PortfolioSnapshot.model_validate(row.payload) if row is not None else None
