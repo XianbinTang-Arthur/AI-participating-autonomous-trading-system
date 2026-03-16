@@ -142,6 +142,7 @@ class DecisionAuditService:
         log_event(
             self.logger,
             "decision_audit_updated",
+            level="debug",
             **correlation_fields(
                 decision_id=record.decision_id,
                 execution_plan_ref=record.execution_plan_ref,

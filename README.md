@@ -184,7 +184,7 @@ Run the API runtime:
 
 ```powershell
 $env:AATS_CONFIG_PROFILE="real_market_paper"
-.\.venv\Scripts\python.exe -m uvicorn apps.api_gateway.main:app --reload
+.\.venv\Scripts\python.exe -m uvicorn apps.api_gateway.main:app --host 127.0.0.1 --port 8000
 ```
 
 The API lifespan starts:
@@ -200,7 +200,7 @@ This enables the OKX execution adapter against the OKX demo environment, request
 
 ```powershell
 $env:AATS_CONFIG_PROFILE="guarded_simulated_submit_dry_run"
-.\.venv\Scripts\python.exe -m uvicorn apps.api_gateway.main:app --reload
+.\.venv\Scripts\python.exe -m uvicorn apps.api_gateway.main:app --host 127.0.0.1 --port 8000
 ```
 
 Behavior:
@@ -233,7 +233,7 @@ Example:
 
 ```powershell
 $env:AATS_CONFIG_PROFILE="guarded_simulated_submit_enabled"
-.\.venv\Scripts\python.exe -m uvicorn apps.api_gateway.main:app --reload
+.\.venv\Scripts\python.exe -m uvicorn apps.api_gateway.main:app --host 127.0.0.1 --port 8000
 ```
 
 What this mode does:

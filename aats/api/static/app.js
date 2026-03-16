@@ -330,6 +330,8 @@ async function refreshDashboard({ manual = false } = {}) {
     }
   });
 
+  const runtimeProfileControlEnabled = state.data.authProviders?.runtime_profile_control_enabled === true;
+
   if (operatorCanAdmin()) {
     const operatorUsers = await fetchPanel("operatorUsers", "/auth/users");
     if (operatorUsers.ok) {
@@ -338,12 +340,17 @@ async function refreshDashboard({ manual = false } = {}) {
     } else {
       state.panelErrors[operatorUsers.key] = operatorUsers.error;
     }
-    const runtimeProfiles = await fetchPanel("runtimeProfiles", "/runtime-profiles");
-    if (runtimeProfiles.ok) {
-      state.data[runtimeProfiles.key] = runtimeProfiles.data;
-      delete state.panelErrors[runtimeProfiles.key];
+    if (runtimeProfileControlEnabled) {
+      const runtimeProfiles = await fetchPanel("runtimeProfiles", "/runtime-profiles");
+      if (runtimeProfiles.ok) {
+        state.data[runtimeProfiles.key] = runtimeProfiles.data;
+        delete state.panelErrors[runtimeProfiles.key];
+      } else {
+        state.panelErrors[runtimeProfiles.key] = runtimeProfiles.error;
+      }
     } else {
-      state.panelErrors[runtimeProfiles.key] = runtimeProfiles.error;
+      delete state.data.runtimeProfiles;
+      delete state.panelErrors.runtimeProfiles;
     }
   } else {
     delete state.data.operatorUsers;
@@ -1040,6 +1047,7 @@ function renderDiagnostics() {
 
 function renderRuntimeProfiles() {
   const profiles = state.data.runtimeProfiles || {};
+  const controlEnabled = state.data.authProviders?.runtime_profile_control_enabled === true;
   const payload = profiles.current_runtime_payload || {};
   setRuntimeProfilesViewEnabled(false);
   nodes.runtimeProfileSummary.innerHTML = renderFactGrid([
@@ -1050,7 +1058,11 @@ function renderRuntimeProfiles() {
     ["Product Type", readableState(payload.trading_product_type || "-")],
     ["Margin Mode", readableState(payload.margin_mode || "-")],
   ]);
-  nodes.runtimeProfileSupervisor.innerHTML = emptyState("Runtime profile control in the UI is disabled. Switch posture by replacing .env with .env.spot.backup or .env.derivatives.primary, then restart the service.");
+  nodes.runtimeProfileSupervisor.innerHTML = emptyState(
+    controlEnabled
+      ? "Browser-managed runtime profile control is enabled."
+      : "Runtime profile control in the UI is disabled. Switch posture by replacing .env with .env.spot.backup or .env.derivatives.primary, then restart the service."
+  );
   nodes.runtimeProfileImpact.innerHTML = emptyState("No browser-managed revisions in env-switch mode.");
   nodes.runtimeProfileTable.innerHTML = emptyState("Runtime profile drafts are disabled in env-switch mode.");
   nodes.runtimeProfileRevisionSelect.innerHTML = `<option value="">Env switch mode</option>`;

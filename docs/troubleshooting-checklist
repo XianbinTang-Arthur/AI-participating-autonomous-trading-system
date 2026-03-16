@@ -1,0 +1,267 @@
+# AATS 人工排障 Checklist
+
+## 适用场景
+
+这份清单用于线上人工排障，重点覆盖三类问题：
+
+- 系统不下单
+- 系统一直 `halted`
+- 页面状态和实际行为不一致
+
+---
+
+## 1. 先确认运行姿态
+
+先确认你以为系统在跑什么，和系统实际在跑什么，是不是同一个东西。
+
+检查：
+- `.env`
+- `.env.spot.backup`
+- `.env.derivatives.primary`
+- `configs/*.yaml`
+
+重点确认：
+- `AATS_CONFIG_PROFILE`
+- `AATS_DEFAULT_SYMBOL`
+- `AATS_TRADING_PRODUCT_TYPE`
+- `AATS_MARGIN_MODE`
+- `AATS_EXECUTION_BACKEND`
+- `AATS_LIVE_SUBMIT_ENABLED`
+- `AATS_OKX_SIMULATED_TRADING`
+
+如果这里都没搞清楚，后面的排查基本会跑偏。
+
+---
+
+## 2. 确认服务是不是正常活着
+
+检查：
+
+```powershell
+Get-Process | Where-Object { $_.ProcessName -like '*python*' }
+Get-NetTCPConnection -LocalPort 8000 -State Listen
+```
+
+不要用：
+
+```powershell
+uvicorn apps.api_gateway.main:app --reload
+```
+
+交易服务要用普通启动：
+
+```powershell
+.\.venv\Scripts\python.exe -m uvicorn apps.api_gateway.main:app --host 127.0.0.1 --port 8000
+```
+
+---
+
+## 3. 看日志里有没有硬错误
+
+检查：
+
+```powershell
+Get-Content logs\runtime\aats.log -Tail 200
+Select-String -Path logs\runtime\aats.log -Pattern "ERROR|WARNING|Traceback|background_loop_failed|Exception"
+```
+
+重点看：
+- `background_loop_failed`
+- OKX 请求报错
+- reconciliation/recovery 相关异常
+- 登录认证失败
+- 启动时配置异常
+
+如果日志里没有错误，但页面仍有问题，通常是“状态解释错位”或“被风控/恢复链正常阻断”。
+
+---
+
+## 4. 系统不下单时怎么查
+
+按这个顺序查：
+
+1. `/system/runtime`
+2. `/system/health`
+3. `/system/blockers`
+4. `/decision/latest`
+5. `/execution/latest`
+6. `/reconciliation/latest`
+
+重点判断：
+
+### 4.1 有没有被 halt
+
+如果 `halted=true`：
+- 先不要看 adapter
+- 先看 `blockers` 和 `recovery`
+
+### 4.2 最新决策有没有出来
+
+如果 `/decision/latest` 根本不更新：
+- 看 market data 是否 stale
+- 看 trigger policy 是否过严
+- 看 feature 链是否断了
+
+### 4.3 决策出来了但没有执行
+
+重点看：
+- `policy_decision`
+- `risk_decision`
+- `execution_latest.submit_blocked_reasons`
+
+常见原因：
+- `kill_switch_active`
+- `reconciliation_halt_required`
+- `market_data_stale`
+- `insufficient_quote_balance`
+- `max_notional_per_symbol`
+- `real_money_live_not_supported`
+
+### 4.4 执行下发了但没有 fill
+
+重点看：
+- order state 是否停在 `SUBMITTED`
+- OKX sync loop 是否正常
+- recent fills 是否为空
+- `execution/errors` 有没有积累
+
+---
+
+## 5. 一直 halted 时怎么查
+
+重点看这 4 个接口：
+
+- `/system/health`
+- `/system/recovery`
+- `/reconciliation/latest`
+- `/portfolio/latest`
+
+先区分是哪一类 halt：
+
+### 5.1 kill switch halt
+
+典型 blocker：
+- `kill_switch_active`
+
+处理：
+- 看是不是手工 halt
+- 如果只是手工 halt，且无其他 blocker，`Resume` 应该能成功
+
+### 5.2 reconciliation halt
+
+典型 blocker：
+- `reconciliation_halt_required`
+
+处理顺序：
+1. 看 `reconciliation.latest.severity`
+2. 看 `mismatch_categories`
+3. 看 `mismatch_reasons`
+4. 判断是：
+   - 真异常
+   - baseline 需要更新
+   - 还是时序窗口误判
+
+### 5.3 profile/scope 错位
+
+这类最容易忽略。
+
+典型表现：
+- 当前运行姿态是 `derivatives/cross`
+- 但 `portfolio/latest` 还是 `spot/cash`
+
+处理：
+- 确认 `.env`
+- 重启服务
+- 必要时 `Rebaseline`
+
+---
+
+## 6. 状态不一致时怎么查
+
+如果你看到：
+- 页面说 `healthy`
+- 但系统不下单
+
+或者：
+- 一个接口说 `normal_operation`
+- 另一个接口说 `resume_blocked`
+
+那就按这个顺序查：
+
+1. `/system/mode`
+2. `/system/runtime`
+3. `/system/health`
+4. `/system/recovery`
+5. `/execution/latest`
+
+你要确认：
+- recovery 状态是不是统一来源
+- execution 视图有没有消费旧状态
+- 前端是不是把原始字段误解释成坏状态
+
+---
+
+## 7. 现货/合约切换后出问题怎么查
+
+先确认：
+- 当前 `.env` 是哪一份
+- 服务是否已经重启
+
+再查：
+- `runtime.product_type`
+- `runtime.margin_mode`
+- `portfolio.product_type`
+- `portfolio.margin_mode`
+- `reconciliation.latest`
+
+如果运行姿态和本地组合快照不一致：
+- 不要强行 resume
+- 先确认是不是旧姿态数据残留
+- 必要时执行 `Rebaseline`
+
+---
+
+## 8. 登录/权限异常怎么查
+
+重点检查：
+- `/auth/providers`
+- `/auth/session`
+- `/auth/users`
+
+常见问题：
+- session cookie 过期
+- 用户被禁用
+- 角色被降级
+- `operator_auth_enabled` 配置错误
+
+如果浏览器一直跳登录页：
+- 检查 `AATS_OPERATOR_SESSION_SECRET`
+- 检查 cookie secure 配置
+- 检查数据库里的用户是否存在且启用
+
+---
+
+## 9. 最后一轮人工确认
+
+每次修完线上问题，至少手工确认一次：
+
+1. 能登录 `/login`
+2. `/system/health` 正常
+3. `/decision/latest` 在更新
+4. `/execution/latest` 状态解释合理
+5. `/reconciliation/latest` 没有异常升级
+6. UI detail drawer 不是纯 JSON 垃圾堆
+
+---
+
+## 10. 经验规则
+
+碰到问题时，优先怀疑这几类：
+
+- 配置覆盖顺序错了
+- 当前运行姿态和持久化状态不一致
+- fill / portfolio / reconciliation 链某处串了
+- 前端把状态解释错了
+- `--reload` 被错误用于交易服务
+
+不要一上来就怀疑“OKX 下不了单”。大多数问题发生在更前面的链路。

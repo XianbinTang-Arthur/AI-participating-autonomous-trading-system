@@ -303,6 +303,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(login.status_code, 200)
         self.assertEqual(session.status_code, 200)
         self.assertFalse(providers.json()["database_backed"])
+        self.assertFalse(providers.json()["runtime_profile_control_enabled"])
         self.assertFalse(session.json()["database_backed"])
 
     async def test_session_login_enforces_viewer_and_operator_roles(self) -> None:
@@ -570,6 +571,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         payload = providers.json()
         self.assertFalse(payload["bootstrap_pending"])
         self.assertEqual(payload["configured_roles"], [])
+        self.assertFalse(payload["runtime_profile_control_enabled"])
 
     async def test_local_config_identity_ignores_bootstrap_file_when_bootstrap_is_disabled(self) -> None:
         runtime = await self._runtime(
@@ -626,6 +628,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(providers.status_code, 200)
             self.assertEqual(providers.json()["stored_user_count"], 1)
+            self.assertFalse(providers.json()["runtime_profile_control_enabled"])
             self.assertEqual(login.status_code, 200)
             self.assertEqual(login.json()["identity"], "admin")
             if recovered_runtime.database_runtime is not None:
