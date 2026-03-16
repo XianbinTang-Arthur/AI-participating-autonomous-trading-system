@@ -12,6 +12,7 @@ from aats.services.decision_engine.trigger_policy import DecisionTriggerPolicy
 from aats.services.execution_engine.okx_account import OKXAccountService
 from aats.services.governance_engine.health import SystemHealthService
 from aats.services.governance_engine.mode import RuntimeModeController
+from aats.services.governance_engine.runtime_layers import EnvironmentCapabilities, PolicyProfile
 
 
 class RiskEngine:
@@ -24,6 +25,8 @@ class RiskEngine:
         trigger_policy: DecisionTriggerPolicy,
         price_provider: Callable[[str], float],
         mode_controller: RuntimeModeController,
+        environment_capabilities: EnvironmentCapabilities | None = None,
+        policy_profile: PolicyProfile | None = None,
     ) -> None:
         self.settings = settings
         self.account_service = account_service
@@ -31,6 +34,8 @@ class RiskEngine:
         self.trigger_policy = trigger_policy
         self.price_provider = price_provider
         self.mode_controller = mode_controller
+        self.environment_capabilities = environment_capabilities or mode_controller.environment_capabilities
+        self.policy_profile = policy_profile or mode_controller.policy_profile
 
     def evaluate(self, target: PositionTarget) -> RiskDecision:
         max_abs_qty = self.settings.max_abs_position_qty
@@ -51,6 +56,9 @@ class RiskEngine:
         current_open_order_count = self.account_service.open_order_count(symbol=target.symbol)
         approved = True
         rejection_reasons: list[str] = []
+        capped_target_leverage = self._capped_target_leverage(target.target_leverage)
+        if abs(capped_target_leverage - target.target_leverage) > 1e-12:
+            constraints_applied.append("max_target_leverage")
         if current_open_order_count >= self.settings.max_open_orders:
             approved = False
             rejection_reasons.append("max_open_orders_reached")
@@ -62,29 +70,44 @@ class RiskEngine:
             approved = False
             rejection_reasons.append("max_decision_frequency_reached")
 
-        if (
-            self.mode_controller.mode == "guarded_live"
-            and self.settings.execution_backend == "okx"
-            and self.settings.account_backend == "okx"
-            and self.settings.account_read_enabled
-        ):
+        if self.policy_profile.balance_checks_required and self.environment_capabilities.account_state_source_kind == "exchange":
             delta_qty = capped_qty - target.current_position_qty
             base_currency, quote_currency = self._symbol_currencies(target.symbol)
             fee_multiplier = 1.0 + (self.settings.paper_taker_fee_bps / 10_000.0)
-            if delta_qty > 1e-12 and quote_currency is not None:
-                required_quote = abs(delta_qty) * mark_price * fee_multiplier
-                available_quote = self._available_balance(quote_currency)
-                if available_quote + 1e-9 < required_quote:
+            if self.environment_capabilities.position_directionality == "bi_directional":
+                if target.target_leverage > self.policy_profile.max_target_leverage + 1e-9:
                     approved = False
-                    rejection_reasons.append("insufficient_quote_balance")
-            elif delta_qty < -1e-12 and base_currency is not None:
-                required_base = abs(delta_qty)
-                available_base = self._available_balance(base_currency)
-                if available_base + 1e-9 < required_base:
+                    rejection_reasons.append("max_target_leverage_exceeded")
+                required_margin = abs(delta_qty) * mark_price * fee_multiplier / max(capped_target_leverage, 1.0)
+                available_quote = self._available_balance(quote_currency) if quote_currency is not None else 0.0
+                max_margin_capacity = available_quote * self.settings.max_margin_usage_fraction
+                if max_margin_capacity + 1e-9 < required_margin:
                     approved = False
-                    rejection_reasons.append("insufficient_base_balance")
+                    rejection_reasons.append("insufficient_initial_margin")
+                projected_notional = abs(capped_qty) * mark_price
+                if available_quote > 0.0:
+                    margin_usage = required_margin / available_quote
+                    if margin_usage > max(self.settings.max_margin_usage_fraction - self.settings.liquidation_buffer_fraction, 0.0):
+                        approved = False
+                        rejection_reasons.append("liquidation_buffer_breached")
+                if projected_notional > max_notional * max(capped_target_leverage, 1.0):
+                    approved = False
+                    rejection_reasons.append("max_gross_notional_per_symbol_exceeded")
+            else:
+                if delta_qty > 1e-12 and quote_currency is not None:
+                    required_quote = abs(delta_qty) * mark_price * fee_multiplier
+                    available_quote = self._available_balance(quote_currency)
+                    if available_quote + 1e-9 < required_quote:
+                        approved = False
+                        rejection_reasons.append("insufficient_quote_balance")
+                elif delta_qty < -1e-12 and base_currency is not None:
+                    required_base = abs(delta_qty)
+                    available_base = self._available_balance(base_currency)
+                    if available_base + 1e-9 < required_base:
+                        approved = False
+                        rejection_reasons.append("insufficient_base_balance")
 
-        if self.mode_controller.mode == "guarded_live" and self.settings.execution_backend == "okx":
+        if self.policy_profile.enforce_health_blockers:
             health_blockers = self.health_service.execution_blockers()
             if health_blockers:
                 approved = False
@@ -106,6 +129,9 @@ class RiskEngine:
             halt_required=halt_required,
             rejection_reasons=rejection_reasons,
         )
+
+    def _capped_target_leverage(self, leverage: float) -> float:
+        return max(1.0, min(leverage, self.policy_profile.max_target_leverage))
 
     def _available_balance(self, currency: str) -> float:
         snapshot_getter = getattr(self.account_service, "latest_snapshot", None)

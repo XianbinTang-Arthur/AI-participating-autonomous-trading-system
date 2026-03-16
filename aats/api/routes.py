@@ -48,14 +48,13 @@ def _query(request: Request) -> OperatorQueryService:
 @router.get("/system/health")
 async def system_health(request: Request) -> dict[str, Any]:
     query = _query(request)
-    runtime = _runtime(request)
     health = query.system_health()
     health["execution_summary"] = {
-        "order_count": len(runtime.execution_repo.order_states()),
-        "fill_count": len(runtime.execution_repo.fills()),
-        "open_order_count": len(runtime.execution_repo.open_order_states()),
-        "order_intents_generated": runtime.metrics.snapshot().get("order_intents_generated", 0),
-        "fills_processed": runtime.metrics.snapshot().get("fills_processed", 0),
+        "order_count": len(query._scoped_order_states()),
+        "fill_count": len(query._scoped_fills()),
+        "open_order_count": len(query._scoped_open_order_states()),
+        "order_intents_generated": _runtime(request).metrics.snapshot().get("order_intents_generated", 0),
+        "fills_processed": _runtime(request).metrics.snapshot().get("fills_processed", 0),
     }
     return health
 
@@ -93,10 +92,15 @@ async def set_system_mode(
     _: OperatorPrincipal = Depends(require_write_access),
 ) -> dict[str, Any]:
     runtime = _runtime(request)
-    try:
-        runtime.mode_controller.set_mode(payload.mode)  # type: ignore[arg-type]
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if payload.mode == "autonomous_live":
+        raise HTTPException(status_code=400, detail="autonomous_live is not supported in this prototype")
+    if payload.mode not in {"backtest", "paper_live", "guarded_live"}:
+        raise HTTPException(status_code=400, detail=f"unsupported mode={payload.mode}")
+    if payload.mode != runtime.mode_controller.mode:
+        raise HTTPException(
+            status_code=409,
+            detail="runtime_mode_hot_swap_not_supported_restart_required",
+        )
     return RuntimeModeState(**_query(request).system_mode()).model_dump(mode="json")
 
 
@@ -150,12 +154,15 @@ async def system_rebaseline(
     principal: OperatorPrincipal = Depends(require_write_access),
 ) -> dict[str, Any]:
     reason = payload.reason if payload is not None else "operator_rebaseline"
-    return await _query(request).rebaseline(
-        reason=reason,
-        actor_role=principal.role,
-        actor_identity=principal.identity,
-        auth_source=principal.auth_source,
-    )
+    try:
+        return await _query(request).rebaseline(
+            reason=reason,
+            actor_role=principal.role,
+            actor_identity=principal.identity,
+            auth_source=principal.auth_source,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/decision/latest")
@@ -287,14 +294,16 @@ async def cancel_order(
     payload: CancelOrderRequest | None = None,
     principal: OperatorPrincipal = Depends(require_write_access),
 ) -> dict[str, Any]:
-    runtime = _runtime(request)
-    _ = payload
-    _ = principal
     try:
-        state = await runtime.order_manager.cancel_order(client_order_id)
+        return await _query(request).cancel_order(
+            client_order_id=client_order_id,
+            reason=payload.reason if payload is not None else "operator_cancel",
+            actor_role=principal.role,
+            actor_identity=principal.identity,
+            auth_source=principal.auth_source,
+        )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return {"order": state.model_dump(mode="json")}
 
 
 @router.get("/fills/latest")

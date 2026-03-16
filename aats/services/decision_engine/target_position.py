@@ -22,6 +22,24 @@ class TargetPositionEngine:
             baseline=baseline,
             ai_assessment=ai_assessment,
         )
+        if not self._short_bias_allowed():
+            target_qty = self._normalize_long_only_target(
+                current_position_qty=context.current_position_qty,
+                target_qty=target_qty,
+                baseline=baseline,
+                ai_assessment=ai_assessment,
+            )
+        target_exposure_side = self._exposure_side(target_qty)
+        position_intent = self._position_intent(
+            current_position_qty=context.current_position_qty,
+            target_position_qty=target_qty,
+        )
+        target_leverage = self._target_leverage(
+            context=context,
+            baseline=baseline,
+            ai_assessment=ai_assessment,
+            target_qty=target_qty,
+        )
         source_mix = self._source_mix(ai_assessment=ai_assessment)
         rebalance_reason = f"{self.settings.ai_operating_mode}_decision"
 
@@ -41,6 +59,16 @@ class TargetPositionEngine:
             max_slippage_tolerance_bps=self.settings.max_slippage_tolerance_bps,
             source_mix=source_mix,
             decision_expiry_ts=utc_now() + timedelta(minutes=15),
+            product_type=context.product_type,
+            current_exposure_side=context.current_exposure_side,
+            target_exposure_side=target_exposure_side,
+            position_intent=position_intent,
+            target_leverage=target_leverage,
+            margin_mode=self.settings.margin_mode,
+            leverage_bias=self._leverage_bias(
+                baseline=baseline,
+                ai_assessment=ai_assessment,
+            ),
         )
 
     def _target_quantity(
@@ -104,8 +132,71 @@ class TargetPositionEngine:
     def _qty_from_bias(self, direction_bias: str) -> float:
         if direction_bias == "long":
             return self.settings.default_order_qty
-        if direction_bias == "short":
+        if direction_bias == "short" and self._short_bias_allowed():
             return -self.settings.default_order_qty
+        return 0.0
+
+    def _target_leverage(
+        self,
+        *,
+        context: DecisionContext,
+        baseline: BaselineAssessment,
+        ai_assessment: AIMarketAssessment,
+        target_qty: float,
+    ) -> float:
+        if abs(target_qty) < 1e-12:
+            return 1.0
+        if context.product_type != "derivatives":
+            return 1.0
+        if not self.settings.strategy_dynamic_leverage_enabled:
+            return min(max(self.settings.default_target_leverage, 1.0), self.settings.max_target_leverage)
+        leverage_bias = self._leverage_bias(baseline=baseline, ai_assessment=ai_assessment)
+        return self._clamp(
+            max(1.0, self.settings.default_target_leverage * leverage_bias),
+            1.0,
+            self.settings.max_target_leverage,
+        )
+
+    def _leverage_bias(
+        self,
+        *,
+        baseline: BaselineAssessment,
+        ai_assessment: AIMarketAssessment,
+    ) -> float:
+        conviction = max(
+            0.0,
+            (baseline.confidence * 0.45)
+            + (abs(ai_assessment.directional_edge) * 0.35)
+            + (max(ai_assessment.calibrated_confidence, ai_assessment.confidence) * 0.2),
+        )
+        if baseline.volatility_state in {"high", "extreme"}:
+            conviction *= 0.7
+        if ai_assessment.degraded or ai_assessment.fallback_used:
+            conviction *= 0.85
+        return self._clamp(0.85 + conviction, 0.85, 2.5)
+
+    def _short_bias_allowed(self) -> bool:
+        return self.settings.trading_product_type == "derivatives" or self.settings.strategy_short_bias_enabled
+
+    @staticmethod
+    def _normalize_long_only_target(
+        *,
+        current_position_qty: float,
+        target_qty: float,
+        baseline: BaselineAssessment,
+        ai_assessment: AIMarketAssessment,
+    ) -> float:
+        if target_qty >= 0.0:
+            bearish_signal = baseline.direction_bias == "short" or ai_assessment.directional_edge < 0.0
+            if current_position_qty > 1e-12 and bearish_signal and target_qty < current_position_qty:
+                return current_position_qty
+            if current_position_qty > 1e-12 and baseline.direction_bias == "flat" and target_qty <= 1e-12:
+                return max(current_position_qty * 0.5, 0.0)
+            return target_qty
+        if current_position_qty > 1e-12 and (baseline.direction_bias == "short" or ai_assessment.directional_edge < 0.0):
+            # Long-only spot should treat bearish reversal signals as "stop adding"
+            # rather than forcing churn into immediate flat on every negative flip.
+            return current_position_qty
         return 0.0
 
     def _apply_position_management(
@@ -129,9 +220,43 @@ class TargetPositionEngine:
         delta_qty = abs(target_position_qty - current_position_qty)
         if delta_qty < 1e-12:
             return "low"
+        if current_position_qty * target_position_qty < 0.0:
+            return "high"
         if delta_qty >= self.settings.default_order_qty * 0.75:
             return "high"
         return "medium"
+
+    def _position_intent(
+        self,
+        *,
+        current_position_qty: float,
+        target_position_qty: float,
+    ) -> str:
+        if abs(target_position_qty - current_position_qty) < 1e-12:
+            return "hold"
+        current_side = self._exposure_side(current_position_qty)
+        target_side = self._exposure_side(target_position_qty)
+        if current_side == "flat":
+            return "open_long" if target_side == "long" else "open_short"
+        if target_side == "flat":
+            return "close_long" if current_side == "long" else "close_short"
+        if current_side != target_side:
+            return "reverse_to_long" if target_side == "long" else "reverse_to_short"
+        if current_side == "long":
+            if abs(target_position_qty) >= abs(current_position_qty):
+                return "open_long"
+            return "reduce_long"
+        if abs(target_position_qty) >= abs(current_position_qty):
+            return "open_short"
+        return "reduce_short"
+
+    @staticmethod
+    def _exposure_side(quantity: float) -> str:
+        if quantity > 1e-12:
+            return "long"
+        if quantity < -1e-12:
+            return "short"
+        return "flat"
 
     def _source_mix(self, *, ai_assessment: AIMarketAssessment) -> dict[str, float]:
         mode = self.settings.ai_operating_mode

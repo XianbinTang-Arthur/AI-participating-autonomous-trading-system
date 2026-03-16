@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Callable
 
 from aats.bootstrap.metrics import MetricsRegistry
+from aats.bootstrap.settings import AATSSettings
 from aats.bus.base import EventBus
 from aats.events import topics
 from aats.events.envelopes import parse_envelope, publish_model
@@ -14,9 +15,18 @@ from aats.services.portfolio_service.positions import PortfolioState
 from aats.services.portfolio_service.reconstruction import PortfolioReconstructionService
 from aats.services.reconciliation_service.comparator import StateComparator
 from aats.services.reconciliation_service.fetcher import ExchangeStateFetcher
+from aats.services.governance_engine.runtime_layers import RecoveryPolicy
 from aats.storage.base import EventStore
 from aats.storage.base import ExecutionRepository, ReconciliationRepository
 from aats.schemas.common import utc_now
+from aats.services.runtime_scope import (
+    filter_fills,
+    filter_order_states,
+    filter_snapshots,
+    latest_matching_snapshot,
+    runtime_state_scope,
+    scoped_portfolio_event,
+)
 from aats.storage.base import PortfolioRepository
 
 
@@ -30,6 +40,7 @@ class ReconciliationService:
     def __init__(
         self,
         *,
+        settings: AATSSettings,
         bus: EventBus,
         fetcher: ExchangeStateFetcher,
         comparator: StateComparator,
@@ -41,8 +52,10 @@ class ReconciliationService:
         reconstruction_service: PortfolioReconstructionService,
         price_provider: Callable[[str], float],
         bootstrap_portfolio_from_exchange: bool = False,
+        recovery_policy: RecoveryPolicy | None = None,
         metrics: MetricsRegistry | None = None,
     ) -> None:
+        self.settings = settings
         self.bus = bus
         self.fetcher = fetcher
         self.comparator = comparator
@@ -54,7 +67,9 @@ class ReconciliationService:
         self.reconstruction_service = reconstruction_service
         self.price_provider = price_provider
         self.bootstrap_portfolio_from_exchange = bootstrap_portfolio_from_exchange
+        self.recovery_policy = recovery_policy
         self.metrics = metrics
+        self.runtime_scope = runtime_state_scope(settings)
 
     async def handle_portfolio_snapshot(self, message: dict) -> None:
         envelope = parse_envelope(message)
@@ -67,16 +82,26 @@ class ReconciliationService:
         await self._persist_report(report)
 
     async def validate_now(self, *, reason: str = "operator_validate") -> ReconciliationReport:
-        latest_snapshot = self.portfolio_repo.latest()
-        latest_snapshot_event = self.event_store.latest(topics.PORTFOLIO_SNAPSHOTS)
+        latest_snapshot = latest_matching_snapshot(self.portfolio_repo.history(), self.runtime_scope)
+        latest_snapshot_event = scoped_portfolio_event(
+            self.event_store.by_topic(topics.PORTFOLIO_SNAPSHOTS),
+            self.runtime_scope,
+        )
+        scoped_order_states = filter_order_states(self.execution_repo.order_states(), self.runtime_scope)
         if latest_snapshot is None:
             latest_snapshot = self.reconstruction_service.rebuild_snapshot(
-                fills=self.execution_repo.fills(),
+                fills=filter_fills(self.execution_repo.fills(), self.runtime_scope),
                 price_provider=self.price_provider,
             ).model_copy(
                 update={
                     "snapshot_ts": utc_now(),
-                    "decision_id": self.execution_repo.order_states()[-1].decision_id if self.execution_repo.order_states() else None,
+                    "decision_id": (
+                        scoped_order_states[-1].decision_id
+                        if scoped_order_states
+                        else None
+                    ),
+                    "product_type": self.runtime_scope.product_type,
+                    "margin_mode": self.runtime_scope.margin_mode,
                 }
             )
         report = self._build_report(
@@ -98,26 +123,42 @@ class ReconciliationService:
         portfolio_snapshot_ref: str,
         stored_snapshot: PortfolioSnapshot,
     ) -> ReconciliationReport:
-        order_states: list[OrderState] = self.execution_repo.order_states()
-        fills: list[FillEvent] = self.execution_repo.fills()
+        order_states = filter_order_states(self.execution_repo.order_states(), self.runtime_scope)
+        fills = filter_fills(self.execution_repo.fills(), self.runtime_scope)
         exchange_snapshot: ExchangeAccountSnapshot | None = self.fetcher.fetch_snapshot()
+        baseline_snapshot = self._bootstrap_baseline_snapshot()
+        trusted_exchange_portfolio_baseline = (
+            self.bootstrap_portfolio_from_exchange and baseline_snapshot is not None
+        )
         reconstructed_snapshot = self._rebuild_snapshot_for_comparison(
             stored_snapshot=stored_snapshot,
             fills=fills,
         )
-        exchange_comparison_enabled = any(order.venue == "OKX" for order in order_states) or any(
-            fill.venue == "OKX" for fill in fills
+        exchange_comparison_enabled = exchange_snapshot is not None and (
+            trusted_exchange_portfolio_baseline
+            or any(order.venue == "OKX" for order in order_states)
+            or any(fill.venue == "OKX" for fill in fills)
+        )
+        compare_exchange_portfolio = (
+            exchange_snapshot is not None
+            and self.bootstrap_portfolio_from_exchange
+            and (self.recovery_policy.exchange_portfolio_comparison_enabled if self.recovery_policy is not None else True)
         )
         report = self.comparator.compare(
             decision_id=decision_id,
             portfolio_snapshot_ref=portfolio_snapshot_ref,
+            product_type=self.runtime_scope.product_type,
+            margin_mode=self.runtime_scope.margin_mode,
+            allowed_symbols=list(self.runtime_scope.allowed_symbols),
             order_states=order_states,
             fills=fills,
             stored_snapshot=stored_snapshot,
             reconstructed_snapshot=reconstructed_snapshot,
             exchange_snapshot=exchange_snapshot,
             exchange_comparison_enabled=exchange_comparison_enabled,
-            compare_exchange_portfolio=exchange_comparison_enabled and self.bootstrap_portfolio_from_exchange,
+            compare_exchange_portfolio=compare_exchange_portfolio,
+            accepted_exchange_fill_ids=self._accepted_exchange_fill_ids(),
+            trusted_exchange_portfolio_baseline=trusted_exchange_portfolio_baseline,
         )
         return report
 
@@ -131,6 +172,11 @@ class ReconciliationService:
             return self.reconstruction_service.rebuild_snapshot(
                 fills=fills,
                 price_provider=self.price_provider,
+            ).model_copy(
+                update={
+                    "product_type": self.runtime_scope.product_type,
+                    "margin_mode": self.runtime_scope.margin_mode,
+                }
             )
 
         baseline_snapshot = self._bootstrap_baseline_snapshot()
@@ -138,9 +184,18 @@ class ReconciliationService:
             return self.reconstruction_service.rebuild_snapshot(
                 fills=fills,
                 price_provider=self.price_provider,
+            ).model_copy(
+                update={
+                    "product_type": self.runtime_scope.product_type,
+                    "margin_mode": self.runtime_scope.margin_mode,
+                }
             )
 
-        state = PortfolioState(initial_usdt_balance=self.reconstruction_service.initial_usdt_balance)
+        state = PortfolioState(
+            initial_usdt_balance=self.reconstruction_service.initial_usdt_balance,
+            default_product_type=self.runtime_scope.product_type,
+            default_margin_mode=self.runtime_scope.margin_mode,
+        )
         state.load_portfolio_snapshot(baseline_snapshot)
         baseline_ts = baseline_snapshot.snapshot_ts
         for fill in sorted(fills, key=lambda item: (item.ingestion_timestamp, item.fill_id)):
@@ -154,12 +209,27 @@ class ReconciliationService:
     def _bootstrap_baseline_snapshot(self) -> PortfolioSnapshot | None:
         candidates = [
             snapshot
-            for snapshot in self.portfolio_repo.history()
+            for snapshot in filter_snapshots(self.portfolio_repo.history(), self.runtime_scope)
             if snapshot.source_fill_id is None and snapshot.source_intent_id is None
         ]
         if not candidates:
             return None
         return max(candidates, key=lambda item: (item.snapshot_ts, item.created_at))
+
+    def _accepted_exchange_fill_ids(self) -> set[str]:
+        latest_baseline = self.event_store.latest(topics.ACCOUNT_BASELINES)
+        if latest_baseline is None:
+            return set()
+        fills = latest_baseline.payload.get("fills")
+        if not isinstance(fills, list):
+            return set()
+        accepted_ids: set[str] = set()
+        for fill in fills:
+            if isinstance(fill, dict):
+                fill_id = fill.get("fill_id")
+                if isinstance(fill_id, str) and fill_id:
+                    accepted_ids.add(fill_id)
+        return accepted_ids
 
     async def _persist_report(self, report: ReconciliationReport) -> None:
         self.reconciliation_repo.save_report(report)

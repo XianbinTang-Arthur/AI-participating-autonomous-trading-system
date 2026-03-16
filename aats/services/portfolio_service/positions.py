@@ -19,6 +19,9 @@ from aats.services.portfolio_service.snapshots import PortfolioSnapshotBuilder
 class PositionRecord:
     quantity: float = 0.0
     avg_entry_price: float = 0.0
+    product_type: str = "spot"
+    target_leverage: float = 1.0
+    margin_mode: str = "cash"
 
 
 @dataclass
@@ -31,12 +34,20 @@ class FillApplicationResult:
 
 
 class PortfolioState:
-    def __init__(self, *, initial_usdt_balance: float) -> None:
+    def __init__(
+        self,
+        *,
+        initial_usdt_balance: float,
+        default_product_type: str = "spot",
+        default_margin_mode: str = "cash",
+    ) -> None:
         self.positions: dict[str, PositionRecord] = {}
         self.balances: dict[str, float] = {"USDT": initial_usdt_balance}
         self.realized_pnl: float = 0.0
         self.total_fees_paid: float = 0.0
         self._applied_fill_ids: set[str] = set()
+        self.default_product_type = default_product_type
+        self.default_margin_mode = default_margin_mode
 
     def has_applied_fill(self, fill_id: str) -> bool:
         return fill_id in self._applied_fill_ids
@@ -54,7 +65,13 @@ class PortfolioState:
             self.positions[position.symbol] = PositionRecord(
                 quantity=position.quantity,
                 avg_entry_price=position.average_entry_price or 0.0,
+                product_type=getattr(position, "product_type", self.default_product_type),
+                target_leverage=getattr(position, "target_leverage", 1.0),
+                margin_mode=getattr(position, "margin_mode", self.default_margin_mode),
             )
+        if self.default_product_type == "spot" and not snapshot.positions:
+            for symbol, quantity in self._synthetic_spot_positions(snapshot).items():
+                self.positions[symbol] = PositionRecord(quantity=quantity, avg_entry_price=0.0)
         self.realized_pnl = 0.0
         self.total_fees_paid = 0.0
         self._applied_fill_ids.clear()
@@ -70,6 +87,9 @@ class PortfolioState:
             position.symbol: PositionRecord(
                 quantity=position.position_qty,
                 avg_entry_price=position.avg_entry_price,
+                product_type=position.product_type,
+                target_leverage=position.target_leverage,
+                margin_mode=position.margin_mode,
             )
             for position in snapshot.positions
             if abs(position.position_qty) > 1e-12
@@ -92,15 +112,37 @@ class PortfolioState:
             )
 
         record = self.positions.setdefault(fill.symbol, PositionRecord())
+        record.product_type = getattr(fill, "product_type", "spot")
+        record.target_leverage = getattr(fill, "target_leverage", 1.0)
+        record.margin_mode = getattr(fill, "margin_mode", "cash")
         signed_qty = fill.fill_qty if fill.side == "buy" else -fill.fill_qty
         starting_qty = record.quantity
-        fee_delta = fill.fee_amount
-        realized_pnl_delta = -fee_delta
+        base_currency, quote_currency = self._symbol_currencies(fill.symbol)
+        notional = fill.fill_qty * fill.fill_price
+        fee_currency = self._resolved_fee_currency(fill=fill, base_currency=base_currency, quote_currency=quote_currency)
+        fee_quote_amount = self._fee_cost_in_quote(
+            fill=fill,
+            base_currency=base_currency,
+            quote_currency=quote_currency,
+            fee_currency=fee_currency,
+        )
+        fee_delta = fee_quote_amount
+        realized_pnl_delta = -fee_quote_amount
 
-        if fill.side == "buy":
-            self.balances["USDT"] = self.balances.get("USDT", 0.0) - (fill.fill_qty * fill.fill_price) - fill.fee_amount
-        else:
-            self.balances["USDT"] = self.balances.get("USDT", 0.0) + (fill.fill_qty * fill.fill_price) - fill.fee_amount
+        if quote_currency is not None:
+            quote_balance = self.balances.get(quote_currency, 0.0)
+            if fill.side == "buy":
+                self.balances[quote_currency] = quote_balance - notional
+            else:
+                self.balances[quote_currency] = quote_balance + notional
+        if base_currency is not None:
+            base_balance = self.balances.get(base_currency, 0.0)
+            if fill.side == "buy":
+                self.balances[base_currency] = base_balance + fill.fill_qty
+            else:
+                self.balances[base_currency] = base_balance - fill.fill_qty
+        if fee_currency is not None:
+            self.balances[fee_currency] = self.balances.get(fee_currency, 0.0) - fill.fee_amount
 
         if self._same_direction(starting_qty, signed_qty):
             ending_qty = starting_qty + signed_qty
@@ -141,6 +183,74 @@ class PortfolioState:
         record = self.positions.get(symbol)
         if record is not None and abs(record.quantity) < 1e-12:
             self.positions.pop(symbol, None)
+
+    @staticmethod
+    def _symbol_currencies(symbol: str) -> tuple[str | None, str | None]:
+        if "-" not in symbol:
+            return symbol or None, None
+        base_currency, quote_currency = symbol.split("-", 1)
+        return base_currency or None, quote_currency or None
+
+    def _synthetic_spot_positions(self, snapshot: ExchangeAccountSnapshot) -> dict[str, float]:
+        synthetic_positions: dict[str, float] = {}
+        for instrument in snapshot.instruments:
+            if instrument.quote_currency != "USDT":
+                continue
+            if instrument.symbol in self.positions:
+                continue
+            quantity = self.balances.get(instrument.base_currency, 0.0)
+            if abs(quantity) < 1e-12:
+                continue
+            synthetic_positions[instrument.symbol] = quantity
+        return synthetic_positions
+
+    @staticmethod
+    def _resolved_fee_currency(
+        *,
+        fill: FillEvent,
+        base_currency: str | None,
+        quote_currency: str | None,
+    ) -> str | None:
+        if fill.fee_currency:
+            return fill.fee_currency
+        if fill.venue == "OKX":
+            return base_currency if fill.side == "buy" else quote_currency
+        return quote_currency
+
+    @classmethod
+    def fee_cost_in_quote(cls, fill: FillEvent) -> float:
+        base_currency, quote_currency = cls._symbol_currencies(fill.symbol)
+        fee_currency = cls._resolved_fee_currency(
+            fill=fill,
+            base_currency=base_currency,
+            quote_currency=quote_currency,
+        )
+        return cls._fee_cost_in_quote(
+            fill=fill,
+            base_currency=base_currency,
+            quote_currency=quote_currency,
+            fee_currency=fee_currency,
+        )
+
+    @classmethod
+    def total_fee_cost_in_quote(cls, fills: list[FillEvent]) -> float:
+        return sum(cls.fee_cost_in_quote(fill) for fill in fills)
+
+    @staticmethod
+    def _fee_cost_in_quote(
+        *,
+        fill: FillEvent,
+        base_currency: str | None,
+        quote_currency: str | None,
+        fee_currency: str | None,
+    ) -> float:
+        if fill.fee_amount <= 0.0:
+            return 0.0
+        if fee_currency == quote_currency or fee_currency is None:
+            return fill.fee_amount
+        if fee_currency == base_currency:
+            return fill.fee_amount * fill.fill_price
+        return 0.0
 
     @staticmethod
     def _same_direction(left: float, right: float) -> bool:

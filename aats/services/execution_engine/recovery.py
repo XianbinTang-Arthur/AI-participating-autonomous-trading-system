@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Callable
 
+from aats.bootstrap.settings import AATSSettings
 from aats.schemas.common import utc_now
 from aats.schemas.exchange import AccountBaselineSnapshot
 from aats.schemas.portfolio import PortfolioSnapshot
@@ -11,8 +12,16 @@ from aats.schemas.execution import FillEvent
 from aats.schemas.reconciliation import ReconciliationReport
 from aats.schemas.system import RecoveryStatus
 from aats.services.governance_engine.kill_switch import KillSwitch
+from aats.services.governance_engine.runtime_layers import RecoveryPolicy
 from aats.services.portfolio_service.positions import PortfolioState
 from aats.services.portfolio_service.reconstruction import PortfolioReconstructionService
+from aats.services.runtime_scope import (
+    filter_fills,
+    filter_order_states,
+    latest_matching_reconciliation,
+    latest_matching_snapshot,
+    runtime_state_scope,
+)
 from aats.storage.base import ExecutionRepository, PortfolioRepository, ReconciliationRepository
 
 
@@ -26,6 +35,7 @@ class ExecutionRecoveryService:
     def __init__(
         self,
         *,
+        settings: AATSSettings,
         execution_repo: ExecutionRepository,
         portfolio_repo: PortfolioRepository,
         reconciliation_repo: ReconciliationRepository,
@@ -34,7 +44,9 @@ class ExecutionRecoveryService:
         kill_switch: KillSwitch,
         bootstrap_portfolio_from_exchange: bool,
         reconciliation_stale_after_seconds: float,
+        recovery_policy: RecoveryPolicy | None = None,
     ) -> None:
+        self.settings = settings
         self.execution_repo = execution_repo
         self.portfolio_repo = portfolio_repo
         self.reconciliation_repo = reconciliation_repo
@@ -43,6 +55,16 @@ class ExecutionRecoveryService:
         self.kill_switch = kill_switch
         self.bootstrap_portfolio_from_exchange = bootstrap_portfolio_from_exchange
         self.reconciliation_stale_after_seconds = reconciliation_stale_after_seconds
+        self.recovery_policy = recovery_policy or RecoveryPolicy(
+            name="default_recovery",
+            startup_baseline_import_supported=bootstrap_portfolio_from_exchange,
+            operator_rebaseline_supported=bootstrap_portfolio_from_exchange,
+            account_snapshot_required=bootstrap_portfolio_from_exchange,
+            review_required_blocks_resume=bootstrap_portfolio_from_exchange,
+            reconciliation_required_for_execution_state=True,
+            exchange_portfolio_comparison_enabled=bootstrap_portfolio_from_exchange,
+        )
+        self.runtime_scope = runtime_state_scope(settings)
 
     def recover(
         self,
@@ -51,10 +73,13 @@ class ExecutionRecoveryService:
         account_baseline: AccountBaselineSnapshot | None = None,
         account_baseline_event_id: str | None = None,
     ) -> RecoveryArtifacts:
-        fills = self.execution_repo.fills()
-        latest_snapshot = self.portfolio_repo.latest()
-        latest_reconciliation = self.reconciliation_repo.latest()
-        open_orders = self.execution_repo.open_order_states()
+        fills = filter_fills(self.execution_repo.fills(), self.runtime_scope)
+        latest_snapshot = latest_matching_snapshot(self.portfolio_repo.history(), self.runtime_scope)
+        latest_reconciliation = latest_matching_reconciliation(
+            self.reconciliation_repo.history(),
+            self.runtime_scope,
+        )
+        open_orders = filter_order_states(self.execution_repo.open_order_states(), self.runtime_scope)
         notes: list[str] = []
         rebuilt_snapshot_saved = False
         divergence_count = 0
@@ -77,7 +102,7 @@ class ExecutionRecoveryService:
             portfolio_state.load_portfolio_snapshot(
                 latest_snapshot,
                 applied_fill_ids={fill.fill_id for fill in fills},
-                total_fees_paid=sum(fill.fee_amount for fill in fills),
+                total_fees_paid=PortfolioState.total_fee_cost_in_quote(fills),
             )
             if self.bootstrap_portfolio_from_exchange:
                 notes.append("reconstruction_validation_skipped_bootstrap_exchange")
@@ -85,6 +110,11 @@ class ExecutionRecoveryService:
                 rebuilt = self.reconstruction_service.rebuild_snapshot(
                     fills=fills,
                     price_provider=self._recovery_price_provider(latest_snapshot),
+                ).model_copy(
+                    update={
+                        "product_type": self.runtime_scope.product_type,
+                        "margin_mode": self.runtime_scope.margin_mode,
+                    }
                 )
                 divergence_count = self._divergence_count(latest_snapshot, rebuilt)
                 if divergence_count:
@@ -110,11 +140,16 @@ class ExecutionRecoveryService:
                 rebuilt_snapshot = self.reconstruction_service.rebuild_snapshot(
                     fills=fills,
                     price_provider=self.price_provider,
+                ).model_copy(
+                    update={
+                        "product_type": self.runtime_scope.product_type,
+                        "margin_mode": self.runtime_scope.margin_mode,
+                    }
                 )
                 portfolio_state.load_portfolio_snapshot(
                     rebuilt_snapshot,
                     applied_fill_ids={fill.fill_id for fill in fills},
-                    total_fees_paid=sum(fill.fee_amount for fill in fills),
+                    total_fees_paid=PortfolioState.total_fee_cost_in_quote(fills),
                 )
                 self.portfolio_repo.save_snapshot(rebuilt_snapshot)
                 rebuilt_snapshot_saved = True
@@ -124,7 +159,7 @@ class ExecutionRecoveryService:
 
         safe_startup, recovery_action = self._apply_reconciliation_safety(
             latest_reconciliation=latest_reconciliation,
-            latest_snapshot=latest_snapshot or self.portfolio_repo.latest(),
+            latest_snapshot=latest_snapshot or latest_matching_snapshot(self.portfolio_repo.history(), self.runtime_scope),
             fills=fills,
             open_orders=open_orders,
             safe_startup=safe_startup,
@@ -158,9 +193,9 @@ class ExecutionRecoveryService:
                 halted=self.kill_switch.halted,
                 latest_reconciliation=latest_reconciliation,
             ),
-            recovered_order_count=len(self.execution_repo.order_states()),
+            recovered_order_count=len(filter_order_states(self.execution_repo.order_states(), self.runtime_scope)),
             recovered_fill_count=len(fills),
-            recovered_snapshot_available=self.portfolio_repo.latest() is not None,
+            recovered_snapshot_available=latest_matching_snapshot(self.portfolio_repo.history(), self.runtime_scope) is not None,
             rebuilt_snapshot_saved=rebuilt_snapshot_saved,
             recovered_reconciliation_available=latest_reconciliation is not None,
             latest_reconciliation_id=latest_reconciliation.reconciliation_id if latest_reconciliation else None,
@@ -243,7 +278,11 @@ class ExecutionRecoveryService:
     ) -> tuple[bool, str | None]:
         has_execution_state = bool(fills or open_orders)
         if latest_reconciliation is None:
-            if has_execution_state and latest_snapshot is not None:
+            if (
+                self.recovery_policy.reconciliation_required_for_execution_state
+                and has_execution_state
+                and latest_snapshot is not None
+            ):
                 self._halt_for_recovery(
                     reason="recovery_reconciliation_missing",
                     action="halted_missing_reconciliation_context",
@@ -255,7 +294,10 @@ class ExecutionRecoveryService:
 
         notes.append("reconciliation_context_restored")
         age_seconds = (utc_now() - latest_reconciliation.as_of_ts).total_seconds()
-        if age_seconds > self.reconciliation_stale_after_seconds:
+        if (
+            self.recovery_policy.reconciliation_required_for_execution_state
+            and age_seconds > self.reconciliation_stale_after_seconds
+        ):
             self._halt_for_recovery(
                 reason="recovery_reconciliation_stale",
                 action="halted_stale_reconciliation_context",

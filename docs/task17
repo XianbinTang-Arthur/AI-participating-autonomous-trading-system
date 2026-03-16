@@ -1,0 +1,623 @@
+The repository currently has:
+
+- a working unified trading mainline for local paper and OKX exchange-simulated spot execution
+- explicit runtime/environment/policy/recovery layering from task15/task16
+- PostgreSQL-backed operator auth, session login, recovery controls, replay, and audit
+- a guarded simulated-submit path that works for spot cash trading
+
+It does NOT yet have:
+
+- true short-selling support on the exchange-backed path
+- leveraged trading support
+- margin / perpetual / futures execution semantics
+- directional contract-position reconciliation
+- liquidation-aware risk controls
+
+Now perform the next architecture pass.
+
+Primary goal of this pass:
+
+Upgrade the simulated trading architecture from spot-only cash semantics to a derivatives-capable architecture that can eventually support:
+
+- short positions
+- true position reversal
+- leverage
+- margin-aware execution
+- exchange-backed contract positions
+
+without forking the trading mainline into separate spot and derivatives systems.
+
+This pass is NOT about:
+
+- enabling real-money live trading
+- weakening the current guarded execution model
+- adding a second exchange
+- rewriting strategy logic
+- changing OpenAI / AI logic
+- removing the existing spot simulated path
+- replacing the operator auth or dashboard stack
+
+This pass IS about:
+
+- extending the architecture so the shared mainline can support both spot and leveraged derivatives
+- explicitly modeling venue product type and account mode
+- making execution/risk/recovery/reconciliation correct for short and leveraged positions
+- preparing the codebase for exchange-simulated derivatives trading without breaking spot
+
+Core problem to solve:
+
+Right now the codebase allows negative target quantities in some strategy/planning layers, but the actual exchange-backed execution path is still spot cash only.
+
+Concrete limitations of the current implementation:
+
+1. The OKX execution adapter submits with `tdMode="cash"` and spot payload assumptions.
+2. The risk engine only allows sells when enough base asset is already held, which blocks true shorting.
+3. Portfolio state is primarily modeled as:
+   - spot balances
+   - net position quantity per symbol
+   and does not model leverage, margin usage, liquidation risk, or contract-side semantics.
+4. Reconciliation assumes spot-like balance/position relationships.
+5. Recovery / rebaseline flows are written around spot balances + account baseline import, not derivatives exposure state.
+
+As a result:
+
+- local paper can conceptually simulate negative quantities
+- exchange-simulated submit cannot truly reverse into short
+- the platform currently cannot support leveraged or margined execution correctly
+
+Architectural objective:
+
+Keep one trading mainline:
+
+1. market data ingress
+2. feature calculation
+3. decision creation
+4. position targeting
+5. policy evaluation
+6. risk evaluation
+7. execution planning
+8. order intent emission
+9. adapter submission / synchronization
+10. portfolio update
+11. reconciliation / recovery
+12. audit / replay / operator controls
+
+Do NOT split this into:
+
+- a spot trading pipeline
+- a derivatives trading pipeline
+
+Instead:
+
+- keep one core business pipeline
+- move spot-vs-derivatives differences into explicit capability, instrument, account, execution, risk, and recovery layers
+
+Target end-state of this pass:
+
+The system should support a clean conceptual model where:
+
+- `spot_cash` remains available
+- `derivatives_simulated` becomes architecturally possible
+- short and leveraged behavior are first-class concepts
+- the current exchange-simulated spot path does not regress
+- future contract-enabled simulated execution can be added without rewriting the mainline again
+
+Required design changes
+
+1. Introduce product-type modeling
+
+The codebase must stop assuming every tradable symbol is equivalent to a spot cash pair.
+
+Introduce explicit product/instrument typing, at minimum covering:
+
+- `spot`
+- `margin`
+- `perpetual_swap`
+- `futures`
+
+At minimum, the runtime must know for the active instrument:
+
+- product type
+- base currency
+- quote currency
+- settlement currency
+- margin currency
+- contract multiplier or contract value if applicable
+- whether the venue supports directional shorting
+- whether leverage is meaningful
+
+This information must not remain implicit in symbol strings alone.
+
+2. Extend runtime/environment layering with trading capability profiles
+
+The existing runtime/environment layering must be extended so the runtime can explicitly express:
+
+- whether the current path is spot-only
+- whether short selling is supported
+- whether leverage is supported
+- whether margin state is meaningful
+- whether liquidation risk must be evaluated
+- whether reconciliation must compare derivatives positions rather than just balances
+
+Add explicit capability concepts such as:
+
+- `position_directionality`
+  - `long_only`
+  - `bi_directional`
+- `leverage_support`
+  - `none`
+  - `supported`
+- `margin_model`
+  - `cash`
+  - `cross`
+  - `isolated`
+- `instrument_product_type`
+
+These capabilities must be derived centrally, not inferred ad hoc throughout the codebase.
+
+3. Add a trading account model that can represent margin and contract state
+
+Current account handling is too spot-biased.
+
+Introduce or extend schemas so the runtime can represent:
+
+- balances
+- available balances
+- margin balances
+- maintenance margin
+- initial margin
+- leverage
+- liquidation price
+- unrealized PnL by position
+- directional exposure
+- contract quantity / notional / side
+
+This applies at least to:
+
+- exchange account snapshot schemas
+- portfolio/internal state schemas
+- reconciliation inputs
+- operator/runtime inspection payloads
+
+Important:
+
+Do not throw away spot support.
+
+The model should support:
+
+- spot balances for cash trading
+- derivatives position state for leveraged trading
+
+under one shared account-state abstraction.
+
+4. Extend portfolio state from spot-biased storage to exposure-aware storage
+
+Current portfolio state is centered on:
+
+- balances
+- net quantity by symbol
+- average entry
+
+That is not sufficient for leveraged derivatives.
+
+The portfolio model must be extended so it can represent:
+
+- net or side-specific contract exposure
+- contract quantity vs asset quantity
+- entry price and mark price
+- realized / unrealized PnL
+- margin allocated
+- leverage used
+- liquidation threshold information where available
+
+Design goal:
+
+the same portfolio subsystem should still work for:
+
+- spot cash holdings
+- derivatives positions
+
+This may require:
+
+- richer `Position` schema
+- richer `PortfolioSnapshot`
+- richer fill application semantics
+
+5. Refactor execution planning so reversal is first-class
+
+Current planning already supports negative deltas conceptually, but execution semantics are too simple.
+
+The planner/execution intent model must be able to distinguish:
+
+- opening a long
+- reducing a long
+- closing a long
+- opening a short
+- reducing a short
+- closing a short
+- reversing from long to short
+- reversing from short to long
+
+This does NOT require multiple planning pipelines.
+
+It DOES require a richer execution intent model.
+
+At minimum, execution intents and/or plans should be able to express:
+
+- target side / resulting exposure side
+- whether the order is opening vs closing vs reversing
+- margin mode if relevant
+- leverage if relevant
+- reduce-only / close-only correctness for derivatives venues
+
+6. Split adapter responsibilities by product semantics, not by entire business pipeline
+
+Keep the shared execution engine and order manager.
+
+But refactor exchange adapter support so venue-facing behavior can differ by product type.
+
+Expected direction:
+
+- shared adapter contract remains
+- spot cash OKX semantics stay in one implementation path
+- derivatives-capable OKX semantics can be added through either:
+  - explicit sub-adapters
+  - a product-aware adapter strategy layer
+
+The adapter layer must support differences such as:
+
+- `tdMode`
+- margin mode
+- leverage field handling
+- contract size conversion
+- directional position semantics
+- reduce-only / close-only behavior
+- derivatives-specific order-state mapping
+
+Do NOT duplicate the whole execution engine just to support derivatives.
+
+7. Extend risk engine for short and leverage
+
+This is one of the most important parts of the pass.
+
+The current risk engine is correct for spot cash simulation, but insufficient for leveraged derivatives.
+
+The shared risk engine must be extended to support:
+
+- long-only vs bi-directional account capability
+- short exposure limits
+- gross and net exposure limits
+- leverage caps
+- margin sufficiency checks
+- maintenance margin safety checks
+- liquidation-distance checks
+- contract-position sizing limits
+- reduce-only safety behavior when shrinking risky exposure
+
+Spot and derivatives must still use one risk engine.
+
+That means:
+
+- shared engine
+- different risk-policy/profile inputs
+- different account/exposure data depending on active runtime capability
+
+Avoid:
+
+- a spot risk engine
+- a derivatives risk engine
+
+unless the shared design becomes impossible. The default requirement is shared risk logic with product-aware inputs.
+
+8. Extend reconciliation for derivatives state
+
+Current reconciliation mainly compares:
+
+- local balances
+- local fills
+- local open orders
+- exchange balances
+- exchange fills
+- exchange open orders
+- spot-like positions
+
+That is not enough for leveraged contract trading.
+
+Reconciliation must become product-aware.
+
+It must be able to compare:
+
+- spot balances for spot instruments
+- contract positions for derivatives instruments
+- side / direction
+- contract quantity
+- entry price / average price
+- leverage / margin mode if relevant
+- liquidation-relevant state when available
+
+Do NOT make reconciliation always derivatives-heavy.
+
+Instead:
+
+- spot path compares the correct spot state
+- derivatives path compares the correct derivatives state
+
+under one shared reconciliation framework.
+
+9. Extend recovery and rebaseline semantics for derivatives
+
+Recovery and rebaseline today assume spot-like exchange baseline takeover.
+
+That is insufficient for leveraged products.
+
+The recovery model must become product-aware for:
+
+- startup baseline import
+- open exposure restoration
+- derivatives position trust boundary
+- rebaseline after manual intervention
+- operator resume gating when margin/liquidation risk exists
+
+For derivatives-capable runtime profiles, rebaseline and resume checks must be stricter, not looser.
+
+Examples of conditions that must become first-class blockers where applicable:
+
+- unknown open contract positions
+- margin insufficiency
+- liquidation risk proximity
+- derivatives position mismatch
+- leverage mismatch
+- unexpected side mismatch
+
+10. Add explicit runtime profiles for leveraged simulated trading
+
+The runtime profile layer introduced in task15 should be extended with at least one additional formal profile, for example:
+
+- `paper_local`
+- `exchange_simulated_spot`
+- `exchange_simulated_derivatives`
+- `exchange_live_reserved`
+
+Naming can differ, but the intent must be explicit.
+
+Requirements:
+
+- spot and derivatives simulated paths must be clearly distinguishable
+- operator/runtime APIs must expose the resolved profile
+- UI must not need to infer product support from raw flags
+
+11. Keep real-money live structurally blocked
+
+This task is about architecture and simulated support, not live trading enablement.
+
+Even after this pass:
+
+- real-money live must remain blocked
+- autonomous live must remain blocked
+- any derivatives support should remain inside paper or exchange-simulated environments only
+
+12. Preserve operator controls, audit, and replay
+
+This refactor must preserve:
+
+- operator login / session auth
+- halt / resume
+- validation / rebaseline
+- replay
+- audit record linkage
+- operator action traceability
+
+If schemas become richer, replay and audit must be updated accordingly.
+
+Do not regress operator observability.
+
+Files and modules likely involved
+
+At minimum, expect meaningful work in:
+
+- `aats/bootstrap/settings.py`
+- `aats/bootstrap/config.py`
+- `aats/schemas/exchange.py`
+- `aats/schemas/execution.py`
+- `aats/schemas/portfolio.py`
+- `aats/schemas/system.py`
+- `aats/services/governance_engine/runtime_layers.py`
+- `aats/services/governance_engine/policy.py`
+- `aats/services/governance_engine/risk.py`
+- `aats/services/execution_engine/planner.py`
+- `aats/services/execution_engine/paper_adapter.py`
+- `aats/services/execution_engine/okx_account.py`
+- `aats/services/execution_engine/okx_adapter.py`
+- `aats/services/execution_engine/recovery.py`
+- `aats/services/portfolio_service/positions.py`
+- `aats/services/portfolio_service/snapshots.py`
+- `aats/services/reconciliation_service/comparator.py`
+- `aats/services/reconciliation_service/repair.py`
+- `aats/services/operator/query_service.py`
+- `aats/api/static/app.js`
+- `aats/api/static/dashboard.html`
+- `README.md`
+
+New modules are expected if they simplify the design.
+
+Good candidates:
+
+- product / instrument capability schema
+- margin / leverage schema
+- derivatives position schema
+- product-aware execution capability schema
+- derivatives risk-policy schema
+
+Suggested concrete implementation shape
+
+1. Introduce product-aware instrument and account abstractions
+
+First add the schemas and value objects needed to represent:
+
+- spot instruments
+- derivatives instruments
+- spot balances
+- derivatives positions
+- leverage/margin semantics
+
+Do this before touching business logic.
+
+2. Extend runtime profile/capability resolution
+
+Resolve, in one place:
+
+- whether the runtime is spot or derivatives
+- whether shorting is allowed
+- whether leverage is allowed
+- what account mode semantics apply
+
+3. Refactor portfolio and position state
+
+Make local state capable of representing both:
+
+- spot holdings
+- derivatives exposure
+
+without splitting the portfolio subsystem into two unrelated implementations.
+
+4. Refactor execution planning and intent schema
+
+Make open/close/reduce/reverse semantics explicit.
+
+5. Refactor exchange adapters around product semantics
+
+Keep the adapter interface shared, but make product-specific submission/state mapping explicit.
+
+6. Extend risk engine
+
+Add margin, leverage, and short-side risk semantics.
+
+7. Extend reconciliation and recovery
+
+Make divergence detection and resume/rebaseline logic product-aware.
+
+8. Update operator/runtime payloads and UI
+
+Expose the resolved product/runtime posture.
+
+9. Update replay/audit/test coverage
+
+Ensure richer schemas still preserve traceability.
+
+Acceptance criteria
+
+1. Shared mainline preserved
+
+There must still be one end-to-end trading core.
+
+2. Spot path preserved
+
+Current spot-cash simulated behavior must continue to work.
+
+3. Product semantics explicit
+
+A reader should be able to identify where the system distinguishes:
+
+- spot cash
+- derivatives-capable simulated trading
+
+4. Shorting architecturally supported
+
+The codebase must have first-class concepts required for true short exposure.
+
+5. Leverage architecturally supported
+
+The codebase must have first-class concepts required for leverage and margin evaluation.
+
+6. Reversal semantics explicit
+
+Execution planning and intent modeling must support reversal as a first-class operation.
+
+7. Risk model extended
+
+Short-side and leverage-related controls must be representable in the shared risk engine.
+
+8. Reconciliation/recovery extended
+
+The system must be able to reason about derivatives exposure state, not only spot balances.
+
+9. UI/runtime posture consistent
+
+Operator/runtime endpoints and dashboard presentation must expose whether the runtime is:
+
+- spot-only
+- short-capable
+- leverage-capable
+
+10. Live remains blocked
+
+No real-money trading path may be accidentally enabled.
+
+Testing requirements
+
+Add or update tests for:
+
+- runtime profile resolution for spot vs derivatives simulated profiles
+- position-target and execution-plan reversal semantics
+- risk checks for:
+  - insufficient quote balance in spot
+  - insufficient base balance in spot sells
+  - short-side leverage/margin constraints in derivatives mode
+  - leverage cap enforcement
+  - liquidation-distance or maintenance-margin blockers
+- adapter payload mapping for spot vs derivatives
+- portfolio state application for:
+  - spot fills
+  - short opens
+  - short covers
+  - reversals
+- reconciliation for:
+  - spot balances
+  - derivatives positions
+  - side mismatches
+  - leverage/margin mismatches
+- recovery/rebaseline semantics for derivatives-capable runtime profiles
+- operator/runtime endpoints exposing product/runtime posture consistently
+- replay/audit remaining healthy with richer position/execution schemas
+
+Tests must validate actual behavior, not just object construction.
+
+Documentation requirements
+
+Update README and relevant docs to explain:
+
+- why the current system was spot-only
+- why shorting/leverage require architectural changes rather than a small flag flip
+- the new product/runtime capability model
+- how spot and derivatives now share one mainline
+- what remains blocked for live trading
+- how operator controls behave under spot vs derivatives simulated profiles
+
+Required implementation sequence
+
+1. First produce the implementation plan for this pass.
+2. Then define the new schemas/abstractions for product, position, margin, and leverage semantics.
+3. Then extend runtime profile and capability resolution.
+4. Then refactor portfolio/execution intent modeling.
+5. Then refactor adapters and risk logic.
+6. Then extend reconciliation/recovery.
+7. Then adapt operator/runtime payloads and UI.
+8. Then update tests.
+9. Then update documentation.
+10. Finally summarize:
+   - what the shared mainline remains
+   - how spot is represented
+   - how derivatives are represented
+   - how shorting is modeled
+   - how leverage is modeled
+   - how reversal is modeled
+   - how risk/recovery changed
+   - what still remains blocked for future live
+
+Final rule:
+
+Do not bolt shorting and leverage on as special cases inside the current spot cash path.
+Do not fork the system into separate spot and derivatives architectures.
+Do not enable real-money live trading.
+
+Refactor the current shared trading system so that short-capable and leverage-capable simulated trading become first-class architectural concepts while preserving spot correctness and operator safety.

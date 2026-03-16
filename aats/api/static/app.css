@@ -64,12 +64,14 @@ body::before {
 }
 
 button,
-input {
+input,
+select {
   font: inherit;
 }
 
 button:focus-visible,
-input:focus-visible {
+input:focus-visible,
+select:focus-visible {
   outline: 2px solid rgba(89, 168, 255, 0.72);
   outline-offset: 2px;
 }
@@ -330,7 +332,8 @@ h3 {
   gap: 14px;
 }
 
-input {
+input,
+select {
   min-height: 46px;
   padding: 0 14px;
   border-radius: var(--radius-sm);
@@ -341,6 +344,16 @@ input {
 
 input::placeholder {
   color: var(--text-dim);
+}
+
+select {
+  appearance: none;
+}
+
+.field-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
 }
 
 .action-row,
@@ -410,6 +423,15 @@ input::placeholder {
   border: 1px solid var(--line);
   background: rgba(9, 16, 24, 0.64);
   font-weight: 700;
+}
+
+.operator-toggle {
+  min-height: 46px;
+}
+
+.operator-form {
+  display: grid;
+  gap: 16px;
 }
 
 .permission-note {
@@ -673,6 +695,22 @@ input::placeholder {
   flex-wrap: wrap;
 }
 
+.table-copy {
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+
+.cell-stack {
+  display: grid;
+  gap: 6px;
+}
+
+.table-inline-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .table-button {
   min-height: 30px;
   padding: 0 10px;
@@ -748,6 +786,18 @@ input::placeholder {
   gap: 10px;
 }
 
+.detail-prose {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.detail-prose p {
+  margin: 0;
+  line-height: 1.7;
+  color: var(--text);
+}
+
 .detail-grid-row {
   display: flex;
   justify-content: space-between;
@@ -764,8 +814,40 @@ input::placeholder {
   font-weight: 800;
 }
 
+.detail-raw {
+  margin-top: 14px;
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+
+.detail-raw summary {
+  cursor: pointer;
+  color: var(--text-soft);
+  font-weight: 800;
+  list-style: none;
+}
+
+.detail-raw summary::-webkit-details-marker {
+  display: none;
+}
+
+.detail-raw summary::after {
+  content: "Show raw JSON";
+}
+
+.detail-raw[open] summary::after {
+  content: "Hide raw JSON";
+}
+
+.detail-empty-note {
+  margin-top: 12px;
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
 .detail-json {
   margin: 0;
+  margin-top: 12px;
   padding: 12px;
   border-radius: var(--radius-sm);
   background: rgba(5, 10, 16, 0.82);
@@ -839,6 +921,10 @@ input::placeholder {
   .panel-hero {
     grid-column: 1 / -1;
   }
+
+  .field-grid {
+    grid-template-columns: 1fr 1fr;
+  }
 }
 
 @media (max-width: 1120px) {
@@ -863,7 +949,8 @@ input::placeholder {
   }
 
   .field-row,
-  .field-row-compact {
+  .field-row-compact,
+  .field-grid {
     grid-template-columns: 1fr;
   }
 

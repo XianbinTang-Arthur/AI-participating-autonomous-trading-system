@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 from aats.events.envelopes import parse_payload
 from aats.schemas.features import FeatureSnapshot
 from aats.services.decision_engine.trigger_policy import DecisionTriggerPolicy
@@ -18,21 +20,25 @@ class DecisionCycleTrigger:
         self.orchestrator = orchestrator
         self.market_gateway = market_gateway
         self.policy = policy
+        self._timeframe_locks: dict[tuple[str, str], asyncio.Lock] = {}
 
     async def handle_feature_snapshot(self, message: dict) -> None:
         snapshot = parse_payload(message, FeatureSnapshot)
         market_snapshot = self.market_gateway.latest_snapshot(snapshot.symbol)
         for timeframe in self.policy.enabled_timeframes():
-            should_trigger, _reason = self.policy.should_trigger(
-                feature_snapshot=snapshot,
-                market_snapshot=market_snapshot,
-                timeframe=timeframe,
-            )
-            if not should_trigger or market_snapshot is None:
-                continue
-            await self.orchestrator.run_cycle(symbol=snapshot.symbol, timeframe=timeframe)
-            self.policy.record_trigger(
-                feature_snapshot=snapshot,
-                market_snapshot=market_snapshot,
-                timeframe=timeframe,
-            )
+            lock = self._timeframe_locks.setdefault((snapshot.symbol, timeframe), asyncio.Lock())
+            async with lock:
+                current_market_snapshot = self.market_gateway.latest_snapshot(snapshot.symbol)
+                should_trigger, _reason = self.policy.should_trigger(
+                    feature_snapshot=snapshot,
+                    market_snapshot=current_market_snapshot,
+                    timeframe=timeframe,
+                )
+                if not should_trigger or current_market_snapshot is None:
+                    continue
+                await self.orchestrator.run_cycle(symbol=snapshot.symbol, timeframe=timeframe)
+                self.policy.record_trigger(
+                    feature_snapshot=snapshot,
+                    market_snapshot=current_market_snapshot,
+                    timeframe=timeframe,
+                )

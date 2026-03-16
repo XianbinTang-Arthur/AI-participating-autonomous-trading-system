@@ -16,7 +16,7 @@ class TestDashboardUI(unittest.TestCase):
         app = FastAPI()
         app.include_router(auth_router)
         app.include_router(ui_router)
-        app.state.runtime = SimpleNamespace(settings=AATSSettings())
+        app.state.runtime = SimpleNamespace(settings=AATSSettings.model_validate({}))
 
         with TestClient(app) as client:
             root = client.get("/")
@@ -36,9 +36,11 @@ class TestDashboardUI(unittest.TestCase):
         self.assertIn("AATS Operator Console", root.text)
         self.assertIn("Signed-In Operator", root.text)
         self.assertIn("Logout", root.text)
+        self.assertIn("Runtime Profiles", root.text)
         self.assertIn("/ui/app.css", ui.text)
         self.assertIn("refreshDashboard", js.text)
         self.assertIn("/auth/session", js.text)
+        self.assertIn("/runtime-profiles", js.text)
         self.assertIn("logoutOperator", js.text)
         self.assertIn("/auth/login", login_js.text)
         self.assertIn(".workspace-nav", css.text)
@@ -49,8 +51,6 @@ class TestDashboardUI(unittest.TestCase):
             {
                 "operator_auth_enabled": True,
                 "operator_session_secret": "session-secret",
-                "operator_admin_username": "admin",
-                "operator_admin_password": "password",
             }
         )
         app = FastAPI()

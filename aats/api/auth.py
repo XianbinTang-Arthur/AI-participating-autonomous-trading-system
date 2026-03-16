@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-
-from fastapi import Cookie, Header, HTTPException, Request
+from fastapi import Header, HTTPException, Request
 from pydantic import BaseModel
 
 from aats.api.session_auth import SessionIdentity, verify_session_token
 from aats.bootstrap.config import ApplicationRuntime
-from aats.bootstrap.settings import AATSSettings
+from aats.schemas.common import utc_now
 from aats.schemas.operator import AuthSource, OperatorRole
+from aats.services.operator.accounts import configured_bootstrap_operator_users
+from aats.services.operator.passwords import verify_password
 
 
 class OperatorPrincipal(BaseModel):
@@ -22,56 +22,43 @@ class OperatorPrincipal(BaseModel):
         return self.role in {"operator", "admin"}
 
 
-@dataclass(frozen=True, slots=True)
-class ConfiguredOperatorUser:
-    username: str
-    password: str
-    role: OperatorRole
-
-
 def _runtime(request: Request) -> ApplicationRuntime:
     return request.app.state.runtime
 
 
-def configured_operator_users(settings: AATSSettings) -> list[ConfiguredOperatorUser]:
-    users: list[ConfiguredOperatorUser] = []
-    if settings.operator_viewer_username and settings.operator_viewer_password:
-        users.append(
-            ConfiguredOperatorUser(
-                username=settings.operator_viewer_username,
-                password=settings.operator_viewer_password,
-                role="viewer",
-            )
-        )
-    if settings.operator_operator_username and settings.operator_operator_password:
-        users.append(
-            ConfiguredOperatorUser(
-                username=settings.operator_operator_username,
-                password=settings.operator_operator_password,
-                role="operator",
-            )
-        )
-    if settings.operator_admin_username and settings.operator_admin_password:
-        users.append(
-            ConfiguredOperatorUser(
-                username=settings.operator_admin_username,
-                password=settings.operator_admin_password,
-                role="admin",
-            )
-        )
-    return users
-
-
-def authenticate_operator_user(settings: AATSSettings, *, username: str, password: str) -> OperatorPrincipal | None:
-    for user in configured_operator_users(settings):
-        if user.username == username and user.password == password:
-            return OperatorPrincipal(
-                identity=user.username,
-                role=user.role,
-                auth_enabled=True,
-                auth_source="session",
-            )
+def configured_local_principal(runtime: ApplicationRuntime) -> OperatorPrincipal | None:
+    _ = runtime
     return None
+
+
+def authenticate_operator_user(runtime: ApplicationRuntime, *, username: str, password: str) -> OperatorPrincipal | None:
+    if not hasattr(runtime, "operator_repo"):
+        return None
+    user = runtime.operator_repo.get_by_username(username)
+    if user is None or not user.enabled:
+        return None
+    if not verify_password(password, user.password_hash):
+        return None
+    runtime.operator_repo.record_login(username, utc_now())
+    return OperatorPrincipal(
+        identity=user.username,
+        role=user.role,
+        auth_enabled=True,
+        auth_source="session",
+    )
+
+
+def configured_operator_roles(runtime: ApplicationRuntime) -> list[OperatorRole]:
+    roles = [user.role for user in runtime.operator_repo.all_users() if user.enabled] if hasattr(runtime, "operator_repo") else []
+    if roles:
+        return sorted(set(roles), key=lambda role: {"viewer": 0, "operator": 1, "admin": 2}.get(role, 99))
+    return [user.role for user in configured_bootstrap_operator_users(runtime.settings)]
+
+
+def stored_operator_user_count(runtime: ApplicationRuntime) -> int:
+    if not hasattr(runtime, "operator_repo"):
+        return 0
+    return runtime.operator_repo.count()
 
 
 def session_principal(request: Request) -> OperatorPrincipal | None:
@@ -79,8 +66,10 @@ def session_principal(request: Request) -> OperatorPrincipal | None:
     if runtime is None:
         return None
     settings = runtime.settings
-    session_token = request.cookies.get(settings.operator_session_cookie_name)
-    identity = verify_session_token(settings=settings, token=session_token)
+    identity = _validated_session_identity(
+        runtime,
+        request.cookies.get(settings.operator_session_cookie_name),
+    )
     if identity is None:
         return None
     return OperatorPrincipal(
@@ -95,10 +84,26 @@ def session_identity(request: Request) -> SessionIdentity | None:
     runtime = getattr(request.app.state, "runtime", None)
     if runtime is None:
         return None
-    settings = runtime.settings
-    return verify_session_token(
-        settings=settings,
-        token=request.cookies.get(settings.operator_session_cookie_name),
+    return _validated_session_identity(
+        runtime,
+        request.cookies.get(runtime.settings.operator_session_cookie_name),
+    )
+
+
+def _validated_session_identity(runtime: ApplicationRuntime, token: str | None) -> SessionIdentity | None:
+    identity = verify_session_token(settings=runtime.settings, token=token)
+    if identity is None:
+        return None
+    user = runtime.operator_repo.get_by_username(identity.identity) if hasattr(runtime, "operator_repo") else None
+    if user is None or not user.enabled:
+        return None
+    if user.role == identity.role and user.username == identity.identity:
+        return identity
+    return SessionIdentity(
+        identity=user.username,
+        role=user.role,
+        issued_at=identity.issued_at,
+        expires_at=identity.expires_at,
     )
 
 
@@ -106,9 +111,14 @@ def require_read_access(
     request: Request,
     x_aats_api_key: str | None = Header(default=None, alias="X-AATS-API-Key"),
 ) -> OperatorPrincipal:
-    settings = _runtime(request).settings
+    runtime = _runtime(request)
+    settings = runtime.settings
     if not settings.operator_auth_enabled:
-        return OperatorPrincipal(role="anonymous", auth_enabled=False, auth_source="anonymous")
+        return configured_local_principal(runtime) or OperatorPrincipal(
+            role="anonymous",
+            auth_enabled=False,
+            auth_source="anonymous",
+        )
 
     session_user = session_principal(request)
     if session_user is not None:
@@ -129,7 +139,8 @@ def require_read_access(
             auth_source="api_key",
         )
 
-    if not configured_operator_users(settings) and not settings.operator_read_api_key and not settings.operator_write_api_key:
+    enabled_user_count = runtime.operator_repo.count(enabled_only=True) if hasattr(runtime, "operator_repo") else 0
+    if enabled_user_count == 0 and not settings.operator_read_api_key and not settings.operator_write_api_key:
         raise HTTPException(status_code=503, detail="operator_auth_misconfigured")
     raise HTTPException(status_code=401, detail="operator_auth_required")
 
@@ -146,4 +157,14 @@ def require_write_access(
         raise HTTPException(status_code=403, detail="operator_write_auth_required")
     if not principal.can_write:
         raise HTTPException(status_code=403, detail="operator_write_access_required")
+    return principal
+
+
+def require_admin_access(
+    request: Request,
+    x_aats_api_key: str | None = Header(default=None, alias="X-AATS-API-Key"),
+) -> OperatorPrincipal:
+    principal = require_write_access(request, x_aats_api_key)
+    if principal.role != "admin":
+        raise HTTPException(status_code=403, detail="operator_admin_access_required")
     return principal

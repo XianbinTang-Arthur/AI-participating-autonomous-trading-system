@@ -46,8 +46,73 @@ class TestTargetPositionEngine(unittest.TestCase):
         self.assertGreater(target.target_position_qty, context.current_position_qty)
         self.assertLess(target.target_position_qty, 0.001)
 
+    def test_long_only_spot_holds_existing_long_when_signal_flips_short(self) -> None:
+        engine = TargetPositionEngine(settings=AATSSettings.model_validate({"default_order_qty": 0.001}))
+        context = self._context(current_position_qty=0.00035, current_exposure_side="long")
+        baseline = self._baseline(
+            volatility_target_scale=1.0,
+            suggested_position_scale=1.0,
+            direction_bias="short",
+        )
+
+        target = engine.build(context, baseline, self._ai_assessment(direction=-0.4))
+
+        self.assertAlmostEqual(target.target_position_qty, context.current_position_qty)
+        self.assertEqual(target.delta_position_qty, 0.0)
+        self.assertEqual(target.position_intent, "hold")
+
+    def test_long_only_spot_decays_existing_long_on_flat_signal(self) -> None:
+        engine = TargetPositionEngine(settings=AATSSettings.model_validate({"default_order_qty": 0.001}))
+        context = self._context(current_position_qty=0.00035, current_exposure_side="long")
+        baseline = self._baseline(
+            volatility_target_scale=1.0,
+            suggested_position_scale=0.2,
+            direction_bias="flat",
+        )
+
+        target = engine.build(context, baseline, self._ai_assessment(direction=0.0))
+
+        self.assertGreater(target.target_position_qty, 0.0)
+        self.assertLess(target.target_position_qty, context.current_position_qty)
+        self.assertEqual(target.position_intent, "reduce_long")
+
+    def test_derivatives_profile_allows_short_targets_and_sets_reversal_intent(self) -> None:
+        engine = TargetPositionEngine(
+            settings=AATSSettings.model_validate(
+                {
+                    "default_order_qty": 0.001,
+                    "trading_product_type": "derivatives",
+                    "max_target_leverage": 3.0,
+                    "default_target_leverage": 2.0,
+                    "strategy_short_bias_enabled": True,
+                    "strategy_dynamic_leverage_enabled": True,
+                }
+            )
+        )
+        context = self._context(current_position_qty=0.0008, product_type="derivatives", current_exposure_side="long")
+        baseline = self._baseline(
+            volatility_target_scale=1.0,
+            suggested_position_scale=1.0,
+            direction_bias="short",
+            confidence=0.92,
+        )
+
+        target = engine.build(context, baseline, self._ai_assessment(direction=-0.55, confidence=0.9))
+
+        self.assertLess(target.target_position_qty, 0.0)
+        self.assertEqual(target.position_intent, "reverse_to_short")
+        self.assertEqual(target.target_exposure_side, "short")
+        self.assertEqual(target.product_type, "derivatives")
+        self.assertGreaterEqual(target.target_leverage, 1.0)
+        self.assertLessEqual(target.target_leverage, 3.0)
+
     @staticmethod
-    def _context(*, current_position_qty: float = 0.0) -> DecisionContext:
+    def _context(
+        *,
+        current_position_qty: float = 0.0,
+        product_type: str = "spot",
+        current_exposure_side: str = "flat",
+    ) -> DecisionContext:
         return DecisionContext(
             decision_id="decision_target_test",
             symbol="BTC-USDT",
@@ -59,18 +124,27 @@ class TestTargetPositionEngine(unittest.TestCase):
             health_snapshot_ref="evt_health",
             mode="paper_live",
             current_position_qty=current_position_qty,
+            product_type=product_type,  # type: ignore[arg-type]
+            current_exposure_side=current_exposure_side,  # type: ignore[arg-type]
+            current_target_leverage=1.0,
         )
 
     @staticmethod
-    def _baseline(*, volatility_target_scale: float, suggested_position_scale: float) -> BaselineAssessment:
+    def _baseline(
+        *,
+        volatility_target_scale: float,
+        suggested_position_scale: float,
+        direction_bias: str = "long",
+        confidence: float = 0.8,
+    ) -> BaselineAssessment:
         return BaselineAssessment(
             decision_id="decision_target_test",
             symbol="BTC-USDT",
             regime="trend",
-            direction_bias="long",
+            direction_bias=direction_bias,  # type: ignore[arg-type]
             trend_strength=0.7,
             volatility_state="medium",
-            confidence=0.8,
+            confidence=confidence,
             composite_alpha_score=0.45,
             suggested_position_scale=suggested_position_scale,
             volatility_target_scale=volatility_target_scale,
@@ -82,14 +156,14 @@ class TestTargetPositionEngine(unittest.TestCase):
         )
 
     @staticmethod
-    def _ai_assessment() -> AIMarketAssessment:
+    def _ai_assessment(*, direction: float = 0.1, confidence: float = 0.7) -> AIMarketAssessment:
         return AIMarketAssessment(
             decision_id="decision_target_test",
             symbol="BTC-USDT",
             regime="trend",
-            directional_edge=0.1,
+            directional_edge=direction,
             expected_volatility=0.02,
-            confidence=0.7,
+            confidence=confidence,
             uncertainty=0.2,
             expected_holding_horizon="15m",
             invalidation_conditions=[],
@@ -101,7 +175,7 @@ class TestTargetPositionEngine(unittest.TestCase):
             fallback_used=True,
             fallback_reason="baseline_only_mode",
             degraded=False,
-            calibrated_confidence=0.0,
+            calibrated_confidence=confidence,
             model_name="none",
             model_version="1",
             prompt_version="1",

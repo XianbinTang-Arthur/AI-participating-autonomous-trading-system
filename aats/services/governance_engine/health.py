@@ -8,6 +8,8 @@ from aats.schemas.reconciliation import ReconciliationReport
 from aats.schemas.system import ComponentHealth, SystemHealthSnapshot
 from aats.services.governance_engine.kill_switch import KillSwitch
 from aats.services.governance_engine.mode import RuntimeModeController
+from aats.services.governance_engine.runtime_layers import RecoveryPolicy
+from aats.services.runtime_scope import latest_matching_reconciliation, runtime_state_scope
 from aats.storage.base import ReconciliationRepository
 
 
@@ -37,6 +39,7 @@ class SystemHealthService:
         account_provider: AccountStatusProvider,
         execution_provider: ExecutionReadinessProvider,
         reconciliation_repo: ReconciliationRepository,
+        recovery_policy: RecoveryPolicy | None = None,
     ) -> None:
         self.settings = settings
         self.mode_controller = mode_controller
@@ -45,6 +48,8 @@ class SystemHealthService:
         self.account_provider = account_provider
         self.execution_provider = execution_provider
         self.reconciliation_repo = reconciliation_repo
+        self.recovery_policy = recovery_policy or mode_controller.recovery_policy
+        self.state_scope = runtime_state_scope(settings)
 
     def snapshot(self) -> SystemHealthSnapshot:
         base_components = self._base_components()
@@ -76,7 +81,14 @@ class SystemHealthService:
     def _base_components(self) -> list[ComponentHealth]:
         market_status = self.market_provider.status()
         account_status = self.account_provider.status()
-        reconciliation_status = self._reconciliation_status(self.reconciliation_repo.latest())
+        history_getter = getattr(self.reconciliation_repo, "history", None)
+        if callable(history_getter):
+            latest_reconciliation = latest_matching_reconciliation(history_getter(), self.state_scope)
+        else:
+            latest_reconciliation = self.reconciliation_repo.latest()
+        reconciliation_status = self._reconciliation_status(
+            latest_reconciliation
+        )
         return [
             self._component_from_status("market_data", market_status),
             self._component_from_status("account_state", account_status),
@@ -121,7 +133,7 @@ class SystemHealthService:
             blockers.append("reconciliation_stale")
         if report.halt_required:
             blockers.append("reconciliation_halt_required")
-        if report.review_required:
+        if report.review_required and self.recovery_policy.review_required_blocks_resume:
             blockers.append("operator_rebaseline_required")
         return {
             "connected": True,
@@ -129,5 +141,7 @@ class SystemHealthService:
             "last_update_ts": report.as_of_ts,
             "blockers": blockers,
             "detail": report.severity,
-            "ready": fresh and not report.halt_required and not report.review_required,
+            "ready": fresh and not report.halt_required and not (
+                report.review_required and self.recovery_policy.review_required_blocks_resume
+            ),
         }

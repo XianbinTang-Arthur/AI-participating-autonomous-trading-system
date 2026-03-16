@@ -1,0 +1,540 @@
+The repository already contains:
+
+- a working end-to-end simulated trading loop across decision, policy, risk, execution, portfolio, reconciliation, audit, and operator control
+- a PostgreSQL-backed operator user model with browser login and session auth
+- replay and audit linkage strong enough to support operator diagnostics
+- recovery / reconciliation / rebaseline control surfaces for guarded simulated trading
+- a mode / operating-state model that works, but currently mixes environment capability, execution semantics, future-live placeholders, and UI-facing posture labels too tightly
+
+Now perform the next implementation pass.
+
+Primary goal of this pass:
+
+Refactor the runtime into a unified trading core with environment layering, so that:
+
+- simulated local paper and exchange simulated trading continue to share one trading mainline
+- environment-specific differences are isolated into explicit environment / policy / recovery layers
+- the codebase becomes simpler for current simulated trading
+- the future path toward exchange live support becomes cleaner rather than more fragmented
+
+This pass is NOT about:
+
+- adding real-money live trading
+- enabling autonomous live trading
+- changing exchange coverage
+- changing strategy logic or AI prompts
+- replacing the current operator frontend stack
+- weakening current operator auth / audit behavior
+- removing replay / reconciliation / recovery capabilities
+
+This pass IS about:
+
+- unified mainline architecture
+- explicit environment profiles
+- explicit capability layering
+- explicit policy layering
+- explicit recovery-policy layering
+- simpler simulated-trading semantics
+- reducing configuration and runtime state cross-product complexity
+- preserving correctness while making the simulated path easier to understand and operate
+
+Architectural intent:
+
+The system should have one trading mainline:
+
+1. market data ingress
+2. feature calculation
+3. decision creation
+4. policy evaluation
+5. risk evaluation
+6. execution planning
+7. order intent emission
+8. adapter submission / synchronization
+9. portfolio update
+10. reconciliation / recovery
+11. audit / replay / operator controls
+
+This mainline must remain shared.
+
+Do NOT split simulated trading and future live trading into separate business pipelines.
+
+Instead, isolate differences into explicit boundary layers.
+
+Core design rule:
+
+- shared business chain in the core
+- environment differences at the edge
+- environment-specific display logic in the UI layer only
+
+Problem statement to solve in this pass:
+
+Right now, the repository mixes several concerns:
+
+- runtime mode names
+- operator-facing operating-state labels
+- execution adapter routing
+- exchange submission capability
+- future live placeholders
+- simulated-trading safety posture
+- recovery / rebaseline semantics
+
+These concerns are currently spread across:
+
+- `aats/bootstrap/config.py`
+- `aats/bootstrap/settings.py`
+- `aats/services/governance_engine/mode.py`
+- `aats/services/governance_engine/policy.py`
+- `aats/services/governance_engine/risk.py`
+- `aats/services/execution_engine/okx_adapter.py`
+- `aats/services/execution_engine/recovery.py`
+- `aats/services/operator/query_service.py`
+- the dashboard UI rendering and wording
+
+This creates two concrete problems:
+
+1. Simulated trading is harder to reason about than necessary because several flags combine into overlapping posture states.
+2. Future live support would become more complex if new code keeps being added on top of this cross-product model.
+
+Target end-state of this pass:
+
+The repository should still support the current simulated trading paths, but the architecture should become:
+
+- unified core trading mainline
+- explicit runtime profile resolution
+- explicit environment capability object(s)
+- explicit policy profile object(s)
+- explicit recovery policy object(s)
+- UI that reads the resolved runtime posture instead of reconstructing semantics from many raw flags
+
+Target conceptual model:
+
+Runtime Profile
+-> Environment Capabilities
+-> Policy Bundle
+-> Recovery Policy
+-> Shared Trading Core
+-> Shared Audit / Replay / Operator Chain
+-> Environment-aware UI presentation
+
+Required design changes
+
+1. Introduce explicit runtime profiles
+
+Replace the current implicit mode / backend / flag cross-product with a first-class resolved runtime profile.
+
+At minimum, define formal profiles for:
+
+- `paper_local`
+- `exchange_simulated`
+- `exchange_live_reserved`
+
+Notes:
+
+- `exchange_live_reserved` is a structural placeholder only. It must remain blocked for real-money use.
+- The purpose is to cleanly represent intent, not to enable live trading.
+
+The profile must be derived in one place, not recomputed ad hoc throughout the codebase.
+
+Expected responsibilities of the profile:
+
+- name the active runtime profile
+- express whether exchange submission is conceptually possible
+- express whether persistent storage is required
+- express whether account-state synchronization is meaningful
+- express whether rebaseline is meaningful
+- express whether the current runtime is local-only or exchange-coupled
+
+2. Introduce environment capability layering
+
+Create an explicit environment layer that describes what the runtime can do, independent of business logic.
+
+The environment layer should provide at least:
+
+- market data source kind
+- account-state source kind
+- execution adapter kind
+- exchange submission target
+- exchange submission enabled/disabled
+- persistent storage requirement
+- exchange-coupled vs local-only classification
+
+The core trading flow must consume these resolved capabilities rather than repeatedly inspecting raw settings flags.
+
+Examples:
+
+- `paper_local`
+  - market source may be demo or real market feed
+  - account source is local-only or disabled
+  - execution adapter is paper
+  - exchange submission is disabled by design
+
+- `exchange_simulated`
+  - market source is exchange-backed
+  - account source is exchange-backed
+  - execution adapter is OKX simulated submit
+  - exchange submission target is exchange simulated / demo
+
+3. Introduce policy profiles
+
+Move environment-specific execution-eligibility semantics out of raw conditional logic and into a policy profile layer.
+
+The policy profile should centralize questions such as:
+
+- is exchange submission allowed in principle
+- is dry-run-only posture required
+- does this environment require human approval semantics
+- should account freshness block execution
+- should reconciliation freshness block execution
+- should review-required state block execution
+- are real-money submissions structurally unsupported
+
+This means:
+
+- `PolicyEngine` should keep evaluating decisions
+- but it should read a resolved policy profile instead of re-deriving environment semantics from scattered settings flags
+
+4. Keep risk logic shared, but parameterized by profile
+
+The risk engine should remain part of the shared trading core.
+
+Do NOT create separate simulated and live risk engines.
+
+Instead:
+
+- keep shared checks such as notional caps, position caps, open-order caps, balance sufficiency, and health blockers
+- move environment-specific enablement / requirement decisions into risk-policy/profile inputs
+
+The resulting structure should make it clear:
+
+- policy decides whether execution is admissible in this environment
+- risk decides whether this specific target is safe within configured limits
+- adapter decides whether a concrete submission can proceed against the current external venue state
+
+Avoid duplicating the same blocker semantics across all three layers.
+
+5. Introduce recovery-policy layering
+
+Current recovery logic correctly handles:
+
+- cold start
+- snapshot restore
+- fill-based reconstruction
+- missing reconciliation
+- stale reconciliation
+- operator rebaseline
+- halt / resume semantics
+
+But it currently mixes:
+
+- generic recovery logic
+- exchange baseline takeover semantics
+- simulated exchange operator workflow
+- environment-specific startup safety decisions
+
+Refactor this into explicit recovery-policy layering:
+
+- shared core recovery service
+  - reconstruct state
+  - compare reconstructed vs stored state
+  - restore portfolio state
+- recovery policy evaluator
+  - decide halt / review_required / rebaseline_available / resume_eligible
+- exchange baseline service
+  - handle account baseline import and rebaseline flows
+
+Expected outcome:
+
+- `paper_local` does not carry unnecessary exchange-baseline semantics
+- `exchange_simulated` still preserves reconciliation / baseline takeover / rebaseline workflow
+- future exchange live support can reuse the same structure without being forced into paper-mode assumptions
+
+6. Simplify mode / posture semantics
+
+Refactor `aats/services/governance_engine/mode.py` so that it no longer tries to be:
+
+- configuration resolver
+- capability resolver
+- UI wording source
+- execution posture source
+- future live placeholder policy source
+
+Desired direction:
+
+- one component resolves the runtime profile from settings
+- one component exposes environment capabilities
+- one component reports operator-facing runtime posture using resolved profile + runtime state
+
+The current operator-facing posture labels can remain, but they should be derived from the resolved architecture rather than hand-built from many booleans.
+
+7. Keep one shared execution mainline
+
+The following must remain shared and environment-agnostic as much as practical:
+
+- `DecisionOrchestrator`
+- `ExecutionPlanner`
+- `OrderManager`
+- portfolio state application
+- replay
+- audit linkage
+
+Do NOT fork the event bus or decision/execution chain into separate simulated vs future-live variants.
+
+Environment-specific differences should be introduced through:
+
+- adapter selection
+- capability objects
+- policy profile inputs
+- recovery policy inputs
+
+8. Clean up adapter responsibilities
+
+Execution adapters should own venue-facing concerns only.
+
+That means the adapter layer should answer questions like:
+
+- can this venue accept submission right now
+- how is order payload built
+- how are exchange order states mapped
+- how are fills synchronized
+
+It should not become the main home of broad business-policy semantics that belong in policy or recovery layers.
+
+At the same time, keep the final adapter-side submission gate.
+
+That last gate is still useful, especially for exchange simulated trading.
+
+9. Keep operator auth / audit intact
+
+This refactor must preserve:
+
+- database-backed operator auth
+- session login
+- admin/operator/viewer roles
+- operator action audit
+- replay validation support
+- recovery and rebaseline operator workflows where applicable
+
+This pass is architectural refactoring, not a rollback of operator capabilities.
+
+10. Make UI environment-aware, not environment-defining
+
+The frontend should stop inferring too much semantics from many low-level flags.
+
+The backend should expose a resolved runtime profile / posture payload, and the UI should render from that.
+
+For example:
+
+- `paper_local`
+  - hide or de-emphasize rebaseline controls
+  - avoid presenting lack of exchange submission as a near-failure condition
+- `exchange_simulated`
+  - show reconciliation / account sync / rebaseline / resume posture
+- `exchange_live_reserved`
+  - remain clearly blocked and reserved
+
+Important:
+
+- the UI may vary by environment
+- the backend business chain must remain shared
+
+11. Preserve and strengthen replay / audit invariants
+
+Do NOT break:
+
+- decision -> policy -> risk -> execution -> fill -> portfolio -> reconciliation references
+- replay validation
+- audit record linkage
+- operator action event traceability
+
+The refactor should preserve current data contracts where practical.
+
+If any contract changes are necessary, update replay and audit tests accordingly.
+
+Files and modules likely involved
+
+At minimum, expect meaningful work in:
+
+- `aats/bootstrap/config.py`
+- `aats/bootstrap/settings.py`
+- `aats/services/governance_engine/mode.py`
+- `aats/services/governance_engine/policy.py`
+- `aats/services/governance_engine/risk.py`
+- `aats/services/govenance_engine/health.py`
+- `aats/services/execution_engine/okx_adapter.py`
+- `aats/services/execution_engine/paper_adapter.py`
+- `aats/services/execution_engine/recovery.py`
+- `aats/services/reconciliation_service/repair.py`
+- `aats/services/operator/query_service.py`
+- `aats/api/routes.py`
+- `aats/api/static/app.js`
+- `aats/api/static/dashboard.html`
+- `README.md`
+
+If new modules are helpful, prefer introducing explicit new types such as:
+
+- runtime profile schema / value object
+- environment capability schema / value object
+- policy profile schema / value object
+- recovery policy schema / value object
+
+These should be added only if they simplify the architecture clearly.
+
+Suggested concrete refactor shape
+
+1. Add a runtime-profile resolver
+
+Add a single place that converts raw settings into a resolved runtime profile object.
+
+That object should answer:
+
+- what environment is active
+- what execution adapter family is active
+- whether exchange submission is structurally allowed
+- whether exchange account synchronization is expected
+- whether rebaseline is applicable
+- whether persistent storage is mandatory
+
+2. Refactor runtime construction
+
+Restructure `build_runtime()` so it becomes conceptually:
+
+- resolve settings
+- resolve runtime profile
+- build storage
+- build environment services
+- build policy bundle
+- build shared trading core
+- build recovery / operator layer
+
+The goal is to make runtime assembly readable and architecture-driven.
+
+3. Refactor operator-facing runtime status
+
+`system_mode`, `system_runtime`, `system_health`, and related UI payloads should read from resolved profile / capability / recovery objects rather than piecing together many settings flags manually.
+
+4. Refactor recovery semantics by environment
+
+Make it explicit when the following apply:
+
+- reconciliation freshness as an execution blocker
+- rebaseline availability
+- baseline takeover behavior
+- account snapshot requirement
+- operator review requirement
+
+This should be governed by recovery policy, not scattered conditional logic.
+
+5. Refactor UI around resolved posture
+
+The frontend should display:
+
+- current runtime profile
+- execution posture
+- recovery posture
+- environment-relevant controls
+
+It should not need to reverse-engineer the environment from low-level booleans.
+
+Acceptance criteria
+
+1. Shared mainline preserved
+
+The following remain shared across simulated paths:
+
+- decision creation
+- policy and risk sequence
+- execution planning
+- order intent handling
+- order state persistence
+- fill processing
+- portfolio snapshot generation
+- reconciliation
+- replay and audit
+
+2. Environment layering is explicit
+
+A reader should be able to identify:
+
+- where raw settings end
+- where runtime profile resolution occurs
+- where environment capabilities are defined
+- where policy semantics are defined
+- where recovery-policy semantics are defined
+
+3. Simulated paths are simpler to understand
+
+For current simulated use, the code should make it obvious what distinguishes:
+
+- local paper
+- exchange simulated submit
+
+without requiring cross-referencing many booleans.
+
+4. Real-money trading remains blocked
+
+This pass must not accidentally weaken current guards against real-money live trading.
+
+5. Operator features remain working
+
+Browser login, user management, operator audit, halt/resume, validation, rebaseline, replay, and diagnostics must remain operable.
+
+6. UI reflects resolved posture
+
+The frontend should meaningfully adapt to the active environment, but it must not redefine business logic on its own.
+
+7. Replay / audit integrity remains healthy
+
+Existing replay and audit chain tests should still pass, or be updated only when the architectural contract has been intentionally improved.
+
+Testing requirements
+
+Add or update tests for:
+
+- runtime profile resolution
+- environment capability resolution
+- policy behavior under `paper_local`
+- policy behavior under `exchange_simulated`
+- recovery semantics under `paper_local`
+- recovery semantics under `exchange_simulated`
+- operator runtime endpoints exposing the new resolved profile / posture consistently
+- replay / audit remaining healthy after refactor
+- UI payload compatibility where behavior intentionally changes
+
+Tests must validate behavior, not only object existence.
+
+Documentation requirements
+
+Update README and relevant docs to explain:
+
+- the new unified-mainline / environment-layered architecture
+- the difference between runtime profile, policy profile, and recovery policy
+- how simulated local paper differs from exchange simulated submit
+- why future exchange live support remains blocked but architecturally cleaner
+- how operator UI adapts to environment without changing core business logic
+
+Required implementation sequence
+
+1. First produce the implementation plan for this refactor pass.
+2. Then list the new abstractions and the files to modify.
+3. Then refactor the runtime assembly layer.
+4. Then refactor policy / mode / recovery semantics.
+5. Then adapt operator status APIs and frontend rendering.
+6. Then update tests.
+7. Then update documentation.
+8. Finally summarize:
+   - what the unified mainline now is
+   - what environment layering now exists
+   - what policy layering now exists
+   - what recovery layering now exists
+   - how simulated local paper behaves
+   - how exchange simulated submit behaves
+   - what remains blocked for future live
+   - what the next engineering pass should focus on
+
+Final rule:
+
+Do not fork the business pipeline by environment.
+Do not introduce a second simulated-trading architecture.
+Do not move toward real-money live trading.
+
+Only refactor the current system into a cleaner unified mainline with explicit environment layering, preserving simulated-trading correctness and making future exchange-live extension structurally cleaner.

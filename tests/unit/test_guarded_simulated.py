@@ -4,8 +4,8 @@ import unittest
 
 from aats.bootstrap.settings import AATSSettings
 from aats.schemas.common import utc_now
-from aats.schemas.execution import FillEvent, OrderIntent
-from aats.schemas.exchange import ExchangeAccountSnapshot, InstrumentMetadata
+from aats.schemas.execution import FillEvent, OrderIntent, OrderState
+from aats.schemas.exchange import ExchangeAccountSnapshot, ExchangeFill, InstrumentMetadata
 from aats.schemas.reconciliation import ReconciliationReport
 from aats.services.execution_engine.okx_adapter import OKXExecutionAdapter, OKXOrderPayloadBuilder
 from aats.services.execution_engine.okx_rest import OKXRequestError
@@ -273,6 +273,51 @@ class FakePartialFillOKXClient(FakeOKXClient):
         }
 
 
+class FakeUnfilteredFillsOKXClient(FakeOKXClient):
+    async def get_fills(self, *, symbol: str | None = None, order_id: str | None = None, limit: int | None = None):
+        self.fill_queries.append({"symbol": symbol, "order_id": order_id, "limit": limit})
+        return {
+            "code": "0",
+            "data": [
+                {
+                    "instId": symbol,
+                    "ordId": "historical_ord",
+                    "clOrdId": "historical_client_order",
+                    "tradeId": "historical_trade",
+                    "side": "buy",
+                    "fillSz": "0.5",
+                    "fillPx": "67000",
+                    "fee": "-0.01",
+                    "feeCcy": "USDT",
+                    "fillTime": "1699999999000",
+                },
+                {
+                    "instId": symbol,
+                    "ordId": order_id or "ord_1",
+                    "clOrdId": self.place_order_calls[-1]["clOrdId"] if self.place_order_calls else "clord_1",
+                    "tradeId": "trade_1",
+                    "side": "buy",
+                    "fillSz": "0.001",
+                    "fillPx": "68000",
+                    "fee": "-0.068",
+                    "feeCcy": "USDT",
+                    "fillTime": "1700000001000",
+                },
+            ],
+        }
+
+
+class FakeEventuallyConsistentOKXClient(FakeOKXClient):
+    async def get_order(self, *, symbol: str, order_id: str | None = None, client_order_id: str | None = None):
+        raise OKXRequestError(
+            path="/api/v5/trade/order",
+            code="51603",
+            msg="Order does not exist",
+            status_code=200,
+            payload={"code": "51603", "msg": "Order does not exist", "data": []},
+        )
+
+
 def make_settings(overrides: dict | None = None) -> AATSSettings:
     payload = {
         "mode": "guarded_live",
@@ -412,8 +457,9 @@ class TestGuardedSimulatedExecution(unittest.IsolatedAsyncioTestCase):
         self.assertIn("reconciliation_missing", snapshot.blockers)
 
     def test_order_payload_generation_is_okx_compatible(self) -> None:
+        intent = make_intent()
         payload = OKXOrderPayloadBuilder().build(
-            intent=make_intent(),
+            intent=intent,
             instrument=InstrumentMetadata(
                 instrument_id="BTC-USDT",
                 symbol="BTC-USDT",
@@ -434,6 +480,56 @@ class TestGuardedSimulatedExecution(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(payload["clOrdId"].isalnum())
         self.assertLessEqual(len(payload["clOrdId"]), 32)
         self.assertNotIn("_", payload["clOrdId"])
+        self.assertNotEqual(payload["clOrdId"], f"cl{intent.idempotency_key}".replace("_", "")[:32])
+
+    async def test_submit_filters_out_unrelated_recent_exchange_fills(self) -> None:
+        settings = make_settings(
+            {
+                "live_submit_enabled": True,
+                "guarded_execution_dry_run": False,
+                "max_notional_per_symbol": 1_000.0,
+            }
+        )
+        mode_controller = RuntimeModeController(settings=settings, kill_switch=KillSwitch())
+        client = FakeUnfilteredFillsOKXClient()
+        adapter = OKXExecutionAdapter(
+            settings=settings,
+            client=client,  # type: ignore[arg-type]
+            account_service=FakeAccountService(),  # type: ignore[arg-type]
+            mode_controller=mode_controller,
+            health_service=FakeHealthService(),
+            price_provider=lambda _symbol: 68_000.0,
+        )
+
+        state, fills = await adapter.submit(make_intent())
+
+        self.assertEqual(state.status, "FILLED")
+        self.assertEqual([fill.fill_id for fill in fills], ["trade_1"])
+
+    async def test_submit_tolerates_eventual_consistency_when_order_lookup_lags(self) -> None:
+        settings = make_settings(
+            {
+                "live_submit_enabled": True,
+                "guarded_execution_dry_run": False,
+                "max_notional_per_symbol": 1_000.0,
+            }
+        )
+        mode_controller = RuntimeModeController(settings=settings, kill_switch=KillSwitch())
+        client = FakeEventuallyConsistentOKXClient()
+        adapter = OKXExecutionAdapter(
+            settings=settings,
+            client=client,  # type: ignore[arg-type]
+            account_service=FakeAccountService(),  # type: ignore[arg-type]
+            mode_controller=mode_controller,
+            health_service=FakeHealthService(),
+            price_provider=lambda _symbol: 68_000.0,
+        )
+
+        state, fills = await adapter.submit(make_intent())
+
+        self.assertEqual(state.status, "SUBMITTED")
+        self.assertEqual(state.venue, "OKX")
+        self.assertEqual(fills, [])
 
     async def test_sync_maps_exchange_order_state_into_local_state(self) -> None:
         settings = make_settings(
@@ -461,6 +557,57 @@ class TestGuardedSimulatedExecution(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(refreshed_states[0].status, "FILLED")
         self.assertEqual(len(refreshed_fills), 1)
         self.assertEqual(refreshed_fills[0].fill_id, "trade_1")
+        self.assertEqual(refreshed_fills[0].fee_currency, "USDT")
+
+    async def test_sync_skips_local_submitting_orders_without_exchange_identity(self) -> None:
+        settings = make_settings(
+            {
+                "live_submit_enabled": True,
+                "guarded_execution_dry_run": False,
+            }
+        )
+        mode_controller = RuntimeModeController(settings=settings, kill_switch=KillSwitch())
+        client = FakeOKXClient()
+        adapter = OKXExecutionAdapter(
+            settings=settings,
+            client=client,  # type: ignore[arg-type]
+            account_service=FakeAccountService(),  # type: ignore[arg-type]
+            mode_controller=mode_controller,
+            health_service=FakeHealthService(),
+            price_provider=lambda _symbol: 68_000.0,
+        )
+        now = utc_now()
+        state = OrderState(
+            decision_id="decision_1",
+            intent_id="intent_1",
+            symbol="BTC-USDT",
+            client_order_id="cl_local_only",
+            venue="OKX",
+            exchange_order_id=None,
+            status="SUBMITTING",
+            submission_mode="local_order_manager",
+            submitted_ts=None,
+            last_update_ts=now,
+            last_exchange_update_ts=now,
+            requested_qty=0.001,
+            filled_qty=0.0,
+            remaining_qty=0.001,
+            average_fill_price=None,
+            fees=0.0,
+            product_type="spot",
+            target_leverage=1.0,
+            margin_mode="cash",
+            exposure_side="flat",
+            position_intent="open_long",
+            submission_payload={},
+        )
+
+        refreshed_states, refreshed_fills = await adapter.sync([state])
+
+        self.assertEqual(refreshed_states, [])
+        self.assertEqual(refreshed_fills, [])
+        self.assertEqual(client.order_queries, [])
+        self.assertEqual(client.fill_queries, [])
 
     async def test_partial_fill_ingestion_updates_portfolio_incrementally(self) -> None:
         settings = make_settings(
@@ -613,6 +760,30 @@ class TestGuardedSimulatedExecution(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fills, [])
         self.assertFalse(adapter.readiness()["exchange_submit_allowed"])
         self.assertIn("operator_rebaseline_required", adapter.readiness()["submit_blocked_reasons"])
+
+    def test_select_exchange_fills_does_not_fallback_to_unrelated_recent_history(self) -> None:
+        fills = [
+            ExchangeFill(
+                fill_id="trade_other",
+                exchange_order_id="ord_other",
+                client_order_id="cl_other",
+                instrument_id="BTC-USDT",
+                symbol="BTC-USDT",
+                side="buy",
+                fill_qty=0.001,
+                fill_price=100.0,
+                fee_amount=0.1,
+                fill_ts=utc_now(),
+            )
+        ]
+
+        selected = OKXExecutionAdapter._select_exchange_fills(
+            exchange_fills=fills,
+            order_id="ord_expected",
+            client_order_id="cl_expected",
+        )
+
+        self.assertEqual(selected, [])
 
 
 if __name__ == "__main__":

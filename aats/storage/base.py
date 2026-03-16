@@ -8,6 +8,8 @@ from aats.schemas.audit import DecisionAuditRecord
 from aats.schemas.execution import FillEvent, OrderState
 from aats.schemas.portfolio import PortfolioSnapshot
 from aats.schemas.reconciliation import ReconciliationReport
+from aats.schemas.operator import OperatorUserRecord
+from aats.schemas.runtime_profiles import RuntimeProfileActivationState, RuntimeProfileRevision
 
 
 class EventStore(Protocol):
@@ -27,6 +29,9 @@ class EventStore(Protocol):
         ...
 
     def by_topic(self, topic: str) -> list[EventEnvelope]:
+        ...
+
+    def recent_by_topic(self, topic: str, *, limit: int) -> list[EventEnvelope]:
         ...
 
     def by_decision(self, decision_id: str) -> list[EventEnvelope]:
@@ -73,6 +78,14 @@ class ExecutionRepository(Protocol):
     def fills(self) -> list[FillEvent]:
         ...
 
+    def fills_since(
+        self,
+        *,
+        since: datetime | None = None,
+        limit: int | None = None,
+    ) -> list[FillEvent]:
+        ...
+
     def fills_for_order(self, client_order_id: str) -> list[FillEvent]:
         ...
 
@@ -87,6 +100,9 @@ class PortfolioRepository(Protocol):
     def history(self) -> list[PortfolioSnapshot]:
         ...
 
+    def recent_history(self, *, limit: int) -> list[PortfolioSnapshot]:
+        ...
+
 
 class ReconciliationRepository(Protocol):
     def save_report(self, report: ReconciliationReport) -> None:
@@ -96,6 +112,9 @@ class ReconciliationRepository(Protocol):
         ...
 
     def history(self) -> list[ReconciliationReport]:
+        ...
+
+    def recent_history(self, *, limit: int) -> list[ReconciliationReport]:
         ...
 
 
@@ -113,4 +132,41 @@ class AuditRepository(Protocol):
         ...
 
     def count(self) -> int:
+        ...
+
+
+class OperatorUserRepository(Protocol):
+    def save_user(self, user: OperatorUserRecord) -> OperatorUserRecord:
+        ...
+
+    def get_by_username(self, username: str) -> OperatorUserRecord | None:
+        ...
+
+    def all_users(self) -> list[OperatorUserRecord]:
+        ...
+
+    def count(self, *, enabled_only: bool = False) -> int:
+        ...
+
+    def record_login(self, username: str, logged_in_at: datetime) -> None:
+        ...
+
+    def delete_user(self, username: str) -> bool:
+        ...
+
+
+class RuntimeProfileRepository(Protocol):
+    def save_revision(self, revision: RuntimeProfileRevision) -> RuntimeProfileRevision:
+        ...
+
+    def get_revision(self, revision_id: str) -> RuntimeProfileRevision | None:
+        ...
+
+    def list_revisions(self) -> list[RuntimeProfileRevision]:
+        ...
+
+    def activation_state(self) -> RuntimeProfileActivationState:
+        ...
+
+    def save_activation_state(self, state: RuntimeProfileActivationState) -> RuntimeProfileActivationState:
         ...

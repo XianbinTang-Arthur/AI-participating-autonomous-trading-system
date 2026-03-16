@@ -6,12 +6,31 @@ from typing import Callable
 from aats.schemas.common import new_id
 from aats.schemas.execution import FillEvent, OrderIntent, OrderState
 from aats.services.execution_engine.exchange_adapter import ExchangeAdapter
+from aats.services.governance_engine.runtime_layers import EnvironmentCapabilities
 
 
 class PaperExecutionAdapter(ExchangeAdapter):
-    def __init__(self, *, price_provider: Callable[[str], float], taker_fee_bps: float) -> None:
+    def __init__(
+        self,
+        *,
+        price_provider: Callable[[str], float],
+        taker_fee_bps: float,
+        environment_capabilities: EnvironmentCapabilities | None = None,
+    ) -> None:
         self.price_provider = price_provider
         self.taker_fee_bps = taker_fee_bps
+        self.environment_capabilities = environment_capabilities or EnvironmentCapabilities(
+            market_data_source_kind="demo",
+            account_state_source_kind="disabled",
+            execution_adapter_kind="paper",
+            execution_route="paper_local",
+            exchange_submission_target="none",
+            exchange_submission_possible=False,
+            exchange_submission_enabled=False,
+            persistent_storage_required=False,
+            exchange_coupled=False,
+            local_only=True,
+        )
 
     async def submit(self, intent: OrderIntent) -> tuple[OrderState, list[FillEvent]]:
         now = datetime.now(timezone.utc)
@@ -27,7 +46,11 @@ class PaperExecutionAdapter(ExchangeAdapter):
             venue="PAPER",
             exchange_order_id=exchange_order_id,
             status="FILLED",
-            submission_mode="paper_local",
+            submission_mode=(
+                "paper_derivatives_local"
+                if intent.product_type == "derivatives"
+                else "paper_local"
+            ),
             exchange_status="filled",
             exchange_status_history=["filled"],
             submitted_ts=now,
@@ -38,11 +61,20 @@ class PaperExecutionAdapter(ExchangeAdapter):
             remaining_qty=0.0,
             average_fill_price=fill_price,
             fees=fee_amount,
+            product_type=intent.product_type,
+            target_leverage=intent.target_leverage,
+            margin_mode=intent.margin_mode,
+            exposure_side=intent.exposure_side,
+            position_intent=intent.position_intent,
             submission_payload={
                 "instId": intent.symbol,
                 "side": intent.side,
                 "sz": str(intent.quantity),
                 "ordType": intent.order_type,
+                "productType": intent.product_type,
+                "marginMode": intent.margin_mode,
+                "targetLeverage": str(intent.target_leverage),
+                "positionIntent": intent.position_intent,
             },
         )
         fill = FillEvent(
@@ -57,6 +89,12 @@ class PaperExecutionAdapter(ExchangeAdapter):
             fill_qty=intent.quantity,
             fill_price=fill_price,
             fee_amount=fee_amount,
+            fee_currency="USDT",
+            product_type=intent.product_type,
+            target_leverage=intent.target_leverage,
+            margin_mode=intent.margin_mode,
+            exposure_side=intent.exposure_side,
+            position_intent=intent.position_intent,
             liquidity_role="taker",
             exchange_timestamp=now,
             ingestion_timestamp=now,
@@ -93,4 +131,5 @@ class PaperExecutionAdapter(ExchangeAdapter):
             "exchange_submit_allowed": False,
             "submit_blocked_reasons": ["paper_execution_has_no_exchange_submission"],
             "live_submit_enabled": False,
+            "environment_capabilities": self.environment_capabilities.to_dict(),
         }

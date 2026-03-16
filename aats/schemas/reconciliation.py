@@ -6,6 +6,7 @@ from typing import Any
 from pydantic import Field
 
 from aats.schemas.common import SchemaBase
+from aats.schemas.system import MarginModelType, ProductType
 
 
 class ReconciliationReport(SchemaBase):
@@ -14,6 +15,9 @@ class ReconciliationReport(SchemaBase):
     portfolio_snapshot_ref: str | None = None
     as_of_ts: datetime
     exchange_snapshot_ts: datetime | None = None
+    product_type: ProductType | None = None
+    margin_mode: MarginModelType | None = None
+    allowed_symbols: list[str] = Field(default_factory=list)
     exchange_comparison_enabled: bool = False
     order_diff: dict[str, Any]
     fill_diff: dict[str, Any]

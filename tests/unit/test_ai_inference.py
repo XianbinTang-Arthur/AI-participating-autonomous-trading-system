@@ -268,10 +268,26 @@ class TestAIOperatingModes(unittest.TestCase):
         advisory_target = TargetPositionEngine(settings=advisory_settings).build(context, baseline, ai_short)
         blended_target = TargetPositionEngine(settings=blended_settings).build(context, baseline, ai_short)
         primary_target = TargetPositionEngine(settings=primary_settings).build(context, baseline, ai_short)
+        primary_derivatives_target = TargetPositionEngine(
+            settings=AATSSettings.model_validate(
+                {
+                    "ai_operating_mode": "ai_primary",
+                    "default_order_qty": 0.001,
+                    "ai_primary_min_confidence": 0.6,
+                    "trading_product_type": "derivatives",
+                    "strategy_short_bias_enabled": True,
+                }
+            )
+        ).build(
+            context.model_copy(update={"product_type": "derivatives"}),
+            baseline,
+            ai_short,
+        )
 
         self.assertGreater(advisory_target.target_position_qty, 0.0)
         self.assertEqual(blended_target.target_position_qty, 0.0)
-        self.assertLess(primary_target.target_position_qty, 0.0)
+        self.assertEqual(primary_target.target_position_qty, 0.0)
+        self.assertLess(primary_derivatives_target.target_position_qty, 0.0)
 
 
 if __name__ == "__main__":

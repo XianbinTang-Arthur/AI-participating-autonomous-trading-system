@@ -1,13 +1,47 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import timedelta
 import unittest
 
+from aats.events import topics
+from aats.events.envelopes import build_envelope
 from aats.bootstrap.settings import AATSSettings
 from aats.schemas.common import utc_now
 from aats.schemas.features import FeatureSnapshot
 from aats.schemas.market import MarketSnapshot
+from aats.services.decision_engine.trigger import DecisionCycleTrigger
 from aats.services.decision_engine.trigger_policy import DecisionTriggerPolicy
+
+
+def _feature(*, snapshot_ts, momentum: float, regime: str) -> FeatureSnapshot:
+    return FeatureSnapshot(
+        symbol="BTC-USDT",
+        snapshot_ts=snapshot_ts,
+        trend_strength=0.6,
+        volatility_state="medium",
+        volatility_value=1.0,
+        momentum_score=momentum,
+        liquidity_score=0.9,
+        regime_indicator=regime,  # type: ignore[arg-type]
+        feature_version="test",
+    )
+
+
+def _market(*, snapshot_ts, last_price: float) -> MarketSnapshot:
+    return MarketSnapshot(
+        symbol="BTC-USDT",
+        exchange="OKX",
+        snapshot_ts=snapshot_ts,
+        best_bid=last_price - 1.0,
+        best_ask=last_price + 1.0,
+        last_price=last_price,
+        bid_size=1.0,
+        ask_size=1.0,
+        volume_24h=1000.0,
+        kline_15m={"open": last_price, "high": last_price, "low": last_price, "close": last_price},
+        kline_1h={"open": last_price, "high": last_price, "low": last_price, "close": last_price},
+    )
 
 
 class TestDecisionTriggerPolicy(unittest.TestCase):
@@ -21,8 +55,8 @@ class TestDecisionTriggerPolicy(unittest.TestCase):
         )
         policy = DecisionTriggerPolicy(settings=settings)
         base_ts = utc_now()
-        feature = self._feature(snapshot_ts=base_ts, momentum=0.1, regime="trend")
-        market = self._market(snapshot_ts=base_ts, last_price=67_000.0)
+        feature = _feature(snapshot_ts=base_ts, momentum=0.1, regime="trend")
+        market = _market(snapshot_ts=base_ts, last_price=67_000.0)
 
         allowed, reason = policy.should_trigger(
             feature_snapshot=feature,
@@ -42,8 +76,8 @@ class TestDecisionTriggerPolicy(unittest.TestCase):
         self.assertEqual(duplicate_reason, "duplicate_market_snapshot")
 
         next_ts = base_ts + timedelta(seconds=10)
-        small_move_market = self._market(snapshot_ts=next_ts, last_price=67_001.0)
-        small_move_feature = self._feature(snapshot_ts=next_ts, momentum=0.11, regime="trend")
+        small_move_market = _market(snapshot_ts=next_ts, last_price=67_001.0)
+        small_move_feature = _feature(snapshot_ts=next_ts, momentum=0.11, regime="trend")
         suppressed, suppressed_reason = policy.should_trigger(
             feature_snapshot=small_move_feature,
             market_snapshot=small_move_market,
@@ -52,7 +86,7 @@ class TestDecisionTriggerPolicy(unittest.TestCase):
         self.assertFalse(suppressed)
         self.assertEqual(suppressed_reason, "suppressed_duplicate")
 
-        big_move_market = self._market(snapshot_ts=next_ts, last_price=67_100.0)
+        big_move_market = _market(snapshot_ts=next_ts, last_price=67_100.0)
         material, material_reason = policy.should_trigger(
             feature_snapshot=small_move_feature.model_copy(update={"momentum_score": 0.45}),
             market_snapshot=big_move_market,
@@ -61,36 +95,52 @@ class TestDecisionTriggerPolicy(unittest.TestCase):
         self.assertTrue(material)
         self.assertEqual(material_reason, "material_change")
 
-    @staticmethod
-    def _feature(*, snapshot_ts, momentum: float, regime: str) -> FeatureSnapshot:
-        return FeatureSnapshot(
-            symbol="BTC-USDT",
-            snapshot_ts=snapshot_ts,
-            trend_strength=0.6,
-            volatility_state="medium",
-            volatility_value=1.0,
-            momentum_score=momentum,
-            liquidity_score=0.9,
-            regime_indicator=regime,  # type: ignore[arg-type]
-            feature_version="test",
+
+class TestDecisionCycleTrigger(unittest.IsolatedAsyncioTestCase):
+    async def test_concurrent_same_snapshot_only_runs_one_cycle(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "enabled_decision_timeframes": ["15m"],
+                "decision_min_interval_seconds_15m": 60.0,
+            }
+        )
+        policy = DecisionTriggerPolicy(settings=settings)
+        base_ts = utc_now()
+        market = _market(snapshot_ts=base_ts, last_price=67_000.0)
+        feature = _feature(snapshot_ts=base_ts, momentum=0.1, regime="trend")
+
+        class _FakeOrchestrator:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, str]] = []
+
+            async def run_cycle(self, *, symbol: str, timeframe: str):
+                self.calls.append((symbol, timeframe))
+                await asyncio.sleep(0)
+
+        class _FakeMarketGateway:
+            def latest_snapshot(self, symbol: str):
+                return market if symbol == "BTC-USDT" else None
+
+        orchestrator = _FakeOrchestrator()
+        trigger = DecisionCycleTrigger(
+            orchestrator=orchestrator,
+            market_gateway=_FakeMarketGateway(),
+            policy=policy,
+        )
+        envelope = build_envelope(
+            topic=topics.FEATURE_SNAPSHOTS,
+            key=feature.symbol,
+            payload_model=feature,
+            source_component="test",
+        )
+        message = {"topic": topics.FEATURE_SNAPSHOTS, "key": feature.symbol, "payload": envelope.model_dump(mode="json")}
+
+        await asyncio.gather(
+            trigger.handle_feature_snapshot(message),
+            trigger.handle_feature_snapshot(message),
+            trigger.handle_feature_snapshot(message),
         )
 
-    @staticmethod
-    def _market(*, snapshot_ts, last_price: float) -> MarketSnapshot:
-        return MarketSnapshot(
-            symbol="BTC-USDT",
-            exchange="OKX",
-            snapshot_ts=snapshot_ts,
-            best_bid=last_price - 1.0,
-            best_ask=last_price + 1.0,
-            last_price=last_price,
-            bid_size=1.0,
-            ask_size=1.0,
-            volume_24h=1000.0,
-            kline_15m={"open": last_price, "high": last_price, "low": last_price, "close": last_price},
-            kline_1h={"open": last_price, "high": last_price, "low": last_price, "close": last_price},
-        )
-
-
+        self.assertEqual(orchestrator.calls, [("BTC-USDT", "15m")])
 if __name__ == "__main__":
     unittest.main()

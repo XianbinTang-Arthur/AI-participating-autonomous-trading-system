@@ -153,10 +153,14 @@ class TestRecovery(unittest.IsolatedAsyncioTestCase):
         settings = AATSSettings.model_validate(
             {
                 "storage_mode": "memory",
+                "mode": "guarded_live",
                 "market_data_backend": "demo",
-                "execution_backend": "paper",
+                "execution_backend": "okx",
                 "account_backend": "okx",
                 "account_read_enabled": True,
+                "okx_simulated_trading": True,
+                "live_submit_enabled": False,
+                "guarded_execution_dry_run": True,
                 "bootstrap_portfolio_from_exchange": True,
             }
         )
@@ -189,10 +193,14 @@ class TestRecovery(unittest.IsolatedAsyncioTestCase):
         settings = AATSSettings.model_validate(
             {
                 "storage_mode": "memory",
+                "mode": "guarded_live",
                 "market_data_backend": "demo",
-                "execution_backend": "paper",
+                "execution_backend": "okx",
                 "account_backend": "okx",
                 "account_read_enabled": True,
+                "okx_simulated_trading": True,
+                "live_submit_enabled": False,
+                "guarded_execution_dry_run": True,
                 "bootstrap_portfolio_from_exchange": True,
             }
         )
@@ -245,6 +253,130 @@ class TestRecovery(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(latest_snapshot.positions[0].symbol, "BTC-USDT")
         self.assertAlmostEqual(latest_snapshot.positions[0].position_qty, 0.01)
 
+    async def test_derivatives_runtime_ignores_persisted_spot_state_when_selecting_recovery_context(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = Path(temp_dir)
+            spot_settings = self._sqlite_settings(database_path)
+            runtime = await build_runtime(spot_settings)
+            try:
+                await runtime.market_gateway.run_local_publisher(
+                    symbol=spot_settings.default_symbol,
+                    iterations=4,
+                    interval_seconds=0.0,
+                )
+                spot_snapshot = runtime.portfolio_repo.latest()
+                self.assertIsNotNone(spot_snapshot)
+                self.assertEqual(spot_snapshot.product_type, "spot")
+            finally:
+                if runtime.database_runtime is not None:
+                    runtime.database_runtime.dispose()
+
+            derivatives_settings = AATSSettings.model_validate(
+                {
+                    **spot_settings.model_dump(),
+                    "mode": "guarded_live",
+                    "execution_backend": "okx",
+                    "account_backend": "okx",
+                    "account_read_enabled": True,
+                    "okx_simulated_trading": True,
+                    "live_submit_enabled": False,
+                    "guarded_execution_dry_run": True,
+                    "bootstrap_portfolio_from_exchange": True,
+                    "trading_product_type": "derivatives",
+                    "margin_mode": "cross",
+                    "default_symbol": "BTC-USDT-SWAP",
+                    "allowed_symbols": ("BTC-USDT-SWAP",),
+                }
+            )
+            FakeBaselineAccountService.SNAPSHOT = ExchangeAccountSnapshot(
+                account_source="okx",
+                fetched_at=utc_now(),
+                balances=[ExchangeBalance(currency="USDT", total=1000.0, available=1000.0, frozen=0.0)],
+                positions=[],
+                open_orders=[],
+                fills=[],
+                instruments=[],
+                account_mode="cross",
+            )
+
+            with patch("aats.bootstrap.config.OKXAccountService", FakeBaselineAccountService):
+                recovered_runtime = await build_runtime(derivatives_settings)
+
+            try:
+                query = OperatorQueryService(recovered_runtime)
+                self.assertFalse(recovered_runtime.recovery_status.halted)
+                self.assertEqual(recovered_runtime.recovery_status.recovered_fill_count, 0)
+                scoped_snapshot = query.portfolio_latest()["portfolio"]
+                self.assertIsNotNone(scoped_snapshot)
+                self.assertEqual(scoped_snapshot["product_type"], "derivatives")
+                self.assertEqual(scoped_snapshot["margin_mode"], "cross")
+            finally:
+                if recovered_runtime.database_runtime is not None:
+                    recovered_runtime.database_runtime.dispose()
+
+    async def test_reconciliation_detects_exchange_drift_after_clean_baseline_before_local_execution(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "storage_mode": "memory",
+                "mode": "guarded_live",
+                "market_data_backend": "demo",
+                "execution_backend": "okx",
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "okx_simulated_trading": True,
+                "live_submit_enabled": False,
+                "guarded_execution_dry_run": True,
+                "bootstrap_portfolio_from_exchange": True,
+            }
+        )
+        FakeBaselineAccountService.SNAPSHOT = ExchangeAccountSnapshot(
+            account_source="okx",
+            fetched_at=utc_now(),
+            balances=[ExchangeBalance(currency="USDT", total=1000.0, available=1000.0, frozen=0.0)],
+            positions=[],
+            open_orders=[],
+            fills=[],
+            instruments=[],
+            account_mode="cash",
+        )
+
+        with patch("aats.bootstrap.config.OKXAccountService", FakeBaselineAccountService):
+            runtime = await build_runtime(settings)
+
+        runtime.account_service._snapshot = ExchangeAccountSnapshot(
+            account_source="okx",
+            fetched_at=utc_now() + timedelta(seconds=5),
+            balances=[
+                ExchangeBalance(currency="USDT", total=500.0, available=500.0, frozen=0.0),
+                ExchangeBalance(currency="BTC", total=0.01, available=0.01, frozen=0.0),
+            ],
+            positions=[],
+            open_orders=[],
+            fills=[
+                ExchangeFill(
+                    fill_id="manual_fill_after_baseline",
+                    exchange_order_id="ord_ext_1",
+                    client_order_id=None,
+                    instrument_id="BTC-USDT",
+                    symbol="BTC-USDT",
+                    side="buy",
+                    fill_qty=0.01,
+                    fill_price=70000.0,
+                    fee_amount=0.0,
+                    fill_ts=utc_now() + timedelta(seconds=5),
+                )
+            ],
+            instruments=[],
+            account_mode="cash",
+        )
+
+        report = await runtime.reconciliation_service.validate_now(reason="external_activity_probe")
+
+        self.assertTrue(report.exchange_comparison_enabled)
+        self.assertEqual(report.severity, "REVIEW_REQUIRED")
+        self.assertTrue(report.review_required)
+        self.assertIn("external_manual_activity_detected", report.mismatch_categories)
+
     async def test_runtime_enters_review_required_state_when_imported_baseline_has_open_orders(self) -> None:
         settings = AATSSettings.model_validate(
             {
@@ -294,10 +426,14 @@ class TestRecovery(unittest.IsolatedAsyncioTestCase):
         settings = AATSSettings.model_validate(
             {
                 "storage_mode": "memory",
+                "mode": "guarded_live",
                 "market_data_backend": "demo",
-                "execution_backend": "paper",
+                "execution_backend": "okx",
                 "account_backend": "okx",
                 "account_read_enabled": True,
+                "okx_simulated_trading": True,
+                "live_submit_enabled": False,
+                "guarded_execution_dry_run": True,
                 "bootstrap_portfolio_from_exchange": True,
             }
         )
@@ -376,6 +512,7 @@ class TestRecovery(unittest.IsolatedAsyncioTestCase):
         rebaseline = await query.rebaseline(reason="accept_current_exchange_state", actor_role="admin")
         self.assertEqual(rebaseline["status"], "rebaseline_completed")
         self.assertTrue(rebaseline["halted"])
+        self.assertTrue(runtime.recovery_status.resume_eligible)
         self.assertEqual(runtime.recovery_status.last_rebaseline_event_ref, rebaseline["baseline_event_ref"])
         latest_baseline = runtime.event_store.latest(topics.ACCOUNT_BASELINES)
         self.assertIsNotNone(latest_baseline)

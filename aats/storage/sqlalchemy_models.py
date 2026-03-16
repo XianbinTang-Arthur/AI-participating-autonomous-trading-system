@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import JSON, DateTime, Float, Integer, String
+from sqlalchemy import JSON, Boolean, DateTime, Float, Integer, String
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -106,4 +106,40 @@ class DecisionAuditRecordModel(Base):
     fill_event_refs: Mapped[list] = mapped_column(JSON, nullable=False)
     portfolio_delta_ref: Mapped[str | None] = mapped_column(String(64), nullable=True)
     reconciliation_refs: Mapped[list] = mapped_column(JSON, nullable=False)
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+
+
+class OperatorUserModel(Base):
+    __tablename__ = "operator_users"
+
+    user_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    username: Mapped[str] = mapped_column(String(128), nullable=False, unique=True, index=True)
+    password_hash: Mapped[str] = mapped_column(String(512), nullable=False)
+    role: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+
+
+class RuntimeProfileRevisionModel(Base):
+    __tablename__ = "runtime_profile_revisions"
+
+    revision_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    profile_label: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    change_classification: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    created_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    supersedes_revision_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    activation_note: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+    summary: Mapped[dict] = mapped_column(JSON, nullable=False)
+
+
+class RuntimeProfileActivationModel(Base):
+    __tablename__ = "runtime_profile_activation"
+
+    activation_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     payload: Mapped[dict] = mapped_column(JSON, nullable=False)

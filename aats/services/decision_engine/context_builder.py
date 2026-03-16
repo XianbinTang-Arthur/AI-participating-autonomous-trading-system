@@ -8,6 +8,7 @@ from aats.schemas.portfolio import PortfolioSnapshot
 from aats.schemas.system import HealthSnapshot
 from aats.services.governance_engine.health import SystemHealthService
 from aats.services.governance_engine.mode import RuntimeModeController
+from aats.services.runtime_scope import latest_matching_snapshot, runtime_state_scope, scoped_portfolio_event
 from aats.storage.base import EventStore, PortfolioRepository
 
 
@@ -26,6 +27,7 @@ class DecisionContextBuilder:
         self.portfolio_repo = portfolio_repo
         self.mode_controller = mode_controller
         self.health_service = health_service
+        self.state_scope = runtime_state_scope(settings)
 
     def build_health_snapshot(self, *, decision_id: str) -> HealthSnapshot:
         snapshot = self.health_service.snapshot()
@@ -52,7 +54,10 @@ class DecisionContextBuilder:
 
         market_event = self.event_store.latest(topics.MARKET_SNAPSHOTS, key=symbol)
         feature_event = self.event_store.latest(topics.FEATURE_SNAPSHOTS, key=symbol)
-        portfolio_event = self.event_store.latest(topics.PORTFOLIO_SNAPSHOTS, key="portfolio")
+        portfolio_event = scoped_portfolio_event(
+            self.event_store.by_topic(topics.PORTFOLIO_SNAPSHOTS),
+            self.state_scope,
+        )
 
         if market_event is None:
             raise RuntimeError("Market snapshot is required before building decision context")
@@ -61,8 +66,9 @@ class DecisionContextBuilder:
         if portfolio_event is None:
             raise RuntimeError("Portfolio snapshot is required before building decision context")
 
-        portfolio_snapshot = self.portfolio_repo.latest()
+        portfolio_snapshot = latest_matching_snapshot(self.portfolio_repo.history(), self.state_scope)
         current_position_qty = self._position_qty(portfolio_snapshot, symbol)
+        current_exposure_side = self._exposure_side(current_position_qty)
         return DecisionContext(
             decision_id=decision_id,
             symbol=symbol,
@@ -74,9 +80,19 @@ class DecisionContextBuilder:
             health_snapshot_ref=health_snapshot_ref,
             mode=self.mode_controller.mode,
             policy_flags=[],
-            risk_budget_state={"max_abs_position_qty": self.settings.max_abs_position_qty},
+            risk_budget_state={
+                "max_abs_position_qty": self.settings.max_abs_position_qty,
+                "max_target_leverage": self.settings.max_target_leverage,
+            },
             current_position_qty=current_position_qty,
             current_open_orders=[],
+            product_type=self.settings.trading_product_type,
+            current_exposure_side=current_exposure_side,
+            current_target_leverage=(
+                portfolio_snapshot.leverage_profile.get(symbol, 1.0)
+                if portfolio_snapshot is not None
+                else 1.0
+            ),
         )
 
     @staticmethod
@@ -86,4 +102,15 @@ class DecisionContextBuilder:
         for position in snapshot.positions:
             if position.symbol == symbol:
                 return position.position_qty
+        if "-" in symbol:
+            base_currency, _quote_currency = symbol.split("-", 1)
+            return snapshot.balances.get(base_currency, 0.0)
         return 0.0
+
+    @staticmethod
+    def _exposure_side(quantity: float) -> str:
+        if quantity > 1e-12:
+            return "long"
+        if quantity < -1e-12:
+            return "short"
+        return "flat"

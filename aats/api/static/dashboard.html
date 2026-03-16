@@ -130,6 +130,8 @@
       <button class="workspace-tab" data-view="decisions">Decisions</button>
       <button class="workspace-tab" data-view="execution">Execution</button>
       <button class="workspace-tab" data-view="diagnostics">Diagnostics</button>
+      <button class="workspace-tab" data-view="runtime-profiles" hidden>Runtime Profiles</button>
+      <button class="workspace-tab" data-view="operators">Operators</button>
     </nav>
 
     <main class="workspace">
@@ -157,8 +159,8 @@
           <section class="panel">
             <div class="panel-head">
               <div>
-                <h3>System Posture</h3>
-                <p class="panel-copy">Health, readiness, and execution gating.</p>
+                <h3 id="overviewPostureTitle">System Posture</h3>
+                <p id="overviewPostureCopy" class="panel-copy">Health, readiness, and execution gating.</p>
               </div>
               <button id="inspectSystemButton" class="action-button action-muted">System Detail</button>
             </div>
@@ -187,11 +189,11 @@
             <div id="overviewBlockers" class="panel-content"></div>
           </section>
 
-          <section class="panel">
+          <section id="overviewRecoveryPanel" class="panel">
             <div class="panel-head">
               <div>
-                <h3>Recovery Control</h3>
-                <p class="panel-copy">Baseline takeover, review posture, and whether resume is actually safe.</p>
+                <h3 id="overviewRecoveryTitle">Recovery Control</h3>
+                <p id="overviewRecoveryCopy" class="panel-copy">Baseline takeover, review posture, and whether resume is actually safe.</p>
               </div>
               <button id="inspectRecoveryButton" class="action-button action-muted">Recovery Detail</button>
             </div>
@@ -414,6 +416,225 @@
               </div>
             </div>
             <div id="diagnosticMetrics" class="panel-content"></div>
+          </section>
+        </div>
+      </section>
+
+      <section id="view-runtime-profiles" class="workspace-view" data-view="runtime-profiles" hidden>
+        <div class="page-head">
+          <div>
+            <p class="section-kicker">Runtime Control Plane</p>
+            <h2>Runtime Profiles</h2>
+          </div>
+          <p class="page-copy">Stage spot or derivatives posture changes safely with revision history, preflight blockers, and restart-gated activation.</p>
+        </div>
+
+        <div class="panel-grid decision-grid">
+          <section class="panel">
+            <div class="panel-head">
+              <div>
+                <h3>Activation State</h3>
+                <p class="panel-copy">Current source of truth, active revision, pending revision, and restart requirement.</p>
+              </div>
+            </div>
+            <div id="runtimeProfileSummary" class="panel-content"></div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head">
+              <div>
+                <h3>Supervisor Status</h3>
+                <p class="panel-copy">Managed launcher heartbeat, last restart cause, and activation outcome.</p>
+              </div>
+            </div>
+            <div id="runtimeProfileSupervisor" class="panel-content"></div>
+          </section>
+
+          <section class="panel panel-wide">
+            <div class="panel-head">
+              <div>
+                <h3>Create Or Update Draft</h3>
+                <p class="panel-copy">Copy current runtime posture into a draft, adjust only operator-safe fields, then stage after preflight passes.</p>
+              </div>
+            </div>
+            <form id="runtimeProfileForm" class="operator-form">
+              <div class="field-grid">
+                <div class="lookup-stack">
+                  <label for="runtimeProfileRevisionSelect" class="field-label">Draft Revision</label>
+                  <select id="runtimeProfileRevisionSelect"></select>
+                </div>
+                <div class="lookup-stack">
+                  <label for="runtimeProfileLabel" class="field-label">Profile Label</label>
+                  <input id="runtimeProfileLabel" type="text" placeholder="Primary derivatives profile">
+                </div>
+                <div class="lookup-stack">
+                  <label for="runtimeProfileDefaultSymbol" class="field-label">Default Symbol</label>
+                  <input id="runtimeProfileDefaultSymbol" type="text" placeholder="BTC-USDT-SWAP">
+                </div>
+                <div class="lookup-stack">
+                  <label for="runtimeProfileAllowedSymbols" class="field-label">Allowed Symbols</label>
+                  <input id="runtimeProfileAllowedSymbols" type="text" placeholder="BTC-USDT-SWAP,ETH-USDT-SWAP">
+                </div>
+                <div class="lookup-stack">
+                  <label for="runtimeProfileProductType" class="field-label">Product Type</label>
+                  <select id="runtimeProfileProductType">
+                    <option value="spot">spot</option>
+                    <option value="derivatives">derivatives</option>
+                  </select>
+                </div>
+                <div class="lookup-stack">
+                  <label for="runtimeProfileMarginMode" class="field-label">Margin Mode</label>
+                  <select id="runtimeProfileMarginMode">
+                    <option value="cash">cash</option>
+                    <option value="cross">cross</option>
+                    <option value="isolated">isolated</option>
+                  </select>
+                </div>
+                <div class="lookup-stack">
+                  <label for="runtimeProfileDefaultOrderQty" class="field-label">Default Order Qty</label>
+                  <input id="runtimeProfileDefaultOrderQty" type="number" step="0.000001">
+                </div>
+                <div class="lookup-stack">
+                  <label for="runtimeProfileMaxNotional" class="field-label">Max Notional / Symbol</label>
+                  <input id="runtimeProfileMaxNotional" type="number" step="0.01">
+                </div>
+                <div class="lookup-stack">
+                  <label for="runtimeProfileMaxPositionQty" class="field-label">Max Abs Position Qty</label>
+                  <input id="runtimeProfileMaxPositionQty" type="number" step="0.000001">
+                </div>
+                <div class="lookup-stack">
+                  <label for="runtimeProfileMaxOpenOrders" class="field-label">Max Open Orders</label>
+                  <input id="runtimeProfileMaxOpenOrders" type="number" step="1">
+                </div>
+                <div class="lookup-stack">
+                  <label for="runtimeProfileDefaultLeverage" class="field-label">Default Leverage</label>
+                  <input id="runtimeProfileDefaultLeverage" type="number" step="0.1">
+                </div>
+                <div class="lookup-stack">
+                  <label for="runtimeProfileMaxLeverage" class="field-label">Max Leverage</label>
+                  <input id="runtimeProfileMaxLeverage" type="number" step="0.1">
+                </div>
+                <label class="toggle-switch operator-toggle" for="runtimeProfileShortBias">
+                  <input id="runtimeProfileShortBias" type="checkbox">
+                  <span>Short bias enabled</span>
+                </label>
+                <label class="toggle-switch operator-toggle" for="runtimeProfileDynamicLeverage">
+                  <input id="runtimeProfileDynamicLeverage" type="checkbox">
+                  <span>Dynamic leverage enabled</span>
+                </label>
+                <div class="lookup-stack">
+                  <label for="runtimeProfileActivationNote" class="field-label">Activation Note</label>
+                  <input id="runtimeProfileActivationNote" type="text" placeholder="Reason for next activation">
+                </div>
+              </div>
+              <div class="action-row">
+                <button id="runtimeProfileCreateButton" type="button" class="action-button action-secondary">Create Draft</button>
+                <button id="runtimeProfileSaveButton" type="submit" class="action-button action-primary">Save Draft</button>
+                <button id="runtimeProfileStageButton" type="button" class="action-button action-warning">Stage Activation</button>
+                <button id="runtimeProfileCancelPendingButton" type="button" class="action-button action-muted">Cancel Pending</button>
+                <button id="runtimeProfileRestartButton" type="button" class="action-button action-danger">Request Restart</button>
+              </div>
+              <span id="runtimeProfilePermissionNote" class="command-meta permission-note">Checking runtime profile permissions.</span>
+            </form>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head">
+              <div>
+                <h3>Change Impact</h3>
+                <p class="panel-copy">Human-readable diff, classification, and whether the switch is safe to stage.</p>
+              </div>
+            </div>
+            <div id="runtimeProfileImpact" class="panel-content"></div>
+          </section>
+
+          <section class="panel panel-wide">
+            <div class="panel-head">
+              <div>
+                <h3>Revision History</h3>
+                <p class="panel-copy">Immutable revisions with active and pending markers.</p>
+              </div>
+            </div>
+            <div id="runtimeProfileTable" class="panel-content"></div>
+          </section>
+        </div>
+      </section>
+
+      <section id="view-operators" class="workspace-view" data-view="operators">
+        <div class="page-head">
+          <div>
+            <p class="section-kicker">Identity Administration</p>
+            <h2>Operators</h2>
+          </div>
+          <p class="page-copy">Manage database-backed viewer, operator, and admin accounts from the authenticated admin session.</p>
+        </div>
+
+        <div class="panel-grid decision-grid">
+          <section class="panel">
+            <div class="panel-head">
+              <div>
+                <h3>Auth Posture</h3>
+                <p class="panel-copy">Current browser auth mode, bootstrap state, and admin eligibility.</p>
+              </div>
+            </div>
+            <div id="operatorSummary" class="panel-content"></div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head">
+              <div>
+                <h3>Bootstrap Status</h3>
+                <p class="panel-copy">One-time seed behavior and current stored account counts.</p>
+              </div>
+            </div>
+            <div id="operatorBootstrap" class="panel-content"></div>
+          </section>
+
+          <section class="panel panel-wide">
+            <div class="panel-head">
+              <div>
+                <h3>Create Operator User</h3>
+                <p class="panel-copy">Add a new database-backed account with one of the three supported roles.</p>
+              </div>
+            </div>
+            <form id="operatorCreateForm" class="operator-form">
+              <div class="field-grid">
+                <div class="lookup-stack">
+                  <label for="operatorCreateUsername" class="field-label">Username</label>
+                  <input id="operatorCreateUsername" type="text" autocomplete="username" placeholder="new username" required>
+                </div>
+                <div class="lookup-stack">
+                  <label for="operatorCreatePassword" class="field-label">Password</label>
+                  <input id="operatorCreatePassword" type="password" autocomplete="new-password" placeholder="temporary password" required>
+                </div>
+                <div class="lookup-stack">
+                  <label for="operatorCreateRole" class="field-label">Role</label>
+                  <select id="operatorCreateRole">
+                    <option value="viewer">viewer</option>
+                    <option value="operator">operator</option>
+                    <option value="admin">admin</option>
+                  </select>
+                </div>
+                <label class="toggle-switch operator-toggle" for="operatorCreateEnabled">
+                  <input id="operatorCreateEnabled" type="checkbox" checked>
+                  <span>Enable immediately</span>
+                </label>
+              </div>
+              <div class="action-row">
+                <button id="operatorCreateButton" type="submit" class="action-button action-primary">Create User</button>
+                <span id="operatorPermissionNote" class="command-meta permission-note">Checking admin access.</span>
+              </div>
+            </form>
+          </section>
+
+          <section class="panel panel-wide">
+            <div class="panel-head">
+              <div>
+                <h3>Stored Operator Accounts</h3>
+                <p class="panel-copy">Reset passwords, change roles, disable accounts, or remove accounts from the database.</p>
+              </div>
+            </div>
+            <div id="operatorUsersTable" class="panel-content"></div>
           </section>
         </div>
       </section>

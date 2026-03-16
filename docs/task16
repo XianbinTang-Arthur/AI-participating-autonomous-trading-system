@@ -1,0 +1,152 @@
+The repository already completed `task15` and now has:
+
+- one shared trading mainline
+- explicit runtime/environment/policy/recovery layering
+- operator/runtime APIs that expose the resolved posture
+- a dashboard that consumes those posture objects
+
+Now perform the next cleanup pass.
+
+Primary goal of this pass:
+
+Finish the first real follow-through on the task15 architecture by:
+
+- extracting recovery posture evaluation out of `aats/services/operator/query_service.py`
+- making recovery semantics derive from one dedicated evaluator instead of being reimplemented inside operator query assembly
+- trimming the dashboard overview so it adapts more clearly to `paper_local` vs `exchange_simulated`
+
+This pass is NOT about:
+
+- changing strategy logic
+- changing execution adapters
+- changing order lifecycle behavior
+- adding live trading support
+- changing the operator auth model
+- replacing the UI stack
+
+This pass IS about:
+
+- clean code around recovery semantics
+- consistent recovery-state derivation
+- reducing duplicated recovery logic
+- reducing overview clutter in local paper mode
+- making the environment-aware UI posture more obvious
+
+Problem statement to solve in this pass:
+
+After task15, the repository still has one noticeable architectural mismatch:
+
+- `query_service.py` remains responsible for too many recovery semantics
+- recovery state normalization, resume blocker derivation, and mode/recovery posture stitching still live in the operator aggregation layer
+- the overview page still shows too much exchange-recovery posture even when the runtime is `paper_local`
+
+That means:
+
+1. recovery semantics are harder to test directly than they should be
+2. operator query assembly still owns logic that should sit closer to governance/recovery policy evaluation
+3. the overview page still exposes exchange-oriented concepts too aggressively for local paper use
+
+Required implementation changes
+
+1. Introduce a dedicated recovery posture evaluator
+
+Create a dedicated service that owns recovery posture derivation for the running runtime.
+
+Expected responsibilities:
+
+- normalize the current recovery state from:
+  - runtime recovery status
+  - latest reconciliation report
+  - kill switch state
+  - recovery policy
+- derive resume blockers
+- derive whether resume is actually runnable
+- derive whether rebaseline is available
+- derive whether the runtime is safe to trade
+- derive the final recovery status fields used by operator/runtime views
+
+This evaluator must not live inside `query_service.py`.
+
+2. Use the evaluator from operator query assembly
+
+`aats/services/operator/query_service.py` should stop directly owning the recovery-state derivation rules.
+
+After this pass:
+
+- `query_service.py` may still assemble API payloads
+- but it should delegate recovery posture logic to the evaluator
+
+At minimum, route these concerns through the dedicated evaluator:
+
+- `recovery_view()`
+- `system_mode()` recovery/execution blocker stitching
+- recovery status updates after reconciliation validation
+- recovery status finalization after operator rebaseline
+- recovery status finalization after halt/resume
+
+3. Keep recovery semantics profile-aware
+
+The evaluator must respect the runtime layering introduced in task15.
+
+Specifically:
+
+- `paper_local`
+  - must remain local-only
+  - must not surface operator rebaseline as supported
+  - may still surface halt/resume state, but should not pretend exchange baseline takeover is meaningful
+
+- `exchange_simulated`
+  - must continue to support reconciliation-aware resume gating
+  - must continue to support operator rebaseline
+  - must continue to treat exchange/account divergence as meaningful
+
+- `exchange_live_reserved`
+  - remains structurally blocked
+  - this pass must not enable any real-money behavior
+
+4. Clean up overview information architecture
+
+The overview page should become more obviously profile-aware.
+
+Required behavior:
+
+- `paper_local`
+  - hide or strongly de-emphasize exchange recovery controls in the main overview
+  - present local-paper posture more directly
+  - avoid implying that rebaseline is a normal operator concern in this profile
+
+- `exchange_simulated`
+  - keep recovery control visibility
+  - keep baseline/reconciliation posture visible
+  - keep guarded-exchange semantics visible
+
+5. Improve front-end wording where profile semantics differ
+
+At minimum, make the main overview and execution posture copy/profile rows reflect:
+
+- local paper execution
+- guarded exchange simulated execution
+- whether exchange submission is enabled, guarded, or intentionally absent
+
+Do not reconstruct environment semantics from scattered raw flags if the resolved runtime posture already exists.
+
+Acceptance criteria
+
+1. Recovery posture logic is extracted into a dedicated evaluator/service.
+2. `query_service.py` becomes thinner and no longer directly owns the full recovery-state derivation rules.
+3. Recovery-related API payloads remain backward compatible enough for the existing operator UI/tests.
+4. Stored recovery status and rendered recovery view no longer drift because of duplicated logic.
+5. The overview page is clearly slimmer in `paper_local` and still informative in `exchange_simulated`.
+6. Rebaseline remains unavailable in `paper_local`.
+7. Exchange-simulated resume/rebaseline flow continues to work.
+8. No trading mainline behavior is changed beyond the recovery-view cleanup and profile-aware UI trimming.
+
+Testing requirements
+
+- add focused tests for the dedicated recovery posture evaluator
+- keep or extend integration coverage for:
+  - paper-local recovery semantics
+  - exchange-simulated rebaseline/resume semantics
+  - operator API recovery payloads
+- run the full test suite
+- run `node --check aats/api/static/app.js`

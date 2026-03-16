@@ -4,7 +4,6 @@ const nodes = {
   password: document.getElementById("loginPassword"),
   button: document.getElementById("loginButton"),
   message: document.getElementById("loginMessage"),
-  providers: document.getElementById("loginProviders"),
 };
 
 init();
@@ -21,29 +20,9 @@ async function renderProviders() {
   try {
     const payload = await requestJson("/auth/providers");
     updateLoginAvailability(payload);
-    nodes.providers.innerHTML = `
-      <div class="fact-grid">
-        <div class="fact-row">
-          <span class="fact-key">Auth Enabled</span>
-          <strong class="fact-value">${payload.auth_enabled ? "yes" : "no"}</strong>
-        </div>
-        <div class="fact-row">
-          <span class="fact-key">Session Login</span>
-          <strong class="fact-value">${payload.session_enabled ? "configured" : "not configured"}</strong>
-        </div>
-        <div class="fact-row">
-          <span class="fact-key">Configured Roles</span>
-          <strong class="fact-value">${payload.configured_roles?.length ? payload.configured_roles.join(", ") : "-"}</strong>
-        </div>
-        <div class="fact-row">
-          <span class="fact-key">API-Key Compatibility</span>
-          <strong class="fact-value">${payload.api_key_compatibility_enabled ? "enabled" : "disabled"}</strong>
-        </div>
-      </div>
-    `;
   } catch (error) {
     updateLoginAvailability({ auth_enabled: false, session_enabled: false });
-    nodes.providers.innerHTML = `<div class="empty-state">${escapeHtml(error.message || "Failed to load auth providers.")}</div>`;
+    setMessage(error.message || "Failed to load login availability.", "danger");
   }
 }
 
@@ -110,13 +89,4 @@ function safeJsonParse(text) {
 function setMessage(message, tone) {
   nodes.message.className = `alert alert-${tone}`;
   nodes.message.textContent = message;
-}
-
-function escapeHtml(value) {
-  return String(value)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
 }

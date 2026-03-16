@@ -5,13 +5,13 @@ from typing import Any, Literal
 
 from pydantic import Field
 
-from aats.schemas.common import SchemaBase, new_id
+from aats.schemas.common import SchemaBase, new_id, utc_now
 from aats.schemas.system import OperatingState
 
 
 RuntimeState = Literal["healthy", "degraded", "blocked", "halted"]
 OperatorRole = Literal["anonymous", "viewer", "operator", "admin"]
-AuthSource = Literal["anonymous", "session", "api_key"]
+AuthSource = Literal["anonymous", "session", "api_key", "local_config"]
 
 
 class BlockerSnapshotRecord(SchemaBase):
@@ -67,9 +67,39 @@ class ReconciliationValidationSummary(SchemaBase):
     validated_at: datetime
 
 
+class OperatorUserRecord(SchemaBase):
+    user_id: str = Field(default_factory=lambda: new_id("opuser"))
+    username: str
+    password_hash: str
+    role: Literal["viewer", "operator", "admin"]
+    enabled: bool = True
+    updated_at: datetime = Field(default_factory=utc_now)
+    last_login_at: datetime | None = None
+
+
 class OperatorActionRecord(SchemaBase):
     action_id: str = Field(default_factory=lambda: new_id("opact"))
-    action: Literal["halt", "resume", "mode_change", "reconciliation_validate", "rebaseline"]
+    action: Literal[
+        "halt",
+        "resume",
+        "mode_change",
+        "reconciliation_validate",
+        "rebaseline",
+        "cancel_order",
+        "login",
+        "user_create",
+        "user_update",
+        "user_delete",
+        "runtime_profile_create",
+        "runtime_profile_update",
+        "runtime_profile_stage",
+        "runtime_profile_stage_rejected",
+        "runtime_profile_cancel_pending",
+        "runtime_profile_restart_request",
+        "runtime_profile_activation",
+        "runtime_profile_activation_failed",
+        "runtime_profile_supervisor_restart",
+    ]
     actor_role: OperatorRole
     actor_identity: str | None = None
     auth_source: AuthSource = "anonymous"

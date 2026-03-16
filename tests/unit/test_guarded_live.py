@@ -97,6 +97,20 @@ class FakeReconciliationRepo:
         return None
 
 
+class FakeHealthyReconciliationRepo:
+    def latest(self):
+        return type(
+            "_Report",
+            (),
+            {
+                "severity": "CLEAN",
+                "halt_required": False,
+                "review_required": False,
+                "as_of_ts": utc_now(),
+            },
+        )()
+
+
 class FakeOKXClient:
     def __init__(self) -> None:
         self.place_order_calls: list[dict] = []
@@ -125,11 +139,11 @@ class TestGuardedLive(unittest.IsolatedAsyncioTestCase):
 
         snapshot = controller.snapshot()
 
-        self.assertEqual(snapshot["operating_state"], "guarded_simulated_submit_dry_run")
+        self.assertEqual(snapshot["operating_state"], "guarded_simulated_submit_spot_dry_run")
         self.assertEqual(snapshot["market_data_source"], "okx")
         self.assertEqual(snapshot["account_read_source"], "okx")
         self.assertEqual(snapshot["execution_route"], "okx_demo_guarded")
-        self.assertEqual(snapshot["exchange_submit_target"], "okx_demo")
+        self.assertEqual(snapshot["exchange_submit_target"], "okx_demo_spot")
         self.assertFalse(snapshot["exchange_submit_allowed"])
         self.assertIn("guarded_execution_dry_run", snapshot["submit_blocked_reasons"])
 
@@ -346,6 +360,90 @@ class TestGuardedLive(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(decision.approved)
         self.assertIn("insufficient_base_balance", decision.rejection_reasons)
+
+    def test_derivatives_risk_allows_short_without_base_inventory_but_enforces_margin_and_leverage(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "mode": "guarded_live",
+                "execution_backend": "okx",
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "okx_simulated_trading": True,
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "max_target_leverage": 3.0,
+                "max_margin_usage_fraction": 0.8,
+                "liquidation_buffer_fraction": 0.15,
+            }
+        )
+        kill_switch = KillSwitch()
+        mode_controller = RuntimeModeController(settings=settings, kill_switch=kill_switch)
+        health_service = SystemHealthService(
+            settings=settings,
+            mode_controller=mode_controller,
+            kill_switch=kill_switch,
+            market_provider=FakeHealthyMarketProvider(),  # type: ignore[arg-type]
+            account_provider=FakeAccountService(btc_available=0.0, usdt_available=200.0),  # type: ignore[arg-type]
+            execution_provider=FakeExecutionProvider(),  # type: ignore[arg-type]
+            reconciliation_repo=FakeHealthyReconciliationRepo(),  # type: ignore[arg-type]
+        )
+        risk = RiskEngine(
+            settings=settings,
+            account_service=FakeAccountService(btc_available=0.0, usdt_available=200.0),  # type: ignore[arg-type]
+            health_service=health_service,
+            trigger_policy=DecisionTriggerPolicy(settings=settings),
+            price_provider=lambda _symbol: 67_000.0,
+            mode_controller=mode_controller,
+        )
+
+        accepted = risk.evaluate(
+            PositionTarget(
+                decision_id="decision_short_derivatives",
+                symbol="BTC-USDT",
+                current_position_qty=0.0,
+                target_position_qty=-0.001,
+                delta_position_qty=-0.001,
+                current_notional=0.0,
+                target_notional=-67.0,
+                rebalance_reason="test",
+                urgency="medium",
+                max_slippage_tolerance_bps=20,
+                source_mix={"baseline": 1.0},
+                decision_expiry_ts=utc_now(),
+                product_type="derivatives",
+                current_exposure_side="flat",
+                target_exposure_side="short",
+                position_intent="open_short",
+                target_leverage=3.0,
+                margin_mode="cross",
+            )
+        )
+        self.assertTrue(accepted.approved)
+
+        rejected = risk.evaluate(
+            PositionTarget(
+                decision_id="decision_short_derivatives_overlevered",
+                symbol="BTC-USDT",
+                current_position_qty=0.0,
+                target_position_qty=-0.01,
+                delta_position_qty=-0.01,
+                current_notional=0.0,
+                target_notional=-670.0,
+                rebalance_reason="test",
+                urgency="medium",
+                max_slippage_tolerance_bps=20,
+                source_mix={"baseline": 1.0},
+                decision_expiry_ts=utc_now(),
+                product_type="derivatives",
+                current_exposure_side="flat",
+                target_exposure_side="short",
+                position_intent="open_short",
+                target_leverage=5.0,
+                margin_mode="cross",
+            )
+        )
+        self.assertFalse(rejected.approved)
+        self.assertIn("max_target_leverage_exceeded", rejected.rejection_reasons)
 
 
 if __name__ == "__main__":

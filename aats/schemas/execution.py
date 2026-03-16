@@ -6,6 +6,7 @@ from typing import Literal
 from pydantic import Field
 
 from aats.schemas.common import SchemaBase
+from aats.schemas.system import MarginModelType, ProductType
 
 OrderLifecycleStatus = Literal[
     "CREATED",
@@ -37,6 +38,20 @@ class OrderIntent(SchemaBase):
     reduce_only: bool = False
     close_only: bool = False
     idempotency_key: str
+    product_type: ProductType = "spot"
+    target_leverage: float = 1.0
+    margin_mode: MarginModelType = "cash"
+    exposure_side: Literal["long", "short", "flat"] = "flat"
+    position_intent: Literal[
+        "open_long",
+        "reduce_long",
+        "close_long",
+        "open_short",
+        "reduce_short",
+        "close_short",
+        "reverse_to_long",
+        "reverse_to_short",
+    ] = "open_long"
 
 
 class ExecutionPlan(SchemaBase):
@@ -52,6 +67,20 @@ class ExecutionPlan(SchemaBase):
     order_type: Literal["market", "limit"]
     urgency: Literal["low", "medium", "high"]
     max_slippage_tolerance_bps: int
+    product_type: ProductType = "spot"
+    target_leverage: float = 1.0
+    margin_mode: MarginModelType = "cash"
+    exposure_side: Literal["long", "short", "flat"] = "flat"
+    position_intent: Literal[
+        "open_long",
+        "reduce_long",
+        "close_long",
+        "open_short",
+        "reduce_short",
+        "close_short",
+        "reverse_to_long",
+        "reverse_to_short",
+    ] = "open_long"
 
 
 class OrderState(SchemaBase):
@@ -75,6 +104,20 @@ class OrderState(SchemaBase):
     remaining_qty: float
     average_fill_price: float | None = None
     fees: float = 0.0
+    product_type: ProductType = "spot"
+    target_leverage: float = 1.0
+    margin_mode: MarginModelType = "cash"
+    exposure_side: Literal["long", "short", "flat"] = "flat"
+    position_intent: Literal[
+        "open_long",
+        "reduce_long",
+        "close_long",
+        "open_short",
+        "reduce_short",
+        "close_short",
+        "reverse_to_long",
+        "reverse_to_short",
+    ] = "open_long"
     cancel_reason: str | None = None
     execution_error: str | None = None
     submission_payload: dict[str, str] = Field(default_factory=dict)
@@ -92,6 +135,21 @@ class FillEvent(SchemaBase):
     fill_qty: float
     fill_price: float
     fee_amount: float
+    fee_currency: str | None = None
+    product_type: ProductType = "spot"
+    target_leverage: float = 1.0
+    margin_mode: MarginModelType = "cash"
+    exposure_side: Literal["long", "short", "flat"] = "flat"
+    position_intent: Literal[
+        "open_long",
+        "reduce_long",
+        "close_long",
+        "open_short",
+        "reduce_short",
+        "close_short",
+        "reverse_to_long",
+        "reverse_to_short",
+    ] = "open_long"
     liquidity_role: Literal["maker", "taker"]
     exchange_timestamp: datetime
     ingestion_timestamp: datetime

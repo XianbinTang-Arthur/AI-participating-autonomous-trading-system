@@ -12,12 +12,32 @@ from aats.schemas.operator import (
     ExecutionErrorSummary,
     OperatorActionRecord,
     OperatorRole,
+    OperatorUserRecord,
     ReconciliationValidationSummary,
     ReplayValidationSummary,
 )
 from aats.services.execution_engine.baseline_import import AccountBaselineImportService
+from aats.services.governance_engine.recovery_posture import RecoveryPostureEvaluator
+from aats.services.operator.accounts import (
+    create_operator_user as create_managed_operator_user,
+    delete_operator_user as delete_managed_operator_user,
+    enabled_admin_count,
+    update_operator_user as update_managed_operator_user,
+)
+from aats.services.operator.runtime_profiles import RuntimeProfileControlService
 from aats.services.portfolio_service.reconstruction import PortfolioReconstructionService
 from aats.services.reconciliation_service.replay import ReplayEngine, ReplayResult
+from aats.services.runtime_scope import (
+    filter_fills,
+    filter_order_states,
+    filter_snapshots,
+    latest_matching_reconciliation,
+    latest_matching_snapshot,
+    order_state_matches_scope,
+    reconciliation_report_matches_scope as report_matches_scope,
+    runtime_state_scope,
+    scoped_portfolio_event,
+)
 
 if TYPE_CHECKING:
     from aats.bootstrap.config import ApplicationRuntime
@@ -27,6 +47,32 @@ class OperatorQueryService:
     def __init__(self, runtime: ApplicationRuntime) -> None:
         self.runtime = runtime
         self.logger = get_logger("aats.operator_api")
+        self.recovery_posture = RecoveryPostureEvaluator(runtime)
+        self.state_scope = runtime_state_scope(runtime.settings)
+        self.runtime_profiles = RuntimeProfileControlService(
+            settings=runtime.settings,
+            repo=runtime.runtime_profile_repo,
+            execution_repo=runtime.execution_repo,
+            event_store=runtime.event_store,
+        )
+
+    def _scoped_order_states(self):
+        return filter_order_states(self.runtime.execution_repo.order_states(), self.state_scope)
+
+    def _scoped_open_order_states(self):
+        return filter_order_states(self.runtime.execution_repo.open_order_states(), self.state_scope)
+
+    def _scoped_fills(self):
+        return filter_fills(self.runtime.execution_repo.fills(), self.state_scope)
+
+    def _latest_scoped_snapshot(self):
+        return latest_matching_snapshot(self.runtime.portfolio_repo.history(), self.state_scope)
+
+    def _latest_scoped_reconciliation(self):
+        return latest_matching_reconciliation(self.runtime.reconciliation_repo.history(), self.state_scope)
+
+    def _latest_scoped_portfolio_event(self):
+        return scoped_portfolio_event(self.runtime.event_store.by_topic(topics.PORTFOLIO_SNAPSHOTS), self.state_scope)
 
     def payload(self, envelope: EventEnvelope | None) -> dict[str, Any] | None:
         if envelope is None:
@@ -50,11 +96,11 @@ class OperatorQueryService:
         return rows
 
     def latest_order(self):
-        rows = self.runtime.execution_repo.order_states()
+        rows = self._scoped_order_states()
         return max(rows, key=lambda item: item.last_update_ts or item.created_at, default=None)
 
     def latest_fill(self):
-        rows = self.runtime.execution_repo.fills()
+        rows = self._scoped_fills()
         return max(rows, key=lambda item: item.ingestion_timestamp, default=None)
 
     def latest_account_baseline(self) -> dict[str, Any] | None:
@@ -63,7 +109,7 @@ class OperatorQueryService:
 
     def recent_fills(self, *, limit: int = 50):
         return sorted(
-            self.runtime.execution_repo.fills(),
+            self._scoped_fills(),
             key=lambda item: (item.ingestion_timestamp, item.fill_id),
             reverse=True,
         )[:limit]
@@ -80,48 +126,207 @@ class OperatorQueryService:
         ]
         return actions[-1] if actions else None
 
+    def record_operator_login(
+        self,
+        *,
+        actor_identity: str,
+        actor_role: OperatorRole,
+        auth_source: AuthSource = "session",
+    ) -> None:
+        self._append_event(
+            topic=topics.OPERATOR_ACTIONS,
+            key="auth",
+            payload_model=OperatorActionRecord(
+                action="login",
+                actor_role=actor_role,
+                actor_identity=actor_identity,
+                auth_source=auth_source,
+                reason="operator_login",
+                status="login_succeeded",
+                details={"database_backed": self.runtime.database_runtime is not None},
+            ),
+        )
+
+    def operator_users(self, *, actor_identity: str | None = None) -> dict[str, Any]:
+        users = self.runtime.operator_repo.all_users()
+        protected_last_admin = enabled_admin_count(self.runtime.operator_repo) <= 1
+        return {
+            "users": [
+                self._operator_user_view(
+                    user,
+                    actor_identity=actor_identity,
+                    last_admin_protected=protected_last_admin,
+                )
+                for user in users
+            ],
+            "enabled_user_count": self.runtime.operator_repo.count(enabled_only=True),
+            "enabled_admin_count": enabled_admin_count(self.runtime.operator_repo),
+            "bootstrap_pending": (
+                self.runtime.settings.operator_bootstrap_enabled
+                and self.runtime.settings.operator_bootstrap_users_configured
+                and self.runtime.operator_repo.count() == 0
+            ),
+        }
+
+    def runtime_profile_snapshot(self) -> dict[str, Any]:
+        snapshot = self.runtime_profiles.snapshot()
+        activation = snapshot["activation"]
+        return {
+            **snapshot,
+            "profile_source": self.runtime.runtime_profile_resolution.profile_source,
+            "active_revision_id": activation.get("active_revision_id"),
+            "pending_revision_id": activation.get("pending_revision_id"),
+            "restart_required": activation.get("restart_required", False),
+        }
+
+    def record_runtime_profile_action(
+        self,
+        *,
+        action: str,
+        actor_role: OperatorRole,
+        actor_identity: str | None = None,
+        auth_source: AuthSource = "anonymous",
+        status: str,
+        previous_revision_id: str | None = None,
+        new_revision_id: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        self._append_event(
+            topic=topics.OPERATOR_ACTIONS,
+            key="runtime_profile",
+            payload_model=self.runtime_profiles.audit_payload(
+                action=action,
+                actor_role=actor_role,
+                actor_identity=actor_identity,
+                auth_source=auth_source,
+                status=status,
+                previous_revision_id=previous_revision_id,
+                new_revision_id=new_revision_id,
+                details=details,
+            ),
+        )
+
+    def create_operator_user(
+        self,
+        *,
+        username: str,
+        password: str,
+        role: OperatorRole,
+        enabled: bool,
+        actor_role: OperatorRole,
+        actor_identity: str | None = None,
+        auth_source: AuthSource = "anonymous",
+    ) -> dict[str, Any]:
+        user = create_managed_operator_user(
+            self.runtime.operator_repo,
+            username=username,
+            password=password,
+            role=role,
+            enabled=enabled,
+        )
+        self._append_event(
+            topic=topics.OPERATOR_ACTIONS,
+            key="auth",
+            payload_model=OperatorActionRecord(
+                action="user_create",
+                actor_role=actor_role,
+                actor_identity=actor_identity,
+                auth_source=auth_source,
+                reason="operator_user_create",
+                status="user_created",
+                details={
+                    "target_username": user.username,
+                    "target_role": user.role,
+                    "target_enabled": user.enabled,
+                },
+            ),
+        )
+        return {"user": self._operator_user_view(user, actor_identity=actor_identity)}
+
+    def update_operator_user(
+        self,
+        *,
+        username: str,
+        role: OperatorRole | None = None,
+        enabled: bool | None = None,
+        password: str | None = None,
+        actor_role: OperatorRole,
+        actor_identity: str | None = None,
+        auth_source: AuthSource = "anonymous",
+    ) -> dict[str, Any]:
+        user, changes = update_managed_operator_user(
+            self.runtime.operator_repo,
+            username=username,
+            role=role,
+            enabled=enabled,
+            password=password,
+            actor_identity=actor_identity,
+        )
+        self._append_event(
+            topic=topics.OPERATOR_ACTIONS,
+            key="auth",
+            payload_model=OperatorActionRecord(
+                action="user_update",
+                actor_role=actor_role,
+                actor_identity=actor_identity,
+                auth_source=auth_source,
+                reason="operator_user_update",
+                status="user_updated",
+                details={
+                    "target_username": user.username,
+                    "changes": changes,
+                },
+            ),
+        )
+        return {
+            "user": self._operator_user_view(user, actor_identity=actor_identity),
+            "changes": changes,
+        }
+
+    def delete_operator_user(
+        self,
+        *,
+        username: str,
+        actor_role: OperatorRole,
+        actor_identity: str | None = None,
+        auth_source: AuthSource = "anonymous",
+    ) -> dict[str, Any]:
+        user = delete_managed_operator_user(
+            self.runtime.operator_repo,
+            username=username,
+            actor_identity=actor_identity,
+        )
+        self._append_event(
+            topic=topics.OPERATOR_ACTIONS,
+            key="auth",
+            payload_model=OperatorActionRecord(
+                action="user_delete",
+                actor_role=actor_role,
+                actor_identity=actor_identity,
+                auth_source=auth_source,
+                reason="operator_user_delete",
+                status="user_deleted",
+                details={
+                    "target_username": user.username,
+                    "target_role": user.role,
+                },
+            ),
+        )
+        return {"status": "deleted", "user": self._operator_user_view(user, actor_identity=actor_identity)}
+
     def recovery_view(self) -> dict[str, Any]:
-        latest_reconciliation = self.runtime.reconciliation_repo.latest()
+        latest_reconciliation = self._latest_scoped_reconciliation()
         latest_baseline_envelope = self.runtime.event_store.latest(topics.ACCOUNT_BASELINES)
         latest_baseline = latest_baseline_envelope.payload if latest_baseline_envelope is not None else None
         latest_rebaseline_action = self.latest_operator_action("rebaseline")
         latest_resume_action = self.latest_operator_action("resume")
-        base = self.runtime.recovery_status
-
-        recovery_state = base.recovery_state
-        if latest_reconciliation is not None:
-            if latest_reconciliation.halt_required:
-                recovery_state = "resume_blocked"
-            elif latest_reconciliation.review_required and recovery_state not in {"rebaseline_pending", "rebaseline_completed"}:
-                recovery_state = "review_required"
-        if base.baseline_requires_operator_review:
-            recovery_state = "review_required"
-        if recovery_state == "rebaseline_completed" and not self.runtime.kill_switch.halted:
-            recovery_state = "normal_operation"
-        elif self.runtime.kill_switch.halted and recovery_state == "normal_operation":
-            recovery_state = "resume_blocked" if latest_resume_action is not None else recovery_state
-
-        resume_check = self._resume_check(include_kill_switch=False)
-        review_required = recovery_state == "review_required"
-        rebaseline_available = (
-            self.runtime.settings.account_backend == "okx"
-            and self.runtime.settings.account_read_enabled
-            and recovery_state in {"review_required", "resume_blocked"}
-        )
-        resume_eligible = recovery_state in {"normal_operation", "rebaseline_completed"} and not resume_check["blockers"]
-        safe_to_trade = resume_eligible and not self.runtime.kill_switch.halted
+        base = self.recovery_posture.finalize_status(latest_reconciliation=latest_reconciliation)
         return {
             **base.model_dump(mode="json"),
-            "recovery_state": recovery_state,
-            "review_required": review_required,
-            "rebaseline_available": rebaseline_available,
-            "resume_eligible": resume_eligible,
-            "safe_to_trade": safe_to_trade,
             "last_rebaseline_action": latest_rebaseline_action,
             "last_resume_action": latest_resume_action,
             "latest_account_baseline": latest_baseline,
             "latest_reconciliation": latest_reconciliation.model_dump(mode="json") if latest_reconciliation is not None else None,
-            "resume_blocked_reasons": resume_check["blockers"],
         }
 
     def system_recovery(self) -> dict[str, Any]:
@@ -148,13 +353,11 @@ class OperatorQueryService:
         exchange_submit_allowed = bool(
             readiness.get("exchange_submit_allowed", snapshot.get("exchange_submit_allowed", False))
         )
-        execution_blockers = list(dict.fromkeys(health_blockers + recovery_blockers))
-        if self.runtime.kill_switch.halted and "kill_switch_active" not in execution_blockers:
-            execution_blockers.insert(0, "kill_switch_active")
-
-        guarded_exchange_mode = self.runtime.mode_controller.mode == "guarded_live"
-        if guarded_exchange_mode:
-            execution_blockers = list(dict.fromkeys(execution_blockers + submit_blocked_reasons))
+        execution_blockers = self.recovery_posture.execution_blockers(
+            health_blockers=health_blockers,
+            recovery_blockers=recovery_blockers,
+            submit_blocked_reasons=submit_blocked_reasons,
+        )
 
         snapshot["exchange_submit_allowed"] = exchange_submit_allowed
         snapshot["submit_blocked"] = bool(submit_blocked_reasons) or not exchange_submit_allowed
@@ -164,6 +367,10 @@ class OperatorQueryService:
         snapshot["recovery_state"] = recovery["recovery_state"]
         snapshot["review_required"] = recovery["review_required"]
         snapshot["rebaseline_available"] = recovery["rebaseline_available"]
+        snapshot["profile_source"] = self.runtime.runtime_profile_resolution.profile_source
+        snapshot["active_profile_revision_id"] = self.runtime.runtime_profile_resolution.activation_state.active_revision_id
+        snapshot["pending_profile_revision_id"] = self.runtime.runtime_profile_resolution.activation_state.pending_revision_id
+        snapshot["restart_required"] = self.runtime.runtime_profile_resolution.activation_state.restart_required
         return snapshot
 
     def system_health(self) -> dict[str, Any]:
@@ -173,8 +380,8 @@ class OperatorQueryService:
         market = self.runtime.market_gateway.status()
         account = self.runtime.account_service.status()
         execution = self.runtime.execution_adapter.readiness()
-        latest_reconciliation = self.runtime.reconciliation_repo.latest()
-        latest_portfolio = self.runtime.portfolio_repo.latest()
+        latest_reconciliation = self._latest_scoped_reconciliation()
+        latest_portfolio = self._latest_scoped_snapshot()
         blockers = self.blockers()
         account_baseline = self.latest_account_baseline()
         reconciliation_component = next(
@@ -209,6 +416,11 @@ class OperatorQueryService:
             "runtime_state": runtime_state,
             "operating_state": snapshot.operating_state,
             "mode": snapshot.mode,
+            "runtime_profile": self.runtime.runtime_profile.to_dict(),
+            "environment_capabilities": self.runtime.environment_capabilities.to_dict(),
+            "policy_profile": self.runtime.policy_profile.to_dict(),
+            "recovery_policy": self.runtime.recovery_policy.to_dict(),
+            "profile_control": self.runtime_profile_snapshot(),
             "halted": self.runtime.kill_switch.halted,
             "blockers": blockers,
             "warnings": warnings,
@@ -275,11 +487,17 @@ class OperatorQueryService:
     def system_runtime(self) -> dict[str, Any]:
         latest_decision = self.runtime.event_store.latest(topics.DECISION_CONTEXTS)
         latest_fill = self.latest_fill()
-        latest_reconciliation = self.runtime.reconciliation_repo.latest()
+        latest_reconciliation = self._latest_scoped_reconciliation()
         account_baseline = self.latest_account_baseline()
         recovery = self.recovery_view()
         now = utc_now()
         return {
+            "runtime_profile": self.runtime.runtime_profile.to_dict(),
+            "environment_capabilities": self.runtime.environment_capabilities.to_dict(),
+            "policy_profile": self.runtime.policy_profile.to_dict(),
+            "recovery_policy": self.runtime.recovery_policy.to_dict(),
+            "profile_source": self.runtime.runtime_profile_resolution.profile_source,
+            "runtime_profile_control": self.runtime_profile_snapshot(),
             "symbols": [self.runtime.settings.default_symbol],
             "enabled_timeframes": list(self.runtime.settings.enabled_decision_timeframes),
             "decision_cadence": {
@@ -294,6 +512,10 @@ class OperatorQueryService:
             "operator_auth": {
                 "auth_enabled": self.runtime.settings.operator_auth_enabled,
                 "session_enabled": self.runtime.settings.operator_session_configured,
+                "database_backed": self.runtime.database_runtime is not None,
+                "stored_user_count": self.runtime.operator_repo.count() if hasattr(self.runtime, "operator_repo") else 0,
+                "bootstrap_enabled": self.runtime.settings.operator_bootstrap_enabled,
+                "bootstrap_configured": self.runtime.settings.operator_bootstrap_users_configured,
                 "api_key_compatibility_enabled": bool(
                     self.runtime.settings.operator_read_api_key or self.runtime.settings.operator_write_api_key
                 ),
@@ -478,15 +700,24 @@ class OperatorQueryService:
         }
 
     def metrics(self) -> dict[str, Any]:
-        snapshot = self.runtime.portfolio_repo.latest()
+        snapshot = self._latest_scoped_snapshot()
         metrics = self.runtime.metrics.snapshot()
         return {
             "decision_cycle_count": metrics.get("decision_cycles", 0),
             "order_intent_count": metrics.get("order_intents_generated", 0),
-            "fill_count": len(self.runtime.execution_repo.fills()),
-            "rejection_count": len(self.runtime.execution_repo.recent_order_states(limit=200, statuses=("FAILED", "REJECTED", "BLOCKED"))),
+            "fill_count": len(self._scoped_fills()),
+            "rejection_count": len(
+                [
+                    order
+                    for order in self.runtime.execution_repo.recent_order_states(
+                        limit=200,
+                        statuses=("FAILED", "REJECTED", "BLOCKED"),
+                    )
+                    if order_state_matches_scope(order, self.state_scope)
+                ]
+            ),
             "reconciliation_mismatch_count": metrics.get("reconciliation_mismatches", 0),
-            "current_open_order_count": len(self.runtime.execution_repo.open_order_states()),
+            "current_open_order_count": len(self._scoped_open_order_states()),
             "recent_execution_errors": self.execution_errors()["errors"][:10],
             "exposure_summary": None if snapshot is None else {
                 "gross_exposure": snapshot.gross_exposure,
@@ -496,21 +727,21 @@ class OperatorQueryService:
         }
 
     def portfolio_latest(self) -> dict[str, Any]:
-        snapshot = self.runtime.portfolio_repo.latest()
+        snapshot = self._latest_scoped_snapshot()
         return {
             "portfolio": snapshot.model_dump(mode="json") if snapshot is not None else None,
             "latest_update_timestamp": snapshot.snapshot_ts if snapshot is not None else None,
         }
 
     def portfolio_history(self, *, limit: int = 20) -> dict[str, Any]:
-        history = self.runtime.portfolio_repo.history()
+        history = filter_snapshots(self.runtime.portfolio_repo.history(), self.state_scope)
         return {
             "snapshots": [snapshot.model_dump(mode="json") for snapshot in history[-limit:]],
             "total_available": len(history),
         }
 
     def balances(self) -> dict[str, Any]:
-        snapshot = self.runtime.portfolio_repo.latest()
+        snapshot = self._latest_scoped_snapshot()
         exchange = self.runtime.account_service.latest_snapshot()
         return {
             "local_balances": snapshot.balances if snapshot is not None else {},
@@ -518,7 +749,7 @@ class OperatorQueryService:
         }
 
     def positions(self) -> dict[str, Any]:
-        snapshot = self.runtime.portfolio_repo.latest()
+        snapshot = self._latest_scoped_snapshot()
         exchange = self.runtime.account_service.latest_snapshot()
         return {
             "local_positions": [item.model_dump(mode="json") for item in snapshot.positions] if snapshot is not None else [],
@@ -564,7 +795,7 @@ class OperatorQueryService:
     def account_open_orders(self) -> dict[str, Any]:
         exchange = self.runtime.account_service.latest_snapshot()
         return {
-            "local_open_orders": [order.model_dump(mode="json") for order in self.runtime.execution_repo.open_order_states()],
+            "local_open_orders": [order.model_dump(mode="json") for order in self._scoped_open_order_states()],
             "exchange_open_orders": [order.model_dump(mode="json") for order in exchange.open_orders] if exchange is not None else [],
         }
 
@@ -579,25 +810,33 @@ class OperatorQueryService:
         return self.account_open_orders()
 
     def orders_recent(self, *, limit: int = 50) -> dict[str, Any]:
-        return {"orders": [order.model_dump(mode="json") for order in self.runtime.execution_repo.recent_order_states(limit=limit)]}
+        orders = [
+            order
+            for order in self.runtime.execution_repo.recent_order_states(limit=limit * 4)
+            if order_state_matches_scope(order, self.state_scope)
+        ][:limit]
+        return {"orders": [order.model_dump(mode="json") for order in orders]}
 
     def order_detail(self, client_order_id: str) -> dict[str, Any]:
         order = next(
-            (item for item in self.runtime.execution_repo.order_states() if item.client_order_id == client_order_id),
+            (item for item in self._scoped_order_states() if item.client_order_id == client_order_id),
             None,
         )
         if order is None:
             raise KeyError(f"order_not_found:{client_order_id}")
         return {
             "order": order.model_dump(mode="json"),
-            "fills": [fill.model_dump(mode="json") for fill in self.runtime.execution_repo.fills_for_order(client_order_id)],
+            "fills": [
+                fill.model_dump(mode="json")
+                for fill in filter_fills(self.runtime.execution_repo.fills_for_order(client_order_id), self.state_scope)
+            ],
         }
 
     def fills_recent(self, *, limit: int = 50) -> dict[str, Any]:
         return {"fills": [fill.model_dump(mode="json") for fill in self.recent_fills(limit=limit)]}
 
     def fill_detail(self, fill_id: str) -> dict[str, Any]:
-        fill = next((item for item in self.runtime.execution_repo.fills() if item.fill_id == fill_id), None)
+        fill = next((item for item in self._scoped_fills() if item.fill_id == fill_id), None)
         if fill is None:
             raise KeyError(f"fill_not_found:{fill_id}")
         return {"fill": fill.model_dump(mode="json")}
@@ -605,7 +844,8 @@ class OperatorQueryService:
     def execution_latest(self) -> dict[str, Any]:
         latest_order = self.latest_order()
         latest_fill = self.latest_fill()
-        latest_reconciliation = self.runtime.reconciliation_repo.latest()
+        latest_reconciliation = self._latest_scoped_reconciliation()
+        recovery = self.recovery_view()
         return {
             "mode": self.system_mode(),
             "execution": self.runtime.execution_adapter.readiness(),
@@ -613,7 +853,7 @@ class OperatorQueryService:
             "latest_fill": latest_fill.model_dump(mode="json") if latest_fill is not None else None,
             "latest_reconciliation": latest_reconciliation.model_dump(mode="json") if latest_reconciliation is not None else None,
             "recent_failures": self.execution_errors()["errors"],
-            "recovery": self.runtime.recovery_status.model_dump(mode="json"),
+            "recovery": recovery,
         }
 
     def execution_errors(self) -> dict[str, Any]:
@@ -625,6 +865,8 @@ class OperatorQueryService:
             return {"errors": persisted}
         errors = []
         for order in self.runtime.execution_repo.recent_order_states(limit=20, statuses=("FAILED", "REJECTED", "BLOCKED")):
+            if not order_state_matches_scope(order, self.state_scope):
+                continue
             errors.append(
                 {
                     "timestamp": order.last_update_ts or order.created_at,
@@ -639,7 +881,7 @@ class OperatorQueryService:
         return {"errors": errors}
 
     def reconciliation_latest(self) -> dict[str, Any]:
-        report = self.runtime.reconciliation_repo.latest()
+        report = self._latest_scoped_reconciliation()
         latest_validation = self.runtime.event_store.latest(topics.RECONCILIATION_VALIDATIONS)
         return {
             "reconciliation": report.model_dump(mode="json") if report is not None else None,
@@ -649,15 +891,30 @@ class OperatorQueryService:
         }
 
     def reconciliation_recent(self, *, limit: int = 20) -> dict[str, Any]:
-        history = self.runtime.reconciliation_repo.history()
+        history = [
+            report
+            for report in self.runtime.reconciliation_repo.history()
+            if report_matches_scope(report, self.state_scope)
+        ]
         return {"reconciliations": [report.model_dump(mode="json") for report in history[-limit:]]}
 
     def reconciliation_mismatches(self, *, limit: int = 20) -> dict[str, Any]:
-        reports = [report for report in self.runtime.reconciliation_repo.history() if report.severity != "CLEAN"][-limit:]
+        reports = [
+            report
+            for report in self.runtime.reconciliation_repo.history()
+            if report.severity != "CLEAN" and report_matches_scope(report, self.state_scope)
+        ][-limit:]
         return {"mismatches": [self._reconciliation_mismatch_summary(report) for report in reports]}
 
     def reconciliation_detail(self, reconciliation_id: str) -> dict[str, Any]:
-        report = next((item for item in self.runtime.reconciliation_repo.history() if item.reconciliation_id == reconciliation_id), None)
+        report = next(
+            (
+                item
+                for item in self.runtime.reconciliation_repo.history()
+                if item.reconciliation_id == reconciliation_id and report_matches_scope(item, self.state_scope)
+            ),
+            None,
+        )
         if report is None:
             raise KeyError(f"reconciliation_not_found:{reconciliation_id}")
         return {
@@ -795,6 +1052,36 @@ class OperatorQueryService:
             "validation": summary.model_dump(mode="json"),
         }
 
+    async def cancel_order(
+        self,
+        *,
+        client_order_id: str,
+        reason: str,
+        actor_role: OperatorRole,
+        actor_identity: str | None = None,
+        auth_source: AuthSource = "anonymous",
+    ) -> dict[str, Any]:
+        recovery_before = self.recovery_view()["recovery_state"]
+        state = await self.runtime.order_manager.cancel_order(client_order_id)
+        self._append_event(
+            topic=topics.OPERATOR_ACTIONS,
+            key="system",
+            payload_model=OperatorActionRecord(
+                action="cancel_order",
+                actor_role=actor_role,
+                actor_identity=actor_identity,
+                auth_source=auth_source,
+                reason=reason,
+                status=state.status,
+                decision_id=state.decision_id,
+                order_id=state.client_order_id,
+                recovery_state_before=recovery_before,
+                recovery_state_after=self.recovery_view()["recovery_state"],
+                details={"final_order_status": state.status},
+            ),
+        )
+        return {"order": state.model_dump(mode="json")}
+
     async def rebaseline(
         self,
         *,
@@ -805,23 +1092,18 @@ class OperatorQueryService:
     ) -> dict[str, Any]:
         if not self.runtime.settings.account_read_enabled or self.runtime.settings.account_backend != "okx":
             raise ValueError("rebaseline_requires_okx_account_read")
+        if not self.runtime.recovery_policy.operator_rebaseline_supported:
+            raise ValueError("rebaseline_not_supported_for_runtime_profile")
 
         recovery_before = self.recovery_view()["recovery_state"]
         previous_baseline_event = self.runtime.event_store.latest(topics.ACCOUNT_BASELINES)
         previous_baseline_ref = previous_baseline_event.event_id if previous_baseline_event is not None else None
 
         self.runtime.kill_switch.halt(reason="operator_rebaseline_pending")
-        self.runtime.recovery_status = self.runtime.recovery_status.model_copy(
-            update={
-                "recovery_state": "rebaseline_pending",
-                "safe_to_trade": False,
-                "resume_eligible": False,
-                "review_required": False,
-                "rebaseline_available": False,
-                "halted": True,
-                "recovery_action": "operator_rebaseline_pending",
-            }
+        pending_status = self.runtime.recovery_status.model_copy(
+            update={"recovery_state": "rebaseline_pending", "recovery_action": "operator_rebaseline_pending"}
         )
+        self.runtime.recovery_status = self.recovery_posture.finalize_status(base_status=pending_status)
 
         exchange_snapshot = await self.runtime.account_service.refresh(force=True)
         if exchange_snapshot is None:
@@ -860,17 +1142,11 @@ class OperatorQueryService:
             if report.review_required
             else "rebaseline_completed"
         )
-        resume_eligible = recovery_state == "rebaseline_completed" and not self._resume_check(include_kill_switch=False)["blockers"]
-        self.runtime.recovery_status = self.runtime.recovery_status.model_copy(
+        updated_status = self.runtime.recovery_status.model_copy(
             update={
                 "status": imported.snapshot.baseline_status,
                 "recovery_state": recovery_state,
                 "safe_startup": False,
-                "safe_to_trade": False,
-                "resume_eligible": resume_eligible,
-                "review_required": recovery_state == "review_required",
-                "rebaseline_available": recovery_state in {"review_required", "resume_blocked"},
-                "halted": True,
                 "recovery_action": (
                     "operator_rebaseline_completed"
                     if recovery_state == "rebaseline_completed"
@@ -892,7 +1168,6 @@ class OperatorQueryService:
                 "last_rebaseline_at": imported.snapshot.imported_at,
                 "last_rebaseline_event_ref": imported.event_id,
                 "last_rebaseline_action_ref": action_envelope.event_id,
-                "resume_blocked_reasons": self._resume_check(include_kill_switch=False)["blockers"],
                 "notes": self.runtime.recovery_status.notes
                 + [
                     "operator_rebaseline_confirmed",
@@ -900,6 +1175,11 @@ class OperatorQueryService:
                 ],
             }
         )
+        self.runtime.recovery_status = self.recovery_posture.finalize_status(
+            base_status=updated_status,
+            latest_reconciliation=report,
+        )
+        resume_eligible = self.runtime.recovery_status.resume_eligible
         self._append_event(
             topic=topics.OPERATOR_ACTIONS,
             key="system",
@@ -945,15 +1225,18 @@ class OperatorQueryService:
         self.runtime.kill_switch.halt(reason=reason)
         log_event(self.logger, "operator_halt", level="warning", reason=reason, already_halted=was_halted)
         status = "already_halted" if was_halted else "halted"
-        self.runtime.recovery_status = self.runtime.recovery_status.model_copy(
+        updated_status = self.runtime.recovery_status.model_copy(
             update={
-                "halted": True,
-                "safe_to_trade": False,
-                "resume_eligible": False,
+                "recovery_state": (
+                    "resume_blocked"
+                    if self.runtime.recovery_status.recovery_state == "normal_operation"
+                    else self.runtime.recovery_status.recovery_state
+                ),
                 "last_resume_status": None,
                 "last_resume_reason": None,
             }
         )
+        self.runtime.recovery_status = self.recovery_posture.finalize_status(base_status=updated_status)
         self._append_event(
             topic=topics.OPERATOR_ACTIONS,
             key="system",
@@ -990,47 +1273,45 @@ class OperatorQueryService:
             await self.runtime.account_service.refresh(force=True)
         report = await self.runtime.reconciliation_service.validate_now(reason=f"resume_check:{reason}")
         self._update_recovery_status_for_report(report)
-        resume_check = self._resume_check(include_kill_switch=False)
-        runnable = not resume_check["blockers"]
+        resume_check = self.recovery_posture.resume_check(include_kill_switch=False, latest_reconciliation=report)
+        runnable = resume_check.runnable
         if runnable:
             self.runtime.kill_switch.resume()
             status = "already_resumed" if not was_halted else "resumed"
             recovery_after = "normal_operation"
-            self.runtime.recovery_status = self.runtime.recovery_status.model_copy(
+            updated_status = self.runtime.recovery_status.model_copy(
                 update={
                     "recovery_state": recovery_after,
-                    "halted": False,
-                    "safe_to_trade": True,
-                    "resume_eligible": True,
-                    "review_required": False,
-                    "rebaseline_available": False,
                     "recovery_action": "operator_resume_completed",
                     "last_resume_status": status,
                     "last_resume_reason": reason,
                     "resume_blocked_reasons": [],
                 }
             )
+            self.runtime.recovery_status = self.recovery_posture.finalize_status(
+                base_status=updated_status,
+                latest_reconciliation=report,
+            )
         else:
             self.runtime.kill_switch.halt(reason="resume_blocked")
             status = "resume_blocked"
             recovery_after = (
                 "review_required"
-                if "operator_rebaseline_required" in resume_check["blockers"]
+                if "operator_rebaseline_required" in resume_check.blockers
                 else "resume_blocked"
             )
-            self.runtime.recovery_status = self.runtime.recovery_status.model_copy(
+            updated_status = self.runtime.recovery_status.model_copy(
                 update={
                     "recovery_state": recovery_after,
-                    "halted": True,
-                    "safe_to_trade": False,
-                    "resume_eligible": False,
-                    "review_required": recovery_after == "review_required",
-                    "rebaseline_available": True,
                     "recovery_action": "operator_resume_blocked",
                     "last_resume_status": status,
                     "last_resume_reason": reason,
-                    "resume_blocked_reasons": list(resume_check["blockers"]),
+                    "resume_blocked_reasons": list(resume_check.blockers),
                 }
+            )
+            self.runtime.recovery_status = self.recovery_posture.finalize_status(
+                base_status=updated_status,
+                latest_reconciliation=report,
             )
         mode_state = self.system_mode()
         blockers = self.blockers()
@@ -1056,7 +1337,7 @@ class OperatorQueryService:
                 recovery_state_before=recovery_before,
                 recovery_state_after=recovery_after,
                 reconciliation_id=report.reconciliation_id,
-                details={"runnable": runnable, "blockers": resume_check["blockers"]},
+                details={"runnable": runnable, "blockers": list(resume_check.blockers)},
             ),
         )
         self.runtime.recovery_status = self.runtime.recovery_status.model_copy(
@@ -1135,45 +1416,17 @@ class OperatorQueryService:
         return envelope
 
     def _update_recovery_status_for_report(self, report) -> None:
-        recovery_state = self.runtime.recovery_status.recovery_state
-        if report.halt_required:
-            recovery_state = "resume_blocked"
-        elif report.review_required and recovery_state not in {"rebaseline_pending", "rebaseline_completed"}:
-            recovery_state = "review_required"
-        elif not self.runtime.kill_switch.halted and recovery_state not in {"rebaseline_pending", "rebaseline_completed"}:
-            recovery_state = "normal_operation"
-        self.runtime.recovery_status = self.runtime.recovery_status.model_copy(
+        updated_status = self.runtime.recovery_status.model_copy(
             update={
                 "latest_reconciliation_id": report.reconciliation_id,
                 "latest_reconciliation_severity": report.severity,
                 "recovered_reconciliation_available": True,
-                "recovery_state": recovery_state,
-                "review_required": report.review_required,
-                "rebaseline_available": report.review_required or report.halt_required,
-                "resume_blocked_reasons": self._resume_check(include_kill_switch=False)["blockers"],
             }
         )
-
-    def _resume_check(self, *, include_kill_switch: bool) -> dict[str, Any]:
-        health_snapshot = self.runtime.health_service.snapshot()
-        blockers = list(health_snapshot.blockers)
-        if not include_kill_switch:
-            blockers = [blocker for blocker in blockers if blocker != "kill_switch_active"]
-        latest_reconciliation = self.runtime.reconciliation_repo.latest()
-        if latest_reconciliation is not None:
-            if latest_reconciliation.halt_required and "reconciliation_halt_required" not in blockers:
-                blockers.append("reconciliation_halt_required")
-            if latest_reconciliation.review_required and "operator_rebaseline_required" not in blockers:
-                blockers.append("operator_rebaseline_required")
-        if self.runtime.recovery_status.recovery_state == "rebaseline_pending" and "rebaseline_in_progress" not in blockers:
-            blockers.append("rebaseline_in_progress")
-        if self.runtime.mode_controller.mode == "guarded_live":
-            blockers.extend(
-                blocker
-                for blocker in self.runtime.execution_adapter.readiness().get("submit_blocked_reasons", [])
-                if blocker not in blockers
-            )
-        return {"blockers": blockers, "runnable": not blockers}
+        self.runtime.recovery_status = self.recovery_posture.finalize_status(
+            base_status=updated_status,
+            latest_reconciliation=report,
+        )
 
     def _baseline_switch_history(
         self,
@@ -1257,3 +1510,15 @@ class OperatorQueryService:
             "submit_only": submit_only_value,
             "recommended_action": recommended_action,
         }
+
+    @staticmethod
+    def _operator_user_view(
+        user: OperatorUserRecord,
+        *,
+        actor_identity: str | None = None,
+        last_admin_protected: bool | None = None,
+    ) -> dict[str, Any]:
+        payload = user.model_dump(mode="json", exclude={"password_hash"})
+        payload["is_current_session_user"] = actor_identity is not None and user.username == actor_identity
+        payload["protected_last_admin"] = bool(last_admin_protected and user.enabled and user.role == "admin")
+        return payload

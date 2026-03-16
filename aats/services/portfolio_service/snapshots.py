@@ -44,6 +44,15 @@ class PortfolioSnapshotBuilder:
                     position_notional=position_notional,
                     avg_entry_price=record.avg_entry_price,
                     unrealized_pnl=position_unrealized,
+                    product_type=record.product_type,  # type: ignore[arg-type]
+                    exposure_side=("long" if record.quantity > 1e-12 else "short" if record.quantity < -1e-12 else "flat"),
+                    target_leverage=record.target_leverage,
+                    margin_mode=record.margin_mode,  # type: ignore[arg-type]
+                    margin_allocated=(
+                        abs(position_notional) / max(record.target_leverage, 1.0)
+                        if record.product_type == "derivatives"
+                        else 0.0
+                    ),
                 )
             )
             gross_exposure += abs(position_notional)
@@ -67,4 +76,18 @@ class PortfolioSnapshotBuilder:
             gross_exposure=gross_exposure,
             net_exposure=net_exposure,
             risk_budget_usage={"gross_exposure": gross_exposure},
+            product_type=(
+                "derivatives"
+                if any(record.product_type == "derivatives" for record in state.positions.values())
+                else state.default_product_type
+            ),
+            margin_mode=next(iter({record.margin_mode for record in state.positions.values()}), state.default_margin_mode),
+            margin_usage=sum(
+                abs(record.quantity * price_provider(symbol)) / max(record.target_leverage, 1.0)
+                for symbol, record in state.positions.items()
+                if record.product_type == "derivatives"
+            ),
+            leverage_profile={
+                symbol: record.target_leverage for symbol, record in state.positions.items()
+            },
         )

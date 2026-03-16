@@ -50,10 +50,13 @@ class OKXAccountService:
                 )
                 instruments_payload = await self.client.get_instruments()
                 account_config_payload = await self.client.get_account_config()
-                # OKX spot accounts expose holdings through balances. The positions
-                # endpoint is not consistently available for spot and can return 400s,
-                # which would otherwise spam the refresh loop logs.
-                positions_payload = {"data": []}
+                if self.settings.trading_product_type == "derivatives":
+                    positions_payload = await self.client.get_positions()
+                else:
+                    # OKX spot accounts expose holdings through balances. The positions
+                    # endpoint is not consistently available for spot and can return 400s,
+                    # which would otherwise spam the refresh loop logs.
+                    positions_payload = {"data": []}
 
                 snapshot = ExchangeAccountSnapshot(
                     account_source="okx",
@@ -169,8 +172,12 @@ class OKXAccountService:
         rows: list[ExchangeBalance] = []
         for account in payload.get("data", []):
             for detail in account.get("details", []):
-                total = float(detail.get("eq", detail.get("cashBal", 0.0)) or 0.0)
-                available = float(detail.get("availEq", detail.get("availBal", total)) or 0.0)
+                total = OKXAccountService._balance_value(detail, "eq", "cashBal")
+                # For spot accounts OKX can report `availEq=0` while `availBal`
+                # still carries the real spendable quantity. Prefer the explicit
+                # cash balance field when present so simulated submit does not
+                # treat funded spot accounts as fully frozen.
+                available = OKXAccountService._balance_value(detail, "availBal", "availEq", default=total)
                 frozen = max(total - available, 0.0)
                 rows.append(
                     ExchangeBalance(
@@ -181,6 +188,15 @@ class OKXAccountService:
                     )
                 )
         return rows
+
+    @staticmethod
+    def _balance_value(detail: dict[str, Any], *keys: str, default: float = 0.0) -> float:
+        for key in keys:
+            value = detail.get(key)
+            if value in {None, ""}:
+                continue
+            return float(value or 0.0)
+        return default
 
     @staticmethod
     def _parse_positions(payload: dict[str, Any]) -> list[ExchangePosition]:

@@ -50,6 +50,9 @@ class OKXRESTClient:
     def __init__(self, *, settings: AATSSettings) -> None:
         self.settings = settings
 
+    def _inst_type(self) -> str:
+        return "SWAP" if self.settings.trading_product_type == "derivatives" else "SPOT"
+
     async def request(
         self,
         *,
@@ -109,12 +112,12 @@ class OKXRESTClient:
         return await self.request(
             method="GET",
             path="/api/v5/account/positions",
-            params={"instType": "SPOT"},
+            params={"instType": self._inst_type()},
             require_auth=True,
         )
 
     async def get_open_orders(self, *, symbol: str | None = None) -> dict[str, Any]:
-        params: dict[str, Any] = {"instType": "SPOT"}
+        params: dict[str, Any] = {"instType": self._inst_type()}
         if symbol is not None:
             params["instId"] = symbol
         return await self.request(
@@ -128,7 +131,7 @@ class OKXRESTClient:
         return await self.request(
             method="GET",
             path="/api/v5/account/instruments",
-            params={"instType": "SPOT"},
+            params={"instType": self._inst_type()},
             require_auth=True,
         )
 
@@ -186,7 +189,7 @@ class OKXRESTClient:
             method="GET",
             path="/api/v5/trade/fills",
             params={
-                "instType": "SPOT",
+                "instType": self._inst_type(),
                 "instId": symbol,
                 "ordId": order_id,
                 "limit": limit,

@@ -45,10 +45,15 @@ const nodes = mapNodes({
   stripEquityMeta: "stripEquityMeta",
   overviewDecisionSpotlight: "overviewDecisionSpotlight",
   overviewPosture: "overviewPosture",
+  overviewPostureTitle: "overviewPostureTitle",
+  overviewPostureCopy: "overviewPostureCopy",
   overviewPortfolio: "overviewPortfolio",
   overviewBlockers: "overviewBlockers",
   overviewBlockerStamp: "overviewBlockerStamp",
+  overviewRecoveryPanel: "overviewRecoveryPanel",
   overviewRecovery: "overviewRecovery",
+  overviewRecoveryTitle: "overviewRecoveryTitle",
+  overviewRecoveryCopy: "overviewRecoveryCopy",
   overviewMetrics: "overviewMetrics",
   overviewTimeline: "overviewTimeline",
   decisionSpotlight: "decisionSpotlight",
@@ -69,6 +74,42 @@ const nodes = mapNodes({
   diagnosticAccount: "diagnosticAccount",
   diagnosticBlockers: "diagnosticBlockers",
   diagnosticMetrics: "diagnosticMetrics",
+  runtimeProfileSummary: "runtimeProfileSummary",
+  runtimeProfileSupervisor: "runtimeProfileSupervisor",
+  runtimeProfileForm: "runtimeProfileForm",
+  runtimeProfileRevisionSelect: "runtimeProfileRevisionSelect",
+  runtimeProfileLabel: "runtimeProfileLabel",
+  runtimeProfileDefaultSymbol: "runtimeProfileDefaultSymbol",
+  runtimeProfileAllowedSymbols: "runtimeProfileAllowedSymbols",
+  runtimeProfileProductType: "runtimeProfileProductType",
+  runtimeProfileMarginMode: "runtimeProfileMarginMode",
+  runtimeProfileDefaultOrderQty: "runtimeProfileDefaultOrderQty",
+  runtimeProfileMaxNotional: "runtimeProfileMaxNotional",
+  runtimeProfileMaxPositionQty: "runtimeProfileMaxPositionQty",
+  runtimeProfileMaxOpenOrders: "runtimeProfileMaxOpenOrders",
+  runtimeProfileDefaultLeverage: "runtimeProfileDefaultLeverage",
+  runtimeProfileMaxLeverage: "runtimeProfileMaxLeverage",
+  runtimeProfileShortBias: "runtimeProfileShortBias",
+  runtimeProfileDynamicLeverage: "runtimeProfileDynamicLeverage",
+  runtimeProfileActivationNote: "runtimeProfileActivationNote",
+  runtimeProfileCreateButton: "runtimeProfileCreateButton",
+  runtimeProfileSaveButton: "runtimeProfileSaveButton",
+  runtimeProfileStageButton: "runtimeProfileStageButton",
+  runtimeProfileCancelPendingButton: "runtimeProfileCancelPendingButton",
+  runtimeProfileRestartButton: "runtimeProfileRestartButton",
+  runtimeProfilePermissionNote: "runtimeProfilePermissionNote",
+  runtimeProfileImpact: "runtimeProfileImpact",
+  runtimeProfileTable: "runtimeProfileTable",
+  operatorSummary: "operatorSummary",
+  operatorBootstrap: "operatorBootstrap",
+  operatorCreateForm: "operatorCreateForm",
+  operatorCreateUsername: "operatorCreateUsername",
+  operatorCreatePassword: "operatorCreatePassword",
+  operatorCreateRole: "operatorCreateRole",
+  operatorCreateEnabled: "operatorCreateEnabled",
+  operatorCreateButton: "operatorCreateButton",
+  operatorPermissionNote: "operatorPermissionNote",
+  operatorUsersTable: "operatorUsersTable",
   inspectSystemButton: "inspectSystemButton",
   inspectPortfolioButton: "inspectPortfolioButton",
   inspectLatestDecisionButton: "inspectLatestDecisionButton",
@@ -131,6 +172,19 @@ function bindEvents() {
   nodes.inspectRecoveryButton.addEventListener("click", inspectRecoveryDetail);
   nodes.inspectRecoveryDiagnosticsButton.addEventListener("click", inspectRecoveryDetail);
   nodes.inspectRuntimeButton.addEventListener("click", inspectRuntimeDetail);
+  nodes.runtimeProfileCreateButton.addEventListener("click", () => void createRuntimeProfileDraft());
+  nodes.runtimeProfileForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void saveRuntimeProfileDraft();
+  });
+  nodes.runtimeProfileRevisionSelect.addEventListener("change", populateRuntimeProfileDraftForm);
+  nodes.runtimeProfileStageButton.addEventListener("click", () => void stageRuntimeProfileDraft());
+  nodes.runtimeProfileCancelPendingButton.addEventListener("click", () => void cancelPendingRuntimeProfile());
+  nodes.runtimeProfileRestartButton.addEventListener("click", () => void requestRuntimeProfileRestart());
+  nodes.operatorCreateForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void createOperatorUser();
+  });
   nodes.loadDecisionButton.addEventListener("click", () => void inspectDecision(nodes.decisionLookupInput.value.trim(), { manual: true }));
   nodes.loadOrderButton.addEventListener("click", () => void inspectOrder(nodes.orderLookupInput.value.trim(), { manual: true }));
   nodes.loadFillButton.addEventListener("click", () => void inspectFill(nodes.fillLookupInput.value.trim(), { manual: true }));
@@ -165,6 +219,40 @@ function bindEvents() {
     const fillButton = target.closest("[data-inspect-fill]");
     if (fillButton instanceof HTMLElement) {
       void inspectFill(fillButton.dataset.inspectFill || "", { manual: true });
+      return;
+    }
+    const toggleUserButton = target.closest("[data-toggle-user]");
+    if (toggleUserButton instanceof HTMLElement) {
+      void toggleOperatorUser(toggleUserButton.dataset.toggleUser || "", toggleUserButton.dataset.nextEnabled === "true");
+      return;
+    }
+    const roleUserButton = target.closest("[data-role-user]");
+    if (roleUserButton instanceof HTMLElement) {
+      void updateOperatorUserRole(roleUserButton.dataset.roleUser || "", roleUserButton.dataset.currentRole || "");
+      return;
+    }
+    const passwordUserButton = target.closest("[data-password-user]");
+    if (passwordUserButton instanceof HTMLElement) {
+      void resetOperatorUserPassword(passwordUserButton.dataset.passwordUser || "");
+      return;
+    }
+    const deleteUserButton = target.closest("[data-delete-user]");
+    if (deleteUserButton instanceof HTMLElement) {
+      void deleteOperatorUser(deleteUserButton.dataset.deleteUser || "");
+      return;
+    }
+    const selectRuntimeProfileButton = target.closest("[data-select-runtime-profile]");
+    if (selectRuntimeProfileButton instanceof HTMLElement) {
+      nodes.runtimeProfileRevisionSelect.value = selectRuntimeProfileButton.dataset.selectRuntimeProfile || "";
+      populateRuntimeProfileDraftForm();
+      setActiveView("runtime-profiles");
+      return;
+    }
+    const stageRuntimeProfileButton = target.closest("[data-stage-runtime-profile]");
+    if (stageRuntimeProfileButton instanceof HTMLElement) {
+      nodes.runtimeProfileRevisionSelect.value = stageRuntimeProfileButton.dataset.stageRuntimeProfile || "";
+      populateRuntimeProfileDraftForm();
+      void stageRuntimeProfileDraft();
     }
   });
 }
@@ -189,6 +277,20 @@ function setActiveView(viewName) {
   views.forEach((view) => view.classList.toggle("is-active", view.dataset.view === viewName));
 }
 
+function setRuntimeProfilesViewEnabled(enabled) {
+  const tab = document.querySelector('.workspace-tab[data-view="runtime-profiles"]');
+  const view = document.querySelector('.workspace-view[data-view="runtime-profiles"]');
+  if (tab instanceof HTMLElement) {
+    tab.hidden = !enabled;
+  }
+  if (view instanceof HTMLElement) {
+    view.hidden = !enabled;
+  }
+  if (!enabled && state.activeView === "runtime-profiles") {
+    setActiveView("overview");
+  }
+}
+
 async function refreshDashboard({ manual = false } = {}) {
   if (state.refreshing) {
     return;
@@ -199,6 +301,7 @@ async function refreshDashboard({ manual = false } = {}) {
 
   const specs = [
     ["session", "/auth/session"],
+    ["authProviders", "/auth/providers"],
     ["health", "/system/health"],
     ["mode", "/system/mode"],
     ["runtime", "/system/runtime"],
@@ -226,6 +329,28 @@ async function refreshDashboard({ manual = false } = {}) {
       state.panelErrors[result.key] = result.error;
     }
   });
+
+  if (operatorCanAdmin()) {
+    const operatorUsers = await fetchPanel("operatorUsers", "/auth/users");
+    if (operatorUsers.ok) {
+      state.data[operatorUsers.key] = operatorUsers.data;
+      delete state.panelErrors[operatorUsers.key];
+    } else {
+      state.panelErrors[operatorUsers.key] = operatorUsers.error;
+    }
+    const runtimeProfiles = await fetchPanel("runtimeProfiles", "/runtime-profiles");
+    if (runtimeProfiles.ok) {
+      state.data[runtimeProfiles.key] = runtimeProfiles.data;
+      delete state.panelErrors[runtimeProfiles.key];
+    } else {
+      state.panelErrors[runtimeProfiles.key] = runtimeProfiles.error;
+    }
+  } else {
+    delete state.data.operatorUsers;
+    delete state.panelErrors.operatorUsers;
+    delete state.data.runtimeProfiles;
+    delete state.panelErrors.runtimeProfiles;
+  }
 
   state.lastRefreshAt = new Date();
   renderDashboard({ manual });
@@ -344,6 +469,8 @@ function renderDashboard({ manual = false } = {}) {
   renderDecisions();
   renderExecution();
   renderDiagnostics();
+  renderRuntimeProfiles();
+  renderOperators();
   nodes.lastRefreshLabel.textContent = state.lastRefreshAt
     ? `Last refresh ${formatDateTime(state.lastRefreshAt)}${manual ? " | manual" : ""}`
     : "Not refreshed yet";
@@ -351,14 +478,18 @@ function renderDashboard({ manual = false } = {}) {
 
 function updateActionAccess() {
   const canWrite = operatorCanWrite();
+  const recovery = recoveryData();
+  const recoveryPolicy = recoveryPolicyData();
   nodes.reconcileButton.disabled = state.refreshing || !canWrite;
-  nodes.rebaselineButton.disabled = state.refreshing || !canWrite;
+  nodes.rebaselineButton.disabled = state.refreshing || !canWrite || !recoveryPolicy.operator_rebaseline_supported || !recovery.rebaseline_available;
+  nodes.rebaselineButton.hidden = !recoveryPolicy.operator_rebaseline_supported;
   nodes.resumeButton.disabled = state.refreshing || !canWrite;
   nodes.haltButton.disabled = state.refreshing || !canWrite;
   nodes.actionPermissionHint.textContent = permissionHint(canWrite);
 }
 
 function renderEmptyState() {
+  setRuntimeProfilesViewEnabled(false);
   nodes.stripOverallValue.textContent = "-";
   nodes.stripOverallMeta.textContent = "-";
   nodes.stripModeValue.textContent = "-";
@@ -390,6 +521,18 @@ function renderEmptyState() {
   nodes.diagnosticAccount.innerHTML = emptyState("No account state yet.");
   nodes.diagnosticBlockers.innerHTML = emptyState("No blocker history yet.");
   nodes.diagnosticMetrics.innerHTML = emptyState("No runtime metrics yet.");
+  nodes.runtimeProfileSummary.innerHTML = emptyState("No runtime profile control state yet.");
+  nodes.runtimeProfileSupervisor.innerHTML = emptyState("No supervisor state yet.");
+  nodes.runtimeProfileImpact.innerHTML = emptyState("No draft diff yet.");
+  nodes.runtimeProfileTable.innerHTML = emptyState("No runtime profile revisions yet.");
+  nodes.runtimeProfilePermissionNote.textContent = "Checking runtime profile permissions.";
+  nodes.operatorSummary.innerHTML = emptyState("No auth posture yet.");
+  nodes.operatorBootstrap.innerHTML = emptyState("No bootstrap status yet.");
+  nodes.operatorUsersTable.innerHTML = emptyState("No operator account data yet.");
+  nodes.operatorPermissionNote.textContent = "Checking admin access.";
+  nodes.runtimeProfileRevisionSelect.innerHTML = `<option value="">No draft selected</option>`;
+  setRuntimeProfileFormEnabled(false);
+  setOperatorCreateFormEnabled(false);
   setDrawerContent("Operator Detail", `<div class="empty-state">Use a table action or lookup to inspect detail.</div>`, `<div class="empty-state">Raw detail is available once an item is selected.</div>`);
 }
 
@@ -429,6 +572,15 @@ function operatorCanWrite() {
   return Boolean(operatorAuth.unsafe_write_without_auth);
 }
 
+function operatorCanAdmin() {
+  const session = state.data.session || {};
+  const operatorAuth = state.data.runtime?.operator_auth || {};
+  if (session.auth_enabled) {
+    return session.role === "admin";
+  }
+  return session.role === "admin" && Boolean(operatorAuth.unsafe_write_without_auth);
+}
+
 function permissionHint(canWrite) {
   const session = state.data.session || {};
   const operatorAuth = state.data.runtime?.operator_auth || {};
@@ -447,16 +599,29 @@ function permissionHint(canWrite) {
 function renderHeaderBadges() {
   const health = state.data.health || {};
   const mode = state.data.mode || {};
+  const runtimeProfile = runtimeProfileData();
+  const environment = environmentData();
   setStatusChip(nodes.runtimeStateChip, readableState(health.runtime_state || health.overall_status), toneForRuntimeState(health.runtime_state));
-  setStatusChip(nodes.operatingStateChip, readableMode(mode.operating_state || "unknown"), mode.execution_blocked ? "warning" : "outline");
-  setStatusChip(nodes.executionRouteChip, mode.execution_route || mode.execution_backend || "unknown", mode.exchange_submit_allowed ? "info" : "outline");
-  setStatusChip(nodes.submitPostureChip, mode.exchange_submit_allowed ? "submit enabled" : "submit blocked", mode.exchange_submit_allowed ? "success" : "danger");
+  setStatusChip(nodes.operatingStateChip, readableMode(runtimeProfile.name || mode.operating_state || "unknown"), mode.execution_blocked ? "warning" : "outline");
+  setStatusChip(nodes.executionRouteChip, environment.execution_route || mode.execution_route || mode.execution_backend || "unknown", mode.exchange_submit_allowed ? "info" : "outline");
+  setStatusChip(
+    nodes.submitPostureChip,
+    environment.exchange_submission_enabled
+      ? "exchange submit"
+      : environment.exchange_submission_possible
+      ? "guarded exchange"
+      : "local paper",
+    environment.exchange_submission_enabled ? "success" : environment.exchange_submission_possible ? "warning" : "neutral",
+  );
 }
 
 function renderRuntimeStrip() {
   const health = state.data.health || {};
   const mode = state.data.mode || {};
+  const runtimeProfile = runtimeProfileData();
+  const environment = environmentData();
   const portfolio = state.data.portfolio?.portfolio || null;
+  const primaryPosition = trackedPortfolioPosition(portfolio);
   const freshness = health.freshness || {};
   const account = state.data.accountState || {};
   const recovery = recoveryData();
@@ -464,20 +629,35 @@ function renderRuntimeStrip() {
   nodes.stripOverallValue.textContent = readableState(health.runtime_state || health.overall_status);
   nodes.stripOverallMeta.textContent = health.execution_blocked ? listOrDash(health.submit_blocked_reasons || health.blockers?.map((item) => item.blocker)) : "No active blockers";
 
-  nodes.stripModeValue.textContent = readableMode(mode.operating_state || mode.mode || "unknown");
-  nodes.stripModeMeta.textContent = `${mode.execution_backend || "-"} | ${mode.execution_route || "-"}`;
+  nodes.stripModeValue.textContent = readableMode(runtimeProfile.name || mode.operating_state || mode.mode || "unknown");
+  nodes.stripModeMeta.textContent = `${readableMode(mode.operating_state || "-")} | ${readableMode(environment.product_type || mode.trading_product_type || "-")} | ${readableMode(environment.margin_model || mode.margin_mode || "-")}`;
 
-  nodes.stripExecutionValue.textContent = mode.exchange_submit_allowed ? "Armed" : "Guarded";
-  nodes.stripExecutionMeta.textContent = mode.exchange_submit_allowed ? "Submission path is open" : listOrDash(mode.submit_blocked_reasons);
+  nodes.stripExecutionValue.textContent = environment.exchange_submission_enabled
+    ? "Exchange Armed"
+    : environment.exchange_submission_possible
+    ? "Guarded Exchange"
+    : "Local Paper";
+  nodes.stripExecutionMeta.textContent = environment.exchange_submission_enabled
+    ? `${environment.exchange_submission_target || "exchange"} | ${readableMode(environment.position_directionality)} | lev ${formatNumber(mode.max_target_leverage || 1)}`
+    : `${listOrDash(mode.submit_blocked_reasons)} | ${readableMode(environment.position_directionality)}`;
 
-  nodes.stripRecoveryValue.textContent = readableState(recovery.recovery_state);
-  nodes.stripRecoveryMeta.textContent = recoverySummaryLine(recovery);
+  if (runtimeProfile.name === "paper_local") {
+    nodes.stripRecoveryValue.textContent = "Local Paper";
+    nodes.stripRecoveryMeta.textContent = recovery.safe_to_trade
+      ? "No exchange baseline takeover in this profile"
+      : recoverySummaryLine(recovery);
+  } else {
+    nodes.stripRecoveryValue.textContent = readableState(recovery.recovery_state);
+    nodes.stripRecoveryMeta.textContent = recoverySummaryLine(recovery);
+  }
 
   nodes.stripFreshnessValue.textContent = freshnessSummary(freshness);
   nodes.stripFreshnessMeta.textContent = `market ${booleanWord(freshness.market_fresh)} | account ${booleanWord(account.fresh)} | recon ${booleanWord(freshness.reconciliation_fresh)}`;
 
   nodes.stripEquityValue.textContent = portfolio ? formatNumber(portfolio.total_equity) : "-";
-  nodes.stripEquityMeta.textContent = portfolio ? `gross ${formatNumber(portfolio.gross_exposure)} | net ${formatSigned(portfolio.net_exposure)}` : "No portfolio snapshot";
+  nodes.stripEquityMeta.textContent = portfolio
+    ? `gross ${formatNumber(portfolio.gross_exposure)} | ${positionPosture(primaryPosition)}`
+    : "No portfolio snapshot";
 }
 
 function renderAlerts() {
@@ -500,7 +680,9 @@ function renderAlerts() {
   } else if (recovery.review_required) {
     banners.push({
       tone: "warning",
-      message: "Recovery review is required. Accept the current exchange state as a new baseline before resuming automation.",
+      message: recoveryPolicyData().operator_rebaseline_supported
+        ? "Recovery review is required. Accept the current exchange state as a new baseline before resuming automation."
+        : "Recovery review is required before trusting the next automated action.",
     });
   } else if (recovery.recovery_state === "rebaseline_completed" && !recovery.safe_to_trade) {
     banners.push({
@@ -524,35 +706,66 @@ function renderAlerts() {
 function renderOverview() {
   const health = state.data.health || {};
   const mode = state.data.mode || {};
+  const runtimeProfile = runtimeProfileData();
+  const environment = environmentData();
+  const policyProfile = state.data.runtime?.policy_profile || state.data.mode?.policy_profile || {};
   const portfolio = state.data.portfolio?.portfolio || null;
   const latestDecision = state.data.latestDecision || {};
+  const executionLatest = state.data.executionLatest || {};
   const blockers = state.data.blockers?.blockers || [];
   const metrics = state.data.metrics || {};
   const recovery = recoveryData();
   const baseline = state.data.runtime?.baseline_takeover || {};
+  const paperLocal = runtimeProfile.name === "paper_local";
+  const primaryPosition = trackedPortfolioPosition(portfolio);
 
-  nodes.overviewDecisionSpotlight.innerHTML = renderDecisionHero(latestDecision, state.data.executionLatest);
-  nodes.overviewPosture.innerHTML = renderFactGrid([
-    ["Overall", readableState(health.overall_status)],
-    ["Runtime", readableState(health.runtime_state)],
-    ["Mode", readableMode(mode.mode)],
-    ["Operating State", readableMode(mode.operating_state)],
-    ["Execution Backend", mode.execution_backend || "-"],
-    ["Submit Allowed", booleanWord(mode.exchange_submit_allowed)],
-    ["Halted", booleanWord(health.halted)],
-    ["Account Ready", booleanWord(state.data.accountState?.ready)],
-  ]);
+  applyOverviewProfile(runtimeProfile);
 
-  nodes.overviewPortfolio.innerHTML = renderFactGrid([
-    ["Total Equity", portfolio ? formatNumber(portfolio.total_equity) : "-"],
-    ["Realized PnL", portfolio ? formatSigned(portfolio.realized_pnl) : "-"],
-    ["Unrealized PnL", portfolio ? formatSigned(portfolio.unrealized_pnl) : "-"],
-    ["Gross Exposure", portfolio ? formatNumber(portfolio.gross_exposure) : "-"],
-    ["Net Exposure", portfolio ? formatSigned(portfolio.net_exposure) : "-"],
-    ["Positions", portfolio ? String((portfolio.positions || []).length) : "-"],
-    ["USDT Balance", portfolio ? formatNumber(portfolio.balances?.USDT) : "-"],
-    ["Updated", state.data.portfolio?.latest_update_timestamp ? formatDateTime(state.data.portfolio.latest_update_timestamp) : "-"],
-  ]);
+  nodes.overviewDecisionSpotlight.innerHTML = renderDecisionHero(latestDecision, executionLatest);
+  nodes.overviewPosture.innerHTML = renderFactGrid(paperLocal
+      ? [
+        ["Runtime", readableState(health.runtime_state)],
+        ["Profile", readableMode(runtimeProfile.name)],
+        ["Product", readableMode(environment.product_type)],
+        ["Margin Model", readableMode(environment.margin_model)],
+        ["Market Feed", environment.market_data_source_kind || "-"],
+        ["Execution Route", environment.execution_route || mode.execution_route || "-"],
+        ["Directionality", readableMode(environment.position_directionality)],
+        ["Leverage Support", readableMode(environment.leverage_support)],
+        ["Local Only", booleanWord(environment.local_only)],
+        ["Exchange Coupled", booleanWord(environment.exchange_coupled)],
+        ["Account Observation", booleanWord(state.data.accountState?.read_enabled)],
+        ["Halted", booleanWord(health.halted)],
+      ]
+    : [
+        ["Overall", readableState(health.overall_status)],
+        ["Runtime", readableState(health.runtime_state)],
+        ["Profile", readableMode(runtimeProfile.name)],
+        ["Product", readableMode(environment.product_type)],
+        ["Margin Model", readableMode(environment.margin_model)],
+        ["Directionality", readableMode(environment.position_directionality)],
+        ["Leverage Support", readableMode(environment.leverage_support)],
+        ["Operating State", readableMode(mode.operating_state)],
+        ["Execution Route", environment.execution_route || mode.execution_route || "-"],
+        ["Submit Target", environment.exchange_submission_target || "-"],
+        ["Submit Allowed", booleanWord(mode.exchange_submit_allowed)],
+        ["Human Approval", booleanWord(policyProfile.requires_human_approval)],
+    ]);
+
+    nodes.overviewPortfolio.innerHTML = renderFactGrid([
+      ["Total Equity", portfolio ? formatNumber(portfolio.total_equity) : "-"],
+      ["Realized PnL", portfolio ? formatSigned(portfolio.realized_pnl) : "-"],
+      ["Unrealized PnL", portfolio ? formatSigned(portfolio.unrealized_pnl) : "-"],
+      ["Gross Exposure", portfolio ? formatNumber(portfolio.gross_exposure) : "-"],
+      ["Net Exposure", portfolio ? formatSigned(portfolio.net_exposure) : "-"],
+      ["Primary Symbol", trackedSymbol() || "-"],
+      ["Primary Side", primaryPosition ? readableMode(primaryPosition.exposure_side) : "-"],
+      ["Primary Qty", primaryPosition ? formatSigned(primaryPosition.position_qty) : "-"],
+      ["Primary Leverage", primaryPosition ? formatNumber(primaryPosition.target_leverage) : "-"],
+      ["Margin Usage", portfolio ? formatNumber(portfolio.margin_usage) : "-"],
+      ["USDT Balance", portfolio ? formatNumber(portfolio.balances?.USDT) : "-"],
+      ["Updated", state.data.portfolio?.latest_update_timestamp ? formatDateTime(state.data.portfolio.latest_update_timestamp) : "-"],
+    ]);
 
   nodes.overviewBlockerStamp.textContent = blockers.length ? `${blockers.length} active` : "clear";
   nodes.overviewBlockers.innerHTML = renderSignalCards(
@@ -580,18 +793,21 @@ function renderOverview() {
     ["Open Orders At Baseline", formatNumber(baseline.open_order_count)],
   ]);
 
-  nodes.overviewMetrics.innerHTML = renderFactGrid([
-    ["Decision Cycles", formatNumber(metrics.decision_cycle_count)],
-    ["Order Intents", formatNumber(metrics.order_intent_count)],
-    ["Open Orders", formatNumber(metrics.current_open_order_count)],
-    ["Fills", formatNumber(metrics.fill_count)],
-    ["Rejections", formatNumber(metrics.rejection_count)],
-    ["Recon Mismatches", formatNumber(metrics.reconciliation_mismatch_count)],
-    ["Recent Exec Errors", formatNumber((metrics.recent_execution_errors || []).length)],
-    ["Account Fresh", booleanWord(state.data.accountState?.fresh)],
-  ]);
+    nodes.overviewMetrics.innerHTML = renderFactGrid([
+      ["Decision Cycles", formatNumber(metrics.decision_cycle_count)],
+      ["Order Intents", formatNumber(metrics.order_intent_count)],
+      ["Open Orders", formatNumber(metrics.current_open_order_count)],
+      ["Fills", formatNumber(metrics.fill_count)],
+      ["Rejections", formatNumber(metrics.rejection_count)],
+      ["Recon Mismatches", formatNumber(metrics.reconciliation_mismatch_count)],
+      ["Recent Exec Errors", formatNumber((metrics.recent_execution_errors || []).length)],
+      ["Latest Decision", formatMaybeTimestamp(latestDecision.decision_context?.as_of_ts)],
+      ["Latest Fill", fillFreshnessLabel(executionLatest.latest_fill)],
+      ["Latest Action", decisionActivityLabel(latestDecision, executionLatest.latest_order, executionLatest.latest_fill)],
+      ["Account Fresh", booleanWord(state.data.accountState?.fresh)],
+    ]);
 
-  nodes.overviewTimeline.innerHTML = renderTimeline(buildTimeline());
+  nodes.overviewTimeline.innerHTML = renderTimeline(buildTimeline({ paperLocal }));
 }
 
 function renderDecisions() {
@@ -600,14 +816,12 @@ function renderDecisions() {
 
   nodes.decisionSpotlight.innerHTML = renderDecisionInvestigation(latestDecision);
   nodes.decisionTable.innerHTML = renderTable(
-    ["Decision", "Time", "Target Delta", "Policy", "Risk", "Execution", "Action"],
+    ["Decision", "Intent", "Outcome", "When", "Open"],
     recentDecisions.map((item) => ([
-      `<div><strong>${escapeHtml(item.symbol || "-")}</strong><div class="mono">${escapeHtml(item.decision_id || "-")}</div></div>`,
-      escapeHtml(formatMaybeTimestamp(item.decision_time)),
-      escapeHtml(formatSigned(item.target_delta_qty)),
-      miniBadge(booleanShort(item.policy_result), item.policy_result ? "success" : "danger"),
-      miniBadge(booleanShort(item.risk_result), item.risk_result ? "success" : "danger"),
-      `<div class="table-meta">${escapeHtml(decisionOutcomeLabel(item))}</div>`,
+      `<div class="cell-stack"><strong>${escapeHtml(item.symbol || "-")}</strong><div class="table-meta">${escapeHtml(item.timeframe || "-")} | ${escapeHtml(item.decision_id || "-")}</div></div>`,
+      `<div class="cell-stack"><strong>${escapeHtml(recentDecisionHeadline(item))}</strong><div class="table-meta">${escapeHtml(recentDecisionNarrative(item))}</div></div>`,
+      `<div class="cell-stack"><div class="table-inline-badges">${miniBadge(item.policy_result ? "policy ok" : "policy blocked", item.policy_result ? "success" : "danger")}${miniBadge(item.risk_result ? "risk ok" : "risk blocked", item.risk_result ? "success" : "danger")}</div><div class="table-meta">${escapeHtml(recentDecisionOutcome(item))}</div></div>`,
+      `<div class="cell-stack"><strong>${escapeHtml(formatRelativeAge(item.decision_time))}</strong><div class="table-meta">${escapeHtml(formatMaybeTimestamp(item.decision_time))}</div></div>`,
       item.decision_id ? `<button class="table-button" data-inspect-decision="${escapeHtml(item.decision_id)}">Inspect</button>` : "",
     ])),
     "No recent decisions available."
@@ -617,6 +831,8 @@ function renderDecisions() {
 function renderExecution() {
   const execution = state.data.executionLatest || {};
   const mode = execution.mode || state.data.mode || {};
+  const runtimeProfile = runtimeProfileData();
+  const environment = environmentData();
   const readiness = execution.execution || {};
   const latestOrder = execution.latest_order || null;
   const latestFill = execution.latest_fill || null;
@@ -625,56 +841,54 @@ function renderExecution() {
   const recentFills = state.data.recentFills?.fills || [];
   const errors = state.data.executionErrors?.errors || [];
 
-  nodes.executionSpotlight.innerHTML = `
-    <div class="overview-hero">
-      <div class="hero-header">
+    nodes.executionSpotlight.innerHTML = `
+      <div class="overview-hero">
+        <div class="hero-header">
         <div>
           <p class="hero-id">${escapeHtml(mode.execution_route || mode.execution_backend || "unknown")}</p>
-          <h3 class="hero-title">${escapeHtml(mode.exchange_submit_allowed ? "Submit Enabled" : "Guarded")}</h3>
+          <h3 class="hero-title">${escapeHtml(executionHeadline(runtimeProfile, environment, mode))}</h3>
         </div>
         <div class="runtime-badges">
-          ${miniBadge(mode.okx_simulated_trading ? "simulated" : "paper", mode.okx_simulated_trading ? "info" : "outline")}
-          ${miniBadge(mode.guarded_execution_dry_run ? "dry run" : "submit path", mode.guarded_execution_dry_run ? "warning" : "success")}
+          ${miniBadge(readableMode(runtimeProfile.name || "unknown"), environment.exchange_coupled ? "info" : "outline")}
+          ${miniBadge(executionModeBadge(environment, mode), executionModeTone(environment, mode))}
         </div>
+        </div>
+        <p class="hero-copy">${escapeHtml(executionCopy(runtimeProfile, environment, mode))}</p>
+        ${renderFactGrid([
+          ["Execution Ready", booleanWord(readiness.ready)],
+          ["Product", readableMode(environment.product_type)],
+          ["Margin Model", readableMode(environment.margin_model)],
+          ["Directionality", readableMode(environment.position_directionality)],
+          ["Latest Order", latestOrder ? `${latestOrder.status} | ${latestOrder.client_order_id}` : "-"],
+          ["Latest Fill", latestFill ? `${formatNumber(latestFill.fill_qty)} @ ${formatNumber(latestFill.fill_price)}` : "-"],
+          ["Latest Intent", latestFill?.position_intent || latestOrder?.submission_payload?.positionIntent || state.data.latestDecision?.position_target?.position_intent || "-"],
+          ["Latest Fill Age", fillFreshnessLabel(latestFill)],
+          ["Reconciliation", latestReconciliation ? latestReconciliation.severity : "-"],
+          ["Recovery", readableState(execution.recovery?.recovery_state)],
+          ["Open Orders", formatNumber(state.data.metrics?.current_open_order_count)],
+        ])}
       </div>
-      <p class="hero-copy">${escapeHtml(mode.exchange_submit_allowed ? "All execution gates are clear." : listOrDash(mode.submit_blocked_reasons))}</p>
-      ${renderFactGrid([
-        ["Execution Ready", booleanWord(readiness.ready)],
-        ["Latest Order", latestOrder ? `${latestOrder.status} | ${latestOrder.client_order_id}` : "-"],
-        ["Latest Fill", latestFill ? `${formatNumber(latestFill.fill_qty)} @ ${formatNumber(latestFill.fill_price)}` : "-"],
-        ["Reconciliation", latestReconciliation ? latestReconciliation.severity : "-"],
-        ["Recovery", execution.recovery?.safe_startup ? "safe" : "review required"],
-        ["Open Orders", formatNumber(state.data.metrics?.current_open_order_count)],
-      ])}
-    </div>
-  `;
+    `;
 
   nodes.orderTable.innerHTML = renderTable(
-    ["Order", "Decision", "Side", "Quantity", "Venue", "Status", "Updated", "Action"],
+    ["Order", "Meaning", "State", "Updated", "Open"],
     recentOrders.map((order) => ([
-      `<div><strong>${escapeHtml(order.symbol || "-")}</strong><div class="mono">${escapeHtml(order.client_order_id || "-")}</div></div>`,
-      escapeHtml(order.decision_id || "-"),
-      escapeHtml(order.side || "-"),
-      escapeHtml(formatNumber(order.requested_qty)),
-      escapeHtml(order.venue || order.submission_mode || "-"),
-      miniBadge(order.status || "-", toneForOrderStatus(order.status)),
-      escapeHtml(formatMaybeTimestamp(order.last_update_ts || order.created_at)),
+      `<div class="cell-stack"><strong>${escapeHtml(order.symbol || "-")}</strong><div class="table-meta">${escapeHtml(order.client_order_id || "-")}</div></div>`,
+      `<div class="cell-stack"><strong>${escapeHtml(recentOrderHeadline(order))}</strong><div class="table-meta">${escapeHtml(recentOrderNarrative(order))}</div></div>`,
+      `<div class="cell-stack"><div class="table-inline-badges">${miniBadge(order.status || "-", toneForOrderStatus(order.status))}</div><div class="table-meta">${escapeHtml(recentOrderStateSummary(order))}</div></div>`,
+      `<div class="cell-stack"><strong>${escapeHtml(formatRelativeAge(order.last_update_ts || order.created_at))}</strong><div class="table-meta">${escapeHtml(formatMaybeTimestamp(order.last_update_ts || order.created_at))}</div></div>`,
       order.client_order_id ? `<button class="table-button" data-inspect-order="${escapeHtml(order.client_order_id)}">Inspect</button>` : "",
     ])),
     "No recent orders available."
   );
 
   nodes.fillTable.innerHTML = renderTable(
-    ["Fill", "Decision", "Side", "Quantity", "Price", "Fee", "Venue", "Ingested", "Action"],
+    ["Fill", "What Happened", "Impact", "Ingested", "Open"],
     recentFills.map((fill) => ([
-      `<div><strong>${escapeHtml(fill.symbol || "-")}</strong><div class="mono">${escapeHtml(fill.fill_id || "-")}</div></div>`,
-      escapeHtml(fill.decision_id || "-"),
-      escapeHtml(fill.side || "-"),
-      escapeHtml(formatNumber(fill.fill_qty)),
-      escapeHtml(formatNumber(fill.fill_price)),
-      escapeHtml(formatNumber(fill.fee_amount)),
-      escapeHtml(fill.venue || "-"),
-      escapeHtml(formatMaybeTimestamp(fill.ingestion_timestamp)),
+      `<div class="cell-stack"><strong>${escapeHtml(fill.symbol || "-")}</strong><div class="table-meta">${escapeHtml(fill.fill_id || "-")}</div></div>`,
+      `<div class="cell-stack"><strong>${escapeHtml(recentFillHeadline(fill))}</strong><div class="table-meta">${escapeHtml(recentFillNarrative(fill))}</div></div>`,
+      `<div class="cell-stack"><strong>${escapeHtml(recentFillImpactSummary(fill))}</strong><div class="table-meta">${escapeHtml(`fee ${formatNumber(fill.fee_amount)} ${fill.fee_currency || ""}`.trim())}</div></div>`,
+      `<div class="cell-stack"><strong>${escapeHtml(formatRelativeAge(fill.ingestion_timestamp))}</strong><div class="table-meta">${escapeHtml(formatMaybeTimestamp(fill.ingestion_timestamp))}</div></div>`,
       fill.fill_id ? `<button class="table-button" data-inspect-fill="${escapeHtml(fill.fill_id)}">Inspect</button>` : "",
     ])),
     "No recent fills available."
@@ -728,42 +942,68 @@ function renderDiagnostics() {
     </div>
   ` : emptyState("No reconciliation report yet.");
 
-  nodes.diagnosticRecovery.innerHTML = renderFactGrid([
-    ["Recovery State", readableState(recovery.recovery_state)],
-    ["Safe To Trade", booleanWord(recovery.safe_to_trade)],
-    ["Resume Eligible", booleanWord(recovery.resume_eligible)],
-    ["Review Required", booleanWord(recovery.review_required)],
-    ["Rebaseline Available", booleanWord(recovery.rebaseline_available)],
-    ["Resume Blockers", listOrDash(recovery.resume_blocked_reasons)],
-    ["Baseline Status", readableState(baseline.status)],
-    ["Baseline Kind", readableState(baseline.baseline_kind)],
-    ["Baseline Source", baseline.baseline_source || "-"],
-    ["Baseline Imported At", formatMaybeTimestamp(baseline.baseline_imported_at)],
-    ["Baseline Event", baseline.event_ref || "-"],
-    ["Last Rebaseline Event", baseline.last_rebaseline_event_ref || "-"],
-  ]);
+    nodes.diagnosticRecovery.innerHTML = renderSignalCards([
+      {
+        title: `Recovery ${readableState(recovery.recovery_state)}`,
+        subtitle: `safe ${booleanWord(recovery.safe_to_trade)} | resume ${booleanWord(recovery.resume_eligible)}`,
+        tone: recovery.safe_to_trade ? "success" : recovery.review_required ? "warning" : "danger",
+        detail: recovery.review_required
+          ? `Operator review is still required. Resume blockers: ${listOrDash(recovery.resume_blocked_reasons)}.`
+          : recovery.safe_to_trade
+            ? "Recovery posture is clear enough to keep trading."
+            : `Trading is still gated by ${listOrDash(recovery.resume_blocked_reasons)}.`,
+      },
+      {
+        title: `Baseline ${readableState(baseline.status)}`,
+        subtitle: `${readableState(baseline.baseline_kind)} | ${baseline.baseline_source || "-"}`,
+        tone: baseline.status === "ready" || baseline.status === "accepted" ? "info" : "outline",
+        detail: baseline.baseline_imported_at
+          ? `Imported ${formatRelativeAge(baseline.baseline_imported_at)}. Event ref ${baseline.event_ref || "-"}.`
+          : "No baseline import timestamp is stored yet.",
+      },
+      {
+        title: "Operator recovery controls",
+        subtitle: `rebaseline ${booleanWord(recovery.rebaseline_available)} | review ${booleanWord(recovery.review_required)}`,
+        tone: recovery.rebaseline_available ? "warning" : "info",
+        detail: baseline.last_rebaseline_event_ref
+          ? `Last rebaseline event ${baseline.last_rebaseline_event_ref}.`
+          : "No rebaseline event has been recorded yet.",
+      },
+    ], "No recovery posture yet.");
 
-  nodes.diagnosticReplay.innerHTML = renderFactGrid([
-    ["Replay Supported", booleanWord(replay.supported)],
-    ["Replay Healthy", booleanWord(replay.healthy)],
-    ["Last Decision", replay.last_validation?.decision_id || "-"],
-    ["Replayed Events", formatNumber(replay.last_validation?.replayed_event_count)],
-    ["Divergences", formatNumber(replay.last_validation?.divergence_count)],
-    ["Baseline Switches", formatNumber(replay.last_validation?.baseline_switch_count)],
-    ["Validated", replay.last_validation?.validated_at ? formatDateTime(replay.last_validation.validated_at) : "-"],
-  ]);
+    nodes.diagnosticReplay.innerHTML = renderSignalCards([
+      {
+        title: replay.last_validation ? "Replay validated recently" : "Replay idle",
+        subtitle: replay.last_validation?.decision_id || "no recent validation",
+        tone: replay.healthy ? "success" : replay.supported ? "warning" : "outline",
+        detail: replay.last_validation
+          ? `Validated ${formatRelativeAge(replay.last_validation.validated_at)} with ${formatNumber(replay.last_validation.divergence_count)} divergence${pluralize(replay.last_validation.divergence_count)}.`
+          : "No recent replay validation is stored.",
+      },
+      {
+        title: "Replay coverage",
+        subtitle: `supported ${booleanWord(replay.supported)} | healthy ${booleanWord(replay.healthy)}`,
+        tone: replay.supported ? "info" : "outline",
+        detail: `Replayed events ${formatNumber(replay.last_validation?.replayed_event_count)} | baseline switches ${formatNumber(replay.last_validation?.baseline_switch_count)}.`,
+      },
+    ], "No replay validation yet.");
 
-  nodes.diagnosticAccount.innerHTML = renderFactGrid([
-    ["Backend", account.backend || "-"],
-    ["Read Enabled", booleanWord(account.read_enabled)],
-    ["Connected", booleanWord(account.connected)],
-    ["Fresh", booleanWord(account.fresh)],
-    ["Ready", booleanWord(account.ready)],
-    ["Blocking Reason", account.current_blocking_reason || "-"],
-    ["Last Refresh", account.last_refresh_timestamp ? formatDateTime(account.last_refresh_timestamp) : "-"],
-    ["Recovery", readableState(account.recovery?.recovery_state)],
-    ["Baseline Status", readableState(account.baseline_takeover?.status)],
-  ]);
+    nodes.diagnosticAccount.innerHTML = renderSignalCards([
+      {
+        title: `Account backend ${readableMode(account.backend || "-")}`,
+        subtitle: `connected ${booleanWord(account.connected)} | fresh ${booleanWord(account.fresh)} | ready ${booleanWord(account.ready)}`,
+        tone: account.ready ? "success" : account.connected ? "warning" : "danger",
+        detail: account.current_blocking_reason
+          ? `Current blocking reason: ${account.current_blocking_reason}.`
+          : `Last refresh ${account.last_refresh_timestamp ? formatRelativeAge(account.last_refresh_timestamp) : "-"}.`,
+      },
+      {
+        title: "Baseline posture",
+        subtitle: readableState(account.baseline_takeover?.status),
+        tone: account.baseline_takeover?.status ? "info" : "outline",
+        detail: `Baseline source ${account.baseline_takeover?.baseline_source || "-"} | recovery ${readableState(account.recovery?.recovery_state)}.`,
+      },
+    ], "No account state yet.");
 
   nodes.diagnosticBlockers.innerHTML = renderTimeline(
     blockerHistory.slice().reverse().map((item) => ({
@@ -776,16 +1016,409 @@ function renderDiagnostics() {
     "No blocker history available."
   );
 
-  nodes.diagnosticMetrics.innerHTML = renderFactGrid([
-    ["Decision Cycles", formatNumber(metrics.decision_cycle_count)],
-    ["Order Intents", formatNumber(metrics.order_intent_count)],
-    ["Fills", formatNumber(metrics.fill_count)],
-    ["Rejections", formatNumber(metrics.rejection_count)],
-    ["Open Orders", formatNumber(metrics.current_open_order_count)],
-    ["Runtime Uptime", formatDuration(runtime.uptime_seconds)],
-    ["Last Decision", runtime.last_decision_timestamp ? formatDateTime(runtime.last_decision_timestamp) : "-"],
-    ["Last Reconciliation", runtime.last_reconciliation_timestamp ? formatDateTime(runtime.last_reconciliation_timestamp) : "-"],
+    nodes.diagnosticMetrics.innerHTML = renderSignalCards([
+      {
+        title: "Decision cadence",
+        subtitle: `${formatNumber(metrics.decision_cycle_count)} cycles | ${formatNumber(metrics.order_intent_count)} intents`,
+        tone: "info",
+        detail: `Latest decision ${runtime.last_decision_timestamp ? formatRelativeAge(runtime.last_decision_timestamp) : "-"} | uptime ${formatDuration(runtime.uptime_seconds)}.`,
+      },
+      {
+        title: "Execution throughput",
+        subtitle: `${formatNumber(metrics.fill_count)} fills | ${formatNumber(metrics.current_open_order_count)} open orders`,
+        tone: metrics.current_open_order_count > 0 ? "warning" : "success",
+        detail: `Latest fill ${fillFreshnessLabel(state.data.executionLatest?.latest_fill)}.`,
+      },
+      {
+        title: "Recent activity",
+        subtitle: `${formatNumber(metrics.rejection_count)} rejection${pluralize(metrics.rejection_count)}`,
+        tone: metrics.rejection_count > 0 ? "warning" : "info",
+        detail: decisionActivityLabel(state.data.latestDecision || {}, state.data.executionLatest?.latest_order, state.data.executionLatest?.latest_fill),
+      },
+    ], "No runtime metrics yet.");
+  }
+
+function renderRuntimeProfiles() {
+  const profiles = state.data.runtimeProfiles || {};
+  const payload = profiles.current_runtime_payload || {};
+  setRuntimeProfilesViewEnabled(false);
+  nodes.runtimeProfileSummary.innerHTML = renderFactGrid([
+    ["Control Mode", "Environment file switch"],
+    ["Profile Source", readableState(profiles.profile_source || state.data.runtime?.profile_source || "env_fallback")],
+    ["Default Symbol", payload.default_symbol || "-"],
+    ["Allowed Symbols", listOrDash(payload.allowed_symbols)],
+    ["Product Type", readableState(payload.trading_product_type || "-")],
+    ["Margin Mode", readableState(payload.margin_mode || "-")],
   ]);
+  nodes.runtimeProfileSupervisor.innerHTML = emptyState("Runtime profile control in the UI is disabled. Switch posture by replacing .env with .env.spot.backup or .env.derivatives.primary, then restart the service.");
+  nodes.runtimeProfileImpact.innerHTML = emptyState("No browser-managed revisions in env-switch mode.");
+  nodes.runtimeProfileTable.innerHTML = emptyState("Runtime profile drafts are disabled in env-switch mode.");
+  nodes.runtimeProfileRevisionSelect.innerHTML = `<option value="">Env switch mode</option>`;
+  nodes.runtimeProfilePermissionNote.textContent = "Runtime posture changes now come from the env preset files, not the browser control plane.";
+  setRuntimeProfileFormEnabled(false);
+}
+
+function renderOperators() {
+  const providers = state.data.authProviders || {};
+  const runtimeAuth = state.data.runtime?.operator_auth || {};
+  const operatorUsers = state.data.operatorUsers || {};
+  const users = operatorUsers.users || [];
+  const canAdmin = operatorCanAdmin();
+
+  nodes.operatorSummary.innerHTML = renderFactGrid([
+    ["Auth Enabled", booleanWord(providers.auth_enabled)],
+    ["Session Enabled", booleanWord(providers.session_enabled)],
+    ["Database Backed", booleanWord(providers.database_backed)],
+    ["Stored Users", formatNumber(providers.stored_user_count)],
+    ["Configured Roles", listOrDash(providers.configured_roles)],
+    ["API-Key Compatibility", booleanWord(providers.api_key_compatibility_enabled)],
+    ["Current Identity", state.data.session?.identity || "-"],
+    ["Current Role", readableState(state.data.session?.role)],
+  ]);
+
+  nodes.operatorBootstrap.innerHTML = renderFactGrid([
+    ["Bootstrap Enabled", booleanWord(runtimeAuth.bootstrap_enabled)],
+    ["Bootstrap Configured", booleanWord(runtimeAuth.bootstrap_configured)],
+    ["Bootstrap Pending", booleanWord(operatorUsers.bootstrap_pending ?? providers.bootstrap_pending)],
+    ["Enabled Users", formatNumber(operatorUsers.enabled_user_count)],
+    ["Enabled Admins", formatNumber(operatorUsers.enabled_admin_count)],
+    ["Unsafe Local Write", booleanWord(runtimeAuth.unsafe_write_without_auth)],
+    ["Session Source", readableState(state.data.session?.auth_source)],
+    ["Admin Access", canAdmin ? "granted" : "not available"],
+  ]);
+
+  setOperatorCreateFormEnabled(canAdmin);
+  if (!canAdmin) {
+    nodes.operatorPermissionNote.textContent = "Admin access is required to manage operator accounts.";
+    nodes.operatorUsersTable.innerHTML = emptyState("Sign in as an admin to create, edit, disable, or delete operator users.");
+    return;
+  }
+
+  nodes.operatorPermissionNote.textContent = "Admin session active. Changes are written to the operator user table immediately.";
+  nodes.operatorUsersTable.innerHTML = renderTable(
+    ["Username", "Role", "Status", "Last Login", "Updated", "Session", "Actions"],
+    users.map((user) => ([
+      `<div><strong>${escapeHtml(user.username || "-")}</strong><div class="mono">${escapeHtml(user.user_id || "-")}</div></div>`,
+      miniBadge(user.role || "-", user.role === "admin" ? "danger" : user.role === "operator" ? "info" : "outline"),
+      `<div>${miniBadge(user.enabled ? "enabled" : "disabled", user.enabled ? "success" : "warning")}${user.protected_last_admin ? '<div class="table-meta">last enabled admin</div>' : ""}</div>`,
+      escapeHtml(formatMaybeTimestamp(user.last_login_at)),
+      escapeHtml(formatMaybeTimestamp(user.updated_at || user.created_at)),
+      user.is_current_session_user ? miniBadge("current session", "info") : '<span class="table-meta">other account</span>',
+      renderOperatorUserActions(user),
+    ])),
+    "No operator users are stored yet."
+  );
+}
+
+function renderOperatorUserActions(user) {
+  const toggleDisabled = user.protected_last_admin || user.is_current_session_user;
+  const deleteDisabled = user.protected_last_admin || user.is_current_session_user;
+  return `
+    <div class="table-actions">
+      <button class="table-button" data-role-user="${escapeHtml(user.username)}" data-current-role="${escapeHtml(user.role || "")}">Role</button>
+      <button class="table-button" data-password-user="${escapeHtml(user.username)}">Password</button>
+      <button class="table-button" data-toggle-user="${escapeHtml(user.username)}" data-next-enabled="${String(!user.enabled)}" ${toggleDisabled ? "disabled" : ""}>${user.enabled ? "Disable" : "Enable"}</button>
+      <button class="table-button" data-delete-user="${escapeHtml(user.username)}" ${deleteDisabled ? "disabled" : ""}>Delete</button>
+    </div>
+  `;
+}
+
+function setOperatorCreateFormEnabled(enabled) {
+  nodes.operatorCreateUsername.disabled = !enabled;
+  nodes.operatorCreatePassword.disabled = !enabled;
+  nodes.operatorCreateRole.disabled = !enabled;
+  nodes.operatorCreateEnabled.disabled = !enabled;
+  nodes.operatorCreateButton.disabled = !enabled;
+}
+
+function setRuntimeProfileFormEnabled(enabled) {
+  nodes.runtimeProfileRevisionSelect.disabled = !enabled;
+  nodes.runtimeProfileLabel.disabled = !enabled;
+  nodes.runtimeProfileDefaultSymbol.disabled = !enabled;
+  nodes.runtimeProfileAllowedSymbols.disabled = !enabled;
+  nodes.runtimeProfileProductType.disabled = !enabled;
+  nodes.runtimeProfileMarginMode.disabled = !enabled;
+  nodes.runtimeProfileDefaultOrderQty.disabled = !enabled;
+  nodes.runtimeProfileMaxNotional.disabled = !enabled;
+  nodes.runtimeProfileMaxPositionQty.disabled = !enabled;
+  nodes.runtimeProfileMaxOpenOrders.disabled = !enabled;
+  nodes.runtimeProfileDefaultLeverage.disabled = !enabled;
+  nodes.runtimeProfileMaxLeverage.disabled = !enabled;
+  nodes.runtimeProfileShortBias.disabled = !enabled;
+  nodes.runtimeProfileDynamicLeverage.disabled = !enabled;
+  nodes.runtimeProfileActivationNote.disabled = !enabled;
+  nodes.runtimeProfileCreateButton.disabled = !enabled;
+  nodes.runtimeProfileSaveButton.disabled = !enabled;
+  nodes.runtimeProfileStageButton.disabled = !enabled;
+  nodes.runtimeProfileCancelPendingButton.disabled = !enabled;
+  nodes.runtimeProfileRestartButton.disabled = !enabled;
+}
+
+function selectedRuntimeProfileRevision() {
+  const revisionId = nodes.runtimeProfileRevisionSelect.value;
+  return (state.data.runtimeProfiles?.revisions || []).find((revision) => revision.revision_id === revisionId) || null;
+}
+
+function populateRuntimeProfileDraftForm() {
+  const revision = selectedRuntimeProfileRevision();
+  const payload = revision?.payload || state.data.runtimeProfiles?.current_runtime_payload || {};
+  nodes.runtimeProfileLabel.value = revision?.profile_label || "";
+  nodes.runtimeProfileDefaultSymbol.value = payload.default_symbol || "";
+  nodes.runtimeProfileAllowedSymbols.value = (payload.allowed_symbols || []).join(",");
+  nodes.runtimeProfileProductType.value = payload.trading_product_type || "spot";
+  nodes.runtimeProfileMarginMode.value = payload.margin_mode || "cash";
+  nodes.runtimeProfileDefaultOrderQty.value = payload.default_order_qty ?? "";
+  nodes.runtimeProfileMaxNotional.value = payload.max_notional_per_symbol ?? "";
+  nodes.runtimeProfileMaxPositionQty.value = payload.max_abs_position_qty ?? "";
+  nodes.runtimeProfileMaxOpenOrders.value = payload.max_open_orders ?? "";
+  nodes.runtimeProfileDefaultLeverage.value = payload.default_target_leverage ?? "";
+  nodes.runtimeProfileMaxLeverage.value = payload.max_target_leverage ?? "";
+  nodes.runtimeProfileShortBias.checked = Boolean(payload.strategy_short_bias_enabled);
+  nodes.runtimeProfileDynamicLeverage.checked = Boolean(payload.strategy_dynamic_leverage_enabled);
+  nodes.runtimeProfileActivationNote.value = revision?.activation_note || "";
+}
+
+function runtimeProfilePayloadFromForm() {
+  return {
+    default_symbol: nodes.runtimeProfileDefaultSymbol.value.trim(),
+    allowed_symbols: nodes.runtimeProfileAllowedSymbols.value.split(",").map((item) => item.trim()).filter(Boolean),
+    trading_product_type: nodes.runtimeProfileProductType.value,
+    margin_mode: nodes.runtimeProfileMarginMode.value,
+    default_order_qty: Number(nodes.runtimeProfileDefaultOrderQty.value || 0),
+    max_notional_per_symbol: Number(nodes.runtimeProfileMaxNotional.value || 0),
+    max_abs_position_qty: Number(nodes.runtimeProfileMaxPositionQty.value || 0),
+    max_open_orders: Number(nodes.runtimeProfileMaxOpenOrders.value || 0),
+    default_target_leverage: Number(nodes.runtimeProfileDefaultLeverage.value || 1),
+    max_target_leverage: Number(nodes.runtimeProfileMaxLeverage.value || 1),
+    strategy_short_bias_enabled: nodes.runtimeProfileShortBias.checked,
+    strategy_dynamic_leverage_enabled: nodes.runtimeProfileDynamicLeverage.checked,
+  };
+}
+
+function renderRuntimeProfileImpact(revision) {
+  const diff = revision.diff || {};
+  const postureChange = diff.classification === "product_posture_change" || diff.classification === "account_interpretation_change";
+  return `
+    <div class="signal-card">
+      <div class="signal-head">
+        <span class="signal-title">${escapeHtml(revision.profile_label || "-")}</span>
+        ${miniBadge(readableState(diff.classification || revision.change_classification || "-"), postureChange ? "warning" : "info")}
+      </div>
+      <div class="detail-meta">${escapeHtml(revision.revision_id || "-")}</div>
+      <div class="signal-copy">${escapeHtml((revision.diff_narrative || ["No human-readable diff available."]).join(" "))}</div>
+      ${renderDetailFacts([
+        ["Changed Fields", listOrDash(diff.changed_fields)],
+        ["Activation Note", revision.activation_note || "-"],
+        ["Stage Guard", postureChange ? "Open-order preflight will run before staging." : "Restart-gated parameter update."],
+      ])}
+    </div>
+  `;
+}
+
+function renderRuntimeProfileActions(revision) {
+  return `
+    <div class="table-actions">
+      <button class="table-button" data-select-runtime-profile="${escapeHtml(revision.revision_id)}">Edit</button>
+      <button class="table-button" data-stage-runtime-profile="${escapeHtml(revision.revision_id)}" ${revision.is_active ? "disabled" : ""}>Stage</button>
+    </div>
+  `;
+}
+
+async function createRuntimeProfileDraft() {
+  const profileLabel = nodes.runtimeProfileLabel.value.trim() || "Runtime profile draft";
+  try {
+    const response = await requestJson("/runtime-profiles/drafts", {
+      method: "POST",
+      body: { profile_label: profileLabel },
+    });
+    flash(`Draft ${response.revision.profile_label} created.`, "info");
+    await refreshDashboard({ manual: true });
+    nodes.runtimeProfileRevisionSelect.value = response.revision.revision_id;
+    populateRuntimeProfileDraftForm();
+    setActiveView("runtime-profiles");
+  } catch (error) {
+    flash(`Draft creation failed: ${normalizeError(error, "Runtime profile draft creation failed").message}`, "danger");
+    renderDashboard({ manual: true });
+  }
+}
+
+async function saveRuntimeProfileDraft() {
+  const revision = selectedRuntimeProfileRevision();
+  if (!revision) {
+    flash("Create or select a runtime profile draft first.", "warning");
+    renderAlerts();
+    return;
+  }
+  try {
+    await requestJson(`/runtime-profiles/revisions/${encodeURIComponent(revision.revision_id)}`, {
+      method: "PATCH",
+      body: {
+        profile_label: nodes.runtimeProfileLabel.value.trim(),
+        activation_note: nodes.runtimeProfileActivationNote.value.trim() || null,
+        payload: runtimeProfilePayloadFromForm(),
+      },
+    });
+    flash("Runtime profile draft saved.", "info");
+    await refreshDashboard({ manual: true });
+    nodes.runtimeProfileRevisionSelect.value = revision.revision_id;
+    populateRuntimeProfileDraftForm();
+  } catch (error) {
+    flash(`Runtime profile save failed: ${normalizeError(error, "Runtime profile save failed").message}`, "danger");
+    renderDashboard({ manual: true });
+  }
+}
+
+async function stageRuntimeProfileDraft() {
+  const revision = selectedRuntimeProfileRevision();
+  if (!revision) {
+    flash("Select a runtime profile draft before staging it.", "warning");
+    renderAlerts();
+    return;
+  }
+  if (!window.confirm("Stage this runtime profile for activation? A restart will be required before it can take effect.")) {
+    return;
+  }
+  try {
+    await requestJson(`/runtime-profiles/revisions/${encodeURIComponent(revision.revision_id)}/stage`, {
+      method: "POST",
+      body: { activation_note: nodes.runtimeProfileActivationNote.value.trim() || null },
+    });
+    flash("Runtime profile staged. Restart the managed API to activate it.", "warning");
+    await refreshDashboard({ manual: true });
+  } catch (error) {
+    flash(`Runtime profile staging failed: ${normalizeError(error, "Runtime profile staging failed").message}`, "danger");
+    renderDashboard({ manual: true });
+  }
+}
+
+async function cancelPendingRuntimeProfile() {
+  try {
+    await requestJson("/runtime-profiles/pending/cancel", { method: "POST" });
+    flash("Pending runtime profile activation canceled.", "info");
+    await refreshDashboard({ manual: true });
+  } catch (error) {
+    flash(`Cancel pending failed: ${normalizeError(error, "Runtime profile cancel failed").message}`, "danger");
+    renderDashboard({ manual: true });
+  }
+}
+
+async function requestRuntimeProfileRestart() {
+  if (!window.confirm("Request a managed restart? This is only effective when the API is running under the managed supervisor.")) {
+    return;
+  }
+  try {
+    await requestJson("/runtime-profiles/restart", { method: "POST" });
+    flash("Managed restart requested.", "warning");
+    await refreshDashboard({ manual: true });
+  } catch (error) {
+    flash(`Restart request failed: ${normalizeError(error, "Restart request failed").message}`, "danger");
+    renderDashboard({ manual: true });
+  }
+}
+
+async function createOperatorUser() {
+  const username = nodes.operatorCreateUsername.value.trim();
+  const password = nodes.operatorCreatePassword.value;
+  const role = nodes.operatorCreateRole.value;
+  const enabled = nodes.operatorCreateEnabled.checked;
+  if (!username || !password) {
+    flash("Username and password are required to create an operator user.", "warning");
+    renderAlerts();
+    return;
+  }
+  nodes.operatorCreateButton.disabled = true;
+  nodes.operatorCreateButton.textContent = "Creating...";
+  try {
+    await requestJson("/auth/users", {
+      method: "POST",
+      body: { username, password, role, enabled },
+    });
+    nodes.operatorCreateForm.reset();
+    nodes.operatorCreateRole.value = "viewer";
+    nodes.operatorCreateEnabled.checked = true;
+    flash(`Operator user ${username} created.`, "info");
+    await refreshDashboard({ manual: true });
+  } catch (error) {
+    flash(`User creation failed: ${normalizeError(error, "Operator user creation failed").message}`, "danger");
+    renderDashboard({ manual: true });
+  } finally {
+    nodes.operatorCreateButton.disabled = !operatorCanAdmin();
+    nodes.operatorCreateButton.textContent = "Create User";
+  }
+}
+
+async function toggleOperatorUser(username, nextEnabled) {
+  if (!username) {
+    return;
+  }
+  const actionLabel = nextEnabled ? "enable" : "disable";
+  if (!window.confirm(`${actionLabel === "enable" ? "Enable" : "Disable"} operator user ${username}?`)) {
+    return;
+  }
+  await patchOperatorUser(username, { enabled: nextEnabled }, `Operator user ${username} ${nextEnabled ? "enabled" : "disabled"}.`);
+}
+
+async function updateOperatorUserRole(username, currentRole) {
+  if (!username) {
+    return;
+  }
+  const nextRole = (window.prompt("Enter the new role: viewer, operator, or admin.", currentRole || "viewer") || "").trim();
+  if (!nextRole || nextRole === currentRole) {
+    return;
+  }
+  if (!["viewer", "operator", "admin"].includes(nextRole)) {
+    flash("Role must be one of viewer, operator, or admin.", "warning");
+    renderAlerts();
+    return;
+  }
+  await patchOperatorUser(username, { role: nextRole }, `Operator user ${username} role updated to ${nextRole}.`);
+}
+
+async function resetOperatorUserPassword(username) {
+  if (!username) {
+    return;
+  }
+  const password = window.prompt(`Enter a new password for ${username}.`, "");
+  if (password === null) {
+    return;
+  }
+  if (!password) {
+    flash("Password reset requires a non-empty password.", "warning");
+    renderAlerts();
+    return;
+  }
+  await patchOperatorUser(username, { password }, `Password reset for ${username} completed.`);
+}
+
+async function deleteOperatorUser(username) {
+  if (!username) {
+    return;
+  }
+  if (!window.confirm(`Delete operator user ${username}? This removes the stored login account.`)) {
+    return;
+  }
+  try {
+    await requestJson(`/auth/users/${encodeURIComponent(username)}`, { method: "DELETE" });
+    flash(`Operator user ${username} deleted.`, "info");
+    await refreshDashboard({ manual: true });
+  } catch (error) {
+    flash(`User deletion failed: ${normalizeError(error, "Operator user deletion failed").message}`, "danger");
+    renderDashboard({ manual: true });
+  }
+}
+
+async function patchOperatorUser(username, payload, successMessage) {
+  try {
+    await requestJson(`/auth/users/${encodeURIComponent(username)}`, {
+      method: "PATCH",
+      body: payload,
+    });
+    flash(successMessage, "info");
+    await refreshDashboard({ manual: true });
+  } catch (error) {
+    flash(`User update failed: ${normalizeError(error, "Operator user update failed").message}`, "danger");
+    renderDashboard({ manual: true });
+  }
 }
 
 async function inspectLatestDecision() {
@@ -836,8 +1469,15 @@ async function inspectLatestReconciliation() {
         ["Exchange Aware", booleanWord(detail.reconciliation?.exchange_comparison_enabled)],
       ],
       sections: [
-        detailCard("Mismatch Summary", detail.mismatch_summary || {}),
-        detailCard("Reconciliation", detail.reconciliation || {}),
+        detailCard("Mismatch Summary", detail.mismatch_summary || {}, {
+          narrative: reconciliationNarrative(detail),
+          facts: [
+            ["Mismatch Categories", listOrDash(detail.reconciliation?.mismatch_categories)],
+            ["Mismatch Reasons", listOrDash(detail.reconciliation?.mismatch_reasons)],
+            ["Recommended Action", detail.reconciliation?.recommended_operator_action || "-"],
+          ],
+        }),
+        detailCard("Reconciliation Payload", detail.reconciliation || {}),
       ],
     });
   } catch (error) {
@@ -856,11 +1496,24 @@ function inspectSystemDetail() {
       ["Submit Blocked", booleanWord(state.data.health?.submit_blocked)],
     ],
     sections: [
-      detailCard("Health", state.data.health || {}),
-      detailCard("Mode", state.data.mode || {}),
-      detailCard("Recovery", state.data.systemRecovery || {}),
-      detailCard("Blockers", state.data.blockers || {}),
-      detailCard("Account", state.data.accountState || {}),
+      detailCard("System Posture", { health: state.data.health || {}, mode: state.data.mode || {} }, {
+        narrative: systemNarrative(),
+        facts: [
+          ["Runtime Profile", readableMode(state.data.mode?.runtime_profile?.name)],
+          ["Product Type", readableMode(state.data.mode?.environment_capabilities?.product_type)],
+          ["Execution Route", state.data.mode?.execution_route || "-"],
+          ["Blockers", String((state.data.blockers?.blockers || []).length)],
+        ],
+      }),
+      detailCard("Recovery", state.data.systemRecovery || {}, {
+        narrative: recoveryNarrative(),
+      }),
+      detailCard("Blockers", state.data.blockers || {}, {
+        narrative: blockerNarrative(state.data.blockers?.blockers || []),
+      }),
+      detailCard("Account", state.data.accountState || {}, {
+        narrative: accountNarrative(state.data.accountState || {}),
+      }),
     ],
   });
 }
@@ -879,10 +1532,20 @@ function inspectRecoveryDetail() {
       ["Baseline Status", readableState(baseline.status)],
     ],
     sections: [
-      detailCard("System Recovery", state.data.systemRecovery || {}),
-      detailCard("Runtime Recovery", state.data.runtime?.recovery || {}),
-      detailCard("Baseline Takeover", baseline || {}),
-      detailCard("Account State", state.data.accountState || {}),
+      detailCard("Recovery Summary", state.data.systemRecovery || {}, {
+        narrative: recoveryNarrative(),
+        facts: [
+          ["Resume Blockers", listOrDash(recovery.resume_blocked_reasons)],
+          ["Last Resume Status", readableState(recovery.last_resume_status)],
+          ["Last Rebaseline", formatMaybeTimestamp(recovery.last_rebaseline_at)],
+        ],
+      }),
+      detailCard("Baseline Takeover", baseline || {}, {
+        narrative: baselineNarrative(baseline || {}),
+      }),
+      detailCard("Account State", state.data.accountState || {}, {
+        narrative: accountNarrative(state.data.accountState || {}),
+      }),
     ],
   });
 }
@@ -897,10 +1560,24 @@ function inspectRuntimeDetail() {
       ["Uptime", formatDuration(state.data.runtime?.uptime_seconds)],
     ],
     sections: [
-      detailCard("Runtime", state.data.runtime || {}),
-      detailCard("Recovery", state.data.systemRecovery || {}),
-      detailCard("Metrics", state.data.metrics || {}),
-      detailCard("Replay", state.data.replayStatus || {}),
+      detailCard("Runtime Summary", state.data.runtime || {}, {
+        narrative: runtimeNarrative(),
+        facts: [
+          ["Profile", readableMode(state.data.runtime?.runtime_profile?.name || state.data.mode?.runtime_profile?.name)],
+          ["Product", readableMode(state.data.runtime?.environment_capabilities?.product_type || state.data.mode?.environment_capabilities?.product_type)],
+          ["Margin", readableMode(state.data.runtime?.environment_capabilities?.margin_model || state.data.mode?.environment_capabilities?.margin_model)],
+          ["Directionality", readableMode(state.data.runtime?.environment_capabilities?.position_directionality || state.data.mode?.environment_capabilities?.position_directionality)],
+        ],
+      }),
+      detailCard("Recovery", state.data.systemRecovery || {}, {
+        narrative: recoveryNarrative(),
+      }),
+      detailCard("Metrics", state.data.metrics || {}, {
+        narrative: metricsNarrative(state.data.metrics || {}),
+      }),
+      detailCard("Replay", state.data.replayStatus || {}, {
+        narrative: replayNarrative(state.data.replayStatus || {}),
+      }),
     ],
   });
 }
@@ -915,7 +1592,10 @@ function inspectPortfolioDetail() {
       ["Updated", formatMaybeTimestamp(state.data.portfolio?.latest_update_timestamp)],
     ],
     sections: [
-      detailCard("Portfolio Snapshot", state.data.portfolio?.portfolio || {}),
+      detailCard("Portfolio Snapshot", state.data.portfolio?.portfolio || {}, {
+        narrative: portfolioNarrative(state.data.portfolio?.portfolio || {}),
+        facts: portfolioDetailFacts(state.data.portfolio?.portfolio || {}),
+      }),
     ],
   });
 }
@@ -931,8 +1611,8 @@ async function inspectDecision(decisionId, { manual = false } = {}) {
   try {
     const detail = await requestJson(`/decision/${encodeURIComponent(decisionId)}`);
     nodes.decisionLookupInput.value = decisionId;
-    showStructuredDetail({
-      title: "Decision Detail",
+      showStructuredDetail({
+        title: "Decision Detail",
       summary: [
         ["Decision ID", detail.decision_id],
         ["Symbol", detail.decision_context?.symbol],
@@ -941,26 +1621,47 @@ async function inspectDecision(decisionId, { manual = false } = {}) {
         ["Policy Allowed", booleanWord(detail.policy_decision?.execution_allowed)],
         ["Risk Approved", booleanWord(detail.risk_decision?.approved)],
       ],
-      sections: [
-        detailCard("Decision Context", detail.decision_context || {}),
-        detailCard("Baseline Assessment", detail.baseline_assessment || {}),
-        detailCard("AI Assessment", detail.ai_assessment || {}),
-        detailCard("Target / Policy / Risk", {
-          position_target: detail.position_target || null,
-          policy_decision: detail.policy_decision || null,
-          risk_decision: detail.risk_decision || null,
-        }),
-        detailCard("Execution Chain", {
-          execution_plan: detail.execution_plan || null,
-          order_intents: detail.order_intents || [],
-          order_updates: detail.order_updates || [],
-          fills: detail.fills || [],
-          portfolio_snapshot: detail.portfolio_snapshot || null,
-          reconciliations: detail.reconciliations || [],
-        }),
-        detailCard("Audit", detail.audit || {}),
-      ],
-    });
+        sections: [
+          detailCard("Decision Summary", detail, {
+            narrative: decisionNarrative(detail),
+            facts: [
+              ["Position Intent", readableMode(detail.position_target?.position_intent)],
+              ["Exposure Side", readableMode(detail.position_target?.target_exposure_side)],
+              ["Risk Rejections", listOrDash(detail.risk_decision?.rejection_reasons)],
+              ["Execution Outcome", decisionExecutionOutcome(detail)],
+            ],
+          }),
+          detailCard("Decision Context", detail.decision_context || {}, {
+            narrative: decisionContextNarrative(detail.decision_context || {}),
+          }),
+          detailCard("Baseline Assessment", detail.baseline_assessment || {}, {
+            narrative: baselineAssessmentNarrative(detail.baseline_assessment || {}),
+          }),
+          detailCard("AI Assessment", detail.ai_assessment || {}, {
+            narrative: aiAssessmentNarrative(detail.ai_assessment || {}),
+          }),
+          detailCard("Target / Policy / Risk", {
+            position_target: detail.position_target || null,
+            policy_decision: detail.policy_decision || null,
+            risk_decision: detail.risk_decision || null,
+          }, {
+            narrative: targetPolicyRiskNarrative(detail),
+          }),
+          detailCard("Execution Chain", {
+            execution_plan: detail.execution_plan || null,
+            order_intents: detail.order_intents || [],
+            order_updates: detail.order_updates || [],
+            fills: detail.fills || [],
+            portfolio_snapshot: detail.portfolio_snapshot || null,
+            reconciliations: detail.reconciliations || [],
+          }, {
+            narrative: executionChainNarrative(detail),
+          }),
+          detailCard("Audit", detail.audit || {}, {
+            narrative: auditNarrative(detail.audit || {}),
+          }),
+        ],
+      });
   } catch (error) {
     flash(`Decision lookup failed: ${normalizeError(error, "Decision lookup failed").message}`, "danger");
     renderAlerts();
@@ -978,8 +1679,8 @@ async function inspectOrder(orderId, { manual = false } = {}) {
   try {
     const detail = await requestJson(`/orders/${encodeURIComponent(orderId)}`);
     nodes.orderLookupInput.value = orderId;
-    showStructuredDetail({
-      title: "Order Detail",
+      showStructuredDetail({
+        title: "Order Detail",
       summary: [
         ["Order ID", detail.order?.client_order_id],
         ["Decision ID", detail.order?.decision_id],
@@ -988,11 +1689,21 @@ async function inspectOrder(orderId, { manual = false } = {}) {
         ["Venue", detail.order?.venue],
         ["Requested Qty", formatNumber(detail.order?.requested_qty)],
       ],
-      sections: [
-        detailCard("Order", detail.order || {}),
-        detailCard("Linked Fills", detail.fills || []),
-      ],
-    });
+        sections: [
+          detailCard("Order Summary", detail.order || {}, {
+            narrative: orderNarrative(detail.order || {}, detail.fills || []),
+            facts: [
+              ["Position Intent", detail.order?.submission_payload?.positionIntent || "-"],
+              ["Exchange Order ID", detail.order?.exchange_order_id || "-"],
+              ["Filled Qty", formatNumber(detail.order?.filled_qty)],
+              ["Average Fill", formatNumber(detail.order?.average_fill_price)],
+            ],
+          }),
+          detailCard("Linked Fills", detail.fills || [], {
+            narrative: linkedFillsNarrative(detail.fills || []),
+          }),
+        ],
+      });
   } catch (error) {
     flash(`Order lookup failed: ${normalizeError(error, "Order lookup failed").message}`, "danger");
     renderAlerts();
@@ -1010,8 +1721,8 @@ async function inspectFill(fillId, { manual = false } = {}) {
   try {
     const detail = await requestJson(`/fills/${encodeURIComponent(fillId)}`);
     nodes.fillLookupInput.value = fillId;
-    showStructuredDetail({
-      title: "Fill Detail",
+      showStructuredDetail({
+        title: "Fill Detail",
       summary: [
         ["Fill ID", detail.fill?.fill_id],
         ["Decision ID", detail.fill?.decision_id],
@@ -1020,10 +1731,18 @@ async function inspectFill(fillId, { manual = false } = {}) {
         ["Quantity", formatNumber(detail.fill?.fill_qty)],
         ["Price", formatNumber(detail.fill?.fill_price)],
       ],
-      sections: [
-        detailCard("Fill", detail.fill || {}),
-      ],
-    });
+        sections: [
+          detailCard("Fill Summary", detail.fill || {}, {
+            narrative: fillNarrative(detail.fill || {}),
+            facts: [
+              ["Intent", readableMode(detail.fill?.position_intent)],
+              ["Exposure Side", readableMode(detail.fill?.exposure_side)],
+              ["Fee Currency", detail.fill?.fee_currency || "-"],
+              ["Occurred", formatMaybeTimestamp(detail.fill?.exchange_timestamp)],
+            ],
+          }),
+        ],
+      });
   } catch (error) {
     flash(`Fill lookup failed: ${normalizeError(error, "Fill lookup failed").message}`, "danger");
     renderAlerts();
@@ -1038,7 +1757,7 @@ function renderDecisionHero(latestDecision, executionLatest) {
   const summary = latestDecision.summary || null;
   const latestOrder = executionLatest?.latest_order || null;
   const latestFill = executionLatest?.latest_fill || null;
-  const outcome = decisionOutcomeLabel(summary);
+  const outcome = decisionActivityLabel(latestDecision, latestOrder, latestFill, decisionOutcomeLabel(summary));
 
   if (!latestDecision.decision_id) {
     return emptyState("No latest decision is available yet.");
@@ -1058,12 +1777,16 @@ function renderDecisionHero(latestDecision, executionLatest) {
         </div>
       </div>
       <p class="hero-copy">${escapeHtml(outcome)}</p>
-      ${renderFactGrid([
-        ["Target Delta", formatSigned(target?.delta_position_qty)],
-        ["Target Qty", formatSigned(target?.target_position_qty)],
-        ["Baseline Bias", baseline?.direction_bias || "-"],
-        ["Composite Alpha", formatSigned(baseline?.composite_alpha_score)],
-        ["Position Scale", formatNumber(baseline?.suggested_position_scale)],
+        ${renderFactGrid([
+          ["Position Intent", target?.position_intent || "-"],
+          ["Exposure Side", readableMode(target?.target_exposure_side || "-")],
+          ["Product", readableMode(target?.product_type || latestDecision.decision_context?.product_type || "-")],
+          ["Margin", readableMode(target?.margin_mode || "-")],
+          ["Target Delta", formatSigned(target?.delta_position_qty)],
+          ["Target Qty", formatSigned(target?.target_position_qty)],
+          ["Baseline Bias", baseline?.direction_bias || "-"],
+          ["Composite Alpha", formatSigned(baseline?.composite_alpha_score)],
+          ["Position Scale", formatNumber(baseline?.suggested_position_scale)],
         ["Volatility Target", formatNumber(baseline?.volatility_target_scale)],
         ["Latest Order", latestOrder ? latestOrder.status : "-"],
         ["Latest Fill", latestFill ? `${formatNumber(latestFill.fill_qty)} @ ${formatNumber(latestFill.fill_price)}` : "-"],
@@ -1096,13 +1819,16 @@ function renderDecisionInvestigation(latestDecision) {
           ${miniBadge(risk.approved ? "risk approved" : "risk denied", risk.approved ? "success" : "danger")}
         </div>
       </div>
-      ${renderFactGrid([
-        ["Decision Time", formatMaybeTimestamp(context.as_of_ts)],
-        ["Bias", baseline.direction_bias || "-"],
-        ["Baseline Confidence", formatNumber(baseline.confidence)],
-        ["AI Mode", aiAssessment.operating_mode || state.data.mode?.ai_operating_mode || "-"],
-        ["Target Qty", formatSigned(target.target_position_qty)],
-        ["Target Delta", formatSigned(target.delta_position_qty)],
+        ${renderFactGrid([
+          ["Decision Time", formatMaybeTimestamp(context.as_of_ts)],
+          ["Product", readableMode(context.product_type)],
+          ["Exposure Side", readableMode(context.current_exposure_side)],
+          ["Target Leverage", formatNumber(target.target_leverage)],
+          ["Bias", baseline.direction_bias || "-"],
+          ["Baseline Confidence", formatNumber(baseline.confidence)],
+          ["AI Mode", aiAssessment.operating_mode || state.data.mode?.ai_operating_mode || "-"],
+          ["Target Qty", formatSigned(target.target_position_qty)],
+          ["Target Delta", formatSigned(target.delta_position_qty)],
         ["Risk Rejections", listOrDash(risk.rejection_reasons)],
         ["Latest Reconciliation", latestReconciliation?.severity || "-"],
       ])}
@@ -1117,7 +1843,235 @@ function renderDecisionInvestigation(latestDecision) {
   `;
 }
 
-function buildTimeline() {
+function decisionNarrative(detail) {
+  const context = detail.decision_context || {};
+  const target = detail.position_target || {};
+  const policy = detail.policy_decision || {};
+  const risk = detail.risk_decision || {};
+  const summary = detail.summary || {};
+  return [
+    `${context.symbol || "This symbol"} was evaluated on the ${context.timeframe || "-"} timeframe at ${formatMaybeTimestamp(context.as_of_ts)}.`,
+    `The system wanted to ${readableMode(target.position_intent || "hold")} and move exposure from ${formatSigned(target.current_position_qty)} to ${formatSigned(target.target_position_qty)}.`,
+    policy.execution_allowed
+      ? risk.approved
+        ? `Both policy and risk approved the action. ${decisionExecutionOutcome(detail)}`
+        : `Policy allowed the idea, but risk blocked it because of ${listOrDash(risk.rejection_reasons)}.`
+      : `Policy blocked the action because of ${listOrDash(policy.rejection_reasons)}.`,
+  ];
+}
+
+function decisionContextNarrative(context) {
+  return [
+    `The runtime was in ${readableMode(context.mode)} mode with current exposure ${readableMode(context.current_exposure_side)} ${formatSigned(context.current_position_qty)}.`,
+    `This decision used product type ${readableMode(context.product_type)} and current target leverage ${formatNumber(context.current_target_leverage)}.`,
+  ];
+}
+
+function baselineAssessmentNarrative(baseline) {
+  return [
+    `The baseline model saw the regime as ${readableMode(baseline.regime)} with a ${readableMode(baseline.direction_bias)} bias.`,
+    `Confidence was ${formatNumber(baseline.confidence)} and suggested position scale was ${formatNumber(baseline.suggested_position_scale)}.`,
+    `Main reason codes: ${listOrDash(baseline.reason_codes)}.`,
+  ];
+}
+
+function aiAssessmentNarrative(assessment) {
+  return [
+    `AI mode was ${readableMode(assessment.operating_mode)}.`,
+    assessment.fallback_used
+      ? `The system used a fallback assessment because ${readableMode(assessment.fallback_reason)}.`
+      : `The provider response was accepted with calibrated confidence ${formatNumber(assessment.calibrated_confidence)}.`,
+    `Directional edge was ${formatSigned(assessment.directional_edge)} with expected volatility ${formatNumber(assessment.expected_volatility)}.`,
+  ];
+}
+
+function targetPolicyRiskNarrative(detail) {
+  const target = detail.position_target || {};
+  const policy = detail.policy_decision || {};
+  const risk = detail.risk_decision || {};
+  return [
+    `Target intent was ${readableMode(target.position_intent)} on ${readableMode(target.product_type)} with ${readableMode(target.margin_mode)} margin semantics.`,
+    `Policy ${policy.execution_allowed ? "allowed" : "blocked"} the action. Risk ${risk.approved ? "approved" : "blocked"} it.`,
+    `Risk constraints applied: ${listOrDash(risk.constraints_applied)}.`,
+  ];
+}
+
+function executionChainNarrative(detail) {
+  const intents = detail.order_intents || [];
+  const orders = detail.order_updates || [];
+  const fills = detail.fills || [];
+  const reconciliations = detail.reconciliations || [];
+  return [
+    `This decision produced ${intents.length} intent${pluralize(intents.length)}, ${orders.length} order update${pluralize(orders.length)}, and ${fills.length} fill${pluralize(fills.length)}.`,
+    fills.length
+      ? `A portfolio snapshot and reconciliation were generated after execution. Reconciliation count: ${reconciliations.length}.`
+      : `No fill was ingested yet, so downstream portfolio and reconciliation effects may still be pending.`,
+  ];
+}
+
+function auditNarrative(audit) {
+  return [
+    `Audit links the full chain from decision context through execution and reconciliation for decision ${audit.decision_id || "-"}.`,
+    `Linked refs: ${audit.order_intent_refs?.length || 0} intent${pluralize(audit.order_intent_refs?.length || 0)}, ${audit.order_state_refs?.length || 0} order update${pluralize(audit.order_state_refs?.length || 0)}, ${audit.fill_event_refs?.length || 0} fill${pluralize(audit.fill_event_refs?.length || 0)}.`,
+  ];
+}
+
+function orderNarrative(order, fills) {
+  return [
+    `This order was sent as a ${order.submission_payload?.ordType || "market"} ${order.submission_payload?.side || "-"} on ${order.symbol || "-"} through ${order.venue || "-"}.`,
+    `Current lifecycle state is ${readableMode(order.status)} with requested quantity ${formatNumber(order.requested_qty)} and filled quantity ${formatNumber(order.filled_qty)}.`,
+    fills.length
+      ? `There are ${fills.length} linked fill${pluralize(fills.length)} for this order.`
+      : `No linked fills are stored for this order yet.`,
+  ];
+}
+
+function linkedFillsNarrative(fills) {
+  if (!fills.length) {
+    return ["No fills have been linked to this order yet."];
+  }
+  const totalQty = fills.reduce((sum, fill) => sum + Number(fill.fill_qty || 0), 0);
+  return [
+    `${fills.length} fill${pluralize(fills.length)} are linked to this order.`,
+    `Total executed quantity across linked fills is ${formatNumber(totalQty)}.`,
+  ];
+}
+
+function fillNarrative(fill) {
+  return [
+    `This fill executed a ${fill.side || "-"} on ${fill.symbol || "-"} at ${formatNumber(fill.fill_price)} for quantity ${formatNumber(fill.fill_qty)}.`,
+    `It represents ${readableMode(fill.position_intent)} on ${readableMode(fill.product_type)} and affects ${readableMode(fill.exposure_side)} exposure.`,
+    `Fees were charged as ${formatNumber(fill.fee_amount)} ${fill.fee_currency || ""}`.trim(),
+  ];
+}
+
+function reconciliationNarrative(detail) {
+  const reconciliation = detail.reconciliation || {};
+  const severity = readableMode(reconciliation.severity);
+  if (!reconciliation.mismatch_categories?.length) {
+    return [
+      `This reconciliation report is ${severity}. The system did not find any mismatch that currently requires intervention.`,
+      reconciliation.exchange_comparison_enabled
+        ? "Exchange comparison was enabled for this report."
+        : "This report focused on local reconstruction consistency rather than exchange-side comparison.",
+    ];
+  }
+  return [
+    `This reconciliation report is ${severity} and found ${reconciliation.mismatch_categories.length} mismatch category${pluralize(reconciliation.mismatch_categories.length)}.`,
+    `Main mismatch reasons: ${listOrDash(reconciliation.mismatch_reasons)}.`,
+    `Recommended operator action: ${reconciliation.recommended_operator_action || "review the mismatch payload"}.`,
+  ];
+}
+
+function systemNarrative() {
+  const health = state.data.health || {};
+  const mode = state.data.mode || {};
+  return [
+    `The runtime is currently ${readableMode(health.runtime_state)} in ${readableMode(mode.operating_state)}.`,
+    health.execution_blocked
+      ? `Execution is blocked because of ${listOrDash((state.data.blockers?.blockers || []).map((item) => item.blocker))}.`
+      : "Execution is currently allowed. There are no active blockers stopping the mainline.",
+  ];
+}
+
+function recoveryNarrative() {
+  const recovery = recoveryData();
+  return [
+    `Recovery state is ${readableMode(recovery.recovery_state)}.`,
+    recovery.safe_to_trade
+      ? "The runtime currently considers trading safe."
+      : "The runtime does not currently consider trading safe.",
+    recovery.review_required
+      ? `Operator review is still required because of ${listOrDash(recovery.resume_blocked_reasons)}.`
+      : `Resume blockers: ${listOrDash(recovery.resume_blocked_reasons)}.`,
+  ];
+}
+
+function baselineNarrative(baseline) {
+  return [
+    `Baseline status is ${readableMode(baseline.status || baseline.baseline_status)}.`,
+    `It was created from ${readableMode(baseline.baseline_kind || baseline.baseline_source || "current account state")}.`,
+  ];
+}
+
+function accountNarrative(account) {
+  return [
+    `Account backend is ${readableMode(account.backend || account.account_source || "-")} and freshness is ${booleanWord(account.fresh)}.`,
+    `Current account read posture is ${account.ready ? "ready" : "not ready"} with blockers ${listOrDash(account.blockers)}.`,
+  ];
+}
+
+function runtimeNarrative() {
+  const runtime = state.data.runtime || {};
+  const mode = state.data.mode || {};
+  const environment = runtime.environment_capabilities || mode.environment_capabilities || {};
+  return [
+    `Runtime profile is ${readableMode(runtime.runtime_profile?.name || mode.runtime_profile?.name)}.`,
+    `Execution route is ${environment.execution_route || mode.execution_route || "-"} with ${readableMode(environment.product_type)} / ${readableMode(environment.margin_model)} semantics.`,
+    `Directionality is ${readableMode(environment.position_directionality)} and leverage support is ${readableMode(environment.leverage_support)}.`,
+  ];
+}
+
+function metricsNarrative(metrics) {
+  return [
+    `The runtime has processed ${formatNumber(metrics.decision_cycle_count)} decision cycles and emitted ${formatNumber(metrics.order_intent_count)} order intents.`,
+    `It has ingested ${formatNumber(metrics.fill_count)} fills and recorded ${formatNumber(metrics.rejection_count)} rejection${pluralize(metrics.rejection_count)}.`,
+  ];
+}
+
+function replayNarrative(replayStatus) {
+  return [
+    replayStatus.last_validation
+      ? `The most recent replay validation ran at ${formatMaybeTimestamp(replayStatus.last_validation.validated_at)}.`
+      : "No replay validation has been run recently.",
+    `Recent validations stored: ${formatNumber((replayStatus.recent_validations || []).length)}.`,
+  ];
+}
+
+function portfolioNarrative(portfolio) {
+  const primary = trackedPortfolioPosition(portfolio);
+  return [
+    `Total equity is ${formatNumber(portfolio.total_equity)} with gross exposure ${formatNumber(portfolio.gross_exposure)} and net exposure ${formatSigned(portfolio.net_exposure)}.`,
+    primary
+      ? `Primary tracked position is ${readableMode(primary.exposure_side)} ${formatSigned(primary.position_qty)} on ${primary.symbol}.`
+      : "No active tracked position is currently stored in the portfolio snapshot.",
+  ];
+}
+
+function portfolioDetailFacts(portfolio) {
+  const primary = trackedPortfolioPosition(portfolio);
+  return [
+    ["Primary Symbol", primary?.symbol || "-"],
+    ["Primary Side", readableMode(primary?.exposure_side || "-")],
+    ["Primary Qty", primary ? formatSigned(primary.position_qty) : "-"],
+    ["Margin Usage", formatNumber(portfolio.margin_usage)],
+    ["Tracked Positions", String((portfolio.positions || []).length)],
+  ];
+}
+
+function blockerNarrative(blockers) {
+  if (!blockers.length) {
+    return ["There are no current blocker records on the runtime."];
+  }
+  return [
+    `${blockers.length} blocker${pluralize(blockers.length)} are currently recorded.`,
+    `Most important blocker: ${blockers[0].blocker}. Recommended action: ${blockers[0].recommended_action}.`,
+  ];
+}
+
+function decisionExecutionOutcome(detail) {
+  const summary = detail.summary || {};
+  const result = summary.execution_result || {};
+  if (result.fill_count > 0) {
+    return `${result.fill_count} fill${pluralize(result.fill_count)} were ingested for this decision.`;
+  }
+  if (result.order_count > 0) {
+    return `${result.order_count} order${pluralize(result.order_count)} were created but no fill has been ingested yet.`;
+  }
+  return "No execution was created for this decision.";
+}
+
+function buildTimeline({ paperLocal = false } = {}) {
   const items = [];
   const latestDecision = state.data.latestDecision || {};
   const latestValidation = state.data.reconciliationLatest?.latest_validation || null;
@@ -1147,7 +2101,7 @@ function buildTimeline() {
     });
   }
 
-  if (latestRebaselineAction) {
+  if (!paperLocal && latestRebaselineAction) {
     items.push({
       title: "Operator rebaseline",
       subtitle: latestRebaselineAction.status || "-",
@@ -1157,7 +2111,7 @@ function buildTimeline() {
     });
   }
 
-  if (latestResumeAction) {
+  if (!paperLocal && latestResumeAction) {
     items.push({
       title: "Operator resume",
       subtitle: latestResumeAction.status || "-",
@@ -1268,18 +2222,120 @@ function showStructuredDetail({ title, summary = [], sections = [] }) {
     : `<div class="empty-state">No summary fields available.</div>`;
   const bodyHtml = sections.length
     ? sections.map((section) => `
-      <section class="detail-card">
-        <h3>${escapeHtml(section.title)}</h3>
-        <pre class="detail-json">${escapeHtml(JSON.stringify(section.value, null, 2))}</pre>
-      </section>
-    `).join("")
+        <section class="detail-card">
+          <h3>${escapeHtml(section.title)}</h3>
+          ${renderDetailNarrative(section.narrative || [])}
+          ${renderDetailFacts(section.facts || [])}
+          ${renderRawDetail(section.value)}
+        </section>
+      `).join("")
     : `<div class="empty-state">No detail sections available.</div>`;
   setDrawerContent(title, summaryHtml, bodyHtml);
   openDrawer();
 }
 
-function detailCard(title, value) {
-  return { title, value };
+function detailCard(title, value, options = {}) {
+  return {
+    title,
+    value,
+    narrative: options.narrative || [],
+    facts: options.facts || [],
+  };
+}
+
+function renderDetailNarrative(lines) {
+  if (!lines.length) {
+    return "";
+  }
+  return `<div class="detail-prose">${lines.map((line) => `<p>${escapeHtml(line)}</p>`).join("")}</div>`;
+}
+
+function renderDetailFacts(facts) {
+  if (!facts.length) {
+    return "";
+  }
+  return `<div class="detail-grid">${facts.map(([key, value]) => `
+    <div class="detail-grid-row">
+      <span class="detail-key">${escapeHtml(key)}</span>
+      <strong class="detail-value">${escapeHtml(value == null || value === "" ? "-" : String(value))}</strong>
+    </div>
+  `).join("")}</div>`;
+}
+
+function renderRawDetail(value) {
+  if (value == null || (typeof value === "object" && Object.keys(value).length === 0) || (Array.isArray(value) && value.length === 0)) {
+    return `<div class="detail-empty-note">No raw payload for this section.</div>`;
+  }
+  return `
+    <details class="detail-raw">
+      <summary>Raw JSON</summary>
+      <pre class="detail-json">${escapeHtml(JSON.stringify(value, null, 2))}</pre>
+    </details>
+  `;
+}
+
+function recentDecisionHeadline(item) {
+  const intent = readableMode(item.position_target?.position_intent || item.position_intent || "hold");
+  const symbol = item.symbol || "tracked symbol";
+  const delta = Number(item.position_target?.delta_position_qty ?? item.target_delta_qty ?? item.delta_position_qty ?? 0);
+  if (Math.abs(delta) < 1e-12 || intent === "hold") {
+    return `Hold ${symbol}`;
+  }
+  const side = delta > 0 ? "increase" : "reduce";
+  return `${capitalizeWord(intent)} ${symbol} and ${side} exposure`;
+}
+
+function recentDecisionNarrative(item) {
+  const target = item.position_target || {};
+  const current = formatSigned(target.current_position_qty ?? item.current_position_qty ?? 0);
+  const next = formatSigned(target.target_position_qty ?? item.target_position_qty ?? 0);
+  return `Exposure would move from ${current} to ${next} with ${readableMode(target.product_type || item.product_type || "-")} semantics.`;
+}
+
+function recentDecisionOutcome(item) {
+  if (item.policy_result === false) {
+    return `Policy stopped the idea because of ${listOrDash(item.policy_rejection_reasons || item.policy_decision?.rejection_reasons)}.`;
+  }
+  if (item.risk_result === false) {
+    return `Risk stopped the idea because of ${listOrDash(item.risk_rejection_reasons || item.risk_decision?.rejection_reasons)}.`;
+  }
+  const orderCount = Number(item.execution_result?.order_count ?? item.order_count ?? 0);
+  const fillCount = Number(item.execution_result?.fill_count ?? item.fill_count ?? 0);
+  if (fillCount > 0) {
+    return `${fillCount} fill${pluralize(fillCount)} landed from this decision.`;
+  }
+  if (orderCount > 0) {
+    return `${orderCount} order${pluralize(orderCount)} were created and are still syncing.`;
+  }
+  return "The decision passed safety checks but did not need to place an order.";
+}
+
+function recentOrderHeadline(order) {
+  const side = readableMode(order.submission_payload?.side || order.side || "-");
+  const type = readableMode(order.submission_payload?.ordType || order.order_type || "market");
+  return `${capitalizeWord(side)} ${formatNumber(order.requested_qty)} ${order.symbol || "-" } as a ${type} order`;
+}
+
+function recentOrderNarrative(order) {
+  const intent = readableMode(order.submission_payload?.positionIntent || order.position_intent || "-");
+  return `This order carries ${intent} intent through ${order.venue || order.submission_mode || "-"} on ${readableMode(order.product_type || "-")} rules.`;
+}
+
+function recentOrderStateSummary(order) {
+  return `${order.venue || order.submission_mode || "-"} | filled ${formatNumber(order.filled_qty)} of ${formatNumber(order.requested_qty)}`;
+}
+
+function recentFillHeadline(fill) {
+  const side = readableMode(fill.side || "-");
+  return `${capitalizeWord(side)} ${formatNumber(fill.fill_qty)} ${fill.symbol || "-"}`;
+}
+
+function recentFillNarrative(fill) {
+  return `Executed at ${formatNumber(fill.fill_price)} with ${readableMode(fill.position_intent || "-")} intent on ${readableMode(fill.product_type || "-")}.`;
+}
+
+function recentFillImpactSummary(fill) {
+  return `${formatNumber(fill.fill_qty)} @ ${formatNumber(fill.fill_price)} | ${readableMode(fill.exposure_side || "flat")}`;
 }
 
 function setDrawerContent(title, summaryHtml, bodyHtml) {
@@ -1350,6 +2406,114 @@ function recoveryData() {
   return state.data.systemRecovery?.recovery || state.data.runtime?.recovery || state.data.accountState?.recovery || {};
 }
 
+function trackedSymbol() {
+  return state.data.latestDecision?.decision_context?.symbol
+    || state.data.latestFill?.symbol
+    || state.data.executionLatest?.latest_fill?.symbol
+    || state.data.executionLatest?.latest_order?.symbol
+    || state.data.runtime?.symbols?.[0]
+    || null;
+}
+
+function trackedPortfolioPosition(portfolio) {
+  if (!portfolio?.positions?.length) {
+    return null;
+  }
+  const symbol = trackedSymbol();
+  return portfolio.positions.find((position) => position.symbol === symbol) || portfolio.positions[0] || null;
+}
+
+function positionPosture(position) {
+  if (!position) {
+    return "flat";
+  }
+  return `${readableMode(position.exposure_side || "flat")} ${formatNumber(position.position_qty)}`;
+}
+
+function fillFreshnessLabel(fill) {
+  if (!fill?.ingestion_timestamp) {
+    return "-";
+  }
+  return `${formatMaybeTimestamp(fill.ingestion_timestamp)} | ${formatRelativeAge(fill.ingestion_timestamp)}`;
+}
+
+function decisionActivityLabel(latestDecision, latestOrder, latestFill, fallback = "No decision outcome.") {
+  const summary = latestDecision?.summary || {};
+  const result = summary.execution_result || {};
+  const target = latestDecision?.position_target || {};
+  if (result.fill_count > 0 && latestFill) {
+    return `Latest decision ${readableMode(target.position_intent || "executed")} and produced a fill ${formatRelativeAge(latestFill.ingestion_timestamp)}.`;
+  }
+  if (result.order_count > 0 && latestOrder) {
+    return `Latest decision submitted ${readableMode(target.position_intent || "an order")}; awaiting or syncing execution state.`;
+  }
+  if (target.position_intent === "hold" || Math.abs(Number(target.delta_position_qty || 0)) < 1e-12) {
+    return "Latest decision is holding current posture. No trade was required.";
+  }
+  if (summary.risk_result === false) {
+    return "Latest decision was blocked by risk controls.";
+  }
+  if (summary.policy_result === false) {
+    return "Latest decision was blocked by policy controls.";
+  }
+  return fallback;
+}
+
+function runtimeProfileData() {
+  return state.data.runtime?.runtime_profile || state.data.mode?.runtime_profile || state.data.health?.runtime_profile || {};
+}
+
+function environmentData() {
+  return state.data.runtime?.environment_capabilities || state.data.mode?.environment_capabilities || state.data.health?.environment_capabilities || {};
+}
+
+function recoveryPolicyData() {
+  return state.data.runtime?.recovery_policy || state.data.mode?.recovery_policy || state.data.health?.recovery_policy || {};
+}
+
+function applyOverviewProfile(runtimeProfile) {
+  const paperLocal = runtimeProfile.name === "paper_local";
+  nodes.overviewPostureTitle.textContent = paperLocal ? "Local Paper Posture" : "System Posture";
+  nodes.overviewPostureCopy.textContent = paperLocal
+    ? "Shared decision and risk core with local paper execution. Exchange repair controls stay out of the landing view."
+    : "Health, readiness, and execution gating.";
+  nodes.overviewRecoveryTitle.textContent = "Recovery Control";
+  nodes.overviewRecoveryCopy.textContent = "Baseline takeover, review posture, and whether resume is actually safe.";
+  nodes.overviewRecoveryPanel.hidden = paperLocal;
+  nodes.inspectRecoveryButton.hidden = paperLocal;
+}
+
+function executionHeadline(runtimeProfile, environment, mode) {
+  if (runtimeProfile.name === "paper_local") {
+    return "Local Paper Execution";
+  }
+  if (environment.exchange_submission_enabled) {
+    return "Exchange Submit Enabled";
+  }
+  return mode.exchange_submit_allowed ? "Exchange Armed" : "Guarded Exchange";
+}
+
+function executionModeBadge(environment, mode) {
+  if (!environment.exchange_coupled) {
+    return "paper fills";
+  }
+  return mode.guarded_execution_dry_run ? "dry run" : environment.exchange_submission_enabled ? "submit enabled" : "guarded";
+}
+
+function executionModeTone(environment, mode) {
+  if (!environment.exchange_coupled) {
+    return "outline";
+  }
+  return mode.guarded_execution_dry_run ? "warning" : environment.exchange_submission_enabled ? "success" : "info";
+}
+
+function executionCopy(runtimeProfile, environment, mode) {
+  if (runtimeProfile.name === "paper_local") {
+    return "Orders stay inside the local paper adapter in this profile. No exchange submission occurs.";
+  }
+  return mode.exchange_submit_allowed ? "All exchange submission gates are clear." : listOrDash(mode.submit_blocked_reasons);
+}
+
 function recoverySummaryLine(recovery) {
   const parts = [];
   if (recovery.resume_eligible) {
@@ -1371,6 +2535,25 @@ function formatDuration(seconds) {
   if (number < 60) return `${Math.round(number)}s`;
   if (number < 3600) return `${Math.floor(number / 60)}m ${Math.round(number % 60)}s`;
   return `${Math.floor(number / 3600)}h ${Math.floor((number % 3600) / 60)}m`;
+}
+
+function formatRelativeAge(value) {
+  if (!value) return "-";
+  const deltaSeconds = Math.max(0, Math.round((Date.now() - dateValue(value)) / 1000));
+  if (!Number.isFinite(deltaSeconds)) return "-";
+  if (deltaSeconds < 60) return `${deltaSeconds}s ago`;
+  if (deltaSeconds < 3600) return `${Math.floor(deltaSeconds / 60)}m ago`;
+  if (deltaSeconds < 86400) return `${Math.floor(deltaSeconds / 3600)}h ago`;
+  return `${Math.floor(deltaSeconds / 86400)}d ago`;
+}
+
+function pluralize(count) {
+  return Number(count) === 1 ? "" : "s";
+}
+
+function capitalizeWord(value) {
+  const text = value == null ? "" : String(value);
+  return text ? `${text.charAt(0).toUpperCase()}${text.slice(1)}` : "-";
 }
 
 function readableState(value) {

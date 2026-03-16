@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import Field
@@ -12,6 +13,8 @@ EnvironmentName = Literal["dev", "staging", "prod"]
 SupportedTimeframe = Literal["15m", "1h"]
 StorageMode = Literal["memory", "postgres"]
 PersistenceMode = Literal["strict", "permissive"]
+TradingProductType = Literal["spot", "derivatives"]
+MarginMode = Literal["cash", "cross", "isolated"]
 ConfigProfile = Literal[
     "local_demo",
     "real_market_paper",
@@ -93,22 +96,26 @@ class AATSSettings(BaseSettings):
     okx_account_refresh_interval_seconds: float = 15.0
     okx_execution_sync_interval_seconds: float = 5.0
     okx_fill_fetch_limit: int = 100
+    trading_product_type: TradingProductType = "spot"
+    margin_mode: MarginMode = "cash"
+    max_target_leverage: float = 1.0
+    default_target_leverage: float = 1.0
+    strategy_short_bias_enabled: bool = False
+    strategy_dynamic_leverage_enabled: bool = False
+    max_margin_usage_fraction: float = 0.85
+    liquidation_buffer_fraction: float = 0.15
     api_host: str = "127.0.0.1"
     api_port: int = 8000
     operator_auth_enabled: bool = False
     operator_read_api_key: str | None = None
     operator_write_api_key: str | None = None
     operator_unsafe_write_without_auth: bool = False
+    operator_bootstrap_enabled: bool = True
+    operator_bootstrap_user_file: str = "docs/user.txt"
     operator_session_secret: str | None = None
     operator_session_cookie_name: str = "aats_operator_session"
     operator_session_max_age_seconds: int = 43_200
     operator_session_cookie_secure: bool = False
-    operator_viewer_username: str | None = None
-    operator_viewer_password: str | None = None
-    operator_operator_username: str | None = None
-    operator_operator_password: str | None = None
-    operator_admin_username: str | None = None
-    operator_admin_password: str | None = None
     log_level: str = "INFO"
     log_dir: str = "logs"
     log_rotate_max_bytes: int = 5_242_880
@@ -118,10 +125,12 @@ class AATSSettings(BaseSettings):
 
     @classmethod
     def model_validate(cls, obj: Any, *args: Any, **kwargs: Any) -> "AATSSettings":
-        # BaseSettings.model_validate() will still consult .env sources. When callers
-        # pass an explicit dict, treat it as a concrete override set instead.
+        # BaseSettings instances still consult process environment unless we neutralize
+        # the env prefix as well as the env file. Callers that pass an explicit dict
+        # expect deterministic defaults plus their overrides, not the operator shell's
+        # live AATS_* values leaking into tests or runtime-built settings objects.
         if isinstance(obj, dict):
-            return cls(_env_file=None, **obj)
+            return cls(_env_file=None, _env_prefix="__AATS_EXPLICIT_CONFIG__", **obj)
         return super().model_validate(obj, *args, **kwargs)
 
     @property
@@ -142,11 +151,8 @@ class AATSSettings(BaseSettings):
 
     @property
     def operator_session_configured(self) -> bool:
-        return bool(
-            self.operator_session_secret
-            and (
-                (self.operator_viewer_username and self.operator_viewer_password)
-                or (self.operator_operator_username and self.operator_operator_password)
-                or (self.operator_admin_username and self.operator_admin_password)
-            )
-        )
+        return bool(self.operator_session_secret)
+
+    @property
+    def operator_bootstrap_users_configured(self) -> bool:
+        return Path(self.operator_bootstrap_user_file).exists()

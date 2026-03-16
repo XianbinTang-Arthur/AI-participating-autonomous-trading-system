@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 from datetime import datetime, timezone
 
+from aats.schemas.exchange import ExchangeAccountSnapshot, ExchangeBalance, InstrumentMetadata
 from aats.schemas.execution import FillEvent
 from aats.services.portfolio_service.positions import PortfolioState
 
@@ -14,6 +15,8 @@ def build_fill(
     qty: float,
     price: float,
     fee: float,
+    fee_currency: str | None = None,
+    venue: str = "PAPER",
 ) -> FillEvent:
     now = datetime.now(timezone.utc)
     return FillEvent(
@@ -23,10 +26,12 @@ def build_fill(
         client_order_id="clord_test",
         exchange_order_id="paper_test",
         symbol="BTC-USDT",
+        venue=venue,
         side=side,
         fill_qty=qty,
         fill_price=price,
         fee_amount=fee,
+        fee_currency=fee_currency,
         liquidity_role="taker",
         exchange_timestamp=now,
         ingestion_timestamp=now,
@@ -49,6 +54,7 @@ class TestPortfolioState(unittest.TestCase):
 
         self.assertEqual(state.positions, {})
         self.assertAlmostEqual(state.balances["USDT"], 10_011.0)
+        self.assertAlmostEqual(state.balances["BTC"], 0.0)
         self.assertAlmostEqual(state.realized_pnl, 11.0)
         self.assertAlmostEqual(state.total_fees_paid, 4.0)
 
@@ -62,6 +68,7 @@ class TestPortfolioState(unittest.TestCase):
         self.assertTrue(reversal.applied)
         self.assertAlmostEqual(position.quantity, -1.0)
         self.assertAlmostEqual(position.avg_entry_price, 90.0)
+        self.assertAlmostEqual(state.balances["BTC"], -1.0)
         self.assertAlmostEqual(state.realized_pnl, -10.0)
         self.assertAlmostEqual(state.balances["USDT"], 10_080.0)
 
@@ -75,11 +82,81 @@ class TestPortfolioState(unittest.TestCase):
         self.assertTrue(first.applied)
         self.assertFalse(second.applied)
         self.assertAlmostEqual(state.positions["BTC-USDT"].quantity, 1.0)
+        self.assertAlmostEqual(state.balances["BTC"], 1.0)
         self.assertAlmostEqual(state.balances["USDT"], 9_899.5)
         self.assertAlmostEqual(state.realized_pnl, -0.5)
         self.assertAlmostEqual(state.total_fees_paid, 0.5)
 
+    def test_okx_buy_fee_in_base_currency_reduces_base_balance_and_converts_fee_to_quote_pnl(self) -> None:
+        state = PortfolioState(initial_usdt_balance=10_000.0)
+
+        state.apply_fill(
+            build_fill(
+                fill_id="fill_okx_buy",
+                side="buy",
+                qty=0.001,
+                price=70_000.0,
+                fee=0.0000005,
+                fee_currency="BTC",
+                venue="OKX",
+            )
+        )
+
+        self.assertAlmostEqual(state.balances["USDT"], 9_930.0)
+        self.assertAlmostEqual(state.balances["BTC"], 0.0009995)
+        self.assertAlmostEqual(state.realized_pnl, -(0.0000005 * 70_000.0))
+        self.assertAlmostEqual(state.total_fees_paid, 0.0000005 * 70_000.0)
+
+    def test_okx_legacy_fill_without_fee_currency_infers_spot_fee_side(self) -> None:
+        state = PortfolioState(initial_usdt_balance=10_000.0)
+
+        state.apply_fill(
+            build_fill(
+                fill_id="fill_okx_legacy",
+                side="buy",
+                qty=0.001,
+                price=70_000.0,
+                fee=0.0000005,
+                venue="OKX",
+            )
+        )
+
+        self.assertAlmostEqual(state.balances["USDT"], 9_930.0)
+        self.assertAlmostEqual(state.balances["BTC"], 0.0009995)
+
+    def test_load_exchange_snapshot_synthesizes_spot_positions_from_balances(self) -> None:
+        state = PortfolioState(initial_usdt_balance=0.0)
+        now = datetime.now(timezone.utc)
+
+        state.load_exchange_snapshot(
+            ExchangeAccountSnapshot(
+                account_source="okx",
+                fetched_at=now,
+                balances=[
+                    ExchangeBalance(currency="USDT", total=1_000.0, available=1_000.0, frozen=0.0),
+                    ExchangeBalance(currency="BTC", total=0.001, available=0.001, frozen=0.0),
+                ],
+                positions=[],
+                open_orders=[],
+                fills=[],
+                instruments=[
+                    InstrumentMetadata(
+                        instrument_id="BTC-USDT",
+                        symbol="BTC-USDT",
+                        base_currency="BTC",
+                        quote_currency="USDT",
+                        lot_size=0.0001,
+                        tick_size=0.1,
+                        min_size=0.0001,
+                        state="live",
+                    )
+                ],
+                account_mode="cash",
+            )
+        )
+
+        self.assertAlmostEqual(state.positions["BTC-USDT"].quantity, 0.001)
+
 
 if __name__ == "__main__":
     unittest.main()
-

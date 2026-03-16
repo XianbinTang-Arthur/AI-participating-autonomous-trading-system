@@ -3,15 +3,23 @@ from __future__ import annotations
 from aats.bootstrap.settings import AATSSettings, RuntimeMode
 from aats.schemas.system import OperatingState
 from aats.services.governance_engine.kill_switch import KillSwitch
+from aats.services.governance_engine.runtime_layers import RuntimeLayering, resolve_runtime_layering
 
 
 class RuntimeModeController:
     _SUPPORTED_SET = {"backtest", "paper_live", "guarded_live"}
 
-    def __init__(self, *, settings: AATSSettings, kill_switch: KillSwitch) -> None:
+    def __init__(
+        self,
+        *,
+        settings: AATSSettings,
+        kill_switch: KillSwitch,
+        runtime_layering: RuntimeLayering | None = None,
+    ) -> None:
         self.settings = settings
         self.kill_switch = kill_switch
         self._mode: RuntimeMode = settings.mode
+        self.runtime_layering = runtime_layering or resolve_runtime_layering(settings)
 
     @property
     def mode(self) -> RuntimeMode:
@@ -25,26 +33,36 @@ class RuntimeModeController:
         self._mode = mode
         return self._mode
 
+    @property
+    def runtime_profile(self):
+        return self.runtime_layering.runtime_profile
+
+    @property
+    def environment_capabilities(self):
+        return self.runtime_layering.environment_capabilities
+
+    @property
+    def policy_profile(self):
+        return self.runtime_layering.policy_profile
+
+    @property
+    def recovery_policy(self):
+        return self.runtime_layering.recovery_policy
+
     def operating_state(self) -> OperatingState:
-        if self.settings.market_data_backend == "demo":
-            return "local_demo"
-        if self._mode == "paper_live":
-            return "real_market_paper"
-        if self.settings.execution_backend == "okx" and self.settings.okx_simulated_trading:
-            if self.settings.live_submit_enabled and not self.settings.guarded_execution_dry_run:
-                return "guarded_simulated_submit_enabled"
-            return "guarded_simulated_submit_dry_run"
-        if self.settings.live_submit_enabled and not self.settings.guarded_execution_dry_run:
-            return "guarded_live_enabled"
-        return "guarded_live_blocked"
+        return self.runtime_layering.operating_state
 
     def snapshot(self) -> dict[str, object]:
         operating_state = self.operating_state()
-        mode_behavior = self._mode_behavior(operating_state)
+        mode_behavior = self._mode_behavior()
         return {
             "mode": self._mode,
             "config_profile": self.settings.config_profile,
             "operating_state": operating_state,
+            "runtime_profile": self.runtime_profile.to_dict(),
+            "environment_capabilities": self.environment_capabilities.to_dict(),
+            "policy_profile": self.policy_profile.to_dict(),
+            "recovery_policy": self.recovery_policy.to_dict(),
             "market_data_source": mode_behavior["market_data_source"],
             "account_read_source": mode_behavior["account_read_source"],
             "market_data_backend": self.settings.market_data_backend,
@@ -64,62 +82,41 @@ class RuntimeModeController:
             "live_submit_enabled": self.settings.live_submit_enabled,
             "guarded_execution_dry_run": self.settings.guarded_execution_dry_run,
             "okx_simulated_trading": self.settings.okx_simulated_trading,
+            "trading_product_type": self.settings.trading_product_type,
+            "margin_mode": self.settings.margin_mode,
+            "max_target_leverage": self.settings.max_target_leverage,
             "halted": self.kill_switch.halted,
         }
 
-    def _mode_behavior(self, operating_state: OperatingState) -> dict[str, object]:
-        market_data_source = "demo" if self.settings.market_data_backend == "demo" else "okx"
-        account_read_source = "okx" if self.settings.account_read_enabled and self.settings.account_backend == "okx" else "disabled"
-        if operating_state == "local_demo":
-            return {
-                "market_data_source": "demo",
-                "account_read_source": "disabled",
-                "execution_route": "paper_local",
-                "exchange_submit_target": "none",
-                "exchange_submit_allowed": False,
-                "submit_blocked_reasons": ["local_demo_no_exchange_submission"],
-            }
-        if operating_state == "real_market_paper":
+    def _mode_behavior(self) -> dict[str, object]:
+        market_data_source = "demo" if self.environment_capabilities.market_data_source_kind == "demo" else "okx"
+        account_read_source = (
+            "okx" if self.environment_capabilities.account_state_source_kind == "exchange" else "disabled"
+        )
+        operating_state = self.operating_state()
+        if self.runtime_profile.name == "paper_local" and operating_state == "local_demo":
             return {
                 "market_data_source": market_data_source,
                 "account_read_source": account_read_source,
-                "execution_route": "paper_local",
-                "exchange_submit_target": "none",
-                "exchange_submit_allowed": False,
-                "submit_blocked_reasons": ["real_market_paper_uses_local_paper_execution"],
+                "execution_route": self.environment_capabilities.execution_route,
+                "exchange_submit_target": self.environment_capabilities.exchange_submission_target,
+                "exchange_submit_allowed": self.environment_capabilities.exchange_submission_enabled,
+                "submit_blocked_reasons": list(self.runtime_layering.mode_submit_blocked_reasons),
             }
-        if operating_state == "guarded_simulated_submit_dry_run":
+        if self.runtime_profile.name == "paper_local":
             return {
                 "market_data_source": market_data_source,
                 "account_read_source": account_read_source,
-                "execution_route": "okx_demo_guarded",
-                "exchange_submit_target": "okx_demo",
-                "exchange_submit_allowed": False,
-                "submit_blocked_reasons": ["guarded_execution_dry_run"],
-            }
-        if operating_state == "guarded_simulated_submit_enabled":
-            return {
-                "market_data_source": market_data_source,
-                "account_read_source": account_read_source,
-                "execution_route": "okx_demo_guarded",
-                "exchange_submit_target": "okx_demo",
-                "exchange_submit_allowed": True,
-                "submit_blocked_reasons": [],
-            }
-        if operating_state == "guarded_live_enabled":
-            return {
-                "market_data_source": market_data_source,
-                "account_read_source": account_read_source,
-                "execution_route": "reserved_future_live",
-                "exchange_submit_target": "future_real_money_live",
-                "exchange_submit_allowed": False,
-                "submit_blocked_reasons": ["real_money_live_not_supported"],
+                "execution_route": self.environment_capabilities.execution_route,
+                "exchange_submit_target": self.environment_capabilities.exchange_submission_target,
+                "exchange_submit_allowed": self.environment_capabilities.exchange_submission_enabled,
+                "submit_blocked_reasons": list(self.runtime_layering.mode_submit_blocked_reasons),
             }
         return {
             "market_data_source": market_data_source,
             "account_read_source": account_read_source,
-            "execution_route": "reserved_future_live",
-            "exchange_submit_target": "future_real_money_live",
-            "exchange_submit_allowed": False,
-            "submit_blocked_reasons": ["guarded_live_blocked_by_default"],
+            "execution_route": self.environment_capabilities.execution_route,
+            "exchange_submit_target": self.environment_capabilities.exchange_submission_target,
+            "exchange_submit_allowed": self.environment_capabilities.exchange_submission_enabled,
+            "submit_blocked_reasons": list(self.runtime_layering.mode_submit_blocked_reasons),
         }

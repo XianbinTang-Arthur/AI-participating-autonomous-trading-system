@@ -78,6 +78,11 @@ class OrderManager:
             remaining_qty=intent.quantity,
             average_fill_price=None,
             fees=0.0,
+            product_type=intent.product_type,
+            target_leverage=intent.target_leverage,
+            margin_mode=intent.margin_mode,
+            exposure_side=intent.exposure_side,
+            position_intent=intent.position_intent,
             submission_payload={},
         )
         created_state = await self._persist_order_state(order_state=created_state, key=intent.symbol)
@@ -108,6 +113,11 @@ class OrderManager:
                 remaining_qty=intent.quantity,
                 average_fill_price=None,
                 fees=0.0,
+                product_type=intent.product_type,
+                target_leverage=intent.target_leverage,
+                margin_mode=intent.margin_mode,
+                exposure_side=intent.exposure_side,
+                position_intent=intent.position_intent,
                 cancel_reason=str(exc),
                 execution_error=str(exc),
                 submission_payload={},

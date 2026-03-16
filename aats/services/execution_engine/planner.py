@@ -23,12 +23,20 @@ class ExecutionPlanner:
         delta_qty: float,
         urgency: str,
         max_slippage_tolerance_bps: int,
+        product_type: str = "spot",
+        target_leverage: float = 1.0,
+        margin_mode: str = "cash",
     ) -> ExecutionPlan | None:
         if abs(delta_qty) < 1e-12:
             return None
 
         normalized_urgency = urgency if urgency in {"low", "medium", "high"} else "medium"
         side = "buy" if delta_qty > 0 else "sell"
+        position_intent = self._position_intent(
+            current_position_qty=current_position_qty,
+            target_position_qty=approved_target_position_qty,
+        )
+        exposure_side = self._exposure_side(approved_target_position_qty)
         return ExecutionPlan(
             plan_id=new_id("plan"),
             decision_id=decision_id,
@@ -42,6 +50,11 @@ class ExecutionPlanner:
             order_type="market",
             urgency=normalized_urgency,
             max_slippage_tolerance_bps=max_slippage_tolerance_bps,
+            product_type=product_type,  # type: ignore[arg-type]
+            target_leverage=target_leverage,
+            margin_mode=margin_mode,  # type: ignore[arg-type]
+            exposure_side=exposure_side,  # type: ignore[arg-type]
+            position_intent=position_intent,  # type: ignore[arg-type]
         )
 
     def build_intent(self, *, plan: ExecutionPlan) -> OrderIntent | None:
@@ -60,9 +73,14 @@ class ExecutionPlanner:
             order_type=plan.order_type,
             urgency=plan.urgency,
             time_in_force="IOC",
-            reduce_only=False,
-            close_only=False,
+            reduce_only=plan.position_intent in {"reduce_long", "reduce_short"},
+            close_only=plan.position_intent in {"close_long", "close_short"},
             idempotency_key=intent_id,
+            product_type=plan.product_type,
+            target_leverage=plan.target_leverage,
+            margin_mode=plan.margin_mode,
+            exposure_side=plan.exposure_side,
+            position_intent=plan.position_intent,
         )
 
     async def publish_plan(self, *, bus: EventBus, plan: ExecutionPlan) -> None:
@@ -82,3 +100,31 @@ class ExecutionPlanner:
             payload_model=intent,
             source_component="execution_engine",
         )
+
+    @staticmethod
+    def _position_intent(*, current_position_qty: float, target_position_qty: float) -> str:
+        if current_position_qty > 1e-12:
+            if target_position_qty > current_position_qty:
+                return "open_long"
+            if target_position_qty > 1e-12:
+                return "reduce_long"
+            if target_position_qty < -1e-12:
+                return "reverse_to_short"
+            return "close_long"
+        if current_position_qty < -1e-12:
+            if target_position_qty < current_position_qty:
+                return "open_short"
+            if target_position_qty < -1e-12:
+                return "reduce_short"
+            if target_position_qty > 1e-12:
+                return "reverse_to_long"
+            return "close_short"
+        return "open_long" if target_position_qty > 0.0 else "open_short"
+
+    @staticmethod
+    def _exposure_side(quantity: float) -> str:
+        if quantity > 1e-12:
+            return "long"
+        if quantity < -1e-12:
+            return "short"
+        return "flat"

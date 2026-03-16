@@ -39,10 +39,21 @@ from aats.services.governance_engine.kill_switch import KillSwitch
 from aats.services.governance_engine.mode import RuntimeModeController
 from aats.services.governance_engine.policy import PolicyEngine
 from aats.services.governance_engine.risk import RiskEngine
+from aats.services.governance_engine.runtime_layers import (
+    EnvironmentCapabilities,
+    PolicyProfile,
+    RecoveryPolicy,
+    RuntimeLayering,
+    RuntimeProfile,
+    resolve_runtime_layering,
+)
 from aats.services.market_gateway.gateway import MarketDataGateway
 from aats.services.market_gateway.normalizer import MarketSnapshotNormalizer
 from aats.services.market_gateway.okx_websocket import OKXPublicWebSocketClient
 from aats.services.market_gateway.publisher import MarketSnapshotPublisher
+from aats.services.operator.accounts import seed_operator_users
+from aats.services.operator.runtime_profiles import runtime_profile_resolution
+from aats.services.runtime_scope import latest_matching_snapshot, runtime_state_scope
 from aats.services.portfolio_service.pnl import PortfolioPnLCalculator
 from aats.services.portfolio_service.positions import PortfolioService, PortfolioState
 from aats.services.portfolio_service.reconstruction import PortfolioReconstructionService
@@ -52,19 +63,32 @@ from aats.services.reconciliation_service.fetcher import ExchangeStateFetcher
 from aats.services.reconciliation_service.repair import ReconciliationRepairService, ReconciliationService
 from aats.storage.audit_repo import InMemoryAuditRepository
 from aats.storage.audit_repo_postgres import PostgresAuditRepository
-from aats.storage.base import AuditRepository, EventStore, ExecutionRepository, PortfolioRepository, ReconciliationRepository
+from aats.storage.base import (
+    AuditRepository,
+    EventStore,
+    ExecutionRepository,
+    OperatorUserRepository,
+    PortfolioRepository,
+    ReconciliationRepository,
+    RuntimeProfileRepository,
+)
 from aats.storage.event_store import InMemoryEventStore
 from aats.storage.event_store_postgres import PostgresEventStore
 from aats.storage.execution_repo import InMemoryExecutionRepository
 from aats.storage.execution_repo_postgres import PostgresExecutionRepository
+from aats.storage.operator_repo import InMemoryOperatorUserRepository
+from aats.storage.operator_repo_postgres import PostgresOperatorUserRepository
 from aats.storage.portfolio_repo import InMemoryPortfolioRepository
 from aats.storage.portfolio_repo_postgres import PostgresPortfolioRepository
 from aats.storage.reconciliation_repo import InMemoryReconciliationRepository
 from aats.storage.reconciliation_repo_postgres import PostgresReconciliationRepository
+from aats.storage.runtime_profile_repo import InMemoryRuntimeProfileRepository
+from aats.storage.runtime_profile_repo_postgres import PostgresRuntimeProfileRepository
 from aats.storage.session import DatabaseRuntime, create_database_runtime, create_schema
 from aats.schemas.system import RecoveryStatus
 from aats.schemas.common import utc_now
 from aats.schemas.operator import ExecutionErrorSummary
+from aats.schemas.runtime_profiles import RuntimeProfileResolution
 
 
 def load_yaml_config(environment: str, profile: str, config_dir: str | Path = "configs") -> dict[str, Any]:
@@ -99,6 +123,8 @@ class StorageBackends:
     portfolio_repo: PortfolioRepository
     execution_repo: ExecutionRepository
     reconciliation_repo: ReconciliationRepository
+    operator_repo: OperatorUserRepository
+    runtime_profile_repo: RuntimeProfileRepository
     database_runtime: DatabaseRuntime | None = None
 
 
@@ -106,6 +132,12 @@ class StorageBackends:
 class ApplicationRuntime:
     started_at: Any
     settings: AATSSettings
+    runtime_profile_resolution: RuntimeProfileResolution
+    runtime_layering: RuntimeLayering
+    runtime_profile: RuntimeProfile
+    environment_capabilities: EnvironmentCapabilities
+    policy_profile: PolicyProfile
+    recovery_policy: RecoveryPolicy
     bus: InMemoryEventBus
     event_store: EventStore
     market_gateway: MarketDataGateway
@@ -130,6 +162,8 @@ class ApplicationRuntime:
     portfolio_repo: PortfolioRepository
     execution_repo: ExecutionRepository
     reconciliation_repo: ReconciliationRepository
+    operator_repo: OperatorUserRepository
+    runtime_profile_repo: RuntimeProfileRepository
     recovery_status: RecoveryStatus
     replay_validation_history: list[dict[str, Any]] = field(default_factory=list)
     database_runtime: DatabaseRuntime | None = None
@@ -142,11 +176,11 @@ class ApplicationRuntime:
         self.background_tasks.append(
             asyncio.create_task(self._refresh_reconciliation_loop(), name="aats_reconciliation_refresh")
         )
-        if self.settings.account_backend == "okx" and self.settings.account_read_enabled:
+        if self.environment_capabilities.account_state_source_kind == "exchange":
             self.background_tasks.append(
                 asyncio.create_task(self._refresh_account_loop(), name="aats_okx_account_refresh")
             )
-        if self.settings.execution_backend == "okx" and self.mode_controller.mode == "guarded_live":
+        if self.environment_capabilities.execution_adapter_kind == "okx":
             self.background_tasks.append(
                 asyncio.create_task(self._sync_execution_loop(), name="aats_okx_execution_sync")
             )
@@ -222,14 +256,12 @@ class ApplicationRuntime:
         )
 
 
-def _validate_runtime_settings(settings: AATSSettings) -> None:
-    guarded_simulated_submit_enabled = (
-        settings.mode == "guarded_live"
-        and settings.execution_backend == "okx"
-        and settings.live_submit_enabled
-        and not settings.guarded_execution_dry_run
-    )
-    if guarded_simulated_submit_enabled and settings.storage_mode == "memory":
+def _validate_runtime_settings(settings: AATSSettings, runtime_layering: RuntimeLayering) -> None:
+    if (
+        runtime_layering.environment_capabilities.persistent_storage_required
+        and runtime_layering.environment_capabilities.exchange_submission_enabled
+        and settings.storage_mode == "memory"
+    ):
         raise ValueError("guarded_simulated_submit_requires_persistent_storage")
 
 
@@ -241,6 +273,8 @@ def build_storage_backends(settings: AATSSettings) -> StorageBackends:
             portfolio_repo=InMemoryPortfolioRepository(),
             execution_repo=InMemoryExecutionRepository(),
             reconciliation_repo=InMemoryReconciliationRepository(),
+            operator_repo=InMemoryOperatorUserRepository(),
+            runtime_profile_repo=InMemoryRuntimeProfileRepository(),
         )
 
     if not settings.database_url:
@@ -256,6 +290,8 @@ def build_storage_backends(settings: AATSSettings) -> StorageBackends:
         portfolio_repo=PostgresPortfolioRepository(database_runtime.session_factory),
         execution_repo=PostgresExecutionRepository(database_runtime.session_factory),
         reconciliation_repo=PostgresReconciliationRepository(database_runtime.session_factory),
+        operator_repo=PostgresOperatorUserRepository(database_runtime.session_factory),
+        runtime_profile_repo=PostgresRuntimeProfileRepository(database_runtime.session_factory),
         database_runtime=database_runtime,
     )
 
@@ -266,20 +302,27 @@ def _build_execution_adapter(
     market_gateway: MarketDataGateway,
     account_service: OKXAccountService,
     mode_controller: RuntimeModeController,
+    environment_capabilities: EnvironmentCapabilities | None = None,
+    policy_profile: PolicyProfile | None = None,
     health_service: SystemHealthService | None = None,
 ) -> ExchangeAdapter:
-    if mode_controller.mode == "guarded_live" and settings.execution_backend == "okx":
+    resolved_environment = environment_capabilities or mode_controller.environment_capabilities
+    resolved_policy = policy_profile or mode_controller.policy_profile
+    if resolved_environment.execution_adapter_kind == "okx":
         return OKXExecutionAdapter(
             settings=settings,
             client=OKXRESTClient(settings=settings),
             account_service=account_service,
             mode_controller=mode_controller,
+            environment_capabilities=resolved_environment,
+            policy_profile=resolved_policy,
             health_service=health_service,
             price_provider=market_gateway.latest_price,
         )
     return PaperExecutionAdapter(
         price_provider=market_gateway.latest_price,
         taker_fee_bps=settings.paper_taker_fee_bps,
+        environment_capabilities=resolved_environment,
     )
 
 
@@ -288,9 +331,14 @@ async def build_runtime(
     *,
     bootstrap_portfolio_snapshot: bool = True,
 ) -> ApplicationRuntime:
-    runtime_settings = settings or load_settings()
-    _validate_runtime_settings(runtime_settings)
-    storage = build_storage_backends(runtime_settings)
+    base_settings = settings or load_settings()
+    storage = build_storage_backends(base_settings)
+    profile_resolution = runtime_profile_resolution(settings=base_settings, repo=storage.runtime_profile_repo)
+    runtime_settings = AATSSettings.model_validate(profile_resolution.resolved_settings)
+    runtime_layering = resolve_runtime_layering(runtime_settings)
+    state_scope = runtime_state_scope(runtime_settings)
+    _validate_runtime_settings(runtime_settings, runtime_layering)
+    seed_operator_users(runtime_settings, storage.operator_repo)
     metrics = MetricsRegistry()
     bus = InMemoryEventBus(
         event_store=storage.event_store,
@@ -298,7 +346,11 @@ async def build_runtime(
     )
 
     kill_switch = KillSwitch()
-    mode_controller = RuntimeModeController(settings=runtime_settings, kill_switch=kill_switch)
+    mode_controller = RuntimeModeController(
+        settings=runtime_settings,
+        kill_switch=kill_switch,
+        runtime_layering=runtime_layering,
+    )
 
     normalizer = MarketSnapshotNormalizer(exchange_name=runtime_settings.exchange_name)
     market_publisher = MarketSnapshotPublisher(bus=bus)
@@ -317,16 +369,14 @@ async def build_runtime(
     okx_client = OKXRESTClient(settings=runtime_settings)
     account_service = OKXAccountService(settings=runtime_settings, client=okx_client)
     baseline_import_service = AccountBaselineImportService(event_store=storage.event_store)
-    bootstrap_from_exchange = (
-        runtime_settings.bootstrap_portfolio_from_exchange
-        and runtime_settings.account_backend == "okx"
-        and runtime_settings.account_read_enabled
-    )
+    bootstrap_from_exchange = runtime_layering.recovery_policy.startup_baseline_import_supported
     execution_adapter = _build_execution_adapter(
         settings=runtime_settings,
         market_gateway=market_gateway,
         account_service=account_service,
         mode_controller=mode_controller,
+        environment_capabilities=runtime_layering.environment_capabilities,
+        policy_profile=runtime_layering.policy_profile,
     )
     health_service = SystemHealthService(
         settings=runtime_settings,
@@ -336,6 +386,7 @@ async def build_runtime(
         account_provider=account_service,
         execution_provider=execution_adapter,
         reconciliation_repo=storage.reconciliation_repo,
+        recovery_policy=runtime_layering.recovery_policy,
     )
     if isinstance(execution_adapter, OKXExecutionAdapter):
         execution_adapter.health_service = health_service
@@ -375,6 +426,8 @@ async def build_runtime(
         kill_switch=kill_switch,
         mode_controller=mode_controller,
         health_service=health_service,
+        environment_capabilities=runtime_layering.environment_capabilities,
+        policy_profile=runtime_layering.policy_profile,
     )
     risk_engine = RiskEngine(
         settings=runtime_settings,
@@ -383,6 +436,8 @@ async def build_runtime(
         trigger_policy=decision_trigger_policy,
         price_provider=market_gateway.latest_price,
         mode_controller=mode_controller,
+        environment_capabilities=runtime_layering.environment_capabilities,
+        policy_profile=runtime_layering.policy_profile,
     )
     execution_planner = ExecutionPlanner(settings=runtime_settings)
     order_manager = OrderManager(
@@ -394,7 +449,11 @@ async def build_runtime(
 
     portfolio_service = PortfolioService(
         bus=bus,
-        state=PortfolioState(initial_usdt_balance=runtime_settings.initial_usdt_balance),
+        state=PortfolioState(
+            initial_usdt_balance=runtime_settings.initial_usdt_balance,
+            default_product_type=runtime_settings.trading_product_type,
+            default_margin_mode=runtime_settings.margin_mode,
+        ),
         snapshot_builder=snapshot_builder,
         portfolio_repo=storage.portfolio_repo,
         price_provider=market_gateway.latest_price,
@@ -402,6 +461,7 @@ async def build_runtime(
     )
 
     reconciliation_service = ReconciliationService(
+        settings=runtime_settings,
         bus=bus,
         fetcher=ExchangeStateFetcher(account_service=account_service),
         comparator=StateComparator(),
@@ -416,9 +476,11 @@ async def build_runtime(
         ),
         price_provider=market_gateway.latest_price,
         bootstrap_portfolio_from_exchange=bootstrap_from_exchange,
+        recovery_policy=runtime_layering.recovery_policy,
         metrics=metrics,
     )
     recovery_service = ExecutionRecoveryService(
+        settings=runtime_settings,
         execution_repo=storage.execution_repo,
         portfolio_repo=storage.portfolio_repo,
         reconciliation_repo=storage.reconciliation_repo,
@@ -430,6 +492,7 @@ async def build_runtime(
         kill_switch=kill_switch,
         bootstrap_portfolio_from_exchange=bootstrap_from_exchange,
         reconciliation_stale_after_seconds=runtime_settings.reconciliation_stale_after_seconds,
+        recovery_policy=runtime_layering.recovery_policy,
     )
 
     await bus.subscribe(topics.MARKET_SNAPSHOTS, feature_engine.handle_market_snapshot)
@@ -455,7 +518,7 @@ async def build_runtime(
 
     async def handle_position_target(message: dict[str, Any]) -> None:
         target = parse_payload(message, PositionTarget)
-        if runtime_settings.account_backend == "okx" and runtime_settings.account_read_enabled:
+        if runtime_layering.environment_capabilities.account_state_source_kind == "exchange":
             await account_service.refresh()
 
         policy_decision = policy_engine.evaluate(target=target)
@@ -479,6 +542,9 @@ async def build_runtime(
             delta_qty=risk_decision.capped_target_position_qty - target.current_position_qty,
             urgency=target.urgency,
             max_slippage_tolerance_bps=target.max_slippage_tolerance_bps,
+            product_type=target.product_type,
+            target_leverage=target.target_leverage,
+            margin_mode=target.margin_mode,
         )
         if plan is None:
             return
@@ -492,14 +558,15 @@ async def build_runtime(
 
     await bus.subscribe(topics.POSITION_TARGETS, handle_position_target)
 
-    if runtime_settings.account_backend == "okx" and runtime_settings.account_read_enabled:
+    if runtime_layering.environment_capabilities.account_state_source_kind == "exchange":
         account_snapshot = await account_service.refresh(force=True)
         imported_baseline = None
         imported_baseline_event_id = None
+        latest_scoped_snapshot = latest_matching_snapshot(storage.portfolio_repo.history(), state_scope)
         if (
             bootstrap_from_exchange
             and account_snapshot is not None
-            and storage.portfolio_repo.latest() is None
+            and latest_scoped_snapshot is None
         ):
             imported = baseline_import_service.import_snapshot(
                 exchange_snapshot=account_snapshot,
@@ -517,7 +584,7 @@ async def build_runtime(
     )
     if (
         bootstrap_portfolio_snapshot
-        and storage.portfolio_repo.latest() is None
+        and latest_matching_snapshot(storage.portfolio_repo.history(), state_scope) is None
         and not recovery_artifacts.rebuilt_snapshot_saved
     ):
         await portfolio_service.bootstrap_snapshot()
@@ -530,6 +597,12 @@ async def build_runtime(
     return ApplicationRuntime(
         started_at=utc_now(),
         settings=runtime_settings,
+        runtime_profile_resolution=profile_resolution,
+        runtime_layering=runtime_layering,
+        runtime_profile=runtime_layering.runtime_profile,
+        environment_capabilities=runtime_layering.environment_capabilities,
+        policy_profile=runtime_layering.policy_profile,
+        recovery_policy=runtime_layering.recovery_policy,
         bus=bus,
         event_store=storage.event_store,
         market_gateway=market_gateway,
@@ -554,6 +627,8 @@ async def build_runtime(
         portfolio_repo=storage.portfolio_repo,
         execution_repo=storage.execution_repo,
         reconciliation_repo=storage.reconciliation_repo,
+        operator_repo=storage.operator_repo,
+        runtime_profile_repo=storage.runtime_profile_repo,
         recovery_status=recovery_status,
         database_runtime=storage.database_runtime,
     )

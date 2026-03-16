@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Callable
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_DOWN
@@ -11,9 +12,10 @@ from aats.schemas.execution import FillEvent, OrderIntent, OrderState
 from aats.schemas.exchange import ExchangeFill, InstrumentMetadata
 from aats.services.execution_engine.exchange_adapter import ExchangeAdapter
 from aats.services.execution_engine.okx_account import OKXAccountService, datetime_from_ms
-from aats.services.execution_engine.okx_rest import OKXRESTClient
+from aats.services.execution_engine.okx_rest import OKXRESTClient, OKXRequestError
 from aats.services.governance_engine.health import SystemHealthService
 from aats.services.governance_engine.mode import RuntimeModeController
+from aats.services.governance_engine.runtime_layers import EnvironmentCapabilities, PolicyProfile
 from aats.bootstrap.logging import correlation_fields, get_logger, log_event
 
 
@@ -27,12 +29,17 @@ class OKXOrderPayloadBuilder:
 
         payload = {
             "instId": instrument.instrument_id,
-            "tdMode": "cash",
+            "tdMode": "cash" if intent.product_type == "spot" else intent.margin_mode,
             "side": intent.side,
             "ordType": intent.order_type,
             "sz": self._render_decimal(quantity),
             "clOrdId": self._client_order_id(intent),
         }
+        if intent.product_type == "derivatives":
+            payload["lever"] = self._render_decimal(max(intent.target_leverage, 1.0))
+            payload["posSide"] = "long" if intent.exposure_side == "long" else "short"
+            if intent.reduce_only:
+                payload["reduceOnly"] = "true"
         if intent.order_type == "limit" and intent.limit_price is not None:
             limit_price = self._round_down(value=intent.limit_price, step=instrument.tick_size)
             payload["px"] = self._render_decimal(limit_price)
@@ -49,7 +56,8 @@ class OKXOrderPayloadBuilder:
             sanitized = "".join(
                 ch for ch in new_id("okx") if ch.isascii() and ch.isalnum()
             )
-        return f"cl{sanitized}"[:32]
+        digest = hashlib.sha256(sanitized.encode("utf-8")).hexdigest()
+        return f"cl{digest[:30]}"
 
     @staticmethod
     def _round_down(*, value: float, step: float) -> float:
@@ -73,6 +81,8 @@ class OKXExecutionAdapter(ExchangeAdapter):
         client: OKXRESTClient,
         account_service: OKXAccountService,
         mode_controller: RuntimeModeController,
+        environment_capabilities: EnvironmentCapabilities | None = None,
+        policy_profile: PolicyProfile | None = None,
         health_service: SystemHealthService | None = None,
         price_provider: Callable[[str], float] | None = None,
         payload_builder: OKXOrderPayloadBuilder | None = None,
@@ -81,6 +91,8 @@ class OKXExecutionAdapter(ExchangeAdapter):
         self.client = client
         self.account_service = account_service
         self.mode_controller = mode_controller
+        self.environment_capabilities = environment_capabilities or mode_controller.environment_capabilities
+        self.policy_profile = policy_profile or mode_controller.policy_profile
         self.health_service = health_service
         self.price_provider = price_provider
         self.payload_builder = payload_builder or OKXOrderPayloadBuilder()
@@ -164,7 +176,11 @@ class OKXExecutionAdapter(ExchangeAdapter):
             fills = self._map_fill_events(
                 intent=intent,
                 client_order_id=state.client_order_id,
-                exchange_fills=self._parse_fill_rows(fills_payload),
+                exchange_fills=self._select_exchange_fills(
+                    exchange_fills=self._parse_fill_rows(fills_payload),
+                    order_id=state.exchange_order_id,
+                    client_order_id=state.client_order_id,
+                ),
             )
             self._last_error = None
             return state, fills
@@ -255,7 +271,11 @@ class OKXExecutionAdapter(ExchangeAdapter):
             fills = self._map_fill_events(
                 intent=intent,
                 client_order_id=order_state.client_order_id,
-                exchange_fills=self._parse_fill_rows(fills_payload),
+                exchange_fills=self._select_exchange_fills(
+                    exchange_fills=self._parse_fill_rows(fills_payload),
+                    order_id=order_state.exchange_order_id,
+                    client_order_id=order_state.client_order_id,
+                ),
             )
             self._last_error = None
             return state, fills
@@ -274,13 +294,19 @@ class OKXExecutionAdapter(ExchangeAdapter):
             )
 
     async def sync(self, open_order_states: list[OrderState]) -> tuple[list[OrderState], list[FillEvent]]:
-        if self.mode_controller.mode != "guarded_live" or self.settings.execution_backend != "okx":
+        if self.environment_capabilities.execution_adapter_kind != "okx":
             return [], []
 
         refreshed_states: list[OrderState] = []
         fills: list[FillEvent] = []
         for state in open_order_states:
             if state.venue != "OKX":
+                continue
+            # A local order can sit in SUBMITTING while adapter-side safety gates
+            # are still being evaluated. Do not query the exchange until we have
+            # an exchange order id or a post-submit state that can be resolved by
+            # client order id.
+            if state.status in {"CREATED", "SUBMITTING"} and state.exchange_order_id is None:
                 continue
             try:
                 order_detail = await self._load_order_detail(
@@ -307,7 +333,11 @@ class OKXExecutionAdapter(ExchangeAdapter):
                     self._map_fill_events(
                         intent=self._intent_from_state(state),
                         client_order_id=state.client_order_id,
-                        exchange_fills=self._parse_fill_rows(fills_payload),
+                        exchange_fills=self._select_exchange_fills(
+                            exchange_fills=self._parse_fill_rows(fills_payload),
+                            order_id=state.exchange_order_id,
+                            client_order_id=state.client_order_id,
+                        ),
                     )
                 )
                 self._last_error = None
@@ -332,8 +362,10 @@ class OKXExecutionAdapter(ExchangeAdapter):
             "backend": "okx",
             "mode": self.mode_controller.mode,
             "execution_mode": (
-                "guarded_simulated_submit"
-                if self.settings.okx_simulated_trading
+                "guarded_simulated_submit_derivatives"
+                if self.environment_capabilities.exchange_submission_target == "okx_demo_derivatives"
+                else "guarded_simulated_submit"
+                if self.environment_capabilities.exchange_submission_target == "okx_demo_spot"
                 else "guarded_live_blocked"
             ),
             "live_submit_enabled": self.settings.live_submit_enabled,
@@ -345,20 +377,23 @@ class OKXExecutionAdapter(ExchangeAdapter):
             "last_error": self._last_error,
             "last_submission_payload": self._last_submission_payload,
             "account_status": account_status,
+            "environment_capabilities": self.environment_capabilities.to_dict(),
+            "policy_profile": self.policy_profile.to_dict(),
         }
 
     def _submission_gate_error(self, *, intent: OrderIntent) -> str | None:
+        live_submission_requested = self.settings.live_submit_enabled and not self.settings.guarded_execution_dry_run
         if self.mode_controller.kill_switch.halted:
             return "kill_switch_active"
-        if self.mode_controller.mode != "guarded_live":
+        if self.environment_capabilities.execution_adapter_kind != "okx":
             return "mode_not_guarded_live"
-        if self.settings.execution_backend != "okx":
-            return "execution_backend_not_okx"
-        if self.settings.guarded_execution_dry_run:
+        if self.policy_profile.dry_run_only:
             return "guarded_execution_dry_run"
-        if not self.settings.live_submit_enabled:
+        if self.policy_profile.real_money_submission_structurally_blocked and live_submission_requested:
+            return "real_money_live_not_supported"
+        if not self.environment_capabilities.exchange_submission_enabled:
             return "live_submit_disabled"
-        if not self.settings.okx_simulated_trading:
+        if self.environment_capabilities.exchange_submission_target not in {"okx_demo_spot", "okx_demo_derivatives"}:
             return "okx_simulated_trading_required"
         if intent.symbol not in self.settings.allowed_symbols:
             return "symbol_not_allowed"
@@ -379,18 +414,20 @@ class OKXExecutionAdapter(ExchangeAdapter):
     def _gate_status(self) -> dict[str, Any]:
         account_status = self.account_service.status()
         health_blockers = self.health_service.execution_blockers() if self.health_service is not None else []
+        live_submission_requested = self.settings.live_submit_enabled and not self.settings.guarded_execution_dry_run
         safety_gates = {
-            "mode_is_guarded_live": self.mode_controller.mode == "guarded_live",
-            "execution_backend_is_okx": self.settings.execution_backend == "okx",
-            "simulated_trading_enabled": self.settings.okx_simulated_trading,
-            "live_submit_enabled": self.settings.live_submit_enabled,
-            "dry_run_disabled": not self.settings.guarded_execution_dry_run,
+            "mode_is_guarded_live": self.environment_capabilities.execution_adapter_kind == "okx",
+            "execution_backend_is_okx": self.environment_capabilities.execution_adapter_kind == "okx",
+            "simulated_trading_enabled": self.environment_capabilities.exchange_submission_target in {"okx_demo_spot", "okx_demo_derivatives"},
+            "live_submit_enabled": self.environment_capabilities.exchange_submission_enabled,
+            "dry_run_disabled": not self.policy_profile.dry_run_only,
             "halt_state_clear": not self.mode_controller.kill_switch.halted,
             "account_ready": bool(account_status.get("ready", False)),
             "health_checks_clear": not health_blockers,
             "symbol_allowlist_configured": bool(self.settings.allowed_symbols),
             "max_notional_cap_configured": self.settings.max_notional_per_symbol > 0.0,
             "max_open_orders_configured": self.settings.max_open_orders > 0,
+            "real_money_submission_blocked": self.policy_profile.real_money_submission_structurally_blocked and live_submission_requested,
         }
         blocked_reasons: list[str] = []
         if not safety_gates["halt_state_clear"]:
@@ -407,6 +444,8 @@ class OKXExecutionAdapter(ExchangeAdapter):
             blocked_reasons.append("guarded_execution_dry_run")
         if not safety_gates["account_ready"]:
             blocked_reasons.append("account_not_ready")
+        if safety_gates["real_money_submission_blocked"]:
+            blocked_reasons.append("real_money_live_not_supported")
         blocked_reasons.extend([reason for reason in health_blockers if reason not in blocked_reasons])
         return {
             "exchange_submit_allowed": not blocked_reasons,
@@ -436,9 +475,14 @@ class OKXExecutionAdapter(ExchangeAdapter):
             remaining_qty=intent.quantity,
             average_fill_price=None,
             fees=0.0,
+            product_type=intent.product_type,
+            target_leverage=intent.target_leverage,
+            margin_mode=intent.margin_mode,
+            exposure_side=intent.exposure_side,
+            position_intent=intent.position_intent,
             cancel_reason=reason,
             execution_error=reason,
-            submission_payload={key: str(value) for key, value in payload.items()},
+            submission_payload=self._state_submission_payload(intent=intent, payload=payload),
         )
 
     def _submitted_state(
@@ -469,9 +513,14 @@ class OKXExecutionAdapter(ExchangeAdapter):
             remaining_qty=intent.quantity,
             average_fill_price=None,
             fees=0.0,
+            product_type=intent.product_type,
+            target_leverage=intent.target_leverage,
+            margin_mode=intent.margin_mode,
+            exposure_side=intent.exposure_side,
+            position_intent=intent.position_intent,
             cancel_reason=None,
             execution_error=None,
-            submission_payload={key: str(value) for key, value in payload.items()},
+            submission_payload=self._state_submission_payload(intent=intent, payload=payload),
         )
 
     def _rejected_state(
@@ -501,9 +550,14 @@ class OKXExecutionAdapter(ExchangeAdapter):
             remaining_qty=intent.quantity,
             average_fill_price=None,
             fees=0.0,
+            product_type=intent.product_type,
+            target_leverage=intent.target_leverage,
+            margin_mode=intent.margin_mode,
+            exposure_side=intent.exposure_side,
+            position_intent=intent.position_intent,
             cancel_reason=error,
             execution_error=error,
-            submission_payload={key: str(value) for key, value in payload.items()},
+            submission_payload=self._state_submission_payload(intent=intent, payload=payload),
         )
 
     def _failed_state(
@@ -533,9 +587,14 @@ class OKXExecutionAdapter(ExchangeAdapter):
             remaining_qty=intent.quantity,
             average_fill_price=None,
             fees=0.0,
+            product_type=intent.product_type,
+            target_leverage=intent.target_leverage,
+            margin_mode=intent.margin_mode,
+            exposure_side=intent.exposure_side,
+            position_intent=intent.position_intent,
             cancel_reason=error,
             execution_error=error,
-            submission_payload={key: str(value) for key, value in payload.items()},
+            submission_payload=self._state_submission_payload(intent=intent, payload=payload),
         )
 
     async def _load_order_detail(
@@ -545,11 +604,16 @@ class OKXExecutionAdapter(ExchangeAdapter):
         order_id: str | None,
         client_order_id: str | None,
     ) -> dict[str, Any] | None:
-        response = await self.client.get_order(
-            symbol=symbol,
-            order_id=order_id,
-            client_order_id=client_order_id,
-        )
+        try:
+            response = await self.client.get_order(
+                symbol=symbol,
+                order_id=order_id,
+                client_order_id=client_order_id,
+            )
+        except OKXRequestError as exc:
+            if exc.path == "/api/v5/trade/order" and exc.code == "51603":
+                return None
+            raise
         data = response.get("data", [])
         if not data:
             return None
@@ -608,9 +672,14 @@ class OKXExecutionAdapter(ExchangeAdapter):
             remaining_qty=remaining_qty,
             average_fill_price=average_fill_price,
             fees=fees,
+            product_type=intent.product_type,
+            target_leverage=intent.target_leverage,
+            margin_mode=intent.margin_mode,
+            exposure_side=intent.exposure_side,
+            position_intent=intent.position_intent,
             cancel_reason=str(order_row.get("cancelSource")) if order_row.get("cancelSource") else None,
             execution_error=None,
-            submission_payload={key: str(value) for key, value in payload.items()},
+            submission_payload=self._state_submission_payload(intent=intent, payload=payload),
         )
 
     def _map_fill_events(
@@ -643,6 +712,12 @@ class OKXExecutionAdapter(ExchangeAdapter):
                     fill_qty=fill.fill_qty,
                     fill_price=fill.fill_price,
                     fee_amount=fill.fee_amount,
+                    fee_currency=fill.fee_currency,
+                    product_type=intent.product_type,
+                    target_leverage=intent.target_leverage,
+                    margin_mode=intent.margin_mode,
+                    exposure_side=intent.exposure_side,
+                    position_intent=intent.position_intent,
                     liquidity_role="taker",
                     exchange_timestamp=fill.fill_ts or utc_now(),
                     ingestion_timestamp=utc_now(),
@@ -654,6 +729,16 @@ class OKXExecutionAdapter(ExchangeAdapter):
                 )
             )
         return fills
+
+    @staticmethod
+    def _state_submission_payload(*, intent: OrderIntent, payload: dict[str, str]) -> dict[str, str]:
+        state_payload = {key: str(value) for key, value in payload.items()}
+        state_payload.setdefault("productType", intent.product_type)
+        state_payload.setdefault("marginMode", intent.margin_mode)
+        state_payload.setdefault("targetLeverage", str(intent.target_leverage))
+        state_payload.setdefault("positionIntent", intent.position_intent)
+        state_payload.setdefault("posSide", intent.exposure_side)
+        return state_payload
 
     def _parse_fill_rows(self, payload: dict[str, Any]) -> list[ExchangeFill]:
         rows: list[ExchangeFill] = []
@@ -678,6 +763,25 @@ class OKXExecutionAdapter(ExchangeAdapter):
                 )
             )
         return rows
+
+    @staticmethod
+    def _select_exchange_fills(
+        *,
+        exchange_fills: list[ExchangeFill],
+        order_id: str | None,
+        client_order_id: str | None,
+    ) -> list[ExchangeFill]:
+        if order_id:
+            filtered = [fill for fill in exchange_fills if fill.exchange_order_id == order_id]
+            if filtered:
+                return filtered
+        if client_order_id:
+            filtered = [fill for fill in exchange_fills if fill.client_order_id == client_order_id]
+            if filtered:
+                return filtered
+        if order_id or client_order_id:
+            return []
+        return exchange_fills
 
     @staticmethod
     def _map_status(exchange_status: str) -> str:
@@ -721,7 +825,12 @@ class OKXExecutionAdapter(ExchangeAdapter):
             limit_price=limit_price,
             urgency="medium",
             time_in_force="IOC",
-            reduce_only=False,
+            reduce_only=str(payload.get("reduceOnly", "false")).lower() == "true",
             close_only=False,
             idempotency_key=state.client_order_id,
+            product_type=state.product_type,
+            target_leverage=state.target_leverage,
+            margin_mode=state.margin_mode,
+            exposure_side=state.exposure_side,
+            position_intent=state.position_intent,
         )

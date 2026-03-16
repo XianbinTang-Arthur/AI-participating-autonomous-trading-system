@@ -6,6 +6,8 @@ __pycache__/
 
 .env
 .env.local
+.env.*
+!.env.example
 
 .idea/
 .vscode/
@@ -27,3 +29,4 @@ logs/
 *.db
 *.db-shm
 *.db-wal
+docs/user.txt

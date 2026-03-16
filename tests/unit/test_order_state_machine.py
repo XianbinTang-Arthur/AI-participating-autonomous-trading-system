@@ -69,6 +69,16 @@ class TestOrderStateMachine(unittest.TestCase):
 
         self.assertEqual(state_machine.validate_path(states), [])
 
+    def test_submitting_to_blocked_path_is_accepted(self) -> None:
+        state_machine = OrderStateMachine()
+        states = [
+            make_state(status="CREATED"),
+            make_state(status="SUBMITTING"),
+            make_state(status="BLOCKED"),
+        ]
+
+        self.assertEqual(state_machine.validate_path(states), [])
+
     def test_invalid_terminal_regression_is_rejected_in_path_validation(self) -> None:
         state_machine = OrderStateMachine()
         states = [

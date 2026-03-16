@@ -15,6 +15,9 @@ class StateComparator:
         *,
         decision_id: str | None,
         portfolio_snapshot_ref: str | None,
+        product_type: str | None = None,
+        margin_mode: str | None = None,
+        allowed_symbols: list[str] | None = None,
         order_states: list[OrderState],
         fills: list[FillEvent],
         stored_snapshot: PortfolioSnapshot,
@@ -22,30 +25,44 @@ class StateComparator:
         exchange_snapshot: ExchangeAccountSnapshot | None = None,
         exchange_comparison_enabled: bool = False,
         compare_exchange_portfolio: bool = False,
+        accepted_exchange_fill_ids: set[str] | None = None,
+        trusted_exchange_portfolio_baseline: bool = False,
     ) -> ReconciliationReport:
+        exchange_snapshot_covers_local_execution = self._exchange_snapshot_covers_local_execution(
+            order_states=order_states,
+            fills=fills,
+            exchange_snapshot=exchange_snapshot,
+        )
+        effective_exchange_comparison_enabled = (
+            exchange_comparison_enabled and exchange_snapshot_covers_local_execution
+        )
+        effective_compare_exchange_portfolio = (
+            compare_exchange_portfolio and exchange_snapshot_covers_local_execution
+        )
         order_diff = self._order_diff(
             order_states=order_states,
             fills=fills,
             exchange_snapshot=exchange_snapshot,
-            exchange_comparison_enabled=exchange_comparison_enabled,
+            exchange_comparison_enabled=effective_exchange_comparison_enabled,
         )
         fill_diff = self._fill_diff(
             order_states=order_states,
             fills=fills,
             exchange_snapshot=exchange_snapshot,
-            exchange_comparison_enabled=exchange_comparison_enabled,
+            exchange_comparison_enabled=effective_exchange_comparison_enabled,
+            accepted_exchange_fill_ids=accepted_exchange_fill_ids,
         )
         balance_diff = self._balance_diff(
             stored_balances=stored_snapshot.balances,
             reconstructed_balances=reconstructed_snapshot.balances,
             exchange_snapshot=exchange_snapshot,
-            compare_exchange_portfolio=compare_exchange_portfolio,
+            compare_exchange_portfolio=effective_compare_exchange_portfolio,
         )
         position_diff = self._position_diff(
             stored_snapshot=stored_snapshot,
             reconstructed_snapshot=reconstructed_snapshot,
             exchange_snapshot=exchange_snapshot,
-            compare_exchange_portfolio=compare_exchange_portfolio,
+            compare_exchange_portfolio=effective_compare_exchange_portfolio,
         )
 
         mismatch_categories = self._mismatch_categories(
@@ -55,6 +72,7 @@ class StateComparator:
             fill_diff=fill_diff,
             balance_diff=balance_diff,
             position_diff=position_diff,
+            trusted_exchange_portfolio_baseline=trusted_exchange_portfolio_baseline,
         )
         severity = self._severity(
             mismatch_categories=mismatch_categories,
@@ -86,7 +104,10 @@ class StateComparator:
             portfolio_snapshot_ref=portfolio_snapshot_ref,
             as_of_ts=utc_now(),
             exchange_snapshot_ts=exchange_snapshot.fetched_at if exchange_snapshot is not None else None,
-            exchange_comparison_enabled=exchange_comparison_enabled,
+            product_type=product_type,  # type: ignore[arg-type]
+            margin_mode=margin_mode,  # type: ignore[arg-type]
+            allowed_symbols=list(allowed_symbols or []),
+            exchange_comparison_enabled=effective_exchange_comparison_enabled,
             order_diff=order_diff,
             fill_diff=fill_diff,
             balance_diff=balance_diff,
@@ -110,6 +131,7 @@ class StateComparator:
         fill_diff: dict[str, object],
         balance_diff: dict[str, object],
         position_diff: dict[str, object],
+        trusted_exchange_portfolio_baseline: bool,
     ) -> list[str]:
         categories: list[str] = []
         has_local_execution_state = bool(order_states or fills)
@@ -124,9 +146,18 @@ class StateComparator:
             position_diff.get("reconstructed_mismatches")
         )
 
-        if not has_local_execution_state and (exchange_fill_diff or exchange_balance_diff or exchange_position_diff):
+        if (
+            not has_local_execution_state
+            and (exchange_fill_diff or exchange_balance_diff or exchange_position_diff)
+            and not trusted_exchange_portfolio_baseline
+        ):
             return ["historical_state_only"]
-        if (unexpected_exchange_fills or exchange_balance_diff or exchange_position_diff) and not exchange_order_diff and not local_execution_diff and not local_portfolio_diff:
+        if (
+            (unexpected_exchange_fills or exchange_balance_diff or exchange_position_diff)
+            and not exchange_order_diff
+            and not local_execution_diff
+            and not local_portfolio_diff
+        ):
             categories.append("external_manual_activity_detected")
 
         if fill_diff.get("replayed"):
@@ -213,6 +244,7 @@ class StateComparator:
         fills: list[FillEvent],
         exchange_snapshot: ExchangeAccountSnapshot | None,
         exchange_comparison_enabled: bool,
+        accepted_exchange_fill_ids: set[str] | None,
     ) -> dict[str, object]:
         known_intents = {order_state.intent_id for order_state in order_states}
         replay_mismatches: dict[str, dict[str, object]] = {}
@@ -229,11 +261,16 @@ class StateComparator:
             local_exchange_fills = {
                 StateComparator._fill_key(fill): fill for fill in fills if fill.venue == "OKX"
             }
+            accepted_fill_ids = set(accepted_exchange_fill_ids or set())
             exchange_fills = {
                 StateComparator._exchange_fill_key(fill): fill for fill in exchange_snapshot.fills
             }
             missing_on_exchange = sorted(set(local_exchange_fills) - set(exchange_fills))
-            unexpected_on_exchange = sorted(set(exchange_fills) - set(local_exchange_fills))
+            unexpected_on_exchange = sorted(
+                fill_id
+                for fill_id in (set(exchange_fills) - set(local_exchange_fills))
+                if fill_id not in accepted_fill_ids
+            )
             if missing_on_exchange or unexpected_on_exchange:
                 exchange_view = {
                     "missing_on_exchange": missing_on_exchange,
@@ -297,7 +334,7 @@ class StateComparator:
 
         exchange_positions: dict[str, float] = {}
         exchange_mismatches: dict[str, dict[str, float]] = {}
-        if compare_exchange_portfolio and exchange_snapshot is not None:
+        if compare_exchange_portfolio and exchange_snapshot is not None and exchange_snapshot.positions:
             exchange_positions = {
                 position.symbol: position.quantity
                 for position in exchange_snapshot.positions
@@ -316,6 +353,37 @@ class StateComparator:
             "exchange": exchange_positions,
             "exchange_mismatches": exchange_mismatches,
         }
+
+    @staticmethod
+    def _exchange_snapshot_covers_local_execution(
+        *,
+        order_states: list[OrderState],
+        fills: list[FillEvent],
+        exchange_snapshot: ExchangeAccountSnapshot | None,
+    ) -> bool:
+        if exchange_snapshot is None:
+            return False
+        latest_local_execution_ts = exchange_snapshot.fetched_at
+        saw_local_execution = False
+        for order in order_states:
+            if order.venue != "OKX":
+                continue
+            for candidate in (order.last_exchange_update_ts, order.last_update_ts, order.submitted_ts):
+                if candidate is None:
+                    continue
+                if not saw_local_execution or candidate > latest_local_execution_ts:
+                    latest_local_execution_ts = candidate
+                saw_local_execution = True
+        for fill in fills:
+            if fill.venue != "OKX":
+                continue
+            for candidate in (fill.exchange_timestamp, fill.ingestion_timestamp):
+                if not saw_local_execution or candidate > latest_local_execution_ts:
+                    latest_local_execution_ts = candidate
+                saw_local_execution = True
+        if not saw_local_execution:
+            return True
+        return latest_local_execution_ts <= exchange_snapshot.fetched_at
 
     @staticmethod
     def _severity(

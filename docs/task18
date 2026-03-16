@@ -1,0 +1,152 @@
+The repository now has:
+
+- a shared trading mainline that can express spot and derivatives posture
+- guarded OKX demo simulated submit
+- operator auth, recovery, reconciliation, replay, and audit already in place
+- a current primary runtime `.env` that is still tuned for spot cash
+
+The user wants the next pass to operationalize the single-instance path:
+
+1. make the main runtime config default to the guarded derivatives simulated posture
+2. preserve a clean spot fallback config file so the operator can switch back without hand-editing many lines
+3. document the exact switch procedure in README
+
+This pass is NOT about:
+
+- enabling real-money live trading
+- splitting the system into two concurrent runtimes on one account
+- changing the operator login model
+- rewriting the strategy engine
+- adding a second exchange
+
+This pass IS about:
+
+- making one primary runtime default to derivatives-capable simulated trading
+- reducing manual configuration churn
+- preserving an operator-safe fallback to spot
+- making the switch procedure explicit and repeatable
+- closing the minimum runtime gaps that would make a derivatives config obviously inconsistent
+
+Problem to solve in this pass:
+
+The repository architecture already supports a derivatives-capable posture conceptually, but the operational path is still awkward:
+
+- the main `.env` remains spot cash oriented
+- switching between spot and derivatives still requires hand-editing several related fields
+- README does not describe a clean operational toggle
+- the OKX REST/account polling path still hardcodes `SPOT` request semantics in places that would make a derivatives default inconsistent
+
+As a result:
+
+- the user cannot safely adopt a single default derivatives runtime without manual guesswork
+- a later switch back to spot would be tedious and error-prone
+- the derivatives runtime posture would be only partially wired through the OKX account/fill/instrument polling chain
+
+Primary goal of this pass:
+
+Make the repository operationally ready for a single-instance default derivatives simulated runtime while preserving a fast, documented fallback to spot.
+
+Required implementation changes
+
+1. Create an explicit operational task document
+
+Add this task file under `docs/task18` describing:
+
+- why the primary runtime is being moved to derivatives
+- why spot fallback remains available
+- why one-instance operation is preferred over two concurrent runtimes on one account
+- what exact files/configs are changed in this pass
+
+2. Switch the main runtime config to derivatives simulated posture
+
+Update the primary `.env` so the default live runtime becomes a guarded derivatives simulated profile.
+
+At minimum the active config must set a coherent derivatives posture including:
+
+- derivatives product type
+- non-cash margin mode
+- short-bias enabled
+- dynamic leverage enabled
+- non-trivial leverage caps/defaults
+- a derivatives instrument symbol and allowlist consistent with the OKX simulated runtime
+
+The resulting primary runtime should represent:
+
+- one main instance
+- guarded simulated submit
+- automatic long/short target generation
+- automatic leverage selection within configured caps
+
+3. Temporary env fallback only
+
+At the time of task18, temporary local env presets were acceptable as an operator convenience.
+
+This requirement is now superseded by task19:
+
+- product posture switching should move to database-backed runtime profiles
+- `.env` should shrink back to boot-critical config only
+- manual file-copy switching should no longer be the primary operational path
+- committed documentation examples
+
+5. Close the minimum OKX derivatives polling gap
+
+Do not leave the main runtime in an obviously inconsistent state.
+
+If the active runtime is derivatives, the OKX REST/account polling path must stop hardcoding `SPOT` for:
+
+- fills lookup
+- instrument lookup
+- open-order lookup
+- position lookup where applicable
+
+Implement the minimum product-aware request behavior needed so the primary derivatives config is internally coherent.
+
+This does NOT require full real-money derivatives support.
+It DOES require the polling/config path to stop contradicting the selected product type.
+
+6. Update README operational guidance
+
+README must document:
+
+- that the primary local runtime now defaults to guarded simulated derivatives
+- that spot fallback remains available
+- where the fallback file lives
+- how to switch from derivatives to spot
+- how to switch back from spot to derivatives
+- that a restart is required after replacing `.env`
+- that a rebaseline and resume may be required after switching product posture on an exchange-coupled account
+
+The switch steps must be practical and short.
+
+7. Preserve the single-instance intent
+
+README and task text should reinforce:
+
+- do not run two exchange-coupled instances on the same account/database expecting clean isolation
+- prefer one primary runtime
+- use the fallback config to switch the same runtime between spot and derivatives as needed
+
+Acceptance criteria
+
+1. `docs/task18` exists and describes the operational derivatives-default pass.
+2. Primary `.env` is now configured for guarded simulated derivatives.
+3. A spot fallback env file exists and preserves the prior usable spot posture.
+4. `.gitignore` protects the local fallback env file pattern if needed.
+5. OKX REST/account polling no longer hardcodes `SPOT` when the runtime is configured for derivatives.
+6. README explains the switch workflow clearly.
+7. Existing operator/login/runtime behavior is not regressed by this pass.
+8. Real-money live trading remains blocked.
+
+Testing requirements
+
+- add focused unit coverage for product-aware OKX REST `instType` selection
+- add focused account-service coverage that derivatives refresh requests positions while spot refresh remains spot-safe
+- run the full test suite
+
+Final rule:
+
+Do not introduce a second concurrent-runtime architecture here.
+Do not enable real-money live trading.
+Do not force the user to hand-edit many interdependent env lines just to move between spot and derivatives.
+
+Make one primary derivatives default, preserve one clean spot fallback, and document the operational switch clearly.

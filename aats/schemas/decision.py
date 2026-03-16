@@ -7,6 +7,7 @@ from pydantic import Field
 from pydantic import BaseModel
 
 from aats.schemas.common import SchemaBase
+from aats.schemas.system import MarginModelType, ProductType
 
 
 AIOperatingMode = Literal["baseline_only", "ai_advisory", "ai_blended", "ai_primary"]
@@ -26,6 +27,9 @@ class DecisionContext(SchemaBase):
     risk_budget_state: dict[str, float] = Field(default_factory=dict)
     current_position_qty: float
     current_open_orders: list[str] = Field(default_factory=list)
+    product_type: ProductType = "spot"
+    current_exposure_side: Literal["long", "short", "flat"] = "flat"
+    current_target_leverage: float = 1.0
 
 class BaselineAssessment(SchemaBase):
     decision_id: str
@@ -123,3 +127,20 @@ class PositionTarget(SchemaBase):
     max_slippage_tolerance_bps: int
     source_mix: dict[str, float]
     decision_expiry_ts: datetime
+    product_type: ProductType = "spot"
+    current_exposure_side: Literal["long", "short", "flat"] = "flat"
+    target_exposure_side: Literal["long", "short", "flat"] = "flat"
+    position_intent: Literal[
+        "hold",
+        "open_long",
+        "reduce_long",
+        "close_long",
+        "open_short",
+        "reduce_short",
+        "close_short",
+        "reverse_to_long",
+        "reverse_to_short",
+    ] = "hold"
+    target_leverage: float = 1.0
+    margin_mode: MarginModelType = "cash"
+    leverage_bias: float = 1.0
