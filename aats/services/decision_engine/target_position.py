@@ -178,8 +178,8 @@ class TargetPositionEngine:
     def _short_bias_allowed(self) -> bool:
         return self.settings.trading_product_type == "derivatives" or self.settings.strategy_short_bias_enabled
 
-    @staticmethod
     def _normalize_long_only_target(
+        self,
         *,
         current_position_qty: float,
         target_qty: float,
@@ -191,6 +191,8 @@ class TargetPositionEngine:
             if current_position_qty > 1e-12 and bearish_signal and target_qty < current_position_qty:
                 return current_position_qty
             if current_position_qty > 1e-12 and baseline.direction_bias == "flat" and target_qty <= 1e-12:
+                if current_position_qty <= self._flat_cleanup_threshold():
+                    return 0.0
                 return max(current_position_qty * 0.5, 0.0)
             return target_qty
         if current_position_qty > 1e-12 and (baseline.direction_bias == "short" or ai_assessment.directional_edge < 0.0):
@@ -207,6 +209,8 @@ class TargetPositionEngine:
     ) -> float:
         rebalance_band = max(self.settings.default_order_qty * 0.15, abs(desired_target_qty) * 0.1, 1e-12)
         delta_qty = desired_target_qty - current_position_qty
+        if abs(desired_target_qty) < 1e-12 and abs(current_position_qty) <= rebalance_band:
+            return 0.0
         if abs(delta_qty) <= rebalance_band:
             return current_position_qty
 
@@ -285,3 +289,6 @@ class TargetPositionEngine:
     @staticmethod
     def _clamp(value: float, lower: float, upper: float) -> float:
         return max(lower, min(value, upper))
+
+    def _flat_cleanup_threshold(self) -> float:
+        return max(self.settings.default_order_qty * 0.15, 1e-12)

@@ -76,6 +76,21 @@ class TestTargetPositionEngine(unittest.TestCase):
         self.assertLess(target.target_position_qty, context.current_position_qty)
         self.assertEqual(target.position_intent, "reduce_long")
 
+    def test_long_only_spot_flat_signal_cleans_small_residual_position(self) -> None:
+        engine = TargetPositionEngine(settings=AATSSettings.model_validate({"default_order_qty": 0.001}))
+        context = self._context(current_position_qty=0.000083696216, current_exposure_side="long")
+        baseline = self._baseline(
+            volatility_target_scale=1.0,
+            suggested_position_scale=0.15,
+            direction_bias="flat",
+        )
+
+        target = engine.build(context, baseline, self._ai_assessment(direction=0.0))
+
+        self.assertAlmostEqual(target.target_position_qty, 0.0)
+        self.assertAlmostEqual(target.delta_position_qty, -context.current_position_qty)
+        self.assertEqual(target.position_intent, "close_long")
+
     def test_derivatives_profile_allows_short_targets_and_sets_reversal_intent(self) -> None:
         engine = TargetPositionEngine(
             settings=AATSSettings.model_validate(
