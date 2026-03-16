@@ -52,6 +52,7 @@ class PolicyEngine:
             and self.environment_capabilities.exchange_submission_enabled
         ):
             rejection_reasons.append("real_money_live_not_supported")
+        rejection_reasons = list(dict.fromkeys(rejection_reasons))
 
         allowed = not rejection_reasons
         execution_allowed = allowed

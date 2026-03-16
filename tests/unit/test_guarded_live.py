@@ -259,6 +259,55 @@ class TestGuardedLive(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(AATSSettings.model_fields["account_read_enabled"].default)
         self.assertFalse(AATSSettings.model_fields["live_submit_enabled"].default)
 
+    def test_policy_rejection_reasons_are_deduplicated(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "mode": "guarded_live",
+                "execution_backend": "okx",
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "okx_simulated_trading": True,
+                "live_submit_enabled": True,
+                "guarded_execution_dry_run": False,
+            }
+        )
+        kill_switch = KillSwitch()
+        kill_switch.halt(reason="manual_test")
+        mode_controller = RuntimeModeController(settings=settings, kill_switch=kill_switch)
+        health_service = SystemHealthService(
+            settings=settings,
+            mode_controller=mode_controller,
+            kill_switch=kill_switch,
+            market_provider=FakeMarketProvider(),  # type: ignore[arg-type]
+            account_provider=FakeAccountService(),  # type: ignore[arg-type]
+            execution_provider=FakeExecutionProvider(),  # type: ignore[arg-type]
+            reconciliation_repo=FakeReconciliationRepo(),  # type: ignore[arg-type]
+        )
+        policy = PolicyEngine(
+            settings=settings,
+            kill_switch=kill_switch,
+            mode_controller=mode_controller,
+            health_service=health_service,
+        )
+        target = PositionTarget(
+            decision_id="decision_dedupe",
+            symbol="BTC-USDT",
+            current_position_qty=0.0,
+            target_position_qty=0.01,
+            delta_position_qty=0.01,
+            current_notional=0.0,
+            target_notional=670.0,
+            rebalance_reason="test",
+            urgency="medium",
+            max_slippage_tolerance_bps=20,
+            source_mix={"baseline": 1.0},
+            decision_expiry_ts=utc_now(),
+        )
+
+        decision = policy.evaluate(target=target)
+
+        self.assertEqual(decision.rejection_reasons.count("kill_switch_active"), 1)
+
     def test_derivatives_margin_check_uses_quote_currency_from_swap_symbol(self) -> None:
         settings = AATSSettings.model_validate(
             {
