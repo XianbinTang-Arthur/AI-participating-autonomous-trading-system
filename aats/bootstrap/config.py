@@ -113,7 +113,11 @@ def load_yaml_config(environment: str, profile: str, config_dir: str | Path = "c
 def load_settings() -> AATSSettings:
     discovered = AATSSettings()
     yaml_values = load_yaml_config(discovered.environment, discovered.config_profile)
-    return AATSSettings.model_validate({**yaml_values, **discovered.model_dump()})
+    explicit_overrides = {
+        field_name: getattr(discovered, field_name)
+        for field_name in discovered.model_fields_set
+    }
+    return AATSSettings.model_validate({**yaml_values, **explicit_overrides})
 
 
 @dataclass(slots=True)
