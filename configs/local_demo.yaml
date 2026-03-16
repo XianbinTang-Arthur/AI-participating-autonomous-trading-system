@@ -1,11 +1,30 @@
+# 指定当前配置档案名称。
 config_profile: local_demo
+
+# 指定 local demo 使用 paper_live 模式。
 mode: paper_live
+
+# 指定 local demo 使用本地 demo 市场数据。
 market_data_backend: demo
+
+# 指定 local demo 使用 paper 执行器。
 execution_backend: paper
+
+# 指定 local demo 不接账户读取。
 account_backend: disabled
+
+# 指定 local demo 关闭账户状态读取。
 account_read_enabled: false
+
+# 指定 local demo 不允许真实提交。
 live_submit_enabled: false
+
+# 指定 local demo 的 guarded 执行只做演练。
 guarded_execution_dry_run: true
+
+# 指定 local demo 只启用 15m 决策周期。
 enabled_decision_timeframes:
   - 15m
+
+# 指定交易所标识为 PAPER。
 exchange_name: PAPER

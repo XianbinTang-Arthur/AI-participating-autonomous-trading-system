@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from aats.bootstrap.logging import get_logger, log_event
@@ -67,6 +68,20 @@ class OperatorQueryService:
 
     def _latest_scoped_snapshot(self):
         return latest_matching_snapshot(self.runtime.portfolio_repo.history(), self.state_scope)
+
+    def _current_runtime_started_at(self) -> datetime:
+        return self.runtime.started_at
+
+    def _is_current_runtime_timestamp(self, value: datetime | str | None) -> bool:
+        if value is None:
+            return False
+        if isinstance(value, str):
+            normalized = value.replace("Z", "+00:00")
+            try:
+                value = datetime.fromisoformat(normalized)
+            except ValueError:
+                return False
+        return value >= self._current_runtime_started_at()
 
     def _latest_scoped_reconciliation(self):
         return latest_matching_reconciliation(self.runtime.reconciliation_repo.history(), self.state_scope)
@@ -860,12 +875,15 @@ class OperatorQueryService:
         persisted = [
             item.payload
             for item in self.runtime.event_store.by_topic(topics.EXECUTION_ERROR_SUMMARIES)[-20:]
+            if self._is_current_runtime_timestamp(item.payload.get("observed_at"))
         ]
         if persisted:
             return {"errors": persisted}
         errors = []
         for order in self.runtime.execution_repo.recent_order_states(limit=20, statuses=("FAILED", "REJECTED", "BLOCKED")):
             if not order_state_matches_scope(order, self.state_scope):
+                continue
+            if not self._is_current_runtime_timestamp(order.last_update_ts or order.created_at):
                 continue
             errors.append(
                 {

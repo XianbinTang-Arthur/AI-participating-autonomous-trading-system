@@ -1,3 +1,5 @@
+# 指定当前环境为预发布环境。
 environment: staging
-mode: guarded_live
 
+# 指定预发布环境默认模式。
+mode: guarded_live

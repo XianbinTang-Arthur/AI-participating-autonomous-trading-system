@@ -1,3 +1,5 @@
+# 指定当前环境为生产环境。
 environment: prod
-mode: autonomous_live
 
+# 指定生产环境默认模式。
+mode: autonomous_live

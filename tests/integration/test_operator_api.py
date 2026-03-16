@@ -14,10 +14,12 @@ from aats.api.auth_routes import auth_router
 from aats.api.routes import router
 from aats.bootstrap.config import build_runtime
 from aats.bootstrap.settings import AATSSettings
+from aats.events.envelopes import build_envelope
 from aats.schemas.common import utc_now
 from aats.schemas.execution import OrderState
 from aats.schemas.exchange import ExchangeAccountSnapshot, ExchangeBalance
 from aats.events import topics
+from aats.schemas.operator import ExecutionErrorSummary
 from aats.schemas.operator import OperatorUserRecord
 from aats.services.operator.passwords import hash_password
 
@@ -678,6 +680,34 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             recovery.json()["recovery"]["recovery_state"],
         )
         self.assertEqual(execution.json()["recovery"]["recovery_state"], "resume_blocked")
+
+    async def test_execution_errors_hide_stale_failures_from_previous_runtime(self) -> None:
+        runtime = await self._runtime()
+        stale_error = ExecutionErrorSummary(
+            subsystem="execution_engine",
+            severity="error",
+            message="stale_failure",
+            decision_id="decision_old",
+            order_id="order_old",
+            status="FAILED",
+            observed_at=utc_now() - timedelta(hours=2),
+        )
+        runtime.event_store.append(
+            build_envelope(
+                topic=topics.EXECUTION_ERROR_SUMMARIES,
+                key=runtime.settings.default_symbol,
+                payload_model=stale_error,
+                source_component="execution_engine",
+            )
+        )
+        runtime.started_at = utc_now()
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            execution_errors = client.get("/execution/errors")
+
+        self.assertEqual(execution_errors.status_code, 200)
+        self.assertEqual(execution_errors.json()["errors"], [])
 
     async def test_operator_histories_are_persisted_for_blockers_and_replay(self) -> None:
         runtime = await self._runtime()
