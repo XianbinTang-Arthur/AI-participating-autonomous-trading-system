@@ -26,6 +26,89 @@ from aats.services.reconciliation_service.repair import ReconciliationRepairServ
 
 
 class TestReconciliationComparator(unittest.TestCase):
+    def test_compare_derivatives_balance_matches_exchange_cash_balance(self) -> None:
+        comparator = StateComparator()
+        now = utc_now()
+        report = comparator.compare(
+            decision_id="decision_derivatives_clean",
+            portfolio_snapshot_ref="evt_portfolio_derivatives_clean",
+            product_type="derivatives",
+            margin_mode="cross",
+            order_states=[],
+            fills=[],
+            stored_snapshot=PortfolioSnapshot(
+                snapshot_ts=now,
+                balances={"USDT": 10_000.0},
+                positions=[
+                    Position(
+                        symbol="BTC-USDT-SWAP",
+                        position_qty=0.01,
+                        position_notional=710.0,
+                        avg_entry_price=70_000.0,
+                        unrealized_pnl=10.0,
+                        product_type="derivatives",
+                        margin_mode="cross",
+                    )
+                ],
+                cost_basis={"BTC-USDT-SWAP": 70_000.0},
+                realized_pnl=0.0,
+                unrealized_pnl=10.0,
+                total_equity=10_010.0,
+                gross_exposure=710.0,
+                net_exposure=710.0,
+                risk_budget_usage={},
+                product_type="derivatives",
+                margin_mode="cross",
+            ),
+            reconstructed_snapshot=PortfolioSnapshot(
+                snapshot_ts=now,
+                balances={"USDT": 10_000.0},
+                positions=[
+                    Position(
+                        symbol="BTC-USDT-SWAP",
+                        position_qty=0.01,
+                        position_notional=710.0,
+                        avg_entry_price=70_000.0,
+                        unrealized_pnl=10.0,
+                        product_type="derivatives",
+                        margin_mode="cross",
+                    )
+                ],
+                cost_basis={"BTC-USDT-SWAP": 70_000.0},
+                realized_pnl=0.0,
+                unrealized_pnl=10.0,
+                total_equity=10_010.0,
+                gross_exposure=710.0,
+                net_exposure=710.0,
+                risk_budget_usage={},
+                product_type="derivatives",
+                margin_mode="cross",
+            ),
+            exchange_snapshot=ExchangeAccountSnapshot(
+                account_source="okx",
+                fetched_at=now,
+                balances=[ExchangeBalance(currency="USDT", total=10_000.0, available=10_000.0, frozen=0.0)],
+                positions=[
+                    ExchangePosition(
+                        instrument_id="BTC-USDT-SWAP",
+                        symbol="BTC-USDT-SWAP",
+                        quantity=0.01,
+                        average_entry_price=70_000.0,
+                        mark_price=71_000.0,
+                    )
+                ],
+                open_orders=[],
+                fills=[],
+                instruments=[],
+                account_mode="futures",
+            ),
+            exchange_comparison_enabled=True,
+            compare_exchange_portfolio=True,
+        )
+
+        self.assertEqual(report.severity, "CLEAN")
+        self.assertFalse(report.balance_diff["exchange"])
+
     def test_compare_detects_hard_snapshot_mismatch(self) -> None:
         comparator = StateComparator()
         report = comparator.compare(

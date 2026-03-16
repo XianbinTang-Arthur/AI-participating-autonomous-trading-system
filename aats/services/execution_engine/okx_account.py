@@ -169,12 +169,14 @@ class OKXAccountService:
             return list(snapshot.fills)
         return [fill for fill in snapshot.fills if fill.symbol == symbol]
 
-    @staticmethod
-    def _parse_balances(payload: dict[str, Any]) -> list[ExchangeBalance]:
+    def _parse_balances(self, payload: dict[str, Any]) -> list[ExchangeBalance]:
         rows: list[ExchangeBalance] = []
         for account in payload.get("data", []):
             for detail in account.get("details", []):
-                total = OKXAccountService._balance_value(detail, "eq", "cashBal")
+                if self.settings.trading_product_type == "derivatives":
+                    total = OKXAccountService._balance_value(detail, "cashBal", "eq")
+                else:
+                    total = OKXAccountService._balance_value(detail, "eq", "cashBal")
                 # For spot accounts OKX can report `availEq=0` while `availBal`
                 # still carries the real spendable quantity. Prefer the explicit
                 # cash balance field when present so simulated submit does not
@@ -303,6 +305,7 @@ class OKXAccountService:
         instruments: list[InstrumentMetadata] = []
         for row in payload.get("data", []):
             base_currency, quote_currency = OKXAccountService._instrument_currencies(row)
+            contract_value_raw = row.get("ctVal")
             instruments.append(
                 InstrumentMetadata(
                     instrument_id=str(row.get("instId")),
@@ -312,7 +315,7 @@ class OKXAccountService:
                     lot_size=float(Decimal(str(row.get("lotSz", "0.00000001")))),
                     tick_size=float(Decimal(str(row.get("tickSz", "0.00000001")))),
                     min_size=float(Decimal(str(row.get("minSz", row.get("lotSz", "0.0"))))),
-                    contract_value=float(Decimal(str(row.get("ctVal", "1")))),
+                    contract_value=float(Decimal(str(contract_value_raw if contract_value_raw not in {None, ""} else "1"))),
                     state=str(row.get("state", "")),
                     raw=dict(row),
                 )

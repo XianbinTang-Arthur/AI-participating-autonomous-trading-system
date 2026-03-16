@@ -53,6 +53,18 @@ class _FakeOKXClient:
 
 
 class _FakeDerivativesOKXClient(_FakeOKXClient):
+    async def get_balance(self):
+        return {
+            "code": "0",
+            "data": [
+                {
+                    "details": [
+                        {"ccy": "USDT", "eq": "1010", "cashBal": "1000", "availEq": "1000", "availBal": "1000"},
+                    ]
+                }
+            ],
+        }
+
     async def get_instruments(self):
         return {
             "code": "0",
@@ -166,6 +178,7 @@ class TestOKXAccountService(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(snapshot.positions), 1)
         self.assertEqual(snapshot.positions[0].symbol, "BTC-USDT-SWAP")
         self.assertEqual(snapshot.positions[0].side, "long")
+        self.assertEqual(snapshot.balances[0].total, 1000.0)
         instrument = service.instrument_metadata("BTC-USDT-SWAP")
         self.assertIsNotNone(instrument)
         self.assertEqual(instrument.base_currency, "BTC")

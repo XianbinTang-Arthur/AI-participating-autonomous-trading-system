@@ -17,6 +17,9 @@ def build_fill(
     fee: float,
     fee_currency: str | None = None,
     venue: str = "PAPER",
+    symbol: str = "BTC-USDT",
+    product_type: str = "spot",
+    margin_mode: str = "cash",
 ) -> FillEvent:
     now = datetime.now(timezone.utc)
     return FillEvent(
@@ -25,13 +28,15 @@ def build_fill(
         intent_id="intent_test",
         client_order_id="clord_test",
         exchange_order_id="paper_test",
-        symbol="BTC-USDT",
+        symbol=symbol,
         venue=venue,
         side=side,
         fill_qty=qty,
         fill_price=price,
         fee_amount=fee,
         fee_currency=fee_currency,
+        product_type=product_type,
+        margin_mode=margin_mode,
         liquidity_role="taker",
         exchange_timestamp=now,
         ingestion_timestamp=now,
@@ -156,6 +161,64 @@ class TestPortfolioState(unittest.TestCase):
         )
 
         self.assertAlmostEqual(state.positions["BTC-USDT"].quantity, 0.001)
+
+    def test_derivatives_fill_updates_position_without_spot_notional_balance_transfer(self) -> None:
+        state = PortfolioState(initial_usdt_balance=10_000.0, default_product_type="derivatives", default_margin_mode="cross")
+
+        state.apply_fill(
+            build_fill(
+                fill_id="fill_swap_open_short",
+                side="sell",
+                qty=0.01,
+                price=70_000.0,
+                fee=0.5,
+                fee_currency="USDT",
+                venue="OKX",
+                symbol="BTC-USDT-SWAP",
+                product_type="derivatives",
+                margin_mode="cross",
+            )
+        )
+
+        self.assertAlmostEqual(state.positions["BTC-USDT-SWAP"].quantity, -0.01)
+        self.assertAlmostEqual(state.balances["USDT"], 9_999.5)
+        self.assertNotIn("BTC", state.balances)
+        self.assertAlmostEqual(state.realized_pnl, -0.5)
+
+    def test_derivatives_closing_fill_realizes_pnl_into_quote_balance(self) -> None:
+        state = PortfolioState(initial_usdt_balance=10_000.0, default_product_type="derivatives", default_margin_mode="cross")
+        state.apply_fill(
+            build_fill(
+                fill_id="fill_swap_open_long",
+                side="buy",
+                qty=0.01,
+                price=70_000.0,
+                fee=0.2,
+                fee_currency="USDT",
+                venue="OKX",
+                symbol="BTC-USDT-SWAP",
+                product_type="derivatives",
+                margin_mode="cross",
+            )
+        )
+        state.apply_fill(
+            build_fill(
+                fill_id="fill_swap_close_long",
+                side="sell",
+                qty=0.01,
+                price=71_000.0,
+                fee=0.2,
+                fee_currency="USDT",
+                venue="OKX",
+                symbol="BTC-USDT-SWAP",
+                product_type="derivatives",
+                margin_mode="cross",
+            )
+        )
+
+        self.assertEqual(state.positions, {})
+        self.assertAlmostEqual(state.balances["USDT"], 10_009.6)
+        self.assertAlmostEqual(state.realized_pnl, 9.6)
 
 
 if __name__ == "__main__":

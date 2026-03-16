@@ -146,8 +146,8 @@ function bindEvents() {
   nodes.rebaselineButton.addEventListener("click", () => void runDangerousAction({
     path: "/system/rebaseline",
     body: { reason: "ui_manual_rebaseline" },
-    successMessage: "Current exchange state accepted as a new baseline. Runtime remains halted until resume succeeds.",
-    confirmMessage: "Accept current exchange account state as the new trusted baseline? This is an operator repair action and does not auto-resume trading.",
+    successMessage: "Rebaseline completed. The current exchange state was accepted as the new trusted baseline. Runtime remains halted until resume succeeds.",
+    confirmMessage: "Run rebaseline now? This accepts the current exchange account state as the new trusted baseline and does not auto-resume trading.",
   }));
   nodes.resumeButton.addEventListener("click", () => void runAction("/system/resume", { reason: "ui_manual_resume" }, "Resume requested. Runtime readiness was re-evaluated."));
   nodes.haltButton.addEventListener("click", () => void runDangerousAction({
@@ -688,7 +688,7 @@ function renderAlerts() {
     banners.push({
       tone: "warning",
       message: recoveryPolicyData().operator_rebaseline_supported
-        ? "Recovery review is required. Accept the current exchange state as a new baseline before resuming automation."
+        ? "Rebaseline required before Resume. Accept the current exchange state as a new trusted baseline, then resume automation."
         : "Recovery review is required before trusting the next automated action.",
     });
   } else if (recovery.recovery_state === "rebaseline_completed" && !recovery.safe_to_trade) {

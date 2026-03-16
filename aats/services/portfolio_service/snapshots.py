@@ -27,7 +27,8 @@ class PortfolioSnapshotBuilder:
         gross_exposure = 0.0
         net_exposure = 0.0
         unrealized_pnl = 0.0
-        marked_value = 0.0
+        spot_marked_value = 0.0
+        derivatives_unrealized_pnl = 0.0
 
         for symbol, record in state.positions.items():
             mark_price = price_provider(symbol)
@@ -58,10 +59,13 @@ class PortfolioSnapshotBuilder:
             gross_exposure += abs(position_notional)
             net_exposure += position_notional
             unrealized_pnl += position_unrealized
-            marked_value += position_notional
+            if record.product_type == "derivatives":
+                derivatives_unrealized_pnl += position_unrealized
+            else:
+                spot_marked_value += position_notional
 
         balances = dict(state.balances)
-        total_equity = balances.get("USDT", 0.0) + marked_value
+        total_equity = balances.get("USDT", 0.0) + spot_marked_value + derivatives_unrealized_pnl
         return PortfolioSnapshot(
             decision_id=decision_id,
             source_intent_id=source_intent_id,

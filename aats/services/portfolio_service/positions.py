@@ -115,6 +115,7 @@ class PortfolioState:
         record.product_type = getattr(fill, "product_type", "spot")
         record.target_leverage = getattr(fill, "target_leverage", 1.0)
         record.margin_mode = getattr(fill, "margin_mode", "cash")
+        product_type = record.product_type or self.default_product_type
         signed_qty = fill.fill_qty if fill.side == "buy" else -fill.fill_qty
         starting_qty = record.quantity
         base_currency, quote_currency = self._symbol_currencies(fill.symbol)
@@ -127,22 +128,21 @@ class PortfolioState:
             fee_currency=fee_currency,
         )
         fee_delta = fee_quote_amount
-        realized_pnl_delta = -fee_quote_amount
+        trading_pnl_delta = 0.0
 
-        if quote_currency is not None:
-            quote_balance = self.balances.get(quote_currency, 0.0)
-            if fill.side == "buy":
-                self.balances[quote_currency] = quote_balance - notional
-            else:
-                self.balances[quote_currency] = quote_balance + notional
-        if base_currency is not None:
-            base_balance = self.balances.get(base_currency, 0.0)
-            if fill.side == "buy":
-                self.balances[base_currency] = base_balance + fill.fill_qty
-            else:
-                self.balances[base_currency] = base_balance - fill.fill_qty
-        if fee_currency is not None:
-            self.balances[fee_currency] = self.balances.get(fee_currency, 0.0) - fill.fee_amount
+        if product_type != "derivatives":
+            if quote_currency is not None:
+                quote_balance = self.balances.get(quote_currency, 0.0)
+                if fill.side == "buy":
+                    self.balances[quote_currency] = quote_balance - notional
+                else:
+                    self.balances[quote_currency] = quote_balance + notional
+            if base_currency is not None:
+                base_balance = self.balances.get(base_currency, 0.0)
+                if fill.side == "buy":
+                    self.balances[base_currency] = base_balance + fill.fill_qty
+                else:
+                    self.balances[base_currency] = base_balance - fill.fill_qty
 
         if self._same_direction(starting_qty, signed_qty):
             ending_qty = starting_qty + signed_qty
@@ -152,9 +152,9 @@ class PortfolioState:
         else:
             closing_qty = min(abs(starting_qty), abs(signed_qty))
             if starting_qty > 0:
-                realized_pnl_delta += (fill.fill_price - record.avg_entry_price) * closing_qty
+                trading_pnl_delta += (fill.fill_price - record.avg_entry_price) * closing_qty
             else:
-                realized_pnl_delta += (record.avg_entry_price - fill.fill_price) * closing_qty
+                trading_pnl_delta += (record.avg_entry_price - fill.fill_price) * closing_qty
 
             ending_qty = starting_qty + signed_qty
             record.quantity = ending_qty
@@ -167,6 +167,12 @@ class PortfolioState:
                 # Position crossed through flat and reopened in the opposite direction.
                 record.avg_entry_price = fill.fill_price
 
+        if product_type == "derivatives" and quote_currency is not None and abs(trading_pnl_delta) > 1e-12:
+            self.balances[quote_currency] = self.balances.get(quote_currency, 0.0) + trading_pnl_delta
+        if fee_currency is not None:
+            self.balances[fee_currency] = self.balances.get(fee_currency, 0.0) - fill.fee_amount
+
+        realized_pnl_delta = trading_pnl_delta - fee_quote_amount
         self.realized_pnl += realized_pnl_delta
         self.total_fees_paid += fee_delta
         self._applied_fill_ids.add(fill.fill_id)
@@ -188,6 +194,9 @@ class PortfolioState:
     def _symbol_currencies(symbol: str) -> tuple[str | None, str | None]:
         if "-" not in symbol:
             return symbol or None, None
+        parts = symbol.split("-")
+        if len(parts) >= 2:
+            return parts[0] or None, parts[1] or None
         base_currency, quote_currency = symbol.split("-", 1)
         return base_currency or None, quote_currency or None
 
