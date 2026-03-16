@@ -827,7 +827,7 @@ function renderDecisions() {
     recentDecisions.map((item) => ([
       `<div class="cell-stack"><strong>${escapeHtml(item.symbol || "-")}</strong><div class="table-meta">${escapeHtml(item.timeframe || "-")} | ${escapeHtml(item.decision_id || "-")}</div></div>`,
       `<div class="cell-stack"><strong>${escapeHtml(recentDecisionHeadline(item))}</strong><div class="table-meta">${escapeHtml(recentDecisionNarrative(item))}</div></div>`,
-      `<div class="cell-stack"><div class="table-inline-badges">${miniBadge(item.policy_result ? "policy ok" : "policy blocked", item.policy_result ? "success" : "danger")}${miniBadge(item.risk_result ? "risk ok" : "risk blocked", item.risk_result ? "success" : "danger")}</div><div class="table-meta">${escapeHtml(recentDecisionOutcome(item))}</div></div>`,
+      `<div class="cell-stack"><div class="table-inline-badges">${miniBadge(item.policy_result ? "policy ok" : "policy blocked", item.policy_result ? "success" : "danger")}${miniBadge(item.risk_result ? "risk ok" : "risk blocked", item.risk_result ? "success" : "danger")}${miniBadge(recentDecisionRequiresTrade(item) ? "trade needed" : "no trade needed", recentDecisionRequiresTrade(item) ? "info" : "outline")}</div><div class="table-meta">${escapeHtml(recentDecisionOutcome(item))}</div></div>`,
       `<div class="cell-stack"><strong>${escapeHtml(formatRelativeAge(item.decision_time))}</strong><div class="table-meta">${escapeHtml(formatMaybeTimestamp(item.decision_time))}</div></div>`,
       item.decision_id ? `<button class="table-button" data-inspect-decision="${escapeHtml(item.decision_id)}">Inspect</button>` : "",
     ])),
@@ -1785,7 +1785,7 @@ function renderDecisionHero(latestDecision, executionLatest) {
         <div class="runtime-badges">
           ${miniBadge(policy?.execution_allowed ? "policy ok" : "policy blocked", policy?.execution_allowed ? "success" : "danger")}
           ${miniBadge(risk?.approved ? "risk ok" : "risk blocked", risk?.approved ? "success" : "danger")}
-          ${miniBadge(target?.delta_position_qty ? "active target" : "flat target", target?.delta_position_qty ? "info" : "outline")}
+          ${miniBadge(decisionTargetNeedsTrade(target) ? "rebalance needed" : "holding target", decisionTargetNeedsTrade(target) ? "info" : "outline")}
         </div>
       </div>
       <p class="hero-copy">${escapeHtml(outcome)}</p>
@@ -1860,7 +1860,17 @@ function decisionNarrative(detail) {
   const target = detail.position_target || {};
   const policy = detail.policy_decision || {};
   const risk = detail.risk_decision || {};
-  const summary = detail.summary || {};
+  if (!decisionTargetNeedsTrade(target)) {
+    return [
+      `${context.symbol || "This symbol"} was evaluated on the ${context.timeframe || "-"} timeframe at ${formatMaybeTimestamp(context.as_of_ts)}.`,
+      `Current exposure already matched the target at ${formatSigned(target.current_position_qty ?? 0)}, so no rebalance was required.`,
+      policy.execution_allowed
+        ? risk.approved
+          ? "Policy and risk both agreed that holding the current position was acceptable."
+          : `Policy allowed the posture, but risk still reported ${listOrDash(risk.rejection_reasons)}.`
+        : `Policy blocked any change because of ${listOrDash(policy.rejection_reasons)}.`,
+    ];
+  }
   return [
     `${context.symbol || "This symbol"} was evaluated on the ${context.timeframe || "-"} timeframe at ${formatMaybeTimestamp(context.as_of_ts)}.`,
     `The system wanted to ${readableMode(target.position_intent || "hold")} and move exposure from ${formatSigned(target.current_position_qty)} to ${formatSigned(target.target_position_qty)}.`,
@@ -2074,6 +2084,9 @@ function blockerNarrative(blockers) {
 function decisionExecutionOutcome(detail) {
   const summary = detail.summary || {};
   const result = summary.execution_result || {};
+  if (!decisionTargetNeedsTrade(detail.position_target || {})) {
+    return "No execution was created because the current exposure already matched the target.";
+  }
   if (result.fill_count > 0) {
     return `${result.fill_count} fill${pluralize(result.fill_count)} were ingested for this decision.`;
   }
@@ -2301,6 +2314,9 @@ function recentDecisionNarrative(item) {
   const target = item.position_target || {};
   const current = formatSigned(target.current_position_qty ?? item.current_position_qty ?? 0);
   const next = formatSigned(target.target_position_qty ?? item.target_position_qty ?? 0);
+  if (!recentDecisionRequiresTrade(item)) {
+    return `Current exposure already matches the target at ${next}; this review cycle kept the posture unchanged.`;
+  }
   return `Exposure would move from ${current} to ${next} with ${readableMode(target.product_type || item.product_type || "-")} semantics.`;
 }
 
@@ -2319,7 +2335,18 @@ function recentDecisionOutcome(item) {
   if (orderCount > 0) {
     return `${orderCount} order${pluralize(orderCount)} were created and are still syncing.`;
   }
-  return "The decision passed safety checks but did not need to place an order.";
+  if (!recentDecisionRequiresTrade(item)) {
+    return "The decision passed safety checks and correctly held the current position without placing an order.";
+  }
+  return "The decision passed safety checks but did not produce an execution artifact.";
+}
+
+function decisionTargetNeedsTrade(target) {
+  return Math.abs(Number(target?.delta_position_qty ?? 0)) >= 1e-12;
+}
+
+function recentDecisionRequiresTrade(item) {
+  return Math.abs(Number(item.position_target?.delta_position_qty ?? item.target_delta_qty ?? item.delta_position_qty ?? 0)) >= 1e-12;
 }
 
 function recentOrderHeadline(order) {
