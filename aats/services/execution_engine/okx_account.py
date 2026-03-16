@@ -43,12 +43,14 @@ class OKXAccountService:
 
             try:
                 balance_payload = await self.client.get_balance()
+                instruments_payload = await self.client.get_instruments()
+                instruments = self._parse_instruments(instruments_payload)
+                instrument_map = {instrument.symbol: instrument for instrument in instruments}
                 open_orders_payload = await self.client.get_open_orders(symbol=self.settings.default_symbol)
                 fills_payload = await self.client.get_fills(
                     symbol=self.settings.default_symbol,
                     limit=self.settings.okx_fill_fetch_limit,
                 )
-                instruments_payload = await self.client.get_instruments()
                 account_config_payload = await self.client.get_account_config()
                 if self.settings.trading_product_type == "derivatives":
                     positions_payload = await self.client.get_positions()
@@ -62,10 +64,10 @@ class OKXAccountService:
                     account_source="okx",
                     fetched_at=utc_now(),
                     balances=self._parse_balances(balance_payload),
-                    positions=self._parse_positions(positions_payload),
-                    open_orders=self._parse_open_orders(open_orders_payload),
-                    fills=self._parse_fills(fills_payload),
-                    instruments=self._parse_instruments(instruments_payload),
+                    positions=self._parse_positions(positions_payload, instrument_map=instrument_map),
+                    open_orders=self._parse_open_orders(open_orders_payload, instrument_map=instrument_map),
+                    fills=self._parse_fills(fills_payload, instrument_map=instrument_map),
+                    instruments=instruments,
                     account_mode=self._parse_account_mode(account_config_payload),
                     raw={
                         "balance": balance_payload,
@@ -199,14 +201,23 @@ class OKXAccountService:
         return default
 
     @staticmethod
-    def _parse_positions(payload: dict[str, Any]) -> list[ExchangePosition]:
+    def _parse_positions(
+        payload: dict[str, Any],
+        *,
+        instrument_map: dict[str, InstrumentMetadata],
+    ) -> list[ExchangePosition]:
         positions: list[ExchangePosition] = []
         for row in payload.get("data", []):
+            symbol = str(row.get("instId"))
             positions.append(
                 ExchangePosition(
-                    instrument_id=str(row.get("instId")),
-                    symbol=str(row.get("instId")),
-                    quantity=float(row.get("pos", 0.0) or 0.0),
+                    instrument_id=symbol,
+                    symbol=symbol,
+                    quantity=OKXAccountService._exchange_quantity_to_internal(
+                        symbol=symbol,
+                        quantity=float(row.get("pos", 0.0) or 0.0),
+                        instrument_map=instrument_map,
+                    ),
                     average_entry_price=(
                         float(row.get("avgPx")) if row.get("avgPx") not in {None, ""} else None
                     ),
@@ -218,21 +229,34 @@ class OKXAccountService:
         return positions
 
     @staticmethod
-    def _parse_open_orders(payload: dict[str, Any]) -> list[ExchangeOpenOrder]:
+    def _parse_open_orders(
+        payload: dict[str, Any],
+        *,
+        instrument_map: dict[str, InstrumentMetadata],
+    ) -> list[ExchangeOpenOrder]:
         rows: list[ExchangeOpenOrder] = []
         for row in payload.get("data", []):
             created_ts = row.get("cTime")
             updated_ts = row.get("uTime")
+            symbol = str(row.get("instId"))
             rows.append(
                 ExchangeOpenOrder(
-                    instrument_id=str(row.get("instId")),
+                    instrument_id=symbol,
                     client_order_id=str(row.get("clOrdId")) if row.get("clOrdId") else None,
                     exchange_order_id=str(row.get("ordId")),
                     side=str(row.get("side")),
                     order_type=str(row.get("ordType")),
                     status=str(row.get("state", "")).upper(),
-                    quantity=float(row.get("sz", 0.0) or 0.0),
-                    filled_quantity=float(row.get("accFillSz", 0.0) or 0.0),
+                    quantity=OKXAccountService._exchange_quantity_to_internal(
+                        symbol=symbol,
+                        quantity=float(row.get("sz", 0.0) or 0.0),
+                        instrument_map=instrument_map,
+                    ),
+                    filled_quantity=OKXAccountService._exchange_quantity_to_internal(
+                        symbol=symbol,
+                        quantity=float(row.get("accFillSz", 0.0) or 0.0),
+                        instrument_map=instrument_map,
+                    ),
                     price=(float(row.get("px")) if row.get("px") not in {None, ""} else None),
                     created_ts=utc_now() if not created_ts else datetime_from_ms(str(created_ts)),
                     updated_ts=utc_now() if not updated_ts else datetime_from_ms(str(updated_ts)),
@@ -241,22 +265,31 @@ class OKXAccountService:
         return rows
 
     @staticmethod
-    def _parse_fills(payload: dict[str, Any]) -> list[ExchangeFill]:
+    def _parse_fills(
+        payload: dict[str, Any],
+        *,
+        instrument_map: dict[str, InstrumentMetadata],
+    ) -> list[ExchangeFill]:
         rows: list[ExchangeFill] = []
         for row in payload.get("data", []):
             fill_ts = row.get("fillTime") or row.get("ts")
             fill_id = str(row.get("tradeId") or row.get("billId") or row.get("fillId") or "")
             if not fill_id:
                 fill_id = f"{row.get('ordId', 'unknown')}-{fill_ts or 'unknown'}"
+            symbol = str(row.get("instId"))
             rows.append(
                 ExchangeFill(
                     fill_id=fill_id,
                     exchange_order_id=str(row.get("ordId") or ""),
                     client_order_id=str(row.get("clOrdId")) if row.get("clOrdId") else None,
-                    instrument_id=str(row.get("instId")),
-                    symbol=str(row.get("instId")),
+                    instrument_id=symbol,
+                    symbol=symbol,
                     side=str(row.get("side")),
-                    fill_qty=float(row.get("fillSz", row.get("sz", 0.0)) or 0.0),
+                    fill_qty=OKXAccountService._exchange_quantity_to_internal(
+                        symbol=symbol,
+                        quantity=float(row.get("fillSz", row.get("sz", 0.0)) or 0.0),
+                        instrument_map=instrument_map,
+                    ),
                     fill_price=float(row.get("fillPx", row.get("px", 0.0)) or 0.0),
                     fee_amount=abs(float(row.get("fee", 0.0) or 0.0)),
                     fee_currency=str(row.get("feeCcy")) if row.get("feeCcy") else None,
@@ -279,11 +312,27 @@ class OKXAccountService:
                     lot_size=float(Decimal(str(row.get("lotSz", "0.00000001")))),
                     tick_size=float(Decimal(str(row.get("tickSz", "0.00000001")))),
                     min_size=float(Decimal(str(row.get("minSz", row.get("lotSz", "0.0"))))),
+                    contract_value=float(Decimal(str(row.get("ctVal", "1")))),
                     state=str(row.get("state", "")),
                     raw=dict(row),
                 )
             )
         return instruments
+
+    @staticmethod
+    def _exchange_quantity_to_internal(
+        *,
+        symbol: str,
+        quantity: float,
+        instrument_map: dict[str, InstrumentMetadata],
+    ) -> float:
+        instrument = instrument_map.get(symbol)
+        if instrument is None or "-SWAP" not in symbol:
+            return quantity
+        contract_value = max(instrument.contract_value, 0.0)
+        if contract_value <= 0.0:
+            return quantity
+        return quantity * contract_value
 
     @staticmethod
     def _instrument_currencies(row: dict[str, Any]) -> tuple[str, str]:

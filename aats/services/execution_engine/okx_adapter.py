@@ -21,7 +21,8 @@ from aats.bootstrap.logging import correlation_fields, get_logger, log_event
 
 class OKXOrderPayloadBuilder:
     def build(self, *, intent: OrderIntent, instrument: InstrumentMetadata) -> dict[str, str]:
-        quantity = self._round_down(value=intent.quantity, step=instrument.lot_size)
+        quantity = self._exchange_quantity(intent=intent, instrument=instrument)
+        quantity = self._round_down(value=quantity, step=instrument.lot_size)
         if quantity <= 0.0 or quantity < instrument.min_size:
             raise ValueError(
                 f"Order quantity below OKX minimum size symbol={intent.symbol} quantity={intent.quantity} min_size={instrument.min_size}"
@@ -46,6 +47,15 @@ class OKXOrderPayloadBuilder:
         if intent.product_type == "spot" and intent.order_type == "market" and intent.side == "buy":
             payload["tgtCcy"] = "base_ccy"
         return payload
+
+    @staticmethod
+    def _exchange_quantity(*, intent: OrderIntent, instrument: InstrumentMetadata) -> float:
+        if intent.product_type != "derivatives":
+            return intent.quantity
+        contract_value = max(instrument.contract_value, 0.0)
+        if contract_value <= 0.0:
+            return intent.quantity
+        return intent.quantity / contract_value
 
     @staticmethod
     def _client_order_id(intent: OrderIntent) -> str:
@@ -110,6 +120,7 @@ class OKXExecutionAdapter(ExchangeAdapter):
             raise RuntimeError(f"OKX instrument metadata unavailable for symbol={intent.symbol}")
 
         payload = self.payload_builder.build(intent=intent, instrument=instrument)
+        payload = self._normalize_payload_for_account_mode(payload)
         self._last_submission_payload = dict(payload)
         submitted_ts = utc_now()
         gate_error = self._submission_gate_error(intent=intent)
@@ -642,8 +653,19 @@ class OKXExecutionAdapter(ExchangeAdapter):
             if order_row.get("avgPx") not in {None, ""}
             else None
         )
-        requested_qty = float(order_row.get("sz", intent.quantity) or intent.quantity)
-        filled_qty = float(order_row.get("accFillSz", 0.0) or 0.0)
+        instrument = self.account_service.instrument_metadata(intent.symbol)
+        requested_qty = self._internal_quantity(
+            symbol=intent.symbol,
+            quantity=float(order_row.get("sz", intent.quantity) or intent.quantity),
+            instrument=instrument,
+            product_type=intent.product_type,
+        )
+        filled_qty = self._internal_quantity(
+            symbol=intent.symbol,
+            quantity=float(order_row.get("accFillSz", 0.0) or 0.0),
+            instrument=instrument,
+            product_type=intent.product_type,
+        )
         remaining_qty = max(requested_qty - filled_qty, 0.0)
         fees = abs(float(order_row.get("fee", 0.0) or 0.0))
         canceled_ts = last_update_ts if status in {"CANCELED", "EXPIRED"} else None
@@ -747,15 +769,22 @@ class OKXExecutionAdapter(ExchangeAdapter):
             fill_id = str(row.get("tradeId") or row.get("billId") or row.get("fillId") or "")
             if not fill_id:
                 fill_id = f"{row.get('ordId', 'unknown')}-{fill_ts or 'unknown'}"
+            symbol = str(row.get("instId"))
+            instrument = self.account_service.instrument_metadata(symbol)
             rows.append(
                 ExchangeFill(
                     fill_id=fill_id,
                     exchange_order_id=str(row.get("ordId") or ""),
                     client_order_id=str(row.get("clOrdId")) if row.get("clOrdId") else None,
-                    instrument_id=str(row.get("instId")),
-                    symbol=str(row.get("instId")),
+                    instrument_id=symbol,
+                    symbol=symbol,
                     side=str(row.get("side")),
-                    fill_qty=float(row.get("fillSz", row.get("sz", 0.0)) or 0.0),
+                    fill_qty=self._internal_quantity(
+                        symbol=symbol,
+                        quantity=float(row.get("fillSz", row.get("sz", 0.0)) or 0.0),
+                        instrument=instrument,
+                        product_type="derivatives" if "-SWAP" in symbol else "spot",
+                    ),
                     fill_price=float(row.get("fillPx", row.get("px", 0.0)) or 0.0),
                     fee_amount=abs(float(row.get("fee", 0.0) or 0.0)),
                     fee_currency=str(row.get("feeCcy")) if row.get("feeCcy") else None,
@@ -763,6 +792,36 @@ class OKXExecutionAdapter(ExchangeAdapter):
                 )
             )
         return rows
+
+    def _normalize_payload_for_account_mode(self, payload: dict[str, str]) -> dict[str, str]:
+        snapshot_getter = getattr(self.account_service, "latest_snapshot", None)
+        snapshot = snapshot_getter() if callable(snapshot_getter) else None
+        if snapshot is None:
+            return payload
+        account_config = snapshot.raw.get("account_config", {}) if isinstance(snapshot.raw, dict) else {}
+        rows = account_config.get("data", []) if isinstance(account_config, dict) else []
+        pos_mode = None
+        if rows and isinstance(rows[0], dict):
+            pos_mode = str(rows[0].get("posMode") or "").strip()
+        if pos_mode == "net_mode":
+            payload = dict(payload)
+            payload.pop("posSide", None)
+        return payload
+
+    @staticmethod
+    def _internal_quantity(
+        *,
+        symbol: str,
+        quantity: float,
+        instrument: InstrumentMetadata | None,
+        product_type: str,
+    ) -> float:
+        if product_type != "derivatives" or instrument is None or "-SWAP" not in symbol:
+            return quantity
+        contract_value = max(instrument.contract_value, 0.0)
+        if contract_value <= 0.0:
+            return quantity
+        return quantity * contract_value
 
     @staticmethod
     def _select_exchange_fills(

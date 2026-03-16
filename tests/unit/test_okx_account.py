@@ -64,6 +64,7 @@ class _FakeDerivativesOKXClient(_FakeOKXClient):
                     "uly": "BTC-USDT",
                     "settleCcy": "USDT",
                     "ctValCcy": "BTC",
+                    "ctVal": "0.01",
                     "lotSz": "0.01",
                     "tickSz": "0.1",
                     "minSz": "0.01",
@@ -169,6 +170,8 @@ class TestOKXAccountService(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(instrument)
         self.assertEqual(instrument.base_currency, "BTC")
         self.assertEqual(instrument.quote_currency, "USDT")
+        self.assertEqual(instrument.contract_value, 0.01)
+        self.assertAlmostEqual(snapshot.positions[0].quantity, 0.0002)
 
 
 if __name__ == "__main__":

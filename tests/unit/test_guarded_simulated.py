@@ -39,6 +39,7 @@ class FakeAccountService:
                 )
             ],
             account_mode="cash",
+            raw={"account_config": {"data": [{"posMode": "net_mode"}]}},
         )
 
     async def refresh(self, *, force: bool = False):
@@ -507,6 +508,7 @@ class TestGuardedSimulatedExecution(unittest.IsolatedAsyncioTestCase):
                 lot_size=0.01,
                 tick_size=0.1,
                 min_size=0.01,
+                contract_value=0.01,
                 state="live",
             ),
         )
@@ -515,10 +517,76 @@ class TestGuardedSimulatedExecution(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["tdMode"], "cross")
         self.assertEqual(payload["side"], "buy")
         self.assertEqual(payload["ordType"], "market")
+        self.assertEqual(payload["sz"], "3")
         self.assertNotIn("tgtCcy", payload)
         self.assertLessEqual(len(payload["clOrdId"]), 32)
         self.assertNotIn("_", payload["clOrdId"])
         self.assertNotEqual(payload["clOrdId"], f"cl{intent.idempotency_key}".replace("_", "")[:32])
+
+    async def test_submit_omits_pos_side_for_net_mode_derivatives_accounts(self) -> None:
+        settings = make_settings(
+            {
+                "live_submit_enabled": True,
+                "guarded_execution_dry_run": False,
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "max_notional_per_symbol": 10_000.0,
+            }
+        )
+        mode_controller = RuntimeModeController(settings=settings, kill_switch=KillSwitch())
+        account_service = FakeAccountService()
+        account_service._snapshot = account_service._snapshot.model_copy(
+            update={
+                "instruments": [
+                    InstrumentMetadata(
+                        instrument_id="BTC-USDT-SWAP",
+                        symbol="BTC-USDT-SWAP",
+                        base_currency="BTC",
+                        quote_currency="USDT",
+                        lot_size=0.01,
+                        tick_size=0.1,
+                        min_size=0.01,
+                        contract_value=0.01,
+                        state="live",
+                    )
+                ],
+                "account_mode": "2",
+                "raw": {"account_config": {"data": [{"posMode": "net_mode"}]}},
+            }
+        )
+        account_service.instrument_metadata = lambda symbol: account_service._snapshot.instruments[0] if symbol == "BTC-USDT-SWAP" else None
+        client = FakeOKXClient()
+        adapter = OKXExecutionAdapter(
+            settings=settings,
+            client=client,  # type: ignore[arg-type]
+            account_service=account_service,  # type: ignore[arg-type]
+            mode_controller=mode_controller,
+            health_service=FakeHealthService(),
+            price_provider=lambda _symbol: 68_000.0,
+        )
+        intent = OrderIntent(
+            intent_id="intent_derivatives_net_mode",
+            decision_id="decision_derivatives_net_mode",
+            symbol="BTC-USDT-SWAP",
+            side="buy",
+            quantity=0.03,
+            execution_style="taker",
+            order_type="market",
+            urgency="medium",
+            time_in_force="IOC",
+            idempotency_key="intent_derivatives_net_mode",
+            product_type="derivatives",
+            target_leverage=2.5,
+            margin_mode="cross",
+            exposure_side="long",
+            position_intent="open_long",
+        )
+
+        await adapter.submit(intent)
+
+        self.assertNotIn("posSide", client.place_order_calls[0])
 
     async def test_submit_filters_out_unrelated_recent_exchange_fills(self) -> None:
         settings = make_settings(

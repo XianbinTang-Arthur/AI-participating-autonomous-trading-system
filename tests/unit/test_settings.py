@@ -27,14 +27,15 @@ class TestAATSSettings(unittest.TestCase):
         self.assertEqual(settings.execution_backend, "paper")
 
     def test_load_settings_preserves_yaml_profile_values_when_env_does_not_override(self) -> None:
-        with patch.dict(
-            os.environ,
-            {
-                "AATS_CONFIG_PROFILE": "guarded_simulated_submit_enabled",
-            },
-            clear=False,
-        ):
-            settings = load_settings()
+        with patch.object(AATSSettings, "model_config", {**AATSSettings.model_config, "env_file": None}):
+            with patch.dict(
+                os.environ,
+                {
+                    "AATS_CONFIG_PROFILE": "guarded_simulated_submit_enabled",
+                },
+                clear=False,
+            ):
+                settings = load_settings()
 
         self.assertEqual(settings.config_profile, "guarded_simulated_submit_enabled")
         self.assertEqual(settings.decision_min_interval_seconds_15m, 30.0)
@@ -43,15 +44,16 @@ class TestAATSSettings(unittest.TestCase):
         self.assertEqual(settings.decision_min_momentum_delta, 0.0005)
 
     def test_load_settings_allows_explicit_env_override_on_top_of_yaml_profile(self) -> None:
-        with patch.dict(
-            os.environ,
-            {
-                "AATS_CONFIG_PROFILE": "guarded_simulated_submit_enabled",
-                "AATS_DECISION_MIN_INTERVAL_SECONDS_15M": "5",
-            },
-            clear=False,
-        ):
-            settings = load_settings()
+        with patch.object(AATSSettings, "model_config", {**AATSSettings.model_config, "env_file": None}):
+            with patch.dict(
+                os.environ,
+                {
+                    "AATS_CONFIG_PROFILE": "guarded_simulated_submit_enabled",
+                    "AATS_DECISION_MIN_INTERVAL_SECONDS_15M": "5",
+                },
+                clear=False,
+            ):
+                settings = load_settings()
 
         self.assertEqual(settings.decision_min_interval_seconds_15m, 5.0)
         self.assertEqual(settings.decision_min_interval_seconds_1h, 120.0)

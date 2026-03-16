@@ -61,6 +61,7 @@ class InstrumentMetadata(SchemaBase):
     lot_size: float
     tick_size: float
     min_size: float
+    contract_value: float = 1.0
     state: str
     raw: dict[str, Any] = Field(default_factory=dict)
 
