@@ -95,6 +95,49 @@ class TestDecisionTriggerPolicy(unittest.TestCase):
         self.assertTrue(material)
         self.assertEqual(material_reason, "material_change")
 
+    def test_frequency_cap_is_enforced_in_trigger_policy(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "max_decisions_per_minute": 2,
+                "decision_min_interval_seconds_15m": 0.0,
+                "decision_min_price_move_bps": 0.0,
+                "decision_min_momentum_delta": 0.0,
+            }
+        )
+        policy = DecisionTriggerPolicy(settings=settings)
+        base_ts = utc_now()
+
+        first_feature = _feature(snapshot_ts=base_ts, momentum=0.1, regime="trend")
+        first_market = _market(snapshot_ts=base_ts, last_price=67_000.0)
+        self.assertEqual(
+            policy.should_trigger(feature_snapshot=first_feature, market_snapshot=first_market, timeframe="15m"),
+            (True, "initial_decision"),
+        )
+        policy.record_trigger(feature_snapshot=first_feature, market_snapshot=first_market, timeframe="15m")
+
+        second_ts = base_ts + timedelta(seconds=10)
+        second_feature = _feature(snapshot_ts=second_ts, momentum=0.2, regime="trend")
+        second_market = _market(snapshot_ts=second_ts, last_price=67_010.0)
+        second_allowed, second_reason = policy.should_trigger(
+            feature_snapshot=second_feature,
+            market_snapshot=second_market,
+            timeframe="15m",
+        )
+        self.assertTrue(second_allowed)
+        self.assertIn(second_reason, {"cadence_elapsed", "material_change"})
+        policy.record_trigger(feature_snapshot=second_feature, market_snapshot=second_market, timeframe="15m")
+
+        third_ts = base_ts + timedelta(seconds=20)
+        third_feature = _feature(snapshot_ts=third_ts, momentum=0.3, regime="trend")
+        third_market = _market(snapshot_ts=third_ts, last_price=67_020.0)
+        third_allowed, third_reason = policy.should_trigger(
+            feature_snapshot=third_feature,
+            market_snapshot=third_market,
+            timeframe="15m",
+        )
+        self.assertFalse(third_allowed)
+        self.assertEqual(third_reason, "max_decision_frequency_reached")
+
 
 class TestDecisionCycleTrigger(unittest.IsolatedAsyncioTestCase):
     async def test_concurrent_same_snapshot_only_runs_one_cycle(self) -> None:

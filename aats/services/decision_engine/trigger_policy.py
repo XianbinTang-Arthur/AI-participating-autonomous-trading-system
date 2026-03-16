@@ -48,6 +48,11 @@ class DecisionTriggerPolicy:
         if state.last_market_snapshot_ts == market_snapshot.snapshot_ts:
             return False, "duplicate_market_snapshot"
 
+        decision_times = self._decision_times[state_key]
+        self._prune_decision_times(decision_times=decision_times, reference_ts=market_snapshot.snapshot_ts)
+        if len(decision_times) >= self.settings.max_decisions_per_minute:
+            return False, "max_decision_frequency_reached"
+
         min_interval = self._min_interval_seconds(timeframe)
         seconds_since_trigger = (
             (market_snapshot.snapshot_ts - state.last_trigger_ts).total_seconds()
@@ -83,9 +88,8 @@ class DecisionTriggerPolicy:
             last_regime=feature_snapshot.regime_indicator,
         )
         decision_times = self._decision_times[state_key]
+        self._prune_decision_times(decision_times=decision_times, reference_ts=market_snapshot.snapshot_ts)
         decision_times.append(market_snapshot.snapshot_ts)
-        while decision_times and (market_snapshot.snapshot_ts - decision_times[0]).total_seconds() > 60.0:
-            decision_times.popleft()
 
     def decision_count_last_minute(self, *, symbol: str, timeframe: str) -> int:
         state_key = (symbol, timeframe)
@@ -123,3 +127,8 @@ class DecisionTriggerPolicy:
         if timeframe == "1h":
             return self.settings.decision_min_interval_seconds_1h
         return 0.0
+
+    @staticmethod
+    def _prune_decision_times(*, decision_times: deque, reference_ts: datetime) -> None:
+        while decision_times and (reference_ts - decision_times[0]).total_seconds() > 60.0:
+            decision_times.popleft()

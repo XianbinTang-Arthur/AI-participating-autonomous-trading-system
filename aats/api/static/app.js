@@ -2624,9 +2624,13 @@ function formatNumber(value) {
   if (value === null || value === undefined || value === "") return "-";
   const number = Number(value);
   if (Number.isNaN(number)) return String(value);
-  if (Math.abs(number) >= 1000) return number.toFixed(2);
-  if (Math.abs(number) >= 1) return number.toFixed(4);
-  return number.toFixed(6);
+  const magnitude = Math.abs(number);
+  if (magnitude === 0) return "0";
+  if (magnitude >= 1000) return trimTrailingZeros(number.toFixed(2));
+  if (magnitude >= 1) return trimTrailingZeros(number.toFixed(4));
+  if (magnitude >= 0.0001) return trimTrailingZeros(number.toFixed(6));
+  if (magnitude >= 0.000001) return trimTrailingZeros(number.toFixed(8));
+  return number.toExponential(2);
 }
 
 function formatSigned(value) {
@@ -2634,6 +2638,10 @@ function formatSigned(value) {
   const number = Number(value);
   if (Number.isNaN(number)) return String(value);
   return `${number > 0 ? "+" : ""}${formatNumber(number)}`;
+}
+
+function trimTrailingZeros(value) {
+  return value.replace(/(\.\d*?[1-9])0+$/u, "$1").replace(/\.0+$/u, "");
 }
 
 function formatDateTime(value) {

@@ -63,13 +63,6 @@ class RiskEngine:
             approved = False
             rejection_reasons.append("max_open_orders_reached")
 
-        if self.trigger_policy.decision_count_last_minute(
-            symbol=target.symbol,
-            timeframe=self.settings.primary_timeframe,
-        ) >= self.settings.max_decisions_per_minute:
-            approved = False
-            rejection_reasons.append("max_decision_frequency_reached")
-
         if self.policy_profile.balance_checks_required and self.environment_capabilities.account_state_source_kind == "exchange":
             delta_qty = capped_qty - target.current_position_qty
             base_currency, quote_currency = self._symbol_currencies(target.symbol)
