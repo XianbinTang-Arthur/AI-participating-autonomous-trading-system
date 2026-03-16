@@ -59,8 +59,11 @@ class _FakeDerivativesOKXClient(_FakeOKXClient):
             "data": [
                 {
                     "instId": "BTC-USDT-SWAP",
-                    "baseCcy": "BTC",
-                    "quoteCcy": "USDT",
+                    "baseCcy": "",
+                    "quoteCcy": "",
+                    "uly": "BTC-USDT",
+                    "settleCcy": "USDT",
+                    "ctValCcy": "BTC",
                     "lotSz": "0.01",
                     "tickSz": "0.1",
                     "minSz": "0.01",
@@ -162,6 +165,10 @@ class TestOKXAccountService(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(snapshot.positions), 1)
         self.assertEqual(snapshot.positions[0].symbol, "BTC-USDT-SWAP")
         self.assertEqual(snapshot.positions[0].side, "long")
+        instrument = service.instrument_metadata("BTC-USDT-SWAP")
+        self.assertIsNotNone(instrument)
+        self.assertEqual(instrument.base_currency, "BTC")
+        self.assertEqual(instrument.quote_currency, "USDT")
 
 
 if __name__ == "__main__":

@@ -4,10 +4,36 @@ import unittest
 
 from aats.bootstrap.settings import AATSSettings
 from aats.bus.memory_bus import InMemoryEventBus
+from aats.events import topics
 from aats.schemas.common import utc_now
+from aats.schemas.market import MarketSnapshot
 from aats.services.market_gateway.gateway import MarketDataGateway
 from aats.services.market_gateway.normalizer import MarketSnapshotNormalizer
 from aats.services.market_gateway.publisher import MarketSnapshotPublisher
+
+
+class _FakeWSClient:
+    def __init__(self, *, connected_public: bool, connected_business: bool, last_error: str | None = None) -> None:
+        self.connected_public = connected_public
+        self.connected_business = connected_business
+        self.last_error = last_error
+
+    def status(self):
+        return {
+            "connected_public": self.connected_public,
+            "connected_business": self.connected_business,
+            "connected": self.connected_public and self.connected_business,
+            "last_message_ts": utc_now(),
+            "last_error": self.last_error,
+        }
+
+
+class _FakeOKXNormalizer:
+    def __init__(self, snapshot: MarketSnapshot) -> None:
+        self.snapshot = snapshot
+
+    def apply_message(self, *, message, states):
+        return [self.snapshot]
 
 
 class TestMarketGatewayStatus(unittest.IsolatedAsyncioTestCase):
@@ -31,6 +57,99 @@ class TestMarketGatewayStatus(unittest.IsolatedAsyncioTestCase):
         status = gateway.status()
         self.assertFalse(gateway.is_fresh("BTC-USDT"))
         self.assertIn("market_data_stale", status["blockers"])
+
+    async def test_okx_transport_degradation_does_not_block_when_snapshot_is_fresh(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "market_data_backend": "okx",
+                "default_symbol": "BTC-USDT",
+                "market_data_stale_after_seconds": 30.0,
+            }
+        )
+        gateway = MarketDataGateway(
+            settings=settings,
+            normalizer=MarketSnapshotNormalizer(exchange_name="OKX"),
+            publisher=MarketSnapshotPublisher(bus=InMemoryEventBus()),
+            okx_ws_client=_FakeWSClient(connected_public=True, connected_business=False, last_error="business reconnecting"),  # type: ignore[arg-type]
+        )
+        await gateway.publish_local_snapshot(symbol="BTC-USDT")
+
+        status = gateway.status()
+
+        self.assertTrue(status["fresh"])
+        self.assertTrue(status["connected"])
+        self.assertTrue(status["ready"])
+        self.assertEqual(status["blockers"], [])
+        self.assertEqual(status["transport_connected_public"], True)
+        self.assertEqual(status["transport_connected_business"], False)
+        self.assertIn("transport_degraded", status["detail"])
+
+    async def test_okx_transport_down_blocks_when_no_fresh_snapshot_exists(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "market_data_backend": "okx",
+                "default_symbol": "BTC-USDT",
+                "market_data_stale_after_seconds": 30.0,
+            }
+        )
+        gateway = MarketDataGateway(
+            settings=settings,
+            normalizer=MarketSnapshotNormalizer(exchange_name="OKX"),
+            publisher=MarketSnapshotPublisher(bus=InMemoryEventBus()),
+            okx_ws_client=_FakeWSClient(connected_public=False, connected_business=False, last_error="disconnected"),  # type: ignore[arg-type]
+        )
+
+        status = gateway.status()
+
+        self.assertFalse(status["fresh"])
+        self.assertFalse(status["connected"])
+        self.assertFalse(status["ready"])
+        self.assertIn("market_connection_down", status["blockers"])
+        self.assertIn("market_data_stale", status["blockers"])
+
+    async def test_market_stream_survives_downstream_publish_failure(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "market_data_backend": "okx",
+                "default_symbol": "BTC-USDT",
+            }
+        )
+        bus = InMemoryEventBus()
+
+        async def broken_handler(_message) -> None:
+            raise RuntimeError("downstream failed")
+
+        await bus.subscribe(topics.MARKET_SNAPSHOTS, broken_handler)
+        publisher = MarketSnapshotPublisher(bus=bus)
+        snapshot = MarketSnapshot.model_validate(
+            {
+                "symbol": "BTC-USDT",
+                "exchange": "OKX",
+                "snapshot_ts": utc_now(),
+                "best_bid": 100000.0,
+                "best_ask": 100010.0,
+                "last_price": 100005.0,
+                "bid_size": 1.0,
+                "ask_size": 1.0,
+                "volume_24h": 1000.0,
+                "kline_15m": {"open": 99900.0, "high": 100100.0, "low": 99800.0, "close": 100005.0, "volume": 10.0},
+                "kline_1h": {"open": 99500.0, "high": 100500.0, "low": 99400.0, "close": 100005.0, "volume": 40.0},
+                "recent_trades": [],
+                "orderbook_depth": {"bids": [], "asks": []},
+            }
+        )
+        gateway = MarketDataGateway(
+            settings=settings,
+            normalizer=MarketSnapshotNormalizer(exchange_name="OKX"),
+            publisher=publisher,
+            okx_normalizer=_FakeOKXNormalizer(snapshot),
+            okx_ws_client=_FakeWSClient(connected_public=True, connected_business=True),  # type: ignore[arg-type]
+        )
+
+        await gateway._handle_okx_message({"arg": {"channel": "tickers"}, "data": []})
+
+        self.assertEqual(gateway.latest_snapshot("BTC-USDT"), snapshot)
+        self.assertEqual(gateway._last_error, "downstream failed")
 
 
 if __name__ == "__main__":

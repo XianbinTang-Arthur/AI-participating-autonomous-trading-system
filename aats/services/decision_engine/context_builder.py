@@ -67,7 +67,7 @@ class DecisionContextBuilder:
             raise RuntimeError("Portfolio snapshot is required before building decision context")
 
         portfolio_snapshot = latest_matching_snapshot(self.portfolio_repo.history(), self.state_scope)
-        current_position_qty = self._position_qty(portfolio_snapshot, symbol)
+        current_position_qty = self._position_qty(portfolio_snapshot, symbol, self.settings.trading_product_type)
         current_exposure_side = self._exposure_side(current_position_qty)
         return DecisionContext(
             decision_id=decision_id,
@@ -96,13 +96,17 @@ class DecisionContextBuilder:
         )
 
     @staticmethod
-    def _position_qty(snapshot: PortfolioSnapshot | None, symbol: str) -> float:
+    def _position_qty(
+        snapshot: PortfolioSnapshot | None,
+        symbol: str,
+        product_type: str = "spot",
+    ) -> float:
         if snapshot is None:
             return 0.0
         for position in snapshot.positions:
             if position.symbol == symbol:
                 return position.position_qty
-        if "-" in symbol:
+        if product_type == "spot" and "-" in symbol:
             base_currency, _quote_currency = symbol.split("-", 1)
             return snapshot.balances.get(base_currency, 0.0)
         return 0.0

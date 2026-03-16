@@ -43,7 +43,7 @@ class OKXOrderPayloadBuilder:
         if intent.order_type == "limit" and intent.limit_price is not None:
             limit_price = self._round_down(value=intent.limit_price, step=instrument.tick_size)
             payload["px"] = self._render_decimal(limit_price)
-        if intent.order_type == "market" and intent.side == "buy":
+        if intent.product_type == "spot" and intent.order_type == "market" and intent.side == "buy":
             payload["tgtCcy"] = "base_ccy"
         return payload
 

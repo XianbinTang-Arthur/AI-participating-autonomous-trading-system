@@ -77,10 +77,10 @@ def portfolio_snapshot_matches_scope(
         return False
     if snapshot.margin_mode != scope.margin_mode:
         return False
-    symbols = {position.symbol for position in snapshot.positions if position.symbol}
-    if not symbols:
-        return True
-    return all(scope.symbol_allowed(symbol) for symbol in symbols)
+    # Portfolio snapshots represent account-wide state. Extra balances or positions in
+    # the same product/margin posture should not make the current runtime ignore the
+    # snapshot for recovery or decision context bootstrapping.
+    return True
 
 
 def reconciliation_report_matches_scope(

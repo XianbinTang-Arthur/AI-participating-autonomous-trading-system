@@ -98,6 +98,49 @@ class TestRuntimeScope(unittest.TestCase):
         self.assertFalse(portfolio_snapshot_matches_scope(spot_snapshot, scope))
         self.assertTrue(reconciliation_report_matches_scope(derivatives_report, scope))
 
+    def test_spot_snapshot_with_extra_positions_still_matches_spot_scope(self) -> None:
+        scope = runtime_state_scope(
+            AATSSettings.model_validate(
+                {
+                    "trading_product_type": "spot",
+                    "margin_mode": "cash",
+                    "allowed_symbols": ("BTC-USDT",),
+                    "default_symbol": "BTC-USDT",
+                }
+            )
+        )
+        spot_snapshot = PortfolioSnapshot(
+            snapshot_ts=utc_now(),
+            balances={"USDT": 1000.0, "BTC": 0.01, "ETH": 1.0},
+            positions=[
+                Position(
+                    symbol="BTC-USDT",
+                    position_qty=0.01,
+                    position_notional=700.0,
+                    avg_entry_price=70000.0,
+                    unrealized_pnl=0.0,
+                ),
+                Position(
+                    symbol="ETH-USDT",
+                    position_qty=1.0,
+                    position_notional=3000.0,
+                    avg_entry_price=3000.0,
+                    unrealized_pnl=0.0,
+                ),
+            ],
+            cost_basis={},
+            realized_pnl=0.0,
+            unrealized_pnl=0.0,
+            total_equity=4000.0,
+            gross_exposure=3700.0,
+            net_exposure=3700.0,
+            risk_budget_usage={},
+            product_type="spot",
+            margin_mode="cash",
+        )
+
+        self.assertTrue(portfolio_snapshot_matches_scope(spot_snapshot, scope))
+
     def test_fill_with_wrong_symbol_is_out_of_scope(self) -> None:
         scope = runtime_state_scope(
             AATSSettings.model_validate(

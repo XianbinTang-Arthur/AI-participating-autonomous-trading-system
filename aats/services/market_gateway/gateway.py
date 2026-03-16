@@ -102,27 +102,39 @@ class MarketDataGateway:
         connected = True
         last_update_ts = default_snapshot.snapshot_ts if default_snapshot is not None else None
         detail = "demo_market_data"
+        transport_connected = True
+        transport_connected_public: bool | None = None
+        transport_connected_business: bool | None = None
         if self.settings.market_data_backend == "okx" and self.okx_ws_client is not None:
             okx_status = self.okx_ws_client.status()
-            connected = bool(okx_status["connected"])
+            transport_connected = bool(okx_status["connected"])
+            transport_connected_public = bool(okx_status.get("connected_public", False))
+            transport_connected_business = bool(okx_status.get("connected_business", False))
             last_update_ts = okx_status.get("last_message_ts") or last_update_ts
             detail = "okx_public_ws"
             self._last_error = okx_status.get("last_error")
         fresh = self.is_fresh(self.settings.default_symbol)
+        if self.settings.market_data_backend == "okx":
+            connected = transport_connected or fresh
         blockers: list[str] = []
-        if not connected:
+        if not transport_connected and not fresh:
             blockers.append("market_connection_down")
         if not fresh:
             blockers.append("market_data_stale")
+        if not transport_connected and fresh:
+            detail = f"{detail}_transport_degraded"
         return {
             "backend": self.settings.market_data_backend,
             "connected": connected,
+            "transport_connected": transport_connected,
+            "transport_connected_public": transport_connected_public,
+            "transport_connected_business": transport_connected_business,
             "fresh": fresh,
             "last_update_ts": last_update_ts,
             "last_error": self._last_error,
             "detail": detail,
             "blockers": blockers,
-            "ready": connected and fresh,
+            "ready": fresh,
         }
 
     async def _run_okx_stream(self) -> None:
@@ -145,7 +157,8 @@ class MarketDataGateway:
                 error_type=type(exc).__name__,
                 error=str(exc),
             )
-            raise
+            # Market transport should stay alive even if a downstream consumer fails.
+            return
 
     async def _publish_snapshot(self, snapshot: MarketSnapshot) -> None:
         self._latest_snapshots[snapshot.symbol] = snapshot

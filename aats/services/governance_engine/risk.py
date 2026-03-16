@@ -137,10 +137,14 @@ class RiskEngine:
         instrument_getter = getattr(self.account_service, "instrument_metadata", None)
         instrument = instrument_getter(symbol) if callable(instrument_getter) else None
         if instrument is not None:
-            return instrument.base_currency, instrument.quote_currency
+            base_currency = (instrument.base_currency or "").strip()
+            quote_currency = (instrument.quote_currency or "").strip()
+            if base_currency and quote_currency:
+                return base_currency, quote_currency
         if "-" in symbol:
-            base_currency, quote_currency = symbol.split("-", 1)
-            return base_currency, quote_currency
+            parts = [part for part in symbol.split("-") if part]
+            if len(parts) >= 2:
+                return parts[0], parts[1]
         return None, None
 
     async def publish_decision(

@@ -478,6 +478,44 @@ class TestGuardedSimulatedExecution(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["ordType"], "market")
         self.assertEqual(payload["tgtCcy"], "base_ccy")
         self.assertTrue(payload["clOrdId"].isalnum())
+
+    def test_derivatives_market_buy_payload_omits_spot_only_target_currency(self) -> None:
+        intent = OrderIntent(
+            intent_id="intent_derivatives",
+            decision_id="decision_derivatives",
+            symbol="BTC-USDT-SWAP",
+            side="buy",
+            quantity=0.03,
+            execution_style="taker",
+            order_type="market",
+            urgency="medium",
+            time_in_force="IOC",
+            idempotency_key="intent_derivatives",
+            product_type="derivatives",
+            target_leverage=2.5,
+            margin_mode="cross",
+            exposure_side="long",
+            position_intent="open_long",
+        )
+        payload = OKXOrderPayloadBuilder().build(
+            intent=intent,
+            instrument=InstrumentMetadata(
+                instrument_id="BTC-USDT-SWAP",
+                symbol="BTC-USDT-SWAP",
+                base_currency="BTC",
+                quote_currency="USDT",
+                lot_size=0.01,
+                tick_size=0.1,
+                min_size=0.01,
+                state="live",
+            ),
+        )
+
+        self.assertEqual(payload["instId"], "BTC-USDT-SWAP")
+        self.assertEqual(payload["tdMode"], "cross")
+        self.assertEqual(payload["side"], "buy")
+        self.assertEqual(payload["ordType"], "market")
+        self.assertNotIn("tgtCcy", payload)
         self.assertLessEqual(len(payload["clOrdId"]), 32)
         self.assertNotIn("_", payload["clOrdId"])
         self.assertNotEqual(payload["clOrdId"], f"cl{intent.idempotency_key}".replace("_", "")[:32])

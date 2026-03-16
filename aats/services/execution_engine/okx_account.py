@@ -269,12 +269,13 @@ class OKXAccountService:
     def _parse_instruments(payload: dict[str, Any]) -> list[InstrumentMetadata]:
         instruments: list[InstrumentMetadata] = []
         for row in payload.get("data", []):
+            base_currency, quote_currency = OKXAccountService._instrument_currencies(row)
             instruments.append(
                 InstrumentMetadata(
                     instrument_id=str(row.get("instId")),
                     symbol=str(row.get("instId")),
-                    base_currency=str(row.get("baseCcy")),
-                    quote_currency=str(row.get("quoteCcy")),
+                    base_currency=base_currency,
+                    quote_currency=quote_currency,
                     lot_size=float(Decimal(str(row.get("lotSz", "0.00000001")))),
                     tick_size=float(Decimal(str(row.get("tickSz", "0.00000001")))),
                     min_size=float(Decimal(str(row.get("minSz", row.get("lotSz", "0.0"))))),
@@ -283,6 +284,38 @@ class OKXAccountService:
                 )
             )
         return instruments
+
+    @staticmethod
+    def _instrument_currencies(row: dict[str, Any]) -> tuple[str, str]:
+        base_currency = str(row.get("baseCcy") or "").strip()
+        quote_currency = str(row.get("quoteCcy") or "").strip()
+        underlying = str(row.get("uly") or "").strip()
+        settle_currency = str(row.get("settleCcy") or "").strip()
+        contract_value_currency = str(row.get("ctValCcy") or "").strip()
+        instrument_id = str(row.get("instId") or "").strip()
+
+        if underlying and "-" in underlying:
+            underlying_parts = underlying.split("-")
+            if len(underlying_parts) >= 2:
+                if not base_currency:
+                    base_currency = underlying_parts[0]
+                if not quote_currency:
+                    quote_currency = underlying_parts[1]
+
+        if not base_currency and contract_value_currency:
+            base_currency = contract_value_currency
+        if not quote_currency and settle_currency:
+            quote_currency = settle_currency
+
+        if instrument_id and "-" in instrument_id:
+            symbol_parts = instrument_id.split("-")
+            if len(symbol_parts) >= 2:
+                if not base_currency:
+                    base_currency = symbol_parts[0]
+                if not quote_currency:
+                    quote_currency = symbol_parts[1]
+
+        return base_currency, quote_currency
 
     @staticmethod
     def _parse_account_mode(payload: dict[str, Any]) -> str | None:

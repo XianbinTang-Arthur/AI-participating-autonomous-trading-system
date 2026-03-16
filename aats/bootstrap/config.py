@@ -12,7 +12,7 @@ from aats.bootstrap.metrics import MetricsRegistry
 from aats.bootstrap.settings import AATSSettings
 from aats.bus.memory_bus import InMemoryEventBus
 from aats.events import topics
-from aats.events.envelopes import build_envelope, parse_payload
+from aats.events.envelopes import build_envelope, parse_payload, publish_model
 from aats.schemas.decision import PositionTarget
 from aats.services.ai_service.inference import AIInferenceService
 from aats.services.ai_service.prompt_builder import PromptBuilder
@@ -53,7 +53,7 @@ from aats.services.market_gateway.okx_websocket import OKXPublicWebSocketClient
 from aats.services.market_gateway.publisher import MarketSnapshotPublisher
 from aats.services.operator.accounts import seed_operator_users
 from aats.services.operator.runtime_profiles import runtime_profile_resolution
-from aats.services.runtime_scope import latest_matching_snapshot, runtime_state_scope
+from aats.services.runtime_scope import latest_matching_snapshot, runtime_state_scope, scoped_portfolio_event
 from aats.services.portfolio_service.pnl import PortfolioPnLCalculator
 from aats.services.portfolio_service.positions import PortfolioService, PortfolioState
 from aats.services.portfolio_service.reconstruction import PortfolioReconstructionService
@@ -597,6 +597,19 @@ async def build_runtime(
         )
     else:
         recovery_status = recovery_artifacts.status
+
+    latest_scoped_portfolio_snapshot = latest_matching_snapshot(storage.portfolio_repo.history(), state_scope)
+    if (
+        latest_scoped_portfolio_snapshot is not None
+        and scoped_portfolio_event(storage.event_store.by_topic(topics.PORTFOLIO_SNAPSHOTS), state_scope) is None
+    ):
+        await publish_model(
+            bus=bus,
+            topic=topics.PORTFOLIO_SNAPSHOTS,
+            key="portfolio",
+            payload_model=latest_scoped_portfolio_snapshot,
+            source_component="runtime",
+        )
 
     return ApplicationRuntime(
         started_at=utc_now(),
