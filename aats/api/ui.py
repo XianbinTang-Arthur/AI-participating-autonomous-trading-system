@@ -2,13 +2,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, RedirectResponse
 
 from aats.api.auth import session_principal
 
 
 UI_DIR = Path(__file__).resolve().parent / "static"
+MODULES_DIR = UI_DIR / "modules"
 
 ui_router = APIRouter(include_in_schema=False)
 
@@ -54,3 +55,11 @@ async def dashboard_js() -> FileResponse:
 @ui_router.get("/ui/login.js")
 async def login_js() -> FileResponse:
     return FileResponse(UI_DIR / "login.js", media_type="application/javascript; charset=utf-8", headers=NO_STORE_HEADERS)
+
+
+@ui_router.get("/ui/modules/{module_path:path}")
+async def dashboard_module(module_path: str) -> FileResponse:
+    resolved = (MODULES_DIR / module_path).resolve()
+    if MODULES_DIR.resolve() not in resolved.parents or not resolved.is_file():
+        raise HTTPException(status_code=404, detail="ui_module_not_found")
+    return FileResponse(resolved, media_type="application/javascript; charset=utf-8", headers=NO_STORE_HEADERS)

@@ -3,17 +3,17 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>AATS 登录</title>
+  <title>AATS 控制台登录</title>
   <link rel="stylesheet" href="/ui/app.css">
 </head>
 <body>
   <main class="login-shell">
     <section class="login-panel">
-      <div class="login-head">
-        <p class="brand-kicker">AI 参与式自主交易系统</p>
+      <div class="login-copy">
+        <p class="eyebrow">AI 参与式自主交易系统</p>
         <h1>控制台登录</h1>
-        <p class="brand-copy">
-          使用已配置的只读、操作员或管理员账户登录交易控制台。
+        <p class="lead">
+          使用已配置的只读、操作员或管理员账户登录交易控制台。登录后可以查看交易状态、收益变化、风控阻断和人工操作入口。
         </p>
       </div>
 
@@ -24,10 +24,10 @@
         <label for="loginPassword" class="field-label">密码</label>
         <input id="loginPassword" type="password" autocomplete="current-password" placeholder="请输入密码" required>
 
-        <button id="loginButton" type="submit" class="action-button action-primary login-button">登录</button>
+        <button id="loginButton" type="submit" class="primary-button login-button">登录</button>
       </form>
 
-      <div id="loginMessage" class="alert alert-info">请输入控制台账户和密码后继续。</div>
+      <div id="loginMessage" class="notice-card tone-info">请输入控制台账户和密码后继续。</div>
     </section>
   </main>
 
