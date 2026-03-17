@@ -270,7 +270,10 @@ class TestExecutionObligations(unittest.IsolatedAsyncioTestCase):
 
         obligation = obligation_repo.get_obligation("clclient_outbox_filled")
         self.assertIsNotNone(obligation)
-        self.assertEqual(outbox.order_state_obligations, [None, None, None])
+        self.assertEqual(len(outbox.order_state_obligations), 3)
+        self.assertIsNotNone(outbox.order_state_obligations[0])
+        self.assertEqual(outbox.order_state_obligations[0].client_order_id, "clclient_outbox_filled")
+        self.assertEqual(outbox.order_state_obligations[1:], [None, None])
         self.assertEqual(len(outbox.fill_obligations), 1)
         self.assertAlmostEqual(outbox.fill_obligations[0].consumed_amount, 60.0)
         self.assertAlmostEqual(outbox.fill_obligations[0].released_amount, 0.0)

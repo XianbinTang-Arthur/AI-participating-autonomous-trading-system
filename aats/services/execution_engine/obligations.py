@@ -34,6 +34,20 @@ class ExecutionObligationService:
         intent: OrderIntent,
         client_order_id: str,
     ) -> OrderObligation | None:
+        obligation = await self.preview_reservation_for_intent(
+            intent=intent,
+            client_order_id=client_order_id,
+        )
+        if obligation is None:
+            return None
+        return self.obligation_repo.save_obligation(obligation)
+
+    async def preview_reservation_for_intent(
+        self,
+        *,
+        intent: OrderIntent,
+        client_order_id: str,
+    ) -> OrderObligation | None:
         existing = self.obligation_repo.get_obligation(client_order_id)
         if existing is not None:
             return existing
@@ -74,7 +88,7 @@ class ExecutionObligationService:
             reference_price=reference_price,
             last_update_ts=utc_now(),
         )
-        return self.obligation_repo.save_obligation(obligation)
+        return obligation
 
     def consume_for_fill(self, fill: FillEvent) -> OrderObligation | None:
         updated = self.preview_obligation_for_fill(fill)

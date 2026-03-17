@@ -68,12 +68,19 @@ class OrderManager:
             if callable(preview_client_order_id_fn)
             else None
         ) or intent.idempotency_key or new_id("clord")
+        initial_obligation = None
         try:
             if self.obligation_service is not None:
-                await self.obligation_service.reserve_for_intent(
-                    intent=intent,
-                    client_order_id=preview_client_order_id,
-                )
+                if self.execution_outbox_publisher is not None:
+                    initial_obligation = await self.obligation_service.preview_reservation_for_intent(
+                        intent=intent,
+                        client_order_id=preview_client_order_id,
+                    )
+                else:
+                    await self.obligation_service.reserve_for_intent(
+                        intent=intent,
+                        client_order_id=preview_client_order_id,
+                    )
         except ExecutionReservationError as exc:
             blocked_state = OrderState(
                 decision_id=intent.decision_id,
@@ -124,7 +131,11 @@ class OrderManager:
             position_intent=intent.position_intent,
             submission_payload={},
         )
-        created_state = await self._persist_order_state(order_state=created_state, key=intent.symbol)
+        created_state = await self._persist_order_state(
+            order_state=created_state,
+            key=intent.symbol,
+            obligation=initial_obligation,
+        )
         submitting_state = created_state.model_copy(
             update={
                 "status": "SUBMITTING",
@@ -211,11 +222,18 @@ class OrderManager:
         self._finalize_obligation(order_state=persisted)
         return persisted
 
-    async def _persist_order_state(self, *, order_state: OrderState, key: str) -> OrderState:
+    async def _persist_order_state(
+        self,
+        *,
+        order_state: OrderState,
+        key: str,
+        obligation=None,
+    ) -> OrderState:
         if self.execution_outbox_publisher is not None:
             persisted = await self.execution_outbox_publisher.persist_order_state(
                 order_state=order_state,
                 key=key,
+                obligation=obligation,
             )
             log_event(
                 self.logger,
