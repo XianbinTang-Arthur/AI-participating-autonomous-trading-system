@@ -21,19 +21,34 @@ class LiquidityAnalyzer:
         ask_depth = self._depth_total(snapshot.orderbook_depth.get("asks"))
         total_depth = bid_depth + ask_depth
         depth_imbalance = (bid_depth - ask_depth) / total_depth if total_depth else top_of_book_imbalance
+        trade_flow_imbalance = self._trade_flow_imbalance(snapshot.recent_trades)
 
         quoted_depth = total_depth if total_depth else top_depth
         spread_score = max(0.0, 1.0 - min(spread_bps / 10.0, 1.0))
         depth_score = min(quoted_depth / 10.0, 1.0)
         balance_score = 1.0 - min(abs(depth_imbalance), 1.0)
         liquidity_score = max(0.0, min((spread_score * 0.5) + (depth_score * 0.3) + (balance_score * 0.2), 1.0))
+        spread_penalty = min(spread_bps / 12.0, 1.0)
+        execution_quality_scale = max(
+            0.25,
+            min(
+                (spread_score * 0.45)
+                + (depth_score * 0.2)
+                + ((1.0 - min(abs(top_of_book_imbalance - trade_flow_imbalance), 1.0)) * 0.15)
+                + ((1.0 - min(abs(trade_flow_imbalance), 1.0)) * 0.2),
+                1.0,
+            ),
+        )
 
         return LiquidityFeatureSet(
             created_at=snapshot.snapshot_ts,
             spread_bps=spread_bps,
             top_of_book_imbalance=top_of_book_imbalance,
             depth_imbalance=depth_imbalance,
+            trade_flow_imbalance=trade_flow_imbalance,
             quoted_depth=quoted_depth,
+            spread_penalty=spread_penalty,
+            execution_quality_scale=execution_quality_scale,
             liquidity_score=liquidity_score,
         )
 
@@ -51,3 +66,27 @@ class LiquidityAnalyzer:
             except (TypeError, ValueError):
                 continue
         return total
+
+    @staticmethod
+    def _trade_flow_imbalance(trades: object) -> float:
+        if not isinstance(trades, list):
+            return 0.0
+        buy_volume = 0.0
+        sell_volume = 0.0
+        for trade in trades:
+            if not isinstance(trade, dict):
+                continue
+            side = str(trade.get("side") or "").lower()
+            size = trade.get("size") or trade.get("qty") or trade.get("quantity") or trade.get("fillSz")
+            try:
+                quantity = abs(float(size))
+            except (TypeError, ValueError):
+                continue
+            if side == "buy":
+                buy_volume += quantity
+            elif side == "sell":
+                sell_volume += quantity
+        total = buy_volume + sell_volume
+        if total <= 0.0:
+            return 0.0
+        return (buy_volume - sell_volume) / total

@@ -56,12 +56,18 @@ class FeatureCalculator:
             features_1h=features_1h,
             multi_timeframe=multi_timeframe_context,
             liquidity_score=liquidity.liquidity_score,
+            top_of_book_imbalance=liquidity.top_of_book_imbalance,
+            depth_imbalance=liquidity.depth_imbalance,
+            trade_flow_imbalance=liquidity.trade_flow_imbalance,
+            execution_quality_scale=liquidity.execution_quality_scale,
+            spread_penalty=liquidity.spread_penalty,
             regime_indicator=regime.regime_indicator,
             regime_confidence=regime.regime_confidence,
             regime_bias=regime.trend_bias,
         )
         position_sizing = self._position_sizing_context(
             alpha_factors=alpha_factors,
+            execution_quality_scale=liquidity.execution_quality_scale,
             volatility_state=features_15m.volatility_state,
             volatility_value=features_15m.volatility_value,
         )
@@ -177,6 +183,11 @@ class FeatureCalculator:
         features_1h: TimeframeFeatureSet,
         multi_timeframe: MultiTimeframeContext,
         liquidity_score: float,
+        top_of_book_imbalance: float,
+        depth_imbalance: float,
+        trade_flow_imbalance: float,
+        execution_quality_scale: float,
+        spread_penalty: float,
         regime_indicator: str,
         regime_confidence: float,
         regime_bias: str,
@@ -207,13 +218,26 @@ class FeatureCalculator:
             -1.0,
             1.0,
         )
+        microstructure_direction = FeatureCalculator._clamp(
+            (top_of_book_imbalance * 0.25)
+            + (depth_imbalance * 0.4)
+            + (trade_flow_imbalance * 0.35),
+            -1.0,
+            1.0,
+        )
+        microstructure_alpha = FeatureCalculator._clamp(
+            microstructure_direction * execution_quality_scale * (1.0 - min(spread_penalty * 0.5, 0.45)),
+            -1.0,
+            1.0,
+        )
         liquidity_scale = FeatureCalculator._clamp(0.45 + (liquidity_score * 0.55), 0.25, 1.0)
         composite_alpha_score = FeatureCalculator._clamp(
             (
-                momentum_alpha * 0.4
-                + trend_alpha * 0.25
-                + regime_alpha * 0.2
-                + multi_timeframe_alpha * 0.15
+                momentum_alpha * 0.34
+                + trend_alpha * 0.22
+                + regime_alpha * 0.17
+                + multi_timeframe_alpha * 0.12
+                + microstructure_alpha * 0.15
             )
             * liquidity_scale,
             -1.0,
@@ -221,8 +245,9 @@ class FeatureCalculator:
         )
         conviction_score = FeatureCalculator._clamp(
             (abs(composite_alpha_score) * 0.7)
-            + (regime_confidence * 0.2)
-            + (multi_timeframe.regime_alignment_score * 0.1),
+            + (regime_confidence * 0.15)
+            + (multi_timeframe.regime_alignment_score * 0.08)
+            + (execution_quality_scale * 0.07),
             0.0,
             1.0,
         )
@@ -232,6 +257,7 @@ class FeatureCalculator:
             trend_alpha=trend_alpha,
             regime_alpha=regime_alpha,
             multi_timeframe_alpha=multi_timeframe_alpha,
+            microstructure_alpha=microstructure_alpha,
             liquidity_scale=liquidity_scale,
             composite_alpha_score=composite_alpha_score,
             conviction_score=conviction_score,
@@ -241,6 +267,7 @@ class FeatureCalculator:
     def _position_sizing_context(
         *,
         alpha_factors: AlphaFactorSet,
+        execution_quality_scale: float,
         volatility_state: str,
         volatility_value: float,
     ) -> PositionSizingContext:
@@ -257,6 +284,7 @@ class FeatureCalculator:
         suggested_position_scale = FeatureCalculator._clamp(
             alpha_factors.conviction_score
             * alpha_factors.liquidity_scale
+            * execution_quality_scale
             * volatility_target_scale,
             0.0,
             1.0,
@@ -267,6 +295,7 @@ class FeatureCalculator:
             created_at=alpha_factors.created_at,
             volatility_target_scale=volatility_target_scale,
             liquidity_scale=alpha_factors.liquidity_scale,
+            execution_quality_scale=execution_quality_scale,
             conviction_scale=alpha_factors.conviction_score,
             suggested_position_scale=suggested_position_scale,
         )

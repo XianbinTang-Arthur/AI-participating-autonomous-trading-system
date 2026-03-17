@@ -121,6 +121,64 @@ class TestTargetPositionEngine(unittest.TestCase):
         self.assertGreaterEqual(target.target_leverage, 1.0)
         self.assertLessEqual(target.target_leverage, 3.0)
 
+    def test_derivatives_reduces_before_reversing_on_weak_opposite_signal(self) -> None:
+        engine = TargetPositionEngine(
+            settings=AATSSettings.model_validate(
+                {
+                    "default_order_qty": 0.01,
+                    "trading_product_type": "derivatives",
+                    "strategy_short_bias_enabled": True,
+                }
+            )
+        )
+        context = self._context(current_position_qty=0.05, product_type="derivatives", current_exposure_side="long")
+        baseline = self._baseline(
+            volatility_target_scale=1.0,
+            suggested_position_scale=0.2,
+            direction_bias="short",
+            confidence=0.7,
+        )
+
+        target = engine.build(context, baseline, self._ai_assessment(direction=-0.18, confidence=0.6))
+
+        self.assertGreater(target.target_position_qty, 0.0)
+        self.assertLess(target.target_position_qty, context.current_position_qty)
+        self.assertEqual(target.position_intent, "reduce_long")
+
+    def test_derivatives_leverage_reduces_when_microstructure_conflicts(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "default_order_qty": 0.01,
+                "trading_product_type": "derivatives",
+                "max_target_leverage": 4.0,
+                "default_target_leverage": 2.5,
+                "strategy_short_bias_enabled": True,
+                "strategy_dynamic_leverage_enabled": True,
+            }
+        )
+        engine = TargetPositionEngine(settings=settings)
+        context = self._context(product_type="derivatives", current_exposure_side="flat")
+        supportive = self._baseline(
+            volatility_target_scale=1.0,
+            suggested_position_scale=1.0,
+            direction_bias="long",
+            confidence=0.92,
+            factor_scores={"momentum_alpha": 0.4, "microstructure_alpha": 0.18, "liquidity_scale": 0.95},
+        )
+        conflicting = self._baseline(
+            volatility_target_scale=1.0,
+            suggested_position_scale=1.0,
+            direction_bias="long",
+            confidence=0.92,
+            volatility_state="high",
+            factor_scores={"momentum_alpha": 0.4, "microstructure_alpha": -0.18, "liquidity_scale": 0.6},
+        )
+
+        supportive_target = engine.build(context, supportive, self._ai_assessment(direction=0.5, confidence=0.9))
+        conflicting_target = engine.build(context, conflicting, self._ai_assessment(direction=0.5, confidence=0.9))
+
+        self.assertGreater(supportive_target.target_leverage, conflicting_target.target_leverage)
+
     @staticmethod
     def _context(
         *,
@@ -151,6 +209,8 @@ class TestTargetPositionEngine(unittest.TestCase):
         suggested_position_scale: float,
         direction_bias: str = "long",
         confidence: float = 0.8,
+        volatility_state: str = "medium",
+        factor_scores: dict[str, float] | None = None,
     ) -> BaselineAssessment:
         return BaselineAssessment(
             decision_id="decision_target_test",
@@ -158,12 +218,12 @@ class TestTargetPositionEngine(unittest.TestCase):
             regime="trend",
             direction_bias=direction_bias,  # type: ignore[arg-type]
             trend_strength=0.7,
-            volatility_state="medium",
+            volatility_state=volatility_state,
             confidence=confidence,
             composite_alpha_score=0.45,
             suggested_position_scale=suggested_position_scale,
             volatility_target_scale=volatility_target_scale,
-            factor_scores={"momentum_alpha": 0.4},
+            factor_scores=factor_scores or {"momentum_alpha": 0.4},
             holding_horizon="15m",
             invalidation_conditions=[],
             reason_codes=["test"],

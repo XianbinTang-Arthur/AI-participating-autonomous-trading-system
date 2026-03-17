@@ -84,17 +84,20 @@ class TargetPositionEngine:
             return self._apply_position_management(
                 current_position_qty=current_position_qty,
                 desired_target_qty=baseline_qty,
+                product_type=self.settings.trading_product_type,
             )
         if mode == "ai_blended":
             if baseline.direction_bias == "long" and ai_assessment.directional_edge >= 0.0:
                 return self._apply_position_management(
                     current_position_qty=current_position_qty,
                     desired_target_qty=baseline_qty,
+                    product_type=self.settings.trading_product_type,
                 )
             if baseline.direction_bias == "short" and ai_assessment.directional_edge <= 0.0:
                 return self._apply_position_management(
                     current_position_qty=current_position_qty,
                     desired_target_qty=baseline_qty,
+                    product_type=self.settings.trading_product_type,
                 )
             return 0.0
         if mode == "ai_primary":
@@ -107,19 +110,23 @@ class TargetPositionEngine:
                     return self._apply_position_management(
                         current_position_qty=current_position_qty,
                         desired_target_qty=abs(baseline_qty) or self.settings.default_order_qty * 0.35,
+                        product_type=self.settings.trading_product_type,
                     )
                 if ai_assessment.directional_edge < 0.0:
                     return self._apply_position_management(
                         current_position_qty=current_position_qty,
                         desired_target_qty=-(abs(baseline_qty) or self.settings.default_order_qty * 0.35),
+                        product_type=self.settings.trading_product_type,
                     )
             return self._apply_position_management(
                 current_position_qty=current_position_qty,
                 desired_target_qty=baseline_qty,
+                product_type=self.settings.trading_product_type,
             )
         return self._apply_position_management(
             current_position_qty=current_position_qty,
             desired_target_qty=baseline_qty,
+            product_type=self.settings.trading_product_type,
         )
 
     def _baseline_target_qty(self, *, baseline: BaselineAssessment) -> float:
@@ -169,8 +176,20 @@ class TargetPositionEngine:
             + (abs(ai_assessment.directional_edge) * 0.35)
             + (max(ai_assessment.calibrated_confidence, ai_assessment.confidence) * 0.2),
         )
-        if baseline.volatility_state in {"high", "extreme"}:
-            conviction *= 0.7
+        if baseline.volatility_state == "high":
+            conviction *= 0.62
+        if baseline.regime == "breakout":
+            conviction *= 1.08
+        if baseline.regime in {"range", "uncertain"}:
+            conviction *= 0.85
+        microstructure = baseline.factor_scores.get("microstructure_alpha", 0.0)
+        liquidity_scale = baseline.factor_scores.get("liquidity_scale", 1.0)
+        conviction *= max(0.75, min(1.15, liquidity_scale + (abs(microstructure) * 0.2)))
+        if microstructure and (
+            (baseline.direction_bias == "long" and microstructure < 0.0)
+            or (baseline.direction_bias == "short" and microstructure > 0.0)
+        ):
+            conviction *= 0.75
         if ai_assessment.degraded or ai_assessment.fallback_used:
             conviction *= 0.85
         return self._clamp(0.85 + conviction, 0.85, 2.5)
@@ -206,19 +225,64 @@ class TargetPositionEngine:
         *,
         current_position_qty: float,
         desired_target_qty: float,
+        product_type: str,
     ) -> float:
-        rebalance_band = max(self.settings.default_order_qty * 0.15, abs(desired_target_qty) * 0.1, 1e-12)
+        rebalance_band = self._rebalance_band(
+            current_position_qty=current_position_qty,
+            desired_target_qty=desired_target_qty,
+        )
         delta_qty = desired_target_qty - current_position_qty
         if abs(desired_target_qty) < 1e-12 and abs(current_position_qty) <= rebalance_band:
             return 0.0
         if abs(delta_qty) <= rebalance_band:
             return current_position_qty
 
-        if self._same_direction(current_position_qty, desired_target_qty) and abs(desired_target_qty) > abs(current_position_qty):
-            max_step = max(self.settings.default_order_qty * 0.35, abs(desired_target_qty) * 0.5)
-            step = min(abs(delta_qty), max_step)
-            return current_position_qty + (self._sign(delta_qty) * step)
+        if self._same_direction(current_position_qty, desired_target_qty):
+            if abs(desired_target_qty) > abs(current_position_qty):
+                max_step = self._max_scale_step(desired_target_qty)
+                step = min(abs(delta_qty), max_step)
+                return current_position_qty + (self._sign(delta_qty) * step)
+            if abs(delta_qty) <= self._reduce_threshold(
+                current_position_qty=current_position_qty,
+                desired_target_qty=desired_target_qty,
+            ):
+                return current_position_qty
+            return desired_target_qty
+
+        if abs(current_position_qty) > 1e-12 and abs(desired_target_qty) > 1e-12:
+            if abs(desired_target_qty) < self._reverse_threshold(current_position_qty=current_position_qty):
+                if product_type == "derivatives":
+                    return self._derivatives_reversal_step(current_position_qty=current_position_qty)
+                return 0.0
         return desired_target_qty
+
+    def _rebalance_band(self, *, current_position_qty: float, desired_target_qty: float) -> float:
+        return max(
+            self.settings.default_order_qty * 0.12,
+            abs(desired_target_qty) * 0.08,
+            abs(current_position_qty) * 0.08,
+            1e-12,
+        )
+
+    def _reduce_threshold(self, *, current_position_qty: float, desired_target_qty: float) -> float:
+        return max(
+            self.settings.default_order_qty * 0.1,
+            abs(current_position_qty) * 0.12,
+            abs(desired_target_qty) * 0.12,
+        )
+
+    def _reverse_threshold(self, *, current_position_qty: float) -> float:
+        return max(
+            self.settings.default_order_qty * 0.45,
+            abs(current_position_qty) * 0.35,
+        )
+
+    def _max_scale_step(self, desired_target_qty: float) -> float:
+        return max(self.settings.default_order_qty * 0.4, abs(desired_target_qty) * 0.45)
+
+    @staticmethod
+    def _derivatives_reversal_step(*, current_position_qty: float) -> float:
+        return current_position_qty * 0.35
 
     def _urgency(self, *, current_position_qty: float, target_position_qty: float) -> str:
         delta_qty = abs(target_position_qty - current_position_qty)

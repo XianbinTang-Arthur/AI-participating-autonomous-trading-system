@@ -17,9 +17,12 @@ class BaselineStrategy:
         features = FeatureSnapshot.model_validate(feature_event.payload)
         analysis = features.analysis_context
         alpha_score = features.composite_alpha_score
+        microstructure_alpha = analysis.alpha_factors.microstructure_alpha if analysis is not None else 0.0
         direction_bias = self._direction_bias(
             alpha_score=alpha_score,
             regime_indicator=features.regime_indicator,
+            microstructure_alpha=microstructure_alpha,
+            directional_alignment=analysis.multi_timeframe.directional_alignment if analysis is not None else "flat",
         )
         position_scale = features.suggested_position_scale
         volatility_scale = features.volatility_target_scale
@@ -42,9 +45,16 @@ class BaselineStrategy:
                 "trend_alpha": analysis.alpha_factors.trend_alpha,
                 "regime_alpha": analysis.alpha_factors.regime_alpha,
                 "multi_timeframe_alpha": analysis.alpha_factors.multi_timeframe_alpha,
+                "microstructure_alpha": analysis.alpha_factors.microstructure_alpha,
                 "liquidity_scale": analysis.alpha_factors.liquidity_scale,
             }
             reason_codes.extend(self._factor_reason_codes(analysis))
+            reason_codes.extend(
+                self._microstructure_reason_codes(
+                    direction_bias=direction_bias,
+                    microstructure_alpha=analysis.alpha_factors.microstructure_alpha,
+                )
+            )
             if features.liquidity_score < 0.3:
                 reason_codes.append("liquidity_thin")
         return BaselineAssessment(
@@ -66,26 +76,56 @@ class BaselineStrategy:
         )
 
     @staticmethod
-    def _direction_bias(*, alpha_score: float, regime_indicator: str) -> str:
-        breakout_threshold = 0.12
-        trend_threshold = 0.18
-        weak_threshold = 0.28
+    def _direction_bias(
+        *,
+        alpha_score: float,
+        regime_indicator: str,
+        microstructure_alpha: float,
+        directional_alignment: str,
+    ) -> str:
+        breakout_threshold = 0.1
+        trend_threshold = 0.16
+        range_threshold = 0.24
+        uncertain_threshold = 0.3
+        alignment_bonus = 0.02 if directional_alignment in {"long", "short"} else 0.0
+        microstructure_support = abs(microstructure_alpha) >= 0.08 and (
+            alpha_score == 0.0 or (alpha_score > 0.0 and microstructure_alpha > 0.0) or (alpha_score < 0.0 and microstructure_alpha < 0.0)
+        )
+        microstructure_conflict = abs(microstructure_alpha) >= 0.08 and (
+            (alpha_score > 0.0 and microstructure_alpha < 0.0) or (alpha_score < 0.0 and microstructure_alpha > 0.0)
+        )
+
+        def adjusted_threshold(value: float) -> float:
+            threshold = value - alignment_bonus if microstructure_support else value
+            if microstructure_conflict:
+                threshold += 0.04
+            return max(threshold, 0.06)
+
         if regime_indicator == "breakout":
-            if alpha_score >= breakout_threshold:
+            threshold = adjusted_threshold(breakout_threshold)
+            if alpha_score >= threshold:
                 return "long"
-            if alpha_score <= -breakout_threshold:
+            if alpha_score <= -threshold:
                 return "short"
             return "flat"
         if regime_indicator == "trend":
-            if alpha_score >= trend_threshold:
+            threshold = adjusted_threshold(trend_threshold)
+            if alpha_score >= threshold:
                 return "long"
-            if alpha_score <= -trend_threshold:
+            if alpha_score <= -threshold:
+                return "short"
+            return "flat"
+        if regime_indicator == "range":
+            threshold = adjusted_threshold(range_threshold)
+            if alpha_score >= threshold and microstructure_alpha >= -0.02:
+                return "long"
+            if alpha_score <= -threshold and microstructure_alpha <= 0.02:
                 return "short"
             return "flat"
         if regime_indicator == "uncertain":
-            if alpha_score >= weak_threshold:
+            if alpha_score >= adjusted_threshold(uncertain_threshold) and microstructure_alpha > 0.1:
                 return "long"
-            if alpha_score <= -weak_threshold:
+            if alpha_score <= -adjusted_threshold(uncertain_threshold) and microstructure_alpha < -0.1:
                 return "short"
         return "flat"
 
@@ -106,3 +146,15 @@ class BaselineStrategy:
         elif analysis.position_sizing.volatility_target_scale > 1.05:
             reason_codes.append("volatility_targeting_expanded_size")
         return reason_codes
+
+    @staticmethod
+    def _microstructure_reason_codes(*, direction_bias: str, microstructure_alpha: float) -> list[str]:
+        if abs(microstructure_alpha) < 0.08:
+            return ["microstructure_neutral"]
+        if direction_bias == "long" and microstructure_alpha > 0.0:
+            return ["microstructure_confirms_long"]
+        if direction_bias == "short" and microstructure_alpha < 0.0:
+            return ["microstructure_confirms_short"]
+        if direction_bias == "flat":
+            return ["microstructure_not_strong_enough"]
+        return ["microstructure_conflicts_with_direction"]

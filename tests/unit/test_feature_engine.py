@@ -40,6 +40,10 @@ class TestFeatureEngine(unittest.TestCase):
         self.assertEqual(features.regime_indicator, analysis.regime_indicator)
         self.assertGreaterEqual(analysis.alpha_factors.composite_alpha_score, -1.0)
         self.assertLessEqual(analysis.alpha_factors.composite_alpha_score, 1.0)
+        self.assertGreaterEqual(analysis.alpha_factors.microstructure_alpha, -1.0)
+        self.assertLessEqual(analysis.alpha_factors.microstructure_alpha, 1.0)
+        self.assertGreaterEqual(analysis.liquidity.execution_quality_scale, 0.0)
+        self.assertLessEqual(analysis.liquidity.execution_quality_scale, 1.0)
         self.assertGreaterEqual(analysis.position_sizing.suggested_position_scale, 0.0)
         self.assertLessEqual(analysis.position_sizing.suggested_position_scale, 1.0)
         self.assertEqual(features.composite_alpha_score, analysis.alpha_factors.composite_alpha_score)
@@ -79,6 +83,20 @@ class TestFeatureEngine(unittest.TestCase):
         self.assertLess(high_vol.volatility_target_scale, low_vol.volatility_target_scale)
         self.assertLess(high_vol.suggested_position_scale, low_vol.suggested_position_scale)
 
+    def test_buy_side_trade_flow_improves_microstructure_alpha(self) -> None:
+        calculator = FeatureCalculator()
+        neutral = calculator.calculate(self._snapshot(), market_snapshot_ref="evt_market_1")
+        buy_flow = calculator.calculate(self._snapshot_with_buy_flow(), market_snapshot_ref="evt_market_2")
+
+        self.assertGreater(
+            buy_flow.analysis_context.alpha_factors.microstructure_alpha,  # type: ignore[union-attr]
+            neutral.analysis_context.alpha_factors.microstructure_alpha,  # type: ignore[union-attr]
+        )
+        self.assertGreater(
+            buy_flow.analysis_context.position_sizing.execution_quality_scale,  # type: ignore[union-attr]
+            0.0,
+        )
+
     @staticmethod
     def _snapshot() -> MarketSnapshot:
         now = utc_now()
@@ -99,6 +117,10 @@ class TestFeatureEngine(unittest.TestCase):
                 "bids": [{"price": 67_000.0, "size": 5.0}, {"price": 66_999.0, "size": 6.0}],
                 "asks": [{"price": 67_001.0, "size": 4.0}, {"price": 67_002.0, "size": 4.5}],
             },
+            recent_trades=[
+                {"side": "buy", "size": 0.9},
+                {"side": "sell", "size": 0.9},
+            ],
         )
 
     @staticmethod
@@ -121,6 +143,25 @@ class TestFeatureEngine(unittest.TestCase):
                 "bids": [{"price": 67_000.0, "size": 1.0}, {"price": 66_995.0, "size": 1.1}],
                 "asks": [{"price": 67_015.0, "size": 0.9}, {"price": 67_020.0, "size": 1.0}],
             },
+            recent_trades=[
+                {"side": "sell", "size": 1.2},
+                {"side": "buy", "size": 0.4},
+            ],
+        )
+
+    @staticmethod
+    def _snapshot_with_buy_flow() -> MarketSnapshot:
+        snapshot = TestFeatureEngine._snapshot()
+        return snapshot.model_copy(
+            update={
+                "recent_trades": [
+                    {"side": "buy", "size": 1.5},
+                    {"side": "buy", "size": 1.1},
+                    {"side": "sell", "size": 0.3},
+                ],
+                "bid_size": 4.0,
+                "ask_size": 2.0,
+            }
         )
 
 

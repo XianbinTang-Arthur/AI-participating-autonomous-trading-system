@@ -1,0 +1,110 @@
+Task21: Derivatives Strategy Upgrade
+
+Goal
+- Upgrade the current derivatives strategy from a generic baseline trend allocator into a stronger crypto-derivatives directional system without splitting the trading mainline.
+- Keep the existing architecture: feature -> baseline -> target position -> policy -> risk -> execution.
+- Use only data already available in the current runtime: multi-timeframe candles, top-of-book, orderbook depth, recent trades, and current position state.
+
+Why
+- The current strategy is structurally sound but too generic.
+- It behaves like a light CTA with volatility scaling, not a crypto-native derivatives strategy.
+- Entry, hold, reduce, close, and reversal are currently too compressed into a single target function.
+- Dynamic leverage exists, but the leverage posture is still too linear and not sufficiently tied to liquidity and microstructure quality.
+
+Scope
+- In scope:
+  - Add crypto-native microstructure features from existing market inputs.
+  - Add regime-aware directional thresholds.
+  - Add position-management hysteresis so entry, hold, reduce, close, and reversal are not governed by the same threshold.
+  - Make derivatives leverage posture more sensitive to liquidity, volatility, and signal quality.
+  - Keep spot and derivatives on one shared mainline.
+- Out of scope:
+  - New external data feeds such as funding rate, open interest, or liquidation feeds.
+  - New AI provider behavior.
+  - Portfolio-level multi-symbol optimization.
+  - Hedge-mode dual-sided long/short inventory.
+
+Design
+
+1. Feature layer upgrades
+- Extend feature analysis with microstructure signals computed from already available data:
+  - recent trade flow imbalance
+  - top-of-book imbalance
+  - depth imbalance
+  - spread penalty
+- Produce structured alpha terms instead of hiding all of them inside one composite number.
+- Use these terms to improve conviction and sizing quality, especially in derivatives mode.
+
+2. Baseline layer upgrades
+- Replace the current one-size-fits-all directional thresholds with regime-aware thresholds:
+  - breakout: lower entry threshold, faster directional commitment
+  - trend: moderate threshold with persistence bias
+  - range: require stronger directional evidence to trade
+  - uncertain: bias toward flat unless microstructure confirms momentum
+- Add explicit reason codes for microstructure support or conflict.
+
+3. Position management upgrades
+- Keep the signed net-position model.
+- Add hysteresis so these are separated:
+  - open threshold
+  - hold threshold
+  - reduce threshold
+  - reverse threshold
+- Behavior target:
+  - strong same-direction signal: scale in
+  - weakened but still same-side signal: hold or reduce, not churn
+  - flat/weak signal: decay position toward zero
+  - strong opposite signal: reverse only when reversal threshold is clearly exceeded
+
+4. Leverage upgrades
+- Derivatives leverage should not be a simple confidence multiplier.
+- Increase leverage only when all of these are supportive:
+  - liquidity quality is good
+  - spread penalty is low
+  - volatility is not excessive
+  - directional conviction is strong
+  - microstructure is aligned with the intended side
+- De-leverage when volatility, thin liquidity, or weak alignment appears.
+
+5. Safety and compatibility
+- Spot logic must remain long-only and stable.
+- Existing execution, reconciliation, and operator flows must remain unchanged.
+- The new behavior should be driven by better target generation, not by weakening policy or risk controls.
+
+Implementation plan
+- Update feature schemas to include microstructure-derived factor outputs.
+- Extend feature calculator to compute:
+  - trade flow imbalance
+  - microstructure alpha
+  - spread penalty
+  - execution quality scale
+- Update baseline strategy to use regime-aware thresholds and microstructure confirmation.
+- Upgrade target position engine to apply hysteresis-based position state transitions.
+- Upgrade leverage bias to use liquidity/microstructure/volatility quality.
+- Add and update unit tests for:
+  - feature calculation
+  - baseline directional decisions
+  - target position hysteresis
+  - derivatives leverage behavior
+
+Acceptance criteria
+- The strategy still produces deterministic outputs for identical snapshots.
+- Derivatives mode can still open, reduce, close, and reverse, but with less churn.
+- Weak mixed signals should hold or reduce rather than rapidly reverse.
+- Strong breakout/trend signals should commit faster than before.
+- Poor liquidity or high volatility should reduce leverage posture.
+- Spot behavior remains long-only.
+- Existing full test suite remains green.
+
+Files expected to change
+- aats/schemas/features.py
+- aats/services/feature_engine/calculator.py
+- aats/services/decision_engine/baseline.py
+- aats/services/decision_engine/target_position.py
+- tests/unit/test_feature_engine.py
+- tests/unit/test_target_position_engine.py
+
+Validation
+- Run focused unit tests for feature and target logic.
+- Run the full pytest suite.
+- Update this task file if implementation scope needs to narrow for correctness.
