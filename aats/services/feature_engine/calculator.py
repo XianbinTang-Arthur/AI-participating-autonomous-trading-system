@@ -290,7 +290,10 @@ class FeatureCalculator:
             1.0,
         )
         if abs(alpha_factors.composite_alpha_score) >= 0.18:
-            suggested_position_scale = max(suggested_position_scale, 0.2)
+            suggested_position_scale = max(
+                suggested_position_scale,
+                0.2 * max(min(execution_quality_scale, 1.0), 0.1),
+            )
         return PositionSizingContext(
             created_at=alpha_factors.created_at,
             volatility_target_scale=volatility_target_scale,

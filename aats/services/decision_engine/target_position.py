@@ -21,8 +21,9 @@ class TargetPositionEngine:
             current_position_qty=context.current_position_qty,
             baseline=baseline,
             ai_assessment=ai_assessment,
+            product_type=context.product_type,
         )
-        if not self._short_bias_allowed():
+        if not self._short_bias_allowed(context.product_type):
             target_qty = self._normalize_long_only_target(
                 current_position_qty=context.current_position_qty,
                 target_qty=target_qty,
@@ -77,27 +78,28 @@ class TargetPositionEngine:
         current_position_qty: float,
         baseline: BaselineAssessment,
         ai_assessment: AIMarketAssessment,
+        product_type: str,
     ) -> float:
         mode = self.settings.ai_operating_mode
-        baseline_qty = self._baseline_target_qty(baseline=baseline)
+        baseline_qty = self._baseline_target_qty(baseline=baseline, product_type=product_type)
         if mode in {"baseline_only", "ai_advisory"}:
             return self._apply_position_management(
                 current_position_qty=current_position_qty,
                 desired_target_qty=baseline_qty,
-                product_type=self.settings.trading_product_type,
+                product_type=product_type,
             )
         if mode == "ai_blended":
             if baseline.direction_bias == "long" and ai_assessment.directional_edge >= 0.0:
                 return self._apply_position_management(
                     current_position_qty=current_position_qty,
                     desired_target_qty=baseline_qty,
-                    product_type=self.settings.trading_product_type,
+                    product_type=product_type,
                 )
             if baseline.direction_bias == "short" and ai_assessment.directional_edge <= 0.0:
                 return self._apply_position_management(
                     current_position_qty=current_position_qty,
                     desired_target_qty=baseline_qty,
-                    product_type=self.settings.trading_product_type,
+                    product_type=product_type,
                 )
             return 0.0
         if mode == "ai_primary":
@@ -110,36 +112,36 @@ class TargetPositionEngine:
                     return self._apply_position_management(
                         current_position_qty=current_position_qty,
                         desired_target_qty=abs(baseline_qty) or self.settings.default_order_qty * 0.35,
-                        product_type=self.settings.trading_product_type,
+                        product_type=product_type,
                     )
                 if ai_assessment.directional_edge < 0.0:
                     return self._apply_position_management(
                         current_position_qty=current_position_qty,
                         desired_target_qty=-(abs(baseline_qty) or self.settings.default_order_qty * 0.35),
-                        product_type=self.settings.trading_product_type,
+                        product_type=product_type,
                     )
             return self._apply_position_management(
                 current_position_qty=current_position_qty,
                 desired_target_qty=baseline_qty,
-                product_type=self.settings.trading_product_type,
+                product_type=product_type,
             )
         return self._apply_position_management(
             current_position_qty=current_position_qty,
             desired_target_qty=baseline_qty,
-            product_type=self.settings.trading_product_type,
+            product_type=product_type,
         )
 
-    def _baseline_target_qty(self, *, baseline: BaselineAssessment) -> float:
+    def _baseline_target_qty(self, *, baseline: BaselineAssessment, product_type: str) -> float:
         scale = self._clamp(baseline.suggested_position_scale, 0.0, 1.0)
-        target_qty = self._qty_from_bias(baseline.direction_bias) * scale
+        target_qty = self._qty_from_bias(baseline.direction_bias, product_type=product_type) * scale
         if baseline.volatility_target_scale < 0.55:
             target_qty *= baseline.volatility_target_scale
         return target_qty
 
-    def _qty_from_bias(self, direction_bias: str) -> float:
+    def _qty_from_bias(self, direction_bias: str, *, product_type: str) -> float:
         if direction_bias == "long":
             return self.settings.default_order_qty
-        if direction_bias == "short" and self._short_bias_allowed():
+        if direction_bias == "short" and self._short_bias_allowed(product_type):
             return -self.settings.default_order_qty
         return 0.0
 
@@ -194,8 +196,8 @@ class TargetPositionEngine:
             conviction *= 0.85
         return self._clamp(0.85 + conviction, 0.85, 2.5)
 
-    def _short_bias_allowed(self) -> bool:
-        return self.settings.trading_product_type == "derivatives" or self.settings.strategy_short_bias_enabled
+    def _short_bias_allowed(self, product_type: str) -> bool:
+        return product_type == "derivatives"
 
     def _normalize_long_only_target(
         self,

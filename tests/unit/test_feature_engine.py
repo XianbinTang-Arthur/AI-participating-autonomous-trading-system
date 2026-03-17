@@ -6,6 +6,7 @@ from aats.bus.memory_bus import InMemoryEventBus
 from aats.events import topics
 from aats.events.envelopes import build_envelope
 from aats.schemas.common import utc_now
+from aats.schemas.features import FeatureSnapshot
 from aats.schemas.market import MarketSnapshot
 from aats.services.feature_engine.calculator import FeatureCalculator, FeatureEngine
 from aats.storage.event_store import InMemoryEventStore
@@ -97,6 +98,29 @@ class TestFeatureEngine(unittest.TestCase):
             0.0,
         )
 
+    def test_feature_snapshot_remains_backward_compatible_with_pre_task21_payloads(self) -> None:
+        features = FeatureCalculator().calculate(self._snapshot(), market_snapshot_ref="evt_market_1")
+        payload = features.model_dump(mode="json")
+        analysis = payload["analysis_context"]
+        del analysis["liquidity"]["trade_flow_imbalance"]
+        del analysis["liquidity"]["spread_penalty"]
+        del analysis["liquidity"]["execution_quality_scale"]
+        del analysis["alpha_factors"]["microstructure_alpha"]
+        del analysis["position_sizing"]["execution_quality_scale"]
+
+        reparsed = FeatureSnapshot.model_validate(payload)
+
+        self.assertEqual(reparsed.analysis_context.liquidity.trade_flow_imbalance, 0.0)  # type: ignore[union-attr]
+        self.assertEqual(reparsed.analysis_context.alpha_factors.microstructure_alpha, 0.0)  # type: ignore[union-attr]
+        self.assertEqual(reparsed.analysis_context.position_sizing.execution_quality_scale, 1.0)  # type: ignore[union-attr]
+
+    def test_poor_execution_quality_caps_minimum_size_commitment(self) -> None:
+        calculator = FeatureCalculator()
+        poor = calculator.calculate(self._poor_execution_snapshot(), market_snapshot_ref="evt_market_poor")
+
+        self.assertLess(poor.analysis_context.liquidity.execution_quality_scale, 0.2)  # type: ignore[union-attr]
+        self.assertLess(poor.suggested_position_scale, 0.1)
+
     @staticmethod
     def _snapshot() -> MarketSnapshot:
         now = utc_now()
@@ -162,6 +186,33 @@ class TestFeatureEngine(unittest.TestCase):
                 "bid_size": 4.0,
                 "ask_size": 2.0,
             }
+        )
+
+    @staticmethod
+    def _poor_execution_snapshot() -> MarketSnapshot:
+        now = utc_now()
+        return MarketSnapshot(
+            created_at=now,
+            symbol="BTC-USDT",
+            exchange="OKX",
+            snapshot_ts=now,
+            best_bid=67000.0,
+            best_ask=67120.0,
+            last_price=67060.0,
+            bid_size=0.08,
+            ask_size=0.03,
+            volume_24h=600.0,
+            kline_15m={"open": 66650.0, "high": 67250.0, "low": 66600.0, "close": 67180.0},
+            kline_1h={"open": 66100.0, "high": 67350.0, "low": 66050.0, "close": 67180.0},
+            orderbook_depth={
+                "bids": [{"price": 67000.0, "size": 0.02}],
+                "asks": [{"price": 67120.0, "size": 0.8}],
+            },
+            recent_trades=[
+                {"side": "sell", "size": 2.8},
+                {"side": "sell", "size": 2.1},
+                {"side": "buy", "size": 0.1},
+            ],
         )
 
 

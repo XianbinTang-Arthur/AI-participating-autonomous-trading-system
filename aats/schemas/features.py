@@ -30,10 +30,10 @@ class LiquidityFeatureSet(SchemaBase):
     spread_bps: float
     top_of_book_imbalance: float
     depth_imbalance: float
-    trade_flow_imbalance: float
+    trade_flow_imbalance: float = 0.0
     quoted_depth: float
-    spread_penalty: float
-    execution_quality_scale: float
+    spread_penalty: float = 0.0
+    execution_quality_scale: float = 1.0
     liquidity_score: float
 
 
@@ -42,7 +42,7 @@ class AlphaFactorSet(SchemaBase):
     trend_alpha: float
     regime_alpha: float
     multi_timeframe_alpha: float
-    microstructure_alpha: float
+    microstructure_alpha: float = 0.0
     liquidity_scale: float
     composite_alpha_score: float
     conviction_score: float
@@ -51,7 +51,7 @@ class AlphaFactorSet(SchemaBase):
 class PositionSizingContext(SchemaBase):
     volatility_target_scale: float
     liquidity_scale: float
-    execution_quality_scale: float
+    execution_quality_scale: float = 1.0
     conviction_scale: float
     suggested_position_scale: float
 

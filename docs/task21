@@ -70,6 +70,9 @@ Design
 - Spot logic must remain long-only and stable.
 - Existing execution, reconciliation, and operator flows must remain unchanged.
 - The new behavior should be driven by better target generation, not by weakening policy or risk controls.
+- Historical feature payloads must remain parseable after schema extension.
+- Product handling must follow the current decision context, not only global settings defaults.
+- Poor execution quality must be able to suppress the previous minimum-size commitment behavior.
 
 Implementation plan
 - Update feature schemas to include microstructure-derived factor outputs.
@@ -108,3 +111,8 @@ Validation
 - Run focused unit tests for feature and target logic.
 - Run the full pytest suite.
 - Update this task file if implementation scope needs to narrow for correctness.
+
+Post-implementation hardening
+- Add backward-compatible defaults for newly introduced feature-schema fields.
+- Add regression coverage for spot-context behavior when global defaults are derivatives-oriented.
+- Add regression coverage proving poor execution quality compresses target size instead of forcing a fixed minimum commitment.

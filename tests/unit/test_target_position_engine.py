@@ -121,6 +121,30 @@ class TestTargetPositionEngine(unittest.TestCase):
         self.assertGreaterEqual(target.target_leverage, 1.0)
         self.assertLessEqual(target.target_leverage, 3.0)
 
+    def test_spot_context_stays_long_only_even_if_settings_default_to_derivatives(self) -> None:
+        engine = TargetPositionEngine(
+            settings=AATSSettings.model_validate(
+                {
+                    "default_order_qty": 0.01,
+                    "trading_product_type": "derivatives",
+                    "strategy_short_bias_enabled": True,
+                }
+            )
+        )
+        context = self._context(product_type="spot", current_exposure_side="flat")
+        baseline = self._baseline(
+            volatility_target_scale=1.0,
+            suggested_position_scale=1.0,
+            direction_bias="short",
+            confidence=0.9,
+        )
+
+        target = engine.build(context, baseline, self._ai_assessment(direction=-0.5, confidence=0.8))
+
+        self.assertEqual(target.product_type, "spot")
+        self.assertEqual(target.target_position_qty, 0.0)
+        self.assertEqual(target.position_intent, "hold")
+
     def test_derivatives_reduces_before_reversing_on_weak_opposite_signal(self) -> None:
         engine = TargetPositionEngine(
             settings=AATSSettings.model_validate(

@@ -30,7 +30,7 @@ class LiquidityAnalyzer:
         liquidity_score = max(0.0, min((spread_score * 0.5) + (depth_score * 0.3) + (balance_score * 0.2), 1.0))
         spread_penalty = min(spread_bps / 12.0, 1.0)
         execution_quality_scale = max(
-            0.25,
+            0.05,
             min(
                 (spread_score * 0.45)
                 + (depth_score * 0.2)
