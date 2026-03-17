@@ -13,44 +13,48 @@ class PostgresExecutionObligationRepository:
 
     def save_obligation(self, obligation: OrderObligation) -> OrderObligation:
         with self.session_factory() as session:
-            row = session.get(OrderObligationModel, obligation.client_order_id)
-            payload = obligation.model_dump(mode="json")
-            if row is None:
-                row = OrderObligationModel(
-                    client_order_id=obligation.client_order_id,
-                    obligation_id=obligation.obligation_id,
-                    decision_id=obligation.decision_id,
-                    intent_id=obligation.intent_id,
-                    symbol=obligation.symbol,
-                    reserve_currency=obligation.reserve_currency,
-                    status=obligation.status,
-                    reserved_amount=obligation.reserved_amount,
-                    consumed_amount=obligation.consumed_amount,
-                    released_amount=obligation.released_amount,
-                    product_type=obligation.product_type,
-                    margin_mode=obligation.margin_mode,
-                    last_update_ts=obligation.last_update_ts,
-                    created_at=obligation.created_at,
-                    payload=payload,
-                )
-                session.add(row)
-            else:
-                row.obligation_id = obligation.obligation_id
-                row.decision_id = obligation.decision_id
-                row.intent_id = obligation.intent_id
-                row.symbol = obligation.symbol
-                row.reserve_currency = obligation.reserve_currency
-                row.status = obligation.status
-                row.reserved_amount = obligation.reserved_amount
-                row.consumed_amount = obligation.consumed_amount
-                row.released_amount = obligation.released_amount
-                row.product_type = obligation.product_type
-                row.margin_mode = obligation.margin_mode
-                row.last_update_ts = obligation.last_update_ts
-                row.created_at = obligation.created_at
-                row.payload = payload
+            self.save_obligation_in_session(session, obligation)
             session.commit()
             return obligation
+
+    def save_obligation_in_session(self, session: Session, obligation: OrderObligation) -> OrderObligation:
+        row = session.get(OrderObligationModel, obligation.client_order_id)
+        payload = obligation.model_dump(mode="json")
+        if row is None:
+            row = OrderObligationModel(
+                client_order_id=obligation.client_order_id,
+                obligation_id=obligation.obligation_id,
+                decision_id=obligation.decision_id,
+                intent_id=obligation.intent_id,
+                symbol=obligation.symbol,
+                reserve_currency=obligation.reserve_currency,
+                status=obligation.status,
+                reserved_amount=obligation.reserved_amount,
+                consumed_amount=obligation.consumed_amount,
+                released_amount=obligation.released_amount,
+                product_type=obligation.product_type,
+                margin_mode=obligation.margin_mode,
+                last_update_ts=obligation.last_update_ts,
+                created_at=obligation.created_at,
+                payload=payload,
+            )
+            session.add(row)
+        else:
+            row.obligation_id = obligation.obligation_id
+            row.decision_id = obligation.decision_id
+            row.intent_id = obligation.intent_id
+            row.symbol = obligation.symbol
+            row.reserve_currency = obligation.reserve_currency
+            row.status = obligation.status
+            row.reserved_amount = obligation.reserved_amount
+            row.consumed_amount = obligation.consumed_amount
+            row.released_amount = obligation.released_amount
+            row.product_type = obligation.product_type
+            row.margin_mode = obligation.margin_mode
+            row.last_update_ts = obligation.last_update_ts
+            row.created_at = obligation.created_at
+            row.payload = payload
+        return obligation
 
     def get_obligation(self, client_order_id: str) -> OrderObligation | None:
         with self.session_factory() as session:

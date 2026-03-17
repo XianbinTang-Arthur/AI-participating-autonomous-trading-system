@@ -9,6 +9,7 @@ from aats.schemas.execution import OrderIntent, OrderState
 from aats.schemas.operator import ExecutionErrorSummary
 from aats.services.execution_engine.exchange_adapter import ExchangeAdapter
 from aats.services.execution_engine.obligations import ExecutionObligationService, ExecutionReservationError
+from aats.services.execution_engine.outbox import PostgresExecutionOutboxPublisher
 from aats.services.governance_engine.kill_switch import KillSwitch
 from aats.storage.base import ExecutionRepository
 
@@ -21,12 +22,14 @@ class OrderManager:
         adapter: ExchangeAdapter,
         execution_repo: ExecutionRepository,
         obligation_service: ExecutionObligationService | None = None,
+        execution_outbox_publisher: PostgresExecutionOutboxPublisher | None = None,
         kill_switch: KillSwitch,
     ) -> None:
         self.bus = bus
         self.adapter = adapter
         self.execution_repo = execution_repo
         self.obligation_service = obligation_service
+        self.execution_outbox_publisher = execution_outbox_publisher
         self.kill_switch = kill_switch
         self.logger = get_logger("aats.execution_engine")
 
@@ -209,6 +212,25 @@ class OrderManager:
         return persisted
 
     async def _persist_order_state(self, *, order_state: OrderState, key: str) -> OrderState:
+        if self.execution_outbox_publisher is not None:
+            persisted = await self.execution_outbox_publisher.persist_order_state(
+                order_state=order_state,
+                key=key,
+            )
+            log_event(
+                self.logger,
+                "order_state_persisted",
+                **correlation_fields(
+                    decision_id=persisted.decision_id,
+                    intent_id=persisted.intent_id,
+                    order_id=persisted.client_order_id,
+                    status=persisted.status,
+                    venue=persisted.venue,
+                    submission_mode=persisted.submission_mode,
+                    execution_error=persisted.execution_error,
+                ),
+            )
+            return persisted
         previous = self.execution_repo.get_order_state(order_state.client_order_id)
         persisted = self.execution_repo.save_order_state(order_state)
         log_event(
@@ -235,10 +257,18 @@ class OrderManager:
         return persisted
 
     async def _persist_fill(self, fill) -> None:
-        if not self.execution_repo.save_fill(fill):
-            return
+        obligation = None
         if self.obligation_service is not None:
-            self.obligation_service.consume_for_fill(fill)
+            if self.execution_outbox_publisher is not None:
+                obligation = self.obligation_service.preview_obligation_for_fill(fill)
+            else:
+                obligation = self.obligation_service.consume_for_fill(fill)
+        if self.execution_outbox_publisher is not None:
+            saved = await self.execution_outbox_publisher.persist_fill(fill=fill, obligation=obligation)
+            if not saved:
+                return
+        elif not self.execution_repo.save_fill(fill):
+            return
         log_event(
             self.logger,
             "fill_event_created",
@@ -253,6 +283,8 @@ class OrderManager:
                 venue=fill.venue,
             ),
         )
+        if self.execution_outbox_publisher is not None:
+            return
         await publish_model(
             bus=self.bus,
             topic=topics.FILL_EVENTS,

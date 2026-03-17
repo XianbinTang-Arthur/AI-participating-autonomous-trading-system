@@ -17,31 +17,34 @@ class PostgresEventStore:
 
     def append(self, envelope: EventEnvelope) -> None:
         with self.session_factory() as session:
-            existing = session.scalar(
-                select(EventEnvelopeModel.sequence_id).where(EventEnvelopeModel.event_id == envelope.event_id)
-            )
-            if existing is not None:
-                return
-
-            session.add(
-                EventEnvelopeModel(
-                    event_id=envelope.event_id,
-                    schema_version=envelope.schema_version,
-                    created_at=envelope.created_at,
-                    event_type=envelope.event_type,
-                    event_timestamp=envelope.event_timestamp,
-                    source_component=envelope.source_component,
-                    topic=envelope.topic,
-                    event_key=envelope.key,
-                    decision_id=self._decision_id(envelope),
-                    symbol=envelope_scope_metadata(envelope)["symbol"],
-                    timeframe=envelope_scope_metadata(envelope)["timeframe"],
-                    product_type=envelope_scope_metadata(envelope)["product_type"],
-                    margin_mode=envelope_scope_metadata(envelope)["margin_mode"],
-                    payload=envelope.payload,
-                )
-            )
+            self.append_in_session(session, envelope)
             session.commit()
+
+    def append_in_session(self, session: Session, envelope: EventEnvelope) -> None:
+        existing = session.scalar(
+            select(EventEnvelopeModel.sequence_id).where(EventEnvelopeModel.event_id == envelope.event_id)
+        )
+        if existing is not None:
+            return
+
+        session.add(
+            EventEnvelopeModel(
+                event_id=envelope.event_id,
+                schema_version=envelope.schema_version,
+                created_at=envelope.created_at,
+                event_type=envelope.event_type,
+                event_timestamp=envelope.event_timestamp,
+                source_component=envelope.source_component,
+                topic=envelope.topic,
+                event_key=envelope.key,
+                decision_id=self._decision_id(envelope),
+                symbol=envelope_scope_metadata(envelope)["symbol"],
+                timeframe=envelope_scope_metadata(envelope)["timeframe"],
+                product_type=envelope_scope_metadata(envelope)["product_type"],
+                margin_mode=envelope_scope_metadata(envelope)["margin_mode"],
+                payload=envelope.payload,
+            )
+        )
 
     def all(self) -> list[EventEnvelope]:
         with self.session_factory() as session:

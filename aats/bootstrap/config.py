@@ -32,6 +32,7 @@ from aats.services.execution_engine.obligations import ExecutionObligationServic
 from aats.services.execution_engine.recovery import ExecutionRecoveryService
 from aats.services.execution_engine.okx_rest import OKXRESTClient
 from aats.services.execution_engine.order_manager import OrderManager
+from aats.services.execution_engine.outbox import PostgresExecutionOutboxPublisher
 from aats.services.execution_engine.paper_adapter import PaperExecutionAdapter
 from aats.services.execution_engine.planner import ExecutionPlanner
 from aats.services.feature_engine.calculator import FeatureCalculator, FeatureEngine
@@ -80,6 +81,7 @@ from aats.storage.execution_repo import InMemoryExecutionRepository
 from aats.storage.execution_repo_postgres import PostgresExecutionRepository
 from aats.storage.obligation_repo import InMemoryExecutionObligationRepository
 from aats.storage.obligation_repo_postgres import PostgresExecutionObligationRepository
+from aats.storage.outbox_repo_postgres import PostgresOutboxRepository
 from aats.storage.operator_repo import InMemoryOperatorUserRepository
 from aats.storage.operator_repo_postgres import PostgresOperatorUserRepository
 from aats.storage.portfolio_repo import InMemoryPortfolioRepository
@@ -134,6 +136,7 @@ class StorageBackends:
     reconciliation_repo: ReconciliationRepository
     operator_repo: OperatorUserRepository
     runtime_profile_repo: RuntimeProfileRepository
+    outbox_repo: PostgresOutboxRepository | None = None
     database_runtime: DatabaseRuntime | None = None
 
 
@@ -178,6 +181,7 @@ class ApplicationRuntime:
     replay_validation_history: list[dict[str, Any]] = field(default_factory=list)
     database_runtime: DatabaseRuntime | None = None
     background_tasks: list[asyncio.Task[Any]] = field(default_factory=list)
+    execution_outbox_publisher: PostgresExecutionOutboxPublisher | None = None
     logger: Any = field(default_factory=lambda: get_logger("aats.runtime"))
 
     async def start_background_tasks(self) -> None:
@@ -193,6 +197,10 @@ class ApplicationRuntime:
         if self.environment_capabilities.execution_adapter_kind == "okx":
             self.background_tasks.append(
                 asyncio.create_task(self._sync_execution_loop(), name="aats_okx_execution_sync")
+            )
+        if self.execution_outbox_publisher is not None:
+            self.background_tasks.append(
+                asyncio.create_task(self._flush_execution_outbox_loop(), name="aats_execution_outbox_flush")
             )
 
     async def stop_background_tasks(self) -> None:
@@ -235,6 +243,15 @@ class ApplicationRuntime:
             except Exception as exc:
                 self._record_background_failure(subsystem="reconciliation_refresh", exc=exc)
             await asyncio.sleep(interval_seconds)
+
+    async def _flush_execution_outbox_loop(self) -> None:
+        while True:
+            try:
+                if self.execution_outbox_publisher is not None:
+                    await self.execution_outbox_publisher.flush_pending()
+            except Exception as exc:
+                self._record_background_failure(subsystem="execution_outbox_flush", exc=exc)
+            await asyncio.sleep(1.0)
 
     def _record_background_failure(self, *, subsystem: str, exc: Exception) -> None:
         message = f"{subsystem}_failed: {exc}"
@@ -283,6 +300,7 @@ def build_storage_backends(settings: AATSSettings) -> StorageBackends:
             portfolio_repo=InMemoryPortfolioRepository(),
             execution_repo=InMemoryExecutionRepository(),
             obligation_repo=InMemoryExecutionObligationRepository(),
+            outbox_repo=None,
             reconciliation_repo=InMemoryReconciliationRepository(),
             operator_repo=InMemoryOperatorUserRepository(),
             runtime_profile_repo=InMemoryRuntimeProfileRepository(),
@@ -301,6 +319,7 @@ def build_storage_backends(settings: AATSSettings) -> StorageBackends:
         portfolio_repo=PostgresPortfolioRepository(database_runtime.session_factory),
         execution_repo=PostgresExecutionRepository(database_runtime.session_factory),
         obligation_repo=PostgresExecutionObligationRepository(database_runtime.session_factory),
+        outbox_repo=PostgresOutboxRepository(database_runtime.session_factory),
         reconciliation_repo=PostgresReconciliationRepository(database_runtime.session_factory),
         operator_repo=PostgresOperatorUserRepository(database_runtime.session_factory),
         runtime_profile_repo=PostgresRuntimeProfileRepository(database_runtime.session_factory),
@@ -458,11 +477,28 @@ async def build_runtime(
         account_snapshot_loader=lambda: account_service.refresh(),
         price_provider=market_gateway.latest_price,
     )
+    execution_outbox_publisher = None
+    if (
+        storage.database_runtime is not None
+        and isinstance(storage.execution_repo, PostgresExecutionRepository)
+        and isinstance(storage.obligation_repo, PostgresExecutionObligationRepository)
+        and isinstance(storage.event_store, PostgresEventStore)
+        and storage.outbox_repo is not None
+    ):
+        execution_outbox_publisher = PostgresExecutionOutboxPublisher(
+            session_factory=storage.database_runtime.session_factory,
+            event_store=storage.event_store,
+            execution_repo=storage.execution_repo,
+            obligation_repo=storage.obligation_repo,
+            outbox_repo=storage.outbox_repo,
+            bus=bus,
+        )
     order_manager = OrderManager(
         bus=bus,
         adapter=execution_adapter,
         execution_repo=storage.execution_repo,
         obligation_service=obligation_service,
+        execution_outbox_publisher=execution_outbox_publisher,
         kill_switch=kill_switch,
     )
 
@@ -667,4 +703,5 @@ async def build_runtime(
         runtime_profile_repo=storage.runtime_profile_repo,
         recovery_status=recovery_status,
         database_runtime=storage.database_runtime,
+        execution_outbox_publisher=execution_outbox_publisher,
     )

@@ -21,16 +21,19 @@ class InMemoryEventBus(EventBus):
         self.logger = get_logger("aats.event_bus")
 
     async def publish(self, topic: str, key: str, payload: dict) -> None:
-        if self._event_store is not None:
+        await self.publish_envelope(EventEnvelope.model_validate(payload), persist=True)
+
+    async def publish_envelope(self, envelope: EventEnvelope, *, persist: bool = True) -> None:
+        if persist and self._event_store is not None:
             try:
-                self._event_store.append(EventEnvelope.model_validate(payload))
+                self._event_store.append(envelope)
             except Exception as exc:
                 log_event(
                     self.logger,
                     "event_persistence_failed",
                     level="error",
-                    topic=topic,
-                    key=key,
+                    topic=envelope.topic,
+                    key=envelope.key,
                     persistence_mode=self._persistence_mode,
                     error_type=type(exc).__name__,
                     error=str(exc),
@@ -38,8 +41,8 @@ class InMemoryEventBus(EventBus):
                 if self._persistence_mode == "strict":
                     raise
 
-        message = {"topic": topic, "key": key, "payload": payload}
-        for handler in tuple(self._subs[topic]):
+        message = {"topic": envelope.topic, "key": envelope.key, "payload": envelope.model_dump(mode="json")}
+        for handler in tuple(self._subs[envelope.topic]):
             await handler(message)
 
     async def subscribe(self, topic: str, handler: MessageHandler) -> None:

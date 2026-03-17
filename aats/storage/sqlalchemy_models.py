@@ -128,6 +128,24 @@ class OrderObligationModel(Base):
     payload: Mapped[dict] = mapped_column(JSON, nullable=False)
 
 
+class OutboxEventModel(Base):
+    __tablename__ = "outbox_events"
+    __table_args__ = (
+        Index("ix_outbox_status_created", "status", "created_at"),
+    )
+
+    event_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    topic: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    event_key: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    source_component: Mapped[str] = mapped_column(String(128), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+
+
 class ReconciliationReportModel(Base):
     __tablename__ = "reconciliation_reports"
     __table_args__ = (

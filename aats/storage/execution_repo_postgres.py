@@ -19,62 +19,66 @@ class PostgresExecutionRepository:
 
     def save_order_state(self, state: OrderState) -> OrderState:
         with self.session_factory() as session:
-            row = session.get(OrderStateModel, state.client_order_id)
-            if row is None:
-                row = session.scalar(
-                    select(OrderStateModel).where(OrderStateModel.intent_id == state.intent_id).limit(1)
-                )
-            current = self._to_order_state(row) if row is not None else None
-            merged = self.state_machine.merge(current=current, incoming=state)
-            payload = merged.model_dump(mode="json")
-            scope = order_scope_metadata(merged)
-            if row is None:
-                row = OrderStateModel(
-                    client_order_id=merged.client_order_id,
-                    decision_id=merged.decision_id,
-                    intent_id=merged.intent_id,
-                    symbol=merged.symbol,
-                    exchange_order_id=merged.exchange_order_id,
-                    created_at=merged.created_at,
-                    status=merged.status,
-                    submitted_ts=merged.submitted_ts,
-                    last_update_ts=merged.last_update_ts,
-                    requested_qty=merged.requested_qty,
-                    filled_qty=merged.filled_qty,
-                    remaining_qty=merged.remaining_qty,
-                    average_fill_price=merged.average_fill_price,
-                    fees=merged.fees,
-                    product_type=scope["product_type"],
-                    margin_mode=scope["margin_mode"],
-                    position_intent=scope["position_intent"],
-                    payload=payload,
-                )
-                session.add(row)
-            else:
-                if row.client_order_id != merged.client_order_id:
-                    session.delete(row)
-                    session.flush()
-                    row = OrderStateModel(client_order_id=merged.client_order_id)
-                    session.add(row)
-                row.decision_id = merged.decision_id
-                row.intent_id = merged.intent_id
-                row.symbol = merged.symbol
-                row.exchange_order_id = merged.exchange_order_id
-                row.created_at = merged.created_at
-                row.status = merged.status
-                row.submitted_ts = merged.submitted_ts
-                row.last_update_ts = merged.last_update_ts
-                row.requested_qty = merged.requested_qty
-                row.filled_qty = merged.filled_qty
-                row.remaining_qty = merged.remaining_qty
-                row.average_fill_price = merged.average_fill_price
-                row.fees = merged.fees
-                row.product_type = scope["product_type"]
-                row.margin_mode = scope["margin_mode"]
-                row.position_intent = scope["position_intent"]
-                row.payload = payload
+            merged, _current = self.save_order_state_in_session(session, state)
             session.commit()
             return merged
+
+    def save_order_state_in_session(self, session: Session, state: OrderState) -> tuple[OrderState, OrderState | None]:
+        row = session.get(OrderStateModel, state.client_order_id)
+        if row is None:
+            row = session.scalar(
+                select(OrderStateModel).where(OrderStateModel.intent_id == state.intent_id).limit(1)
+            )
+        current = self._to_order_state(row) if row is not None else None
+        merged = self.state_machine.merge(current=current, incoming=state)
+        payload = merged.model_dump(mode="json")
+        scope = order_scope_metadata(merged)
+        if row is None:
+            row = OrderStateModel(
+                client_order_id=merged.client_order_id,
+                decision_id=merged.decision_id,
+                intent_id=merged.intent_id,
+                symbol=merged.symbol,
+                exchange_order_id=merged.exchange_order_id,
+                created_at=merged.created_at,
+                status=merged.status,
+                submitted_ts=merged.submitted_ts,
+                last_update_ts=merged.last_update_ts,
+                requested_qty=merged.requested_qty,
+                filled_qty=merged.filled_qty,
+                remaining_qty=merged.remaining_qty,
+                average_fill_price=merged.average_fill_price,
+                fees=merged.fees,
+                product_type=scope["product_type"],
+                margin_mode=scope["margin_mode"],
+                position_intent=scope["position_intent"],
+                payload=payload,
+            )
+            session.add(row)
+        else:
+            if row.client_order_id != merged.client_order_id:
+                session.delete(row)
+                session.flush()
+                row = OrderStateModel(client_order_id=merged.client_order_id)
+                session.add(row)
+            row.decision_id = merged.decision_id
+            row.intent_id = merged.intent_id
+            row.symbol = merged.symbol
+            row.exchange_order_id = merged.exchange_order_id
+            row.created_at = merged.created_at
+            row.status = merged.status
+            row.submitted_ts = merged.submitted_ts
+            row.last_update_ts = merged.last_update_ts
+            row.requested_qty = merged.requested_qty
+            row.filled_qty = merged.filled_qty
+            row.remaining_qty = merged.remaining_qty
+            row.average_fill_price = merged.average_fill_price
+            row.fees = merged.fees
+            row.product_type = scope["product_type"]
+            row.margin_mode = scope["margin_mode"]
+            row.position_intent = scope["position_intent"]
+            row.payload = payload
+        return merged, current
 
     def has_intent(self, intent_id: str) -> bool:
         with self.session_factory() as session:
@@ -83,32 +87,43 @@ class PostgresExecutionRepository:
     def save_fill(self, fill: FillEvent) -> bool:
         scope = fill_scope_metadata(fill)
         with self.session_factory() as session:
-            if session.get(FillEventModel, fill.fill_id) is not None:
-                return False
-
-            session.add(
-                FillEventModel(
-                    fill_id=fill.fill_id,
-                    decision_id=fill.decision_id,
-                    intent_id=fill.intent_id,
-                    client_order_id=fill.client_order_id,
-                    exchange_order_id=fill.exchange_order_id,
-                    symbol=fill.symbol,
-                    side=fill.side,
-                    fill_qty=fill.fill_qty,
-                    fill_price=fill.fill_price,
-                    fee_amount=fill.fee_amount,
-                    product_type=scope["product_type"],
-                    margin_mode=scope["margin_mode"],
-                    position_intent=scope["position_intent"],
-                    exchange_timestamp=fill.exchange_timestamp,
-                    ingestion_timestamp=fill.ingestion_timestamp,
-                    created_at=fill.created_at,
-                    payload=fill.model_dump(mode="json"),
-                )
-            )
+            saved = self.save_fill_in_session(session, fill, scope=scope)
             session.commit()
-            return True
+            return saved
+
+    def save_fill_in_session(
+        self,
+        session: Session,
+        fill: FillEvent,
+        *,
+        scope: dict[str, str | None] | None = None,
+    ) -> bool:
+        resolved_scope = scope or fill_scope_metadata(fill)
+        if session.get(FillEventModel, fill.fill_id) is not None:
+            return False
+
+        session.add(
+            FillEventModel(
+                fill_id=fill.fill_id,
+                decision_id=fill.decision_id,
+                intent_id=fill.intent_id,
+                client_order_id=fill.client_order_id,
+                exchange_order_id=fill.exchange_order_id,
+                symbol=fill.symbol,
+                side=fill.side,
+                fill_qty=fill.fill_qty,
+                fill_price=fill.fill_price,
+                fee_amount=fill.fee_amount,
+                product_type=resolved_scope["product_type"],
+                margin_mode=resolved_scope["margin_mode"],
+                position_intent=resolved_scope["position_intent"],
+                exchange_timestamp=fill.exchange_timestamp,
+                ingestion_timestamp=fill.ingestion_timestamp,
+                created_at=fill.created_at,
+                payload=fill.model_dump(mode="json"),
+            )
+        )
+        return True
 
     def order_states(self) -> list[OrderState]:
         with self.session_factory() as session:

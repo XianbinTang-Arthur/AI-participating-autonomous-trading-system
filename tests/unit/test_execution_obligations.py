@@ -140,6 +140,25 @@ class _FilledAdapter(_SubmittedAdapter):
         return state, [fill]
 
 
+class _RecordingOutboxPublisher:
+    def __init__(self, obligation_repo) -> None:
+        self.order_state_obligations = []
+        self.fill_obligations = []
+        self.obligation_repo = obligation_repo
+
+    async def persist_order_state(self, *, order_state: OrderState, key: str, obligation=None) -> OrderState:
+        self.order_state_obligations.append(obligation)
+        if obligation is not None:
+            self.obligation_repo.save_obligation(obligation)
+        return order_state
+
+    async def persist_fill(self, *, fill: FillEvent, obligation=None) -> bool:
+        self.fill_obligations.append(obligation)
+        if obligation is not None:
+            self.obligation_repo.save_obligation(obligation)
+        return True
+
+
 class TestExecutionObligations(unittest.IsolatedAsyncioTestCase):
     async def test_second_spot_buy_is_blocked_by_local_reserved_quote_balance(self) -> None:
         snapshot = ExchangeAccountSnapshot(
@@ -221,6 +240,40 @@ class TestExecutionObligations(unittest.IsolatedAsyncioTestCase):
 
         obligation = obligation_repo.get_obligation("clclient_filled")
         self.assertIsNotNone(obligation)
+        self.assertEqual(obligation.status, "RELEASED")
+        self.assertAlmostEqual(obligation.consumed_amount, 60.0)
+        self.assertAlmostEqual(obligation.released_amount, 0.0)
+
+    async def test_outbox_path_does_not_finalize_obligation_before_fill_consumption(self) -> None:
+        snapshot = ExchangeAccountSnapshot(
+            account_source="okx",
+            fetched_at=utc_now(),
+            balances=[ExchangeBalance(currency="USDT", total=100.0, available=100.0, frozen=0.0)],
+        )
+        obligation_repo = InMemoryExecutionObligationRepository()
+        outbox = _RecordingOutboxPublisher(obligation_repo)
+        manager = OrderManager(
+            bus=InMemoryEventBus(event_store=InMemoryEventStore(), persistence_mode="strict"),
+            adapter=_FilledAdapter(),
+            execution_repo=InMemoryExecutionRepository(),
+            obligation_service=ExecutionObligationService(
+                settings=AATSSettings.model_validate({"account_backend": "okx", "account_read_enabled": True}),
+                obligation_repo=obligation_repo,
+                account_snapshot_loader=lambda: _return_snapshot(snapshot),
+                price_provider=lambda _symbol: 60_000.0,
+            ),
+            execution_outbox_publisher=outbox,
+            kill_switch=KillSwitch(),
+        )
+
+        await manager.handle_order_intent(_intent_message(_intent("intent_outbox_filled", "decision_outbox_filled", "client_outbox_filled")))
+
+        obligation = obligation_repo.get_obligation("clclient_outbox_filled")
+        self.assertIsNotNone(obligation)
+        self.assertEqual(outbox.order_state_obligations, [None, None, None])
+        self.assertEqual(len(outbox.fill_obligations), 1)
+        self.assertAlmostEqual(outbox.fill_obligations[0].consumed_amount, 60.0)
+        self.assertAlmostEqual(outbox.fill_obligations[0].released_amount, 0.0)
         self.assertEqual(obligation.status, "RELEASED")
         self.assertAlmostEqual(obligation.consumed_amount, 60.0)
         self.assertAlmostEqual(obligation.released_amount, 0.0)

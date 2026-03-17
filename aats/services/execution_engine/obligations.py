@@ -77,6 +77,12 @@ class ExecutionObligationService:
         return self.obligation_repo.save_obligation(obligation)
 
     def consume_for_fill(self, fill: FillEvent) -> OrderObligation | None:
+        updated = self.preview_obligation_for_fill(fill)
+        if updated is None:
+            return None
+        return self.obligation_repo.save_obligation(updated)
+
+    def preview_obligation_for_fill(self, fill: FillEvent) -> OrderObligation | None:
         obligation = self.obligation_repo.get_obligation(fill.client_order_id)
         if obligation is None:
             return None
@@ -84,7 +90,7 @@ class ExecutionObligationService:
         if consume_amount <= self._EPSILON:
             return obligation
         consumed_amount = obligation.consumed_amount + consume_amount
-        updated = obligation.model_copy(
+        return obligation.model_copy(
             update={
                 "consumed_amount": consumed_amount,
                 "status": self._consumption_status(
@@ -95,9 +101,14 @@ class ExecutionObligationService:
                 "last_update_ts": utc_now(),
             }
         )
-        return self.obligation_repo.save_obligation(updated)
 
     def finalize_for_order_state(self, order_state: OrderState) -> OrderObligation | None:
+        updated = self.preview_obligation_for_order_state(order_state)
+        if updated is None:
+            return None
+        return self.obligation_repo.save_obligation(updated)
+
+    def preview_obligation_for_order_state(self, order_state: OrderState) -> OrderObligation | None:
         if order_state.status not in {"FILLED", "CANCELED", "REJECTED", "FAILED", "BLOCKED", "DRY_RUN", "EXPIRED"}:
             return None
         obligation = self.obligation_repo.get_obligation(order_state.client_order_id)
@@ -113,14 +124,13 @@ class ExecutionObligationService:
             if order_state.status == "FILLED"
             else "FAILED"
         )
-        updated = obligation.model_copy(
+        return obligation.model_copy(
             update={
                 "released_amount": obligation.released_amount + max(remaining_amount, 0.0),
                 "status": terminal_status,
                 "last_update_ts": utc_now(),
             }
         )
-        return self.obligation_repo.save_obligation(updated)
 
     @classmethod
     def remaining_amount(cls, obligation: OrderObligation) -> float:
