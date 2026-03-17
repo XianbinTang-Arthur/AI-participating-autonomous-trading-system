@@ -61,6 +61,102 @@ const state = {
   data: {},
 };
 
+const UI_TERM_MAP = {
+  anonymous: "未登录",
+  authenticated: "已登录",
+  unknown: "未知",
+  ok: "正常",
+  healthy: "健康",
+  degraded: "降级",
+  blocked: "阻断",
+  halted: "已暂停",
+  ready: "就绪",
+  enabled: "已启用",
+  disabled: "未启用",
+  active: "生效中",
+  pending: "待处理",
+  recovered: "已恢复",
+  review_required: "需人工复核",
+  resume_blocked: "恢复受阻",
+  normal_operation: "正常运行",
+  rebaseline_completed: "基线已重建",
+  submitted: "已提交",
+  submitting: "提交中",
+  created: "已创建",
+  filled: "已成交",
+  partially_filled: "部分成交",
+  canceled: "已撤单",
+  cancel_pending: "撤单中",
+  failed: "失败",
+  rejected: "已拒绝",
+  local: "本地",
+  exchange: "交易所",
+  paper_local: "本地模拟",
+  exchange_simulated_derivatives: "交易所模拟合约",
+  guarded_live: "受保护运行",
+  derivatives: "合约",
+  spot: "现货",
+  cross: "全仓",
+  isolated: "逐仓",
+  cash: "现货现金",
+  buy: "买入",
+  sell: "卖出",
+  market: "市价",
+  limit: "限价",
+  long: "多头",
+  short: "空头",
+  flat: "空仓",
+  hold: "持有",
+  executed: "已执行",
+  an_order: "订单",
+  open_long: "开多",
+  reduce_long: "减多仓",
+  close_long: "平多仓",
+  open_short: "开空",
+  reduce_short: "减空仓",
+  close_short: "平空仓",
+  reverse_to_long: "反手开多",
+  reverse_to_short: "反手开空",
+  trend: "趋势",
+  breakout: "突破",
+  range: "震荡",
+  uncertain: "不确定",
+  operator: "操作员",
+  admin: "管理员",
+  viewer: "只读用户",
+  session: "会话",
+  local_only: "仅本地",
+  bi_directional: "双向",
+  supported: "支持",
+  yes: "是",
+  no: "否",
+  env_fallback: "环境配置",
+  current_account_state: "当前账户状态",
+  execution: "执行",
+  replay: "回放",
+};
+
+const PANEL_LABELS = {
+  session: "登录会话",
+  authProviders: "认证能力",
+  health: "系统健康",
+  mode: "运行模式",
+  runtime: "运行状态",
+  systemRecovery: "系统恢复",
+  blockers: "阻断项",
+  metrics: "运行指标",
+  portfolio: "账户快照",
+  latestDecision: "最新决策",
+  executionLatest: "执行概况",
+  reconciliationLatest: "最新对账",
+  accountState: "账户状态",
+  recentDecisions: "最近决策",
+  recentOrders: "最近订单",
+  recentFills: "最近成交",
+  executionErrors: "执行异常",
+  replayStatus: "回放状态",
+};
+
 const nodes = mapNodes({
   runtimeStateChip: "runtimeStateChip",
   operatingStateChip: "operatingStateChip",
@@ -193,19 +289,19 @@ function init() {
 function bindEvents() {
   nodes.logoutButton.addEventListener("click", () => void logoutOperator());
   nodes.refreshButton.addEventListener("click", () => void refreshDashboard({ manual: true }));
-  nodes.reconcileButton.addEventListener("click", () => void runAction("/reconciliation/validate", { reason: "ui_manual_validate" }, "Reconciliation validation requested."));
+  nodes.reconcileButton.addEventListener("click", () => void runAction("/reconciliation/validate", { reason: "ui_manual_validate" }, "已发起人工对账检查。"));
   nodes.rebaselineButton.addEventListener("click", () => void runDangerousAction({
     path: "/system/rebaseline",
     body: { reason: "ui_manual_rebaseline" },
-    successMessage: "Rebaseline completed. The current exchange state was accepted as the new trusted baseline. Runtime remains halted until resume succeeds.",
-    confirmMessage: "Run rebaseline now? This accepts the current exchange account state as the new trusted baseline and does not auto-resume trading.",
+    successMessage: "基线重建已完成。当前交易所账户状态已被接受为新的可信基线，系统仍会保持暂停，直到恢复成功。",
+    confirmMessage: "现在执行基线重建吗？这会接受当前交易所账户状态为新的可信基线，但不会自动恢复交易。",
   }));
-  nodes.resumeButton.addEventListener("click", () => void runAction("/system/resume", { reason: "ui_manual_resume" }, "Resume requested. Runtime readiness was re-evaluated."));
+  nodes.resumeButton.addEventListener("click", () => void runAction("/system/resume", { reason: "ui_manual_resume" }, "已发起恢复请求，系统会重新评估当前是否具备交易条件。"));
   nodes.haltButton.addEventListener("click", () => void runDangerousAction({
     path: "/system/halt",
     body: { reason: "ui_manual_halt" },
-    successMessage: "System halted.",
-    confirmMessage: "Safe halt the runtime and stop execution eligibility?",
+    successMessage: "系统已安全暂停。",
+    confirmMessage: "确认要安全暂停系统并停止交易资格吗？",
   }));
   nodes.autoRefreshToggle.addEventListener("change", () => {
     if (nodes.autoRefreshToggle.checked) {
@@ -454,7 +550,7 @@ function safeJsonParse(text) {
 function normalizeError(error, fallbackMessage) {
   return {
     status: typeof error?.status === "number" ? error.status : null,
-    message: error?.message || fallbackMessage,
+    message: localizeErrorMessage(error?.message || fallbackMessage),
   };
 }
 
@@ -473,7 +569,7 @@ async function runAction(path, body, successMessage) {
     flash(successMessage, "info");
     await refreshDashboard({ manual: true });
   } catch (error) {
-    flash(`Action failed: ${normalizeError(error, `Failed to call ${path}`).message}`, "danger");
+    flash(`操作失败：${normalizeError(error, `调用 ${path} 失败`).message}`, "danger");
     renderDashboard({ manual: true });
   }
 }
@@ -491,7 +587,7 @@ function flash(message, tone = "info") {
 
 function setActionButtonsBusy(busy) {
   nodes.refreshButton.disabled = busy;
-  nodes.refreshButton.textContent = busy ? "Refreshing..." : "Refresh";
+  nodes.refreshButton.textContent = busy ? "刷新中..." : "立即刷新";
   updateActionAccess();
 }
 
@@ -519,8 +615,8 @@ function renderDashboard({ manual = false } = {}) {
   renderAlerts();
   renderActiveView();
   nodes.lastRefreshLabel.textContent = state.lastRefreshAt
-    ? `Last refresh ${formatDateTime(state.lastRefreshAt)}${manual ? " | manual" : ""}`
-    : "Not refreshed yet";
+    ? `上次刷新：${formatDateTime(state.lastRefreshAt)}${manual ? " | 手动" : ""}`
+    : "尚未刷新";
 }
 
 function viewPanelSpecs(viewName) {
@@ -606,61 +702,61 @@ function renderEmptyState() {
   nodes.stripFreshnessMeta.textContent = "-";
   nodes.stripEquityValue.textContent = "-";
   nodes.stripEquityMeta.textContent = "-";
-  nodes.overviewDecisionSpotlight.innerHTML = emptyState("Waiting for runtime data.");
-  nodes.overviewPosture.innerHTML = emptyState("Waiting for system posture.");
-  nodes.overviewPortfolio.innerHTML = emptyState("Waiting for portfolio state.");
-  nodes.overviewBlockers.innerHTML = emptyState("No blocker data yet.");
-  nodes.overviewRecovery.innerHTML = emptyState("No recovery posture yet.");
-  nodes.overviewMetrics.innerHTML = emptyState("No metrics yet.");
-  nodes.overviewTimeline.innerHTML = emptyState("No recent runtime activity.");
-  nodes.decisionSpotlight.innerHTML = emptyState("No latest decision yet.");
-  nodes.decisionTable.innerHTML = emptyState("No recent decisions yet.");
-  nodes.executionSpotlight.innerHTML = emptyState("No execution posture yet.");
-  nodes.orderTable.innerHTML = emptyState("No recent orders.");
-  nodes.fillTable.innerHTML = emptyState("No recent fills.");
-  nodes.executionErrorsPanel.innerHTML = emptyState("No recent execution errors.");
-  nodes.diagnosticReconciliation.innerHTML = emptyState("No reconciliation report yet.");
-  nodes.diagnosticRecovery.innerHTML = emptyState("No recovery state yet.");
-  nodes.diagnosticReplay.innerHTML = emptyState("No replay validation yet.");
-  nodes.diagnosticAccount.innerHTML = emptyState("No account state yet.");
-  nodes.diagnosticBlockers.innerHTML = emptyState("No blocker history yet.");
-  nodes.diagnosticMetrics.innerHTML = emptyState("No runtime metrics yet.");
-  nodes.runtimeProfileSummary.innerHTML = emptyState("No runtime profile control state yet.");
-  nodes.runtimeProfileSupervisor.innerHTML = emptyState("No supervisor state yet.");
-  nodes.runtimeProfileImpact.innerHTML = emptyState("No draft diff yet.");
-  nodes.runtimeProfileTable.innerHTML = emptyState("No runtime profile revisions yet.");
-  nodes.runtimeProfilePermissionNote.textContent = "Checking runtime profile permissions.";
-  nodes.operatorSummary.innerHTML = emptyState("No auth posture yet.");
-  nodes.operatorBootstrap.innerHTML = emptyState("No bootstrap status yet.");
-  nodes.operatorUsersTable.innerHTML = emptyState("No operator account data yet.");
-  nodes.operatorPermissionNote.textContent = "Checking admin access.";
-  nodes.runtimeProfileRevisionSelect.innerHTML = `<option value="">No draft selected</option>`;
+  nodes.overviewDecisionSpotlight.innerHTML = emptyState("正在等待系统运行数据。");
+  nodes.overviewPosture.innerHTML = emptyState("正在等待系统状态数据。");
+  nodes.overviewPortfolio.innerHTML = emptyState("正在等待账户与仓位快照。");
+  nodes.overviewBlockers.innerHTML = emptyState("暂未获取阻断项数据。");
+  nodes.overviewRecovery.innerHTML = emptyState("暂未获取恢复状态。");
+  nodes.overviewMetrics.innerHTML = emptyState("暂未获取运行指标。");
+  nodes.overviewTimeline.innerHTML = emptyState("暂未获取最近运行记录。");
+  nodes.decisionSpotlight.innerHTML = emptyState("暂未获取最新决策。");
+  nodes.decisionTable.innerHTML = emptyState("暂未获取最近决策。");
+  nodes.executionSpotlight.innerHTML = emptyState("暂未获取执行状态。");
+  nodes.orderTable.innerHTML = emptyState("暂未获取最近订单。");
+  nodes.fillTable.innerHTML = emptyState("暂未获取最近成交。");
+  nodes.executionErrorsPanel.innerHTML = emptyState("暂未获取执行异常。");
+  nodes.diagnosticReconciliation.innerHTML = emptyState("暂未获取对账报告。");
+  nodes.diagnosticRecovery.innerHTML = emptyState("暂未获取恢复状态。");
+  nodes.diagnosticReplay.innerHTML = emptyState("暂未获取回放校验结果。");
+  nodes.diagnosticAccount.innerHTML = emptyState("暂未获取账户状态。");
+  nodes.diagnosticBlockers.innerHTML = emptyState("暂未获取阻断历史。");
+  nodes.diagnosticMetrics.innerHTML = emptyState("暂未获取运行指标。");
+  nodes.runtimeProfileSummary.innerHTML = emptyState("暂未获取运行配置状态。");
+  nodes.runtimeProfileSupervisor.innerHTML = emptyState("暂未获取托管重启状态。");
+  nodes.runtimeProfileImpact.innerHTML = emptyState("暂未获取配置差异说明。");
+  nodes.runtimeProfileTable.innerHTML = emptyState("暂未获取运行配置版本。");
+  nodes.runtimeProfilePermissionNote.textContent = "正在检查运行配置权限。";
+  nodes.operatorSummary.innerHTML = emptyState("暂未获取认证状态。");
+  nodes.operatorBootstrap.innerHTML = emptyState("暂未获取初始化状态。");
+  nodes.operatorUsersTable.innerHTML = emptyState("暂未获取操作员账户数据。");
+  nodes.operatorPermissionNote.textContent = "正在检查管理员权限。";
+  nodes.runtimeProfileRevisionSelect.innerHTML = `<option value="">未选择草稿</option>`;
   setRuntimeProfileFormEnabled(false);
   setOperatorCreateFormEnabled(false);
-  setDrawerContent("Operator Detail", `<div class="empty-state">Use a table action or lookup to inspect detail.</div>`, `<div class="empty-state">Raw detail is available once an item is selected.</div>`);
+  setDrawerContent("明细查看", `<div class="empty-state">点击表格中的查看按钮，或输入编号后打开详情。</div>`, `<div class="empty-state">选中具体项目后，这里会显示完整明细。</div>`);
 }
 
 function updateAuthStateChip() {
   const session = state.data.session || {};
   const denied = Object.values(state.panelErrors).some((error) => error?.status === 401 || error?.status === 403);
-  let text = "anonymous";
+  let text = "未登录";
   let tone = "outline";
   if (denied) {
-    text = "access denied";
+    text = "访问被拒绝";
     tone = "danger";
   } else if (session.authenticated) {
-    text = session.auth_source === "session" ? "session active" : String(session.auth_source || "authenticated");
+    text = session.auth_source === "session" ? "会话有效" : readableState(session.auth_source || "authenticated");
     tone = "success";
   } else if (session.auth_enabled) {
-    text = "login required";
+    text = "需要登录";
     tone = "warning";
   } else {
-    text = "local access";
+    text = "本地访问";
     tone = "neutral";
   }
   setStatusChip(nodes.authStateChip, text, tone);
-  nodes.sessionIdentityValue.textContent = session.identity || "anonymous session";
-  nodes.sessionRoleValue.textContent = `role: ${readableState(session.role || "anonymous")}`;
+  nodes.sessionIdentityValue.textContent = session.identity || "当前未建立会话";
+  nodes.sessionRoleValue.textContent = `角色：${readableState(session.role || "anonymous")}`;
   nodes.sessionCardIdentity.textContent = session.identity || "-";
   nodes.sessionCardRole.textContent = readableState(session.role || "anonymous");
   nodes.sessionCardSource.textContent = readableState(session.auth_source || "anonymous");
@@ -690,14 +786,14 @@ function permissionHint(canWrite) {
   const operatorAuth = state.data.runtime?.operator_auth || {};
   if (session.auth_enabled) {
     if (canWrite) {
-      return `Control actions enabled for ${readableState(session.role || "operator")}.`;
+      return `当前会话角色为${readableState(session.role || "operator")}，允许执行控制操作。`;
     }
-    return "Read-only session. Control actions require operator or admin access.";
+    return "当前是只读会话。需要操作员或管理员权限才能执行控制操作。";
   }
   if (operatorAuth.unsafe_write_without_auth) {
-    return "Local development mode: write actions are enabled without auth.";
+    return "当前是本地开发模式，未登录也允许执行写入操作。";
   }
-  return "Write actions are locked until operator auth is configured or unsafe local write is explicitly enabled.";
+  return "当前已锁定写入操作。只有配置好操作员认证，或显式开启本地不安全写入后才可操作。";
 }
 
 function renderHeaderBadges() {
@@ -711,10 +807,10 @@ function renderHeaderBadges() {
   setStatusChip(
     nodes.submitPostureChip,
     environment.exchange_submission_enabled
-      ? "exchange submit"
+      ? "允许提交"
       : environment.exchange_submission_possible
-      ? "guarded exchange"
-      : "local paper",
+      ? "受保护提交通道"
+      : "本地模拟",
     environment.exchange_submission_enabled ? "success" : environment.exchange_submission_possible ? "warning" : "neutral",
   );
 }
@@ -731,24 +827,24 @@ function renderRuntimeStrip() {
   const recovery = recoveryData();
 
   nodes.stripOverallValue.textContent = readableState(health.runtime_state || health.overall_status);
-  nodes.stripOverallMeta.textContent = health.execution_blocked ? listOrDash(health.submit_blocked_reasons || health.blockers?.map((item) => item.blocker)) : "No active blockers";
+  nodes.stripOverallMeta.textContent = health.execution_blocked ? listOrDash(health.submit_blocked_reasons || health.blockers?.map((item) => item.blocker)) : "当前没有阻断项";
 
   nodes.stripModeValue.textContent = readableMode(runtimeProfile.name || mode.operating_state || mode.mode || "unknown");
   nodes.stripModeMeta.textContent = `${readableMode(mode.operating_state || "-")} | ${readableMode(environment.product_type || mode.trading_product_type || "-")} | ${readableMode(environment.margin_model || mode.margin_mode || "-")}`;
 
   nodes.stripExecutionValue.textContent = environment.exchange_submission_enabled
-    ? "Exchange Armed"
+    ? "交易所提交通道已开启"
     : environment.exchange_submission_possible
-    ? "Guarded Exchange"
-    : "Local Paper";
+    ? "受保护提交通道"
+    : "本地模拟";
   nodes.stripExecutionMeta.textContent = environment.exchange_submission_enabled
-    ? `${environment.exchange_submission_target || "exchange"} | ${readableMode(environment.position_directionality)} | lev ${formatNumber(mode.max_target_leverage || 1)}`
+    ? `${environment.exchange_submission_target || "交易所"} | ${readableMode(environment.position_directionality)} | 最大杠杆 ${formatNumber(mode.max_target_leverage || 1)}`
     : `${listOrDash(mode.submit_blocked_reasons)} | ${readableMode(environment.position_directionality)}`;
 
   if (runtimeProfile.name === "paper_local") {
-    nodes.stripRecoveryValue.textContent = "Local Paper";
+    nodes.stripRecoveryValue.textContent = "本地模拟";
     nodes.stripRecoveryMeta.textContent = recovery.safe_to_trade
-      ? "No exchange baseline takeover in this profile"
+      ? "当前运行姿态不需要交易所基线接管"
       : recoverySummaryLine(recovery);
   } else {
     nodes.stripRecoveryValue.textContent = readableState(recovery.recovery_state);
@@ -756,12 +852,12 @@ function renderRuntimeStrip() {
   }
 
   nodes.stripFreshnessValue.textContent = freshnessSummary(freshness);
-  nodes.stripFreshnessMeta.textContent = `market ${booleanWord(freshness.market_fresh)} | account ${booleanWord(account.fresh)} | recon ${booleanWord(freshness.reconciliation_fresh)}`;
+  nodes.stripFreshnessMeta.textContent = `行情 ${booleanWord(freshness.market_fresh)} | 账户 ${booleanWord(account.fresh)} | 对账 ${booleanWord(freshness.reconciliation_fresh)}`;
 
   nodes.stripEquityValue.textContent = portfolio ? formatNumber(portfolio.total_equity) : "-";
   nodes.stripEquityMeta.textContent = portfolio
-    ? `gross ${formatNumber(portfolio.gross_exposure)} | ${positionPosture(primaryPosition)}`
-    : "No portfolio snapshot";
+    ? `总敞口 ${formatNumber(portfolio.gross_exposure)} | ${positionPosture(primaryPosition)}`
+    : "暂未获取账户快照";
 }
 
 function renderAlerts() {
@@ -774,33 +870,33 @@ function renderAlerts() {
     state.flashMessage = null;
   }
   if (health.runtime_state === "halted") {
-    banners.push({ tone: "danger", message: "Runtime is halted. Execution is stopped until resume succeeds." });
+    banners.push({ tone: "danger", message: "系统当前已暂停，恢复成功前不会允许继续交易。" });
   } else if (health.runtime_state === "blocked") {
     const lead = blockers[0];
     banners.push({
       tone: "warning",
-      message: lead ? `Execution is blocked by ${lead.blocker}. ${lead.recommended_action}` : "Execution is blocked by an active safety condition.",
+      message: lead ? `交易被阻断：${localizeErrorMessage(lead.blocker)}。${localizeErrorMessage(lead.recommended_action || "")}` : "当前存在安全阻断条件，系统暂不允许交易。",
     });
   } else if (recovery.review_required) {
     banners.push({
       tone: "warning",
       message: recoveryPolicyData().operator_rebaseline_supported
-        ? "Rebaseline required before Resume. Accept the current exchange state as a new trusted baseline, then resume automation."
-        : "Recovery review is required before trusting the next automated action.",
+        ? "恢复前需要先重建基线。请先接受当前交易所状态为新的可信基线，再恢复自动交易。"
+        : "当前恢复状态仍需人工复核，暂不应继续信任下一次自动操作。",
     });
   } else if (recovery.recovery_state === "rebaseline_completed" && !recovery.safe_to_trade) {
     banners.push({
       tone: "info",
-      message: "A new baseline is ready, but the runtime remains halted until resume succeeds.",
+      message: "新的基线已经准备好，但系统仍保持暂停，直到恢复成功。",
     });
   } else if (health.runtime_state === "degraded") {
-    banners.push({ tone: "info", message: "Runtime is degraded. Review freshness, blockers, and reconciliation before trusting the next action." });
+    banners.push({ tone: "info", message: "系统当前处于降级状态。请先检查数据新鲜度、阻断项和对账结果，再决定是否继续信任自动交易。" });
   }
 
   Object.entries(state.panelErrors).slice(0, 4).forEach(([panel, error]) => {
     banners.push({
       tone: error.status === 401 || error.status === 403 ? "danger" : "warning",
-      message: `${panel} failed: ${error.message}`,
+      message: `${PANEL_LABELS[panel] || panel}加载失败：${error.message}`,
     });
   });
 
@@ -826,90 +922,92 @@ function renderOverview() {
   applyOverviewProfile(runtimeProfile);
 
   nodes.overviewDecisionSpotlight.innerHTML = renderDecisionHero(latestDecision, executionLatest);
-  nodes.overviewPosture.innerHTML = renderFactGrid(paperLocal
+  nodes.overviewPosture.innerHTML = renderFactGrid(
+    paperLocal
       ? [
-        ["Runtime", readableState(health.runtime_state)],
-        ["Profile", readableMode(runtimeProfile.name)],
-        ["Product", readableMode(environment.product_type)],
-        ["Margin Model", readableMode(environment.margin_model)],
-        ["Market Feed", environment.market_data_source_kind || "-"],
-        ["Execution Route", environment.execution_route || mode.execution_route || "-"],
-        ["Directionality", readableMode(environment.position_directionality)],
-        ["Leverage Support", readableMode(environment.leverage_support)],
-        ["Local Only", booleanWord(environment.local_only)],
-        ["Exchange Coupled", booleanWord(environment.exchange_coupled)],
-        ["Account Observation", booleanWord(state.data.accountState?.read_enabled)],
-        ["Halted", booleanWord(health.halted)],
-      ]
-    : [
-        ["Overall", readableState(health.overall_status)],
-        ["Runtime", readableState(health.runtime_state)],
-        ["Profile", readableMode(runtimeProfile.name)],
-        ["Product", readableMode(environment.product_type)],
-        ["Margin Model", readableMode(environment.margin_model)],
-        ["Directionality", readableMode(environment.position_directionality)],
-        ["Leverage Support", readableMode(environment.leverage_support)],
-        ["Operating State", readableMode(mode.operating_state)],
-        ["Execution Route", environment.execution_route || mode.execution_route || "-"],
-        ["Submit Target", environment.exchange_submission_target || "-"],
-        ["Submit Allowed", booleanWord(mode.exchange_submit_allowed)],
-        ["Human Approval", booleanWord(policyProfile.requires_human_approval)],
-    ]);
+          ["运行状态", readableState(health.runtime_state)],
+          ["运行配置", readableMode(runtimeProfile.name)],
+          ["产品类型", readableMode(environment.product_type)],
+          ["保证金模式", readableMode(environment.margin_model)],
+          ["行情来源", environment.market_data_source_kind || "-"],
+          ["执行通道", environment.execution_route || mode.execution_route || "-"],
+          ["持仓方向模式", readableMode(environment.position_directionality)],
+          ["杠杆支持", readableMode(environment.leverage_support)],
+          ["仅本地运行", booleanWord(environment.local_only)],
+          ["是否连接交易所", booleanWord(environment.exchange_coupled)],
+          ["账户观测", booleanWord(state.data.accountState?.read_enabled)],
+          ["是否暂停", booleanWord(health.halted)],
+        ]
+      : [
+          ["总体状态", readableState(health.overall_status)],
+          ["运行状态", readableState(health.runtime_state)],
+          ["运行配置", readableMode(runtimeProfile.name)],
+          ["产品类型", readableMode(environment.product_type)],
+          ["保证金模式", readableMode(environment.margin_model)],
+          ["持仓方向模式", readableMode(environment.position_directionality)],
+          ["杠杆支持", readableMode(environment.leverage_support)],
+          ["运行姿态", readableMode(mode.operating_state)],
+          ["执行通道", environment.execution_route || mode.execution_route || "-"],
+          ["提交通道目标", environment.exchange_submission_target || "-"],
+          ["允许提交到交易所", booleanWord(mode.exchange_submit_allowed)],
+          ["需要人工审批", booleanWord(policyProfile.requires_human_approval)],
+        ]
+  );
 
-    nodes.overviewPortfolio.innerHTML = renderFactGrid([
-      ["Total Equity", portfolio ? formatNumber(portfolio.total_equity) : "-"],
-      ["Realized PnL", portfolio ? formatSigned(portfolio.realized_pnl) : "-"],
-      ["Unrealized PnL", portfolio ? formatSigned(portfolio.unrealized_pnl) : "-"],
-      ["Gross Exposure", portfolio ? formatNumber(portfolio.gross_exposure) : "-"],
-      ["Net Exposure", portfolio ? formatSigned(portfolio.net_exposure) : "-"],
-      ["Primary Symbol", trackedSymbol() || "-"],
-      ["Primary Side", primaryPosition ? readableMode(primaryPosition.exposure_side) : "-"],
-      ["Primary Qty", primaryPosition ? formatSigned(primaryPosition.position_qty) : "-"],
-      ["Primary Leverage", primaryPosition ? formatNumber(primaryPosition.target_leverage) : "-"],
-      ["Margin Usage", portfolio ? formatNumber(portfolio.margin_usage) : "-"],
-      ["USDT Balance", portfolio ? formatNumber(portfolio.balances?.USDT) : "-"],
-      ["Updated", state.data.portfolio?.latest_update_timestamp ? formatDateTime(state.data.portfolio.latest_update_timestamp) : "-"],
-    ]);
+  nodes.overviewPortfolio.innerHTML = renderFactGrid([
+    ["总权益", portfolio ? formatNumber(portfolio.total_equity) : "-"],
+    ["已实现收益", portfolio ? formatSigned(portfolio.realized_pnl) : "-"],
+    ["未实现收益", portfolio ? formatSigned(portfolio.unrealized_pnl) : "-"],
+    ["总敞口", portfolio ? formatNumber(portfolio.gross_exposure) : "-"],
+    ["净敞口", portfolio ? formatSigned(portfolio.net_exposure) : "-"],
+    ["主跟踪标的", trackedSymbol() || "-"],
+    ["主持仓方向", primaryPosition ? readableMode(primaryPosition.exposure_side) : "-"],
+    ["主持仓数量", primaryPosition ? formatSigned(primaryPosition.position_qty) : "-"],
+    ["主持仓目标杠杆", primaryPosition ? formatNumber(primaryPosition.target_leverage) : "-"],
+    ["保证金占用", portfolio ? formatNumber(portfolio.margin_usage) : "-"],
+    ["USDT 余额", portfolio ? formatNumber(portfolio.balances?.USDT) : "-"],
+    ["更新时间", state.data.portfolio?.latest_update_timestamp ? formatDateTime(state.data.portfolio.latest_update_timestamp) : "-"],
+  ]);
 
-  nodes.overviewBlockerStamp.textContent = blockers.length ? `${blockers.length} active` : "clear";
+  nodes.overviewBlockerStamp.textContent = blockers.length ? `${blockers.length} 个阻断项` : "无阻断";
   nodes.overviewBlockers.innerHTML = renderSignalCards(
     blockers.map((item) => ({
-      title: item.blocker,
-      subtitle: `${item.subsystem} | ${item.submit_only ? "submit path" : "execution path"}`,
+      title: localizeErrorMessage(item.blocker),
+      subtitle: `${readableMode(item.subsystem)} | ${item.submit_only ? "仅阻断提交" : "阻断执行路径"}`,
       tone: item.affects_execution ? "warning" : "info",
-      detail: item.recommended_action,
+      detail: localizeErrorMessage(item.recommended_action),
     })),
-    "No current blockers."
+    "当前没有阻断项。"
   );
 
   nodes.overviewRecovery.innerHTML = renderFactGrid([
-    ["Recovery State", readableState(recovery.recovery_state)],
-    ["Safe To Trade", booleanWord(recovery.safe_to_trade)],
-    ["Resume Eligible", booleanWord(recovery.resume_eligible)],
-    ["Review Required", booleanWord(recovery.review_required)],
-    ["Rebaseline Available", booleanWord(recovery.rebaseline_available)],
-    ["Resume Blockers", listOrDash(recovery.resume_blocked_reasons)],
-    ["Baseline Status", readableState(baseline.status)],
-    ["Baseline Kind", readableState(baseline.baseline_kind)],
-    ["Baseline Imported", booleanWord(baseline.baseline_imported)],
-    ["Baseline Imported At", formatMaybeTimestamp(baseline.baseline_imported_at)],
-    ["Last Rebaseline", formatMaybeTimestamp(baseline.last_rebaseline_at)],
-    ["Open Orders At Baseline", formatNumber(baseline.open_order_count)],
+    ["恢复状态", readableState(recovery.recovery_state)],
+    ["允许继续交易", booleanWord(recovery.safe_to_trade)],
+    ["允许恢复运行", booleanWord(recovery.resume_eligible)],
+    ["需要人工复核", booleanWord(recovery.review_required)],
+    ["可执行基线重建", booleanWord(recovery.rebaseline_available)],
+    ["恢复阻断原因", listOrDashLocalized(recovery.resume_blocked_reasons)],
+    ["基线状态", readableState(baseline.status)],
+    ["基线类型", readableState(baseline.baseline_kind)],
+    ["已导入基线", booleanWord(baseline.baseline_imported)],
+    ["基线导入时间", formatMaybeTimestamp(baseline.baseline_imported_at)],
+    ["最近一次重建基线", formatMaybeTimestamp(baseline.last_rebaseline_at)],
+    ["基线时挂单数", formatNumber(baseline.open_order_count)],
   ]);
 
-    nodes.overviewMetrics.innerHTML = renderFactGrid([
-      ["Decision Cycles", formatNumber(metrics.decision_cycle_count)],
-      ["Order Intents", formatNumber(metrics.order_intent_count)],
-      ["Open Orders", formatNumber(metrics.current_open_order_count)],
-      ["Fills", formatNumber(metrics.fill_count)],
-      ["Rejections", formatNumber(metrics.rejection_count)],
-      ["Recon Mismatches", formatNumber(metrics.reconciliation_mismatch_count)],
-      ["Recent Exec Errors", formatNumber((metrics.recent_execution_errors || []).length)],
-      ["Latest Decision", formatMaybeTimestamp(latestDecision.decision_context?.as_of_ts)],
-      ["Latest Fill", fillFreshnessLabel(executionLatest.latest_fill)],
-      ["Latest Action", decisionActivityLabel(latestDecision, executionLatest.latest_order, executionLatest.latest_fill)],
-      ["Account Fresh", booleanWord(state.data.accountState?.fresh)],
-    ]);
+  nodes.overviewMetrics.innerHTML = renderFactGrid([
+    ["决策轮次", formatNumber(metrics.decision_cycle_count)],
+    ["订单意图数", formatNumber(metrics.order_intent_count)],
+    ["当前挂单数", formatNumber(metrics.current_open_order_count)],
+    ["成交数", formatNumber(metrics.fill_count)],
+    ["拒单数", formatNumber(metrics.rejection_count)],
+    ["对账差异数", formatNumber(metrics.reconciliation_mismatch_count)],
+    ["近期执行异常数", formatNumber((metrics.recent_execution_errors || []).length)],
+    ["最近决策时间", formatMaybeTimestamp(latestDecision.decision_context?.as_of_ts)],
+    ["最近成交", fillFreshnessLabel(executionLatest.latest_fill)],
+    ["最近动作", decisionActivityLabel(latestDecision, executionLatest.latest_order, executionLatest.latest_fill)],
+    ["账户数据新鲜", booleanWord(state.data.accountState?.fresh)],
+  ]);
 
   nodes.overviewTimeline.innerHTML = renderTimeline(buildTimeline({ paperLocal }));
 }
@@ -920,15 +1018,15 @@ function renderDecisions() {
 
   nodes.decisionSpotlight.innerHTML = renderDecisionInvestigation(latestDecision);
   nodes.decisionTable.innerHTML = renderTable(
-    ["Decision", "Intent", "Outcome", "When", "Open"],
+    ["决策", "意图", "结果", "时间", "查看"],
     recentDecisions.map((item) => ([
       `<div class="cell-stack"><strong>${escapeHtml(item.symbol || "-")}</strong><div class="table-meta">${escapeHtml(item.timeframe || "-")} | ${escapeHtml(item.decision_id || "-")}</div></div>`,
       `<div class="cell-stack"><strong>${escapeHtml(recentDecisionHeadline(item))}</strong><div class="table-meta">${escapeHtml(recentDecisionNarrative(item))}</div></div>`,
-      `<div class="cell-stack"><div class="table-inline-badges">${miniBadge(item.policy_result ? "policy ok" : "policy blocked", item.policy_result ? "success" : "danger")}${miniBadge(item.risk_result ? "risk ok" : "risk blocked", item.risk_result ? "success" : "danger")}${miniBadge(recentDecisionRequiresTrade(item) ? "trade needed" : "no trade needed", recentDecisionRequiresTrade(item) ? "info" : "outline")}</div><div class="table-meta">${escapeHtml(recentDecisionOutcome(item))}</div></div>`,
+      `<div class="cell-stack"><div class="table-inline-badges">${miniBadge(item.policy_result ? "策略放行" : "策略阻断", item.policy_result ? "success" : "danger")}${miniBadge(item.risk_result ? "风控通过" : "风控阻断", item.risk_result ? "success" : "danger")}${miniBadge(recentDecisionRequiresTrade(item) ? "需要交易" : "无需交易", recentDecisionRequiresTrade(item) ? "info" : "outline")}</div><div class="table-meta">${escapeHtml(recentDecisionOutcome(item))}</div></div>`,
       `<div class="cell-stack"><strong>${escapeHtml(formatRelativeAge(item.decision_time))}</strong><div class="table-meta">${escapeHtml(formatMaybeTimestamp(item.decision_time))}</div></div>`,
-      item.decision_id ? `<button class="table-button" data-inspect-decision="${escapeHtml(item.decision_id)}">Inspect</button>` : "",
+      item.decision_id ? `<button class="table-button" data-inspect-decision="${escapeHtml(item.decision_id)}">查看</button>` : "",
     ])),
-    "No recent decisions available."
+    "暂无最近决策。"
   );
 }
 
@@ -959,23 +1057,23 @@ function renderExecution() {
         </div>
         <p class="hero-copy">${escapeHtml(executionCopy(runtimeProfile, environment, mode))}</p>
         ${renderFactGrid([
-          ["Execution Ready", booleanWord(readiness.ready)],
-          ["Product", readableMode(environment.product_type)],
-          ["Margin Model", readableMode(environment.margin_model)],
-          ["Directionality", readableMode(environment.position_directionality)],
-          ["Latest Order", latestOrder ? `${latestOrder.status} | ${latestOrder.client_order_id}` : "-"],
-          ["Latest Fill", latestFill ? `${formatNumber(latestFill.fill_qty)} @ ${formatNumber(latestFill.fill_price)}` : "-"],
-          ["Latest Intent", latestFill?.position_intent || latestOrder?.submission_payload?.positionIntent || state.data.latestDecision?.position_target?.position_intent || "-"],
-          ["Latest Fill Age", fillFreshnessLabel(latestFill)],
-          ["Reconciliation", latestReconciliation ? latestReconciliation.severity : "-"],
-          ["Recovery", readableState(execution.recovery?.recovery_state)],
-          ["Open Orders", formatNumber(state.data.metrics?.current_open_order_count)],
+          ["执行就绪", booleanWord(readiness.ready)],
+          ["产品类型", readableMode(environment.product_type)],
+          ["保证金模式", readableMode(environment.margin_model)],
+          ["持仓方向模式", readableMode(environment.position_directionality)],
+          ["最近订单", latestOrder ? `${readableState(latestOrder.status)} | ${latestOrder.client_order_id}` : "-"],
+          ["最近成交", latestFill ? `${formatNumber(latestFill.fill_qty)} @ ${formatNumber(latestFill.fill_price)}` : "-"],
+          ["最近交易意图", readableMode(latestFill?.position_intent || latestOrder?.submission_payload?.positionIntent || state.data.latestDecision?.position_target?.position_intent || "-")],
+          ["最近成交新鲜度", fillFreshnessLabel(latestFill)],
+          ["对账状态", latestReconciliation ? readableState(latestReconciliation.severity) : "-"],
+          ["恢复状态", readableState(execution.recovery?.recovery_state)],
+          ["当前挂单数", formatNumber(state.data.metrics?.current_open_order_count)],
         ])}
       </div>
     `;
 
   nodes.orderTable.innerHTML = renderTable(
-    ["Order", "Meaning", "State", "Updated", "Open"],
+    ["订单", "含义", "状态", "更新时间", "操作"],
     recentOrders.map((order) => ([
       `<div class="cell-stack"><strong>${escapeHtml(order.symbol || "-")}</strong><div class="table-meta">${escapeHtml(order.client_order_id || "-")}</div></div>`,
       `<div class="cell-stack"><strong>${escapeHtml(recentOrderHeadline(order))}</strong><div class="table-meta">${escapeHtml(recentOrderNarrative(order))}</div></div>`,
@@ -983,29 +1081,29 @@ function renderExecution() {
       `<div class="cell-stack"><strong>${escapeHtml(formatRelativeAge(order.last_update_ts || order.created_at))}</strong><div class="table-meta">${escapeHtml(formatMaybeTimestamp(order.last_update_ts || order.created_at))}</div></div>`,
       renderOrderActions(order),
     ])),
-    "No recent orders available."
+    "暂无最近订单。"
   );
 
   nodes.fillTable.innerHTML = renderTable(
-    ["Fill", "What Happened", "Impact", "Ingested", "Open"],
+    ["成交", "发生了什么", "收益影响", "写入时间", "操作"],
     recentFills.map((fill) => ([
       `<div class="cell-stack"><strong>${escapeHtml(fill.symbol || "-")}</strong><div class="table-meta">${escapeHtml(fill.fill_id || "-")}</div></div>`,
       `<div class="cell-stack"><strong>${escapeHtml(recentFillHeadline(fill))}</strong><div class="table-meta">${escapeHtml(recentFillNarrative(fill))}</div></div>`,
-      `<div class="cell-stack"><strong>${escapeHtml(recentFillImpactSummary(fill))}</strong><div class="table-meta">${escapeHtml(`fee ${formatNumber(fill.fee_amount)} ${fill.fee_currency || ""}`.trim())}</div></div>`,
+      `<div class="cell-stack"><strong>${escapeHtml(recentFillImpactSummary(fill))}</strong><div class="table-meta">${escapeHtml(`手续费 ${formatNumber(fill.fee_amount)} ${fill.fee_currency || ""}`.trim())}</div></div>`,
       `<div class="cell-stack"><strong>${escapeHtml(formatRelativeAge(fill.ingestion_timestamp))}</strong><div class="table-meta">${escapeHtml(formatMaybeTimestamp(fill.ingestion_timestamp))}</div></div>`,
-      fill.fill_id ? `<button class="table-button" data-inspect-fill="${escapeHtml(fill.fill_id)}">Inspect</button>` : "",
+      fill.fill_id ? `<button class="table-button" data-inspect-fill="${escapeHtml(fill.fill_id)}">查看</button>` : "",
     ])),
-    "No recent fills available."
+    "暂无最近成交。"
   );
 
   nodes.executionErrorsPanel.innerHTML = renderSignalCards(
     errors.slice(0, 6).map((item) => ({
-      title: item.message || item.status || "execution issue",
-      subtitle: `${item.subsystem || "execution"} | ${formatMaybeTimestamp(item.timestamp)}`,
+      title: localizeErrorMessage(item.message || item.status || "execution issue"),
+      subtitle: `${readableMode(item.subsystem || "execution")} | ${formatMaybeTimestamp(item.timestamp)}`,
       tone: item.severity === "error" ? "danger" : "warning",
-      detail: [item.decision_id, item.order_id].filter(Boolean).join(" | ") || "no linked identifiers",
+      detail: [item.decision_id, item.order_id].filter(Boolean).join(" | ") || "暂无关联编号",
     })),
-    "No recent execution errors."
+    "近期没有执行异常。"
   );
 }
 
@@ -1026,121 +1124,121 @@ function renderDiagnostics() {
       <div class="hero-header">
         <div>
           <p class="hero-id">${escapeHtml(reconciliation.reconciliation_id)}</p>
-          <h3 class="hero-title">${escapeHtml(reconciliation.severity)}</h3>
+          <h3 class="hero-title">${escapeHtml(readableState(reconciliation.severity))}</h3>
         </div>
         <div class="runtime-badges">
-          ${miniBadge(reconciliation.halt_required ? "halt required" : "safe", reconciliation.halt_required ? "danger" : "success")}
-          ${miniBadge(reconciliation.exchange_comparison_enabled ? "exchange aware" : "local only", reconciliation.exchange_comparison_enabled ? "info" : "outline")}
+          ${miniBadge(reconciliation.halt_required ? "需要暂停" : "可继续运行", reconciliation.halt_required ? "danger" : "success")}
+          ${miniBadge(reconciliation.exchange_comparison_enabled ? "已比对交易所" : "仅本地校验", reconciliation.exchange_comparison_enabled ? "info" : "outline")}
         </div>
       </div>
-      <p class="hero-copy">${escapeHtml(listOrDash(mismatchSummary?.mismatch_reasons) || "-")}</p>
+      <p class="hero-copy">${escapeHtml(listOrDashLocalized(mismatchSummary?.mismatch_reasons) || "-")}</p>
       ${renderFactGrid([
-        ["Mismatch Reasons", listOrDash(mismatchSummary?.mismatch_reasons)],
-        ["Mismatch Categories", listOrDash(mismatchSummary?.mismatch_categories)],
-        ["Safety Impacts", listOrDash(mismatchSummary?.safety_impacts)],
-        ["Review Required", booleanWord(reconciliation.review_required)],
-        ["Recommended Action", mismatchSummary?.recommended_operator_action || "-"],
-        ["Last Validation", latestValidation?.validated_at ? formatDateTime(latestValidation.validated_at) : "-"],
-        ["Exchange Comparison", booleanWord(reconciliation.exchange_comparison_enabled)],
+        ["差异原因", listOrDashLocalized(mismatchSummary?.mismatch_reasons)],
+        ["差异类别", listOrDashLocalized(mismatchSummary?.mismatch_categories)],
+        ["安全影响", listOrDashLocalized(mismatchSummary?.safety_impacts)],
+        ["需要人工复核", booleanWord(reconciliation.review_required)],
+        ["建议动作", localizeErrorMessage(mismatchSummary?.recommended_operator_action || "-")],
+        ["最近校验时间", latestValidation?.validated_at ? formatDateTime(latestValidation.validated_at) : "-"],
+        ["是否已比对交易所", booleanWord(reconciliation.exchange_comparison_enabled)],
       ])}
     </div>
-  ` : emptyState("No reconciliation report yet.");
+  ` : emptyState("还没有对账报告。");
 
-    nodes.diagnosticRecovery.innerHTML = renderSignalCards([
+  nodes.diagnosticRecovery.innerHTML = renderSignalCards([
       {
-        title: `Recovery ${readableState(recovery.recovery_state)}`,
-        subtitle: `safe ${booleanWord(recovery.safe_to_trade)} | resume ${booleanWord(recovery.resume_eligible)}`,
+        title: `恢复状态：${readableState(recovery.recovery_state)}`,
+        subtitle: `可交易 ${booleanWord(recovery.safe_to_trade)} | 可恢复 ${booleanWord(recovery.resume_eligible)}`,
         tone: recovery.safe_to_trade ? "success" : recovery.review_required ? "warning" : "danger",
         detail: recovery.review_required
-          ? `Operator review is still required. Resume blockers: ${listOrDash(recovery.resume_blocked_reasons)}.`
+          ? `仍需人工复核。恢复阻断原因：${listOrDashLocalized(recovery.resume_blocked_reasons)}。`
           : recovery.safe_to_trade
-            ? "Recovery posture is clear enough to keep trading."
-            : `Trading is still gated by ${listOrDash(recovery.resume_blocked_reasons)}.`,
+            ? "当前恢复姿态已满足继续交易的要求。"
+            : `交易仍被以下原因阻断：${listOrDashLocalized(recovery.resume_blocked_reasons)}。`,
       },
       {
-        title: `Baseline ${readableState(baseline.status)}`,
+        title: `基线状态：${readableState(baseline.status)}`,
         subtitle: `${readableState(baseline.baseline_kind)} | ${baseline.baseline_source || "-"}`,
         tone: baseline.status === "ready" || baseline.status === "accepted" ? "info" : "outline",
         detail: baseline.baseline_imported_at
-          ? `Imported ${formatRelativeAge(baseline.baseline_imported_at)}. Event ref ${baseline.event_ref || "-"}.`
-          : "No baseline import timestamp is stored yet.",
+          ? `${formatRelativeAge(baseline.baseline_imported_at)}导入。事件引用：${baseline.event_ref || "-"}。`
+          : "还没有记录基线导入时间。",
       },
       {
-        title: "Operator recovery controls",
-        subtitle: `rebaseline ${booleanWord(recovery.rebaseline_available)} | review ${booleanWord(recovery.review_required)}`,
+        title: "人工恢复控制",
+        subtitle: `可重建基线 ${booleanWord(recovery.rebaseline_available)} | 需要复核 ${booleanWord(recovery.review_required)}`,
         tone: recovery.rebaseline_available ? "warning" : "info",
         detail: baseline.last_rebaseline_event_ref
-          ? `Last rebaseline event ${baseline.last_rebaseline_event_ref}.`
-          : "No rebaseline event has been recorded yet.",
+          ? `最近一次重建基线事件：${baseline.last_rebaseline_event_ref}。`
+          : "还没有记录重建基线事件。",
       },
-    ], "No recovery posture yet.");
+    ], "还没有恢复状态数据。");
 
-    nodes.diagnosticReplay.innerHTML = renderSignalCards([
+  nodes.diagnosticReplay.innerHTML = renderSignalCards([
       {
-        title: replay.last_validation ? "Replay validated recently" : "Replay idle",
-        subtitle: replay.last_validation?.decision_id || "no recent validation",
+        title: replay.last_validation ? "近期已执行回放校验" : "回放当前空闲",
+        subtitle: replay.last_validation?.decision_id || "近期没有回放校验",
         tone: replay.healthy ? "success" : replay.supported ? "warning" : "outline",
         detail: replay.last_validation
-          ? `Validated ${formatRelativeAge(replay.last_validation.validated_at)} with ${formatNumber(replay.last_validation.divergence_count)} divergence${pluralize(replay.last_validation.divergence_count)}.`
-          : "No recent replay validation is stored.",
+          ? `${formatRelativeAge(replay.last_validation.validated_at)}完成校验，记录到 ${formatNumber(replay.last_validation.divergence_count)} 个偏差。`
+          : "近期没有保存回放校验记录。",
       },
       {
-        title: "Replay coverage",
-        subtitle: `supported ${booleanWord(replay.supported)} | healthy ${booleanWord(replay.healthy)}`,
+        title: "回放覆盖情况",
+        subtitle: `支持回放 ${booleanWord(replay.supported)} | 回放健康 ${booleanWord(replay.healthy)}`,
         tone: replay.supported ? "info" : "outline",
-        detail: `Replayed events ${formatNumber(replay.last_validation?.replayed_event_count)} | baseline switches ${formatNumber(replay.last_validation?.baseline_switch_count)}.`,
+        detail: `回放事件数 ${formatNumber(replay.last_validation?.replayed_event_count)} | 基线切换次数 ${formatNumber(replay.last_validation?.baseline_switch_count)}。`,
       },
-    ], "No replay validation yet.");
+    ], "还没有回放校验记录。");
 
-    nodes.diagnosticAccount.innerHTML = renderSignalCards([
+  nodes.diagnosticAccount.innerHTML = renderSignalCards([
       {
-        title: `Account backend ${readableMode(account.backend || "-")}`,
-        subtitle: `connected ${booleanWord(account.connected)} | fresh ${booleanWord(account.fresh)} | ready ${booleanWord(account.ready)}`,
+        title: `账户后端：${readableMode(account.backend || "-")}`,
+        subtitle: `已连接 ${booleanWord(account.connected)} | 数据新鲜 ${booleanWord(account.fresh)} | 已就绪 ${booleanWord(account.ready)}`,
         tone: account.ready ? "success" : account.connected ? "warning" : "danger",
         detail: account.current_blocking_reason
-          ? `Current blocking reason: ${account.current_blocking_reason}.`
-          : `Last refresh ${account.last_refresh_timestamp ? formatRelativeAge(account.last_refresh_timestamp) : "-"}.`,
+          ? `当前阻断原因：${localizeErrorMessage(account.current_blocking_reason)}。`
+          : `最近刷新：${account.last_refresh_timestamp ? formatRelativeAge(account.last_refresh_timestamp) : "-"}。`,
       },
       {
-        title: "Baseline posture",
+        title: "基线状态",
         subtitle: readableState(account.baseline_takeover?.status),
         tone: account.baseline_takeover?.status ? "info" : "outline",
-        detail: `Baseline source ${account.baseline_takeover?.baseline_source || "-"} | recovery ${readableState(account.recovery?.recovery_state)}.`,
+        detail: `基线来源 ${account.baseline_takeover?.baseline_source || "-"} | 恢复状态 ${readableState(account.recovery?.recovery_state)}。`,
       },
-    ], "No account state yet.");
+    ], "还没有账户状态数据。");
 
   nodes.diagnosticBlockers.innerHTML = renderTimeline(
     blockerHistory.slice().reverse().map((item) => ({
-      title: "Blocker snapshot",
-      subtitle: `${item.runtime_state || "-"} | ${item.operating_state || "-"}`,
+      title: "阻断快照",
+      subtitle: `${readableState(item.runtime_state || "-")} | ${readableMode(item.operating_state || "-")}`,
       timestamp: item.created_at,
       tone: item.execution_blocked ? "warning" : "info",
-      detail: item.blockers?.length ? item.blockers.map((blocker) => blocker.blocker).join(", ") : "clear",
+      detail: item.blockers?.length ? item.blockers.map((blocker) => localizeErrorMessage(blocker.blocker)).join("，") : "无阻断",
     })),
-    "No blocker history available."
+    "暂无阻断历史。"
   );
 
-    nodes.diagnosticMetrics.innerHTML = renderSignalCards([
+  nodes.diagnosticMetrics.innerHTML = renderSignalCards([
       {
-        title: "Decision cadence",
-        subtitle: `${formatNumber(metrics.decision_cycle_count)} cycles | ${formatNumber(metrics.order_intent_count)} intents`,
+        title: "决策节奏",
+        subtitle: `${formatNumber(metrics.decision_cycle_count)} 次决策 | ${formatNumber(metrics.order_intent_count)} 个订单意图`,
         tone: "info",
-        detail: `Latest decision ${runtime.last_decision_timestamp ? formatRelativeAge(runtime.last_decision_timestamp) : "-"} | uptime ${formatDuration(runtime.uptime_seconds)}.`,
+        detail: `最近决策：${runtime.last_decision_timestamp ? formatRelativeAge(runtime.last_decision_timestamp) : "-"} | 已运行 ${formatDuration(runtime.uptime_seconds)}。`,
       },
       {
-        title: "Execution throughput",
-        subtitle: `${formatNumber(metrics.fill_count)} fills | ${formatNumber(metrics.current_open_order_count)} open orders`,
+        title: "执行吞吐",
+        subtitle: `${formatNumber(metrics.fill_count)} 笔成交 | ${formatNumber(metrics.current_open_order_count)} 笔挂单`,
         tone: metrics.current_open_order_count > 0 ? "warning" : "success",
-        detail: `Latest fill ${fillFreshnessLabel(state.data.executionLatest?.latest_fill)}.`,
+        detail: `最近成交：${fillFreshnessLabel(state.data.executionLatest?.latest_fill)}。`,
       },
       {
-        title: "Recent activity",
-        subtitle: `${formatNumber(metrics.rejection_count)} rejection${pluralize(metrics.rejection_count)}`,
+        title: "近期活动",
+        subtitle: `${formatNumber(metrics.rejection_count)} 次拒单`,
         tone: metrics.rejection_count > 0 ? "warning" : "info",
         detail: decisionActivityLabel(state.data.latestDecision || {}, state.data.executionLatest?.latest_order, state.data.executionLatest?.latest_fill),
       },
-    ], "No runtime metrics yet.");
-  }
+    ], "还没有运行指标。");
+}
 
 function renderRuntimeProfiles() {
   const profiles = state.data.runtimeProfiles || {};
@@ -1148,22 +1246,22 @@ function renderRuntimeProfiles() {
   const payload = profiles.current_runtime_payload || {};
   setRuntimeProfilesViewEnabled(false);
   nodes.runtimeProfileSummary.innerHTML = renderFactGrid([
-    ["Control Mode", "Environment file switch"],
-    ["Profile Source", readableState(profiles.profile_source || state.data.runtime?.profile_source || "env_fallback")],
-    ["Default Symbol", payload.default_symbol || "-"],
-    ["Allowed Symbols", listOrDash(payload.allowed_symbols)],
-    ["Product Type", readableState(payload.trading_product_type || "-")],
-    ["Margin Mode", readableState(payload.margin_mode || "-")],
+    ["控制方式", "通过环境配置文件切换"],
+    ["当前配置来源", readableState(profiles.profile_source || state.data.runtime?.profile_source || "env_fallback")],
+    ["默认交易对", payload.default_symbol || "-"],
+    ["允许交易的标的", listOrDash(payload.allowed_symbols)],
+    ["产品类型", readableState(payload.trading_product_type || "-")],
+    ["保证金模式", readableState(payload.margin_mode || "-")],
   ]);
   nodes.runtimeProfileSupervisor.innerHTML = emptyState(
     controlEnabled
-      ? "Browser-managed runtime profile control is enabled."
-      : "Runtime profile control in the UI is disabled. Switch posture by replacing .env with .env.spot.backup or .env.derivatives.primary, then restart the service."
+      ? "当前已启用浏览器内的运行配置控制。"
+      : "当前 UI 内的运行配置控制已关闭。请通过切换 .env、.env.spot 或 .env.derivatives 后再重启服务。"
   );
-  nodes.runtimeProfileImpact.innerHTML = emptyState("No browser-managed revisions in env-switch mode.");
-  nodes.runtimeProfileTable.innerHTML = emptyState("Runtime profile drafts are disabled in env-switch mode.");
-  nodes.runtimeProfileRevisionSelect.innerHTML = `<option value="">Env switch mode</option>`;
-  nodes.runtimeProfilePermissionNote.textContent = "Runtime posture changes now come from the env preset files, not the browser control plane.";
+  nodes.runtimeProfileImpact.innerHTML = emptyState("当前环境文件切换模式下，没有浏览器内版本草稿。");
+  nodes.runtimeProfileTable.innerHTML = emptyState("当前环境文件切换模式下，不支持浏览器内运行配置草稿。");
+  nodes.runtimeProfileRevisionSelect.innerHTML = `<option value="">环境文件切换模式</option>`;
+  nodes.runtimeProfilePermissionNote.textContent = "当前运行姿态来自环境配置文件，而不是浏览器控制平面。";
   setRuntimeProfileFormEnabled(false);
 }
 
@@ -1175,47 +1273,47 @@ function renderOperators() {
   const canAdmin = operatorCanAdmin();
 
   nodes.operatorSummary.innerHTML = renderFactGrid([
-    ["Auth Enabled", booleanWord(providers.auth_enabled)],
-    ["Session Enabled", booleanWord(providers.session_enabled)],
-    ["Database Backed", booleanWord(providers.database_backed)],
-    ["Stored Users", formatNumber(providers.stored_user_count)],
-    ["Configured Roles", listOrDash(providers.configured_roles)],
-    ["API-Key Compatibility", booleanWord(providers.api_key_compatibility_enabled)],
-    ["Current Identity", state.data.session?.identity || "-"],
-    ["Current Role", readableState(state.data.session?.role)],
+    ["启用认证", booleanWord(providers.auth_enabled)],
+    ["启用会话登录", booleanWord(providers.session_enabled)],
+    ["使用数据库账户", booleanWord(providers.database_backed)],
+    ["已存储账户数", formatNumber(providers.stored_user_count)],
+    ["已配置角色", listOrDashLocalized(providers.configured_roles)],
+    ["兼容 API Key", booleanWord(providers.api_key_compatibility_enabled)],
+    ["当前身份", state.data.session?.identity || "-"],
+    ["当前角色", readableState(state.data.session?.role)],
   ]);
 
   nodes.operatorBootstrap.innerHTML = renderFactGrid([
-    ["Bootstrap Enabled", booleanWord(runtimeAuth.bootstrap_enabled)],
-    ["Bootstrap Configured", booleanWord(runtimeAuth.bootstrap_configured)],
-    ["Bootstrap Pending", booleanWord(operatorUsers.bootstrap_pending ?? providers.bootstrap_pending)],
-    ["Enabled Users", formatNumber(operatorUsers.enabled_user_count)],
-    ["Enabled Admins", formatNumber(operatorUsers.enabled_admin_count)],
-    ["Unsafe Local Write", booleanWord(runtimeAuth.unsafe_write_without_auth)],
-    ["Session Source", readableState(state.data.session?.auth_source)],
-    ["Admin Access", canAdmin ? "granted" : "not available"],
+    ["启用初始化引导", booleanWord(runtimeAuth.bootstrap_enabled)],
+    ["已配置初始化引导", booleanWord(runtimeAuth.bootstrap_configured)],
+    ["等待初始化", booleanWord(operatorUsers.bootstrap_pending ?? providers.bootstrap_pending)],
+    ["已启用用户数", formatNumber(operatorUsers.enabled_user_count)],
+    ["已启用管理员数", formatNumber(operatorUsers.enabled_admin_count)],
+    ["允许本地无认证写入", booleanWord(runtimeAuth.unsafe_write_without_auth)],
+    ["当前会话来源", readableState(state.data.session?.auth_source)],
+    ["管理员权限", canAdmin ? "已授予" : "不可用"],
   ]);
 
   setOperatorCreateFormEnabled(canAdmin);
   if (!canAdmin) {
-    nodes.operatorPermissionNote.textContent = "Admin access is required to manage operator accounts.";
-    nodes.operatorUsersTable.innerHTML = emptyState("Sign in as an admin to create, edit, disable, or delete operator users.");
+    nodes.operatorPermissionNote.textContent = "管理操作员账户需要管理员权限。";
+    nodes.operatorUsersTable.innerHTML = emptyState("请先以管理员身份登录，然后再创建、修改、停用或删除操作员账户。");
     return;
   }
 
-  nodes.operatorPermissionNote.textContent = "Admin session active. Changes are written to the operator user table immediately.";
+  nodes.operatorPermissionNote.textContent = "当前已使用管理员会话登录，修改会立即写入操作员用户表。";
   nodes.operatorUsersTable.innerHTML = renderTable(
-    ["Username", "Role", "Status", "Last Login", "Updated", "Session", "Actions"],
+    ["用户名", "角色", "状态", "最近登录", "最近更新", "当前会话", "操作"],
     users.map((user) => ([
       `<div><strong>${escapeHtml(user.username || "-")}</strong><div class="mono">${escapeHtml(user.user_id || "-")}</div></div>`,
       miniBadge(user.role || "-", user.role === "admin" ? "danger" : user.role === "operator" ? "info" : "outline"),
-      `<div>${miniBadge(user.enabled ? "enabled" : "disabled", user.enabled ? "success" : "warning")}${user.protected_last_admin ? '<div class="table-meta">last enabled admin</div>' : ""}</div>`,
+      `<div>${miniBadge(user.enabled ? "已启用" : "已停用", user.enabled ? "success" : "warning")}${user.protected_last_admin ? '<div class="table-meta">最后一个已启用管理员</div>' : ""}</div>`,
       escapeHtml(formatMaybeTimestamp(user.last_login_at)),
       escapeHtml(formatMaybeTimestamp(user.updated_at || user.created_at)),
-      user.is_current_session_user ? miniBadge("current session", "info") : '<span class="table-meta">other account</span>',
+      user.is_current_session_user ? miniBadge("当前会话", "info") : '<span class="table-meta">其他账户</span>',
       renderOperatorUserActions(user),
     ])),
-    "No operator users are stored yet."
+    "当前还没有存储任何操作员账户。"
   );
 }
 
@@ -1224,10 +1322,10 @@ function renderOperatorUserActions(user) {
   const deleteDisabled = user.protected_last_admin || user.is_current_session_user;
   return `
     <div class="table-actions">
-      <button class="table-button" data-role-user="${escapeHtml(user.username)}" data-current-role="${escapeHtml(user.role || "")}">Role</button>
-      <button class="table-button" data-password-user="${escapeHtml(user.username)}">Password</button>
-      <button class="table-button" data-toggle-user="${escapeHtml(user.username)}" data-next-enabled="${String(!user.enabled)}" ${toggleDisabled ? "disabled" : ""}>${user.enabled ? "Disable" : "Enable"}</button>
-      <button class="table-button" data-delete-user="${escapeHtml(user.username)}" ${deleteDisabled ? "disabled" : ""}>Delete</button>
+      <button class="table-button" data-role-user="${escapeHtml(user.username)}" data-current-role="${escapeHtml(user.role || "")}">修改角色</button>
+      <button class="table-button" data-password-user="${escapeHtml(user.username)}">重置密码</button>
+      <button class="table-button" data-toggle-user="${escapeHtml(user.username)}" data-next-enabled="${String(!user.enabled)}" ${toggleDisabled ? "disabled" : ""}>${user.enabled ? "停用" : "启用"}</button>
+      <button class="table-button" data-delete-user="${escapeHtml(user.username)}" ${deleteDisabled ? "disabled" : ""}>删除</button>
     </div>
   `;
 }
@@ -1334,19 +1432,19 @@ function renderRuntimeProfileActions(revision) {
 }
 
 async function createRuntimeProfileDraft() {
-  const profileLabel = nodes.runtimeProfileLabel.value.trim() || "Runtime profile draft";
+  const profileLabel = nodes.runtimeProfileLabel.value.trim() || "运行配置草稿";
   try {
     const response = await requestJson("/runtime-profiles/drafts", {
       method: "POST",
       body: { profile_label: profileLabel },
     });
-    flash(`Draft ${response.revision.profile_label} created.`, "info");
+    flash(`已创建草稿：${response.revision.profile_label}。`, "info");
     await refreshDashboard({ manual: true });
     nodes.runtimeProfileRevisionSelect.value = response.revision.revision_id;
     populateRuntimeProfileDraftForm();
     setActiveView("runtime-profiles");
   } catch (error) {
-    flash(`Draft creation failed: ${normalizeError(error, "Runtime profile draft creation failed").message}`, "danger");
+    flash(`创建运行配置草稿失败：${normalizeError(error, "Runtime profile draft creation failed").message}`, "danger");
     renderDashboard({ manual: true });
   }
 }
@@ -1354,7 +1452,7 @@ async function createRuntimeProfileDraft() {
 async function saveRuntimeProfileDraft() {
   const revision = selectedRuntimeProfileRevision();
   if (!revision) {
-    flash("Create or select a runtime profile draft first.", "warning");
+    flash("请先创建或选择一个运行配置草稿。", "warning");
     renderAlerts();
     return;
   }
@@ -1367,12 +1465,12 @@ async function saveRuntimeProfileDraft() {
         payload: runtimeProfilePayloadFromForm(),
       },
     });
-    flash("Runtime profile draft saved.", "info");
+    flash("运行配置草稿已保存。", "info");
     await refreshDashboard({ manual: true });
     nodes.runtimeProfileRevisionSelect.value = revision.revision_id;
     populateRuntimeProfileDraftForm();
   } catch (error) {
-    flash(`Runtime profile save failed: ${normalizeError(error, "Runtime profile save failed").message}`, "danger");
+    flash(`保存运行配置草稿失败：${normalizeError(error, "Runtime profile save failed").message}`, "danger");
     renderDashboard({ manual: true });
   }
 }
@@ -1380,11 +1478,11 @@ async function saveRuntimeProfileDraft() {
 async function stageRuntimeProfileDraft() {
   const revision = selectedRuntimeProfileRevision();
   if (!revision) {
-    flash("Select a runtime profile draft before staging it.", "warning");
+    flash("请先选择需要进入待激活状态的运行配置草稿。", "warning");
     renderAlerts();
     return;
   }
-  if (!window.confirm("Stage this runtime profile for activation? A restart will be required before it can take effect.")) {
+  if (!window.confirm("确认将这份运行配置设为待激活吗？只有重启后才会真正生效。")) {
     return;
   }
   try {
@@ -1392,10 +1490,10 @@ async function stageRuntimeProfileDraft() {
       method: "POST",
       body: { activation_note: nodes.runtimeProfileActivationNote.value.trim() || null },
     });
-    flash("Runtime profile staged. Restart the managed API to activate it.", "warning");
+    flash("运行配置已进入待激活状态。请重启托管 API 以使其生效。", "warning");
     await refreshDashboard({ manual: true });
   } catch (error) {
-    flash(`Runtime profile staging failed: ${normalizeError(error, "Runtime profile staging failed").message}`, "danger");
+    flash(`设为待激活失败：${normalizeError(error, "Runtime profile staging failed").message}`, "danger");
     renderDashboard({ manual: true });
   }
 }
@@ -1403,24 +1501,24 @@ async function stageRuntimeProfileDraft() {
 async function cancelPendingRuntimeProfile() {
   try {
     await requestJson("/runtime-profiles/pending/cancel", { method: "POST" });
-    flash("Pending runtime profile activation canceled.", "info");
+    flash("已取消待激活的运行配置。", "info");
     await refreshDashboard({ manual: true });
   } catch (error) {
-    flash(`Cancel pending failed: ${normalizeError(error, "Runtime profile cancel failed").message}`, "danger");
+    flash(`取消待激活配置失败：${normalizeError(error, "Runtime profile cancel failed").message}`, "danger");
     renderDashboard({ manual: true });
   }
 }
 
 async function requestRuntimeProfileRestart() {
-  if (!window.confirm("Request a managed restart? This is only effective when the API is running under the managed supervisor.")) {
+  if (!window.confirm("确认发起托管重启吗？只有当前 API 由托管启动器运行时，这个操作才会生效。")) {
     return;
   }
   try {
     await requestJson("/runtime-profiles/restart", { method: "POST" });
-    flash("Managed restart requested.", "warning");
+    flash("已发起托管重启请求。", "warning");
     await refreshDashboard({ manual: true });
   } catch (error) {
-    flash(`Restart request failed: ${normalizeError(error, "Restart request failed").message}`, "danger");
+    flash(`发起重启请求失败：${normalizeError(error, "Restart request failed").message}`, "danger");
     renderDashboard({ manual: true });
   }
 }
@@ -1431,12 +1529,12 @@ async function createOperatorUser() {
   const role = nodes.operatorCreateRole.value;
   const enabled = nodes.operatorCreateEnabled.checked;
   if (!username || !password) {
-    flash("Username and password are required to create an operator user.", "warning");
+    flash("创建操作员账户时必须填写用户名和密码。", "warning");
     renderAlerts();
     return;
   }
   nodes.operatorCreateButton.disabled = true;
-  nodes.operatorCreateButton.textContent = "Creating...";
+  nodes.operatorCreateButton.textContent = "创建中...";
   try {
     await requestJson("/auth/users", {
       method: "POST",
@@ -1445,14 +1543,14 @@ async function createOperatorUser() {
     nodes.operatorCreateForm.reset();
     nodes.operatorCreateRole.value = "viewer";
     nodes.operatorCreateEnabled.checked = true;
-    flash(`Operator user ${username} created.`, "info");
+    flash(`已创建操作员账户：${username}。`, "info");
     await refreshDashboard({ manual: true });
   } catch (error) {
-    flash(`User creation failed: ${normalizeError(error, "Operator user creation failed").message}`, "danger");
+    flash(`创建操作员账户失败：${normalizeError(error, "Operator user creation failed").message}`, "danger");
     renderDashboard({ manual: true });
   } finally {
     nodes.operatorCreateButton.disabled = !operatorCanAdmin();
-    nodes.operatorCreateButton.textContent = "Create User";
+    nodes.operatorCreateButton.textContent = "创建账户";
   }
 }
 
@@ -1461,57 +1559,57 @@ async function toggleOperatorUser(username, nextEnabled) {
     return;
   }
   const actionLabel = nextEnabled ? "enable" : "disable";
-  if (!window.confirm(`${actionLabel === "enable" ? "Enable" : "Disable"} operator user ${username}?`)) {
+  if (!window.confirm(`确认要${actionLabel === "enable" ? "启用" : "停用"}操作员账户 ${username} 吗？`)) {
     return;
   }
-  await patchOperatorUser(username, { enabled: nextEnabled }, `Operator user ${username} ${nextEnabled ? "enabled" : "disabled"}.`);
+  await patchOperatorUser(username, { enabled: nextEnabled }, `操作员账户 ${username} 已${nextEnabled ? "启用" : "停用"}。`);
 }
 
 async function updateOperatorUserRole(username, currentRole) {
   if (!username) {
     return;
   }
-  const nextRole = (window.prompt("Enter the new role: viewer, operator, or admin.", currentRole || "viewer") || "").trim();
+  const nextRole = (window.prompt("请输入新的角色：viewer、operator 或 admin。", currentRole || "viewer") || "").trim();
   if (!nextRole || nextRole === currentRole) {
     return;
   }
   if (!["viewer", "operator", "admin"].includes(nextRole)) {
-    flash("Role must be one of viewer, operator, or admin.", "warning");
+    flash("角色只能填写 viewer、operator 或 admin。", "warning");
     renderAlerts();
     return;
   }
-  await patchOperatorUser(username, { role: nextRole }, `Operator user ${username} role updated to ${nextRole}.`);
+  await patchOperatorUser(username, { role: nextRole }, `操作员账户 ${username} 的角色已更新为 ${readableState(nextRole)}。`);
 }
 
 async function resetOperatorUserPassword(username) {
   if (!username) {
     return;
   }
-  const password = window.prompt(`Enter a new password for ${username}.`, "");
+  const password = window.prompt(`请输入 ${username} 的新密码。`, "");
   if (password === null) {
     return;
   }
   if (!password) {
-    flash("Password reset requires a non-empty password.", "warning");
+    flash("重置密码时必须输入非空密码。", "warning");
     renderAlerts();
     return;
   }
-  await patchOperatorUser(username, { password }, `Password reset for ${username} completed.`);
+  await patchOperatorUser(username, { password }, `已完成 ${username} 的密码重置。`);
 }
 
 async function deleteOperatorUser(username) {
   if (!username) {
     return;
   }
-  if (!window.confirm(`Delete operator user ${username}? This removes the stored login account.`)) {
+  if (!window.confirm(`确认删除操作员账户 ${username} 吗？这会移除这条已存储的登录账户记录。`)) {
     return;
   }
   try {
     await requestJson(`/auth/users/${encodeURIComponent(username)}`, { method: "DELETE" });
-    flash(`Operator user ${username} deleted.`, "info");
+    flash(`已删除操作员账户：${username}。`, "info");
     await refreshDashboard({ manual: true });
   } catch (error) {
-    flash(`User deletion failed: ${normalizeError(error, "Operator user deletion failed").message}`, "danger");
+    flash(`删除操作员账户失败：${normalizeError(error, "Operator user deletion failed").message}`, "danger");
     renderDashboard({ manual: true });
   }
 }
@@ -1525,7 +1623,7 @@ async function patchOperatorUser(username, payload, successMessage) {
     flash(successMessage, "info");
     await refreshDashboard({ manual: true });
   } catch (error) {
-    flash(`User update failed: ${normalizeError(error, "Operator user update failed").message}`, "danger");
+    flash(`更新操作员账户失败：${normalizeError(error, "Operator user update failed").message}`, "danger");
     renderDashboard({ manual: true });
   }
 }
@@ -1533,7 +1631,7 @@ async function patchOperatorUser(username, payload, successMessage) {
 async function inspectLatestDecision() {
   const decisionId = state.data.latestDecision?.decision_id;
   if (!decisionId) {
-    flash("No latest decision is available yet.", "warning");
+    flash("当前还没有最新决策可查看。", "warning");
     renderAlerts();
     return;
   }
@@ -1543,7 +1641,7 @@ async function inspectLatestDecision() {
 async function inspectLatestOrder() {
   const orderId = state.data.executionLatest?.latest_order?.client_order_id;
   if (!orderId) {
-    flash("No latest order is available yet.", "warning");
+    flash("当前还没有最新订单可查看。", "warning");
     renderAlerts();
     return;
   }
@@ -1553,7 +1651,7 @@ async function inspectLatestOrder() {
 async function inspectLatestFill() {
   const fillId = state.data.executionLatest?.latest_fill?.fill_id;
   if (!fillId) {
-    flash("No latest fill is available yet.", "warning");
+    flash("当前还没有最新成交可查看。", "warning");
     renderAlerts();
     return;
   }
@@ -1563,64 +1661,64 @@ async function inspectLatestFill() {
 async function inspectLatestReconciliation() {
   const reconciliationId = state.data.reconciliationLatest?.reconciliation?.reconciliation_id;
   if (!reconciliationId) {
-    flash("No reconciliation report is available yet.", "warning");
+    flash("当前还没有对账报告可查看。", "warning");
     renderAlerts();
     return;
   }
   try {
     const detail = await requestJson(`/reconciliation/${encodeURIComponent(reconciliationId)}`);
     showStructuredDetail({
-      title: "Reconciliation Detail",
+      title: "对账详情",
       summary: [
-        ["Reconciliation ID", detail.reconciliation?.reconciliation_id],
-        ["Severity", detail.reconciliation?.severity],
-        ["Halt Required", booleanWord(detail.reconciliation?.halt_required)],
-        ["Exchange Aware", booleanWord(detail.reconciliation?.exchange_comparison_enabled)],
+        ["对账编号", detail.reconciliation?.reconciliation_id],
+        ["严重级别", readableState(detail.reconciliation?.severity)],
+        ["是否需要暂停", booleanWord(detail.reconciliation?.halt_required)],
+        ["是否包含交易所比对", booleanWord(detail.reconciliation?.exchange_comparison_enabled)],
       ],
       sections: [
-        detailCard("Mismatch Summary", detail.mismatch_summary || {}, {
+        detailCard("差异摘要", detail.mismatch_summary || {}, {
           narrative: reconciliationNarrative(detail),
           facts: [
-            ["Mismatch Categories", listOrDash(detail.reconciliation?.mismatch_categories)],
-            ["Mismatch Reasons", listOrDash(detail.reconciliation?.mismatch_reasons)],
-            ["Recommended Action", detail.reconciliation?.recommended_operator_action || "-"],
+            ["差异类别", listOrDashLocalized(detail.reconciliation?.mismatch_categories)],
+            ["差异原因", listOrDashLocalized(detail.reconciliation?.mismatch_reasons)],
+            ["建议动作", localizeErrorMessage(detail.reconciliation?.recommended_operator_action || "-")],
           ],
         }),
-        detailCard("Reconciliation Payload", detail.reconciliation || {}),
+        detailCard("对账原始内容", detail.reconciliation || {}),
       ],
     });
   } catch (error) {
-    flash(`Reconciliation lookup failed: ${normalizeError(error, "Reconciliation lookup failed").message}`, "danger");
+    flash(`查询对账详情失败：${normalizeError(error, "Reconciliation lookup failed").message}`, "danger");
     renderAlerts();
   }
 }
 
 function inspectSystemDetail() {
   showStructuredDetail({
-    title: "System Detail",
+    title: "系统详情",
     summary: [
-      ["Runtime State", state.data.health?.runtime_state],
-      ["Operating State", state.data.mode?.operating_state],
-      ["Execution Blocked", booleanWord(state.data.health?.execution_blocked)],
-      ["Submit Blocked", booleanWord(state.data.health?.submit_blocked)],
+      ["运行状态", readableState(state.data.health?.runtime_state)],
+      ["运行姿态", readableMode(state.data.mode?.operating_state)],
+      ["执行是否阻断", booleanWord(state.data.health?.execution_blocked)],
+      ["提交是否阻断", booleanWord(state.data.health?.submit_blocked)],
     ],
     sections: [
-      detailCard("System Posture", { health: state.data.health || {}, mode: state.data.mode || {} }, {
+      detailCard("系统姿态", { health: state.data.health || {}, mode: state.data.mode || {} }, {
         narrative: systemNarrative(),
         facts: [
-          ["Runtime Profile", readableMode(state.data.mode?.runtime_profile?.name)],
-          ["Product Type", readableMode(state.data.mode?.environment_capabilities?.product_type)],
-          ["Execution Route", state.data.mode?.execution_route || "-"],
-          ["Blockers", String((state.data.blockers?.blockers || []).length)],
+          ["运行配置", readableMode(state.data.mode?.runtime_profile?.name)],
+          ["产品类型", readableMode(state.data.mode?.environment_capabilities?.product_type)],
+          ["执行通道", state.data.mode?.execution_route || "-"],
+          ["阻断项数量", String((state.data.blockers?.blockers || []).length)],
         ],
       }),
-      detailCard("Recovery", state.data.systemRecovery || {}, {
+      detailCard("恢复状态", state.data.systemRecovery || {}, {
         narrative: recoveryNarrative(),
       }),
-      detailCard("Blockers", state.data.blockers || {}, {
+      detailCard("阻断项", state.data.blockers || {}, {
         narrative: blockerNarrative(state.data.blockers?.blockers || []),
       }),
-      detailCard("Account", state.data.accountState || {}, {
+      detailCard("账户状态", state.data.accountState || {}, {
         narrative: accountNarrative(state.data.accountState || {}),
       }),
     ],
@@ -1631,28 +1729,28 @@ function inspectRecoveryDetail() {
   const recovery = recoveryData();
   const baseline = state.data.runtime?.baseline_takeover || state.data.accountState?.baseline_takeover || {};
   showStructuredDetail({
-    title: "Recovery Detail",
+    title: "恢复详情",
     summary: [
-      ["Recovery State", readableState(recovery.recovery_state)],
-      ["Safe To Trade", booleanWord(recovery.safe_to_trade)],
-      ["Resume Eligible", booleanWord(recovery.resume_eligible)],
-      ["Review Required", booleanWord(recovery.review_required)],
-      ["Rebaseline Available", booleanWord(recovery.rebaseline_available)],
-      ["Baseline Status", readableState(baseline.status)],
+      ["恢复状态", readableState(recovery.recovery_state)],
+      ["允许继续交易", booleanWord(recovery.safe_to_trade)],
+      ["允许恢复运行", booleanWord(recovery.resume_eligible)],
+      ["需要人工复核", booleanWord(recovery.review_required)],
+      ["可重建基线", booleanWord(recovery.rebaseline_available)],
+      ["基线状态", readableState(baseline.status)],
     ],
     sections: [
-      detailCard("Recovery Summary", state.data.systemRecovery || {}, {
+      detailCard("恢复摘要", state.data.systemRecovery || {}, {
         narrative: recoveryNarrative(),
         facts: [
-          ["Resume Blockers", listOrDash(recovery.resume_blocked_reasons)],
-          ["Last Resume Status", readableState(recovery.last_resume_status)],
-          ["Last Rebaseline", formatMaybeTimestamp(recovery.last_rebaseline_at)],
+          ["恢复阻断原因", listOrDashLocalized(recovery.resume_blocked_reasons)],
+          ["最近恢复结果", readableState(recovery.last_resume_status)],
+          ["最近一次重建基线", formatMaybeTimestamp(recovery.last_rebaseline_at)],
         ],
       }),
-      detailCard("Baseline Takeover", baseline || {}, {
+      detailCard("基线接管", baseline || {}, {
         narrative: baselineNarrative(baseline || {}),
       }),
-      detailCard("Account State", state.data.accountState || {}, {
+      detailCard("账户状态", state.data.accountState || {}, {
         narrative: accountNarrative(state.data.accountState || {}),
       }),
     ],
@@ -1661,30 +1759,30 @@ function inspectRecoveryDetail() {
 
 function inspectRuntimeDetail() {
   showStructuredDetail({
-    title: "Runtime Detail",
+    title: "运行详情",
     summary: [
-      ["Profile", state.data.mode?.config_profile],
-      ["Execution Route", state.data.mode?.execution_route],
-      ["Startup", state.data.runtime?.startup_timestamp],
-      ["Uptime", formatDuration(state.data.runtime?.uptime_seconds)],
+      ["配置", state.data.mode?.config_profile],
+      ["执行通道", state.data.mode?.execution_route],
+      ["启动时间", state.data.runtime?.startup_timestamp],
+      ["已运行时长", formatDuration(state.data.runtime?.uptime_seconds)],
     ],
     sections: [
-      detailCard("Runtime Summary", state.data.runtime || {}, {
+      detailCard("运行摘要", state.data.runtime || {}, {
         narrative: runtimeNarrative(),
         facts: [
-          ["Profile", readableMode(state.data.runtime?.runtime_profile?.name || state.data.mode?.runtime_profile?.name)],
-          ["Product", readableMode(state.data.runtime?.environment_capabilities?.product_type || state.data.mode?.environment_capabilities?.product_type)],
-          ["Margin", readableMode(state.data.runtime?.environment_capabilities?.margin_model || state.data.mode?.environment_capabilities?.margin_model)],
-          ["Directionality", readableMode(state.data.runtime?.environment_capabilities?.position_directionality || state.data.mode?.environment_capabilities?.position_directionality)],
+          ["运行配置", readableMode(state.data.runtime?.runtime_profile?.name || state.data.mode?.runtime_profile?.name)],
+          ["产品类型", readableMode(state.data.runtime?.environment_capabilities?.product_type || state.data.mode?.environment_capabilities?.product_type)],
+          ["保证金模式", readableMode(state.data.runtime?.environment_capabilities?.margin_model || state.data.mode?.environment_capabilities?.margin_model)],
+          ["持仓方向模式", readableMode(state.data.runtime?.environment_capabilities?.position_directionality || state.data.mode?.environment_capabilities?.position_directionality)],
         ],
       }),
-      detailCard("Recovery", state.data.systemRecovery || {}, {
+      detailCard("恢复状态", state.data.systemRecovery || {}, {
         narrative: recoveryNarrative(),
       }),
-      detailCard("Metrics", state.data.metrics || {}, {
+      detailCard("运行指标", state.data.metrics || {}, {
         narrative: metricsNarrative(state.data.metrics || {}),
       }),
-      detailCard("Replay", state.data.replayStatus || {}, {
+      detailCard("回放校验", state.data.replayStatus || {}, {
         narrative: replayNarrative(state.data.replayStatus || {}),
       }),
     ],
@@ -1693,15 +1791,15 @@ function inspectRuntimeDetail() {
 
 function inspectPortfolioDetail() {
   showStructuredDetail({
-    title: "Portfolio Detail",
+    title: "账户与仓位详情",
     summary: [
-      ["Total Equity", formatNumber(state.data.portfolio?.portfolio?.total_equity)],
-      ["Gross Exposure", formatNumber(state.data.portfolio?.portfolio?.gross_exposure)],
-      ["Net Exposure", formatSigned(state.data.portfolio?.portfolio?.net_exposure)],
-      ["Updated", formatMaybeTimestamp(state.data.portfolio?.latest_update_timestamp)],
+      ["总权益", formatNumber(state.data.portfolio?.portfolio?.total_equity)],
+      ["总敞口", formatNumber(state.data.portfolio?.portfolio?.gross_exposure)],
+      ["净敞口", formatSigned(state.data.portfolio?.portfolio?.net_exposure)],
+      ["更新时间", formatMaybeTimestamp(state.data.portfolio?.latest_update_timestamp)],
     ],
     sections: [
-      detailCard("Portfolio Snapshot", state.data.portfolio?.portfolio || {}, {
+      detailCard("账户快照", state.data.portfolio?.portfolio || {}, {
         narrative: portfolioNarrative(state.data.portfolio?.portfolio || {}),
         facts: portfolioDetailFacts(state.data.portfolio?.portfolio || {}),
       }),
@@ -1712,7 +1810,7 @@ function inspectPortfolioDetail() {
 async function inspectDecision(decisionId, { manual = false } = {}) {
   if (!decisionId) {
     if (manual) {
-      flash("Enter a valid decision ID.", "warning");
+      flash("请输入有效的决策编号。", "warning");
       renderAlerts();
     }
     return;
@@ -1721,42 +1819,42 @@ async function inspectDecision(decisionId, { manual = false } = {}) {
     const detail = await requestJson(`/decision/${encodeURIComponent(decisionId)}`);
     nodes.decisionLookupInput.value = decisionId;
       showStructuredDetail({
-        title: "Decision Detail",
+        title: "决策详情",
       summary: [
-        ["Decision ID", detail.decision_id],
-        ["Symbol", detail.decision_context?.symbol],
-        ["Timeframe", detail.decision_context?.timeframe],
-        ["Target Delta", formatSigned(detail.position_target?.delta_position_qty)],
-        ["Policy Allowed", booleanWord(detail.policy_decision?.execution_allowed)],
-        ["Risk Approved", booleanWord(detail.risk_decision?.approved)],
+        ["决策编号", detail.decision_id],
+        ["标的", detail.decision_context?.symbol],
+        ["周期", detail.decision_context?.timeframe],
+        ["目标调整量", formatSigned(detail.position_target?.delta_position_qty)],
+        ["策略是否放行", booleanWord(detail.policy_decision?.execution_allowed)],
+        ["风控是否通过", booleanWord(detail.risk_decision?.approved)],
       ],
         sections: [
-          detailCard("Decision Summary", detail, {
+          detailCard("决策摘要", detail, {
             narrative: decisionNarrative(detail),
             facts: [
-              ["Position Intent", readableMode(detail.position_target?.position_intent)],
-              ["Exposure Side", readableMode(detail.position_target?.target_exposure_side)],
-              ["Risk Rejections", listOrDash(detail.risk_decision?.rejection_reasons)],
-              ["Execution Outcome", decisionExecutionOutcome(detail)],
+              ["仓位意图", readableMode(detail.position_target?.position_intent)],
+              ["目标敞口方向", readableMode(detail.position_target?.target_exposure_side)],
+              ["风控拒绝原因", listOrDashLocalized(detail.risk_decision?.rejection_reasons)],
+              ["执行结果", decisionExecutionOutcome(detail)],
             ],
           }),
-          detailCard("Decision Context", detail.decision_context || {}, {
+          detailCard("决策上下文", detail.decision_context || {}, {
             narrative: decisionContextNarrative(detail.decision_context || {}),
           }),
-          detailCard("Baseline Assessment", detail.baseline_assessment || {}, {
+          detailCard("基线策略判断", detail.baseline_assessment || {}, {
             narrative: baselineAssessmentNarrative(detail.baseline_assessment || {}),
           }),
-          detailCard("AI Assessment", detail.ai_assessment || {}, {
+          detailCard("AI 判断", detail.ai_assessment || {}, {
             narrative: aiAssessmentNarrative(detail.ai_assessment || {}),
           }),
-          detailCard("Target / Policy / Risk", {
+          detailCard("目标仓位 / 策略 / 风控", {
             position_target: detail.position_target || null,
             policy_decision: detail.policy_decision || null,
             risk_decision: detail.risk_decision || null,
           }, {
             narrative: targetPolicyRiskNarrative(detail),
           }),
-          detailCard("Execution Chain", {
+          detailCard("执行链路", {
             execution_plan: detail.execution_plan || null,
             order_intents: detail.order_intents || [],
             order_updates: detail.order_updates || [],
@@ -1766,13 +1864,13 @@ async function inspectDecision(decisionId, { manual = false } = {}) {
           }, {
             narrative: executionChainNarrative(detail),
           }),
-          detailCard("Audit", detail.audit || {}, {
+          detailCard("审计链", detail.audit || {}, {
             narrative: auditNarrative(detail.audit || {}),
           }),
         ],
       });
   } catch (error) {
-    flash(`Decision lookup failed: ${normalizeError(error, "Decision lookup failed").message}`, "danger");
+    flash(`查询决策详情失败：${normalizeError(error, "Decision lookup failed").message}`, "danger");
     renderAlerts();
   }
 }
@@ -1780,7 +1878,7 @@ async function inspectDecision(decisionId, { manual = false } = {}) {
 async function inspectOrder(orderId, { manual = false } = {}) {
   if (!orderId) {
     if (manual) {
-      flash("Enter a valid order ID.", "warning");
+      flash("请输入有效的订单编号。", "warning");
       renderAlerts();
     }
     return;
@@ -1790,43 +1888,43 @@ async function inspectOrder(orderId, { manual = false } = {}) {
     nodes.orderLookupInput.value = orderId;
     const stuckResolution = detail.stuck_submission_resolution || {};
       showStructuredDetail({
-        title: "Order Detail",
+        title: "订单详情",
       actions: stuckResolution.eligible ? [
-        `<button class="action-button action-warning" data-resolve-stuck-order="${escapeHtml(detail.order?.client_order_id || "")}">Resolve Stuck Submit</button>`,
+        `<button class="action-button action-warning" data-resolve-stuck-order="${escapeHtml(detail.order?.client_order_id || "")}">处理卡住的提交</button>`,
       ] : [],
       summary: [
-        ["Order ID", detail.order?.client_order_id],
-        ["Decision ID", detail.order?.decision_id],
-        ["Symbol", detail.order?.symbol],
-        ["Status", detail.order?.status],
-        ["Venue", detail.order?.venue],
-        ["Requested Qty", formatNumber(detail.order?.requested_qty)],
+        ["订单编号", detail.order?.client_order_id],
+        ["决策编号", detail.order?.decision_id],
+        ["标的", detail.order?.symbol],
+        ["状态", readableState(detail.order?.status)],
+        ["通道", detail.order?.venue],
+        ["请求数量", formatNumber(detail.order?.requested_qty)],
       ],
         sections: [
-          detailCard("Order Summary", detail.order || {}, {
+          detailCard("订单摘要", detail.order || {}, {
             narrative: orderNarrative(detail.order || {}, detail.fills || [], stuckResolution),
             facts: [
-              ["Position Intent", detail.order?.submission_payload?.positionIntent || "-"],
-              ["Exchange Order ID", detail.order?.exchange_order_id || "-"],
-              ["Filled Qty", formatNumber(detail.order?.filled_qty)],
-              ["Average Fill", formatNumber(detail.order?.average_fill_price)],
-              ["Restart-Orphaned Submit", booleanWord(stuckResolution.runtime_restarted_after_order)],
-              ["Recovery Eligible", booleanWord(stuckResolution.eligible)],
-              ["Recovery Status", stuckResolution.reason_code || "ready"],
+              ["仓位意图", readableMode(detail.order?.submission_payload?.positionIntent || "-")],
+              ["交易所订单号", detail.order?.exchange_order_id || "-"],
+              ["已成交数量", formatNumber(detail.order?.filled_qty)],
+              ["平均成交价", formatNumber(detail.order?.average_fill_price)],
+              ["是否启动后遗留提交", booleanWord(stuckResolution.runtime_restarted_after_order)],
+              ["是否可恢复处理", booleanWord(stuckResolution.eligible)],
+              ["恢复状态", localizeErrorMessage(stuckResolution.reason_code || "ready")],
             ],
           }),
-          detailCard("Linked Fills", detail.fills || [], {
+          detailCard("关联成交", detail.fills || [], {
             narrative: linkedFillsNarrative(detail.fills || []),
           }),
-          detailCard("Operator Recovery", stuckResolution, {
+          detailCard("人工恢复建议", stuckResolution, {
             narrative: [
-              stuckResolution.summary || "No operator recovery hint is available for this order.",
+              localizeErrorMessage(stuckResolution.summary || "当前没有针对这笔订单的人工恢复建议。"),
             ],
           }),
         ],
       });
   } catch (error) {
-    flash(`Order lookup failed: ${normalizeError(error, "Order lookup failed").message}`, "danger");
+    flash(`查询订单详情失败：${normalizeError(error, "Order lookup failed").message}`, "danger");
     renderAlerts();
   }
 }
@@ -1834,7 +1932,7 @@ async function inspectOrder(orderId, { manual = false } = {}) {
 async function inspectFill(fillId, { manual = false } = {}) {
   if (!fillId) {
     if (manual) {
-      flash("Enter a valid fill ID.", "warning");
+      flash("请输入有效的成交编号。", "warning");
       renderAlerts();
     }
     return;
@@ -1843,29 +1941,29 @@ async function inspectFill(fillId, { manual = false } = {}) {
     const detail = await requestJson(`/fills/${encodeURIComponent(fillId)}`);
     nodes.fillLookupInput.value = fillId;
       showStructuredDetail({
-        title: "Fill Detail",
+        title: "成交详情",
       summary: [
-        ["Fill ID", detail.fill?.fill_id],
-        ["Decision ID", detail.fill?.decision_id],
-        ["Symbol", detail.fill?.symbol],
-        ["Side", detail.fill?.side],
-        ["Quantity", formatNumber(detail.fill?.fill_qty)],
-        ["Price", formatNumber(detail.fill?.fill_price)],
+        ["成交编号", detail.fill?.fill_id],
+        ["决策编号", detail.fill?.decision_id],
+        ["标的", detail.fill?.symbol],
+        ["方向", readableMode(detail.fill?.side)],
+        ["数量", formatNumber(detail.fill?.fill_qty)],
+        ["价格", formatNumber(detail.fill?.fill_price)],
       ],
         sections: [
-          detailCard("Fill Summary", detail.fill || {}, {
+          detailCard("成交摘要", detail.fill || {}, {
             narrative: fillNarrative(detail.fill || {}),
             facts: [
-              ["Intent", readableMode(detail.fill?.position_intent)],
-              ["Exposure Side", readableMode(detail.fill?.exposure_side)],
-              ["Fee Currency", detail.fill?.fee_currency || "-"],
-              ["Occurred", formatMaybeTimestamp(detail.fill?.exchange_timestamp)],
+              ["仓位意图", readableMode(detail.fill?.position_intent)],
+              ["敞口方向", readableMode(detail.fill?.exposure_side)],
+              ["手续费币种", detail.fill?.fee_currency || "-"],
+              ["发生时间", formatMaybeTimestamp(detail.fill?.exchange_timestamp)],
             ],
           }),
         ],
       });
   } catch (error) {
-    flash(`Fill lookup failed: ${normalizeError(error, "Fill lookup failed").message}`, "danger");
+    flash(`查询成交详情失败：${normalizeError(error, "Fill lookup failed").message}`, "danger");
     renderAlerts();
   }
 }
@@ -1881,7 +1979,7 @@ function renderDecisionHero(latestDecision, executionLatest) {
   const outcome = decisionActivityLabel(latestDecision, latestOrder, latestFill, decisionOutcomeLabel(summary));
 
   if (!latestDecision.decision_id) {
-    return emptyState("No latest decision is available yet.");
+    return emptyState("当前还没有最新决策。");
   }
 
   return `
@@ -1892,25 +1990,25 @@ function renderDecisionHero(latestDecision, executionLatest) {
           <h3 class="hero-title">${escapeHtml(latestDecision.decision_context?.symbol || "-")} | ${escapeHtml(latestDecision.decision_context?.timeframe || "-")}</h3>
         </div>
         <div class="runtime-badges">
-          ${miniBadge(policy?.execution_allowed ? "policy ok" : "policy blocked", policy?.execution_allowed ? "success" : "danger")}
-          ${miniBadge(risk?.approved ? "risk ok" : "risk blocked", risk?.approved ? "success" : "danger")}
-          ${miniBadge(decisionTargetNeedsTrade(target) ? "rebalance needed" : "holding target", decisionTargetNeedsTrade(target) ? "info" : "outline")}
+          ${miniBadge(policy?.execution_allowed ? "策略放行" : "策略阻断", policy?.execution_allowed ? "success" : "danger")}
+          ${miniBadge(risk?.approved ? "风控通过" : "风控阻断", risk?.approved ? "success" : "danger")}
+          ${miniBadge(decisionTargetNeedsTrade(target) ? "需要调仓" : "继续持有", decisionTargetNeedsTrade(target) ? "info" : "outline")}
         </div>
       </div>
       <p class="hero-copy">${escapeHtml(outcome)}</p>
         ${renderFactGrid([
-          ["Position Intent", target?.position_intent || "-"],
-          ["Exposure Side", readableMode(target?.target_exposure_side || "-")],
-          ["Product", readableMode(target?.product_type || latestDecision.decision_context?.product_type || "-")],
-          ["Margin", readableMode(target?.margin_mode || "-")],
-          ["Target Delta", formatSigned(target?.delta_position_qty)],
-          ["Target Qty", formatSigned(target?.target_position_qty)],
-          ["Baseline Bias", baseline?.direction_bias || "-"],
-          ["Composite Alpha", formatSigned(baseline?.composite_alpha_score)],
-          ["Position Scale", formatNumber(baseline?.suggested_position_scale)],
-        ["Volatility Target", formatNumber(baseline?.volatility_target_scale)],
-        ["Latest Order", latestOrder ? latestOrder.status : "-"],
-        ["Latest Fill", latestFill ? `${formatNumber(latestFill.fill_qty)} @ ${formatNumber(latestFill.fill_price)}` : "-"],
+          ["仓位意图", readableMode(target?.position_intent || "-")],
+          ["目标敞口方向", readableMode(target?.target_exposure_side || "-")],
+          ["产品类型", readableMode(target?.product_type || latestDecision.decision_context?.product_type || "-")],
+          ["保证金模式", readableMode(target?.margin_mode || "-")],
+          ["目标调整量", formatSigned(target?.delta_position_qty)],
+          ["目标持仓数量", formatSigned(target?.target_position_qty)],
+          ["基线方向偏置", readableMode(baseline?.direction_bias || "-")],
+          ["综合 Alpha 分数", formatSigned(baseline?.composite_alpha_score)],
+          ["建议仓位比例", formatNumber(baseline?.suggested_position_scale)],
+          ["波动率目标缩放", formatNumber(baseline?.volatility_target_scale)],
+          ["最近订单状态", latestOrder ? readableState(latestOrder.status) : "-"],
+          ["最近成交", latestFill ? `${formatNumber(latestFill.fill_qty)} @ ${formatNumber(latestFill.fill_price)}` : "-"],
       ])}
     </div>
   `;
@@ -1918,7 +2016,7 @@ function renderDecisionHero(latestDecision, executionLatest) {
 
 function renderDecisionInvestigation(latestDecision) {
   if (!latestDecision.decision_id) {
-    return emptyState("No decision detail is available yet.");
+    return emptyState("当前还没有决策详情。");
   }
   const context = latestDecision.decision_context || {};
   const baseline = latestDecision.baseline_assessment || {};
@@ -1936,29 +2034,29 @@ function renderDecisionInvestigation(latestDecision) {
           <h3 class="hero-title">${escapeHtml(context.symbol || "-")} | ${escapeHtml(context.timeframe || "-")}</h3>
         </div>
         <div class="runtime-badges">
-          ${miniBadge(policy.execution_allowed ? "policy ok" : "policy blocked", policy.execution_allowed ? "success" : "danger")}
-          ${miniBadge(risk.approved ? "risk approved" : "risk denied", risk.approved ? "success" : "danger")}
+          ${miniBadge(policy.execution_allowed ? "策略放行" : "策略阻断", policy.execution_allowed ? "success" : "danger")}
+          ${miniBadge(risk.approved ? "风控通过" : "风控拒绝", risk.approved ? "success" : "danger")}
         </div>
       </div>
         ${renderFactGrid([
-          ["Decision Time", formatMaybeTimestamp(context.as_of_ts)],
-          ["Product", readableMode(context.product_type)],
-          ["Exposure Side", readableMode(context.current_exposure_side)],
-          ["Target Leverage", formatNumber(target.target_leverage)],
-          ["Bias", baseline.direction_bias || "-"],
-          ["Baseline Confidence", formatNumber(baseline.confidence)],
-          ["AI Mode", aiAssessment.operating_mode || state.data.mode?.ai_operating_mode || "-"],
-          ["Target Qty", formatSigned(target.target_position_qty)],
-          ["Target Delta", formatSigned(target.delta_position_qty)],
-        ["Risk Rejections", listOrDash(risk.rejection_reasons)],
-        ["Latest Reconciliation", latestReconciliation?.severity || "-"],
+          ["决策时间", formatMaybeTimestamp(context.as_of_ts)],
+          ["产品类型", readableMode(context.product_type)],
+          ["当前敞口方向", readableMode(context.current_exposure_side)],
+          ["目标杠杆", formatNumber(target.target_leverage)],
+          ["方向偏置", readableMode(baseline.direction_bias || "-")],
+          ["基线置信度", formatNumber(baseline.confidence)],
+          ["AI 模式", readableMode(aiAssessment.operating_mode || state.data.mode?.ai_operating_mode || "-")],
+          ["目标持仓数量", formatSigned(target.target_position_qty)],
+          ["目标调整量", formatSigned(target.delta_position_qty)],
+          ["风控拒绝原因", listOrDashLocalized(risk.rejection_reasons)],
+          ["最近对账结论", readableState(latestReconciliation?.severity || "-")],
       ])}
       <div class="signal-card">
         <div class="signal-head">
-          <span class="signal-title">Reason Codes</span>
-          <button class="table-button" data-inspect-decision="${escapeHtml(latestDecision.decision_id)}">Open audit chain</button>
+          <span class="signal-title">原因代码</span>
+          <button class="table-button" data-inspect-decision="${escapeHtml(latestDecision.decision_id)}">打开审计链路</button>
         </div>
-        <div class="signal-copy">${escapeHtml(listOrDash(baseline.reason_codes || aiAssessment.reason_codes || risk.rejection_reasons))}</div>
+        <div class="signal-copy">${escapeHtml(listOrDashLocalized(baseline.reason_codes || aiAssessment.reason_codes || risk.rejection_reasons))}</div>
       </div>
     </div>
   `;
@@ -1971,48 +2069,48 @@ function decisionNarrative(detail) {
   const risk = detail.risk_decision || {};
   if (!decisionTargetNeedsTrade(target)) {
     return [
-      `${context.symbol || "This symbol"} was evaluated on the ${context.timeframe || "-"} timeframe at ${formatMaybeTimestamp(context.as_of_ts)}.`,
-      `Current exposure already matched the target at ${formatSigned(target.current_position_qty ?? 0)}, so no rebalance was required.`,
+      `${context.symbol || "该标的"}在 ${context.timeframe || "-"} 周期、${formatMaybeTimestamp(context.as_of_ts)} 被评估。`,
+      `当前敞口已经与目标一致，持仓为 ${formatSigned(target.current_position_qty ?? 0)}，因此不需要调仓。`,
       policy.execution_allowed
         ? risk.approved
-          ? "Policy and risk both agreed that holding the current position was acceptable."
-          : `Policy allowed the posture, but risk still reported ${listOrDash(risk.rejection_reasons)}.`
-        : `Policy blocked any change because of ${listOrDash(policy.rejection_reasons)}.`,
+          ? "策略层和风控层都认为继续持有当前仓位是可接受的。"
+          : `策略层允许保持当前姿态，但风控仍给出了这些拒绝原因：${listOrDashLocalized(risk.rejection_reasons)}。`
+        : `策略层因以下原因阻断了任何改动：${listOrDashLocalized(policy.rejection_reasons)}。`,
     ];
   }
   return [
-    `${context.symbol || "This symbol"} was evaluated on the ${context.timeframe || "-"} timeframe at ${formatMaybeTimestamp(context.as_of_ts)}.`,
-    `The system wanted to ${readableMode(target.position_intent || "hold")} and move exposure from ${formatSigned(target.current_position_qty)} to ${formatSigned(target.target_position_qty)}.`,
+    `${context.symbol || "该标的"}在 ${context.timeframe || "-"} 周期、${formatMaybeTimestamp(context.as_of_ts)} 被评估。`,
+    `系统计划执行 ${readableMode(target.position_intent || "hold")}，将敞口从 ${formatSigned(target.current_position_qty)} 调整到 ${formatSigned(target.target_position_qty)}。`,
     policy.execution_allowed
       ? risk.approved
-        ? `Both policy and risk approved the action. ${decisionExecutionOutcome(detail)}`
-        : `Policy allowed the idea, but risk blocked it because of ${listOrDash(risk.rejection_reasons)}.`
-      : `Policy blocked the action because of ${listOrDash(policy.rejection_reasons)}.`,
+        ? `策略层与风控层都已放行。${decisionExecutionOutcome(detail)}`
+        : `策略层允许该动作，但风控因以下原因阻断：${listOrDashLocalized(risk.rejection_reasons)}。`
+      : `策略层因以下原因阻断了这次动作：${listOrDashLocalized(policy.rejection_reasons)}。`,
   ];
 }
 
 function decisionContextNarrative(context) {
   return [
-    `The runtime was in ${readableMode(context.mode)} mode with current exposure ${readableMode(context.current_exposure_side)} ${formatSigned(context.current_position_qty)}.`,
-    `This decision used product type ${readableMode(context.product_type)} and current target leverage ${formatNumber(context.current_target_leverage)}.`,
+    `系统当时处于 ${readableMode(context.mode)} 运行模式，当前敞口为 ${readableMode(context.current_exposure_side)} ${formatSigned(context.current_position_qty)}。`,
+    `这次决策基于 ${readableMode(context.product_type)} 产品类型，并使用当前目标杠杆 ${formatNumber(context.current_target_leverage)}。`,
   ];
 }
 
 function baselineAssessmentNarrative(baseline) {
   return [
-    `The baseline model saw the regime as ${readableMode(baseline.regime)} with a ${readableMode(baseline.direction_bias)} bias.`,
-    `Confidence was ${formatNumber(baseline.confidence)} and suggested position scale was ${formatNumber(baseline.suggested_position_scale)}.`,
-    `Main reason codes: ${listOrDash(baseline.reason_codes)}.`,
+    `基线模型判断当前市场状态为 ${readableMode(baseline.regime)}，方向偏置为 ${readableMode(baseline.direction_bias)}。`,
+    `当前置信度为 ${formatNumber(baseline.confidence)}，建议仓位比例为 ${formatNumber(baseline.suggested_position_scale)}。`,
+    `主要原因代码：${listOrDashLocalized(baseline.reason_codes)}。`,
   ];
 }
 
 function aiAssessmentNarrative(assessment) {
   return [
-    `AI mode was ${readableMode(assessment.operating_mode)}.`,
+    `AI 当前运行模式为 ${readableMode(assessment.operating_mode)}。`,
     assessment.fallback_used
-      ? `The system used a fallback assessment because ${readableMode(assessment.fallback_reason)}.`
-      : `The provider response was accepted with calibrated confidence ${formatNumber(assessment.calibrated_confidence)}.`,
-    `Directional edge was ${formatSigned(assessment.directional_edge)} with expected volatility ${formatNumber(assessment.expected_volatility)}.`,
+      ? `由于 ${readableMode(assessment.fallback_reason)}，系统采用了回退判断。`
+      : `模型返回已被接受，校准后置信度为 ${formatNumber(assessment.calibrated_confidence)}。`,
+    `方向性边际为 ${formatSigned(assessment.directional_edge)}，预期波动率为 ${formatNumber(assessment.expected_volatility)}。`,
   ];
 }
 
@@ -2021,9 +2119,9 @@ function targetPolicyRiskNarrative(detail) {
   const policy = detail.policy_decision || {};
   const risk = detail.risk_decision || {};
   return [
-    `Target intent was ${readableMode(target.position_intent)} on ${readableMode(target.product_type)} with ${readableMode(target.margin_mode)} margin semantics.`,
-    `Policy ${policy.execution_allowed ? "allowed" : "blocked"} the action. Risk ${risk.approved ? "approved" : "blocked"} it.`,
-    `Risk constraints applied: ${listOrDash(risk.constraints_applied)}.`,
+    `目标意图为 ${readableMode(target.position_intent)}，交易产品是 ${readableMode(target.product_type)}，保证金语义为 ${readableMode(target.margin_mode)}。`,
+    `策略层${policy.execution_allowed ? "允许" : "阻断"}该动作，风控层${risk.approved ? "通过" : "阻断"}该动作。`,
+    `生效的风控约束：${listOrDashLocalized(risk.constraints_applied)}。`,
   ];
 }
 
@@ -2033,32 +2131,32 @@ function executionChainNarrative(detail) {
   const fills = detail.fills || [];
   const reconciliations = detail.reconciliations || [];
   return [
-    `This decision produced ${intents.length} intent${pluralize(intents.length)}, ${orders.length} order update${pluralize(orders.length)}, and ${fills.length} fill${pluralize(fills.length)}.`,
+    `这次决策共产生 ${intents.length} 个意图、${orders.length} 条订单更新，以及 ${fills.length} 条成交记录。`,
     fills.length
-      ? `A portfolio snapshot and reconciliation were generated after execution. Reconciliation count: ${reconciliations.length}.`
-      : `No fill was ingested yet, so downstream portfolio and reconciliation effects may still be pending.`,
+      ? `执行后已生成账户快照和对账结果。相关对账次数：${reconciliations.length}。`
+      : "当前还没有成交写入，因此下游账户快照和对账结果可能仍在等待。",
   ];
 }
 
 function auditNarrative(audit) {
   return [
-    `Audit links the full chain from decision context through execution and reconciliation for decision ${audit.decision_id || "-"}.`,
-    `Linked refs: ${audit.order_intent_refs?.length || 0} intent${pluralize(audit.order_intent_refs?.length || 0)}, ${audit.order_state_refs?.length || 0} order update${pluralize(audit.order_state_refs?.length || 0)}, ${audit.fill_event_refs?.length || 0} fill${pluralize(audit.fill_event_refs?.length || 0)}.`,
+    `审计链路串起了决策 ${audit.decision_id || "-"} 从上下文、执行到对账的完整过程。`,
+    `当前已关联 ${audit.order_intent_refs?.length || 0} 个意图、${audit.order_state_refs?.length || 0} 条订单更新，以及 ${audit.fill_event_refs?.length || 0} 条成交事件。`,
   ];
 }
 
 function orderNarrative(order, fills, stuckResolution = {}) {
   const lines = [
-    `This order was sent as a ${order.submission_payload?.ordType || "market"} ${order.submission_payload?.side || "-"} on ${order.symbol || "-"} through ${order.venue || "-"}.`,
-    `Current lifecycle state is ${readableMode(order.status)} with requested quantity ${formatNumber(order.requested_qty)} and filled quantity ${formatNumber(order.filled_qty)}.`,
+    `这笔订单通过 ${order.venue || "-"} 向 ${order.symbol || "-"} 提交，类型为 ${readableMode(order.submission_payload?.ordType || "market")}，方向为 ${readableMode(order.submission_payload?.side || "-")}。`,
+    `当前生命周期状态为 ${readableMode(order.status)}，请求数量 ${formatNumber(order.requested_qty)}，已成交数量 ${formatNumber(order.filled_qty)}。`,
     fills.length
-      ? `There are ${fills.length} linked fill${pluralize(fills.length)} for this order.`
-      : `No linked fills are stored for this order yet.`,
+      ? `当前已有 ${fills.length} 条关联成交记录。`
+      : "当前还没有关联成交记录。",
   ];
   if (stuckResolution.eligible) {
-    lines.push("This order looks like a pre-restart stuck submission and can be resolved from the execution table.");
+    lines.push("这笔订单看起来像是服务重启前遗留的卡住提交，可在执行表中发起收敛处理。");
   } else if (stuckResolution.summary) {
-    lines.push(stuckResolution.summary);
+    lines.push(localizeErrorMessage(stuckResolution.summary));
   }
   return lines;
 }
@@ -2068,14 +2166,14 @@ function renderOrderActions(order) {
     return "";
   }
   const canWrite = operatorCanWrite();
-  const inspectButton = `<button class="table-button" data-inspect-order="${escapeHtml(order.client_order_id)}">Inspect</button>`;
+  const inspectButton = `<button class="table-button" data-inspect-order="${escapeHtml(order.client_order_id)}">查看</button>`;
   if (!isRecoverableRestartSubmission(order)) {
     return inspectButton;
   }
   return `
     <div class="table-actions">
       ${inspectButton}
-      <button class="table-button" data-resolve-stuck-order="${escapeHtml(order.client_order_id)}" ${canWrite ? "" : "disabled"}>Resolve Stuck Submit</button>
+      <button class="table-button" data-resolve-stuck-order="${escapeHtml(order.client_order_id)}" ${canWrite ? "" : "disabled"}>处理卡住的提交</button>
     </div>
   `;
 }
@@ -2102,7 +2200,7 @@ async function resolveStuckOrder(orderId) {
   if (!orderId) {
     return;
   }
-  if (!window.confirm("Resolve this pre-restart stuck submission as FAILED? The runtime will first confirm the order is absent from the latest exchange snapshot.")) {
+  if (!window.confirm("确认将这笔重启前卡住的提交收敛为 FAILED 吗？系统会先确认它不在最新交易所快照中。")) {
     return;
   }
   try {
@@ -2110,30 +2208,30 @@ async function resolveStuckOrder(orderId) {
       method: "POST",
       body: { reason: "ui_resolve_stuck_submission" },
     });
-    flash(`Resolved stuck submission ${orderId} and re-ran reconciliation.`, "warning");
+    flash(`已收敛卡住的提交 ${orderId}，并重新执行了对账。`, "warning");
     await refreshDashboard({ manual: true });
   } catch (error) {
-    flash(`Resolve stuck submission failed: ${normalizeError(error, "Stuck submission resolution failed").message}`, "danger");
+    flash(`处理卡住提交失败：${normalizeError(error, "Stuck submission resolution failed").message}`, "danger");
     renderDashboard({ manual: true });
   }
 }
 
 function linkedFillsNarrative(fills) {
   if (!fills.length) {
-    return ["No fills have been linked to this order yet."];
+    return ["当前还没有任何成交关联到这笔订单。"];
   }
   const totalQty = fills.reduce((sum, fill) => sum + Number(fill.fill_qty || 0), 0);
   return [
-    `${fills.length} fill${pluralize(fills.length)} are linked to this order.`,
-    `Total executed quantity across linked fills is ${formatNumber(totalQty)}.`,
+    `当前共有 ${fills.length} 条成交关联到这笔订单。`,
+    `这些成交累计执行数量为 ${formatNumber(totalQty)}。`,
   ];
 }
 
 function fillNarrative(fill) {
   return [
-    `This fill executed a ${fill.side || "-"} on ${fill.symbol || "-"} at ${formatNumber(fill.fill_price)} for quantity ${formatNumber(fill.fill_qty)}.`,
-    `It represents ${readableMode(fill.position_intent)} on ${readableMode(fill.product_type)} and affects ${readableMode(fill.exposure_side)} exposure.`,
-    `Fees were charged as ${formatNumber(fill.fee_amount)} ${fill.fee_currency || ""}`.trim(),
+    `这条成交在 ${fill.symbol || "-"} 上以 ${formatNumber(fill.fill_price)} 的价格成交了 ${formatNumber(fill.fill_qty)}，方向为 ${readableMode(fill.side || "-")}。`,
+    `它代表 ${readableMode(fill.position_intent)} 的交易意图，作用于 ${readableMode(fill.product_type)} 产品，并影响 ${readableMode(fill.exposure_side)} 敞口。`,
+    `手续费为 ${formatNumber(fill.fee_amount)} ${fill.fee_currency || ""}`.trim(),
   ];
 }
 
@@ -2142,16 +2240,16 @@ function reconciliationNarrative(detail) {
   const severity = readableMode(reconciliation.severity);
   if (!reconciliation.mismatch_categories?.length) {
     return [
-      `This reconciliation report is ${severity}. The system did not find any mismatch that currently requires intervention.`,
+      `这份对账报告的结论是 ${severity}，系统当前没有发现需要人工介入的差异。`,
       reconciliation.exchange_comparison_enabled
-        ? "Exchange comparison was enabled for this report."
-        : "This report focused on local reconstruction consistency rather than exchange-side comparison.",
+        ? "这份报告已启用交易所侧比对。"
+        : "这份报告只关注本地重建一致性，并未引入交易所侧比对。",
     ];
   }
   return [
-    `This reconciliation report is ${severity} and found ${reconciliation.mismatch_categories.length} mismatch category${pluralize(reconciliation.mismatch_categories.length)}.`,
-    `Main mismatch reasons: ${listOrDash(reconciliation.mismatch_reasons)}.`,
-    `Recommended operator action: ${reconciliation.recommended_operator_action || "review the mismatch payload"}.`,
+    `这份对账报告的结论是 ${severity}，共发现 ${reconciliation.mismatch_categories.length} 类差异。`,
+    `主要差异原因：${listOrDashLocalized(reconciliation.mismatch_reasons)}。`,
+    `建议人工动作：${localizeErrorMessage(reconciliation.recommended_operator_action || "review the mismatch payload")}。`,
   ];
 }
 
@@ -2159,37 +2257,37 @@ function systemNarrative() {
   const health = state.data.health || {};
   const mode = state.data.mode || {};
   return [
-    `The runtime is currently ${readableMode(health.runtime_state)} in ${readableMode(mode.operating_state)}.`,
+    `系统当前处于 ${readableMode(health.runtime_state)} 状态，运行姿态为 ${readableMode(mode.operating_state)}。`,
     health.execution_blocked
-      ? `Execution is blocked because of ${listOrDash((state.data.blockers?.blockers || []).map((item) => item.blocker))}.`
-      : "Execution is currently allowed. There are no active blockers stopping the mainline.",
+      ? `执行路径当前被阻断，原因包括：${listOrDashLocalized((state.data.blockers?.blockers || []).map((item) => item.blocker))}。`
+      : "当前执行路径允许继续运行，没有主链阻断项。",
   ];
 }
 
 function recoveryNarrative() {
   const recovery = recoveryData();
   return [
-    `Recovery state is ${readableMode(recovery.recovery_state)}.`,
+    `恢复状态为 ${readableMode(recovery.recovery_state)}。`,
     recovery.safe_to_trade
-      ? "The runtime currently considers trading safe."
-      : "The runtime does not currently consider trading safe.",
+      ? "系统当前认为继续交易是安全的。"
+      : "系统当前认为继续交易仍不安全。",
     recovery.review_required
-      ? `Operator review is still required because of ${listOrDash(recovery.resume_blocked_reasons)}.`
-      : `Resume blockers: ${listOrDash(recovery.resume_blocked_reasons)}.`,
+      ? `仍需人工复核，原因包括：${listOrDashLocalized(recovery.resume_blocked_reasons)}。`
+      : `恢复阻断原因：${listOrDashLocalized(recovery.resume_blocked_reasons)}。`,
   ];
 }
 
 function baselineNarrative(baseline) {
   return [
-    `Baseline status is ${readableMode(baseline.status || baseline.baseline_status)}.`,
-    `It was created from ${readableMode(baseline.baseline_kind || baseline.baseline_source || "current account state")}.`,
+    `基线状态为 ${readableMode(baseline.status || baseline.baseline_status)}。`,
+    `这份基线来自 ${readableMode(baseline.baseline_kind || baseline.baseline_source || "current account state")}。`,
   ];
 }
 
 function accountNarrative(account) {
   return [
-    `Account backend is ${readableMode(account.backend || account.account_source || "-")} and freshness is ${booleanWord(account.fresh)}.`,
-    `Current account read posture is ${account.ready ? "ready" : "not ready"} with blockers ${listOrDash(account.blockers)}.`,
+    `账户后端是 ${readableMode(account.backend || account.account_source || "-")}，数据新鲜度为 ${booleanWord(account.fresh)}。`,
+    `当前账户读取状态${account.ready ? "已就绪" : "未就绪"}，阻断原因为 ${listOrDashLocalized(account.blockers)}。`,
   ];
 }
 
@@ -2198,56 +2296,56 @@ function runtimeNarrative() {
   const mode = state.data.mode || {};
   const environment = runtime.environment_capabilities || mode.environment_capabilities || {};
   return [
-    `Runtime profile is ${readableMode(runtime.runtime_profile?.name || mode.runtime_profile?.name)}.`,
-    `Execution route is ${environment.execution_route || mode.execution_route || "-"} with ${readableMode(environment.product_type)} / ${readableMode(environment.margin_model)} semantics.`,
-    `Directionality is ${readableMode(environment.position_directionality)} and leverage support is ${readableMode(environment.leverage_support)}.`,
+    `当前运行配置为 ${readableMode(runtime.runtime_profile?.name || mode.runtime_profile?.name)}。`,
+    `执行通道为 ${environment.execution_route || mode.execution_route || "-"}，产品类型 / 保证金模式分别为 ${readableMode(environment.product_type)} / ${readableMode(environment.margin_model)}。`,
+    `持仓方向模式为 ${readableMode(environment.position_directionality)}，杠杆支持为 ${readableMode(environment.leverage_support)}。`,
   ];
 }
 
 function metricsNarrative(metrics) {
   return [
-    `The runtime has processed ${formatNumber(metrics.decision_cycle_count)} decision cycles and emitted ${formatNumber(metrics.order_intent_count)} order intents.`,
-    `It has ingested ${formatNumber(metrics.fill_count)} fills and recorded ${formatNumber(metrics.rejection_count)} rejection${pluralize(metrics.rejection_count)}.`,
+    `系统累计处理了 ${formatNumber(metrics.decision_cycle_count)} 轮决策，并产生了 ${formatNumber(metrics.order_intent_count)} 个订单意图。`,
+    `目前已经写入 ${formatNumber(metrics.fill_count)} 条成交，并记录了 ${formatNumber(metrics.rejection_count)} 次拒单。`,
   ];
 }
 
 function replayNarrative(replayStatus) {
   return [
     replayStatus.last_validation
-      ? `The most recent replay validation ran at ${formatMaybeTimestamp(replayStatus.last_validation.validated_at)}.`
-      : "No replay validation has been run recently.",
-    `Recent validations stored: ${formatNumber((replayStatus.recent_validations || []).length)}.`,
+      ? `最近一次回放校验执行于 ${formatMaybeTimestamp(replayStatus.last_validation.validated_at)}。`
+      : "近期没有执行回放校验。",
+    `当前已存储的最近回放校验数量：${formatNumber((replayStatus.recent_validations || []).length)}。`,
   ];
 }
 
 function portfolioNarrative(portfolio) {
   const primary = trackedPortfolioPosition(portfolio);
   return [
-    `Total equity is ${formatNumber(portfolio.total_equity)} with gross exposure ${formatNumber(portfolio.gross_exposure)} and net exposure ${formatSigned(portfolio.net_exposure)}.`,
+    `账户总权益为 ${formatNumber(portfolio.total_equity)}，总敞口 ${formatNumber(portfolio.gross_exposure)}，净敞口 ${formatSigned(portfolio.net_exposure)}。`,
     primary
-      ? `Primary tracked position is ${readableMode(primary.exposure_side)} ${formatSigned(primary.position_qty)} on ${primary.symbol}.`
-      : "No active tracked position is currently stored in the portfolio snapshot.",
+      ? `当前主要跟踪持仓为 ${primary.symbol} 的 ${readableMode(primary.exposure_side)} ${formatSigned(primary.position_qty)}。`
+      : "当前账户快照里没有活跃跟踪持仓。",
   ];
 }
 
 function portfolioDetailFacts(portfolio) {
   const primary = trackedPortfolioPosition(portfolio);
   return [
-    ["Primary Symbol", primary?.symbol || "-"],
-    ["Primary Side", readableMode(primary?.exposure_side || "-")],
-    ["Primary Qty", primary ? formatSigned(primary.position_qty) : "-"],
-    ["Margin Usage", formatNumber(portfolio.margin_usage)],
-    ["Tracked Positions", String((portfolio.positions || []).length)],
+    ["主跟踪标的", primary?.symbol || "-"],
+    ["主持仓方向", readableMode(primary?.exposure_side || "-")],
+    ["主持仓数量", primary ? formatSigned(primary.position_qty) : "-"],
+    ["保证金占用", formatNumber(portfolio.margin_usage)],
+    ["跟踪持仓数量", String((portfolio.positions || []).length)],
   ];
 }
 
 function blockerNarrative(blockers) {
   if (!blockers.length) {
-    return ["There are no current blocker records on the runtime."];
+    return ["当前系统没有任何阻断记录。"];
   }
   return [
-    `${blockers.length} blocker${pluralize(blockers.length)} are currently recorded.`,
-    `Most important blocker: ${blockers[0].blocker}. Recommended action: ${blockers[0].recommended_action}.`,
+    `当前共记录了 ${blockers.length} 个阻断项。`,
+    `最需要优先处理的阻断项是：${localizeErrorMessage(blockers[0].blocker)}。建议动作：${localizeErrorMessage(blockers[0].recommended_action)}。`,
   ];
 }
 
@@ -2255,15 +2353,15 @@ function decisionExecutionOutcome(detail) {
   const summary = detail.summary || {};
   const result = summary.execution_result || {};
   if (!decisionTargetNeedsTrade(detail.position_target || {})) {
-    return "No execution was created because the current exposure already matched the target.";
+    return "当前敞口已经与目标一致，因此没有创建新的执行动作。";
   }
   if (result.fill_count > 0) {
-    return `${result.fill_count} fill${pluralize(result.fill_count)} were ingested for this decision.`;
+    return `这次决策已写入 ${result.fill_count} 条成交记录。`;
   }
   if (result.order_count > 0) {
-    return `${result.order_count} order${pluralize(result.order_count)} were created but no fill has been ingested yet.`;
+    return `这次决策已创建 ${result.order_count} 笔订单，但暂时还没有成交写入。`;
   }
-  return "No execution was created for this decision.";
+  return "这次决策没有产生执行动作。";
 }
 
 function buildTimeline({ paperLocal = false } = {}) {
@@ -2278,7 +2376,7 @@ function buildTimeline({ paperLocal = false } = {}) {
 
   if (latestDecision.decision_id) {
     items.push({
-      title: "Latest decision completed",
+      title: "最新决策完成",
       subtitle: latestDecision.decision_id,
       timestamp: latestDecision.decision_context?.as_of_ts,
       tone: latestDecision.risk_decision?.approved ? "info" : "warning",
@@ -2288,58 +2386,58 @@ function buildTimeline({ paperLocal = false } = {}) {
 
   if (latestValidation) {
     items.push({
-      title: "Reconciliation validation",
+      title: "对账校验",
       subtitle: latestValidation.reconciliation_id || "-",
       timestamp: latestValidation.validated_at,
       tone: latestValidation.halt_required ? "danger" : "success",
-      detail: listOrDash(latestValidation.mismatch_reasons),
+      detail: listOrDashLocalized(latestValidation.mismatch_reasons),
     });
   }
 
   if (!paperLocal && latestRebaselineAction) {
     items.push({
-      title: "Operator rebaseline",
-      subtitle: latestRebaselineAction.status || "-",
+      title: "人工重建基线",
+      subtitle: readableState(latestRebaselineAction.status || "-"),
       timestamp: latestRebaselineAction.created_at,
       tone: recovery.review_required ? "warning" : latestRebaselineAction.status === "rebaseline_completed" ? "info" : "danger",
-      detail: latestRebaselineAction.reason || "Operator accepted a new trusted baseline.",
+      detail: localizeErrorMessage(latestRebaselineAction.reason || "操作员接受了新的可信基线。"),
     });
   }
 
   if (!paperLocal && latestResumeAction) {
     items.push({
-      title: "Operator resume",
-      subtitle: latestResumeAction.status || "-",
+      title: "人工恢复运行",
+      subtitle: readableState(latestResumeAction.status || "-"),
       timestamp: latestResumeAction.created_at,
       tone: latestResumeAction.status === "resumed" || latestResumeAction.status === "already_resumed" ? "success" : "warning",
-      detail: latestResumeAction.reason || "Operator requested resume.",
+      detail: localizeErrorMessage(latestResumeAction.reason || "操作员发起了恢复请求。"),
     });
   }
 
   errors.slice(0, 2).forEach((item) => {
     items.push({
-      title: "Execution issue",
+      title: "执行异常",
       subtitle: item.order_id || item.decision_id || "-",
       timestamp: item.timestamp,
       tone: item.severity === "error" ? "danger" : "warning",
-      detail: item.message || item.status || "execution issue",
+      detail: localizeErrorMessage(item.message || item.status || "execution issue"),
     });
   });
 
   blockerHistory.slice(-2).forEach((item) => {
     items.push({
-      title: "Blocker snapshot",
-      subtitle: item.runtime_state || "-",
+      title: "阻断快照",
+      subtitle: readableState(item.runtime_state || "-"),
       timestamp: item.created_at,
       tone: item.execution_blocked ? "warning" : "info",
-      detail: item.blockers?.length ? item.blockers.map((blocker) => blocker.blocker).join(", ") : "clear",
+      detail: item.blockers?.length ? item.blockers.map((blocker) => localizeErrorMessage(blocker.blocker)).join("，") : "无阻断",
     });
   });
 
   return items.sort((left, right) => dateValue(right.timestamp) - dateValue(left.timestamp)).slice(0, 6);
 }
 
-function renderTimeline(items, emptyText = "No recent operational activity.") {
+function renderTimeline(items, emptyText = "近期没有运行活动。") {
   if (!items.length) {
     return emptyState(emptyText);
   }
@@ -2411,13 +2509,13 @@ function showStructuredDetail({ title, summary = [], sections = [], actions = []
     ? `<div class="detail-card"><div class="table-actions">${actions.join("")}</div></div>`
     : "";
   const summaryHtml = summary.length
-    ? `<div class="detail-card"><h3>Summary</h3><div class="detail-grid">${summary.map(([key, value]) => `
+    ? `<div class="detail-card"><h3>摘要</h3><div class="detail-grid">${summary.map(([key, value]) => `
         <div class="detail-grid-row">
           <span class="detail-key">${escapeHtml(key)}</span>
           <strong class="detail-value">${escapeHtml(value == null || value === "" ? "-" : String(value))}</strong>
         </div>
       `).join("")}</div></div>`
-    : `<div class="empty-state">No summary fields available.</div>`;
+    : `<div class="empty-state">当前没有可展示的摘要字段。</div>`;
   const bodyHtml = sections.length
     ? sections.map((section) => `
         <section class="detail-card">
@@ -2427,7 +2525,7 @@ function showStructuredDetail({ title, summary = [], sections = [], actions = []
           ${renderRawDetail(section.value)}
         </section>
       `).join("")
-    : `<div class="empty-state">No detail sections available.</div>`;
+    : `<div class="empty-state">当前没有可展示的详情分区。</div>`;
   setDrawerContent(title, `${actionsHtml}${summaryHtml}`, bodyHtml);
   openDrawer();
 }
@@ -2462,11 +2560,11 @@ function renderDetailFacts(facts) {
 
 function renderRawDetail(value) {
   if (value == null || (typeof value === "object" && Object.keys(value).length === 0) || (Array.isArray(value) && value.length === 0)) {
-    return `<div class="detail-empty-note">No raw payload for this section.</div>`;
+    return `<div class="detail-empty-note">这一部分没有原始载荷可展示。</div>`;
   }
   return `
     <details class="detail-raw">
-      <summary>Raw JSON</summary>
+      <summary>原始 JSON</summary>
       <pre class="detail-json">${escapeHtml(JSON.stringify(value, null, 2))}</pre>
     </details>
   `;
@@ -2474,13 +2572,13 @@ function renderRawDetail(value) {
 
 function recentDecisionHeadline(item) {
   const intent = readableMode(item.position_target?.position_intent || item.position_intent || "hold");
-  const symbol = item.symbol || "tracked symbol";
+  const symbol = item.symbol || "当前跟踪标的";
   const delta = Number(item.position_target?.delta_position_qty ?? item.target_delta_qty ?? item.delta_position_qty ?? 0);
   if (Math.abs(delta) < 1e-12 || intent === "hold") {
-    return `Hold ${symbol}`;
+    return `继续持有 ${symbol}`;
   }
-  const side = delta > 0 ? "increase" : "reduce";
-  return `${capitalizeWord(intent)} ${symbol} and ${side} exposure`;
+  const side = delta > 0 ? "增加敞口" : "降低敞口";
+  return `${capitalizeWord(intent)} ${symbol}，并${side}`;
 }
 
 function recentDecisionNarrative(item) {
@@ -2488,30 +2586,30 @@ function recentDecisionNarrative(item) {
   const current = formatSigned(target.current_position_qty ?? item.current_position_qty ?? 0);
   const next = formatSigned(target.target_position_qty ?? item.target_position_qty ?? 0);
   if (!recentDecisionRequiresTrade(item)) {
-    return `Current exposure already matches the target at ${next}; this review cycle kept the posture unchanged.`;
+    return `当前敞口已经与目标 ${next} 一致，这一轮决策保持原姿态不变。`;
   }
-  return `Exposure would move from ${current} to ${next} with ${readableMode(target.product_type || item.product_type || "-")} semantics.`;
+  return `系统计划把敞口从 ${current} 调整到 ${next}，并按 ${readableMode(target.product_type || item.product_type || "-")} 规则执行。`;
 }
 
 function recentDecisionOutcome(item) {
   if (item.policy_result === false) {
-    return `Policy stopped the idea because of ${listOrDash(item.policy_rejection_reasons || item.policy_decision?.rejection_reasons)}.`;
+    return `策略层因以下原因阻断了这次想法：${listOrDashLocalized(item.policy_rejection_reasons || item.policy_decision?.rejection_reasons)}。`;
   }
   if (item.risk_result === false) {
-    return `Risk stopped the idea because of ${listOrDash(item.risk_rejection_reasons || item.risk_decision?.rejection_reasons)}.`;
+    return `风控因以下原因阻断了这次想法：${listOrDashLocalized(item.risk_rejection_reasons || item.risk_decision?.rejection_reasons)}。`;
   }
   const orderCount = Number(item.execution_result?.order_count ?? item.order_count ?? 0);
   const fillCount = Number(item.execution_result?.fill_count ?? item.fill_count ?? 0);
   if (fillCount > 0) {
-    return `${fillCount} fill${pluralize(fillCount)} landed from this decision.`;
+    return `这次决策已产生 ${fillCount} 条成交。`;
   }
   if (orderCount > 0) {
-    return `${orderCount} order${pluralize(orderCount)} were created and are still syncing.`;
+    return `这次决策已创建 ${orderCount} 笔订单，当前仍在同步状态。`;
   }
   if (!recentDecisionRequiresTrade(item)) {
-    return "The decision passed safety checks and correctly held the current position without placing an order.";
+    return "这次决策通过了安全检查，并正确地保持了当前仓位，没有下单。";
   }
-  return "The decision passed safety checks but did not produce an execution artifact.";
+  return "这次决策通过了安全检查，但还没有产生执行记录。";
 }
 
 function decisionTargetNeedsTrade(target) {
@@ -2525,16 +2623,16 @@ function recentDecisionRequiresTrade(item) {
 function recentOrderHeadline(order) {
   const side = readableMode(order.submission_payload?.side || order.side || "-");
   const type = readableMode(order.submission_payload?.ordType || order.order_type || "market");
-  return `${capitalizeWord(side)} ${formatNumber(order.requested_qty)} ${order.symbol || "-" } as a ${type} order`;
+  return `${capitalizeWord(side)} ${formatNumber(order.requested_qty)} ${order.symbol || "-"}，订单类型为 ${type}`;
 }
 
 function recentOrderNarrative(order) {
   const intent = readableMode(order.submission_payload?.positionIntent || order.position_intent || "-");
-  return `This order carries ${intent} intent through ${order.venue || order.submission_mode || "-"} on ${readableMode(order.product_type || "-")} rules.`;
+  return `这笔订单在 ${readableMode(order.product_type || "-")} 规则下，通过 ${order.venue || order.submission_mode || "-"} 执行 ${intent} 意图。`;
 }
 
 function recentOrderStateSummary(order) {
-  return `${order.venue || order.submission_mode || "-"} | filled ${formatNumber(order.filled_qty)} of ${formatNumber(order.requested_qty)}`;
+  return `${order.venue || order.submission_mode || "-"} | 已成交 ${formatNumber(order.filled_qty)} / ${formatNumber(order.requested_qty)}`;
 }
 
 function recentFillHeadline(fill) {
@@ -2543,7 +2641,7 @@ function recentFillHeadline(fill) {
 }
 
 function recentFillNarrative(fill) {
-  return `Executed at ${formatNumber(fill.fill_price)} with ${readableMode(fill.position_intent || "-")} intent on ${readableMode(fill.product_type || "-")}.`;
+  return `以 ${formatNumber(fill.fill_price)} 的价格成交，交易意图为 ${readableMode(fill.position_intent || "-")}，产品类型为 ${readableMode(fill.product_type || "-")}。`;
 }
 
 function recentFillImpactSummary(fill) {
@@ -2595,23 +2693,23 @@ function toneForOrderStatus(status) {
 }
 
 function decisionOutcomeLabel(summary) {
-  if (!summary) return "No decision outcome.";
+  if (!summary) return "当前没有决策结果。";
   const orderCount = summary.execution_result?.order_count ?? 0;
   const fillCount = summary.execution_result?.fill_count ?? 0;
-  if (summary.risk_result === false) return "Risk denied execution for this decision.";
-  if (summary.policy_result === false) return "Policy blocked execution for this decision.";
-  if (orderCount === 0) return "Decision completed without creating an execution intent.";
-  if (fillCount === 0) return "Execution intent exists but no fills have been ingested yet.";
-  return "Decision flowed through execution and produced fills.";
+  if (summary.risk_result === false) return "这次决策被风控拒绝执行。";
+  if (summary.policy_result === false) return "这次决策被策略层阻断执行。";
+  if (orderCount === 0) return "这次决策完成了评估，但没有创建执行意图。";
+  if (fillCount === 0) return "这次决策已经创建执行意图，但还没有成交写入。";
+  return "这次决策已经进入执行链路，并产生了成交。";
 }
 
 function freshnessSummary(freshness) {
   const parts = [
-    freshness.market_fresh ? "market" : null,
-    freshness.account_fresh ? "account" : null,
-    freshness.reconciliation_fresh ? "recon" : null,
+    freshness.market_fresh ? "行情" : null,
+    freshness.account_fresh ? "账户" : null,
+    freshness.reconciliation_fresh ? "对账" : null,
   ].filter(Boolean);
-  return parts.length === 3 ? "Fully Fresh" : parts.length ? parts.join(" + ") : "Stale";
+  return parts.length === 3 ? "全部新鲜" : parts.length ? `${parts.join(" + ")} 新鲜` : "数据陈旧";
 }
 
 function recoveryData() {
@@ -2649,24 +2747,24 @@ function fillFreshnessLabel(fill) {
   return `${formatMaybeTimestamp(fill.ingestion_timestamp)} | ${formatRelativeAge(fill.ingestion_timestamp)}`;
 }
 
-function decisionActivityLabel(latestDecision, latestOrder, latestFill, fallback = "No decision outcome.") {
+function decisionActivityLabel(latestDecision, latestOrder, latestFill, fallback = "当前没有决策结果。") {
   const summary = latestDecision?.summary || {};
   const result = summary.execution_result || {};
   const target = latestDecision?.position_target || {};
   if (result.fill_count > 0 && latestFill) {
-    return `Latest decision ${readableMode(target.position_intent || "executed")} and produced a fill ${formatRelativeAge(latestFill.ingestion_timestamp)}.`;
+    return `最近一次决策执行了 ${readableMode(target.position_intent || "executed")}，并在 ${formatRelativeAge(latestFill.ingestion_timestamp)} 产生了成交。`;
   }
   if (result.order_count > 0 && latestOrder) {
-    return `Latest decision submitted ${readableMode(target.position_intent || "an order")}; awaiting or syncing execution state.`;
+    return `最近一次决策已提交 ${readableMode(target.position_intent || "an order")}，当前正在等待或同步执行状态。`;
   }
   if (target.position_intent === "hold" || Math.abs(Number(target.delta_position_qty || 0)) < 1e-12) {
-    return "Latest decision is holding current posture. No trade was required.";
+    return "最近一次决策选择继续持有当前姿态，不需要发起交易。";
   }
   if (summary.risk_result === false) {
-    return "Latest decision was blocked by risk controls.";
+    return "最近一次决策被风控阻断。";
   }
   if (summary.policy_result === false) {
-    return "Latest decision was blocked by policy controls.";
+    return "最近一次决策被策略层阻断。";
   }
   return fallback;
 }
@@ -2685,31 +2783,31 @@ function recoveryPolicyData() {
 
 function applyOverviewProfile(runtimeProfile) {
   const paperLocal = runtimeProfile.name === "paper_local";
-  nodes.overviewPostureTitle.textContent = paperLocal ? "Local Paper Posture" : "System Posture";
+  nodes.overviewPostureTitle.textContent = paperLocal ? "本地模拟姿态" : "系统姿态";
   nodes.overviewPostureCopy.textContent = paperLocal
-    ? "Shared decision and risk core with local paper execution. Exchange repair controls stay out of the landing view."
-    : "Health, readiness, and execution gating.";
-  nodes.overviewRecoveryTitle.textContent = "Recovery Control";
-  nodes.overviewRecoveryCopy.textContent = "Baseline takeover, review posture, and whether resume is actually safe.";
+    ? "当前使用与实盘相同的决策和风控核心，但执行停留在本地模拟，不涉及交易所修复动作。"
+    : "查看健康度、运行就绪状态，以及执行通道是否被阻断。";
+  nodes.overviewRecoveryTitle.textContent = "恢复控制";
+  nodes.overviewRecoveryCopy.textContent = "查看基线接管、人工复核姿态，以及当前是否真的可以安全恢复运行。";
   nodes.overviewRecoveryPanel.hidden = paperLocal;
   nodes.inspectRecoveryButton.hidden = paperLocal;
 }
 
 function executionHeadline(runtimeProfile, environment, mode) {
   if (runtimeProfile.name === "paper_local") {
-    return "Local Paper Execution";
+    return "本地模拟执行";
   }
   if (environment.exchange_submission_enabled) {
-    return "Exchange Submit Enabled";
+    return "已开启交易所提交";
   }
-  return mode.exchange_submit_allowed ? "Exchange Armed" : "Guarded Exchange";
+  return mode.exchange_submit_allowed ? "交易所提交通道就绪" : "交易所提交通道受保护";
 }
 
 function executionModeBadge(environment, mode) {
   if (!environment.exchange_coupled) {
-    return "paper fills";
+    return "本地模拟成交";
   }
-  return mode.guarded_execution_dry_run ? "dry run" : environment.exchange_submission_enabled ? "submit enabled" : "guarded";
+  return mode.guarded_execution_dry_run ? "仅演练不提交" : environment.exchange_submission_enabled ? "允许真实提交" : "受保护模式";
 }
 
 function executionModeTone(environment, mode) {
@@ -2721,22 +2819,22 @@ function executionModeTone(environment, mode) {
 
 function executionCopy(runtimeProfile, environment, mode) {
   if (runtimeProfile.name === "paper_local") {
-    return "Orders stay inside the local paper adapter in this profile. No exchange submission occurs.";
+    return "当前配置下，所有订单都会停留在本地模拟适配器中，不会提交到交易所。";
   }
-  return mode.exchange_submit_allowed ? "All exchange submission gates are clear." : listOrDash(mode.submit_blocked_reasons);
+  return mode.exchange_submit_allowed ? "当前所有交易所提交门都已放行。" : listOrDashLocalized(mode.submit_blocked_reasons);
 }
 
 function recoverySummaryLine(recovery) {
   const parts = [];
   if (recovery.resume_eligible) {
-    parts.push("resume eligible");
+    parts.push("允许恢复运行");
   } else if (recovery.review_required) {
-    parts.push("review required");
+    parts.push("需要人工复核");
   } else if (recovery.recovery_state) {
     parts.push(readableState(recovery.recovery_state));
   }
   if (recovery.resume_blocked_reasons?.length) {
-    parts.push(listOrDash(recovery.resume_blocked_reasons));
+    parts.push(listOrDashLocalized(recovery.resume_blocked_reasons));
   }
   return parts.length ? parts.join(" | ") : "-";
 }
@@ -2744,19 +2842,19 @@ function recoverySummaryLine(recovery) {
 function formatDuration(seconds) {
   const number = Number(seconds);
   if (!Number.isFinite(number)) return "-";
-  if (number < 60) return `${Math.round(number)}s`;
-  if (number < 3600) return `${Math.floor(number / 60)}m ${Math.round(number % 60)}s`;
-  return `${Math.floor(number / 3600)}h ${Math.floor((number % 3600) / 60)}m`;
+  if (number < 60) return `${Math.round(number)} 秒`;
+  if (number < 3600) return `${Math.floor(number / 60)} 分 ${Math.round(number % 60)} 秒`;
+  return `${Math.floor(number / 3600)} 小时 ${Math.floor((number % 3600) / 60)} 分`;
 }
 
 function formatRelativeAge(value) {
   if (!value) return "-";
   const deltaSeconds = Math.max(0, Math.round((Date.now() - dateValue(value)) / 1000));
   if (!Number.isFinite(deltaSeconds)) return "-";
-  if (deltaSeconds < 60) return `${deltaSeconds}s ago`;
-  if (deltaSeconds < 3600) return `${Math.floor(deltaSeconds / 60)}m ago`;
-  if (deltaSeconds < 86400) return `${Math.floor(deltaSeconds / 3600)}h ago`;
-  return `${Math.floor(deltaSeconds / 86400)}d ago`;
+  if (deltaSeconds < 60) return `${deltaSeconds} 秒前`;
+  if (deltaSeconds < 3600) return `${Math.floor(deltaSeconds / 60)} 分钟前`;
+  if (deltaSeconds < 86400) return `${Math.floor(deltaSeconds / 3600)} 小时前`;
+  return `${Math.floor(deltaSeconds / 86400)} 天前`;
 }
 
 function pluralize(count) {
@@ -2765,15 +2863,15 @@ function pluralize(count) {
 
 function capitalizeWord(value) {
   const text = value == null ? "" : String(value);
-  return text ? `${text.charAt(0).toUpperCase()}${text.slice(1)}` : "-";
+  return text ? translateUiTerm(text) : "-";
 }
 
 function readableState(value) {
-  return value ? String(value).replaceAll("_", " ") : "-";
+  return value ? translateUiTerm(value) : "-";
 }
 
 function readableMode(value) {
-  return value ? String(value).replaceAll("_", " ") : "-";
+  return value ? translateUiTerm(value) : "-";
 }
 
 function listOrDash(value) {
@@ -2781,16 +2879,21 @@ function listOrDash(value) {
   return Array.isArray(value) ? value.join(", ") : String(value);
 }
 
+function listOrDashLocalized(value) {
+  if (!value || (Array.isArray(value) && value.length === 0)) return "-";
+  return Array.isArray(value) ? value.map((item) => localizeErrorMessage(item)).join("，") : localizeErrorMessage(value);
+}
+
 function booleanWord(value) {
-  if (value === true) return "yes";
-  if (value === false) return "no";
+  if (value === true) return "是";
+  if (value === false) return "否";
   return "-";
 }
 
 function booleanShort(value) {
-  if (value === true) return "ok";
-  if (value === false) return "blocked";
-  return "n/a";
+  if (value === true) return "正常";
+  if (value === false) return "阻断";
+  return "未知";
 }
 
 function formatNumber(value) {
@@ -2819,7 +2922,59 @@ function trimTrailingZeros(value) {
 
 function formatDateTime(value) {
   const date = value instanceof Date ? value : new Date(value);
-  return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString("en-CA", { hour12: false });
+  return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString("zh-CN", { hour12: false });
+}
+
+function translateUiTerm(value) {
+  const text = value == null ? "" : String(value).trim();
+  if (!text) {
+    return "-";
+  }
+  const normalized = text.toLowerCase().replaceAll(/[\s-]+/g, "_");
+  return UI_TERM_MAP[normalized] || text.replaceAll("_", " ");
+}
+
+function localizeErrorMessage(message) {
+  const text = String(message || "").trim();
+  if (!text) {
+    return "未知错误";
+  }
+  const exactMap = {
+    "execution issue": "执行异常",
+    "review the mismatch payload": "人工检查差异内容",
+    "Runtime profile draft creation failed": "创建运行配置草稿失败",
+    "Runtime profile save failed": "保存运行配置草稿失败",
+    "Runtime profile staging failed": "设为待激活失败",
+    "Runtime profile cancel failed": "取消待激活运行配置失败",
+    "Restart request failed": "发起重启请求失败",
+    "Operator user creation failed": "创建操作员账户失败",
+    "Operator user update failed": "更新操作员账户失败",
+    "Operator user deletion failed": "删除操作员账户失败",
+    "Reconciliation lookup failed": "查询对账详情失败",
+    "Decision lookup failed": "查询决策详情失败",
+    "Order lookup failed": "查询订单详情失败",
+    "Fill lookup failed": "查询成交详情失败",
+    "Stuck submission resolution failed": "处理卡住提交失败",
+    "ready": "就绪",
+  };
+  if (exactMap[text]) {
+    return exactMap[text];
+  }
+  const direct = translateUiTerm(text);
+  if (direct !== text) {
+    return direct;
+  }
+  const rewritten = text
+    .replace(/^Failed to load (.+)$/i, "加载 $1 失败")
+    .replace(/^Current blocking reason:/i, "当前阻断原因：")
+    .replace(/^No raw payload for this section\.$/i, "这一部分没有原始载荷可展示。");
+  if (rewritten !== text) {
+    return rewritten;
+  }
+  if (/^[a-z0-9_,\s-]+$/i.test(text) && text.includes("_")) {
+    return text.split(",").map((item) => translateUiTerm(item.trim())).join("，");
+  }
+  return text;
 }
 
 function formatMaybeTimestamp(value) {

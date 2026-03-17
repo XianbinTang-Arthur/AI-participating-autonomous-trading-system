@@ -37,10 +37,12 @@ class TestDashboardUI(unittest.TestCase):
         self.assertEqual(css.headers["cache-control"], "no-store")
         self.assertEqual(js.headers["cache-control"], "no-store")
         self.assertEqual(login_js.headers["cache-control"], "no-store")
-        self.assertIn("AATS Operator Console", root.text)
-        self.assertIn("Signed-In Operator", root.text)
-        self.assertIn("Logout", root.text)
-        self.assertIn("Runtime Profiles", root.text)
+        self.assertIn("text/html; charset=utf-8", root.headers["content-type"])
+        self.assertIn("application/javascript; charset=utf-8", js.headers["content-type"])
+        self.assertIn("AATS 交易控制台", root.text)
+        self.assertIn("当前登录", root.text)
+        self.assertIn("退出登录", root.text)
+        self.assertIn("运行配置", root.text)
         self.assertIn("/ui/app.css", ui.text)
         self.assertIn("refreshDashboard", js.text)
         self.assertIn("const AUTO_REFRESH_MS = 15000;", js.text)
@@ -52,7 +54,7 @@ class TestDashboardUI(unittest.TestCase):
         self.assertIn("/auth/login", login_js.text)
         self.assertIn(".workspace-nav", css.text)
         self.assertIn(".login-shell", css.text)
-        self.assertIn("Auto refresh every 15 seconds", root.text)
+        self.assertIn("每 15 秒自动刷新一次", root.text)
 
     def test_dashboard_redirects_to_login_when_auth_is_enabled(self) -> None:
         settings = AATSSettings.model_validate(
@@ -73,8 +75,8 @@ class TestDashboardUI(unittest.TestCase):
         self.assertEqual(root.status_code, 303)
         self.assertEqual(root.headers["location"], "/login")
         self.assertEqual(login.status_code, 200)
-        self.assertIn("Operator Login", login.text)
-        self.assertIn("Sign In", login.text)
+        self.assertIn("控制台登录", login.text)
+        self.assertIn("登录", login.text)
 
 
 if __name__ == "__main__":

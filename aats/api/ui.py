@@ -31,26 +31,26 @@ def _dashboard_allowed(request: Request) -> bool:
 async def dashboard_index(request: Request):
     if not _dashboard_allowed(request):
         return RedirectResponse(url="/login", status_code=303)
-    return FileResponse(UI_DIR / "dashboard.html", headers=NO_STORE_HEADERS)
+    return FileResponse(UI_DIR / "dashboard.html", media_type="text/html; charset=utf-8", headers=NO_STORE_HEADERS)
 
 
 @ui_router.get("/login")
 async def login_index(request: Request):
     if _dashboard_allowed(request):
         return RedirectResponse(url="/ui", status_code=303)
-    return FileResponse(UI_DIR / "login.html", headers=NO_STORE_HEADERS)
+    return FileResponse(UI_DIR / "login.html", media_type="text/html; charset=utf-8", headers=NO_STORE_HEADERS)
 
 
 @ui_router.get("/ui/app.css")
 async def dashboard_css() -> FileResponse:
-    return FileResponse(UI_DIR / "app.css", media_type="text/css", headers=NO_STORE_HEADERS)
+    return FileResponse(UI_DIR / "app.css", media_type="text/css; charset=utf-8", headers=NO_STORE_HEADERS)
 
 
 @ui_router.get("/ui/app.js")
 async def dashboard_js() -> FileResponse:
-    return FileResponse(UI_DIR / "app.js", media_type="application/javascript", headers=NO_STORE_HEADERS)
+    return FileResponse(UI_DIR / "app.js", media_type="application/javascript; charset=utf-8", headers=NO_STORE_HEADERS)
 
 
 @ui_router.get("/ui/login.js")
 async def login_js() -> FileResponse:
-    return FileResponse(UI_DIR / "login.js", media_type="application/javascript", headers=NO_STORE_HEADERS)
+    return FileResponse(UI_DIR / "login.js", media_type="application/javascript; charset=utf-8", headers=NO_STORE_HEADERS)

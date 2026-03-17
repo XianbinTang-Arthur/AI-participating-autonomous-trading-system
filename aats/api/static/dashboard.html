@@ -1,95 +1,94 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>AATS Operator Console</title>
+  <title>AATS 交易控制台</title>
   <link rel="stylesheet" href="/ui/app.css">
 </head>
 <body>
   <div class="console-shell">
     <header class="console-topbar">
       <div class="brand-block">
-        <p class="brand-kicker">AI Autonomous Trading System</p>
-        <h1>AATS Operator Console</h1>
+        <p class="brand-kicker">AI 参与式自主交易系统</p>
+        <h1>AATS 交易控制台</h1>
         <p class="brand-copy">
-          Guarded execution posture, decision observability, reconciliation visibility, and operator
-          controls in one live console.
+          在一个实时控制台中查看交易权限、决策过程、成交结果、收益变化、对账状态和人工操作入口。
         </p>
       </div>
 
       <div class="topbar-side">
         <div class="session-card">
           <div>
-            <p class="section-kicker">Operator Session</p>
-            <h2>Control Surface</h2>
-            <p id="sessionIdentityValue" class="brand-copy">session unavailable</p>
-            <p id="sessionRoleValue" class="detail-meta">role: anonymous</p>
+            <p class="section-kicker">当前登录</p>
+            <h2>控制台权限</h2>
+            <p id="sessionIdentityValue" class="brand-copy">暂未获取会话信息</p>
+            <p id="sessionRoleValue" class="detail-meta">角色：未登录</p>
           </div>
           <div class="session-actions">
-            <span id="authStateChip" class="status-badge status-neutral">anonymous</span>
-            <button id="logoutButton" class="action-button action-muted">Logout</button>
+            <span id="authStateChip" class="status-badge status-neutral">未登录</span>
+            <button id="logoutButton" class="action-button action-muted">退出登录</button>
           </div>
         </div>
         <div class="runtime-badges">
-          <span id="runtimeStateChip" class="status-badge status-neutral">unknown</span>
-          <span id="operatingStateChip" class="status-badge status-outline">operating state</span>
-          <span id="executionRouteChip" class="status-badge status-outline">execution route</span>
-          <span id="submitPostureChip" class="status-badge status-outline">submit posture</span>
+          <span id="runtimeStateChip" class="status-badge status-neutral">未知</span>
+          <span id="operatingStateChip" class="status-badge status-outline">运行姿态</span>
+          <span id="executionRouteChip" class="status-badge status-outline">执行通道</span>
+          <span id="submitPostureChip" class="status-badge status-outline">提交通道</span>
         </div>
       </div>
     </header>
 
-    <section class="runtime-strip" aria-label="Runtime posture">
+    <section class="runtime-strip" aria-label="系统运行概览">
       <article class="runtime-card">
-        <p class="metric-label">Overall State</p>
+        <p class="metric-label">总体状态</p>
         <strong id="stripOverallValue" class="metric-value">-</strong>
         <span id="stripOverallMeta" class="metric-meta">-</span>
       </article>
       <article class="runtime-card">
-        <p class="metric-label">Mode</p>
+        <p class="metric-label">运行模式</p>
         <strong id="stripModeValue" class="metric-value">-</strong>
         <span id="stripModeMeta" class="metric-meta">-</span>
       </article>
       <article class="runtime-card">
-        <p class="metric-label">Execution Posture</p>
+        <p class="metric-label">交易执行</p>
         <strong id="stripExecutionValue" class="metric-value">-</strong>
         <span id="stripExecutionMeta" class="metric-meta">-</span>
       </article>
       <article class="runtime-card">
-        <p class="metric-label">Recovery</p>
+        <p class="metric-label">恢复状态</p>
         <strong id="stripRecoveryValue" class="metric-value">-</strong>
         <span id="stripRecoveryMeta" class="metric-meta">-</span>
       </article>
       <article class="runtime-card">
-        <p class="metric-label">Freshness</p>
+        <p class="metric-label">数据新鲜度</p>
         <strong id="stripFreshnessValue" class="metric-value">-</strong>
         <span id="stripFreshnessMeta" class="metric-meta">-</span>
       </article>
       <article class="runtime-card">
-        <p class="metric-label">Portfolio Equity</p>
+        <p class="metric-label">账户权益</p>
         <strong id="stripEquityValue" class="metric-value">-</strong>
         <span id="stripEquityMeta" class="metric-meta">-</span>
       </article>
     </section>
 
-    <section class="command-bar" aria-label="Operator actions">
+    <section class="command-bar" aria-label="操作入口">
       <div class="command-group command-auth">
         <div class="command-head">
-          <p class="section-kicker">Access</p>
-          <h2>Signed-In Operator</h2>
+          <p class="section-kicker">访问身份</p>
+          <h2>当前会话</h2>
         </div>
         <div class="fact-grid">
           <div class="fact-row">
-            <span class="fact-key">Identity</span>
+            <span class="fact-key">身份</span>
             <strong id="sessionCardIdentity" class="fact-value">-</strong>
           </div>
           <div class="fact-row">
-            <span class="fact-key">Role</span>
+            <span class="fact-key">角色</span>
             <strong id="sessionCardRole" class="fact-value">-</strong>
           </div>
           <div class="fact-row">
-            <span class="fact-key">Auth Source</span>
+            <span class="fact-key">认证来源</span>
             <strong id="sessionCardSource" class="fact-value">-</strong>
           </div>
         </div>
@@ -97,61 +96,61 @@
 
       <div class="command-group command-actions">
         <div class="command-head">
-          <p class="section-kicker">Runtime Actions</p>
-          <h2>Operator Commands</h2>
+          <p class="section-kicker">人工操作</p>
+          <h2>运行控制</h2>
         </div>
         <div class="action-row">
-          <button id="refreshButton" class="action-button action-primary">Refresh</button>
-          <button id="reconcileButton" class="action-button action-secondary">Run Reconciliation Check</button>
-          <button id="rebaselineButton" class="action-button action-warning">Rebaseline (Accept Current State)</button>
-          <button id="resumeButton" class="action-button action-muted">Resume</button>
-          <button id="haltButton" class="action-button action-danger">Safe Halt</button>
+          <button id="refreshButton" class="action-button action-primary">立即刷新</button>
+          <button id="reconcileButton" class="action-button action-secondary">执行对账检查</button>
+          <button id="rebaselineButton" class="action-button action-warning">重建基线（接受当前状态）</button>
+          <button id="resumeButton" class="action-button action-muted">恢复运行</button>
+          <button id="haltButton" class="action-button action-danger">安全暂停</button>
         </div>
-        <span id="actionPermissionHint" class="command-meta permission-note">Evaluating control permissions.</span>
+        <span id="actionPermissionHint" class="command-meta permission-note">正在检查当前会话是否有操作权限。</span>
       </div>
 
       <div class="command-group command-runtime">
         <div class="command-head">
-          <p class="section-kicker">Runtime Behavior</p>
-          <h2>Session Options</h2>
+          <p class="section-kicker">界面行为</p>
+          <h2>刷新设置</h2>
         </div>
         <label class="toggle-switch" for="autoRefreshToggle">
           <input id="autoRefreshToggle" type="checkbox" checked>
-          <span>Auto refresh every 15 seconds</span>
+          <span>每 15 秒自动刷新一次</span>
         </label>
-        <span id="lastRefreshLabel" class="command-meta">Not refreshed yet</span>
+        <span id="lastRefreshLabel" class="command-meta">尚未刷新</span>
       </div>
     </section>
 
     <section id="bannerContainer" class="alert-stack" aria-live="polite"></section>
 
-    <nav class="workspace-nav" aria-label="Primary console views">
-      <button class="workspace-tab is-active" data-view="overview">Overview</button>
-      <button class="workspace-tab" data-view="decisions">Decisions</button>
-      <button class="workspace-tab" data-view="execution">Execution</button>
-      <button class="workspace-tab" data-view="diagnostics">Diagnostics</button>
-      <button class="workspace-tab" data-view="runtime-profiles" hidden>Runtime Profiles</button>
-      <button class="workspace-tab" data-view="operators">Operators</button>
+    <nav class="workspace-nav" aria-label="主视图导航">
+      <button class="workspace-tab is-active" data-view="overview">概览</button>
+      <button class="workspace-tab" data-view="decisions">决策</button>
+      <button class="workspace-tab" data-view="execution">执行</button>
+      <button class="workspace-tab" data-view="diagnostics">诊断</button>
+      <button class="workspace-tab" data-view="runtime-profiles" hidden>运行配置</button>
+      <button class="workspace-tab" data-view="operators">操作员</button>
     </nav>
 
     <main class="workspace">
       <section id="view-overview" class="workspace-view is-active" data-view="overview">
         <div class="page-head">
           <div>
-            <p class="section-kicker">Runtime Landing</p>
-            <h2>Overview</h2>
+            <p class="section-kicker">系统总览</p>
+            <h2>概览</h2>
           </div>
-          <p class="page-copy">System posture, blockers, portfolio state, and the latest decision outcome.</p>
+          <p class="page-copy">查看当前交易状态、风险阻断、仓位与收益、以及最近一次决策结果。</p>
         </div>
 
         <div class="panel-grid overview-grid">
           <section class="panel panel-hero">
             <div class="panel-head">
               <div>
-                <h3>Latest Decision Spotlight</h3>
-                <p class="panel-copy">The newest decision, target posture, and whether execution can proceed.</p>
+                <h3>最新决策摘要</h3>
+                <p class="panel-copy">显示最新一次交易判断、目标仓位，以及是否允许继续执行。</p>
               </div>
-              <button id="inspectLatestDecisionButton" class="action-button action-muted">Inspect</button>
+              <button id="inspectLatestDecisionButton" class="action-button action-muted">查看详情</button>
             </div>
             <div id="overviewDecisionSpotlight" class="panel-content"></div>
           </section>
@@ -159,10 +158,10 @@
           <section class="panel">
             <div class="panel-head">
               <div>
-                <h3 id="overviewPostureTitle">System Posture</h3>
-                <p id="overviewPostureCopy" class="panel-copy">Health, readiness, and execution gating.</p>
+                <h3 id="overviewPostureTitle">系统状态</h3>
+                <p id="overviewPostureCopy" class="panel-copy">健康度、是否就绪、以及交易权限是否被阻断。</p>
               </div>
-              <button id="inspectSystemButton" class="action-button action-muted">System Detail</button>
+              <button id="inspectSystemButton" class="action-button action-muted">系统详情</button>
             </div>
             <div id="overviewPosture" class="panel-content"></div>
           </section>
@@ -170,10 +169,10 @@
           <section class="panel">
             <div class="panel-head">
               <div>
-                <h3>Portfolio Summary</h3>
-                <p class="panel-copy">Equity, exposure, balances, and current holdings.</p>
+                <h3>账户与收益概览</h3>
+                <p class="panel-copy">展示账户权益、持仓方向、风险敞口、已实现与未实现收益。</p>
               </div>
-              <button id="inspectPortfolioButton" class="action-button action-muted">Portfolio Detail</button>
+              <button id="inspectPortfolioButton" class="action-button action-muted">仓位详情</button>
             </div>
             <div id="overviewPortfolio" class="panel-content"></div>
           </section>
@@ -181,10 +180,10 @@
           <section class="panel">
             <div class="panel-head">
               <div>
-                <h3>Current Blockers</h3>
-                <p class="panel-copy">What is stopping execution or degrading the runtime right now.</p>
+                <h3>当前阻断项</h3>
+                <p class="panel-copy">说明当前是什么原因阻止了交易，或让系统进入降级状态。</p>
               </div>
-              <span id="overviewBlockerStamp" class="panel-stamp">waiting</span>
+              <span id="overviewBlockerStamp" class="panel-stamp">等待数据</span>
             </div>
             <div id="overviewBlockers" class="panel-content"></div>
           </section>
@@ -192,10 +191,10 @@
           <section id="overviewRecoveryPanel" class="panel">
             <div class="panel-head">
               <div>
-                <h3 id="overviewRecoveryTitle">Recovery Control</h3>
-                <p id="overviewRecoveryCopy" class="panel-copy">Baseline takeover, review posture, and whether resume is actually safe.</p>
+                <h3 id="overviewRecoveryTitle">恢复与基线</h3>
+                <p id="overviewRecoveryCopy" class="panel-copy">显示恢复状态、当前基线是否可信，以及是否可以安全恢复交易。</p>
               </div>
-              <button id="inspectRecoveryButton" class="action-button action-muted">Recovery Detail</button>
+              <button id="inspectRecoveryButton" class="action-button action-muted">恢复详情</button>
             </div>
             <div id="overviewRecovery" class="panel-content"></div>
           </section>
@@ -203,8 +202,8 @@
           <section class="panel">
             <div class="panel-head">
               <div>
-                <h3>Operational Metrics</h3>
-                <p class="panel-copy">High-signal counts for decisions, orders, fills, and mismatches.</p>
+                <h3>核心指标</h3>
+                <p class="panel-copy">查看决策次数、订单数、成交数、拒单数和对账异常数等核心运行指标。</p>
               </div>
             </div>
             <div id="overviewMetrics" class="panel-content"></div>
@@ -213,8 +212,8 @@
           <section class="panel">
             <div class="panel-head">
               <div>
-                <h3>Recent Operational Timeline</h3>
-                <p class="panel-copy">Latest state changes, validations, and error signals.</p>
+                <h3>最近运行时间线</h3>
+                <p class="panel-copy">按时间查看最近的状态变化、对账校验和异常信号。</p>
               </div>
             </div>
             <div id="overviewTimeline" class="panel-content"></div>
@@ -225,18 +224,18 @@
       <section id="view-decisions" class="workspace-view" data-view="decisions">
         <div class="page-head">
           <div>
-            <p class="section-kicker">Decision Investigation</p>
-            <h2>Decisions</h2>
+            <p class="section-kicker">决策排查</p>
+            <h2>决策</h2>
           </div>
-          <p class="page-copy">Trace from context and assessments through policy, risk, execution, and audit.</p>
+          <p class="page-copy">追踪一笔交易想法从市场上下文到风控、执行和审计的完整链路。</p>
         </div>
 
         <div class="panel-grid decision-grid">
           <section class="panel panel-hero">
             <div class="panel-head">
               <div>
-                <h3>Latest Decision Detail</h3>
-                <p class="panel-copy">Decision summary with target, policy, risk, and execution outcome.</p>
+                <h3>最新决策详情</h3>
+                <p class="panel-copy">查看最近一次决策的目标仓位、风控结果和最终执行结果。</p>
               </div>
             </div>
             <div id="decisionSpotlight" class="panel-content"></div>
@@ -245,22 +244,22 @@
           <section class="panel">
             <div class="panel-head">
               <div>
-                <h3>Decision Lookup</h3>
-                <p class="panel-copy">Open any decision ID and inspect its full chain in the side panel.</p>
+                <h3>按决策编号查询</h3>
+                <p class="panel-copy">输入决策编号后，可在右侧抽屉查看完整链路明细。</p>
               </div>
             </div>
-            <label for="decisionLookupInput" class="field-label">Decision ID</label>
+            <label for="decisionLookupInput" class="field-label">决策编号</label>
             <div class="field-row field-row-compact">
               <input id="decisionLookupInput" type="text" placeholder="decision_xxx">
-              <button id="loadDecisionButton" class="action-button action-secondary">Open Detail</button>
+              <button id="loadDecisionButton" class="action-button action-secondary">打开详情</button>
             </div>
           </section>
 
           <section class="panel panel-wide">
             <div class="panel-head">
               <div>
-                <h3>Recent Decisions</h3>
-                <p class="panel-copy">Short rolling history for operator review.</p>
+                <h3>最近决策</h3>
+                <p class="panel-copy">显示短期滚动决策历史，方便人工复核。</p>
               </div>
             </div>
             <div id="decisionTable" class="panel-content"></div>
@@ -271,22 +270,22 @@
       <section id="view-execution" class="workspace-view" data-view="execution">
         <div class="page-head">
           <div>
-            <p class="section-kicker">Execution Control</p>
-            <h2>Execution</h2>
+            <p class="section-kicker">执行监控</p>
+            <h2>执行</h2>
           </div>
-          <p class="page-copy">Inspect current execution posture, recent orders and fills, and any execution failures.</p>
+          <p class="page-copy">查看当前交易提交通道、最近订单、最新成交和执行异常。</p>
         </div>
 
         <div class="panel-grid execution-grid">
           <section class="panel panel-hero">
             <div class="panel-head">
               <div>
-                <h3>Execution Posture</h3>
-                <p class="panel-copy">Submit route, readiness, latest order, latest fill, and recovery posture.</p>
+                <h3>执行概况</h3>
+                <p class="panel-copy">显示当前提交通道、执行是否就绪、最新订单、最新成交和恢复状态。</p>
               </div>
               <div class="inline-actions">
-                <button id="inspectLatestOrderButton" class="action-button action-muted">Latest Order</button>
-                <button id="inspectLatestFillButton" class="action-button action-muted">Latest Fill</button>
+                <button id="inspectLatestOrderButton" class="action-button action-muted">最新订单</button>
+                <button id="inspectLatestFillButton" class="action-button action-muted">最新成交</button>
               </div>
             </div>
             <div id="executionSpotlight" class="panel-content"></div>
@@ -295,20 +294,20 @@
           <section class="panel">
             <div class="panel-head">
               <div>
-                <h3>Order Lookup</h3>
-                <p class="panel-copy">Jump directly to an order or fill by identifier.</p>
+                <h3>订单 / 成交查询</h3>
+                <p class="panel-copy">输入订单号或成交号后，可直接查看对应详情。</p>
               </div>
             </div>
             <div class="lookup-stack">
-              <label for="orderLookupInput" class="field-label">Order ID</label>
+              <label for="orderLookupInput" class="field-label">订单编号</label>
               <div class="field-row field-row-compact">
                 <input id="orderLookupInput" type="text" placeholder="client_order_id">
-                <button id="loadOrderButton" class="action-button action-secondary">Open Order</button>
+                <button id="loadOrderButton" class="action-button action-secondary">查看订单</button>
               </div>
-              <label for="fillLookupInput" class="field-label">Fill ID</label>
+              <label for="fillLookupInput" class="field-label">成交编号</label>
               <div class="field-row field-row-compact">
                 <input id="fillLookupInput" type="text" placeholder="fill_id">
-                <button id="loadFillButton" class="action-button action-secondary">Open Fill</button>
+                <button id="loadFillButton" class="action-button action-secondary">查看成交</button>
               </div>
             </div>
           </section>
@@ -316,8 +315,8 @@
           <section class="panel panel-wide">
             <div class="panel-head">
               <div>
-                <h3>Recent Orders</h3>
-                <p class="panel-copy">Lifecycle state, venue, quantity, and linked decision context.</p>
+                <h3>最近订单</h3>
+                <p class="panel-copy">查看订单状态、提交方向、数量和对应的决策来源。</p>
               </div>
             </div>
             <div id="orderTable" class="panel-content"></div>
@@ -326,8 +325,8 @@
           <section class="panel panel-wide">
             <div class="panel-head">
               <div>
-                <h3>Recent Fills</h3>
-                <p class="panel-copy">Newest execution confirmations and pricing details.</p>
+                <h3>最近成交</h3>
+                <p class="panel-copy">查看最新成交回报、成交价格、数量和手续费信息。</p>
               </div>
             </div>
             <div id="fillTable" class="panel-content"></div>
@@ -336,8 +335,8 @@
           <section class="panel">
             <div class="panel-head">
               <div>
-                <h3>Execution Errors</h3>
-                <p class="panel-copy">Blocked submits, rejects, and recent execution failures.</p>
+                <h3>执行异常</h3>
+                <p class="panel-copy">查看最近的阻断、拒单和执行失败原因。</p>
               </div>
             </div>
             <div id="executionErrorsPanel" class="panel-content"></div>
@@ -348,20 +347,20 @@
       <section id="view-diagnostics" class="workspace-view" data-view="diagnostics">
         <div class="page-head">
           <div>
-            <p class="section-kicker">Reliability and Forensics</p>
-            <h2>Diagnostics</h2>
+            <p class="section-kicker">诊断与排障</p>
+            <h2>诊断</h2>
           </div>
-          <p class="page-copy">Reconciliation, replay, account freshness, blockers, and runtime integrity context.</p>
+          <p class="page-copy">查看对账、回放、账户数据新鲜度、阻断历史和系统完整性。</p>
         </div>
 
         <div class="panel-grid diagnostics-grid">
           <section class="panel panel-hero">
             <div class="panel-head">
               <div>
-                <h3>Reconciliation Summary</h3>
-                <p class="panel-copy">Latest severity, mismatch summary, and validation posture.</p>
+                <h3>对账摘要</h3>
+                <p class="panel-copy">显示最新对账级别、差异摘要和校验结果。</p>
               </div>
-              <button id="inspectReconciliationButton" class="action-button action-muted">Inspect</button>
+              <button id="inspectReconciliationButton" class="action-button action-muted">查看详情</button>
             </div>
             <div id="diagnosticReconciliation" class="panel-content"></div>
           </section>
@@ -369,10 +368,10 @@
           <section class="panel">
             <div class="panel-head">
               <div>
-                <h3>Recovery and Baseline</h3>
-                <p class="panel-copy">Current recovery state, baseline takeover status, and operator repair posture.</p>
+                <h3>恢复与基线</h3>
+                <p class="panel-copy">显示当前恢复状态、基线接管情况和人工修复姿态。</p>
               </div>
-              <button id="inspectRecoveryDiagnosticsButton" class="action-button action-muted">Inspect</button>
+              <button id="inspectRecoveryDiagnosticsButton" class="action-button action-muted">查看详情</button>
             </div>
             <div id="diagnosticRecovery" class="panel-content"></div>
           </section>
@@ -380,8 +379,8 @@
           <section class="panel">
             <div class="panel-head">
               <div>
-                <h3>Replay Status</h3>
-                <p class="panel-copy">Latest validation health, baseline switches, and divergence count.</p>
+                <h3>回放状态</h3>
+                <p class="panel-copy">显示最近的回放校验结果、基线切换情况和偏差数量。</p>
               </div>
             </div>
             <div id="diagnosticReplay" class="panel-content"></div>
@@ -390,10 +389,10 @@
           <section class="panel">
             <div class="panel-head">
               <div>
-                <h3>Account State</h3>
-                <p class="panel-copy">Backend, freshness, readiness, and account-side blockers.</p>
+                <h3>账户状态</h3>
+                <p class="panel-copy">显示账户后端、数据新鲜度、是否就绪，以及账户侧阻断原因。</p>
               </div>
-              <button id="inspectRuntimeButton" class="action-button action-muted">Runtime Detail</button>
+              <button id="inspectRuntimeButton" class="action-button action-muted">运行详情</button>
             </div>
             <div id="diagnosticAccount" class="panel-content"></div>
           </section>
@@ -401,8 +400,8 @@
           <section class="panel panel-wide">
             <div class="panel-head">
               <div>
-                <h3>Blocker History</h3>
-                <p class="panel-copy">Recent blocker snapshots and their operator impact.</p>
+                <h3>阻断历史</h3>
+                <p class="panel-copy">按时间查看最近的阻断快照及其对人工操作的影响。</p>
               </div>
             </div>
             <div id="diagnosticBlockers" class="panel-content"></div>
@@ -411,8 +410,8 @@
           <section class="panel">
             <div class="panel-head">
               <div>
-                <h3>Runtime Metrics</h3>
-                <p class="panel-copy">Decision cadence and core runtime counters.</p>
+                <h3>运行指标</h3>
+                <p class="panel-copy">查看决策频率与核心运行计数器。</p>
               </div>
             </div>
             <div id="diagnosticMetrics" class="panel-content"></div>
@@ -423,18 +422,18 @@
       <section id="view-runtime-profiles" class="workspace-view" data-view="runtime-profiles" hidden>
         <div class="page-head">
           <div>
-            <p class="section-kicker">Runtime Control Plane</p>
-            <h2>Runtime Profiles</h2>
+            <p class="section-kicker">运行配置</p>
+            <h2>运行配置档</h2>
           </div>
-          <p class="page-copy">Stage spot or derivatives posture changes safely with revision history, preflight blockers, and restart-gated activation.</p>
+          <p class="page-copy">安全切换现货或合约运行姿态，并查看版本历史、预检查结果和重启激活要求。</p>
         </div>
 
         <div class="panel-grid decision-grid">
           <section class="panel">
             <div class="panel-head">
               <div>
-                <h3>Activation State</h3>
-                <p class="panel-copy">Current source of truth, active revision, pending revision, and restart requirement.</p>
+                <h3>当前生效状态</h3>
+                <p class="panel-copy">查看当前以哪份配置为准、正在生效的版本、待激活版本，以及是否需要重启。</p>
               </div>
             </div>
             <div id="runtimeProfileSummary" class="panel-content"></div>
@@ -443,8 +442,8 @@
           <section class="panel">
             <div class="panel-head">
               <div>
-                <h3>Supervisor Status</h3>
-                <p class="panel-copy">Managed launcher heartbeat, last restart cause, and activation outcome.</p>
+                <h3>托管重启状态</h3>
+                <p class="panel-copy">查看托管启动器的心跳、最近一次重启原因，以及配置激活结果。</p>
               </div>
             </div>
             <div id="runtimeProfileSupervisor" class="panel-content"></div>
@@ -453,96 +452,96 @@
           <section class="panel panel-wide">
             <div class="panel-head">
               <div>
-                <h3>Create Or Update Draft</h3>
-                <p class="panel-copy">Copy current runtime posture into a draft, adjust only operator-safe fields, then stage after preflight passes.</p>
+                <h3>创建或更新草稿</h3>
+                <p class="panel-copy">先复制当前运行配置到草稿，再只调整允许人工安全修改的字段，通过预检查后再进入待激活状态。</p>
               </div>
             </div>
             <form id="runtimeProfileForm" class="operator-form">
               <div class="field-grid">
                 <div class="lookup-stack">
-                  <label for="runtimeProfileRevisionSelect" class="field-label">Draft Revision</label>
+                  <label for="runtimeProfileRevisionSelect" class="field-label">草稿版本</label>
                   <select id="runtimeProfileRevisionSelect"></select>
                 </div>
                 <div class="lookup-stack">
-                  <label for="runtimeProfileLabel" class="field-label">Profile Label</label>
-                  <input id="runtimeProfileLabel" type="text" placeholder="Primary derivatives profile">
+                  <label for="runtimeProfileLabel" class="field-label">配置标签</label>
+                  <input id="runtimeProfileLabel" type="text" placeholder="主合约运行配置">
                 </div>
                 <div class="lookup-stack">
-                  <label for="runtimeProfileDefaultSymbol" class="field-label">Default Symbol</label>
+                  <label for="runtimeProfileDefaultSymbol" class="field-label">默认交易对</label>
                   <input id="runtimeProfileDefaultSymbol" type="text" placeholder="BTC-USDT-SWAP">
                 </div>
                 <div class="lookup-stack">
-                  <label for="runtimeProfileAllowedSymbols" class="field-label">Allowed Symbols</label>
+                  <label for="runtimeProfileAllowedSymbols" class="field-label">允许交易的标的</label>
                   <input id="runtimeProfileAllowedSymbols" type="text" placeholder="BTC-USDT-SWAP,ETH-USDT-SWAP">
                 </div>
                 <div class="lookup-stack">
-                  <label for="runtimeProfileProductType" class="field-label">Product Type</label>
+                  <label for="runtimeProfileProductType" class="field-label">产品类型</label>
                   <select id="runtimeProfileProductType">
-                    <option value="spot">spot</option>
-                    <option value="derivatives">derivatives</option>
+                    <option value="spot">现货</option>
+                    <option value="derivatives">合约</option>
                   </select>
                 </div>
                 <div class="lookup-stack">
-                  <label for="runtimeProfileMarginMode" class="field-label">Margin Mode</label>
+                  <label for="runtimeProfileMarginMode" class="field-label">保证金模式</label>
                   <select id="runtimeProfileMarginMode">
-                    <option value="cash">cash</option>
-                    <option value="cross">cross</option>
-                    <option value="isolated">isolated</option>
+                    <option value="cash">现货现金</option>
+                    <option value="cross">全仓</option>
+                    <option value="isolated">逐仓</option>
                   </select>
                 </div>
                 <div class="lookup-stack">
-                  <label for="runtimeProfileDefaultOrderQty" class="field-label">Default Order Qty</label>
+                  <label for="runtimeProfileDefaultOrderQty" class="field-label">默认下单数量</label>
                   <input id="runtimeProfileDefaultOrderQty" type="number" step="0.000001">
                 </div>
                 <div class="lookup-stack">
-                  <label for="runtimeProfileMaxNotional" class="field-label">Max Notional / Symbol</label>
+                  <label for="runtimeProfileMaxNotional" class="field-label">单标的最大名义金额</label>
                   <input id="runtimeProfileMaxNotional" type="number" step="0.01">
                 </div>
                 <div class="lookup-stack">
-                  <label for="runtimeProfileMaxPositionQty" class="field-label">Max Abs Position Qty</label>
+                  <label for="runtimeProfileMaxPositionQty" class="field-label">最大绝对持仓数量</label>
                   <input id="runtimeProfileMaxPositionQty" type="number" step="0.000001">
                 </div>
                 <div class="lookup-stack">
-                  <label for="runtimeProfileMaxOpenOrders" class="field-label">Max Open Orders</label>
+                  <label for="runtimeProfileMaxOpenOrders" class="field-label">最大挂单数</label>
                   <input id="runtimeProfileMaxOpenOrders" type="number" step="1">
                 </div>
                 <div class="lookup-stack">
-                  <label for="runtimeProfileDefaultLeverage" class="field-label">Default Leverage</label>
+                  <label for="runtimeProfileDefaultLeverage" class="field-label">默认杠杆</label>
                   <input id="runtimeProfileDefaultLeverage" type="number" step="0.1">
                 </div>
                 <div class="lookup-stack">
-                  <label for="runtimeProfileMaxLeverage" class="field-label">Max Leverage</label>
+                  <label for="runtimeProfileMaxLeverage" class="field-label">最大杠杆</label>
                   <input id="runtimeProfileMaxLeverage" type="number" step="0.1">
                 </div>
                 <label class="toggle-switch operator-toggle" for="runtimeProfileShortBias">
                   <input id="runtimeProfileShortBias" type="checkbox">
-                  <span>Short bias enabled</span>
+                  <span>允许做空偏置</span>
                 </label>
                 <label class="toggle-switch operator-toggle" for="runtimeProfileDynamicLeverage">
                   <input id="runtimeProfileDynamicLeverage" type="checkbox">
-                  <span>Dynamic leverage enabled</span>
+                  <span>启用动态杠杆</span>
                 </label>
                 <div class="lookup-stack">
-                  <label for="runtimeProfileActivationNote" class="field-label">Activation Note</label>
-                  <input id="runtimeProfileActivationNote" type="text" placeholder="Reason for next activation">
+                  <label for="runtimeProfileActivationNote" class="field-label">激活说明</label>
+                  <input id="runtimeProfileActivationNote" type="text" placeholder="填写这次切换原因">
                 </div>
               </div>
               <div class="action-row">
-                <button id="runtimeProfileCreateButton" type="button" class="action-button action-secondary">Create Draft</button>
-                <button id="runtimeProfileSaveButton" type="submit" class="action-button action-primary">Save Draft</button>
-                <button id="runtimeProfileStageButton" type="button" class="action-button action-warning">Stage Activation</button>
-                <button id="runtimeProfileCancelPendingButton" type="button" class="action-button action-muted">Cancel Pending</button>
-                <button id="runtimeProfileRestartButton" type="button" class="action-button action-danger">Request Restart</button>
+                <button id="runtimeProfileCreateButton" type="button" class="action-button action-secondary">新建草稿</button>
+                <button id="runtimeProfileSaveButton" type="submit" class="action-button action-primary">保存草稿</button>
+                <button id="runtimeProfileStageButton" type="button" class="action-button action-warning">设为待激活</button>
+                <button id="runtimeProfileCancelPendingButton" type="button" class="action-button action-muted">取消待激活</button>
+                <button id="runtimeProfileRestartButton" type="button" class="action-button action-danger">申请重启生效</button>
               </div>
-              <span id="runtimeProfilePermissionNote" class="command-meta permission-note">Checking runtime profile permissions.</span>
+              <span id="runtimeProfilePermissionNote" class="command-meta permission-note">正在检查运行配置权限。</span>
             </form>
           </section>
 
           <section class="panel">
             <div class="panel-head">
               <div>
-                <h3>Change Impact</h3>
-                <p class="panel-copy">Human-readable diff, classification, and whether the switch is safe to stage.</p>
+                <h3>改动影响</h3>
+                <p class="panel-copy">查看这次改动的人类可读说明、风险分类，以及是否适合进入待激活状态。</p>
               </div>
             </div>
             <div id="runtimeProfileImpact" class="panel-content"></div>
@@ -551,8 +550,8 @@
           <section class="panel panel-wide">
             <div class="panel-head">
               <div>
-                <h3>Revision History</h3>
-                <p class="panel-copy">Immutable revisions with active and pending markers.</p>
+                <h3>版本历史</h3>
+                <p class="panel-copy">查看不可变版本记录，以及当前生效版和待激活版的标记。</p>
               </div>
             </div>
             <div id="runtimeProfileTable" class="panel-content"></div>
@@ -563,18 +562,18 @@
       <section id="view-operators" class="workspace-view" data-view="operators">
         <div class="page-head">
           <div>
-            <p class="section-kicker">Identity Administration</p>
-            <h2>Operators</h2>
+            <p class="section-kicker">身份管理</p>
+            <h2>操作员</h2>
           </div>
-          <p class="page-copy">Manage database-backed viewer, operator, and admin accounts from the authenticated admin session.</p>
+          <p class="page-copy">用管理员会话管理数据库中的只读、操作员和管理员账户。</p>
         </div>
 
         <div class="panel-grid decision-grid">
           <section class="panel">
             <div class="panel-head">
               <div>
-                <h3>Auth Posture</h3>
-                <p class="panel-copy">Current browser auth mode, bootstrap state, and admin eligibility.</p>
+                <h3>认证状态</h3>
+                <p class="panel-copy">查看当前浏览器认证方式、初始化状态，以及是否具备管理员权限。</p>
               </div>
             </div>
             <div id="operatorSummary" class="panel-content"></div>
@@ -583,8 +582,8 @@
           <section class="panel">
             <div class="panel-head">
               <div>
-                <h3>Bootstrap Status</h3>
-                <p class="panel-copy">One-time seed behavior and current stored account counts.</p>
+                <h3>初始化状态</h3>
+                <p class="panel-copy">查看一次性种子账户行为，以及当前数据库里已有的账户数量。</p>
               </div>
             </div>
             <div id="operatorBootstrap" class="panel-content"></div>
@@ -593,36 +592,36 @@
           <section class="panel panel-wide">
             <div class="panel-head">
               <div>
-                <h3>Create Operator User</h3>
-                <p class="panel-copy">Add a new database-backed account with one of the three supported roles.</p>
+                <h3>创建操作员账户</h3>
+                <p class="panel-copy">新增一个写入数据库的控制台账户，并指定只读、操作员或管理员角色。</p>
               </div>
             </div>
             <form id="operatorCreateForm" class="operator-form">
               <div class="field-grid">
                 <div class="lookup-stack">
-                  <label for="operatorCreateUsername" class="field-label">Username</label>
-                  <input id="operatorCreateUsername" type="text" autocomplete="username" placeholder="new username" required>
+                  <label for="operatorCreateUsername" class="field-label">用户名</label>
+                  <input id="operatorCreateUsername" type="text" autocomplete="username" placeholder="输入新用户名" required>
                 </div>
                 <div class="lookup-stack">
-                  <label for="operatorCreatePassword" class="field-label">Password</label>
-                  <input id="operatorCreatePassword" type="password" autocomplete="new-password" placeholder="temporary password" required>
+                  <label for="operatorCreatePassword" class="field-label">密码</label>
+                  <input id="operatorCreatePassword" type="password" autocomplete="new-password" placeholder="输入临时密码" required>
                 </div>
                 <div class="lookup-stack">
-                  <label for="operatorCreateRole" class="field-label">Role</label>
+                  <label for="operatorCreateRole" class="field-label">角色</label>
                   <select id="operatorCreateRole">
-                    <option value="viewer">viewer</option>
-                    <option value="operator">operator</option>
-                    <option value="admin">admin</option>
+                    <option value="viewer">只读用户</option>
+                    <option value="operator">操作员</option>
+                    <option value="admin">管理员</option>
                   </select>
                 </div>
                 <label class="toggle-switch operator-toggle" for="operatorCreateEnabled">
                   <input id="operatorCreateEnabled" type="checkbox" checked>
-                  <span>Enable immediately</span>
+                  <span>创建后立即启用</span>
                 </label>
               </div>
               <div class="action-row">
-                <button id="operatorCreateButton" type="submit" class="action-button action-primary">Create User</button>
-                <span id="operatorPermissionNote" class="command-meta permission-note">Checking admin access.</span>
+                <button id="operatorCreateButton" type="submit" class="action-button action-primary">创建账户</button>
+                <span id="operatorPermissionNote" class="command-meta permission-note">正在检查管理员权限。</span>
               </div>
             </form>
           </section>
@@ -630,8 +629,8 @@
           <section class="panel panel-wide">
             <div class="panel-head">
               <div>
-                <h3>Stored Operator Accounts</h3>
-                <p class="panel-copy">Reset passwords, change roles, disable accounts, or remove accounts from the database.</p>
+                <h3>已存储的操作员账户</h3>
+                <p class="panel-copy">可以在这里重置密码、修改角色、停用账户，或从数据库中删除账户。</p>
               </div>
             </div>
             <div id="operatorUsersTable" class="panel-content"></div>
@@ -646,20 +645,20 @@
     <aside class="drawer-panel" role="dialog" aria-modal="true" aria-labelledby="drawerTitle">
       <header class="drawer-header">
         <div>
-          <p class="section-kicker">Detail Inspector</p>
-          <h2 id="drawerTitle">Operator Detail</h2>
+          <p class="section-kicker">详情抽屉</p>
+          <h2 id="drawerTitle">明细查看</h2>
         </div>
-        <button id="closeDrawerButton" class="action-button action-muted">Close</button>
+        <button id="closeDrawerButton" class="action-button action-muted">关闭</button>
       </header>
       <div id="drawerSummary" class="drawer-summary">
-        <div class="empty-state">Use a table action or lookup to inspect detail.</div>
+        <div class="empty-state">点击表格中的查看按钮，或输入编号后打开详情。</div>
       </div>
       <div id="drawerBody" class="drawer-body">
-        <div class="empty-state">Raw detail is available once an item is selected.</div>
+        <div class="empty-state">选中具体项目后，这里会显示完整明细。</div>
       </div>
     </aside>
   </div>
 
-  <script type="module" src="/ui/app.js"></script>
+  <script type="module" charset="utf-8" src="/ui/app.js"></script>
 </body>
 </html>

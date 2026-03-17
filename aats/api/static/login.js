@@ -22,14 +22,14 @@ async function renderProviders() {
     updateLoginAvailability(payload);
   } catch (error) {
     updateLoginAvailability({ auth_enabled: false, session_enabled: false });
-    setMessage(error.message || "Failed to load login availability.", "danger");
+    setMessage(error.message || "加载登录能力失败。", "danger");
   }
 }
 
 async function login() {
   nodes.button.disabled = true;
-  nodes.button.textContent = "Signing In...";
-  setMessage("Signing in...", "info");
+  nodes.button.textContent = "登录中...";
+  setMessage("正在登录...", "info");
   try {
     await requestJson("/auth/login", {
       method: "POST",
@@ -40,9 +40,9 @@ async function login() {
     });
     window.location.assign("/ui");
   } catch (error) {
-    setMessage(error.message || "Login failed.", "danger");
+    setMessage(error.message || "登录失败。", "danger");
     nodes.button.disabled = false;
-    nodes.button.textContent = "Sign In";
+    nodes.button.textContent = "登录";
   }
 }
 
@@ -53,9 +53,9 @@ function updateLoginAvailability(payload) {
   nodes.button.disabled = !loginAvailable;
   nodes.form.classList.toggle("is-disabled", !loginAvailable);
   if (!payload.auth_enabled) {
-    setMessage("Operator auth is disabled. Open /ui directly in local development mode.", "info");
+    setMessage("当前未启用操作员认证。本地开发模式下可直接打开 /ui。", "info");
   } else if (!payload.session_enabled) {
-    setMessage("Session login is not configured. Add operator session credentials before using the browser console.", "warning");
+    setMessage("当前未配置浏览器会话登录。请先补齐操作员会话配置。", "warning");
   }
 }
 
@@ -73,7 +73,7 @@ async function requestJson(path, options = {}) {
   const payload = text ? safeJsonParse(text) : null;
   if (!response.ok) {
     const detail = typeof payload === "object" && payload !== null && "detail" in payload ? payload.detail : text || response.statusText;
-    throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+    throw new Error(localizeLoginError(typeof detail === "string" ? detail : JSON.stringify(detail)));
   }
   return payload;
 }
@@ -89,4 +89,13 @@ function safeJsonParse(text) {
 function setMessage(message, tone) {
   nodes.message.className = `alert alert-${tone}`;
   nodes.message.textContent = message;
+}
+
+function localizeLoginError(message) {
+  const text = String(message || "");
+  const normalized = text.trim();
+  if (normalized === "operator_auth_required") return "当前操作需要先登录。";
+  if (normalized === "operator_login_failed") return "用户名或密码错误。";
+  if (normalized === "Session login is not configured.") return "当前未配置浏览器会话登录。";
+  return text;
 }

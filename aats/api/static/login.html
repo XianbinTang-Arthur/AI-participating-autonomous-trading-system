@@ -1,36 +1,36 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>AATS Operator Login</title>
+  <title>AATS 登录</title>
   <link rel="stylesheet" href="/ui/app.css">
 </head>
 <body>
   <main class="login-shell">
     <section class="login-panel">
       <div class="login-head">
-        <p class="brand-kicker">AI Autonomous Trading System</p>
-        <h1>Operator Login</h1>
+        <p class="brand-kicker">AI 参与式自主交易系统</p>
+        <h1>控制台登录</h1>
         <p class="brand-copy">
-          Authenticate into the operator console with a configured viewer, operator, or admin account.
+          使用已配置的只读、操作员或管理员账户登录交易控制台。
         </p>
       </div>
 
       <form id="loginForm" class="login-form">
-        <label for="loginUsername" class="field-label">Username</label>
-        <input id="loginUsername" type="text" autocomplete="username" placeholder="operator username" required>
+        <label for="loginUsername" class="field-label">用户名</label>
+        <input id="loginUsername" type="text" autocomplete="username" placeholder="请输入操作员用户名" required>
 
-        <label for="loginPassword" class="field-label">Password</label>
-        <input id="loginPassword" type="password" autocomplete="current-password" placeholder="password" required>
+        <label for="loginPassword" class="field-label">密码</label>
+        <input id="loginPassword" type="password" autocomplete="current-password" placeholder="请输入密码" required>
 
-        <button id="loginButton" type="submit" class="action-button action-primary login-button">Sign In</button>
+        <button id="loginButton" type="submit" class="action-button action-primary login-button">登录</button>
       </form>
 
-      <div id="loginMessage" class="alert alert-info">Enter your operator credentials to continue.</div>
+      <div id="loginMessage" class="alert alert-info">请输入控制台账户和密码后继续。</div>
     </section>
   </main>
 
-  <script type="module" src="/ui/login.js"></script>
+  <script type="module" charset="utf-8" src="/ui/login.js"></script>
 </body>
 </html>
