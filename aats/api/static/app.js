@@ -1,4 +1,5 @@
-const AUTO_REFRESH_MS = 5000;
+const AUTO_REFRESH_MS = 15000;
+const BACKGROUND_REFRESH_MS = 60000;
 
 const state = {
   activeView: "overview",
@@ -197,6 +198,17 @@ function bindEvents() {
     if (event.key === "Escape") {
       closeDrawer();
     }
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (!nodes.autoRefreshToggle.checked) {
+      return;
+    }
+    if (document.hidden) {
+      cancelScheduledRefresh();
+      scheduleRefresh();
+      return;
+    }
+    void refreshDashboard();
   });
   viewTabs.forEach((tab) => {
     tab.addEventListener("click", () => setActiveView(tab.dataset.view || "overview"));
@@ -456,7 +468,8 @@ function scheduleRefresh() {
   if (!nodes.autoRefreshToggle.checked) {
     return;
   }
-  state.refreshTimer = window.setTimeout(() => void refreshDashboard(), AUTO_REFRESH_MS);
+  const delay = document.hidden ? BACKGROUND_REFRESH_MS : AUTO_REFRESH_MS;
+  state.refreshTimer = window.setTimeout(() => void refreshDashboard(), delay);
 }
 
 function cancelScheduledRefresh() {

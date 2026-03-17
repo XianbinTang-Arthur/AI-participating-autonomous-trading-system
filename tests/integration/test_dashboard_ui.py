@@ -43,6 +43,8 @@ class TestDashboardUI(unittest.TestCase):
         self.assertIn("Runtime Profiles", root.text)
         self.assertIn("/ui/app.css", ui.text)
         self.assertIn("refreshDashboard", js.text)
+        self.assertIn("const AUTO_REFRESH_MS = 15000;", js.text)
+        self.assertIn("const BACKGROUND_REFRESH_MS = 60000;", js.text)
         self.assertIn("/auth/session", js.text)
         self.assertIn("/runtime-profiles", js.text)
         self.assertIn("runtime_profile_control_enabled", js.text)
@@ -50,6 +52,7 @@ class TestDashboardUI(unittest.TestCase):
         self.assertIn("/auth/login", login_js.text)
         self.assertIn(".workspace-nav", css.text)
         self.assertIn(".login-shell", css.text)
+        self.assertIn("Auto refresh every 15 seconds", root.text)
 
     def test_dashboard_redirects_to_login_when_auth_is_enabled(self) -> None:
         settings = AATSSettings.model_validate(
