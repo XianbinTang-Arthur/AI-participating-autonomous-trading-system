@@ -5,7 +5,7 @@ from typing import Literal
 
 from pydantic import Field
 
-from aats.schemas.common import SchemaBase
+from aats.schemas.common import SchemaBase, new_id
 from aats.schemas.system import MarginModelType, ProductType
 
 OrderLifecycleStatus = Literal[
@@ -21,6 +21,14 @@ OrderLifecycleStatus = Literal[
     "BLOCKED",
     "DRY_RUN",
     "EXPIRED",
+]
+
+ObligationStatus = Literal[
+    "ACTIVE",
+    "PARTIALLY_CONSUMED",
+    "RELEASED",
+    "CANCELED",
+    "FAILED",
 ]
 
 
@@ -154,3 +162,21 @@ class FillEvent(SchemaBase):
     exchange_timestamp: datetime
     ingestion_timestamp: datetime
     order_status_after_fill: OrderLifecycleStatus | None = None
+
+
+class OrderObligation(SchemaBase):
+    obligation_id: str = Field(default_factory=lambda: new_id("obl"))
+    client_order_id: str
+    decision_id: str
+    intent_id: str
+    symbol: str
+    side: Literal["buy", "sell"]
+    reserve_currency: str
+    reserved_amount: float
+    consumed_amount: float = 0.0
+    released_amount: float = 0.0
+    status: ObligationStatus = "ACTIVE"
+    product_type: ProductType = "spot"
+    margin_mode: MarginModelType = "cash"
+    reference_price: float | None = None
+    last_update_ts: datetime | None = None

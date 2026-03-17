@@ -5,7 +5,7 @@ from typing import Protocol
 
 from aats.schemas.common import EventEnvelope
 from aats.schemas.audit import DecisionAuditRecord
-from aats.schemas.execution import FillEvent, OrderState
+from aats.schemas.execution import FillEvent, OrderObligation, OrderState
 from aats.schemas.portfolio import PortfolioSnapshot
 from aats.schemas.reconciliation import ReconciliationReport
 from aats.schemas.operator import OperatorUserRecord
@@ -128,6 +128,20 @@ class ExecutionRepository(Protocol):
         ...
 
 
+class ExecutionObligationRepository(Protocol):
+    def save_obligation(self, obligation: OrderObligation) -> OrderObligation:
+        ...
+
+    def get_obligation(self, client_order_id: str) -> OrderObligation | None:
+        ...
+
+    def active_obligations(self) -> list[OrderObligation]:
+        ...
+
+    def all_obligations(self) -> list[OrderObligation]:
+        ...
+
+
 class PortfolioRepository(Protocol):
     def save_snapshot(self, snapshot: PortfolioSnapshot) -> None:
         ...
@@ -183,6 +197,12 @@ class AuditRepository(Protocol):
         ...
 
     def get(self, decision_id: str) -> DecisionAuditRecord | None:
+        ...
+
+    def latest(self) -> DecisionAuditRecord | None:
+        ...
+
+    def recent(self, *, limit: int) -> list[DecisionAuditRecord]:
         ...
 
     def all(self) -> list[DecisionAuditRecord]:

@@ -28,6 +28,7 @@ from aats.services.execution_engine.exchange_adapter import ExchangeAdapter
 from aats.services.execution_engine.okx_account import OKXAccountService
 from aats.services.execution_engine.okx_adapter import OKXExecutionAdapter
 from aats.services.execution_engine.baseline_import import AccountBaselineImportService
+from aats.services.execution_engine.obligations import ExecutionObligationService
 from aats.services.execution_engine.recovery import ExecutionRecoveryService
 from aats.services.execution_engine.okx_rest import OKXRESTClient
 from aats.services.execution_engine.order_manager import OrderManager
@@ -67,6 +68,7 @@ from aats.storage.base import (
     AuditRepository,
     EventStore,
     ExecutionRepository,
+    ExecutionObligationRepository,
     OperatorUserRepository,
     PortfolioRepository,
     ReconciliationRepository,
@@ -76,6 +78,8 @@ from aats.storage.event_store import InMemoryEventStore
 from aats.storage.event_store_postgres import PostgresEventStore
 from aats.storage.execution_repo import InMemoryExecutionRepository
 from aats.storage.execution_repo_postgres import PostgresExecutionRepository
+from aats.storage.obligation_repo import InMemoryExecutionObligationRepository
+from aats.storage.obligation_repo_postgres import PostgresExecutionObligationRepository
 from aats.storage.operator_repo import InMemoryOperatorUserRepository
 from aats.storage.operator_repo_postgres import PostgresOperatorUserRepository
 from aats.storage.portfolio_repo import InMemoryPortfolioRepository
@@ -126,6 +130,7 @@ class StorageBackends:
     audit_repo: AuditRepository
     portfolio_repo: PortfolioRepository
     execution_repo: ExecutionRepository
+    obligation_repo: ExecutionObligationRepository
     reconciliation_repo: ReconciliationRepository
     operator_repo: OperatorUserRepository
     runtime_profile_repo: RuntimeProfileRepository
@@ -165,6 +170,7 @@ class ApplicationRuntime:
     audit_repo: AuditRepository
     portfolio_repo: PortfolioRepository
     execution_repo: ExecutionRepository
+    obligation_repo: ExecutionObligationRepository
     reconciliation_repo: ReconciliationRepository
     operator_repo: OperatorUserRepository
     runtime_profile_repo: RuntimeProfileRepository
@@ -276,6 +282,7 @@ def build_storage_backends(settings: AATSSettings) -> StorageBackends:
             audit_repo=InMemoryAuditRepository(),
             portfolio_repo=InMemoryPortfolioRepository(),
             execution_repo=InMemoryExecutionRepository(),
+            obligation_repo=InMemoryExecutionObligationRepository(),
             reconciliation_repo=InMemoryReconciliationRepository(),
             operator_repo=InMemoryOperatorUserRepository(),
             runtime_profile_repo=InMemoryRuntimeProfileRepository(),
@@ -293,6 +300,7 @@ def build_storage_backends(settings: AATSSettings) -> StorageBackends:
         audit_repo=PostgresAuditRepository(database_runtime.session_factory),
         portfolio_repo=PostgresPortfolioRepository(database_runtime.session_factory),
         execution_repo=PostgresExecutionRepository(database_runtime.session_factory),
+        obligation_repo=PostgresExecutionObligationRepository(database_runtime.session_factory),
         reconciliation_repo=PostgresReconciliationRepository(database_runtime.session_factory),
         operator_repo=PostgresOperatorUserRepository(database_runtime.session_factory),
         runtime_profile_repo=PostgresRuntimeProfileRepository(database_runtime.session_factory),
@@ -444,10 +452,17 @@ async def build_runtime(
         policy_profile=runtime_layering.policy_profile,
     )
     execution_planner = ExecutionPlanner(settings=runtime_settings)
+    obligation_service = ExecutionObligationService(
+        settings=runtime_settings,
+        obligation_repo=storage.obligation_repo,
+        account_snapshot_loader=lambda: account_service.refresh(),
+        price_provider=market_gateway.latest_price,
+    )
     order_manager = OrderManager(
         bus=bus,
         adapter=execution_adapter,
         execution_repo=storage.execution_repo,
+        obligation_service=obligation_service,
         kill_switch=kill_switch,
     )
 
@@ -575,6 +590,9 @@ async def build_runtime(
             imported = baseline_import_service.import_snapshot(
                 exchange_snapshot=account_snapshot,
                 portfolio_state=portfolio_service.state,
+                product_type=state_scope.product_type,
+                margin_mode=state_scope.margin_mode,
+                allowed_symbols=state_scope.allowed_symbols,
             )
             imported_baseline = imported.snapshot
             imported_baseline_event_id = imported.event_id
@@ -643,6 +661,7 @@ async def build_runtime(
         audit_repo=storage.audit_repo,
         portfolio_repo=storage.portfolio_repo,
         execution_repo=storage.execution_repo,
+        obligation_repo=storage.obligation_repo,
         reconciliation_repo=storage.reconciliation_repo,
         operator_repo=storage.operator_repo,
         runtime_profile_repo=storage.runtime_profile_repo,

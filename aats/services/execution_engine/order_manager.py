@@ -8,6 +8,7 @@ from aats.schemas.common import new_id, utc_now
 from aats.schemas.execution import OrderIntent, OrderState
 from aats.schemas.operator import ExecutionErrorSummary
 from aats.services.execution_engine.exchange_adapter import ExchangeAdapter
+from aats.services.execution_engine.obligations import ExecutionObligationService, ExecutionReservationError
 from aats.services.governance_engine.kill_switch import KillSwitch
 from aats.storage.base import ExecutionRepository
 
@@ -19,11 +20,13 @@ class OrderManager:
         bus: EventBus,
         adapter: ExchangeAdapter,
         execution_repo: ExecutionRepository,
+        obligation_service: ExecutionObligationService | None = None,
         kill_switch: KillSwitch,
     ) -> None:
         self.bus = bus
         self.adapter = adapter
         self.execution_repo = execution_repo
+        self.obligation_service = obligation_service
         self.kill_switch = kill_switch
         self.logger = get_logger("aats.execution_engine")
 
@@ -62,6 +65,39 @@ class OrderManager:
             if callable(preview_client_order_id_fn)
             else None
         ) or intent.idempotency_key or new_id("clord")
+        try:
+            if self.obligation_service is not None:
+                await self.obligation_service.reserve_for_intent(
+                    intent=intent,
+                    client_order_id=preview_client_order_id,
+                )
+        except ExecutionReservationError as exc:
+            blocked_state = OrderState(
+                decision_id=intent.decision_id,
+                intent_id=intent.intent_id,
+                symbol=intent.symbol,
+                client_order_id=preview_client_order_id,
+                venue="OKX" if self.adapter.readiness().get("backend") == "okx" else "PAPER",
+                exchange_order_id=None,
+                status="BLOCKED",
+                submission_mode="local_order_manager",
+                submitted_ts=None,
+                last_update_ts=utc_now(),
+                requested_qty=intent.quantity,
+                filled_qty=0.0,
+                remaining_qty=intent.quantity,
+                average_fill_price=None,
+                fees=0.0,
+                product_type=intent.product_type,
+                target_leverage=intent.target_leverage,
+                margin_mode=intent.margin_mode,
+                exposure_side=intent.exposure_side,
+                position_intent=intent.position_intent,
+                execution_error=str(exc),
+                submission_payload={},
+            )
+            await self._persist_order_state(order_state=blocked_state, key=intent.symbol)
+            return
         created_state = OrderState(
             decision_id=intent.decision_id,
             intent_id=intent.intent_id,
@@ -141,13 +177,17 @@ class OrderManager:
             if fill.client_order_id != persisted_order_state.client_order_id:
                 fill = fill.model_copy(update={"client_order_id": persisted_order_state.client_order_id})
             await self._persist_fill(fill)
+        self._finalize_obligation(order_state=persisted_order_state)
 
     async def sync_exchange_state(self) -> None:
         order_states, fills = await self.adapter.sync(self.execution_repo.open_order_states())
+        persisted_states: list[OrderState] = []
         for order_state in order_states:
-            await self._persist_order_state(order_state=order_state, key=order_state.symbol)
+            persisted_states.append(await self._persist_order_state(order_state=order_state, key=order_state.symbol))
         for fill in fills:
             await self._persist_fill(fill)
+        for order_state in persisted_states:
+            self._finalize_obligation(order_state=order_state)
 
     async def cancel_order(self, client_order_id: str) -> OrderState:
         current = self.execution_repo.get_order_state(client_order_id)
@@ -165,6 +205,7 @@ class OrderManager:
         persisted = await self._persist_order_state(order_state=state, key=current.symbol)
         for fill in fills:
             await self._persist_fill(fill)
+        self._finalize_obligation(order_state=persisted)
         return persisted
 
     async def _persist_order_state(self, *, order_state: OrderState, key: str) -> OrderState:
@@ -196,6 +237,8 @@ class OrderManager:
     async def _persist_fill(self, fill) -> None:
         if not self.execution_repo.save_fill(fill):
             return
+        if self.obligation_service is not None:
+            self.obligation_service.consume_for_fill(fill)
         log_event(
             self.logger,
             "fill_event_created",
@@ -245,3 +288,8 @@ class OrderManager:
             payload_model=summary,
             source_component="execution_engine",
         )
+
+    def _finalize_obligation(self, *, order_state: OrderState) -> None:
+        if self.obligation_service is None:
+            return
+        self.obligation_service.finalize_for_order_state(order_state)

@@ -104,6 +104,30 @@ class FillEventModel(Base):
     payload: Mapped[dict] = mapped_column(JSON, nullable=False)
 
 
+class OrderObligationModel(Base):
+    __tablename__ = "order_obligations"
+    __table_args__ = (
+        Index("ix_order_obligations_scope_status", "product_type", "margin_mode", "status"),
+        Index("ix_order_obligations_currency_status", "reserve_currency", "status"),
+    )
+
+    client_order_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    obligation_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    decision_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    intent_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    reserve_currency: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    reserved_amount: Mapped[float] = mapped_column(Float, nullable=False)
+    consumed_amount: Mapped[float] = mapped_column(Float, nullable=False)
+    released_amount: Mapped[float] = mapped_column(Float, nullable=False)
+    product_type: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
+    margin_mode: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
+    last_update_ts: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+
+
 class ReconciliationReportModel(Base):
     __tablename__ = "reconciliation_reports"
     __table_args__ = (
