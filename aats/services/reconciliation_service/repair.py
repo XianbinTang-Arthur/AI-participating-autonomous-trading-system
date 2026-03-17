@@ -73,6 +73,8 @@ class ReconciliationService:
 
     async def handle_portfolio_snapshot(self, message: dict) -> None:
         envelope = parse_envelope(message)
+        if self._report_exists_for_portfolio_snapshot_ref(envelope.event_id):
+            return
         snapshot = PortfolioSnapshot.model_validate(envelope.payload)
         report = self._build_report(
             decision_id=snapshot.decision_id,
@@ -231,6 +233,12 @@ class ReconciliationService:
                 if isinstance(fill_id, str) and fill_id:
                     accepted_ids.add(fill_id)
         return accepted_ids
+
+    def _report_exists_for_portfolio_snapshot_ref(self, portfolio_snapshot_ref: str) -> bool:
+        return any(
+            report.portfolio_snapshot_ref == portfolio_snapshot_ref
+            for report in self.reconciliation_repo.history_for_scope(scope=self.runtime_scope)
+        )
 
     async def _persist_report(self, report: ReconciliationReport) -> None:
         self.reconciliation_repo.save_report(report)

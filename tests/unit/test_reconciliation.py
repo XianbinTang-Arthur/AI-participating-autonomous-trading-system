@@ -4,6 +4,7 @@ import unittest
 from datetime import timedelta
 
 from aats.bootstrap.settings import AATSSettings
+from aats.bus.memory_bus import InMemoryEventBus
 from aats.events import topics
 from aats.events.envelopes import build_envelope
 from aats.schemas.common import utc_now
@@ -23,6 +24,10 @@ from aats.services.portfolio_service.reconstruction import PortfolioReconstructi
 from aats.services.reconciliation_service.comparator import StateComparator
 from aats.services.reconciliation_service.fetcher import ExchangeStateFetcher
 from aats.services.reconciliation_service.repair import ReconciliationRepairService, ReconciliationService
+from aats.storage.event_store import InMemoryEventStore
+from aats.storage.execution_repo import InMemoryExecutionRepository
+from aats.storage.portfolio_repo import InMemoryPortfolioRepository
+from aats.storage.reconciliation_repo import InMemoryReconciliationRepository
 
 
 class TestReconciliationComparator(unittest.TestCase):
@@ -1274,6 +1279,10 @@ class TestReconciliationComparator(unittest.TestCase):
                     source_component="test",
                 )
 
+            def by_topic(self, topic: str):
+                latest = self.latest(topic)
+                return [latest] if latest is not None else []
+
         class _AccountService:
             def latest_snapshot(self):
                 return exchange_snapshot
@@ -1305,6 +1314,74 @@ class TestReconciliationComparator(unittest.TestCase):
 
         self.assertEqual(report.severity, "CLEAN")
         self.assertEqual(report.fill_diff["exchange"], {})
+
+
+class TestReconciliationServiceIdempotency(unittest.IsolatedAsyncioTestCase):
+    async def test_duplicate_portfolio_snapshot_event_does_not_create_duplicate_report(self) -> None:
+        now = utc_now()
+        event_store = InMemoryEventStore()
+        bus = InMemoryEventBus(event_store=event_store, persistence_mode="strict")
+        reconciliation_repo = InMemoryReconciliationRepository()
+        service = ReconciliationService(
+            settings=AATSSettings.model_validate({}),
+            bus=bus,
+            fetcher=ExchangeStateFetcher(account_service=None),
+            comparator=StateComparator(),
+            repair_service=ReconciliationRepairService(),
+            reconciliation_repo=reconciliation_repo,
+            execution_repo=InMemoryExecutionRepository(),
+            portfolio_repo=InMemoryPortfolioRepository(),
+            event_store=event_store,
+            reconstruction_service=PortfolioReconstructionService(
+                initial_usdt_balance=10_000.0,
+                snapshot_builder=PortfolioSnapshotBuilder(pnl_calculator=PortfolioPnLCalculator()),
+            ),
+            price_provider=lambda _symbol: 0.0,
+            bootstrap_portfolio_from_exchange=False,
+            metrics=None,
+        )
+        snapshot = PortfolioSnapshot(
+            snapshot_ts=now,
+            decision_id="decision_recon_dup",
+            source_fill_id="fill_recon_dup",
+            balances={"USDT": 9_950.0, "BTC": 0.001},
+            positions=[
+                Position(
+                    symbol="BTC-USDT",
+                    position_qty=0.001,
+                    position_notional=50.0,
+                    avg_entry_price=50_000.0,
+                    unrealized_pnl=0.0,
+                )
+            ],
+            cost_basis={"BTC-USDT": 50_000.0},
+            realized_pnl=0.0,
+            unrealized_pnl=0.0,
+            total_equity=10_000.0,
+            gross_exposure=50.0,
+            net_exposure=50.0,
+            risk_budget_usage={},
+        )
+        envelope = build_envelope(
+            topic=topics.PORTFOLIO_SNAPSHOTS,
+            key="portfolio",
+            payload_model=snapshot,
+            source_component="test",
+        )
+        message = {
+            "topic": topics.PORTFOLIO_SNAPSHOTS,
+            "key": "portfolio",
+            "payload": envelope.model_dump(mode="json"),
+        }
+
+        await service.handle_portfolio_snapshot(message)
+        await service.handle_portfolio_snapshot(message)
+
+        self.assertEqual(len(reconciliation_repo.history()), 1)
+        self.assertEqual(event_store.count(topic=topics.RECONCILIATION_REPORTS), 1)
+        report = reconciliation_repo.latest()
+        self.assertIsNotNone(report)
+        self.assertEqual(report.portfolio_snapshot_ref, envelope.event_id)
 
 
 if __name__ == "__main__":
