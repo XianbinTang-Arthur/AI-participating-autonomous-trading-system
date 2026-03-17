@@ -1,10 +1,25 @@
 from __future__ import annotations
 
 import unittest
+from decimal import Decimal
 from datetime import datetime, timezone
 
+from aats.bootstrap.settings import AATSSettings
+from aats.events import topics
+from aats.events.envelopes import build_envelope
+from aats.schemas.features import FeatureSnapshot
+from aats.schemas.market import MarketSnapshot
 from aats.schemas.portfolio import PortfolioSnapshot
+from aats.services.governance_engine.kill_switch import KillSwitch
+from aats.services.governance_engine.mode import RuntimeModeController
 from aats.services.decision_engine.context_builder import DecisionContextBuilder
+from aats.storage.event_store import InMemoryEventStore
+from aats.storage.portfolio_repo import InMemoryPortfolioRepository
+
+
+class _FakeHealthService:
+    def snapshot(self):  # pragma: no cover - not used by these tests
+        raise AssertionError("health snapshot should not be requested in this unit test")
 
 
 class TestDecisionContextBuilder(unittest.TestCase):
@@ -24,7 +39,7 @@ class TestDecisionContextBuilder(unittest.TestCase):
 
         quantity = DecisionContextBuilder._position_qty(snapshot, "BTC-USDT", "spot")
 
-        self.assertAlmostEqual(quantity, 0.0015)
+        self.assertEqual(quantity, Decimal("0.0015"))
 
     def test_position_qty_does_not_treat_balance_as_derivatives_position(self) -> None:
         snapshot = PortfolioSnapshot(
@@ -45,6 +60,93 @@ class TestDecisionContextBuilder(unittest.TestCase):
         quantity = DecisionContextBuilder._position_qty(snapshot, "BTC-USDT-SWAP", "derivatives")
 
         self.assertEqual(quantity, 0.0)
+
+    def test_build_uses_repo_snapshot_when_portfolio_event_is_missing(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "default_symbol": "BTC-USDT",
+                "allowed_symbols": ("BTC-USDT",),
+                "trading_product_type": "spot",
+                "margin_mode": "cash",
+            }
+        )
+        event_store = InMemoryEventStore()
+        portfolio_repo = InMemoryPortfolioRepository()
+        snapshot = PortfolioSnapshot(
+            snapshot_ts=datetime.now(timezone.utc),
+            balances={"USDT": 1_000.0, "BTC": 0.0015},
+            positions=[],
+            cost_basis={},
+            realized_pnl=0.0,
+            unrealized_pnl=0.0,
+            total_equity=1_000.0,
+            gross_exposure=0.0,
+            net_exposure=0.0,
+            risk_budget_usage={},
+        )
+        portfolio_repo.save_snapshot(snapshot)
+        event_store.append(
+            build_envelope(
+                topic=topics.MARKET_SNAPSHOTS,
+                key="BTC-USDT",
+                payload_model=MarketSnapshot(
+                    symbol="BTC-USDT",
+                    exchange="OKX",
+                    snapshot_ts=datetime.now(timezone.utc),
+                    best_bid=70_000.0,
+                    best_ask=70_001.0,
+                    last_price=70_000.5,
+                    bid_size=1.0,
+                    ask_size=1.0,
+                    volume_24h=10_000_000.0,
+                    kline_15m={"open": 69_900.0, "high": 70_100.0, "low": 69_800.0, "close": 70_000.5},
+                    kline_1h={"open": 69_800.0, "high": 70_200.0, "low": 69_700.0, "close": 70_000.5},
+                ),
+                source_component="test",
+            )
+        )
+        event_store.append(
+            build_envelope(
+                topic=topics.FEATURE_SNAPSHOTS,
+                key="BTC-USDT",
+                payload_model=FeatureSnapshot(
+                    symbol="BTC-USDT",
+                    snapshot_ts=datetime.now(timezone.utc),
+                    market_snapshot_ref="evt_market",
+                    trend_strength=0.7,
+                    volatility_state="medium",
+                    volatility_value=0.2,
+                    momentum_score=12.0,
+                    liquidity_score=0.8,
+                    regime_indicator="trend",
+                    regime_confidence=0.75,
+                    multi_timeframe_alignment=0.6,
+                    composite_alpha_score=0.4,
+                    suggested_position_scale=0.5,
+                    volatility_target_scale=1.0,
+                    feature_version="test",
+                ),
+                source_component="test",
+            )
+        )
+
+        builder = DecisionContextBuilder(
+            settings=settings,
+            event_store=event_store,
+            portfolio_repo=portfolio_repo,
+            mode_controller=RuntimeModeController(settings=settings, kill_switch=KillSwitch()),
+            health_service=_FakeHealthService(),
+        )
+
+        context = builder.build(
+            "BTC-USDT",
+            "15m",
+            decision_id="decision_test",
+            health_snapshot_ref="evt_health",
+        )
+
+        self.assertTrue(context.portfolio_snapshot_ref.startswith("portfolio_snapshot:"))
+        self.assertAlmostEqual(context.current_position_qty, 0.0015)
 
 
 if __name__ == "__main__":

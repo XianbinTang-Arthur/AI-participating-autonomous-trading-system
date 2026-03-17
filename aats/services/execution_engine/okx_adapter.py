@@ -197,7 +197,7 @@ class OKXExecutionAdapter(ExchangeAdapter):
                     limit=self.settings.okx_fill_fetch_limit,
                 )
                 fills = self._map_fill_events(
-                    intent=intent,
+                    intent=self._intent_from_state(state),
                     client_order_id=state.client_order_id,
                     exchange_fills=self._select_exchange_fills(
                         exchange_fills=self._parse_fill_rows(fills_payload),
@@ -307,7 +307,7 @@ class OKXExecutionAdapter(ExchangeAdapter):
                     limit=self.settings.okx_fill_fetch_limit,
                 )
                 fills = self._map_fill_events(
-                    intent=intent,
+                    intent=self._intent_from_state(state),
                     client_order_id=order_state.client_order_id,
                     exchange_fills=self._select_exchange_fills(
                         exchange_fills=self._parse_fill_rows(fills_payload),

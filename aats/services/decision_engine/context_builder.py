@@ -58,15 +58,15 @@ class DecisionContextBuilder:
             self.event_store.by_topic(topics.PORTFOLIO_SNAPSHOTS),
             self.state_scope,
         )
+        portfolio_snapshot = latest_matching_snapshot(self.portfolio_repo.history(), self.state_scope)
 
         if market_event is None:
             raise RuntimeError("Market snapshot is required before building decision context")
         if feature_event is None:
             raise RuntimeError("Feature snapshot is required before building decision context")
-        if portfolio_event is None:
+        if portfolio_event is None and portfolio_snapshot is None:
             raise RuntimeError("Portfolio snapshot is required before building decision context")
 
-        portfolio_snapshot = latest_matching_snapshot(self.portfolio_repo.history(), self.state_scope)
         current_position_qty = self._position_qty(portfolio_snapshot, symbol, self.settings.trading_product_type)
         current_exposure_side = self._exposure_side(current_position_qty)
         return DecisionContext(
@@ -76,7 +76,11 @@ class DecisionContextBuilder:
             as_of_ts=utc_now(),
             market_snapshot_ref=market_event.event_id,
             feature_snapshot_ref=feature_event.event_id,
-            portfolio_snapshot_ref=portfolio_event.event_id,
+            portfolio_snapshot_ref=(
+                portfolio_event.event_id
+                if portfolio_event is not None
+                else f"portfolio_snapshot:{portfolio_snapshot.created_at.isoformat()}"
+            ),
             health_snapshot_ref=health_snapshot_ref,
             mode=self.mode_controller.mode,
             policy_flags=[],

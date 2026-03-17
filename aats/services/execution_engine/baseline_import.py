@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections.abc import Sequence
 
 from aats.events import topics
 from aats.events.envelopes import build_envelope
@@ -24,10 +25,16 @@ class AccountBaselineImportService:
         *,
         exchange_snapshot: ExchangeAccountSnapshot,
         portfolio_state: PortfolioState,
+        product_type: str,
+        margin_mode: str,
+        allowed_symbols: Sequence[str],
     ) -> ImportedAccountBaseline:
         requires_review = bool(exchange_snapshot.open_orders)
         baseline = self._build_baseline(
             exchange_snapshot=exchange_snapshot,
+            product_type=product_type,
+            margin_mode=margin_mode,
+            allowed_symbols=allowed_symbols,
             baseline_status=(
                 "baseline_import_requires_review"
                 if requires_review
@@ -52,6 +59,9 @@ class AccountBaselineImportService:
         *,
         exchange_snapshot: ExchangeAccountSnapshot,
         portfolio_state: PortfolioState,
+        product_type: str,
+        margin_mode: str,
+        allowed_symbols: Sequence[str],
         previous_baseline_ref: str | None,
         operator_action_ref: str | None,
         trigger_reason: str,
@@ -59,6 +69,9 @@ class AccountBaselineImportService:
         requires_review = bool(exchange_snapshot.open_orders)
         baseline = self._build_baseline(
             exchange_snapshot=exchange_snapshot,
+            product_type=product_type,
+            margin_mode=margin_mode,
+            allowed_symbols=allowed_symbols,
             baseline_status="rebaseline_completed",
             baseline_kind="operator_rebaseline",
             safe_for_automatic_continuation=not requires_review,
@@ -96,6 +109,9 @@ class AccountBaselineImportService:
     def _build_baseline(
         *,
         exchange_snapshot: ExchangeAccountSnapshot,
+        product_type: str,
+        margin_mode: str,
+        allowed_symbols: Sequence[str],
         baseline_status: str,
         baseline_kind: str,
         safe_for_automatic_continuation: bool,
@@ -112,6 +128,9 @@ class AccountBaselineImportService:
             account_source=exchange_snapshot.account_source,
             exchange_snapshot_ts=exchange_snapshot.fetched_at,
             imported_at=exchange_snapshot.fetched_at,
+            product_type=product_type,  # type: ignore[arg-type]
+            margin_mode=margin_mode,  # type: ignore[arg-type]
+            allowed_symbols=list(allowed_symbols),
             baseline_status=baseline_status,
             baseline_kind=baseline_kind,
             safe_for_automatic_continuation=safe_for_automatic_continuation,

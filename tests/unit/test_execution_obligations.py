@@ -281,6 +281,41 @@ class TestExecutionObligations(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(obligation.consumed_amount, 60.0)
         self.assertAlmostEqual(obligation.released_amount, 0.0)
 
+    async def test_outbox_path_finalizes_failed_zero_fill_obligation_with_terminal_state(self) -> None:
+        snapshot = ExchangeAccountSnapshot(
+            account_source="okx",
+            fetched_at=utc_now(),
+            balances=[ExchangeBalance(currency="USDT", total=100.0, available=100.0, frozen=0.0)],
+        )
+        obligation_repo = InMemoryExecutionObligationRepository()
+        outbox = _RecordingOutboxPublisher(obligation_repo)
+        manager = OrderManager(
+            bus=InMemoryEventBus(event_store=InMemoryEventStore(), persistence_mode="strict"),
+            adapter=_FailedAdapter(),
+            execution_repo=InMemoryExecutionRepository(),
+            obligation_service=ExecutionObligationService(
+                settings=AATSSettings.model_validate({"account_backend": "okx", "account_read_enabled": True}),
+                obligation_repo=obligation_repo,
+                account_snapshot_loader=lambda: _return_snapshot(snapshot),
+                price_provider=lambda _symbol: 60_000.0,
+            ),
+            execution_outbox_publisher=outbox,
+            kill_switch=KillSwitch(),
+        )
+
+        await manager.handle_order_intent(_intent_message(_intent("intent_outbox_failed", "decision_outbox_failed", "client_outbox_failed")))
+
+        obligation = obligation_repo.get_obligation("clclient_outbox_failed")
+        self.assertIsNotNone(obligation)
+        self.assertEqual(len(outbox.order_state_obligations), 3)
+        self.assertIsNotNone(outbox.order_state_obligations[0])
+        self.assertEqual(outbox.order_state_obligations[1], None)
+        self.assertIsNotNone(outbox.order_state_obligations[2])
+        self.assertEqual(outbox.order_state_obligations[2].status, "FAILED")
+        self.assertAlmostEqual(outbox.order_state_obligations[2].released_amount, 60.0)
+        self.assertEqual(obligation.status, "FAILED")
+        self.assertAlmostEqual(obligation.released_amount, 60.0)
+
 
 async def _return_snapshot(snapshot: ExchangeAccountSnapshot) -> ExchangeAccountSnapshot:
     return snapshot

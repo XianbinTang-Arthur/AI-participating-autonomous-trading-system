@@ -46,6 +46,54 @@ class PostgresAuditRepository:
             )
         return DecisionAuditRecord.model_validate(row.payload) if row is not None else None
 
+    def latest(self) -> DecisionAuditRecord | None:
+        with self.session_factory() as session:
+            latest_revision = (
+                select(
+                    DecisionAuditRecordModel.decision_id,
+                    func.max(DecisionAuditRecordModel.audit_revision_id).label("max_revision"),
+                )
+                .group_by(DecisionAuditRecordModel.decision_id)
+                .subquery()
+            )
+            row = session.scalar(
+                select(DecisionAuditRecordModel)
+                .join(
+                    latest_revision,
+                    DecisionAuditRecordModel.audit_revision_id == latest_revision.c.max_revision,
+                )
+                .order_by(
+                    desc(DecisionAuditRecordModel.updated_at),
+                    desc(DecisionAuditRecordModel.audit_revision_id),
+                )
+                .limit(1)
+            )
+        return DecisionAuditRecord.model_validate(row.payload) if row is not None else None
+
+    def recent(self, *, limit: int) -> list[DecisionAuditRecord]:
+        with self.session_factory() as session:
+            latest_revision = (
+                select(
+                    DecisionAuditRecordModel.decision_id,
+                    func.max(DecisionAuditRecordModel.audit_revision_id).label("max_revision"),
+                )
+                .group_by(DecisionAuditRecordModel.decision_id)
+                .subquery()
+            )
+            rows = session.scalars(
+                select(DecisionAuditRecordModel)
+                .join(
+                    latest_revision,
+                    DecisionAuditRecordModel.audit_revision_id == latest_revision.c.max_revision,
+                )
+                .order_by(
+                    desc(DecisionAuditRecordModel.updated_at),
+                    desc(DecisionAuditRecordModel.audit_revision_id),
+                )
+                .limit(limit)
+            ).all()
+        return [DecisionAuditRecord.model_validate(row.payload) for row in rows]
+
     def all(self) -> list[DecisionAuditRecord]:
         with self.session_factory() as session:
             latest_revision = (

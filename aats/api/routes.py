@@ -29,6 +29,10 @@ class CancelOrderRequest(BaseModel):
     reason: str = "operator_cancel"
 
 
+class ResolveStuckSubmissionRequest(BaseModel):
+    reason: str = "operator_resolve_stuck_submission"
+
+
 class ValidationRequest(BaseModel):
     reason: str = "operator_validate"
 
@@ -304,6 +308,27 @@ async def cancel_order(
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/orders/{client_order_id}/resolve-stuck-submission")
+async def resolve_stuck_submission(
+    request: Request,
+    client_order_id: str,
+    payload: ResolveStuckSubmissionRequest | None = None,
+    principal: OperatorPrincipal = Depends(require_write_access),
+) -> dict[str, Any]:
+    try:
+        return await _query(request).resolve_stuck_submission(
+            client_order_id=client_order_id,
+            reason=payload.reason if payload is not None else "operator_resolve_stuck_submission",
+            actor_role=principal.role,
+            actor_identity=principal.identity,
+            auth_source=principal.auth_source,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/fills/latest")

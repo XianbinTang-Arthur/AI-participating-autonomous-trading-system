@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from datetime import timedelta
+from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
@@ -106,6 +107,7 @@ class TestRecovery(unittest.IsolatedAsyncioTestCase):
                     interval_seconds=0.0,
                 )
                 self._delete_portfolio_snapshots(runtime)
+                self._delete_event_topic(runtime, topics.PORTFOLIO_SNAPSHOTS)
             finally:
                 if runtime.database_runtime is not None:
                     runtime.database_runtime.dispose()
@@ -116,6 +118,7 @@ class TestRecovery(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(recovered_runtime.recovery_status.rebuilt_snapshot_saved)
                 self.assertTrue(recovered_runtime.recovery_status.recovered_snapshot_available)
                 self.assertIsNotNone(recovered_runtime.portfolio_repo.latest())
+                self.assertIsNotNone(recovered_runtime.event_store.latest(topics.PORTFOLIO_SNAPSHOTS))
             finally:
                 if recovered_runtime.database_runtime is not None:
                     recovered_runtime.database_runtime.dispose()
@@ -279,9 +282,9 @@ class TestRecovery(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(runtime.recovery_status.baseline_fill_count, 1)
         latest_snapshot = runtime.portfolio_repo.latest()
         self.assertIsNotNone(latest_snapshot)
-        self.assertEqual(latest_snapshot.balances["BTC"], 0.01)
+        self.assertEqual(latest_snapshot.balances["BTC"], Decimal("0.010000000000"))
         self.assertEqual(latest_snapshot.positions[0].symbol, "BTC-USDT")
-        self.assertAlmostEqual(latest_snapshot.positions[0].position_qty, 0.01)
+        self.assertEqual(latest_snapshot.positions[0].position_qty, Decimal("0.010000000000"))
 
     async def test_derivatives_runtime_ignores_persisted_spot_state_when_selecting_recovery_context(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -550,7 +553,7 @@ class TestRecovery(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(latest_baseline.payload["previous_baseline_ref"], previous_baseline_ref)
         latest_snapshot = runtime.portfolio_repo.latest()
         self.assertIsNotNone(latest_snapshot)
-        self.assertEqual(latest_snapshot.balances["BTC"], 0.001)
+        self.assertEqual(latest_snapshot.balances["BTC"], Decimal("0.001000000000"))
 
         resumed = await query.resume(reason="resume_after_rebaseline", actor_role="admin")
         self.assertEqual(resumed["status"], "resumed")

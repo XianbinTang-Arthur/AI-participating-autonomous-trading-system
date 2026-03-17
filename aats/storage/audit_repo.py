@@ -15,6 +15,16 @@ class InMemoryAuditRepository:
     def get(self, decision_id: str) -> DecisionAuditRecord | None:
         return self._latest_by_decision.get(decision_id)
 
+    def latest(self) -> DecisionAuditRecord | None:
+        return max(self._latest_by_decision.values(), key=lambda item: item.created_at, default=None)
+
+    def recent(self, *, limit: int) -> list[DecisionAuditRecord]:
+        return sorted(
+            self._latest_by_decision.values(),
+            key=lambda item: item.created_at,
+            reverse=True,
+        )[:limit]
+
     def all(self) -> list[DecisionAuditRecord]:
         return list(self._latest_by_decision.values())
 

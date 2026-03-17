@@ -5,7 +5,8 @@ import unittest
 from aats.bus.memory_bus import InMemoryEventBus
 from aats.events import topics
 from aats.events.envelopes import build_envelope
-from aats.schemas.execution import OrderIntent, OrderState
+from aats.schemas.common import utc_now
+from aats.schemas.execution import FillEvent, OrderIntent, OrderState
 from aats.services.execution_engine.order_manager import OrderManager
 from aats.services.governance_engine.kill_switch import KillSwitch
 from aats.storage.event_store import InMemoryEventStore
@@ -78,6 +79,34 @@ class _PreviewingExceptionAdapter(_FailingAdapter):
 
     async def submit(self, intent: OrderIntent):
         raise RuntimeError("preview_exception")
+
+
+class _BackfillAdapter(_FailingAdapter):
+    def __init__(self) -> None:
+        self.synced_client_order_ids: list[str] = []
+
+    async def sync(self, open_order_states):
+        self.synced_client_order_ids = [state.client_order_id for state in open_order_states]
+        if not open_order_states:
+            return [], []
+        state = open_order_states[0]
+        fill = FillEvent(
+            fill_id="fill_backfill_1",
+            decision_id=state.decision_id,
+            intent_id=state.intent_id,
+            client_order_id=state.client_order_id,
+            exchange_order_id=state.exchange_order_id,
+            symbol=state.symbol,
+            venue="OKX",
+            side="buy",
+            fill_qty=state.filled_qty,
+            fill_price=state.average_fill_price or 100.0,
+            fee_amount=state.fees,
+            liquidity_role="taker",
+            exchange_timestamp=state.last_exchange_update_ts or state.last_update_ts or state.created_at,
+            ingestion_timestamp=state.last_update_ts or state.created_at,
+        )
+        return [state], [fill]
 
 
 class TestOrderManagerExecutionErrorHistory(unittest.IsolatedAsyncioTestCase):
@@ -195,6 +224,42 @@ class TestOrderManagerExecutionErrorHistory(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(persisted)
         self.assertEqual(persisted.status, "FAILED")
         self.assertIsNone(repo.get_order_state("preview_exception_id"))
+
+    async def test_sync_backfills_terminal_filled_order_without_local_fills(self) -> None:
+        repo = InMemoryExecutionRepository()
+        adapter = _BackfillAdapter()
+        manager = OrderManager(
+            bus=InMemoryEventBus(event_store=InMemoryEventStore(), persistence_mode="strict"),
+            adapter=adapter,
+            execution_repo=repo,
+            kill_switch=KillSwitch(),
+        )
+        filled_state = OrderState(
+            decision_id="decision_fill_backfill",
+            intent_id="intent_fill_backfill",
+            symbol="BTC-USDT",
+            client_order_id="clord_fill_backfill",
+            venue="OKX",
+            exchange_order_id="ord_fill_backfill",
+            status="FILLED",
+            exchange_status="filled",
+            submitted_ts=utc_now(),
+            last_update_ts=utc_now(),
+            last_exchange_update_ts=utc_now(),
+            requested_qty=0.001,
+            filled_qty=0.001,
+            remaining_qty=0.0,
+            average_fill_price=100.0,
+            fees=0.1,
+        )
+        repo.save_order_state(filled_state)
+
+        await manager.sync_exchange_state()
+
+        self.assertIn("clord_fill_backfill", adapter.synced_client_order_ids)
+        fills = repo.fills_for_order("clord_fill_backfill")
+        self.assertEqual(len(fills), 1)
+        self.assertEqual(fills[0].fill_id, "fill_backfill_1")
 
 
 if __name__ == "__main__":

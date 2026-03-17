@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from decimal import Decimal
 
 from aats.schemas.common import new_id, utc_now
 from aats.schemas.execution import FillEvent, OrderState
 from aats.schemas.exchange import ExchangeAccountSnapshot, ExchangeFill, ExchangeOpenOrder
 from aats.schemas.portfolio import PortfolioSnapshot
 from aats.schemas.reconciliation import ReconciliationReport
+from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, EPSILON_DECIMAL_9, to_decimal
 
 
 class StateComparator:
@@ -265,7 +267,11 @@ class StateComparator:
             exchange_fills = {
                 StateComparator._exchange_fill_key(fill): fill for fill in exchange_snapshot.fills
             }
-            missing_on_exchange = sorted(set(local_exchange_fills) - set(exchange_fills))
+            missing_on_exchange = sorted(
+                fill_id
+                for fill_id in (set(local_exchange_fills) - set(exchange_fills))
+                if fill_id not in accepted_fill_ids
+            )
             unexpected_on_exchange = sorted(
                 fill_id
                 for fill_id in (set(exchange_fills) - set(local_exchange_fills))
@@ -285,27 +291,27 @@ class StateComparator:
     @staticmethod
     def _balance_diff(
         *,
-        stored_balances: dict[str, float],
-        reconstructed_balances: dict[str, float],
+        stored_balances: dict[str, Decimal],
+        reconstructed_balances: dict[str, Decimal],
         exchange_snapshot: ExchangeAccountSnapshot | None,
         compare_exchange_portfolio: bool,
     ) -> dict[str, object]:
-        reconstructed_mismatches: dict[str, dict[str, float]] = {}
+        reconstructed_mismatches: dict[str, dict[str, Decimal]] = {}
         currencies = sorted(set(stored_balances) | set(reconstructed_balances))
         for currency in currencies:
-            stored = stored_balances.get(currency, 0.0)
-            replayed = reconstructed_balances.get(currency, 0.0)
-            if abs(stored - replayed) > 1e-9:
+            stored = to_decimal(stored_balances.get(currency, 0))
+            replayed = to_decimal(reconstructed_balances.get(currency, 0))
+            if abs(stored - replayed) > EPSILON_DECIMAL_9:
                 reconstructed_mismatches[currency] = {"stored": stored, "reconstructed": replayed}
 
-        exchange_mismatches: dict[str, dict[str, float]] = {}
+        exchange_mismatches: dict[str, dict[str, Decimal]] = {}
         if compare_exchange_portfolio and exchange_snapshot is not None:
-            exchange_balances = {balance.currency: balance.total for balance in exchange_snapshot.balances}
+            exchange_balances = {balance.currency: to_decimal(balance.total) for balance in exchange_snapshot.balances}
             currencies = sorted(set(stored_balances) | set(exchange_balances))
             for currency in currencies:
-                stored = stored_balances.get(currency, 0.0)
-                exchange = exchange_balances.get(currency, 0.0)
-                if abs(stored - exchange) > 1e-9:
+                stored = to_decimal(stored_balances.get(currency, 0))
+                exchange = to_decimal(exchange_balances.get(currency, 0))
+                if abs(stored - exchange) > EPSILON_DECIMAL_9:
                     exchange_mismatches[currency] = {"stored": stored, "exchange": exchange}
 
         return {
@@ -325,25 +331,25 @@ class StateComparator:
         replayed_positions = {
             position.symbol: position.position_qty for position in reconstructed_snapshot.positions
         }
-        reconstructed_mismatches: dict[str, dict[str, float]] = {}
+        reconstructed_mismatches: dict[str, dict[str, Decimal]] = {}
         for symbol in sorted(set(stored_positions) | set(replayed_positions)):
-            stored = stored_positions.get(symbol, 0.0)
-            replayed = replayed_positions.get(symbol, 0.0)
-            if abs(stored - replayed) > 1e-12:
+            stored = to_decimal(stored_positions.get(symbol, 0))
+            replayed = to_decimal(replayed_positions.get(symbol, 0))
+            if abs(stored - replayed) > EPSILON_DECIMAL_12:
                 reconstructed_mismatches[symbol] = {"stored": stored, "reconstructed": replayed}
 
-        exchange_positions: dict[str, float] = {}
-        exchange_mismatches: dict[str, dict[str, float]] = {}
+        exchange_positions: dict[str, Decimal] = {}
+        exchange_mismatches: dict[str, dict[str, Decimal]] = {}
         if compare_exchange_portfolio and exchange_snapshot is not None and exchange_snapshot.positions:
             exchange_positions = {
-                position.symbol: position.quantity
+                position.symbol: to_decimal(position.quantity)
                 for position in exchange_snapshot.positions
-                if abs(position.quantity) > 1e-12
+                if abs(to_decimal(position.quantity)) > EPSILON_DECIMAL_12
             }
             for symbol in sorted(set(stored_positions) | set(exchange_positions)):
-                stored = stored_positions.get(symbol, 0.0)
-                exchange = exchange_positions.get(symbol, 0.0)
-                if abs(stored - exchange) > 1e-12:
+                stored = to_decimal(stored_positions.get(symbol, 0))
+                exchange = to_decimal(exchange_positions.get(symbol, 0))
+                if abs(stored - exchange) > EPSILON_DECIMAL_12:
                     exchange_mismatches[symbol] = {"stored": stored, "exchange": exchange}
 
         return {

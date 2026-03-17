@@ -29,9 +29,12 @@ from aats.storage.base import ExecutionObligationRepository, ExecutionRepository
 class RecoveryArtifacts:
     status: RecoveryStatus
     rebuilt_snapshot_saved: bool = False
+    rebuilt_snapshot: PortfolioSnapshot | None = None
 
 
 class ExecutionRecoveryService:
+    _RECOVERY_COMPARISON_EPSILON = 1e-8
+
     def __init__(
         self,
         *,
@@ -83,6 +86,7 @@ class ExecutionRecoveryService:
         open_orders = order_states_for_scope(self.execution_repo, self.runtime_scope, open_only=True)
         notes: list[str] = []
         rebuilt_snapshot_saved = False
+        rebuilt_snapshot_for_event: PortfolioSnapshot | None = None
         divergence_count = 0
         recovery_action: str | None = None
         safe_startup = True
@@ -157,6 +161,7 @@ class ExecutionRecoveryService:
                 )
                 self.portfolio_repo.save_snapshot(rebuilt_snapshot)
                 rebuilt_snapshot_saved = True
+                rebuilt_snapshot_for_event = rebuilt_snapshot
                 notes.append("portfolio_rebuilt_from_fills")
         else:
             notes.append("cold_start_no_execution_state")
@@ -247,7 +252,11 @@ class ExecutionRecoveryService:
             ),
             notes=self._dedupe_notes(notes),
         )
-        return RecoveryArtifacts(status=status, rebuilt_snapshot_saved=rebuilt_snapshot_saved)
+        return RecoveryArtifacts(
+            status=status,
+            rebuilt_snapshot_saved=rebuilt_snapshot_saved,
+            rebuilt_snapshot=rebuilt_snapshot_for_event,
+        )
 
     def _cleanup_orphan_obligations(self) -> int:
         order_states = {
@@ -426,14 +435,17 @@ class ExecutionRecoveryService:
             "gross_exposure",
             "net_exposure",
         ):
-            if abs(getattr(left, field_name) - getattr(right, field_name)) > 1e-9:
+            if abs(getattr(left, field_name) - getattr(right, field_name)) > ExecutionRecoveryService._RECOVERY_COMPARISON_EPSILON:
                 count += 1
         return count
 
     @staticmethod
     def _dict_diverges(left: dict[str, float], right: dict[str, float]) -> bool:
         keys = set(left) | set(right)
-        return any(abs(left.get(key, 0.0) - right.get(key, 0.0)) > 1e-9 for key in keys)
+        return any(
+            abs(left.get(key, 0.0) - right.get(key, 0.0)) > ExecutionRecoveryService._RECOVERY_COMPARISON_EPSILON
+            for key in keys
+        )
 
     @staticmethod
     def _position_diverges(
@@ -444,6 +456,9 @@ class ExecutionRecoveryService:
         for key in keys:
             left_qty, left_avg = left.get(key, (0.0, 0.0))
             right_qty, right_avg = right.get(key, (0.0, 0.0))
-            if abs(left_qty - right_qty) > 1e-9 or abs(left_avg - right_avg) > 1e-9:
+            if (
+                abs(left_qty - right_qty) > ExecutionRecoveryService._RECOVERY_COMPARISON_EPSILON
+                or abs(left_avg - right_avg) > ExecutionRecoveryService._RECOVERY_COMPARISON_EPSILON
+            ):
                 return True
         return False

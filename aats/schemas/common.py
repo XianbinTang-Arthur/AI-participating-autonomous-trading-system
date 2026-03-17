@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from decimal import Decimal
 from datetime import datetime, timezone
 from typing import Any, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 def utc_now() -> datetime:
@@ -16,6 +17,7 @@ def new_id(prefix: str) -> str:
 
 
 class SchemaBase(BaseModel):
+    model_config = ConfigDict(json_encoders={Decimal: lambda value: float(value)})
     schema_version: str = "1.0.0"
     created_at: datetime = Field(default_factory=utc_now)
 
@@ -33,4 +35,3 @@ class EventEnvelope(SchemaBase):
 class SymbolTimeframe(BaseModel):
     symbol: str
     timeframe: Literal["15m", "1h"]
-

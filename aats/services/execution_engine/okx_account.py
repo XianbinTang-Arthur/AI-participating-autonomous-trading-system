@@ -46,11 +46,18 @@ class OKXAccountService:
                 instruments_payload = await self.client.get_instruments()
                 instruments = self._parse_instruments(instruments_payload)
                 instrument_map = {instrument.symbol: instrument for instrument in instruments}
-                open_orders_payload = await self.client.get_open_orders(symbol=self.settings.default_symbol)
-                fills_payload = await self.client.get_fills(
-                    symbol=self.settings.default_symbol,
-                    limit=self.settings.okx_fill_fetch_limit,
-                )
+                tracked_symbols = self._tracked_symbols()
+                open_orders_payloads = [
+                    await self.client.get_open_orders(symbol=symbol)
+                    for symbol in tracked_symbols
+                ]
+                fills_payloads = [
+                    await self.client.get_fills(
+                        symbol=symbol,
+                        limit=self.settings.okx_fill_fetch_limit,
+                    )
+                    for symbol in tracked_symbols
+                ]
                 account_config_payload = await self.client.get_account_config()
                 if self.settings.trading_product_type == "derivatives":
                     positions_payload = await self.client.get_positions()
@@ -65,15 +72,25 @@ class OKXAccountService:
                     fetched_at=utc_now(),
                     balances=self._parse_balances(balance_payload),
                     positions=self._parse_positions(positions_payload, instrument_map=instrument_map),
-                    open_orders=self._parse_open_orders(open_orders_payload, instrument_map=instrument_map),
-                    fills=self._parse_fills(fills_payload, instrument_map=instrument_map),
+                    open_orders=self._dedupe_open_orders(
+                        self._parse_open_orders(
+                            self._merge_payloads(open_orders_payloads),
+                            instrument_map=instrument_map,
+                        )
+                    ),
+                    fills=self._dedupe_fills(
+                        self._parse_fills(
+                            self._merge_payloads(fills_payloads),
+                            instrument_map=instrument_map,
+                        )
+                    ),
                     instruments=instruments,
                     account_mode=self._parse_account_mode(account_config_payload),
                     raw={
                         "balance": balance_payload,
                         "positions": positions_payload,
-                        "open_orders": open_orders_payload,
-                        "fills": fills_payload,
+                        "open_orders": self._merge_payloads(open_orders_payloads),
+                        "fills": self._merge_payloads(fills_payloads),
                         "instruments": instruments_payload,
                         "account_config": account_config_payload,
                     },
@@ -168,6 +185,35 @@ class OKXAccountService:
         if symbol is None:
             return list(snapshot.fills)
         return [fill for fill in snapshot.fills if fill.symbol == symbol]
+
+    def _tracked_symbols(self) -> tuple[str, ...]:
+        symbols = tuple(dict.fromkeys(self.settings.allowed_symbols))
+        if symbols:
+            return symbols
+        return (self.settings.default_symbol,)
+
+    @staticmethod
+    def _merge_payloads(payloads: list[dict[str, Any]]) -> dict[str, Any]:
+        merged_data: list[Any] = []
+        for payload in payloads:
+            rows = payload.get("data", [])
+            if isinstance(rows, list):
+                merged_data.extend(rows)
+        return {"code": "0", "data": merged_data}
+
+    @staticmethod
+    def _dedupe_open_orders(rows: list[ExchangeOpenOrder]) -> list[ExchangeOpenOrder]:
+        deduped: dict[tuple[str, str | None], ExchangeOpenOrder] = {}
+        for row in rows:
+            deduped[(row.exchange_order_id, row.client_order_id)] = row
+        return list(deduped.values())
+
+    @staticmethod
+    def _dedupe_fills(rows: list[ExchangeFill]) -> list[ExchangeFill]:
+        deduped: dict[str, ExchangeFill] = {}
+        for row in rows:
+            deduped[row.fill_id] = row
+        return list(deduped.values())
 
     def _parse_balances(self, payload: dict[str, Any]) -> list[ExchangeBalance]:
         rows: list[ExchangeBalance] = []

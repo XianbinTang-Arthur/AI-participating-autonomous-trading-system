@@ -15,9 +15,10 @@ from aats.api.routes import router
 from aats.bootstrap.config import build_runtime
 from aats.bootstrap.settings import AATSSettings
 from aats.events.envelopes import build_envelope
+from aats.schemas.audit import DecisionAuditRecord
 from aats.schemas.common import utc_now
 from aats.schemas.execution import OrderState
-from aats.schemas.exchange import ExchangeAccountSnapshot, ExchangeBalance
+from aats.schemas.exchange import AccountBaselineSnapshot, ExchangeAccountSnapshot, ExchangeBalance, ExchangeOpenOrder
 from aats.events import topics
 from aats.schemas.operator import ExecutionErrorSummary
 from aats.schemas.operator import OperatorUserRecord
@@ -663,6 +664,288 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cancel_action["reason"], "ui_cancel_test")
         self.assertEqual(cancel_action["order_id"], latest_order_id)
 
+    async def test_stuck_submission_can_be_resolved_after_restart_when_exchange_confirms_absence(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "config_profile": "guarded_simulated_submit_dry_run",
+                "mode": "guarded_live",
+                "market_data_backend": "demo",
+                "execution_backend": "okx",
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "okx_simulated_trading": True,
+                "live_submit_enabled": False,
+                "guarded_execution_dry_run": False,
+                "bootstrap_portfolio_from_exchange": True,
+                "storage_mode": "memory",
+                "event_persistence_mode": "strict",
+                "operator_unsafe_write_without_auth": True,
+            }
+        )
+        FakeOperatorAccountService.SNAPSHOT = ExchangeAccountSnapshot(
+            account_source="okx",
+            fetched_at=utc_now(),
+            balances=[ExchangeBalance(currency="USDT", total=1000.0, available=1000.0, frozen=0.0)],
+            positions=[],
+            open_orders=[],
+            fills=[],
+            instruments=[],
+            account_mode="cross",
+        )
+        with patch("aats.bootstrap.config.OKXAccountService", FakeOperatorAccountService):
+            runtime = await build_runtime(settings)
+        await runtime.market_gateway.run_local_publisher(
+            symbol=settings.default_symbol,
+            iterations=2,
+            interval_seconds=0.0,
+        )
+        stale_ts = utc_now() - timedelta(minutes=10)
+        runtime.execution_repo.save_order_state(
+            OrderState(
+                decision_id="decision_restart_stuck",
+                intent_id="intent_restart_stuck",
+                symbol=settings.default_symbol,
+                client_order_id="cl_restart_stuck",
+                venue="OKX",
+                exchange_order_id=None,
+                status="SUBMITTING",
+                submission_mode="local_order_manager",
+                submitted_ts=None,
+                last_update_ts=stale_ts,
+                requested_qty=0.1,
+                filled_qty=0.0,
+                remaining_qty=0.1,
+                product_type="spot",
+                margin_mode="cash",
+                submission_payload={},
+            )
+        )
+        runtime.started_at = utc_now()
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/orders/cl_restart_stuck/resolve-stuck-submission",
+                json={"reason": "ui_resolve_stuck_submission"},
+            )
+            detail = client.get("/orders/cl_restart_stuck")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["order"]["status"], "FAILED")
+        self.assertEqual(detail.status_code, 200)
+        self.assertFalse(detail.json()["stuck_submission_resolution"]["eligible"])
+        actions = [item.payload for item in runtime.event_store.by_topic(topics.OPERATOR_ACTIONS)]
+        resolution_action = next(item for item in reversed(actions) if item["action"] == "resolve_stuck_submission")
+        self.assertEqual(resolution_action["reason"], "ui_resolve_stuck_submission")
+        self.assertEqual(resolution_action["order_id"], "cl_restart_stuck")
+
+    async def test_stuck_submission_resolution_updates_audit_record_when_decision_audit_exists(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "config_profile": "guarded_simulated_submit_dry_run",
+                "mode": "guarded_live",
+                "market_data_backend": "demo",
+                "execution_backend": "okx",
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "okx_simulated_trading": True,
+                "live_submit_enabled": False,
+                "guarded_execution_dry_run": False,
+                "bootstrap_portfolio_from_exchange": True,
+                "storage_mode": "memory",
+                "event_persistence_mode": "strict",
+                "operator_unsafe_write_without_auth": True,
+            }
+        )
+        FakeOperatorAccountService.SNAPSHOT = ExchangeAccountSnapshot(
+            account_source="okx",
+            fetched_at=utc_now(),
+            balances=[ExchangeBalance(currency="USDT", total=1000.0, available=1000.0, frozen=0.0)],
+            positions=[],
+            open_orders=[],
+            fills=[],
+            instruments=[],
+            account_mode="cash",
+        )
+        with patch("aats.bootstrap.config.OKXAccountService", FakeOperatorAccountService):
+            runtime = await build_runtime(settings)
+        await runtime.market_gateway.run_local_publisher(
+            symbol=settings.default_symbol,
+            iterations=2,
+            interval_seconds=0.0,
+        )
+        stale_ts = utc_now() - timedelta(minutes=10)
+        runtime.execution_repo.save_order_state(
+            OrderState(
+                decision_id="decision_restart_stuck_audit",
+                intent_id="intent_restart_stuck_audit",
+                symbol=settings.default_symbol,
+                client_order_id="cl_restart_stuck_audit",
+                venue="OKX",
+                exchange_order_id=None,
+                status="SUBMITTING",
+                submission_mode="local_order_manager",
+                submitted_ts=None,
+                last_update_ts=stale_ts,
+                requested_qty=0.1,
+                filled_qty=0.0,
+                remaining_qty=0.1,
+                product_type="spot",
+                margin_mode="cash",
+                submission_payload={},
+            )
+        )
+        runtime.audit_repo.upsert(
+            DecisionAuditRecord(
+                decision_id="decision_restart_stuck_audit",
+                decision_context_ref="evt_decision_context_seed",
+            )
+        )
+        runtime.started_at = utc_now()
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/orders/cl_restart_stuck_audit/resolve-stuck-submission",
+                json={"reason": "ui_resolve_stuck_submission"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        audit = runtime.audit_repo.get("decision_restart_stuck_audit")
+        self.assertIsNotNone(audit)
+        self.assertEqual(len(audit.order_state_refs), 1)
+        order_update = runtime.event_store.get(audit.order_state_refs[0])
+        self.assertIsNotNone(order_update)
+        self.assertEqual(order_update.payload["status"], "FAILED")
+
+    async def test_stuck_submission_resolution_is_rejected_when_exchange_still_has_order(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "config_profile": "guarded_simulated_submit_dry_run",
+                "mode": "guarded_live",
+                "market_data_backend": "demo",
+                "execution_backend": "okx",
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "okx_simulated_trading": True,
+                "live_submit_enabled": False,
+                "guarded_execution_dry_run": False,
+                "bootstrap_portfolio_from_exchange": True,
+                "storage_mode": "memory",
+                "event_persistence_mode": "strict",
+                "operator_unsafe_write_without_auth": True,
+            }
+        )
+        FakeOperatorAccountService.SNAPSHOT = ExchangeAccountSnapshot(
+            account_source="okx",
+            fetched_at=utc_now(),
+            balances=[ExchangeBalance(currency="USDT", total=1000.0, available=1000.0, frozen=0.0)],
+            positions=[],
+            open_orders=[
+                ExchangeOpenOrder(
+                    instrument_id="BTC-USDT",
+                    client_order_id="cl_restart_live",
+                    exchange_order_id="ord_live",
+                    side="buy",
+                    order_type="market",
+                    status="live",
+                    quantity=0.1,
+                )
+            ],
+            fills=[],
+            instruments=[],
+            account_mode="cross",
+        )
+        with patch("aats.bootstrap.config.OKXAccountService", FakeOperatorAccountService):
+            runtime = await build_runtime(settings)
+        await runtime.market_gateway.run_local_publisher(
+            symbol=settings.default_symbol,
+            iterations=2,
+            interval_seconds=0.0,
+        )
+        runtime.execution_repo.save_order_state(
+            OrderState(
+                decision_id="decision_restart_live",
+                intent_id="intent_restart_live",
+                symbol=settings.default_symbol,
+                client_order_id="cl_restart_live",
+                venue="OKX",
+                exchange_order_id=None,
+                status="SUBMITTING",
+                submission_mode="local_order_manager",
+                submitted_ts=None,
+                last_update_ts=utc_now() - timedelta(minutes=10),
+                requested_qty=0.1,
+                filled_qty=0.0,
+                remaining_qty=0.1,
+                product_type="spot",
+                margin_mode="cash",
+                submission_payload={},
+            )
+        )
+        runtime.started_at = utc_now()
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/orders/cl_restart_live/resolve-stuck-submission",
+                json={"reason": "ui_resolve_stuck_submission"},
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            response.json()["detail"],
+            "stuck_submission_resolution_blocked:exchange_order_still_open",
+        )
+
+    async def test_orders_recent_returns_latest_orders_first(self) -> None:
+        runtime = await self._runtime()
+        runtime.execution_repo.save_order_state(
+            OrderState(
+                decision_id="decision_old_recent",
+                intent_id="intent_old_recent",
+                symbol=runtime.settings.default_symbol,
+                client_order_id="order_old_recent",
+                venue="PAPER",
+                status="FAILED",
+                submission_mode="paper_local",
+                submitted_ts=None,
+                last_update_ts=utc_now() - timedelta(minutes=5),
+                requested_qty=1.0,
+                filled_qty=0.0,
+                remaining_qty=1.0,
+                product_type="spot",
+                margin_mode="cash",
+                submission_payload={},
+            )
+        )
+        runtime.execution_repo.save_order_state(
+            OrderState(
+                decision_id="decision_new_recent",
+                intent_id="intent_new_recent",
+                symbol=runtime.settings.default_symbol,
+                client_order_id="order_new_recent",
+                venue="PAPER",
+                status="SUBMITTING",
+                submission_mode="paper_local",
+                submitted_ts=None,
+                last_update_ts=utc_now(),
+                requested_qty=1.0,
+                filled_qty=0.0,
+                remaining_qty=1.0,
+                product_type="spot",
+                margin_mode="cash",
+                submission_payload={},
+            )
+        )
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            recent = client.get("/orders/recent?limit=1")
+
+        self.assertEqual(recent.status_code, 200)
+        self.assertEqual(recent.json()["orders"][0]["client_order_id"], "order_new_recent")
+
     async def test_execution_latest_uses_normalized_recovery_view(self) -> None:
         runtime = await self._runtime()
         runtime.kill_switch.halt(reason="operator_test_halt")
@@ -770,6 +1053,107 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(recovery_after["recovery"]["recovery_state"], "rebaseline_completed")
         self.assertTrue(recovery_after["recovery"]["resume_eligible"])
         self.assertIsNotNone(recovery_after["recovery"]["last_rebaseline_action"])
+
+    async def test_recovery_view_uses_latest_account_baseline_for_current_scope(self) -> None:
+        runtime = await self._runtime()
+        runtime.event_store.append(
+            build_envelope(
+                topic=topics.ACCOUNT_BASELINES,
+                key="okx",
+                payload_model=AccountBaselineSnapshot(
+                    account_source="okx",
+                    exchange_snapshot_ts=utc_now(),
+                    imported_at=utc_now(),
+                    product_type="spot",
+                    margin_mode="cash",
+                    allowed_symbols=["BTC-USDT"],
+                    baseline_status="baseline_imported",
+                ),
+                source_component="test",
+            )
+        )
+        runtime.event_store.append(
+            build_envelope(
+                topic=topics.ACCOUNT_BASELINES,
+                key="okx",
+                payload_model=AccountBaselineSnapshot(
+                    account_source="okx",
+                    exchange_snapshot_ts=utc_now(),
+                    imported_at=utc_now(),
+                    product_type="spot",
+                    margin_mode="cash",
+                    allowed_symbols=["ETH-USDT"],
+                    baseline_status="baseline_imported",
+                ),
+                source_component="test",
+            )
+        )
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            recovery = client.get("/system/recovery").json()
+
+        self.assertEqual(recovery["latest_account_baseline"]["allowed_symbols"], ["BTC-USDT"])
+
+    async def test_rebaseline_uses_previous_baseline_from_current_scope(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "config_profile": "guarded_simulated_submit_dry_run",
+                "mode": "guarded_live",
+                "market_data_backend": "demo",
+                "execution_backend": "okx",
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "okx_simulated_trading": True,
+                "live_submit_enabled": False,
+                "guarded_execution_dry_run": True,
+                "bootstrap_portfolio_from_exchange": True,
+                "storage_mode": "memory",
+                "event_persistence_mode": "strict",
+                "operator_unsafe_write_without_auth": True,
+            }
+        )
+        FakeOperatorAccountService.SNAPSHOT = ExchangeAccountSnapshot(
+            account_source="okx",
+            fetched_at=utc_now(),
+            balances=[ExchangeBalance(currency="USDT", total=1000.0, available=1000.0, frozen=0.0)],
+            positions=[],
+            open_orders=[],
+            fills=[],
+            instruments=[],
+            account_mode="cash",
+        )
+        with patch("aats.bootstrap.config.OKXAccountService", FakeOperatorAccountService):
+            runtime = await build_runtime(settings)
+
+        initial_baseline = runtime.event_store.latest(topics.ACCOUNT_BASELINES)
+        self.assertIsNotNone(initial_baseline)
+        runtime.event_store.append(
+            build_envelope(
+                topic=topics.ACCOUNT_BASELINES,
+                key="okx",
+                payload_model=AccountBaselineSnapshot(
+                    account_source="okx",
+                    exchange_snapshot_ts=utc_now(),
+                    imported_at=utc_now(),
+                    product_type="spot",
+                    margin_mode="cash",
+                    allowed_symbols=["ETH-USDT"],
+                    baseline_status="baseline_imported",
+                ),
+                source_component="test",
+            )
+        )
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            response = client.post("/system/rebaseline", json={"reason": "accept_exchange_state"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json()["baseline"]["previous_baseline_ref"],
+            initial_baseline.event_id,
+        )
 
     async def test_system_rebaseline_is_rejected_for_paper_local_profile(self) -> None:
         settings = AATSSettings.model_validate(

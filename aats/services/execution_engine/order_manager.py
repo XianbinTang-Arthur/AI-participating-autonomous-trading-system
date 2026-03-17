@@ -15,6 +15,10 @@ from aats.storage.base import ExecutionRepository
 
 
 class OrderManager:
+    _OBLIGATION_ATOMIC_FINALIZE_EPSILON = 1e-12
+    _FILL_BACKFILL_RECENT_LIMIT = 100
+    _FILL_BACKFILL_TERMINAL_STATUSES = ("FILLED", "CANCELED", "EXPIRED")
+
     def __init__(
         self,
         *,
@@ -185,7 +189,11 @@ class OrderManager:
                 ),
             )
 
-        persisted_order_state = await self._persist_order_state(order_state=order_state, key=intent.symbol)
+        persisted_order_state = await self._persist_order_state(
+            order_state=order_state,
+            key=intent.symbol,
+            obligation=self._terminal_outbox_obligation(order_state=order_state, fills=fills),
+        )
 
         for fill in fills:
             if fill.client_order_id != persisted_order_state.client_order_id:
@@ -194,14 +202,36 @@ class OrderManager:
         self._finalize_obligation(order_state=persisted_order_state)
 
     async def sync_exchange_state(self) -> None:
-        order_states, fills = await self.adapter.sync(self.execution_repo.open_order_states())
+        order_states, fills = await self.adapter.sync(self._sync_candidates())
         persisted_states: list[OrderState] = []
         for order_state in order_states:
-            persisted_states.append(await self._persist_order_state(order_state=order_state, key=order_state.symbol))
+            persisted_states.append(
+                await self._persist_order_state(
+                    order_state=order_state,
+                    key=order_state.symbol,
+                    obligation=self._terminal_outbox_obligation(order_state=order_state, fills=[]),
+                )
+            )
         for fill in fills:
             await self._persist_fill(fill)
         for order_state in persisted_states:
             self._finalize_obligation(order_state=order_state)
+
+    def _sync_candidates(self) -> list[OrderState]:
+        candidates: dict[str, OrderState] = {
+            state.client_order_id: state
+            for state in self.execution_repo.open_order_states()
+        }
+        for state in self.execution_repo.recent_order_states(
+            limit=self._FILL_BACKFILL_RECENT_LIMIT,
+            statuses=self._FILL_BACKFILL_TERMINAL_STATUSES,
+        ):
+            if state.filled_qty <= self._OBLIGATION_ATOMIC_FINALIZE_EPSILON:
+                continue
+            if self.execution_repo.fills_for_order(state.client_order_id):
+                continue
+            candidates.setdefault(state.client_order_id, state)
+        return list(candidates.values())
 
     async def cancel_order(self, client_order_id: str) -> OrderState:
         current = self.execution_repo.get_order_state(client_order_id)
@@ -216,7 +246,11 @@ class OrderManager:
         )
         persisted_pending = await self._persist_order_state(order_state=cancel_pending, key=current.symbol)
         state, fills = await self.adapter.cancel(persisted_pending)
-        persisted = await self._persist_order_state(order_state=state, key=current.symbol)
+        persisted = await self._persist_order_state(
+            order_state=state,
+            key=current.symbol,
+            obligation=self._terminal_outbox_obligation(order_state=state, fills=fills),
+        )
         for fill in fills:
             await self._persist_fill(fill)
         self._finalize_obligation(order_state=persisted)
@@ -343,3 +377,14 @@ class OrderManager:
         if self.obligation_service is None:
             return
         self.obligation_service.finalize_for_order_state(order_state)
+
+    def _terminal_outbox_obligation(self, *, order_state: OrderState, fills: list) -> object | None:
+        if self.execution_outbox_publisher is None or self.obligation_service is None:
+            return None
+        if fills:
+            return None
+        if order_state.status not in {"CANCELED", "REJECTED", "FAILED", "BLOCKED", "DRY_RUN", "EXPIRED"}:
+            return None
+        if abs(order_state.filled_qty) > self._OBLIGATION_ATOMIC_FINALIZE_EPSILON:
+            return None
+        return self.obligation_service.preview_obligation_for_order_state(order_state)

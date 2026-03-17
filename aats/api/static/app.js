@@ -1,5 +1,55 @@
 const AUTO_REFRESH_MS = 15000;
 const BACKGROUND_REFRESH_MS = 60000;
+const CORE_PANEL_SPECS = [
+  ["session", "/auth/session"],
+  ["authProviders", "/auth/providers"],
+  ["health", "/system/health"],
+  ["mode", "/system/mode"],
+  ["runtime", "/system/runtime"],
+  ["systemRecovery", "/system/recovery"],
+];
+const VIEW_PANEL_SPECS = {
+  overview: [
+    ["blockers", "/system/blockers"],
+    ["metrics", "/system/metrics"],
+    ["portfolio", "/portfolio/latest"],
+    ["latestDecision", "/decision/latest"],
+    ["executionLatest", "/execution/latest"],
+    ["reconciliationLatest", "/reconciliation/latest"],
+    ["accountState", "/account/state"],
+  ],
+  decisions: [
+    ["latestDecision", "/decision/latest"],
+    ["recentDecisions", "/decision/recent?limit=8"],
+  ],
+  execution: [
+    ["metrics", "/system/metrics"],
+    ["latestDecision", "/decision/latest"],
+    ["executionLatest", "/execution/latest"],
+    ["recentOrders", "/orders/recent?limit=8"],
+    ["recentFills", "/fills/recent?limit=8"],
+    ["executionErrors", "/execution/errors"],
+  ],
+  diagnostics: [
+    ["blockers", "/system/blockers"],
+    ["metrics", "/system/metrics"],
+    ["latestDecision", "/decision/latest"],
+    ["executionLatest", "/execution/latest"],
+    ["reconciliationLatest", "/reconciliation/latest"],
+    ["replayStatus", "/replay/status"],
+    ["accountState", "/account/state"],
+  ],
+  "runtime-profiles": [],
+  operators: [],
+};
+const VIEW_REQUIRED_KEYS = {
+  overview: ["blockers", "metrics", "portfolio", "latestDecision", "executionLatest", "reconciliationLatest", "accountState"],
+  decisions: ["latestDecision", "recentDecisions"],
+  execution: ["metrics", "latestDecision", "executionLatest", "recentOrders", "recentFills", "executionErrors"],
+  diagnostics: ["blockers", "metrics", "latestDecision", "executionLatest", "reconciliationLatest", "replayStatus", "accountState"],
+  "runtime-profiles": [],
+  operators: [],
+};
 
 const state = {
   activeView: "overview",
@@ -228,6 +278,11 @@ function bindEvents() {
       void inspectOrder(orderButton.dataset.inspectOrder || "", { manual: true });
       return;
     }
+    const resolveStuckOrderButton = target.closest("[data-resolve-stuck-order]");
+    if (resolveStuckOrderButton instanceof HTMLElement) {
+      void resolveStuckOrder(resolveStuckOrderButton.dataset.resolveStuckOrder || "");
+      return;
+    }
     const fillButton = target.closest("[data-inspect-fill]");
     if (fillButton instanceof HTMLElement) {
       void inspectFill(fillButton.dataset.inspectFill || "", { manual: true });
@@ -287,6 +342,10 @@ function setActiveView(viewName) {
   state.activeView = viewName;
   viewTabs.forEach((tab) => tab.classList.toggle("is-active", tab.dataset.view === viewName));
   views.forEach((view) => view.classList.toggle("is-active", view.dataset.view === viewName));
+  renderActiveView();
+  if (!viewDataReady(viewName) && !state.refreshing) {
+    void refreshDashboard();
+  }
 }
 
 function setRuntimeProfilesViewEnabled(enabled) {
@@ -311,56 +370,29 @@ async function refreshDashboard({ manual = false } = {}) {
   setActionButtonsBusy(true);
   cancelScheduledRefresh();
 
-  const specs = [
-    ["session", "/auth/session"],
-    ["authProviders", "/auth/providers"],
-    ["health", "/system/health"],
-    ["mode", "/system/mode"],
-    ["runtime", "/system/runtime"],
-    ["blockers", "/system/blockers"],
-    ["metrics", "/system/metrics"],
-    ["systemRecovery", "/system/recovery"],
-    ["portfolio", "/portfolio/latest"],
-    ["latestDecision", "/decision/latest"],
-    ["recentDecisions", "/decision/recent?limit=8"],
-    ["executionLatest", "/execution/latest"],
-    ["recentOrders", "/orders/recent?limit=8"],
-    ["recentFills", "/fills/recent?limit=8"],
-    ["executionErrors", "/execution/errors"],
-    ["reconciliationLatest", "/reconciliation/latest"],
-    ["replayStatus", "/replay/status"],
-    ["accountState", "/account/state"],
-  ];
-
+  const specs = dedupePanelSpecs([
+    ...CORE_PANEL_SPECS,
+    ...viewPanelSpecs(state.activeView),
+  ]);
   const results = await Promise.all(specs.map(([key, path]) => fetchPanel(key, path)));
-  results.forEach((result) => {
-    if (result.ok) {
-      state.data[result.key] = result.data;
-      delete state.panelErrors[result.key];
-    } else {
-      state.panelErrors[result.key] = result.error;
-    }
-  });
-
-  const runtimeProfileControlEnabled = state.data.authProviders?.runtime_profile_control_enabled === true;
+  applyPanelResults(results);
 
   if (operatorCanAdmin()) {
-    const operatorUsers = await fetchPanel("operatorUsers", "/auth/users");
-    if (operatorUsers.ok) {
-      state.data[operatorUsers.key] = operatorUsers.data;
-      delete state.panelErrors[operatorUsers.key];
-    } else {
-      state.panelErrors[operatorUsers.key] = operatorUsers.error;
+    const adminSpecs = [];
+    if (state.activeView === "operators") {
+      adminSpecs.push(["operatorUsers", "/auth/users"]);
     }
-    if (runtimeProfileControlEnabled) {
-      const runtimeProfiles = await fetchPanel("runtimeProfiles", "/runtime-profiles");
-      if (runtimeProfiles.ok) {
-        state.data[runtimeProfiles.key] = runtimeProfiles.data;
-        delete state.panelErrors[runtimeProfiles.key];
-      } else {
-        state.panelErrors[runtimeProfiles.key] = runtimeProfiles.error;
-      }
-    } else {
+    if (state.activeView === "runtime-profiles" && state.data.authProviders?.runtime_profile_control_enabled === true) {
+      adminSpecs.push(["runtimeProfiles", "/runtime-profiles"]);
+    }
+    if (adminSpecs.length) {
+      applyPanelResults(await Promise.all(adminSpecs.map(([key, path]) => fetchPanel(key, path))));
+    }
+    if (state.activeView !== "operators") {
+      delete state.data.operatorUsers;
+      delete state.panelErrors.operatorUsers;
+    }
+    if (state.activeView !== "runtime-profiles" || state.data.authProviders?.runtime_profile_control_enabled !== true) {
       delete state.data.runtimeProfiles;
       delete state.panelErrors.runtimeProfiles;
     }
@@ -485,15 +517,67 @@ function renderDashboard({ manual = false } = {}) {
   renderHeaderBadges();
   renderRuntimeStrip();
   renderAlerts();
-  renderOverview();
-  renderDecisions();
-  renderExecution();
-  renderDiagnostics();
-  renderRuntimeProfiles();
-  renderOperators();
+  renderActiveView();
   nodes.lastRefreshLabel.textContent = state.lastRefreshAt
     ? `Last refresh ${formatDateTime(state.lastRefreshAt)}${manual ? " | manual" : ""}`
     : "Not refreshed yet";
+}
+
+function viewPanelSpecs(viewName) {
+  return VIEW_PANEL_SPECS[viewName] || [];
+}
+
+function dedupePanelSpecs(specs) {
+  const seen = new Set();
+  return specs.filter(([key]) => {
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
+}
+
+function applyPanelResults(results) {
+  results.forEach((result) => {
+    if (result.ok) {
+      state.data[result.key] = result.data;
+      delete state.panelErrors[result.key];
+      return;
+    }
+    state.panelErrors[result.key] = result.error;
+  });
+}
+
+function viewDataReady(viewName) {
+  const required = VIEW_REQUIRED_KEYS[viewName] || [];
+  return required.every((key) => key in state.data || key in state.panelErrors);
+}
+
+function renderActiveView() {
+  if (state.activeView === "overview") {
+    renderOverview();
+    return;
+  }
+  if (state.activeView === "decisions") {
+    renderDecisions();
+    return;
+  }
+  if (state.activeView === "execution") {
+    renderExecution();
+    return;
+  }
+  if (state.activeView === "diagnostics") {
+    renderDiagnostics();
+    return;
+  }
+  if (state.activeView === "runtime-profiles") {
+    renderRuntimeProfiles();
+    return;
+  }
+  if (state.activeView === "operators") {
+    renderOperators();
+  }
 }
 
 function updateActionAccess() {
@@ -897,7 +981,7 @@ function renderExecution() {
       `<div class="cell-stack"><strong>${escapeHtml(recentOrderHeadline(order))}</strong><div class="table-meta">${escapeHtml(recentOrderNarrative(order))}</div></div>`,
       `<div class="cell-stack"><div class="table-inline-badges">${miniBadge(order.status || "-", toneForOrderStatus(order.status))}</div><div class="table-meta">${escapeHtml(recentOrderStateSummary(order))}</div></div>`,
       `<div class="cell-stack"><strong>${escapeHtml(formatRelativeAge(order.last_update_ts || order.created_at))}</strong><div class="table-meta">${escapeHtml(formatMaybeTimestamp(order.last_update_ts || order.created_at))}</div></div>`,
-      order.client_order_id ? `<button class="table-button" data-inspect-order="${escapeHtml(order.client_order_id)}">Inspect</button>` : "",
+      renderOrderActions(order),
     ])),
     "No recent orders available."
   );
@@ -1704,8 +1788,12 @@ async function inspectOrder(orderId, { manual = false } = {}) {
   try {
     const detail = await requestJson(`/orders/${encodeURIComponent(orderId)}`);
     nodes.orderLookupInput.value = orderId;
+    const stuckResolution = detail.stuck_submission_resolution || {};
       showStructuredDetail({
         title: "Order Detail",
+      actions: stuckResolution.eligible ? [
+        `<button class="action-button action-warning" data-resolve-stuck-order="${escapeHtml(detail.order?.client_order_id || "")}">Resolve Stuck Submit</button>`,
+      ] : [],
       summary: [
         ["Order ID", detail.order?.client_order_id],
         ["Decision ID", detail.order?.decision_id],
@@ -1716,16 +1804,24 @@ async function inspectOrder(orderId, { manual = false } = {}) {
       ],
         sections: [
           detailCard("Order Summary", detail.order || {}, {
-            narrative: orderNarrative(detail.order || {}, detail.fills || []),
+            narrative: orderNarrative(detail.order || {}, detail.fills || [], stuckResolution),
             facts: [
               ["Position Intent", detail.order?.submission_payload?.positionIntent || "-"],
               ["Exchange Order ID", detail.order?.exchange_order_id || "-"],
               ["Filled Qty", formatNumber(detail.order?.filled_qty)],
               ["Average Fill", formatNumber(detail.order?.average_fill_price)],
+              ["Restart-Orphaned Submit", booleanWord(stuckResolution.runtime_restarted_after_order)],
+              ["Recovery Eligible", booleanWord(stuckResolution.eligible)],
+              ["Recovery Status", stuckResolution.reason_code || "ready"],
             ],
           }),
           detailCard("Linked Fills", detail.fills || [], {
             narrative: linkedFillsNarrative(detail.fills || []),
+          }),
+          detailCard("Operator Recovery", stuckResolution, {
+            narrative: [
+              stuckResolution.summary || "No operator recovery hint is available for this order.",
+            ],
           }),
         ],
       });
@@ -1951,14 +2047,75 @@ function auditNarrative(audit) {
   ];
 }
 
-function orderNarrative(order, fills) {
-  return [
+function orderNarrative(order, fills, stuckResolution = {}) {
+  const lines = [
     `This order was sent as a ${order.submission_payload?.ordType || "market"} ${order.submission_payload?.side || "-"} on ${order.symbol || "-"} through ${order.venue || "-"}.`,
     `Current lifecycle state is ${readableMode(order.status)} with requested quantity ${formatNumber(order.requested_qty)} and filled quantity ${formatNumber(order.filled_qty)}.`,
     fills.length
       ? `There are ${fills.length} linked fill${pluralize(fills.length)} for this order.`
       : `No linked fills are stored for this order yet.`,
   ];
+  if (stuckResolution.eligible) {
+    lines.push("This order looks like a pre-restart stuck submission and can be resolved from the execution table.");
+  } else if (stuckResolution.summary) {
+    lines.push(stuckResolution.summary);
+  }
+  return lines;
+}
+
+function renderOrderActions(order) {
+  if (!order.client_order_id) {
+    return "";
+  }
+  const canWrite = operatorCanWrite();
+  const inspectButton = `<button class="table-button" data-inspect-order="${escapeHtml(order.client_order_id)}">Inspect</button>`;
+  if (!isRecoverableRestartSubmission(order)) {
+    return inspectButton;
+  }
+  return `
+    <div class="table-actions">
+      ${inspectButton}
+      <button class="table-button" data-resolve-stuck-order="${escapeHtml(order.client_order_id)}" ${canWrite ? "" : "disabled"}>Resolve Stuck Submit</button>
+    </div>
+  `;
+}
+
+function isRecoverableRestartSubmission(order) {
+  const startupTimestamp = state.data.runtime?.startup_timestamp;
+  const lastUpdate = order?.last_update_ts || order?.created_at;
+  if (!startupTimestamp || !lastUpdate) {
+    return false;
+  }
+  if (order?.venue !== "OKX") {
+    return false;
+  }
+  if (!["CREATED", "SUBMITTING"].includes(order?.status || "")) {
+    return false;
+  }
+  if (order?.exchange_order_id) {
+    return false;
+  }
+  return Date.parse(lastUpdate) < Date.parse(startupTimestamp);
+}
+
+async function resolveStuckOrder(orderId) {
+  if (!orderId) {
+    return;
+  }
+  if (!window.confirm("Resolve this pre-restart stuck submission as FAILED? The runtime will first confirm the order is absent from the latest exchange snapshot.")) {
+    return;
+  }
+  try {
+    await requestJson(`/orders/${encodeURIComponent(orderId)}/resolve-stuck-submission`, {
+      method: "POST",
+      body: { reason: "ui_resolve_stuck_submission" },
+    });
+    flash(`Resolved stuck submission ${orderId} and re-ran reconciliation.`, "warning");
+    await refreshDashboard({ manual: true });
+  } catch (error) {
+    flash(`Resolve stuck submission failed: ${normalizeError(error, "Stuck submission resolution failed").message}`, "danger");
+    renderDashboard({ manual: true });
+  }
 }
 
 function linkedFillsNarrative(fills) {
@@ -2249,7 +2406,10 @@ function setStatusChip(node, label, tone) {
   node.className = `status-badge ${badgeClass(tone)}`;
 }
 
-function showStructuredDetail({ title, summary = [], sections = [] }) {
+function showStructuredDetail({ title, summary = [], sections = [], actions = [] }) {
+  const actionsHtml = actions.length
+    ? `<div class="detail-card"><div class="table-actions">${actions.join("")}</div></div>`
+    : "";
   const summaryHtml = summary.length
     ? `<div class="detail-card"><h3>Summary</h3><div class="detail-grid">${summary.map(([key, value]) => `
         <div class="detail-grid-row">
@@ -2268,7 +2428,7 @@ function showStructuredDetail({ title, summary = [], sections = [] }) {
         </section>
       `).join("")
     : `<div class="empty-state">No detail sections available.</div>`;
-  setDrawerContent(title, summaryHtml, bodyHtml);
+  setDrawerContent(title, `${actionsHtml}${summaryHtml}`, bodyHtml);
   openDrawer();
 }
 

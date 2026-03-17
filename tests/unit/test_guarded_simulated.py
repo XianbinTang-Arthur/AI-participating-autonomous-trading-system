@@ -360,6 +360,49 @@ class FakeCancelOrderLookupFailureOKXClient(FakeOKXClient):
         raise RuntimeError("order_lookup_failed_after_cancel_accept")
 
 
+class FakeRoundedDerivativeOKXClient(FakeOKXClient):
+    async def get_order(self, *, symbol: str, order_id: str | None = None, client_order_id: str | None = None):
+        self.order_queries.append({"symbol": symbol, "order_id": order_id, "client_order_id": client_order_id})
+        submitted_size = self.place_order_calls[-1]["sz"]
+        return {
+            "code": "0",
+            "data": [
+                {
+                    "instId": symbol,
+                    "ordId": order_id or "ord_round_1",
+                    "clOrdId": client_order_id or self.place_order_calls[-1]["clOrdId"],
+                    "state": "filled",
+                    "sz": submitted_size,
+                    "accFillSz": submitted_size,
+                    "avgPx": "68000",
+                    "cTime": "1700000000000",
+                    "uTime": "1700000001000",
+                }
+            ],
+        }
+
+    async def get_fills(self, *, symbol: str | None = None, order_id: str | None = None, limit: int | None = None):
+        self.fill_queries.append({"symbol": symbol, "order_id": order_id, "limit": limit})
+        submitted_size = self.place_order_calls[-1]["sz"]
+        return {
+            "code": "0",
+            "data": [
+                {
+                    "instId": symbol,
+                    "ordId": order_id or "ord_round_1",
+                    "clOrdId": self.place_order_calls[-1]["clOrdId"],
+                    "tradeId": "trade_round_1",
+                    "side": self.place_order_calls[-1]["side"],
+                    "fillSz": submitted_size,
+                    "fillPx": "68000",
+                    "fee": "-0.0476",
+                    "feeCcy": "USDT",
+                    "fillTime": "1700000001000",
+                }
+            ],
+        }
+
+
 def make_settings(overrides: dict | None = None) -> AATSSettings:
     payload = {
         "mode": "guarded_live",
@@ -669,6 +712,76 @@ class TestGuardedSimulatedExecution(unittest.IsolatedAsyncioTestCase):
         await adapter.submit(intent)
 
         self.assertNotIn("posSide", client.place_order_calls[0])
+
+    async def test_submit_marks_fill_complete_when_derivatives_size_is_rounded_down(self) -> None:
+        settings = make_settings(
+            {
+                "live_submit_enabled": True,
+                "guarded_execution_dry_run": False,
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "max_notional_per_symbol": 10_000.0,
+            }
+        )
+        mode_controller = RuntimeModeController(settings=settings, kill_switch=KillSwitch())
+        account_service = FakeAccountService()
+        account_service._snapshot = account_service._snapshot.model_copy(
+            update={
+                "instruments": [
+                    InstrumentMetadata(
+                        instrument_id="BTC-USDT-SWAP",
+                        symbol="BTC-USDT-SWAP",
+                        base_currency="BTC",
+                        quote_currency="USDT",
+                        lot_size=0.01,
+                        tick_size=0.1,
+                        min_size=0.01,
+                        contract_value=0.01,
+                        state="live",
+                    )
+                ],
+                "account_mode": "2",
+                "raw": {"account_config": {"data": [{"posMode": "net_mode"}]}},
+            }
+        )
+        account_service.instrument_metadata = (
+            lambda symbol: account_service._snapshot.instruments[0] if symbol == "BTC-USDT-SWAP" else None
+        )
+        adapter = OKXExecutionAdapter(
+            settings=settings,
+            client=FakeRoundedDerivativeOKXClient(),  # type: ignore[arg-type]
+            account_service=account_service,  # type: ignore[arg-type]
+            mode_controller=mode_controller,
+            health_service=FakeHealthService(),
+            price_provider=lambda _symbol: 68_000.0,
+        )
+        intent = OrderIntent(
+            intent_id="intent_derivatives_rounded_fill",
+            decision_id="decision_derivatives_rounded_fill",
+            symbol="BTC-USDT-SWAP",
+            side="buy",
+            quantity=0.00078,
+            execution_style="taker",
+            order_type="market",
+            urgency="medium",
+            time_in_force="IOC",
+            idempotency_key="intent_derivatives_rounded_fill",
+            product_type="derivatives",
+            target_leverage=2.5,
+            margin_mode="cross",
+            exposure_side="long",
+            position_intent="open_long",
+        )
+
+        state, fills = await adapter.submit(intent)
+
+        self.assertEqual(state.status, "FILLED")
+        self.assertAlmostEqual(state.requested_qty, 0.0007)
+        self.assertEqual(len(fills), 1)
+        self.assertAlmostEqual(fills[0].fill_qty, 0.0007)
+        self.assertEqual(fills[0].order_status_after_fill, "FILLED")
 
     async def test_submit_filters_out_unrelated_recent_exchange_fills(self) -> None:
         settings = make_settings(

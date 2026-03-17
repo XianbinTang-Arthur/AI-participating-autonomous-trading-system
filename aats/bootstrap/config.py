@@ -541,6 +541,7 @@ async def build_runtime(
     recovery_service = ExecutionRecoveryService(
         settings=runtime_settings,
         execution_repo=storage.execution_repo,
+        obligation_repo=storage.obligation_repo,
         portfolio_repo=storage.portfolio_repo,
         reconciliation_repo=storage.reconciliation_repo,
         reconstruction_service=PortfolioReconstructionService(
@@ -644,6 +645,14 @@ async def build_runtime(
         account_baseline=imported_baseline,
         account_baseline_event_id=imported_baseline_event_id,
     )
+    if recovery_artifacts.rebuilt_snapshot is not None:
+        await publish_model(
+            bus=bus,
+            topic=topics.PORTFOLIO_SNAPSHOTS,
+            key="portfolio",
+            payload_model=recovery_artifacts.rebuilt_snapshot,
+            source_component="recovery_service",
+        )
     if (
         bootstrap_portfolio_snapshot
         and latest_matching_snapshot(storage.portfolio_repo.history(), state_scope) is None

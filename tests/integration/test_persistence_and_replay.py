@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from datetime import timedelta
+from decimal import Decimal
 from pathlib import Path
 
 from aats.bootstrap.config import build_runtime, build_storage_backends
@@ -1114,9 +1115,12 @@ class TestPersistenceAndReplay(unittest.IsolatedAsyncioTestCase):
             cost_basis={"BTC-USDT": position_qty * avg_entry_price} if positions else {},
             realized_pnl=0.0,
             unrealized_pnl=0.0,
-            total_equity=balances.get("USDT", 0.0) + sum(position.position_notional for position in positions),
-            gross_exposure=sum(abs(position.position_notional) for position in positions),
-            net_exposure=sum(position.position_notional for position in positions),
+            total_equity=Decimal(str(balances.get("USDT", 0.0))) + sum(
+                (position.position_notional for position in positions),
+                start=Decimal("0"),
+            ),
+            gross_exposure=sum((abs(position.position_notional) for position in positions), start=Decimal("0")),
+            net_exposure=sum((position.position_notional for position in positions), start=Decimal("0")),
         )
 
     @staticmethod

@@ -1315,6 +1315,170 @@ class TestReconciliationComparator(unittest.TestCase):
         self.assertEqual(report.severity, "CLEAN")
         self.assertEqual(report.fill_diff["exchange"], {})
 
+    def test_service_ignores_local_exchange_fills_older_than_visible_exchange_window(self) -> None:
+        now = utc_now()
+        old_fill_ts = now - timedelta(hours=2)
+        recent_fill_ts = now - timedelta(minutes=1)
+        local_fills = [
+            FillEvent(
+                fill_id="trade_old_visible",
+                decision_id="decision_window",
+                intent_id="intent_old_visible",
+                client_order_id="clord_old_visible",
+                exchange_order_id="ord_old_visible",
+                symbol="BTC-USDT",
+                venue="OKX",
+                side="buy",
+                fill_qty=0.001,
+                fill_price=100.0,
+                fee_amount=0.1,
+                fee_currency="USDT",
+                liquidity_role="taker",
+                exchange_timestamp=old_fill_ts,
+                ingestion_timestamp=old_fill_ts,
+            ),
+            FillEvent(
+                fill_id="trade_recent_visible",
+                decision_id="decision_window",
+                intent_id="intent_recent_visible",
+                client_order_id="clord_recent_visible",
+                exchange_order_id="ord_recent_visible",
+                symbol="BTC-USDT",
+                venue="OKX",
+                side="buy",
+                fill_qty=0.001,
+                fill_price=101.0,
+                fee_amount=0.1,
+                fee_currency="USDT",
+                liquidity_role="taker",
+                exchange_timestamp=recent_fill_ts,
+                ingestion_timestamp=recent_fill_ts,
+            ),
+        ]
+        reconstruction_service = PortfolioReconstructionService(
+            initial_usdt_balance=10_000.0,
+            snapshot_builder=PortfolioSnapshotBuilder(pnl_calculator=PortfolioPnLCalculator()),
+        )
+        stored_snapshot = reconstruction_service.rebuild_snapshot(
+            fills=local_fills,
+            price_provider=lambda _symbol: 0.0,
+        ).model_copy(
+            update={
+                "decision_id": "decision_window",
+                "source_fill_id": "trade_recent_visible",
+            }
+        )
+        exchange_snapshot = ExchangeAccountSnapshot(
+            account_source="okx",
+            fetched_at=now,
+            balances=[
+                ExchangeBalance(
+                    currency="USDT",
+                    total=float(stored_snapshot.balances["USDT"]),
+                    available=float(stored_snapshot.balances["USDT"]),
+                    frozen=0.0,
+                ),
+                ExchangeBalance(currency="BTC", total=0.002, available=0.002, frozen=0.0),
+            ],
+            positions=[],
+            open_orders=[],
+            fills=[
+                ExchangeFill(
+                    fill_id="trade_recent_visible",
+                    exchange_order_id="ord_recent_visible",
+                    client_order_id="clord_recent_visible",
+                    instrument_id="BTC-USDT",
+                    symbol="BTC-USDT",
+                    side="buy",
+                    fill_qty=0.001,
+                    fill_price=101.0,
+                    fee_amount=0.1,
+                    fill_ts=recent_fill_ts,
+                )
+            ],
+            instruments=[],
+        )
+
+        class _PortfolioRepo:
+            def latest(self):
+                return stored_snapshot
+
+            def history(self):
+                return [stored_snapshot]
+
+        class _ExecutionRepo:
+            def order_states(self):
+                return [
+                    OrderState(
+                        decision_id="decision_window",
+                        intent_id="intent_old_visible",
+                        symbol="BTC-USDT",
+                        client_order_id="clord_old_visible",
+                        venue="OKX",
+                        exchange_order_id="ord_old_visible",
+                        status="FILLED",
+                        exchange_status="filled",
+                        submitted_ts=old_fill_ts,
+                        last_update_ts=old_fill_ts,
+                        last_exchange_update_ts=old_fill_ts,
+                        requested_qty=0.001,
+                        filled_qty=0.001,
+                        remaining_qty=0.0,
+                        average_fill_price=100.0,
+                        fees=0.1,
+                    ),
+                    OrderState(
+                        decision_id="decision_window",
+                        intent_id="intent_recent_visible",
+                        symbol="BTC-USDT",
+                        client_order_id="clord_recent_visible",
+                        venue="OKX",
+                        exchange_order_id="ord_recent_visible",
+                        status="FILLED",
+                        exchange_status="filled",
+                        submitted_ts=recent_fill_ts,
+                        last_update_ts=recent_fill_ts,
+                        last_exchange_update_ts=recent_fill_ts,
+                        requested_qty=0.001,
+                        filled_qty=0.001,
+                        remaining_qty=0.0,
+                        average_fill_price=101.0,
+                        fees=0.1,
+                    ),
+                ]
+
+            def fills(self):
+                return list(local_fills)
+
+        class _AccountService:
+            def latest_snapshot(self):
+                return exchange_snapshot
+
+        service = ReconciliationService(
+            settings=AATSSettings.model_validate({"okx_fill_fetch_limit": 1}),
+            bus=None,  # type: ignore[arg-type]
+            fetcher=ExchangeStateFetcher(account_service=_AccountService()),
+            comparator=StateComparator(),
+            repair_service=ReconciliationRepairService(),
+            reconciliation_repo=None,  # type: ignore[arg-type]
+            execution_repo=_ExecutionRepo(),  # type: ignore[arg-type]
+            portfolio_repo=_PortfolioRepo(),  # type: ignore[arg-type]
+            event_store=InMemoryEventStore(),  # type: ignore[arg-type]
+            reconstruction_service=reconstruction_service,
+            price_provider=lambda _symbol: 0.0,
+            bootstrap_portfolio_from_exchange=False,
+            metrics=None,
+        )
+
+        report = service._build_report(
+            decision_id="decision_window",
+            portfolio_snapshot_ref="evt_portfolio_window",
+            stored_snapshot=stored_snapshot,
+        )
+
+        self.assertEqual(report.severity, "CLEAN")
+        self.assertEqual(report.fill_diff["exchange"], {})
+
 
 class TestReconciliationServiceIdempotency(unittest.IsolatedAsyncioTestCase):
     async def test_duplicate_portfolio_snapshot_event_does_not_create_duplicate_report(self) -> None:

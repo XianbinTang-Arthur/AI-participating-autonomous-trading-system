@@ -90,6 +90,9 @@ class AccountBaselineSnapshot(SchemaBase):
     account_source: str
     exchange_snapshot_ts: datetime
     imported_at: datetime
+    product_type: Literal["spot", "derivatives"] = "spot"
+    margin_mode: Literal["cash", "cross", "isolated"] = "cash"
+    allowed_symbols: list[str] = Field(default_factory=list)
     baseline_status: BaselineImportStatus
     baseline_kind: Literal["startup_import", "operator_rebaseline"] = "startup_import"
     safe_for_automatic_continuation: bool = True

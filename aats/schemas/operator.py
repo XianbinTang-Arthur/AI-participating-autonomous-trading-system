@@ -86,6 +86,7 @@ class OperatorActionRecord(SchemaBase):
         "reconciliation_validate",
         "rebaseline",
         "cancel_order",
+        "resolve_stuck_submission",
         "login",
         "user_create",
         "user_update",

@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
+from decimal import Decimal
 
 from aats.events import topics
 from aats.schemas.audit import DecisionAuditRecord
@@ -16,6 +17,7 @@ from aats.schemas.portfolio import PortfolioSnapshot
 from aats.schemas.reconciliation import ReconciliationReport
 from aats.schemas.system import HealthSnapshot
 from aats.services.execution_engine.state_machine import OrderStateMachine
+from aats.services.portfolio_service.decimals import is_effectively_zero, to_decimal
 from aats.services.portfolio_service.positions import PortfolioState
 from aats.storage.base import AuditRepository, EventStore, PortfolioRepository
 from aats.services.portfolio_service.reconstruction import PortfolioReconstructionService
@@ -928,14 +930,23 @@ class ReplayEngine:
     @staticmethod
     def _snapshot_signature(snapshot: PortfolioSnapshot) -> dict[str, object]:
         return {
-            "balances": snapshot.balances,
-            "positions": {position.symbol: position.position_qty for position in snapshot.positions},
-            "cost_basis": snapshot.cost_basis,
-            "realized_pnl": snapshot.realized_pnl,
-            "unrealized_pnl": snapshot.unrealized_pnl,
-            "total_equity": snapshot.total_equity,
-            "gross_exposure": snapshot.gross_exposure,
-            "net_exposure": snapshot.net_exposure,
+            "balances": {
+                currency: ReplayEngine._normalize_decimal(value)
+                for currency, value in snapshot.balances.items()
+            },
+            "positions": {
+                position.symbol: ReplayEngine._normalize_decimal(position.position_qty)
+                for position in snapshot.positions
+            },
+            "cost_basis": {
+                symbol: ReplayEngine._normalize_decimal(value)
+                for symbol, value in snapshot.cost_basis.items()
+            },
+            "realized_pnl": ReplayEngine._normalize_decimal(snapshot.realized_pnl),
+            "unrealized_pnl": ReplayEngine._normalize_decimal(snapshot.unrealized_pnl),
+            "total_equity": ReplayEngine._normalize_decimal(snapshot.total_equity),
+            "gross_exposure": ReplayEngine._normalize_decimal(snapshot.gross_exposure),
+            "net_exposure": ReplayEngine._normalize_decimal(snapshot.net_exposure),
         }
 
     @staticmethod
@@ -945,39 +956,40 @@ class ReplayEngine:
         reconstructed_snapshot: PortfolioSnapshot,
     ) -> dict[str, object]:
         mismatch: dict[str, object] = {}
-        if stored_snapshot.balances != reconstructed_snapshot.balances:
+        stored_signature = ReplayEngine._snapshot_signature(stored_snapshot)
+        reconstructed_signature = ReplayEngine._snapshot_signature(reconstructed_snapshot)
+        if stored_signature["balances"] != reconstructed_signature["balances"]:
             mismatch["balances"] = {
                 "stored": stored_snapshot.balances,
                 "reconstructed": reconstructed_snapshot.balances,
             }
-        if stored_snapshot.cost_basis != reconstructed_snapshot.cost_basis:
+        if stored_signature["cost_basis"] != reconstructed_signature["cost_basis"]:
             mismatch["cost_basis"] = {
                 "stored": stored_snapshot.cost_basis,
                 "reconstructed": reconstructed_snapshot.cost_basis,
             }
 
-        stored_positions = {position.symbol: position.position_qty for position in stored_snapshot.positions}
-        replayed_positions = {
-            position.symbol: position.position_qty for position in reconstructed_snapshot.positions
-        }
+        stored_positions = stored_signature["positions"]
+        replayed_positions = reconstructed_signature["positions"]
         if stored_positions != replayed_positions:
             mismatch["positions"] = {
                 "stored": stored_positions,
                 "reconstructed": replayed_positions,
             }
 
-        numeric_fields = (
-            "realized_pnl",
-            "unrealized_pnl",
-            "total_equity",
-            "gross_exposure",
-            "net_exposure",
-        )
+        numeric_fields = ("realized_pnl",)
         for field_name in numeric_fields:
-            if abs(getattr(stored_snapshot, field_name) - getattr(reconstructed_snapshot, field_name)) > 1e-9:
+            if stored_signature[field_name] != reconstructed_signature[field_name]:
                 mismatch[field_name] = {
                     "stored": getattr(stored_snapshot, field_name),
                     "reconstructed": getattr(reconstructed_snapshot, field_name),
                 }
 
         return mismatch
+
+    @staticmethod
+    def _normalize_decimal(value: Decimal | float | int) -> Decimal:
+        decimal_value = to_decimal(value)
+        if is_effectively_zero(decimal_value):
+            return Decimal("0")
+        return decimal_value.normalize()

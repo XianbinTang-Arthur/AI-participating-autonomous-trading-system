@@ -5,8 +5,9 @@ from typing import TYPE_CHECKING, Any
 
 from aats.bootstrap.logging import get_logger, log_event
 from aats.events import topics
-from aats.events.envelopes import build_envelope
+from aats.events.envelopes import build_envelope, publish_model
 from aats.schemas.common import EventEnvelope, utc_now
+from aats.schemas.execution import OrderState
 from aats.schemas.operator import (
     AuthSource,
     BlockerSnapshotRecord,
@@ -44,11 +45,14 @@ if TYPE_CHECKING:
 
 
 class OperatorQueryService:
+    _STUCK_SUBMISSION_STATUSES = {"CREATED", "SUBMITTING"}
+
     def __init__(self, runtime: ApplicationRuntime) -> None:
         self.runtime = runtime
         self.logger = get_logger("aats.operator_api")
         self.recovery_posture = RecoveryPostureEvaluator(runtime)
         self.state_scope = runtime_state_scope(runtime.settings)
+        self._cache: dict[str, Any] = {}
         self.runtime_profiles = RuntimeProfileControlService(
             settings=runtime.settings,
             repo=runtime.runtime_profile_repo,
@@ -56,17 +60,37 @@ class OperatorQueryService:
             event_store=runtime.event_store,
         )
 
+    def _cached(self, key: str, loader):
+        if key not in self._cache:
+            self._cache[key] = loader()
+        return self._cache[key]
+
+    def _invalidate_cache(self) -> None:
+        self._cache.clear()
+
     def _scoped_order_states(self):
-        return order_states_for_scope(self.runtime.execution_repo, self.state_scope)
+        return self._cached(
+            "scoped_order_states",
+            lambda: order_states_for_scope(self.runtime.execution_repo, self.state_scope),
+        )
 
     def _scoped_open_order_states(self):
-        return order_states_for_scope(self.runtime.execution_repo, self.state_scope, open_only=True)
+        return self._cached(
+            "scoped_open_order_states",
+            lambda: order_states_for_scope(self.runtime.execution_repo, self.state_scope, open_only=True),
+        )
 
     def _scoped_fills(self):
-        return fills_for_scope(self.runtime.execution_repo, self.state_scope)
+        return self._cached(
+            "scoped_fills",
+            lambda: fills_for_scope(self.runtime.execution_repo, self.state_scope),
+        )
 
     def _latest_scoped_snapshot(self):
-        return latest_snapshot_for_scope(self.runtime.portfolio_repo, self.state_scope)
+        return self._cached(
+            "latest_scoped_snapshot",
+            lambda: latest_snapshot_for_scope(self.runtime.portfolio_repo, self.state_scope),
+        )
 
     def _current_runtime_started_at(self) -> datetime:
         return self.runtime.started_at
@@ -83,7 +107,10 @@ class OperatorQueryService:
         return value >= self._current_runtime_started_at()
 
     def _latest_scoped_reconciliation(self):
-        return latest_reconciliation_for_scope(self.runtime.reconciliation_repo, self.state_scope)
+        return self._cached(
+            "latest_scoped_reconciliation",
+            lambda: latest_reconciliation_for_scope(self.runtime.reconciliation_repo, self.state_scope),
+        )
 
     def _latest_scoped_portfolio_event(self):
         return latest_topic_event_for_scope(self.runtime.event_store, topics.PORTFOLIO_SNAPSHOTS, self.state_scope)
@@ -118,7 +145,14 @@ class OperatorQueryService:
         return max(rows, key=lambda item: item.ingestion_timestamp, default=None)
 
     def latest_account_baseline(self) -> dict[str, Any] | None:
-        latest = self.runtime.event_store.latest(topics.ACCOUNT_BASELINES)
+        latest = self._cached(
+            "latest_account_baseline_event",
+            lambda: latest_topic_event_for_scope(
+                self.runtime.event_store,
+                topics.ACCOUNT_BASELINES,
+                self.state_scope,
+            ),
+        )
         return latest.payload if latest is not None else None
 
     def recent_fills(self, *, limit: int = 50):
@@ -129,16 +163,18 @@ class OperatorQueryService:
         )[:limit]
 
     def latest_decision_id(self) -> str | None:
-        latest = max(self.runtime.audit_repo.all(), key=lambda item: item.created_at, default=None)
+        latest = self._cached("latest_decision_record", self.runtime.audit_repo.latest)
         return latest.decision_id if latest is not None else None
 
     def latest_operator_action(self, action: str) -> dict[str, Any] | None:
-        actions = [
-            item.payload
-            for item in self.runtime.event_store.by_topic(topics.OPERATOR_ACTIONS)
-            if item.payload.get("action") == action
-        ]
-        return actions[-1] if actions else None
+        actions = self._cached(
+            "operator_action_events",
+            lambda: self.runtime.event_store.by_topic(topics.OPERATOR_ACTIONS),
+        )
+        for item in reversed(actions):
+            if item.payload.get("action") == action:
+                return item.payload
+        return None
 
     def record_operator_login(
         self,
@@ -183,7 +219,7 @@ class OperatorQueryService:
         }
 
     def runtime_profile_snapshot(self) -> dict[str, Any]:
-        snapshot = self.runtime_profiles.snapshot()
+        snapshot = self._cached("runtime_profile_snapshot", self.runtime_profiles.snapshot)
         activation = snapshot["activation"]
         return {
             **snapshot,
@@ -329,9 +365,11 @@ class OperatorQueryService:
         return {"status": "deleted", "user": self._operator_user_view(user, actor_identity=actor_identity)}
 
     def recovery_view(self) -> dict[str, Any]:
+        return self._cached("recovery_view", self._build_recovery_view)
+
+    def _build_recovery_view(self) -> dict[str, Any]:
         latest_reconciliation = self._latest_scoped_reconciliation()
-        latest_baseline_envelope = self.runtime.event_store.latest(topics.ACCOUNT_BASELINES)
-        latest_baseline = latest_baseline_envelope.payload if latest_baseline_envelope is not None else None
+        latest_baseline = self.latest_account_baseline()
         latest_rebaseline_action = self.latest_operator_action("rebaseline")
         latest_resume_action = self.latest_operator_action("resume")
         base = self.recovery_posture.finalize_status(latest_reconciliation=latest_reconciliation)
@@ -353,6 +391,9 @@ class OperatorQueryService:
         }
 
     def system_mode(self) -> dict[str, Any]:
+        return self._cached("system_mode", self._build_system_mode)
+
+    def _build_system_mode(self) -> dict[str, Any]:
         snapshot = dict(self.runtime.mode_controller.snapshot())
         readiness = self.runtime.execution_adapter.readiness()
         recovery = self.recovery_view()
@@ -601,7 +642,7 @@ class OperatorQueryService:
         }
 
     def recent_decisions(self, *, limit: int = 20) -> list[dict[str, Any]]:
-        rows = sorted(self.runtime.audit_repo.all(), key=lambda item: item.created_at, reverse=True)[:limit]
+        rows = self.runtime.audit_repo.recent(limit=limit)
         payloads: list[dict[str, Any]] = []
         for record in rows:
             context = self.payload_by_ref(record.decision_context_ref)
@@ -709,7 +750,7 @@ class OperatorQueryService:
         return {
             "history": [
                 item.payload
-                for item in self.runtime.event_store.by_topic(topics.BLOCKER_SNAPSHOTS)[-limit:]
+                for item in self.runtime.event_store.recent_by_topic(topics.BLOCKER_SNAPSHOTS, limit=limit)
             ]
         }
 
@@ -822,7 +863,11 @@ class OperatorQueryService:
         return self.account_open_orders()
 
     def orders_recent(self, *, limit: int = 50) -> dict[str, Any]:
-        orders = order_states_for_scope(self.runtime.execution_repo, self.state_scope, limit=limit)
+        orders = sorted(
+            order_states_for_scope(self.runtime.execution_repo, self.state_scope),
+            key=lambda item: (item.last_update_ts or item.created_at, item.client_order_id),
+            reverse=True,
+        )[:limit]
         return {"orders": [order.model_dump(mode="json") for order in orders]}
 
     def order_detail(self, client_order_id: str) -> dict[str, Any]:
@@ -832,18 +877,15 @@ class OperatorQueryService:
         )
         if order is None:
             raise KeyError(f"order_not_found:{client_order_id}")
+        fills = self._scoped_fills_for_order(client_order_id)
         return {
             "order": order.model_dump(mode="json"),
-            "fills": [
-                fill.model_dump(mode="json")
-                for fill in [
-                    item
-                    for item in self.runtime.execution_repo.fills_for_order(client_order_id)
-                    if item.product_type == self.state_scope.product_type
-                    and item.margin_mode == self.state_scope.margin_mode
-                    and self.state_scope.symbol_allowed(item.symbol)
-                ]
-            ],
+            "fills": [fill.model_dump(mode="json") for fill in fills],
+            "stuck_submission_resolution": self._stuck_submission_resolution(
+                order=order,
+                fills=fills,
+                exchange_snapshot=self.runtime.account_service.latest_snapshot(),
+            ),
         }
 
     def fills_recent(self, *, limit: int = 50) -> dict[str, Any]:
@@ -873,7 +915,7 @@ class OperatorQueryService:
     def execution_errors(self) -> dict[str, Any]:
         persisted = [
             item.payload
-            for item in self.runtime.event_store.by_topic(topics.EXECUTION_ERROR_SUMMARIES)[-20:]
+            for item in self.runtime.event_store.recent_by_topic(topics.EXECUTION_ERROR_SUMMARIES, limit=20)
             if self._is_current_runtime_timestamp(item.payload.get("observed_at"))
         ]
         if persisted:
@@ -1080,6 +1122,7 @@ class OperatorQueryService:
     ) -> dict[str, Any]:
         recovery_before = self.recovery_view()["recovery_state"]
         state = await self.runtime.order_manager.cancel_order(client_order_id)
+        self._invalidate_cache()
         self._append_event(
             topic=topics.OPERATOR_ACTIONS,
             key="system",
@@ -1099,6 +1142,123 @@ class OperatorQueryService:
         )
         return {"order": state.model_dump(mode="json")}
 
+    async def resolve_stuck_submission(
+        self,
+        *,
+        client_order_id: str,
+        reason: str,
+        actor_role: OperatorRole,
+        actor_identity: str | None = None,
+        auth_source: AuthSource = "anonymous",
+    ) -> dict[str, Any]:
+        order = next(
+            (item for item in self._scoped_order_states() if item.client_order_id == client_order_id),
+            None,
+        )
+        if order is None:
+            raise KeyError(f"order_not_found:{client_order_id}")
+
+        fills = self._scoped_fills_for_order(client_order_id)
+        recovery_before = self.recovery_view()["recovery_state"]
+        exchange_snapshot = await self._refresh_exchange_snapshot_for_resolution()
+        resolution = self._stuck_submission_resolution(
+            order=order,
+            fills=fills,
+            exchange_snapshot=exchange_snapshot,
+        )
+        if not resolution["eligible"]:
+            raise ValueError(f"stuck_submission_resolution_blocked:{resolution['reason_code']}")
+
+        now = utc_now()
+        resolved_state = order.model_copy(
+            update={
+                "status": "FAILED",
+                "last_update_ts": now,
+                "execution_error": "operator_resolved_stuck_submission_after_restart",
+                "cancel_reason": reason,
+            }
+        )
+        persisted = self.runtime.execution_repo.save_order_state(resolved_state)
+        if self.runtime.audit_repo.get(persisted.decision_id) is not None:
+            await publish_model(
+                bus=self.runtime.bus,
+                topic=topics.ORDER_UPDATES,
+                key=persisted.symbol,
+                payload_model=persisted,
+                source_component="operator_api",
+            )
+        else:
+            self._append_event(
+                topic=topics.ORDER_UPDATES,
+                key=persisted.symbol,
+                payload_model=persisted,
+            )
+        await publish_model(
+            bus=self.runtime.bus,
+            topic=topics.EXECUTION_ERROR_SUMMARIES,
+            key=persisted.symbol,
+            payload_model=ExecutionErrorSummary(
+                subsystem="operator_recovery",
+                severity="warning",
+                message="Operator resolved a stuck pre-restart submission as FAILED.",
+                decision_id=persisted.decision_id,
+                intent_id=persisted.intent_id,
+                order_id=persisted.client_order_id,
+                status=persisted.status,
+                observed_at=now,
+            ),
+            source_component="operator_api",
+        )
+        report = await self.runtime.reconciliation_service.validate_now(
+            reason=f"resolve_stuck_submission:{client_order_id}"
+        )
+        self._update_recovery_status_for_report(report)
+        self._invalidate_cache()
+        recovery_after = self.recovery_view()["recovery_state"]
+        self._append_event(
+            topic=topics.OPERATOR_ACTIONS,
+            key="system",
+            payload_model=OperatorActionRecord(
+                action="resolve_stuck_submission",
+                actor_role=actor_role,
+                actor_identity=actor_identity,
+                auth_source=auth_source,
+                reason=reason,
+                status="resolved_as_failed",
+                decision_id=persisted.decision_id,
+                order_id=persisted.client_order_id,
+                recovery_state_before=recovery_before,
+                recovery_state_after=recovery_after,
+                reconciliation_id=report.reconciliation_id,
+                details={
+                    "previous_order_status": order.status,
+                    "final_order_status": persisted.status,
+                    "resolution": resolution,
+                },
+            ),
+        )
+        self._persist_blocker_snapshot(
+            source="resolve_stuck_submission",
+            runtime_state=self.system_health()["runtime_state"],
+            mode_snapshot=self.system_mode(),
+            blockers=self.blockers(),
+        )
+        log_event(
+            self.logger,
+            "resolve_stuck_submission",
+            level="warning",
+            order_id=persisted.client_order_id,
+            previous_status=order.status,
+            final_status=persisted.status,
+            reason=reason,
+        )
+        return {
+            "order": persisted.model_dump(mode="json"),
+            "resolution": resolution,
+            "reconciliation": report.model_dump(mode="json"),
+            "recovery": self.recovery_view(),
+        }
+
     async def rebaseline(
         self,
         *,
@@ -1113,7 +1273,11 @@ class OperatorQueryService:
             raise ValueError("rebaseline_not_supported_for_runtime_profile")
 
         recovery_before = self.recovery_view()["recovery_state"]
-        previous_baseline_event = self.runtime.event_store.latest(topics.ACCOUNT_BASELINES)
+        previous_baseline_event = latest_topic_event_for_scope(
+            self.runtime.event_store,
+            topics.ACCOUNT_BASELINES,
+            self.state_scope,
+        )
         previous_baseline_ref = previous_baseline_event.event_id if previous_baseline_event is not None else None
 
         self.runtime.kill_switch.halt(reason="operator_rebaseline_pending")
@@ -1145,6 +1309,9 @@ class OperatorQueryService:
         imported = baseline_importer.rebaseline_snapshot(
             exchange_snapshot=exchange_snapshot,
             portfolio_state=self.runtime.portfolio_service.state,
+            product_type=self.state_scope.product_type,
+            margin_mode=self.state_scope.margin_mode,
+            allowed_symbols=self.state_scope.allowed_symbols,
             previous_baseline_ref=previous_baseline_ref,
             operator_action_ref=action_envelope.event_id,
             trigger_reason=reason,
@@ -1196,6 +1363,7 @@ class OperatorQueryService:
             base_status=updated_status,
             latest_reconciliation=report,
         )
+        self._invalidate_cache()
         resume_eligible = self.runtime.recovery_status.resume_eligible
         self._append_event(
             topic=topics.OPERATOR_ACTIONS,
@@ -1254,6 +1422,7 @@ class OperatorQueryService:
             }
         )
         self.runtime.recovery_status = self.recovery_posture.finalize_status(base_status=updated_status)
+        self._invalidate_cache()
         self._append_event(
             topic=topics.OPERATOR_ACTIONS,
             key="system",
@@ -1330,6 +1499,7 @@ class OperatorQueryService:
                 base_status=updated_status,
                 latest_reconciliation=report,
             )
+        self._invalidate_cache()
         mode_state = self.system_mode()
         blockers = self.blockers()
         log_event(
@@ -1432,6 +1602,105 @@ class OperatorQueryService:
         self.runtime.event_store.append(envelope)
         return envelope
 
+    def _scoped_fills_for_order(self, client_order_id: str):
+        return [
+            item
+            for item in self.runtime.execution_repo.fills_for_order(client_order_id)
+            if item.product_type == self.state_scope.product_type
+            and item.margin_mode == self.state_scope.margin_mode
+            and self.state_scope.symbol_allowed(item.symbol)
+        ]
+
+    async def _refresh_exchange_snapshot_for_resolution(self):
+        if self.runtime.settings.account_backend != "okx" or not self.runtime.settings.account_read_enabled:
+            return None
+        return await self.runtime.account_service.refresh(force=True)
+
+    def _stuck_submission_resolution(
+        self,
+        *,
+        order: OrderState,
+        fills: list[Any] | None = None,
+        exchange_snapshot=None,
+    ) -> dict[str, Any]:
+        local_fills = list(fills or [])
+        last_update = order.last_update_ts or order.created_at
+        runtime_started_at = self._current_runtime_started_at()
+        runtime_restarted_after_order = last_update is not None and last_update < runtime_started_at
+        exchange_order_present: bool | None = None
+        exchange_fill_present: bool | None = None
+        reason_code: str | None = None
+
+        if order.venue != "OKX":
+            reason_code = "venue_not_exchange_coupled"
+        elif order.status not in self._STUCK_SUBMISSION_STATUSES:
+            reason_code = "order_not_in_pre_submit_state"
+        elif order.exchange_order_id is not None:
+            reason_code = "exchange_order_id_present"
+        elif local_fills:
+            reason_code = "local_fills_present"
+        elif not runtime_restarted_after_order:
+            reason_code = "order_belongs_to_current_runtime"
+        elif self.runtime.settings.account_backend != "okx" or not self.runtime.settings.account_read_enabled:
+            reason_code = "exchange_confirmation_unavailable"
+        elif exchange_snapshot is None:
+            reason_code = "exchange_snapshot_unavailable"
+        else:
+            exchange_order_present = any(
+                item.client_order_id == order.client_order_id
+                or (
+                    order.exchange_order_id is not None
+                    and item.exchange_order_id == order.exchange_order_id
+                )
+                for item in exchange_snapshot.open_orders
+            )
+            exchange_fill_present = any(
+                item.client_order_id == order.client_order_id
+                or (
+                    order.exchange_order_id is not None
+                    and item.exchange_order_id == order.exchange_order_id
+                )
+                for item in exchange_snapshot.fills
+            )
+            if exchange_order_present:
+                reason_code = "exchange_order_still_open"
+            elif exchange_fill_present:
+                reason_code = "exchange_fill_detected"
+
+        eligible = reason_code is None
+        summary = (
+            "Eligible for operator resolution: the order predates the current runtime, has no exchange order id, and is absent from the latest exchange snapshot."
+            if eligible
+            else self._stuck_submission_resolution_summary(reason_code)
+        )
+        return {
+            "eligible": eligible,
+            "summary": summary,
+            "reason_code": reason_code,
+            "order_status": order.status,
+            "last_local_update_ts": last_update,
+            "runtime_started_at": runtime_started_at,
+            "runtime_restarted_after_order": runtime_restarted_after_order,
+            "local_fill_count": len(local_fills),
+            "exchange_order_present": exchange_order_present,
+            "exchange_fill_present": exchange_fill_present,
+        }
+
+    @staticmethod
+    def _stuck_submission_resolution_summary(reason_code: str | None) -> str:
+        messages = {
+            "venue_not_exchange_coupled": "This order is not exchange-coupled, so stuck submission recovery is not applicable.",
+            "order_not_in_pre_submit_state": "Only pre-submit orders can use stuck submission recovery.",
+            "exchange_order_id_present": "This order already has an exchange order id. Use normal exchange refresh or cancel flows instead.",
+            "local_fills_present": "Local fills already exist for this order, so manual stuck submission resolution is unsafe.",
+            "order_belongs_to_current_runtime": "This order belongs to the current runtime and may still be progressing normally.",
+            "exchange_confirmation_unavailable": "Exchange confirmation is unavailable, so the runtime cannot safely resolve this submission.",
+            "exchange_snapshot_unavailable": "No fresh exchange snapshot is available to confirm the order is absent.",
+            "exchange_order_still_open": "The order is still visible on the exchange, so it must not be force-resolved locally.",
+            "exchange_fill_detected": "Exchange fills exist for this order, so manual stuck submission resolution is unsafe.",
+        }
+        return messages.get(reason_code, "This order is not eligible for stuck submission resolution.")
+
     def _update_recovery_status_for_report(self, report) -> None:
         updated_status = self.runtime.recovery_status.model_copy(
             update={
@@ -1451,7 +1720,10 @@ class OperatorQueryService:
         as_of_ts: str | None = None,
         limit: int = 20,
     ) -> list[dict[str, Any]]:
-        events = self.runtime.event_store.by_topic(topics.ACCOUNT_BASELINES)
+        if as_of_ts is None:
+            events = self.runtime.event_store.recent_by_topic(topics.ACCOUNT_BASELINES, limit=limit)
+        else:
+            events = self.runtime.event_store.by_topic(topics.ACCOUNT_BASELINES)
         if as_of_ts is not None:
             events = [event for event in events if event.payload.get("imported_at") <= as_of_ts]
         rows = []
