@@ -167,12 +167,14 @@ class TestExecutionObligations(unittest.IsolatedAsyncioTestCase):
             balances=[ExchangeBalance(currency="USDT", total=100.0, available=100.0, frozen=0.0)],
         )
         obligation_repo = InMemoryExecutionObligationRepository()
+        settings = AATSSettings.model_validate({"account_backend": "okx", "account_read_enabled": True})
         manager = OrderManager(
+            settings=settings,
             bus=InMemoryEventBus(event_store=InMemoryEventStore(), persistence_mode="strict"),
             adapter=_SubmittedAdapter(),
             execution_repo=InMemoryExecutionRepository(),
             obligation_service=ExecutionObligationService(
-                settings=AATSSettings.model_validate({"account_backend": "okx", "account_read_enabled": True}),
+                settings=settings,
                 obligation_repo=obligation_repo,
                 account_snapshot_loader=lambda: _return_snapshot(snapshot),
                 price_provider=lambda _symbol: 60_000.0,
@@ -195,12 +197,14 @@ class TestExecutionObligations(unittest.IsolatedAsyncioTestCase):
             balances=[ExchangeBalance(currency="USDT", total=100.0, available=100.0, frozen=0.0)],
         )
         obligation_repo = InMemoryExecutionObligationRepository()
+        settings = AATSSettings.model_validate({"account_backend": "okx", "account_read_enabled": True})
         manager = OrderManager(
+            settings=settings,
             bus=InMemoryEventBus(event_store=InMemoryEventStore(), persistence_mode="strict"),
             adapter=_FailedAdapter(),
             execution_repo=InMemoryExecutionRepository(),
             obligation_service=ExecutionObligationService(
-                settings=AATSSettings.model_validate({"account_backend": "okx", "account_read_enabled": True}),
+                settings=settings,
                 obligation_repo=obligation_repo,
                 account_snapshot_loader=lambda: _return_snapshot(snapshot),
                 price_provider=lambda _symbol: 60_000.0,
@@ -223,12 +227,14 @@ class TestExecutionObligations(unittest.IsolatedAsyncioTestCase):
             balances=[ExchangeBalance(currency="USDT", total=100.0, available=100.0, frozen=0.0)],
         )
         obligation_repo = InMemoryExecutionObligationRepository()
+        settings = AATSSettings.model_validate({"account_backend": "okx", "account_read_enabled": True})
         manager = OrderManager(
+            settings=settings,
             bus=InMemoryEventBus(event_store=InMemoryEventStore(), persistence_mode="strict"),
             adapter=_FilledAdapter(),
             execution_repo=InMemoryExecutionRepository(),
             obligation_service=ExecutionObligationService(
-                settings=AATSSettings.model_validate({"account_backend": "okx", "account_read_enabled": True}),
+                settings=settings,
                 obligation_repo=obligation_repo,
                 account_snapshot_loader=lambda: _return_snapshot(snapshot),
                 price_provider=lambda _symbol: 60_000.0,
@@ -252,12 +258,14 @@ class TestExecutionObligations(unittest.IsolatedAsyncioTestCase):
         )
         obligation_repo = InMemoryExecutionObligationRepository()
         outbox = _RecordingOutboxPublisher(obligation_repo)
+        settings = AATSSettings.model_validate({"account_backend": "okx", "account_read_enabled": True})
         manager = OrderManager(
+            settings=settings,
             bus=InMemoryEventBus(event_store=InMemoryEventStore(), persistence_mode="strict"),
             adapter=_FilledAdapter(),
             execution_repo=InMemoryExecutionRepository(),
             obligation_service=ExecutionObligationService(
-                settings=AATSSettings.model_validate({"account_backend": "okx", "account_read_enabled": True}),
+                settings=settings,
                 obligation_repo=obligation_repo,
                 account_snapshot_loader=lambda: _return_snapshot(snapshot),
                 price_provider=lambda _symbol: 60_000.0,
@@ -289,12 +297,14 @@ class TestExecutionObligations(unittest.IsolatedAsyncioTestCase):
         )
         obligation_repo = InMemoryExecutionObligationRepository()
         outbox = _RecordingOutboxPublisher(obligation_repo)
+        settings = AATSSettings.model_validate({"account_backend": "okx", "account_read_enabled": True})
         manager = OrderManager(
+            settings=settings,
             bus=InMemoryEventBus(event_store=InMemoryEventStore(), persistence_mode="strict"),
             adapter=_FailedAdapter(),
             execution_repo=InMemoryExecutionRepository(),
             obligation_service=ExecutionObligationService(
-                settings=AATSSettings.model_validate({"account_backend": "okx", "account_read_enabled": True}),
+                settings=settings,
                 obligation_repo=obligation_repo,
                 account_snapshot_loader=lambda: _return_snapshot(snapshot),
                 price_provider=lambda _symbol: 60_000.0,

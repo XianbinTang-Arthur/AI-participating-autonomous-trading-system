@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 
+from aats.bootstrap.settings import AATSSettings
 from aats.bus.memory_bus import InMemoryEventBus
 from aats.events import topics
 from aats.events.envelopes import build_envelope
@@ -109,11 +110,41 @@ class _BackfillAdapter(_FailingAdapter):
         return [state], [fill]
 
 
+class _BusyFailingAdapter(_PreviewingFailingAdapter):
+    async def submit(self, intent: OrderIntent):
+        state = OrderState(
+            decision_id=intent.decision_id,
+            intent_id=intent.intent_id,
+            symbol=intent.symbol,
+            client_order_id=f"cl{intent.idempotency_key}",
+            venue="OKX",
+            exchange_order_id=None,
+            status="FAILED",
+            submission_mode="guarded_simulated_submit",
+            submitted_ts=intent.created_at,
+            last_update_ts=intent.created_at,
+            requested_qty=intent.quantity,
+            filled_qty=0.0,
+            remaining_qty=intent.quantity,
+            average_fill_price=None,
+            fees=0.0,
+            execution_error="code=50013 sMsg=Systems are busy",
+            submission_payload={},
+            position_intent=intent.position_intent,
+            product_type=intent.product_type,
+            target_leverage=intent.target_leverage,
+            margin_mode=intent.margin_mode,
+            exposure_side=intent.exposure_side,
+        )
+        return state, []
+
+
 class TestOrderManagerExecutionErrorHistory(unittest.IsolatedAsyncioTestCase):
     async def test_failed_order_publishes_execution_error_summary(self) -> None:
         event_store = InMemoryEventStore()
         bus = InMemoryEventBus(event_store=event_store, persistence_mode="strict")
         manager = OrderManager(
+            settings=AATSSettings.model_validate({}),
             bus=bus,
             adapter=_FailingAdapter(),
             execution_repo=InMemoryExecutionRepository(),
@@ -154,6 +185,7 @@ class TestOrderManagerExecutionErrorHistory(unittest.IsolatedAsyncioTestCase):
     async def test_preview_client_order_id_is_used_for_provisional_okx_states(self) -> None:
         repo = InMemoryExecutionRepository()
         manager = OrderManager(
+            settings=AATSSettings.model_validate({}),
             bus=InMemoryEventBus(event_store=InMemoryEventStore(), persistence_mode="strict"),
             adapter=_PreviewingFailingAdapter(),
             execution_repo=repo,
@@ -190,6 +222,7 @@ class TestOrderManagerExecutionErrorHistory(unittest.IsolatedAsyncioTestCase):
     async def test_preview_client_order_id_is_used_after_adapter_exception(self) -> None:
         repo = InMemoryExecutionRepository()
         manager = OrderManager(
+            settings=AATSSettings.model_validate({}),
             bus=InMemoryEventBus(event_store=InMemoryEventStore(), persistence_mode="strict"),
             adapter=_PreviewingExceptionAdapter(),
             execution_repo=repo,
@@ -229,6 +262,7 @@ class TestOrderManagerExecutionErrorHistory(unittest.IsolatedAsyncioTestCase):
         repo = InMemoryExecutionRepository()
         adapter = _BackfillAdapter()
         manager = OrderManager(
+            settings=AATSSettings.model_validate({}),
             bus=InMemoryEventBus(event_store=InMemoryEventStore(), persistence_mode="strict"),
             adapter=adapter,
             execution_repo=repo,
@@ -260,6 +294,105 @@ class TestOrderManagerExecutionErrorHistory(unittest.IsolatedAsyncioTestCase):
         fills = repo.fills_for_order("clord_fill_backfill")
         self.assertEqual(len(fills), 1)
         self.assertEqual(fills[0].fill_id, "fill_backfill_1")
+
+    async def test_transient_close_failures_enter_retry_cooldown(self) -> None:
+        repo = InMemoryExecutionRepository()
+        settings = AATSSettings.model_validate({"strategy_transient_close_retry_cooldown_seconds": 90.0})
+        manager = OrderManager(
+            settings=settings,
+            bus=InMemoryEventBus(event_store=InMemoryEventStore(), persistence_mode="strict"),
+            adapter=_BusyFailingAdapter(),
+            execution_repo=repo,
+            kill_switch=KillSwitch(),
+        )
+        first_intent = OrderIntent(
+            intent_id="intent_close_1",
+            decision_id="decision_close_1",
+            symbol="BTC-USDT",
+            side="sell",
+            quantity=0.0028,
+            execution_style="exchange",
+            order_type="market",
+            urgency="medium",
+            time_in_force="IOC",
+            reduce_only=False,
+            close_only=True,
+            idempotency_key="close_1",
+            product_type="derivatives",
+            margin_mode="cross",
+            exposure_side="long",
+            position_intent="close_long",
+        )
+        second_intent = first_intent.model_copy(
+            update={
+                "intent_id": "intent_close_2",
+                "decision_id": "decision_close_2",
+                "idempotency_key": "close_2",
+            }
+        )
+
+        await manager.handle_order_intent(
+            {"topic": topics.ORDER_INTENTS, "key": first_intent.symbol, "payload": build_envelope(topic=topics.ORDER_INTENTS, key=first_intent.symbol, payload_model=first_intent, source_component="test").model_dump(mode="json")}
+        )
+        await manager.handle_order_intent(
+            {"topic": topics.ORDER_INTENTS, "key": second_intent.symbol, "payload": build_envelope(topic=topics.ORDER_INTENTS, key=second_intent.symbol, payload_model=second_intent, source_component="test").model_dump(mode="json")}
+        )
+
+        first = repo.get_order_state("clclose_1")
+        second = repo.get_order_state("close_2")
+        self.assertIsNotNone(first)
+        self.assertEqual(first.status, "FAILED")
+        self.assertIsNotNone(second)
+        self.assertEqual(second.status, "BLOCKED")
+        self.assertEqual(second.submission_mode, "local_retry_cooldown")
+        self.assertIn("transient_close_retry_cooldown_active", second.execution_error)
+
+    async def test_high_urgency_close_bypasses_retry_cooldown(self) -> None:
+        repo = InMemoryExecutionRepository()
+        settings = AATSSettings.model_validate({"strategy_transient_close_retry_cooldown_seconds": 90.0})
+        manager = OrderManager(
+            settings=settings,
+            bus=InMemoryEventBus(event_store=InMemoryEventStore(), persistence_mode="strict"),
+            adapter=_BusyFailingAdapter(),
+            execution_repo=repo,
+            kill_switch=KillSwitch(),
+        )
+        first_intent = OrderIntent(
+            intent_id="intent_close_high_1",
+            decision_id="decision_close_high_1",
+            symbol="BTC-USDT",
+            side="sell",
+            quantity=0.01,
+            execution_style="exchange",
+            order_type="market",
+            urgency="medium",
+            time_in_force="IOC",
+            close_only=True,
+            idempotency_key="close_high_1",
+            product_type="derivatives",
+            margin_mode="cross",
+            exposure_side="long",
+            position_intent="close_long",
+        )
+        second_intent = first_intent.model_copy(
+            update={
+                "intent_id": "intent_close_high_2",
+                "decision_id": "decision_close_high_2",
+                "idempotency_key": "close_high_2",
+                "urgency": "high",
+            }
+        )
+
+        await manager.handle_order_intent(
+            {"topic": topics.ORDER_INTENTS, "key": first_intent.symbol, "payload": build_envelope(topic=topics.ORDER_INTENTS, key=first_intent.symbol, payload_model=first_intent, source_component="test").model_dump(mode="json")}
+        )
+        await manager.handle_order_intent(
+            {"topic": topics.ORDER_INTENTS, "key": second_intent.symbol, "payload": build_envelope(topic=topics.ORDER_INTENTS, key=second_intent.symbol, payload_model=second_intent, source_component="test").model_dump(mode="json")}
+        )
+
+        second = repo.get_order_state("clclose_high_2")
+        self.assertIsNotNone(second)
+        self.assertEqual(second.status, "FAILED")
 
 
 if __name__ == "__main__":

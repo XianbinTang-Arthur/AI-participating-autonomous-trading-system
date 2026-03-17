@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from aats.bootstrap.settings import AATSSettings
@@ -9,6 +9,7 @@ from aats.bus.memory_bus import InMemoryEventBus
 from aats.storage.event_store import InMemoryEventStore
 from aats.events import topics
 from aats.schemas.execution import FillEvent, OrderState
+from aats.schemas.exchange import ExchangeAccountSnapshot, ExchangeFill
 from aats.schemas.portfolio import PortfolioSnapshot
 from aats.services.portfolio_service.pnl import PortfolioPnLCalculator
 from aats.services.portfolio_service.reconstruction import PortfolioReconstructionService
@@ -116,6 +117,86 @@ class TestReconciliationRepair(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second_report.severity, "CLEAN")
         self.assertEqual(event_store.count(topic=topics.PORTFOLIO_SNAPSHOTS), 1)
         self.assertEqual(event_store.count(topic=topics.RECONCILIATION_REPORTS), 2)
+
+    async def test_accepts_local_okx_fill_on_recent_window_boundary(self) -> None:
+        now = datetime.now(timezone.utc)
+        service = ReconciliationService(
+            settings=AATSSettings.model_validate({"okx_fill_fetch_limit": 2}),
+            bus=InMemoryEventBus(event_store=InMemoryEventStore(), persistence_mode="strict"),
+            fetcher=ExchangeStateFetcher(account_service=None),
+            comparator=StateComparator(),
+            repair_service=ReconciliationRepairService(),
+            reconciliation_repo=InMemoryReconciliationRepository(),
+            execution_repo=InMemoryExecutionRepository(),
+            portfolio_repo=InMemoryPortfolioRepository(),
+            event_store=InMemoryEventStore(),
+            reconstruction_service=PortfolioReconstructionService(
+                initial_usdt_balance=10_000.0,
+                snapshot_builder=PortfolioSnapshotBuilder(pnl_calculator=PortfolioPnLCalculator()),
+            ),
+            price_provider=lambda _symbol: 0.0,
+            bootstrap_portfolio_from_exchange=False,
+            metrics=None,
+        )
+        local_fill = FillEvent(
+            fill_id="boundary_fill",
+            decision_id="decision_boundary",
+            intent_id="intent_boundary",
+            client_order_id="clord_boundary",
+            exchange_order_id="ord_boundary",
+            symbol="BTC-USDT-SWAP",
+            venue="OKX",
+            side="sell",
+            fill_qty=0.0009,
+            fill_price=73818.2,
+            fee_amount=0.03321819,
+            fee_currency="USDT",
+            product_type="derivatives",
+            margin_mode="cross",
+            exposure_side="short",
+            position_intent="open_short",
+            liquidity_role="taker",
+            exchange_timestamp=now,
+            ingestion_timestamp=now,
+        )
+        snapshot = ExchangeAccountSnapshot(
+            account_source="okx",
+            fetched_at=now,
+            balances=[],
+            positions=[],
+            open_orders=[],
+            fills=[
+                ExchangeFill(
+                    fill_id="window_oldest",
+                    exchange_order_id="ord_oldest",
+                    client_order_id="cl_oldest",
+                    instrument_id="BTC-USDT-SWAP",
+                    symbol="BTC-USDT-SWAP",
+                    side="sell",
+                    fill_qty=0.001,
+                    fill_price=73818.2,
+                    fee_amount=0.03,
+                    fill_ts=now,
+                ),
+                ExchangeFill(
+                    fill_id="window_newer",
+                    exchange_order_id="ord_newer",
+                    client_order_id="cl_newer",
+                    instrument_id="BTC-USDT-SWAP",
+                    symbol="BTC-USDT-SWAP",
+                    side="buy",
+                    fill_qty=0.001,
+                    fill_price=73830.0,
+                    fee_amount=0.03,
+                    fill_ts=now + timedelta(seconds=1),
+                ),
+            ],
+            instruments=[],
+        )
+
+        accepted = service._accepted_exchange_fill_ids(exchange_snapshot=snapshot, local_fills=[local_fill])
+
+        self.assertIn("boundary_fill", accepted)
 
 
 if __name__ == "__main__":

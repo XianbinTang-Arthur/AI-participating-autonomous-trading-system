@@ -498,6 +498,7 @@ async def build_runtime(
             bus=bus,
         )
     order_manager = OrderManager(
+        settings=runtime_settings,
         bus=bus,
         adapter=execution_adapter,
         execution_repo=storage.execution_repo,

@@ -82,7 +82,21 @@ class TargetPositionEngine:
     ) -> float:
         mode = self.settings.ai_operating_mode
         baseline_qty = self._baseline_target_qty(baseline=baseline, product_type=product_type)
+        baseline_qty = self._apply_entry_edge_gate(
+            current_position_qty=current_position_qty,
+            desired_target_qty=baseline_qty,
+            baseline=baseline,
+            ai_assessment=ai_assessment,
+        )
         if mode in {"baseline_only", "ai_advisory"}:
+            if self._should_hold_on_flat_signal(
+                current_position_qty=current_position_qty,
+                desired_target_qty=baseline_qty,
+                baseline=baseline,
+                ai_assessment=ai_assessment,
+                product_type=product_type,
+            ):
+                return current_position_qty
             return self._apply_position_management(
                 current_position_qty=current_position_qty,
                 desired_target_qty=baseline_qty,
@@ -137,6 +151,73 @@ class TargetPositionEngine:
         if baseline.volatility_target_scale < 0.55:
             target_qty *= baseline.volatility_target_scale
         return target_qty
+
+    def _apply_entry_edge_gate(
+        self,
+        *,
+        current_position_qty: float,
+        desired_target_qty: float,
+        baseline: BaselineAssessment,
+        ai_assessment: AIMarketAssessment,
+    ) -> float:
+        if not self.settings.strategy_cost_guard_enabled:
+            return desired_target_qty
+        if abs(desired_target_qty) < 1e-12:
+            return desired_target_qty
+        if self._same_direction(current_position_qty, desired_target_qty) and abs(desired_target_qty) <= abs(current_position_qty):
+            return desired_target_qty
+        estimated_cost_bps = self._estimated_trade_cost_bps()
+        required_edge_bps = estimated_cost_bps + max(self.settings.strategy_min_net_edge_bps, 0.0)
+        signal_edge_bps = self._signal_edge_bps(baseline=baseline, ai_assessment=ai_assessment)
+        if signal_edge_bps + 1e-12 >= required_edge_bps:
+            return desired_target_qty
+        return current_position_qty
+
+    def _should_hold_on_flat_signal(
+        self,
+        *,
+        current_position_qty: float,
+        desired_target_qty: float,
+        baseline: BaselineAssessment,
+        ai_assessment: AIMarketAssessment,
+        product_type: str,
+    ) -> bool:
+        if not self.settings.strategy_flat_signal_hold_enabled:
+            return False
+        if product_type != "derivatives":
+            return False
+        if abs(current_position_qty) < 1e-12 or abs(desired_target_qty) > 1e-12:
+            return False
+        if baseline.direction_bias != "flat":
+            return False
+        return not self._explicit_flat_exit_required(
+            current_position_qty=current_position_qty,
+            baseline=baseline,
+            ai_assessment=ai_assessment,
+        )
+
+    def _explicit_flat_exit_required(
+        self,
+        *,
+        current_position_qty: float,
+        baseline: BaselineAssessment,
+        ai_assessment: AIMarketAssessment,
+    ) -> bool:
+        side_sign = self._sign(current_position_qty)
+        microstructure = baseline.factor_scores.get("microstructure_alpha", 0.0)
+        momentum_alpha = baseline.factor_scores.get("momentum_alpha", 0.0)
+        trend_alpha = baseline.factor_scores.get("trend_alpha", 0.0)
+        ai_edge = ai_assessment.directional_edge
+        adverse_microstructure = (side_sign * microstructure) <= -abs(self.settings.strategy_flat_exit_microstructure_threshold)
+        adverse_momentum = (side_sign * momentum_alpha) <= -abs(self.settings.strategy_flat_exit_factor_threshold)
+        adverse_trend = (side_sign * trend_alpha) <= -abs(self.settings.strategy_flat_exit_factor_threshold)
+        adverse_ai = (side_sign * ai_edge) <= -abs(self.settings.strategy_flat_exit_ai_edge_threshold)
+        adverse_count = sum((adverse_microstructure, adverse_momentum, adverse_trend, adverse_ai))
+        if adverse_count >= 2:
+            return True
+        if adverse_microstructure and adverse_ai:
+            return True
+        return False
 
     def _qty_from_bias(self, direction_bias: str, *, product_type: str) -> float:
         if direction_bias == "long":
@@ -358,3 +439,21 @@ class TargetPositionEngine:
 
     def _flat_cleanup_threshold(self) -> float:
         return max(self.settings.default_order_qty * 0.15, 1e-12)
+
+    def _estimated_trade_cost_bps(self) -> float:
+        expected_slippage_bps = max(self.settings.max_slippage_tolerance_bps, 0) * max(
+            self.settings.strategy_expected_slippage_bps_fraction,
+            0.0,
+        )
+        return max(self.settings.paper_taker_fee_bps, 0.0) + expected_slippage_bps
+
+    def _signal_edge_bps(
+        self,
+        *,
+        baseline: BaselineAssessment,
+        ai_assessment: AIMarketAssessment,
+    ) -> float:
+        alpha_edge = abs(baseline.composite_alpha_score) * max(self.settings.strategy_alpha_edge_bps_scale, 0.0)
+        microstructure_bonus = max(abs(baseline.factor_scores.get("microstructure_alpha", 0.0)) - 0.08, 0.0) * 25.0
+        ai_bonus = max(abs(ai_assessment.directional_edge) - 0.1, 0.0) * 20.0
+        return alpha_edge + microstructure_bonus + ai_bonus

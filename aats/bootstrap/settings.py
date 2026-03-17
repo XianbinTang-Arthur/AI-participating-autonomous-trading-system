@@ -102,6 +102,15 @@ class AATSSettings(BaseSettings):
     default_target_leverage: float = 1.0
     strategy_short_bias_enabled: bool = False
     strategy_dynamic_leverage_enabled: bool = False
+    strategy_flat_signal_hold_enabled: bool = True
+    strategy_flat_exit_microstructure_threshold: float = 0.12
+    strategy_flat_exit_factor_threshold: float = 0.18
+    strategy_flat_exit_ai_edge_threshold: float = 0.22
+    strategy_cost_guard_enabled: bool = True
+    strategy_alpha_edge_bps_scale: float = 100.0
+    strategy_expected_slippage_bps_fraction: float = 0.25
+    strategy_min_net_edge_bps: float = 2.0
+    strategy_transient_close_retry_cooldown_seconds: float = 90.0
     max_margin_usage_fraction: float = 0.85
     liquidation_buffer_fraction: float = 0.15
     api_host: str = "127.0.0.1"

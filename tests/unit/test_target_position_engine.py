@@ -169,6 +169,125 @@ class TestTargetPositionEngine(unittest.TestCase):
         self.assertLess(target.target_position_qty, context.current_position_qty)
         self.assertEqual(target.position_intent, "reduce_long")
 
+    def test_derivatives_flat_signal_holds_existing_position_without_explicit_exit(self) -> None:
+        engine = TargetPositionEngine(
+            settings=AATSSettings.model_validate(
+                {
+                    "default_order_qty": 0.01,
+                    "trading_product_type": "derivatives",
+                    "strategy_short_bias_enabled": True,
+                    "strategy_flat_signal_hold_enabled": True,
+                }
+            )
+        )
+        context = self._context(current_position_qty=0.028, product_type="derivatives", current_exposure_side="long")
+        baseline = self._baseline(
+            volatility_target_scale=1.0,
+            suggested_position_scale=0.2,
+            direction_bias="flat",
+            confidence=0.52,
+            factor_scores={
+                "momentum_alpha": 0.08,
+                "trend_alpha": 0.05,
+                "microstructure_alpha": -0.06,
+                "liquidity_scale": 0.9,
+            },
+        )
+
+        target = engine.build(context, baseline, self._ai_assessment(direction=-0.08, confidence=0.55))
+
+        self.assertAlmostEqual(target.target_position_qty, context.current_position_qty)
+        self.assertEqual(target.delta_position_qty, 0.0)
+        self.assertEqual(target.position_intent, "hold")
+
+    def test_derivatives_flat_signal_exits_when_multiple_adverse_factors_align(self) -> None:
+        engine = TargetPositionEngine(
+            settings=AATSSettings.model_validate(
+                {
+                    "default_order_qty": 0.01,
+                    "trading_product_type": "derivatives",
+                    "strategy_short_bias_enabled": True,
+                    "strategy_flat_signal_hold_enabled": True,
+                }
+            )
+        )
+        context = self._context(current_position_qty=0.028, product_type="derivatives", current_exposure_side="long")
+        baseline = self._baseline(
+            volatility_target_scale=1.0,
+            suggested_position_scale=0.2,
+            direction_bias="flat",
+            confidence=0.38,
+            factor_scores={
+                "momentum_alpha": -0.21,
+                "trend_alpha": -0.19,
+                "microstructure_alpha": -0.16,
+                "liquidity_scale": 0.9,
+            },
+        )
+
+        target = engine.build(context, baseline, self._ai_assessment(direction=-0.26, confidence=0.72))
+
+        self.assertEqual(target.target_position_qty, 0.0)
+        self.assertEqual(target.position_intent, "close_long")
+
+    def test_cost_guard_blocks_weak_derivatives_entry(self) -> None:
+        engine = TargetPositionEngine(
+            settings=AATSSettings.model_validate(
+                {
+                    "default_order_qty": 0.01,
+                    "trading_product_type": "derivatives",
+                    "strategy_short_bias_enabled": True,
+                    "paper_taker_fee_bps": 5.0,
+                    "max_slippage_tolerance_bps": 20,
+                    "strategy_cost_guard_enabled": True,
+                    "strategy_min_net_edge_bps": 2.0,
+                    "strategy_alpha_edge_bps_scale": 100.0,
+                }
+            )
+        )
+        context = self._context(product_type="derivatives", current_exposure_side="flat")
+        baseline = self._baseline(
+            volatility_target_scale=1.0,
+            suggested_position_scale=0.55,
+            direction_bias="long",
+            confidence=0.55,
+            factor_scores={"momentum_alpha": 0.08, "trend_alpha": 0.06, "microstructure_alpha": 0.04, "liquidity_scale": 0.85},
+        ).model_copy(update={"composite_alpha_score": 0.06})
+
+        target = engine.build(context, baseline, self._ai_assessment(direction=0.06, confidence=0.56))
+
+        self.assertEqual(target.target_position_qty, 0.0)
+        self.assertEqual(target.position_intent, "hold")
+
+    def test_cost_guard_allows_strong_derivatives_entry(self) -> None:
+        engine = TargetPositionEngine(
+            settings=AATSSettings.model_validate(
+                {
+                    "default_order_qty": 0.01,
+                    "trading_product_type": "derivatives",
+                    "strategy_short_bias_enabled": True,
+                    "paper_taker_fee_bps": 5.0,
+                    "max_slippage_tolerance_bps": 20,
+                    "strategy_cost_guard_enabled": True,
+                    "strategy_min_net_edge_bps": 2.0,
+                    "strategy_alpha_edge_bps_scale": 100.0,
+                }
+            )
+        )
+        context = self._context(product_type="derivatives", current_exposure_side="flat")
+        baseline = self._baseline(
+            volatility_target_scale=1.0,
+            suggested_position_scale=0.8,
+            direction_bias="long",
+            confidence=0.84,
+            factor_scores={"momentum_alpha": 0.24, "trend_alpha": 0.22, "microstructure_alpha": 0.17, "liquidity_scale": 0.95},
+        ).model_copy(update={"composite_alpha_score": 0.21})
+
+        target = engine.build(context, baseline, self._ai_assessment(direction=0.24, confidence=0.86))
+
+        self.assertGreater(target.target_position_qty, 0.0)
+        self.assertEqual(target.position_intent, "open_long")
+
     def test_derivatives_leverage_reduces_when_microstructure_conflicts(self) -> None:
         settings = AATSSettings.model_validate(
             {

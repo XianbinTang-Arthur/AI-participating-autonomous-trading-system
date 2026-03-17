@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from datetime import timedelta
+
+from aats.bootstrap.settings import AATSSettings
 from aats.bootstrap.logging import correlation_fields, get_logger, log_event
 from aats.bus.base import EventBus
 from aats.events import topics
@@ -18,10 +21,12 @@ class OrderManager:
     _OBLIGATION_ATOMIC_FINALIZE_EPSILON = 1e-12
     _FILL_BACKFILL_RECENT_LIMIT = 100
     _FILL_BACKFILL_TERMINAL_STATUSES = ("FILLED", "CANCELED", "EXPIRED")
+    _TRANSIENT_RETRY_PATTERNS = ("50013", "systems are busy", "service busy", "temporarily unavailable")
 
     def __init__(
         self,
         *,
+        settings: AATSSettings,
         bus: EventBus,
         adapter: ExchangeAdapter,
         execution_repo: ExecutionRepository,
@@ -29,6 +34,7 @@ class OrderManager:
         execution_outbox_publisher: PostgresExecutionOutboxPublisher | None = None,
         kill_switch: KillSwitch,
     ) -> None:
+        self.settings = settings
         self.bus = bus
         self.adapter = adapter
         self.execution_repo = execution_repo
@@ -53,6 +59,10 @@ class OrderManager:
             )
             return
         if self.execution_repo.has_intent(intent.intent_id):
+            return
+        cooldown_state = self._transient_close_retry_cooldown_state(intent=intent)
+        if cooldown_state is not None:
+            await self._persist_order_state(order_state=cooldown_state, key=intent.symbol)
             return
 
         log_event(
@@ -388,3 +398,49 @@ class OrderManager:
         if abs(order_state.filled_qty) > self._OBLIGATION_ATOMIC_FINALIZE_EPSILON:
             return None
         return self.obligation_service.preview_obligation_for_order_state(order_state)
+
+    def _transient_close_retry_cooldown_state(self, *, intent: OrderIntent) -> OrderState | None:
+        cooldown_seconds = max(self.settings.strategy_transient_close_retry_cooldown_seconds, 0.0)
+        if cooldown_seconds <= 0.0:
+            return None
+        if intent.position_intent not in {"close_long", "close_short"}:
+            return None
+        if intent.urgency == "high":
+            return None
+        cutoff = utc_now() - timedelta(seconds=cooldown_seconds)
+        for state in self.execution_repo.recent_order_states(limit=25, statuses=("FAILED", "BLOCKED")):
+            if state.symbol != intent.symbol or state.position_intent != intent.position_intent:
+                continue
+            observed_at = state.last_update_ts or state.created_at
+            if observed_at < cutoff:
+                continue
+            if abs(state.requested_qty - intent.quantity) > max(intent.quantity * 0.2, 1e-8):
+                continue
+            error_text = f"{state.execution_error or ''} {state.cancel_reason or ''}".lower()
+            if not any(pattern in error_text for pattern in self._TRANSIENT_RETRY_PATTERNS):
+                continue
+            return OrderState(
+                decision_id=intent.decision_id,
+                intent_id=intent.intent_id,
+                symbol=intent.symbol,
+                client_order_id=intent.idempotency_key or new_id("clord"),
+                venue="OKX" if self.adapter.readiness().get("backend") == "okx" else "PAPER",
+                exchange_order_id=None,
+                status="BLOCKED",
+                submission_mode="local_retry_cooldown",
+                submitted_ts=None,
+                last_update_ts=utc_now(),
+                requested_qty=intent.quantity,
+                filled_qty=0.0,
+                remaining_qty=intent.quantity,
+                average_fill_price=None,
+                fees=0.0,
+                product_type=intent.product_type,
+                target_leverage=intent.target_leverage,
+                margin_mode=intent.margin_mode,
+                exposure_side=intent.exposure_side,
+                position_intent=intent.position_intent,
+                execution_error=f"transient_close_retry_cooldown_active:{state.execution_error or state.cancel_reason or 'transient_exchange_failure'}",
+                submission_payload={},
+            )
+        return None

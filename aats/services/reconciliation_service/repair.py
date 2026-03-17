@@ -322,7 +322,7 @@ class ReconciliationService:
         for fill in local_fills:
             if fill.venue != "OKX":
                 continue
-            if fill.exchange_timestamp < oldest_visible_fill_ts:
+            if fill.exchange_timestamp <= oldest_visible_fill_ts:
                 accepted_ids.add(fill.fill_id)
         return accepted_ids
 
