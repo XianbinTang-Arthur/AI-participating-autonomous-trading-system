@@ -8,7 +8,7 @@ from aats.bootstrap.settings import AATSSettings
 from aats.schemas.common import utc_now
 from aats.schemas.exchange import AccountBaselineSnapshot
 from aats.schemas.portfolio import PortfolioSnapshot
-from aats.schemas.execution import FillEvent
+from aats.schemas.execution import FillEvent, OrderObligation, OrderState
 from aats.schemas.reconciliation import ReconciliationReport
 from aats.schemas.system import RecoveryStatus
 from aats.services.governance_engine.kill_switch import KillSwitch
@@ -22,7 +22,7 @@ from aats.services.runtime_scope import (
     order_states_for_scope,
     runtime_state_scope,
 )
-from aats.storage.base import ExecutionRepository, PortfolioRepository, ReconciliationRepository
+from aats.storage.base import ExecutionObligationRepository, ExecutionRepository, PortfolioRepository, ReconciliationRepository
 
 
 @dataclass(slots=True)
@@ -37,6 +37,7 @@ class ExecutionRecoveryService:
         *,
         settings: AATSSettings,
         execution_repo: ExecutionRepository,
+        obligation_repo: ExecutionObligationRepository,
         portfolio_repo: PortfolioRepository,
         reconciliation_repo: ReconciliationRepository,
         reconstruction_service: PortfolioReconstructionService,
@@ -48,6 +49,7 @@ class ExecutionRecoveryService:
     ) -> None:
         self.settings = settings
         self.execution_repo = execution_repo
+        self.obligation_repo = obligation_repo
         self.portfolio_repo = portfolio_repo
         self.reconciliation_repo = reconciliation_repo
         self.reconstruction_service = reconstruction_service
@@ -57,12 +59,14 @@ class ExecutionRecoveryService:
         self.reconciliation_stale_after_seconds = reconciliation_stale_after_seconds
         self.recovery_policy = recovery_policy or RecoveryPolicy(
             name="default_recovery",
+            product_type=settings.trading_product_type,
             startup_baseline_import_supported=bootstrap_portfolio_from_exchange,
             operator_rebaseline_supported=bootstrap_portfolio_from_exchange,
             account_snapshot_required=bootstrap_portfolio_from_exchange,
             review_required_blocks_resume=bootstrap_portfolio_from_exchange,
             reconciliation_required_for_execution_state=True,
             exchange_portfolio_comparison_enabled=bootstrap_portfolio_from_exchange,
+            derivatives_position_comparison_enabled=settings.trading_product_type == "derivatives",
         )
         self.runtime_scope = runtime_state_scope(settings)
 
@@ -82,6 +86,9 @@ class ExecutionRecoveryService:
         divergence_count = 0
         recovery_action: str | None = None
         safe_startup = True
+        released_orphan_obligation_count = self._cleanup_orphan_obligations()
+        if released_orphan_obligation_count:
+            notes.append(f"released_orphan_obligations:{released_orphan_obligation_count}")
 
         if account_baseline is not None:
             notes.append(account_baseline.baseline_status)
@@ -241,6 +248,66 @@ class ExecutionRecoveryService:
             notes=self._dedupe_notes(notes),
         )
         return RecoveryArtifacts(status=status, rebuilt_snapshot_saved=rebuilt_snapshot_saved)
+
+    def _cleanup_orphan_obligations(self) -> int:
+        order_states = {
+            state.client_order_id: state
+            for state in order_states_for_scope(self.execution_repo, self.runtime_scope)
+        }
+        released = 0
+        for obligation in self._scoped_active_obligations():
+            order_state = order_states.get(obligation.client_order_id)
+            updated = self._resolved_obligation(obligation=obligation, order_state=order_state)
+            if updated is None:
+                continue
+            self.obligation_repo.save_obligation(updated)
+            released += 1
+        return released
+
+    def _scoped_active_obligations(self) -> list[OrderObligation]:
+        obligations: list[OrderObligation] = []
+        for obligation in self.obligation_repo.active_obligations():
+            if obligation.product_type != self.runtime_scope.product_type:
+                continue
+            if obligation.margin_mode != self.runtime_scope.margin_mode:
+                continue
+            if self.runtime_scope.allowed_symbols and obligation.symbol not in self.runtime_scope.allowed_symbols:
+                continue
+            obligations.append(obligation)
+        return obligations
+
+    def _resolved_obligation(
+        self,
+        *,
+        obligation: OrderObligation,
+        order_state: OrderState | None,
+    ) -> OrderObligation | None:
+        if order_state is None:
+            return self._terminalized_obligation(obligation=obligation, target_status="FAILED")
+        if order_state.status not in {"FILLED", "CANCELED", "REJECTED", "FAILED", "BLOCKED", "DRY_RUN", "EXPIRED"}:
+            return None
+        target_status = "CANCELED" if order_state.status == "CANCELED" else "RELEASED" if order_state.status == "FILLED" else "FAILED"
+        return self._terminalized_obligation(obligation=obligation, target_status=target_status)
+
+    @staticmethod
+    def _terminalized_obligation(
+        *,
+        obligation: OrderObligation,
+        target_status: str,
+    ) -> OrderObligation | None:
+        remaining_amount = max(
+            obligation.reserved_amount - obligation.consumed_amount - obligation.released_amount,
+            0.0,
+        )
+        if remaining_amount <= 1e-12 and obligation.status == target_status:
+            return None
+        return obligation.model_copy(
+            update={
+                "released_amount": obligation.released_amount + max(remaining_amount, 0.0),
+                "status": target_status,
+                "last_update_ts": utc_now(),
+            }
+        )
 
     @staticmethod
     def _initial_recovery_state(
