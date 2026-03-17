@@ -1,450 +1,462 @@
-# Baseline Strategy Rework Plan
+# 策略改造方案书
 
-The repository currently runs a conservative `baseline_only` strategy chain:
+## 1. 文档目标
 
-`MarketSnapshot -> FeatureSnapshot -> BaselineAssessment -> PositionTarget -> PolicyDecision -> RiskDecision -> ExecutionPlan -> OrderIntent`
+本文档面向当前 `AIParticipatingAutonomousTradingSystem` 中实际运行的 `baseline_only` 策略，目标是把“能跑通”与“能交易”区分开，围绕以下问题建立一套可执行的改造与验证标准：
 
-This strategy is structurally coherent, but the live/demo behavior observed on `BTC-USDT-SWAP` shows a gap between:
+- 当前策略到底在做什么
+- 当前决策链中哪些环节决定了高频磨损
+- 哪些问题属于真实缺陷，哪些属于策略语义不合理
+- 应当如何收紧开仓、加仓、反手、减仓、平仓逻辑
+- 如何在不削弱风控阻断的前提下，提高交易经济性
+- 如何验证改造确实减少了手续费型亏损，而不是仅仅减少交易次数
 
-- market-state classification quality
-- and tradable edge quality after fees, slippage, and execution friction
+本文档既是策略评估结论，也是本轮代码改造与运行验证的执行依据。
 
-The most important problem is not that the system cannot infer direction at all. The problem is that the current strategy semantics convert weak or neutral evidence into unnecessary trading activity.
+## 2. 当前策略的真实决策链
 
-Current pain points confirmed from code and runtime logs:
+当前系统实际运行的主链路是：
 
-- `baseline_only` maps `direction_bias="flat"` to `target_position_qty=0`, which often means immediate flattening of an existing derivatives position
-- entry and exit thresholds are not separated, so the strategy oscillates around threshold boundaries
-- there is no explicit cost gate that requires estimated edge to exceed fees and expected slippage
-- transient exchange failures can cause repeated medium-urgency close attempts on the same position
-- the feature stack behaves more like a regime and eligibility filter than a fully production-grade short-horizon alpha engine
+`MarketSnapshot -> FeatureSnapshot -> BaselineAssessment -> PositionTarget -> PolicyDecision -> RiskDecision -> ExecutionPlan -> OrderIntent -> OrderState -> FillEvent -> PortfolioSnapshot`
 
-This document defines a practical rework plan. It is intentionally staged. The first stage is designed to be safe enough to merge and deploy without rewriting the architecture.
+关键模块如下：
 
-## 1. Objectives
+- 特征计算：
+  [calculator.py](D:/文件/project/AIParticipatingAutonomousTradingSystem/aats/services/feature_engine/calculator.py)
+- 基线方向判断：
+  [baseline.py](D:/文件/project/AIParticipatingAutonomousTradingSystem/aats/services/decision_engine/baseline.py)
+- 目标仓位与杠杆：
+  [target_position.py](D:/文件/project/AIParticipatingAutonomousTradingSystem/aats/services/decision_engine/target_position.py)
+- 决策触发节奏：
+  [trigger_policy.py](D:/文件/project/AIParticipatingAutonomousTradingSystem/aats/services/decision_engine/trigger_policy.py)
+- 决策编排：
+  [orchestrator.py](D:/文件/project/AIParticipatingAutonomousTradingSystem/aats/services/decision_engine/orchestrator.py)
+- 风控阻断：
+  [risk.py](D:/文件/project/AIParticipatingAutonomousTradingSystem/aats/services/governance_engine/risk.py)
+- 执行与同步：
+  [order_manager.py](D:/文件/project/AIParticipatingAutonomousTradingSystem/aats/services/execution_engine/order_manager.py)
+  [okx_adapter.py](D:/文件/project/AIParticipatingAutonomousTradingSystem/aats/services/execution_engine/okx_adapter.py)
 
-Primary objectives:
+### 2.1 特征层做了什么
 
-- reduce churn and unnecessary flattening
-- require stronger evidence before opening or reversing risk
-- preserve genuine risk exits and safety blockers
-- keep the strategy explainable and testable
-- avoid mixing strategy optimization with unrelated architecture changes
+`FeatureCalculator` 把多个方向相关因子压成一个 `composite_alpha_score`，同时给出：
 
-Non-objectives in this pass:
+- `regime_indicator`
+- `regime_confidence`
+- `trend_strength`
+- `volatility_state`
+- `suggested_position_scale`
+- `volatility_target_scale`
+- `microstructure_alpha`
+- `multi_timeframe_alpha`
 
-- redesigning the execution architecture
-- replacing the feature engine with a new alpha model
-- enabling autonomous real-money live trading
-- weakening reconciliation, kill-switch, or operator review controls
+从代码看，它更像一个“市场状态分类器 + 风险过滤器”，而不是一个已经被严格校准过的短周期交易 alpha。
 
-## 2. Current Strategy Map
+### 2.2 基线策略做了什么
 
-### 2.1 Feature Construction
+`BaselineStrategy` 按 `regime` 采用不同阈值：
 
-`FeatureCalculator` combines:
+- `breakout` 最宽松
+- `trend` 次之
+- `range` 更严格
+- `uncertain` 最保守
 
-- momentum alpha
-- trend alpha
-- regime alpha
-- multi-timeframe alignment alpha
-- microstructure alpha
-- liquidity scaling
-- volatility targeting
+并使用 `microstructure_alpha` 做支持/冲突校正。
 
-Observed weighting in code:
+输出是：
 
-- momentum alpha: `0.34`
-- trend alpha: `0.22`
-- regime alpha: `0.17`
-- multi-timeframe alpha: `0.12`
-- microstructure alpha: `0.15`
+- `direction_bias = long / short / flat`
+- `confidence`
+- `composite_alpha_score`
+- `factor_scores`
 
-Strengths:
+这一步的优点是解释性好，缺点是语义比较粗。它只回答“现在更偏多、偏空还是中性”，并不回答“是否值得支付手续费和滑点去交易”。
 
-- more robust than a single-indicator strategy
-- explicitly penalizes poor liquidity and poor execution quality
-- already produces sensible `suggested_position_scale` and `volatility_target_scale`
+### 2.3 目标仓位层做了什么
 
-Weaknesses:
+`TargetPositionEngine` 把 `direction_bias` 翻译成：
 
-- the final score is still a generic directional score, not an explicit estimate of tradable post-cost edge
-- feature composition is optimized for state inference, not necessarily for short-horizon execution alpha
+- 目标方向
+- 目标仓位
+- 目标杠杆
+- 仓位意图，如 `open_long` / `reduce_long` / `close_short`
 
-### 2.2 Baseline Direction Logic
+这里历史上存在一个最关键的问题：
 
-`BaselineStrategy` converts the feature state into `long / short / flat`.
+- `flat` 直接映射为 `target_position_qty = 0`
 
-Current behavior:
+对于衍生品，这意味着：
 
-- `breakout` regime uses the loosest threshold
-- `trend` uses a medium threshold
-- `range` is stricter
-- `uncertain` is the strictest
-- supportive microstructure lowers thresholds
-- conflicting microstructure raises thresholds
+- “信号不够强”
+- 被解释成
+- “把已有仓位直接平掉”
 
-Strengths:
+这会让策略在阈值附近发生高频来回调整。
 
-- regime-sensitive thresholds are correct in principle
-- microstructure confirmation is a good safety feature
+### 2.4 触发策略做了什么
 
-Weaknesses:
+当前系统不是等到 K 线收盘才唯一触发一次决策，它会基于：
 
-- the baseline layer does not distinguish:
-  - entry threshold
-  - hold threshold
-  - exit threshold
-  - reverse threshold
-- therefore `flat` means both "not enough edge to add" and "enough reason to fully flatten"
+- 最小时间间隔
+- 每分钟最大决策次数
+- 价格变动门槛
+- 动量变化门槛
+- 关键状态变更
 
-### 2.3 Target Position Logic
+进行决策。因此，若同时允许多个 timeframe 直接参与触发，就容易出现多频率叠加带来的重复决策。
 
-`TargetPositionEngine` converts baseline output into a target quantity and leverage.
+## 3. 当前策略的优点
 
-Current strengths:
+当前策略并非毫无价值，它具备几项真实优点：
 
-- staged scale-in
-- reduced aggression under high volatility
-- leverage scaling based on confidence and microstructure
-- partial reduction before weak reversals
+- 不是单一指标策略，而是多因子组合
+- 明确区分 `trend / breakout / range / uncertain`
+- 有盘口微结构冲突修正
+- 有波动率缩放与流动性缩放
+- 有 staged scale-in 和 staged reversal 机制
+- 已被 execution / reconciliation / risk / recovery 安全链路包住，不是裸奔策略
 
-Current weakness with highest production impact:
+如果只从“是否具备基本量化策略结构”判断，它是及格的。
 
-- in `baseline_only` and `ai_advisory`, `flat` becomes a zero target
-- for derivatives, this makes the system behave as if "weak signal" means "close now"
+## 4. 当前策略的主要不足
 
-### 2.4 Execution and Retry Behavior
+### 4.1 `flat` 语义过于激进
 
-Execution is already guarded by:
+这是当前第一大问题。
 
-- policy checks
-- risk checks
-- local obligations
-- execution outbox
-- exchange health and reconciliation blockers
+在 `baseline_only` 下，`flat` 被解释为“把仓位打回 0”，结果是：
 
-However, the strategy layer can still emit repeated medium-urgency close targets when:
+- 阈值刚刚跌回中性带时就开始减仓/平仓
+- 方向没有显著反转，只是信号减弱，也会触发退出
+- 费用和滑点被动放大
 
-- the current position remains open
-- the signal remains weak
-- the exchange returns transient busy errors
+这对高费率、以 taker 为主的永续合约尤其伤。
 
-That is a strategy-to-execution coupling problem, not only an exchange reliability problem.
+### 4.2 entry / hold / exit / reverse 没有分层阈值
 
-## 3. Confirmed Strategy Problems
+当前 `BaselineStrategy` 只决定 `long / short / flat`，没有显式区分：
 
-### Problem A: `flat` Is Too Close to `exit`
+- 开仓需要多强证据
+- 加仓需要多强证据
+- 持仓需要多强证据
+- 平仓需要多强反证据
+- 反手需要多强反向证据
 
-Current semantics:
+因此它天然缺乏迟滞带，容易出现：
 
-- `long` -> open or hold long
-- `short` -> open or hold short
-- `flat` -> target zero
+- 刚刚进场
+- 很快又减仓或平仓
 
-For derivatives, this is too aggressive.
+### 4.3 缺少“净优势覆盖成本”的交易资格层
 
-Desired semantics:
+方向成立不等于值得交易。
 
-- `long` -> open/add/hold long
-- `short` -> open/add/hold short
-- `flat` -> do not add new risk; usually hold existing risk unless explicit exit evidence exists
+当前策略历史上没有单独要求：
 
-### Problem B: No Hysteresis
+- 预估 alpha 边际
+- 必须超过 taker fee
+- 必须超过预期滑点
+- 必须超过一个净边际缓冲
 
-The strategy lacks a stable neutral band.
+所以它会做很多“方向看起来有点道理，但经济上不值得付费”的交易。
 
-Consequences:
+### 4.4 决策节奏偏快，且多周期直接参与触发
 
-- opens can happen shortly above threshold
-- closes can happen shortly below threshold
-- threshold-boundary noise becomes turnover
+如果 `15m` 和 `1h` 都直接触发决策，而不是让 `1h` 只作为辅助上下文，那么系统会在短时间内得到多个近似重复的 target。
 
-### Problem C: No Net-Edge Gate
+这会放大：
 
-There is no explicit control requiring:
+- 重复决策
+- 仓位微调
+- 手续费型亏损
 
-`expected edge > fee + expected slippage + desired safety margin`
+### 4.5 执行失败后的重复操作会污染策略表现
 
-Consequences:
+虽然 execution 层已经做了不少保护，但若策略层持续发出相同 close/reduce 意图，就会：
 
-- many small trades look theoretically directionally justified
-- but are economically poor after taker fees and real execution friction
+- 让日志看起来像策略很激进
+- 实际上一部分只是执行失败后的重复操作噪声
+- 干扰策略本身的收益评估
 
-### Problem D: Position Management Is Overloaded
+### 4.6 当前 alpha 更像资格过滤器，不像成熟的短线 alpha
 
-`TargetPositionEngine` currently mixes:
+`composite_alpha_score` 更适合回答：
 
-- direction interpretation
-- risk posture
-- position management
-- reversal staging
-- leverage setting
+- 市场现在是否允许做多/做空
+- 风险是否足够低
 
-This is workable for a small system, but it hides important invariants.
+不太适合直接回答：
 
-### Problem E: Repeated Close Intents After Transient Exchange Failures
+- 这笔单现在值得用 taker 成本去做吗
+- 这笔单的期望收益能否覆盖摩擦成本
 
-The current stack can repeatedly attempt the same close behavior after transient exchange errors such as:
+## 5. 运行期观测到的核心问题
 
-- `50013`
-- `Systems are busy`
+这部分不是理论推演，而是来自当前仓库和运行日志的真实现象。
 
-This creates operational churn and can distort strategy evaluation.
+### 5.1 手续费磨损明显
 
-## 4. Design Principles for the Rework
+运行结果显示，单笔成交的已实现盈亏常常只有几美分到几毛美元，但手续费本身就已经很接近甚至超过这一级别。  
+这说明策略的真实问题不是“总是完全错方向”，而是：
 
-The rework must preserve these invariants:
+- 边际不够厚
+- 交易太碎
+- 成本门槛不够严
 
-- safety blockers remain authoritative
-- kill-switch behavior must not be weakened
-- reconciliation review requirements must still block submission
-- strong adverse signals must still be able to reduce or exit risk
-- changes must be explainable from the decision payload alone
-- new behavior must be covered by unit and runtime tests
+### 5.2 高频弱调整依然存在
 
-## 5. Proposed Rework
+即使已有“flat 持仓默认 hold”的第一轮修正，历史日志仍然表明策略会做这类行为：
 
-## 5.1 Phase 1: Safe Behavioral Corrections
+- 先按较高 target 加到某个多头仓位
+- 接着把 target 下修一点点
+- 然后发出小幅 `reduce_long`
 
-This phase is intentionally narrow and is suitable for immediate implementation.
+从交易角度看，这种仓位微调若没有显著优势，往往只是手续费再分配。
 
-### Change 1: Flat-Signal Hold for Existing Derivatives Positions
+### 5.3 旧进程下仍有 `1h` 决策直接触发
 
-New rule:
+在旧进程日志中仍可见：
 
-- when `baseline_only` or `ai_advisory`
-- and current product type is `derivatives`
-- and current position is non-zero
-- and the derived target is zero because `direction_bias == "flat"`
-- default behavior becomes `hold current position`
+- `timeframe=15m`
+- `timeframe=1h`
 
-Exception:
+都在直接触发 decision cycle。  
+这说明配置未生效前，系统仍处于多周期直接下单状态。
 
-- exit is still allowed if explicit adverse evidence exists
+## 6. 策略改造原则
 
-Explicit adverse evidence can be based on:
+改造必须满足以下约束：
 
-- adverse microstructure
-- adverse momentum factor
-- adverse trend factor
-- strong adverse AI edge if present
+- 不削弱原有风控阻断
+- 不绕过 reconciliation / halt / kill switch
+- 不把“减少交易次数”误当成“提升策略”
+- 不把真实需要减仓/止损的情况挡掉
+- 每一条新规则都应能从 decision payload 解释出来
+- 优先修正交易语义，不先大改架构
 
-Recommended logic:
+## 7. 本轮改造方案
 
-- exit if at least two adverse signals align
-- or if a particularly strong adverse combination is present
+### 7.1 第一层：平掉最明显的经济性错误
 
-What this fixes:
+#### 方案 A：`flat != 立即平仓`
 
-- weak signal no longer automatically becomes churn
-- the baseline strategy becomes less trigger-happy without weakening hard safety exits
+规则：
 
-### Change 2: Cost Guard for Entry / Add / Reverse
+- 仅对 `derivatives` 生效
+- 仅对 `baseline_only / ai_advisory` 的 neutral 状态生效
+- 若已有仓位且 `direction_bias == flat`
+- 默认保持当前仓位
+- 只有明确不利证据同时出现时才允许退出
 
-New rule:
+显式退出证据使用：
 
-- before allowing a new opening, scale-in, or reversal target
-- estimate a conservative one-way cost budget:
-  - taker fee
-  - expected slippage as a fraction of max tolerated slippage
-- require the signal-strength proxy to exceed:
-  - expected cost
-  - plus a configurable net-edge buffer
+- `microstructure_alpha`
+- `momentum_alpha`
+- `trend_alpha`
+- `ai directional edge`
 
-Recommended initial approximation:
+要求至少两个不利信号同时成立，或特别强的冲突组合成立。
 
-- estimated cost bps = `paper_taker_fee_bps + max_slippage_tolerance_bps * expected_slippage_fraction`
-- signal edge proxy = function of:
-  - `abs(composite_alpha_score)`
-  - plus bonus for strong supportive microstructure
-  - plus bonus for strong non-fallback AI edge when available
+#### 方案 B：交易资格门
 
-Important constraint:
+对以下行为增加更严格资格要求：
 
-- this gate should not block risk-reducing moves
-- it should only apply to:
-  - open
-  - add
-  - reverse
+- 开新仓
+- 同向加仓
+- 真正反手
 
-What this fixes:
+新增限制：
 
-- weak alpha no longer results in frequent uneconomic entries
+- 只允许在 `trend / breakout` 开新方向
+- `entry`、`scale_in`、`reversal` 使用不同 `alpha` / `confidence` 最小门槛
+- 若强度不足，保持现有仓位，不生成新的增风险 target
 
-### Change 3: Transient Close Retry Cooldown
+这一步的目的不是“预测更准”，而是把噪声交易挡在交易层之前。
 
-New rule:
+#### 方案 C：成本门槛
 
-- if a recent close attempt failed with a known transient exchange error
-- and the next close attempt is medium/low urgency with essentially the same size and intent
-- block the retry locally for a short cooldown window
+要求开仓/加仓/反手的边际至少覆盖：
 
-Safety constraint:
+- taker fee
+- 预期滑点
+- 额外净收益缓冲
 
-- do not apply cooldown to `high` urgency intents
+本轮采用保守代理：
 
-What this fixes:
+- `signal_edge_proxy`
+- `expected_cost_bps`
+- `required_net_edge_bps`
 
-- repeated noisy close attempts after transient exchange congestion
+只要边际不够，就不加新风险。
 
-### Phase 1 Status
+#### 方案 D：相同 close 重试冷却
 
-This implementation pass should include:
+若近期同一 close intent 因已知瞬时交易所错误失败，则在短时间内阻止同类、同尺寸、非高紧急度 close 重试，降低执行噪声。
 
-- flat-signal hold behavior
-- explicit flat-exit conditions
-- entry cost guard
-- transient close retry cooldown
-- unit tests for each new behavior
-- runtime validation after deployment
+### 7.2 第二层：把决策节奏收紧成“主周期驱动”
 
-## 5.2 Phase 2: Proper Entry / Hold / Exit / Reverse Bands
+交易层只允许 `15m` 直接触发下单。  
+`1h` 只保留为上下文和趋势辅助，不再直接变成高频补刀。
 
-After Phase 1 is stable, the next step is to split the current threshold model.
+同时收紧：
 
-Required changes:
+- 每分钟最大决策数
+- 最小决策间隔
+- 最小价格变动
+- 最小动量变化
 
-- separate `entry_threshold`
-- separate `hold_threshold`
-- separate `exit_threshold`
-- separate `reverse_threshold`
+目标是减少“没有新信息却重复做同一决策”。
 
-Target semantics:
+### 7.3 第三层：限制无意义的仓位微调
 
-- entry requires the strongest evidence
-- hold requires less evidence than entry
-- exit requires stronger adverse evidence than "not enough to add"
-- reverse requires stronger evidence than simple exit
+这是本轮之后如果仍不达预期的下一步重点。
 
-This phase should be done in `BaselineStrategy`, not only in the target engine.
+需要进一步评估是否增加：
 
-## 5.3 Phase 3: Position Manager Separation
+- 最小减仓变动阈值
+- 持仓最小保持时间
+- 成交后再入场冷却
+- 同方向加仓冷却
 
-Refactor target generation into two steps:
+如果第一轮重启后仍然出现频繁 `reduce_long / reduce_short`，下一轮就优先做这一层。
 
-- `SignalDecision`
-- `PositionManager`
+## 8. 参数设计建议
 
-`SignalDecision` should answer:
+本轮建议的衍生品默认策略参数如下：
 
-- preferred side
-- confidence
-- whether trading is justified
+- `AATS_ENABLED_DECISION_TIMEFRAMES=["15m"]`
+- `AATS_MAX_DECISIONS_PER_MINUTE=3`
+- `AATS_DECISION_MIN_INTERVAL_SECONDS_15M=45`
+- `AATS_DECISION_MIN_INTERVAL_SECONDS_1H=180`
+- `AATS_DECISION_MIN_PRICE_MOVE_BPS=4`
+- `AATS_DECISION_MIN_MOMENTUM_DELTA=0.0004`
+- `AATS_STRATEGY_MIN_NET_EDGE_BPS=8`
+- `AATS_STRATEGY_EXPECTED_SLIPPAGE_BPS_FRACTION=0.35`
+- `AATS_STRATEGY_ENTRY_ALLOWED_REGIMES=["trend","breakout"]`
+- `AATS_STRATEGY_ENTRY_ALPHA_MIN=0.18`
+- `AATS_STRATEGY_ENTRY_CONFIDENCE_MIN=0.62`
+- `AATS_STRATEGY_SCALE_IN_ALPHA_MIN=0.24`
+- `AATS_STRATEGY_SCALE_IN_CONFIDENCE_MIN=0.68`
+- `AATS_STRATEGY_REVERSAL_ALPHA_MIN=0.30`
+- `AATS_STRATEGY_REVERSAL_CONFIDENCE_MIN=0.75`
+- `AATS_STRATEGY_TRANSIENT_CLOSE_RETRY_COOLDOWN_SECONDS=120`
 
-`PositionManager` should answer:
+这些值不是“理论最优”，而是“先显著减少噪声交易，再保留真正强信号”的安全初始值。
 
-- hold
-- add
-- reduce
-- close
-- reverse
-- target leverage
+## 9. 代码落地方向
 
-Benefits:
+### 9.1 已落地项
 
-- clearer invariants
-- easier testing
-- easier future addition of holding-time logic and PnL-aware exits
+本轮已经或准备落地以下修改：
 
-## 5.4 Phase 4: Holding-Time and PnL-Aware Exits
+- `TargetPositionEngine` 增加衍生品 entry/scale-in/reversal 资格门
+- `TargetPositionEngine` 保留原有风控阻断语义，只拦增风险路径
+- `.env / .env.derivatives / .env.spot` 统一按分组整理与同步
+- 运行配置调整为 `15m-only` 直接决策
 
-Add state-aware exit rules:
+### 9.2 视重启结果决定的候选二次改造
 
-- maximum holding duration
-- time-decay of conviction
-- minimum unrealized improvement expectation
-- optional stop-loss / time-stop / stale-signal cleanup
+若重启后仍然表现出明显 fee churn，则优先追加：
 
-This phase should only happen after the simpler semantic fixes are proven stable.
+- 成交后再入场冷却
+- 同方向再次加仓冷却
+- 最小有效减仓阈值
+- 持仓时间感知的 exit 逻辑
 
-## 5.5 Phase 5: Better Alpha Calibration
+## 10. 风控语义要求
 
-The current feature stack may continue to be useful as a regime and risk filter, even if it is not the final trading alpha.
+下列语义必须在任何策略改造后继续保持：
 
-Potential next steps:
+- `halted` 仍然阻止提交
+- `review_required` 仍然阻止提交
+- `kill_switch_active` 仍然阻止提交
+- reconciliation 异常不能被策略层“优化”掩盖
+- 高紧急度减仓/平仓不能被成本门槛错误挡住
+- 明确 adverse signal 的风险退出不能被“hold”语义吞掉
 
-- calibrate `composite_alpha_score` against realized forward returns
-- derive empirical edge curves by regime
-- separate "eligibility model" from "execution alpha"
-- learn or fit alpha-to-edge translation instead of using a static proxy
+换句话说：
 
-## 6. Configuration Additions
+- 可以减少噪声交易
+- 不能削弱真实风险退出
 
-Recommended strategy settings:
+## 11. 测试计划
 
-- `strategy_flat_signal_hold_enabled`
-- `strategy_flat_exit_microstructure_threshold`
-- `strategy_flat_exit_factor_threshold`
-- `strategy_flat_exit_ai_edge_threshold`
-- `strategy_cost_guard_enabled`
-- `strategy_alpha_edge_bps_scale`
-- `strategy_expected_slippage_bps_fraction`
-- `strategy_min_net_edge_bps`
-- `strategy_transient_close_retry_cooldown_seconds`
+### 11.1 单元测试
 
-These settings should stay conservative by default.
+至少覆盖：
 
-## 7. Testing Plan
+- 非允许 regime 下不得新开仓
+- 同向加仓要求比开仓更强
+- 反手要求比开仓更强
+- `flat` 持仓在弱 adverse 下应 hold
+- `flat` 持仓在强 adverse 下应允许退出
+- 成本门槛不能误挡风险减仓
 
-### Unit tests required
+### 11.2 集成测试
 
-- derivatives flat signal holds existing long when adverse evidence is weak
-- derivatives flat signal exits when multiple adverse factors align
-- weak entry signal is blocked by cost guard
-- strong entry signal survives cost guard
-- transient close failure places the next similar close into cooldown
-- high-urgency close is not blocked by cooldown
+至少覆盖：
 
-### Integration tests required
+- guarded live 不回归
+- guarded simulated 不回归
+- risk blocking 不回归
+- outbox / recovery / reconciliation 不回归
 
-- no regression in guarded simulated mode
-- no regression in risk-blocking behavior
-- no regression in reconciliation-required blocking
-- no regression in execution outbox flow
+### 11.3 运行验证
 
-### Runtime checks required
+上线后至少观察：
 
-- strategy still produces decisions
-- decision rate does not collapse unexpectedly
-- repeated target flips reduce meaningfully
-- execution error volume from repeated close attempts decreases
-- health and reconciliation remain green
+- 决策频率是否明显下降
+- 是否只剩 `15m` 直接决策
+- 同方向微幅开平是否显著减少
+- close retry busy 错误是否下降
+- `reconciliation` 是否仍保持 `CLEAN`
+- 是否出现新的 `halted` 假阳性
 
-## 8. Risk Review
+## 12. 收益验证方法
 
-Potential risks introduced by the rework:
+不能只看“有没有盈利单”，必须看：
 
-- holding too long on weak signals
-- blocking a useful retry after an exchange transient error
-- over-constraining entries and reducing opportunity capture
+- fill 数量
+- 手续费总额
+- 净 realized PnL
+- gross before fees
+- 各 `position_intent` 的收益分布
+- 平均持仓时长
+- 单位边际收益是否提升
 
-Mitigations:
+如果交易数少了但 gross alpha 也一起塌掉，需要重新判断是不是过度保守。
 
-- keep flat-hold logic limited to derivatives and neutral baseline states
-- keep retry cooldown limited to transient failures and non-high urgency close intents
-- keep cost guard only on open/add/reverse paths
-- add tests that confirm risk-reducing actions are not suppressed incorrectly
+## 13. 失败标准
 
-## 9. Implementation Order
+以下任一情况出现，都视为本轮策略改造未达预期：
 
-1. Add configuration knobs
-2. Add flat-signal hold logic
-3. Add explicit flat-exit rule
-4. Add cost guard for open/add/reverse
-5. Add transient close retry cooldown
-6. Update unit tests
-7. Run guarded-live and guarded-simulated regression tests
-8. Start server and validate decision/execution behavior from runtime logs and APIs
-9. Iterate on bugs before deployment
+- fill 数量明显下降，但净收益仍持续为负且 fee 占比未改善
+- `reduce_long / reduce_short` 仍然大量出现且绝大多数为小额负收益
+- 仍有多个 timeframe 直接驱动下单
+- 风控阻断被意外放松
+- `halted / reconciliation` 出现新的假阳性
 
-## 10. Expected Outcome
+## 14. 下一阶段路线
 
-After Phase 1, the strategy should behave more like:
+若第一轮仍未达到预期，后续应按以下顺序推进：
 
-- "open only when the edge appears worth paying for"
-- "hold through weak neutral noise"
-- "exit only when adverse evidence is explicit"
-- "do not spam the exchange with repeated medium-urgency close retries after transient failures"
+1. 成交后再入场冷却
+2. 持仓最小保持时间
+3. entry / hold / exit / reverse 四段阈值下沉到 `BaselineStrategy`
+4. `SignalDecision` 与 `PositionManager` 分层
+5. alpha-to-edge 经验校准
 
-That is still a conservative baseline strategy, but it is materially better aligned with live trading economics.
+## 15. 最终预期
+
+完成本轮改造后，策略不应再表现为：
+
+- “只要有点想法就交易”
+- “信号一弱就马上平仓”
+- “多个周期叠加重复出手”
+
+而应表现为：
+
+- “只有强信号才开新风险”
+- “中性噪声下默认持有，不做无意义仓位微调”
+- “高成本环境下宁可少做，也不做净边际不足的交易”
+- “保持现有风控和对账语义不被削弱”

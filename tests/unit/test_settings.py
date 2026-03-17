@@ -8,6 +8,14 @@ from aats.bootstrap.config import load_settings
 from aats.bootstrap.settings import AATSSettings
 
 
+def _non_aats_environment() -> dict[str, str]:
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith("AATS_")
+    }
+
+
 class TestAATSSettings(unittest.TestCase):
     def test_model_validate_dict_ignores_process_environment(self) -> None:
         with patch.dict(
@@ -31,9 +39,10 @@ class TestAATSSettings(unittest.TestCase):
             with patch.dict(
                 os.environ,
                 {
+                    **_non_aats_environment(),
                     "AATS_CONFIG_PROFILE": "guarded_simulated_submit_enabled",
                 },
-                clear=False,
+                clear=True,
             ):
                 settings = load_settings()
 
@@ -48,10 +57,11 @@ class TestAATSSettings(unittest.TestCase):
             with patch.dict(
                 os.environ,
                 {
+                    **_non_aats_environment(),
                     "AATS_CONFIG_PROFILE": "guarded_simulated_submit_enabled",
                     "AATS_DECISION_MIN_INTERVAL_SECONDS_15M": "5",
                 },
-                clear=False,
+                clear=True,
             ):
                 settings = load_settings()
 

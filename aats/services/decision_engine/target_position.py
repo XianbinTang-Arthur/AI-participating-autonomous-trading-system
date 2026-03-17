@@ -87,6 +87,7 @@ class TargetPositionEngine:
             desired_target_qty=baseline_qty,
             baseline=baseline,
             ai_assessment=ai_assessment,
+            product_type=product_type,
         )
         if mode in {"baseline_only", "ai_advisory"}:
             if self._should_hold_on_flat_signal(
@@ -159,7 +160,14 @@ class TargetPositionEngine:
         desired_target_qty: float,
         baseline: BaselineAssessment,
         ai_assessment: AIMarketAssessment,
+        product_type: str,
     ) -> float:
+        desired_target_qty = self._apply_trade_qualification_gate(
+            current_position_qty=current_position_qty,
+            desired_target_qty=desired_target_qty,
+            baseline=baseline,
+            product_type=product_type,
+        )
         if not self.settings.strategy_cost_guard_enabled:
             return desired_target_qty
         if abs(desired_target_qty) < 1e-12:
@@ -172,6 +180,69 @@ class TargetPositionEngine:
         if signal_edge_bps + 1e-12 >= required_edge_bps:
             return desired_target_qty
         return current_position_qty
+
+    def _apply_trade_qualification_gate(
+        self,
+        *,
+        current_position_qty: float,
+        desired_target_qty: float,
+        baseline: BaselineAssessment,
+        product_type: str,
+    ) -> float:
+        if product_type != "derivatives":
+            return desired_target_qty
+        trade_kind = self._trade_kind(
+            current_position_qty=current_position_qty,
+            desired_target_qty=desired_target_qty,
+        )
+        if trade_kind is None:
+            return desired_target_qty
+        if not self._regime_allowed_for_entry(baseline.regime):
+            return current_position_qty
+        alpha = abs(baseline.composite_alpha_score)
+        confidence = baseline.confidence
+        if trade_kind == "entry":
+            if alpha + 1e-12 < self.settings.strategy_entry_alpha_min:
+                return current_position_qty
+            if confidence + 1e-12 < self.settings.strategy_entry_confidence_min:
+                return current_position_qty
+            return desired_target_qty
+        if trade_kind == "scale_in":
+            if alpha + 1e-12 < self.settings.strategy_scale_in_alpha_min:
+                return current_position_qty
+            if confidence + 1e-12 < self.settings.strategy_scale_in_confidence_min:
+                return current_position_qty
+            return desired_target_qty
+        if trade_kind == "reversal":
+            if alpha + 1e-12 < self.settings.strategy_reversal_alpha_min:
+                return current_position_qty
+            if confidence + 1e-12 < self.settings.strategy_reversal_confidence_min:
+                return current_position_qty
+        return desired_target_qty
+
+    def _trade_kind(
+        self,
+        *,
+        current_position_qty: float,
+        desired_target_qty: float,
+    ) -> str | None:
+        if abs(desired_target_qty) < 1e-12:
+            return None
+        if abs(current_position_qty) < 1e-12:
+            return "entry"
+        if self._same_direction(current_position_qty, desired_target_qty):
+            if abs(desired_target_qty) > abs(current_position_qty) + 1e-12:
+                return "scale_in"
+            return None
+        if abs(desired_target_qty) + 1e-12 >= self._reverse_threshold(current_position_qty=current_position_qty):
+            return "reversal"
+        return None
+
+    def _regime_allowed_for_entry(self, regime: str) -> bool:
+        allowed_regimes = {value.lower() for value in self.settings.strategy_entry_allowed_regimes if value}
+        if not allowed_regimes:
+            return True
+        return regime.lower() in allowed_regimes
 
     def _should_hold_on_flat_signal(
         self,

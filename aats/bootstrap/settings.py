@@ -110,6 +110,13 @@ class AATSSettings(BaseSettings):
     strategy_alpha_edge_bps_scale: float = 100.0
     strategy_expected_slippage_bps_fraction: float = 0.25
     strategy_min_net_edge_bps: float = 2.0
+    strategy_entry_allowed_regimes: tuple[str, ...] = Field(default=("trend", "breakout"))
+    strategy_entry_alpha_min: float = 0.18
+    strategy_entry_confidence_min: float = 0.62
+    strategy_scale_in_alpha_min: float = 0.24
+    strategy_scale_in_confidence_min: float = 0.68
+    strategy_reversal_alpha_min: float = 0.3
+    strategy_reversal_confidence_min: float = 0.75
     strategy_transient_close_retry_cooldown_seconds: float = 90.0
     max_margin_usage_fraction: float = 0.85
     liquidation_buffer_fraction: float = 0.15
