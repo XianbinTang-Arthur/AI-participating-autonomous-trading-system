@@ -5,7 +5,7 @@ import unittest
 from aats.bootstrap.settings import AATSSettings
 from aats.schemas.common import utc_now
 from aats.schemas.decision import PositionTarget
-from aats.schemas.execution import OrderIntent
+from aats.schemas.execution import OrderIntent, OrderObligation
 from aats.schemas.exchange import ExchangeAccountSnapshot, ExchangeBalance, InstrumentMetadata
 from aats.schemas.governance import PolicyDecision
 from aats.services.decision_engine.trigger_policy import DecisionTriggerPolicy
@@ -15,6 +15,7 @@ from aats.services.governance_engine.kill_switch import KillSwitch
 from aats.services.governance_engine.mode import RuntimeModeController
 from aats.services.governance_engine.policy import PolicyEngine
 from aats.services.governance_engine.risk import RiskEngine
+from aats.storage.obligation_repo import InMemoryExecutionObligationRepository
 
 
 class FakeAccountService:
@@ -435,6 +436,71 @@ class TestGuardedLive(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertFalse(decision.approved)
+        self.assertIn("insufficient_quote_balance", decision.rejection_reasons)
+
+    def test_risk_subtracts_local_quote_obligations_before_balance_check(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "mode": "guarded_live",
+                "execution_backend": "okx",
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "okx_simulated_trading": True,
+            }
+        )
+        kill_switch = KillSwitch()
+        mode_controller = RuntimeModeController(settings=settings, kill_switch=kill_switch)
+        health_service = SystemHealthService(
+            settings=settings,
+            mode_controller=mode_controller,
+            kill_switch=kill_switch,
+            market_provider=FakeHealthyMarketProvider(),  # type: ignore[arg-type]
+            account_provider=FakeAccountService(usdt_available=100.0),  # type: ignore[arg-type]
+            execution_provider=FakeExecutionProvider(),  # type: ignore[arg-type]
+            reconciliation_repo=FakeReconciliationRepo(),  # type: ignore[arg-type]
+        )
+        obligation_repo = InMemoryExecutionObligationRepository()
+        obligation_repo.save_obligation(
+            OrderObligation(
+                client_order_id="cl_pending_quote",
+                decision_id="decision_pending_quote",
+                intent_id="intent_pending_quote",
+                symbol="BTC-USDT",
+                side="buy",
+                reserve_currency="USDT",
+                reserved_amount=50.0,
+                status="ACTIVE",
+            )
+        )
+        risk = RiskEngine(
+            settings=settings,
+            account_service=FakeAccountService(usdt_available=100.0),  # type: ignore[arg-type]
+            health_service=health_service,
+            trigger_policy=DecisionTriggerPolicy(settings=settings),
+            price_provider=lambda _symbol: 67_000.0,
+            mode_controller=mode_controller,
+            obligation_repo=obligation_repo,
+        )
+
+        decision = risk.evaluate(
+            PositionTarget(
+                decision_id="decision_buy_after_local_hold",
+                symbol="BTC-USDT",
+                current_position_qty=0.0,
+                target_position_qty=0.001,
+                delta_position_qty=0.001,
+                current_notional=0.0,
+                target_notional=67.0,
+                rebalance_reason="test",
+                urgency="medium",
+                max_slippage_tolerance_bps=20,
+                source_mix={"baseline": 1.0},
+                decision_expiry_ts=utc_now(),
+            )
+        )
+
+        self.assertFalse(decision.approved)
+        self.assertEqual(decision.current_open_order_count, 1)
         self.assertIn("insufficient_quote_balance", decision.rejection_reasons)
 
     def test_risk_blocks_sell_when_base_balance_is_insufficient(self) -> None:

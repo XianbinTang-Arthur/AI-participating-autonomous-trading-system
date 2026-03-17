@@ -4,15 +4,17 @@ import unittest
 
 from aats.bootstrap.settings import AATSSettings
 from aats.schemas.common import utc_now
-from aats.schemas.execution import FillEvent, OrderIntent, OrderState
+from aats.schemas.execution import FillEvent, OrderIntent, OrderObligation, OrderState
 from aats.schemas.exchange import ExchangeAccountSnapshot, ExchangeFill, InstrumentMetadata
 from aats.schemas.reconciliation import ReconciliationReport
 from aats.services.execution_engine.okx_adapter import OKXExecutionAdapter, OKXOrderPayloadBuilder
+from aats.services.execution_engine.okx_account import datetime_from_ms
 from aats.services.execution_engine.okx_rest import OKXRequestError
 from aats.services.portfolio_service.positions import PortfolioState
 from aats.services.governance_engine.health import SystemHealthService
 from aats.services.governance_engine.kill_switch import KillSwitch
 from aats.services.governance_engine.mode import RuntimeModeController
+from aats.storage.obligation_repo import InMemoryExecutionObligationRepository
 
 
 class FakeAccountService:
@@ -319,6 +321,45 @@ class FakeEventuallyConsistentOKXClient(FakeOKXClient):
         )
 
 
+class FakeAcceptedOrderLookupFailureOKXClient(FakeOKXClient):
+    async def get_order(self, *, symbol: str, order_id: str | None = None, client_order_id: str | None = None):
+        raise RuntimeError("order_lookup_failed_after_accept")
+
+
+class FakeAcceptedFillLookupFailureOKXClient(FakeOKXClient):
+    async def get_fills(self, *, symbol: str | None = None, order_id: str | None = None, limit: int | None = None):
+        raise RuntimeError("fill_lookup_failed_after_accept")
+
+
+class FakePartialOrderFillLookupFailureOKXClient(FakeOKXClient):
+    async def get_order(self, *, symbol: str, order_id: str | None = None, client_order_id: str | None = None):
+        self.order_queries.append({"symbol": symbol, "order_id": order_id, "client_order_id": client_order_id})
+        return {
+            "code": "0",
+            "data": [
+                {
+                    "instId": symbol,
+                    "ordId": order_id or "ord_1",
+                    "clOrdId": client_order_id or "clord_1",
+                    "state": "partially_filled",
+                    "sz": "0.001",
+                    "accFillSz": "0.0004",
+                    "avgPx": "68000",
+                    "cTime": "1700000000000",
+                    "uTime": "1700000001000",
+                }
+            ],
+        }
+
+    async def get_fills(self, *, symbol: str | None = None, order_id: str | None = None, limit: int | None = None):
+        raise RuntimeError("fill_lookup_failed_after_partial_order_detail")
+
+
+class FakeCancelOrderLookupFailureOKXClient(FakeOKXClient):
+    async def get_order(self, *, symbol: str, order_id: str | None = None, client_order_id: str | None = None):
+        raise RuntimeError("order_lookup_failed_after_cancel_accept")
+
+
 def make_settings(overrides: dict | None = None) -> AATSSettings:
     payload = {
         "mode": "guarded_live",
@@ -394,6 +435,47 @@ class TestGuardedSimulatedExecution(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(state.status, "BLOCKED")
         self.assertEqual(state.execution_error, "max_notional_per_symbol_exceeded")
+        self.assertEqual(fills, [])
+        self.assertEqual(client.place_order_calls, [])
+
+    async def test_submit_is_blocked_by_local_open_order_obligation_before_exchange_snapshot_catches_up(self) -> None:
+        settings = make_settings(
+            {
+                "live_submit_enabled": True,
+                "guarded_execution_dry_run": False,
+                "max_notional_per_symbol": 1_000.0,
+                "max_open_orders": 1,
+            }
+        )
+        mode_controller = RuntimeModeController(settings=settings, kill_switch=KillSwitch())
+        client = FakeOKXClient()
+        obligation_repo = InMemoryExecutionObligationRepository()
+        obligation_repo.save_obligation(
+            OrderObligation(
+                client_order_id="cl_pending_gate",
+                decision_id="decision_pending_gate",
+                intent_id="intent_pending_gate",
+                symbol="BTC-USDT",
+                side="buy",
+                reserve_currency="USDT",
+                reserved_amount=68.0,
+                status="ACTIVE",
+            )
+        )
+        adapter = OKXExecutionAdapter(
+            settings=settings,
+            client=client,  # type: ignore[arg-type]
+            account_service=FakeAccountService(),  # type: ignore[arg-type]
+            mode_controller=mode_controller,
+            obligation_repo=obligation_repo,
+            health_service=FakeHealthService(),
+            price_provider=lambda _symbol: 68_000.0,
+        )
+
+        state, fills = await adapter.submit(make_intent())
+
+        self.assertEqual(state.status, "BLOCKED")
+        self.assertEqual(state.execution_error, "max_open_orders_reached")
         self.assertEqual(fills, [])
         self.assertEqual(client.place_order_calls, [])
 
@@ -637,6 +719,85 @@ class TestGuardedSimulatedExecution(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state.venue, "OKX")
         self.assertEqual(fills, [])
 
+    async def test_submit_keeps_trackable_submitted_state_when_order_lookup_fails_after_accept(self) -> None:
+        settings = make_settings(
+            {
+                "live_submit_enabled": True,
+                "guarded_execution_dry_run": False,
+                "max_notional_per_symbol": 1_000.0,
+            }
+        )
+        mode_controller = RuntimeModeController(settings=settings, kill_switch=KillSwitch())
+        client = FakeAcceptedOrderLookupFailureOKXClient()
+        adapter = OKXExecutionAdapter(
+            settings=settings,
+            client=client,  # type: ignore[arg-type]
+            account_service=FakeAccountService(),  # type: ignore[arg-type]
+            mode_controller=mode_controller,
+            health_service=FakeHealthService(),
+            price_provider=lambda _symbol: 68_000.0,
+        )
+
+        state, fills = await adapter.submit(make_intent())
+
+        self.assertEqual(state.status, "SUBMITTED")
+        self.assertEqual(state.exchange_order_id, "ord_1")
+        self.assertEqual(fills, [])
+        self.assertEqual(state.execution_error, "order_lookup_failed_after_accept")
+
+    async def test_submit_keeps_trackable_submitted_state_when_fill_lookup_fails_after_accept(self) -> None:
+        settings = make_settings(
+            {
+                "live_submit_enabled": True,
+                "guarded_execution_dry_run": False,
+                "max_notional_per_symbol": 1_000.0,
+            }
+        )
+        mode_controller = RuntimeModeController(settings=settings, kill_switch=KillSwitch())
+        client = FakeAcceptedFillLookupFailureOKXClient()
+        adapter = OKXExecutionAdapter(
+            settings=settings,
+            client=client,  # type: ignore[arg-type]
+            account_service=FakeAccountService(),  # type: ignore[arg-type]
+            mode_controller=mode_controller,
+            health_service=FakeHealthService(),
+            price_provider=lambda _symbol: 68_000.0,
+        )
+
+        state, fills = await adapter.submit(make_intent())
+
+        self.assertEqual(state.status, "FILLED")
+        self.assertEqual(state.exchange_order_id, "ord_1")
+        self.assertEqual(fills, [])
+        self.assertEqual(state.execution_error, "fill_lookup_failed_after_accept")
+
+    async def test_submit_preserves_mapped_order_state_when_fill_lookup_fails(self) -> None:
+        settings = make_settings(
+            {
+                "live_submit_enabled": True,
+                "guarded_execution_dry_run": False,
+                "max_notional_per_symbol": 1_000.0,
+            }
+        )
+        mode_controller = RuntimeModeController(settings=settings, kill_switch=KillSwitch())
+        client = FakePartialOrderFillLookupFailureOKXClient()
+        adapter = OKXExecutionAdapter(
+            settings=settings,
+            client=client,  # type: ignore[arg-type]
+            account_service=FakeAccountService(),  # type: ignore[arg-type]
+            mode_controller=mode_controller,
+            health_service=FakeHealthService(),
+            price_provider=lambda _symbol: 68_000.0,
+        )
+
+        state, fills = await adapter.submit(make_intent())
+
+        self.assertEqual(state.status, "PARTIALLY_FILLED")
+        self.assertEqual(state.exchange_order_id, "ord_1")
+        self.assertAlmostEqual(state.filled_qty, 0.0004)
+        self.assertEqual(state.execution_error, "fill_lookup_failed_after_partial_order_detail")
+        self.assertEqual(fills, [])
+
     async def test_sync_maps_exchange_order_state_into_local_state(self) -> None:
         settings = make_settings(
             {
@@ -715,6 +876,109 @@ class TestGuardedSimulatedExecution(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.order_queries, [])
         self.assertEqual(client.fill_queries, [])
 
+    async def test_sync_keeps_open_order_trackable_when_exchange_lookup_fails(self) -> None:
+        settings = make_settings(
+            {
+                "live_submit_enabled": True,
+                "guarded_execution_dry_run": False,
+            }
+        )
+        mode_controller = RuntimeModeController(settings=settings, kill_switch=KillSwitch())
+        client = FakeAcceptedOrderLookupFailureOKXClient()
+        adapter = OKXExecutionAdapter(
+            settings=settings,
+            client=client,  # type: ignore[arg-type]
+            account_service=FakeAccountService(),  # type: ignore[arg-type]
+            mode_controller=mode_controller,
+            health_service=FakeHealthService(),
+            price_provider=lambda _symbol: 68_000.0,
+        )
+        now = utc_now()
+        state = OrderState(
+            decision_id="decision_1",
+            intent_id="intent_1",
+            symbol="BTC-USDT",
+            client_order_id="clord_sync_1",
+            venue="OKX",
+            exchange_order_id="ord_1",
+            status="SUBMITTED",
+            submission_mode="guarded_simulated_submit",
+            submitted_ts=now,
+            last_update_ts=now,
+            last_exchange_update_ts=now,
+            requested_qty=0.001,
+            filled_qty=0.0,
+            remaining_qty=0.001,
+            average_fill_price=None,
+            fees=0.0,
+            product_type="spot",
+            target_leverage=1.0,
+            margin_mode="cash",
+            exposure_side="flat",
+            position_intent="open_long",
+            submission_payload={"instId": "BTC-USDT", "side": "buy", "ordType": "market"},
+        )
+
+        refreshed_states, refreshed_fills = await adapter.sync([state])
+
+        self.assertEqual(len(refreshed_states), 1)
+        self.assertEqual(refreshed_states[0].status, "SUBMITTED")
+        self.assertEqual(refreshed_states[0].exchange_order_id, "ord_1")
+        self.assertEqual(refreshed_states[0].execution_error, "order_lookup_failed_after_accept")
+        self.assertEqual(refreshed_fills, [])
+
+    async def test_sync_preserves_mapped_order_state_when_fill_lookup_fails(self) -> None:
+        settings = make_settings(
+            {
+                "live_submit_enabled": True,
+                "guarded_execution_dry_run": False,
+            }
+        )
+        mode_controller = RuntimeModeController(settings=settings, kill_switch=KillSwitch())
+        client = FakePartialOrderFillLookupFailureOKXClient()
+        adapter = OKXExecutionAdapter(
+            settings=settings,
+            client=client,  # type: ignore[arg-type]
+            account_service=FakeAccountService(),  # type: ignore[arg-type]
+            mode_controller=mode_controller,
+            health_service=FakeHealthService(),
+            price_provider=lambda _symbol: 68_000.0,
+        )
+        now = utc_now()
+        state = OrderState(
+            decision_id="decision_1",
+            intent_id="intent_1",
+            symbol="BTC-USDT",
+            client_order_id="clord_sync_partial",
+            venue="OKX",
+            exchange_order_id="ord_1",
+            status="SUBMITTED",
+            submission_mode="guarded_simulated_submit",
+            submitted_ts=now,
+            last_update_ts=now,
+            last_exchange_update_ts=now,
+            requested_qty=0.001,
+            filled_qty=0.0,
+            remaining_qty=0.001,
+            average_fill_price=None,
+            fees=0.0,
+            product_type="spot",
+            target_leverage=1.0,
+            margin_mode="cash",
+            exposure_side="flat",
+            position_intent="open_long",
+            submission_payload={"instId": "BTC-USDT", "side": "buy", "ordType": "market"},
+        )
+
+        refreshed_states, refreshed_fills = await adapter.sync([state])
+
+        self.assertEqual(len(refreshed_states), 1)
+        self.assertEqual(refreshed_states[0].status, "PARTIALLY_FILLED")
+        self.assertAlmostEqual(refreshed_states[0].filled_qty, 0.0004)
+        self.assertEqual(refreshed_states[0].execution_error, "fill_lookup_failed_after_partial_order_detail")
+        self.assertEqual(refreshed_states[0].last_exchange_update_ts, datetime_from_ms("1700000001000"))
+        self.assertEqual(refreshed_fills, [])
+
     async def test_partial_fill_ingestion_updates_portfolio_incrementally(self) -> None:
         settings = make_settings(
             {
@@ -774,6 +1038,56 @@ class TestGuardedSimulatedExecution(unittest.IsolatedAsyncioTestCase):
         self.assertIn(canceled.status, {"PARTIALLY_FILLED", "CANCELED", "FILLED"})
         self.assertIsNotNone(canceled.cancellation_requested_ts)
         self.assertIsInstance(fills, list)
+
+    async def test_cancel_keeps_cancel_pending_state_when_order_lookup_fails_after_ack(self) -> None:
+        settings = make_settings(
+            {
+                "live_submit_enabled": True,
+                "guarded_execution_dry_run": False,
+            }
+        )
+        mode_controller = RuntimeModeController(settings=settings, kill_switch=KillSwitch())
+        adapter = OKXExecutionAdapter(
+            settings=settings,
+            client=FakeCancelOrderLookupFailureOKXClient(),  # type: ignore[arg-type]
+            account_service=FakeAccountService(),  # type: ignore[arg-type]
+            mode_controller=mode_controller,
+            health_service=FakeHealthService(),
+            price_provider=lambda _symbol: 68_000.0,
+        )
+
+        state, _fills = await adapter.submit(make_intent())
+        canceled, fills = await adapter.cancel(state)
+
+        self.assertEqual(canceled.status, "CANCEL_PENDING")
+        self.assertEqual(canceled.execution_error, "order_lookup_failed_after_cancel_accept")
+        self.assertIsNotNone(canceled.cancellation_requested_ts)
+        self.assertEqual(fills, [])
+
+    async def test_cancel_preserves_mapped_order_state_when_fill_lookup_fails(self) -> None:
+        settings = make_settings(
+            {
+                "live_submit_enabled": True,
+                "guarded_execution_dry_run": False,
+            }
+        )
+        mode_controller = RuntimeModeController(settings=settings, kill_switch=KillSwitch())
+        adapter = OKXExecutionAdapter(
+            settings=settings,
+            client=FakePartialOrderFillLookupFailureOKXClient(),  # type: ignore[arg-type]
+            account_service=FakeAccountService(),  # type: ignore[arg-type]
+            mode_controller=mode_controller,
+            health_service=FakeHealthService(),
+            price_provider=lambda _symbol: 68_000.0,
+        )
+
+        state, _fills = await adapter.submit(make_intent())
+        canceled, fills = await adapter.cancel(state)
+
+        self.assertEqual(canceled.status, "PARTIALLY_FILLED")
+        self.assertEqual(canceled.execution_error, "fill_lookup_failed_after_partial_order_detail")
+        self.assertIsNotNone(canceled.cancellation_requested_ts)
+        self.assertEqual(fills, [])
 
     async def test_submit_is_blocked_when_health_freshness_is_unhealthy(self) -> None:
         settings = make_settings(

@@ -7,12 +7,14 @@ from aats.bus.base import EventBus
 from aats.events import topics
 from aats.events.envelopes import publish_model
 from aats.schemas.decision import PositionTarget
+from aats.schemas.execution import OrderObligation
 from aats.schemas.governance import RiskDecision
 from aats.services.decision_engine.trigger_policy import DecisionTriggerPolicy
 from aats.services.execution_engine.okx_account import OKXAccountService
 from aats.services.governance_engine.health import SystemHealthService
 from aats.services.governance_engine.mode import RuntimeModeController
 from aats.services.governance_engine.runtime_layers import EnvironmentCapabilities, PolicyProfile
+from aats.storage.base import ExecutionObligationRepository
 
 
 class RiskEngine:
@@ -25,6 +27,7 @@ class RiskEngine:
         trigger_policy: DecisionTriggerPolicy,
         price_provider: Callable[[str], float],
         mode_controller: RuntimeModeController,
+        obligation_repo: ExecutionObligationRepository | None = None,
         environment_capabilities: EnvironmentCapabilities | None = None,
         policy_profile: PolicyProfile | None = None,
     ) -> None:
@@ -34,6 +37,7 @@ class RiskEngine:
         self.trigger_policy = trigger_policy
         self.price_provider = price_provider
         self.mode_controller = mode_controller
+        self.obligation_repo = obligation_repo
         self.environment_capabilities = environment_capabilities or mode_controller.environment_capabilities
         self.policy_profile = policy_profile or mode_controller.policy_profile
 
@@ -53,7 +57,7 @@ class RiskEngine:
             target_notional = max_notional
             constraints_applied.append("max_notional_per_symbol")
 
-        current_open_order_count = self.account_service.open_order_count(symbol=target.symbol)
+        current_open_order_count = self._current_open_order_count(target.symbol)
         approved = True
         rejection_reasons: list[str] = []
         capped_target_leverage = self._capped_target_leverage(target.target_leverage)
@@ -131,7 +135,43 @@ class RiskEngine:
         snapshot = snapshot_getter() if callable(snapshot_getter) else None
         if snapshot is None:
             return 0.0
-        return sum(balance.available for balance in snapshot.balances if balance.currency == currency)
+        exchange_available = sum(balance.available for balance in snapshot.balances if balance.currency == currency)
+        local_reserved = sum(
+            self._remaining_obligation_amount(obligation)
+            for obligation in self._active_local_obligations()
+            if obligation.reserve_currency == currency
+        )
+        return max(exchange_available - local_reserved, 0.0)
+
+    def _current_open_order_count(self, symbol: str) -> int:
+        return self.account_service.open_order_count(symbol=symbol) + sum(
+            1
+            for obligation in self._active_local_obligations()
+            if obligation.symbol == symbol
+        )
+
+    def _active_local_obligations(self) -> list[OrderObligation]:
+        if self.obligation_repo is None:
+            return []
+        snapshot_getter = getattr(self.account_service, "latest_snapshot", None)
+        snapshot = snapshot_getter() if callable(snapshot_getter) else None
+        visible_client_order_ids = {
+            order.client_order_id
+            for order in (snapshot.open_orders if snapshot is not None else [])
+            if order.client_order_id
+        }
+        return [
+            obligation
+            for obligation in self.obligation_repo.active_obligations()
+            if obligation.client_order_id not in visible_client_order_ids
+        ]
+
+    @staticmethod
+    def _remaining_obligation_amount(obligation: OrderObligation) -> float:
+        return max(
+            obligation.reserved_amount - obligation.consumed_amount - obligation.released_amount,
+            0.0,
+        )
 
     def _symbol_currencies(self, symbol: str) -> tuple[str | None, str | None]:
         instrument_getter = getattr(self.account_service, "instrument_metadata", None)

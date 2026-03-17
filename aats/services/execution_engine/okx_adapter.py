@@ -17,6 +17,7 @@ from aats.services.governance_engine.health import SystemHealthService
 from aats.services.governance_engine.mode import RuntimeModeController
 from aats.services.governance_engine.runtime_layers import EnvironmentCapabilities, PolicyProfile
 from aats.bootstrap.logging import correlation_fields, get_logger, log_event
+from aats.storage.base import ExecutionObligationRepository
 
 
 class OKXOrderPayloadBuilder:
@@ -91,6 +92,7 @@ class OKXExecutionAdapter(ExchangeAdapter):
         client: OKXRESTClient,
         account_service: OKXAccountService,
         mode_controller: RuntimeModeController,
+        obligation_repo: ExecutionObligationRepository | None = None,
         environment_capabilities: EnvironmentCapabilities | None = None,
         policy_profile: PolicyProfile | None = None,
         health_service: SystemHealthService | None = None,
@@ -101,6 +103,7 @@ class OKXExecutionAdapter(ExchangeAdapter):
         self.client = client
         self.account_service = account_service
         self.mode_controller = mode_controller
+        self.obligation_repo = obligation_repo
         self.environment_capabilities = environment_capabilities or mode_controller.environment_capabilities
         self.policy_profile = policy_profile or mode_controller.policy_profile
         self.health_service = health_service
@@ -158,43 +161,58 @@ class OKXExecutionAdapter(ExchangeAdapter):
 
             client_order_id = str(row.get("clOrdId") or payload["clOrdId"])
             order_id = str(row.get("ordId")) if row.get("ordId") else None
-            order_detail = await self._load_order_detail(
-                symbol=intent.symbol,
-                order_id=order_id,
-                client_order_id=client_order_id,
-            )
-            if order_detail is None:
-                state = self._submitted_state(
-                    intent=intent,
-                    payload=payload,
-                    submitted_ts=submitted_ts,
-                    client_order_id=client_order_id,
-                    order_id=order_id,
-                )
-                return state, []
-
-            state = self._map_order_state(
+            accepted_state = self._submitted_state(
                 intent=intent,
                 payload=payload,
-                order_row=order_detail,
                 submitted_ts=submitted_ts,
+                client_order_id=client_order_id,
+                order_id=order_id,
             )
-            fills_payload = await self.client.get_fills(
-                symbol=intent.symbol,
-                order_id=state.exchange_order_id,
-                limit=self.settings.okx_fill_fetch_limit,
-            )
-            fills = self._map_fill_events(
-                intent=intent,
-                client_order_id=state.client_order_id,
-                exchange_fills=self._select_exchange_fills(
-                    exchange_fills=self._parse_fill_rows(fills_payload),
+            try:
+                order_detail = await self._load_order_detail(
+                    symbol=intent.symbol,
+                    order_id=order_id,
+                    client_order_id=client_order_id,
+                )
+                if order_detail is None:
+                    self._last_error = None
+                    return accepted_state, []
+                state = self._map_order_state(
+                    intent=intent,
+                    payload=payload,
+                    order_row=order_detail,
+                    submitted_ts=submitted_ts,
+                )
+            except Exception as exc:
+                self._last_error = str(exc)
+                return self._recoverable_order_state(
+                    state=accepted_state,
+                    error=str(exc),
+                ), []
+
+            try:
+                fills_payload = await self.client.get_fills(
+                    symbol=intent.symbol,
                     order_id=state.exchange_order_id,
+                    limit=self.settings.okx_fill_fetch_limit,
+                )
+                fills = self._map_fill_events(
+                    intent=intent,
                     client_order_id=state.client_order_id,
-                ),
-            )
-            self._last_error = None
-            return state, fills
+                    exchange_fills=self._select_exchange_fills(
+                        exchange_fills=self._parse_fill_rows(fills_payload),
+                        order_id=state.exchange_order_id,
+                        client_order_id=state.client_order_id,
+                    ),
+                )
+                self._last_error = None
+                return state, fills
+            except Exception as exc:
+                self._last_error = str(exc)
+                return self._recoverable_order_state(
+                    state=state,
+                    error=str(exc),
+                ), []
         except Exception as exc:
             self._last_error = str(exc)
             return (
@@ -254,42 +272,57 @@ class OKXExecutionAdapter(ExchangeAdapter):
                     [],
                 )
 
-            order_detail = await self._load_order_detail(
-                symbol=order_state.symbol,
-                order_id=order_state.exchange_order_id,
-                client_order_id=order_state.client_order_id,
-            )
-            if order_detail is None:
-                return cancel_pending, []
             intent = self._intent_from_state(order_state)
-            state = self._map_order_state(
-                intent=intent,
-                payload=order_state.submission_payload,
-                order_row=order_detail,
-                submitted_ts=order_state.submitted_ts or utc_now(),
-            )
-            state = state.model_copy(
-                update={
-                    "cancellation_requested_ts": cancel_pending.cancellation_requested_ts,
-                    "cancel_reason": state.cancel_reason or cancel_pending.cancel_reason,
-                }
-            )
-            fills_payload = await self.client.get_fills(
-                symbol=order_state.symbol,
-                order_id=order_state.exchange_order_id,
-                limit=self.settings.okx_fill_fetch_limit,
-            )
-            fills = self._map_fill_events(
-                intent=intent,
-                client_order_id=order_state.client_order_id,
-                exchange_fills=self._select_exchange_fills(
-                    exchange_fills=self._parse_fill_rows(fills_payload),
+            try:
+                order_detail = await self._load_order_detail(
+                    symbol=order_state.symbol,
                     order_id=order_state.exchange_order_id,
                     client_order_id=order_state.client_order_id,
-                ),
-            )
-            self._last_error = None
-            return state, fills
+                )
+                if order_detail is None:
+                    self._last_error = None
+                    return cancel_pending, []
+                state = self._map_order_state(
+                    intent=intent,
+                    payload=order_state.submission_payload,
+                    order_row=order_detail,
+                    submitted_ts=order_state.submitted_ts or utc_now(),
+                )
+                state = state.model_copy(
+                    update={
+                        "cancellation_requested_ts": cancel_pending.cancellation_requested_ts,
+                        "cancel_reason": state.cancel_reason or cancel_pending.cancel_reason,
+                    }
+                )
+            except Exception as exc:
+                self._last_error = str(exc)
+                return self._recoverable_order_state(
+                    state=cancel_pending,
+                    error=str(exc),
+                ), []
+            try:
+                fills_payload = await self.client.get_fills(
+                    symbol=order_state.symbol,
+                    order_id=order_state.exchange_order_id,
+                    limit=self.settings.okx_fill_fetch_limit,
+                )
+                fills = self._map_fill_events(
+                    intent=intent,
+                    client_order_id=order_state.client_order_id,
+                    exchange_fills=self._select_exchange_fills(
+                        exchange_fills=self._parse_fill_rows(fills_payload),
+                        order_id=order_state.exchange_order_id,
+                        client_order_id=order_state.client_order_id,
+                    ),
+                )
+                self._last_error = None
+                return state, fills
+            except Exception as exc:
+                self._last_error = str(exc)
+                return self._recoverable_order_state(
+                    state=state,
+                    error=str(exc),
+                ), []
         except Exception as exc:
             self._last_error = str(exc)
             return (
@@ -319,6 +352,7 @@ class OKXExecutionAdapter(ExchangeAdapter):
             # client order id.
             if state.status in {"CREATED", "SUBMITTING"} and state.exchange_order_id is None:
                 continue
+            refreshed_state = state
             try:
                 order_detail = await self._load_order_detail(
                     symbol=state.symbol,
@@ -327,13 +361,11 @@ class OKXExecutionAdapter(ExchangeAdapter):
                 )
                 if order_detail is not None:
                     intent = self._intent_from_state(state)
-                    refreshed_states.append(
-                        self._map_order_state(
-                            intent=intent,
-                            payload=state.submission_payload,
-                            order_row=order_detail,
-                            submitted_ts=state.submitted_ts or utc_now(),
-                        )
+                    refreshed_state = self._map_order_state(
+                        intent=intent,
+                        payload=state.submission_payload,
+                        order_row=order_detail,
+                        submitted_ts=state.submitted_ts or utc_now(),
                     )
                 fills_payload = await self.client.get_fills(
                     symbol=state.symbol,
@@ -342,26 +374,21 @@ class OKXExecutionAdapter(ExchangeAdapter):
                 )
                 fills.extend(
                     self._map_fill_events(
-                        intent=self._intent_from_state(state),
-                        client_order_id=state.client_order_id,
+                        intent=self._intent_from_state(refreshed_state),
+                        client_order_id=refreshed_state.client_order_id,
                         exchange_fills=self._select_exchange_fills(
                             exchange_fills=self._parse_fill_rows(fills_payload),
-                            order_id=state.exchange_order_id,
-                            client_order_id=state.client_order_id,
+                            order_id=refreshed_state.exchange_order_id,
+                            client_order_id=refreshed_state.client_order_id,
                         ),
                     )
                 )
+                refreshed_states.append(refreshed_state)
                 self._last_error = None
             except Exception as exc:
                 self._last_error = str(exc)
                 refreshed_states.append(
-                    state.model_copy(
-                        update={
-                            "status": "FAILED",
-                            "last_update_ts": utc_now(),
-                            "execution_error": str(exc),
-                        }
-                    )
+                    self._recoverable_order_state(state=refreshed_state, error=str(exc))
                 )
         return refreshed_states, fills
 
@@ -408,7 +435,7 @@ class OKXExecutionAdapter(ExchangeAdapter):
             return "okx_simulated_trading_required"
         if intent.symbol not in self.settings.allowed_symbols:
             return "symbol_not_allowed"
-        if self.account_service.open_order_count(symbol=intent.symbol) >= self.settings.max_open_orders:
+        if self._current_open_order_count(intent.symbol) >= self.settings.max_open_orders:
             return "max_open_orders_reached"
         price = self.price_provider(intent.symbol) if self.price_provider is not None else 0.0
         if price > 0.0 and (intent.quantity * price) > self.settings.max_notional_per_symbol:
@@ -463,6 +490,24 @@ class OKXExecutionAdapter(ExchangeAdapter):
             "submit_blocked_reasons": blocked_reasons,
             "safety_gates": safety_gates,
         }
+
+    def _current_open_order_count(self, symbol: str) -> int:
+        exchange_count = self.account_service.open_order_count(symbol=symbol)
+        if self.obligation_repo is None:
+            return exchange_count
+        snapshot_getter = getattr(self.account_service, "latest_snapshot", None)
+        snapshot = snapshot_getter() if callable(snapshot_getter) else None
+        visible_client_order_ids = {
+            order.client_order_id
+            for order in (snapshot.open_orders if snapshot is not None else [])
+            if order.client_order_id
+        }
+        local_pending = sum(
+            1
+            for obligation in self.obligation_repo.active_obligations()
+            if obligation.symbol == symbol and obligation.client_order_id not in visible_client_order_ids
+        )
+        return exchange_count + local_pending
 
     def _blocked_state(self, *, intent: OrderIntent, payload: dict[str, str], reason: str) -> OrderState:
         now = utc_now()
@@ -606,6 +651,19 @@ class OKXExecutionAdapter(ExchangeAdapter):
             cancel_reason=error,
             execution_error=error,
             submission_payload=self._state_submission_payload(intent=intent, payload=payload),
+        )
+
+    @staticmethod
+    def _recoverable_order_state(
+        *,
+        state: OrderState,
+        error: str,
+    ) -> OrderState:
+        return state.model_copy(
+            update={
+                "last_update_ts": utc_now(),
+                "execution_error": error,
+            }
         )
 
     async def _load_order_detail(
