@@ -8,6 +8,7 @@ from aats.schemas.execution import FillEvent, OrderState
 from aats.schemas.exchange import ExchangeAccountSnapshot, ExchangeFill, ExchangeOpenOrder
 from aats.schemas.portfolio import PortfolioSnapshot
 from aats.schemas.reconciliation import ReconciliationReport
+from aats.services.execution_engine.state_machine import OrderStateMachine
 from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, EPSILON_DECIMAL_9, to_decimal
 
 
@@ -208,7 +209,7 @@ class StateComparator:
             local_open_orders = {
                 StateComparator._order_key(order): order
                 for order in order_states
-                if order.venue == "OKX" and order.status not in {"FILLED", "CANCELED", "REJECTED", "FAILED"}
+                if order.venue == "OKX" and OrderStateMachine.is_open(order.status)
             }
             exchange_open_orders = {
                 StateComparator._exchange_order_key(order): order

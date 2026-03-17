@@ -391,6 +391,75 @@ class TestReconciliationComparator(unittest.TestCase):
         self.assertTrue(report.mismatch_reasons)
         self.assertEqual(report.recommended_operator_action, "investigate_state_divergence")
 
+    def test_compare_ignores_blocked_local_order_for_exchange_open_order_diff(self) -> None:
+        comparator = StateComparator()
+        now = utc_now()
+        report = comparator.compare(
+            decision_id="decision_blocked",
+            portfolio_snapshot_ref="evt_portfolio_blocked",
+            order_states=[
+                OrderState(
+                    decision_id="decision_blocked",
+                    intent_id="intent_blocked",
+                    symbol="BTC-USDT-SWAP",
+                    client_order_id="clord_blocked",
+                    venue="OKX",
+                    exchange_order_id=None,
+                    status="BLOCKED",
+                    exchange_status=None,
+                    submitted_ts=None,
+                    last_update_ts=now,
+                    last_exchange_update_ts=None,
+                    requested_qty=0.0028,
+                    filled_qty=0.0,
+                    remaining_qty=0.0028,
+                    average_fill_price=None,
+                    fees=0.0,
+                    execution_error="max_open_orders_reached",
+                )
+            ],
+            fills=[],
+            stored_snapshot=PortfolioSnapshot(
+                snapshot_ts=now,
+                balances={"USDT": 10_000.0},
+                positions=[],
+                cost_basis={},
+                realized_pnl=0.0,
+                unrealized_pnl=0.0,
+                total_equity=10_000.0,
+                gross_exposure=0.0,
+                net_exposure=0.0,
+                risk_budget_usage={},
+            ),
+            reconstructed_snapshot=PortfolioSnapshot(
+                snapshot_ts=now,
+                balances={"USDT": 10_000.0},
+                positions=[],
+                cost_basis={},
+                realized_pnl=0.0,
+                unrealized_pnl=0.0,
+                total_equity=10_000.0,
+                gross_exposure=0.0,
+                net_exposure=0.0,
+                risk_budget_usage={},
+            ),
+            exchange_snapshot=ExchangeAccountSnapshot(
+                account_source="okx",
+                fetched_at=now,
+                balances=[ExchangeBalance(currency="USDT", total=10_000.0, available=10_000.0, frozen=0.0)],
+                positions=[],
+                open_orders=[],
+                fills=[],
+                instruments=[],
+            ),
+            exchange_comparison_enabled=True,
+            compare_exchange_portfolio=False,
+        )
+
+        self.assertEqual(report.severity, "CLEAN")
+        self.assertFalse(report.halt_required)
+        self.assertFalse(report.order_diff["exchange"])
+
     def test_compare_reports_clean_when_local_and_exchange_state_match(self) -> None:
         comparator = StateComparator()
         now = utc_now()
