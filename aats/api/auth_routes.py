@@ -167,11 +167,6 @@ async def auth_providers(request: Request) -> dict[str, Any]:
         "configured_roles": configured_operator_roles(runtime),
         "stored_user_count": stored_operator_user_count(runtime),
         "runtime_profile_control_enabled": False,
-        "bootstrap_pending": (
-            settings.operator_bootstrap_enabled
-            and settings.operator_bootstrap_users_configured
-            and stored_operator_user_count(runtime) == 0
-        ),
         "api_key_compatibility_enabled": bool(settings.operator_read_api_key or settings.operator_write_api_key),
     }
 

@@ -7,7 +7,6 @@ from aats.api.session_auth import SessionIdentity, verify_session_token
 from aats.bootstrap.config import ApplicationRuntime
 from aats.schemas.common import utc_now
 from aats.schemas.operator import AuthSource, OperatorRole
-from aats.services.operator.accounts import configured_bootstrap_operator_users
 from aats.services.operator.passwords import verify_password
 
 
@@ -52,7 +51,7 @@ def configured_operator_roles(runtime: ApplicationRuntime) -> list[OperatorRole]
     roles = [user.role for user in runtime.operator_repo.all_users() if user.enabled] if hasattr(runtime, "operator_repo") else []
     if roles:
         return sorted(set(roles), key=lambda role: {"viewer": 0, "operator": 1, "admin": 2}.get(role, 99))
-    return [user.role for user in configured_bootstrap_operator_users(runtime.settings)]
+    return []
 
 
 def stored_operator_user_count(runtime: ApplicationRuntime) -> int:

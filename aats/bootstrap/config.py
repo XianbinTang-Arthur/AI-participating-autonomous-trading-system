@@ -53,7 +53,7 @@ from aats.services.market_gateway.gateway import MarketDataGateway
 from aats.services.market_gateway.normalizer import MarketSnapshotNormalizer
 from aats.services.market_gateway.okx_websocket import OKXPublicWebSocketClient
 from aats.services.market_gateway.publisher import MarketSnapshotPublisher
-from aats.services.operator.accounts import seed_operator_users
+from aats.services.operator.accounts import enabled_admin_count
 from aats.services.operator.runtime_profiles import runtime_profile_resolution
 from aats.services.runtime_scope import latest_matching_snapshot, runtime_state_scope, scoped_portfolio_event
 from aats.services.portfolio_service.pnl import PortfolioPnLCalculator
@@ -292,6 +292,20 @@ def _validate_runtime_settings(settings: AATSSettings, runtime_layering: Runtime
         raise ValueError("guarded_simulated_submit_requires_persistent_storage")
 
 
+def _validate_operator_auth_settings(settings: AATSSettings, storage: StorageBackends) -> None:
+    if settings.storage_mode != "postgres":
+        return
+    if not settings.operator_auth_enabled:
+        return
+    if not settings.operator_session_configured:
+        return
+    if settings.operator_write_api_key:
+        return
+    if enabled_admin_count(storage.operator_repo) > 0:
+        return
+    raise ValueError("operator_session_auth_requires_enabled_admin_user")
+
+
 def build_storage_backends(settings: AATSSettings) -> StorageBackends:
     if settings.storage_mode == "memory":
         return StorageBackends(
@@ -366,12 +380,17 @@ async def build_runtime(
 ) -> ApplicationRuntime:
     base_settings = settings or load_settings()
     storage = build_storage_backends(base_settings)
-    profile_resolution = runtime_profile_resolution(settings=base_settings, repo=storage.runtime_profile_repo)
-    runtime_settings = AATSSettings.model_validate(profile_resolution.resolved_settings)
-    runtime_layering = resolve_runtime_layering(runtime_settings)
-    state_scope = runtime_state_scope(runtime_settings)
-    _validate_runtime_settings(runtime_settings, runtime_layering)
-    seed_operator_users(runtime_settings, storage.operator_repo)
+    try:
+        profile_resolution = runtime_profile_resolution(settings=base_settings, repo=storage.runtime_profile_repo)
+        runtime_settings = AATSSettings.model_validate(profile_resolution.resolved_settings)
+        runtime_layering = resolve_runtime_layering(runtime_settings)
+        state_scope = runtime_state_scope(runtime_settings)
+        _validate_runtime_settings(runtime_settings, runtime_layering)
+        _validate_operator_auth_settings(runtime_settings, storage)
+    except Exception:
+        if storage.database_runtime is not None:
+            storage.database_runtime.dispose()
+        raise
     metrics = MetricsRegistry()
     bus = InMemoryEventBus(
         event_store=storage.event_store,

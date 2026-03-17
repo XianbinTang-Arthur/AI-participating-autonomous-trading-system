@@ -3,7 +3,6 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
-import shutil
 from datetime import timedelta
 from unittest.mock import patch
 
@@ -64,13 +63,6 @@ class FakeOperatorAccountService:
 
 
 class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
-    def setUp(self) -> None:
-        self._temp_dirs: list[Path] = []
-
-    def tearDown(self) -> None:
-        for temp_dir in self._temp_dirs:
-            shutil.rmtree(temp_dir, ignore_errors=True)
-
     async def test_system_status_and_mode_endpoints_are_operator_readable(self) -> None:
         runtime = await self._runtime()
         app = self._app(runtime)
@@ -313,7 +305,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         runtime = await self._runtime(
             operator_auth_enabled=True,
             operator_session_secret="session-secret",
-            bootstrap_users=[("viewer", "viewer-pass"), ("operator", "operator-pass")],
+            operator_users=[("viewer", "viewer-pass"), ("operator", "operator-pass")],
         )
         app = self._app(runtime)
         with TestClient(app) as viewer_client:
@@ -341,7 +333,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         runtime = await self._runtime(
             operator_auth_enabled=True,
             operator_session_secret="session-secret",
-            bootstrap_users=[("admin", "correct-pass")],
+            operator_users=[("admin", "correct-pass")],
         )
         app = self._app(runtime)
         with TestClient(app) as client:
@@ -354,7 +346,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         runtime = await self._runtime(
             operator_auth_enabled=True,
             operator_session_secret="session-secret",
-            bootstrap_users=[("admin", "correct-pass")],
+            operator_users=[("admin", "correct-pass")],
         )
         runtime.operator_repo.save_user(
             OperatorUserRecord(
@@ -375,7 +367,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         runtime = await self._runtime(
             operator_auth_enabled=True,
             operator_session_secret="session-secret",
-            bootstrap_users=[("admin", "admin-pass")],
+            operator_users=[("admin", "admin-pass")],
         )
         app = self._app(runtime)
 
@@ -423,7 +415,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         runtime = await self._runtime(
             operator_auth_enabled=True,
             operator_session_secret="session-secret",
-            bootstrap_users=[("admin", "admin-pass")],
+            operator_users=[("admin", "admin-pass")],
         )
         app = self._app(runtime)
 
@@ -443,7 +435,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         runtime = await self._runtime(
             operator_auth_enabled=True,
             operator_session_secret="session-secret",
-            bootstrap_users=[("admin", "admin-pass")],
+            operator_users=[("admin", "admin-pass")],
         )
         runtime.execution_repo.save_order_state(
             OrderState(
@@ -472,7 +464,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         runtime = await self._runtime(
             operator_auth_enabled=True,
             operator_session_secret="session-secret",
-            bootstrap_users=[("admin", "admin-pass"), ("operator", "operator-pass")],
+            operator_users=[("admin", "admin-pass"), ("operator", "operator-pass")],
             operator_write_api_key="write-key",
         )
         app = self._app(runtime)
@@ -509,7 +501,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         runtime = await self._runtime(
             operator_auth_enabled=True,
             operator_session_secret="session-secret",
-            bootstrap_users=[("admin", "admin-pass"), ("operator", "operator-pass")],
+            operator_users=[("admin", "admin-pass"), ("operator", "operator-pass")],
             operator_write_api_key="write-key",
         )
         operator_user = runtime.operator_repo.get_by_username("operator")
@@ -546,7 +538,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
     async def test_unauthenticated_session_remains_anonymous_when_browser_auth_is_disabled(self) -> None:
         runtime = await self._runtime(
             operator_auth_enabled=False,
-            bootstrap_users=[("admin", "solo-pass")],
+            operator_users=[("admin", "solo-pass")],
         )
         app = self._app(runtime)
         with TestClient(app) as client:
@@ -559,12 +551,10 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["role"], "anonymous")
         self.assertEqual(payload["auth_source"], "anonymous")
 
-    async def test_bootstrap_pending_is_false_when_user_file_is_missing(self) -> None:
+    async def test_auth_providers_no_longer_expose_runtime_bootstrap_state(self) -> None:
         runtime = await self._runtime(
             operator_auth_enabled=True,
             operator_session_secret="session-secret",
-            operator_bootstrap_enabled=True,
-            operator_bootstrap_user_file=str(Path("docs") / "missing-user.txt"),
         )
         app = self._app(runtime)
         with TestClient(app) as client:
@@ -572,15 +562,13 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(providers.status_code, 200)
         payload = providers.json()
-        self.assertFalse(payload["bootstrap_pending"])
         self.assertEqual(payload["configured_roles"], [])
         self.assertFalse(payload["runtime_profile_control_enabled"])
+        self.assertNotIn("bootstrap_pending", payload)
 
-    async def test_local_config_identity_ignores_bootstrap_file_when_bootstrap_is_disabled(self) -> None:
+    async def test_unauthenticated_session_is_anonymous_without_stored_operator_users(self) -> None:
         runtime = await self._runtime(
             operator_auth_enabled=False,
-            operator_bootstrap_enabled=False,
-            bootstrap_users=[("admin", "solo-pass")],
         )
         app = self._app(runtime)
         with TestClient(app) as client:
@@ -592,7 +580,63 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["role"], "anonymous")
         self.assertEqual(payload["auth_source"], "anonymous")
 
-    async def test_sqlite_backed_bootstrap_operator_account_persists_and_allows_login(self) -> None:
+    async def test_sqlite_backed_operator_account_persists_and_allows_login(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = (Path(temp_dir) / "aats_auth.db").resolve().as_posix()
+            seed_settings = AATSSettings.model_validate(
+                {
+                    "config_profile": "local_demo",
+                    "mode": "paper_live",
+                    "market_data_backend": "demo",
+                    "execution_backend": "paper",
+                    "account_backend": "disabled",
+                    "account_read_enabled": False,
+                    "storage_mode": "postgres",
+                    "database_url": f"sqlite+pysqlite:///{database_path}",
+                    "database_auto_create_schema": True,
+                    "event_persistence_mode": "strict",
+                    "enabled_decision_timeframes": ("15m",),
+                    "operator_auth_enabled": False,
+                }
+            )
+            runtime = await build_runtime(seed_settings)
+            runtime.operator_repo.save_user(
+                OperatorUserRecord(
+                    username="admin",
+                    password_hash=hash_password("correct-pass"),
+                    role="admin",
+                )
+            )
+            await runtime.market_gateway.run_local_publisher(
+                symbol=seed_settings.default_symbol,
+                iterations=2,
+                interval_seconds=0.0,
+            )
+            self.assertEqual(runtime.operator_repo.count(), 1)
+            if runtime.database_runtime is not None:
+                runtime.database_runtime.dispose()
+
+            settings = seed_settings.model_copy(
+                update={
+                    "operator_auth_enabled": True,
+                    "operator_session_secret": "session-secret",
+                }
+            )
+            recovered_runtime = await build_runtime(settings)
+            app = self._app(recovered_runtime)
+            with TestClient(app) as client:
+                providers = client.get("/auth/providers")
+                login = client.post("/auth/login", json={"username": "admin", "password": "correct-pass"})
+
+            self.assertEqual(providers.status_code, 200)
+            self.assertEqual(providers.json()["stored_user_count"], 1)
+            self.assertFalse(providers.json()["runtime_profile_control_enabled"])
+            self.assertEqual(login.status_code, 200)
+            self.assertEqual(login.json()["identity"], "admin")
+            if recovered_runtime.database_runtime is not None:
+                recovered_runtime.database_runtime.dispose()
+
+    async def test_database_backed_session_auth_requires_preexisting_admin_user(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             database_path = (Path(temp_dir) / "aats_auth.db").resolve().as_posix()
             settings = AATSSettings.model_validate(
@@ -610,36 +654,15 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
                     "enabled_decision_timeframes": ("15m",),
                     "operator_auth_enabled": True,
                     "operator_session_secret": "session-secret",
-                    "operator_bootstrap_user_file": self._bootstrap_user_file([("admin", "correct-pass")]),
                 }
             )
-            runtime = await build_runtime(settings)
-            await runtime.market_gateway.run_local_publisher(
-                symbol=settings.default_symbol,
-                iterations=2,
-                interval_seconds=0.0,
-            )
-            self.assertEqual(runtime.operator_repo.count(), 1)
-            if runtime.database_runtime is not None:
-                runtime.database_runtime.dispose()
 
-            recovered_runtime = await build_runtime(settings)
-            app = self._app(recovered_runtime)
-            with TestClient(app) as client:
-                providers = client.get("/auth/providers")
-                login = client.post("/auth/login", json={"username": "admin", "password": "correct-pass"})
-
-            self.assertEqual(providers.status_code, 200)
-            self.assertEqual(providers.json()["stored_user_count"], 1)
-            self.assertFalse(providers.json()["runtime_profile_control_enabled"])
-            self.assertEqual(login.status_code, 200)
-            self.assertEqual(login.json()["identity"], "admin")
-            if recovered_runtime.database_runtime is not None:
-                recovered_runtime.database_runtime.dispose()
+            with self.assertRaisesRegex(ValueError, "operator_session_auth_requires_enabled_admin_user"):
+                await build_runtime(settings)
 
     async def test_mode_hot_swap_is_rejected_and_cancel_is_operator_audited(self) -> None:
         runtime = await self._runtime(
-            bootstrap_users=[("admin", "solo-pass")],
+            operator_users=[("admin", "solo-pass")],
         )
         app = self._app(runtime)
         with TestClient(app) as client:
@@ -1190,9 +1213,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["detail"], "rebaseline_not_supported_for_runtime_profile")
 
-    async def _runtime(self, bootstrap_users: list[tuple[str, str]] | None = None, **overrides):
-        if bootstrap_users is not None:
-            overrides.setdefault("operator_bootstrap_user_file", self._bootstrap_user_file(bootstrap_users))
+    async def _runtime(self, operator_users: list[tuple[str, str]] | None = None, **overrides):
         settings = AATSSettings.model_validate(
             {
                 "config_profile": "local_demo",
@@ -1209,22 +1230,21 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             }
         )
         runtime = await build_runtime(settings)
+        for username, password in operator_users or []:
+            role = "admin" if username == "admin" else "operator" if username == "operator" else "viewer"
+            runtime.operator_repo.save_user(
+                OperatorUserRecord(
+                    username=username,
+                    password_hash=hash_password(password),
+                    role=role,
+                )
+            )
         await runtime.market_gateway.run_local_publisher(
             symbol=settings.default_symbol,
             iterations=4,
             interval_seconds=0.0,
         )
         return runtime
-
-    def _bootstrap_user_file(self, users: list[tuple[str, str]]) -> str:
-        temp_dir = Path(tempfile.mkdtemp())
-        self._temp_dirs.append(temp_dir)
-        path = temp_dir / "user.txt"
-        path.write_text(
-            "\n".join(f"{username}:{password}" for username, password in users),
-            encoding="utf-8",
-        )
-        return str(path)
 
     @staticmethod
     def _app(runtime) -> FastAPI:

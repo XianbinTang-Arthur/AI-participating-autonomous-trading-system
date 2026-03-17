@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import Field
@@ -126,8 +125,6 @@ class AATSSettings(BaseSettings):
     operator_read_api_key: str | None = None
     operator_write_api_key: str | None = None
     operator_unsafe_write_without_auth: bool = False
-    operator_bootstrap_enabled: bool = True
-    operator_bootstrap_user_file: str = "docs/user.txt"
     operator_session_secret: str | None = None
     operator_session_cookie_name: str = "aats_operator_session"
     operator_session_max_age_seconds: int = 43_200
@@ -168,7 +165,3 @@ class AATSSettings(BaseSettings):
     @property
     def operator_session_configured(self) -> bool:
         return bool(self.operator_session_secret)
-
-    @property
-    def operator_bootstrap_users_configured(self) -> bool:
-        return Path(self.operator_bootstrap_user_file).exists()

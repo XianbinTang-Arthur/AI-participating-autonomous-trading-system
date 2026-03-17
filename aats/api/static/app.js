@@ -1284,9 +1284,6 @@ function renderOperators() {
   ]);
 
   nodes.operatorBootstrap.innerHTML = renderFactGrid([
-    ["启用初始化引导", booleanWord(runtimeAuth.bootstrap_enabled)],
-    ["已配置初始化引导", booleanWord(runtimeAuth.bootstrap_configured)],
-    ["等待初始化", booleanWord(operatorUsers.bootstrap_pending ?? providers.bootstrap_pending)],
     ["已启用用户数", formatNumber(operatorUsers.enabled_user_count)],
     ["已启用管理员数", formatNumber(operatorUsers.enabled_admin_count)],
     ["允许本地无认证写入", booleanWord(runtimeAuth.unsafe_write_without_auth)],

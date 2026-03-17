@@ -1,74 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from pathlib import Path
-
-from aats.bootstrap.settings import AATSSettings
 from aats.schemas.operator import OperatorRole, OperatorUserRecord
 from aats.schemas.common import utc_now
 from aats.services.operator.passwords import hash_password
-
-
-@dataclass(frozen=True, slots=True)
-class BootstrapOperatorUser:
-    username: str
-    password: str
-    role: OperatorRole
-
-
-def bootstrap_operator_users(settings: AATSSettings) -> list[BootstrapOperatorUser]:
-    path = Path(settings.operator_bootstrap_user_file)
-    if not path.exists():
-        return []
-    users: list[BootstrapOperatorUser] = []
-    seen_roles: set[OperatorRole] = set()
-    for line_number, raw_line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
-            continue
-        try:
-            username, password = raw_line.split(":", 1)
-        except ValueError as exc:
-            raise ValueError(f"operator_bootstrap_file_invalid_line:{line_number}") from exc
-        normalized_username = username.strip()
-        role = _infer_bootstrap_role(normalized_username, line_number=line_number)
-        if role in seen_roles:
-            raise ValueError(f"operator_bootstrap_role_duplicate:{role}")
-        password_value = password.rstrip("\r\n")
-        if not password_value:
-            raise ValueError(f"operator_bootstrap_password_required:{role}")
-        users.append(
-            BootstrapOperatorUser(
-                username=normalized_username,
-                password=password_value,
-                role=role,
-            )
-        )
-        seen_roles.add(role)
-    return users
-
-
-def configured_bootstrap_operator_users(settings: AATSSettings) -> list[BootstrapOperatorUser]:
-    if not settings.operator_bootstrap_enabled:
-        return []
-    return bootstrap_operator_users(settings)
-
-
-def seed_operator_users(settings: AATSSettings, operator_repo) -> list[OperatorUserRecord]:
-    if not settings.operator_bootstrap_enabled or operator_repo.count() > 0:
-        return []
-    seeded: list[OperatorUserRecord] = []
-    for user in configured_bootstrap_operator_users(settings):
-        seeded.append(
-            operator_repo.save_user(
-                OperatorUserRecord(
-                    username=user.username,
-                    password_hash=hash_password(user.password),
-                    role=user.role,
-                )
-            )
-        )
-    return seeded
 
 
 def create_operator_user(
@@ -169,16 +103,6 @@ def delete_operator_user(
 
 def enabled_admin_count(operator_repo) -> int:
     return sum(1 for user in operator_repo.all_users() if user.enabled and user.role == "admin")
-
-
-def _infer_bootstrap_role(username: str, *, line_number: int) -> OperatorRole:
-    if username == "viewer":
-        return "viewer"
-    if username == "operator":
-        return "operator"
-    if username == "admin":
-        return "admin"
-    raise ValueError(f"operator_bootstrap_username_invalid:{line_number}")
 
 
 def _ensure_admin_retained(

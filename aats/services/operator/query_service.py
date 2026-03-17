@@ -211,11 +211,6 @@ class OperatorQueryService:
             ],
             "enabled_user_count": self.runtime.operator_repo.count(enabled_only=True),
             "enabled_admin_count": enabled_admin_count(self.runtime.operator_repo),
-            "bootstrap_pending": (
-                self.runtime.settings.operator_bootstrap_enabled
-                and self.runtime.settings.operator_bootstrap_users_configured
-                and self.runtime.operator_repo.count() == 0
-            ),
         }
 
     def runtime_profile_snapshot(self) -> dict[str, Any]:
@@ -569,8 +564,6 @@ class OperatorQueryService:
                 "session_enabled": self.runtime.settings.operator_session_configured,
                 "database_backed": self.runtime.database_runtime is not None,
                 "stored_user_count": self.runtime.operator_repo.count() if hasattr(self.runtime, "operator_repo") else 0,
-                "bootstrap_enabled": self.runtime.settings.operator_bootstrap_enabled,
-                "bootstrap_configured": self.runtime.settings.operator_bootstrap_users_configured,
                 "api_key_compatibility_enabled": bool(
                     self.runtime.settings.operator_read_api_key or self.runtime.settings.operator_write_api_key
                 ),
