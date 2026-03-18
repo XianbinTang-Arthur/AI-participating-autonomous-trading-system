@@ -77,7 +77,13 @@ class AATSSettings(BaseSettings):
     ai_max_retries: int = 0
     ai_degrade_after_failures: int = 3
     ai_recover_after_successes: int = 2
+    ai_auto_downgrade_enabled: bool = True
+    ai_recovery_probe_interval_seconds: float = 300.0
     ai_primary_min_confidence: float = 0.6
+    ai_primary_max_uncertainty: float = 0.35
+    ai_primary_min_directional_edge: float = 0.2
+    ai_shadow_mode_enabled: bool = False
+    ai_shadow_evaluation_window: int = 50
     openai_api_key: str | None = None
     openai_base_url: str = "https://api.openai.com"
     market_data_stale_after_seconds: float = 30.0

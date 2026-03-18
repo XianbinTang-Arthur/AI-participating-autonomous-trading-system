@@ -26,7 +26,7 @@ class FakeProvider:
             "confidence": 0.75,
             "uncertainty": 0.2,
             "expected_holding_horizon": "15m",
-            "invalidation_conditions": ["trend_break"],
+            "invalidation_conditions": ["trend_break", "book_flip"],
             "risk_tags": ["provider_ok"],
             "rationale_summary": "valid_output",
         }
@@ -57,6 +57,24 @@ class FlakyProvider(FakeProvider):
         if self._attempts == 1:
             raise ValueError("temporary_failure")
         return await super().generate_assessment(prompt=prompt, response_schema=response_schema)
+
+
+class SequenceProvider(FakeProvider):
+    def __init__(self, payloads: list[dict]) -> None:
+        super().__init__(payload=payloads[0] if payloads else None)
+        self._payloads = list(payloads)
+
+    async def generate_assessment(self, *, prompt: str, response_schema: dict[str, object]) -> AIProviderResponse:
+        self.calls += 1
+        _ = prompt
+        _ = response_schema
+        payload = self._payloads.pop(0)
+        return AIProviderResponse(
+            provider_name="sequence_provider",
+            request_id=f"seq_{self.calls}",
+            latency_ms=10.0,
+            payload=payload,
+        )
 
 
 class TestAIInferenceService(unittest.IsolatedAsyncioTestCase):
@@ -98,6 +116,20 @@ class TestAIInferenceService(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(assessment.output_valid)
         self.assertEqual(assessment.fallback_reason, "baseline_only_mode")
 
+    async def test_baseline_only_shadow_mode_does_not_call_provider(self) -> None:
+        service, context, baseline, provider = self._service(
+            ai_operating_mode="baseline_only",
+            provider=FakeProvider(),
+            ai_shadow_mode_enabled=True,
+        )
+
+        assessment = await service.assess(context=context, baseline=baseline)
+        shadow = service.latest_shadow_assessment(context.decision_id)
+
+        self.assertEqual(provider.calls, 0)
+        self.assertTrue(assessment.fallback_used)
+        self.assertIsNone(shadow)
+
     async def test_valid_provider_output_enforces_schema_and_records_calibration(self) -> None:
         service, context, baseline, _ = self._service(
             ai_operating_mode="ai_blended",
@@ -110,6 +142,33 @@ class TestAIInferenceService(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(assessment.output_valid)
         self.assertGreater(assessment.calibrated_confidence, 0.0)
         self.assertEqual(assessment.provider_name, "fake_provider")
+
+    async def test_semantically_invalid_provider_output_is_marked_non_actionable(self) -> None:
+        service, context, baseline, _ = self._service(
+            ai_operating_mode="ai_primary",
+            provider=FakeProvider(
+                payload={
+                    "regime": "trend",
+                    "directional_edge": 0.45,
+                    "expected_volatility": 0.08,
+                    "confidence": 0.85,
+                    "uncertainty": 0.2,
+                    "expected_holding_horizon": "15m",
+                    "invalidation_conditions": ["one_only"],
+                    "risk_tags": ["provider_ok"],
+                    "rationale_summary": "invalid_override_contract",
+                    "baseline_override_recommended": True,
+                    "override_reason_codes": [],
+                }
+            ),
+        )
+
+        assessment = await service.assess(context=context, baseline=baseline)
+
+        self.assertFalse(assessment.fallback_used)
+        self.assertFalse(assessment.output_valid)
+        self.assertIn("override_requires_reason_codes", assessment.rejection_flags)
+        self.assertFalse(assessment.economically_actionable)
 
     async def test_retry_recovers_from_transient_provider_failure(self) -> None:
         provider = FlakyProvider()
@@ -126,6 +185,79 @@ class TestAIInferenceService(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(provider.calls, 1)
         self.assertEqual(provider._attempts, 2)
 
+    async def test_degraded_auto_downgrades_effective_mode_and_skips_next_provider_call(self) -> None:
+        service, context, baseline, provider = self._service(
+            ai_operating_mode="ai_primary",
+            provider=FakeProvider(payload={"bad": "payload"}),
+        )
+
+        first = await service.assess(context=context, baseline=baseline)
+        second_context = context.model_copy(update={"decision_id": "decision_ai_test_2"})
+        second_baseline = baseline.model_copy(update={"decision_id": "decision_ai_test_2"})
+        second = await service.assess(context=second_context, baseline=second_baseline)
+
+        self.assertTrue(first.fallback_used)
+        self.assertEqual(first.fallback_reason, "ai_output_schema_validation_failed")
+        self.assertTrue(service.status()["degraded"])
+        self.assertEqual(service.status()["effective_operating_mode"], "baseline_only")
+        self.assertTrue(service.status()["auto_downgrade_active"])
+        self.assertEqual(provider.calls, 1)
+        self.assertTrue(second.fallback_used)
+        self.assertEqual(second.fallback_reason, "ai_auto_downgraded")
+
+    async def test_degraded_auto_downgrade_recovers_via_probe_attempts(self) -> None:
+        provider = SequenceProvider(
+            payloads=[
+                {"bad": "payload"},
+                {
+                    "regime": "trend",
+                    "directional_edge": 0.4,
+                    "expected_volatility": 0.08,
+                    "confidence": 0.8,
+                    "uncertainty": 0.2,
+                    "expected_holding_horizon": "15m",
+                    "invalidation_conditions": ["trend_break", "book_flip"],
+                    "risk_tags": ["provider_ok"],
+                    "rationale_summary": "probe_recovery",
+                    "baseline_override_recommended": True,
+                    "override_reason_codes": ["ai_trend_override"],
+                },
+            ]
+        )
+        service, context, baseline, _ = self._service(
+            ai_operating_mode="ai_primary",
+            provider=provider,
+            ai_recover_after_successes=1,
+            ai_recovery_probe_interval_seconds=0.0,
+        )
+
+        first = await service.assess(context=context, baseline=baseline)
+        second_context = context.model_copy(update={"decision_id": "decision_ai_probe_2"})
+        second_baseline = baseline.model_copy(update={"decision_id": "decision_ai_probe_2"})
+        second = await service.assess(context=second_context, baseline=second_baseline)
+
+        self.assertTrue(first.fallback_used)
+        self.assertTrue(first.degraded)
+        self.assertFalse(second.fallback_used)
+        self.assertFalse(second.degraded)
+        self.assertEqual(service.status()["effective_operating_mode"], "ai_primary")
+        self.assertFalse(service.status()["degraded"])
+        self.assertEqual(provider.calls, 2)
+
+    async def test_degradation_event_uses_dedicated_payload(self) -> None:
+        service, context, baseline, _ = self._service(
+            ai_operating_mode="ai_primary",
+            provider=FakeProvider(payload={"bad": "payload"}),
+        )
+
+        await service.assess(context=context, baseline=baseline)
+
+        event = service.event_store.latest(topics.AI_DEGRADATION_EVENTS)
+        self.assertIsNotNone(event)
+        self.assertEqual(event.payload["reason_code"], "ai_output_schema_validation_failed")
+        self.assertIn("recovery_probe_after", event.payload)
+        self.assertEqual(event.payload["configured_operating_mode"], "ai_primary")
+
     @staticmethod
     def _service(
         *,
@@ -133,6 +265,9 @@ class TestAIInferenceService(unittest.IsolatedAsyncioTestCase):
         provider: FakeProvider,
         ai_timeout_seconds: float = 5.0,
         ai_max_retries: int = 0,
+        ai_shadow_mode_enabled: bool = False,
+        ai_recover_after_successes: int = 1,
+        ai_recovery_probe_interval_seconds: float = 300.0,
     ) -> tuple[AIInferenceService, DecisionContext, BaselineAssessment, FakeProvider]:
         settings = AATSSettings.model_validate(
             {
@@ -141,7 +276,9 @@ class TestAIInferenceService(unittest.IsolatedAsyncioTestCase):
                 "ai_timeout_seconds": ai_timeout_seconds,
                 "ai_max_retries": ai_max_retries,
                 "ai_degrade_after_failures": 1,
-                "ai_recover_after_successes": 1,
+                "ai_recover_after_successes": ai_recover_after_successes,
+                "ai_recovery_probe_interval_seconds": ai_recovery_probe_interval_seconds,
+                "ai_shadow_mode_enabled": ai_shadow_mode_enabled,
             }
         )
         event_store = InMemoryEventStore()
@@ -242,6 +379,14 @@ class TestAIOperatingModes(unittest.TestCase):
             fallback_used=False,
             degraded=False,
             calibrated_confidence=0.7,
+            baseline_override_recommended=True,
+            override_reason_codes=["ai_trend_override"],
+            economically_actionable=True,
+            estimated_edge_bps=50.0,
+            estimated_cost_bps=12.0,
+            estimated_net_edge_bps=38.0,
+            source_mode="provider",
+            execution_condition="normal",
             model_name="fake",
             model_version="1",
             prompt_version="1",

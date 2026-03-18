@@ -5,6 +5,7 @@ from aats.bootstrap.metrics import MetricsRegistry
 from aats.bus.base import EventBus
 from aats.events import topics
 from aats.events.envelopes import publish_model
+from aats.schemas.ai_shadow import AITakeoverDecision
 from aats.schemas.common import new_id
 from aats.schemas.decision import PositionTarget
 from aats.services.ai_service.inference import AIInferenceService
@@ -58,8 +59,19 @@ class DecisionOrchestrator:
             ),
         )
         baseline = self.baseline_strategy.evaluate(context)
-        ai_assessment = await self.ai_service.assess(context=context, baseline=baseline)
-        target = self.target_engine.build(context, baseline, ai_assessment)
+        operating_mode = self.ai_service.effective_operating_mode()
+        ai_assessment = None
+        if self.ai_service.should_attempt_assessment():
+            ai_assessment = await self.ai_service.assess(context=context, baseline=baseline)
+            operating_mode = self.ai_service.effective_operating_mode()
+        target = self.target_engine.build(
+            context,
+            baseline,
+            ai_assessment,
+            operating_mode=operating_mode,
+        )
+        brief = None if ai_assessment is None else self.ai_service.latest_brief(context.decision_id)
+        shadow_assessment = None if ai_assessment is None else self.ai_service.latest_shadow_assessment(context.decision_id)
 
         await publish_model(
             bus=self.bus,
@@ -75,13 +87,54 @@ class DecisionOrchestrator:
             payload_model=baseline,
             source_component="decision_engine",
         )
-        await publish_model(
-            bus=self.bus,
-            topic=topics.AI_ASSESSMENTS,
-            key=symbol,
-            payload_model=ai_assessment,
-            source_component="ai_service",
-        )
+        if brief is not None:
+            await publish_model(
+                bus=self.bus,
+                topic=topics.AI_DECISION_BRIEFS,
+                key=symbol,
+                payload_model=brief,
+                source_component="ai_service",
+            )
+        if ai_assessment is not None:
+            await publish_model(
+                bus=self.bus,
+                topic=topics.AI_ASSESSMENTS,
+                key=symbol,
+                payload_model=ai_assessment,
+                source_component="ai_service",
+            )
+            await publish_model(
+                bus=self.bus,
+                topic=topics.AI_TAKEOVER_DECISIONS,
+                key=symbol,
+                payload_model=AITakeoverDecision(
+                    decision_id=context.decision_id,
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    ai_takeover_allowed=target.ai_takeover_allowed,
+                    ai_takeover_applied=target.ai_takeover_applied,
+                    ai_takeover_blockers=list(target.ai_takeover_blockers),
+                    baseline_direction=baseline.direction_bias,
+                    ai_direction="long" if ai_assessment.directional_edge > 0 else "short" if ai_assessment.directional_edge < 0 else "flat",
+                    final_direction=target.target_exposure_side,
+                ),
+                source_component="decision_engine",
+            )
+        if shadow_assessment is not None:
+            shadow_decision = self.target_engine.build_shadow(
+                context=context,
+                baseline=baseline,
+                ai_assessment=shadow_assessment,
+                actual_target=target,
+            )
+            self.ai_service.record_shadow_decision(shadow_decision)
+            await publish_model(
+                bus=self.bus,
+                topic=topics.AI_SHADOW_DECISIONS,
+                key=symbol,
+                payload_model=shadow_decision,
+                source_component="decision_engine",
+            )
         await publish_model(
             bus=self.bus,
             topic=topics.POSITION_TARGETS,

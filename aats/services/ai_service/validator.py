@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pydantic import ValidationError
 
+from aats.schemas.ai_brief import AIDecisionBrief
 from aats.schemas.decision import (
     AIProviderAssessmentOutput,
     AIMarketAssessment,
@@ -16,6 +17,8 @@ class AIOutputValidationError(ValueError):
 
 
 class AssessmentValidator:
+    _ALLOWED_REGIMES = {"trend", "range", "breakout", "uncertain"}
+
     def output_schema(self) -> dict[str, object]:
         return AIProviderAssessmentOutput.model_json_schema()
 
@@ -23,6 +26,7 @@ class AssessmentValidator:
         self,
         *,
         raw_output: dict[str, object],
+        brief: AIDecisionBrief,
         context: DecisionContext,
         baseline: BaselineAssessment,
         operating_mode: AIOperatingMode,
@@ -33,6 +37,7 @@ class AssessmentValidator:
         model_version: str,
         prompt_version: str,
         degraded: bool,
+        edge_bps_scale: float,
     ) -> AIMarketAssessment:
         try:
             payload = AIProviderAssessmentOutput.model_validate(raw_output)
@@ -49,12 +54,46 @@ class AssessmentValidator:
             uncertainty=uncertainty,
             baseline_confidence=baseline.confidence,
         )
+        validation_flags: list[str] = []
+        rejection_flags: list[str] = []
+
+        regime = payload.regime.lower()
+        if regime not in self._ALLOWED_REGIMES:
+            rejection_flags.append("unsupported_regime")
+        directional_edge = float(payload.directional_edge)
+        if abs(directional_edge) > 1.0:
+            rejection_flags.append("directional_edge_out_of_range")
+        if confidence >= 0.75 and uncertainty >= 0.45:
+            rejection_flags.append("confidence_uncertainty_incoherent")
+        if abs(directional_edge) >= 0.3 and confidence < 0.55:
+            rejection_flags.append("strong_edge_low_confidence")
+        if payload.baseline_override_recommended and not payload.override_reason_codes:
+            rejection_flags.append("override_requires_reason_codes")
+        if abs(directional_edge) >= 0.25 and len(payload.invalidation_conditions) < 2:
+            rejection_flags.append("strong_direction_requires_invalidation_conditions")
+        if brief.execution_condition != "normal" and payload.baseline_override_recommended:
+            rejection_flags.append("override_not_allowed_during_execution_degradation")
+        if not brief.safe_to_trade and payload.baseline_override_recommended:
+            rejection_flags.append("override_not_allowed_when_not_safe_to_trade")
+
+        expected_volatility = max(float(payload.expected_volatility), 0.0)
+        estimated_edge_bps = abs(directional_edge) * max(edge_bps_scale, 0.0)
+        estimated_cost_bps = max(brief.fee_bps, 0.0) + max(brief.expected_slippage_proxy_bps, 0.0)
+        estimated_net_edge_bps = estimated_edge_bps - estimated_cost_bps
+        economically_actionable = estimated_net_edge_bps + 1e-12 >= max(brief.min_net_edge_bps, 0.0)
+        if not economically_actionable:
+            validation_flags.append("low_edge")
+        if degraded:
+            validation_flags.append("provider_degraded")
+        if brief.execution_condition != "normal":
+            validation_flags.append("execution_condition_not_normal")
+
         return AIMarketAssessment(
             decision_id=context.decision_id,
             symbol=context.symbol,
             regime=payload.regime,
-            directional_edge=payload.directional_edge,
-            expected_volatility=max(payload.expected_volatility, 0.0),
+            directional_edge=directional_edge,
+            expected_volatility=expected_volatility,
             confidence=confidence,
             uncertainty=uncertainty,
             expected_holding_horizon=payload.expected_holding_horizon,
@@ -65,12 +104,22 @@ class AssessmentValidator:
             provider_name=provider_name,
             provider_request_id=provider_request_id,
             provider_latency_ms=provider_latency_ms,
-            output_valid=True,
+            output_valid=not rejection_flags,
             fallback_used=False,
             fallback_reason=None,
             degraded=degraded,
             calibrated_confidence=calibrated_confidence,
-            evaluation_tags=["output_valid", "confidence_calibrated"],
+            baseline_override_recommended=payload.baseline_override_recommended,
+            override_reason_codes=list(payload.override_reason_codes),
+            economically_actionable=economically_actionable and not rejection_flags,
+            estimated_edge_bps=estimated_edge_bps,
+            estimated_cost_bps=estimated_cost_bps,
+            estimated_net_edge_bps=estimated_net_edge_bps,
+            validation_flags=validation_flags,
+            rejection_flags=rejection_flags,
+            source_mode="provider",
+            execution_condition=brief.execution_condition,
+            evaluation_tags=["output_valid" if not rejection_flags else "output_rejected", "confidence_calibrated"],
             model_name=model_name,
             model_version=model_version,
             prompt_version=prompt_version,
@@ -79,6 +128,7 @@ class AssessmentValidator:
     def fallback_assessment(
         self,
         *,
+        brief: AIDecisionBrief | None,
         context: DecisionContext,
         baseline: BaselineAssessment,
         operating_mode: AIOperatingMode,
@@ -99,9 +149,16 @@ class AssessmentValidator:
             uncertainty=max(0.0, 1.0 - baseline.confidence),
             baseline_confidence=baseline.confidence,
         )
+        estimated_edge_bps = abs(directional_edge) * 100.0
+        estimated_cost_bps = 0.0 if brief is None else max(brief.fee_bps, 0.0) + max(brief.expected_slippage_proxy_bps, 0.0)
+        estimated_net_edge_bps = estimated_edge_bps - estimated_cost_bps
+        economically_actionable = estimated_net_edge_bps + 1e-12 >= (0.0 if brief is None else max(brief.min_net_edge_bps, 0.0))
         tags = ["fallback", fallback_reason]
         if degraded:
             tags.append("degraded")
+        validation_flags: list[str] = []
+        if not economically_actionable:
+            validation_flags.append("low_edge")
         return AIMarketAssessment(
             decision_id=context.decision_id,
             symbol=context.symbol,
@@ -123,6 +180,16 @@ class AssessmentValidator:
             fallback_reason=fallback_reason,
             degraded=degraded,
             calibrated_confidence=calibrated_confidence,
+            baseline_override_recommended=False,
+            override_reason_codes=[],
+            economically_actionable=economically_actionable,
+            estimated_edge_bps=estimated_edge_bps,
+            estimated_cost_bps=estimated_cost_bps,
+            estimated_net_edge_bps=estimated_net_edge_bps,
+            validation_flags=validation_flags,
+            rejection_flags=[],
+            source_mode="fallback",
+            execution_condition=None if brief is None else brief.execution_condition,
             evaluation_tags=tags,
             model_name=model_name,
             model_version=model_version,

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from aats.events.envelopes import parse_envelope, parse_payload
+from aats.events.envelopes import parse_envelope
+from aats.schemas.ai_brief import AIDecisionBrief
+from aats.schemas.ai_shadow import AIShadowDecision, AIShadowEvaluation
 from aats.schemas.decision import AIDecisionEvaluation, AIMarketAssessment
 from aats.schemas.portfolio import PortfolioSnapshot
 from aats.schemas.reconciliation import ReconciliationReport
@@ -9,8 +11,20 @@ from aats.schemas.reconciliation import ReconciliationReport
 class AIEvaluationTracker:
     def __init__(self) -> None:
         self._evaluations: dict[str, AIDecisionEvaluation] = {}
+        self._assessments: dict[str, AIMarketAssessment] = {}
+        self._decision_briefs: dict[str, AIDecisionBrief] = {}
+        self._shadow_assessments: dict[str, AIMarketAssessment] = {}
+        self._shadow_decisions: list[AIShadowDecision] = []
+        self._shadow_evaluations: list[AIShadowEvaluation] = []
+
+    def record_brief(self, brief: AIDecisionBrief) -> None:
+        self._decision_briefs[brief.decision_id] = brief
+
+    def latest_brief(self, decision_id: str) -> AIDecisionBrief | None:
+        return self._decision_briefs.get(decision_id)
 
     def record_assessment(self, assessment: AIMarketAssessment) -> None:
+        self._assessments[assessment.decision_id] = assessment
         self._evaluations[assessment.decision_id] = AIDecisionEvaluation(
             decision_id=assessment.decision_id,
             operating_mode=assessment.operating_mode,
@@ -21,6 +35,56 @@ class AIEvaluationTracker:
             fallback_reason=assessment.fallback_reason,
             degraded=assessment.degraded,
         )
+
+    def latest_assessment(self, decision_id: str) -> AIMarketAssessment | None:
+        return self._assessments.get(decision_id)
+
+    def assessments_recent(self, *, limit: int) -> list[AIMarketAssessment]:
+        if limit <= 0:
+            return []
+        items = sorted(self._assessments.values(), key=lambda item: item.created_at, reverse=True)
+        return items[:limit]
+
+    def record_shadow_assessment(self, assessment: AIMarketAssessment) -> None:
+        self._shadow_assessments[assessment.decision_id] = assessment
+
+    def latest_shadow_assessment(self, decision_id: str) -> AIMarketAssessment | None:
+        return self._shadow_assessments.get(decision_id)
+
+    def record_shadow_decision(self, shadow: AIShadowDecision) -> None:
+        self._shadow_decisions.append(shadow)
+
+    def shadow_decisions_recent(self, *, limit: int) -> list[AIShadowDecision]:
+        if limit <= 0:
+            return []
+        return list(reversed(self._shadow_decisions[-limit:]))
+
+    def latest_shadow_decision(self) -> AIShadowDecision | None:
+        if not self._shadow_decisions:
+            return None
+        return self._shadow_decisions[-1]
+
+    def record_shadow_evaluation(self, evaluation: AIShadowEvaluation) -> None:
+        self._shadow_evaluations.append(evaluation)
+
+    def latest_shadow_evaluation(self) -> AIShadowEvaluation | None:
+        if not self._shadow_evaluations:
+            return None
+        return self._shadow_evaluations[-1]
+
+    def find_shadow_evaluation(self, *, decision_ids: list[str]) -> AIShadowEvaluation | None:
+        target = tuple(decision_ids)
+        if not target:
+            return None
+        for evaluation in reversed(self._shadow_evaluations):
+            if tuple(evaluation.decision_ids) == target:
+                return evaluation
+        return None
+
+    def shadow_evaluations_recent(self, *, limit: int) -> list[AIShadowEvaluation]:
+        if limit <= 0:
+            return []
+        return list(reversed(self._shadow_evaluations[-limit:]))
 
     def latest(self, decision_id: str) -> AIDecisionEvaluation | None:
         return self._evaluations.get(decision_id)

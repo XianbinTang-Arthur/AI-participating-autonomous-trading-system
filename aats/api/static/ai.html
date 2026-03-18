@@ -3,18 +3,18 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>AATS 自动交易控制台 | 策略档位、账号与权限</title>
+  <title>AATS 交易控制台 | AI 工作台</title>
   <link rel="stylesheet" href="/ui/app.css">
 </head>
-<body data-view="admin">
+<body data-view="ai">
   <div class="console-shell">
     <header class="masthead">
       <div class="masthead-copy">
-        <p class="eyebrow">AI 参与式自主交易系统</p>
-        <h1>策略档位、账号与权限</h1>
+        <p class="eyebrow">AI 交易主链工作台</p>
+        <h1>AI 工作台</h1>
         <p class="lead">
-          这页专门处理“谁能操作系统、当前按哪套策略档位运行、AI 最近建议切换到哪一档、是否需要人工审批或回滚”。
-          交易本身仍然留在总览、策略、执行和风险页面里，避免把人工控制和实时交易信息混在一起。
+          这一页专门追踪 AI 决策主链的运行状态、最新判断、接管门禁、shadow 决策和 shadow 收益回放。
+          重点回答“AI 现在是否参与、为什么没接管、如果让 AI 主导会发生什么”。
         </p>
       </div>
       <div class="masthead-side">
@@ -61,22 +61,24 @@
       <a class="workspace-link" href="/ui/strategy">策略判断</a>
       <a class="workspace-link" href="/ui/execution">委托与成交</a>
       <a class="workspace-link" href="/ui/risk">风险与恢复</a>
-      <a class="workspace-link is-active" href="/ui/settings">策略档位与权限</a>
-      <a class="workspace-link" href="/ui/ai">AI 宸ヤ綔鍙?/a>
+      <a class="workspace-link is-active" href="/ui/ai">AI 工作台</a>
+      <a class="workspace-link" href="/ui/settings">账户与权限</a>
     </nav>
 
     <main class="workspace">
-      <section class="workspace-view is-active" data-view="admin">
+      <section class="workspace-view is-active" data-view="ai">
         <div class="page-head">
           <div>
-            <p class="panel-kicker">控制面</p>
-            <h2>谁能操作，当前按什么策略档位运行</h2>
+            <p class="panel-kicker">AI 主链</p>
+            <h2>AI 现在是否真的在参与交易判断？</h2>
           </div>
-          <p class="page-copy">
-            重点看当前档位、AI 最近建议、待审批档位、最近切换记录，以及控制台账号权限。这里不直接展示逐笔交易细节。
-          </p>
+          <p class="page-copy">这里重点看 AI 当前有效模式、最新判断、接管阻断原因，以及 shadow 回放是否真的优于 baseline。</p>
         </div>
-        <div id="adminContent" class="view-layout"></div>
+        <div id="aiContent" class="view-layout panel-grid">
+          <div id="aiHero" class="span-7"></div>
+          <div id="aiLatest" class="span-5"></div>
+          <div id="aiHistory" class="span-12"></div>
+        </div>
       </section>
     </main>
   </div>
@@ -87,7 +89,7 @@
         <div>
           <p id="drawerEyebrow" class="panel-kicker">详情</p>
           <h2 id="drawerTitle">明细面板</h2>
-          <p id="drawerSummary" class="meta-copy">点击任意记录查看更完整的交易明细。</p>
+          <p id="drawerSummary" class="meta-copy">点击任意记录查看更完整的 AI 判断和 shadow 回放明细。</p>
         </div>
         <button id="closeDrawerButton" class="ghost-button">关闭</button>
       </header>

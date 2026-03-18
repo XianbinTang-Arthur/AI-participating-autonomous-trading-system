@@ -105,6 +105,7 @@ class OperatorActionRecord(SchemaBase):
         "strategy_profile_reject",
         "strategy_profile_activate_pending",
         "strategy_profile_rollback",
+        "ai_shadow_evaluate",
     ]
     actor_role: OperatorRole
     actor_identity: str | None = None

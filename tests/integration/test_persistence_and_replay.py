@@ -125,8 +125,12 @@ class TestPersistenceAndReplay(unittest.IsolatedAsyncioTestCase):
                             self.assertEqual(health_event.payload.get("decision_id"), record.decision_id)
                     if record.baseline_assessment_ref is not None:
                         self.assertIsNotNone(event_store.get(record.baseline_assessment_ref))
+                    if record.ai_decision_brief_ref is not None:
+                        self.assertIsNotNone(event_store.get(record.ai_decision_brief_ref))
                     if record.ai_market_assessment_ref is not None:
                         self.assertIsNotNone(event_store.get(record.ai_market_assessment_ref))
+                    if record.ai_takeover_decision_ref is not None:
+                        self.assertIsNotNone(event_store.get(record.ai_takeover_decision_ref))
                     if record.position_target_ref is not None:
                         self.assertIsNotNone(event_store.get(record.position_target_ref))
                     if record.policy_decision_ref is not None:
@@ -143,7 +147,9 @@ class TestPersistenceAndReplay(unittest.IsolatedAsyncioTestCase):
                         self.assertIsNotNone(snapshot_event)
                         self.assertEqual(snapshot_event.payload.get("decision_id"), record.decision_id)
                     for ref in (
-                        record.order_intent_refs
+                        record.ai_shadow_decision_refs
+                        + record.ai_shadow_evaluation_refs
+                        + record.order_intent_refs
                         + record.order_state_refs
                         + record.fill_event_refs
                         + record.reconciliation_refs

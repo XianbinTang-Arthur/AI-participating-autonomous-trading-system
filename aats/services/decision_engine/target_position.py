@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 from aats.bootstrap.settings import AATSSettings
+from aats.schemas.ai_shadow import AIShadowDecision
 from aats.schemas.common import utc_now
 from aats.schemas.decision import AIMarketAssessment, BaselineAssessment, DecisionContext, PositionTarget
 
@@ -15,13 +16,70 @@ class TargetPositionEngine:
         self,
         context: DecisionContext,
         baseline: BaselineAssessment,
-        ai_assessment: AIMarketAssessment,
+        ai_assessment: AIMarketAssessment | None,
+        *,
+        operating_mode: str | None = None,
     ) -> PositionTarget:
+        return self._build(
+            context=context,
+            baseline=baseline,
+            ai_assessment=ai_assessment,
+            operating_mode=operating_mode or self.settings.ai_operating_mode,
+        )
+
+    def build_shadow(
+        self,
+        context: DecisionContext,
+        baseline: BaselineAssessment,
+        ai_assessment: AIMarketAssessment,
+        actual_target: PositionTarget,
+    ) -> AIShadowDecision:
+        shadow_target = self._build(
+            context=context,
+            baseline=baseline,
+            ai_assessment=ai_assessment,
+            operating_mode="ai_primary",
+        )
+        return AIShadowDecision(
+            decision_id=context.decision_id,
+            symbol=context.symbol,
+            timeframe=context.timeframe,
+            baseline_target_qty=actual_target.target_position_qty,
+            baseline_action=actual_target.position_intent,
+            ai_shadow_target_qty=shadow_target.target_position_qty,
+            ai_shadow_action=shadow_target.position_intent,
+            would_override_baseline=(
+                abs(actual_target.target_position_qty - shadow_target.target_position_qty) > 1e-12
+                or actual_target.position_intent != shadow_target.position_intent
+            ),
+            shadow_action_type=self._shadow_action_type(
+                baseline_action=actual_target.position_intent,
+                shadow_action=shadow_target.position_intent,
+            ),
+            reason_codes=list(ai_assessment.override_reason_codes),
+        )
+
+    def _build(
+        self,
+        *,
+        context: DecisionContext,
+        baseline: BaselineAssessment,
+        ai_assessment: AIMarketAssessment | None,
+        operating_mode: str,
+    ) -> PositionTarget:
+        ai_takeover_allowed, ai_takeover_blockers = self._ai_takeover_gate(
+            context=context,
+            baseline=baseline,
+            ai_assessment=ai_assessment,
+            operating_mode=operating_mode,
+        )
         target_qty = self._target_quantity(
             current_position_qty=context.current_position_qty,
             baseline=baseline,
             ai_assessment=ai_assessment,
             product_type=context.product_type,
+            operating_mode=operating_mode,
+            ai_takeover_allowed=ai_takeover_allowed,
         )
         if not self._short_bias_allowed(context.product_type):
             target_qty = self._normalize_long_only_target(
@@ -41,8 +99,9 @@ class TargetPositionEngine:
             ai_assessment=ai_assessment,
             target_qty=target_qty,
         )
-        source_mix = self._source_mix(ai_assessment=ai_assessment)
-        rebalance_reason = f"{self.settings.ai_operating_mode}_decision"
+        source_mix = self._source_mix(ai_assessment=ai_assessment, operating_mode=operating_mode, ai_takeover_allowed=ai_takeover_allowed)
+        rebalance_reason = f"{operating_mode}_decision"
+        ai_takeover_applied = operating_mode == "ai_primary" and ai_takeover_allowed and ai_takeover_blockers == []
 
         return PositionTarget(
             decision_id=context.decision_id,
@@ -70,6 +129,9 @@ class TargetPositionEngine:
                 baseline=baseline,
                 ai_assessment=ai_assessment,
             ),
+            ai_takeover_allowed=ai_takeover_allowed,
+            ai_takeover_applied=ai_takeover_applied,
+            ai_takeover_blockers=ai_takeover_blockers,
         )
 
     def _target_quantity(
@@ -77,10 +139,12 @@ class TargetPositionEngine:
         *,
         current_position_qty: float,
         baseline: BaselineAssessment,
-        ai_assessment: AIMarketAssessment,
+        ai_assessment: AIMarketAssessment | None,
         product_type: str,
+        operating_mode: str,
+        ai_takeover_allowed: bool,
     ) -> float:
-        mode = self.settings.ai_operating_mode
+        mode = operating_mode
         baseline_qty = self._baseline_target_qty(baseline=baseline, product_type=product_type)
         baseline_qty = self._apply_entry_edge_gate(
             current_position_qty=current_position_qty,
@@ -94,7 +158,7 @@ class TargetPositionEngine:
                 current_position_qty=current_position_qty,
                 desired_target_qty=baseline_qty,
                 baseline=baseline,
-                ai_assessment=ai_assessment,
+                ai_assessment=None if mode == "baseline_only" else ai_assessment,
                 product_type=product_type,
             ):
                 return current_position_qty
@@ -118,11 +182,7 @@ class TargetPositionEngine:
                 )
             return 0.0
         if mode == "ai_primary":
-            if (
-                not ai_assessment.fallback_used
-                and ai_assessment.output_valid
-                and ai_assessment.calibrated_confidence >= self.settings.ai_primary_min_confidence
-            ):
+            if ai_takeover_allowed:
                 if ai_assessment.directional_edge > 0.0:
                     return self._apply_position_management(
                         current_position_qty=current_position_qty,
@@ -159,7 +219,7 @@ class TargetPositionEngine:
         current_position_qty: float,
         desired_target_qty: float,
         baseline: BaselineAssessment,
-        ai_assessment: AIMarketAssessment,
+        ai_assessment: AIMarketAssessment | None,
         product_type: str,
     ) -> float:
         desired_target_qty = self._apply_trade_qualification_gate(
@@ -272,13 +332,13 @@ class TargetPositionEngine:
         *,
         current_position_qty: float,
         baseline: BaselineAssessment,
-        ai_assessment: AIMarketAssessment,
+        ai_assessment: AIMarketAssessment | None,
     ) -> bool:
         side_sign = self._sign(current_position_qty)
         microstructure = baseline.factor_scores.get("microstructure_alpha", 0.0)
         momentum_alpha = baseline.factor_scores.get("momentum_alpha", 0.0)
         trend_alpha = baseline.factor_scores.get("trend_alpha", 0.0)
-        ai_edge = ai_assessment.directional_edge
+        ai_edge = 0.0 if ai_assessment is None else ai_assessment.directional_edge
         adverse_microstructure = (side_sign * microstructure) <= -abs(self.settings.strategy_flat_exit_microstructure_threshold)
         adverse_momentum = (side_sign * momentum_alpha) <= -abs(self.settings.strategy_flat_exit_factor_threshold)
         adverse_trend = (side_sign * trend_alpha) <= -abs(self.settings.strategy_flat_exit_factor_threshold)
@@ -302,7 +362,7 @@ class TargetPositionEngine:
         *,
         context: DecisionContext,
         baseline: BaselineAssessment,
-        ai_assessment: AIMarketAssessment,
+        ai_assessment: AIMarketAssessment | None,
         target_qty: float,
     ) -> float:
         if abs(target_qty) < 1e-12:
@@ -322,13 +382,13 @@ class TargetPositionEngine:
         self,
         *,
         baseline: BaselineAssessment,
-        ai_assessment: AIMarketAssessment,
+        ai_assessment: AIMarketAssessment | None,
     ) -> float:
         conviction = max(
             0.0,
             (baseline.confidence * 0.45)
-            + (abs(ai_assessment.directional_edge) * 0.35)
-            + (max(ai_assessment.calibrated_confidence, ai_assessment.confidence) * 0.2),
+            + (abs(self._ai_directional_edge(ai_assessment)) * 0.35)
+            + (self._ai_confidence_component(ai_assessment) * 0.2),
         )
         if baseline.volatility_state == "high":
             conviction *= 0.62
@@ -344,7 +404,7 @@ class TargetPositionEngine:
             or (baseline.direction_bias == "short" and microstructure > 0.0)
         ):
             conviction *= 0.75
-        if ai_assessment.degraded or ai_assessment.fallback_used:
+        if ai_assessment is not None and (ai_assessment.degraded or ai_assessment.fallback_used):
             conviction *= 0.85
         return self._clamp(0.85 + conviction, 0.85, 2.5)
 
@@ -357,10 +417,10 @@ class TargetPositionEngine:
         current_position_qty: float,
         target_qty: float,
         baseline: BaselineAssessment,
-        ai_assessment: AIMarketAssessment,
+        ai_assessment: AIMarketAssessment | None,
     ) -> float:
         if target_qty >= 0.0:
-            bearish_signal = baseline.direction_bias == "short" or ai_assessment.directional_edge < 0.0
+            bearish_signal = baseline.direction_bias == "short" or self._ai_directional_edge(ai_assessment) < 0.0
             if current_position_qty > 1e-12 and bearish_signal and target_qty < current_position_qty:
                 return current_position_qty
             if current_position_qty > 1e-12 and baseline.direction_bias == "flat" and target_qty <= 1e-12:
@@ -368,7 +428,7 @@ class TargetPositionEngine:
                     return 0.0
                 return max(current_position_qty * 0.5, 0.0)
             return target_qty
-        if current_position_qty > 1e-12 and (baseline.direction_bias == "short" or ai_assessment.directional_edge < 0.0):
+        if current_position_qty > 1e-12 and (baseline.direction_bias == "short" or self._ai_directional_edge(ai_assessment) < 0.0):
             # Long-only spot should treat bearish reversal signals as "stop adding"
             # rather than forcing churn into immediate flat on every negative flip.
             return current_position_qty
@@ -480,15 +540,72 @@ class TargetPositionEngine:
             return "short"
         return "flat"
 
-    def _source_mix(self, *, ai_assessment: AIMarketAssessment) -> dict[str, float]:
-        mode = self.settings.ai_operating_mode
+    def _source_mix(
+        self,
+        *,
+        ai_assessment: AIMarketAssessment | None,
+        operating_mode: str,
+        ai_takeover_allowed: bool,
+    ) -> dict[str, float]:
+        mode = operating_mode
         if mode in {"baseline_only", "ai_advisory"}:
             return {"baseline": 1.0, "ai": 0.0}
         if mode == "ai_blended":
             return {"baseline": 0.6, "ai": 0.4}
-        if mode == "ai_primary" and not ai_assessment.fallback_used:
+        if mode == "ai_primary" and ai_takeover_allowed and ai_assessment is not None and not ai_assessment.fallback_used:
             return {"baseline": 0.2, "ai": 0.8}
         return {"baseline": 1.0, "ai": 0.0}
+
+    def _ai_takeover_gate(
+        self,
+        *,
+        context: DecisionContext,
+        baseline: BaselineAssessment,
+        ai_assessment: AIMarketAssessment | None,
+        operating_mode: str,
+    ) -> tuple[bool, list[str]]:
+        if operating_mode != "ai_primary":
+            return False, []
+        if ai_assessment is None:
+            return False, ["ai_assessment_missing"]
+        blockers: list[str] = []
+        if ai_assessment.fallback_used:
+            blockers.append("ai_fallback_used")
+        if not ai_assessment.output_valid:
+            blockers.append("ai_output_invalid")
+        blockers.extend(ai_assessment.rejection_flags)
+        if ai_assessment.degraded:
+            blockers.append("ai_degraded")
+        if ai_assessment.calibrated_confidence + 1e-12 < self.settings.ai_primary_min_confidence:
+            blockers.append("ai_confidence_below_threshold")
+        if ai_assessment.uncertainty - 1e-12 > self.settings.ai_primary_max_uncertainty:
+            blockers.append("ai_uncertainty_above_threshold")
+        if abs(ai_assessment.directional_edge) + 1e-12 < self.settings.ai_primary_min_directional_edge:
+            blockers.append("ai_directional_edge_too_small")
+        if not ai_assessment.baseline_override_recommended:
+            blockers.append("ai_override_not_recommended")
+        if not ai_assessment.economically_actionable:
+            blockers.append("ai_not_economically_actionable")
+        allowed_regimes = {item.lower() for item in self.settings.strategy_entry_allowed_regimes if item}
+        if allowed_regimes and ai_assessment.regime.lower() not in allowed_regimes:
+            blockers.append("ai_regime_not_allowed")
+        if context.current_open_orders:
+            blockers.append("ai_open_orders_present")
+        if baseline.direction_bias == "flat" and abs(ai_assessment.directional_edge) < self.settings.ai_primary_min_directional_edge + 0.05:
+            blockers.append("ai_flat_context_requires_stronger_edge")
+        return not blockers, blockers
+
+    @staticmethod
+    def _shadow_action_type(*, baseline_action: str, shadow_action: str) -> str:
+        if baseline_action == shadow_action:
+            return "same_as_baseline"
+        if baseline_action == "hold" and shadow_action != "hold":
+            return "entry_override"
+        if baseline_action != "hold" and shadow_action == "hold":
+            return "hold_instead"
+        if shadow_action.startswith("reverse"):
+            return "reverse_override"
+        return "exit_override"
 
     @staticmethod
     def _same_direction(left: float, right: float) -> bool:
@@ -522,9 +639,19 @@ class TargetPositionEngine:
         self,
         *,
         baseline: BaselineAssessment,
-        ai_assessment: AIMarketAssessment,
+        ai_assessment: AIMarketAssessment | None,
     ) -> float:
         alpha_edge = abs(baseline.composite_alpha_score) * max(self.settings.strategy_alpha_edge_bps_scale, 0.0)
         microstructure_bonus = max(abs(baseline.factor_scores.get("microstructure_alpha", 0.0)) - 0.08, 0.0) * 25.0
-        ai_bonus = max(abs(ai_assessment.directional_edge) - 0.1, 0.0) * 20.0
+        ai_bonus = max(abs(self._ai_directional_edge(ai_assessment)) - 0.1, 0.0) * 20.0
         return alpha_edge + microstructure_bonus + ai_bonus
+
+    @staticmethod
+    def _ai_directional_edge(ai_assessment: AIMarketAssessment | None) -> float:
+        return 0.0 if ai_assessment is None else ai_assessment.directional_edge
+
+    @staticmethod
+    def _ai_confidence_component(ai_assessment: AIMarketAssessment | None) -> float:
+        if ai_assessment is None:
+            return 0.0
+        return max(ai_assessment.calibrated_confidence, ai_assessment.confidence)

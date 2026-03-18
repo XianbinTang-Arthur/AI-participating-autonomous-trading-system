@@ -35,6 +35,45 @@ class DecisionAuditService:
             ref_field="ai_market_assessment_ref",
         )
 
+    async def handle_ai_decision_brief(self, message: dict) -> None:
+        await self._update_decision_record(
+            message=message,
+            ref_field="ai_decision_brief_ref",
+        )
+
+    async def handle_ai_takeover_decision(self, message: dict) -> None:
+        await self._update_decision_record(
+            message=message,
+            ref_field="ai_takeover_decision_ref",
+        )
+
+    async def handle_ai_shadow_decision(self, message: dict) -> None:
+        envelope = parse_envelope(message)
+        decision_id = str(envelope.payload["decision_id"])
+        record = self._existing_record(decision_id)
+        if envelope.event_id in record.ai_shadow_decision_refs:
+            return
+        updated = record.model_copy(
+            update={"ai_shadow_decision_refs": [*record.ai_shadow_decision_refs, envelope.event_id]}
+        )
+        await self._publish_record(updated)
+
+    async def handle_ai_shadow_evaluation(self, message: dict) -> None:
+        envelope = parse_envelope(message)
+        decision_ids = envelope.payload.get("decision_ids")
+        if not isinstance(decision_ids, list):
+            return
+        for decision_id in decision_ids:
+            if not isinstance(decision_id, str):
+                continue
+            record = self._existing_record(decision_id)
+            if envelope.event_id in record.ai_shadow_evaluation_refs:
+                continue
+            updated = record.model_copy(
+                update={"ai_shadow_evaluation_refs": [*record.ai_shadow_evaluation_refs, envelope.event_id]}
+            )
+            await self._publish_record(updated)
+
     async def handle_position_target(self, message: dict) -> None:
         await self._update_decision_record(
             message=message,
@@ -149,6 +188,8 @@ class DecisionAuditService:
                 order_intent_ref_count=len(record.order_intent_refs),
                 order_state_ref_count=len(record.order_state_refs),
                 fill_event_ref_count=len(record.fill_event_refs),
+                ai_shadow_decision_ref_count=len(record.ai_shadow_decision_refs),
+                ai_shadow_evaluation_ref_count=len(record.ai_shadow_evaluation_refs),
                 reconciliation_ref_count=len(record.reconciliation_refs),
             ),
         )

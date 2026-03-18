@@ -200,6 +200,60 @@ async def decision_detail(request: Request, decision_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@router.get("/ai/runtime")
+async def ai_runtime(request: Request) -> dict[str, Any]:
+    return _query(request).ai_runtime()
+
+
+@router.get("/ai/latest")
+async def ai_latest(request: Request) -> dict[str, Any]:
+    return _query(request).ai_latest()
+
+
+@router.get("/ai/recent")
+async def ai_recent(
+    request: Request,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0, le=5000),
+) -> dict[str, Any]:
+    return _query(request).ai_recent(limit=limit, offset=offset)
+
+
+@router.get("/ai/shadow/latest")
+async def ai_shadow_latest(request: Request) -> dict[str, Any]:
+    return _query(request).ai_shadow_latest()
+
+
+@router.get("/ai/shadow/recent")
+async def ai_shadow_recent(
+    request: Request,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0, le=5000),
+) -> dict[str, Any]:
+    return _query(request).ai_shadow_recent(limit=limit, offset=offset)
+
+
+@router.get("/ai/shadow/evaluations")
+async def ai_shadow_evaluations(
+    request: Request,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0, le=5000),
+) -> dict[str, Any]:
+    return _query(request).ai_shadow_evaluations(limit=limit, offset=offset)
+
+
+@router.post("/ai/shadow/evaluate-now")
+async def ai_shadow_evaluate_now(
+    request: Request,
+    principal: OperatorPrincipal = Depends(require_write_access),
+) -> dict[str, Any]:
+    return await _query(request).evaluate_ai_shadow(
+        actor_role=principal.role,
+        actor_identity=principal.identity,
+        auth_source=principal.auth_source,
+    )
+
+
 @router.get("/risk/latest")
 async def latest_risk(request: Request) -> dict[str, Any]:
     payload = _query(request).latest_risk()

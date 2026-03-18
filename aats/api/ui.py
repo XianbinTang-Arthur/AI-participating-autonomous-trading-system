@@ -15,6 +15,7 @@ PAGE_FILES = {
     "strategy": UI_DIR / "strategy.html",
     "execution": UI_DIR / "execution.html",
     "risk": UI_DIR / "risk.html",
+    "ai": UI_DIR / "ai.html",
     "settings": UI_DIR / "settings.html",
 }
 
@@ -67,6 +68,11 @@ async def execution_index(request: Request):
 @ui_router.get("/ui/risk")
 async def risk_index(request: Request):
     return _serve_dashboard_page(request, "risk")
+
+
+@ui_router.get("/ui/ai")
+async def ai_index(request: Request):
+    return _serve_dashboard_page(request, "ai")
 
 
 @ui_router.get("/ui/settings")

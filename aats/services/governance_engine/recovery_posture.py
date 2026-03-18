@@ -41,6 +41,12 @@ class RecoveryPostureEvaluator:
         self.runtime = runtime
         self.state_scope = runtime_state_scope(runtime.settings)
 
+    def _ai_requires_manual_review(self) -> bool:
+        if self.runtime.settings.ai_operating_mode == "baseline_only":
+            return False
+        ai_runtime = self.runtime.ai_service.status()
+        return bool(ai_runtime.get("degraded")) and not bool(ai_runtime.get("auto_downgrade_active"))
+
     def resume_check(
         self,
         *,
@@ -67,6 +73,8 @@ class RecoveryPostureEvaluator:
                 blockers.append("operator_rebaseline_required")
         if status.recovery_state == "rebaseline_pending" and "rebaseline_in_progress" not in blockers:
             blockers.append("rebaseline_in_progress")
+        if self._ai_requires_manual_review() and "ai_degraded_requires_manual_review" not in blockers:
+            blockers.append("ai_degraded_requires_manual_review")
         if self.runtime.environment_capabilities.exchange_coupled:
             submit_blockers = list(self.runtime.execution_adapter.readiness().get("submit_blocked_reasons", []))
             if not include_kill_switch:
@@ -100,6 +108,8 @@ class RecoveryPostureEvaluator:
             ):
                 recovery_state = "review_required"
         if status.baseline_requires_operator_review:
+            recovery_state = "review_required"
+        if self._ai_requires_manual_review():
             recovery_state = "review_required"
         if recovery_state == "rebaseline_completed" and not self.runtime.kill_switch.halted:
             recovery_state = "normal_operation"

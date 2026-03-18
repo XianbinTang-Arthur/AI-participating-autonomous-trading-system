@@ -15,13 +15,17 @@ from aats.bootstrap.config import build_runtime
 from aats.bootstrap.settings import AATSSettings
 from aats.events.envelopes import build_envelope
 from aats.schemas.audit import DecisionAuditRecord
+from aats.schemas.ai_brief import AIDecisionBrief
+from aats.schemas.ai_shadow import AIDegradationEvent, AITakeoverDecision
 from aats.schemas.common import utc_now
+from aats.schemas.decision import AIMarketAssessment
 from aats.schemas.execution import OrderState
 from aats.schemas.exchange import AccountBaselineSnapshot, ExchangeAccountSnapshot, ExchangeBalance, ExchangeOpenOrder
 from aats.events import topics
 from aats.schemas.operator import ExecutionErrorSummary
 from aats.schemas.operator import OperatorUserRecord
 from aats.schemas.strategy_profiles import StrategyProfileMarketRegimeAssessment, StrategyProfileRecommendation
+from aats.services.ai_service.provider import AIProviderResponse
 from aats.services.operator.passwords import hash_password
 
 
@@ -61,6 +65,30 @@ class FakeOperatorAccountService:
             "detail": "fake_operator_account",
             "blockers": [] if self._snapshot is not None else ["account_snapshot_missing"],
         }
+
+
+class FakeShadowProvider:
+    async def generate_assessment(self, *, prompt: str, response_schema: dict[str, object]) -> AIProviderResponse:
+        _ = prompt
+        _ = response_schema
+        return AIProviderResponse(
+            provider_name="fake_shadow_provider",
+            request_id="shadow_req",
+            latency_ms=8.0,
+            payload={
+                "regime": "trend",
+                "directional_edge": -0.42,
+                "expected_volatility": 0.07,
+                "confidence": 0.86,
+                "uncertainty": 0.18,
+                "expected_holding_horizon": "15m",
+                "invalidation_conditions": ["trend_break", "book_flip"],
+                "risk_tags": ["shadow_ok"],
+                "rationale_summary": "shadow_primary_signal",
+                "baseline_override_recommended": True,
+                "override_reason_codes": ["ai_trend_override"],
+            },
+        )
 
 
 class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
@@ -198,6 +226,259 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(replay_recent["validations"])
         self.assertIn("total_available", replay_recent)
         self.assertIn("has_more", replay_recent)
+
+    async def test_ai_endpoints_expose_latest_assessment_and_shadow_decisions(self) -> None:
+        runtime = await self._runtime(
+            ai_operating_mode="ai_blended",
+            ai_shadow_mode_enabled=True,
+            ai_provider="openai",
+            openai_api_key="test-key",
+            trading_product_type="derivatives",
+            margin_mode="cross",
+            strategy_short_bias_enabled=True,
+            default_symbol="BTC-USDT-SWAP",
+            allowed_symbols=("BTC-USDT-SWAP",),
+        )
+        runtime.ai_service.provider = FakeShadowProvider()
+        runtime.ai_service._degraded = False
+        runtime.ai_service._consecutive_failures = 0
+        runtime.ai_service._consecutive_successes = 0
+        await runtime.decision_engine.run_cycle(runtime.settings.default_symbol, runtime.settings.primary_timeframe)
+        app = self._app(runtime)
+        with TestClient(app) as client:
+            latest = client.get("/ai/latest")
+            recent = client.get("/ai/recent?limit=5")
+            shadow_latest = client.get("/ai/shadow/latest")
+            shadow_recent = client.get("/ai/shadow/recent?limit=5")
+            runtime_status = client.get("/ai/runtime")
+            evaluation = client.post("/ai/shadow/evaluate-now")
+            evaluation_reused = client.post("/ai/shadow/evaluate-now")
+            evaluations = client.get("/ai/shadow/evaluations?limit=5")
+            decision_id = client.get("/decision/latest").json()["decision_id"]
+            decision_detail = client.get(f"/decision/{decision_id}")
+            replay_validation = client.post(f"/replay/validate/{decision_id}")
+
+        self.assertEqual(latest.status_code, 200)
+        self.assertEqual(recent.status_code, 200)
+        self.assertEqual(shadow_latest.status_code, 200)
+        self.assertEqual(shadow_recent.status_code, 200)
+        self.assertEqual(runtime_status.status_code, 200)
+        self.assertEqual(evaluation.status_code, 200)
+        self.assertEqual(evaluation_reused.status_code, 200)
+        self.assertEqual(evaluations.status_code, 200)
+        self.assertEqual(decision_detail.status_code, 200)
+        self.assertEqual(replay_validation.status_code, 200)
+
+        self.assertIsNotNone(latest.json()["assessment"])
+        self.assertIsNotNone(shadow_latest.json()["shadow_decision"])
+        self.assertIsNotNone(decision_detail.json()["ai_decision_brief"])
+        self.assertIsNotNone(decision_detail.json()["ai_assessment"])
+        self.assertIsNotNone(decision_detail.json()["ai_takeover_decision"])
+        self.assertTrue(decision_detail.json()["ai_shadow_decisions"])
+        self.assertTrue(decision_detail.json()["ai_shadow_evaluations"])
+        self.assertIn(
+            shadow_latest.json()["shadow_decision"]["shadow_action_type"],
+            {"same_as_baseline", "hold_instead", "entry_override", "exit_override", "reverse_override"},
+        )
+        self.assertTrue(recent.json()["assessments"])
+        self.assertTrue(shadow_recent.json()["shadow_decisions"])
+        self.assertEqual(evaluation.json()["status"], "evaluation_created")
+        self.assertEqual(evaluation_reused.json()["status"], "evaluation_reused")
+        self.assertTrue(evaluations.json()["evaluations"])
+        self.assertEqual(len(runtime.event_store.by_topic(topics.AI_SHADOW_EVALUATIONS)), 1)
+        self.assertFalse(
+            any("ai_" in issue for issue in replay_validation.json()["decision_chain_issues"]),
+            replay_validation.json()["decision_chain_issues"],
+        )
+        self.assertFalse(
+            any("ai_" in issue for issue in replay_validation.json()["audit_issues"]),
+            replay_validation.json()["audit_issues"],
+        )
+
+    async def test_baseline_only_does_not_emit_ai_chain_events(self) -> None:
+        runtime = await self._runtime(
+            ai_operating_mode="baseline_only",
+            ai_shadow_mode_enabled=True,
+            ai_provider="openai",
+            openai_api_key="test-key",
+        )
+        runtime.ai_service.provider = FakeShadowProvider()
+        await runtime.decision_engine.run_cycle(runtime.settings.default_symbol, runtime.settings.primary_timeframe)
+        app = self._app(runtime)
+        with TestClient(app) as client:
+            latest = client.get("/ai/latest")
+            recent = client.get("/ai/recent?limit=5")
+            shadow_latest = client.get("/ai/shadow/latest")
+            shadow_recent = client.get("/ai/shadow/recent?limit=5")
+
+        self.assertEqual(latest.status_code, 200)
+        self.assertIsNone(latest.json()["brief"])
+        self.assertIsNone(latest.json()["assessment"])
+        self.assertIsNone(latest.json()["takeover"])
+        self.assertEqual(recent.json()["assessments"], [])
+        self.assertIsNone(shadow_latest.json()["shadow_decision"])
+        self.assertEqual(shadow_recent.json()["shadow_decisions"], [])
+        self.assertEqual(len(runtime.event_store.by_topic(topics.AI_DECISION_BRIEFS)), 0)
+        self.assertEqual(len(runtime.event_store.by_topic(topics.AI_ASSESSMENTS)), 0)
+        self.assertEqual(len(runtime.event_store.by_topic(topics.AI_SHADOW_DECISIONS)), 0)
+
+    async def test_baseline_only_hides_historical_ai_events(self) -> None:
+        runtime = await self._runtime(ai_operating_mode="baseline_only")
+        brief = AIDecisionBrief(
+            decision_id="decision_ai_hidden",
+            symbol=runtime.settings.default_symbol,
+            timeframe=runtime.settings.primary_timeframe,
+            product_type=runtime.settings.trading_product_type,
+            margin_mode=runtime.settings.margin_mode,
+            last_price=100_000.0,
+            regime_indicator="trend",
+            regime_confidence=0.7,
+            composite_alpha_score=0.3,
+            momentum_score=0.01,
+            volatility_state="medium",
+            volatility_value=0.02,
+            current_position_qty=0.0,
+            current_exposure_side="flat",
+            current_open_order_count=0,
+            baseline_direction_bias="long",
+            baseline_confidence=0.6,
+            fee_bps=runtime.settings.paper_taker_fee_bps,
+            max_slippage_tolerance_bps=float(runtime.settings.max_slippage_tolerance_bps),
+            expected_slippage_proxy_bps=2.0,
+            min_net_edge_bps=runtime.settings.strategy_min_net_edge_bps,
+            safe_to_trade=True,
+            review_required=False,
+            halted=False,
+            reconciliation_severity="CLEAN",
+            reconciliation_halt_required=False,
+            market_snapshot_fresh=True,
+            account_snapshot_fresh=True,
+            execution_condition="normal",
+        )
+        assessment = AIMarketAssessment(
+            decision_id="decision_ai_hidden",
+            symbol=runtime.settings.default_symbol,
+            regime="trend",
+            directional_edge=0.4,
+            expected_volatility=0.08,
+            confidence=0.8,
+            uncertainty=0.2,
+            expected_holding_horizon="15m",
+            invalidation_conditions=["trend_break", "book_flip"],
+            risk_tags=["provider_ok"],
+            rationale_summary="historical_assessment",
+            operating_mode="ai_primary",
+            provider_name="fake",
+            output_valid=True,
+            fallback_used=False,
+            degraded=False,
+            calibrated_confidence=0.75,
+            baseline_override_recommended=True,
+            override_reason_codes=["ai_trend_override"],
+            economically_actionable=True,
+            estimated_edge_bps=40.0,
+            estimated_cost_bps=12.0,
+            estimated_net_edge_bps=28.0,
+            source_mode="provider",
+            execution_condition="normal",
+            model_name="fake",
+            model_version="1",
+            prompt_version="1",
+        )
+        takeover = AITakeoverDecision(
+            decision_id="decision_ai_hidden",
+            symbol=runtime.settings.default_symbol,
+            timeframe=runtime.settings.primary_timeframe,
+            ai_takeover_allowed=True,
+            ai_takeover_applied=True,
+            baseline_direction="long",
+            ai_direction="long",
+            final_direction="long",
+        )
+        brief_event = build_envelope(
+            topic=topics.AI_DECISION_BRIEFS,
+            key=runtime.settings.default_symbol,
+            payload_model=brief,
+            source_component="test",
+        )
+        assessment_event = build_envelope(
+            topic=topics.AI_ASSESSMENTS,
+            key=runtime.settings.default_symbol,
+            payload_model=assessment,
+            source_component="test",
+        )
+        takeover_event = build_envelope(
+            topic=topics.AI_TAKEOVER_DECISIONS,
+            key=runtime.settings.default_symbol,
+            payload_model=takeover,
+            source_component="test",
+        )
+        runtime.event_store.append(brief_event)
+        runtime.event_store.append(assessment_event)
+        runtime.event_store.append(takeover_event)
+        runtime.audit_repo.upsert(
+            DecisionAuditRecord(
+                decision_id="decision_ai_hidden",
+                decision_context_ref=brief_event.event_id,
+                ai_decision_brief_ref=brief_event.event_id,
+                ai_market_assessment_ref=assessment_event.event_id,
+                ai_takeover_decision_ref=takeover_event.event_id,
+            )
+        )
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            latest = client.get("/ai/latest")
+            recent = client.get("/ai/recent?limit=5")
+            decision = client.get("/decision/decision_ai_hidden")
+
+        self.assertEqual(latest.status_code, 200)
+        self.assertIsNone(latest.json()["brief"])
+        self.assertIsNone(latest.json()["assessment"])
+        self.assertIsNone(latest.json()["takeover"])
+        self.assertEqual(recent.json()["assessments"], [])
+        self.assertIsNone(decision.json()["ai_decision_brief"])
+        self.assertIsNone(decision.json()["ai_assessment"])
+        self.assertIsNone(decision.json()["ai_takeover_decision"])
+
+    async def test_recovery_blocks_when_ai_is_degraded_without_auto_downgrade(self) -> None:
+        runtime = await self._runtime(
+            ai_operating_mode="ai_primary",
+            ai_auto_downgrade_enabled=False,
+            ai_provider="openai",
+            openai_api_key="test-key",
+        )
+        runtime.ai_service._degraded = True
+        runtime.ai_service._degradation_reason = "ai_timeout"
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            recovery = client.get("/system/recovery")
+            health = client.get("/system/health")
+
+        self.assertEqual(recovery.status_code, 200)
+        self.assertTrue(recovery.json()["recovery"]["review_required"])
+        self.assertIn("ai_degraded_requires_manual_review", recovery.json()["recovery"]["resume_blocked_reasons"])
+        blockers = [item["blocker"] for item in health.json()["blockers"]]
+        self.assertIn("ai_degraded_requires_manual_review", blockers)
+
+    async def test_recovery_does_not_block_when_ai_auto_downgrade_is_active(self) -> None:
+        runtime = await self._runtime(
+            ai_operating_mode="ai_primary",
+            ai_auto_downgrade_enabled=True,
+            ai_provider="openai",
+            openai_api_key="test-key",
+        )
+        runtime.ai_service._degraded = True
+        runtime.ai_service._degradation_reason = "ai_timeout"
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            recovery = client.get("/system/recovery")
+
+        self.assertEqual(recovery.status_code, 200)
+        self.assertFalse(recovery.json()["recovery"]["review_required"])
+        self.assertNotIn("ai_degraded_requires_manual_review", recovery.json()["recovery"]["resume_blocked_reasons"])
 
     async def test_halt_resume_and_stale_market_blocker_are_visible(self) -> None:
         runtime = await self._runtime()

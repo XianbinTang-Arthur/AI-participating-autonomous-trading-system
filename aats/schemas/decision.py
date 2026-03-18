@@ -70,6 +70,16 @@ class AIMarketAssessment(SchemaBase):
     fallback_reason: str | None = None
     degraded: bool = False
     calibrated_confidence: float = 0.0
+    baseline_override_recommended: bool = False
+    override_reason_codes: list[str] = Field(default_factory=list)
+    economically_actionable: bool = False
+    estimated_edge_bps: float | None = None
+    estimated_cost_bps: float | None = None
+    estimated_net_edge_bps: float | None = None
+    validation_flags: list[str] = Field(default_factory=list)
+    rejection_flags: list[str] = Field(default_factory=list)
+    source_mode: Literal["provider", "fallback"] = "fallback"
+    execution_condition: str | None = None
     evaluation_tags: list[str] = Field(default_factory=list)
     model_name: str
     model_version: str
@@ -86,6 +96,8 @@ class AIProviderAssessmentOutput(BaseModel):
     invalidation_conditions: list[str] = Field(default_factory=list)
     risk_tags: list[str] = Field(default_factory=list)
     rationale_summary: str
+    baseline_override_recommended: bool = False
+    override_reason_codes: list[str] = Field(default_factory=list)
 
 
 class AIDecisionEvaluation(SchemaBase):
@@ -144,3 +156,6 @@ class PositionTarget(SchemaBase):
     target_leverage: float = 1.0
     margin_mode: MarginModelType = "cash"
     leverage_bias: float = 1.0
+    ai_takeover_allowed: bool = False
+    ai_takeover_applied: bool = False
+    ai_takeover_blockers: list[str] = Field(default_factory=list)

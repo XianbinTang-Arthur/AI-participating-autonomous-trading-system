@@ -6,6 +6,9 @@ export const DEFAULT_PAGE_LIMITS = {
   recentReconciliations: 8,
   blockerHistory: 8,
   replayValidations: 8,
+  recentAIAssessments: 8,
+  recentAIShadowDecisions: 8,
+  recentAIShadowEvaluations: 8,
 };
 export const PAGE_LOAD_STEP = 12;
 
@@ -66,6 +69,14 @@ export function viewSpecs(view, state = null) {
       ["reconciliationRecent", `/reconciliation/recent?limit=${limits.recentReconciliations}&offset=0`],
       ["blockerHistory", `/system/blocker-history?limit=${limits.blockerHistory}&offset=0`],
       ["replayRecentValidations", `/replay/recent-validations?limit=${limits.replayValidations}&offset=0`],
+    ],
+    ai: [
+      ["aiRuntime", "/ai/runtime"],
+      ["aiLatest", "/ai/latest"],
+      ["aiRecent", `/ai/recent?limit=${limits.recentAIAssessments}&offset=0`],
+      ["aiShadowLatest", "/ai/shadow/latest"],
+      ["aiShadowRecent", `/ai/shadow/recent?limit=${limits.recentAIShadowDecisions}&offset=0`],
+      ["aiShadowEvaluations", `/ai/shadow/evaluations?limit=${limits.recentAIShadowEvaluations}&offset=0`],
     ],
     admin: [
       ["operatorUsers", "/auth/users"],

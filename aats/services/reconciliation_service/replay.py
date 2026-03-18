@@ -56,7 +56,12 @@ class ReplayEngine:
         topics.ACCOUNT_BASELINES,
         topics.DECISION_CONTEXTS,
         topics.BASELINE_ASSESSMENTS,
+        topics.AI_DECISION_BRIEFS,
         topics.AI_ASSESSMENTS,
+        topics.AI_TAKEOVER_DECISIONS,
+        topics.AI_SHADOW_DECISIONS,
+        topics.AI_SHADOW_EVALUATIONS,
+        topics.AI_DEGRADATION_EVENTS,
         topics.POSITION_TARGETS,
         topics.POLICY_DECISIONS,
         topics.RISK_DECISIONS,
@@ -370,6 +375,31 @@ class ReplayEngine:
                         context.health_snapshot_ref,
                     }
                 )
+            if self.audit_repo is not None:
+                record = self.audit_repo.get(decision_id)
+                if record is not None:
+                    referenced_event_ids.update(
+                        ref
+                        for ref in (
+                            record.decision_context_ref,
+                            record.baseline_assessment_ref,
+                            record.ai_decision_brief_ref,
+                            record.ai_market_assessment_ref,
+                            record.ai_takeover_decision_ref,
+                            record.position_target_ref,
+                            record.policy_decision_ref,
+                            record.risk_decision_ref,
+                            record.execution_plan_ref,
+                            record.portfolio_delta_ref,
+                            *record.order_intent_refs,
+                            *record.order_state_refs,
+                            *record.fill_event_refs,
+                            *record.ai_shadow_decision_refs,
+                            *record.ai_shadow_evaluation_refs,
+                            *record.reconciliation_refs,
+                        )
+                        if ref is not None
+                    )
             referenced_events = [
                 referenced
                 for ref in referenced_event_ids
@@ -560,11 +590,50 @@ class ReplayEngine:
                 issues=issues,
                 decision_id=decision_id,
                 events_by_id=events_by_id,
+                ref=record.ai_decision_brief_ref,
+                ref_name="ai_decision_brief_ref",
+                expected_topic=topics.AI_DECISION_BRIEFS,
+                required=False,
+            )
+            self._validate_ref(
+                issues=issues,
+                decision_id=decision_id,
+                events_by_id=events_by_id,
                 ref=record.ai_market_assessment_ref,
                 ref_name="ai_market_assessment_ref",
                 expected_topic=topics.AI_ASSESSMENTS,
                 required=False,
             )
+            self._validate_ref(
+                issues=issues,
+                decision_id=decision_id,
+                events_by_id=events_by_id,
+                ref=record.ai_takeover_decision_ref,
+                ref_name="ai_takeover_decision_ref",
+                expected_topic=topics.AI_TAKEOVER_DECISIONS,
+                required=False,
+            )
+
+            for ref in record.ai_shadow_decision_refs:
+                self._validate_ref(
+                    issues=issues,
+                    decision_id=decision_id,
+                    events_by_id=events_by_id,
+                    ref=ref,
+                    ref_name="ai_shadow_decision_refs",
+                    expected_topic=topics.AI_SHADOW_DECISIONS,
+                    required=True,
+                )
+            for ref in record.ai_shadow_evaluation_refs:
+                self._validate_ref(
+                    issues=issues,
+                    decision_id=decision_id,
+                    events_by_id=events_by_id,
+                    ref=ref,
+                    ref_name="ai_shadow_evaluation_refs",
+                    expected_topic=topics.AI_SHADOW_EVALUATIONS,
+                    required=True,
+                )
 
             target_event = self._validate_ref(
                 issues=issues,
@@ -839,7 +908,9 @@ class ReplayEngine:
             for ref_name, ref_value in (
                 ("decision_context_ref", record.decision_context_ref),
                 ("baseline_assessment_ref", record.baseline_assessment_ref),
+                ("ai_decision_brief_ref", record.ai_decision_brief_ref),
                 ("ai_market_assessment_ref", record.ai_market_assessment_ref),
+                ("ai_takeover_decision_ref", record.ai_takeover_decision_ref),
                 ("position_target_ref", record.position_target_ref),
                 ("policy_decision_ref", record.policy_decision_ref),
                 ("risk_decision_ref", record.risk_decision_ref),
@@ -854,6 +925,8 @@ class ReplayEngine:
                 ("order_intent_refs", record.order_intent_refs),
                 ("order_state_refs", record.order_state_refs),
                 ("fill_event_refs", record.fill_event_refs),
+                ("ai_shadow_decision_refs", record.ai_shadow_decision_refs),
+                ("ai_shadow_evaluation_refs", record.ai_shadow_evaluation_refs),
                 ("reconciliation_refs", record.reconciliation_refs),
             ):
                 for ref_value in refs:

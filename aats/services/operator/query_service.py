@@ -188,6 +188,130 @@ class OperatorQueryService:
         latest = self._cached("latest_decision_record", self.runtime.audit_repo.latest)
         return latest.decision_id if latest is not None else None
 
+    def ai_runtime(self) -> dict[str, Any]:
+        return self.runtime.ai_service.status()
+
+    def _ai_history_visible(self) -> bool:
+        return self.runtime.settings.ai_operating_mode != "baseline_only"
+
+    def ai_latest(self) -> dict[str, Any]:
+        if not self._ai_history_visible():
+            return {"brief": None, "assessment": None, "takeover": None}
+        brief = latest_topic_event_for_scope(self.runtime.event_store, topics.AI_DECISION_BRIEFS, self.state_scope)
+        assessment = latest_topic_event_for_scope(self.runtime.event_store, topics.AI_ASSESSMENTS, self.state_scope)
+        takeover = latest_topic_event_for_scope(self.runtime.event_store, topics.AI_TAKEOVER_DECISIONS, self.state_scope)
+        return {
+            "brief": self.payload(brief),
+            "assessment": self.payload(assessment),
+            "takeover": self.payload(takeover),
+        }
+
+    def ai_recent(self, *, limit: int, offset: int) -> dict[str, Any]:
+        if not self._ai_history_visible():
+            return {"assessments": [], "limit": limit, "offset": offset, "total_available": 0, "has_more": False}
+        rows = self.runtime.event_store.by_topic_scoped(topics.AI_ASSESSMENTS, scope=self.state_scope)
+        rows = list(reversed(rows))
+        return self._paginate_rows(
+            rows,
+            limit=limit,
+            offset=offset,
+            key="assessments",
+            serializer=self.payload,
+        )
+
+    def ai_shadow_latest(self) -> dict[str, Any]:
+        if not self._ai_history_visible():
+            return {"shadow_decision": None}
+        shadow = latest_topic_event_for_scope(self.runtime.event_store, topics.AI_SHADOW_DECISIONS, self.state_scope)
+        return {"shadow_decision": self.payload(shadow)}
+
+    def ai_shadow_recent(self, *, limit: int, offset: int) -> dict[str, Any]:
+        if not self._ai_history_visible():
+            return {"shadow_decisions": [], "limit": limit, "offset": offset, "total_available": 0, "has_more": False}
+        rows = self.runtime.event_store.by_topic_scoped(topics.AI_SHADOW_DECISIONS, scope=self.state_scope)
+        rows = list(reversed(rows))
+        return self._paginate_rows(
+            rows,
+            limit=limit,
+            offset=offset,
+            key="shadow_decisions",
+            serializer=self.payload,
+        )
+
+    def ai_shadow_evaluations(self, *, limit: int, offset: int) -> dict[str, Any]:
+        if not self._ai_history_visible():
+            return {"evaluations": [], "limit": limit, "offset": offset, "total_available": 0, "has_more": False}
+        rows = self.runtime.event_store.by_topic_scoped(topics.AI_SHADOW_EVALUATIONS, scope=self.state_scope)
+        rows = list(reversed(rows))
+        return self._paginate_rows(
+            rows,
+            limit=limit,
+            offset=offset,
+            key="evaluations",
+            serializer=self.payload,
+        )
+
+    async def evaluate_ai_shadow(
+        self,
+        *,
+        actor_role: OperatorRole,
+        actor_identity: str | None,
+        auth_source: AuthSource,
+    ) -> dict[str, Any]:
+        if not self._ai_history_visible():
+            return {"evaluation": None, "status": "baseline_only_ai_history_hidden"}
+        evaluation, created = self.runtime.ai_service.evaluate_shadow_window(
+            limit=self.runtime.settings.ai_shadow_evaluation_window
+        )
+        if evaluation is None:
+            return {"evaluation": None, "status": "no_shadow_decisions"}
+        if created:
+            await publish_model(
+                bus=self.runtime.bus,
+                topic=topics.AI_SHADOW_EVALUATIONS,
+                key=evaluation.symbol,
+                payload_model=evaluation,
+                source_component="operator_api",
+            )
+            self._append_event(
+                topic=topics.OPERATOR_ACTIONS,
+                key="ai_shadow",
+                payload_model=OperatorActionRecord(
+                    action="ai_shadow_evaluate",
+                    actor_role=actor_role,
+                    actor_identity=actor_identity,
+                    auth_source=auth_source,
+                    reason="operator_ai_shadow_evaluate",
+                    status="evaluation_created",
+                    details={
+                        "evaluation_id": evaluation.evaluation_id,
+                        "window_size": evaluation.summary.get("window_size"),
+                        "override_rate": evaluation.summary.get("override_rate"),
+                    },
+                ),
+            )
+            status = "evaluation_created"
+        else:
+            status = "evaluation_reused"
+            self._append_event(
+                topic=topics.OPERATOR_ACTIONS,
+                key="ai_shadow",
+                payload_model=OperatorActionRecord(
+                    action="ai_shadow_evaluate",
+                    actor_role=actor_role,
+                    actor_identity=actor_identity,
+                    auth_source=auth_source,
+                    reason="operator_ai_shadow_evaluate",
+                    status="evaluation_reused",
+                    details={
+                        "evaluation_id": evaluation.evaluation_id,
+                        "window_size": evaluation.summary.get("window_size"),
+                        "override_rate": evaluation.summary.get("override_rate"),
+                    },
+                ),
+            ),
+        return {"evaluation": evaluation.model_dump(mode="json"), "status": status}
+
     def latest_operator_action(self, action: str) -> dict[str, Any] | None:
         actions = self._cached(
             "operator_action_events",
@@ -581,13 +705,29 @@ class OperatorQueryService:
         latest_baseline = self.latest_account_baseline()
         latest_rebaseline_action = self.latest_operator_action("rebaseline")
         latest_resume_action = self.latest_operator_action("resume")
+        latest_ai_degradation = latest_topic_event_for_scope(
+            self.runtime.event_store,
+            topics.AI_DEGRADATION_EVENTS,
+            self.state_scope,
+        )
+        latest_ai_shadow_evaluation = latest_topic_event_for_scope(
+            self.runtime.event_store,
+            topics.AI_SHADOW_EVALUATIONS,
+            self.state_scope,
+        )
         base = self.recovery_posture.finalize_status(latest_reconciliation=latest_reconciliation)
+        if not self._ai_history_visible():
+            latest_ai_degradation = None
+            latest_ai_shadow_evaluation = None
         return {
             **base.model_dump(mode="json"),
             "last_rebaseline_action": latest_rebaseline_action,
             "last_resume_action": latest_resume_action,
             "latest_account_baseline": latest_baseline,
             "latest_reconciliation": latest_reconciliation.model_dump(mode="json") if latest_reconciliation is not None else None,
+            "latest_ai_degradation": self.payload(latest_ai_degradation),
+            "latest_ai_shadow_evaluation": self.payload(latest_ai_shadow_evaluation),
+            "ai_runtime": self.ai_runtime(),
         }
 
     def system_recovery(self) -> dict[str, Any]:
@@ -826,12 +966,17 @@ class OperatorQueryService:
         order_updates = self.payloads_by_refs(audit.order_state_refs)
         fills = self.payloads_by_refs(audit.fill_event_refs)
         reconciliations = self.payloads_by_refs(audit.reconciliation_refs)
+        ai_visible = self._ai_history_visible()
         return {
             "decision_id": decision_id,
             "health_snapshot": health_snapshot,
             "decision_context": decision_context,
             "baseline_assessment": self.payload_by_ref(audit.baseline_assessment_ref),
-            "ai_assessment": self.payload_by_ref(audit.ai_market_assessment_ref),
+            "ai_decision_brief": self.payload_by_ref(audit.ai_decision_brief_ref) if ai_visible else None,
+            "ai_assessment": self.payload_by_ref(audit.ai_market_assessment_ref) if ai_visible else None,
+            "ai_takeover_decision": self.payload_by_ref(audit.ai_takeover_decision_ref) if ai_visible else None,
+            "ai_shadow_decisions": self.payloads_by_refs(audit.ai_shadow_decision_refs) if ai_visible else [],
+            "ai_shadow_evaluations": self.payloads_by_refs(audit.ai_shadow_evaluation_refs) if ai_visible else [],
             "position_target": self.payload_by_ref(audit.position_target_ref),
             "policy_decision": self.payload_by_ref(audit.policy_decision_ref),
             "risk_decision": self.payload_by_ref(audit.risk_decision_ref),
@@ -1243,7 +1388,11 @@ class OperatorQueryService:
             "linked_events": {
                 "decision_context": detail["decision_context"],
                 "baseline_assessment": detail["baseline_assessment"],
+                "ai_decision_brief": detail["ai_decision_brief"],
                 "ai_assessment": detail["ai_assessment"],
+                "ai_takeover_decision": detail["ai_takeover_decision"],
+                "ai_shadow_decisions": detail["ai_shadow_decisions"],
+                "ai_shadow_evaluations": detail["ai_shadow_evaluations"],
                 "position_target": detail["position_target"],
                 "policy_decision": detail["policy_decision"],
                 "risk_decision": detail["risk_decision"],

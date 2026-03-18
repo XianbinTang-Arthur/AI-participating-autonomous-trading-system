@@ -364,6 +364,68 @@ class TestTargetPositionEngine(unittest.TestCase):
         self.assertEqual(target.target_position_qty, context.current_position_qty)
         self.assertEqual(target.position_intent, "hold")
 
+    def test_ai_primary_requires_override_and_actionable_edge(self) -> None:
+        engine = TargetPositionEngine(
+            settings=AATSSettings.model_validate(
+                {
+                    "default_order_qty": 0.01,
+                    "trading_product_type": "derivatives",
+                    "ai_operating_mode": "ai_primary",
+                    "strategy_short_bias_enabled": True,
+                    "ai_primary_min_confidence": 0.75,
+                    "ai_primary_min_directional_edge": 0.2,
+                }
+            )
+        )
+        context = self._context(product_type="derivatives", current_exposure_side="flat")
+        baseline = self._baseline(
+            direction_bias="long",
+            confidence=0.84,
+            suggested_position_scale=0.8,
+            volatility_target_scale=1.0,
+        )
+
+        target = engine.build(
+            context,
+            baseline,
+            self._ai_assessment(direction=-0.4, confidence=0.88, fallback_used=False, override=False, actionable=False),
+        )
+
+        self.assertGreater(target.target_position_qty, 0.0)
+        self.assertFalse(target.ai_takeover_allowed)
+        self.assertIn("ai_override_not_recommended", target.ai_takeover_blockers)
+
+    def test_ai_primary_can_take_over_direction_when_all_gates_pass(self) -> None:
+        engine = TargetPositionEngine(
+            settings=AATSSettings.model_validate(
+                {
+                    "default_order_qty": 0.01,
+                    "trading_product_type": "derivatives",
+                    "ai_operating_mode": "ai_primary",
+                    "strategy_short_bias_enabled": True,
+                    "ai_primary_min_confidence": 0.75,
+                    "ai_primary_min_directional_edge": 0.2,
+                }
+            )
+        )
+        context = self._context(product_type="derivatives", current_exposure_side="flat")
+        baseline = self._baseline(
+            direction_bias="long",
+            confidence=0.84,
+            suggested_position_scale=0.8,
+            volatility_target_scale=1.0,
+        )
+
+        target = engine.build(
+            context,
+            baseline,
+            self._ai_assessment(direction=-0.45, confidence=0.9, fallback_used=False, override=True, actionable=True),
+        )
+
+        self.assertLess(target.target_position_qty, 0.0)
+        self.assertTrue(target.ai_takeover_allowed)
+        self.assertTrue(target.ai_takeover_applied)
+
     def test_derivatives_leverage_reduces_when_microstructure_conflicts(self) -> None:
         settings = AATSSettings.model_validate(
             {
@@ -450,7 +512,14 @@ class TestTargetPositionEngine(unittest.TestCase):
         )
 
     @staticmethod
-    def _ai_assessment(*, direction: float = 0.1, confidence: float = 0.7) -> AIMarketAssessment:
+    def _ai_assessment(
+        *,
+        direction: float = 0.1,
+        confidence: float = 0.7,
+        fallback_used: bool = True,
+        override: bool = False,
+        actionable: bool = False,
+    ) -> AIMarketAssessment:
         return AIMarketAssessment(
             decision_id="decision_target_test",
             symbol="BTC-USDT",
@@ -466,10 +535,18 @@ class TestTargetPositionEngine(unittest.TestCase):
             operating_mode="baseline_only",
             provider_name="baseline_fallback",
             output_valid=True,
-            fallback_used=True,
+            fallback_used=fallback_used,
             fallback_reason="baseline_only_mode",
             degraded=False,
             calibrated_confidence=confidence,
+            baseline_override_recommended=override,
+            override_reason_codes=["ai_override"] if override else [],
+            economically_actionable=actionable,
+            estimated_edge_bps=45.0 if actionable else 4.0,
+            estimated_cost_bps=12.0,
+            estimated_net_edge_bps=33.0 if actionable else -8.0,
+            source_mode="provider" if not fallback_used else "fallback",
+            execution_condition="normal",
             model_name="none",
             model_version="1",
             prompt_version="1",

@@ -458,6 +458,7 @@ async def build_runtime(
     ai_service = AIInferenceService(
         settings=runtime_settings,
         event_store=storage.event_store,
+        bus=bus,
         prompt_builder=PromptBuilder(),
         validator=AssessmentValidator(),
     )
@@ -589,7 +590,11 @@ async def build_runtime(
 
     await bus.subscribe(topics.DECISION_CONTEXTS, audit_service.handle_decision_context)
     await bus.subscribe(topics.BASELINE_ASSESSMENTS, audit_service.handle_baseline_assessment)
+    await bus.subscribe(topics.AI_DECISION_BRIEFS, audit_service.handle_ai_decision_brief)
     await bus.subscribe(topics.AI_ASSESSMENTS, audit_service.handle_ai_assessment)
+    await bus.subscribe(topics.AI_TAKEOVER_DECISIONS, audit_service.handle_ai_takeover_decision)
+    await bus.subscribe(topics.AI_SHADOW_DECISIONS, audit_service.handle_ai_shadow_decision)
+    await bus.subscribe(topics.AI_SHADOW_EVALUATIONS, audit_service.handle_ai_shadow_evaluation)
     await bus.subscribe(topics.POSITION_TARGETS, audit_service.handle_position_target)
     await bus.subscribe(topics.POLICY_DECISIONS, audit_service.handle_policy_decision)
     await bus.subscribe(topics.RISK_DECISIONS, audit_service.handle_risk_decision)

@@ -20,6 +20,7 @@ import {
   orderDrawerRows,
   orderSceneSummary,
 } from "./modules/trade-display.js";
+import { renderAISections, renderAIView } from "./modules/views/ai-view.js";
 import { renderAdminView } from "./modules/views/admin-view.js";
 import { renderExecutionSections, renderExecutionView } from "./modules/views/execution-view.js";
 import { renderOverviewView } from "./modules/views/overview-view.js";
@@ -51,6 +52,7 @@ const nodes = {
   strategyContent: document.getElementById("strategyContent"),
   executionContent: document.getElementById("executionContent"),
   riskContent: document.getElementById("riskContent"),
+  aiContent: document.getElementById("aiContent"),
   adminContent: document.getElementById("adminContent"),
   detailDrawer: document.getElementById("detailDrawer"),
   drawerBackdrop: document.getElementById("drawerBackdrop"),
@@ -280,6 +282,10 @@ function renderActiveView() {
     patchRenderedSections(renderRiskSections(viewData), () => nodes.riskContent, () => renderRiskView(viewData));
     return;
   }
+  if (state.activeView === "ai") {
+    patchRenderedSections(renderAISections(viewData), () => nodes.aiContent, () => renderAIView(viewData));
+    return;
+  }
   if (state.activeView === "admin" && nodes.adminContent) {
     patchHtml(nodes.adminContent, renderAdminView(viewData));
   }
@@ -384,6 +390,13 @@ async function dispatchAction(action, value) {
   if (action === "collapse-blocker-history") return resetPageLimit("blockerHistory");
   if (action === "load-more-replay-validations") return adjustPageLimit("replayValidations", PAGE_LOAD_STEP);
   if (action === "collapse-replay-validations") return resetPageLimit("replayValidations");
+  if (action === "load-more-ai-assessments") return adjustPageLimit("recentAIAssessments", PAGE_LOAD_STEP);
+  if (action === "collapse-ai-assessments") return resetPageLimit("recentAIAssessments");
+  if (action === "load-more-ai-shadow-decisions") return adjustPageLimit("recentAIShadowDecisions", PAGE_LOAD_STEP);
+  if (action === "collapse-ai-shadow-decisions") return resetPageLimit("recentAIShadowDecisions");
+  if (action === "load-more-ai-shadow-evaluations") return adjustPageLimit("recentAIShadowEvaluations", PAGE_LOAD_STEP);
+  if (action === "collapse-ai-shadow-evaluations") return resetPageLimit("recentAIShadowEvaluations");
+  if (action === "evaluate-ai-shadow") return evaluateAIShadow();
   if (action === "toggle-user") return toggleOperatorUser(value);
   if (action === "change-user-role") return updateOperatorUserRole(value);
   if (action === "reset-user-password") return resetOperatorPassword(value);
@@ -553,6 +566,21 @@ async function evaluateStrategyProfile() {
       message: autoApplied
         ? `已生成建议并自动切换到更保守的档位：${profileId}。`
         : `已生成新的策略档位建议：${profileId}。如需生效，请在设置页继续审批。`,
+    };
+    await refreshDashboard({ manual: true });
+  } catch (error) {
+    state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
+    renderBanners();
+  }
+}
+
+async function evaluateAIShadow() {
+  try {
+    const result = await requestJson("/ai/shadow/evaluate-now", { method: "POST" });
+    const evaluation = result?.evaluation || {};
+    state.flash = {
+      tone: "info",
+      message: `已生成一轮 shadow 收益回放：baseline 净收益 ${formatNumber(evaluation.baseline_net_pnl ?? 0)}，shadow 净收益 ${formatNumber(evaluation.shadow_net_pnl ?? 0)}。`,
     };
     await refreshDashboard({ manual: true });
   } catch (error) {
