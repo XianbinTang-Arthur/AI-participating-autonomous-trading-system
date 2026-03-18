@@ -136,6 +136,26 @@ class OperatorQueryService:
                 rows.append(payload)
         return rows
 
+    @staticmethod
+    def _paginate_rows(
+        rows: list[Any],
+        *,
+        limit: int,
+        offset: int,
+        key: str,
+        serializer=None,
+    ) -> dict[str, Any]:
+        total_available = len(rows)
+        paged_rows = rows[offset : offset + limit]
+        payloads = [serializer(item) for item in paged_rows] if serializer is not None else list(paged_rows)
+        return {
+            key: payloads,
+            "limit": limit,
+            "offset": offset,
+            "total_available": total_available,
+            "has_more": offset + len(paged_rows) < total_available,
+        }
+
     def latest_order(self):
         rows = self._scoped_order_states()
         return max(rows, key=lambda item: item.last_update_ts or item.created_at, default=None)
@@ -634,10 +654,11 @@ class OperatorQueryService:
             "reconciliations": reconciliations,
         }
 
-    def recent_decisions(self, *, limit: int = 20) -> list[dict[str, Any]]:
-        rows = self.runtime.audit_repo.recent(limit=limit)
+    def recent_decisions(self, *, limit: int = 20, offset: int = 0) -> dict[str, Any]:
+        rows = self.runtime.audit_repo.recent(limit=limit + offset)
+        paged_rows = rows[offset : offset + limit]
         payloads: list[dict[str, Any]] = []
-        for record in rows:
+        for record in paged_rows:
             context = self.payload_by_ref(record.decision_context_ref)
             target = self.payload_by_ref(record.position_target_ref)
             policy = self.payload_by_ref(record.policy_decision_ref)
@@ -648,6 +669,20 @@ class OperatorQueryService:
                     "symbol": context.get("symbol") if context else None,
                     "timeframe": context.get("timeframe") if context else None,
                     "decision_time": context.get("as_of_ts") if context else None,
+                    "product_type": (
+                        target.get("product_type")
+                        if target
+                        else (context.get("product_type") if context else None)
+                    ),
+                    "margin_mode": (
+                        target.get("margin_mode")
+                        if target
+                        else (context.get("margin_mode") if context else None)
+                    ),
+                    "position_intent": target.get("position_intent") if target else None,
+                    "current_position_qty": target.get("current_position_qty") if target else None,
+                    "target_position_qty": target.get("target_position_qty") if target else None,
+                    "delta_position_qty": target.get("delta_position_qty") if target else None,
                     "target_delta_qty": target.get("delta_position_qty") if target else None,
                     "policy_result": policy.get("execution_allowed") if policy else None,
                     "risk_result": risk.get("approved") if risk else None,
@@ -658,7 +693,14 @@ class OperatorQueryService:
                     },
                 }
             )
-        return payloads
+        total_available = self.runtime.audit_repo.count()
+        return {
+            "decisions": payloads,
+            "limit": limit,
+            "offset": offset,
+            "total_available": total_available,
+            "has_more": offset + len(payloads) < total_available,
+        }
 
     def latest_decision(self) -> dict[str, Any]:
         decision_id = self.latest_decision_id()
@@ -681,23 +723,22 @@ class OperatorQueryService:
                 "summary": None,
             }
         detail = self.decision_view(decision_id)
-        detail["summary"] = next(
-            (item for item in self.recent_decisions(limit=1) if item["decision_id"] == decision_id),
-            None,
-        )
+        detail["summary"] = next((item for item in self.recent_decisions(limit=1)["decisions"] if item["decision_id"] == decision_id), None)
         return detail
 
     def latest_risk(self) -> dict[str, Any]:
         return self._latest_topic_summary(topics.RISK_DECISIONS)
 
-    def recent_risks(self, *, limit: int = 20) -> dict[str, Any]:
-        return {"risks": self._recent_topic_summaries(topics.RISK_DECISIONS, limit=limit)}
+    def recent_risks(self, *, limit: int = 20, offset: int = 0) -> dict[str, Any]:
+        rows = list(reversed(self.runtime.event_store.by_topic(topics.RISK_DECISIONS)))
+        return self._paginate_rows(rows, limit=limit, offset=offset, key="risks", serializer=lambda item: item.payload)
 
     def latest_policy(self) -> dict[str, Any]:
         return self._latest_topic_summary(topics.POLICY_DECISIONS)
 
-    def recent_policies(self, *, limit: int = 20) -> dict[str, Any]:
-        return {"policies": self._recent_topic_summaries(topics.POLICY_DECISIONS, limit=limit)}
+    def recent_policies(self, *, limit: int = 20, offset: int = 0) -> dict[str, Any]:
+        rows = list(reversed(self.runtime.event_store.by_topic(topics.POLICY_DECISIONS)))
+        return self._paginate_rows(rows, limit=limit, offset=offset, key="policies", serializer=lambda item: item.payload)
 
     def blockers(self) -> list[dict[str, Any]]:
         snapshot = self.runtime.health_service.snapshot()
@@ -739,13 +780,9 @@ class OperatorQueryService:
             seen.add(blocker)
         return rows
 
-    def blocker_history(self, *, limit: int = 20) -> dict[str, Any]:
-        return {
-            "history": [
-                item.payload
-                for item in self.runtime.event_store.recent_by_topic(topics.BLOCKER_SNAPSHOTS, limit=limit)
-            ]
-        }
+    def blocker_history(self, *, limit: int = 20, offset: int = 0) -> dict[str, Any]:
+        rows = [item.payload for item in reversed(self.runtime.event_store.by_topic(topics.BLOCKER_SNAPSHOTS))]
+        return self._paginate_rows(rows, limit=limit, offset=offset, key="history")
 
     def metrics(self) -> dict[str, Any]:
         snapshot = self._latest_scoped_snapshot()
@@ -855,13 +892,20 @@ class OperatorQueryService:
     def orders_open(self) -> dict[str, Any]:
         return self.account_open_orders()
 
-    def orders_recent(self, *, limit: int = 50) -> dict[str, Any]:
-        orders = sorted(
+    def orders_recent(self, *, limit: int = 50, offset: int = 0) -> dict[str, Any]:
+        all_orders = sorted(
             order_states_for_scope(self.runtime.execution_repo, self.state_scope),
             key=lambda item: (item.last_update_ts or item.created_at, item.client_order_id),
             reverse=True,
-        )[:limit]
-        return {"orders": [order.model_dump(mode="json") for order in orders]}
+        )
+        orders = all_orders[offset : offset + limit]
+        return {
+            "orders": [order.model_dump(mode="json") for order in orders],
+            "limit": limit,
+            "offset": offset,
+            "total_available": len(all_orders),
+            "has_more": offset + len(orders) < len(all_orders),
+        }
 
     def order_detail(self, client_order_id: str) -> dict[str, Any]:
         order = next(
@@ -881,8 +925,17 @@ class OperatorQueryService:
             ),
         }
 
-    def fills_recent(self, *, limit: int = 50) -> dict[str, Any]:
-        return {"fills": [fill.model_dump(mode="json") for fill in self.recent_fills(limit=limit)]}
+    def fills_recent(self, *, limit: int = 50, offset: int = 0) -> dict[str, Any]:
+        all_fills = self.recent_fills(limit=limit + offset)
+        fills = all_fills[offset : offset + limit]
+        total_available = len(self._scoped_fills())
+        return {
+            "fills": [fill.model_dump(mode="json") for fill in fills],
+            "limit": limit,
+            "offset": offset,
+            "total_available": total_available,
+            "has_more": offset + len(fills) < total_available,
+        }
 
     def fill_detail(self, fill_id: str) -> dict[str, Any]:
         fill = next((item for item in self._scoped_fills() if item.fill_id == fill_id), None)
@@ -945,9 +998,15 @@ class OperatorQueryService:
             "recovery": self.recovery_view(),
         }
 
-    def reconciliation_recent(self, *, limit: int = 20) -> dict[str, Any]:
-        history = reconciliation_reports_for_scope(self.runtime.reconciliation_repo, self.state_scope, limit=limit)
-        return {"reconciliations": [report.model_dump(mode="json") for report in history]}
+    def reconciliation_recent(self, *, limit: int = 20, offset: int = 0) -> dict[str, Any]:
+        history = list(reversed(reconciliation_reports_for_scope(self.runtime.reconciliation_repo, self.state_scope)))
+        return self._paginate_rows(
+            history,
+            limit=limit,
+            offset=offset,
+            key="reconciliations",
+            serializer=lambda report: report.model_dump(mode="json"),
+        )
 
     def reconciliation_mismatches(self, *, limit: int = 20) -> dict[str, Any]:
         reports = [
@@ -1039,11 +1098,13 @@ class OperatorQueryService:
         self.runtime.replay_validation_history[:] = self.runtime.replay_validation_history[-20:]
         return summary
 
-    def replay_recent_validations(self) -> dict[str, Any]:
-        persisted = self.runtime.event_store.recent_by_topic(topics.REPLAY_VALIDATIONS, limit=20)
+    def replay_recent_validations(self, *, limit: int = 20, offset: int = 0) -> dict[str, Any]:
+        persisted = self.runtime.event_store.by_topic(topics.REPLAY_VALIDATIONS)
         if persisted:
-            return {"validations": [item.payload for item in persisted]}
-        return {"validations": list(self.runtime.replay_validation_history[-20:])}
+            rows = [item.payload for item in reversed(persisted)]
+        else:
+            rows = list(reversed(self.runtime.replay_validation_history))
+        return self._paginate_rows(rows, limit=limit, offset=offset, key="validations")
 
     async def validate_reconciliation(
         self,

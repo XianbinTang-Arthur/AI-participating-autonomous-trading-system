@@ -309,6 +309,7 @@ h3 {
 }
 
 .workspace-tab,
+.workspace-link,
 .primary-button,
 .secondary-button,
 .warning-button,
@@ -325,6 +326,7 @@ h3 {
 }
 
 .workspace-tab:hover,
+.workspace-link:hover,
 .primary-button:hover,
 .secondary-button:hover,
 .warning-button:hover,
@@ -335,13 +337,19 @@ h3 {
   transform: translateY(-1px);
 }
 
-.workspace-tab {
+.workspace-tab,
+.workspace-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   color: var(--text-soft);
   background: rgba(14, 24, 36, 0.74);
   border: 1px solid var(--line);
+  text-decoration: none;
 }
 
-.workspace-tab.is-active {
+.workspace-tab.is-active,
+.workspace-link.is-active {
   color: #071019;
   background: linear-gradient(135deg, #e8f0ff, #94c5ff);
   border-color: transparent;
@@ -451,6 +459,11 @@ h3 {
 .surface-card {
   display: grid;
   gap: 16px;
+}
+
+.subsection-block {
+  display: grid;
+  gap: 12px;
 }
 
 .span-12 { grid-column: span 12; }
@@ -606,6 +619,17 @@ h3 {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.history-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: rgba(255, 255, 255, 0.02);
 }
 
 .detail-drawer {

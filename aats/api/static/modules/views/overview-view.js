@@ -14,6 +14,7 @@ export function renderOverviewView(data) {
   const latestFill = data.executionLatest?.latest_fill || null;
   const reconciliation = data.reconciliationLatest?.reconciliation || null;
   const metrics = data.metrics || {};
+  const uiHints = data.uiHints || {};
 
   const currentPosition = trackedPosition(portfolio, runtime.symbols?.[0] || mode.default_symbol);
 
@@ -22,13 +23,13 @@ export function renderOverviewView(data) {
       <div class="span-8">
         ${surfaceCard({
           title: "当前交易结论",
-          kicker: "首要关注",
-          copy: "先看系统是否允许交易，再看最新策略想做什么，以及这一轮决策是否真的需要下单。",
+          kicker: "先看这里",
+          copy: "先确认现在能不能交易，再看这一轮策略到底是想开仓、平仓，还是继续观望。",
           classes: "hero-card",
           actions: latestDecision.decision_id ? actionButton("查看决策详情", "inspect-decision", latestDecision.decision_id) : "",
           content: `
             ${callout({
-              title: latestDecision.position_target?.position_intent ? `最新动作：${readableState(latestDecision.position_target.position_intent)}` : "当前没有新的交易动作",
+              title: latestDecision.position_target?.position_intent ? `最新动作：${overviewIntentLabel(latestDecision)}` : "当前没有新的交易动作",
               copy: decisionNarrative(latestDecision, latestOrder),
               pills: [
                 pill(`系统：${readableState(health.runtime_state || health.overall_status)}`, toneForRuntimeState(health.runtime_state || health.overall_status)),
@@ -39,17 +40,17 @@ export function renderOverviewView(data) {
             ${statGrid([
               { label: "最新决策时间", value: formatMaybeTimestamp(latestDecision.decision_time || latestDecision.decision_context?.as_of_ts), meta: formatRelativeAge(latestDecision.decision_time || latestDecision.decision_context?.as_of_ts) },
               { label: "目标仓位变化", value: formatSigned(latestDecision.position_target?.delta_position_qty), meta: readableState(latestDecision.position_target?.target_exposure_side) },
-              { label: "策略放行", value: booleanWord(latestDecision.policy_decision?.execution_allowed), meta: listOrDash(latestDecision.policy_decision?.blocker_reasons) },
-              { label: "风控结果", value: booleanWord(latestDecision.risk_decision?.approved), meta: listOrDash(latestDecision.risk_decision?.rejection_reasons) },
+              { label: "策略门禁", value: booleanWord(latestDecision.policy_decision?.execution_allowed), meta: listOrDash(latestDecision.policy_decision?.blocker_reasons) },
+              { label: "风控结论", value: booleanWord(latestDecision.risk_decision?.approved), meta: listOrDash(latestDecision.risk_decision?.rejection_reasons) },
             ])}
           `,
         })}
       </div>
       <div class="span-4">
         ${surfaceCard({
-          title: "当前风险与阻断",
+          title: "当前为什么不能交易",
           kicker: "人工介入提示",
-          copy: blockers.length ? "下面这些原因正在影响交易资格。" : "当前没有阻断项，系统没有被明显卡住。",
+          copy: blockers.length ? "下面这些原因正在阻止系统继续自动交易。" : "当前没有明确阻断项，系统没有被硬性卡住。",
           content: blockers.length
             ? timeline(
                 blockers.map((item) => ({
@@ -62,8 +63,8 @@ export function renderOverviewView(data) {
               )
             : kvList([
                 ["系统整体状态", readableState(health.overall_status), readableState(health.runtime_state)],
-                ["是否已暂停", booleanWord(health.halted), "人工 kill switch"],
-                ["是否允许恢复交易", booleanWord(recovery.resume_eligible), listOrDash(recovery.resume_blocked_reasons)],
+                ["是否已暂停", booleanWord(health.halted), "手动 kill switch"],
+                ["能否恢复自动交易", booleanWord(recovery.resume_eligible), uiHints.recoveryReasonsText || listOrDash(recovery.resume_blocked_reasons)],
               ]),
         })}
       </div>
@@ -72,7 +73,7 @@ export function renderOverviewView(data) {
         ${surfaceCard({
           title: "账户权益与收益",
           kicker: "资金概览",
-          copy: "用更接近交易者的语言查看权益、收益和当前主仓位。",
+          copy: "这里看账户净值、已实现收益、浮动盈亏和当前敞口。",
           content: statGrid([
             { label: "总权益", value: formatNumber(portfolio.total_equity), meta: "账户当前总价值" },
             { label: "已实现收益", value: formatSigned(portfolio.realized_pnl), meta: "已经落袋的收益" },
@@ -85,12 +86,12 @@ export function renderOverviewView(data) {
         ${surfaceCard({
           title: "当前持仓",
           kicker: "仓位状态",
-          copy: currentPosition ? "这里显示正在跟踪的主仓位。" : "当前没有检测到主仓位。",
+          copy: currentPosition ? "这里显示当前主跟踪仓位。" : "当前没有检测到持仓。",
           content: kvList([
             ["跟踪标的", trackedSymbol(runtime, mode), "当前主交易标的"],
-            ["仓位方向", readableState(currentPosition?.exposure_side || "flat"), currentPosition ? "来自最新 portfolio snapshot" : "暂无持仓"],
+            ["仓位方向", readableState(currentPosition?.exposure_side || "flat"), currentPosition ? "来自最新组合快照" : "当前空仓"],
             ["仓位数量", formatSigned(currentPosition?.position_qty), currentPosition ? `目标杠杆 ${formatNumber(currentPosition?.target_leverage)}` : ""],
-            ["平均开仓价", formatNumber(currentPosition?.average_entry_price), currentPosition ? `最新价格 ${formatNumber(currentPosition?.mark_price)}` : ""],
+            ["持仓均价", formatNumber(currentPosition?.average_entry_price), currentPosition ? `最新标记价 ${formatNumber(currentPosition?.mark_price)}` : ""],
           ]),
         })}
       </div>
@@ -98,12 +99,12 @@ export function renderOverviewView(data) {
         ${surfaceCard({
           title: "恢复与基线",
           kicker: "可信状态",
-          copy: "当系统进入恢复、复核或重建基线流程时，应在这里快速看懂当前阶段。",
+          copy: "当系统进入恢复、复核或重建基线流程时，这里告诉你现在卡在哪一步。",
           content: kvList([
-            ["恢复状态", readableState(recovery.recovery_state), recovery.safe_to_trade ? "已满足继续交易条件" : "当前仍受限制"],
-            ["是否需要人工确认", booleanWord(recovery.review_required), listOrDash(recovery.resume_blocked_reasons)],
+            ["恢复状态", readableState(recovery.recovery_state), recovery.safe_to_trade ? "已满足继续自动交易条件" : "当前仍受限制"],
+            ["是否需要人工确认", booleanWord(recovery.review_required), uiHints.recoveryReasonsText || listOrDash(recovery.resume_blocked_reasons)],
             ["基线状态", readableState(runtime.baseline_takeover?.status), readableState(runtime.baseline_takeover?.baseline_kind)],
-            ["最近重建基线", formatMaybeTimestamp(runtime.baseline_takeover?.last_rebaseline_at), runtime.baseline_takeover?.last_rebaseline_event_ref || "-"],
+            ["最近确认基线", formatMaybeTimestamp(runtime.baseline_takeover?.last_rebaseline_at), runtime.baseline_takeover?.last_rebaseline_event_ref || "-"],
           ]),
         })}
       </div>
@@ -112,12 +113,12 @@ export function renderOverviewView(data) {
         ${surfaceCard({
           title: "最新执行进展",
           kicker: "订单与成交",
-          copy: "快速查看最新订单、最新成交和对账状态，不必先切到执行页。",
+          copy: "快速看最近一笔委托、最近一笔成交和最新对账结论。",
           actions: latestOrder?.client_order_id ? actionButton("查看订单详情", "inspect-order", latestOrder.client_order_id) : "",
           content: kvList([
-            ["最新订单状态", readableState(latestOrder?.status || "unknown"), latestOrder?.client_order_id || "暂无订单"],
+            ["最新委托状态", readableState(latestOrder?.status || "unknown"), latestOrder?.client_order_id || "暂无委托"],
             ["最新成交", latestFill ? `${formatNumber(latestFill.fill_qty)} @ ${formatNumber(latestFill.fill_price)}` : "-", latestFill?.fill_id || "暂无成交"],
-            ["成交写入时间", formatMaybeTimestamp(latestFill?.ingestion_timestamp), formatRelativeAge(latestFill?.ingestion_timestamp)],
+            ["成交落库时间", formatMaybeTimestamp(latestFill?.ingestion_timestamp), formatRelativeAge(latestFill?.ingestion_timestamp)],
             ["最新对账结果", readableState(reconciliation?.severity || "-"), reconciliation?.reconciliation_id || "-"],
           ]),
         })}
@@ -126,7 +127,7 @@ export function renderOverviewView(data) {
         ${surfaceCard({
           title: "最近运行时间线",
           kicker: "时间顺序",
-          copy: "用时间线把最新决策、最新订单、最新成交和最新对账串起来。",
+          copy: "按时间把最新决策、委托、成交和对账串起来，方便快速定位问题。",
           content: timeline(buildTimeline({ latestDecision, latestOrder, latestFill, reconciliation }), "最近没有新的运行活动。"),
         })}
       </div>
@@ -134,15 +135,15 @@ export function renderOverviewView(data) {
       <div class="span-12">
         ${surfaceCard({
           title: "核心运行指标",
-          kicker: "运行密度",
-          copy: "这里只保留真正能帮助判断系统是否在稳定工作的指标。",
+          kicker: "关键计数",
+          copy: "这里只保留最能说明系统是否在稳定工作的指标。",
           content: statGrid([
-            { label: "决策轮次", value: formatNumber(metrics.decision_cycle_count), meta: "系统累计完成的决策轮次" },
-            { label: "订单意图数", value: formatNumber(metrics.order_intent_count), meta: "真正走到执行规划阶段的次数" },
-            { label: "当前活动订单数", value: formatNumber(metrics.current_open_order_count), meta: "仍在活动生命周期里的订单数" },
-            { label: "成交数", value: formatNumber(metrics.fill_count), meta: "已经确认写入的 fill 数量" },
-            { label: "拒单数", value: formatNumber(metrics.rejection_count), meta: "被策略、风控或交易所拒绝的次数" },
-            { label: "对账异常数", value: formatNumber(metrics.reconciliation_mismatch_count), meta: "当前仍未清理的对账异常" },
+            { label: "策略轮次", value: formatNumber(metrics.decision_cycle_count), meta: "系统累计完成的策略判断次数" },
+            { label: "拟下单次数", value: formatNumber(metrics.order_intent_count), meta: "真正进入执行规划的次数" },
+            { label: "活动委托数", value: formatNumber(metrics.current_open_order_count), meta: "仍在活动生命周期里的委托数" },
+            { label: "累计成交笔数", value: formatNumber(metrics.fill_count), meta: "已经确认落库的成交笔数" },
+            { label: "拒单次数", value: formatNumber(metrics.rejection_count), meta: "被策略、风控或交易所拒绝的次数" },
+            { label: "异常对账数", value: formatNumber(metrics.reconciliation_mismatch_count), meta: "当前尚未清理的对账异常" },
           ]),
         })}
       </div>
@@ -156,7 +157,7 @@ function decisionNarrative(latestDecision, latestOrder) {
   if (!latestDecision.decision_id) {
     return "系统最近没有新的策略决策，因此当前更适合先关注账户状态和对账状态。";
   }
-  return `${decisionTime}，系统针对 ${latestDecision.decision_context?.symbol || "当前标的"} 形成了 ${readableState(target.position_intent || "hold")} 的判断。` +
+  return `${decisionTime}，系统针对 ${latestDecision.decision_context?.symbol || "当前标的"} 形成了 ${overviewIntentLabel(latestDecision)} 的判断。` +
     `${latestDecision.policy_decision?.execution_allowed ? "策略层允许继续执行，" : "策略层没有放行，"}` +
     `${latestDecision.risk_decision?.approved ? "风控层也已通过。" : "风控层仍未通过。"}${latestOrder ? ` 最近一笔订单状态为 ${readableState(latestOrder.status)}。` : ""}`;
 }
@@ -176,7 +177,7 @@ function buildTimeline({ latestDecision, latestOrder, latestFill, reconciliation
       ? {
           title: "最新决策",
           subtitle: latestDecision.decision_id,
-          detail: `${readableState(latestDecision.position_target?.position_intent || "hold")} | ${latestDecision.decision_context?.symbol || "-"}`,
+          detail: `${overviewIntentLabel(latestDecision)} | ${latestDecision.decision_context?.symbol || "-"}`,
           timestamp: formatMaybeTimestamp(latestDecision.decision_time || latestDecision.decision_context?.as_of_ts),
           pill: pill("策略", "info"),
         }
@@ -209,4 +210,16 @@ function buildTimeline({ latestDecision, latestOrder, latestFill, reconciliation
         }
       : null,
   ].filter(Boolean);
+}
+
+function overviewIntentLabel(detail) {
+  const target = detail.position_target || {};
+  const rawIntent = String(target.position_intent || "hold").toLowerCase();
+  const currentQty = Number(target.current_position_qty ?? detail.decision_context?.current_position_qty ?? 0);
+  const targetQty = Number(target.target_position_qty ?? 0);
+  const openOrders = Array.isArray(detail.decision_context?.current_open_orders) ? detail.decision_context.current_open_orders : [];
+  if (rawIntent === "hold" && currentQty === 0 && targetQty === 0 && openOrders.length === 0) {
+    return "继续观望";
+  }
+  return readableState(rawIntent);
 }

@@ -80,8 +80,17 @@ async def system_blockers(request: Request) -> dict[str, Any]:
         "blocked": bool(blockers),
         "halted": _runtime(request).kill_switch.halted,
         "blockers": blockers,
-        "recent_history": _query(request).blocker_history(limit=20)["history"],
+        "recent_history": _query(request).blocker_history(limit=20, offset=0)["history"],
     }
+
+
+@router.get("/system/blocker-history")
+async def system_blocker_history(
+    request: Request,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0, le=5000),
+) -> dict[str, Any]:
+    return _query(request).blocker_history(limit=limit, offset=offset)
 
 
 @router.get("/system/metrics")
@@ -175,8 +184,12 @@ async def latest_decision(request: Request) -> dict[str, Any]:
 
 
 @router.get("/decision/recent")
-async def recent_decisions(request: Request, limit: int = Query(default=20, ge=1, le=100)) -> dict[str, Any]:
-    return {"decisions": _query(request).recent_decisions(limit=limit)}
+async def recent_decisions(
+    request: Request,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0, le=5000),
+) -> dict[str, Any]:
+    return _query(request).recent_decisions(limit=limit, offset=offset)
 
 
 @router.get("/decision/{decision_id}")
@@ -194,8 +207,12 @@ async def latest_risk(request: Request) -> dict[str, Any]:
 
 
 @router.get("/risk/recent")
-async def recent_risk(request: Request, limit: int = Query(default=20, ge=1, le=100)) -> dict[str, Any]:
-    return _query(request).recent_risks(limit=limit)
+async def recent_risk(
+    request: Request,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0, le=5000),
+) -> dict[str, Any]:
+    return _query(request).recent_risks(limit=limit, offset=offset)
 
 
 @router.get("/policy/latest")
@@ -205,8 +222,12 @@ async def latest_policy(request: Request) -> dict[str, Any]:
 
 
 @router.get("/policy/recent")
-async def recent_policy(request: Request, limit: int = Query(default=20, ge=1, le=100)) -> dict[str, Any]:
-    return _query(request).recent_policies(limit=limit)
+async def recent_policy(
+    request: Request,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0, le=5000),
+) -> dict[str, Any]:
+    return _query(request).recent_policies(limit=limit, offset=offset)
 
 
 @router.get("/portfolio")
@@ -257,8 +278,12 @@ async def latest_order(request: Request) -> dict[str, Any]:
 
 
 @router.get("/orders/recent")
-async def recent_orders(request: Request, limit: int = Query(default=50, ge=1, le=200)) -> dict[str, Any]:
-    return _query(request).orders_recent(limit=limit)
+async def recent_orders(
+    request: Request,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0, le=5000),
+) -> dict[str, Any]:
+    return _query(request).orders_recent(limit=limit, offset=offset)
 
 
 @router.get("/orders/partial")
@@ -344,8 +369,12 @@ async def latest_fill(request: Request) -> dict[str, Any]:
 
 
 @router.get("/fills/recent")
-async def recent_fills(request: Request, limit: int = Query(default=50, ge=1, le=200)) -> dict[str, Any]:
-    return _query(request).fills_recent(limit=limit)
+async def recent_fills(
+    request: Request,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0, le=5000),
+) -> dict[str, Any]:
+    return _query(request).fills_recent(limit=limit, offset=offset)
 
 
 @router.get("/fills/{fill_id}")
@@ -373,8 +402,12 @@ async def latest_reconciliation(request: Request) -> dict[str, Any]:
 
 
 @router.get("/reconciliation/recent")
-async def recent_reconciliation(request: Request, limit: int = Query(default=20, ge=1, le=100)) -> dict[str, Any]:
-    return _query(request).reconciliation_recent(limit=limit)
+async def recent_reconciliation(
+    request: Request,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0, le=5000),
+) -> dict[str, Any]:
+    return _query(request).reconciliation_recent(limit=limit, offset=offset)
 
 
 @router.get("/reconciliation/mismatches")
@@ -424,8 +457,12 @@ async def replay_status(request: Request) -> dict[str, Any]:
 
 
 @router.get("/replay/recent-validations")
-async def replay_recent_validations(request: Request) -> dict[str, Any]:
-    return _query(request).replay_recent_validations()
+async def replay_recent_validations(
+    request: Request,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0, le=5000),
+) -> dict[str, Any]:
+    return _query(request).replay_recent_validations(limit=limit, offset=offset)
 
 
 @router.post("/replay/validate/{decision_id}")

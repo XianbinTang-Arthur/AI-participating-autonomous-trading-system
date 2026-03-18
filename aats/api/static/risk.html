@@ -3,20 +3,19 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>AATS 自动交易监控台 | 交易总览</title>
+  <title>AATS 自动交易监控台 | 风险与恢复</title>
   <link rel="stylesheet" href="/ui/app.css">
 </head>
-<body data-view="overview">
+<body data-view="risk">
   <div class="console-shell">
     <header class="masthead">
       <div class="masthead-copy">
         <p class="eyebrow">AI 参与式自主交易系统</p>
-        <h1>自动交易监控台</h1>
+        <h1>风险与恢复</h1>
         <p class="lead">
-          首页只看最关键的五件事：现在能不能继续自动交易、策略到底在看多还是观望、当前有没有在途委托、账户权益怎么变化，以及如果系统停下来了你该先处理什么。
+          这一页专门回答“为什么系统还可以继续自动交易”或者“为什么必须暂停”，把风险阻断、对账、恢复、回放和账户快照状态单独集中展示。
         </p>
       </div>
-
       <div class="masthead-side">
         <section class="session-panel">
           <div>
@@ -29,7 +28,6 @@
             <button id="logoutButton" class="ghost-button">退出登录</button>
           </div>
         </section>
-
         <section class="command-panel" aria-label="人工控制">
           <div class="command-head">
             <div>
@@ -41,7 +39,6 @@
               <span>每 15 秒刷新一次</span>
             </label>
           </div>
-
           <div class="command-grid">
             <button id="refreshButton" class="primary-button">刷新数据</button>
             <button id="reconcileButton" class="secondary-button">立即对账</button>
@@ -49,7 +46,6 @@
             <button id="resumeButton" class="ghost-button">恢复自动交易</button>
             <button id="haltButton" class="danger-button">暂停自动交易</button>
           </div>
-
           <p id="actionPermissionHint" class="meta-copy">正在确认当前账号权限…</p>
           <p id="lastRefreshLabel" class="meta-copy">尚未刷新</p>
         </section>
@@ -60,23 +56,33 @@
     <section id="bannerContainer" class="banner-stack" aria-live="polite"></section>
 
     <nav class="workspace-nav" aria-label="主导航">
-      <a class="workspace-link is-active" href="/ui">交易总览</a>
+      <a class="workspace-link" href="/ui">交易总览</a>
       <a class="workspace-link" href="/ui/strategy">策略判断</a>
       <a class="workspace-link" href="/ui/execution">委托与成交</a>
-      <a class="workspace-link" href="/ui/risk">风险与恢复</a>
+      <a class="workspace-link is-active" href="/ui/risk">风险与恢复</a>
       <a class="workspace-link" href="/ui/settings">账户与权限</a>
     </nav>
 
     <main class="workspace">
-      <section class="workspace-view is-active" data-view="overview">
+      <section class="workspace-view is-active" data-view="risk">
         <div class="page-head">
           <div>
-            <p class="panel-kicker">首屏总览</p>
-            <h2>现在系统在做什么</h2>
+            <p class="panel-kicker">风险、对账、恢复</p>
+            <h2>系统现在为什么能交易或不能交易</h2>
           </div>
-          <p class="page-copy">先看当前能否交易，再看策略结论、委托进度、仓位、收益和风险阻断。</p>
+          <p class="page-copy">关注阻断原因、对账结论、恢复状态、账户快照和是否需要人工确认。</p>
         </div>
-        <div id="overviewContent" class="view-layout"></div>
+        <div id="riskContent" class="view-layout panel-grid">
+          <div id="riskHero" class="span-12"></div>
+          <div id="riskAccount" class="span-4"></div>
+          <div id="riskReconciliation" class="span-4"></div>
+          <div id="riskRecovery" class="span-4"></div>
+          <div id="riskBlockers" class="span-6"></div>
+          <div id="riskMetrics" class="span-6"></div>
+          <div id="riskReconciliationHistory" class="span-6"></div>
+          <div id="riskBlockerHistory" class="span-6"></div>
+          <div id="riskReplayHistory" class="span-12"></div>
+        </div>
       </section>
     </main>
   </div>

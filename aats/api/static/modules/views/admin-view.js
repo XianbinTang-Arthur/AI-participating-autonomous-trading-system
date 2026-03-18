@@ -17,14 +17,14 @@ export function renderAdminView(data) {
     <div class="panel-grid">
       <div class="span-5">
         ${surfaceCard({
-          title: "认证与会话",
+          title: "登录与权限",
           kicker: "权限模型",
-          copy: "把当前登录方式、账号来源和权限边界说清楚，避免操作员误判自己是否有写权限。",
+          copy: "把当前登录方式、账号来源和权限边界说清楚，避免误判自己是否有人工操作权限。",
           content: `
             ${callout({
-              title: providers.auth_enabled ? "当前已启用操作员认证" : "当前未启用操作员认证",
+              title: providers.auth_enabled ? "当前已启用控制台认证" : "当前未启用控制台认证",
               copy: providers.auth_enabled
-                ? "浏览器会话、数据库用户和兼容 API Key 都会影响控制面的可操作性。"
+                ? "浏览器会话、数据库用户和兼容 API Key 都会影响控制台的可操作范围。"
                 : "当前是本地开放模式，页面可以直接访问，但高风险操作仍应谨慎。",
               pills: [
                 pill(`会话登录：${booleanWord(providers.session_enabled)}`, providers.session_enabled ? "positive" : "outline"),
@@ -44,27 +44,27 @@ export function renderAdminView(data) {
 
       <div class="span-7">
         ${surfaceCard({
-          title: "运行配置概览",
-          kicker: "当前运行姿态",
-          copy: "把当前真正生效的运行配置讲清楚，避免把环境变量和运行时状态混在一起理解。",
+          title: "运行配置摘要",
+          kicker: "当前运行档位",
+          copy: "把当前真正生效的运行配置讲清楚，避免把环境变量、运行时状态和人工操作记录混在一起理解。",
           content: runtimeProfilesError
             ? callout({
-                title: "当前不能读取运行配置详情",
+                title: "当前无法读取运行配置详情",
                 copy: runtimeProfilesError,
                 pills: [pill("需要管理员权限", "warning")],
               })
             : `
                 ${statGrid([
-                  { label: "配置来源", value: readableState(runtimeProfiles.profile_source || "env_fallback"), meta: runtimeProfiles.management_enabled ? "页面内可管理" : "当前由环境文件控制" },
+                  { label: "配置来源", value: readableState(runtimeProfiles.profile_source || "env_fallback"), meta: runtimeProfiles.management_enabled ? "可在页面内管理" : "当前由环境文件控制" },
                   { label: "主交易标的", value: runtimePayload.default_symbol || "-", meta: listOrDash(runtimePayload.allowed_symbols) },
                   { label: "产品类型", value: readableState(runtimePayload.trading_product_type || "-"), meta: readableState(runtimePayload.margin_mode || "-") },
                   { label: "默认下单量", value: formatNumber(runtimePayload.default_order_qty), meta: `最大名义 ${formatNumber(runtimePayload.max_notional_per_symbol)}` },
                 ])}
                 ${kvList([
                   ["最大仓位", formatNumber(runtimePayload.max_abs_position_qty), "单品种最大绝对仓位"],
-                  ["活动订单上限", formatNumber(runtimePayload.max_open_orders), "同一时刻允许的最大活动订单数"],
+                  ["活动委托上限", formatNumber(runtimePayload.max_open_orders), "同一时刻允许的最大活动委托数"],
                   ["默认杠杆", formatNumber(runtimePayload.default_target_leverage), `最大杠杆 ${formatNumber(runtimePayload.max_target_leverage)}`],
-                  ["策略偏置", booleanWord(runtimePayload.strategy_short_bias_enabled), runtimePayload.strategy_dynamic_leverage_enabled ? "启用动态杠杆" : "未启用动态杠杆"],
+                  ["策略偏置", booleanWord(runtimePayload.strategy_short_bias_enabled), runtimePayload.strategy_dynamic_leverage_enabled ? "已启用动态杠杆" : "未启用动态杠杆"],
                 ])}
               `,
         })}
@@ -72,11 +72,11 @@ export function renderAdminView(data) {
 
       <div class="span-12">
         ${surfaceCard({
-          title: "操作员账户",
+          title: "控制台账号",
           kicker: "账户管理",
           copy: canAdmin
-            ? "管理员可以在这里创建、停用、改角色、重置密码或删除操作员账户。"
-            : "当前会话没有管理员权限，因此只能查看账户概览，不能改动。",
+            ? "管理员可以在这里创建、停用、改角色、重置密码或删除控制台账号。"
+            : "当前账号没有管理员权限，因此只能查看账号概览，不能改动。",
           content: `
             ${operatorUsersError ? `<div class="notice-card tone-warning">${operatorUsersError}</div>` : ""}
             ${renderCreateForm(canAdmin)}
@@ -104,8 +104,8 @@ function renderCreateForm(canAdmin) {
     <form id="operatorCreateForm" class="field-grid">
       <div class="panel-head">
         <div>
-          <h3>创建新账户</h3>
-          <p class="meta-copy">用于增加新的只读、操作员或管理员账号。</p>
+          <h3>创建新账号</h3>
+          <p class="meta-copy">用于增加新的只读、操作员或管理员控制台账号。</p>
         </div>
         ${canAdmin ? pill("可操作", "positive") : pill("仅管理员可操作", "warning")}
       </div>
@@ -135,7 +135,7 @@ function renderCreateForm(canAdmin) {
         </div>
       </div>
       <div class="stack-actions">
-        <button id="operatorCreateButton" class="primary-button" type="submit" ${canAdmin ? "" : "disabled"}>创建账户</button>
+        <button id="operatorCreateButton" class="primary-button" type="submit" ${canAdmin ? "" : "disabled"}>创建账号</button>
       </div>
     </form>
   `;

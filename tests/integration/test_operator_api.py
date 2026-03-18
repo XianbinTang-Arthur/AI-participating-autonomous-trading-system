@@ -71,6 +71,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             mode = client.get("/system/mode")
             runtime_response = client.get("/system/runtime")
             blockers = client.get("/system/blockers")
+            blocker_history = client.get("/system/blocker-history?limit=5")
             metrics = client.get("/system/metrics")
 
         self.assertEqual(health.status_code, 200)
@@ -83,6 +84,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         mode_payload = mode.json()
         runtime_payload = runtime_response.json()
         blockers_payload = blockers.json()
+        blocker_history_payload = blocker_history.json()
         metrics_payload = metrics.json()
 
         self.assertIn("overall_status", health_payload)
@@ -113,6 +115,9 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertIn("exposure_summary", metrics_payload)
         self.assertIsInstance(blockers_payload["blockers"], list)
         self.assertTrue(any(item["submit_only"] for item in blockers_payload["blockers"]))
+        self.assertIn("history", blocker_history_payload)
+        self.assertIn("total_available", blocker_history_payload)
+        self.assertIn("has_more", blocker_history_payload)
         self.assertIn(health_payload["runtime_state"], {"healthy", "degraded", "blocked", "halted"})
 
     async def test_operator_visibility_endpoints_cover_decision_execution_reconciliation_and_audit(self) -> None:
@@ -124,7 +129,9 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             recent_decisions = client.get("/decision/recent").json()
             decision_detail = client.get(f"/decision/{decision_id}").json()
             risk_latest = client.get("/risk/latest").json()
+            risk_recent = client.get("/risk/recent?limit=2").json()
             policy_latest = client.get("/policy/latest").json()
+            policy_recent = client.get("/policy/recent?limit=2").json()
             portfolio_latest = client.get("/portfolio/latest").json()
             portfolio_history = client.get("/portfolio/history?limit=5").json()
             balances = client.get("/balances").json()
@@ -146,24 +153,37 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             replay_status_before = client.get("/replay/status").json()
             replay_validation = client.post(f"/replay/validate/{decision_id}").json()
             replay_status_after = client.get("/replay/status").json()
+            replay_recent = client.get("/replay/recent-validations?limit=5").json()
 
         self.assertIsNotNone(decision_id)
         self.assertEqual(decision_detail["decision_id"], decision_id)
         self.assertTrue(recent_decisions["decisions"])
+        self.assertIn("total_available", recent_decisions)
+        self.assertIn("has_more", recent_decisions)
         self.assertEqual(risk_latest["decision_id"], decision_id)
+        self.assertIn("total_available", risk_recent)
+        self.assertIn("has_more", risk_recent)
         self.assertEqual(policy_latest["decision_id"], decision_id)
+        self.assertIn("total_available", policy_recent)
+        self.assertIn("has_more", policy_recent)
         self.assertIsNotNone(portfolio_latest["portfolio"])
         self.assertTrue(portfolio_history["snapshots"])
         self.assertIn("local_balances", balances)
         self.assertIn("local_positions", positions)
         self.assertTrue(orders_recent["orders"])
+        self.assertIn("total_available", orders_recent)
+        self.assertIn("has_more", orders_recent)
         self.assertEqual(order_detail["order"]["client_order_id"], latest_order_id)
         self.assertTrue(fills_recent["fills"])
+        self.assertIn("total_available", fills_recent)
+        self.assertIn("has_more", fills_recent)
         self.assertEqual(fill_detail["fill"]["fill_id"], latest_fill_id)
         self.assertIsNotNone(execution_latest["latest_order"])
         self.assertIsNotNone(reconciliation_latest["reconciliation"])
         self.assertIn("mismatch_categories", reconciliation_latest["mismatch_summary"])
         self.assertTrue(reconciliation_recent["reconciliations"])
+        self.assertIn("total_available", reconciliation_recent)
+        self.assertIn("has_more", reconciliation_recent)
         self.assertIsInstance(reconciliation_mismatches["mismatches"], list)
         self.assertEqual(
             reconciliation_detail["reconciliation"]["reconciliation_id"],
@@ -174,6 +194,9 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(replay_status_before["last_validation"])
         self.assertEqual(replay_validation["decision_id"], decision_id)
         self.assertTrue(replay_status_after["recent_validations"])
+        self.assertTrue(replay_recent["validations"])
+        self.assertIn("total_available", replay_recent)
+        self.assertIn("has_more", replay_recent)
 
     async def test_halt_resume_and_stale_market_blocker_are_visible(self) -> None:
         runtime = await self._runtime()
@@ -965,9 +988,20 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
 
         with TestClient(app) as client:
             recent = client.get("/orders/recent?limit=1")
+            full_list = client.get("/orders/recent?limit=200").json()
+            order_ids = [item["client_order_id"] for item in full_list["orders"]]
+            old_index = order_ids.index("order_old_recent")
+            next_page = client.get(f"/orders/recent?limit=1&offset={old_index}")
 
         self.assertEqual(recent.status_code, 200)
         self.assertEqual(recent.json()["orders"][0]["client_order_id"], "order_new_recent")
+        self.assertEqual(recent.json()["offset"], 0)
+        self.assertEqual(recent.json()["limit"], 1)
+        self.assertTrue(recent.json()["has_more"])
+        self.assertLess(order_ids.index("order_new_recent"), order_ids.index("order_old_recent"))
+        self.assertEqual(next_page.status_code, 200)
+        self.assertEqual(next_page.json()["orders"][0]["client_order_id"], "order_old_recent")
+        self.assertEqual(next_page.json()["offset"], old_index)
 
     async def test_execution_latest_uses_normalized_recovery_view(self) -> None:
         runtime = await self._runtime()
