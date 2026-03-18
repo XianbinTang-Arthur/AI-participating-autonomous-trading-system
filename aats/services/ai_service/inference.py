@@ -14,11 +14,12 @@ from aats.schemas.common import utc_now
 from aats.schemas.decision import AIMarketAssessment, BaselineAssessment, DecisionContext
 from aats.schemas.features import FeatureSnapshot
 from aats.services.ai_service.evaluator import AIEvaluationTracker
+from aats.services.portfolio_service.positions import PortfolioState
 from aats.services.ai_service.openai_provider import OpenAIProvider
 from aats.services.ai_service.provider import AIProvider, AIProviderError, AIProviderTimeoutError
 from aats.services.ai_service.prompt_builder import PromptBuilder
 from aats.services.ai_service.validator import AIOutputValidationError, AssessmentValidator
-from aats.storage.base import EventStore
+from aats.storage.base import EventStore, ExecutionRepository
 
 
 class AIInferenceService:
@@ -30,12 +31,14 @@ class AIInferenceService:
         prompt_builder: PromptBuilder,
         validator: AssessmentValidator,
         bus: EventBus | None = None,
+        execution_repo: ExecutionRepository | None = None,
         provider: AIProvider | None = None,
         evaluator: AIEvaluationTracker | None = None,
     ) -> None:
         self.settings = settings
         self.event_store = event_store
         self.bus = bus
+        self.execution_repo = execution_repo
         self.prompt_builder = prompt_builder
         self.validator = validator
         self.provider = provider or self._default_provider()
@@ -232,6 +235,7 @@ class AIInferenceService:
         if existing is not None:
             return existing, False
         first = shadow_rows[0]
+        fills_by_decision = self._decision_fills(decision_ids)
         override_count = sum(1 for item in shadow_rows if item.would_override_baseline)
         agreement_count = sum(1 for item in shadow_rows if item.shadow_action_type == "same_as_baseline")
         disagreement_count = len(shadow_rows) - agreement_count
@@ -240,8 +244,8 @@ class AIInferenceService:
             assessment = self.latest_shadow_assessment(item.decision_id)
             if assessment is not None and assessment.fallback_used:
                 fallback_count += 1
-        baseline_replay = self._replay_shadow_path(shadow_rows=shadow_rows, use_shadow_targets=False)
-        shadow_replay = self._replay_shadow_path(shadow_rows=shadow_rows, use_shadow_targets=True)
+        baseline_replay = self._replay_baseline_path(shadow_rows=shadow_rows, fills_by_decision=fills_by_decision)
+        shadow_replay = self._replay_shadow_path(shadow_rows=shadow_rows, fills_by_decision=fills_by_decision)
         evaluation = AIShadowEvaluation(
             window_start=shadow_rows[0].created_at,
             window_end=shadow_rows[-1].created_at,
@@ -271,6 +275,9 @@ class AIInferenceService:
                 "agreement_rate": round(agreement_count / len(shadow_rows), 6),
                 "baseline_final_position_qty": baseline_replay["final_position_qty"],
                 "shadow_final_position_qty": shadow_replay["final_position_qty"],
+                "baseline_fill_backed_decision_count": baseline_replay["fill_backed_decision_count"],
+                "shadow_fill_backed_decision_count": shadow_replay["fill_backed_decision_count"],
+                "shadow_synthetic_decision_count": shadow_replay["synthetic_decision_count"],
             },
         )
         self.evaluator.record_shadow_evaluation(evaluation)
@@ -496,7 +503,173 @@ class AIInferenceService:
             )
         )
 
+    def _decision_fills(self, decision_ids: list[str]) -> dict[str, list]:
+        if self.execution_repo is None or not decision_ids:
+            return {}
+        allowed = set(decision_ids)
+        rows = [
+            fill
+            for fill in self.execution_repo.fills()
+            if fill.decision_id in allowed
+        ]
+        rows.sort(key=lambda item: (item.ingestion_timestamp, item.fill_id))
+        by_decision: dict[str, list] = {}
+        for fill in rows:
+            by_decision.setdefault(fill.decision_id, []).append(fill)
+        return by_decision
+
+    def _replay_baseline_path(
+        self,
+        *,
+        shadow_rows: list,
+        fills_by_decision: dict[str, list],
+    ) -> dict[str, float]:
+        if not fills_by_decision:
+            return self._replay_target_path(shadow_rows=shadow_rows, use_shadow_targets=False)
+
+        current_qty = 0.0
+        avg_entry_price = 0.0
+        realized_gross_pnl = 0.0
+        fee_total = 0.0
+        trade_count = 0
+        low_edge_trade_count = 0
+        last_price = 0.0
+        fill_backed_decision_count = 0
+
+        for row in shadow_rows:
+            decision_fills = fills_by_decision.get(row.decision_id, [])
+            brief = self.latest_brief(row.decision_id)
+            if not decision_fills:
+                if brief is not None and brief.last_price > 0.0:
+                    last_price = brief.last_price
+                continue
+            fill_backed_decision_count += 1
+            trade_count += 1
+            decision_realized = 0.0
+            decision_fee_total = 0.0
+            for fill in decision_fills:
+                last_price = fill.fill_price
+                signed_qty = fill.fill_qty if fill.side == "buy" else -fill.fill_qty
+                realized_delta, current_qty, avg_entry_price = self._apply_signed_execution(
+                    current_qty=current_qty,
+                    avg_entry_price=avg_entry_price,
+                    signed_qty=signed_qty,
+                    execution_price=fill.fill_price,
+                )
+                decision_realized += realized_delta
+                decision_fee_total += PortfolioState.fee_cost_in_quote(fill)
+            realized_gross_pnl += decision_realized
+            fee_total += decision_fee_total
+            if abs(decision_realized) <= decision_fee_total * 1.25:
+                low_edge_trade_count += 1
+            if brief is not None and brief.last_price > 0.0:
+                last_price = brief.last_price
+
+        unrealized_pnl = current_qty * (last_price - avg_entry_price) if last_price > 0.0 else 0.0
+        gross_pnl = realized_gross_pnl + unrealized_pnl
+        net_pnl = gross_pnl - fee_total
+        fee_ratio = abs(fee_total / gross_pnl) if abs(gross_pnl) > 1e-12 else None
+        churn_ratio = (low_edge_trade_count / trade_count) if trade_count else 0.0
+        return {
+            "trade_count": float(trade_count),
+            "gross_pnl": gross_pnl,
+            "net_pnl": net_pnl,
+            "fee_total": fee_total,
+            "fee_ratio": fee_ratio,
+            "churn_ratio": churn_ratio,
+            "final_position_qty": current_qty,
+            "fill_backed_decision_count": float(fill_backed_decision_count),
+            "synthetic_decision_count": 0.0,
+        }
+
     def _replay_shadow_path(
+        self,
+        *,
+        shadow_rows: list,
+        fills_by_decision: dict[str, list],
+    ) -> dict[str, float]:
+        if not fills_by_decision:
+            return self._replay_target_path(shadow_rows=shadow_rows, use_shadow_targets=True)
+
+        current_qty = 0.0
+        avg_entry_price = 0.0
+        realized_gross_pnl = 0.0
+        fee_total = 0.0
+        trade_count = 0
+        low_edge_trade_count = 0
+        last_price = 0.0
+        fill_backed_decision_count = 0
+        synthetic_decision_count = 0
+
+        for row in shadow_rows:
+            brief = self.latest_brief(row.decision_id)
+            price = brief.last_price if brief is not None and brief.last_price > 0.0 else last_price
+            target_qty = row.ai_shadow_target_qty
+            delta_qty = target_qty - current_qty
+            if abs(delta_qty) <= 1e-12:
+                if price > 0.0:
+                    last_price = price
+                continue
+
+            trade_count += 1
+            decision_fills = fills_by_decision.get(row.decision_id, [])
+            decision_fee = 0.0
+            if decision_fills:
+                priced_qty = sum(max(fill.fill_qty, 0.0) for fill in decision_fills)
+                notional = sum(max(fill.fill_qty, 0.0) * fill.fill_price for fill in decision_fills)
+                actual_fee_total = sum(PortfolioState.fee_cost_in_quote(fill) for fill in decision_fills)
+                if priced_qty > 1e-12 and notional > 1e-12:
+                    execution_price = notional / priced_qty
+                    last_price = execution_price
+                    fill_backed_decision_count += 1
+                    executable_qty = min(abs(delta_qty), priced_qty)
+                    if executable_qty <= 1e-12:
+                        continue
+                    signed_qty = executable_qty if delta_qty > 0 else -executable_qty
+                    fee_bps = (actual_fee_total / notional) * 10_000.0
+                    decision_fee = executable_qty * execution_price * (fee_bps / 10_000.0)
+                else:
+                    decision_fills = []
+            if not decision_fills:
+                if price <= 0.0:
+                    continue
+                last_price = price
+                execution_price = price
+                signed_qty = delta_qty
+                synthetic_decision_count += 1
+                decision_fee = abs(signed_qty) * execution_price * (self.settings.paper_taker_fee_bps / 10_000.0)
+
+            fee_total += decision_fee
+            realized_trade_pnl, current_qty, avg_entry_price = self._apply_signed_execution(
+                current_qty=current_qty,
+                avg_entry_price=avg_entry_price,
+                signed_qty=signed_qty,
+                execution_price=execution_price,
+            )
+            realized_gross_pnl += realized_trade_pnl
+            if abs(realized_trade_pnl) <= decision_fee * 1.25:
+                low_edge_trade_count += 1
+            if brief is not None and brief.last_price > 0.0:
+                last_price = brief.last_price
+
+        unrealized_pnl = current_qty * (last_price - avg_entry_price) if last_price > 0.0 else 0.0
+        gross_pnl = realized_gross_pnl + unrealized_pnl
+        net_pnl = gross_pnl - fee_total
+        fee_ratio = abs(fee_total / gross_pnl) if abs(gross_pnl) > 1e-12 else None
+        churn_ratio = (low_edge_trade_count / trade_count) if trade_count else 0.0
+        return {
+            "trade_count": float(trade_count),
+            "gross_pnl": gross_pnl,
+            "net_pnl": net_pnl,
+            "fee_total": fee_total,
+            "fee_ratio": fee_ratio,
+            "churn_ratio": churn_ratio,
+            "final_position_qty": current_qty,
+            "fill_backed_decision_count": float(fill_backed_decision_count),
+            "synthetic_decision_count": float(synthetic_decision_count),
+        }
+
+    def _replay_target_path(
         self,
         *,
         shadow_rows: list,
@@ -520,22 +693,18 @@ class AIInferenceService:
             delta_qty = target_qty - current_qty
             if abs(delta_qty) <= 1e-12:
                 continue
-
             trade_count += 1
             fee = abs(delta_qty) * price * (self.settings.paper_taker_fee_bps / 10_000.0)
             fee_total += fee
-
-            realized_trade_pnl, next_qty, next_avg_entry = self._apply_shadow_fill(
+            realized_trade_pnl, current_qty, avg_entry_price = self._apply_signed_execution(
                 current_qty=current_qty,
                 avg_entry_price=avg_entry_price,
-                target_qty=target_qty,
+                signed_qty=delta_qty,
                 execution_price=price,
             )
             realized_gross_pnl += realized_trade_pnl
             if abs(realized_trade_pnl) <= fee * 1.25:
                 low_edge_trade_count += 1
-            current_qty = next_qty
-            avg_entry_price = next_avg_entry
 
         unrealized_pnl = current_qty * (last_price - avg_entry_price) if last_price > 0.0 else 0.0
         gross_pnl = realized_gross_pnl + unrealized_pnl
@@ -550,36 +719,36 @@ class AIInferenceService:
             "fee_ratio": fee_ratio,
             "churn_ratio": churn_ratio,
             "final_position_qty": current_qty,
+            "fill_backed_decision_count": 0.0,
+            "synthetic_decision_count": float(trade_count),
         }
 
     @staticmethod
-    def _apply_shadow_fill(
+    def _apply_signed_execution(
         *,
         current_qty: float,
         avg_entry_price: float,
-        target_qty: float,
+        signed_qty: float,
         execution_price: float,
     ) -> tuple[float, float, float]:
-        delta_qty = target_qty - current_qty
         realized_trade_pnl = 0.0
-        next_qty = current_qty
-        next_avg = avg_entry_price
+        next_qty = current_qty + signed_qty
 
         if abs(current_qty) <= 1e-12:
-            return 0.0, target_qty, execution_price if abs(target_qty) > 1e-12 else 0.0
+            return 0.0, next_qty, execution_price if abs(next_qty) > 1e-12 else 0.0
 
-        same_direction = current_qty * delta_qty > 0
+        same_direction = current_qty * signed_qty > 0
         if same_direction:
-            combined_qty = current_qty + delta_qty
+            combined_qty = next_qty
             if abs(combined_qty) <= 1e-12:
                 return 0.0, 0.0, 0.0
-            weighted_notional = (current_qty * avg_entry_price) + (delta_qty * execution_price)
+            weighted_notional = (current_qty * avg_entry_price) + (signed_qty * execution_price)
             next_avg = weighted_notional / combined_qty
             return 0.0, combined_qty, next_avg
 
-        close_qty = min(abs(delta_qty), abs(current_qty))
+        close_qty = min(abs(signed_qty), abs(current_qty))
         realized_trade_pnl += close_qty * (execution_price - avg_entry_price) * (1.0 if current_qty > 0 else -1.0)
-        remaining_qty = current_qty + delta_qty
+        remaining_qty = next_qty
         if abs(remaining_qty) <= 1e-12:
             return realized_trade_pnl, 0.0, 0.0
         if current_qty * remaining_qty > 0:

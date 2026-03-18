@@ -459,6 +459,7 @@ async def build_runtime(
         settings=runtime_settings,
         event_store=storage.event_store,
         bus=bus,
+        execution_repo=storage.execution_repo,
         prompt_builder=PromptBuilder(),
         validator=AssessmentValidator(),
     )

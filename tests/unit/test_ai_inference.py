@@ -6,14 +6,18 @@ import unittest
 from aats.bootstrap.settings import AATSSettings
 from aats.events import topics
 from aats.events.envelopes import build_envelope
+from aats.schemas.ai_brief import AIDecisionBrief
+from aats.schemas.ai_shadow import AIShadowDecision
 from aats.schemas.common import utc_now
 from aats.schemas.decision import AIMarketAssessment, BaselineAssessment, DecisionContext
+from aats.schemas.execution import FillEvent
 from aats.schemas.features import FeatureSnapshot
 from aats.services.ai_service.inference import AIInferenceService
 from aats.services.ai_service.provider import AIProviderResponse
 from aats.services.ai_service.prompt_builder import PromptBuilder
 from aats.services.ai_service.validator import AssessmentValidator
 from aats.services.decision_engine.target_position import TargetPositionEngine
+from aats.storage.execution_repo import InMemoryExecutionRepository
 from aats.storage.event_store import InMemoryEventStore
 
 
@@ -258,6 +262,111 @@ class TestAIInferenceService(unittest.IsolatedAsyncioTestCase):
         self.assertIn("recovery_probe_after", event.payload)
         self.assertEqual(event.payload["configured_operating_mode"], "ai_primary")
 
+    async def test_shadow_evaluation_prefers_real_fills_for_price_and_fee_replay(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "ai_operating_mode": "ai_primary",
+                "ai_provider": "openai",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+            }
+        )
+        event_store = InMemoryEventStore()
+        execution_repo = InMemoryExecutionRepository()
+        service = AIInferenceService(
+            settings=settings,
+            event_store=event_store,
+            execution_repo=execution_repo,
+            prompt_builder=PromptBuilder(),
+            validator=AssessmentValidator(),
+            provider=FakeProvider(),
+        )
+        decision_id = "decision_shadow_fill_backed"
+        service.evaluator.record_brief(
+            AIDecisionBrief(
+                decision_id=decision_id,
+                symbol="BTC-USDT-SWAP",
+                timeframe="15m",
+                product_type="derivatives",
+                margin_mode="cross",
+                last_price=110.0,
+                regime_indicator="trend",
+                regime_confidence=0.8,
+                composite_alpha_score=0.4,
+                momentum_score=0.02,
+                volatility_state="medium",
+                volatility_value=0.01,
+                current_position_qty=0.0,
+                current_exposure_side="flat",
+                current_open_order_count=0,
+                baseline_direction_bias="long",
+                baseline_confidence=0.7,
+                fee_bps=settings.paper_taker_fee_bps,
+                max_slippage_tolerance_bps=float(settings.max_slippage_tolerance_bps),
+                expected_slippage_proxy_bps=2.0,
+                min_net_edge_bps=settings.strategy_min_net_edge_bps,
+                safe_to_trade=True,
+                review_required=False,
+                halted=False,
+                reconciliation_severity="CLEAN",
+                reconciliation_halt_required=False,
+                market_snapshot_fresh=True,
+                account_snapshot_fresh=True,
+                execution_condition="normal",
+            )
+        )
+        service.record_shadow_decision(
+            AIShadowDecision(
+                decision_id=decision_id,
+                symbol="BTC-USDT-SWAP",
+                timeframe="15m",
+                baseline_target_qty=0.5,
+                baseline_action="open_long",
+                ai_shadow_target_qty=0.5,
+                ai_shadow_action="open_long",
+                would_override_baseline=False,
+                shadow_action_type="same_as_baseline",
+            )
+        )
+        execution_repo.save_fill(
+            FillEvent(
+                fill_id="fill_shadow_1",
+                decision_id=decision_id,
+                intent_id="intent_shadow_1",
+                client_order_id="order_shadow_1",
+                exchange_order_id="ex_shadow_1",
+                symbol="BTC-USDT-SWAP",
+                venue="OKX",
+                side="buy",
+                fill_qty=0.5,
+                fill_price=100.0,
+                fee_amount=0.2,
+                fee_currency="USDT",
+                product_type="derivatives",
+                target_leverage=1.0,
+                margin_mode="cross",
+                exposure_side="long",
+                position_intent="open_long",
+                liquidity_role="taker",
+                exchange_timestamp=utc_now(),
+                ingestion_timestamp=utc_now(),
+                order_status_after_fill="FILLED",
+            )
+        )
+
+        evaluation, created = service.evaluate_shadow_window(limit=10)
+
+        self.assertTrue(created)
+        self.assertIsNotNone(evaluation)
+        self.assertAlmostEqual(evaluation.baseline_fee_total, 0.2)
+        self.assertAlmostEqual(evaluation.shadow_fee_total, 0.2)
+        self.assertAlmostEqual(evaluation.baseline_gross_pnl, 5.0)
+        self.assertAlmostEqual(evaluation.shadow_gross_pnl, 5.0)
+        self.assertEqual(evaluation.summary["baseline_fill_backed_decision_count"], 1.0)
+        self.assertEqual(evaluation.summary["shadow_fill_backed_decision_count"], 1.0)
+
     @staticmethod
     def _service(
         *,
@@ -282,6 +391,7 @@ class TestAIInferenceService(unittest.IsolatedAsyncioTestCase):
             }
         )
         event_store = InMemoryEventStore()
+        execution_repo = InMemoryExecutionRepository()
         feature = FeatureSnapshot(
             symbol="BTC-USDT",
             snapshot_ts=utc_now(),
@@ -335,6 +445,7 @@ class TestAIInferenceService(unittest.IsolatedAsyncioTestCase):
         service = AIInferenceService(
             settings=settings,
             event_store=event_store,
+            execution_repo=execution_repo,
             prompt_builder=PromptBuilder(),
             validator=AssessmentValidator(),
             provider=provider,
