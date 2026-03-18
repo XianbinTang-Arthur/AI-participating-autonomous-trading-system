@@ -1,4 +1,4 @@
-const nodes = {
+﻿const nodes = {
   form: document.getElementById("loginForm"),
   username: document.getElementById("loginUsername"),
   password: document.getElementById("loginPassword"),

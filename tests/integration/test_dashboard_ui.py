@@ -20,6 +20,7 @@ class TestDashboardUI(unittest.TestCase):
 
         with TestClient(app) as client:
             root = client.get("/")
+            home = client.get("/ui/home")
             overview = client.get("/ui")
             overview_alias = client.get("/ui/overview")
             strategy = client.get("/ui/strategy")
@@ -40,6 +41,7 @@ class TestDashboardUI(unittest.TestCase):
 
         for response in [
             root,
+            home,
             overview,
             overview_alias,
             strategy,
@@ -71,28 +73,41 @@ class TestDashboardUI(unittest.TestCase):
         self.assertIn("text/html; charset=utf-8", root.headers["content-type"])
         self.assertIn("application/javascript; charset=utf-8", js.headers["content-type"])
 
+        self.assertIn('href="/ui"', root.text)
+        self.assertIn("/ui/overview", root.text)
         self.assertIn("/ui/strategy", root.text)
         self.assertIn("/ui/execution", root.text)
         self.assertIn("/ui/risk", root.text)
         self.assertIn("/ui/ai", root.text)
         self.assertIn("/ui/settings", root.text)
 
-        self.assertIn("/ui/ai", ai.text)
-        self.assertIn("window.location.replace(\"/login\")", js.text)
+        self.assertIn("主页", root.text)
+        self.assertIn("控制动作", root.text)
+        self.assertIn("交易总览", overview_alias.text)
+        self.assertIn("AI 工作台", ai.text)
+        self.assertIn("AI 当前有效模式、接管门禁和 shadow 回放", ai.text)
+        self.assertIn("账户与权限", settings.text)
+        self.assertIn("策略档位、账户与权限", settings.text)
+
+        self.assertIn('window.location.replace("/login")', js.text)
         self.assertIn("evaluate-strategy-profile", js.text)
         self.assertIn("evaluate-ai-shadow", js.text)
         self.assertIn("renderAISections", js.text)
         self.assertIn("AUTO_REFRESH_MS", store_js.text)
         self.assertIn("recentAIShadowEvaluations", store_js.text)
         self.assertIn("recentReconciliations", store_js.text)
+        self.assertIn("home:", store_js.text)
         self.assertIn("baseline.regime", strategy_js.text)
-        self.assertIn("AI", ai_view_js.text)
+        self.assertIn("AI 运行状态", ai_view_js.text)
         self.assertIn("evaluate-ai-shadow", ai_view_js.text)
         self.assertIn("strategyProfiles", admin_js.text)
+        self.assertIn("AI 调参建议", admin_js.text)
         self.assertIn("operator_rejected_strategy_profile_recommendation", terms_js.text)
+        self.assertIn("未登录", terms_js.text)
         self.assertIn("/auth/login", login_js.text)
         self.assertIn(".workspace-nav", css.text)
         self.assertIn(".workspace-link", css.text)
+        self.assertIn(".utility-bar", css.text)
         self.assertIn(".status-ribbon", css.text)
         self.assertIn(".login-shell", css.text)
 

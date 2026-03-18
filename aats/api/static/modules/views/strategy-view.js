@@ -1,4 +1,4 @@
-import { actionButton, callout, kvList, pill, statGrid, surfaceCard, table } from "../components.js";
+﻿import { actionButton, callout, kvList, pill, statGrid, surfaceCard, table } from "../components.js";
 import { formatMaybeTimestamp, formatNumber, formatRelativeAge, formatSigned, listOrDash } from "../formatters.js";
 import { readableState } from "../terms.js";
 import { decisionTableHeaders, inferTradeScene } from "../trade-display.js";

@@ -1,11 +1,11 @@
-import { actionButton, callout, kvList, pill, statGrid, surfaceCard, table } from "../components.js";
+﻿import { actionButton, callout, kvList, pill, statGrid, surfaceCard, table } from "../components.js";
 import { formatMaybeTimestamp, formatNumber, formatRelativeAge, listOrDash } from "../formatters.js";
 import { localizeError, readableState } from "../terms.js";
 
 const AI_STATE_MAP = {
   baseline_only: "仅运行 baseline",
   ai_advisory: "AI 参与评估",
-  ai_blended: "AI 一致性确认",
+  ai_blended: "AI 参与一致性确认",
   ai_primary: "AI 主导方向",
   ai_primary_shadow: "AI 影子主导",
   healthy: "正常",
@@ -55,14 +55,13 @@ export function renderAISections(data) {
   const evaluationsPayload = data.aiShadowEvaluations || {};
   const evaluations = evaluationsPayload.evaluations || [];
   const latestAssessment = latest.assessment || null;
-  const latestBrief = latest.brief || null;
   const latestTakeover = latest.takeover || null;
 
   return {
     aiHero: surfaceCard({
       title: "AI 运行状态",
       kicker: "先确认 AI 现在是否真的在主链里",
-      copy: "这张卡只回答三个问题：AI 当前配置是什么、当前是否已降级、系统是否还会继续尝试恢复 AI 主链。",
+      copy: "这张卡只回答三个问题：AI 当前配置是什么、现在是否已降级、系统是否还会继续尝试恢复 AI 主链。",
       actions: actionButton("立即生成 shadow 收益回放", "evaluate-ai-shadow", "", "secondary"),
       classes: "hero-card",
       content: `
@@ -91,7 +90,7 @@ export function renderAISections(data) {
             meta: `连续成功 ${formatNumber(runtime.consecutive_successes ?? 0, 0)} 次`,
           },
           {
-            label: "近期 fallback 比例",
+            label: "近期 fallback 比率",
             value: formatNumber(runtime.recent_fallback_ratio ?? 0, 3),
             meta: `timeout ${formatNumber(runtime.recent_timeout_count ?? 0, 0)} 次 / 无效输出 ${formatNumber(runtime.recent_invalid_output_count ?? 0, 0)} 次`,
           },
@@ -115,7 +114,7 @@ export function renderAISections(data) {
       content: latestAssessment
         ? kvList([
             ["判断时间", formatMaybeTimestamp(latestAssessment.created_at), formatRelativeAge(latestAssessment.created_at)],
-            ["市场结论", humanState(latestAssessment.regime || latestBrief?.regime_indicator || "unknown"), `方向 edge ${formatNumber(latestAssessment.directional_edge ?? 0, 2)}`],
+            ["市场结论", humanState(latestAssessment.regime || "unknown"), `方向 edge ${formatNumber(latestAssessment.directional_edge ?? 0, 2)}`],
             ["是否建议覆盖 baseline", latestAssessment.baseline_override_recommended ? "建议覆盖" : "不建议覆盖", listOrDash(latestAssessment.override_reason_codes)],
             ["交易经济性", latestAssessment.economically_actionable ? "满足交易条件" : "净边际不足", `净边际 ${formatNumber(latestAssessment.estimated_net_edge_bps ?? 0, 2)} bps`],
             ["接管结果", latestTakeover?.ai_takeover_applied ? "AI 已接管方向" : "AI 未接管", listOrDash((latestTakeover?.ai_takeover_blockers || latestAssessment.rejection_flags || []).map(humanError))],
@@ -130,7 +129,7 @@ export function renderAISections(data) {
     aiHistory: surfaceCard({
       title: "AI 历史与 shadow 回放",
       kicker: "看最近判断、动作分歧和 shadow 收益比较",
-      copy: "推荐的查看顺序是：先看最近 AI 判断，再看 shadow 是否会改动作，最后看 shadow 回放是否真的优于 baseline。",
+      copy: "建议的查看顺序是：先看最近 AI 判断，再看 shadow 是否会改动作，最后看 shadow 回放是否真的优于 baseline。",
       content: `
         <div class="panel-grid">
           <div class="span-12">

@@ -1,4 +1,4 @@
-import { fetchPanels, requestJson } from "./modules/api-client.js";
+﻿import { fetchPanels, requestJson } from "./modules/api-client.js";
 import { actionButton, kvList, notice, pill, statusCard, surfaceCard } from "./modules/components.js";
 import {
   booleanWord,
@@ -48,6 +48,7 @@ const nodes = {
   autoRefreshToggle: document.getElementById("autoRefreshToggle"),
   actionPermissionHint: document.getElementById("actionPermissionHint"),
   lastRefreshLabel: document.getElementById("lastRefreshLabel"),
+  homeContent: document.getElementById("homeContent"),
   overviewContent: document.getElementById("overviewContent"),
   strategyContent: document.getElementById("strategyContent"),
   executionContent: document.getElementById("executionContent"),
@@ -79,39 +80,39 @@ function bindEvents() {
     });
   });
 
-  nodes.refreshButton.addEventListener("click", () => void refreshDashboard({ manual: true }));
-  nodes.reconcileButton.addEventListener("click", () =>
-    void runAction("/reconciliation/validate", { reason: "ui_manual_validate" }, "已发起人工对账检查。")
+  nodes.refreshButton?.addEventListener("click", () => void refreshDashboard({ manual: true }));
+  nodes.reconcileButton?.addEventListener("click", () =>
+    void runAction("/reconciliation/validate", { reason: "ui_manual_validate" }, "已提交人工对账请求。")
   );
-  nodes.rebaselineButton.addEventListener("click", () =>
+  nodes.rebaselineButton?.addEventListener("click", () =>
     void runDangerousAction({
       path: "/system/rebaseline",
       body: { reason: "ui_manual_rebaseline" },
-      successMessage: "基线已重建。请继续观察恢复状态和对账状态。",
-      confirmMessage: "现在接受当前账户状态为新的可信基线吗？这会影响后续恢复判断。",
+      successMessage: "已把当前账户状态接受为新基线。",
+      confirmMessage: "确认把当前账户、仓位和挂单状态接受为新的人工基线吗？这会覆盖旧的恢复参照。",
     })
   );
-  nodes.resumeButton.addEventListener("click", () =>
-    void runAction("/system/resume", { reason: "ui_manual_resume" }, "已发起恢复请求，系统将重新评估是否具备交易条件。")
+  nodes.resumeButton?.addEventListener("click", () =>
+    void runAction("/system/resume", { reason: "ui_manual_resume" }, "已提交恢复自动交易请求。")
   );
-  nodes.haltButton.addEventListener("click", () =>
+  nodes.haltButton?.addEventListener("click", () =>
     void runDangerousAction({
       path: "/system/halt",
       body: { reason: "ui_manual_halt" },
-      successMessage: "系统已进入安全暂停状态。",
-      confirmMessage: "确认暂停系统并阻断继续交易吗？",
+      successMessage: "系统已暂停自动交易。",
+      confirmMessage: "确认立即暂停自动交易吗？",
     })
   );
-  nodes.logoutButton.addEventListener("click", () => void logoutOperator());
-  nodes.autoRefreshToggle.addEventListener("change", () => {
+  nodes.logoutButton?.addEventListener("click", () => void logoutOperator());
+  nodes.autoRefreshToggle?.addEventListener("change", () => {
     if (nodes.autoRefreshToggle.checked) {
       scheduleRefresh();
     } else {
       cancelScheduledRefresh();
     }
   });
-  nodes.closeDrawerButton.addEventListener("click", closeDrawer);
-  nodes.drawerBackdrop.addEventListener("click", closeDrawer);
+  nodes.closeDrawerButton?.addEventListener("click", closeDrawer);
+  nodes.drawerBackdrop?.addEventListener("click", closeDrawer);
 
   document.addEventListener("click", (event) => {
     const target = event.target instanceof HTMLElement ? event.target.closest("[data-action]") : null;
@@ -183,54 +184,49 @@ function renderStatusRibbon() {
   const reconciliation = state.data.reconciliationLatest?.reconciliation || null;
   const portfolio = state.data.portfolio?.portfolio || {};
 
+  if (!nodes.statusRibbon) return;
   patchHtml(nodes.statusRibbon, [
     statusCard({
-      title: "运行状态",
+      title: "系统状态",
       value: readableState(health.runtime_state || health.overall_status),
-      meta: `系统总览：${readableState(health.overall_status)}`,
-      pills: [pill(`运行档位 ${readableState(mode.operating_state || "unknown")}`, toneForRuntimeState(health.runtime_state || health.overall_status))],
+      meta: `整体状态：${readableState(health.overall_status)}`,
+      pills: [pill(`运行模式 ${readableState(mode.operating_state || "unknown")}`, toneForRuntimeState(health.runtime_state || health.overall_status))],
     }),
     statusCard({
-      title: "当前能否下单",
-      value: recovery.safe_to_trade ? "允许继续自动交易" : "当前禁止继续交易",
-      meta: recovery.safe_to_trade ? "没有发现会阻止发单的风险项" : localizedRecoveryReasons(),
+      title: "交易资格",
+      value: recovery.safe_to_trade ? "允许自动交易" : "当前不允许自动交易",
+      meta: recovery.safe_to_trade ? "恢复检查已通过，可以继续自动交易。" : localizedRecoveryReasons(),
       pills: [
-        pill(`手动暂停 ${booleanWord(health.halted)}`, health.halted ? "danger" : "outline"),
-        pill(`等待人工确认 ${booleanWord(recovery.review_required)}`, recovery.review_required ? "warning" : "outline"),
+        pill(`已暂停 ${booleanWord(health.halted)}`, health.halted ? "danger" : "outline"),
+        pill(`需要人工复核 ${booleanWord(recovery.review_required)}`, recovery.review_required ? "warning" : "outline"),
       ],
     }),
     statusCard({
-      title: "交易通道",
+      title: "执行线路",
       value: readableState(runtime.environment_capabilities?.exchange_submission_target || mode.execution_route || "unknown"),
-      meta: `执行线路 ${runtime.environment_capabilities?.execution_route || mode.execution_route || "-"}`,
-      pills: [
-        pill(`允许向交易所报单 ${booleanWord(mode.exchange_submit_allowed)}`, mode.exchange_submit_allowed ? "positive" : "outline"),
-      ],
+      meta: `执行路由 ${runtime.environment_capabilities?.execution_route || mode.execution_route || "-"}`,
+      pills: [pill(`允许向交易所报单 ${booleanWord(mode.exchange_submit_allowed)}`, mode.exchange_submit_allowed ? "positive" : "outline")],
     }),
     statusCard({
       title: "账户同步",
       value: account.ready ? "正常" : "异常",
-      meta: account.ready ? "余额、仓位和挂单快照可用" : listOrDash(account.blockers),
+      meta: account.ready ? "账户快照已同步，可用于风控和展示。" : listOrDash(account.blockers),
       pills: [
         pill(`交易所连接 ${booleanWord(account.connected)}`, account.connected ? "positive" : "warning"),
-        pill(`快照新鲜 ${booleanWord(account.fresh)}`, account.fresh ? "positive" : "warning"),
+        pill(`账户快照新鲜 ${booleanWord(account.fresh)}`, account.fresh ? "positive" : "warning"),
       ],
     }),
     statusCard({
-      title: "账实核对",
+      title: "对账结果",
       value: readableState(reconciliation?.severity || "unknown"),
-      meta: reconciliation?.reconciliation_id || "还没有新的对账结论",
-      pills: [
-        pill(`要求停机 ${booleanWord(reconciliation?.halt_required)}`, reconciliation?.halt_required ? "danger" : "outline"),
-      ],
+      meta: reconciliation?.reconciliation_id || "最近还没有对账记录",
+      pills: [pill(`要求停机 ${booleanWord(reconciliation?.halt_required)}`, reconciliation?.halt_required ? "danger" : "outline")],
     }),
     statusCard({
       title: "账户权益",
       value: formatNumber(portfolio.total_equity),
-      meta: `已实现 ${formatSigned(portfolio.realized_pnl)} / 持仓浮盈亏 ${formatSigned(portfolio.unrealized_pnl)}`,
-      pills: [
-        pill(`总敞口 ${formatNumber(portfolio.gross_exposure)}`, "info"),
-      ],
+      meta: `已实现 ${formatSigned(portfolio.realized_pnl)} / 未实现 ${formatSigned(portfolio.unrealized_pnl)}`,
+      pills: [pill(`总敞口 ${formatNumber(portfolio.gross_exposure)}`, "info")],
     }),
   ].join(""));
 }
@@ -241,11 +237,12 @@ function renderBanners() {
   const blockers = state.data.blockers?.blockers || [];
   const controlsMessage = controlPermissionMessage();
 
+  if (!nodes.bannerContainer) return;
   if (!recovery.safe_to_trade) {
-    banners.push(notice(`当前不能继续自动交易：${localizedRecoveryReasons()}`, "warning"));
+    banners.push(notice(`当前还不能恢复自动交易：${localizedRecoveryReasons()}`, "warning"));
   }
   if (blockers.length > 0) {
-    banners.push(notice(`当前主要阻断：${localizeError(blockers[0].blocker)}`, blockers[0].affects_execution ? "danger" : "warning"));
+    banners.push(notice(`当前主要阻断原因：${localizeError(blockers[0].blocker)}`, blockers[0].affects_execution ? "danger" : "warning"));
   }
   if (controlsMessage) {
     banners.push(notice(controlsMessage, "info"));
@@ -268,6 +265,10 @@ function renderActiveView() {
   };
   if (state.activeView === "overview" && nodes.overviewContent) {
     patchHtml(nodes.overviewContent, renderOverviewView(viewData));
+    return;
+  }
+  if (state.activeView === "home" && nodes.homeContent) {
+    patchHtml(nodes.homeContent, renderOverviewView(viewData));
     return;
   }
   if (state.activeView === "strategy") {
@@ -297,7 +298,7 @@ function updateActionAccess() {
     actionButtons.forEach((node) => {
       if (!node) return;
       node.disabled = true;
-      node.title = "正在确认当前账号权限…";
+      node.title = "正在确认当前账号权限。";
     });
     if (nodes.logoutButton) {
       nodes.logoutButton.disabled = false;
@@ -309,7 +310,7 @@ function updateActionAccess() {
 
   const canWrite = operatorCanWrite();
   const buttons = [...actionButtons, nodes.logoutButton];
-  const disabledReason = controlPermissionMessage() || "当前账号没有执行该操作的权限。";
+  const disabledReason = controlPermissionMessage() || "当前账号没有人工控制权限。";
   buttons.forEach((node) => {
     if (!node) return;
     node.disabled = !canWrite && node !== nodes.logoutButton;
@@ -317,7 +318,7 @@ function updateActionAccess() {
       node.title = !canWrite ? disabledReason : "";
     }
   });
-  patchText(nodes.actionPermissionHint, canWrite ? "当前账号可以执行人工操作。" : disabledReason);
+  patchText(nodes.actionPermissionHint, canWrite ? "当前账号可以执行人工控制。" : disabledReason);
 }
 
 function updateRefreshLabel() {
@@ -564,8 +565,8 @@ async function evaluateStrategyProfile() {
     state.flash = {
       tone: autoApplied ? "info" : "warning",
       message: autoApplied
-        ? `已生成建议并自动切换到更保守的档位：${profileId}。`
-        : `已生成新的策略档位建议：${profileId}。如需生效，请在设置页继续审批。`,
+        ? `AI 调参建议已自动生效，当前档位切换到 ${profileId}。`
+        : `AI 已生成新的调参建议：${profileId}，但当前还未自动生效。`,
     };
     await refreshDashboard({ manual: true });
   } catch (error) {
@@ -580,7 +581,7 @@ async function evaluateAIShadow() {
     const evaluation = result?.evaluation || {};
     state.flash = {
       tone: "info",
-      message: `已生成一轮 shadow 收益回放：baseline 净收益 ${formatNumber(evaluation.baseline_net_pnl ?? 0)}，shadow 净收益 ${formatNumber(evaluation.shadow_net_pnl ?? 0)}。`,
+      message: `已完成 shadow 收益回放。baseline 净收益 ${formatNumber(evaluation.baseline_net_pnl ?? 0)}，shadow 净收益 ${formatNumber(evaluation.shadow_net_pnl ?? 0)}。`,
     };
     await refreshDashboard({ manual: true });
   } catch (error) {
@@ -593,8 +594,8 @@ async function acceptStrategyProfileRecommendation(recommendationId, activationM
   if (!recommendationId) return;
   const confirmMessage =
     activationMode === "stage_only"
-      ? "确认把这条 AI 建议转为待审批档位吗？它不会立刻覆盖当前运行中的参数。"
-      : "确认立即采纳这条 AI 建议吗？当前策略档位会立刻切换。";
+      ? "确认先把这条 AI 调参建议转为待审批档位吗？"
+      : "确认立即采纳这条 AI 调参建议并切换当前策略档位吗？";
   if (!window.confirm(confirmMessage)) return;
   try {
     const result = await requestJson(`/strategy-profiles/recommendations/${encodeURIComponent(recommendationId)}/accept`, {
@@ -608,8 +609,8 @@ async function acceptStrategyProfileRecommendation(recommendationId, activationM
       tone: "info",
       message:
         activationMode === "stage_only"
-          ? `已把建议转成待审批档位：${result?.activation?.pending_profile_id || "未知档位"}。`
-          : `已切换到档位：${result?.active_revision?.profile_label || result?.active_revision?.profile_id || "未知档位"}。`,
+          ? `这条建议已转为待审批档位：${result?.activation?.pending_profile_id || "未知档位"}。`
+          : `当前策略档位已切换为 ${result?.active_revision?.profile_label || result?.active_revision?.profile_id || "未知档位"}。`,
     };
     await refreshDashboard({ manual: true });
   } catch (error) {
@@ -620,7 +621,7 @@ async function acceptStrategyProfileRecommendation(recommendationId, activationM
 
 async function rejectStrategyProfileRecommendation(recommendationId) {
   if (!recommendationId) return;
-  const reasonDetail = window.prompt("请输入拒绝原因，便于后续复盘。", "保留当前档位，暂不采纳这条建议。");
+  const reasonDetail = window.prompt("请输入拒绝这条 AI 调参建议的原因：", "当前不希望切换策略档位");
   if (reasonDetail === null) return;
   try {
     await requestJson(`/strategy-profiles/recommendations/${encodeURIComponent(recommendationId)}/reject`, {
@@ -630,7 +631,7 @@ async function rejectStrategyProfileRecommendation(recommendationId) {
         reason_detail: reasonDetail,
       },
     });
-    state.flash = { tone: "info", message: "已拒绝这条策略档位建议。" };
+    state.flash = { tone: "info", message: "这条 AI 调参建议已被拒绝。" };
     await refreshDashboard({ manual: true });
   } catch (error) {
     state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
@@ -639,7 +640,7 @@ async function rejectStrategyProfileRecommendation(recommendationId) {
 }
 
 async function activatePendingStrategyProfile() {
-  if (!window.confirm("确认激活当前待审批档位吗？这会立刻替换当前生效的策略门槛。")) return;
+  if (!window.confirm("确认立即激活当前待审批的策略档位吗？")) return;
   try {
     const result = await requestJson("/strategy-profiles/pending/activate", {
       method: "POST",
@@ -647,7 +648,7 @@ async function activatePendingStrategyProfile() {
     });
     state.flash = {
       tone: "info",
-      message: `已激活待审批档位：${result?.active_revision?.profile_label || result?.active_revision?.profile_id || "未知档位"}。`,
+      message: `待审批档位已激活：${result?.active_revision?.profile_label || result?.active_revision?.profile_id || "未知档位"}。`,
     };
     await refreshDashboard({ manual: true });
   } catch (error) {
@@ -657,7 +658,7 @@ async function activatePendingStrategyProfile() {
 }
 
 async function rollbackStrategyProfile() {
-  if (!window.confirm("确认回滚到上一个稳定档位吗？这会撤销最近一次策略档位切换。")) return;
+  if (!window.confirm("确认回滚到上一个稳定的策略档位吗？")) return;
   try {
     const result = await requestJson("/strategy-profiles/rollback", {
       method: "POST",
@@ -665,7 +666,7 @@ async function rollbackStrategyProfile() {
     });
     state.flash = {
       tone: "warning",
-      message: `已回滚到档位：${result?.active_revision?.profile_label || result?.active_revision?.profile_id || "未知档位"}。`,
+      message: `策略档位已回滚到 ${result?.active_revision?.profile_label || result?.active_revision?.profile_id || "未知档位"}。`,
     };
     await refreshDashboard({ manual: true });
   } catch (error) {
@@ -680,7 +681,7 @@ async function createOperatorUser() {
   const role = document.getElementById("operatorCreateRole")?.value;
   const enabled = document.getElementById("operatorCreateEnabled")?.value === "true";
   if (!username || !password || !role) {
-    state.flash = { tone: "warning", message: "请先完整填写用户名、初始密码和角色。" };
+    state.flash = { tone: "warning", message: "请完整填写用户名、密码和角色后再创建账号。" };
     renderBanners();
     return;
   }
@@ -713,7 +714,7 @@ async function toggleOperatorUser(username) {
 async function updateOperatorUserRole(username) {
   const user = findOperatorUser(username);
   if (!user) return;
-  const nextRole = window.prompt("请输入新角色：viewer / operator / admin", user.role || "viewer");
+  const nextRole = window.prompt("请输入新的角色：viewer / operator / admin", user.role || "viewer");
   if (!nextRole || nextRole === user.role) return;
   try {
     await requestJson(`/auth/users/${encodeURIComponent(username)}`, {
@@ -745,7 +746,7 @@ async function resetOperatorPassword(username) {
 }
 
 async function deleteOperatorUser(username) {
-  if (!window.confirm(`确认删除账户 ${username} 吗？`)) return;
+  if (!window.confirm(`确认删除账号 ${username} 吗？`)) return;
   try {
     await requestJson(`/auth/users/${encodeURIComponent(username)}`, { method: "DELETE" });
     state.flash = { tone: "info", message: `${username} 已删除。` };
@@ -825,7 +826,7 @@ function localizedRecoveryReasons() {
 
 function scheduleRefresh() {
   cancelScheduledRefresh();
-  if (!nodes.autoRefreshToggle.checked) return;
+  if (nodes.autoRefreshToggle && !nodes.autoRefreshToggle.checked) return;
   state.refreshTimer = window.setTimeout(() => void refreshDashboard(), AUTO_REFRESH_MS);
 }
 
@@ -836,6 +837,7 @@ function cancelScheduledRefresh() {
 }
 
 function openDrawer({ eyebrow, title, summary, body }) {
+  if (!nodes.detailDrawer || !nodes.drawerBackdrop) return;
   nodes.drawerEyebrow.textContent = eyebrow;
   nodes.drawerTitle.textContent = title;
   nodes.drawerSummary.textContent = summary;
@@ -846,6 +848,7 @@ function openDrawer({ eyebrow, title, summary, body }) {
 }
 
 function closeDrawer() {
+  if (!nodes.detailDrawer || !nodes.drawerBackdrop) return;
   nodes.detailDrawer.classList.remove("is-open");
   nodes.detailDrawer.setAttribute("aria-hidden", "true");
   nodes.drawerBackdrop.hidden = true;

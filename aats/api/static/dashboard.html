@@ -7,75 +7,45 @@
   <link rel="stylesheet" href="/ui/app.css">
 </head>
 <body data-view="overview">
-  <div class="console-shell">
-    <header class="masthead">
-      <div class="masthead-copy">
-        <p class="eyebrow">AI 参与式自主交易系统</p>
-        <h1>自动交易监控台</h1>
-        <p class="lead">
-          首页只看最关键的五件事：现在能不能继续自动交易、策略到底在看多还是观望、当前有没有在途委托、账户权益怎么变化，以及如果系统停下来了你该先处理什么。
-        </p>
+  <div class="console-shell console-shell--compact">
+    <header class="utility-bar">
+      <div class="utility-bar__brand">
+        <p class="eyebrow">AATS 自动交易监控台</p>
+        <h1>交易总览</h1>
       </div>
-
-      <div class="masthead-side">
-        <section class="session-panel">
-          <div>
-            <p class="panel-kicker">登录会话</p>
-            <h2 id="sessionIdentityValue">未登录</h2>
-            <p id="sessionRoleValue" class="meta-copy">当前身份：未登录</p>
-          </div>
-          <div class="session-actions">
-            <span id="authStateChip" class="status-pill tone-neutral">未登录</span>
-            <button id="logoutButton" class="ghost-button">退出登录</button>
-          </div>
-        </section>
-
-        <section class="command-panel" aria-label="人工控制">
-          <div class="command-head">
-            <div>
-              <p class="panel-kicker">人工操作</p>
-              <h2>控制动作</h2>
-            </div>
-            <label class="toggle-pill" for="autoRefreshToggle">
-              <input id="autoRefreshToggle" type="checkbox" checked>
-              <span>每 15 秒刷新一次</span>
-            </label>
-          </div>
-
-          <div class="command-grid">
-            <button id="refreshButton" class="primary-button">刷新数据</button>
-            <button id="reconcileButton" class="secondary-button">立即对账</button>
-            <button id="rebaselineButton" class="warning-button">接受当前账户为新基线</button>
-            <button id="resumeButton" class="ghost-button">恢复自动交易</button>
-            <button id="haltButton" class="danger-button">暂停自动交易</button>
-          </div>
-
-          <p id="actionPermissionHint" class="meta-copy">正在确认当前账号权限…</p>
-          <p id="lastRefreshLabel" class="meta-copy">尚未刷新</p>
-        </section>
+      <div class="utility-bar__meta">
+        <div class="session-inline">
+          <strong id="sessionIdentityValue">未登录</strong>
+          <span id="sessionRoleValue" class="meta-copy">当前身份：未登录</span>
+          <span id="authStateChip" class="status-pill tone-neutral">未登录</span>
+        </div>
+        <div class="session-actions">
+          <span id="lastRefreshLabel" class="meta-copy">尚未刷新</span>
+          <button id="logoutButton" class="ghost-button">退出登录</button>
+        </div>
       </div>
     </header>
 
-    <section id="statusRibbon" class="status-ribbon" aria-label="首屏状态摘要"></section>
-    <section id="bannerContainer" class="banner-stack" aria-live="polite"></section>
-
     <nav class="workspace-nav" aria-label="主导航">
-      <a class="workspace-link is-active" href="/ui">交易总览</a>
+      <a class="workspace-link" href="/ui">主页</a>
+      <a class="workspace-link is-active" href="/ui/overview">交易总览</a>
       <a class="workspace-link" href="/ui/strategy">策略判断</a>
       <a class="workspace-link" href="/ui/execution">委托与成交</a>
       <a class="workspace-link" href="/ui/risk">风险与恢复</a>
+      <a class="workspace-link" href="/ui/ai">AI 工作台</a>
       <a class="workspace-link" href="/ui/settings">账户与权限</a>
-      <a class="workspace-link" href="/ui/ai">AI 宸ヤ綔鍙?/a>
     </nav>
+
+    <section id="bannerContainer" class="banner-stack" aria-live="polite"></section>
 
     <main class="workspace">
       <section class="workspace-view is-active" data-view="overview">
         <div class="page-head">
           <div>
-            <p class="panel-kicker">首屏总览</p>
+            <p class="panel-kicker">交易总览</p>
             <h2>现在系统在做什么</h2>
           </div>
-          <p class="page-copy">先看当前能否交易，再看策略结论、委托进度、仓位、收益和风险阻断。</p>
+          <p class="page-copy">集中查看交易资格、最新策略结论、权益变化、执行进度和主要风险阻断。</p>
         </div>
         <div id="overviewContent" class="view-layout"></div>
       </section>

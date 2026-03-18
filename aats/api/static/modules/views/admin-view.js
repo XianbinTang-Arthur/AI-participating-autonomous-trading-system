@@ -1,4 +1,4 @@
-import { actionButton, callout, kvList, pill, statGrid, surfaceCard, table } from "../components.js";
+﻿import { actionButton, callout, kvList, pill, statGrid, surfaceCard, table } from "../components.js";
 import { booleanWord, formatMaybeTimestamp, formatNumber, formatRelativeAge, listOrDash } from "../formatters.js";
 import { localizeError, readableState } from "../terms.js";
 
@@ -29,6 +29,8 @@ export function renderAdminView(data) {
   const latestRecommendation = strategyProfiles.latest_recommendation || null;
   const activationHistory = strategyProfiles.activation_history || [];
   const rejectionHistory = strategyProfiles.rejections || [];
+  const evaluations = strategyProfiles.evaluations || [];
+  const safetyState = strategyProfiles.safety_state || {};
   const canAdmin = session.role === "admin" || session.identity === "api_key_write";
   const operatorUsersError = data.errors?.operatorUsers || null;
   const runtimeProfilesError = data.errors?.runtimeProfiles || null;
@@ -55,7 +57,7 @@ export function renderAdminView(data) {
             })}
             ${kvList([
               ["当前身份", session.identity || "未登录", readableState(session.auth_source || "anonymous")],
-              ["当前角色", readableState(session.role || "anonymous"), canAdmin ? "具备管理策略和账号的权限" : "当前只能查看或执行低权限操作"],
+              ["当前角色", readableState(session.role || "anonymous"), canAdmin ? "具备管理策略和账号的权限" : "当前只允许查看或执行低权限操作"],
               ["已存储用户数", formatNumber(providers.stored_user_count), `启用中的用户 ${formatNumber(operatorUsers.enabled_user_count)}`],
               ["启用管理员数", formatNumber(operatorUsers.enabled_admin_count), providers.database_backed ? "来自 operator_users 表" : "当前是内存模式"],
             ])}
@@ -67,7 +69,7 @@ export function renderAdminView(data) {
         ${surfaceCard({
           title: "当前运行参数",
           kicker: "系统实际生效值",
-          copy: "这里展示系统当前真正在用的运行参数，便于对照“当前策略档位”到底改动了什么。",
+          copy: "这里展示系统当前真正生效的运行参数，便于对照“当前策略档位”到底改动了什么。",
           content: runtimeProfilesError
             ? callout({
                 title: "暂时无法读取运行参数",
@@ -95,7 +97,7 @@ export function renderAdminView(data) {
         ${surfaceCard({
           title: "策略档位状态",
           kicker: "当前档位 / 待审批 / 自动切换",
-          copy: "这块只回答三个问题：当前用的是哪一档、有没有待审批的新档、系统是否允许 AI 自动切到更保守档位。",
+          copy: "这里只回答三个问题：当前用的是哪一档、有没有待审批的新档、系统是否允许 AI 自动切到更保守档位。",
           actions: canAdmin ? actionButton("立即评估当前市场", "evaluate-strategy-profile", "", "secondary") : "",
           content: strategyProfilesError
             ? callout({
@@ -113,8 +115,8 @@ export function renderAdminView(data) {
                 ${kvList([
                   ["上次切换结果", readableState(activation.last_activation_result || "-"), activation.last_activation_at ? formatMaybeTimestamp(activation.last_activation_at) : "尚未发生过切换"],
                   ["上次切换原因", localizeError(activation.last_switch_reason || "-"), activation.last_switch_actor || "系统默认值"],
-                  ["上个稳定档位", activation.previous_active_revision_id || "-", "用于人工回滚时作为默认目标"],
-                  ["当前摘要", profileSummary(activeRevision), "展示当前档位最关键的决策与门槛参数"],
+                  ["自动切换安全态", renderSafetySummary(safetyState), listOrDash(safetyState.resume_blocked_reasons)],
+                  ["当前档位摘要", profileSummary(activeRevision), "展示当前档位最关键的决策与门槛参数"],
                 ])}
               `,
         })}
@@ -125,16 +127,14 @@ export function renderAdminView(data) {
           title: "AI 调参建议",
           kicker: "推荐 / 审批 / 回滚",
           copy: canAdmin
-            ? "AI 只负责推荐安全档位，真正生效仍然受本地规则和管理员操作约束。这里可以立即采纳、转成待审批，或者拒绝这条建议。"
+            ? "AI 只负责推荐安全档位，真正生效仍然受本地规则和管理员操作约束。这里可以立即采纳、转为待审批，或者拒绝这条建议。"
             : "当前账号只能查看最近一条 AI 调参建议及其状态，不能直接审批或回滚。",
           actions: renderStrategyActions({ canAdmin, latestRecommendation, pendingRevision, activation }),
-          content: strategyProfilesError
-            ? ""
-            : renderRecommendationPanel({ latestRecommendation, activeRevision, pendingRevision, activation }),
+          content: strategyProfilesError ? "" : renderRecommendationPanel({ latestRecommendation, activeRevision, pendingRevision, activation, safetyState }),
         })}
       </div>
 
-      <div class="span-6">
+      <div class="span-4">
         ${surfaceCard({
           title: "最近切换记录",
           kicker: "激活 / 自动切换 / 回滚",
@@ -143,12 +143,21 @@ export function renderAdminView(data) {
         })}
       </div>
 
-      <div class="span-6">
+      <div class="span-4">
         ${surfaceCard({
           title: "最近拒绝记录",
           kicker: "未采纳的建议",
           copy: "如果一条调参建议没有被采纳，这里会明确记录是谁拒绝的、为何拒绝，以及是被本地规则挡住还是被管理员手动否决。",
           content: renderRejectionHistoryTable(rejectionHistory),
+        })}
+      </div>
+
+      <div class="span-4">
+        ${surfaceCard({
+          title: "最近评估记录",
+          kicker: "档位运行效果",
+          copy: "这里显示当前档位最近一个评估窗口里的净收益、手续费压力和 churn 程度，帮助判断这档参数是否仍然适合当前市场。",
+          content: renderEvaluationTable(evaluations),
         })}
       </div>
 
@@ -172,7 +181,7 @@ export function renderAdminView(data) {
                 formatMaybeTimestamp(user.updated_at || user.created_at),
                 renderUserActions(user, canAdmin),
               ]),
-              "当前还没有控制台账号。"
+              "当前还没有控制台账号。",
             )}
           `,
         })}
@@ -196,12 +205,12 @@ function renderStrategyActions({ canAdmin, latestRecommendation, pendingRevision
     actions.push(actionButton("激活待审批档位", "activate-pending-strategy-profile", pendingRevision.revision_id, "secondary"));
   }
   if (canAdmin && activation?.previous_active_revision_id) {
-    actions.push(actionButton("回滚到上个稳定档位", "rollback-strategy-profile", activation.previous_active_revision_id, "danger"));
+    actions.push(actionButton("回滚到上一个稳定档位", "rollback-strategy-profile", activation.previous_active_revision_id, "danger"));
   }
   return actions.length ? `<div class="table-actions">${actions.join("")}</div>` : "";
 }
 
-function renderRecommendationPanel({ latestRecommendation, activeRevision, pendingRevision, activation }) {
+function renderRecommendationPanel({ latestRecommendation, activeRevision, pendingRevision, activation, safetyState }) {
   if (!latestRecommendation) {
     return callout({
       title: "最近还没有新的调参建议",
@@ -225,6 +234,7 @@ function renderRecommendationPanel({ latestRecommendation, activeRevision, pendi
       ["推荐理由", listOrDash(latestRecommendation.reason_codes), listOrDash(latestRecommendation.risk_notes)],
       ["当前待审批档位", pendingRevision?.profile_label || "无", pendingRevision?.profile_id || "当前没有待生效档位"],
       ["自动切换冷却", activation.cooldown_until ? formatMaybeTimestamp(activation.cooldown_until) : "当前不在冷却期", activation.auto_switch_enabled ? "系统允许自动切向更保守的档位" : "当前未开启自动切换"],
+      ["当前安全态", renderSafetySummary(safetyState), listOrDash(safetyState.resume_blocked_reasons)],
       ["建议时间", formatMaybeTimestamp(latestRecommendation.generated_at), formatRelativeAge(latestRecommendation.generated_at)],
     ])}
   `;
@@ -240,7 +250,7 @@ function renderActivationHistoryTable(history) {
       `<div><strong>${readableState(item.result || "-")}</strong><div class="table-meta">${localizeError(item.reason_code || "-")}</div></div>`,
       `<div><strong>${formatChangedFieldCount(item.diff)}</strong><div class="table-meta">${listChangedFields(item.diff)}</div></div>`,
     ]),
-    "最近还没有策略档位切换记录。"
+    "最近还没有策略档位切换记录。",
   );
 }
 
@@ -253,7 +263,21 @@ function renderRejectionHistoryTable(history) {
       `<div><strong>${readableState(item.rejection_source || "-")}</strong><div class="table-meta">${item.actor_identity || item.actor_role || "-"}</div></div>`,
       `<div><strong>${localizeError(item.rejection_reason_code || "-")}</strong><div class="table-meta">${item.rejection_reason_detail || "没有额外说明"}</div></div>`,
     ]),
-    "最近还没有被拒绝的调参建议。"
+    "最近还没有被拒绝的调参建议。",
+  );
+}
+
+function renderEvaluationTable(evaluations) {
+  return table(
+    ["评估时间", "净收益", "手续费占比", "churn 比率", "状态"],
+    evaluations.map((item) => [
+      `<div><strong>${formatMaybeTimestamp(item.window_end || item.created_at)}</strong><div class="table-meta">${formatRelativeAge(item.created_at)}</div></div>`,
+      `<div><strong>${formatNumber(item.net_realized_pnl ?? 0)}</strong><div class="table-meta">毛收益 ${formatNumber(item.gross_realized_pnl ?? 0)} / 交易 ${formatNumber(item.trade_count ?? 0, 0)}</div></div>`,
+      `<div><strong>${formatNumber(item.fee_to_gross_pnl_ratio ?? 0, 3)}</strong><div class="table-meta">手续费 ${formatNumber(item.fee_total ?? 0)}</div></div>`,
+      `<div><strong>${formatNumber(item.small_pnl_churn_ratio ?? 0, 3)}</strong><div class="table-meta">胜率 ${formatNumber(item.win_rate ?? 0, 3)}</div></div>`,
+      pill(readableState(item.status || "-"), item.status === "healthy" ? "positive" : item.status === "observing" ? "outline" : "warning"),
+    ]),
+    "最近还没有策略档位评估记录。",
   );
 }
 
@@ -275,6 +299,21 @@ function formatChangedFieldCount(diff) {
 function listChangedFields(diff) {
   const fields = Array.isArray(diff?.changed_fields) ? diff.changed_fields : [];
   return fields.length ? fields.slice(0, 3).join("、") : "没有字段变化";
+}
+
+function renderSafetySummary(safetyState) {
+  if (!safetyState || Object.keys(safetyState).length === 0) return "-";
+  const parts = [];
+  parts.push(safetyState.safe_to_trade ? "允许运行" : "不允许运行");
+  if (safetyState.review_required) parts.push("需人工复核");
+  if (!safetyState.market_snapshot_fresh) parts.push("行情不新鲜");
+  if (!safetyState.account_snapshot_fresh) parts.push("账户不新鲜");
+  if (String(safetyState.reconciliation_severity || "").toUpperCase() === "CLEAN") {
+    parts.push("对账干净");
+  } else if (safetyState.reconciliation_severity) {
+    parts.push(`对账 ${readableState(safetyState.reconciliation_severity)}`);
+  }
+  return parts.join(" / ");
 }
 
 function renderCreateForm(canAdmin) {
@@ -320,12 +359,12 @@ function renderCreateForm(canAdmin) {
 }
 
 function renderUserActions(user, canAdmin) {
-  if (!canAdmin) return '<span class="meta-copy">需要管理员权限</span>';
+  if (!canAdmin) return '<span class="table-meta">无管理权限</span>';
   return `
     <div class="table-actions">
-      ${actionButton("改角色", "change-user-role", user.username)}
-      ${actionButton("重置密码", "reset-user-password", user.username)}
       ${actionButton(user.enabled ? "停用" : "启用", "toggle-user", user.username, user.enabled ? "warning" : "secondary")}
+      ${actionButton("改角色", "change-user-role", user.username, "ghost")}
+      ${actionButton("重置密码", "reset-user-password", user.username, "ghost")}
       ${actionButton("删除", "delete-user", user.username, "danger")}
     </div>
   `;

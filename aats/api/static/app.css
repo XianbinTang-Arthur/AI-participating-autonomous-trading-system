@@ -1,4 +1,4 @@
-:root {
+﻿:root {
   --bg: #071019;
   --bg-alt: #0d1722;
   --bg-elevated: rgba(14, 24, 35, 0.92);
@@ -103,7 +103,12 @@ h3 {
   padding: 28px 24px 40px;
 }
 
+.console-shell--compact {
+  max-width: 1480px;
+}
+
 .masthead,
+.utility-bar,
 .session-panel,
 .command-panel,
 .status-card,
@@ -123,6 +128,40 @@ h3 {
   gap: 22px;
   padding: 28px;
   border-radius: var(--radius-xl);
+}
+
+.utility-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 18px;
+  padding: 16px 20px;
+  border-radius: var(--radius-lg);
+}
+
+.utility-bar__brand,
+.utility-bar__meta,
+.session-inline {
+  display: grid;
+  gap: 6px;
+}
+
+.utility-bar__meta {
+  justify-items: end;
+}
+
+.utility-bar__brand h1 {
+  font-size: clamp(22px, 2.4vw, 32px);
+  line-height: 1.05;
+}
+
+.session-inline {
+  justify-items: end;
+}
+
+.session-inline strong {
+  font-size: 16px;
+  font-weight: 800;
 }
 
 .masthead-copy,

@@ -1,4 +1,4 @@
-import { localizeError } from "./terms.js";
+﻿import { localizeError } from "./terms.js";
 
 export async function requestJson(path, options = {}) {
   const headers = new Headers(options.headers || {});

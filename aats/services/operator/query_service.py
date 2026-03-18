@@ -439,6 +439,19 @@ class OperatorQueryService:
             serializer=lambda item: item.model_dump(mode="json"),
         )
 
+    def strategy_profile_evaluations(self, *, limit: int, offset: int) -> dict[str, Any]:
+        rows = self.runtime.strategy_profile_repo.list_evaluations(
+            product_type=self.runtime.settings.trading_product_type,
+            margin_mode=self.runtime.settings.margin_mode,
+        )
+        return self._paginate_rows(
+            rows,
+            limit=limit,
+            offset=offset,
+            key="evaluations",
+            serializer=lambda item: item.model_dump(mode="json"),
+        )
+
     async def evaluate_strategy_profile(
         self,
         *,

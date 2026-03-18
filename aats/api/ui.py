@@ -11,6 +11,7 @@ from aats.api.auth import session_principal
 UI_DIR = Path(__file__).resolve().parent / "static"
 MODULES_DIR = UI_DIR / "modules"
 PAGE_FILES = {
+    "home": UI_DIR / "home.html",
     "overview": UI_DIR / "dashboard.html",
     "strategy": UI_DIR / "strategy.html",
     "execution": UI_DIR / "execution.html",
@@ -47,7 +48,12 @@ def _serve_dashboard_page(request: Request, page_name: str) -> FileResponse | Re
 @ui_router.get("/")
 @ui_router.get("/ui")
 async def dashboard_index(request: Request):
-    return _serve_dashboard_page(request, "overview")
+    return _serve_dashboard_page(request, "home")
+
+
+@ui_router.get("/ui/home")
+async def home_index(request: Request):
+    return _serve_dashboard_page(request, "home")
 
 
 @ui_router.get("/ui/overview")

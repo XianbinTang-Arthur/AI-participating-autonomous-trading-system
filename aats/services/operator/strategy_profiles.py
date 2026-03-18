@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
+from decimal import Decimal
+from hashlib import sha256
 from typing import TYPE_CHECKING, Any
 
 from aats.bootstrap.settings import AATSSettings
@@ -13,6 +15,7 @@ from aats.schemas.operator import AuthSource, OperatorActionRecord, OperatorRole
 from aats.schemas.strategy_profiles import (
     StrategyProfileActivationRecord,
     StrategyProfileActivationState,
+    StrategyProfileEvaluationRecord,
     StrategyProfileGuardrails,
     StrategyProfilePayload,
     StrategyProfileRecommendation,
@@ -25,6 +28,12 @@ from aats.schemas.strategy_profiles import (
 )
 from aats.services.ai_service.openai_provider import OpenAIProvider
 from aats.services.ai_service.provider import AIProviderError, AIProviderTimeoutError
+from aats.services.runtime_scope import (
+    fills_for_scope,
+    latest_reconciliation_for_scope,
+    runtime_state_scope,
+    snapshots_for_scope,
+)
 from aats.storage.base import EventStore, StrategyProfileRepository
 
 if TYPE_CHECKING:
@@ -37,13 +46,31 @@ _RISK_LEVEL_ORDER = {
     "aggressive": 2,
 }
 
-_AUTO_SWITCH_CONFIDENCE_MIN = 0.75
+_AUTO_SWITCH_CONFIDENCE_MIN_CONSERVATIVE = 0.75
+_AUTO_SWITCH_CONFIDENCE_MIN_SAME_RISK = 0.80
+_AUTO_SWITCH_CONFIDENCE_MIN_AGGRESSIVE = 0.88
+_EVALUATION_WINDOW_LIMIT = 50
+_EVALUATION_SMALL_PNL_MULTIPLIER = Decimal("1.25")
 
 
 def _copy_payload(payload: StrategyProfilePayload, **updates: Any) -> StrategyProfilePayload:
     raw = payload.model_dump(mode="python")
     raw.update(updates)
     return StrategyProfilePayload.model_validate(raw)
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, list):
+        return [_json_safe(item) for item in value]
+    return value
 
 
 def _seed_revisions(*, settings: AATSSettings, payload: StrategyProfilePayload) -> list[StrategyProfileRevision]:
@@ -265,6 +292,7 @@ class StrategyProfileControlService:
         )
         return {
             "scope": self._scope(),
+            "safety_state": self._safety_state(),
             "activation": state.model_dump(mode="json"),
             "active_revision": self._revision_view(active),
             "pending_revision": self._revision_view(pending),
@@ -284,11 +312,29 @@ class StrategyProfileControlService:
                     margin_mode=self.settings.margin_mode,
                 )[:20]
             ],
+            "evaluations": [
+                item.model_dump(mode="json")
+                for item in self.repo.list_evaluations(
+                    product_type=self.settings.trading_product_type,
+                    margin_mode=self.settings.margin_mode,
+                )[:20]
+            ],
         }
 
     async def evaluate_now(self) -> dict[str, Any]:
         self.ensure_seed_profiles()
         context = self._tuning_context()
+        evaluation = self._build_evaluation_record()
+        if evaluation is not None:
+            self.repo.save_evaluation(evaluation)
+            self.event_store.append(
+                build_envelope(
+                    topic=topics.STRATEGY_PROFILE_EVALUATIONS,
+                    key=evaluation.profile_id,
+                    payload_model=evaluation,
+                    source_component="strategy_profile_service",
+                )
+            )
         recommendation = await self._generate_recommendation(context=context)
         self.repo.save_recommendation(recommendation)
         self.event_store.append(
@@ -303,7 +349,10 @@ class StrategyProfileControlService:
         result = {
             "recommendation": recommendation.model_dump(mode="json"),
             "validation": validation,
+            "safety_state": self._safety_state(),
         }
+        if evaluation is not None:
+            result["current_evaluation"] = evaluation.model_dump(mode="json")
         if validation["auto_apply_allowed"]:
             activation = self._auto_apply_recommendation(recommendation=recommendation)
             result["auto_activation"] = activation
@@ -520,17 +569,15 @@ class StrategyProfileControlService:
         baseline_event = self.event_store.latest(topics.BASELINE_ASSESSMENTS)
         feature_event = self.event_store.latest(topics.FEATURE_SNAPSHOTS)
         latest_portfolio = self.runtime.portfolio_repo.latest()
-        fills = self.runtime.execution_repo.fills_for_scope(scope=self.runtime_state_scope, limit=20)
         activation = self._activation_state()
-        gross_realized = sum(getattr(item, "realized_pnl", 0.0) for item in fills)
-        fee_total = sum(item.fee_amount for item in fills)
-        trade_count = len(fills)
-        fee_ratio = fee_total / gross_realized if gross_realized > 0 else (1.0 if fee_total > 0 else 0.0)
+        safety_state = self._safety_state()
+        performance = self._performance_summary()
         return {
             "scope": self._scope(),
             "baseline": baseline_event.payload if baseline_event is not None else None,
             "features": feature_event.payload if feature_event is not None else None,
             "portfolio": latest_portfolio.model_dump(mode="json") if latest_portfolio is not None else None,
+            "safety_state": safety_state,
             "execution_health": {
                 "open_order_count": len(
                     self.runtime.execution_repo.order_states_for_scope(scope=self.runtime_state_scope, open_only=True)
@@ -539,12 +586,7 @@ class StrategyProfileControlService:
                     self.runtime.event_store.recent_by_topic(topics.EXECUTION_ERROR_SUMMARIES, limit=20)
                 ),
             },
-            "performance": {
-                "trade_count": trade_count,
-                "gross_realized_pnl": gross_realized,
-                "fee_total": fee_total,
-                "fee_to_gross_pnl_ratio": fee_ratio,
-            },
+            "performance": performance,
             "current_profile_id": activation.active_profile_id,
             "candidate_profiles": [
                 {
@@ -559,6 +601,136 @@ class StrategyProfileControlService:
                 )
             ],
         }
+
+    def _performance_summary(self) -> dict[str, Any]:
+        fills = fills_for_scope(
+            self.runtime.execution_repo,
+            self.runtime_state_scope,
+            limit=_EVALUATION_WINDOW_LIMIT,
+        )
+        snapshots = snapshots_for_scope(
+            self.runtime.portfolio_repo,
+            self.runtime_state_scope,
+            limit=_EVALUATION_WINDOW_LIMIT,
+        )
+        fee_total = sum(Decimal(str(item.fee_amount)) for item in fills)
+        latest_snapshot = snapshots[-1] if snapshots else None
+        earliest_snapshot = snapshots[0] if len(snapshots) > 1 else None
+        latest_realized = latest_snapshot.realized_pnl if latest_snapshot is not None else Decimal("0")
+        earliest_realized = earliest_snapshot.realized_pnl if earliest_snapshot is not None else Decimal("0")
+        net_realized = latest_realized - earliest_realized if earliest_snapshot is not None else Decimal("0")
+        gross_realized = net_realized + fee_total
+
+        pnl_deltas: list[Decimal] = []
+        for previous, current in zip(snapshots, snapshots[1:]):
+            delta = current.realized_pnl - previous.realized_pnl
+            if delta != 0:
+                pnl_deltas.append(delta)
+        avg_fee = fee_total / Decimal(len(fills)) if fills else Decimal("0")
+        material_moves = [delta for delta in pnl_deltas if abs(delta) > Decimal("0")]
+        small_pnl_cutoff = avg_fee * _EVALUATION_SMALL_PNL_MULTIPLIER
+        small_moves = [delta for delta in material_moves if abs(delta) <= small_pnl_cutoff] if material_moves else []
+        fee_ratio = fee_total / gross_realized if gross_realized > 0 else (Decimal("1") if fee_total > 0 else Decimal("0"))
+        win_rate = (
+            Decimal(sum(1 for delta in material_moves if delta > 0)) / Decimal(len(material_moves))
+            if material_moves
+            else Decimal("0")
+        )
+        small_pnl_churn_ratio = (
+            Decimal(len(small_moves)) / Decimal(len(material_moves))
+            if material_moves
+            else Decimal("0")
+        )
+        return {
+            "trade_count": len(fills),
+            "gross_realized_pnl": float(gross_realized),
+            "net_realized_pnl": float(net_realized),
+            "fee_total": float(fee_total),
+            "fee_to_gross_pnl_ratio": float(fee_ratio),
+            "win_rate": float(win_rate),
+            "small_pnl_churn_ratio": float(small_pnl_churn_ratio),
+            "window_start": snapshots[0].snapshot_ts.isoformat() if snapshots else None,
+            "window_end": snapshots[-1].snapshot_ts.isoformat() if snapshots else None,
+        }
+
+    def _safety_state(self) -> dict[str, Any]:
+        scope = runtime_state_scope(self.settings)
+        recovery = self.runtime.recovery_status
+        market_status = self.runtime.market_gateway.status()
+        account_status = self.runtime.account_service.status()
+        latest_reconciliation = latest_reconciliation_for_scope(self.runtime.reconciliation_repo, scope)
+        activation = self._activation_state()
+        now = utc_now()
+        return {
+            "safe_to_trade": recovery.safe_to_trade,
+            "review_required": recovery.review_required,
+            "halted": recovery.halted,
+            "recovery_state": recovery.recovery_state,
+            "resume_blocked_reasons": list(recovery.resume_blocked_reasons),
+            "market_snapshot_fresh": bool(market_status.get("fresh")),
+            "account_snapshot_fresh": bool(account_status.get("fresh")),
+            "market_status": _json_safe(market_status),
+            "account_status": _json_safe(account_status),
+            "reconciliation_id": latest_reconciliation.reconciliation_id if latest_reconciliation else None,
+            "reconciliation_severity": latest_reconciliation.severity if latest_reconciliation else "unknown",
+            "reconciliation_halt_required": bool(latest_reconciliation.halt_required) if latest_reconciliation else False,
+            "reconciliation_review_required": bool(latest_reconciliation.review_required) if latest_reconciliation else False,
+            "auto_switch_frozen": bool(activation.frozen_until and activation.frozen_until > now),
+            "auto_switch_cooldown_active": bool(activation.cooldown_until and activation.cooldown_until > now),
+        }
+
+    def _build_evaluation_record(self) -> StrategyProfileEvaluationRecord | None:
+        state = self._activation_state()
+        active = self._revision(state.active_revision_id)
+        if active is None:
+            return None
+        performance = self._performance_summary()
+        safety_state = self._safety_state()
+        execution_error_rate = (
+            float(self.runtime.event_store.recent_by_topic(topics.EXECUTION_ERROR_SUMMARIES, limit=20).__len__())
+            / float(max(performance["trade_count"], 1))
+        )
+        reconciliation_issue_count = 0
+        reconciliation_severity = str(safety_state.get("reconciliation_severity") or "unknown").upper()
+        if reconciliation_severity not in {"CLEAN", "UNKNOWN"}:
+            reconciliation_issue_count = 1
+        if performance["trade_count"] < 3:
+            status = "observing"
+        elif (
+            safety_state["review_required"]
+            or safety_state["reconciliation_halt_required"]
+            or not safety_state["market_snapshot_fresh"]
+            or not safety_state["account_snapshot_fresh"]
+        ):
+            status = "degraded"
+        else:
+            status = "healthy"
+        return StrategyProfileEvaluationRecord(
+            revision_id=active.revision_id,
+            profile_id=active.profile_id,
+            product_type=self.settings.trading_product_type,
+            margin_mode=self.settings.margin_mode,
+            allowed_symbols=self.settings.allowed_symbols,
+            window_start=utc_now() if performance["window_start"] is None else datetime.fromisoformat(performance["window_start"]),
+            window_end=utc_now() if performance["window_end"] is None else datetime.fromisoformat(performance["window_end"]),
+            trade_count=int(performance["trade_count"]),
+            win_rate=float(performance["win_rate"]),
+            gross_realized_pnl=float(performance["gross_realized_pnl"]),
+            net_realized_pnl=float(performance["net_realized_pnl"]),
+            fee_total=float(performance["fee_total"]),
+            fee_to_gross_pnl_ratio=float(performance["fee_to_gross_pnl_ratio"]),
+            small_pnl_churn_ratio=float(performance["small_pnl_churn_ratio"]),
+            execution_error_rate=execution_error_rate,
+            reconciliation_issue_count=reconciliation_issue_count,
+            status=status,
+            summary={
+                "safe_to_trade": safety_state["safe_to_trade"],
+                "review_required": safety_state["review_required"],
+                "reconciliation_severity": safety_state["reconciliation_severity"],
+                "market_snapshot_fresh": safety_state["market_snapshot_fresh"],
+                "account_snapshot_fresh": safety_state["account_snapshot_fresh"],
+            },
+        )
 
     async def _generate_recommendation(self, *, context: dict[str, Any]) -> StrategyProfileRecommendation:
         active_state = self._activation_state()
@@ -650,18 +822,22 @@ class StrategyProfileControlService:
         )
 
     def _prompt(self, context: dict[str, Any]) -> str:
-        return (
-            "You are a strategy tuning advisor for a cryptocurrency trading system. "
-            "Choose exactly one approved profile from candidate_profiles. "
-            "Optimize for financial safety, lower fee churn, lower low-edge trading, and execution reliability. "
-            "Do not invent new profiles. Return only JSON. "
-            f"prompt_version={self.prompt_version} context={json.dumps(context, ensure_ascii=False, sort_keys=True)}"
+        return "\n".join(
+            [
+                "You are a strategy tuning advisor for a cryptocurrency trading system.",
+                "Select exactly one approved profile from candidate_profiles.",
+                "Prioritize: financial safety, lower fee churn, lower low-edge trading, and execution reliability.",
+                "Do not invent profiles. Do not return markdown. Return only JSON matching the provided schema.",
+                f"prompt_version={self.prompt_version}",
+                "Context JSON:",
+                json.dumps(context, ensure_ascii=False, sort_keys=True, indent=2),
+            ]
         )
 
     @staticmethod
     def _input_digest(context: dict[str, Any]) -> str:
         serialized = json.dumps(context, ensure_ascii=False, sort_keys=True)
-        return str(abs(hash(serialized)))
+        return sha256(serialized.encode("utf-8")).hexdigest()
 
     def _activation_state(self) -> StrategyProfileActivationState:
         return self.repo.activation_state(
@@ -703,15 +879,34 @@ class StrategyProfileControlService:
     def _risk_rank(level: str | None) -> int:
         return _RISK_LEVEL_ORDER.get(str(level or "").lower(), 99)
 
-    def _is_more_conservative_transition(
+    def _transition_risk_direction(
         self,
         *,
         current: StrategyProfileRevision | None,
         target: StrategyProfileRevision,
-    ) -> bool:
+    ) -> str:
         if current is None:
-            return False
-        return self._risk_rank(target.risk_level) < self._risk_rank(current.risk_level)
+            return "same_risk"
+        current_rank = self._risk_rank(current.risk_level)
+        target_rank = self._risk_rank(target.risk_level)
+        if target_rank < current_rank:
+            return "more_conservative"
+        if target_rank > current_rank:
+            return "more_aggressive"
+        return "same_risk"
+
+    def _auto_switch_confidence_min(
+        self,
+        *,
+        current: StrategyProfileRevision | None,
+        target: StrategyProfileRevision,
+    ) -> float:
+        transition = self._transition_risk_direction(current=current, target=target)
+        if transition == "more_conservative":
+            return _AUTO_SWITCH_CONFIDENCE_MIN_CONSERVATIVE
+        if transition == "more_aggressive":
+            return _AUTO_SWITCH_CONFIDENCE_MIN_AGGRESSIVE
+        return _AUTO_SWITCH_CONFIDENCE_MIN_SAME_RISK
 
     def _activation_blockers(self) -> list[str]:
         open_orders = self.runtime.execution_repo.order_states_for_scope(
@@ -724,37 +919,69 @@ class StrategyProfileControlService:
         active = self._activation_state()
         revision = self._revision_for_profile(recommendation.recommended_profile_id)
         current = self._revision(active.active_revision_id)
+        safety_state = self._safety_state()
         blocked_reasons: list[str] = []
+        transition = "unknown"
         if revision is None:
             blocked_reasons.append("strategy_profile_revision_missing")
+        else:
+            transition = self._transition_risk_direction(current=current, target=revision)
         if recommendation.expires_at <= utc_now():
             blocked_reasons.append("strategy_profile_recommendation_expired")
         if recommendation.recommended_profile_id == active.active_profile_id:
             blocked_reasons.append("strategy_profile_already_active")
+        if active.frozen_until is not None and active.frozen_until > utc_now():
+            blocked_reasons.append("strategy_profile_auto_switch_frozen")
         if active.cooldown_until is not None and active.cooldown_until > utc_now():
             blocked_reasons.append("strategy_profile_switch_cooldown_active")
         if not active.auto_switch_enabled:
             blocked_reasons.append("strategy_profile_auto_switch_disabled")
-        if recommendation.confidence < _AUTO_SWITCH_CONFIDENCE_MIN:
-            blocked_reasons.append("strategy_profile_auto_switch_confidence_too_low")
+        if revision is not None:
+            confidence_floor = self._auto_switch_confidence_min(current=current, target=revision)
+            if recommendation.confidence < confidence_floor:
+                if transition == "more_aggressive":
+                    blocked_reasons.append("strategy_profile_auto_switch_aggressive_confidence_too_low")
+                elif transition == "same_risk":
+                    blocked_reasons.append("strategy_profile_auto_switch_same_risk_confidence_too_low")
+                else:
+                    blocked_reasons.append("strategy_profile_auto_switch_confidence_too_low")
+        if not safety_state["safe_to_trade"]:
+            blocked_reasons.append("strategy_profile_runtime_not_safe_to_trade")
+        if safety_state["review_required"]:
+            blocked_reasons.append("strategy_profile_review_required")
+        if not safety_state["market_snapshot_fresh"]:
+            blocked_reasons.append("strategy_profile_market_data_stale")
+        if not safety_state["account_snapshot_fresh"]:
+            blocked_reasons.append("strategy_profile_account_state_stale")
+        if safety_state["reconciliation_halt_required"] or safety_state["reconciliation_review_required"]:
+            blocked_reasons.append("strategy_profile_reconciliation_not_clean")
+        elif str(safety_state["reconciliation_severity"]).upper() not in {"CLEAN", "UNKNOWN"}:
+            blocked_reasons.append("strategy_profile_reconciliation_not_clean")
         if revision is not None and not revision.auto_switch_allowed:
             blocked_reasons.append("strategy_profile_auto_switch_not_allowed")
         if revision is not None and revision.manual_approval_required:
             blocked_reasons.append("strategy_profile_manual_approval_required")
-        if revision is not None and not self._is_more_conservative_transition(current=current, target=revision):
-            blocked_reasons.append("strategy_profile_auto_switch_requires_more_conservative_target")
         blocked_reasons.extend(self._activation_blockers())
         return {
             "auto_apply_allowed": not blocked_reasons,
             "blocked_reasons": blocked_reasons,
             "requires_manual_approval": bool(blocked_reasons),
+            "transition_risk_direction": transition,
         }
 
     def _auto_apply_recommendation(self, *, recommendation: StrategyProfileRecommendation) -> dict[str, Any]:
         state = self._activation_state()
         revision = self._revision_for_profile(recommendation.recommended_profile_id)
+        current = self._revision(state.active_revision_id)
         if revision is None:
             raise ValueError("strategy_profile_revision_missing")
+        transition = self._transition_risk_direction(current=current, target=revision)
+        if transition == "more_aggressive":
+            reason_code = "ai_recommended_more_aggressive_profile"
+        elif transition == "same_risk":
+            reason_code = "ai_recommended_same_risk_profile"
+        else:
+            reason_code = "ai_recommended_more_conservative_profile"
         record = self._activate_revision(
             target=revision,
             state=state,
@@ -763,7 +990,7 @@ class StrategyProfileControlService:
             actor_identity="system_ai",
             auth_source="local_config",
             recommendation_id=recommendation.recommendation_id,
-            reason_code="ai_recommended_more_conservative_profile",
+            reason_code=reason_code,
             reason_detail=recommendation.human_summary,
         )
         updated = recommendation.model_copy(

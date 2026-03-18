@@ -1,4 +1,4 @@
-import { emptyState, escapeHtml } from "./formatters.js";
+﻿import { emptyState, escapeHtml } from "./formatters.js";
 
 export function pill(label, tone = "neutral") {
   return `<span class="signal-pill tone-${escapeHtml(tone)}">${escapeHtml(label)}</span>`;
@@ -90,9 +90,7 @@ export function table(headers, rows, emptyText) {
           <tr>${headers.map((item) => `<th>${escapeHtml(item)}</th>`).join("")}</tr>
         </thead>
         <tbody>
-          ${rows
-            .map((row) => `<tr>${row.map((cell) => `<td>${cell}</td>`).join("")}</tr>`)
-            .join("")}
+          ${rows.map((row) => `<tr>${row.map((cell) => `<td>${cell}</td>`).join("")}</tr>`).join("")}
         </tbody>
       </table>
     </div>

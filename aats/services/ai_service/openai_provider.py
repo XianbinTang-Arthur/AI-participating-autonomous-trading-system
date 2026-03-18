@@ -30,7 +30,7 @@ class OpenAIProvider:
         payload = {
             "model": self.settings.ai_model_name,
             "temperature": 0,
-            "messages": [
+            "input": [
                 {
                     "role": "system",
                     "content": (
@@ -40,9 +40,9 @@ class OpenAIProvider:
                 },
                 {"role": "user", "content": prompt},
             ],
-            "response_format": {
-                "type": "json_schema",
-                "json_schema": {
+            "text": {
+                "format": {
+                    "type": "json_schema",
                     "name": "ai_market_assessment",
                     "strict": True,
                     "schema": response_schema,
@@ -55,18 +55,25 @@ class OpenAIProvider:
                 base_url=self.settings.openai_base_url.rstrip("/"),
                 timeout=timeout,
             ) as client:
-                response = await client.post("/v1/chat/completions", headers=headers, json=payload)
+                response = await client.post("/v1/responses", headers=headers, json=payload)
                 response.raise_for_status()
         except httpx.TimeoutException as exc:
             raise AIProviderTimeoutError("openai_request_timeout") from exc
+        except httpx.HTTPStatusError as exc:
+            detail = ""
+            if exc.response is not None:
+                try:
+                    payload = exc.response.json()
+                    detail = payload.get("error", {}).get("message") or exc.response.text
+                except Exception:
+                    detail = exc.response.text
+            suffix = f":{detail}" if detail else ""
+            raise AIProviderError(f"openai_http_error:{exc}{suffix}") from exc
         except httpx.HTTPError as exc:
             raise AIProviderError(f"openai_http_error:{exc}") from exc
 
         data = response.json()
-        choice = data["choices"][0]["message"]
-        if choice.get("refusal"):
-            raise AIProviderError(f"openai_refusal:{choice['refusal']}")
-        content = choice.get("content")
+        content = self._extract_text_payload(data)
         if not isinstance(content, str):
             raise AIProviderError("openai_missing_content")
 
@@ -83,3 +90,32 @@ class OpenAIProvider:
             latency_ms=latency_ms,
             payload=parsed_payload,
         )
+
+    def _extract_text_payload(self, data: dict[str, object]) -> str | None:
+        output_text = data.get("output_text")
+        if isinstance(output_text, str) and output_text.strip():
+            return output_text
+
+        output = data.get("output")
+        if not isinstance(output, list):
+            return None
+        for item in output:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "refusal":
+                refusal = item.get("refusal") or item.get("content")
+                raise AIProviderError(f"openai_refusal:{refusal}")
+            content = item.get("content")
+            if not isinstance(content, list):
+                continue
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                if part.get("type") == "refusal":
+                    refusal = part.get("refusal") or part.get("text")
+                    raise AIProviderError(f"openai_refusal:{refusal}")
+                if part.get("type") in {"output_text", "text"}:
+                    text = part.get("text")
+                    if isinstance(text, str) and text.strip():
+                        return text
+        return None

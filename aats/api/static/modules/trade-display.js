@@ -1,4 +1,4 @@
-import { formatNumber, formatSigned } from "./formatters.js";
+﻿import { formatNumber, formatSigned } from "./formatters.js";
 import { readableState } from "./terms.js";
 
 export function inferTradeScene(record = {}) {

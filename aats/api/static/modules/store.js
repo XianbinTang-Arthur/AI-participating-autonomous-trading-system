@@ -1,4 +1,4 @@
-export const AUTO_REFRESH_MS = 15000;
+﻿export const AUTO_REFRESH_MS = 15000;
 export const DEFAULT_PAGE_LIMITS = {
   recentDecisions: 8,
   recentOrders: 8,
@@ -23,7 +23,7 @@ export const CORE_SPECS = [
 
 export function createState() {
   return {
-    activeView: "overview",
+    activeView: "home",
     refreshing: false,
     refreshTimer: null,
     lastRefreshAt: null,
@@ -37,6 +37,15 @@ export function createState() {
 export function viewSpecs(view, state = null) {
   const limits = state?.pageLimits || DEFAULT_PAGE_LIMITS;
   const specs = {
+    home: [
+      ["blockers", "/system/blockers"],
+      ["metrics", "/system/metrics"],
+      ["portfolio", "/portfolio/latest"],
+      ["latestDecision", "/decision/latest"],
+      ["executionLatest", "/execution/latest"],
+      ["reconciliationLatest", "/reconciliation/latest"],
+      ["accountState", "/account/state"],
+    ],
     overview: [
       ["blockers", "/system/blockers"],
       ["metrics", "/system/metrics"],

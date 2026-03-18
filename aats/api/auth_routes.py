@@ -427,6 +427,17 @@ async def strategy_profile_rejections(
     return _query(request).strategy_profile_rejections(limit=limit, offset=offset)
 
 
+@auth_router.get("/strategy-profiles/evaluations")
+async def strategy_profile_evaluations(
+    request: Request,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0, le=5000),
+    principal: OperatorPrincipal = Depends(require_admin_access),
+) -> dict[str, Any]:
+    _ = principal
+    return _query(request).strategy_profile_evaluations(limit=limit, offset=offset)
+
+
 @auth_router.post("/strategy-profiles/auto-tuning/evaluate-now")
 async def evaluate_strategy_profile(
     request: Request,

@@ -3,61 +3,32 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>AATS 交易控制台 | AI 工作台</title>
+  <title>AATS 自动交易监控台 | AI 工作台</title>
   <link rel="stylesheet" href="/ui/app.css">
 </head>
 <body data-view="ai">
-  <div class="console-shell">
-    <header class="masthead">
-      <div class="masthead-copy">
-        <p class="eyebrow">AI 交易主链工作台</p>
+  <div class="console-shell console-shell--compact">
+    <header class="utility-bar">
+      <div class="utility-bar__brand">
+        <p class="eyebrow">AATS 自动交易监控台</p>
         <h1>AI 工作台</h1>
-        <p class="lead">
-          这一页专门追踪 AI 决策主链的运行状态、最新判断、接管门禁、shadow 决策和 shadow 收益回放。
-          重点回答“AI 现在是否参与、为什么没接管、如果让 AI 主导会发生什么”。
-        </p>
       </div>
-      <div class="masthead-side">
-        <section class="session-panel">
-          <div>
-            <p class="panel-kicker">登录会话</p>
-            <h2 id="sessionIdentityValue">未登录</h2>
-            <p id="sessionRoleValue" class="meta-copy">当前身份：未登录</p>
-          </div>
-          <div class="session-actions">
-            <span id="authStateChip" class="status-pill tone-neutral">未登录</span>
-            <button id="logoutButton" class="ghost-button">退出登录</button>
-          </div>
-        </section>
-        <section class="command-panel" aria-label="人工控制">
-          <div class="command-head">
-            <div>
-              <p class="panel-kicker">人工操作</p>
-              <h2>控制动作</h2>
-            </div>
-            <label class="toggle-pill" for="autoRefreshToggle">
-              <input id="autoRefreshToggle" type="checkbox" checked>
-              <span>每 15 秒刷新一次</span>
-            </label>
-          </div>
-          <div class="command-grid">
-            <button id="refreshButton" class="primary-button">刷新数据</button>
-            <button id="reconcileButton" class="secondary-button">立即对账</button>
-            <button id="rebaselineButton" class="warning-button">接受当前账户为新基线</button>
-            <button id="resumeButton" class="ghost-button">恢复自动交易</button>
-            <button id="haltButton" class="danger-button">暂停自动交易</button>
-          </div>
-          <p id="actionPermissionHint" class="meta-copy">正在确认当前账号权限…</p>
-          <p id="lastRefreshLabel" class="meta-copy">尚未刷新</p>
-        </section>
+      <div class="utility-bar__meta">
+        <div class="session-inline">
+          <strong id="sessionIdentityValue">未登录</strong>
+          <span id="sessionRoleValue" class="meta-copy">当前身份：未登录</span>
+          <span id="authStateChip" class="status-pill tone-neutral">未登录</span>
+        </div>
+        <div class="session-actions">
+          <span id="lastRefreshLabel" class="meta-copy">尚未刷新</span>
+          <button id="logoutButton" class="ghost-button">退出登录</button>
+        </div>
       </div>
     </header>
 
-    <section id="statusRibbon" class="status-ribbon" aria-label="首屏状态摘要"></section>
-    <section id="bannerContainer" class="banner-stack" aria-live="polite"></section>
-
     <nav class="workspace-nav" aria-label="主导航">
-      <a class="workspace-link" href="/ui">交易总览</a>
+      <a class="workspace-link" href="/ui">主页</a>
+      <a class="workspace-link" href="/ui/overview">交易总览</a>
       <a class="workspace-link" href="/ui/strategy">策略判断</a>
       <a class="workspace-link" href="/ui/execution">委托与成交</a>
       <a class="workspace-link" href="/ui/risk">风险与恢复</a>
@@ -65,14 +36,16 @@
       <a class="workspace-link" href="/ui/settings">账户与权限</a>
     </nav>
 
+    <section id="bannerContainer" class="banner-stack" aria-live="polite"></section>
+
     <main class="workspace">
       <section class="workspace-view is-active" data-view="ai">
         <div class="page-head">
           <div>
             <p class="panel-kicker">AI 主链</p>
-            <h2>AI 现在是否真的在参与交易判断？</h2>
+            <h2>AI 当前有效模式、接管门禁和 shadow 回放</h2>
           </div>
-          <p class="page-copy">这里重点看 AI 当前有效模式、最新判断、接管阻断原因，以及 shadow 回放是否真的优于 baseline。</p>
+          <p class="page-copy">重点看 AI 当前有效模式、最近判断、为什么没有接管，以及 shadow 回放是否真的优于 baseline。</p>
         </div>
         <div id="aiContent" class="view-layout panel-grid">
           <div id="aiHero" class="span-7"></div>
@@ -89,7 +62,7 @@
         <div>
           <p id="drawerEyebrow" class="panel-kicker">详情</p>
           <h2 id="drawerTitle">明细面板</h2>
-          <p id="drawerSummary" class="meta-copy">点击任意记录查看更完整的 AI 判断和 shadow 回放明细。</p>
+          <p id="drawerSummary" class="meta-copy">点击任意记录查看更完整的 AI 明细。</p>
         </div>
         <button id="closeDrawerButton" class="ghost-button">关闭</button>
       </header>
