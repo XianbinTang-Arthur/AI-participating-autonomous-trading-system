@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import Query
 from pydantic import BaseModel
 
 from aats.api.auth import (
@@ -58,6 +59,24 @@ class UpdateRuntimeProfileRequest(BaseModel):
 
 class StageRuntimeProfileRequest(BaseModel):
     activation_note: str | None = None
+
+
+class StrategyProfileAcceptRequest(BaseModel):
+    reason: str = "accept_strategy_profile_recommendation"
+    activation_mode: str = "manual_now"
+
+
+class StrategyProfileRejectRequest(BaseModel):
+    reason_code: str = "operator_rejected_strategy_profile_recommendation"
+    reason_detail: str | None = None
+
+
+class StrategyProfileActivatePendingRequest(BaseModel):
+    reason: str = "activate_pending_strategy_profile"
+
+
+class StrategyProfileRollbackRequest(BaseModel):
+    reason: str = "rollback_strategy_profile"
 
 
 def _runtime(request: Request) -> ApplicationRuntime:
@@ -364,6 +383,136 @@ async def request_runtime_profile_restart(
         new_revision_id=activation.pending_revision_id,
     )
     return {"activation": activation.model_dump(mode="json")}
+
+
+@auth_router.get("/strategy-profiles")
+async def strategy_profiles(
+    request: Request,
+    principal: OperatorPrincipal = Depends(require_admin_access),
+) -> dict[str, Any]:
+    _ = principal
+    return _query(request).strategy_profile_snapshot()
+
+
+@auth_router.get("/strategy-profiles/recommendations")
+async def strategy_profile_recommendations(
+    request: Request,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0, le=5000),
+    principal: OperatorPrincipal = Depends(require_admin_access),
+) -> dict[str, Any]:
+    _ = principal
+    return _query(request).strategy_profile_recommendations(limit=limit, offset=offset)
+
+
+@auth_router.get("/strategy-profiles/activation-history")
+async def strategy_profile_activation_history(
+    request: Request,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0, le=5000),
+    principal: OperatorPrincipal = Depends(require_admin_access),
+) -> dict[str, Any]:
+    _ = principal
+    return _query(request).strategy_profile_activation_history(limit=limit, offset=offset)
+
+
+@auth_router.get("/strategy-profiles/rejections")
+async def strategy_profile_rejections(
+    request: Request,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0, le=5000),
+    principal: OperatorPrincipal = Depends(require_admin_access),
+) -> dict[str, Any]:
+    _ = principal
+    return _query(request).strategy_profile_rejections(limit=limit, offset=offset)
+
+
+@auth_router.post("/strategy-profiles/auto-tuning/evaluate-now")
+async def evaluate_strategy_profile(
+    request: Request,
+    principal: OperatorPrincipal = Depends(require_admin_access),
+) -> dict[str, Any]:
+    return await _query(request).evaluate_strategy_profile(
+        actor_role=principal.role,
+        actor_identity=principal.identity,
+        auth_source=principal.auth_source,
+    )
+
+
+@auth_router.post("/strategy-profiles/recommendations/{recommendation_id}/accept")
+async def accept_strategy_profile_recommendation(
+    request: Request,
+    recommendation_id: str,
+    payload: StrategyProfileAcceptRequest,
+    principal: OperatorPrincipal = Depends(require_admin_access),
+) -> dict[str, Any]:
+    try:
+        return _query(request).accept_strategy_profile_recommendation(
+            recommendation_id=recommendation_id,
+            activation_mode=payload.activation_mode,
+            reason=payload.reason,
+            actor_role=principal.role,
+            actor_identity=principal.identity,
+            auth_source=principal.auth_source,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@auth_router.post("/strategy-profiles/recommendations/{recommendation_id}/reject")
+async def reject_strategy_profile_recommendation(
+    request: Request,
+    recommendation_id: str,
+    payload: StrategyProfileRejectRequest,
+    principal: OperatorPrincipal = Depends(require_admin_access),
+) -> dict[str, Any]:
+    try:
+        return _query(request).reject_strategy_profile_recommendation(
+            recommendation_id=recommendation_id,
+            reason_code=payload.reason_code,
+            reason_detail=payload.reason_detail,
+            actor_role=principal.role,
+            actor_identity=principal.identity,
+            auth_source=principal.auth_source,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@auth_router.post("/strategy-profiles/pending/activate")
+async def activate_pending_strategy_profile(
+    request: Request,
+    payload: StrategyProfileActivatePendingRequest,
+    principal: OperatorPrincipal = Depends(require_admin_access),
+) -> dict[str, Any]:
+    try:
+        return _query(request).activate_pending_strategy_profile(
+            reason=payload.reason,
+            actor_role=principal.role,
+            actor_identity=principal.identity,
+            auth_source=principal.auth_source,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@auth_router.post("/strategy-profiles/rollback")
+async def rollback_strategy_profile(
+    request: Request,
+    payload: StrategyProfileRollbackRequest,
+    principal: OperatorPrincipal = Depends(require_admin_access),
+) -> dict[str, Any]:
+    try:
+        return _query(request).rollback_strategy_profile(
+            reason=payload.reason,
+            actor_role=principal.role,
+            actor_identity=principal.identity,
+            auth_source=principal.auth_source,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @auth_router.post("/auth/users")

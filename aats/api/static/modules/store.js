@@ -70,6 +70,7 @@ export function viewSpecs(view, state = null) {
     admin: [
       ["operatorUsers", "/auth/users"],
       ["runtimeProfiles", "/runtime-profiles"],
+      ["strategyProfiles", "/strategy-profiles"],
     ],
   };
   return specs[view] || [];

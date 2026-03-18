@@ -220,3 +220,109 @@ class RuntimeProfileActivationModel(Base):
 
     activation_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+
+
+class StrategyProfileRevisionModel(Base):
+    __tablename__ = "strategy_profile_revisions"
+    __table_args__ = (
+        Index("ix_strategy_profile_revisions_profile_status", "profile_id", "status"),
+        Index("ix_strategy_profile_revisions_scope", "product_type", "margin_mode"),
+    )
+
+    revision_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    profile_family: Mapped[str] = mapped_column(String(32), nullable=False, default="strategy_tuning")
+    profile_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    profile_label: Mapped[str] = mapped_column(String(128), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    risk_level: Mapped[str] = mapped_column(String(16), nullable=False)
+    market_intent: Mapped[str] = mapped_column(String(32), nullable=False)
+    product_type: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    margin_mode: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    allowed_symbols_json: Mapped[list] = mapped_column(JSON, nullable=False)
+    hot_safe_only: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    auto_switch_allowed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    manual_approval_required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    payload_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+    guardrails_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+    description: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    expected_behavior_json: Mapped[list] = mapped_column(JSON, nullable=False)
+    created_by: Mapped[str] = mapped_column(String(128), nullable=False)
+    created_reason: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_recommendation_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class StrategyProfileActivationModel(Base):
+    __tablename__ = "strategy_profile_activation"
+    __table_args__ = (
+        Index(
+            "ix_strategy_profile_activation_scope",
+            "product_type",
+            "margin_mode",
+            "allowed_symbols_hash",
+            unique=True,
+        ),
+    )
+
+    activation_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    product_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    margin_mode: Mapped[str] = mapped_column(String(16), nullable=False)
+    allowed_symbols_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+
+
+class StrategyProfileRecommendationModel(Base):
+    __tablename__ = "strategy_profile_recommendations"
+    __table_args__ = (
+        Index("ix_strategy_profile_recommendations_scope_time", "product_type", "margin_mode", "generated_at"),
+    )
+
+    recommendation_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    product_type: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    margin_mode: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    allowed_symbols_json: Mapped[list] = mapped_column(JSON, nullable=False)
+    decision_status: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+
+
+class StrategyProfileActivationHistoryModel(Base):
+    __tablename__ = "strategy_profile_activation_history"
+    __table_args__ = (
+        Index("ix_strategy_profile_activation_history_scope_time", "product_type", "margin_mode", "executed_at"),
+    )
+
+    activation_event_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    product_type: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    margin_mode: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    executed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+
+
+class StrategyProfileRejectionModel(Base):
+    __tablename__ = "strategy_profile_rejections"
+    __table_args__ = (
+        Index("ix_strategy_profile_rejections_scope_time", "product_type", "margin_mode", "created_at"),
+    )
+
+    rejection_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    product_type: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    margin_mode: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+
+
+class StrategyProfileEvaluationModel(Base):
+    __tablename__ = "strategy_profile_evaluations"
+    __table_args__ = (
+        Index("ix_strategy_profile_evaluations_scope_time", "product_type", "margin_mode", "created_at"),
+    )
+
+    evaluation_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    product_type: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    margin_mode: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False)

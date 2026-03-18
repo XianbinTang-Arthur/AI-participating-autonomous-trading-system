@@ -100,6 +100,11 @@ class OperatorActionRecord(SchemaBase):
         "runtime_profile_activation",
         "runtime_profile_activation_failed",
         "runtime_profile_supervisor_restart",
+        "strategy_profile_evaluate",
+        "strategy_profile_accept",
+        "strategy_profile_reject",
+        "strategy_profile_activate_pending",
+        "strategy_profile_rollback",
     ]
     actor_role: OperatorRole
     actor_identity: str | None = None

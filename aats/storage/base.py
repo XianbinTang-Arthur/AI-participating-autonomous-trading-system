@@ -10,6 +10,14 @@ from aats.schemas.portfolio import PortfolioSnapshot
 from aats.schemas.reconciliation import ReconciliationReport
 from aats.schemas.operator import OperatorUserRecord
 from aats.schemas.runtime_profiles import RuntimeProfileActivationState, RuntimeProfileRevision
+from aats.schemas.strategy_profiles import (
+    StrategyProfileActivationRecord,
+    StrategyProfileActivationState,
+    StrategyProfileEvaluationRecord,
+    StrategyProfileRecommendation,
+    StrategyProfileRejectionRecord,
+    StrategyProfileRevision,
+)
 from aats.services.runtime_scope import RuntimeStateScope
 
 
@@ -249,4 +257,91 @@ class RuntimeProfileRepository(Protocol):
         ...
 
     def save_activation_state(self, state: RuntimeProfileActivationState) -> RuntimeProfileActivationState:
+        ...
+
+
+class StrategyProfileRepository(Protocol):
+    def save_revision(self, revision: StrategyProfileRevision) -> StrategyProfileRevision:
+        ...
+
+    def get_revision(self, revision_id: str) -> StrategyProfileRevision | None:
+        ...
+
+    def list_revisions(
+        self,
+        *,
+        product_type: str | None = None,
+        margin_mode: str | None = None,
+        profile_id: str | None = None,
+        status: str | None = None,
+    ) -> list[StrategyProfileRevision]:
+        ...
+
+    def activation_state(
+        self,
+        *,
+        product_type: str,
+        margin_mode: str,
+        allowed_symbols: tuple[str, ...],
+    ) -> StrategyProfileActivationState:
+        ...
+
+    def save_activation_state(self, state: StrategyProfileActivationState) -> StrategyProfileActivationState:
+        ...
+
+    def save_recommendation(self, recommendation: StrategyProfileRecommendation) -> StrategyProfileRecommendation:
+        ...
+
+    def get_recommendation(self, recommendation_id: str) -> StrategyProfileRecommendation | None:
+        ...
+
+    def latest_recommendation(
+        self,
+        *,
+        product_type: str,
+        margin_mode: str,
+        allowed_symbols: tuple[str, ...],
+    ) -> StrategyProfileRecommendation | None:
+        ...
+
+    def list_recommendations(
+        self,
+        *,
+        product_type: str | None = None,
+        margin_mode: str | None = None,
+        decision_status: str | None = None,
+    ) -> list[StrategyProfileRecommendation]:
+        ...
+
+    def save_activation_record(self, record: StrategyProfileActivationRecord) -> StrategyProfileActivationRecord:
+        ...
+
+    def list_activation_history(
+        self,
+        *,
+        product_type: str | None = None,
+        margin_mode: str | None = None,
+    ) -> list[StrategyProfileActivationRecord]:
+        ...
+
+    def save_rejection(self, record: StrategyProfileRejectionRecord) -> StrategyProfileRejectionRecord:
+        ...
+
+    def list_rejections(
+        self,
+        *,
+        product_type: str | None = None,
+        margin_mode: str | None = None,
+    ) -> list[StrategyProfileRejectionRecord]:
+        ...
+
+    def save_evaluation(self, record: StrategyProfileEvaluationRecord) -> StrategyProfileEvaluationRecord:
+        ...
+
+    def list_evaluations(
+        self,
+        *,
+        product_type: str | None = None,
+        margin_mode: str | None = None,
+    ) -> list[StrategyProfileEvaluationRecord]:
         ...

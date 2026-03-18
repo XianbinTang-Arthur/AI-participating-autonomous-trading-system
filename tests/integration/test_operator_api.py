@@ -21,6 +21,7 @@ from aats.schemas.exchange import AccountBaselineSnapshot, ExchangeAccountSnapsh
 from aats.events import topics
 from aats.schemas.operator import ExecutionErrorSummary
 from aats.schemas.operator import OperatorUserRecord
+from aats.schemas.strategy_profiles import StrategyProfileMarketRegimeAssessment, StrategyProfileRecommendation
 from aats.services.operator.passwords import hash_password
 
 
@@ -482,6 +483,161 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(canceled.json()["detail"], "runtime_profile_control_disabled")
         self.assertEqual(restart.status_code, 409)
         self.assertEqual(restart.json()["detail"], "runtime_profile_control_disabled")
+
+    async def test_strategy_profile_routes_seed_snapshot_and_generate_recommendation(self) -> None:
+        runtime = await self._runtime(
+            operator_auth_enabled=True,
+            operator_session_secret="session-secret",
+            operator_users=[("admin", "admin-pass")],
+        )
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            login = client.post("/auth/login", json={"username": "admin", "password": "admin-pass"})
+            snapshot = client.get("/strategy-profiles")
+            evaluated = client.post("/strategy-profiles/auto-tuning/evaluate-now")
+            recommendations = client.get("/strategy-profiles/recommendations?limit=5&offset=0")
+
+        self.assertEqual(login.status_code, 200)
+        self.assertEqual(snapshot.status_code, 200)
+        self.assertEqual(evaluated.status_code, 200)
+        self.assertEqual(recommendations.status_code, 200)
+        snapshot_payload = snapshot.json()
+        self.assertEqual(snapshot_payload["activation"]["active_profile_id"], "trend_normal")
+        self.assertTrue(snapshot_payload["revisions"])
+        recommendation_payload = evaluated.json()["recommendation"]
+        self.assertIn(
+            recommendation_payload["recommended_profile_id"],
+            {"trend_normal", "trend_strict", "range_defensive", "high_volatility_defensive", "execution_degraded_safe"},
+        )
+        self.assertEqual(recommendations.json()["total_available"], 1)
+        self.assertFalse(recommendations.json()["has_more"])
+        stored = runtime.event_store.by_topic(topics.STRATEGY_PROFILE_RECOMMENDATIONS)
+        self.assertEqual(len(stored), 1)
+
+    async def test_strategy_profile_accept_stage_activate_and_reject_are_audited(self) -> None:
+        runtime = await self._runtime(
+            operator_auth_enabled=True,
+            operator_session_secret="session-secret",
+            operator_users=[("admin", "admin-pass")],
+        )
+        recommendation = StrategyProfileRecommendation(
+            product_type=runtime.settings.trading_product_type,
+            margin_mode=runtime.settings.margin_mode,
+            allowed_symbols=runtime.settings.allowed_symbols,
+            active_profile_id="trend_normal",
+            recommended_profile_id="range_defensive",
+            confidence=0.82,
+            market_regime_assessment=StrategyProfileMarketRegimeAssessment(
+                regime="range",
+                volatility_state="medium",
+                execution_condition="normal",
+            ),
+            reason_codes=["range_regime_detected"],
+            human_summary="range market",
+            risk_notes=["manual_test"],
+            valid_for_minutes=120,
+            generated_by="test",
+            input_digest="digest",
+            input_snapshot={"source": "test"},
+            expires_at=utc_now() + timedelta(minutes=120),
+        )
+        runtime.strategy_profile_repo.save_recommendation(recommendation)
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            client.post("/auth/login", json={"username": "admin", "password": "admin-pass"})
+            staged = client.post(
+                f"/strategy-profiles/recommendations/{recommendation.recommendation_id}/accept",
+                json={"reason": "stage_now", "activation_mode": "stage_only"},
+            )
+            activated = client.post(
+                "/strategy-profiles/pending/activate",
+                json={"reason": "activate_pending"},
+            )
+
+        self.assertEqual(staged.status_code, 200)
+        self.assertEqual(activated.status_code, 200)
+        self.assertEqual(staged.json()["status"], "accepted_and_staged")
+        self.assertEqual(activated.json()["active_revision"]["profile_id"], "range_defensive")
+        actions = [item.payload for item in runtime.event_store.by_topic(topics.OPERATOR_ACTIONS)]
+        accept_action = next(item for item in reversed(actions) if item["action"] == "strategy_profile_accept")
+        activate_action = next(item for item in reversed(actions) if item["action"] == "strategy_profile_activate_pending")
+        self.assertEqual(accept_action["status"], "accepted_and_staged")
+        self.assertEqual(activate_action["status"], "pending_profile_activated")
+
+        second = recommendation.model_copy(
+            update={
+                "recommendation_id": "strp_rec_manual_reject",
+                "recommended_profile_id": "trend_strict",
+                "generated_at": utc_now(),
+                "expires_at": utc_now() + timedelta(minutes=120),
+            }
+        )
+        runtime.strategy_profile_repo.save_recommendation(second)
+
+        with TestClient(app) as client:
+            client.post("/auth/login", json={"username": "admin", "password": "admin-pass"})
+            rejected = client.post(
+                f"/strategy-profiles/recommendations/{second.recommendation_id}/reject",
+                json={"reason_code": "manual_reject", "reason_detail": "keep current profile"},
+            )
+
+        self.assertEqual(rejected.status_code, 200)
+        self.assertEqual(rejected.json()["status"], "rejected")
+        rejections = runtime.event_store.by_topic(topics.STRATEGY_PROFILE_REJECTIONS)
+        self.assertEqual(len(rejections), 1)
+
+    async def test_strategy_profile_activation_is_blocked_when_open_orders_exist(self) -> None:
+        runtime = await self._runtime(
+            operator_auth_enabled=True,
+            operator_session_secret="session-secret",
+            operator_users=[("admin", "admin-pass")],
+        )
+        runtime.execution_repo.save_order_state(
+            OrderState(
+                decision_id="decision_strategy_profile",
+                intent_id="intent_strategy_profile",
+                symbol=runtime.settings.default_symbol,
+                client_order_id="order_strategy_profile",
+                status="SUBMITTED",
+                requested_qty=0.001,
+                remaining_qty=0.001,
+            )
+        )
+        recommendation = StrategyProfileRecommendation(
+            product_type=runtime.settings.trading_product_type,
+            margin_mode=runtime.settings.margin_mode,
+            allowed_symbols=runtime.settings.allowed_symbols,
+            active_profile_id="trend_normal",
+            recommended_profile_id="range_defensive",
+            confidence=0.82,
+            market_regime_assessment=StrategyProfileMarketRegimeAssessment(
+                regime="range",
+                volatility_state="medium",
+                execution_condition="normal",
+            ),
+            reason_codes=["range_regime_detected"],
+            human_summary="range market",
+            risk_notes=["manual_test"],
+            valid_for_minutes=120,
+            generated_by="test",
+            input_digest="digest2",
+            input_snapshot={"source": "test"},
+            expires_at=utc_now() + timedelta(minutes=120),
+        )
+        runtime.strategy_profile_repo.save_recommendation(recommendation)
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            client.post("/auth/login", json={"username": "admin", "password": "admin-pass"})
+            blocked = client.post(
+                f"/strategy-profiles/recommendations/{recommendation.recommendation_id}/accept",
+                json={"reason": "activate_now", "activation_mode": "manual_now"},
+            )
+
+        self.assertEqual(blocked.status_code, 409)
+        self.assertEqual(blocked.json()["detail"], "strategy_profile_open_orders_present")
 
     async def test_operator_user_management_requires_admin_and_preserves_last_admin(self) -> None:
         runtime = await self._runtime(

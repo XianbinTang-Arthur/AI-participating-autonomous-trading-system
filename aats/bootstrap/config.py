@@ -55,6 +55,7 @@ from aats.services.market_gateway.okx_websocket import OKXPublicWebSocketClient
 from aats.services.market_gateway.publisher import MarketSnapshotPublisher
 from aats.services.operator.accounts import enabled_admin_count
 from aats.services.operator.runtime_profiles import runtime_profile_resolution
+from aats.services.operator.strategy_profiles import seed_strategy_profiles
 from aats.services.runtime_scope import latest_matching_snapshot, runtime_state_scope, scoped_portfolio_event
 from aats.services.portfolio_service.pnl import PortfolioPnLCalculator
 from aats.services.portfolio_service.positions import PortfolioService, PortfolioState
@@ -90,11 +91,14 @@ from aats.storage.reconciliation_repo import InMemoryReconciliationRepository
 from aats.storage.reconciliation_repo_postgres import PostgresReconciliationRepository
 from aats.storage.runtime_profile_repo import InMemoryRuntimeProfileRepository
 from aats.storage.runtime_profile_repo_postgres import PostgresRuntimeProfileRepository
+from aats.storage.strategy_profile_repo import InMemoryStrategyProfileRepository
+from aats.storage.strategy_profile_repo_postgres import PostgresStrategyProfileRepository
 from aats.storage.session import DatabaseRuntime, create_database_runtime, create_schema
 from aats.schemas.system import RecoveryStatus
 from aats.schemas.common import utc_now
 from aats.schemas.operator import ExecutionErrorSummary
 from aats.schemas.runtime_profiles import RuntimeProfileResolution
+from aats.storage.base import StrategyProfileRepository
 
 
 def load_yaml_config(environment: str, profile: str, config_dir: str | Path = "configs") -> dict[str, Any]:
@@ -136,6 +140,7 @@ class StorageBackends:
     reconciliation_repo: ReconciliationRepository
     operator_repo: OperatorUserRepository
     runtime_profile_repo: RuntimeProfileRepository
+    strategy_profile_repo: StrategyProfileRepository
     outbox_repo: PostgresOutboxRepository | None = None
     database_runtime: DatabaseRuntime | None = None
 
@@ -177,6 +182,7 @@ class ApplicationRuntime:
     reconciliation_repo: ReconciliationRepository
     operator_repo: OperatorUserRepository
     runtime_profile_repo: RuntimeProfileRepository
+    strategy_profile_repo: StrategyProfileRepository
     recovery_status: RecoveryStatus
     replay_validation_history: list[dict[str, Any]] = field(default_factory=list)
     database_runtime: DatabaseRuntime | None = None
@@ -318,6 +324,7 @@ def build_storage_backends(settings: AATSSettings) -> StorageBackends:
             reconciliation_repo=InMemoryReconciliationRepository(),
             operator_repo=InMemoryOperatorUserRepository(),
             runtime_profile_repo=InMemoryRuntimeProfileRepository(),
+            strategy_profile_repo=InMemoryStrategyProfileRepository(),
         )
 
     if not settings.database_url:
@@ -337,6 +344,7 @@ def build_storage_backends(settings: AATSSettings) -> StorageBackends:
         reconciliation_repo=PostgresReconciliationRepository(database_runtime.session_factory),
         operator_repo=PostgresOperatorUserRepository(database_runtime.session_factory),
         runtime_profile_repo=PostgresRuntimeProfileRepository(database_runtime.session_factory),
+        strategy_profile_repo=PostgresStrategyProfileRepository(database_runtime.session_factory),
         database_runtime=database_runtime,
     )
 
@@ -387,6 +395,7 @@ async def build_runtime(
         state_scope = runtime_state_scope(runtime_settings)
         _validate_runtime_settings(runtime_settings, runtime_layering)
         _validate_operator_auth_settings(runtime_settings, storage)
+        seed_strategy_profiles(settings=runtime_settings, repo=storage.strategy_profile_repo)
     except Exception:
         if storage.database_runtime is not None:
             storage.database_runtime.dispose()
@@ -734,6 +743,7 @@ async def build_runtime(
         reconciliation_repo=storage.reconciliation_repo,
         operator_repo=storage.operator_repo,
         runtime_profile_repo=storage.runtime_profile_repo,
+        strategy_profile_repo=storage.strategy_profile_repo,
         recovery_status=recovery_status,
         database_runtime=storage.database_runtime,
         execution_outbox_publisher=execution_outbox_publisher,
