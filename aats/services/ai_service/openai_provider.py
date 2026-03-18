@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import json
 from time import perf_counter
 
@@ -27,6 +28,7 @@ class OpenAIProvider:
             "Authorization": f"Bearer {self.settings.openai_api_key}",
             "Content-Type": "application/json",
         }
+        strict_schema = self._strict_json_schema(response_schema)
         payload = {
             "model": self.settings.ai_model_name,
             "temperature": 0,
@@ -45,7 +47,7 @@ class OpenAIProvider:
                     "type": "json_schema",
                     "name": "ai_market_assessment",
                     "strict": True,
-                    "schema": response_schema,
+                    "schema": strict_schema,
                 },
             },
         }
@@ -119,3 +121,49 @@ class OpenAIProvider:
                     if isinstance(text, str) and text.strip():
                         return text
         return None
+
+    @classmethod
+    def _strict_json_schema(cls, schema: dict[str, object]) -> dict[str, object]:
+        normalized = deepcopy(schema)
+        cls._normalize_schema_node(normalized)
+        return normalized
+
+    @classmethod
+    def _normalize_schema_node(cls, node: object) -> None:
+        if isinstance(node, dict):
+            properties = node.get("properties")
+            if isinstance(properties, dict):
+                node["required"] = list(properties.keys())
+                node["additionalProperties"] = False
+                for child in properties.values():
+                    cls._normalize_schema_node(child)
+
+            for key in ("items", "additionalProperties", "contains", "if", "then", "else", "not"):
+                if key in node:
+                    cls._normalize_schema_node(node[key])
+
+            for key in ("allOf", "anyOf", "oneOf", "prefixItems"):
+                value = node.get(key)
+                if isinstance(value, list):
+                    for item in value:
+                        cls._normalize_schema_node(item)
+
+            for key, value in node.items():
+                if key not in {
+                    "properties",
+                    "items",
+                    "additionalProperties",
+                    "contains",
+                    "if",
+                    "then",
+                    "else",
+                    "not",
+                    "allOf",
+                    "anyOf",
+                    "oneOf",
+                    "prefixItems",
+                }:
+                    cls._normalize_schema_node(value)
+        elif isinstance(node, list):
+            for item in node:
+                cls._normalize_schema_node(item)
