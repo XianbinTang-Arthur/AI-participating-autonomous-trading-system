@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>AATS 自动交易监控台 | 账户与权限</title>
+  <title>AATS 自动交易控制台 | 策略档位、账号与权限</title>
   <link rel="stylesheet" href="/ui/app.css">
 </head>
 <body data-view="admin">
@@ -11,9 +11,10 @@
     <header class="masthead">
       <div class="masthead-copy">
         <p class="eyebrow">AI 参与式自主交易系统</p>
-        <h1>账户与权限</h1>
+        <h1>策略档位、账号与权限</h1>
         <p class="lead">
-          把交易页面和后台管理分开：这里专门管理登录方式、账号权限和当前运行配置，避免把策略执行、风控阻断和后台设置混在一起理解。
+          这页专门处理“谁能操作系统、当前按哪套策略档位运行、AI 最近建议切换到哪一档、是否需要人工审批或回滚”。
+          交易本身仍然留在总览、策略、执行和风险页面里，避免把人工控制和实时交易信息混在一起。
         </p>
       </div>
       <div class="masthead-side">
@@ -60,17 +61,19 @@
       <a class="workspace-link" href="/ui/strategy">策略判断</a>
       <a class="workspace-link" href="/ui/execution">委托与成交</a>
       <a class="workspace-link" href="/ui/risk">风险与恢复</a>
-      <a class="workspace-link is-active" href="/ui/settings">账户与权限</a>
+      <a class="workspace-link is-active" href="/ui/settings">策略档位与权限</a>
     </nav>
 
     <main class="workspace">
       <section class="workspace-view is-active" data-view="admin">
         <div class="page-head">
           <div>
-            <p class="panel-kicker">账户、权限、配置</p>
-            <h2>谁能操作，当前按什么配置运行</h2>
+            <p class="panel-kicker">控制面</p>
+            <h2>谁能操作，当前按什么策略档位运行</h2>
           </div>
-          <p class="page-copy">这里放账号权限、认证方式和运行配置摘要，避免和交易信息混在一起。</p>
+          <p class="page-copy">
+            重点看当前档位、AI 最近建议、待审批档位、最近切换记录，以及控制台账号权限。这里不直接展示逐笔交易细节。
+          </p>
         </div>
         <div id="adminContent" class="view-layout"></div>
       </section>

@@ -366,6 +366,12 @@ async function dispatchAction(action, value) {
   if (action === "inspect-fill") return inspectFill(value);
   if (action === "inspect-reconciliation") return inspectReconciliation(value);
   if (action === "resolve-stuck-order") return resolveStuckOrder(value);
+  if (action === "evaluate-strategy-profile") return evaluateStrategyProfile();
+  if (action === "accept-strategy-profile-now") return acceptStrategyProfileRecommendation(value, "manual_now");
+  if (action === "stage-strategy-profile") return acceptStrategyProfileRecommendation(value, "stage_only");
+  if (action === "reject-strategy-profile") return rejectStrategyProfileRecommendation(value);
+  if (action === "activate-pending-strategy-profile") return activatePendingStrategyProfile();
+  if (action === "rollback-strategy-profile") return rollbackStrategyProfile();
   if (action === "load-more-orders") return adjustPageLimit("recentOrders", PAGE_LOAD_STEP);
   if (action === "collapse-orders") return resetPageLimit("recentOrders");
   if (action === "load-more-fills") return adjustPageLimit("recentFills", PAGE_LOAD_STEP);
@@ -535,6 +541,109 @@ async function adjustPageLimit(key, delta) {
 async function resetPageLimit(key) {
   state.pageLimits[key] = DEFAULT_PAGE_LIMITS[key] || state.pageLimits[key];
   await refreshDashboard();
+}
+
+async function evaluateStrategyProfile() {
+  try {
+    const result = await requestJson("/strategy-profiles/auto-tuning/evaluate-now", { method: "POST" });
+    const profileId = result?.recommendation?.recommended_profile_id || "未知档位";
+    const autoApplied = Boolean(result?.auto_activation);
+    state.flash = {
+      tone: autoApplied ? "info" : "warning",
+      message: autoApplied
+        ? `已生成建议并自动切换到更保守的档位：${profileId}。`
+        : `已生成新的策略档位建议：${profileId}。如需生效，请在设置页继续审批。`,
+    };
+    await refreshDashboard({ manual: true });
+  } catch (error) {
+    state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
+    renderBanners();
+  }
+}
+
+async function acceptStrategyProfileRecommendation(recommendationId, activationMode) {
+  if (!recommendationId) return;
+  const confirmMessage =
+    activationMode === "stage_only"
+      ? "确认把这条 AI 建议转为待审批档位吗？它不会立刻覆盖当前运行中的参数。"
+      : "确认立即采纳这条 AI 建议吗？当前策略档位会立刻切换。";
+  if (!window.confirm(confirmMessage)) return;
+  try {
+    const result = await requestJson(`/strategy-profiles/recommendations/${encodeURIComponent(recommendationId)}/accept`, {
+      method: "POST",
+      body: {
+        reason: activationMode === "stage_only" ? "ui_stage_strategy_profile" : "ui_accept_strategy_profile_now",
+        activation_mode: activationMode,
+      },
+    });
+    state.flash = {
+      tone: "info",
+      message:
+        activationMode === "stage_only"
+          ? `已把建议转成待审批档位：${result?.activation?.pending_profile_id || "未知档位"}。`
+          : `已切换到档位：${result?.active_revision?.profile_label || result?.active_revision?.profile_id || "未知档位"}。`,
+    };
+    await refreshDashboard({ manual: true });
+  } catch (error) {
+    state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
+    renderBanners();
+  }
+}
+
+async function rejectStrategyProfileRecommendation(recommendationId) {
+  if (!recommendationId) return;
+  const reasonDetail = window.prompt("请输入拒绝原因，便于后续复盘。", "保留当前档位，暂不采纳这条建议。");
+  if (reasonDetail === null) return;
+  try {
+    await requestJson(`/strategy-profiles/recommendations/${encodeURIComponent(recommendationId)}/reject`, {
+      method: "POST",
+      body: {
+        reason_code: "operator_rejected_strategy_profile_recommendation",
+        reason_detail: reasonDetail,
+      },
+    });
+    state.flash = { tone: "info", message: "已拒绝这条策略档位建议。" };
+    await refreshDashboard({ manual: true });
+  } catch (error) {
+    state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
+    renderBanners();
+  }
+}
+
+async function activatePendingStrategyProfile() {
+  if (!window.confirm("确认激活当前待审批档位吗？这会立刻替换当前生效的策略门槛。")) return;
+  try {
+    const result = await requestJson("/strategy-profiles/pending/activate", {
+      method: "POST",
+      body: { reason: "ui_activate_pending_strategy_profile" },
+    });
+    state.flash = {
+      tone: "info",
+      message: `已激活待审批档位：${result?.active_revision?.profile_label || result?.active_revision?.profile_id || "未知档位"}。`,
+    };
+    await refreshDashboard({ manual: true });
+  } catch (error) {
+    state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
+    renderBanners();
+  }
+}
+
+async function rollbackStrategyProfile() {
+  if (!window.confirm("确认回滚到上一个稳定档位吗？这会撤销最近一次策略档位切换。")) return;
+  try {
+    const result = await requestJson("/strategy-profiles/rollback", {
+      method: "POST",
+      body: { reason: "ui_rollback_strategy_profile" },
+    });
+    state.flash = {
+      tone: "warning",
+      message: `已回滚到档位：${result?.active_revision?.profile_label || result?.active_revision?.profile_id || "未知档位"}。`,
+    };
+    await refreshDashboard({ manual: true });
+  } catch (error) {
+    state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
+    renderBanners();
+  }
 }
 
 async function createOperatorUser() {

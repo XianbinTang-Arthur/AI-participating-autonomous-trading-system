@@ -31,6 +31,15 @@ if TYPE_CHECKING:
     from aats.bootstrap.config import ApplicationRuntime
 
 
+_RISK_LEVEL_ORDER = {
+    "conservative": 0,
+    "normal": 1,
+    "aggressive": 2,
+}
+
+_AUTO_SWITCH_CONFIDENCE_MIN = 0.75
+
+
 def _copy_payload(payload: StrategyProfilePayload, **updates: Any) -> StrategyProfilePayload:
     raw = payload.model_dump(mode="python")
     raw.update(updates)
@@ -201,10 +210,20 @@ def seed_strategy_profiles(*, settings: AATSSettings, repo: StrategyProfileRepos
                 update={
                     "active_revision_id": active.revision_id,
                     "active_profile_id": active.profile_id,
+                    "auto_switch_enabled": True,
                     "last_activation_result": "activation_succeeded",
                     "last_activation_at": utc_now(),
                     "last_switch_reason": "initial_seed",
                     "last_switch_actor": "system_seed",
+                }
+            )
+        )
+        return
+    if not state.auto_switch_enabled:
+        repo.save_activation_state(
+            state.model_copy(
+                update={
+                    "auto_switch_enabled": True,
                 }
             )
         )
@@ -280,10 +299,15 @@ class StrategyProfileControlService:
                 source_component="strategy_profile_service",
             )
         )
-        return {
+        validation = self._recommendation_validation(recommendation)
+        result = {
             "recommendation": recommendation.model_dump(mode="json"),
-            "validation": self._recommendation_validation(recommendation),
+            "validation": validation,
         }
+        if validation["auto_apply_allowed"]:
+            activation = self._auto_apply_recommendation(recommendation=recommendation)
+            result["auto_activation"] = activation
+        return result
 
     def accept_recommendation(
         self,
@@ -598,6 +622,7 @@ class StrategyProfileControlService:
             recommended = "trend_strict"
             summary = "Trend exists but edge is moderate; prefer the stricter trend profile."
             reasons = ["trend_signal_moderate"]
+        confidence = 0.82 if recommended in {"range_defensive", "high_volatility_defensive", "execution_degraded_safe"} else 0.72
 
         return StrategyProfileRecommendation(
             product_type=self.settings.trading_product_type,
@@ -606,7 +631,7 @@ class StrategyProfileControlService:
             active_profile_id=active_profile_id,
             recommended_profile_id=recommended,
             fallback_profile_id="trend_normal",
-            confidence=0.72,
+            confidence=confidence,
             market_regime_assessment={
                 "regime": str(regime),
                 "volatility_state": str(volatility_state),
@@ -674,6 +699,20 @@ class StrategyProfileControlService:
             ),
         }
 
+    @staticmethod
+    def _risk_rank(level: str | None) -> int:
+        return _RISK_LEVEL_ORDER.get(str(level or "").lower(), 99)
+
+    def _is_more_conservative_transition(
+        self,
+        *,
+        current: StrategyProfileRevision | None,
+        target: StrategyProfileRevision,
+    ) -> bool:
+        if current is None:
+            return False
+        return self._risk_rank(target.risk_level) < self._risk_rank(current.risk_level)
+
     def _activation_blockers(self) -> list[str]:
         open_orders = self.runtime.execution_repo.order_states_for_scope(
             scope=self.runtime_state_scope,
@@ -684,6 +723,7 @@ class StrategyProfileControlService:
     def _recommendation_validation(self, recommendation: StrategyProfileRecommendation) -> dict[str, Any]:
         active = self._activation_state()
         revision = self._revision_for_profile(recommendation.recommended_profile_id)
+        current = self._revision(active.active_revision_id)
         blocked_reasons: list[str] = []
         if revision is None:
             blocked_reasons.append("strategy_profile_revision_missing")
@@ -693,11 +733,52 @@ class StrategyProfileControlService:
             blocked_reasons.append("strategy_profile_already_active")
         if active.cooldown_until is not None and active.cooldown_until > utc_now():
             blocked_reasons.append("strategy_profile_switch_cooldown_active")
+        if not active.auto_switch_enabled:
+            blocked_reasons.append("strategy_profile_auto_switch_disabled")
+        if recommendation.confidence < _AUTO_SWITCH_CONFIDENCE_MIN:
+            blocked_reasons.append("strategy_profile_auto_switch_confidence_too_low")
+        if revision is not None and not revision.auto_switch_allowed:
+            blocked_reasons.append("strategy_profile_auto_switch_not_allowed")
+        if revision is not None and revision.manual_approval_required:
+            blocked_reasons.append("strategy_profile_manual_approval_required")
+        if revision is not None and not self._is_more_conservative_transition(current=current, target=revision):
+            blocked_reasons.append("strategy_profile_auto_switch_requires_more_conservative_target")
         blocked_reasons.extend(self._activation_blockers())
         return {
-            "auto_apply_allowed": False,
+            "auto_apply_allowed": not blocked_reasons,
             "blocked_reasons": blocked_reasons,
-            "requires_manual_approval": True,
+            "requires_manual_approval": bool(blocked_reasons),
+        }
+
+    def _auto_apply_recommendation(self, *, recommendation: StrategyProfileRecommendation) -> dict[str, Any]:
+        state = self._activation_state()
+        revision = self._revision_for_profile(recommendation.recommended_profile_id)
+        if revision is None:
+            raise ValueError("strategy_profile_revision_missing")
+        record = self._activate_revision(
+            target=revision,
+            state=state,
+            trigger_type="ai_auto",
+            actor_role="system",
+            actor_identity="system_ai",
+            auth_source="local_config",
+            recommendation_id=recommendation.recommendation_id,
+            reason_code="ai_recommended_more_conservative_profile",
+            reason_detail=recommendation.human_summary,
+        )
+        updated = recommendation.model_copy(
+            update={
+                "decision_status": "accepted",
+                "decision_reason_code": "auto_applied",
+                "decision_reason_detail": record.reason_code,
+            }
+        )
+        self.repo.save_recommendation(updated)
+        return {
+            "status": "auto_applied",
+            "activation_record": record.model_dump(mode="json"),
+            "active_revision": self._revision_view(revision),
+            "recommendation": updated.model_dump(mode="json"),
         }
 
     def _activate_revision(
@@ -706,9 +787,9 @@ class StrategyProfileControlService:
         target: StrategyProfileRevision,
         state: StrategyProfileActivationState,
         trigger_type: str,
-        actor_role: OperatorRole,
+        actor_role: str,
         actor_identity: str | None,
-        auth_source: AuthSource,
+        auth_source: str,
         recommendation_id: str | None,
         reason_code: str,
         reason_detail: str,
@@ -727,8 +808,14 @@ class StrategyProfileControlService:
                 "active_profile_id": target.profile_id,
                 "pending_revision_id": None,
                 "pending_profile_id": None,
-                "activation_mode": "manual" if trigger_type == "manual" else "rollback",
-                "last_activation_result": "rollback_succeeded" if trigger_type == "rollback" else "activation_succeeded",
+                "activation_mode": (
+                    "manual"
+                    if trigger_type == "manual"
+                    else "auto" if trigger_type == "ai_auto" else "rollback"
+                ),
+                "last_activation_result": (
+                    "rollback_succeeded" if trigger_type == "rollback" else "activation_succeeded"
+                ),
                 "last_activation_at": utc_now(),
                 "last_activation_error": None,
                 "last_switch_reason": reason_code,
@@ -776,7 +863,7 @@ class StrategyProfileControlService:
         reason_code: str,
         reason_detail: str | None,
         actor_identity: str | None,
-        actor_role: OperatorRole,
+        actor_role: str,
     ) -> StrategyProfileRejectionRecord:
         record = StrategyProfileRejectionRecord(
             product_type=self.settings.trading_product_type,

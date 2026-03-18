@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from datetime import timedelta
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -494,8 +494,8 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
 
         with TestClient(app) as client:
             login = client.post("/auth/login", json={"username": "admin", "password": "admin-pass"})
-            snapshot = client.get("/strategy-profiles")
             evaluated = client.post("/strategy-profiles/auto-tuning/evaluate-now")
+            snapshot = client.get("/strategy-profiles")
             recommendations = client.get("/strategy-profiles/recommendations?limit=5&offset=0")
 
         self.assertEqual(login.status_code, 200)
@@ -503,17 +503,99 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(evaluated.status_code, 200)
         self.assertEqual(recommendations.status_code, 200)
         snapshot_payload = snapshot.json()
-        self.assertEqual(snapshot_payload["activation"]["active_profile_id"], "trend_normal")
+        self.assertEqual(snapshot_payload["activation"]["active_profile_id"], "range_defensive")
         self.assertTrue(snapshot_payload["revisions"])
-        recommendation_payload = evaluated.json()["recommendation"]
+        evaluated_payload = evaluated.json()
+        recommendation_payload = evaluated_payload["recommendation"]
         self.assertIn(
             recommendation_payload["recommended_profile_id"],
             {"trend_normal", "trend_strict", "range_defensive", "high_volatility_defensive", "execution_degraded_safe"},
         )
+        self.assertTrue(evaluated_payload["validation"]["auto_apply_allowed"])
+        self.assertEqual(evaluated_payload["auto_activation"]["status"], "auto_applied")
         self.assertEqual(recommendations.json()["total_available"], 1)
         self.assertFalse(recommendations.json()["has_more"])
         stored = runtime.event_store.by_topic(topics.STRATEGY_PROFILE_RECOMMENDATIONS)
         self.assertEqual(len(stored), 1)
+        activations = runtime.event_store.by_topic(topics.STRATEGY_PROFILE_ACTIVATIONS)
+        self.assertEqual(len(activations), 1)
+
+    async def test_strategy_profile_auto_apply_requires_more_conservative_target(self) -> None:
+        runtime = await self._runtime(
+            operator_auth_enabled=True,
+            operator_session_secret="session-secret",
+            operator_users=[("admin", "admin-pass")],
+        )
+        app = self._app(runtime)
+        recommendation = StrategyProfileRecommendation(
+            product_type=runtime.settings.trading_product_type,
+            margin_mode=runtime.settings.margin_mode,
+            allowed_symbols=runtime.settings.allowed_symbols,
+            active_profile_id="trend_normal",
+            recommended_profile_id="trend_strict",
+            confidence=0.92,
+            market_regime_assessment=StrategyProfileMarketRegimeAssessment(
+                regime="trend",
+                volatility_state="medium",
+                execution_condition="normal",
+            ),
+            reason_codes=["trend_signal_moderate"],
+            human_summary="keep trend but tighten entries",
+            risk_notes=["test_same_risk"],
+            valid_for_minutes=120,
+            generated_by="test",
+            input_digest="digest_trend_strict",
+            input_snapshot={"source": "test"},
+            expires_at=utc_now() + timedelta(minutes=120),
+        )
+
+        with patch(
+            "aats.services.operator.strategy_profiles.StrategyProfileControlService._generate_recommendation",
+            new=AsyncMock(return_value=recommendation),
+        ):
+            with TestClient(app) as client:
+                client.post("/auth/login", json={"username": "admin", "password": "admin-pass"})
+                evaluated = client.post("/strategy-profiles/auto-tuning/evaluate-now")
+                snapshot = client.get("/strategy-profiles")
+
+        self.assertEqual(evaluated.status_code, 200)
+        self.assertFalse(evaluated.json()["validation"]["auto_apply_allowed"])
+        self.assertIn(
+            "strategy_profile_auto_switch_requires_more_conservative_target",
+            evaluated.json()["validation"]["blocked_reasons"],
+        )
+        self.assertNotIn("auto_activation", evaluated.json())
+        self.assertEqual(snapshot.json()["activation"]["active_profile_id"], "trend_normal")
+
+    async def test_strategy_profile_auto_apply_is_blocked_when_open_orders_exist(self) -> None:
+        runtime = await self._runtime(
+            operator_auth_enabled=True,
+            operator_session_secret="session-secret",
+            operator_users=[("admin", "admin-pass")],
+        )
+        runtime.execution_repo.save_order_state(
+            OrderState(
+                decision_id="decision_strategy_profile_auto",
+                intent_id="intent_strategy_profile_auto",
+                symbol=runtime.settings.default_symbol,
+                client_order_id="order_strategy_profile_auto",
+                status="SUBMITTED",
+                requested_qty=0.001,
+                remaining_qty=0.001,
+            )
+        )
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            client.post("/auth/login", json={"username": "admin", "password": "admin-pass"})
+            evaluated = client.post("/strategy-profiles/auto-tuning/evaluate-now")
+            snapshot = client.get("/strategy-profiles")
+
+        self.assertEqual(evaluated.status_code, 200)
+        self.assertFalse(evaluated.json()["validation"]["auto_apply_allowed"])
+        self.assertIn("strategy_profile_open_orders_present", evaluated.json()["validation"]["blocked_reasons"])
+        self.assertNotIn("auto_activation", evaluated.json())
+        self.assertEqual(snapshot.json()["activation"]["active_profile_id"], "trend_normal")
 
     async def test_strategy_profile_accept_stage_activate_and_reject_are_audited(self) -> None:
         runtime = await self._runtime(
