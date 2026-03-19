@@ -38,9 +38,15 @@ class OKXAccountService:
         self._last_refresh_error: str | None = None
         self._lock = asyncio.Lock()
         self._latest_ws_balances: list[ExchangeBalance] | None = None
+        self._latest_ws_balances_ts: datetime | None = None
+        self._latest_balance_view_ts: datetime | None = None
         self._latest_ws_positions: list[ExchangePosition] | None = None
+        self._latest_ws_positions_ts: datetime | None = None
+        self._latest_position_view_ts: datetime | None = None
         self._latest_ws_order_rows: dict[str, dict[str, Any]] = {}
         self._latest_ws_fill_rows: dict[str, ExchangeFill] = {}
+        self._latest_ws_orders_ts: datetime | None = None
+        self._latest_orders_view_ts: datetime | None = None
         self._latest_ws_update_ts: datetime | None = None
         self._latest_recent_bills: list[dict[str, Any]] = []
         self._last_bills_error: str | None = None
@@ -147,8 +153,28 @@ class OKXAccountService:
                         "recent_bills": bills_payload,
                     },
                 )
+                rest_fetched_at = snapshot.fetched_at
                 snapshot = self._merge_private_ws_state(snapshot)
                 self._latest_snapshot = snapshot
+                self._latest_balance_view_ts = (
+                    self._latest_ws_balances_ts
+                    if self._latest_ws_balances is not None
+                    and self._latest_ws_balances_ts is not None
+                    and self._latest_ws_balances_ts >= rest_fetched_at
+                    else rest_fetched_at
+                )
+                self._latest_position_view_ts = (
+                    self._latest_ws_positions_ts
+                    if self._latest_ws_positions is not None
+                    and self._latest_ws_positions_ts is not None
+                    and self._latest_ws_positions_ts >= rest_fetched_at
+                    else rest_fetched_at
+                )
+                self._latest_orders_view_ts = (
+                    self._latest_ws_orders_ts
+                    if self._latest_ws_orders_ts is not None and self._latest_ws_orders_ts >= rest_fetched_at
+                    else rest_fetched_at
+                )
                 self._last_refresh_error = None
                 log_event(
                     self.logger,
@@ -194,17 +220,57 @@ class OKXAccountService:
             balances, positions, update_ts = self._parse_balance_and_position_ws(message)
             if balances is None and positions is None:
                 return
-            self._latest_ws_update_ts = update_ts or utc_now()
+            effective_update_ts = update_ts or utc_now()
+            accepted_balances = False
+            accepted_positions = False
             if balances is not None:
-                self._latest_ws_balances = balances
+                balance_cutoff = max(
+                    (
+                        item
+                        for item in (self._latest_ws_balances_ts, self._latest_balance_view_ts)
+                        if item is not None
+                    ),
+                    default=None,
+                )
+                if balance_cutoff is not None and effective_update_ts < balance_cutoff:
+                    balances = None
+                else:
+                    self._latest_ws_balances = balances
+                    self._latest_ws_balances_ts = effective_update_ts
+                    accepted_balances = True
             if positions is not None:
-                self._latest_ws_positions = positions
+                position_cutoff = max(
+                    (
+                        item
+                        for item in (self._latest_ws_positions_ts, self._latest_position_view_ts)
+                        if item is not None
+                    ),
+                    default=None,
+                )
+                if position_cutoff is not None and effective_update_ts < position_cutoff:
+                    positions = None
+                else:
+                    self._latest_ws_positions = positions
+                    self._latest_ws_positions_ts = effective_update_ts
+                    accepted_positions = True
+            if not accepted_balances and not accepted_positions:
+                return
+            self._latest_ws_update_ts = self._current_private_ws_update_ts()
+            latest_effective_ts = self._latest_ws_update_ts or effective_update_ts
             if self._latest_snapshot is not None:
-                updates: dict[str, Any] = {"fetched_at": self._latest_ws_update_ts}
+                updates: dict[str, Any] = {"fetched_at": max(self._latest_snapshot.fetched_at, latest_effective_ts)}
                 if balances is not None:
-                    updates["balances"] = balances
+                    updates["balances"] = self._merge_balances(
+                        base=self._latest_snapshot.balances,
+                        updates=balances,
+                    )
+                    self._latest_balance_view_ts = effective_update_ts
                 if positions is not None:
-                    updates["positions"] = positions
+                    updates["positions"] = self._merge_positions(
+                        base=self._latest_snapshot.positions,
+                        updates=positions,
+                    )
+                    self._latest_position_view_ts = effective_update_ts
                 raw = dict(self._latest_snapshot.raw)
                 raw["balance_and_position_ws"] = message
                 updates["raw"] = raw
@@ -215,7 +281,22 @@ class OKXAccountService:
         order_rows, fills, update_ts = self._parse_orders_ws(message)
         if not order_rows and not fills:
             return
-        self._latest_ws_update_ts = update_ts or utc_now()
+        effective_update_ts = update_ts or utc_now()
+        orders_cutoff = max(
+            (
+                item
+                for item in (
+                    self._latest_ws_orders_ts,
+                    self._latest_orders_view_ts,
+                )
+                if item is not None
+            ),
+            default=None,
+        )
+        if orders_cutoff is not None and effective_update_ts < orders_cutoff:
+            return
+        self._latest_ws_orders_ts = effective_update_ts
+        self._latest_ws_update_ts = self._current_private_ws_update_ts()
         for row in order_rows:
             key = self._order_row_key(row)
             if not key:
@@ -228,9 +309,10 @@ class OKXAccountService:
         if self._latest_snapshot is not None:
             raw = dict(self._latest_snapshot.raw)
             raw["orders_ws"] = message
+            self._latest_orders_view_ts = effective_update_ts
             self._latest_snapshot = self._latest_snapshot.model_copy(
                 update={
-                    "fetched_at": self._latest_ws_update_ts,
+                    "fetched_at": max(self._latest_snapshot.fetched_at, self._latest_ws_update_ts or utc_now()),
                     "open_orders": self._current_private_ws_open_orders(
                         instrument_map={item.symbol: item for item in self._latest_snapshot.instruments}
                     ),
@@ -532,17 +614,84 @@ class OKXAccountService:
         if self._latest_ws_update_ts is None:
             return snapshot
         updates: dict[str, Any] = {"fetched_at": max(snapshot.fetched_at, self._latest_ws_update_ts)}
-        if self._latest_ws_balances is not None:
-            updates["balances"] = self._latest_ws_balances
-        if self._latest_ws_positions is not None:
-            updates["positions"] = self._latest_ws_positions
-        if self._latest_ws_order_rows:
+        if self._latest_ws_balances is not None and self._latest_ws_balances_ts is not None and self._latest_ws_balances_ts >= snapshot.fetched_at:
+            updates["balances"] = self._merge_balances(
+                base=snapshot.balances,
+                updates=self._latest_ws_balances,
+            )
+        if self._latest_ws_positions is not None and self._latest_ws_positions_ts is not None and self._latest_ws_positions_ts >= snapshot.fetched_at:
+            updates["positions"] = self._merge_positions(
+                base=snapshot.positions,
+                updates=self._latest_ws_positions,
+            )
+        if self._latest_ws_order_rows and self._latest_ws_orders_ts is not None and self._latest_ws_orders_ts >= snapshot.fetched_at:
             updates["open_orders"] = self._current_private_ws_open_orders(
                 instrument_map={item.symbol: item for item in snapshot.instruments}
             )
-        if self._latest_ws_fill_rows:
+        if self._latest_ws_fill_rows and self._latest_ws_orders_ts is not None and self._latest_ws_orders_ts >= snapshot.fetched_at:
             updates["fills"] = self._dedupe_fills([*snapshot.fills, *self._latest_ws_fill_rows.values()])
         return snapshot.model_copy(update=updates)
+
+    @staticmethod
+    def _merge_balances(
+        *,
+        base: list[ExchangeBalance],
+        updates: list[ExchangeBalance],
+    ) -> list[ExchangeBalance]:
+        if not updates:
+            return list(base)
+        merged: dict[str, ExchangeBalance] = {item.currency: item for item in base}
+        for item in updates:
+            if item.total == Decimal("0") and item.available == Decimal("0") and item.frozen == Decimal("0"):
+                merged.pop(item.currency, None)
+                continue
+            merged[item.currency] = item
+        return list(merged.values())
+
+    @staticmethod
+    def _merge_positions(
+        *,
+        base: list[ExchangePosition],
+        updates: list[ExchangePosition],
+    ) -> list[ExchangePosition]:
+        if not updates:
+            return list(base)
+        merged: dict[tuple[str, str], ExchangePosition] = {
+            (item.symbol, item.side): item for item in base
+        }
+        for item in updates:
+            key = (item.symbol, item.side)
+            if item.quantity == Decimal("0"):
+                merged.pop(key, None)
+                continue
+            existing = merged.get(key)
+            if existing is None:
+                merged[key] = item
+                continue
+            merged[key] = existing.model_copy(
+                update={
+                    "instrument_id": item.instrument_id or existing.instrument_id,
+                    "symbol": item.symbol or existing.symbol,
+                    "side": item.side or existing.side,
+                    "quantity": item.quantity,
+                    "average_entry_price": (
+                        item.average_entry_price
+                        if item.average_entry_price is not None
+                        else existing.average_entry_price
+                    ),
+                    "mark_price": item.mark_price if item.mark_price is not None else existing.mark_price,
+                    "notional_usd": item.notional_usd if item.notional_usd is not None else existing.notional_usd,
+                }
+            )
+        return list(merged.values())
+
+    def _current_private_ws_update_ts(self) -> datetime | None:
+        candidates = [
+            self._latest_ws_balances_ts,
+            self._latest_ws_positions_ts,
+            self._latest_ws_orders_ts,
+        ]
+        return max((item for item in candidates if item is not None), default=None)
 
     async def _optional_client_call(self, method_name: str, **kwargs: Any) -> dict[str, Any]:
         method = getattr(self.client, method_name, None)
@@ -756,11 +905,17 @@ class OKXAccountService:
     ) -> list[ExchangeFill]:
         rows: list[ExchangeFill] = []
         for row in payload.get("data", []):
+            if not OKXAccountService._row_contains_fill(row):
+                continue
             fill_ts = row.get("fillTime") or row.get("ts")
             fill_id = str(row.get("tradeId") or row.get("billId") or row.get("fillId") or "")
             if not fill_id:
                 fill_id = f"{row.get('ordId', 'unknown')}-{fill_ts or 'unknown'}"
             symbol = str(row.get("instId"))
+            fill_qty_value = row.get("fillSz", row.get("sz", "0"))
+            fill_price_value = row.get("fillPx", row.get("px", "0"))
+            if fill_qty_value in {None, ""} or fill_price_value in {None, ""}:
+                continue
             rows.append(
                 ExchangeFill(
                     fill_id=fill_id,
@@ -771,10 +926,10 @@ class OKXAccountService:
                     side=str(row.get("side")),
                     fill_qty=OKXAccountService._exchange_quantity_to_internal(
                         symbol=symbol,
-                        quantity=to_decimal(row.get("fillSz", row.get("sz", "0"))),
+                        quantity=to_decimal(fill_qty_value),
                         instrument_map=instrument_map,
                     ),
-                    fill_price=to_decimal(row.get("fillPx", row.get("px", "0"))),
+                    fill_price=to_decimal(fill_price_value),
                     fee_amount=abs(to_decimal(row.get("fillFee", row.get("fee", "0")))),
                     fee_currency=str(row.get("fillFeeCcy") or row.get("feeCcy")) if (row.get("fillFeeCcy") or row.get("feeCcy")) else None,
                     fill_ts=datetime_from_ms(str(fill_ts)) if fill_ts not in {None, ""} else None,
@@ -890,6 +1045,13 @@ class OKXAccountService:
         if not isinstance(rows, list):
             return []
         return [dict(row) for row in rows if isinstance(row, dict)]
+
+    @staticmethod
+    def _row_contains_fill(row: dict[str, Any]) -> bool:
+        return any(
+            row.get(key) not in {None, ""}
+            for key in ("tradeId", "billId", "fillId", "fillTime", "fillSz", "fillPx")
+        )
 
     def _parse_balance_and_position_ws(
         self,

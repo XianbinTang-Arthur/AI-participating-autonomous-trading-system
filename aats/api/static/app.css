@@ -502,6 +502,18 @@ h3 {
   transform: translateY(-1px);
 }
 
+.primary-button:disabled,
+.secondary-button:disabled,
+.warning-button:disabled,
+.danger-button:disabled,
+.ghost-button:disabled,
+.table-button:disabled,
+.inline-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.52;
+  transform: none;
+}
+
 .workspace-tab,
 .workspace-link {
   display: inline-flex;

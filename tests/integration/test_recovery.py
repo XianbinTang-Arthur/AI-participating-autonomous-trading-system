@@ -25,13 +25,20 @@ from aats.storage.sqlalchemy_models import EventEnvelopeModel, PortfolioSnapshot
 class FakeBaselineAccountService:
     SNAPSHOT: ExchangeAccountSnapshot | None = None
 
-    def __init__(self, *, settings, client) -> None:
+    def __init__(self, *, settings, client, private_ws_client=None) -> None:
         self.settings = settings
         self.client = client
+        self.private_ws_client = private_ws_client
         self._snapshot = self.SNAPSHOT
 
     async def refresh(self, *, force: bool = False):
         return self._snapshot
+
+    async def run_private_ws_forever(self) -> None:
+        return None
+
+    async def stop_private_ws(self) -> None:
+        return None
 
     def latest_snapshot(self):
         return self._snapshot
@@ -83,9 +90,14 @@ class TestRecovery(unittest.IsolatedAsyncioTestCase):
 
             recovered_runtime = await build_runtime(settings, bootstrap_portfolio_snapshot=False)
             try:
-                self.assertEqual(recovered_runtime.recovery_status.status, "recovered")
-                self.assertFalse(recovered_runtime.recovery_status.halted)
-                self.assertTrue(recovered_runtime.recovery_status.safe_startup)
+                self.assertEqual(recovered_runtime.recovery_status.status, "recovered_halted")
+                self.assertTrue(recovered_runtime.recovery_status.halted)
+                self.assertFalse(recovered_runtime.recovery_status.safe_startup)
+                self.assertEqual(
+                    recovered_runtime.recovery_status.recovery_action,
+                    "halted_for_portfolio_divergence",
+                )
+                self.assertEqual(recovered_runtime.recovery_status.divergence_count, 4)
                 recovered_snapshot = recovered_runtime.portfolio_repo.latest()
                 self.assertIsNotNone(recovered_snapshot)
                 self.assertEqual(
@@ -176,8 +188,9 @@ class TestRecovery(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(recovered_runtime.recovery_status.recovered_reconciliation_available)
                 self.assertEqual(
                     recovered_runtime.recovery_status.recovery_action,
-                    "halted_missing_reconciliation_context",
+                    "halted_for_portfolio_divergence",
                 )
+                self.assertIn("halted_missing_reconciliation_context", recovered_runtime.recovery_status.notes)
             finally:
                 if recovered_runtime.database_runtime is not None:
                     recovered_runtime.database_runtime.dispose()

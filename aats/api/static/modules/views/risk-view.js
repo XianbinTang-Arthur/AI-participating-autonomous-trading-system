@@ -59,6 +59,12 @@ export function renderRiskSections(data) {
         },
       ],
     }),
+    riskActions: surfaceCard({
+      title: "异常对账处理",
+      kicker: "下一步操作",
+      copy: reconciliationActionCopy({ reconciliation, recovery }),
+      content: renderReconciliationControls({ reconciliation, recovery, uiHints }),
+    }),
     riskEvidence: surfaceCard({
       title: "第一屏判断依据",
       kicker: "阻断 / 对账 / 恢复",
@@ -182,6 +188,7 @@ export function renderRiskView(data) {
   return `
     <div class="panel-grid">
       <div class="span-12">${sections.riskHero}</div>
+      <div class="span-12">${sections.riskActions}</div>
       <div class="span-12">${sections.riskEvidence}</div>
       <div class="span-4">${sections.riskAccount}</div>
       <div class="span-4">${sections.riskReconciliation}</div>
@@ -196,6 +203,69 @@ export function renderRiskView(data) {
   `;
 }
 
+export function renderReconciliationControls({
+  reconciliation = null,
+  recovery = {},
+  uiHints = {},
+  includeInspect = false,
+  compact = false,
+} = {}) {
+  const permissionMessage = textOrFallback(uiHints.controlPermissionMessage, "");
+  const canWrite = !permissionMessage;
+  const buttons = [];
+  if (includeInspect && reconciliation?.reconciliation_id) {
+    buttons.push(actionButton("查看对账详情", "inspect-reconciliation", reconciliation.reconciliation_id, "ghost"));
+  }
+  if (shouldShowValidateAction({ reconciliation, recovery })) {
+    buttons.push(
+      actionButton("立即对账", "trigger-reconciliation-validate", "", "secondary", {
+        disabled: !canWrite,
+        title: permissionMessage,
+      })
+    );
+  }
+  if (shouldShowRebaselineAction({ reconciliation, recovery })) {
+    buttons.push(
+      actionButton("接受当前账户为新基线", "trigger-rebaseline", "", "warning", {
+        disabled: !canWrite,
+        title: permissionMessage,
+      })
+    );
+  }
+  if (shouldShowResumeAction({ recovery })) {
+    buttons.push(
+      actionButton("恢复自动交易", "trigger-resume", "", "primary", {
+        disabled: !canWrite || !recovery.resume_eligible,
+        title: !canWrite ? permissionMessage : resumeActionHint({ recovery, uiHints }),
+      })
+    );
+  }
+  buttons.push(
+    actionButton("暂停自动交易", "trigger-halt", "", "danger", {
+      disabled: !canWrite,
+      title: permissionMessage,
+    })
+  );
+  if (!buttons.length) return `<p class="meta-copy">${reconciliationActionCopy({ reconciliation, recovery })}</p>`;
+  return `<div class="stack-actions ${compact ? "table-actions--compact" : ""}">${buttons.join("")}</div>`;
+}
+
+export function reconciliationActionCopy({ reconciliation = null, recovery = {}, isHistorical = false } = {}) {
+  if (isHistorical) {
+    return "这是历史对账记录。下面的操作会作用于当前运行态，请先确认最新对账结论是否仍然一致。";
+  }
+  if (reconciliation?.halt_required) {
+    return "最新对账已要求暂停交易。先核对差异原因；确认交易所当前状态才是正确状态后，再接受为新基线。";
+  }
+  if (reconciliation?.review_required || shouldShowRebaselineAction({ reconciliation, recovery })) {
+    return "当前账实状态需要人工确认。先重新对账或核对交易所账单，确认状态符合预期后再接受为新基线。";
+  }
+  if (!recovery.safe_to_trade) {
+    return "当前还不能恢复自动交易。建议先重新对账，等恢复条件满足后再恢复运行。";
+  }
+  return "当前没有必须人工处理的对账异常；如果想再次确认状态，可以手动重新对账。";
+}
+
 function renderReconciliationHistory(payload) {
   const reconciliations = payload?.reconciliations || [];
   return responsiveTable(
@@ -205,7 +275,14 @@ function renderReconciliationHistory(payload) {
       `<div><strong>${readableState(item.severity || "unknown")}</strong><div class="table-meta mono">${middleEllipsis(item.reconciliation_id, 10, 6, "当前没有对账编号")}</div></div>`,
       `<div><strong>${listText(item.mismatch_reasons, "当前没有额外差异原因")}</strong><div class="table-meta">${listText(item.mismatch_categories, "当前没有额外差异分类")}</div></div>`,
       `<div><strong>${booleanWord(item.halt_required)}</strong><div class="table-meta">${item.exchange_comparison_enabled ? "已比对交易所" : "仅校验本地记录"}</div></div>`,
-      item.reconciliation_id ? actionButton("详情", "inspect-reconciliation", item.reconciliation_id) : "",
+      item.reconciliation_id
+        ? actionButton(
+            item.severity && item.severity !== "CLEAN" ? "查看并处理" : "详情",
+            "inspect-reconciliation",
+            item.reconciliation_id,
+            item.severity && item.severity !== "CLEAN" ? "warning" : "ghost"
+          )
+        : "",
     ]),
     "最近还没有对账报告。"
   );
@@ -286,6 +363,34 @@ function riskTone({ blockers, reconciliation, recovery, health }) {
   if (health?.halted || blockers.length > 0 || reconciliation?.halt_required) return "danger";
   if (!recovery.safe_to_trade || recovery.review_required) return "warning";
   return "positive";
+}
+
+function shouldShowValidateAction({ reconciliation, recovery }) {
+  return Boolean(reconciliation?.reconciliation_id || !recovery.safe_to_trade || recovery.review_required);
+}
+
+function shouldShowRebaselineAction({ reconciliation, recovery }) {
+  return Boolean(
+    recovery.rebaseline_available
+    || reconciliation?.review_required
+    || actionSuggestsRebaseline(reconciliation?.recommended_operator_action)
+  );
+}
+
+function shouldShowResumeAction({ recovery }) {
+  return Boolean(!recovery.safe_to_trade || recovery.resume_eligible);
+}
+
+function actionSuggestsRebaseline(value) {
+  return String(value || "").toLowerCase().includes("rebaseline");
+}
+
+function resumeActionHint({ recovery, uiHints }) {
+  if (recovery.resume_eligible) return "";
+  return textOrFallback(
+    uiHints.recoveryReasonsText,
+    listText(recovery.resume_blocked_reasons, "当前恢复条件尚未满足")
+  );
 }
 
 function textOrFallback(value, fallback = "待确认") {

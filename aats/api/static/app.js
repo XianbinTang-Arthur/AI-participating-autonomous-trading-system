@@ -27,7 +27,12 @@ import { renderAdminView } from "./modules/views/admin-view.js";
 import { renderExecutionSections, renderExecutionView } from "./modules/views/execution-view.js";
 import { renderHomeView } from "./modules/views/home-view.js";
 import { renderOverviewView } from "./modules/views/overview-view.js";
-import { renderRiskSections, renderRiskView } from "./modules/views/risk-view.js";
+import {
+  reconciliationActionCopy,
+  renderReconciliationControls,
+  renderRiskSections,
+  renderRiskView,
+} from "./modules/views/risk-view.js";
 import { renderStrategySections, renderStrategyView } from "./modules/views/strategy-view.js";
 
 const VIEW_ROUTES = {
@@ -154,6 +159,9 @@ function init() {
 }
 
 function bindEvents() {
+  if (nodes.reconcileButton) nodes.reconcileButton.hidden = true;
+  if (nodes.rebaselineButton) nodes.rebaselineButton.hidden = true;
+
   viewLinks.forEach((link) => {
     link.addEventListener("click", (event) => {
       if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
@@ -172,28 +180,8 @@ function bindEvents() {
   });
 
   nodes.refreshButton?.addEventListener("click", () => void refreshDashboard({ manual: true }));
-  nodes.reconcileButton?.addEventListener("click", () =>
-    void runAction("/reconciliation/validate", { reason: "ui_manual_validate" }, "已提交人工对账请求。")
-  );
-  nodes.rebaselineButton?.addEventListener("click", () =>
-    void runDangerousAction({
-      path: "/system/rebaseline",
-      body: { reason: "ui_manual_rebaseline" },
-      successMessage: "已把当前账户状态接受为新基线。",
-      confirmMessage: "确认把当前账户、仓位和挂单状态接受为新的人工基线吗？这会覆盖旧的恢复参照。",
-    })
-  );
-  nodes.resumeButton?.addEventListener("click", () =>
-    void runAction("/system/resume", { reason: "ui_manual_resume" }, "已提交恢复自动交易请求。")
-  );
-  nodes.haltButton?.addEventListener("click", () =>
-    void runDangerousAction({
-      path: "/system/halt",
-      body: { reason: "ui_manual_halt" },
-      successMessage: "系统已暂停自动交易。",
-      confirmMessage: "确认立即暂停自动交易吗？",
-    })
-  );
+  nodes.resumeButton?.addEventListener("click", () => void triggerResume());
+  nodes.haltButton?.addEventListener("click", () => void triggerHalt());
   nodes.logoutButton?.addEventListener("click", () => void logoutOperator());
   nodes.autoRefreshToggle?.addEventListener("change", () => {
     if (nodes.autoRefreshToggle.checked) {
@@ -561,6 +549,32 @@ async function runDangerousAction({ path, body, successMessage, confirmMessage }
   await runAction(path, body, successMessage);
 }
 
+async function triggerReconciliationValidate() {
+  await runAction("/reconciliation/validate", { reason: "ui_manual_validate" }, "已提交人工对账请求。");
+}
+
+async function triggerRebaseline() {
+  await runDangerousAction({
+    path: "/system/rebaseline",
+    body: { reason: "ui_manual_rebaseline" },
+    successMessage: "已把当前账户状态接受为新基线。",
+    confirmMessage: "确认把当前账户、仓位和挂单状态接受为新的人工基线吗？这会覆盖旧的恢复参照。",
+  });
+}
+
+async function triggerResume() {
+  await runAction("/system/resume", { reason: "ui_manual_resume" }, "已提交恢复自动交易请求。");
+}
+
+async function triggerHalt() {
+  await runDangerousAction({
+    path: "/system/halt",
+    body: { reason: "ui_manual_halt" },
+    successMessage: "系统已暂停自动交易。",
+    confirmMessage: "确认立即暂停自动交易吗？",
+  });
+}
+
 async function logoutOperator() {
   try {
     await requestJson("/auth/logout", { method: "POST" });
@@ -576,6 +590,10 @@ async function dispatchAction(action, value, target = null) {
   if (action === "inspect-order") return inspectOrder(value);
   if (action === "inspect-fill") return inspectFill(value);
   if (action === "inspect-reconciliation") return inspectReconciliation(value);
+  if (action === "trigger-reconciliation-validate") return triggerReconciliationValidate();
+  if (action === "trigger-rebaseline") return triggerRebaseline();
+  if (action === "trigger-resume") return triggerResume();
+  if (action === "trigger-halt") return triggerHalt();
   if (action === "resolve-stuck-order") return resolveStuckOrder(value);
   if (action === "evaluate-strategy-profile") return evaluateStrategyProfile(target, false);
   if (action === "evaluate-strategy-profile-with-auto-switch") return evaluateStrategyProfile(target, true);
@@ -776,6 +794,13 @@ async function inspectReconciliation(reconciliationId) {
     const reconciliation = detail.reconciliation || {};
     const billsSummary = detail.exchange_bills_summary || {};
     const billsExplanations = Array.isArray(detail.exchange_bills_explanations) ? detail.exchange_bills_explanations : [];
+    const recovery = state.data.systemRecovery?.recovery || {};
+    const latestReconciliationId = state.data.reconciliationLatest?.reconciliation?.reconciliation_id || "";
+    const isHistorical = Boolean(latestReconciliationId) && latestReconciliationId !== reconciliation.reconciliation_id;
+    const uiHints = {
+      recoveryReasonsText: localizedRecoveryReasons(),
+      controlPermissionMessage: controlPermissionMessage(),
+    };
     openDrawer({
       eyebrow: "对账详情",
       title: reconciliation.reconciliation_id || "对账详情",
@@ -798,7 +823,16 @@ async function inspectReconciliation(reconciliationId) {
             ["涉及币种", drawerListText(billsSummary.currencies, "当前没有账单币种摘要"), "最近交易所侧账务变动范围"],
             ["高频账务类别", renderReconciliationBillsCategories(billsSummary.top_categories), "已按类型、子类型和币种聚合"],
             ["可能解释当前差异", renderReconciliationBillExplanations(billsExplanations), billsExplanations.length ? "这些账务事件更可能解释余额、仓位或执行偏差" : "当前没有明确的账单解释链"],
+            ["识别类型", renderReconciliationBillCases(billsExplanations), billsExplanations.length ? "系统按账单语义和对账差异归纳出的处理场景" : "当前没有可归类的账单处理场景"],
+            ["建议处理", renderReconciliationBillActions(billsExplanations), billsExplanations.length ? "这是给操作员的下一步动作建议，不会直接改动交易所账单" : "当前没有额外账单处理建议"],
           ]),
+        }),
+        surfaceCard({
+          title: "处理动作",
+          content: `
+            <p class="meta-copy">${escapeHtml(reconciliationActionCopy({ reconciliation, recovery, isHistorical }))}</p>
+            ${renderReconciliationControls({ reconciliation, recovery, uiHints, compact: true })}
+          `,
         }),
         surfaceCard({
           title: "原始记录",
@@ -825,6 +859,22 @@ function renderReconciliationBillExplanations(rows) {
   return rows
     .slice(0, 3)
     .map((item) => `${item.title}: ${drawerListText(item.likely_explains, "当前没有额外解释")}`)
+    .join(" | ");
+}
+
+function renderReconciliationBillCases(rows) {
+  if (!Array.isArray(rows) || rows.length === 0) return "当前没有账单处理分类";
+  return rows
+    .slice(0, 3)
+    .map((item) => `${item.title}: ${localizeError(item.operator_case || "manual_activity")}`)
+    .join(" | ");
+}
+
+function renderReconciliationBillActions(rows) {
+  if (!Array.isArray(rows) || rows.length === 0) return "当前没有账单处理建议";
+  return rows
+    .slice(0, 3)
+    .map((item) => `${item.title}: ${localizeError(item.operator_action || "observe_only")}`)
     .join(" | ");
 }
 

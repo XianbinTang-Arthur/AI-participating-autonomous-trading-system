@@ -179,11 +179,23 @@ def explain_okx_bills_for_reconciliation(
                     "local_position_differs_from_exchange_position",
                     "local_open_orders_diverge_from_exchange_open_orders",
                 )
+            ) or any(
+                category in mismatch_categories
+                for category in (
+                    "external_manual_activity_detected",
+                    "exchange_bills_activity_available",
+                )
             ):
                 likely_explains.extend(["fill_or_order_divergence", "position_divergence"])
                 why = "This bill category is trade-linked and may correspond to exchange-side execution activity missing from the local chain."
         if not likely_explains:
             continue
+        operator_case, operator_action = suggested_operator_bill_handling(
+            semantic_group=semantic_group,
+            mismatch_categories=mismatch_categories,
+            mismatch_reasons=mismatch_reasons,
+            likely_explains=likely_explains,
+        )
         explanations.append(
             {
                 "title": human_label,
@@ -191,7 +203,44 @@ def explain_okx_bills_for_reconciliation(
                 "count": row.get("count"),
                 "currency": currency or row.get("currency"),
                 "likely_explains": likely_explains,
+                "operator_case": operator_case,
+                "operator_action": operator_action,
                 "why_it_matters": why,
             }
         )
     return explanations
+
+
+def suggested_operator_bill_handling(
+    *,
+    semantic_group: str,
+    mismatch_categories: list[str],
+    mismatch_reasons: list[str],
+    likely_explains: list[str],
+) -> tuple[str, str]:
+    category_set = set(mismatch_categories)
+    reason_set = set(mismatch_reasons)
+    explain_set = set(likely_explains)
+
+    if (
+        "local_open_orders_diverge_from_exchange_open_orders" in reason_set
+        or "local_open_order_divergence" in category_set
+    ):
+        return ("open_order_unsettled", "go_cancel_on_exchange")
+    if (
+        "local_position_differs_from_exchange_position" in reason_set
+        or "local_position_divergence" in category_set
+    ) and semantic_group in {"trade_execution", "liquidation_or_adl", "delivery_or_exercise"}:
+        return ("position_drift", "go_close_position_on_exchange")
+    if semantic_group == "transfer_or_margin_movement":
+        return ("fund_transfer", "confirm_and_rebaseline")
+    if semantic_group in {"funding_fee", "interest_or_borrow"}:
+        return ("manual_activity", "observe_only")
+    if "external_manual_activity_detected" in category_set or semantic_group in {
+        "trade_execution",
+        "liquidation_or_adl",
+        "delivery_or_exercise",
+        "other",
+    }:
+        return ("manual_activity", "confirm_and_rebaseline")
+    return ("manual_activity", "observe_only")

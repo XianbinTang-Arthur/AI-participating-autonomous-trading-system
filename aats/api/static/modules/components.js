@@ -180,8 +180,11 @@ export function notice(message, tone = "info") {
   return `<div class="notice-card tone-${escapeHtml(tone)}">${escapeHtml(message)}</div>`;
 }
 
-export function actionButton(label, action, value = "", tone = "ghost") {
-  return `<button class="${escapeHtml(buttonClass(tone))}" data-action="${escapeHtml(action)}" data-value="${escapeHtml(value)}">${escapeHtml(label)}</button>`;
+export function actionButton(label, action, value = "", tone = "ghost", options = {}) {
+  const disabled = options.disabled ? " disabled" : "";
+  const title = options.title ? ` title="${escapeHtml(options.title)}"` : "";
+  const extraClass = options.className ? ` ${escapeHtml(options.className)}` : "";
+  return `<button class="${escapeHtml(buttonClass(tone))}${extraClass}" data-action="${escapeHtml(action)}" data-value="${escapeHtml(value)}"${title}${disabled}>${escapeHtml(label)}</button>`;
 }
 
 function buttonClass(tone) {

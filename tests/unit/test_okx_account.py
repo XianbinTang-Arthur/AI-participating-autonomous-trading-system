@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 import unittest
+from datetime import timedelta
 from decimal import Decimal
 
 from aats.bootstrap.settings import AATSSettings
+from aats.schemas.common import utc_now
 from aats.services.execution_engine.okx_account import OKXAccountService
+
+
+def _ms_from_now(offset_seconds: int) -> str:
+    return str(int((utc_now() + timedelta(seconds=offset_seconds)).timestamp() * 1000))
 
 
 class _FakeOKXClient:
@@ -132,6 +138,65 @@ class _FakeDerivativesOKXClient(_FakeOKXClient):
 class _FakeIncompatibleDerivativesClient(_FakeDerivativesOKXClient):
     async def get_account_config(self):
         return {"code": "0", "data": [{"acctLv": "1", "posMode": ""}]}
+
+
+class _FakeMultiPositionDerivativesClient(_FakeDerivativesOKXClient):
+    async def get_instruments(self):
+        return {
+            "code": "0",
+            "data": [
+                {
+                    "instId": "BTC-USDT-SWAP",
+                    "baseCcy": "",
+                    "quoteCcy": "",
+                    "uly": "BTC-USDT",
+                    "settleCcy": "USDT",
+                    "ctValCcy": "BTC",
+                    "ctVal": "0.01",
+                    "lotSz": "0.01",
+                    "tickSz": "0.1",
+                    "minSz": "0.01",
+                    "state": "live",
+                },
+                {
+                    "instId": "ETH-USDT-SWAP",
+                    "baseCcy": "",
+                    "quoteCcy": "",
+                    "uly": "ETH-USDT",
+                    "settleCcy": "USDT",
+                    "ctValCcy": "ETH",
+                    "ctVal": "0.1",
+                    "lotSz": "0.1",
+                    "tickSz": "0.01",
+                    "minSz": "0.1",
+                    "state": "live",
+                },
+            ],
+        }
+
+    async def get_positions(self):
+        self.get_positions_called = True
+        return {
+            "code": "0",
+            "data": [
+                {
+                    "instId": "BTC-USDT-SWAP",
+                    "pos": "0.02",
+                    "avgPx": "80000",
+                    "markPx": "80100",
+                    "notionalUsd": "1602",
+                    "posSide": "long",
+                },
+                {
+                    "instId": "ETH-USDT-SWAP",
+                    "pos": "1",
+                    "avgPx": "4000",
+                    "markPx": "4010",
+                    "notionalUsd": "4010",
+                    "posSide": "long",
+                },
+            ],
+        }
 
 
 class _FakeSystemIncidentClient(_FakeOKXClient):
@@ -413,13 +478,14 @@ class TestOKXAccountService(unittest.IsolatedAsyncioTestCase):
         )
         service = OKXAccountService(settings=settings, client=_FakeDerivativesOKXClient())
         await service.refresh(force=True)
+        update_ts = _ms_from_now(5)
 
         await service.handle_private_ws_message(
             {
                 "arg": {"channel": "balance_and_position"},
                 "data": [
                     {
-                        "pTime": "1700000003000",
+                        "pTime": update_ts,
                         "balData": [
                             {"ccy": "USDT", "cashBal": "1200", "availBal": "1180"},
                         ],
@@ -443,6 +509,292 @@ class TestOKXAccountService(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot.balances[0].total, Decimal("1200"))
         self.assertEqual(snapshot.balances[0].available, Decimal("1180"))
         self.assertEqual(snapshot.positions[0].quantity, Decimal("0.0003"))
+
+    async def test_private_balance_and_position_ws_empty_positions_do_not_clear_rest_snapshot(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "okx_api_key": "demo_key",
+                "okx_api_secret": "demo_secret",
+                "okx_api_passphrase": "demo_passphrase",
+                "trading_product_type": "derivatives",
+                "default_symbol": "BTC-USDT-SWAP",
+            }
+        )
+        service = OKXAccountService(settings=settings, client=_FakeDerivativesOKXClient())
+        await service.refresh(force=True)
+        update_ts = _ms_from_now(5)
+
+        await service.handle_private_ws_message(
+            {
+                "arg": {"channel": "balance_and_position"},
+                "data": [
+                    {
+                        "pTime": update_ts,
+                        "balData": [
+                            {"ccy": "USDT", "cashBal": "1200", "availBal": "1180"},
+                        ],
+                        "posData": [],
+                    }
+                ],
+            }
+        )
+
+        snapshot = service.latest_snapshot()
+        self.assertIsNotNone(snapshot)
+        self.assertEqual(snapshot.balances[0].total, Decimal("1200"))
+        self.assertEqual(len(snapshot.positions), 1)
+        self.assertEqual(snapshot.positions[0].quantity, Decimal("0.0002"))
+
+        refreshed = await service.refresh(force=True)
+        self.assertIsNotNone(refreshed)
+        self.assertEqual(len(refreshed.positions), 1)
+        self.assertEqual(refreshed.positions[0].quantity, Decimal("0.0002"))
+
+    async def test_private_balance_and_position_ws_ignores_stale_updates(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "okx_api_key": "demo_key",
+                "okx_api_secret": "demo_secret",
+                "okx_api_passphrase": "demo_passphrase",
+                "trading_product_type": "derivatives",
+                "default_symbol": "BTC-USDT-SWAP",
+            }
+        )
+        service = OKXAccountService(settings=settings, client=_FakeDerivativesOKXClient())
+        await service.refresh(force=True)
+        latest_update_ts = _ms_from_now(10)
+        stale_update_ts = _ms_from_now(-10)
+
+        await service.handle_private_ws_message(
+            {
+                "arg": {"channel": "balance_and_position"},
+                "data": [
+                    {
+                        "pTime": latest_update_ts,
+                        "balData": [{"ccy": "USDT", "cashBal": "1250", "availBal": "1230"}],
+                        "posData": [
+                            {
+                                "instId": "BTC-USDT-SWAP",
+                                "pos": "0.04",
+                                "avgPx": "81000",
+                                "markPx": "81200",
+                                "notionalUsd": "3248",
+                                "posSide": "long",
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+
+        await service.handle_private_ws_message(
+            {
+                "arg": {"channel": "balance_and_position"},
+                "data": [
+                    {
+                        "pTime": stale_update_ts,
+                        "balData": [{"ccy": "USDT", "cashBal": "900", "availBal": "900"}],
+                        "posData": [],
+                    }
+                ],
+            }
+        )
+
+        snapshot = service.latest_snapshot()
+        self.assertIsNotNone(snapshot)
+        self.assertEqual(snapshot.balances[0].total, Decimal("1250"))
+        self.assertEqual(snapshot.positions[0].quantity, Decimal("0.0004"))
+        self.assertEqual(snapshot.positions[0].average_entry_price, Decimal("81000"))
+
+        refreshed = await service.refresh(force=True)
+        self.assertIsNotNone(refreshed)
+        self.assertEqual(refreshed.balances[0].total, Decimal("1250"))
+        self.assertEqual(refreshed.positions[0].quantity, Decimal("0.0004"))
+
+    async def test_private_balance_and_position_ws_ignores_message_older_than_current_snapshot(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "okx_api_key": "demo_key",
+                "okx_api_secret": "demo_secret",
+                "okx_api_passphrase": "demo_passphrase",
+                "trading_product_type": "derivatives",
+                "default_symbol": "BTC-USDT-SWAP",
+            }
+        )
+        service = OKXAccountService(settings=settings, client=_FakeDerivativesOKXClient())
+        await service.refresh(force=True)
+
+        await service.handle_private_ws_message(
+            {
+                "arg": {"channel": "balance_and_position"},
+                "data": [
+                    {
+                        "pTime": _ms_from_now(-10),
+                        "balData": [{"ccy": "USDT", "cashBal": "900", "availBal": "900"}],
+                        "posData": [
+                            {
+                                "instId": "BTC-USDT-SWAP",
+                                "pos": "0.01",
+                                "avgPx": "79000",
+                                "markPx": "79100",
+                                "notionalUsd": "791",
+                                "posSide": "long",
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+
+        snapshot = service.latest_snapshot()
+        self.assertIsNotNone(snapshot)
+        self.assertEqual(snapshot.balances[0].total, Decimal("1000"))
+        self.assertEqual(snapshot.positions[0].quantity, Decimal("0.0002"))
+
+    async def test_balance_and_position_ws_accepts_newer_balance_after_newer_orders_update(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "okx_api_key": "demo_key",
+                "okx_api_secret": "demo_secret",
+                "okx_api_passphrase": "demo_passphrase",
+                "trading_product_type": "derivatives",
+                "default_symbol": "BTC-USDT-SWAP",
+            }
+        )
+        service = OKXAccountService(settings=settings, client=_FakeDerivativesOKXClient())
+        await service.refresh(force=True)
+
+        await service.handle_private_ws_message(
+            {
+                "arg": {"channel": "orders", "instType": "SWAP"},
+                "data": [
+                    {
+                        "instId": "BTC-USDT-SWAP",
+                        "ordId": "ord_1",
+                        "clOrdId": "cl_1",
+                        "side": "buy",
+                        "ordType": "limit",
+                        "state": "live",
+                        "sz": "0.02",
+                        "accFillSz": "0",
+                        "px": "68000",
+                        "fillSz": "",
+                        "fillPx": "",
+                        "tradeId": "",
+                        "fillTime": "",
+                        "uTime": _ms_from_now(10),
+                        "cTime": _ms_from_now(9),
+                    }
+                ],
+            }
+        )
+
+        await service.handle_private_ws_message(
+            {
+                "arg": {"channel": "balance_and_position"},
+                "data": [
+                    {
+                        "pTime": _ms_from_now(5),
+                        "balData": [{"ccy": "USDT", "cashBal": "1200", "availBal": "1180"}],
+                    }
+                ],
+            }
+        )
+
+        snapshot = service.latest_snapshot()
+        self.assertIsNotNone(snapshot)
+        self.assertEqual(snapshot.balances[0].total, Decimal("1200"))
+        self.assertEqual(len(snapshot.open_orders), 1)
+
+    async def test_private_balance_and_position_ws_preserves_existing_position_fields_on_partial_delta(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "okx_api_key": "demo_key",
+                "okx_api_secret": "demo_secret",
+                "okx_api_passphrase": "demo_passphrase",
+                "trading_product_type": "derivatives",
+                "default_symbol": "BTC-USDT-SWAP",
+            }
+        )
+        service = OKXAccountService(settings=settings, client=_FakeDerivativesOKXClient())
+        await service.refresh(force=True)
+        update_ts = _ms_from_now(5)
+
+        await service.handle_private_ws_message(
+            {
+                "arg": {"channel": "balance_and_position"},
+                "data": [
+                    {
+                        "pTime": update_ts,
+                        "posData": [
+                            {
+                                "instId": "BTC-USDT-SWAP",
+                                "pos": "0.03",
+                                "posSide": "long",
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+
+        snapshot = service.latest_snapshot()
+        self.assertIsNotNone(snapshot)
+        self.assertEqual(snapshot.positions[0].quantity, Decimal("0.0003"))
+        self.assertEqual(snapshot.positions[0].average_entry_price, Decimal("80000"))
+        self.assertEqual(snapshot.positions[0].mark_price, Decimal("80100"))
+        self.assertEqual(snapshot.positions[0].notional_usd, Decimal("1602"))
+
+    async def test_private_balance_and_position_ws_zero_quantity_removes_only_target_position(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "okx_api_key": "demo_key",
+                "okx_api_secret": "demo_secret",
+                "okx_api_passphrase": "demo_passphrase",
+                "trading_product_type": "derivatives",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP", "ETH-USDT-SWAP"),
+            }
+        )
+        service = OKXAccountService(settings=settings, client=_FakeMultiPositionDerivativesClient())
+        await service.refresh(force=True)
+        update_ts = _ms_from_now(5)
+
+        await service.handle_private_ws_message(
+            {
+                "arg": {"channel": "balance_and_position"},
+                "data": [
+                    {
+                        "pTime": update_ts,
+                        "posData": [
+                            {
+                                "instId": "BTC-USDT-SWAP",
+                                "pos": "0",
+                                "posSide": "long",
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+
+        snapshot = service.latest_snapshot()
+        self.assertIsNotNone(snapshot)
+        self.assertEqual(len(snapshot.positions), 1)
+        self.assertEqual(snapshot.positions[0].symbol, "ETH-USDT-SWAP")
+        self.assertEqual(snapshot.positions[0].quantity, Decimal("0.1"))
 
     async def test_recent_bills_fetches_and_caches_rows(self) -> None:
         settings = AATSSettings.model_validate(
@@ -529,6 +881,7 @@ class TestOKXAccountService(unittest.IsolatedAsyncioTestCase):
         )
         service = OKXAccountService(settings=settings, client=_FakeOKXClient())
         await service.refresh(force=True)
+        update_ts = _ms_from_now(5)
 
         await service.handle_private_ws_message(
             {
@@ -549,9 +902,9 @@ class TestOKXAccountService(unittest.IsolatedAsyncioTestCase):
                         "fillFee": "-0.27196",
                         "fillFeeCcy": "USDT",
                         "tradeId": "trade_ws_1",
-                        "fillTime": "1700000005000",
-                        "uTime": "1700000005000",
-                        "cTime": "1700000004000",
+                        "fillTime": update_ts,
+                        "uTime": update_ts,
+                        "cTime": _ms_from_now(4),
                     }
                 ],
             }
@@ -564,6 +917,52 @@ class TestOKXAccountService(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot.fills[-1].fill_id, "trade_ws_1")
         self.assertIsNotNone(service.latest_private_order_row(symbol="BTC-USDT", order_id="ord_1"))
         self.assertEqual(len(service.latest_private_order_fills(symbol="BTC-USDT", order_id="ord_1")), 1)
+
+    async def test_private_orders_ws_ignores_non_fill_updates_with_blank_fill_fields(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "okx_api_key": "demo_key",
+                "okx_api_secret": "demo_secret",
+                "okx_api_passphrase": "demo_passphrase",
+            }
+        )
+        service = OKXAccountService(settings=settings, client=_FakeOKXClient())
+        await service.refresh(force=True)
+        update_ts = _ms_from_now(5)
+
+        await service.handle_private_ws_message(
+            {
+                "arg": {"channel": "orders", "instType": "SPOT"},
+                "data": [
+                    {
+                        "instId": "BTC-USDT",
+                        "ordId": "ord_2",
+                        "clOrdId": "cl_2",
+                        "side": "buy",
+                        "ordType": "limit",
+                        "state": "live",
+                        "sz": "0.01",
+                        "accFillSz": "0",
+                        "px": "68000",
+                        "fillSz": "",
+                        "fillPx": "",
+                        "fillFee": "",
+                        "fillFeeCcy": "",
+                        "tradeId": "",
+                        "fillTime": "",
+                        "uTime": update_ts,
+                        "cTime": _ms_from_now(4),
+                    }
+                ],
+            }
+        )
+
+        snapshot = service.latest_snapshot()
+        self.assertIsNotNone(snapshot)
+        self.assertEqual(len(snapshot.open_orders), 1)
+        self.assertEqual(len(snapshot.fills), 0)
 
 
 if __name__ == "__main__":
