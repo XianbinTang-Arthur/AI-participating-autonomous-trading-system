@@ -27,7 +27,9 @@ from aats.schemas.operator import OperatorUserRecord
 from aats.schemas.strategy_profiles import StrategyProfileMarketRegimeAssessment, StrategyProfileRecommendation
 from aats.services.ai_service.provider import AIProviderResponse
 from aats.services.operator.strategy_profiles import StrategyProfileControlService
+from aats.services.operator.strategy_profiles import _seed_revisions, seed_strategy_profiles
 from aats.services.operator.passwords import hash_password
+from aats.schemas.strategy_profiles import strategy_profile_payload_from_settings
 
 
 class FakeOperatorAccountService:
@@ -1083,6 +1085,46 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotEqual(recommendation["recommended_profile_id"], "unregistered_profile")
         self.assertEqual(recommendation["generated_by"], "rule_fallback")
+        self.assertEqual(
+            recommendation["fallback_reason_code"],
+            "strategy_profile_provider_recommended_unregistered_profile",
+        )
+
+    async def test_strategy_profile_seed_backfills_missing_registered_profile(self) -> None:
+        runtime = await self._runtime()
+        legacy_profiles = [
+            "trend_normal",
+            "trend_strict",
+            "range_defensive",
+            "high_volatility_defensive",
+            "execution_degraded_safe",
+        ]
+        repo = runtime.strategy_profile_repo.__class__()
+        payload = strategy_profile_payload_from_settings(runtime.settings)
+        for revision in [
+            item
+            for item in _seed_revisions(settings=runtime.settings, payload=payload)
+            if item.profile_id in set(legacy_profiles)
+        ]:
+            repo.save_revision(revision)
+
+        seed_strategy_profiles(settings=runtime.settings, repo=repo)
+
+        revisions = repo.list_revisions(
+            product_type=runtime.settings.trading_product_type,
+            margin_mode=runtime.settings.margin_mode,
+        )
+        self.assertEqual(
+            {item.profile_id for item in revisions},
+            {
+                "trend_aggressive",
+                "trend_normal",
+                "trend_strict",
+                "range_defensive",
+                "high_volatility_defensive",
+                "execution_degraded_safe",
+            },
+        )
 
     async def test_strategy_profile_evaluate_now_can_generate_recommendation_without_auto_switch(self) -> None:
         runtime = await self._runtime(

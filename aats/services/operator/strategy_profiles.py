@@ -7,6 +7,7 @@ from decimal import Decimal
 from hashlib import sha256
 from typing import TYPE_CHECKING, Any
 
+from aats.bootstrap.logging import get_logger, log_event
 from aats.bootstrap.settings import AATSSettings
 from aats.events import topics
 from aats.events.envelopes import build_envelope
@@ -273,8 +274,9 @@ def seed_strategy_profiles(*, settings: AATSSettings, repo: StrategyProfileRepos
         product_type=settings.trading_product_type,
         margin_mode=settings.margin_mode,
     )
-    if not existing:
-        for revision in _seed_revisions(settings=settings, payload=payload):
+    existing_profile_ids = {item.profile_id for item in existing}
+    for revision in _seed_revisions(settings=settings, payload=payload):
+        if revision.profile_id not in existing_profile_ids:
             repo.save_revision(revision)
     state = repo.activation_state(
         product_type=settings.trading_product_type,
@@ -322,6 +324,7 @@ class StrategyProfileControlService:
         self.event_store: EventStore = self.runtime.event_store
         self.provider = OpenAIProvider(settings=self.settings) if self.settings.ai_provider_configured else None
         self.prompt_version = "strategy_tuning_v1"
+        self.logger = get_logger("aats.strategy_profiles")
 
     def ensure_seed_profiles(self) -> None:
         seed_strategy_profiles(settings=self.settings, repo=self.repo)
@@ -1168,11 +1171,44 @@ class StrategyProfileControlService:
                     input_snapshot=context,
                     expires_at=utc_now() + timedelta(minutes=output.valid_for_minutes),
                 )
-            except (AIProviderError, AIProviderTimeoutError, ValueError):
-                pass
-        return self._fallback_recommendation(context=context, active_profile_id=active_state.active_profile_id)
+            except (AIProviderError, AIProviderTimeoutError, ValueError) as exc:
+                fallback_reason_code = self._fallback_reason_code(exc)
+                fallback_reason_detail = str(exc)
+                log_event(
+                    self.logger,
+                    "strategy_profile_recommendation_fallback",
+                    level="warning",
+                    active_profile_id=active_state.active_profile_id,
+                    provider=self.settings.ai_provider,
+                    fallback_reason_code=fallback_reason_code,
+                    fallback_reason_detail=fallback_reason_detail,
+                )
+                return self._fallback_recommendation(
+                    context=context,
+                    active_profile_id=active_state.active_profile_id,
+                    fallback_reason_code=fallback_reason_code,
+                    fallback_reason_detail=fallback_reason_detail,
+                )
+        return self._fallback_recommendation(
+            context=context,
+            active_profile_id=active_state.active_profile_id,
+            fallback_reason_code="strategy_profile_provider_not_configured",
+            fallback_reason_detail="strategy profile recommendation provider is not configured",
+        )
 
-    def _fallback_recommendation(self, *, context: dict[str, Any], active_profile_id: str | None) -> StrategyProfileRecommendation:
+    @staticmethod
+    def _fallback_reason_code(exc: Exception) -> str:
+        text = str(exc).strip()
+        return text or type(exc).__name__
+
+    def _fallback_recommendation(
+        self,
+        *,
+        context: dict[str, Any],
+        active_profile_id: str | None,
+        fallback_reason_code: str,
+        fallback_reason_detail: str | None,
+    ) -> StrategyProfileRecommendation:
         baseline = context.get("baseline") or {}
         features = context.get("features") or {}
         regime = baseline.get("regime") or features.get("regime_indicator") or "uncertain"
@@ -1223,6 +1259,8 @@ class StrategyProfileControlService:
             generated_by="rule_fallback",
             model_name="rule_fallback",
             prompt_version=self.prompt_version,
+            fallback_reason_code=fallback_reason_code,
+            fallback_reason_detail=fallback_reason_detail,
             input_digest=self._input_digest(context),
             input_snapshot=context,
             expires_at=utc_now() + timedelta(minutes=120),

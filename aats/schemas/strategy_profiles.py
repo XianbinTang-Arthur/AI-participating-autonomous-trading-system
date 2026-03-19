@@ -208,6 +208,8 @@ class StrategyProfileRecommendation(SchemaBase):
     generated_by: str
     model_name: str | None = None
     prompt_version: str | None = None
+    fallback_reason_code: str | None = None
+    fallback_reason_detail: str | None = None
     input_digest: str
     input_snapshot: dict[str, Any] = Field(default_factory=dict)
     generated_at: datetime = Field(default_factory=utc_now)
