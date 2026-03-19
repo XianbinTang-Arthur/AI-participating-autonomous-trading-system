@@ -1065,6 +1065,40 @@ class OperatorQueryService:
         self._invalidate_cache()
         return result
 
+    def activate_strategy_profile(
+        self,
+        *,
+        profile_id: str,
+        reason: str,
+        actor_role: OperatorRole,
+        actor_identity: str | None,
+        auth_source: AuthSource,
+    ) -> dict[str, Any]:
+        result = self.strategy_profiles.activate_profile(
+            profile_id=profile_id,
+            reason=reason,
+            actor_role=actor_role,
+            actor_identity=actor_identity,
+            auth_source=auth_source,
+        )
+        self._append_event(
+            topic=topics.OPERATOR_ACTIONS,
+            key="strategy_profile",
+            payload_model=self.strategy_profiles.audit_payload(
+                action="strategy_profile_manual_activate",
+                actor_role=actor_role,
+                actor_identity=actor_identity,
+                auth_source=auth_source,
+                status="profile_manually_activated",
+                details={
+                    "requested_profile_id": profile_id,
+                    "active_profile_id": result["active_revision"]["profile_id"],
+                },
+            ),
+        )
+        self._invalidate_cache()
+        return result
+
     def update_strategy_profile_auto_rollback_policy(
         self,
         *,

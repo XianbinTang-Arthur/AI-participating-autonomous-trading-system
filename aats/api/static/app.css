@@ -1321,6 +1321,30 @@ h3 {
   font-size: 12px;
 }
 
+.manual-profile-switch-grid {
+  display: grid;
+  gap: 14px;
+}
+
+.manual-profile-switch-actions {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.manual-profile-switch-actions .table-button,
+.manual-profile-switch-actions .secondary-button,
+.manual-profile-switch-actions .warning-button,
+.manual-profile-switch-actions .danger-button,
+.manual-profile-switch-actions .primary-button {
+  min-width: 0;
+  min-height: 38px;
+  padding: 0 10px;
+  font-size: 12px;
+  white-space: nowrap;
+  justify-content: center;
+}
+
 .detail-drawer {
   position: fixed;
   inset: 0 0 0 auto;

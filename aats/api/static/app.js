@@ -582,6 +582,7 @@ async function dispatchAction(action, value, target = null) {
   if (action === "stage-strategy-profile") return acceptStrategyProfileRecommendation(value, "stage_only");
   if (action === "reject-strategy-profile") return rejectStrategyProfileRecommendation(value);
   if (action === "activate-pending-strategy-profile") return activatePendingStrategyProfile();
+  if (action === "manual-activate-strategy-profile") return activateStrategyProfile(value, target);
   if (action === "rollback-strategy-profile") return rollbackStrategyProfile();
   if (action === "load-more-orders") return adjustPageLimit("recentOrders", PAGE_LOAD_STEP);
   if (action === "collapse-orders") return resetPageLimit("recentOrders");
@@ -884,7 +885,7 @@ async function evaluateStrategyProfile(target = null) {
   const clearPending = setActionPending(target, "正在评估并生成建议…");
   try {
     const result = await requestJson("/strategy-profiles/auto-tuning/evaluate-now", { method: "POST" });
-    const profileId = result?.recommendation?.recommended_profile_id || "未知档位";
+    const profileId = readableProfileName(result?.recommendation?.recommended_profile_id);
     const autoApplied = Boolean(result?.auto_activation);
     state.flash = {
       tone: autoApplied ? "info" : "warning",
@@ -935,8 +936,8 @@ async function acceptStrategyProfileRecommendation(recommendationId, activationM
       tone: "info",
       message:
         activationMode === "stage_only"
-          ? `这条建议已转为待审批档位：${result?.activation?.pending_profile_id || "未知档位"}。`
-          : `当前策略档位已切换为 ${result?.active_revision?.profile_label || result?.active_revision?.profile_id || "未知档位"}。`,
+          ? `这条建议已转为待审批档位：${readableProfileName(result?.activation?.pending_profile_id)}。`
+          : `当前策略档位已切换为 ${readableProfileName(result?.active_revision?.profile_label || result?.active_revision?.profile_id)}。`,
     };
     await refreshDashboard({ manual: true });
   } catch (error) {
@@ -974,12 +975,35 @@ async function activatePendingStrategyProfile() {
     });
     state.flash = {
       tone: "info",
-      message: `待审批档位已激活：${result?.active_revision?.profile_label || result?.active_revision?.profile_id || "未知档位"}。`,
+      message: `待审批档位已激活：${readableProfileName(result?.active_revision?.profile_label || result?.active_revision?.profile_id)}。`,
     };
     await refreshDashboard({ manual: true });
   } catch (error) {
     state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
     renderBanners();
+  }
+}
+
+async function activateStrategyProfile(profileId, target = null) {
+  if (!profileId) return;
+  const profileLabel = target instanceof HTMLElement ? (target.textContent || "").trim() : profileId;
+  const clearPending = setActionPending(target, "正在切换档位…");
+  try {
+    if (!window.confirm(`确认立即切换到“${profileLabel}”这个已注册策略档位吗？`)) return;
+    const result = await requestJson(`/strategy-profiles/profiles/${encodeURIComponent(profileId)}/activate`, {
+      method: "POST",
+      body: { reason: "ui_manual_activate_strategy_profile" },
+    });
+    state.flash = {
+      tone: "info",
+      message: `当前策略档位已手动切换为 ${readableProfileName(result?.active_revision?.profile_label || result?.active_revision?.profile_id)}。`,
+    };
+    await refreshDashboard({ manual: true });
+  } catch (error) {
+    state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
+    renderBanners();
+  } finally {
+    clearPending();
   }
 }
 
@@ -992,7 +1016,7 @@ async function rollbackStrategyProfile() {
     });
     state.flash = {
       tone: "warning",
-      message: `策略档位已回滚到 ${result?.active_revision?.profile_label || result?.active_revision?.profile_id || "未知档位"}。`,
+      message: `策略档位已回滚到 ${readableProfileName(result?.active_revision?.profile_label || result?.active_revision?.profile_id)}。`,
     };
     await refreshDashboard({ manual: true });
   } catch (error) {
@@ -1007,6 +1031,11 @@ function csvValues(elementId) {
     .split(",")
     .map((item) => item.trim())
     .filter(Boolean);
+}
+
+function readableProfileName(value, fallback = "未知档位") {
+  if (value === null || value === undefined || value === "") return fallback;
+  return readableState(String(value), fallback);
 }
 
 async function stageAutoRollbackPolicy() {

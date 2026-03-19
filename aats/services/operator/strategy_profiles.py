@@ -671,6 +671,51 @@ class StrategyProfileControlService:
             "active_revision": self._revision_view(revision),
         }
 
+    def activate_profile(
+        self,
+        *,
+        profile_id: str,
+        actor_role: OperatorRole,
+        actor_identity: str | None,
+        auth_source: AuthSource,
+        reason: str,
+    ) -> dict[str, Any]:
+        state = self._activation_state()
+        if profile_id == state.active_profile_id:
+            raise ValueError("strategy_profile_already_active")
+        blockers = self._activation_blockers()
+        if blockers:
+            raise ValueError(blockers[0])
+        revision = self._revision_for_profile(profile_id)
+        if revision is None:
+            raise ValueError("strategy_profile_profile_not_found")
+        record = self._activate_revision(
+            target=revision,
+            state=state,
+            trigger_type="manual",
+            actor_role=actor_role,
+            actor_identity=actor_identity,
+            auth_source=auth_source,
+            recommendation_id=revision.source_recommendation_id,
+            reason_code="operator_manual_profile_activation",
+            reason_detail=reason,
+        )
+        self._append_selection_decision_transition(
+            status="manual_profile_activation_executed",
+            candidate_profile_id=revision.profile_id,
+            rollback_profile_id=record.from_profile_id,
+            execution_state="executed",
+            recommended_action="observe_outcome",
+            rationale=["operator_manual_profile_activation"],
+            execution_outcome=self._activation_outcome_payload(record=record),
+            notes=[reason],
+        )
+        return {
+            "status": "manually_activated",
+            "activation_record": record.model_dump(mode="json"),
+            "active_revision": self._revision_view(revision),
+        }
+
     def rollback(
         self,
         *,

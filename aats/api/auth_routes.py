@@ -79,6 +79,10 @@ class StrategyProfileRollbackRequest(BaseModel):
     reason: str = "rollback_strategy_profile"
 
 
+class StrategyProfileManualActivateRequest(BaseModel):
+    reason: str = "manual_activate_strategy_profile"
+
+
 class StrategyProfileAutoRollbackPolicyUpdateRequest(BaseModel):
     enabled: bool
     review_required_only: bool = True
@@ -734,6 +738,28 @@ async def rollback_strategy_profile(
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@auth_router.post("/strategy-profiles/profiles/{profile_id}/activate")
+async def activate_strategy_profile(
+    request: Request,
+    profile_id: str,
+    payload: StrategyProfileManualActivateRequest,
+    principal: OperatorPrincipal = Depends(require_admin_access),
+) -> dict[str, Any]:
+    try:
+        return _query(request).activate_strategy_profile(
+            profile_id=profile_id,
+            reason=payload.reason,
+            actor_role=principal.role,
+            actor_identity=principal.identity,
+            auth_source=principal.auth_source,
+        )
+    except ValueError as exc:
+        detail = str(exc)
+        if detail == "strategy_profile_profile_not_found":
+            raise HTTPException(status_code=404, detail=detail) from exc
+        raise HTTPException(status_code=409, detail=detail) from exc
 
 
 @auth_router.post("/auth/users")

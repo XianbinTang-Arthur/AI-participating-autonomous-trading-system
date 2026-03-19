@@ -316,6 +316,7 @@ class TargetPositionEngine:
         if trade_kind is None:
             return desired_target_qty
         if not self._regime_allowed_for_entry(baseline.regime):
+            guardrail_flags.append("entry_regime_not_allowed")
             return current_position_qty
         alpha = abs(baseline.composite_alpha_score)
         confidence = baseline.confidence

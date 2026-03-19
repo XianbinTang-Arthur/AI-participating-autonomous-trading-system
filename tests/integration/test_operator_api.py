@@ -1926,6 +1926,35 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         selection_decisions = [item.payload for item in runtime.event_store.by_topic(topics.STRATEGY_PROFILE_SELECTION_DECISIONS)]
         self.assertTrue(any(item["decision_status"] == "recommendation_rejected" for item in selection_decisions))
 
+    async def test_admin_can_manually_activate_registered_strategy_profile(self) -> None:
+        runtime = await self._runtime(
+            operator_auth_enabled=True,
+            operator_session_secret="session-secret",
+            operator_users=[("admin", "admin-pass")],
+        )
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            client.post("/auth/login", json={"username": "admin", "password": "admin-pass"})
+            activated = client.post(
+                "/strategy-profiles/profiles/trend_strict/activate",
+                json={"reason": "manual_switch_from_ui"},
+            )
+            snapshot = client.get("/strategy-profiles")
+
+        self.assertEqual(activated.status_code, 200)
+        self.assertEqual(activated.json()["status"], "manually_activated")
+        self.assertEqual(activated.json()["active_revision"]["profile_id"], "trend_strict")
+        self.assertEqual(snapshot.status_code, 200)
+        self.assertEqual(snapshot.json()["activation"]["active_profile_id"], "trend_strict")
+        selection_decisions = [item.payload for item in runtime.event_store.by_topic(topics.STRATEGY_PROFILE_SELECTION_DECISIONS)]
+        self.assertTrue(any(item["decision_status"] == "manual_profile_activation_executed" for item in selection_decisions))
+        actions = [item.payload for item in runtime.event_store.by_topic(topics.OPERATOR_ACTIONS)]
+        activate_action = next(item for item in reversed(actions) if item["action"] == "strategy_profile_manual_activate")
+        self.assertEqual(activate_action["status"], "profile_manually_activated")
+        self.assertEqual(activate_action["details"]["requested_profile_id"], "trend_strict")
+        self.assertEqual(activate_action["details"]["active_profile_id"], "trend_strict")
+
     async def test_strategy_profile_activation_is_blocked_when_open_orders_exist(self) -> None:
         runtime = await self._runtime(
             operator_auth_enabled=True,

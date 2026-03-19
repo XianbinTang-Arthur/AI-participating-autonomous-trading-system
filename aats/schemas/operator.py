@@ -136,6 +136,7 @@ class OperatorActionRecord(SchemaBase):
         "strategy_profile_accept",
         "strategy_profile_reject",
         "strategy_profile_activate_pending",
+        "strategy_profile_manual_activate",
         "strategy_profile_rollback",
         "strategy_profile_activation_policy",
         "ai_shadow_evaluate",

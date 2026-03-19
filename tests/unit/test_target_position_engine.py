@@ -343,6 +343,7 @@ class TestTargetPositionEngine(unittest.TestCase):
 
         self.assertEqual(target.target_position_qty, 0.0)
         self.assertEqual(target.position_intent, "hold")
+        self.assertIn("entry_regime_not_allowed", target.guardrail_flags)
 
     def test_derivatives_scale_in_requires_stronger_follow_through(self) -> None:
         engine = TargetPositionEngine(

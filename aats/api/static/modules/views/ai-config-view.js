@@ -16,6 +16,14 @@ const CAPABILITY_STATUS_LABELS = {
   enabled_live: "允许进入实盘执行",
 };
 
+const MANUAL_PROFILE_OPTIONS = [
+  { profileId: "trend_normal", label: "趋势标准", tone: "secondary" },
+  { profileId: "trend_strict", label: "趋势严格", tone: "secondary" },
+  { profileId: "range_defensive", label: "范围防御", tone: "warning" },
+  { profileId: "high_volatility_defensive", label: "高波动防御", tone: "warning" },
+  { profileId: "execution_degraded_safe", label: "执行降级安全", tone: "warning" },
+];
+
 export function renderAIConfigView(data) {
   const session = data.session || {};
   const runtimeProfiles = data.runtimeProfiles || {};
@@ -36,9 +44,11 @@ export function renderAIConfigView(data) {
   const executionSuggestionCapability = strategyProfiles.execution_parameter_suggestion_capability || {};
   const profileSpace = strategyProfiles.profile_space || {};
   const comparisonReport = strategyProfiles.comparison_report || {};
+  const activationHistory = Array.isArray(strategyProfiles.activation_history) ? strategyProfiles.activation_history : [];
   const canAdmin = session.role === "admin" || session.identity === "api_key_write";
   const runtimeProfilesError = data.errors?.runtimeProfiles || null;
   const strategyProfilesError = data.errors?.strategyProfiles || null;
+  const overlaySource = describeOverlaySource({ activation, activationHistory, activeRevision });
 
   return `
     <div class="panel-grid ai-config-layout">
@@ -51,18 +61,22 @@ export function renderAIConfigView(data) {
             ? callout({ title: "暂时无法读取运行参数", copy: runtimeProfilesError, pills: [pill("需要管理员权限", "warning")] })
             : summaryStrip([
                 {
-                  label: "运行基础配置来源",
+                  label: "运行基础来源",
                   value: readableState(runtimeProfiles.profile_source || "env_fallback"),
-                  meta: runtimeProfiles.management_enabled
-                    ? "这里显示的是运行时基础参数来源"
-                    : "这里显示的是基础运行参数来源；右侧 AI 建议与档位治理不会直接改写环境文件",
+                  meta: "这里显示基础运行参数从哪里来；不会因为右侧档位切换而改写环境文件",
                   tone: runtimeProfiles.management_enabled ? "positive" : "warning",
                 },
                 {
-                  label: "AI 档位治理状态",
-                  value: textOrFallback(activeRevision?.profile_label || latestRecommendation?.recommended_profile_id, "暂无已采纳档位"),
+                  label: "当前覆盖来源",
+                  value: overlaySource.label,
+                  meta: overlaySource.meta,
+                  tone: overlaySource.tone,
+                },
+                {
+                  label: "当前治理档位",
+                  value: readableProfile(activeRevision?.profile_label || latestRecommendation?.recommended_profile_id, "暂无已采纳档位"),
                   meta: latestRecommendation
-                    ? `最近建议 ${readableState(latestRecommendation.decision_status || "pending")}；通过右侧卡片决定是否激活或回滚`
+                    ? `最近建议 ${readableState(latestRecommendation.decision_status || "pending")}；可在右侧继续采纳、回滚或手动切换`
                     : "当前没有新的 AI 档位建议",
                   tone: activeRevision || latestRecommendation ? "info" : "neutral",
                 },
@@ -87,10 +101,16 @@ export function renderAIConfigView(data) {
               ]),
         })}
         ${surfaceCard({
-          title: "受限执行建议",
-          kicker: "AI 执行边界",
-          copy: "明确告诉用户当前执行建议处于哪一层，避免把诊断能力误解成真实自动执行。",
-          content: strategyProfilesError ? callout({ title: "暂时无法读取执行边界", copy: strategyProfilesError, pills: [pill("等待数据", "warning")] }) : renderExecutionSuggestionCapability(executionSuggestionCapability),
+          title: "管理员手动切换档位",
+          kicker: "安全入口",
+          copy: "这里直接切换已注册档位，只覆盖运行时内存参数，不回写环境文件。",
+          classes: "manual-profile-card",
+          content: strategyProfilesError
+            ? ""
+            : renderManualProfileSwitchPanel({
+                canAdmin,
+                activeRevision,
+              }),
         })}
       </div>
 
@@ -106,25 +126,25 @@ export function renderAIConfigView(data) {
                 ${summaryStrip([
                   {
                     label: "当前档位",
-                    value: textOrFallback(activeRevision?.profile_label || activeRevision?.profile_id, "待确认"),
+                    value: readableProfile(activeRevision?.profile_label || activeRevision?.profile_id, "待确认"),
                     meta: readableRiskLevel(activeRevision?.risk_level),
                     tone: activeRevision ? "positive" : "neutral",
                   },
                   {
                     label: "最新推荐",
-                    value: textOrFallback(latestRecommendation?.recommended_profile_id, "暂无推荐"),
+                    value: readableProfile(latestRecommendation?.recommended_profile_id, "暂无推荐"),
                     meta: readableState(latestRecommendation?.decision_status || "none"),
                     tone: latestRecommendation ? "warning" : "neutral",
                   },
                   {
                     label: "当前决策",
                     value: readableState(selectionDecision.decision_status || "unknown"),
-                    meta: `${textOrFallback(selectionDecision.active_profile_id, "当前档位未记录")} -> ${textOrFallback(selectionDecision.candidate_profile_id, "暂无候选档位")}`,
+                    meta: `${readableProfile(selectionDecision.active_profile_id, "当前档位未记录")} -> ${readableProfile(selectionDecision.candidate_profile_id, "暂无候选档位")}`,
                     tone: selectionDecision.candidate_profile_id ? "info" : "neutral",
                   },
                   {
                     label: "对比胜出档位",
-                    value: textOrFallback(optimizationReport.recommended_profile_id, "尚未生成"),
+                    value: readableProfile(optimizationReport.recommended_profile_id, "尚未生成"),
                     meta: optimizationReport.created_at ? formatMaybeTimestamp(optimizationReport.created_at) : "当前还没有最新对比报告",
                     tone: optimizationReport.recommended_profile_id ? "positive" : "neutral",
                   },
@@ -133,7 +153,7 @@ export function renderAIConfigView(data) {
                   ["推荐理由", listText(latestRecommendation?.reason_codes, "当前没有额外推荐理由"), listText(latestRecommendation?.risk_notes, "当前没有额外风险提示")],
                   ["下一步动作", readableState(selectionDecision.recommended_action || "unknown"), listText(selectionDecision.notes, "当前没有额外决策说明")],
                   ["当前档位摘要", profileSummary(activeRevision), "这里展示当前档位最关键的决策门槛与节奏参数"],
-                  ["档位空间", `${formatNumber((profileSpace.profiles || []).length || 0, 0)} 个已注册档位`, comparisonReport.recommended_profile_id ? `最近对比建议：${comparisonReport.recommended_profile_id}` : "当前还没有最新对比建议"],
+                  ["档位空间", `${formatNumber((profileSpace.registered_profiles || []).length || 0, 0)} 个已注册档位`, comparisonReport.recommended_profile_id ? `最近对比建议：${readableProfile(comparisonReport.recommended_profile_id)}` : "当前还没有最新对比建议"],
                 ])}
               `,
         })}
@@ -156,6 +176,15 @@ export function renderAIConfigView(data) {
           copy: "这里控制胜出档位何时允许真正进入激活链路。",
           classes: "policy-card",
           content: strategyProfilesError ? "" : renderActivationPolicyPanel(activationPolicy, stagedActivationPolicy, activationPolicyHistory, canAdmin),
+        })}
+      </div>
+
+      <div class="span-12">
+        ${surfaceCard({
+          title: "受限执行建议",
+          kicker: "AI 执行边界",
+          copy: "明确告诉用户当前执行建议处于哪一层，避免把诊断能力误解成真实自动执行。",
+          content: strategyProfilesError ? callout({ title: "暂时无法读取执行边界", copy: strategyProfilesError, pills: [pill("等待数据", "warning")] }) : renderExecutionSuggestionCapability(executionSuggestionCapability),
         })}
       </div>
     </div>
@@ -265,6 +294,49 @@ function renderExecutionSuggestionCapability(capability) {
   ]);
 }
 
+function renderManualProfileSwitchPanel({ canAdmin, activeRevision }) {
+  const activeProfileId = activeRevision?.profile_id || "";
+  const activeProfileLabel = readableProfile(activeRevision?.profile_label || activeProfileId, "待确认");
+  const buttons = MANUAL_PROFILE_OPTIONS.map(({ profileId, label, tone }) => {
+    const isActive = profileId === activeProfileId;
+    return `
+      <button
+        class="${escapeHtml(isActive ? "secondary-button" : buttonToneClass(tone))}"
+        data-action="manual-activate-strategy-profile"
+        data-value="${escapeHtml(profileId)}"
+        ${!canAdmin || isActive ? "disabled" : ""}
+        title="${escapeHtml(
+          !canAdmin
+            ? "只有管理员可以执行手动档位切换"
+            : isActive
+              ? "当前档位已经生效，无需重复切换"
+              : `切换到 ${label}`
+        )}"
+      >${escapeHtml(isActive ? `${label}（当前）` : label)}</button>
+    `;
+  }).join("");
+
+  return `
+    <div class="manual-profile-switch-grid">
+      <div class="kv-list">
+        <div class="kv-row">
+          <span class="kv-row__label">当前手动切换目标</span>
+          <strong class="kv-row__value">${escapeHtml(activeProfileLabel)}</strong>
+          <span class="meta-copy">只允许切换已注册档位；切换前仍会检查活动委托等安全门禁</span>
+        </div>
+        <div class="kv-row">
+          <span class="kv-row__label">操作说明</span>
+          <strong class="kv-row__value">${canAdmin ? "点击下方按钮即可立即切换" : "当前账号只有查看权限"}</strong>
+          <span class="meta-copy">管理员手动切换会留下审计记录，便于回查是谁在什么时间切换了档位</span>
+        </div>
+      </div>
+      <div class="table-actions table-actions--compact manual-profile-switch-actions">
+        ${buttons}
+      </div>
+    </div>
+  `;
+}
+
 function profileSummary(revision) {
   if (!revision?.payload) return "当前还没有生效档位摘要";
   const payload = revision.payload;
@@ -290,4 +362,62 @@ function textOrFallback(value, fallback = "待确认") {
 
 function listText(value, fallback = "当前没有额外说明") {
   return listOrDash(value, fallback);
+}
+
+function readableProfile(value, fallback = "待确认") {
+  if (value === null || value === undefined || value === "") return fallback;
+  return readableState(String(value), fallback);
+}
+
+function describeOverlaySource({ activation, activationHistory, activeRevision }) {
+  if (!activeRevision) {
+    return {
+      label: "当前无运行时覆盖",
+      meta: "当前没有可确认的生效档位信息",
+      tone: "neutral",
+    };
+  }
+  const latestActivation = activationHistory.find((item) => item?.to_profile_id === activeRevision.profile_id) || null;
+  const triggerType = String(latestActivation?.trigger_type || "").toLowerCase();
+  if (!latestActivation && String(activation?.last_switch_reason || "").toLowerCase() === "initial_seed") {
+    return {
+      label: "当前无运行时覆盖",
+      meta: "当前仍直接使用环境文件派生出的基础档位参数",
+      tone: "neutral",
+    };
+  }
+  if (triggerType === "ai_auto") {
+    return {
+      label: "AI 自动覆盖",
+      meta: "当前档位覆盖由 AI 推荐并自动执行；只改运行时内存参数，不回写环境文件",
+      tone: "info",
+    };
+  }
+  if (triggerType === "system_guard") {
+    return {
+      label: "系统保护覆盖",
+      meta: "当前档位覆盖由系统保护逻辑触发；只改运行时内存参数，不回写环境文件",
+      tone: "warning",
+    };
+  }
+  if (triggerType === "manual" || triggerType === "rollback" || latestActivation) {
+    return {
+      label: "管理员手动覆盖",
+      meta: "当前档位覆盖由管理员操作触发；只改运行时内存参数，不回写环境文件",
+      tone: "warning",
+    };
+  }
+  return {
+    label: "当前无运行时覆盖",
+    meta: "当前仍直接使用环境文件派生出的基础档位参数",
+    tone: "neutral",
+  };
+}
+
+function buttonToneClass(tone) {
+  if (tone === "primary") return "primary-button";
+  if (tone === "secondary") return "secondary-button";
+  if (tone === "warning") return "warning-button";
+  if (tone === "danger") return "danger-button";
+  return "table-button";
 }
