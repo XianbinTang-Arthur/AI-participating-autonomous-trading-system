@@ -65,10 +65,7 @@
 
               <div class="command-grid">
                 <button id="refreshButton" class="primary-button">刷新数据</button>
-                <button id="reconcileButton" class="secondary-button">立即对账</button>
-                <button id="rebaselineButton" class="warning-button">接受当前账户为新基线</button>
-                <button id="resumeButton" class="ghost-button">恢复自动交易</button>
-                <button id="haltButton" class="danger-button">暂停自动交易</button>
+                <button id="resumeButton" class="warning-button">恢复自动交易</button>
                 <label class="toggle-pill toggle-pill--grid" for="autoRefreshToggle">
                   <input id="autoRefreshToggle" type="checkbox" checked>
                   <span class="toggle-pill__check" aria-hidden="true">✓</span>
@@ -77,6 +74,7 @@
                     <span>每 10 秒刷新一次</span>
                   </span>
                 </label>
+                <button id="haltButton" class="danger-button">暂停自动交易</button>
               </div>
 
               <p id="actionPermissionHint" class="meta-copy">正在确认当前账号权限…</p>

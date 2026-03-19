@@ -159,9 +159,6 @@ function init() {
 }
 
 function bindEvents() {
-  if (nodes.reconcileButton) nodes.reconcileButton.hidden = true;
-  if (nodes.rebaselineButton) nodes.rebaselineButton.hidden = true;
-
   viewLinks.forEach((link) => {
     link.addEventListener("click", (event) => {
       if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
@@ -180,8 +177,8 @@ function bindEvents() {
   });
 
   nodes.refreshButton?.addEventListener("click", () => void refreshDashboard({ manual: true }));
-  nodes.resumeButton?.addEventListener("click", () => void triggerResume());
-  nodes.haltButton?.addEventListener("click", () => void triggerHalt());
+  nodes.resumeButton?.addEventListener("click", () => void triggerResume(nodes.resumeButton));
+  nodes.haltButton?.addEventListener("click", () => void triggerHalt(nodes.haltButton));
   nodes.logoutButton?.addEventListener("click", () => void logoutOperator());
   nodes.autoRefreshToggle?.addEventListener("change", () => {
     if (nodes.autoRefreshToggle.checked) {
@@ -223,6 +220,10 @@ function bindEvents() {
 }
 
 async function refreshDashboard({ manual = false } = {}) {
+  if (state.actionInFlight && !manual) {
+    state.pendingRefresh = true;
+    return;
+  }
   if (state.refreshing) {
     state.pendingRefresh = true;
     return;
@@ -448,7 +449,7 @@ function renderActiveView() {
 }
 
 function updateActionAccess() {
-  const actionButtons = [nodes.reconcileButton, nodes.rebaselineButton, nodes.resumeButton, nodes.haltButton];
+  const actionButtons = [nodes.resumeButton, nodes.haltButton];
   if (!hasResolvedAuthContext()) {
     actionButtons.forEach((node) => {
       if (!node) return;
@@ -463,14 +464,31 @@ function updateActionAccess() {
     return;
   }
 
+  if (state.actionInFlight) {
+    [nodes.refreshButton, ...actionButtons].forEach((node) => {
+      if (!node) return;
+      node.disabled = true;
+      node.title = "正在提交人工控制请求，请等待本次操作完成。";
+    });
+    if (nodes.logoutButton) {
+      nodes.logoutButton.disabled = false;
+      nodes.logoutButton.title = "";
+    }
+    patchText(nodes.actionPermissionHint, "正在提交人工控制请求，请等待当前操作完成。");
+    return;
+  }
+
   const canWrite = operatorCanWrite();
-  const buttons = [...actionButtons, nodes.logoutButton];
+  const buttons = [nodes.refreshButton, ...actionButtons, nodes.logoutButton];
   const disabledReason = controlPermissionMessage() || "当前账号没有人工控制权限。";
   buttons.forEach((node) => {
     if (!node) return;
-    node.disabled = !canWrite && node !== nodes.logoutButton;
-    if (node !== nodes.logoutButton) {
+    const isWriteAction = node !== nodes.logoutButton && node !== nodes.refreshButton;
+    node.disabled = isWriteAction ? !canWrite : false;
+    if (isWriteAction) {
       node.title = !canWrite ? disabledReason : "";
+    } else if (node === nodes.refreshButton) {
+      node.title = "";
     }
   });
   patchText(nodes.actionPermissionHint, canWrite ? "当前账号可以执行人工控制。" : disabledReason);
@@ -533,7 +551,27 @@ function setActiveView(view, { pushHistory = false, refresh = true } = {}) {
   }
 }
 
-async function runAction(path, body, successMessage) {
+function beginAction(target, pendingLabel) {
+  cancelScheduledRefresh();
+  state.actionInFlight = true;
+  const clearPending = setActionPending(target, pendingLabel);
+  renderShell();
+  return () => {
+    clearPending();
+    state.actionInFlight = false;
+    renderShell();
+    if (state.pendingRefresh && !state.refreshing) {
+      state.pendingRefresh = false;
+      void refreshDashboard();
+      return;
+    }
+    scheduleRefresh();
+  };
+}
+
+async function runAction(path, body, successMessage, { target = null, pendingLabel = "正在提交请求…" } = {}) {
+  if (state.actionInFlight) return;
+  const finishAction = beginAction(target, pendingLabel);
   try {
     await requestJson(path, { method: "POST", body });
     state.flash = { tone: "info", message: successMessage };
@@ -541,37 +579,49 @@ async function runAction(path, body, successMessage) {
   } catch (error) {
     state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
     renderBanners();
+  } finally {
+    finishAction();
   }
 }
 
-async function runDangerousAction({ path, body, successMessage, confirmMessage }) {
+async function runDangerousAction({ path, body, successMessage, confirmMessage, target = null, pendingLabel = "正在提交请求…" }) {
   if (!window.confirm(confirmMessage)) return;
-  await runAction(path, body, successMessage);
+  await runAction(path, body, successMessage, { target, pendingLabel });
 }
 
-async function triggerReconciliationValidate() {
-  await runAction("/reconciliation/validate", { reason: "ui_manual_validate" }, "已提交人工对账请求。");
+async function triggerReconciliationValidate(target = null) {
+  await runAction("/reconciliation/validate", { reason: "ui_manual_validate" }, "已提交人工对账请求。", {
+    target,
+    pendingLabel: "正在重新对账…",
+  });
 }
 
-async function triggerRebaseline() {
+async function triggerRebaseline(target = null) {
   await runDangerousAction({
     path: "/system/rebaseline",
     body: { reason: "ui_manual_rebaseline" },
     successMessage: "已把当前账户状态接受为新基线。",
     confirmMessage: "确认把当前账户、仓位和挂单状态接受为新的人工基线吗？这会覆盖旧的恢复参照。",
+    target,
+    pendingLabel: "正在重设基线…",
   });
 }
 
-async function triggerResume() {
-  await runAction("/system/resume", { reason: "ui_manual_resume" }, "已提交恢复自动交易请求。");
+async function triggerResume(target = null) {
+  await runAction("/system/resume", { reason: "ui_manual_resume" }, "已提交恢复自动交易请求。", {
+    target,
+    pendingLabel: "正在恢复自动交易…",
+  });
 }
 
-async function triggerHalt() {
+async function triggerHalt(target = null) {
   await runDangerousAction({
     path: "/system/halt",
     body: { reason: "ui_manual_halt" },
     successMessage: "系统已暂停自动交易。",
     confirmMessage: "确认立即暂停自动交易吗？",
+    target,
+    pendingLabel: "正在暂停自动交易…",
   });
 }
 
@@ -590,10 +640,10 @@ async function dispatchAction(action, value, target = null) {
   if (action === "inspect-order") return inspectOrder(value);
   if (action === "inspect-fill") return inspectFill(value);
   if (action === "inspect-reconciliation") return inspectReconciliation(value);
-  if (action === "trigger-reconciliation-validate") return triggerReconciliationValidate();
-  if (action === "trigger-rebaseline") return triggerRebaseline();
-  if (action === "trigger-resume") return triggerResume();
-  if (action === "trigger-halt") return triggerHalt();
+  if (action === "trigger-reconciliation-validate") return triggerReconciliationValidate(target);
+  if (action === "trigger-rebaseline") return triggerRebaseline(target);
+  if (action === "trigger-resume") return triggerResume(target);
+  if (action === "trigger-halt") return triggerHalt(target);
   if (action === "resolve-stuck-order") return resolveStuckOrder(value);
   if (action === "evaluate-strategy-profile") return evaluateStrategyProfile(target, false);
   if (action === "evaluate-strategy-profile-with-auto-switch") return evaluateStrategyProfile(target, true);
@@ -1566,6 +1616,7 @@ function localizedRecoveryReasons() {
 
 function scheduleRefresh() {
   cancelScheduledRefresh();
+  if (state.actionInFlight) return;
   if (nodes.autoRefreshToggle && !nodes.autoRefreshToggle.checked) return;
   state.refreshTimer = window.setTimeout(() => void refreshDashboard(), AUTO_REFRESH_MS);
 }

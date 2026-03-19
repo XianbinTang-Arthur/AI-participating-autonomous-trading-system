@@ -25,6 +25,7 @@ export const CORE_SPECS = [
 export function createState() {
   return {
     activeView: "home",
+    actionInFlight: false,
     refreshing: false,
     pendingRefresh: false,
     loadingView: null,

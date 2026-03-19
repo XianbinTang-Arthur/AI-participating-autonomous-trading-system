@@ -234,7 +234,7 @@ export function renderReconciliationControls({
   }
   if (shouldShowResumeAction({ recovery })) {
     buttons.push(
-      actionButton("恢复自动交易", "trigger-resume", "", "primary", {
+      actionButton("恢复自动交易", "trigger-resume", "", "warning", {
         disabled: !canWrite || !recovery.resume_eligible,
         title: !canWrite ? permissionMessage : resumeActionHint({ recovery, uiHints }),
       })
