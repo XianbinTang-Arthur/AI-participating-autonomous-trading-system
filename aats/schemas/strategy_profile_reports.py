@@ -36,8 +36,11 @@ class StrategyProfileOptimizationReport(SchemaBase):
     margin_mode: str | None = None
     allowed_symbols: tuple[str, ...] = Field(default_factory=tuple)
     ranking_method: str = "replay_shadow_offline_v1"
+    context_snapshot_id: str | None = None
     active_profile_id: str | None = None
     recommended_profile_id: str | None = None
+    recommended_by: str = "winner_engine"
+    score_delta_vs_active: float = 0.0
     replay_summary: dict[str, Any] = Field(default_factory=dict)
     offline_replay_pipeline: dict[str, Any] = Field(default_factory=dict)
     ai_performance_summary: dict[str, Any] = Field(default_factory=dict)
@@ -56,12 +59,16 @@ class StrategyProfileSelectionDecision(SchemaBase):
     product_type: str | None = None
     margin_mode: str | None = None
     allowed_symbols: tuple[str, ...] = Field(default_factory=tuple)
+    context_snapshot_id: str | None = None
     active_profile_id: str | None = None
     candidate_profile_id: str | None = None
     rollback_profile_id: str | None = None
+    candidate_source: str = "winner_engine"
+    activation_decision_source: str = "activation_gate"
     decision_status: str = "pending_review"
     execution_state: str = "not_executed"
     recommended_action: str | None = None
+    blocked_reasons: list[str] = Field(default_factory=list)
     rationale: list[str] = Field(default_factory=list)
     replay_guard: dict[str, Any] = Field(default_factory=dict)
     shadow_guard: dict[str, Any] = Field(default_factory=dict)

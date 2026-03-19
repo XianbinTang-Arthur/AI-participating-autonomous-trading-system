@@ -144,6 +144,16 @@ class AATSSettings(BaseSettings):
     strategy_profile_failure_rollback_on_degraded_evaluation: bool = True
     strategy_profile_failure_rollback_on_shadow_review_required: bool = True
     strategy_profile_failure_rollback_on_alternative_winner: bool = True
+    strategy_profile_activation_min_active_minutes: int = 0
+    strategy_profile_activation_min_score_delta: float = 0.0
+    strategy_profile_activation_required_consecutive_wins: int = 1
+    strategy_profile_score_fee_penalty_weight: float = -25.0
+    strategy_profile_score_churn_penalty_weight: float = -20.0
+    strategy_profile_score_degraded_status_penalty: float = -15.0
+    strategy_profile_score_low_health_conservative_bonus: float = 2.5
+    strategy_profile_score_low_health_non_conservative_penalty: float = -2.0
+    strategy_profile_score_divergence_execution_bonus: float = 1.5
+    strategy_profile_score_divergence_other_penalty: float = -1.0
     trading_product_type: TradingProductType = "spot"
     margin_mode: MarginMode = "cash"
     max_target_leverage: float = 1.0

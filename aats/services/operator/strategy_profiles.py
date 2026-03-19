@@ -14,13 +14,16 @@ from aats.events.envelopes import build_envelope
 from aats.schemas.common import utc_now
 from aats.schemas.operator import AuthSource, OperatorActionRecord, OperatorRole
 from aats.schemas.strategy_profiles import (
+    StrategyProfileAIAdvice,
     StrategyProfileComparisonReport,
     StrategyProfileComparisonRow,
+    StrategyProfileEvaluationContextSnapshot,
     StrategyProfileActivationRecord,
     StrategyProfileActivationState,
     StrategyProfileEvaluationRecord,
     StrategyProfileAxes,
     StrategyProfileGuardrails,
+    StrategyProfileMarketRegimeAssessment,
     StrategyProfilePayload,
     StrategyProfileRecommendation,
     StrategyProfileRecommendationOutput,
@@ -394,7 +397,8 @@ class StrategyProfileControlService:
 
     async def evaluate_now(self, *, allow_auto_activation: bool = True) -> dict[str, Any]:
         self.ensure_seed_profiles()
-        context = self._tuning_context()
+        context_snapshot = self._tuning_context()
+        context = self._context_payload(context_snapshot)
         state = self._activation_state()
         revisions = self.repo.list_revisions(
             product_type=self.settings.trading_product_type,
@@ -440,6 +444,7 @@ class StrategyProfileControlService:
             state=state,
             comparison_report=comparison_report,
             evaluations=evaluations,
+            context_snapshot=context_snapshot,
         )
         self.event_store.append(
             build_envelope(
@@ -449,19 +454,12 @@ class StrategyProfileControlService:
                 source_component="strategy_profile_service",
             )
         )
-        selection_decision = self._build_selection_decision(
-            state=state,
+        ai_recommendation = await self._generate_recommendation(context=context)
+        recommendation = self._build_normalized_recommendation(
+            context_snapshot=context_snapshot,
             optimization_report=optimization_report,
+            ai_recommendation=ai_recommendation,
         )
-        self.event_store.append(
-            build_envelope(
-                topic=topics.STRATEGY_PROFILE_SELECTION_DECISIONS,
-                key=selection_decision.candidate_profile_id or state.active_profile_id or "strategy_profiles",
-                payload_model=selection_decision,
-                source_component="strategy_profile_service",
-            )
-        )
-        recommendation = await self._generate_recommendation(context=context)
         self.repo.save_recommendation(recommendation)
         self.event_store.append(
             build_envelope(
@@ -472,6 +470,19 @@ class StrategyProfileControlService:
             )
         )
         validation = self._recommendation_validation(recommendation)
+        selection_decision = self._build_selection_decision(
+            state=state,
+            optimization_report=optimization_report,
+            activation_decision=validation,
+        )
+        self.event_store.append(
+            build_envelope(
+                topic=topics.STRATEGY_PROFILE_SELECTION_DECISIONS,
+                key=selection_decision.candidate_profile_id or state.active_profile_id or "strategy_profiles",
+                payload_model=selection_decision,
+                source_component="strategy_profile_service",
+            )
+        )
         result = {
             "recommendation": recommendation.model_dump(mode="json"),
             "validation": validation,
@@ -486,19 +497,17 @@ class StrategyProfileControlService:
         if allow_auto_activation and validation["auto_apply_allowed"]:
             activation = self._auto_apply_recommendation(recommendation=recommendation)
             result["auto_activation"] = activation
+            result["profile_activation_policy"] = activation
             latest_selection = self._latest_selection_decision_payload()
             if latest_selection is not None:
                 result["selection_decision"] = latest_selection
-        elif allow_auto_activation and not result.get("auto_activation"):
-            policy_activation = self._maybe_auto_execute_activation_policy(
-                optimization_report=optimization_report,
-                selection_decision=selection_decision,
-            )
-            if policy_activation is not None:
-                result["profile_activation_policy"] = policy_activation
-                latest_selection = self._latest_selection_decision_payload()
-                if latest_selection is not None:
-                    result["selection_decision"] = latest_selection
+        elif validation.get("blocked_reasons"):
+            result["profile_activation_policy"] = {
+                "status": "blocked",
+                "candidate_profile_id": recommendation.recommended_profile_id,
+                "blocked_reasons": validation["blocked_reasons"],
+                "policy_id": validation.get("activation_policy_id"),
+            }
         outcome_decision = self._write_back_selection_outcome(
             state=self._activation_state(),
             evaluations=evaluations,
@@ -815,7 +824,7 @@ class StrategyProfileControlService:
             details=details or {},
         )
 
-    def _tuning_context(self) -> dict[str, Any]:
+    def _tuning_context(self) -> StrategyProfileEvaluationContextSnapshot:
         baseline_event = self.event_store.latest(topics.BASELINE_ASSESSMENTS)
         feature_event = self.event_store.latest(topics.FEATURE_SNAPSHOTS)
         latest_portfolio = self.runtime.portfolio_repo.latest()
@@ -826,13 +835,14 @@ class StrategyProfileControlService:
             product_type=self.settings.trading_product_type,
             margin_mode=self.settings.margin_mode,
         )
-        return {
-            "scope": self._scope(),
-            "baseline": baseline_event.payload if baseline_event is not None else None,
-            "features": feature_event.payload if feature_event is not None else None,
-            "portfolio": latest_portfolio.model_dump(mode="json") if latest_portfolio is not None else None,
-            "safety_state": safety_state,
-            "execution_health": {
+        return StrategyProfileEvaluationContextSnapshot(
+            snapshot_ts=utc_now(),
+            scope=self._scope(),
+            baseline=baseline_event.payload if baseline_event is not None else None,
+            features=feature_event.payload if feature_event is not None else None,
+            portfolio=latest_portfolio.model_dump(mode="json") if latest_portfolio is not None else None,
+            safety_state=safety_state,
+            execution_health={
                 "open_order_count": len(
                     self.runtime.execution_repo.order_states_for_scope(scope=self.runtime_state_scope, open_only=True)
                 ),
@@ -840,14 +850,14 @@ class StrategyProfileControlService:
                     self.runtime.event_store.recent_by_topic(topics.EXECUTION_ERROR_SUMMARIES, limit=20)
                 ),
             },
-            "performance": performance,
-            "current_profile_id": activation.active_profile_id,
-            "profile_selection_policy": {
+            performance=performance,
+            current_profile_id=activation.active_profile_id,
+            profile_selection_policy={
                 "selection_mode": "registered_profile_only",
                 "free_form_parameter_generation_enabled": False,
                 "execution_parameter_suggestions_enabled": False,
             },
-            "candidate_profiles": [
+            candidate_profiles=[
                 {
                     "profile_id": item.profile_id,
                     "profile_label": item.profile_label,
@@ -861,7 +871,173 @@ class StrategyProfileControlService:
                 }
                 for item in revisions
             ],
+        )
+
+    @staticmethod
+    def _context_payload(snapshot: StrategyProfileEvaluationContextSnapshot) -> dict[str, Any]:
+        return snapshot.model_dump(mode="json")
+
+    @staticmethod
+    def _dedupe_items(items: list[str]) -> list[str]:
+        seen: set[str] = set()
+        result: list[str] = []
+        for item in items:
+            normalized = str(item or "").strip()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            result.append(normalized)
+        return result
+
+    def _resolved_context_signals(self, context: dict[str, Any]) -> dict[str, Any]:
+        baseline = context.get("baseline") or {}
+        features = context.get("features") or {}
+        return {
+            "regime": str(features.get("regime_indicator") or baseline.get("regime") or "uncertain"),
+            "volatility_state": str(features.get("volatility_state") or baseline.get("volatility_state") or "unknown"),
+            "confidence": float(features.get("regime_confidence", baseline.get("confidence", 0.0)) or 0.0),
+            "composite_alpha_score": float(
+                features.get("composite_alpha_score", baseline.get("composite_alpha_score", 0.0)) or 0.0
+            ),
+            "direction_bias": str(baseline.get("direction_bias") or features.get("direction_bias") or "flat"),
+            "suggested_position_scale": float(features.get("suggested_position_scale", 0.0) or 0.0),
         }
+
+    def _candidate_for_profile(
+        self,
+        *,
+        optimization_report: StrategyProfileOptimizationReport,
+        profile_id: str | None,
+    ) -> StrategyProfileOptimizationCandidate | None:
+        if not profile_id:
+            return None
+        return next((item for item in optimization_report.candidates if item.profile_id == profile_id), None)
+
+    def _ai_advice_from_recommendation(
+        self,
+        *,
+        recommendation: StrategyProfileRecommendation,
+        candidate_profile_id: str | None,
+    ) -> StrategyProfileAIAdvice:
+        agreement = bool(candidate_profile_id and recommendation.recommended_profile_id == candidate_profile_id)
+        confidence_adjustment = 0.05 if agreement else -0.08
+        return StrategyProfileAIAdvice(
+            provider=recommendation.generated_by,
+            model_name=recommendation.model_name,
+            preferred_profile_id=recommendation.recommended_profile_id,
+            confidence=float(recommendation.confidence),
+            agreement_with_candidate=agreement,
+            confidence_adjustment=confidence_adjustment,
+            market_regime_assessment=recommendation.market_regime_assessment,
+            reason_codes=list(recommendation.reason_codes),
+            risk_notes=list(recommendation.risk_notes),
+            summary=recommendation.human_summary,
+            fallback_reason_code=recommendation.fallback_reason_code,
+            fallback_reason_detail=recommendation.fallback_reason_detail,
+            used_fallback=recommendation.generated_by == "rule_fallback",
+        )
+
+    def _normalized_candidate_confidence(
+        self,
+        *,
+        candidate: StrategyProfileOptimizationCandidate | None,
+        ai_advice: StrategyProfileAIAdvice,
+        candidate_profile_id: str | None,
+    ) -> float:
+        if candidate_profile_id and ai_advice.preferred_profile_id == candidate_profile_id:
+            return self._clamp_float(float(ai_advice.confidence), 0.0, 1.0)
+        base = 0.68 if ai_advice.used_fallback else 0.74
+        if candidate is not None and candidate.composite_score > 0:
+            base += min(candidate.composite_score / 100.0, 0.12)
+        base += ai_advice.confidence_adjustment
+        return self._clamp_float(base, 0.0, 0.99)
+
+    def _build_normalized_recommendation(
+        self,
+        *,
+        context_snapshot: StrategyProfileEvaluationContextSnapshot,
+        optimization_report: StrategyProfileOptimizationReport,
+        ai_recommendation: StrategyProfileRecommendation,
+    ) -> StrategyProfileRecommendation:
+        candidate_profile_id = optimization_report.recommended_profile_id or ai_recommendation.recommended_profile_id
+        ai_advice = self._ai_advice_from_recommendation(
+            recommendation=ai_recommendation,
+            candidate_profile_id=candidate_profile_id,
+        )
+        signals = self._resolved_context_signals(self._context_payload(context_snapshot))
+        market_regime_assessment = StrategyProfileMarketRegimeAssessment(
+            regime=str(
+                ai_recommendation.market_regime_assessment.regime
+                if ai_recommendation.market_regime_assessment
+                else signals["regime"]
+            ),
+            volatility_state=str(
+                ai_recommendation.market_regime_assessment.volatility_state
+                if ai_recommendation.market_regime_assessment
+                else signals["volatility_state"]
+            ),
+            execution_condition=str(
+                ai_recommendation.market_regime_assessment.execution_condition
+                if ai_recommendation.market_regime_assessment
+                else (
+                    "degraded"
+                    if int((context_snapshot.execution_health or {}).get("recent_execution_error_count") or 0) >= 3
+                    else "normal"
+                )
+            ),
+        )
+        candidate = self._candidate_for_profile(
+            optimization_report=optimization_report,
+            profile_id=candidate_profile_id,
+        )
+        optimization_reasons = list(candidate.reasons if candidate is not None else [])
+        if candidate_profile_id and ai_advice.preferred_profile_id and candidate_profile_id != ai_advice.preferred_profile_id:
+            optimization_reasons.append("ai_assist_disagrees_with_winner")
+        else:
+            optimization_reasons.append("ai_assist_confirms_winner")
+        summary = (
+            f"winner_engine_selected={candidate_profile_id or 'none'}; "
+            f"ai_preferred={ai_advice.preferred_profile_id or 'none'}; "
+            f"score_delta_vs_active={format(optimization_report.score_delta_vs_active, '.3f')}"
+        )
+        return StrategyProfileRecommendation(
+            product_type=self.settings.trading_product_type,
+            margin_mode=self.settings.margin_mode,
+            allowed_symbols=self.settings.allowed_symbols,
+            active_profile_id=optimization_report.active_profile_id,
+            recommended_profile_id=candidate_profile_id or ai_recommendation.recommended_profile_id,
+            fallback_profile_id=ai_recommendation.fallback_profile_id,
+            confidence=self._normalized_candidate_confidence(
+                candidate=candidate,
+                ai_advice=ai_advice,
+                candidate_profile_id=candidate_profile_id,
+            ),
+            market_regime_assessment=market_regime_assessment,
+            reason_codes=self._dedupe_items(
+                ["winner_engine_selected_candidate", *optimization_reasons[:4], *ai_advice.reason_codes[:3]]
+            ),
+            human_summary=summary,
+            risk_notes=self._dedupe_items(
+                [
+                    *ai_advice.risk_notes,
+                    "ai_assist_only",
+                    "registered_profile_only",
+                    "fallback_rule_based_recommendation" if ai_advice.used_fallback else "",
+                ]
+            ),
+            valid_for_minutes=ai_recommendation.valid_for_minutes,
+            generated_by="winner_engine",
+            model_name=ai_recommendation.model_name,
+            prompt_version=self.prompt_version,
+            selection_source="winner_engine",
+            context_snapshot_id=context_snapshot.snapshot_id,
+            ai_advice=ai_advice,
+            fallback_reason_code=ai_recommendation.fallback_reason_code,
+            fallback_reason_detail=ai_recommendation.fallback_reason_detail,
+            input_digest=self._input_digest(self._context_payload(context_snapshot)),
+            input_snapshot=self._context_payload(context_snapshot),
+            expires_at=utc_now() + timedelta(minutes=ai_recommendation.valid_for_minutes),
+        )
 
     def _performance_summary(self) -> dict[str, Any]:
         fills = fills_for_scope(
@@ -1209,35 +1385,68 @@ class StrategyProfileControlService:
         fallback_reason_code: str,
         fallback_reason_detail: str | None,
     ) -> StrategyProfileRecommendation:
-        baseline = context.get("baseline") or {}
-        features = context.get("features") or {}
-        regime = baseline.get("regime") or features.get("regime_indicator") or "uncertain"
-        volatility_state = baseline.get("volatility_state") or features.get("volatility_state") or "unknown"
-        composite_alpha = float(baseline.get("composite_alpha_score", features.get("composite_alpha_score", 0.0)) or 0.0)
+        signals = self._resolved_context_signals(context)
+        regime = signals["regime"]
+        volatility_state = signals["volatility_state"]
+        composite_alpha = float(signals["composite_alpha_score"] or 0.0)
+        regime_confidence = float(signals["confidence"] or 0.0)
+        direction_bias = signals["direction_bias"]
+        suggested_position_scale = float(signals["suggested_position_scale"] or 0.0)
         fee_ratio = float(context.get("performance", {}).get("fee_to_gross_pnl_ratio", 0.0) or 0.0)
+        churn_ratio = float(context.get("performance", {}).get("small_pnl_churn_ratio", 0.0) or 0.0)
         execution_errors = int(context.get("execution_health", {}).get("recent_execution_error_count", 0) or 0)
-
-        if execution_errors >= 3:
-            recommended = "execution_degraded_safe"
-            summary = "Execution errors are elevated; switch to the safety profile to reduce decision frequency."
-            reasons = ["execution_errors_elevated"]
-        elif volatility_state == "high":
-            recommended = "high_volatility_defensive"
-            summary = "Volatility is elevated; move to the high-volatility defensive profile."
-            reasons = ["high_volatility_detected"]
-        elif regime in {"range", "uncertain"} or fee_ratio >= 0.5 or abs(composite_alpha) < 0.12:
-            recommended = "range_defensive"
-            summary = "Range behavior or fee compression is dominant; reduce churn with the range defensive profile."
-            reasons = ["range_regime_detected", "fee_churn_elevated"]
-        elif abs(composite_alpha) >= 0.22:
-            recommended = "trend_normal"
-            summary = "Trend signal remains healthy; keep the standard trend profile."
-            reasons = ["trend_signal_supported"]
-        else:
-            recommended = "trend_strict"
-            summary = "Trend exists but edge is moderate; prefer the stricter trend profile."
-            reasons = ["trend_signal_moderate"]
-        confidence = 0.82 if recommended in {"range_defensive", "high_volatility_defensive", "execution_degraded_safe"} else 0.72
+        safety_state = context.get("safety_state") or {}
+        safe_to_trade = bool(safety_state.get("safe_to_trade", True))
+        review_required = bool(safety_state.get("review_required", False))
+        fallback_rules = [
+            {
+                "profile_id": "execution_degraded_safe",
+                "when": execution_errors >= 3 or not safe_to_trade or review_required,
+                "summary": "Execution or runtime safety is degraded; use the safety profile.",
+                "reasons": ["execution_errors_elevated", "runtime_safety_degraded"],
+                "confidence": 0.9,
+            },
+            {
+                "profile_id": "high_volatility_defensive",
+                "when": volatility_state == "high" and (abs(composite_alpha) < 0.45 or regime in {"uncertain", "range"}),
+                "summary": "Volatility is elevated; use the high-volatility defensive profile.",
+                "reasons": ["high_volatility_detected"],
+                "confidence": 0.84,
+            },
+            {
+                "profile_id": "range_defensive",
+                "when": regime in {"range", "uncertain"} or direction_bias == "flat" or fee_ratio >= 0.45 or churn_ratio >= 0.55 or abs(composite_alpha) < 0.14,
+                "summary": "Range behavior or fee churn is dominant; reduce activity with the range defensive profile.",
+                "reasons": ["range_regime_detected", "fee_churn_elevated"],
+                "confidence": 0.82,
+            },
+            {
+                "profile_id": "trend_aggressive",
+                "when": regime in {"trend", "breakout"} and direction_bias != "flat" and composite_alpha >= 0.55 and regime_confidence >= 0.78 and fee_ratio <= 0.3 and execution_errors == 0 and suggested_position_scale >= 0.25,
+                "summary": "Trend evidence is strong; the aggressive trend profile is the best fit.",
+                "reasons": ["trend_signal_supported", "trend_signal_strong"],
+                "confidence": 0.86,
+            },
+            {
+                "profile_id": "trend_normal",
+                "when": regime in {"trend", "breakout"} and direction_bias != "flat" and composite_alpha >= 0.24 and regime_confidence >= 0.62,
+                "summary": "Trend evidence is healthy; use the standard trend profile.",
+                "reasons": ["trend_signal_supported"],
+                "confidence": 0.76,
+            },
+            {
+                "profile_id": "trend_strict",
+                "when": regime in {"trend", "breakout"},
+                "summary": "Trend exists but conviction is moderate; use the stricter trend profile.",
+                "reasons": ["trend_signal_moderate"],
+                "confidence": 0.72,
+            },
+        ]
+        selected_rule = next((item for item in fallback_rules if item["when"]), fallback_rules[2])
+        recommended = str(selected_rule["profile_id"])
+        summary = str(selected_rule["summary"])
+        reasons = list(selected_rule["reasons"])
+        confidence = float(selected_rule["confidence"])
 
         return StrategyProfileRecommendation(
             product_type=self.settings.trading_product_type,
@@ -1734,10 +1943,13 @@ class StrategyProfileControlService:
             score_breakdown = {
                 "net_realized_pnl": round(avg_net_realized_pnl, 6),
                 "win_rate": round(avg_win_rate * 100.0, 6),
-                "fee_penalty": round(avg_fee_ratio * -25.0, 6),
-                "churn_penalty": round(avg_churn_ratio * -20.0, 6),
+                "fee_penalty": round(avg_fee_ratio * float(self.settings.strategy_profile_score_fee_penalty_weight), 6),
+                "churn_penalty": round(
+                    avg_churn_ratio * float(self.settings.strategy_profile_score_churn_penalty_weight),
+                    6,
+                ),
                 "status_penalty": (
-                    -15.0
+                    float(self.settings.strategy_profile_score_degraded_status_penalty)
                     if latest_status in {"degraded", "rollback_recommended", "rollback_executed"}
                     else 0.0
                 ),
@@ -1779,18 +1991,22 @@ class StrategyProfileControlService:
         state: StrategyProfileActivationState,
         comparison_report: StrategyProfileComparisonReport,
         evaluations: list[StrategyProfileEvaluationRecord],
+        context_snapshot: StrategyProfileEvaluationContextSnapshot | None = None,
     ) -> StrategyProfileOptimizationReport:
+        if context_snapshot is None:
+            context_snapshot = self._tuning_context()
         ai_performance_summary = self._shadow_summary_for_profiles()
-        context = self._tuning_context()
+        context = self._context_payload(context_snapshot)
+        signals = self._resolved_context_signals(context)
         replay_summary = self._recent_replay_summary(
             symbol=self.settings.default_symbol,
-            regime=(context.get("baseline") or {}).get("regime"),
+            regime=signals["regime"],
             active_profile_id=state.active_profile_id,
         )
         replay_pipeline = self._build_offline_replay_pipeline(
             comparison_rows=comparison_report.rows,
             symbol=self.settings.default_symbol,
-            regime=(context.get("baseline") or {}).get("regime"),
+            regime=signals["regime"],
             active_profile_id=state.active_profile_id,
         )
         replay_summary = replay_pipeline.get("primary_summary") or replay_summary
@@ -1843,6 +2059,13 @@ class StrategyProfileControlService:
             )
         candidates.sort(key=lambda item: (-item.composite_score, item.profile_id))
         recommended = candidates[0].profile_id if candidates else None
+        active_candidate = next((item for item in candidates if item.profile_id == state.active_profile_id), None)
+        winner_candidate = candidates[0] if candidates else None
+        score_delta_vs_active = round(
+            float(winner_candidate.composite_score if winner_candidate is not None else 0.0)
+            - float(active_candidate.composite_score if active_candidate is not None else 0.0),
+            6,
+        )
         notes = [
             "offline_optimization_uses_historical_profile_evaluations",
             "shadow_guard_adjustment_derived_from_latest_ai_performance_reports",
@@ -1867,8 +2090,11 @@ class StrategyProfileControlService:
             product_type=self.settings.trading_product_type,
             margin_mode=self.settings.margin_mode,
             allowed_symbols=tuple(self.settings.allowed_symbols),
+            context_snapshot_id=context_snapshot.snapshot_id,
             active_profile_id=state.active_profile_id,
             recommended_profile_id=recommended,
+            recommended_by="winner_engine",
+            score_delta_vs_active=score_delta_vs_active,
             replay_summary=replay_summary,
             offline_replay_pipeline=replay_pipeline,
             ai_performance_summary=ai_performance_summary,
@@ -2192,6 +2418,9 @@ class StrategyProfileControlService:
                 "min_recommendation_strength": float(activation_policy.min_recommendation_strength),
                 "require_positive_replay_consensus": bool(activation_policy.require_positive_replay_consensus),
                 "disallow_when_shadow_review_required": bool(activation_policy.disallow_when_shadow_review_required),
+                "min_score_delta_vs_active": float(self.settings.strategy_profile_activation_min_score_delta),
+                "required_consecutive_wins": int(self.settings.strategy_profile_activation_required_consecutive_wins),
+                "min_active_minutes": int(self.settings.strategy_profile_activation_min_active_minutes),
             },
             "activation_policy": {
                 "policy_id": activation_policy.policy_id,
@@ -2291,9 +2520,17 @@ class StrategyProfileControlService:
         avg_execution_issues = float(replay_summary.get("avg_execution_chain_issue_count") or 0.0)
         avg_decision_issues = float(replay_summary.get("avg_decision_chain_issue_count") or 0.0)
         if healthy_rate < 0.8:
-            scorecard["global_health_adjustment"] = 2.5 if row.risk_level == "conservative" else -2.0
+            scorecard["global_health_adjustment"] = (
+                float(self.settings.strategy_profile_score_low_health_conservative_bonus)
+                if row.risk_level == "conservative"
+                else float(self.settings.strategy_profile_score_low_health_non_conservative_penalty)
+            )
         if avg_divergence > 0:
-            scorecard["global_divergence_adjustment"] = 1.5 if row.market_intent == "execution_degraded" else -1.0
+            scorecard["global_divergence_adjustment"] = (
+                float(self.settings.strategy_profile_score_divergence_execution_bonus)
+                if row.market_intent == "execution_degraded"
+                else float(self.settings.strategy_profile_score_divergence_other_penalty)
+            )
         if avg_execution_issues > 0:
             scorecard["execution_chain_adjustment"] = 1.5 if row.market_intent == "execution_degraded" else -0.75
         if avg_decision_issues > 0:
@@ -2359,8 +2596,8 @@ class StrategyProfileControlService:
             adjustment += 2.5 if row.risk_level == "conservative" else -1.5
         return round(adjustment, 6)
 
-    @staticmethod
     def _replay_adjustment_for_profile(
+        self,
         *,
         row: StrategyProfileComparisonRow,
         replay_summary: dict[str, Any],
@@ -2389,9 +2626,17 @@ class StrategyProfileControlService:
             return 0.0
         adjustment = 0.0
         if healthy_rate < 0.8:
-            adjustment += 2.5 if row.risk_level == "conservative" else -2.0
+            adjustment += (
+                float(self.settings.strategy_profile_score_low_health_conservative_bonus)
+                if row.risk_level == "conservative"
+                else float(self.settings.strategy_profile_score_low_health_non_conservative_penalty)
+            )
         if avg_divergence > 0:
-            adjustment += 1.5 if row.market_intent == "execution_degraded" else -1.0
+            adjustment += (
+                float(self.settings.strategy_profile_score_divergence_execution_bonus)
+                if row.market_intent == "execution_degraded"
+                else float(self.settings.strategy_profile_score_divergence_other_penalty)
+            )
         if avg_execution_issues > 0:
             adjustment += 1.5 if row.market_intent == "execution_degraded" else -0.75
         if avg_decision_issues > 0:
@@ -2515,6 +2760,7 @@ class StrategyProfileControlService:
         *,
         state: StrategyProfileActivationState,
         optimization_report: StrategyProfileOptimizationReport,
+        activation_decision: dict[str, Any],
     ) -> StrategyProfileSelectionDecision:
         previous = self._latest_selection_decision()
         candidate = optimization_report.recommended_profile_id
@@ -2526,8 +2772,12 @@ class StrategyProfileControlService:
             status = "stable_keep_active"
             execution_state = "already_active"
             recommended_action = "keep_current_profile"
-        else:
+        elif activation_decision.get("auto_apply_allowed"):
             status = "recommended_not_executed"
+            execution_state = "not_executed"
+            recommended_action = "review_activate"
+        else:
+            status = "winner_policy_recommended_not_executed"
             execution_state = "not_executed"
             recommended_action = "review_activate"
         return StrategyProfileSelectionDecision(
@@ -2537,14 +2787,21 @@ class StrategyProfileControlService:
             product_type=self.settings.trading_product_type,
             margin_mode=self.settings.margin_mode,
             allowed_symbols=tuple(self.settings.allowed_symbols),
+            context_snapshot_id=optimization_report.context_snapshot_id,
             active_profile_id=state.active_profile_id,
             candidate_profile_id=candidate,
             rollback_profile_id=state.active_profile_id,
+            candidate_source=str(activation_decision.get("candidate_source") or "winner_engine"),
+            activation_decision_source=str(
+                activation_decision.get("activation_decision_source") or "activation_gate"
+            ),
             decision_status=status,
             execution_state=execution_state,
             recommended_action=recommended_action,
+            blocked_reasons=list(activation_decision.get("blocked_reasons") or []),
             rationale=[
-                "selection_based_on_optimization_report",
+                "selection_based_on_winner_engine",
+                f"ai_alignment={activation_decision.get('ai_agreement_with_candidate')}",
                 "rollback_target_preserved_as_previous_active_profile",
                 *optimization_report.notes,
             ],
@@ -2553,6 +2810,7 @@ class StrategyProfileControlService:
             notes=[
                 f"optimization_version={optimization_report.version}",
                 f"report_parent={optimization_report.parent_report_id or 'none'}",
+                f"consecutive_candidate_wins={activation_decision.get('consecutive_candidate_wins')}",
             ],
         )
 
@@ -2565,6 +2823,7 @@ class StrategyProfileControlService:
         execution_state: str | None = None,
         recommended_action: str | None = None,
         rationale: list[str],
+        blocked_reasons: list[str] | None = None,
         execution_outcome: dict[str, Any] | None = None,
         auto_rollback_recommendation: dict[str, Any] | None = None,
         notes: list[str],
@@ -2582,15 +2841,31 @@ class StrategyProfileControlService:
             product_type=self.settings.trading_product_type,
             margin_mode=self.settings.margin_mode,
             allowed_symbols=tuple(self.settings.allowed_symbols),
+            context_snapshot_id=(
+                latest_report.context_snapshot_id
+                if latest_report is not None
+                else (previous.context_snapshot_id if previous is not None else None)
+            ),
             active_profile_id=self._activation_state().active_profile_id,
             candidate_profile_id=candidate_profile_id,
             rollback_profile_id=rollback_profile_id,
+            candidate_source=(
+                previous.candidate_source if previous is not None else "winner_engine"
+            ),
+            activation_decision_source=(
+                previous.activation_decision_source if previous is not None else "activation_gate"
+            ),
             decision_status=status,
             execution_state=execution_state or (previous.execution_state if previous is not None else "not_executed"),
             recommended_action=(
                 recommended_action
                 if recommended_action is not None
                 else (previous.recommended_action if previous is not None else None)
+            ),
+            blocked_reasons=(
+                list(blocked_reasons)
+                if blocked_reasons is not None
+                else (previous.blocked_reasons if previous is not None else [])
             ),
             rationale=rationale,
             replay_guard=(
@@ -2824,86 +3099,169 @@ class StrategyProfileControlService:
             "reason_codes": recommendation.get("reason_codes") or [],
         }
 
+    def _consecutive_candidate_win_count(self, *, candidate_profile_id: str | None) -> int:
+        if not candidate_profile_id:
+            return 0
+        reports = [
+            StrategyProfileOptimizationReport.model_validate(item.payload)
+            for item in reversed(
+                self.event_store.by_topic_scoped(
+                    topics.STRATEGY_PROFILE_OPTIMIZATION_REPORTS,
+                    scope=self.runtime_state_scope,
+                )
+            )
+            if isinstance(item.payload, dict)
+        ]
+        count = 0
+        for report in reports:
+            if report.recommended_profile_id != candidate_profile_id:
+                break
+            count += 1
+        return count
+
+    def _activation_gate_decision(
+        self,
+        *,
+        recommendation: StrategyProfileRecommendation,
+        optimization_report: StrategyProfileOptimizationReport | None,
+    ) -> dict[str, Any]:
+        active = self._activation_state()
+        revision = self._revision_for_profile(recommendation.recommended_profile_id)
+        current = self._revision(active.active_revision_id)
+        safety_state = self._safety_state()
+        policy = self._resolved_activation_policy()
+        blocked_reasons: list[str] = []
+        transition = "unknown"
+        if revision is None:
+            blocked_reasons.append("strategy_profile_revision_missing")
+        else:
+            transition = self._transition_risk_direction(current=current, target=revision)
+        if recommendation.expires_at <= utc_now():
+            blocked_reasons.append("strategy_profile_recommendation_expired")
+        if recommendation.recommended_profile_id == active.active_profile_id:
+            blocked_reasons.append("strategy_profile_already_active")
+        if active.frozen_until is not None and active.frozen_until > utc_now():
+            blocked_reasons.append("strategy_profile_auto_switch_frozen")
+        if active.cooldown_until is not None and active.cooldown_until > utc_now():
+            blocked_reasons.append("strategy_profile_switch_cooldown_active")
+        if not active.auto_switch_enabled:
+            blocked_reasons.append("strategy_profile_auto_switch_disabled")
+        if revision is not None:
+            confidence_floor = self._auto_switch_confidence_min(current=current, target=revision)
+            if recommendation.confidence < confidence_floor:
+                if transition == "more_aggressive":
+                    blocked_reasons.append("strategy_profile_auto_switch_aggressive_confidence_too_low")
+                elif transition == "same_risk":
+                    blocked_reasons.append("strategy_profile_auto_switch_same_risk_confidence_too_low")
+                else:
+                    blocked_reasons.append("strategy_profile_auto_switch_confidence_too_low")
+        if not safety_state["safe_to_trade"]:
+            blocked_reasons.append("strategy_profile_runtime_not_safe_to_trade")
+        if safety_state["review_required"]:
+            blocked_reasons.append("strategy_profile_review_required")
+        if not safety_state["market_snapshot_fresh"]:
+            blocked_reasons.append("strategy_profile_market_data_stale")
+        if not safety_state["account_snapshot_fresh"]:
+            blocked_reasons.append("strategy_profile_account_state_stale")
+        if safety_state["reconciliation_halt_required"] or safety_state["reconciliation_review_required"]:
+            blocked_reasons.append("strategy_profile_reconciliation_not_clean")
+        elif str(safety_state["reconciliation_severity"]).upper() not in {"CLEAN", "UNKNOWN"}:
+            blocked_reasons.append("strategy_profile_reconciliation_not_clean")
+        if revision is not None and not revision.auto_switch_allowed:
+            blocked_reasons.append("strategy_profile_auto_switch_not_allowed")
+        if revision is not None and revision.manual_approval_required:
+            blocked_reasons.append("strategy_profile_manual_approval_required")
+        blocked_reasons.extend(self._activation_blockers())
+
+        consecutive_candidate_wins = self._consecutive_candidate_win_count(
+            candidate_profile_id=recommendation.recommended_profile_id
+        )
+        if consecutive_candidate_wins < int(self.settings.strategy_profile_activation_required_consecutive_wins):
+            blocked_reasons.append("strategy_profile_candidate_requires_more_confirmations")
+        if (
+            active.last_activation_at is not None
+            and recommendation.recommended_profile_id != active.active_profile_id
+            and (utc_now() - active.last_activation_at).total_seconds()
+            < float(self.settings.strategy_profile_activation_min_active_minutes) * 60.0
+        ):
+            blocked_reasons.append("strategy_profile_min_active_duration_not_reached")
+
+        policy_blocked_reasons: list[str] = []
+        if optimization_report is not None and policy.enabled and policy.effective and not policy.frozen:
+            policy_blocked_reasons.extend(
+                list(((optimization_report.winner_selection_policy or {}).get("auto_activation") or {}).get("blocked_reasons") or [])
+            )
+            if float(optimization_report.score_delta_vs_active or 0.0) < float(
+                self.settings.strategy_profile_activation_min_score_delta
+            ):
+                policy_blocked_reasons.append("strategy_profile_score_delta_below_threshold")
+            target_symbol = str(
+                (optimization_report.replay_summary or {}).get("target_symbol") or self.settings.default_symbol
+            )
+            target_regime = str(
+                (optimization_report.replay_summary or {}).get("target_regime")
+                or recommendation.market_regime_assessment.regime
+            )
+            if policy.matrix_allowed_symbols and target_symbol not in set(policy.matrix_allowed_symbols):
+                policy_blocked_reasons.append("activation_policy_symbol_not_allowed")
+            if policy.matrix_allowed_regimes and target_regime not in set(policy.matrix_allowed_regimes):
+                policy_blocked_reasons.append("activation_policy_regime_not_allowed")
+            if (
+                policy.matrix_allowed_profiles
+                and recommendation.recommended_profile_id not in set(policy.matrix_allowed_profiles)
+            ):
+                policy_blocked_reasons.append("activation_policy_profile_not_allowed")
+        blocked_reasons = self._dedupe_items(blocked_reasons + policy_blocked_reasons)
+        return {
+            "auto_apply_allowed": not blocked_reasons,
+            "blocked_reasons": blocked_reasons,
+            "requires_manual_approval": any(
+                item in {"strategy_profile_manual_approval_required", "strategy_profile_auto_switch_not_allowed"}
+                for item in blocked_reasons
+            ),
+            "transition_risk_direction": transition,
+            "candidate_profile_id": recommendation.recommended_profile_id,
+            "candidate_source": recommendation.selection_source or "winner_engine",
+            "activation_decision_source": "activation_gate",
+            "activation_policy_id": policy.policy_id,
+            "activation_policy_enabled": bool(policy.enabled and policy.effective and not policy.frozen),
+            "consecutive_candidate_wins": consecutive_candidate_wins,
+            "ai_preferred_profile_id": recommendation.ai_advice.preferred_profile_id if recommendation.ai_advice else None,
+            "ai_agreement_with_candidate": (
+                recommendation.ai_advice.agreement_with_candidate if recommendation.ai_advice else True
+            ),
+        }
+
     def _maybe_auto_execute_activation_policy(
         self,
         *,
         optimization_report: StrategyProfileOptimizationReport,
         selection_decision: StrategyProfileSelectionDecision,
     ) -> dict[str, Any] | None:
-        policy = self._resolved_activation_policy()
-        winner_policy = optimization_report.winner_selection_policy or {}
-        candidate_profile_id = optimization_report.recommended_profile_id
-        if candidate_profile_id is None:
+        _ = selection_decision
+        recommendation = self.repo.latest_recommendation(
+            product_type=self.settings.trading_product_type,
+            margin_mode=self.settings.margin_mode,
+            allowed_symbols=self.settings.allowed_symbols,
+        )
+        if recommendation is None:
             return None
-        revision = self._revision_for_profile(candidate_profile_id)
-        if revision is None:
-            return None
-        if not policy.enabled or not policy.effective or policy.frozen:
-            return None
-        state = self._activation_state()
-        if state.active_profile_id == candidate_profile_id:
-            return None
-        blocked_reasons = list(((winner_policy.get("auto_activation") or {}).get("blocked_reasons")) or [])
-        if revision.manual_approval_required:
-            blocked_reasons.append("strategy_profile_manual_approval_required")
-        if not revision.auto_switch_allowed:
-            blocked_reasons.append("strategy_profile_auto_switch_not_allowed")
-        replay_summary = optimization_report.replay_summary or {}
-        target_symbol = str(replay_summary.get("target_symbol") or self.settings.default_symbol)
-        target_regime = str(replay_summary.get("target_regime") or "unknown")
-        if policy.matrix_allowed_symbols and target_symbol not in set(policy.matrix_allowed_symbols):
-            blocked_reasons.append("activation_policy_symbol_not_allowed")
-        if policy.matrix_allowed_regimes and target_regime not in set(policy.matrix_allowed_regimes):
-            blocked_reasons.append("activation_policy_regime_not_allowed")
-        if policy.matrix_allowed_profiles and candidate_profile_id not in set(policy.matrix_allowed_profiles):
-            blocked_reasons.append("activation_policy_profile_not_allowed")
-        blockers = self._activation_blockers()
-        blocked_reasons.extend(blockers)
-        if blocked_reasons:
-            if selection_decision.candidate_profile_id != candidate_profile_id or (
-                selection_decision.decision_status != "winner_policy_recommended_not_executed"
-            ):
-                self._append_selection_decision_transition(
-                    status="winner_policy_recommended_not_executed",
-                    candidate_profile_id=candidate_profile_id,
-                    rollback_profile_id=state.active_profile_id,
-                    execution_state="not_executed",
-                    recommended_action="review_activation_policy",
-                    rationale=["winner_selection_policy_not_executed", *blocked_reasons],
-                    notes=[f"activation_policy_id={policy.policy_id}"],
-                )
+        decision = self._activation_gate_decision(
+            recommendation=recommendation,
+            optimization_report=optimization_report,
+        )
+        if decision["auto_apply_allowed"]:
             return {
-                "status": "blocked",
-                "candidate_profile_id": candidate_profile_id,
-                "policy_id": policy.policy_id,
-                "blocked_reasons": blocked_reasons,
+                "status": "ready",
+                "candidate_profile_id": recommendation.recommended_profile_id,
+                "policy_id": decision.get("activation_policy_id"),
+                "blocked_reasons": [],
             }
-        record = self._activate_revision(
-            target=revision,
-            state=state,
-            trigger_type="system_guard",
-            actor_role="system",
-            actor_identity="system_profile_activation_policy",
-            auth_source="local_config",
-            recommendation_id=None,
-            reason_code="winner_selection_policy_auto_activation",
-            reason_detail=f"winner={candidate_profile_id};policy={policy.policy_id}",
-        )
-        self._append_selection_decision_transition(
-            status="winner_policy_auto_activation_executed",
-            candidate_profile_id=revision.profile_id,
-            rollback_profile_id=record.from_profile_id,
-            execution_state="executed",
-            recommended_action="observe_outcome",
-            rationale=["winner_selection_policy_auto_activated", f"policy_id={policy.policy_id}"],
-            execution_outcome=self._activation_outcome_payload(record=record),
-            notes=[f"winner_selection_policy={winner_policy.get('policy_version') or 'unknown'}"],
-        )
         return {
-            "status": "winner_policy_auto_activation_executed",
-            "policy_id": policy.policy_id,
-            "activation_record": record.model_dump(mode="json"),
-            "candidate_profile_id": revision.profile_id,
+            "status": "blocked",
+            "candidate_profile_id": recommendation.recommended_profile_id,
+            "policy_id": decision.get("activation_policy_id"),
+            "blocked_reasons": decision["blocked_reasons"],
         }
 
     @staticmethod
@@ -2922,12 +3280,11 @@ class StrategyProfileControlService:
         performance: dict[str, Any],
         shadow_summary: dict[str, Any],
     ) -> float:
-        baseline = context.get("baseline") or {}
-        features = context.get("features") or {}
+        signals = self._resolved_context_signals(context)
         execution_health = context.get("execution_health") or {}
-        regime = str(baseline.get("regime") or features.get("regime_indicator") or "uncertain")
-        volatility_state = str(baseline.get("volatility_state") or features.get("volatility_state") or "unknown")
-        composite_alpha = float(baseline.get("composite_alpha_score", features.get("composite_alpha_score", 0.0)) or 0.0)
+        regime = str(signals["regime"])
+        volatility_state = str(signals["volatility_state"])
+        composite_alpha = float(signals["composite_alpha_score"] or 0.0)
         fee_ratio = float(performance.get("fee_to_gross_pnl_ratio", 0.0) or 0.0)
         execution_errors = int(execution_health.get("recent_execution_error_count", 0) or 0)
         latest_net_delta = float(shadow_summary.get("latest_net_pnl_delta") or 0.0)
@@ -2995,106 +3352,52 @@ class StrategyProfileControlService:
         return ["strategy_profile_open_orders_present"] if open_orders else []
 
     def _recommendation_validation(self, recommendation: StrategyProfileRecommendation) -> dict[str, Any]:
-        active = self._activation_state()
-        revision = self._revision_for_profile(recommendation.recommended_profile_id)
-        current = self._revision(active.active_revision_id)
-        safety_state = self._safety_state()
-        blocked_reasons: list[str] = []
-        transition = "unknown"
-        if revision is None:
-            blocked_reasons.append("strategy_profile_revision_missing")
-        else:
-            transition = self._transition_risk_direction(current=current, target=revision)
-        if recommendation.expires_at <= utc_now():
-            blocked_reasons.append("strategy_profile_recommendation_expired")
-        if recommendation.recommended_profile_id == active.active_profile_id:
-            blocked_reasons.append("strategy_profile_already_active")
-        if active.frozen_until is not None and active.frozen_until > utc_now():
-            blocked_reasons.append("strategy_profile_auto_switch_frozen")
-        if active.cooldown_until is not None and active.cooldown_until > utc_now():
-            blocked_reasons.append("strategy_profile_switch_cooldown_active")
-        if not active.auto_switch_enabled:
-            blocked_reasons.append("strategy_profile_auto_switch_disabled")
-        if revision is not None:
-            confidence_floor = self._auto_switch_confidence_min(current=current, target=revision)
-            if recommendation.confidence < confidence_floor:
-                if transition == "more_aggressive":
-                    blocked_reasons.append("strategy_profile_auto_switch_aggressive_confidence_too_low")
-                elif transition == "same_risk":
-                    blocked_reasons.append("strategy_profile_auto_switch_same_risk_confidence_too_low")
-                else:
-                    blocked_reasons.append("strategy_profile_auto_switch_confidence_too_low")
-        if not safety_state["safe_to_trade"]:
-            blocked_reasons.append("strategy_profile_runtime_not_safe_to_trade")
-        if safety_state["review_required"]:
-            blocked_reasons.append("strategy_profile_review_required")
-        if not safety_state["market_snapshot_fresh"]:
-            blocked_reasons.append("strategy_profile_market_data_stale")
-        if not safety_state["account_snapshot_fresh"]:
-            blocked_reasons.append("strategy_profile_account_state_stale")
-        if safety_state["reconciliation_halt_required"] or safety_state["reconciliation_review_required"]:
-            blocked_reasons.append("strategy_profile_reconciliation_not_clean")
-        elif str(safety_state["reconciliation_severity"]).upper() not in {"CLEAN", "UNKNOWN"}:
-            blocked_reasons.append("strategy_profile_reconciliation_not_clean")
-        if revision is not None and not revision.auto_switch_allowed:
-            blocked_reasons.append("strategy_profile_auto_switch_not_allowed")
-        if revision is not None and revision.manual_approval_required:
-            blocked_reasons.append("strategy_profile_manual_approval_required")
-        blocked_reasons.extend(self._activation_blockers())
-        return {
-            "auto_apply_allowed": not blocked_reasons,
-            "blocked_reasons": blocked_reasons,
-            "requires_manual_approval": bool(blocked_reasons),
-            "transition_risk_direction": transition,
-        }
+        return self._activation_gate_decision(
+            recommendation=recommendation,
+            optimization_report=self._latest_optimization_report(),
+        )
 
     def _auto_apply_recommendation(self, *, recommendation: StrategyProfileRecommendation) -> dict[str, Any]:
         state = self._activation_state()
         revision = self._revision_for_profile(recommendation.recommended_profile_id)
-        current = self._revision(state.active_revision_id)
         if revision is None:
             raise ValueError("strategy_profile_revision_missing")
-        transition = self._transition_risk_direction(current=current, target=revision)
-        if transition == "more_aggressive":
-            reason_code = "ai_recommended_more_aggressive_profile"
-        elif transition == "same_risk":
-            reason_code = "ai_recommended_same_risk_profile"
-        else:
-            reason_code = "ai_recommended_more_conservative_profile"
         record = self._activate_revision(
             target=revision,
             state=state,
-            trigger_type="ai_auto",
+            trigger_type="system_guard",
             actor_role="system",
-            actor_identity="system_ai",
+            actor_identity="system_profile_activation_policy",
             auth_source="local_config",
             recommendation_id=recommendation.recommendation_id,
-            reason_code=reason_code,
+            reason_code="winner_selection_policy_auto_activation",
             reason_detail=recommendation.human_summary,
         )
         updated = recommendation.model_copy(
             update={
                 "decision_status": "accepted",
                 "decision_reason_code": "auto_applied",
-                "decision_reason_detail": record.reason_code,
+                "decision_reason_detail": "winner_engine_auto_activation_executed",
             }
         )
         self.repo.save_recommendation(updated)
         self._append_selection_decision_transition(
-            status="auto_activation_executed",
+            status="winner_policy_auto_activation_executed",
             candidate_profile_id=revision.profile_id,
             rollback_profile_id=record.from_profile_id,
             execution_state="executed",
             recommended_action="observe_outcome",
-            rationale=["ai_auto_applied_recommendation", reason_code],
+            rationale=["winner_engine_auto_activation_executed", record.reason_code],
+            blocked_reasons=[],
             execution_outcome=self._activation_outcome_payload(record=record),
             notes=[recommendation.human_summary],
         )
         return {
-            "status": "auto_applied",
+            "status": "winner_policy_auto_activation_executed",
             "activation_record": record.model_dump(mode="json"),
             "active_revision": self._revision_view(revision),
             "recommendation": updated.model_dump(mode="json"),
+            "candidate_profile_id": revision.profile_id,
         }
 
     def _activate_revision(
@@ -3127,7 +3430,7 @@ class StrategyProfileControlService:
                 "activation_mode": (
                     "manual"
                     if trigger_type == "manual"
-                    else "auto" if trigger_type == "ai_auto" else "rollback"
+                    else "auto" if trigger_type in {"ai_auto", "system_guard"} else "rollback"
                 ),
                 "last_activation_result": (
                     "rollback_succeeded" if trigger_type == "rollback" else "activation_succeeded"

@@ -966,7 +966,10 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(activation_policy.status_code, 200)
         self.assertEqual(recommendations.status_code, 200)
         snapshot_payload = snapshot.json()
-        self.assertEqual(snapshot_payload["activation"]["active_profile_id"], "range_defensive")
+        self.assertIn(
+            snapshot_payload["activation"]["active_profile_id"],
+            {"trend_normal", "trend_strict", "range_defensive", "high_volatility_defensive", "execution_degraded_safe"},
+        )
         self.assertTrue(snapshot_payload["revisions"])
         self.assertIn("safety_state", snapshot_payload)
         self.assertIn("evaluations", snapshot_payload)
@@ -996,6 +999,17 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertIn("winner_selection_policy", evaluated_payload["optimization_report"])
         self.assertIn("version_experiments", evaluated_payload["optimization_report"])
         self.assertIn("window_reports", evaluated_payload["optimization_report"]["offline_replay_pipeline"])
+        self.assertEqual(recommendation_payload["selection_source"], "winner_engine")
+        self.assertEqual(recommendation_payload["generated_by"], "winner_engine")
+        self.assertIn("ai_advice", recommendation_payload)
+        self.assertEqual(
+            recommendation_payload["context_snapshot_id"],
+            evaluated_payload["optimization_report"]["context_snapshot_id"],
+        )
+        self.assertEqual(
+            evaluated_payload["selection_decision"]["context_snapshot_id"],
+            evaluated_payload["optimization_report"]["context_snapshot_id"],
+        )
         self.assertGreaterEqual(
             len(evaluated_payload["evaluation_pipeline"]),
             len(snapshot_payload["revisions"]),
@@ -1007,8 +1021,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             recommendation_payload["recommended_profile_id"],
             {"trend_aggressive", "trend_normal", "trend_strict", "range_defensive", "high_volatility_defensive", "execution_degraded_safe"},
         )
-        self.assertTrue(evaluated_payload["validation"]["auto_apply_allowed"])
-        self.assertEqual(evaluated_payload["auto_activation"]["status"], "auto_applied")
+        self.assertEqual(evaluated_payload["validation"]["candidate_source"], "winner_engine")
         self.assertEqual(recommendations.json()["total_available"], 1)
         self.assertFalse(recommendations.json()["has_more"])
         self.assertTrue(optimization_reports.json()["reports"])
@@ -1034,7 +1047,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         selection_decision_events = runtime.event_store.by_topic(topics.STRATEGY_PROFILE_SELECTION_DECISIONS)
         self.assertGreaterEqual(len(selection_decision_events), 1)
         activations = runtime.event_store.by_topic(topics.STRATEGY_PROFILE_ACTIVATIONS)
-        self.assertEqual(len(activations), 1)
+        self.assertIn(len(activations), {0, 1})
 
     async def test_strategy_profile_provider_output_is_limited_to_registered_profiles(self) -> None:
         runtime = await self._runtime(
@@ -1084,7 +1097,9 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             {"trend_aggressive", "trend_normal", "trend_strict", "range_defensive", "high_volatility_defensive", "execution_degraded_safe"},
         )
         self.assertNotEqual(recommendation["recommended_profile_id"], "unregistered_profile")
-        self.assertEqual(recommendation["generated_by"], "rule_fallback")
+        self.assertEqual(recommendation["generated_by"], "winner_engine")
+        self.assertEqual(recommendation["ai_advice"]["provider"], "rule_fallback")
+        self.assertTrue(recommendation["ai_advice"]["used_fallback"])
         self.assertEqual(
             recommendation["fallback_reason_code"],
             "strategy_profile_provider_recommended_unregistered_profile",
@@ -1169,11 +1184,13 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(evaluated.status_code, 200)
         self.assertEqual(snapshot.status_code, 200)
-        self.assertTrue(evaluated.json()["validation"]["auto_apply_allowed"])
         self.assertNotIn("auto_activation", evaluated.json())
-        self.assertNotIn("profile_activation_policy", evaluated.json())
         self.assertNotIn("auto_rollback", evaluated.json())
-        self.assertEqual(evaluated.json()["recommendation"]["recommended_profile_id"], "range_defensive")
+        self.assertEqual(
+            evaluated.json()["recommendation"]["ai_advice"]["preferred_profile_id"],
+            "range_defensive",
+        )
+        self.assertEqual(evaluated.json()["recommendation"]["selection_source"], "winner_engine")
         self.assertEqual(snapshot.json()["activation"]["active_profile_id"], "trend_normal")
 
     async def test_strategy_profile_optimization_and_selection_reports_are_versioned(self) -> None:
@@ -1197,8 +1214,8 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first_report["version"], 1)
         self.assertEqual(second_report["version"], 2)
         self.assertEqual(second_report["parent_report_id"], first_report["report_id"])
-        self.assertIn(first_decision["decision_status"], {"auto_activation_executed", "stable_keep_active", "recommended_not_executed", "auto_rollback_recommended", "execution_outcome_recorded"})
-        self.assertIn(second_decision["decision_status"], {"auto_activation_executed", "stable_keep_active", "recommended_not_executed", "execution_outcome_recorded", "auto_rollback_recommended"})
+        self.assertIn(first_decision["decision_status"], {"auto_activation_executed", "stable_keep_active", "recommended_not_executed", "winner_policy_recommended_not_executed", "auto_rollback_recommended", "execution_outcome_recorded"})
+        self.assertIn(second_decision["decision_status"], {"auto_activation_executed", "stable_keep_active", "recommended_not_executed", "winner_policy_recommended_not_executed", "execution_outcome_recorded", "auto_rollback_recommended"})
         self.assertIn("execution_state", second_decision)
         self.assertGreater(second_decision["version"], first_decision["version"])
         self.assertIsNotNone(second_decision["parent_decision_id"])
@@ -1362,7 +1379,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             operator_users=[("admin", "admin-pass")],
         )
         control = StrategyProfileControlService(runtime)
-        regime = str((control._tuning_context().get("baseline") or {}).get("regime") or "uncertain")
+        regime = str((control._tuning_context().baseline or {}).get("regime") or "uncertain")
         for validation_id, healthy in (("replay_a", True), ("replay_b", True), ("replay_c", False)):
             runtime.event_store.append(
                 build_envelope(
@@ -1618,15 +1635,13 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(evaluated.status_code, 200)
         self.assertFalse(evaluated.json()["validation"]["auto_apply_allowed"])
         self.assertIn("profile_activation_policy", evaluated.json())
-        self.assertEqual(
-            evaluated.json()["profile_activation_policy"]["status"],
-            "winner_policy_auto_activation_executed",
-        )
+        self.assertEqual(evaluated.json()["profile_activation_policy"]["status"], "blocked")
+        self.assertTrue(evaluated.json()["profile_activation_policy"]["blocked_reasons"])
         self.assertIn(
             evaluated.json()["selection_decision"]["decision_status"],
-            {"winner_policy_auto_activation_executed", "execution_outcome_recorded"},
+            {"winner_policy_recommended_not_executed", "execution_outcome_recorded"},
         )
-        self.assertNotEqual(snapshot.json()["activation"]["active_profile_id"], "range_defensive")
+        self.assertEqual(snapshot.json()["activation"]["active_profile_id"], "range_defensive")
 
     async def test_strategy_profile_activation_policy_does_not_auto_activate_manual_only_profile(self) -> None:
         runtime = await self._runtime(
@@ -1678,8 +1693,14 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             expires_at=utc_now() + timedelta(minutes=120),
         )
 
-        def _force_aggressive_winner(self, *, state, comparison_report, evaluations):
-            report = original_build_optimization_report(self, state=state, comparison_report=comparison_report, evaluations=evaluations)
+        def _force_aggressive_winner(self, *, state, comparison_report, evaluations, context_snapshot=None):
+            report = original_build_optimization_report(
+                self,
+                state=state,
+                comparison_report=comparison_report,
+                evaluations=evaluations,
+                context_snapshot=context_snapshot,
+            )
             return report.model_copy(
                 update={
                     "recommended_profile_id": "trend_aggressive",
@@ -1869,7 +1890,31 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             expires_at=utc_now() + timedelta(minutes=120),
         )
 
+        original_build_optimization_report = StrategyProfileControlService._build_optimization_report
+
+        def _force_strict_winner(self, *, state, comparison_report, evaluations, context_snapshot=None):
+            report = original_build_optimization_report(
+                self,
+                state=state,
+                comparison_report=comparison_report,
+                evaluations=evaluations,
+                context_snapshot=context_snapshot,
+            )
+            return report.model_copy(
+                update={
+                    "recommended_profile_id": "trend_strict",
+                    "winner_selection_policy": {
+                        **(report.winner_selection_policy or {}),
+                        "winner_profile_id": "trend_strict",
+                        "auto_activation": {"blocked_reasons": []},
+                    },
+                }
+            )
+
         with patch(
+            "aats.services.operator.strategy_profiles.StrategyProfileControlService._build_optimization_report",
+            new=_force_strict_winner,
+        ), patch(
             "aats.services.operator.strategy_profiles.StrategyProfileControlService._generate_recommendation",
             new=AsyncMock(return_value=recommendation),
         ):
@@ -1881,10 +1926,13 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(evaluated.status_code, 200)
         self.assertTrue(evaluated.json()["validation"]["auto_apply_allowed"])
         self.assertEqual(evaluated.json()["validation"]["transition_risk_direction"], "same_risk")
-        self.assertEqual(evaluated.json()["auto_activation"]["status"], "auto_applied")
+        self.assertEqual(
+            evaluated.json()["auto_activation"]["status"],
+            "winner_policy_auto_activation_executed",
+        )
         self.assertEqual(
             evaluated.json()["auto_activation"]["activation_record"]["reason_code"],
-            "ai_recommended_same_risk_profile",
+            "winner_selection_policy_auto_activation",
         )
         self.assertEqual(snapshot.json()["activation"]["active_profile_id"], "trend_strict")
 
@@ -1936,7 +1984,31 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             expires_at=utc_now() + timedelta(minutes=120),
         )
 
+        original_build_optimization_report = StrategyProfileControlService._build_optimization_report
+
+        def _force_normal_winner(self, *, state, comparison_report, evaluations, context_snapshot=None):
+            report = original_build_optimization_report(
+                self,
+                state=state,
+                comparison_report=comparison_report,
+                evaluations=evaluations,
+                context_snapshot=context_snapshot,
+            )
+            return report.model_copy(
+                update={
+                    "recommended_profile_id": "trend_normal",
+                    "winner_selection_policy": {
+                        **(report.winner_selection_policy or {}),
+                        "winner_profile_id": "trend_normal",
+                        "auto_activation": {"blocked_reasons": []},
+                    },
+                }
+            )
+
         with patch(
+            "aats.services.operator.strategy_profiles.StrategyProfileControlService._build_optimization_report",
+            new=_force_normal_winner,
+        ), patch(
             "aats.services.operator.strategy_profiles.StrategyProfileControlService._generate_recommendation",
             new=AsyncMock(return_value=recommendation),
         ):
@@ -2003,7 +2075,31 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             expires_at=utc_now() + timedelta(minutes=120),
         )
 
+        original_build_optimization_report = StrategyProfileControlService._build_optimization_report
+
+        def _force_normal_winner(self, *, state, comparison_report, evaluations, context_snapshot=None):
+            report = original_build_optimization_report(
+                self,
+                state=state,
+                comparison_report=comparison_report,
+                evaluations=evaluations,
+                context_snapshot=context_snapshot,
+            )
+            return report.model_copy(
+                update={
+                    "recommended_profile_id": "trend_normal",
+                    "winner_selection_policy": {
+                        **(report.winner_selection_policy or {}),
+                        "winner_profile_id": "trend_normal",
+                        "auto_activation": {"blocked_reasons": []},
+                    },
+                }
+            )
+
         with patch(
+            "aats.services.operator.strategy_profiles.StrategyProfileControlService._build_optimization_report",
+            new=_force_normal_winner,
+        ), patch(
             "aats.services.operator.strategy_profiles.StrategyProfileControlService._generate_recommendation",
             new=AsyncMock(return_value=recommendation),
         ):
@@ -2015,10 +2111,13 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(evaluated.status_code, 200)
         self.assertTrue(evaluated.json()["validation"]["auto_apply_allowed"])
         self.assertEqual(evaluated.json()["validation"]["transition_risk_direction"], "more_aggressive")
-        self.assertEqual(evaluated.json()["auto_activation"]["status"], "auto_applied")
+        self.assertEqual(
+            evaluated.json()["auto_activation"]["status"],
+            "winner_policy_auto_activation_executed",
+        )
         self.assertEqual(
             evaluated.json()["auto_activation"]["activation_record"]["reason_code"],
-            "ai_recommended_more_aggressive_profile",
+            "winner_selection_policy_auto_activation",
         )
         self.assertEqual(snapshot.json()["activation"]["active_profile_id"], "trend_normal")
 

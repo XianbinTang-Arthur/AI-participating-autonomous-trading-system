@@ -179,6 +179,37 @@ class StrategyProfileMarketRegimeAssessment(BaseModel):
     execution_condition: str
 
 
+class StrategyProfileEvaluationContextSnapshot(SchemaBase):
+    snapshot_id: str = Field(default_factory=lambda: new_id("strp_ctx"))
+    snapshot_ts: datetime = Field(default_factory=utc_now)
+    scope: dict[str, Any] = Field(default_factory=dict)
+    baseline: dict[str, Any] | None = None
+    features: dict[str, Any] | None = None
+    portfolio: dict[str, Any] | None = None
+    safety_state: dict[str, Any] = Field(default_factory=dict)
+    execution_health: dict[str, Any] = Field(default_factory=dict)
+    performance: dict[str, Any] = Field(default_factory=dict)
+    current_profile_id: str | None = None
+    profile_selection_policy: dict[str, Any] = Field(default_factory=dict)
+    candidate_profiles: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class StrategyProfileAIAdvice(SchemaBase):
+    provider: str = "rule_fallback"
+    model_name: str | None = None
+    preferred_profile_id: str | None = None
+    confidence: float = 0.0
+    agreement_with_candidate: bool = False
+    confidence_adjustment: float = 0.0
+    market_regime_assessment: StrategyProfileMarketRegimeAssessment | None = None
+    reason_codes: list[str] = Field(default_factory=list)
+    risk_notes: list[str] = Field(default_factory=list)
+    summary: str | None = None
+    fallback_reason_code: str | None = None
+    fallback_reason_detail: str | None = None
+    used_fallback: bool = False
+
+
 class StrategyProfileRecommendationOutput(BaseModel):
     recommended_profile_id: str
     fallback_profile_id: str | None = None
@@ -208,6 +239,9 @@ class StrategyProfileRecommendation(SchemaBase):
     generated_by: str
     model_name: str | None = None
     prompt_version: str | None = None
+    selection_source: str = "winner_engine"
+    context_snapshot_id: str | None = None
+    ai_advice: StrategyProfileAIAdvice | None = None
     fallback_reason_code: str | None = None
     fallback_reason_detail: str | None = None
     input_digest: str

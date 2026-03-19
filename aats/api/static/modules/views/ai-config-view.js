@@ -34,6 +34,7 @@ export function renderAIConfigView(data) {
   const activeRevision = strategyProfiles.active_revision || null;
   const pendingRevision = strategyProfiles.pending_revision || null;
   const latestRecommendation = strategyProfiles.latest_recommendation || null;
+  const aiAdvice = latestRecommendation?.ai_advice || null;
   const optimizationReport = strategyProfiles.latest_optimization_report || {};
   const selectionDecision = strategyProfiles.latest_selection_decision || {};
   const autoRollbackPolicy = strategyProfiles.auto_rollback_policy || {};
@@ -117,9 +118,9 @@ export function renderAIConfigView(data) {
 
       <div class="span-6 workspace-stack">
         ${surfaceCard({
-          title: "当前档位与推荐摘要",
+          title: "当前档位与激活结论",
           kicker: "当前档位 / AI 推荐",
-          copy: "把当前档位、最新推荐、选择结果和对比胜出档位放在一起，减少频繁跳页。",
+          copy: "这里只保留一条主链结论：系统候选档位、AI 辅助意见，以及这次是否允许自动切换。",
           actions: renderStrategyActions({ canAdmin, latestRecommendation, pendingRevision, activation }),
           content: strategyProfilesError
             ? callout({ title: "暂时无法读取 AI 配置状态", copy: strategyProfilesError, pills: [pill("需要管理员权限", "warning")] })
@@ -132,29 +133,31 @@ export function renderAIConfigView(data) {
                     tone: activeRevision ? "positive" : "neutral",
                   },
                   {
-                    label: "最新推荐",
-                    value: readableProfile(latestRecommendation?.recommended_profile_id, "暂无推荐"),
-                    meta: readableState(latestRecommendation?.decision_status || "none"),
-                    tone: latestRecommendation ? "warning" : "neutral",
+                    label: "系统候选档位",
+                    value: readableProfile(optimizationReport.recommended_profile_id, "暂无候选"),
+                    meta: optimizationReport.created_at ? `快照 ${formatMaybeTimestamp(optimizationReport.created_at)}` : "当前还没有最新对比结果",
+                    tone: optimizationReport.recommended_profile_id ? "warning" : "neutral",
                   },
                   {
-                    label: "当前决策",
+                    label: "AI 辅助意见",
+                    value: readableProfile(aiAdvice?.preferred_profile_id, "当前没有 AI 辅助意见"),
+                    meta: readableAIAdviceMeta(aiAdvice, latestRecommendation),
+                    tone: aiAdvice?.preferred_profile_id ? "info" : "neutral",
+                  },
+                  {
+                    label: "激活结论",
                     value: readableState(selectionDecision.decision_status || "unknown"),
-                    meta: `${readableProfile(selectionDecision.active_profile_id, "当前档位未记录")} -> ${readableProfile(selectionDecision.candidate_profile_id, "暂无候选档位")}`,
-                    tone: selectionDecision.candidate_profile_id ? "info" : "neutral",
-                  },
-                  {
-                    label: "对比胜出档位",
-                    value: readableProfile(optimizationReport.recommended_profile_id, "尚未生成"),
-                    meta: optimizationReport.created_at ? formatMaybeTimestamp(optimizationReport.created_at) : "当前还没有最新对比报告",
-                    tone: optimizationReport.recommended_profile_id ? "positive" : "neutral",
+                    meta: readableActivationMeta(selectionDecision),
+                    tone: selectionDecision.candidate_profile_id ? "positive" : "neutral",
                   },
                 ])}
                 ${kvList([
-                  ["推荐理由", readableCodeList(latestRecommendation?.reason_codes, "当前没有额外推荐理由"), readableCodeList(latestRecommendation?.risk_notes, "当前没有额外风险提示")],
+                  ["推荐来源", readableRecommendationSource(latestRecommendation), readableActivationSource(selectionDecision)],
+                  ["推荐理由", readableReasonSummary(latestRecommendation, optimizationReport), readableAIAdviceSummary(aiAdvice)],
+                  ["未切换原因", readableCodeList(selectionDecision.blocked_reasons, "当前没有记录阻断原因"), readableCodeList(latestRecommendation?.fallback_reason_code ? [latestRecommendation.fallback_reason_code, latestRecommendation.fallback_reason_detail].filter(Boolean) : [], "当前没有回退原因")],
                   ["下一步动作", readableState(selectionDecision.recommended_action || "unknown"), readableCodeList(selectionDecision.notes, "当前没有额外决策说明")],
                   ["当前档位摘要", profileSummary(activeRevision), "这里展示当前档位最关键的决策门槛与节奏参数"],
-                  ["档位空间", `${formatNumber((profileSpace.registered_profiles || []).length || 0, 0)} 个已注册档位`, comparisonReport.recommended_profile_id ? `最近对比建议：${readableProfile(comparisonReport.recommended_profile_id)}` : "当前还没有最新对比建议"],
+                  ["档位空间", `${formatNumber((profileSpace.registered_profiles || []).length || 0, 0)} 个已注册档位`, optimizationReport.score_delta_vs_active !== undefined ? `候选相对当前领先 ${formatNumber(optimizationReport.score_delta_vs_active || 0, 3)}` : "当前还没有最新领先分差"],
                 ])}
               `,
         })}
@@ -400,6 +403,47 @@ function readableCodeList(value, fallback = "当前没有额外说明") {
   }
   const text = readableCodeItem(value, "");
   return text || fallback;
+}
+
+function readableRecommendationSource(recommendation) {
+  if (!recommendation) return "当前没有最新推荐记录";
+  const selectionSource = readableState(recommendation.selection_source || "winner_engine");
+  const aiProvider = readableState(recommendation.ai_advice?.provider || recommendation.generated_by || "unknown");
+  return `候选来源 ${selectionSource} / AI 来源 ${aiProvider}`;
+}
+
+function readableActivationSource(selectionDecision) {
+  if (!selectionDecision) return "当前没有激活裁决记录";
+  return `${readableState(selectionDecision.candidate_source || "winner_engine")} / ${readableState(selectionDecision.activation_decision_source || "activation_gate")}`;
+}
+
+function readableAIAdviceMeta(aiAdvice, recommendation) {
+  if (!aiAdvice && !recommendation) return "当前没有 AI 辅助意见";
+  const provider = readableState(aiAdvice?.provider || recommendation?.generated_by || "unknown");
+  const agreement = aiAdvice?.agreement_with_candidate ? "与系统候选一致" : "与系统候选不一致";
+  return `${provider} / ${agreement}`;
+}
+
+function readableActivationMeta(selectionDecision) {
+  if (!selectionDecision) return "当前还没有激活裁决";
+  return `${readableProfile(selectionDecision.active_profile_id, "当前档位未记录")} -> ${readableProfile(selectionDecision.candidate_profile_id, "暂无候选档位")}`;
+}
+
+function readableReasonSummary(recommendation, optimizationReport) {
+  const reasonParts = [];
+  if (recommendation?.reason_codes?.length) reasonParts.push(readableCodeList(recommendation.reason_codes, ""));
+  const candidate = (optimizationReport?.candidates || []).find((item) => item.profile_id === optimizationReport?.recommended_profile_id);
+  if (candidate?.reasons?.length) reasonParts.push(readableCodeList(candidate.reasons, ""));
+  return reasonParts.filter(Boolean).join("；") || "当前没有额外推荐理由";
+}
+
+function readableAIAdviceSummary(aiAdvice) {
+  if (!aiAdvice) return "当前没有 AI 辅助说明";
+  const summaryParts = [
+    aiAdvice.summary || "",
+    readableCodeList(aiAdvice.risk_notes, ""),
+  ].filter(Boolean);
+  return summaryParts.join("；") || "当前没有 AI 辅助说明";
 }
 
 function describeOverlaySource({ activation, activationHistory, activeRevision }) {
