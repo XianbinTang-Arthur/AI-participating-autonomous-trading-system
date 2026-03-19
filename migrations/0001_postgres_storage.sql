@@ -24,9 +24,9 @@ CREATE TABLE IF NOT EXISTS portfolio_snapshots (
     sequence_id BIGSERIAL PRIMARY KEY,
     snapshot_ts TIMESTAMPTZ NOT NULL,
     created_at TIMESTAMPTZ NOT NULL,
-    total_equity DOUBLE PRECISION NOT NULL,
-    realized_pnl DOUBLE PRECISION NOT NULL,
-    unrealized_pnl DOUBLE PRECISION NOT NULL,
+    total_equity NUMERIC(36, 18) NOT NULL,
+    realized_pnl NUMERIC(36, 18) NOT NULL,
+    unrealized_pnl NUMERIC(36, 18) NOT NULL,
     payload JSONB NOT NULL
 );
 
@@ -38,11 +38,11 @@ CREATE TABLE IF NOT EXISTS order_states (
     status VARCHAR(64) NOT NULL,
     submitted_ts TIMESTAMPTZ,
     last_update_ts TIMESTAMPTZ,
-    requested_qty DOUBLE PRECISION NOT NULL,
-    filled_qty DOUBLE PRECISION NOT NULL,
-    remaining_qty DOUBLE PRECISION NOT NULL,
-    average_fill_price DOUBLE PRECISION,
-    fees DOUBLE PRECISION NOT NULL,
+    requested_qty NUMERIC(36, 18) NOT NULL,
+    filled_qty NUMERIC(36, 18) NOT NULL,
+    remaining_qty NUMERIC(36, 18) NOT NULL,
+    average_fill_price NUMERIC(36, 18),
+    fees NUMERIC(36, 18) NOT NULL,
     payload JSONB NOT NULL
 );
 
@@ -54,9 +54,9 @@ CREATE TABLE IF NOT EXISTS fill_events (
     exchange_order_id VARCHAR(64) NOT NULL,
     symbol VARCHAR(32) NOT NULL,
     side VARCHAR(8) NOT NULL,
-    fill_qty DOUBLE PRECISION NOT NULL,
-    fill_price DOUBLE PRECISION NOT NULL,
-    fee_amount DOUBLE PRECISION NOT NULL,
+    fill_qty NUMERIC(36, 18) NOT NULL,
+    fill_price NUMERIC(36, 18) NOT NULL,
+    fee_amount NUMERIC(36, 18) NOT NULL,
     exchange_timestamp TIMESTAMPTZ NOT NULL,
     ingestion_timestamp TIMESTAMPTZ NOT NULL,
     created_at TIMESTAMPTZ NOT NULL,

@@ -97,6 +97,8 @@ class AIDegradationEvent(SchemaBase):
     configured_operating_mode: str
     effective_operating_mode: str
     degraded: bool = True
+    provider_degraded: bool = False
+    outcome_review_required: bool = False
     auto_downgrade_active: bool = False
 
     reason_code: str

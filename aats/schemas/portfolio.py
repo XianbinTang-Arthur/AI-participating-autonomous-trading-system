@@ -6,7 +6,7 @@ from typing import Literal
 
 from pydantic import Field
 
-from aats.schemas.common import SchemaBase
+from aats.schemas.common import SchemaBase, utc_now
 from aats.schemas.system import MarginModelType, ProductType
 
 PortfolioSnapshotOrigin = Literal[
@@ -80,3 +80,19 @@ class PortfolioSnapshot(SchemaBase):
     off_position_asset_equity: Decimal = Decimal("0")
     derivatives_unrealized_pnl: Decimal = Decimal("0")
     collateral_value: Decimal = Decimal("0")
+
+
+class PortfolioBalanceDelta(SchemaBase):
+    decision_id: str | None = None
+    intent_id: str | None = None
+    order_id: str | None = None
+    fill_id: str
+    symbol: str
+    balances_before: dict[str, Decimal] = Field(default_factory=dict)
+    balances_after: dict[str, Decimal] = Field(default_factory=dict)
+    balance_deltas: dict[str, Decimal] = Field(default_factory=dict)
+    realized_pnl_delta: Decimal = Decimal("0")
+    fee_delta: Decimal = Decimal("0")
+    product_type: ProductType = "spot"
+    margin_mode: MarginModelType = "cash"
+    created_at: datetime = Field(default_factory=utc_now)

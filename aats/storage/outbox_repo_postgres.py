@@ -52,17 +52,30 @@ class PostgresOutboxRepository:
             session.commit()
 
     def record_failure(self, event_id: str, error: str) -> None:
+        self.record_failure_with_threshold(event_id, error)
+
+    def record_failure_with_threshold(
+        self,
+        event_id: str,
+        error: str,
+        *,
+        max_attempts: int | None = None,
+    ) -> str | None:
         with self.session_factory() as session:
             row = session.get(OutboxEventModel, event_id)
             if row is None:
-                return
+                return None
             row.attempt_count += 1
             row.last_error = error[:512]
+            if max_attempts is not None and row.attempt_count >= max_attempts:
+                row.status = "FAILED"
             session.commit()
+            return row.status
 
     def counts(self) -> dict[str, int]:
         with self.session_factory() as session:
             rows = session.scalars(select(OutboxEventModel)).all()
         pending = sum(1 for row in rows if row.status == "PENDING")
         published = sum(1 for row in rows if row.status == "PUBLISHED")
-        return {"pending": pending, "published": published}
+        failed = sum(1 for row in rows if row.status == "FAILED")
+        return {"pending": pending, "published": published, "failed": failed}

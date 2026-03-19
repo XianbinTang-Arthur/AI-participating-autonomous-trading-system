@@ -64,9 +64,13 @@ class ExecutionObligationService:
         if existing is not None:
             return existing
         if self.account_snapshot_loader is None:
+            if self._account_snapshot_required():
+                raise ExecutionReservationError("local_obligation_account_snapshot_unavailable")
             return None
         snapshot = await self.account_snapshot_loader()
         if snapshot is None:
+            if self._account_snapshot_required():
+                raise ExecutionReservationError("local_obligation_account_snapshot_unavailable")
             return None
 
         reserve_currency, reserved_amount, reference_price = self._reservation_spec(intent=intent)
@@ -101,6 +105,9 @@ class ExecutionObligationService:
             last_update_ts=utc_now(),
         )
         return obligation
+
+    def _account_snapshot_required(self) -> bool:
+        return self.settings.account_backend == "okx" and self.settings.account_read_enabled
 
     def consume_for_fill(self, fill: FillEvent) -> OrderObligation | None:
         updated = self.preview_obligation_for_fill(fill)

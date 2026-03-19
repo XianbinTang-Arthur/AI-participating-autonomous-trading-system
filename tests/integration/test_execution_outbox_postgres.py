@@ -4,6 +4,7 @@ import os
 import unittest
 import uuid
 from decimal import Decimal
+from pathlib import Path
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
@@ -17,7 +18,7 @@ from aats.storage.event_store_postgres import PostgresEventStore
 from aats.storage.execution_repo_postgres import PostgresExecutionRepository
 from aats.storage.obligation_repo_postgres import PostgresExecutionObligationRepository
 from aats.storage.outbox_repo_postgres import PostgresOutboxRepository
-from aats.storage.session import create_database_runtime, create_schema
+from aats.storage.session import create_database_runtime, create_schema, validate_runtime_schema
 
 
 @unittest.skipUnless(os.getenv("AATS_DATABASE_URL"), "AATS_DATABASE_URL is required for Postgres integration tests")
@@ -53,7 +54,7 @@ class TestExecutionOutboxPostgres(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(stored)
             self.assertEqual(stored.status, "SUBMITTED")
             self.assertEqual(event_store.count(topic=topics.ORDER_UPDATES), 1)
-            self.assertEqual(outbox_repo.counts(), {"pending": 0, "published": 1})
+            self.assertEqual(outbox_repo.counts(), {"pending": 0, "published": 1, "failed": 0})
             self.assertEqual(len(received), 1)
         finally:
             runtime.dispose()
@@ -87,7 +88,51 @@ class TestExecutionOutboxPostgres(unittest.IsolatedAsyncioTestCase):
             stored = execution_repo.get_order_state(state.client_order_id)
             self.assertIsNotNone(stored)
             self.assertEqual(event_store.count(topic=topics.ORDER_UPDATES), 1)
-            self.assertEqual(outbox_repo.counts(), {"pending": 1, "published": 0})
+            self.assertEqual(outbox_repo.counts(), {"pending": 1, "published": 0, "failed": 0})
+        finally:
+            runtime.dispose()
+            self._drop_schema(admin_engine, schema_name)
+
+    async def test_poisoned_outbox_row_is_failed_after_retry_budget_and_later_rows_still_publish(self) -> None:
+        runtime, admin_engine, schema_name = self._schema_runtime()
+        try:
+            event_store = PostgresEventStore(runtime.session_factory)
+            execution_repo = PostgresExecutionRepository(runtime.session_factory)
+            obligation_repo = PostgresExecutionObligationRepository(runtime.session_factory)
+            outbox_repo = PostgresOutboxRepository(runtime.session_factory)
+            bus = InMemoryEventBus()
+            received: list[str] = []
+
+            async def selective_handler(message: dict) -> None:
+                client_order_id = message["payload"]["payload"]["client_order_id"]
+                if client_order_id == "clord_outbox_poison":
+                    raise RuntimeError("subscriber_boom")
+                received.append(client_order_id)
+
+            await bus.subscribe(topics.ORDER_UPDATES, selective_handler)
+            publisher = PostgresExecutionOutboxPublisher(
+                session_factory=runtime.session_factory,
+                event_store=event_store,
+                execution_repo=execution_repo,
+                obligation_repo=obligation_repo,
+                outbox_repo=outbox_repo,
+                bus=bus,
+            )
+
+            await publisher.persist_order_state(
+                order_state=self._order_state(client_order_id="clord_outbox_poison", status="SUBMITTED"),
+                key="BTC-USDT",
+            )
+            await publisher.flush_pending()
+            await publisher.flush_pending()
+
+            await publisher.persist_order_state(
+                order_state=self._order_state(client_order_id="clord_outbox_ok_after_poison", status="SUBMITTED"),
+                key="BTC-USDT",
+            )
+
+            self.assertEqual(outbox_repo.counts(), {"pending": 0, "published": 1, "failed": 1})
+            self.assertEqual(received, ["clord_outbox_ok_after_poison"])
         finally:
             runtime.dispose()
             self._drop_schema(admin_engine, schema_name)
@@ -160,7 +205,49 @@ class TestExecutionOutboxPostgres(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(stored_obligation.consumed_amount, Decimal("60.0"))
             self.assertEqual(stored_obligation.status, "RELEASED")
             self.assertEqual(event_store.count(topic=topics.FILL_EVENTS), 1)
-            self.assertEqual(outbox_repo.counts(), {"pending": 0, "published": 1})
+            self.assertEqual(outbox_repo.counts(), {"pending": 0, "published": 1, "failed": 0})
+        finally:
+            runtime.dispose()
+            self._drop_schema(admin_engine, schema_name)
+
+    def test_sql_migrations_create_numeric_financial_columns(self) -> None:
+        runtime, admin_engine, schema_name = self._schema_runtime(use_migrations=True)
+        try:
+            validate_runtime_schema(runtime)
+        finally:
+            runtime.dispose()
+            self._drop_schema(admin_engine, schema_name)
+
+    def test_runtime_schema_validation_rejects_float_financial_columns(self) -> None:
+        runtime, admin_engine, schema_name = self._schema_runtime()
+        try:
+            with runtime.engine.begin() as connection:
+                connection.execute(text("DROP TABLE IF EXISTS order_obligations"))
+                connection.execute(
+                    text(
+                        """
+                        CREATE TABLE order_obligations (
+                            client_order_id VARCHAR(64) PRIMARY KEY,
+                            obligation_id VARCHAR(64) NOT NULL,
+                            decision_id VARCHAR(64) NOT NULL,
+                            intent_id VARCHAR(64) NOT NULL,
+                            symbol VARCHAR(32) NOT NULL,
+                            reserve_currency VARCHAR(16) NOT NULL,
+                            status VARCHAR(32) NOT NULL,
+                            reserved_amount DOUBLE PRECISION NOT NULL,
+                            consumed_amount DOUBLE PRECISION NOT NULL DEFAULT 0,
+                            released_amount DOUBLE PRECISION NOT NULL DEFAULT 0,
+                            product_type VARCHAR(16) NULL,
+                            margin_mode VARCHAR(16) NULL,
+                            last_update_ts TIMESTAMPTZ NULL,
+                            created_at TIMESTAMPTZ NOT NULL,
+                            payload JSONB NOT NULL
+                        )
+                        """
+                    )
+                )
+            with self.assertRaisesRegex(RuntimeError, "database_schema_validation_failed"):
+                validate_runtime_schema(runtime)
         finally:
             runtime.dispose()
             self._drop_schema(admin_engine, schema_name)
@@ -190,7 +277,7 @@ class TestExecutionOutboxPostgres(unittest.IsolatedAsyncioTestCase):
         )
 
     @staticmethod
-    def _schema_runtime():
+    def _schema_runtime(*, use_migrations: bool = False):
         base_url = make_url(os.environ["AATS_DATABASE_URL"])
         schema_name = f"aats_test_{uuid.uuid4().hex[:12]}"
         admin_engine = create_engine(base_url.render_as_string(hide_password=False), future=True)
@@ -202,8 +289,20 @@ class TestExecutionOutboxPostgres(unittest.IsolatedAsyncioTestCase):
         query["options"] = f"{existing_options} {search_path_option}".strip() if existing_options else search_path_option
         scoped_url = base_url.set(query=query).render_as_string(hide_password=False)
         runtime = create_database_runtime(scoped_url)
-        create_schema(runtime)
+        if use_migrations:
+            TestExecutionOutboxPostgres._apply_migrations(runtime)
+        else:
+            create_schema(runtime)
         return runtime, admin_engine, schema_name
+
+    @staticmethod
+    def _apply_migrations(runtime) -> None:
+        migrations_dir = Path(__file__).resolve().parents[2] / "migrations"
+        with runtime.engine.begin() as connection:
+            raw_connection = connection.connection
+            with raw_connection.cursor() as cursor:
+                for migration_path in sorted(migrations_dir.glob("*.sql")):
+                    cursor.execute(migration_path.read_text(encoding="utf-8"))
 
     @staticmethod
     def _drop_schema(admin_engine, schema_name: str) -> None:

@@ -147,6 +147,16 @@ class ReconciliationService:
         )
         await self._persist_report(report)
 
+    async def handle_processing_failure(self, message: dict) -> None:
+        envelope = parse_envelope(message)
+        failure = ProcessingFailureRecord.model_validate(envelope.payload)
+        if failure.subsystem != "portfolio_service" or failure.stage != "portfolio_snapshot_persist":
+            return
+        if not failure.retriable:
+            return
+        await self.repair_missing_portfolio_snapshot(reason="processing_failure_repair")
+        await self.validate_now(reason="processing_failure_repair")
+
     async def repair_missing_portfolio_snapshot(
         self,
         *,

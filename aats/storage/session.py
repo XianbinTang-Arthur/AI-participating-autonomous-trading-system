@@ -10,6 +10,24 @@ from sqlalchemy.orm import Session, sessionmaker
 from aats.storage.sqlalchemy_models import Base
 
 
+_EXPECTED_NUMERIC_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("portfolio_snapshots", "total_equity"),
+    ("portfolio_snapshots", "realized_pnl"),
+    ("portfolio_snapshots", "unrealized_pnl"),
+    ("order_states", "requested_qty"),
+    ("order_states", "filled_qty"),
+    ("order_states", "remaining_qty"),
+    ("order_states", "average_fill_price"),
+    ("order_states", "fees"),
+    ("fill_events", "fill_qty"),
+    ("fill_events", "fill_price"),
+    ("fill_events", "fee_amount"),
+    ("order_obligations", "reserved_amount"),
+    ("order_obligations", "consumed_amount"),
+    ("order_obligations", "released_amount"),
+)
+
+
 @dataclass(slots=True)
 class DatabaseRuntime:
     engine: Engine
@@ -66,3 +84,61 @@ def create_database_runtime(database_url: str) -> DatabaseRuntime:
 
 def create_schema(runtime: DatabaseRuntime) -> None:
     Base.metadata.create_all(runtime.engine)
+
+
+def validate_runtime_schema(runtime: DatabaseRuntime) -> None:
+    if runtime.engine.dialect.name != "postgresql":
+        return
+    expected = {(table, column): ("numeric", 36, 18) for table, column in _EXPECTED_NUMERIC_COLUMNS}
+    query = text(
+        """
+        SELECT table_name, column_name, data_type, numeric_precision, numeric_scale
+        FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND (
+            (table_name, column_name) IN (
+              ('portfolio_snapshots', 'total_equity'),
+              ('portfolio_snapshots', 'realized_pnl'),
+              ('portfolio_snapshots', 'unrealized_pnl'),
+              ('order_states', 'requested_qty'),
+              ('order_states', 'filled_qty'),
+              ('order_states', 'remaining_qty'),
+              ('order_states', 'average_fill_price'),
+              ('order_states', 'fees'),
+              ('fill_events', 'fill_qty'),
+              ('fill_events', 'fill_price'),
+              ('fill_events', 'fee_amount'),
+              ('order_obligations', 'reserved_amount'),
+              ('order_obligations', 'consumed_amount'),
+              ('order_obligations', 'released_amount')
+            )
+          )
+        """
+    )
+    with runtime.engine.connect() as connection:
+        rows = connection.execute(query).mappings().all()
+    actual = {
+        (row["table_name"], row["column_name"]): (
+            row["data_type"],
+            row["numeric_precision"],
+            row["numeric_scale"],
+        )
+        for row in rows
+    }
+    missing = [f"{table}.{column}" for table, column in expected if (table, column) not in actual]
+    mismatches = [
+        (
+            f"{table}.{column}",
+            actual[(table, column)],
+        )
+        for table, column in expected
+        if (table, column) in actual and actual[(table, column)] != expected[(table, column)]
+    ]
+    if missing or mismatches:
+        mismatch_text = ", ".join(f"{name}={value}" for name, value in mismatches)
+        missing_text = ", ".join(missing)
+        raise RuntimeError(
+            "database_schema_validation_failed"
+            + (f": missing={missing_text}" if missing_text else "")
+            + (f": mismatched={mismatch_text}" if mismatch_text else "")
+        )

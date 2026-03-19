@@ -123,7 +123,10 @@ class RiskEngine:
                         rejection_reasons.append("insufficient_base_balance")
 
         if self.policy_profile.enforce_health_blockers:
-            health_blockers = self.health_service.execution_blockers()
+            health_blockers = [
+                *self.health_service.execution_blockers(),
+                *self.health_service.submission_blockers(),
+            ]
             if health_blockers:
                 approved = False
                 rejection_reasons.extend(health_blockers)

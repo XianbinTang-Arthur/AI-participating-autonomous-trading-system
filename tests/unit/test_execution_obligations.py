@@ -12,6 +12,7 @@ from aats.schemas.execution import FillEvent, OrderIntent, OrderState
 from aats.schemas.exchange import ExchangeAccountSnapshot, ExchangeBalance
 from aats.services.execution_engine.obligations import ExecutionObligationService
 from aats.services.execution_engine.order_manager import OrderManager
+from aats.services.execution_engine.paper_adapter import PaperExecutionAdapter
 from aats.services.governance_engine.kill_switch import KillSwitch
 from aats.storage.event_store import InMemoryEventStore
 from aats.storage.execution_repo import InMemoryExecutionRepository
@@ -284,6 +285,54 @@ class TestExecutionObligations(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(obligation)
         self.assertEqual(obligation.reserved_amount, Decimal("60.06"))
 
+    async def test_missing_exchange_account_snapshot_blocks_reservation(self) -> None:
+        service = ExecutionObligationService(
+            settings=AATSSettings.model_validate({"account_backend": "okx", "account_read_enabled": True}),
+            obligation_repo=InMemoryExecutionObligationRepository(),
+            account_snapshot_loader=lambda: _return_snapshot_none(),
+            price_provider=lambda _symbol: 60_000.0,
+        )
+
+        with self.assertRaisesRegex(Exception, "local_obligation_account_snapshot_unavailable"):
+            await service.preview_reservation_for_intent(
+                intent=_intent("intent_snapshot_missing", "decision_snapshot_missing", "client_snapshot_missing"),
+                client_order_id="clclient_snapshot_missing",
+            )
+
+    async def test_paper_adapter_uses_stable_preview_client_order_id_for_obligations(self) -> None:
+        snapshot = ExchangeAccountSnapshot(
+            account_source="okx",
+            fetched_at=utc_now(),
+            balances=[ExchangeBalance(currency="USDT", total=100.0, available=100.0, frozen=0.0)],
+        )
+        obligation_repo = InMemoryExecutionObligationRepository()
+        settings = AATSSettings.model_validate({"account_backend": "okx", "account_read_enabled": True})
+        manager = OrderManager(
+            settings=settings,
+            bus=InMemoryEventBus(event_store=InMemoryEventStore(), persistence_mode="strict"),
+            adapter=PaperExecutionAdapter(price_provider=lambda _symbol: Decimal("60000"), taker_fee_bps=5.0),
+            execution_repo=InMemoryExecutionRepository(),
+            obligation_service=ExecutionObligationService(
+                settings=settings,
+                obligation_repo=obligation_repo,
+                account_snapshot_loader=lambda: _return_snapshot(snapshot),
+                price_provider=lambda _symbol: 60_000.0,
+            ),
+            kill_switch=KillSwitch(),
+        )
+
+        await manager.handle_order_intent(
+            _intent_message(_intent("intent_paper_stable_id", "decision_paper_stable_id", "paper_stable_id"))
+        )
+
+        persisted = manager.execution_repo.get_order_state("clpaper_stable_id")
+        obligation = obligation_repo.get_obligation("clpaper_stable_id")
+        self.assertIsNotNone(persisted)
+        self.assertEqual(persisted.status, "FILLED")
+        self.assertIsNotNone(obligation)
+        self.assertEqual(obligation.status, "RELEASED")
+        self.assertEqual(obligation.consumed_amount, Decimal("60.03"))
+
     async def test_outbox_path_does_not_finalize_obligation_before_fill_consumption(self) -> None:
         snapshot = ExchangeAccountSnapshot(
             account_source="okx",
@@ -363,6 +412,10 @@ class TestExecutionObligations(unittest.IsolatedAsyncioTestCase):
 
 async def _return_snapshot(snapshot: ExchangeAccountSnapshot) -> ExchangeAccountSnapshot:
     return snapshot
+
+
+async def _return_snapshot_none() -> None:
+    return None
 
 
 def _intent(intent_id: str, decision_id: str, idempotency_key: str) -> OrderIntent:

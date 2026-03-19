@@ -13,7 +13,7 @@ from aats.schemas.common import utc_now
 from aats.schemas.execution import FillEvent
 from aats.schemas.exchange import ExchangeAccountSnapshot
 from aats.schemas.operator import ProcessingFailureRecord
-from aats.schemas.portfolio import PortfolioSnapshot, PortfolioSnapshotOrigin
+from aats.schemas.portfolio import PortfolioBalanceDelta, PortfolioSnapshot, PortfolioSnapshotOrigin
 from aats.services.accounting import fill_fee_cost_in_quote, resolve_symbol_currencies, resolved_fee_currency
 from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, is_effectively_zero, to_decimal
 from aats.storage.base import PortfolioRepository
@@ -310,6 +310,7 @@ class PortfolioService:
     async def handle_fill_event(self, message: dict) -> None:
         fill = parse_payload(message, FillEvent)
         checkpoint = self.state.checkpoint()
+        balances_before = dict(checkpoint.balances)
         result = self.state.apply_fill(fill)
         if not result.applied:
             return
@@ -332,6 +333,13 @@ class PortfolioService:
                 retriable=True,
             )
             raise
+        balance_delta = self._balance_delta_event(
+            fill=fill,
+            balances_before=balances_before,
+            balances_after=self.state.balances,
+            realized_pnl_delta=result.realized_pnl_delta,
+            fee_delta=result.fee_delta,
+        )
         if self.metrics is not None:
             self.metrics.increment("fills_processed")
         log_event(
@@ -347,6 +355,13 @@ class PortfolioService:
                 realized_pnl_delta=result.realized_pnl_delta,
                 fee_delta=result.fee_delta,
             ),
+        )
+        await publish_model(
+            bus=self.bus,
+            topic=topics.PORTFOLIO_BALANCE_DELTAS,
+            key=fill.symbol,
+            payload_model=balance_delta,
+            source_component="portfolio_service",
         )
         await publish_model(
             bus=self.bus,
@@ -390,3 +405,33 @@ class PortfolioService:
             )
         except Exception:
             pass
+
+    @staticmethod
+    def _balance_delta_event(
+        *,
+        fill: FillEvent,
+        balances_before: dict[str, Decimal],
+        balances_after: dict[str, Decimal],
+        realized_pnl_delta: Decimal,
+        fee_delta: Decimal,
+    ) -> PortfolioBalanceDelta:
+        currencies = sorted(set(balances_before) | set(balances_after))
+        balance_deltas = {
+            currency: to_decimal(balances_after.get(currency, 0)) - to_decimal(balances_before.get(currency, 0))
+            for currency in currencies
+            if to_decimal(balances_after.get(currency, 0)) != to_decimal(balances_before.get(currency, 0))
+        }
+        return PortfolioBalanceDelta(
+            decision_id=fill.decision_id,
+            intent_id=fill.intent_id,
+            order_id=fill.client_order_id,
+            fill_id=fill.fill_id,
+            symbol=fill.symbol,
+            balances_before={currency: to_decimal(value) for currency, value in balances_before.items()},
+            balances_after={currency: to_decimal(value) for currency, value in balances_after.items()},
+            balance_deltas=balance_deltas,
+            realized_pnl_delta=realized_pnl_delta,
+            fee_delta=fee_delta,
+            product_type=fill.product_type,
+            margin_mode=fill.margin_mode,
+        )

@@ -76,7 +76,10 @@ class SystemHealthService:
         )
 
     def execution_blockers(self) -> list[str]:
-        return list(dict.fromkeys(self._base_blockers()))
+        return self._base_blockers()
+
+    def submission_blockers(self) -> list[str]:
+        return list(dict.fromkeys([*self._base_blockers(), *self._execution_provider_blockers()]))
 
     def _base_components(self) -> list[ComponentHealth]:
         market_status = self.market_provider.status()
@@ -100,6 +103,13 @@ class SystemHealthService:
         if self.kill_switch.halted:
             blockers.append("kill_switch_active")
         return blockers
+
+    def _execution_provider_blockers(self) -> list[str]:
+        status = self.execution_provider.readiness()
+        blockers = list(status.get("blockers", []))
+        if not bool(status.get("exchange_submit_allowed", True)):
+            blockers.extend(status.get("submit_blocked_reasons", []))
+        return list(dict.fromkeys(blockers))
 
     @staticmethod
     def _component_from_status(component: str, status: dict[str, Any]) -> ComponentHealth:

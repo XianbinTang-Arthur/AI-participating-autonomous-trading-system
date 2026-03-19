@@ -83,6 +83,19 @@ class FakeExecutionProvider:
         return {"ready": True, "connected": True, "fresh": True, "blockers": [], "detail": "ok"}
 
 
+class FakeBlockedExecutionProvider:
+    def readiness(self):
+        return {
+            "ready": True,
+            "connected": True,
+            "fresh": True,
+            "blockers": [],
+            "detail": "adapter_blocked",
+            "exchange_submit_allowed": False,
+            "submit_blocked_reasons": ["adapter_submit_blocked"],
+        }
+
+
 class FakeMarketProvider:
     def status(self):
         return {"ready": False, "connected": True, "fresh": False, "blockers": ["market_data_stale"], "detail": "stale"}
@@ -259,6 +272,62 @@ class TestGuardedLive(unittest.IsolatedAsyncioTestCase):
         risk_decision = risk.evaluate(target=target)
         self.assertFalse(risk_decision.approved)
         self.assertIn("max_open_orders_reached", risk_decision.rejection_reasons)
+
+    def test_policy_and_risk_include_execution_adapter_submit_blockers(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "mode": "guarded_live",
+                "execution_backend": "okx",
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "okx_simulated_trading": True,
+            }
+        )
+        kill_switch = KillSwitch()
+        mode_controller = RuntimeModeController(settings=settings, kill_switch=kill_switch)
+        health_service = SystemHealthService(
+            settings=settings,
+            mode_controller=mode_controller,
+            kill_switch=kill_switch,
+            market_provider=FakeHealthyMarketProvider(),  # type: ignore[arg-type]
+            account_provider=FakeAccountService(),  # type: ignore[arg-type]
+            execution_provider=FakeBlockedExecutionProvider(),  # type: ignore[arg-type]
+            reconciliation_repo=FakeHealthyReconciliationRepo(),  # type: ignore[arg-type]
+        )
+        policy = PolicyEngine(
+            settings=settings,
+            kill_switch=kill_switch,
+            mode_controller=mode_controller,
+            health_service=health_service,
+        )
+        risk = RiskEngine(
+            settings=settings,
+            account_service=FakeAccountService(),  # type: ignore[arg-type]
+            health_service=health_service,
+            trigger_policy=DecisionTriggerPolicy(settings=settings),
+            price_provider=lambda _symbol: 67_000.0,
+            mode_controller=mode_controller,
+        )
+        target = PositionTarget(
+            decision_id="decision_adapter_blocked",
+            symbol="BTC-USDT",
+            current_position_qty=0.0,
+            target_position_qty=0.001,
+            delta_position_qty=0.001,
+            current_notional=0.0,
+            target_notional=67.0,
+            rebalance_reason="test",
+            urgency="medium",
+            max_slippage_tolerance_bps=20,
+            source_mix={"baseline": 1.0},
+            decision_expiry_ts=utc_now(),
+        )
+
+        policy_decision = policy.evaluate(target)
+        risk_decision = risk.evaluate(target)
+
+        self.assertIn("adapter_submit_blocked", policy_decision.rejection_reasons)
+        self.assertIn("adapter_submit_blocked", risk_decision.rejection_reasons)
 
     def test_config_safety_defaults_remain_disabled(self) -> None:
         self.assertEqual(AATSSettings.model_fields["config_profile"].default, "local_demo")

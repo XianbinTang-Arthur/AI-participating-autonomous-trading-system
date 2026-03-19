@@ -5,6 +5,7 @@ from datetime import datetime
 from sqlalchemy import desc, select
 from sqlalchemy.orm import Session, sessionmaker
 
+from aats.bootstrap.logging import get_logger, log_event
 from aats.schemas.execution import FillEvent, OrderState
 from aats.services.execution_engine.state_machine import OrderStateMachine
 from aats.services.runtime_scope import RuntimeStateScope
@@ -16,6 +17,7 @@ class PostgresExecutionRepository:
     def __init__(self, session_factory: sessionmaker[Session]) -> None:
         self.session_factory = session_factory
         self.state_machine = OrderStateMachine()
+        self.logger = get_logger("aats.execution_repo")
 
     def save_order_state(self, state: OrderState) -> OrderState:
         with self.session_factory() as session:
@@ -30,6 +32,22 @@ class PostgresExecutionRepository:
                 select(OrderStateModel).where(OrderStateModel.intent_id == state.intent_id).limit(1)
             )
         current = self._to_order_state(row) if row is not None else None
+        validation = self.state_machine.validate_transition(
+            current_status=None if current is None else current.status,
+            next_status=state.status,
+        )
+        if not validation.accepted:
+            log_event(
+                self.logger,
+                "order_state_transition_rejected",
+                level="warning",
+                decision_id=state.decision_id,
+                intent_id=state.intent_id,
+                order_id=state.client_order_id,
+                current_status=None if current is None else current.status,
+                incoming_status=state.status,
+                reason=validation.reason,
+            )
         merged = self.state_machine.merge(current=current, incoming=state)
         payload = merged.model_dump(mode="json")
         scope = order_scope_metadata(merged)

@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from aats.schemas.execution import FillEvent, OrderState
+from aats.bootstrap.logging import get_logger, log_event
 from aats.services.execution_engine.state_machine import OrderStateMachine
 from aats.services.runtime_scope import RuntimeStateScope, filter_fills, filter_order_states
 
@@ -13,11 +14,28 @@ class InMemoryExecutionRepository:
         self._order_states_by_intent_id: dict[str, OrderState] = {}
         self._fills_by_fill_id: dict[str, FillEvent] = {}
         self._state_machine = OrderStateMachine()
+        self._logger = get_logger("aats.execution_repo")
 
     def save_order_state(self, state: OrderState) -> OrderState:
         current = self._order_states_by_client_order_id.get(state.client_order_id)
         if current is None:
             current = self._order_states_by_intent_id.get(state.intent_id)
+        validation = self._state_machine.validate_transition(
+            current_status=None if current is None else current.status,
+            next_status=state.status,
+        )
+        if not validation.accepted:
+            log_event(
+                self._logger,
+                "order_state_transition_rejected",
+                level="warning",
+                decision_id=state.decision_id,
+                intent_id=state.intent_id,
+                order_id=state.client_order_id,
+                current_status=None if current is None else current.status,
+                incoming_status=state.status,
+                reason=validation.reason,
+            )
         merged = self._state_machine.merge(current=current, incoming=state)
         if current is not None and current.client_order_id != merged.client_order_id:
             self._order_states_by_client_order_id.pop(current.client_order_id, None)

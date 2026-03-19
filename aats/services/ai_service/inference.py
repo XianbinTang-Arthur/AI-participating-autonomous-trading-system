@@ -63,6 +63,7 @@ class AIInferenceService:
         self._last_provider_recovered_at: datetime | None = None
         self._last_outcome_degraded_at: datetime | None = None
         self._last_outcome_recovered_at: datetime | None = None
+        self._restore_runtime_state_from_events()
 
     async def assess(
         self,
@@ -522,7 +523,7 @@ class AIInferenceService:
             )
             if not was_degraded:
                 self._last_provider_degraded_at = utc_now()
-                await self._publish_degradation_event()
+                self._append_degradation_event(reason_code=self._degradation_reason or "ai_provider_failed")
 
     def _record_success(self) -> None:
         self._consecutive_failures = 0
@@ -533,6 +534,7 @@ class AIInferenceService:
             self._consecutive_successes = 0
             self._recovery_probe_after = None
             self._last_provider_recovered_at = utc_now()
+            self._append_degradation_event(reason_code="provider_recovered")
         elif self._degraded:
             self._recovery_probe_after = utc_now() + timedelta(
                 seconds=max(self.settings.ai_recovery_probe_interval_seconds, 0.0)
@@ -568,31 +570,33 @@ class AIInferenceService:
             return True
         return utc_now() >= self._recovery_probe_after
 
-    async def _publish_degradation_event(self) -> None:
+    def _append_degradation_event(
+        self,
+        *,
+        reason_code: str,
+        symbol: str | None = None,
+        timeframe: str | None = None,
+    ) -> None:
         event = AIDegradationEvent(
-            symbol=self.settings.default_symbol,
-            timeframe=self.settings.primary_timeframe,
+            symbol=symbol or self.settings.default_symbol,
+            timeframe=timeframe or self.settings.primary_timeframe,
             product_type=self.settings.trading_product_type,
             margin_mode=self.settings.margin_mode,
             allowed_symbols=tuple(self.settings.allowed_symbols),
             configured_operating_mode=self.settings.ai_operating_mode,
             effective_operating_mode=self.effective_operating_mode(),
-            degraded=True,
-            auto_downgrade_active=self._degraded and self.settings.ai_auto_downgrade_enabled,
-            reason_code=self._degradation_reason or "ai_provider_failed",
+            degraded=self._degraded or self._outcome_review_required,
+            provider_degraded=self._degraded,
+            outcome_review_required=self._outcome_review_required,
+            auto_downgrade_active=(
+                (self._degraded and self.settings.ai_auto_downgrade_enabled)
+                or self._outcome_auto_downgraded
+            ),
+            reason_code=reason_code,
             consecutive_failures=self._consecutive_failures,
             consecutive_successes=self._consecutive_successes,
             recovery_probe_after=self._recovery_probe_after,
         )
-        if self.bus is not None:
-            await publish_model(
-                bus=self.bus,
-                topic=topics.AI_DEGRADATION_EVENTS,
-                key=event.symbol,
-                payload_model=event,
-                source_component="ai_service",
-            )
-            return
         self.event_store.append(
             build_envelope(
                 topic=topics.AI_DEGRADATION_EVENTS,
@@ -601,6 +605,42 @@ class AIInferenceService:
                 source_component="ai_service",
             )
         )
+
+    def _restore_runtime_state_from_events(self) -> None:
+        latest = self.event_store.latest(topics.AI_DEGRADATION_EVENTS, key=self.settings.default_symbol)
+        if latest is None:
+            return
+        payload = latest.payload
+        self._degraded = bool(payload.get("provider_degraded", payload.get("degraded", False)))
+        self._outcome_review_required = bool(payload.get("outcome_review_required", False))
+        self._outcome_auto_downgraded = bool(payload.get("auto_downgrade_active", False)) and self._outcome_review_required
+        self._degradation_reason = str(payload.get("reason_code") or "") if self._degraded else ""
+        self._outcome_degradation_reason = (
+            str(payload.get("reason_code") or "") if self._outcome_review_required else ""
+        )
+        self._recovery_probe_after = self._parse_event_datetime(payload.get("recovery_probe_after"))
+        self._consecutive_failures = int(payload.get("consecutive_failures", 0) or 0)
+        self._consecutive_successes = int(payload.get("consecutive_successes", 0) or 0)
+        created_at = self._parse_event_datetime(payload.get("created_at"))
+        if self._degraded:
+            self._last_provider_degraded_at = created_at
+        else:
+            self._last_provider_recovered_at = created_at
+        if self._outcome_review_required:
+            self._last_outcome_degraded_at = created_at
+        elif payload.get("outcome_review_required") is not None:
+            self._last_outcome_recovered_at = created_at
+
+    @staticmethod
+    def _parse_event_datetime(value):
+        if isinstance(value, datetime) or value is None:
+            return value
+        if isinstance(value, str):
+            try:
+                return datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+        return None
 
     def _record_shadow_outcome(self, evaluation: AIShadowEvaluation) -> None:
         fee_ratio_delta = float(evaluation.shadow_fee_ratio or 0.0) - float(evaluation.baseline_fee_ratio or 0.0)
@@ -623,6 +663,11 @@ class AIInferenceService:
             self._outcome_degradation_reason = ""
             if was_review_required:
                 self._last_outcome_recovered_at = utc_now()
+                self._append_degradation_event(
+                    reason_code="outcome_review_recovered",
+                    symbol=evaluation.symbol,
+                    timeframe=evaluation.timeframe,
+                )
             return
 
         if self._outcome_bad_window_streak < max(self.settings.ai_outcome_review_bad_window_threshold, 1):
@@ -634,27 +679,10 @@ class AIInferenceService:
         )
         self._outcome_degradation_reason = reason_codes[0]
         self._last_outcome_degraded_at = utc_now()
-        self.event_store.append(
-            build_envelope(
-                topic=topics.AI_DEGRADATION_EVENTS,
-                key=evaluation.symbol,
-                payload_model=AIDegradationEvent(
-                    symbol=evaluation.symbol,
-                    timeframe=evaluation.timeframe,
-                    product_type=self.settings.trading_product_type,
-                    margin_mode=self.settings.margin_mode,
-                    allowed_symbols=tuple(self.settings.allowed_symbols),
-                    configured_operating_mode=self.settings.ai_operating_mode,
-                    effective_operating_mode=self.effective_operating_mode(),
-                    degraded=True,
-                    auto_downgrade_active=self._outcome_auto_downgraded,
-                    reason_code=self._outcome_degradation_reason,
-                    consecutive_failures=self._consecutive_failures,
-                    consecutive_successes=self._consecutive_successes,
-                    recovery_probe_after=None,
-                ),
-                source_component="ai_service",
-            )
+        self._append_degradation_event(
+            reason_code=self._outcome_degradation_reason,
+            symbol=evaluation.symbol,
+            timeframe=evaluation.timeframe,
         )
 
     def _publish_performance_report(self, *, evaluation: AIShadowEvaluation) -> None:

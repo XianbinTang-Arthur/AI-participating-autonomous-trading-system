@@ -147,6 +147,52 @@ def describe_runtime_profile_diff(diff: RuntimeProfileDiff) -> list[str]:
     return lines
 
 
+def readonly_runtime_profile_snapshot(
+    *,
+    settings: AATSSettings,
+    resolution: RuntimeProfileResolution,
+) -> dict[str, Any]:
+    current_payload = runtime_profile_payload_from_settings(settings)
+    return {
+        "profile_source": resolution.profile_source,
+        "active_revision": None,
+        "pending_revision": None,
+        "activation": RuntimeProfileActivationState().model_dump(mode="json"),
+        "current_runtime_payload": current_payload,
+        "current_runtime_summary": summarize_runtime_profile_payload(current_payload),
+        "revisions": [],
+        "management_enabled": False,
+        "control_plane_status": "deprecated_readonly",
+        "control_plane_summary": "runtime_profile_control_disabled",
+    }
+
+
+def runtime_profile_action_payload(
+    *,
+    action: str,
+    actor_role: OperatorRole,
+    actor_identity: str | None,
+    auth_source: AuthSource,
+    status: str,
+    previous_revision_id: str | None = None,
+    new_revision_id: str | None = None,
+    details: dict[str, Any] | None = None,
+) -> OperatorActionRecord:
+    return OperatorActionRecord(
+        action=action,  # type: ignore[arg-type]
+        actor_role=actor_role,
+        actor_identity=actor_identity,
+        auth_source=auth_source,
+        reason="runtime_profile_control",
+        status=status,
+        details={
+            "previous_revision_id": previous_revision_id,
+            "new_revision_id": new_revision_id,
+            **(details or {}),
+        },
+    )
+
+
 @dataclass(slots=True)
 class RuntimeProfileControlService:
     settings: AATSSettings

@@ -38,9 +38,13 @@ class PaperExecutionAdapter(ExchangeAdapter):
             margin_model="cash",
         )
 
+    def preview_client_order_id(self, intent: OrderIntent) -> str | None:
+        stable_key = intent.idempotency_key or intent.intent_id
+        return f"cl{stable_key}"
+
     async def submit(self, intent: OrderIntent) -> tuple[OrderState, list[FillEvent]]:
         now = datetime.now(timezone.utc)
-        client_order_id = new_id("clord")
+        client_order_id = self.preview_client_order_id(intent) or new_id("clord")
         exchange_order_id = new_id("paper")
         fill_price = to_decimal(self.price_provider(intent.symbol))
         if self._limit_ioc_expired(intent=intent, execution_price=fill_price):

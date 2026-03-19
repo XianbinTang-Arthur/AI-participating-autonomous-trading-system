@@ -95,7 +95,7 @@ from aats.storage.runtime_profile_repo import InMemoryRuntimeProfileRepository
 from aats.storage.runtime_profile_repo_postgres import PostgresRuntimeProfileRepository
 from aats.storage.strategy_profile_repo import InMemoryStrategyProfileRepository
 from aats.storage.strategy_profile_repo_postgres import PostgresStrategyProfileRepository
-from aats.storage.session import DatabaseRuntime, create_database_runtime, create_schema
+from aats.storage.session import DatabaseRuntime, create_database_runtime, create_schema, validate_runtime_schema
 from aats.schemas.system import RecoveryStatus
 from aats.schemas.common import utc_now
 from aats.schemas.operator import ExecutionErrorSummary, ProcessingFailureRecord
@@ -122,7 +122,7 @@ def load_yaml_config(environment: str, profile: str, config_dir: str | Path = "c
     return merged
 
 
-def resilient_subscription_handler(*, topic: str, name: str, handler):
+def resilient_subscription_handler(*, topic: str, name: str, handler, subscription_class: str = "observer"):
     logger = get_logger("aats.event_bus")
 
     async def wrapped(message: dict) -> None:
@@ -137,6 +137,7 @@ def resilient_subscription_handler(*, topic: str, name: str, handler):
                 level="error",
                 topic=topic,
                 handler=name,
+                subscription_class=subscription_class,
                 key=message.get("key") if isinstance(message, dict) else None,
                 event_id=event_id,
                 error_type=type(exc).__name__,
@@ -169,6 +170,13 @@ class StorageBackends:
     strategy_profile_repo: StrategyProfileRepository
     outbox_repo: PostgresOutboxRepository | None = None
     database_runtime: DatabaseRuntime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ObserverSubscriptionSpec:
+    topic: str
+    name: str
+    handler: Any
 
 
 @dataclass(slots=True)
@@ -387,6 +395,7 @@ def build_storage_backends(settings: AATSSettings) -> StorageBackends:
     database_runtime = create_database_runtime(settings.database_url)
     if settings.database_auto_create_schema:
         create_schema(database_runtime)
+    validate_runtime_schema(database_runtime)
     if settings.database_single_runtime_guard_enabled:
         database_runtime.acquire_single_runtime_lock(settings.database_runtime_lock_key)
 
@@ -435,6 +444,150 @@ def _build_execution_adapter(
         taker_fee_bps=settings.paper_taker_fee_bps,
         environment_capabilities=resolved_environment,
     )
+
+
+def _build_position_target_handler(
+    *,
+    runtime_layering: RuntimeLayering,
+    account_service: OKXAccountService,
+    policy_engine: PolicyEngine,
+    risk_engine: RiskEngine,
+    execution_planner: ExecutionPlanner,
+    market_gateway: MarketDataGateway,
+    kill_switch: KillSwitch,
+    metrics: MetricsRegistry,
+    bus: InMemoryEventBus,
+):
+    async def handle_position_target(message: dict[str, Any]) -> None:
+        target = parse_payload(message, PositionTarget)
+        if runtime_layering.environment_capabilities.account_state_source_kind == "exchange":
+            await account_service.refresh()
+
+        policy_decision = policy_engine.evaluate(target=target)
+        await policy_engine.publish_decision(bus=bus, target=target, decision=policy_decision)
+        if not policy_decision.execution_allowed:
+            return
+
+        risk_decision = risk_engine.evaluate(target=target)
+        await risk_engine.publish_decision(bus=bus, target=target, decision=risk_decision)
+        if not risk_decision.approved or risk_decision.halt_required:
+            return
+        if kill_switch.halted:
+            return
+
+        target_reference_price = (
+            abs(target.target_notional / target.target_position_qty)
+            if abs(target.target_position_qty) > 1e-12
+            else None
+        )
+        current_reference_price = (
+            abs(target.current_notional / target.current_position_qty)
+            if abs(target.current_position_qty) > 1e-12
+            else None
+        )
+        reference_price = next(
+            (
+                candidate
+                for candidate in (
+                    target_reference_price,
+                    current_reference_price,
+                    market_gateway.latest_price(target.symbol),
+                )
+                if candidate is not None and candidate > 0
+            ),
+            None,
+        )
+
+        plan = execution_planner.build_plan(
+            decision_id=target.decision_id,
+            symbol=target.symbol,
+            current_position_qty=target.current_position_qty,
+            target_position_qty=target.target_position_qty,
+            approved_target_position_qty=risk_decision.capped_target_position_qty,
+            delta_qty=risk_decision.capped_target_position_qty - target.current_position_qty,
+            urgency=target.urgency,
+            max_slippage_tolerance_bps=target.max_slippage_tolerance_bps,
+            reference_price=reference_price,
+            product_type=target.product_type,
+            target_leverage=target.target_leverage,
+            margin_mode=target.margin_mode,
+            ai_execution_parameter_suggestion=target.ai_execution_parameter_suggestion,
+        )
+        if plan is None:
+            return
+        await execution_planner.publish_plan(bus=bus, plan=plan)
+
+        intent = execution_planner.build_intent(plan=plan)
+        if intent is None:
+            return
+        metrics.increment("order_intents_generated")
+        await execution_planner.publish_intent(bus=bus, intent=intent)
+
+    return handle_position_target
+
+
+async def _subscribe_critical_handlers(
+    *,
+    bus: InMemoryEventBus,
+    feature_engine: FeatureEngine,
+    decision_trigger: DecisionCycleTrigger,
+    order_manager: OrderManager,
+    portfolio_service: PortfolioService,
+    reconciliation_service: ReconciliationService,
+    position_target_handler,
+) -> None:
+    await bus.subscribe(topics.MARKET_SNAPSHOTS, feature_engine.handle_market_snapshot)
+    await bus.subscribe(topics.FEATURE_SNAPSHOTS, decision_trigger.handle_feature_snapshot)
+    await bus.subscribe(topics.ORDER_INTENTS, order_manager.handle_order_intent)
+    await bus.subscribe(topics.FILL_EVENTS, portfolio_service.handle_fill_event)
+    await bus.subscribe(topics.PORTFOLIO_SNAPSHOTS, reconciliation_service.handle_portfolio_snapshot)
+    await bus.subscribe(topics.POSITION_TARGETS, position_target_handler)
+
+
+def _observer_subscription_specs(
+    *,
+    audit_service: DecisionAuditService,
+    ai_service: AIInferenceService,
+    reconciliation_service: ReconciliationService,
+) -> tuple[ObserverSubscriptionSpec, ...]:
+    return (
+        ObserverSubscriptionSpec(topics.DECISION_CONTEXTS, "audit.handle_decision_context", audit_service.handle_decision_context),
+        ObserverSubscriptionSpec(topics.BASELINE_ASSESSMENTS, "audit.handle_baseline_assessment", audit_service.handle_baseline_assessment),
+        ObserverSubscriptionSpec(topics.AI_DECISION_BRIEFS, "audit.handle_ai_decision_brief", audit_service.handle_ai_decision_brief),
+        ObserverSubscriptionSpec(topics.AI_ASSESSMENTS, "audit.handle_ai_assessment", audit_service.handle_ai_assessment),
+        ObserverSubscriptionSpec(topics.AI_TAKEOVER_DECISIONS, "audit.handle_ai_takeover_decision", audit_service.handle_ai_takeover_decision),
+        ObserverSubscriptionSpec(topics.AI_SHADOW_DECISIONS, "audit.handle_ai_shadow_decision", audit_service.handle_ai_shadow_decision),
+        ObserverSubscriptionSpec(topics.AI_SHADOW_EVALUATIONS, "audit.handle_ai_shadow_evaluation", audit_service.handle_ai_shadow_evaluation),
+        ObserverSubscriptionSpec(topics.POSITION_TARGETS, "audit.handle_position_target", audit_service.handle_position_target),
+        ObserverSubscriptionSpec(topics.POLICY_DECISIONS, "audit.handle_policy_decision", audit_service.handle_policy_decision),
+        ObserverSubscriptionSpec(topics.RISK_DECISIONS, "audit.handle_risk_decision", audit_service.handle_risk_decision),
+        ObserverSubscriptionSpec(topics.EXECUTION_PLANS, "audit.handle_execution_plan", audit_service.handle_execution_plan),
+        ObserverSubscriptionSpec(topics.ORDER_INTENTS, "audit.handle_order_intent", audit_service.handle_order_intent),
+        ObserverSubscriptionSpec(topics.ORDER_UPDATES, "audit.handle_order_update", audit_service.handle_order_update),
+        ObserverSubscriptionSpec(topics.FILL_EVENTS, "audit.handle_fill_event", audit_service.handle_fill_event),
+        ObserverSubscriptionSpec(topics.PORTFOLIO_SNAPSHOTS, "ai.handle_portfolio_snapshot", ai_service.handle_portfolio_snapshot),
+        ObserverSubscriptionSpec(topics.PORTFOLIO_SNAPSHOTS, "audit.handle_portfolio_snapshot", audit_service.handle_portfolio_snapshot),
+        ObserverSubscriptionSpec(topics.RECONCILIATION_REPORTS, "ai.handle_reconciliation_report", ai_service.handle_reconciliation_report),
+        ObserverSubscriptionSpec(topics.RECONCILIATION_REPORTS, "audit.handle_reconciliation_report", audit_service.handle_reconciliation_report),
+        ObserverSubscriptionSpec(topics.PROCESSING_FAILURES, "reconciliation.handle_processing_failure", reconciliation_service.handle_processing_failure),
+    )
+
+
+async def _subscribe_observer_handlers(
+    *,
+    bus: InMemoryEventBus,
+    specs: tuple[ObserverSubscriptionSpec, ...],
+) -> None:
+    for spec in specs:
+        await bus.subscribe(
+            spec.topic,
+            resilient_subscription_handler(
+                topic=spec.topic,
+                name=spec.name,
+                handler=spec.handler,
+                subscription_class="observer",
+            ),
+        )
 
 
 async def build_runtime(
@@ -658,224 +811,34 @@ async def build_runtime(
         reconciliation_stale_after_seconds=runtime_settings.reconciliation_stale_after_seconds,
         recovery_policy=runtime_layering.recovery_policy,
     )
-
-    await bus.subscribe(topics.MARKET_SNAPSHOTS, feature_engine.handle_market_snapshot)
-    await bus.subscribe(topics.FEATURE_SNAPSHOTS, decision_trigger.handle_feature_snapshot)
-
-    await bus.subscribe(topics.ORDER_INTENTS, order_manager.handle_order_intent)
-    await bus.subscribe(topics.FILL_EVENTS, portfolio_service.handle_fill_event)
-    await bus.subscribe(topics.PORTFOLIO_SNAPSHOTS, reconciliation_service.handle_portfolio_snapshot)
-    await bus.subscribe(
-        topics.DECISION_CONTEXTS,
-        resilient_subscription_handler(
-            topic=topics.DECISION_CONTEXTS,
-            name="audit.handle_decision_context",
-            handler=audit_service.handle_decision_context,
+    position_target_handler = _build_position_target_handler(
+        runtime_layering=runtime_layering,
+        account_service=account_service,
+        policy_engine=policy_engine,
+        risk_engine=risk_engine,
+        execution_planner=execution_planner,
+        market_gateway=market_gateway,
+        kill_switch=kill_switch,
+        metrics=metrics,
+        bus=bus,
+    )
+    await _subscribe_critical_handlers(
+        bus=bus,
+        feature_engine=feature_engine,
+        decision_trigger=decision_trigger,
+        order_manager=order_manager,
+        portfolio_service=portfolio_service,
+        reconciliation_service=reconciliation_service,
+        position_target_handler=position_target_handler,
+    )
+    await _subscribe_observer_handlers(
+        bus=bus,
+        specs=_observer_subscription_specs(
+            audit_service=audit_service,
+            ai_service=ai_service,
+            reconciliation_service=reconciliation_service,
         ),
     )
-    await bus.subscribe(
-        topics.BASELINE_ASSESSMENTS,
-        resilient_subscription_handler(
-            topic=topics.BASELINE_ASSESSMENTS,
-            name="audit.handle_baseline_assessment",
-            handler=audit_service.handle_baseline_assessment,
-        ),
-    )
-    await bus.subscribe(
-        topics.AI_DECISION_BRIEFS,
-        resilient_subscription_handler(
-            topic=topics.AI_DECISION_BRIEFS,
-            name="audit.handle_ai_decision_brief",
-            handler=audit_service.handle_ai_decision_brief,
-        ),
-    )
-    await bus.subscribe(
-        topics.AI_ASSESSMENTS,
-        resilient_subscription_handler(
-            topic=topics.AI_ASSESSMENTS,
-            name="audit.handle_ai_assessment",
-            handler=audit_service.handle_ai_assessment,
-        ),
-    )
-    await bus.subscribe(
-        topics.AI_TAKEOVER_DECISIONS,
-        resilient_subscription_handler(
-            topic=topics.AI_TAKEOVER_DECISIONS,
-            name="audit.handle_ai_takeover_decision",
-            handler=audit_service.handle_ai_takeover_decision,
-        ),
-    )
-    await bus.subscribe(
-        topics.AI_SHADOW_DECISIONS,
-        resilient_subscription_handler(
-            topic=topics.AI_SHADOW_DECISIONS,
-            name="audit.handle_ai_shadow_decision",
-            handler=audit_service.handle_ai_shadow_decision,
-        ),
-    )
-    await bus.subscribe(
-        topics.AI_SHADOW_EVALUATIONS,
-        resilient_subscription_handler(
-            topic=topics.AI_SHADOW_EVALUATIONS,
-            name="audit.handle_ai_shadow_evaluation",
-            handler=audit_service.handle_ai_shadow_evaluation,
-        ),
-    )
-    await bus.subscribe(
-        topics.POSITION_TARGETS,
-        resilient_subscription_handler(
-            topic=topics.POSITION_TARGETS,
-            name="audit.handle_position_target",
-            handler=audit_service.handle_position_target,
-        ),
-    )
-    await bus.subscribe(
-        topics.POLICY_DECISIONS,
-        resilient_subscription_handler(
-            topic=topics.POLICY_DECISIONS,
-            name="audit.handle_policy_decision",
-            handler=audit_service.handle_policy_decision,
-        ),
-    )
-    await bus.subscribe(
-        topics.RISK_DECISIONS,
-        resilient_subscription_handler(
-            topic=topics.RISK_DECISIONS,
-            name="audit.handle_risk_decision",
-            handler=audit_service.handle_risk_decision,
-        ),
-    )
-    await bus.subscribe(
-        topics.EXECUTION_PLANS,
-        resilient_subscription_handler(
-            topic=topics.EXECUTION_PLANS,
-            name="audit.handle_execution_plan",
-            handler=audit_service.handle_execution_plan,
-        ),
-    )
-    await bus.subscribe(
-        topics.ORDER_INTENTS,
-        resilient_subscription_handler(
-            topic=topics.ORDER_INTENTS,
-            name="audit.handle_order_intent",
-            handler=audit_service.handle_order_intent,
-        ),
-    )
-    await bus.subscribe(
-        topics.ORDER_UPDATES,
-        resilient_subscription_handler(
-            topic=topics.ORDER_UPDATES,
-            name="audit.handle_order_update",
-            handler=audit_service.handle_order_update,
-        ),
-    )
-    await bus.subscribe(
-        topics.FILL_EVENTS,
-        resilient_subscription_handler(
-            topic=topics.FILL_EVENTS,
-            name="audit.handle_fill_event",
-            handler=audit_service.handle_fill_event,
-        ),
-    )
-    await bus.subscribe(
-        topics.PORTFOLIO_SNAPSHOTS,
-        resilient_subscription_handler(
-            topic=topics.PORTFOLIO_SNAPSHOTS,
-            name="ai.handle_portfolio_snapshot",
-            handler=ai_service.handle_portfolio_snapshot,
-        ),
-    )
-    await bus.subscribe(
-        topics.PORTFOLIO_SNAPSHOTS,
-        resilient_subscription_handler(
-            topic=topics.PORTFOLIO_SNAPSHOTS,
-            name="audit.handle_portfolio_snapshot",
-            handler=audit_service.handle_portfolio_snapshot,
-        ),
-    )
-    await bus.subscribe(
-        topics.RECONCILIATION_REPORTS,
-        resilient_subscription_handler(
-            topic=topics.RECONCILIATION_REPORTS,
-            name="ai.handle_reconciliation_report",
-            handler=ai_service.handle_reconciliation_report,
-        ),
-    )
-    await bus.subscribe(
-        topics.RECONCILIATION_REPORTS,
-        resilient_subscription_handler(
-            topic=topics.RECONCILIATION_REPORTS,
-            name="audit.handle_reconciliation_report",
-            handler=audit_service.handle_reconciliation_report,
-        ),
-    )
-
-    async def handle_position_target(message: dict[str, Any]) -> None:
-        target = parse_payload(message, PositionTarget)
-        if runtime_layering.environment_capabilities.account_state_source_kind == "exchange":
-            await account_service.refresh()
-
-        policy_decision = policy_engine.evaluate(target=target)
-        await policy_engine.publish_decision(bus=bus, target=target, decision=policy_decision)
-        if not policy_decision.execution_allowed:
-            return
-
-        risk_decision = risk_engine.evaluate(target=target)
-        await risk_engine.publish_decision(bus=bus, target=target, decision=risk_decision)
-        if not risk_decision.approved or risk_decision.halt_required:
-            return
-        if kill_switch.halted:
-            return
-
-        target_reference_price = (
-            abs(target.target_notional / target.target_position_qty)
-            if abs(target.target_position_qty) > 1e-12
-            else None
-        )
-        current_reference_price = (
-            abs(target.current_notional / target.current_position_qty)
-            if abs(target.current_position_qty) > 1e-12
-            else None
-        )
-        reference_price = next(
-            (
-                candidate
-                for candidate in (
-                    target_reference_price,
-                    current_reference_price,
-                    market_gateway.latest_price(target.symbol),
-                )
-                if candidate is not None and candidate > 0
-            ),
-            None,
-        )
-
-        plan = execution_planner.build_plan(
-            decision_id=target.decision_id,
-            symbol=target.symbol,
-            current_position_qty=target.current_position_qty,
-            target_position_qty=target.target_position_qty,
-            approved_target_position_qty=risk_decision.capped_target_position_qty,
-            delta_qty=risk_decision.capped_target_position_qty - target.current_position_qty,
-            urgency=target.urgency,
-            max_slippage_tolerance_bps=target.max_slippage_tolerance_bps,
-            reference_price=reference_price,
-            product_type=target.product_type,
-            target_leverage=target.target_leverage,
-            margin_mode=target.margin_mode,
-            ai_execution_parameter_suggestion=target.ai_execution_parameter_suggestion,
-        )
-        if plan is None:
-            return
-        await execution_planner.publish_plan(bus=bus, plan=plan)
-
-        intent = execution_planner.build_intent(plan=plan)
-        if intent is None:
-            return
-        metrics.increment("order_intents_generated")
-        await execution_planner.publish_intent(bus=bus, intent=intent)
-
-    await bus.subscribe(topics.POSITION_TARGETS, handle_position_target)
 
     if runtime_layering.environment_capabilities.account_state_source_kind == "exchange":
         account_snapshot = await account_service.refresh(force=True)

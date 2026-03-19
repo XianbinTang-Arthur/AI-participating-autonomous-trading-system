@@ -27,7 +27,10 @@ from aats.services.operator.accounts import (
     enabled_admin_count,
     update_operator_user as update_managed_operator_user,
 )
-from aats.services.operator.runtime_profiles import RuntimeProfileControlService
+from aats.services.operator.runtime_profiles import (
+    readonly_runtime_profile_snapshot,
+    runtime_profile_action_payload,
+)
 from aats.services.operator.strategy_profiles import StrategyProfileControlService
 from aats.services.portfolio_service.reconstruction import PortfolioReconstructionService
 from aats.services.reconciliation_service.replay import ReplayEngine, ReplayResult
@@ -56,12 +59,6 @@ class OperatorQueryService:
         self.recovery_posture = RecoveryPostureEvaluator(runtime)
         self.state_scope = runtime_state_scope(runtime.settings)
         self._cache: dict[str, Any] = {}
-        self.runtime_profiles = RuntimeProfileControlService(
-            settings=runtime.settings,
-            repo=runtime.runtime_profile_repo,
-            execution_repo=runtime.execution_repo,
-            event_store=runtime.event_store,
-        )
         self.strategy_profiles = StrategyProfileControlService(runtime)
 
     def _cached(self, key: str, loader):
@@ -789,7 +786,13 @@ class OperatorQueryService:
         }
 
     def runtime_profile_snapshot(self) -> dict[str, Any]:
-        snapshot = self._cached("runtime_profile_snapshot", self.runtime_profiles.snapshot)
+        snapshot = self._cached(
+            "runtime_profile_snapshot",
+            lambda: readonly_runtime_profile_snapshot(
+                settings=self.runtime.settings,
+                resolution=self.runtime.runtime_profile_resolution,
+            ),
+        )
         activation = snapshot["activation"]
         return {
             **snapshot,
@@ -814,7 +817,7 @@ class OperatorQueryService:
         self._append_event(
             topic=topics.OPERATOR_ACTIONS,
             key="runtime_profile",
-            payload_model=self.runtime_profiles.audit_payload(
+            payload_model=runtime_profile_action_payload(
                 action=action,
                 actor_role=actor_role,
                 actor_identity=actor_identity,

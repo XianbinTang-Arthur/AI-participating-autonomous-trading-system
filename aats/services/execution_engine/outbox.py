@@ -20,6 +20,7 @@ from aats.storage.outbox_repo_postgres import PostgresOutboxRepository
 
 @dataclass(slots=True)
 class PostgresExecutionOutboxPublisher:
+    _MAX_PUBLISH_ATTEMPTS = 3
     session_factory: sessionmaker[Session]
     event_store: PostgresEventStore
     execution_repo: PostgresExecutionRepository
@@ -85,7 +86,11 @@ class PostgresExecutionOutboxPublisher:
                 await self.bus.publish_envelope(envelope, persist=False)
                 self.outbox_repo.mark_published(envelope.event_id)
             except Exception as exc:
-                self.outbox_repo.record_failure(envelope.event_id, str(exc))
+                status = self.outbox_repo.record_failure_with_threshold(
+                    envelope.event_id,
+                    str(exc),
+                    max_attempts=self._MAX_PUBLISH_ATTEMPTS,
+                )
                 log_event(
                     self.logger,
                     "execution_outbox_publish_failed",
@@ -93,10 +98,12 @@ class PostgresExecutionOutboxPublisher:
                     topic=envelope.topic,
                     key=envelope.key,
                     event_id=envelope.event_id,
+                    outbox_status=status,
                     error_type=type(exc).__name__,
                     error=str(exc),
                 )
-                break
+                if status != "FAILED":
+                    break
 
     @staticmethod
     def _order_update_envelope(*, key: str, persisted: OrderState) -> EventEnvelope:

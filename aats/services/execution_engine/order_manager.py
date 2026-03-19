@@ -60,6 +60,16 @@ class OrderManager:
             )
             return
         if self.execution_repo.has_intent(intent.intent_id):
+            log_event(
+                self.logger,
+                "duplicate_order_intent_ignored",
+                level="warning",
+                **correlation_fields(
+                    decision_id=intent.decision_id,
+                    intent_id=intent.intent_id,
+                    symbol=intent.symbol,
+                ),
+            )
             return
         cooldown_state = self._transient_close_retry_cooldown_state(intent=intent)
         if cooldown_state is not None:
