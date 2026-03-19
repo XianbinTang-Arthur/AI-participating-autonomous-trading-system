@@ -31,6 +31,7 @@ from aats.services.operator.runtime_profiles import (
     readonly_runtime_profile_snapshot,
     runtime_profile_action_payload,
 )
+from aats.services.operator.runtime_queries import RuntimeQueryFacade
 from aats.services.operator.strategy_profile_queries import StrategyProfileQueryFacade
 from aats.services.operator.strategy_profiles import StrategyProfileControlService
 from aats.services.portfolio_service.reconstruction import PortfolioReconstructionService
@@ -61,6 +62,7 @@ class OperatorQueryService:
         self.state_scope = runtime_state_scope(runtime.settings)
         self._cache: dict[str, Any] = {}
         self.strategy_profiles = StrategyProfileControlService(runtime)
+        self.runtime_queries = RuntimeQueryFacade(self)
         self.strategy_profile_queries = StrategyProfileQueryFacade(self)
 
     def _cached(self, key: str, loader):
@@ -217,7 +219,7 @@ class OperatorQueryService:
         return latest.decision_id if latest is not None else None
 
     def ai_runtime(self) -> dict[str, Any]:
-        return self.runtime.ai_service.status()
+        return self.runtime_queries.ai_runtime()
 
     def _recent_ai_takeover_events(self, *, limit: int | None = None):
         if not self._ai_history_visible():
@@ -465,7 +467,7 @@ class OperatorQueryService:
         rows = [item for item in rows if item is not None]
         return rows[0] if rows else None
 
-    def ai_performance_overview(self) -> dict[str, Any]:
+    def _ai_performance_overview_impl(self) -> dict[str, Any]:
         reports = [self.payload(item) for item in self._recent_ai_performance_report_events(limit=20)]
         reports = [item for item in reports if item is not None]
         latest = reports[0] if reports else None
@@ -527,6 +529,9 @@ class OperatorQueryService:
             },
         }
 
+    def ai_performance_overview(self) -> dict[str, Any]:
+        return self.runtime_queries.ai_performance_overview()
+
     def _ai_downgrade_state(self) -> dict[str, Any]:
         runtime = self.ai_runtime()
         return {
@@ -551,133 +556,31 @@ class OperatorQueryService:
         }
 
     def ai_overview(self) -> dict[str, Any]:
-        latest = self.ai_latest()
-        shadow_latest = self.ai_shadow_latest()
-        latest_decision_id = self.latest_decision_id()
-        latest_decision_detail = self.decision_view(latest_decision_id) if latest_decision_id is not None else None
-        latest_degradation = latest_topic_event_for_scope(
-            self.runtime.event_store,
-            topics.AI_DEGRADATION_EVENTS,
-            self.state_scope,
-        )
-        if not self._ai_history_visible():
-            latest_degradation = None
-        return {
-            "runtime": self.ai_runtime(),
-            "latest_brief": latest.get("brief"),
-            "latest_assessment": latest.get("assessment"),
-            "latest_takeover": latest.get("takeover"),
-            "latest_shadow_decision": shadow_latest.get("shadow_decision"),
-            "latest_degradation": self.payload(latest_degradation),
-            "takeover_summary": self._ai_takeover_summary(),
-            "shadow_summary": self._ai_shadow_summary(),
-            "performance_windows": self._ai_shadow_performance_windows(),
-            "latest_performance_report": self._latest_ai_performance_report_payload(),
-            "performance_view": self.ai_performance_overview(),
-            "downgrade_state": self._ai_downgrade_state(),
-            "latest_execution_suggestion": None if latest_decision_detail is None else latest_decision_detail.get("ai_execution_suggestion"),
-        }
+        return self.runtime_queries.ai_overview()
 
     def _ai_history_visible(self) -> bool:
         return self.runtime.settings.ai_operating_mode != "baseline_only"
 
     def ai_latest(self) -> dict[str, Any]:
-        if not self._ai_history_visible():
-            return {"brief": None, "assessment": None, "takeover": None, "execution_suggestion": None}
-        brief = latest_topic_event_for_scope(self.runtime.event_store, topics.AI_DECISION_BRIEFS, self.state_scope)
-        assessment = latest_topic_event_for_scope(self.runtime.event_store, topics.AI_ASSESSMENTS, self.state_scope)
-        takeover = latest_topic_event_for_scope(self.runtime.event_store, topics.AI_TAKEOVER_DECISIONS, self.state_scope)
-        execution_plan = latest_topic_event_for_scope(self.runtime.event_store, topics.EXECUTION_PLANS, self.state_scope)
-        order_intent = latest_topic_event_for_scope(self.runtime.event_store, topics.ORDER_INTENTS, self.state_scope)
-        assessment_payload = self.payload(assessment)
-        execution_plan_payload = self.payload(execution_plan)
-        order_intent_payload = self.payload(order_intent)
-        return {
-            "brief": self.payload(brief),
-            "assessment": assessment_payload,
-            "takeover": self.payload(takeover),
-            "execution_suggestion": self._ai_execution_suggestion_summary(
-                ai_assessment=assessment_payload,
-                execution_plan=execution_plan_payload,
-                latest_order_intent=order_intent_payload,
-            ),
-        }
+        return self.runtime_queries.ai_latest()
 
     def ai_recent(self, *, limit: int, offset: int) -> dict[str, Any]:
-        if not self._ai_history_visible():
-            return {"assessments": [], "limit": limit, "offset": offset, "total_available": 0, "has_more": False}
-        rows = self.runtime.event_store.by_topic_scoped(topics.AI_ASSESSMENTS, scope=self.state_scope)
-        rows = list(reversed(rows))
-        return self._paginate_rows(
-            rows,
-            limit=limit,
-            offset=offset,
-            key="assessments",
-            serializer=self.payload,
-        )
+        return self.runtime_queries.ai_recent(limit=limit, offset=offset)
 
     def ai_shadow_latest(self) -> dict[str, Any]:
-        if not self._ai_history_visible():
-            return {"shadow_decision": None}
-        shadow = latest_topic_event_for_scope(self.runtime.event_store, topics.AI_SHADOW_DECISIONS, self.state_scope)
-        return {"shadow_decision": self.payload(shadow)}
+        return self.runtime_queries.ai_shadow_latest()
 
     def ai_shadow_recent(self, *, limit: int, offset: int) -> dict[str, Any]:
-        if not self._ai_history_visible():
-            return {"shadow_decisions": [], "limit": limit, "offset": offset, "total_available": 0, "has_more": False}
-        rows = self.runtime.event_store.by_topic_scoped(topics.AI_SHADOW_DECISIONS, scope=self.state_scope)
-        rows = list(reversed(rows))
-        return self._paginate_rows(
-            rows,
-            limit=limit,
-            offset=offset,
-            key="shadow_decisions",
-            serializer=self.payload,
-        )
+        return self.runtime_queries.ai_shadow_recent(limit=limit, offset=offset)
 
     def ai_shadow_evaluations(self, *, limit: int, offset: int) -> dict[str, Any]:
-        if not self._ai_history_visible():
-            return {"evaluations": [], "limit": limit, "offset": offset, "total_available": 0, "has_more": False}
-        rows = self.runtime.event_store.by_topic_scoped(topics.AI_SHADOW_EVALUATIONS, scope=self.state_scope)
-        rows = list(reversed(rows))
-        return self._paginate_rows(
-            rows,
-            limit=limit,
-            offset=offset,
-            key="evaluations",
-            serializer=self.payload,
-        )
+        return self.runtime_queries.ai_shadow_evaluations(limit=limit, offset=offset)
 
     def ai_performance_reports(self, *, limit: int, offset: int) -> dict[str, Any]:
-        if not self._ai_history_visible():
-            return {"reports": [], "limit": limit, "offset": offset, "total_available": 0, "has_more": False}
-        rows = self._recent_ai_performance_report_events()
-        return self._paginate_rows(
-            rows,
-            limit=limit,
-            offset=offset,
-            key="reports",
-            serializer=self.payload,
-        )
+        return self.runtime_queries.ai_performance_reports(limit=limit, offset=offset)
 
     def ai_takeovers_recent(self, *, limit: int, offset: int) -> dict[str, Any]:
-        if not self._ai_history_visible():
-            return {"takeovers": [], "limit": limit, "offset": offset, "total_available": 0, "has_more": False}
-        rows = self._recent_ai_takeover_events()
-        return self._paginate_rows(
-            rows,
-            limit=limit,
-            offset=offset,
-            key="takeovers",
-            serializer=lambda envelope: {
-                **(self.payload(envelope) or {}),
-                "direction_disagreement": (
-                    envelope.payload.get("baseline_direction") != envelope.payload.get("ai_direction")
-                    if isinstance(envelope.payload, dict)
-                    else False
-                ),
-            },
-        )
+        return self.runtime_queries.ai_takeovers_recent(limit=limit, offset=offset)
 
     async def evaluate_ai_shadow(
         self,
@@ -686,59 +589,11 @@ class OperatorQueryService:
         actor_identity: str | None,
         auth_source: AuthSource,
     ) -> dict[str, Any]:
-        if not self._ai_history_visible():
-            return {"evaluation": None, "status": "baseline_only_ai_history_hidden"}
-        evaluation, created = self.runtime.ai_service.evaluate_shadow_window(
-            limit=self.runtime.settings.ai_shadow_evaluation_window
+        return await self.runtime_queries.evaluate_ai_shadow(
+            actor_role=actor_role,
+            actor_identity=actor_identity,
+            auth_source=auth_source,
         )
-        if evaluation is None:
-            return {"evaluation": None, "status": "no_shadow_decisions"}
-        if created:
-            await publish_model(
-                bus=self.runtime.bus,
-                topic=topics.AI_SHADOW_EVALUATIONS,
-                key=evaluation.symbol,
-                payload_model=evaluation,
-                source_component="operator_api",
-            )
-            self._append_event(
-                topic=topics.OPERATOR_ACTIONS,
-                key="ai_shadow",
-                payload_model=OperatorActionRecord(
-                    action="ai_shadow_evaluate",
-                    actor_role=actor_role,
-                    actor_identity=actor_identity,
-                    auth_source=auth_source,
-                    reason="operator_ai_shadow_evaluate",
-                    status="evaluation_created",
-                    details={
-                        "evaluation_id": evaluation.evaluation_id,
-                        "window_size": evaluation.summary.get("window_size"),
-                        "override_rate": evaluation.summary.get("override_rate"),
-                    },
-                ),
-            )
-            status = "evaluation_created"
-        else:
-            status = "evaluation_reused"
-            self._append_event(
-                topic=topics.OPERATOR_ACTIONS,
-                key="ai_shadow",
-                payload_model=OperatorActionRecord(
-                    action="ai_shadow_evaluate",
-                    actor_role=actor_role,
-                    actor_identity=actor_identity,
-                    auth_source=auth_source,
-                    reason="operator_ai_shadow_evaluate",
-                    status="evaluation_reused",
-                    details={
-                        "evaluation_id": evaluation.evaluation_id,
-                        "window_size": evaluation.summary.get("window_size"),
-                        "override_rate": evaluation.summary.get("override_rate"),
-                    },
-                ),
-            ),
-        return {"evaluation": evaluation.model_dump(mode="json"), "status": status}
 
     def latest_operator_action(self, action: str) -> dict[str, Any] | None:
         actions = self._cached(
@@ -1203,7 +1058,7 @@ class OperatorQueryService:
         return {"status": "deleted", "user": self._operator_user_view(user, actor_identity=actor_identity)}
 
     def recovery_view(self) -> dict[str, Any]:
-        return self._cached("recovery_view", self._build_recovery_view)
+        return self.runtime_queries.recovery_view()
 
     def _build_recovery_view(self) -> dict[str, Any]:
         latest_reconciliation = self._latest_scoped_reconciliation()
@@ -1236,16 +1091,25 @@ class OperatorQueryService:
         }
 
     def system_recovery(self) -> dict[str, Any]:
-        recovery = self.recovery_view()
-        return {
-            "recovery": recovery,
-            "latest_rebaseline_action": recovery["last_rebaseline_action"],
-            "latest_resume_action": recovery["last_resume_action"],
-            "latest_account_baseline": recovery["latest_account_baseline"],
-        }
+        return self.runtime_queries.system_recovery()
 
     def system_mode(self) -> dict[str, Any]:
-        return self._cached("system_mode", self._build_system_mode)
+        return self.runtime_queries.system_mode()
+
+    def system_health(self) -> dict[str, Any]:
+        return self.runtime_queries.system_health()
+
+    def system_runtime(self) -> dict[str, Any]:
+        return self.runtime_queries.system_runtime()
+
+    def blockers(self) -> list[dict[str, Any]]:
+        return self.runtime_queries.blockers()
+
+    def blocker_history(self, *, limit: int = 20, offset: int = 0) -> dict[str, Any]:
+        return self.runtime_queries.blocker_history(limit=limit, offset=offset)
+
+    def metrics(self) -> dict[str, Any]:
+        return self.runtime_queries.metrics()
 
     def _build_system_mode(self) -> dict[str, Any]:
         snapshot = dict(self.runtime.mode_controller.snapshot())
@@ -1490,7 +1354,7 @@ class OperatorQueryService:
             "status": "absent" if latest_translation is None else latest_translation.get("status"),
         }
 
-    def system_health(self) -> dict[str, Any]:
+    def _build_system_health(self) -> dict[str, Any]:
         snapshot = self.runtime.health_service.snapshot()
         mode_snapshot = self.system_mode()
         recovery = self.recovery_view()
@@ -1601,7 +1465,7 @@ class OperatorQueryService:
             "mode_contract": mode_snapshot,
         }
 
-    def system_runtime(self) -> dict[str, Any]:
+    def _build_system_runtime(self) -> dict[str, Any]:
         latest_decision = self.runtime.event_store.latest(topics.DECISION_CONTEXTS)
         latest_fill = self.latest_fill()
         latest_reconciliation = self._latest_scoped_reconciliation()
@@ -1830,7 +1694,7 @@ class OperatorQueryService:
         rows = list(reversed(self.runtime.event_store.by_topic(topics.POLICY_DECISIONS)))
         return self._paginate_rows(rows, limit=limit, offset=offset, key="policies", serializer=lambda item: item.payload)
 
-    def blockers(self) -> list[dict[str, Any]]:
+    def _build_blockers(self) -> list[dict[str, Any]]:
         snapshot = self.runtime.health_service.snapshot()
         recovery = self.recovery_view()
         rows: list[dict[str, Any]] = []
@@ -1870,11 +1734,7 @@ class OperatorQueryService:
             seen.add(blocker)
         return rows
 
-    def blocker_history(self, *, limit: int = 20, offset: int = 0) -> dict[str, Any]:
-        rows = [item.payload for item in reversed(self.runtime.event_store.by_topic(topics.BLOCKER_SNAPSHOTS))]
-        return self._paginate_rows(rows, limit=limit, offset=offset, key="history")
-
-    def metrics(self) -> dict[str, Any]:
+    def _build_metrics(self) -> dict[str, Any]:
         snapshot = self._latest_scoped_snapshot()
         metrics = self.runtime.metrics.snapshot()
         fills = self._scoped_fills()

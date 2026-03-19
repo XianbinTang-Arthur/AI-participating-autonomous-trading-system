@@ -43,6 +43,33 @@ from aats.schemas.strategy_profile_reports import (
 )
 from aats.services.ai_service.openai_provider import OpenAIProvider
 from aats.services.ai_service.provider import AIProviderError, AIProviderTimeoutError
+from aats.services.operator.strategy_profile_optimization import (
+    build_comparison_report,
+    build_offline_replay_pipeline,
+    build_optimization_report,
+    recent_replay_summary,
+    shadow_summary_for_profiles,
+)
+from aats.services.operator.strategy_profile_policies import (
+    activation_policy_history,
+    activation_policy_history_payload,
+    activation_policy_view,
+    approve_activation_policy as approve_activation_policy_helper,
+    approve_auto_rollback_policy as approve_auto_rollback_policy_helper,
+    auto_rollback_policy_history,
+    auto_rollback_policy_history_payload,
+    auto_rollback_policy_view,
+    freeze_activation_policy as freeze_activation_policy_helper,
+    freeze_auto_rollback_policy as freeze_auto_rollback_policy_helper,
+    resolved_activation_policy,
+    resolved_auto_rollback_policy,
+    staged_activation_policy_view,
+    staged_auto_rollback_policy_view,
+    stored_activation_policy,
+    stored_auto_rollback_policy,
+    update_activation_policy as update_activation_policy_helper,
+    update_auto_rollback_policy as update_auto_rollback_policy_helper,
+)
 from aats.services.operator.strategy_profile_seed import _seed_revisions, seed_strategy_profiles
 from aats.services.operator.strategy_profile_snapshot import build_strategy_profile_snapshot
 from aats.services.runtime_scope import (
@@ -1310,116 +1337,40 @@ class StrategyProfileControlService:
         }
 
     def _auto_rollback_policy_view(self) -> dict[str, Any]:
-        return self._resolved_auto_rollback_policy().model_dump(mode="json")
+        return auto_rollback_policy_view(self)
 
     def _staged_auto_rollback_policy_view(self) -> dict[str, Any] | None:
-        staged = next(
-            (item for item in self._auto_rollback_policy_history(limit=50) if item.policy_status == "staged"),
-            None,
-        )
-        return staged.model_dump(mode="json") if staged is not None else None
+        return staged_auto_rollback_policy_view(self)
 
     def _stored_auto_rollback_policy(self) -> StrategyProfileAutoRollbackPolicyConfig | None:
-        history = self._auto_rollback_policy_history(limit=50)
-        return next((item for item in history if item.policy_status == "approved"), None)
+        return stored_auto_rollback_policy(self)
 
     def _auto_rollback_policy_history(self, *, limit: int | None = None) -> list[StrategyProfileAutoRollbackPolicyConfig]:
-        rows = [
-            StrategyProfileAutoRollbackPolicyConfig.model_validate(item.payload)
-            for item in reversed(
-                self.event_store.by_topic_scoped(
-                    topics.STRATEGY_PROFILE_AUTO_ROLLBACK_POLICIES,
-                    scope=self.runtime_state_scope,
-                )
-            )
-            if isinstance(item.payload, dict)
-        ]
-        if limit is not None:
-            rows = rows[:limit]
-        return rows
+        return auto_rollback_policy_history(self, limit=limit)
 
     def _auto_rollback_policy_history_payload(self, *, limit: int | None = None) -> list[dict[str, Any]]:
-        return [item.model_dump(mode="json") for item in self._auto_rollback_policy_history(limit=limit)]
+        return auto_rollback_policy_history_payload(self, limit=limit)
 
     def _resolved_auto_rollback_policy(self) -> StrategyProfileAutoRollbackPolicyConfig:
-        stored = self._stored_auto_rollback_policy()
-        if stored is not None:
-            return stored
-        return StrategyProfileAutoRollbackPolicyConfig(
-            product_type=self.settings.trading_product_type,
-            margin_mode=self.settings.margin_mode,
-            allowed_symbols=tuple(self.settings.allowed_symbols),
-            policy_status="settings_fallback",
-            effective=True,
-            enabled=bool(self.settings.strategy_profile_auto_rollback_enabled),
-            review_required_only=bool(self.settings.strategy_profile_auto_rollback_review_required_only),
-            min_trade_count=int(self.settings.strategy_profile_auto_rollback_min_trade_count),
-            cooldown_seconds=float(self.settings.strategy_profile_auto_rollback_cooldown_seconds),
-            matrix_allowed_symbols=tuple(self.settings.strategy_profile_auto_rollback_allowed_symbols),
-            matrix_allowed_regimes=tuple(self.settings.strategy_profile_auto_rollback_allowed_regimes),
-            matrix_allowed_profiles=tuple(self.settings.strategy_profile_auto_rollback_allowed_profiles),
-            updated_by="runtime_settings_default",
-            update_reason="settings_fallback",
-        )
+        return resolved_auto_rollback_policy(self)
 
     def _activation_policy_view(self) -> dict[str, Any]:
-        return self._resolved_activation_policy().model_dump(mode="json")
+        return activation_policy_view(self)
 
     def _staged_activation_policy_view(self) -> dict[str, Any] | None:
-        staged = next(
-            (item for item in self._activation_policy_history(limit=50) if item.policy_status == "staged"),
-            None,
-        )
-        return staged.model_dump(mode="json") if staged is not None else None
+        return staged_activation_policy_view(self)
 
     def _stored_activation_policy(self) -> StrategyProfileActivationPolicyConfig | None:
-        history = self._activation_policy_history(limit=50)
-        return next((item for item in history if item.policy_status == "approved"), None)
+        return stored_activation_policy(self)
 
     def _activation_policy_history(self, *, limit: int | None = None) -> list[StrategyProfileActivationPolicyConfig]:
-        rows = [
-            StrategyProfileActivationPolicyConfig.model_validate(item.payload)
-            for item in reversed(
-                self.event_store.by_topic_scoped(
-                    topics.STRATEGY_PROFILE_ACTIVATION_POLICIES,
-                    scope=self.runtime_state_scope,
-                )
-            )
-            if isinstance(item.payload, dict)
-        ]
-        if limit is not None:
-            rows = rows[:limit]
-        return rows
+        return activation_policy_history(self, limit=limit)
 
     def _activation_policy_history_payload(self, *, limit: int | None = None) -> list[dict[str, Any]]:
-        return [item.model_dump(mode="json") for item in self._activation_policy_history(limit=limit)]
+        return activation_policy_history_payload(self, limit=limit)
 
     def _resolved_activation_policy(self) -> StrategyProfileActivationPolicyConfig:
-        stored = self._stored_activation_policy()
-        if stored is not None:
-            return stored
-        return StrategyProfileActivationPolicyConfig(
-            product_type=self.settings.trading_product_type,
-            margin_mode=self.settings.margin_mode,
-            allowed_symbols=tuple(self.settings.allowed_symbols),
-            policy_status="settings_fallback",
-            effective=True,
-            enabled=bool(self.settings.strategy_profile_activation_policy_enabled),
-            min_composite_score=float(self.settings.strategy_profile_auto_activation_min_composite_score),
-            min_offline_replay_score=float(self.settings.strategy_profile_auto_activation_min_offline_replay_score),
-            min_recommendation_strength=float(self.settings.strategy_profile_auto_activation_min_recommendation_strength),
-            require_positive_replay_consensus=bool(
-                self.settings.strategy_profile_auto_activation_require_positive_replay_consensus
-            ),
-            disallow_when_shadow_review_required=bool(
-                self.settings.strategy_profile_auto_activation_disallow_when_shadow_review_required
-            ),
-            matrix_allowed_symbols=tuple(self.settings.strategy_profile_activation_policy_allowed_symbols),
-            matrix_allowed_regimes=tuple(self.settings.strategy_profile_activation_policy_allowed_regimes),
-            matrix_allowed_profiles=tuple(self.settings.strategy_profile_activation_policy_allowed_profiles),
-            updated_by="runtime_settings_default",
-            update_reason="settings_fallback",
-        )
+        return resolved_activation_policy(self)
 
     def update_activation_policy(
         self,
@@ -1436,36 +1387,20 @@ class StrategyProfileControlService:
         reason: str,
         actor_identity: str | None,
     ) -> dict[str, Any]:
-        previous = self._activation_policy_history(limit=1)
-        previous_policy = previous[0] if previous else None
-        policy = StrategyProfileActivationPolicyConfig(
-            product_type=self.settings.trading_product_type,
-            margin_mode=self.settings.margin_mode,
-            allowed_symbols=tuple(self.settings.allowed_symbols),
-            previous_policy_id=previous_policy.policy_id if previous_policy is not None else None,
-            policy_status="staged",
-            effective=False,
+        return update_activation_policy_helper(
+            self,
             enabled=enabled,
-            min_composite_score=float(min_composite_score),
-            min_offline_replay_score=float(min_offline_replay_score),
-            min_recommendation_strength=float(min_recommendation_strength),
-            require_positive_replay_consensus=bool(require_positive_replay_consensus),
-            disallow_when_shadow_review_required=bool(disallow_when_shadow_review_required),
-            matrix_allowed_symbols=tuple(matrix_allowed_symbols),
-            matrix_allowed_regimes=tuple(matrix_allowed_regimes),
-            matrix_allowed_profiles=tuple(matrix_allowed_profiles),
-            updated_by=actor_identity,
-            update_reason=reason,
+            min_composite_score=min_composite_score,
+            min_offline_replay_score=min_offline_replay_score,
+            min_recommendation_strength=min_recommendation_strength,
+            require_positive_replay_consensus=require_positive_replay_consensus,
+            disallow_when_shadow_review_required=disallow_when_shadow_review_required,
+            matrix_allowed_symbols=matrix_allowed_symbols,
+            matrix_allowed_regimes=matrix_allowed_regimes,
+            matrix_allowed_profiles=matrix_allowed_profiles,
+            reason=reason,
+            actor_identity=actor_identity,
         )
-        self.event_store.append(
-            build_envelope(
-                topic=topics.STRATEGY_PROFILE_ACTIVATION_POLICIES,
-                key=self.settings.default_symbol,
-                payload_model=policy,
-                source_component="strategy_profile_service",
-            )
-        )
-        return policy.model_dump(mode="json")
 
     def approve_activation_policy(
         self,
@@ -1474,28 +1409,12 @@ class StrategyProfileControlService:
         actor_identity: str | None,
         reason: str,
     ) -> dict[str, Any]:
-        history = self._activation_policy_history(limit=50)
-        target = next((item for item in history if policy_id is None or item.policy_id == policy_id), None)
-        if target is None:
-            raise KeyError("strategy_profile_activation_policy_not_found")
-        approved = target.model_copy(
-            update={
-                "policy_status": "approved",
-                "effective": not bool(target.frozen),
-                "approved_by": actor_identity,
-                "approved_at": utc_now(),
-                "update_reason": reason,
-            }
+        return approve_activation_policy_helper(
+            self,
+            policy_id=policy_id,
+            actor_identity=actor_identity,
+            reason=reason,
         )
-        self.event_store.append(
-            build_envelope(
-                topic=topics.STRATEGY_PROFILE_ACTIVATION_POLICIES,
-                key=self.settings.default_symbol,
-                payload_model=approved,
-                source_component="strategy_profile_service",
-            )
-        )
-        return approved.model_dump(mode="json")
 
     def freeze_activation_policy(
         self,
@@ -1504,27 +1423,12 @@ class StrategyProfileControlService:
         actor_identity: str | None,
         reason: str,
     ) -> dict[str, Any]:
-        current = self._resolved_activation_policy()
-        updated = current.model_copy(
-            update={
-                "policy_status": "approved",
-                "effective": False if frozen else True,
-                "frozen": frozen,
-                "frozen_by": actor_identity if frozen else None,
-                "frozen_at": utc_now() if frozen else None,
-                "freeze_reason": reason if frozen else None,
-                "update_reason": reason,
-            }
+        return freeze_activation_policy_helper(
+            self,
+            frozen=frozen,
+            actor_identity=actor_identity,
+            reason=reason,
         )
-        self.event_store.append(
-            build_envelope(
-                topic=topics.STRATEGY_PROFILE_ACTIVATION_POLICIES,
-                key=self.settings.default_symbol,
-                payload_model=updated,
-                source_component="strategy_profile_service",
-            )
-        )
-        return updated.model_dump(mode="json")
 
     def update_auto_rollback_policy(
         self,
@@ -1539,34 +1443,18 @@ class StrategyProfileControlService:
         reason: str,
         actor_identity: str | None,
     ) -> dict[str, Any]:
-        previous = self._auto_rollback_policy_history(limit=1)
-        previous_policy = previous[0] if previous else None
-        policy = StrategyProfileAutoRollbackPolicyConfig(
-            product_type=self.settings.trading_product_type,
-            margin_mode=self.settings.margin_mode,
-            allowed_symbols=tuple(self.settings.allowed_symbols),
-            previous_policy_id=previous_policy.policy_id if previous_policy is not None else None,
-            policy_status="staged",
-            effective=False,
+        return update_auto_rollback_policy_helper(
+            self,
             enabled=enabled,
             review_required_only=review_required_only,
-            min_trade_count=max(int(min_trade_count), 0),
-            cooldown_seconds=max(float(cooldown_seconds), 0.0),
-            matrix_allowed_symbols=tuple(matrix_allowed_symbols),
-            matrix_allowed_regimes=tuple(matrix_allowed_regimes),
-            matrix_allowed_profiles=tuple(matrix_allowed_profiles),
-            updated_by=actor_identity,
-            update_reason=reason,
+            min_trade_count=min_trade_count,
+            cooldown_seconds=cooldown_seconds,
+            matrix_allowed_symbols=matrix_allowed_symbols,
+            matrix_allowed_regimes=matrix_allowed_regimes,
+            matrix_allowed_profiles=matrix_allowed_profiles,
+            reason=reason,
+            actor_identity=actor_identity,
         )
-        self.event_store.append(
-            build_envelope(
-                topic=topics.STRATEGY_PROFILE_AUTO_ROLLBACK_POLICIES,
-                key=self.settings.default_symbol,
-                payload_model=policy,
-                source_component="strategy_profile_service",
-            )
-        )
-        return policy.model_dump(mode="json")
 
     def approve_auto_rollback_policy(
         self,
@@ -1575,28 +1463,12 @@ class StrategyProfileControlService:
         actor_identity: str | None,
         reason: str,
     ) -> dict[str, Any]:
-        history = self._auto_rollback_policy_history(limit=50)
-        target = next((item for item in history if policy_id is None or item.policy_id == policy_id), None)
-        if target is None:
-            raise KeyError("strategy_profile_auto_rollback_policy_not_found")
-        approved = target.model_copy(
-            update={
-                "policy_status": "approved",
-                "effective": not bool(target.frozen),
-                "approved_by": actor_identity,
-                "approved_at": utc_now(),
-                "update_reason": reason,
-            }
+        return approve_auto_rollback_policy_helper(
+            self,
+            policy_id=policy_id,
+            actor_identity=actor_identity,
+            reason=reason,
         )
-        self.event_store.append(
-            build_envelope(
-                topic=topics.STRATEGY_PROFILE_AUTO_ROLLBACK_POLICIES,
-                key=self.settings.default_symbol,
-                payload_model=approved,
-                source_component="strategy_profile_service",
-            )
-        )
-        return approved.model_dump(mode="json")
 
     def freeze_auto_rollback_policy(
         self,
@@ -1605,27 +1477,12 @@ class StrategyProfileControlService:
         actor_identity: str | None,
         reason: str,
     ) -> dict[str, Any]:
-        current = self._resolved_auto_rollback_policy()
-        updated = current.model_copy(
-            update={
-                "policy_status": "approved",
-                "effective": False if frozen else True,
-                "frozen": frozen,
-                "frozen_by": actor_identity if frozen else None,
-                "frozen_at": utc_now() if frozen else None,
-                "freeze_reason": reason if frozen else None,
-                "update_reason": reason,
-            }
+        return freeze_auto_rollback_policy_helper(
+            self,
+            frozen=frozen,
+            actor_identity=actor_identity,
+            reason=reason,
         )
-        self.event_store.append(
-            build_envelope(
-                topic=topics.STRATEGY_PROFILE_AUTO_ROLLBACK_POLICIES,
-                key=self.settings.default_symbol,
-                payload_model=updated,
-                source_component="strategy_profile_service",
-            )
-        )
-        return updated.model_dump(mode="json")
 
     def _comparison_report(
         self,
@@ -1634,84 +1491,12 @@ class StrategyProfileControlService:
         state: StrategyProfileActivationState,
         evaluations: list[StrategyProfileEvaluationRecord] | None = None,
     ) -> StrategyProfileComparisonReport:
-        if evaluations is None:
-            evaluations = self.repo.list_evaluations(
-                product_type=self.settings.trading_product_type,
-                margin_mode=self.settings.margin_mode,
-            )[:_PROFILE_COMPARISON_EVALUATION_LIMIT]
-        by_profile: dict[str, list[StrategyProfileEvaluationRecord]] = {}
-        for item in evaluations:
-            by_profile.setdefault(item.profile_id, []).append(item)
-
-        rows: list[StrategyProfileComparisonRow] = []
-        for revision in revisions:
-            profile_evaluations = by_profile.get(revision.profile_id, [])
-            trade_count = sum(item.trade_count for item in profile_evaluations)
-            evaluation_count = len(profile_evaluations)
-            avg_net_realized_pnl = (
-                sum(item.net_realized_pnl for item in profile_evaluations) / evaluation_count
-                if evaluation_count
-                else 0.0
-            )
-            avg_fee_ratio = (
-                sum(item.fee_to_gross_pnl_ratio for item in profile_evaluations) / evaluation_count
-                if evaluation_count
-                else 0.0
-            )
-            avg_churn_ratio = (
-                sum(item.small_pnl_churn_ratio for item in profile_evaluations) / evaluation_count
-                if evaluation_count
-                else 0.0
-            )
-            avg_win_rate = (
-                sum(item.win_rate for item in profile_evaluations) / evaluation_count
-                if evaluation_count
-                else 0.0
-            )
-            latest_status = profile_evaluations[0].status if profile_evaluations else None
-            score_breakdown = {
-                "net_realized_pnl": round(avg_net_realized_pnl, 6),
-                "win_rate": round(avg_win_rate * 100.0, 6),
-                "fee_penalty": round(avg_fee_ratio * float(self.settings.strategy_profile_score_fee_penalty_weight), 6),
-                "churn_penalty": round(
-                    avg_churn_ratio * float(self.settings.strategy_profile_score_churn_penalty_weight),
-                    6,
-                ),
-                "status_penalty": (
-                    float(self.settings.strategy_profile_score_degraded_status_penalty)
-                    if latest_status in {"degraded", "rollback_recommended", "rollback_executed"}
-                    else 0.0
-                ),
-            }
-            score = round(sum(score_breakdown.values()), 6)
-            rows.append(
-                StrategyProfileComparisonRow(
-                    profile_id=revision.profile_id,
-                    profile_label=revision.profile_label,
-                    risk_level=revision.risk_level,
-                    market_intent=revision.market_intent,
-                    axes=strategy_profile_axes_from_payload(revision.payload),
-                    evaluation_count=evaluation_count,
-                    total_trade_count=trade_count,
-                    avg_net_realized_pnl=avg_net_realized_pnl,
-                    avg_fee_to_gross_pnl_ratio=avg_fee_ratio,
-                    avg_small_pnl_churn_ratio=avg_churn_ratio,
-                    avg_win_rate=avg_win_rate,
-                    latest_status=latest_status,
-                    active=revision.profile_id == state.active_profile_id,
-                    pending=revision.profile_id == state.pending_profile_id,
-                    score=score,
-                    score_breakdown=score_breakdown,
-                    expected_behavior=list(revision.expected_behavior),
-                    summary=summarize_strategy_profile_payload(revision.payload),
-                )
-            )
-        rows.sort(key=lambda item: (-item.score, item.profile_id))
-        return StrategyProfileComparisonReport(
-            scope=self._scope(),
-            shadow_summary=self._shadow_summary_for_profiles(),
-            active_profile_id=state.active_profile_id,
-            rows=rows,
+        return build_comparison_report(
+            self,
+            revisions=revisions,
+            state=state,
+            evaluations=evaluations,
+            evaluation_limit=_PROFILE_COMPARISON_EVALUATION_LIMIT,
         )
 
     def _build_optimization_report(
@@ -1722,171 +1507,16 @@ class StrategyProfileControlService:
         evaluations: list[StrategyProfileEvaluationRecord],
         context_snapshot: StrategyProfileEvaluationContextSnapshot | None = None,
     ) -> StrategyProfileOptimizationReport:
-        if context_snapshot is None:
-            context_snapshot = self._tuning_context()
-        ai_performance_summary = self._shadow_summary_for_profiles()
-        context = self._context_payload(context_snapshot)
-        signals = self._resolved_context_signals(context)
-        replay_summary = self._recent_replay_summary(
-            symbol=self.settings.default_symbol,
-            regime=signals["regime"],
-            active_profile_id=state.active_profile_id,
-        )
-        replay_pipeline = self._build_offline_replay_pipeline(
-            comparison_rows=comparison_report.rows,
-            symbol=self.settings.default_symbol,
-            regime=signals["regime"],
-            active_profile_id=state.active_profile_id,
-        )
-        replay_summary = replay_pipeline.get("primary_summary") or replay_summary
-        previous_report = self._latest_optimization_report()
-        evaluation_refs_by_profile: dict[str, list[str]] = {}
-        for evaluation in evaluations:
-            evaluation_refs_by_profile.setdefault(evaluation.profile_id, []).append(evaluation.evaluation_id)
-
-        candidates: list[StrategyProfileOptimizationCandidate] = []
-        for row in comparison_report.rows:
-            shadow_adjustment = self._shadow_adjustment_for_profile(row=row, ai_performance_summary=ai_performance_summary)
-            replay_scorecard = (replay_pipeline.get("candidate_scores") or {}).get(row.profile_id) or {}
-            replay_adjustment = float(replay_scorecard.get("aggregate_adjustment") or 0.0)
-            stability_adjustment = self._stability_adjustment_for_profile(row=row, replay_summary=replay_summary)
-            composite_score = round(row.score + shadow_adjustment + replay_adjustment + stability_adjustment, 6)
-            reasons = self._optimization_reasons(
-                row=row,
-                shadow_adjustment=shadow_adjustment,
-                replay_adjustment=replay_adjustment,
-                stability_adjustment=stability_adjustment,
-                ai_performance_summary=ai_performance_summary,
-                replay_summary=replay_summary,
-            )
-            candidates.append(
-                StrategyProfileOptimizationCandidate(
-                    profile_id=row.profile_id,
-                    profile_label=row.profile_label,
-                    risk_level=row.risk_level,
-                    market_intent=row.market_intent,
-                    base_score=row.score,
-                    shadow_adjustment=shadow_adjustment,
-                    replay_adjustment=replay_adjustment,
-                    stability_adjustment=stability_adjustment,
-                    composite_score=composite_score,
-                    recommendation_strength=round(max(composite_score, 0.0), 6),
-                    offline_replay_score=replay_adjustment,
-                    offline_replay_breakdown=replay_scorecard,
-                    reasons=reasons,
-                    evaluation_refs=evaluation_refs_by_profile.get(row.profile_id, []),
-                    metrics={
-                        "evaluation_count": row.evaluation_count,
-                        "avg_net_realized_pnl": row.avg_net_realized_pnl,
-                        "avg_fee_to_gross_pnl_ratio": row.avg_fee_to_gross_pnl_ratio,
-                        "avg_small_pnl_churn_ratio": row.avg_small_pnl_churn_ratio,
-                        "avg_win_rate": row.avg_win_rate,
-                        "latest_status": row.latest_status,
-                        "shadow_summary": ai_performance_summary,
-                    },
-                )
-            )
-        candidates.sort(key=lambda item: (-item.composite_score, item.profile_id))
-        recommended = candidates[0].profile_id if candidates else None
-        active_candidate = next((item for item in candidates if item.profile_id == state.active_profile_id), None)
-        winner_candidate = candidates[0] if candidates else None
-        score_delta_vs_active = round(
-            float(winner_candidate.composite_score if winner_candidate is not None else 0.0)
-            - float(active_candidate.composite_score if active_candidate is not None else 0.0),
-            6,
-        )
-        notes = [
-            "offline_optimization_uses_historical_profile_evaluations",
-            "shadow_guard_adjustment_derived_from_latest_ai_performance_reports",
-            "replay_adjustment_derived_from_recent_replay_validations",
-            "replay_cross_bucket_scoring_enabled_for_symbol_regime_profile",
-        ]
-        winner_selection_policy = self._winner_selection_policy(
-            candidates=candidates,
-            ai_performance_summary=ai_performance_summary,
-        )
-        version_experiments = self._profile_version_experiments(
-            revisions=self.repo.list_revisions(
-                product_type=self.settings.trading_product_type,
-                margin_mode=self.settings.margin_mode,
-            ),
-            replay_pipeline=replay_pipeline,
-        )
-        return StrategyProfileOptimizationReport(
-            version=1 if previous_report is None else previous_report.version + 1,
-            parent_report_id=None if previous_report is None else previous_report.report_id,
-            scope=self._scope(),
-            product_type=self.settings.trading_product_type,
-            margin_mode=self.settings.margin_mode,
-            allowed_symbols=tuple(self.settings.allowed_symbols),
-            context_snapshot_id=context_snapshot.snapshot_id,
-            active_profile_id=state.active_profile_id,
-            recommended_profile_id=recommended,
-            recommended_by="winner_engine",
-            score_delta_vs_active=score_delta_vs_active,
-            replay_summary=replay_summary,
-            offline_replay_pipeline=replay_pipeline,
-            ai_performance_summary=ai_performance_summary,
-            winner_selection_policy=winner_selection_policy,
-            version_experiments=version_experiments,
-            candidates=candidates,
-            notes=notes,
+        return build_optimization_report(
+            self,
+            state=state,
+            comparison_report=comparison_report,
+            evaluations=evaluations,
+            context_snapshot=context_snapshot,
         )
 
     def _shadow_summary_for_profiles(self) -> dict[str, Any]:
-        latest_report = self.event_store.latest_by_topic_scoped(
-            topics.AI_PERFORMANCE_REPORTS,
-            scope=self.runtime_state_scope,
-        )
-        if latest_report is not None and isinstance(latest_report.payload, dict):
-            payload = latest_report.payload
-            summary = payload.get("summary") or {}
-            return {
-                "window_count": payload.get("window_count", 0),
-                "outperformed_count": summary.get("outperformed_count", 0),
-                "underperformed_count": summary.get("underperformed_count", 0),
-                "latest_net_pnl_delta": summary.get("latest_net_pnl_delta", 0.0),
-                "latest_fee_ratio_delta": summary.get("latest_fee_ratio_delta", 0.0),
-                "latest_churn_ratio_delta": summary.get("latest_churn_ratio_delta", 0.0),
-                "review_required": payload.get("review_required", False),
-                "latest_status": payload.get("latest_status", "insufficient_data"),
-            }
-        rows = list(
-            reversed(
-                self.event_store.by_topic_scoped(
-                    topics.AI_SHADOW_EVALUATIONS,
-                    scope=self.runtime_state_scope,
-                )
-            )
-        )[:10]
-        payloads = [item.payload for item in rows if isinstance(item.payload, dict)]
-        if not payloads:
-            return {
-                "window_count": 0,
-                "outperformed_count": 0,
-                "underperformed_count": 0,
-                "latest_net_pnl_delta": 0.0,
-                "latest_fee_ratio_delta": 0.0,
-                "latest_churn_ratio_delta": 0.0,
-            }
-        latest = payloads[0]
-        return {
-            "window_count": len(payloads),
-            "outperformed_count": sum(1 for item in payloads if item.get("shadow_outperformed") is True),
-            "underperformed_count": sum(1 for item in payloads if item.get("shadow_outperformed") is False),
-            "latest_net_pnl_delta": round(
-                float(Decimal(str(latest.get("shadow_net_pnl") or "0")) - Decimal(str(latest.get("baseline_net_pnl") or "0"))),
-                6,
-            ),
-            "latest_fee_ratio_delta": round(
-                float(latest.get("shadow_fee_ratio") or 0.0) - float(latest.get("baseline_fee_ratio") or 0.0),
-                6,
-            ),
-            "latest_churn_ratio_delta": round(
-                float(latest.get("shadow_churn_ratio") or 0.0) - float(latest.get("baseline_churn_ratio") or 0.0),
-                6,
-            ),
-        }
+        return shadow_summary_for_profiles(self)
 
     def _recent_replay_summary(
         self,
@@ -1896,144 +1526,13 @@ class StrategyProfileControlService:
         active_profile_id: str | None = None,
         limit: int = 20,
     ) -> dict[str, Any]:
-        rows = list(reversed(self.event_store.by_topic(topics.REPLAY_VALIDATIONS)))
-        scoped_rows: list[dict[str, Any]] = []
-        for event in rows:
-            payload = event.payload if isinstance(event.payload, dict) else None
-            if payload is None:
-                continue
-            product_type = payload.get("product_type")
-            margin_mode = payload.get("margin_mode")
-            allowed_symbols = tuple(payload.get("allowed_symbols") or ())
-            if product_type and product_type != self.settings.trading_product_type:
-                continue
-            if margin_mode and margin_mode != self.settings.margin_mode:
-                continue
-            if allowed_symbols and allowed_symbols != tuple(self.settings.allowed_symbols):
-                continue
-            scoped_rows.append(payload)
-            if len(scoped_rows) >= limit:
-                break
-        matched_symbol_rows = [item for item in scoped_rows if symbol and item.get("symbol") == symbol]
-        matched_regime_rows = [item for item in scoped_rows if regime and item.get("regime") == regime]
-        matched_profile_rows = [
-            item for item in scoped_rows if active_profile_id and item.get("active_profile_id") == active_profile_id
-        ]
-        matched_cross_rows = [
-            item
-            for item in scoped_rows
-            if (symbol is None or item.get("symbol") == symbol)
-            and (regime is None or item.get("regime") == regime)
-            and (active_profile_id is None or item.get("active_profile_id") == active_profile_id)
-        ]
-        if not scoped_rows:
-            return {
-                "validation_count": 0,
-                "healthy_rate": 0.0,
-                "avg_divergence_count": None,
-                "avg_divergence_density": None,
-                "avg_chain_health_score": None,
-                "avg_portfolio_issue_count": None,
-                "avg_decision_chain_issue_count": None,
-                "avg_execution_chain_issue_count": None,
-                "avg_audit_issue_count": None,
-                "avg_baseline_switch_issue_count": None,
-                "latest_validation": None,
-                "target_symbol": symbol,
-                "target_regime": regime,
-            "target_profile_id": active_profile_id,
-            "bucket_scores": {},
-            "cross_bucket_scores": [],
-            "current_cross_bucket": {"count": 0, "healthy_rate": 0.0, "avg_chain_health_score": None, "avg_divergence_density": None},
-        }
-        def _bucket(rows_subset: list[dict[str, Any]]) -> dict[str, Any]:
-            if not rows_subset:
-                return {"count": 0, "healthy_rate": 0.0, "avg_chain_health_score": None, "avg_divergence_density": None}
-            return {
-                "count": len(rows_subset),
-                "healthy_rate": round(sum(1 for item in rows_subset if item.get("healthy")) / len(rows_subset), 6),
-                "avg_chain_health_score": round(
-                    sum(float(item.get("chain_health_score") or 0.0) for item in rows_subset) / len(rows_subset),
-                    6,
-                ),
-                "avg_divergence_density": round(
-                    sum(float(item.get("divergence_density") or 0.0) for item in rows_subset) / len(rows_subset),
-                    6,
-                ),
-            }
-        cross_bucket_map: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
-        for item in scoped_rows:
-            cross_key = (
-                str(item.get("symbol") or "unknown"),
-                str(item.get("regime") or "unknown"),
-                str(item.get("active_profile_id") or "unknown"),
-            )
-            cross_bucket_map.setdefault(cross_key, []).append(item)
-        cross_bucket_scores = [
-            {
-                "symbol": cross_key[0],
-                "regime": cross_key[1],
-                "profile_id": cross_key[2],
-                **_bucket(bucket_rows),
-            }
-            for cross_key, bucket_rows in cross_bucket_map.items()
-        ]
-        cross_bucket_scores.sort(
-            key=lambda item: (
-                -int(item.get("count") or 0),
-                -float(item.get("avg_chain_health_score") or 0.0),
-                str(item.get("symbol") or ""),
-                str(item.get("regime") or ""),
-                str(item.get("profile_id") or ""),
-            )
+        return recent_replay_summary(
+            self,
+            symbol=symbol,
+            regime=regime,
+            active_profile_id=active_profile_id,
+            limit=limit,
         )
-        return {
-            "validation_count": len(scoped_rows),
-            "healthy_rate": round(sum(1 for item in scoped_rows if item.get("healthy")) / len(scoped_rows), 6),
-            "avg_divergence_count": round(
-                sum(float(item.get("divergence_count") or 0.0) for item in scoped_rows) / len(scoped_rows),
-                6,
-            ),
-            "avg_divergence_density": round(
-                sum(float(item.get("divergence_density") or 0.0) for item in scoped_rows) / len(scoped_rows),
-                6,
-            ),
-            "avg_chain_health_score": round(
-                sum(float(item.get("chain_health_score") or 0.0) for item in scoped_rows) / len(scoped_rows),
-                6,
-            ),
-            "avg_portfolio_issue_count": round(
-                sum(float(item.get("portfolio_issue_count") or 0.0) for item in scoped_rows) / len(scoped_rows),
-                6,
-            ),
-            "avg_decision_chain_issue_count": round(
-                sum(float(item.get("decision_chain_issue_count") or 0.0) for item in scoped_rows) / len(scoped_rows),
-                6,
-            ),
-            "avg_execution_chain_issue_count": round(
-                sum(float(item.get("execution_chain_issue_count") or 0.0) for item in scoped_rows) / len(scoped_rows),
-                6,
-            ),
-            "avg_audit_issue_count": round(
-                sum(float(item.get("audit_issue_count") or 0.0) for item in scoped_rows) / len(scoped_rows),
-                6,
-            ),
-            "avg_baseline_switch_issue_count": round(
-                sum(float(item.get("baseline_switch_issue_count") or 0.0) for item in scoped_rows) / len(scoped_rows),
-                6,
-            ),
-            "latest_validation": scoped_rows[0],
-            "target_symbol": symbol,
-            "target_regime": regime,
-            "target_profile_id": active_profile_id,
-            "bucket_scores": {
-                "symbol": _bucket(matched_symbol_rows),
-                "regime": _bucket(matched_regime_rows),
-                "profile": _bucket(matched_profile_rows),
-            },
-            "cross_bucket_scores": cross_bucket_scores[:12],
-            "current_cross_bucket": _bucket(matched_cross_rows),
-        }
 
     def _build_offline_replay_pipeline(
         self,
@@ -2043,71 +1542,13 @@ class StrategyProfileControlService:
         regime: str | None,
         active_profile_id: str | None,
     ) -> dict[str, Any]:
-        windows = sorted({int(item) for item in self.settings.strategy_profile_offline_replay_windows if int(item) > 0})
-        if not windows:
-            windows = [20]
-        window_reports: list[dict[str, Any]] = []
-        primary_summary: dict[str, Any] | None = None
-        for index, window in enumerate(windows):
-            summary = self._recent_replay_summary(
-                symbol=symbol,
-                regime=regime,
-                active_profile_id=active_profile_id,
-                limit=window,
-            )
-            if index == 0:
-                primary_summary = summary
-            window_reports.append(
-                {
-                    "window": window,
-                    "summary": summary,
-                }
-            )
-        candidate_scores: dict[str, dict[str, Any]] = {}
-        for row in comparison_rows:
-            experiments: list[dict[str, Any]] = []
-            for window_report in window_reports:
-                summary = window_report["summary"]
-                scorecard = self._offline_replay_scorecard_for_row(row=row, replay_summary=summary)
-                scorecard["window"] = window_report["window"]
-                experiments.append(scorecard)
-            aggregate_adjustment = round(
-                sum(float(item.get("final_adjustment") or 0.0) for item in experiments) / len(experiments),
-                6,
-            ) if experiments else 0.0
-            aggregate_confidence = round(
-                sum(float(item.get("confidence_weight") or 0.0) for item in experiments) / len(experiments),
-                6,
-            ) if experiments else 0.0
-            consensus = "positive" if aggregate_adjustment > 0 else "negative" if aggregate_adjustment < 0 else "neutral"
-            candidate_scores[row.profile_id] = {
-                "aggregate_adjustment": aggregate_adjustment,
-                "aggregate_confidence": aggregate_confidence,
-                "consensus": consensus,
-                "experiments": experiments,
-            }
-        return {
-            "pipeline_version": self.settings.strategy_profile_offline_replay_pipeline_version,
-            "history_window": {
-                "window_sizes": windows,
-                "target_symbol": symbol,
-                "target_regime": regime,
-                "active_profile_id": active_profile_id,
-            },
-            "stages": [
-                "scope_history",
-                "run_multi_window_replay_scoring",
-                "score_symbol_bucket",
-                "score_regime_bucket",
-                "score_profile_bucket",
-                "score_symbol_regime_profile_cross_bucket",
-                "aggregate_window_experiments",
-                "emit_candidate_adjustments",
-            ],
-            "candidate_scores": candidate_scores,
-            "window_reports": window_reports,
-            "primary_summary": primary_summary or {},
-        }
+        return build_offline_replay_pipeline(
+            self,
+            comparison_rows=comparison_rows,
+            symbol=symbol,
+            regime=regime,
+            active_profile_id=active_profile_id,
+        )
 
     def _winner_selection_policy(
         self,
