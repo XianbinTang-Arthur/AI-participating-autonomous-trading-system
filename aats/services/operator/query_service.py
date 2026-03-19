@@ -31,6 +31,7 @@ from aats.services.operator.runtime_profiles import (
     readonly_runtime_profile_snapshot,
     runtime_profile_action_payload,
 )
+from aats.services.operator.strategy_profile_queries import StrategyProfileQueryFacade
 from aats.services.operator.strategy_profiles import StrategyProfileControlService
 from aats.services.portfolio_service.reconstruction import PortfolioReconstructionService
 from aats.services.reconciliation_service.replay import ReplayEngine, ReplayResult
@@ -60,6 +61,7 @@ class OperatorQueryService:
         self.state_scope = runtime_state_scope(runtime.settings)
         self._cache: dict[str, Any] = {}
         self.strategy_profiles = StrategyProfileControlService(runtime)
+        self.strategy_profile_queries = StrategyProfileQueryFacade(self)
 
     def _cached(self, key: str, loader):
         if key not in self._cache:
@@ -830,93 +832,37 @@ class OperatorQueryService:
         )
 
     def strategy_profile_snapshot(self) -> dict[str, Any]:
-        return self._cached("strategy_profile_snapshot", self.strategy_profiles.snapshot)
+        return self.strategy_profile_queries.snapshot()
 
     def strategy_profile_optimization_reports(self, *, limit: int, offset: int) -> dict[str, Any]:
-        rows = self._recent_strategy_profile_optimization_report_events()
-        return self._paginate_rows(
-            rows,
-            limit=limit,
-            offset=offset,
-            key="reports",
-            serializer=self.payload,
-        )
+        return self.strategy_profile_queries.optimization_reports(limit=limit, offset=offset)
 
     def strategy_profile_selection_decisions(self, *, limit: int, offset: int) -> dict[str, Any]:
-        rows = self._recent_strategy_profile_selection_decision_events()
-        return self._paginate_rows(
-            rows,
-            limit=limit,
-            offset=offset,
-            key="decisions",
-            serializer=self.payload,
-        )
+        return self.strategy_profile_queries.selection_decisions(limit=limit, offset=offset)
 
     def strategy_profile_auto_rollback_policy(self) -> dict[str, Any]:
-        return self.strategy_profiles.snapshot().get("auto_rollback_policy", {})
+        return self.strategy_profile_queries.auto_rollback_policy()
 
     def strategy_profile_auto_rollback_policy_history(self, *, limit: int, offset: int) -> dict[str, Any]:
-        rows = self.strategy_profiles.snapshot().get("auto_rollback_policy_history", [])
-        return self._paginate_rows(rows, limit=limit, offset=offset, key="history")
+        return self.strategy_profile_queries.auto_rollback_policy_history(limit=limit, offset=offset)
 
     def strategy_profile_activation_policy(self) -> dict[str, Any]:
-        return self.strategy_profiles.snapshot().get("activation_policy", {})
+        return self.strategy_profile_queries.activation_policy()
 
     def strategy_profile_activation_policy_history(self, *, limit: int, offset: int) -> dict[str, Any]:
-        rows = self.strategy_profiles.snapshot().get("activation_policy_history", [])
-        return self._paginate_rows(rows, limit=limit, offset=offset, key="history")
+        return self.strategy_profile_queries.activation_policy_history(limit=limit, offset=offset)
 
     def strategy_profile_recommendations(self, *, limit: int, offset: int) -> dict[str, Any]:
-        rows = self.runtime.strategy_profile_repo.list_recommendations(
-            product_type=self.runtime.settings.trading_product_type,
-            margin_mode=self.runtime.settings.margin_mode,
-        )
-        return self._paginate_rows(
-            rows,
-            limit=limit,
-            offset=offset,
-            key="recommendations",
-            serializer=lambda item: item.model_dump(mode="json"),
-        )
+        return self.strategy_profile_queries.recommendations(limit=limit, offset=offset)
 
     def strategy_profile_activation_history(self, *, limit: int, offset: int) -> dict[str, Any]:
-        rows = self.runtime.strategy_profile_repo.list_activation_history(
-            product_type=self.runtime.settings.trading_product_type,
-            margin_mode=self.runtime.settings.margin_mode,
-        )
-        return self._paginate_rows(
-            rows,
-            limit=limit,
-            offset=offset,
-            key="history",
-            serializer=lambda item: item.model_dump(mode="json"),
-        )
+        return self.strategy_profile_queries.activation_history(limit=limit, offset=offset)
 
     def strategy_profile_rejections(self, *, limit: int, offset: int) -> dict[str, Any]:
-        rows = self.runtime.strategy_profile_repo.list_rejections(
-            product_type=self.runtime.settings.trading_product_type,
-            margin_mode=self.runtime.settings.margin_mode,
-        )
-        return self._paginate_rows(
-            rows,
-            limit=limit,
-            offset=offset,
-            key="rejections",
-            serializer=lambda item: item.model_dump(mode="json"),
-        )
+        return self.strategy_profile_queries.rejections(limit=limit, offset=offset)
 
     def strategy_profile_evaluations(self, *, limit: int, offset: int) -> dict[str, Any]:
-        rows = self.runtime.strategy_profile_repo.list_evaluations(
-            product_type=self.runtime.settings.trading_product_type,
-            margin_mode=self.runtime.settings.margin_mode,
-        )
-        return self._paginate_rows(
-            rows,
-            limit=limit,
-            offset=offset,
-            key="evaluations",
-            serializer=lambda item: item.model_dump(mode="json"),
-        )
+        return self.strategy_profile_queries.evaluations(limit=limit, offset=offset)
 
     async def evaluate_strategy_profile(
         self,
@@ -926,25 +872,12 @@ class OperatorQueryService:
         actor_identity: str | None,
         auth_source: AuthSource,
     ) -> dict[str, Any]:
-        result = await self.strategy_profiles.evaluate_now(allow_auto_activation=allow_auto_activation)
-        self._append_event(
-            topic=topics.OPERATOR_ACTIONS,
-            key="strategy_profile",
-            payload_model=self.strategy_profiles.audit_payload(
-                action="strategy_profile_evaluate",
-                actor_role=actor_role,
-                actor_identity=actor_identity,
-                auth_source=auth_source,
-                status="recommendation_generated",
-                details={
-                    "recommended_profile_id": result["recommendation"]["recommended_profile_id"],
-                    "allow_auto_activation": allow_auto_activation,
-                    "auto_activation_executed": bool(result.get("auto_activation") or result.get("profile_activation_policy") or result.get("auto_rollback")),
-                },
-            ),
+        return await self.strategy_profile_queries.evaluate_now(
+            allow_auto_activation=allow_auto_activation,
+            actor_role=actor_role,
+            actor_identity=actor_identity,
+            auth_source=auth_source,
         )
-        self._invalidate_cache()
-        return result
 
     def accept_strategy_profile_recommendation(
         self,
@@ -956,7 +889,7 @@ class OperatorQueryService:
         actor_identity: str | None,
         auth_source: AuthSource,
     ) -> dict[str, Any]:
-        result = self.strategy_profiles.accept_recommendation(
+        return self.strategy_profile_queries.accept_recommendation(
             recommendation_id=recommendation_id,
             activation_mode=activation_mode,
             reason=reason,
@@ -964,24 +897,6 @@ class OperatorQueryService:
             actor_identity=actor_identity,
             auth_source=auth_source,
         )
-        self._append_event(
-            topic=topics.OPERATOR_ACTIONS,
-            key="strategy_profile",
-            payload_model=self.strategy_profiles.audit_payload(
-                action="strategy_profile_accept",
-                actor_role=actor_role,
-                actor_identity=actor_identity,
-                auth_source=auth_source,
-                status=result["status"],
-                details={
-                    "recommendation_id": recommendation_id,
-                    "activation_mode": activation_mode,
-                    "active_profile_id": result.get("active_revision", {}).get("profile_id"),
-                },
-            ),
-        )
-        self._invalidate_cache()
-        return result
 
     def reject_strategy_profile_recommendation(
         self,
@@ -993,27 +908,14 @@ class OperatorQueryService:
         actor_identity: str | None,
         auth_source: AuthSource,
     ) -> dict[str, Any]:
-        result = self.strategy_profiles.reject_recommendation(
+        return self.strategy_profile_queries.reject_recommendation(
             recommendation_id=recommendation_id,
             reason_code=reason_code,
             reason_detail=reason_detail,
             actor_role=actor_role,
             actor_identity=actor_identity,
+            auth_source=auth_source,
         )
-        self._append_event(
-            topic=topics.OPERATOR_ACTIONS,
-            key="strategy_profile",
-            payload_model=self.strategy_profiles.audit_payload(
-                action="strategy_profile_reject",
-                actor_role=actor_role,
-                actor_identity=actor_identity,
-                auth_source=auth_source,
-                status="recommendation_rejected",
-                details={"recommendation_id": recommendation_id, "reason_code": reason_code},
-            ),
-        )
-        self._invalidate_cache()
-        return result
 
     def activate_pending_strategy_profile(
         self,
@@ -1023,26 +925,12 @@ class OperatorQueryService:
         actor_identity: str | None,
         auth_source: AuthSource,
     ) -> dict[str, Any]:
-        result = self.strategy_profiles.activate_pending(
+        return self.strategy_profile_queries.activate_pending(
             reason=reason,
             actor_role=actor_role,
             actor_identity=actor_identity,
             auth_source=auth_source,
         )
-        self._append_event(
-            topic=topics.OPERATOR_ACTIONS,
-            key="strategy_profile",
-            payload_model=self.strategy_profiles.audit_payload(
-                action="strategy_profile_activate_pending",
-                actor_role=actor_role,
-                actor_identity=actor_identity,
-                auth_source=auth_source,
-                status="pending_profile_activated",
-                details={"active_profile_id": result["active_revision"]["profile_id"]},
-            ),
-        )
-        self._invalidate_cache()
-        return result
 
     def rollback_strategy_profile(
         self,
@@ -1052,26 +940,12 @@ class OperatorQueryService:
         actor_identity: str | None,
         auth_source: AuthSource,
     ) -> dict[str, Any]:
-        result = self.strategy_profiles.rollback(
+        return self.strategy_profile_queries.rollback(
             reason=reason,
             actor_role=actor_role,
             actor_identity=actor_identity,
             auth_source=auth_source,
         )
-        self._append_event(
-            topic=topics.OPERATOR_ACTIONS,
-            key="strategy_profile",
-            payload_model=self.strategy_profiles.audit_payload(
-                action="strategy_profile_rollback",
-                actor_role=actor_role,
-                actor_identity=actor_identity,
-                auth_source=auth_source,
-                status="profile_rolled_back",
-                details={"active_profile_id": result["active_revision"]["profile_id"]},
-            ),
-        )
-        self._invalidate_cache()
-        return result
 
     def activate_strategy_profile(
         self,
@@ -1082,30 +956,13 @@ class OperatorQueryService:
         actor_identity: str | None,
         auth_source: AuthSource,
     ) -> dict[str, Any]:
-        result = self.strategy_profiles.activate_profile(
+        return self.strategy_profile_queries.activate_profile(
             profile_id=profile_id,
             reason=reason,
             actor_role=actor_role,
             actor_identity=actor_identity,
             auth_source=auth_source,
         )
-        self._append_event(
-            topic=topics.OPERATOR_ACTIONS,
-            key="strategy_profile",
-            payload_model=self.strategy_profiles.audit_payload(
-                action="strategy_profile_manual_activate",
-                actor_role=actor_role,
-                actor_identity=actor_identity,
-                auth_source=auth_source,
-                status="profile_manually_activated",
-                details={
-                    "requested_profile_id": profile_id,
-                    "active_profile_id": result["active_revision"]["profile_id"],
-                },
-            ),
-        )
-        self._invalidate_cache()
-        return result
 
     def update_strategy_profile_auto_rollback_policy(
         self,
@@ -1122,7 +979,7 @@ class OperatorQueryService:
         actor_identity: str | None,
         auth_source: AuthSource,
     ) -> dict[str, Any]:
-        policy = self.strategy_profiles.update_auto_rollback_policy(
+        return self.strategy_profile_queries.update_auto_rollback_policy(
             enabled=enabled,
             review_required_only=review_required_only,
             min_trade_count=min_trade_count,
@@ -1131,22 +988,10 @@ class OperatorQueryService:
             matrix_allowed_regimes=matrix_allowed_regimes,
             matrix_allowed_profiles=matrix_allowed_profiles,
             reason=reason,
+            actor_role=actor_role,
             actor_identity=actor_identity,
+            auth_source=auth_source,
         )
-        self._append_event(
-            topic=topics.OPERATOR_ACTIONS,
-            key="strategy_profile",
-            payload_model=self.strategy_profiles.audit_payload(
-                action="strategy_profile_rollback",
-                actor_role=actor_role,
-                actor_identity=actor_identity,
-                auth_source=auth_source,
-                status="auto_rollback_policy_updated",
-                details=policy,
-            ),
-        )
-        self._invalidate_cache()
-        return {"policy": policy}
 
     def approve_strategy_profile_auto_rollback_policy(
         self,
@@ -1157,25 +1002,13 @@ class OperatorQueryService:
         actor_identity: str | None,
         auth_source: AuthSource,
     ) -> dict[str, Any]:
-        policy = self.strategy_profiles.approve_auto_rollback_policy(
+        return self.strategy_profile_queries.approve_auto_rollback_policy(
             policy_id=policy_id,
-            actor_identity=actor_identity,
             reason=reason,
+            actor_role=actor_role,
+            actor_identity=actor_identity,
+            auth_source=auth_source,
         )
-        self._append_event(
-            topic=topics.OPERATOR_ACTIONS,
-            key="strategy_profile",
-            payload_model=self.strategy_profiles.audit_payload(
-                action="strategy_profile_rollback",
-                actor_role=actor_role,
-                actor_identity=actor_identity,
-                auth_source=auth_source,
-                status="auto_rollback_policy_approved",
-                details=policy,
-            ),
-        )
-        self._invalidate_cache()
-        return {"policy": policy}
 
     def freeze_strategy_profile_auto_rollback_policy(
         self,
@@ -1186,25 +1019,13 @@ class OperatorQueryService:
         actor_identity: str | None,
         auth_source: AuthSource,
     ) -> dict[str, Any]:
-        policy = self.strategy_profiles.freeze_auto_rollback_policy(
+        return self.strategy_profile_queries.freeze_auto_rollback_policy(
             frozen=frozen,
-            actor_identity=actor_identity,
             reason=reason,
+            actor_role=actor_role,
+            actor_identity=actor_identity,
+            auth_source=auth_source,
         )
-        self._append_event(
-            topic=topics.OPERATOR_ACTIONS,
-            key="strategy_profile",
-            payload_model=self.strategy_profiles.audit_payload(
-                action="strategy_profile_rollback",
-                actor_role=actor_role,
-                actor_identity=actor_identity,
-                auth_source=auth_source,
-                status="auto_rollback_policy_frozen" if frozen else "auto_rollback_policy_unfrozen",
-                details=policy,
-            ),
-        )
-        self._invalidate_cache()
-        return {"policy": policy}
 
     def update_strategy_profile_activation_policy(
         self,
@@ -1223,7 +1044,7 @@ class OperatorQueryService:
         actor_identity: str | None,
         auth_source: AuthSource,
     ) -> dict[str, Any]:
-        policy = self.strategy_profiles.update_activation_policy(
+        return self.strategy_profile_queries.update_activation_policy(
             enabled=enabled,
             min_composite_score=min_composite_score,
             min_offline_replay_score=min_offline_replay_score,
@@ -1234,22 +1055,10 @@ class OperatorQueryService:
             matrix_allowed_regimes=matrix_allowed_regimes,
             matrix_allowed_profiles=matrix_allowed_profiles,
             reason=reason,
+            actor_role=actor_role,
             actor_identity=actor_identity,
+            auth_source=auth_source,
         )
-        self._append_event(
-            topic=topics.OPERATOR_ACTIONS,
-            key="strategy_profile",
-            payload_model=self.strategy_profiles.audit_payload(
-                action="strategy_profile_activation_policy",
-                actor_role=actor_role,
-                actor_identity=actor_identity,
-                auth_source=auth_source,
-                status="activation_policy_updated",
-                details=policy,
-            ),
-        )
-        self._invalidate_cache()
-        return {"policy": policy}
 
     def approve_strategy_profile_activation_policy(
         self,
@@ -1260,25 +1069,13 @@ class OperatorQueryService:
         actor_identity: str | None,
         auth_source: AuthSource,
     ) -> dict[str, Any]:
-        policy = self.strategy_profiles.approve_activation_policy(
+        return self.strategy_profile_queries.approve_activation_policy(
             policy_id=policy_id,
-            actor_identity=actor_identity,
             reason=reason,
+            actor_role=actor_role,
+            actor_identity=actor_identity,
+            auth_source=auth_source,
         )
-        self._append_event(
-            topic=topics.OPERATOR_ACTIONS,
-            key="strategy_profile",
-            payload_model=self.strategy_profiles.audit_payload(
-                action="strategy_profile_activation_policy",
-                actor_role=actor_role,
-                actor_identity=actor_identity,
-                auth_source=auth_source,
-                status="activation_policy_approved",
-                details=policy,
-            ),
-        )
-        self._invalidate_cache()
-        return {"policy": policy}
 
     def freeze_strategy_profile_activation_policy(
         self,
@@ -1289,25 +1086,13 @@ class OperatorQueryService:
         actor_identity: str | None,
         auth_source: AuthSource,
     ) -> dict[str, Any]:
-        policy = self.strategy_profiles.freeze_activation_policy(
+        return self.strategy_profile_queries.freeze_activation_policy(
             frozen=frozen,
-            actor_identity=actor_identity,
             reason=reason,
+            actor_role=actor_role,
+            actor_identity=actor_identity,
+            auth_source=auth_source,
         )
-        self._append_event(
-            topic=topics.OPERATOR_ACTIONS,
-            key="strategy_profile",
-            payload_model=self.strategy_profiles.audit_payload(
-                action="strategy_profile_activation_policy",
-                actor_role=actor_role,
-                actor_identity=actor_identity,
-                auth_source=auth_source,
-                status="activation_policy_frozen" if frozen else "activation_policy_unfrozen",
-                details=policy,
-            ),
-        )
-        self._invalidate_cache()
-        return {"policy": policy}
 
     def create_operator_user(
         self,
