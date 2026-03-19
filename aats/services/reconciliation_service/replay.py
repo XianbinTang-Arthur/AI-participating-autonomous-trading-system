@@ -13,11 +13,11 @@ from aats.schemas.execution import ExecutionPlan, FillEvent, OrderIntent, OrderS
 from aats.schemas.exchange import AccountBaselineSnapshot
 from aats.schemas.governance import PolicyDecision, RiskDecision
 from aats.schemas.market import MarketSnapshot
-from aats.schemas.portfolio import PortfolioSnapshot
+from aats.schemas.portfolio import PortfolioSnapshot, is_baseline_snapshot
 from aats.schemas.reconciliation import ReconciliationReport
 from aats.schemas.system import HealthSnapshot
 from aats.services.execution_engine.state_machine import OrderStateMachine
-from aats.services.portfolio_service.decimals import is_effectively_zero, to_decimal
+from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, EPSILON_DECIMAL_9, is_effectively_zero, quantize_decimal, to_decimal
 from aats.services.portfolio_service.positions import PortfolioState
 from aats.storage.base import AuditRepository, EventStore, PortfolioRepository
 from aats.services.portfolio_service.reconstruction import PortfolioReconstructionService
@@ -49,6 +49,8 @@ class ReplayResult:
 
 
 class ReplayEngine:
+    _SNAPSHOT_DERIVED_FIELD_TOLERANCE = Decimal("1e-7")
+
     _SCOPED_TOPICS: tuple[str, ...] = (
         topics.MARKET_SNAPSHOTS,
         topics.FEATURE_SNAPSHOTS,
@@ -97,7 +99,7 @@ class ReplayEngine:
         end_at: datetime | None = None,
     ) -> ReplayResult:
         selected_decision_id = decision_id
-        latest_prices: dict[str, float] = {}
+        latest_prices: dict[str, Decimal] = {}
         processed_fills: list[FillEvent] = []
         decision_chains: dict[str, DecisionAuditRecord] = {}
         decision_ids: set[str] = set()
@@ -164,10 +166,7 @@ class ReplayEngine:
                 stored_snapshot = PortfolioSnapshot.model_validate(envelope.payload)
                 final_stored_snapshot = stored_snapshot
 
-                if (
-                    stored_snapshot.source_fill_id is None
-                    and stored_snapshot.source_intent_id is None
-                ):
+                if is_baseline_snapshot(stored_snapshot):
                     baseline_snapshot = stored_snapshot
                     continue
 
@@ -196,7 +195,7 @@ class ReplayEngine:
                     latest_prices=latest_prices,
                 )
                 if final_stored_snapshot is not None
-                else lambda symbol: latest_prices.get(symbol, 0.0)
+                else lambda symbol: latest_prices.get(symbol, Decimal("0"))
             )
             final_reconstructed_snapshot = self._rebuild_snapshot(
                 fills=processed_fills,
@@ -244,8 +243,12 @@ class ReplayEngine:
             )
             if repo_latest is None:
                 portfolio_issues.append("portfolio_repository_missing_latest_snapshot")
-            elif self._snapshot_signature(repo_latest) != self._snapshot_signature(final_stored_snapshot):
+            elif self._snapshot_mismatch(
+                stored_snapshot=repo_latest,
+                reconstructed_snapshot=final_stored_snapshot,
+            ):
                 portfolio_issues.append("portfolio_repository_latest_snapshot_mismatch")
+            final_stored_snapshot = repo_latest
 
         if self.audit_repo is not None:
             audit_issues.extend(
@@ -334,22 +337,22 @@ class ReplayEngine:
     def _snapshot_price_provider(
         *,
         stored_snapshot: PortfolioSnapshot | None,
-        latest_prices: dict[str, float],
+        latest_prices: dict[str, Decimal],
     ):
-        snapshot_marks: dict[str, float] = {}
+        snapshot_marks: dict[str, Decimal] = {}
         if stored_snapshot is not None:
             for position in stored_snapshot.positions:
-                if abs(position.position_qty) > 1e-12:
+                if abs(position.position_qty) > EPSILON_DECIMAL_12:
                     snapshot_marks[position.symbol] = (
                         position.position_notional / position.position_qty
                     )
-                elif position.avg_entry_price > 0.0:
+                elif position.avg_entry_price > 0:
                     snapshot_marks[position.symbol] = position.avg_entry_price
 
-        def provider(symbol: str) -> float:
+        def provider(symbol: str) -> Decimal:
             if symbol in snapshot_marks:
                 return snapshot_marks[symbol]
-            return latest_prices.get(symbol, 0.0)
+            return latest_prices.get(symbol, Decimal("0"))
 
         return provider
 
@@ -468,25 +471,25 @@ class ReplayEngine:
                 fills_by_intent_id.get(intent_id, []),
                 key=lambda item: (item.ingestion_timestamp, item.fill_id),
             )
-            cumulative_fill_qty = sum(fill.fill_qty for fill in fill_events)
-            if cumulative_fill_qty - order_state.requested_qty > 1e-12:
+            cumulative_fill_qty = sum((fill.fill_qty for fill in fill_events), start=Decimal("0"))
+            if cumulative_fill_qty - order_state.requested_qty > EPSILON_DECIMAL_12:
                 issues.append(
                     f"execution_chain_overfilled_order intent_id={intent_id} cumulative_fill_qty={cumulative_fill_qty} requested_qty={order_state.requested_qty}"
                 )
-            if abs(cumulative_fill_qty - order_state.filled_qty) > 1e-12:
+            if abs(cumulative_fill_qty - order_state.filled_qty) > EPSILON_DECIMAL_12:
                 issues.append(
                     f"execution_chain_fill_quantity_mismatch intent_id={intent_id} cumulative_fill_qty={cumulative_fill_qty} order_state_filled_qty={order_state.filled_qty}"
                 )
-            expected_remaining = max(order_state.requested_qty - cumulative_fill_qty, 0.0)
-            if abs(order_state.remaining_qty - expected_remaining) > 1e-12:
+            expected_remaining = max(order_state.requested_qty - cumulative_fill_qty, Decimal("0"))
+            if abs(order_state.remaining_qty - expected_remaining) > EPSILON_DECIMAL_12:
                 issues.append(
                     f"execution_chain_remaining_quantity_mismatch intent_id={intent_id} remaining_qty={order_state.remaining_qty} expected_remaining={expected_remaining}"
                 )
-            if order_state.status == "FILLED" and abs(cumulative_fill_qty - order_state.requested_qty) > 1e-12:
+            if order_state.status == "FILLED" and abs(cumulative_fill_qty - order_state.requested_qty) > EPSILON_DECIMAL_12:
                 issues.append(
                     f"execution_chain_filled_without_complete_fill_quantity intent_id={intent_id}"
                 )
-            if order_state.status in {"SUBMITTED", "CREATED", "SUBMITTING"} and cumulative_fill_qty > 1e-12:
+            if order_state.status in {"SUBMITTED", "CREATED", "SUBMITTING"} and cumulative_fill_qty > EPSILON_DECIMAL_12:
                 issues.append(
                     f"execution_chain_open_state_with_fill_quantity intent_id={intent_id} status={order_state.status}"
                 )
@@ -820,7 +823,7 @@ class ReplayEngine:
                 )
             if (
                 target is not None
-                and abs(target.delta_position_qty) < 1e-12
+                and abs(to_decimal(target.delta_position_qty)) < EPSILON_DECIMAL_12
                 and record.order_intent_refs
             ):
                 issues.append(
@@ -841,8 +844,8 @@ class ReplayEngine:
                     if (
                         risk is not None
                         and abs(
-                            execution_plan.approved_target_position_qty - risk.capped_target_position_qty
-                        ) > 1e-12
+                            execution_plan.approved_target_position_qty - to_decimal(risk.capped_target_position_qty)
+                        ) > EPSILON_DECIMAL_12
                     ):
                         issues.append(
                             "decision_chain_execution_plan_risk_mismatch "
@@ -1031,12 +1034,20 @@ class ReplayEngine:
         mismatch: dict[str, object] = {}
         stored_signature = ReplayEngine._snapshot_signature(stored_snapshot)
         reconstructed_signature = ReplayEngine._snapshot_signature(reconstructed_snapshot)
-        if stored_signature["balances"] != reconstructed_signature["balances"]:
+        if not ReplayEngine._decimal_map_matches(
+            stored_snapshot.balances,
+            reconstructed_snapshot.balances,
+            tolerance=EPSILON_DECIMAL_9,
+        ):
             mismatch["balances"] = {
                 "stored": stored_snapshot.balances,
                 "reconstructed": reconstructed_snapshot.balances,
             }
-        if stored_signature["cost_basis"] != reconstructed_signature["cost_basis"]:
+        if not ReplayEngine._decimal_map_matches(
+            stored_snapshot.cost_basis,
+            reconstructed_snapshot.cost_basis,
+            tolerance=EPSILON_DECIMAL_9,
+        ):
             mismatch["cost_basis"] = {
                 "stored": stored_snapshot.cost_basis,
                 "reconstructed": reconstructed_snapshot.cost_basis,
@@ -1044,15 +1055,22 @@ class ReplayEngine:
 
         stored_positions = stored_signature["positions"]
         replayed_positions = reconstructed_signature["positions"]
-        if stored_positions != replayed_positions:
+        if not ReplayEngine._decimal_map_matches(
+            stored_positions,
+            replayed_positions,
+            tolerance=EPSILON_DECIMAL_9,
+        ):
             mismatch["positions"] = {
                 "stored": stored_positions,
                 "reconstructed": replayed_positions,
             }
 
-        numeric_fields = ("realized_pnl",)
+        numeric_fields = ("realized_pnl", "unrealized_pnl", "total_equity", "gross_exposure", "net_exposure")
         for field_name in numeric_fields:
-            if stored_signature[field_name] != reconstructed_signature[field_name]:
+            if abs(
+                ReplayEngine._normalize_decimal(stored_signature[field_name])
+                - ReplayEngine._normalize_decimal(reconstructed_signature[field_name])
+            ) > ReplayEngine._SNAPSHOT_DERIVED_FIELD_TOLERANCE:
                 mismatch[field_name] = {
                     "stored": getattr(stored_snapshot, field_name),
                     "reconstructed": getattr(reconstructed_snapshot, field_name),
@@ -1062,7 +1080,21 @@ class ReplayEngine:
 
     @staticmethod
     def _normalize_decimal(value: Decimal | float | int) -> Decimal:
-        decimal_value = to_decimal(value)
+        decimal_value = quantize_decimal(value)
         if is_effectively_zero(decimal_value):
             return Decimal("0")
         return decimal_value.normalize()
+
+    @staticmethod
+    def _decimal_map_matches(
+        left: dict[str, Decimal | float | int],
+        right: dict[str, Decimal | float | int],
+        *,
+        tolerance: Decimal,
+    ) -> bool:
+        if set(left) != set(right):
+            return False
+        for key in left:
+            if abs(ReplayEngine._normalize_decimal(left[key]) - ReplayEngine._normalize_decimal(right[key])) > tolerance:
+                return False
+        return True

@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import unittest
+from decimal import Decimal
 
 from aats.bootstrap.settings import AATSSettings
 from aats.events import topics
 from aats.events.envelopes import build_envelope
 from aats.schemas.ai_brief import AIDecisionBrief
-from aats.schemas.ai_shadow import AIShadowDecision
+from aats.schemas.ai_shadow import AIShadowDecision, AIShadowEvaluation
 from aats.schemas.common import utc_now
 from aats.schemas.decision import AIMarketAssessment, BaselineAssessment, DecisionContext
 from aats.schemas.execution import FillEvent
@@ -81,6 +82,28 @@ class SequenceProvider(FakeProvider):
         )
 
 
+class _FixedFeeResolver:
+    def __init__(self, fee_bps: str) -> None:
+        self.fee_bps = Decimal(fee_bps)
+
+    def taker_fee_bps_decimal(self, *, symbol: str | None = None) -> Decimal:
+        _ = symbol
+        return self.fee_bps
+
+    def taker_fee_bps(self, *, symbol: str | None = None) -> float:
+        _ = symbol
+        return float(self.fee_bps)
+
+    def estimated_execution_fee_bps_decimal(self, *, symbol: str | None = None, **kwargs) -> Decimal:
+        _ = symbol
+        _ = kwargs
+        return self.fee_bps
+
+    def funding_fee_bps_decimal(self, *, symbol: str | None = None) -> Decimal:
+        _ = symbol
+        return Decimal("0")
+
+
 class TestAIInferenceService(unittest.IsolatedAsyncioTestCase):
     async def test_invalid_ai_output_falls_back_and_is_marked_invalid(self) -> None:
         service, context, baseline, _ = self._service(
@@ -147,6 +170,54 @@ class TestAIInferenceService(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(assessment.calibrated_confidence, 0.0)
         self.assertEqual(assessment.provider_name, "fake_provider")
 
+    async def test_brief_prefers_dynamic_taker_fee_when_resolver_available(self) -> None:
+        service, context, baseline, _ = self._service(
+            ai_operating_mode="ai_blended",
+            provider=FakeProvider(),
+            fee_resolver=_FixedFeeResolver("12.5"),
+        )
+
+        assessment = await service.assess(context=context, baseline=baseline)
+        brief = service.latest_brief(context.decision_id)
+
+        self.assertFalse(assessment.fallback_used)
+        self.assertIsNotNone(brief)
+        self.assertEqual(brief.fee_bps, Decimal("12.5"))
+
+    async def test_provider_output_can_include_restricted_execution_suggestion(self) -> None:
+        service, context, baseline, _ = self._service(
+            ai_operating_mode="ai_primary",
+            provider=FakeProvider(
+                payload={
+                    "regime": "trend",
+                    "directional_edge": 0.45,
+                    "expected_volatility": 0.08,
+                    "confidence": 0.8,
+                    "uncertainty": 0.2,
+                    "expected_holding_horizon": "15m",
+                    "invalidation_conditions": ["trend_break", "book_flip"],
+                    "risk_tags": ["provider_ok"],
+                    "rationale_summary": "valid_output_with_execution_suggestion",
+                    "baseline_override_recommended": True,
+                    "override_reason_codes": ["ai_trend_override"],
+                    "execution_parameter_suggestion": {
+                        "passive_bias": 0.75,
+                        "maker_taker_bias": -0.4,
+                        "max_cross_spread_bps": 3.5,
+                        "slice_count": 3,
+                    },
+                }
+            ),
+        )
+
+        assessment = await service.assess(context=context, baseline=baseline)
+
+        self.assertFalse(assessment.fallback_used)
+        self.assertIsNotNone(assessment.ai_execution_parameter_suggestion)
+        self.assertEqual(assessment.ai_execution_parameter_suggestion.status, "diagnostic_only")
+        self.assertEqual(assessment.ai_execution_parameter_suggestion.suggestion.slice_count, 3)
+        self.assertIn("execution_suggestion_present", assessment.validation_flags)
+
     async def test_semantically_invalid_provider_output_is_marked_non_actionable(self) -> None:
         service, context, baseline, _ = self._service(
             ai_operating_mode="ai_primary",
@@ -205,6 +276,8 @@ class TestAIInferenceService(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(service.status()["degraded"])
         self.assertEqual(service.status()["effective_operating_mode"], "baseline_only")
         self.assertTrue(service.status()["auto_downgrade_active"])
+        self.assertEqual(service.status()["provider_state"], "degraded")
+        self.assertIsNotNone(service.status()["last_provider_degraded_at"])
         self.assertEqual(provider.calls, 1)
         self.assertTrue(second.fallback_used)
         self.assertEqual(second.fallback_reason, "ai_auto_downgraded")
@@ -246,6 +319,8 @@ class TestAIInferenceService(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(second.degraded)
         self.assertEqual(service.status()["effective_operating_mode"], "ai_primary")
         self.assertFalse(service.status()["degraded"])
+        self.assertEqual(service.status()["provider_state"], "healthy")
+        self.assertIsNotNone(service.status()["last_provider_recovered_at"])
         self.assertEqual(provider.calls, 2)
 
     async def test_degradation_event_uses_dedicated_payload(self) -> None:
@@ -261,6 +336,55 @@ class TestAIInferenceService(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(event.payload["reason_code"], "ai_output_schema_validation_failed")
         self.assertIn("recovery_probe_after", event.payload)
         self.assertEqual(event.payload["configured_operating_mode"], "ai_primary")
+
+    async def test_shadow_outcome_can_trigger_ai_primary_review_and_auto_downgrade(self) -> None:
+        service, _context, _baseline, _provider = self._service(
+            ai_operating_mode="ai_primary",
+            provider=FakeProvider(),
+            ai_auto_downgrade_enabled=True,
+            ai_outcome_review_bad_window_threshold=2,
+        )
+
+        bad_window = AIShadowEvaluation(
+            decision_ids=["decision_shadow_bad_1", "decision_shadow_bad_2"],
+            window_start=utc_now(),
+            window_end=utc_now(),
+            symbol="BTC-USDT",
+            timeframe="15m",
+            baseline_trade_count=2,
+            shadow_trade_count=3,
+            override_count=2,
+            agreement_count=0,
+            disagreement_count=2,
+            fallback_count=0,
+            baseline_gross_pnl=Decimal("10"),
+            baseline_net_pnl=Decimal("9"),
+            baseline_fee_total=Decimal("1"),
+            baseline_fee_ratio=0.1,
+            baseline_churn_ratio=0.2,
+            shadow_gross_pnl=Decimal("7"),
+            shadow_net_pnl=Decimal("5"),
+            shadow_fee_total=Decimal("2"),
+            shadow_fee_ratio=0.18,
+            shadow_churn_ratio=0.32,
+            shadow_outperformed=False,
+        )
+
+        service._record_shadow_outcome(bad_window)
+        self.assertEqual(service.status()["effective_operating_mode"], "ai_primary")
+        self.assertFalse(service.status()["outcome_review_required"])
+
+        service._record_shadow_outcome(
+            bad_window.model_copy(update={"decision_ids": ["decision_shadow_bad_3", "decision_shadow_bad_4"]})
+        )
+
+        status = service.status()
+        self.assertTrue(status["outcome_review_required"])
+        self.assertTrue(status["outcome_auto_downgrade_active"])
+        self.assertEqual(status["effective_operating_mode"], "baseline_only")
+        self.assertEqual(status["outcome_degradation_reason"], "ai_shadow_underperformed_baseline")
+        self.assertEqual(status["outcome_state"], "auto_downgraded")
+        self.assertIsNotNone(status["last_outcome_degraded_at"])
 
     async def test_shadow_evaluation_prefers_real_fills_for_price_and_fee_replay(self) -> None:
         settings = AATSSettings.model_validate(
@@ -360,12 +484,18 @@ class TestAIInferenceService(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(created)
         self.assertIsNotNone(evaluation)
-        self.assertAlmostEqual(evaluation.baseline_fee_total, 0.2)
-        self.assertAlmostEqual(evaluation.shadow_fee_total, 0.2)
-        self.assertAlmostEqual(evaluation.baseline_gross_pnl, 5.0)
-        self.assertAlmostEqual(evaluation.shadow_gross_pnl, 5.0)
+        self.assertEqual(evaluation.baseline_fee_total, Decimal("0.2"))
+        self.assertEqual(evaluation.shadow_fee_total, Decimal("0.2"))
+        self.assertEqual(evaluation.baseline_gross_pnl, Decimal("5.0"))
+        self.assertEqual(evaluation.shadow_gross_pnl, Decimal("5.0"))
         self.assertEqual(evaluation.summary["baseline_fill_backed_decision_count"], 1.0)
         self.assertEqual(evaluation.summary["shadow_fill_backed_decision_count"], 1.0)
+        performance_report = service.event_store.latest(topics.AI_PERFORMANCE_REPORTS)
+        self.assertIsNotNone(performance_report)
+        self.assertEqual(performance_report.payload["symbol"], "BTC-USDT-SWAP")
+        self.assertEqual(performance_report.payload["product_type"], "derivatives")
+        self.assertIn("short", performance_report.payload["windows"])
+        self.assertEqual(performance_report.payload["summary"]["outperformed_count"], 0)
 
     @staticmethod
     def _service(
@@ -377,19 +507,21 @@ class TestAIInferenceService(unittest.IsolatedAsyncioTestCase):
         ai_shadow_mode_enabled: bool = False,
         ai_recover_after_successes: int = 1,
         ai_recovery_probe_interval_seconds: float = 300.0,
+        fee_resolver=None,
+        **settings_overrides,
     ) -> tuple[AIInferenceService, DecisionContext, BaselineAssessment, FakeProvider]:
-        settings = AATSSettings.model_validate(
-            {
-                "ai_operating_mode": ai_operating_mode,
-                "ai_provider": "openai",
-                "ai_timeout_seconds": ai_timeout_seconds,
-                "ai_max_retries": ai_max_retries,
-                "ai_degrade_after_failures": 1,
-                "ai_recover_after_successes": ai_recover_after_successes,
-                "ai_recovery_probe_interval_seconds": ai_recovery_probe_interval_seconds,
-                "ai_shadow_mode_enabled": ai_shadow_mode_enabled,
-            }
-        )
+        settings_payload = {
+            "ai_operating_mode": ai_operating_mode,
+            "ai_provider": "openai",
+            "ai_timeout_seconds": ai_timeout_seconds,
+            "ai_max_retries": ai_max_retries,
+            "ai_degrade_after_failures": 1,
+            "ai_recover_after_successes": ai_recover_after_successes,
+            "ai_recovery_probe_interval_seconds": ai_recovery_probe_interval_seconds,
+            "ai_shadow_mode_enabled": ai_shadow_mode_enabled,
+        }
+        settings_payload.update(settings_overrides)
+        settings = AATSSettings.model_validate(settings_payload)
         event_store = InMemoryEventStore()
         execution_repo = InMemoryExecutionRepository()
         feature = FeatureSnapshot(
@@ -449,6 +581,7 @@ class TestAIInferenceService(unittest.IsolatedAsyncioTestCase):
             prompt_builder=PromptBuilder(),
             validator=AssessmentValidator(),
             provider=provider,
+            fee_resolver=fee_resolver,
         )
         return service, context, baseline, provider
 
@@ -544,6 +677,94 @@ class TestAIOperatingModes(unittest.TestCase):
         self.assertEqual(blended_target.target_position_qty, 0.0)
         self.assertEqual(primary_target.target_position_qty, 0.0)
         self.assertLess(primary_derivatives_target.target_position_qty, 0.0)
+
+    def test_ai_primary_takeover_is_blocked_by_execution_cooldown(self) -> None:
+        baseline = BaselineAssessment(
+            decision_id="decision_ai_cooldown",
+            symbol="BTC-USDT-SWAP",
+            regime="trend",
+            direction_bias="long",
+            trend_strength=0.5,
+            volatility_state="medium",
+            confidence=0.8,
+            composite_alpha_score=0.4,
+            suggested_position_scale=1.0,
+            volatility_target_scale=1.0,
+            factor_scores={"momentum_alpha": 0.4},
+            holding_horizon="15m",
+            invalidation_conditions=[],
+            reason_codes=["test"],
+            engine_version="test",
+        )
+        ai_long = AIMarketAssessment(
+            decision_id="decision_ai_cooldown",
+            symbol="BTC-USDT-SWAP",
+            regime="trend",
+            directional_edge=0.6,
+            expected_volatility=0.1,
+            confidence=0.9,
+            uncertainty=0.15,
+            expected_holding_horizon="15m",
+            invalidation_conditions=["trend_break", "book_flip"],
+            risk_tags=[],
+            rationale_summary="test",
+            operating_mode="ai_primary",
+            provider_name="fake",
+            output_valid=True,
+            fallback_used=False,
+            degraded=False,
+            calibrated_confidence=0.8,
+            baseline_override_recommended=True,
+            override_reason_codes=["ai_trend_override"],
+            economically_actionable=True,
+            estimated_edge_bps=60.0,
+            estimated_cost_bps=8.0,
+            estimated_net_edge_bps=52.0,
+            source_mode="provider",
+            execution_condition="normal",
+            model_name="fake",
+            model_version="1",
+            prompt_version="1",
+        )
+        context = DecisionContext(
+            decision_id="decision_ai_cooldown",
+            symbol="BTC-USDT-SWAP",
+            timeframe="15m",
+            as_of_ts=utc_now(),
+            market_snapshot_ref="evt_market",
+            feature_snapshot_ref="evt_feature",
+            portfolio_snapshot_ref="evt_portfolio",
+            health_snapshot_ref="evt_health",
+            mode="paper_live",
+            current_position_qty=0.0,
+            product_type="derivatives",
+            last_position_closed_at=utc_now(),
+            recent_closed_trade_count=5,
+            recent_fee_drag_ratio=0.7,
+            recent_churn_ratio=0.7,
+            recent_low_edge_trade_streak=3,
+            recent_low_edge_trade_at=utc_now(),
+        )
+        settings = AATSSettings.model_validate(
+            {
+                "ai_operating_mode": "ai_primary",
+                "trading_product_type": "derivatives",
+                "strategy_short_bias_enabled": True,
+                "strategy_post_close_cooldown_seconds": 600.0,
+                "strategy_low_edge_streak_limit": 3,
+                "strategy_low_edge_cooldown_seconds": 1800.0,
+                "strategy_performance_guard_min_closed_trades": 4,
+                "strategy_max_fee_drag_ratio": 0.55,
+                "strategy_max_churn_ratio": 0.6,
+            }
+        )
+
+        target = TargetPositionEngine(settings=settings).build(context, baseline, ai_long)
+
+        self.assertFalse(target.ai_takeover_allowed)
+        self.assertIn("ai_post_close_cooldown_active", target.ai_takeover_blockers)
+        self.assertIn("ai_low_edge_cooldown_active", target.ai_takeover_blockers)
+        self.assertIn("ai_execution_performance_guard_active", target.ai_takeover_blockers)
 
 
 if __name__ == "__main__":

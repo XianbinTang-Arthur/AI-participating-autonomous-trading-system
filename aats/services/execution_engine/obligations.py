@@ -1,11 +1,21 @@
 from __future__ import annotations
 
+from decimal import Decimal
 from collections.abc import Awaitable, Callable
 
 from aats.bootstrap.settings import AATSSettings
 from aats.schemas.common import utc_now
 from aats.schemas.execution import FillEvent, OrderIntent, OrderObligation, OrderState
 from aats.schemas.exchange import ExchangeAccountSnapshot
+from aats.services.accounting import (
+    derivatives_initial_margin_requirement,
+    fill_fee_cost_in_quote,
+    remaining_obligation_amount,
+    resolve_symbol_currencies,
+    spot_buy_quote_requirement,
+)
+from aats.services.fee_resolver import EffectiveFeeResolver
+from aats.services.portfolio_service.decimals import to_decimal
 
 
 class ExecutionReservationError(RuntimeError):
@@ -13,7 +23,7 @@ class ExecutionReservationError(RuntimeError):
 
 
 class ExecutionObligationService:
-    _EPSILON = 1e-12
+    _EPSILON = Decimal("1e-12")
 
     def __init__(
         self,
@@ -21,12 +31,14 @@ class ExecutionObligationService:
         settings: AATSSettings,
         obligation_repo,
         account_snapshot_loader: Callable[[], Awaitable[ExchangeAccountSnapshot | None]] | None = None,
-        price_provider: Callable[[str], float] | None = None,
+        price_provider: Callable[[str], Decimal] | None = None,
+        fee_resolver: EffectiveFeeResolver | None = None,
     ) -> None:
         self.settings = settings
         self.obligation_repo = obligation_repo
         self.account_snapshot_loader = account_snapshot_loader
         self.price_provider = price_provider
+        self.fee_resolver = fee_resolver or EffectiveFeeResolver(settings=settings)
 
     async def reserve_for_intent(
         self,
@@ -71,7 +83,7 @@ class ExecutionObligationService:
         if reserved_amount > available_after_obligations + self._EPSILON:
             raise ExecutionReservationError(
                 "local_obligation_insufficient_available_balance:"
-                f"{reserve_currency}:{reserved_amount:.12f}>{available_after_obligations:.12f}"
+                f"{reserve_currency}:{float(reserved_amount):.12f}>{float(available_after_obligations):.12f}"
             )
 
         obligation = OrderObligation(
@@ -100,6 +112,8 @@ class ExecutionObligationService:
         obligation = self.obligation_repo.get_obligation(fill.client_order_id)
         if obligation is None:
             return None
+        if fill.fill_id in obligation.consumed_fill_ids:
+            return obligation
         consume_amount = self._fill_consumption_amount(fill=fill, obligation=obligation)
         if consume_amount <= self._EPSILON:
             return obligation
@@ -107,6 +121,7 @@ class ExecutionObligationService:
         return obligation.model_copy(
             update={
                 "consumed_amount": consumed_amount,
+                "consumed_fill_ids": [*obligation.consumed_fill_ids, fill.fill_id],
                 "status": self._consumption_status(
                     reserved_amount=obligation.reserved_amount,
                     consumed_amount=consumed_amount,
@@ -140,88 +155,91 @@ class ExecutionObligationService:
         )
         return obligation.model_copy(
             update={
-                "released_amount": obligation.released_amount + max(remaining_amount, 0.0),
+                "released_amount": obligation.released_amount + max(remaining_amount, Decimal("0")),
                 "status": terminal_status,
                 "last_update_ts": utc_now(),
             }
         )
 
     @classmethod
-    def remaining_amount(cls, obligation: OrderObligation) -> float:
-        return max(
-            obligation.reserved_amount - obligation.consumed_amount - obligation.released_amount,
-            0.0,
-        )
+    def remaining_amount(cls, obligation: OrderObligation) -> Decimal:
+        return remaining_obligation_amount(obligation)
 
-    def _reservation_spec(self, *, intent: OrderIntent) -> tuple[str | None, float, float | None]:
-        base_currency, quote_currency = self._symbol_currencies(intent.symbol)
+    def _reservation_spec(self, *, intent: OrderIntent) -> tuple[str | None, Decimal, Decimal | None]:
+        base_currency, quote_currency = resolve_symbol_currencies(intent.symbol)
         reference_price = intent.limit_price if intent.limit_price is not None else self._reference_price(intent.symbol)
         if intent.product_type == "spot":
             if intent.side == "buy":
-                if quote_currency is None or reference_price is None or reference_price <= 0.0:
-                    return None, 0.0, reference_price
-                return quote_currency, intent.quantity * reference_price, reference_price
+                reserved_amount = spot_buy_quote_requirement(
+                    quantity=intent.quantity,
+                    reference_price=reference_price,
+                    max_slippage_tolerance_bps=intent.max_slippage_tolerance_bps,
+                    taker_fee_bps=self.fee_resolver.taker_fee_bps_decimal(symbol=intent.symbol),
+                )
+                if quote_currency is None or reserved_amount is None or reserved_amount <= Decimal("0"):
+                    return None, Decimal("0"), reference_price
+                return quote_currency, reserved_amount, reference_price
             if base_currency is None:
-                return None, 0.0, reference_price
+                return None, Decimal("0"), reference_price
             return base_currency, intent.quantity, reference_price
-        if quote_currency is None or reference_price is None or reference_price <= 0.0:
-            return None, 0.0, reference_price
-        leverage = max(intent.target_leverage, 1.0)
-        return quote_currency, (abs(intent.quantity) * reference_price) / leverage, reference_price
+        reserved_amount = derivatives_initial_margin_requirement(
+            quantity=intent.quantity,
+            reference_price=reference_price,
+            target_leverage=intent.target_leverage,
+            max_slippage_tolerance_bps=intent.max_slippage_tolerance_bps,
+        )
+        if quote_currency is None or reserved_amount is None or reserved_amount <= Decimal("0"):
+            return None, Decimal("0"), reference_price
+        return quote_currency, reserved_amount, reference_price
 
     def _fill_consumption_amount(
         self,
         *,
         fill: FillEvent,
         obligation: OrderObligation,
-    ) -> float:
-        base_currency, quote_currency = self._symbol_currencies(fill.symbol)
+    ) -> Decimal:
+        base_currency, quote_currency = resolve_symbol_currencies(fill.symbol)
         if obligation.product_type == "spot":
             if obligation.reserve_currency == quote_currency:
-                return fill.fill_qty * fill.fill_price
+                return (fill.fill_qty * fill.fill_price) + fill_fee_cost_in_quote(
+                    fill,
+                    base_currency=base_currency,
+                    quote_currency=quote_currency,
+                )
             if obligation.reserve_currency == base_currency:
                 return fill.fill_qty
-            return 0.0
-        leverage = max(fill.target_leverage, 1.0)
-        return (abs(fill.fill_qty) * fill.fill_price) / leverage
+            return Decimal("0")
+        leverage = max(to_decimal(fill.target_leverage), Decimal("1"))
+        return (abs(fill.fill_qty) * fill.fill_price) / to_decimal(leverage)
 
-    def _reference_price(self, symbol: str) -> float | None:
+    def _reference_price(self, symbol: str) -> Decimal | None:
         if self.price_provider is None:
             return None
-        price = self.price_provider(symbol)
-        return price if price > 0.0 else None
+        price = to_decimal(self.price_provider(symbol))
+        return price if price > Decimal("0") else None
 
     @staticmethod
     def _snapshot_available_balance(
         *,
         snapshot: ExchangeAccountSnapshot,
         currency: str,
-    ) -> float:
+    ) -> Decimal:
         for balance in snapshot.balances:
             if balance.currency == currency:
-                return balance.available
-        return 0.0
+                return to_decimal(balance.available)
+        return Decimal("0")
 
     @classmethod
     def _consumption_status(
         cls,
         *,
-        reserved_amount: float,
-        consumed_amount: float,
-        released_amount: float,
+        reserved_amount: Decimal,
+        consumed_amount: Decimal,
+        released_amount: Decimal,
     ) -> str:
-        remaining = max(reserved_amount - consumed_amount - released_amount, 0.0)
+        remaining = max(reserved_amount - consumed_amount - released_amount, Decimal("0"))
         if remaining <= cls._EPSILON:
             return "RELEASED"
         if consumed_amount > cls._EPSILON:
             return "PARTIALLY_CONSUMED"
         return "ACTIVE"
-
-    @staticmethod
-    def _symbol_currencies(symbol: str) -> tuple[str | None, str | None]:
-        if "-" not in symbol:
-            return symbol or None, None
-        parts = symbol.split("-")
-        if len(parts) >= 2:
-            return parts[0] or None, parts[1] or None
-        return None, None

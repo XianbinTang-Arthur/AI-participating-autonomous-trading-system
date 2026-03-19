@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import timedelta
+from decimal import Decimal
 import unittest
 
 from aats.events import topics
@@ -28,7 +29,7 @@ def _feature(*, snapshot_ts, momentum: float, regime: str) -> FeatureSnapshot:
     )
 
 
-def _market(*, snapshot_ts, last_price: float) -> MarketSnapshot:
+def _market(*, snapshot_ts, last_price: Decimal | float) -> MarketSnapshot:
     return MarketSnapshot(
         symbol="BTC-USDT",
         exchange="OKX",

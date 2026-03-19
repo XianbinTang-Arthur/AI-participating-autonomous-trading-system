@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import unittest
+from decimal import Decimal
 
 from aats.bootstrap.settings import AATSSettings
 from aats.schemas.common import utc_now
 from aats.schemas.execution import OrderObligation, OrderState
+from aats.schemas.portfolio import PortfolioSnapshot
 from aats.services.execution_engine.recovery import ExecutionRecoveryService
 from aats.services.governance_engine.kill_switch import KillSwitch
 from aats.services.portfolio_service.positions import PortfolioState
@@ -42,7 +44,7 @@ class TestExecutionRecovery(unittest.TestCase):
         obligation = obligation_repo.get_obligation("cl_orphan_1")
         self.assertIsNotNone(obligation)
         self.assertEqual(obligation.status, "FAILED")
-        self.assertAlmostEqual(obligation.released_amount, 60.0)
+        self.assertEqual(obligation.released_amount, Decimal("60.0"))
         self.assertIn("released_orphan_obligations:1", artifacts.status.notes)
 
     def test_recovery_finalizes_active_obligation_for_terminal_order_state(self) -> None:
@@ -93,14 +95,55 @@ class TestExecutionRecovery(unittest.TestCase):
         obligation = obligation_repo.get_obligation("cl_canceled_1")
         self.assertIsNotNone(obligation)
         self.assertEqual(obligation.status, "CANCELED")
-        self.assertAlmostEqual(obligation.released_amount, 60.0)
+        self.assertEqual(obligation.released_amount, Decimal("60.0"))
         self.assertIn("released_orphan_obligations:1", artifacts.status.notes)
+
+    def test_bootstrap_recovery_validates_latest_snapshot_against_trusted_baseline(self) -> None:
+        portfolio_repo = InMemoryPortfolioRepository()
+        baseline_snapshot = PortfolioSnapshot(
+            snapshot_ts=utc_now(),
+            snapshot_origin="exchange_import",
+            balances={"USDT": Decimal("1000")},
+            positions=[],
+            realized_pnl=Decimal("0"),
+            unrealized_pnl=Decimal("0"),
+            total_equity=Decimal("1000"),
+            gross_exposure=Decimal("0"),
+            net_exposure=Decimal("0"),
+            product_type="spot",
+            margin_mode="cash",
+        )
+        portfolio_repo.save_snapshot(baseline_snapshot)
+        divergent_snapshot = baseline_snapshot.model_copy(
+            update={
+                "snapshot_ts": utc_now(),
+                "snapshot_origin": "fill_derived",
+                "balances": {"USDT": Decimal("900"), "BTC": Decimal("1")},
+                "total_equity": Decimal("1000"),
+            }
+        )
+        portfolio_repo.save_snapshot(divergent_snapshot)
+        kill_switch = KillSwitch()
+        recovery = self._service(
+            portfolio_repo=portfolio_repo,
+            kill_switch=kill_switch,
+            bootstrap_portfolio_from_exchange=True,
+        )
+
+        artifacts = recovery.recover(portfolio_state=PortfolioState(initial_usdt_balance=1_000.0))
+
+        self.assertTrue(kill_switch.halted)
+        self.assertFalse(artifacts.status.safe_to_trade)
+        self.assertIn("stored_snapshot_differs_from_fill_reconstruction", artifacts.status.notes)
 
     @staticmethod
     def _service(
         *,
         execution_repo: InMemoryExecutionRepository | None = None,
         obligation_repo: InMemoryExecutionObligationRepository | None = None,
+        portfolio_repo: InMemoryPortfolioRepository | None = None,
+        kill_switch: KillSwitch | None = None,
+        bootstrap_portfolio_from_exchange: bool = False,
     ) -> ExecutionRecoveryService:
         settings = AATSSettings.model_validate(
             {
@@ -115,14 +158,14 @@ class TestExecutionRecovery(unittest.TestCase):
             settings=settings,
             execution_repo=execution_repo or InMemoryExecutionRepository(),
             obligation_repo=obligation_repo or InMemoryExecutionObligationRepository(),
-            portfolio_repo=InMemoryPortfolioRepository(),
+            portfolio_repo=portfolio_repo or InMemoryPortfolioRepository(),
             reconciliation_repo=InMemoryReconciliationRepository(),
             reconstruction_service=PortfolioReconstructionService(
                 initial_usdt_balance=settings.initial_usdt_balance,
                 snapshot_builder=PortfolioSnapshotBuilder(pnl_calculator=PortfolioPnLCalculator()),
             ),
-            price_provider=lambda _symbol: 0.0,
-            kill_switch=KillSwitch(),
-            bootstrap_portfolio_from_exchange=False,
+            price_provider=lambda _symbol: Decimal("0"),
+            kill_switch=kill_switch or KillSwitch(),
+            bootstrap_portfolio_from_exchange=bootstrap_portfolio_from_exchange,
             reconciliation_stale_after_seconds=settings.reconciliation_stale_after_seconds,
         )

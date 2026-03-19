@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Callable
 
 from aats.schemas.execution import FillEvent
@@ -12,7 +13,7 @@ class PortfolioReconstructionService:
     def __init__(
         self,
         *,
-        initial_usdt_balance: float,
+        initial_usdt_balance: Decimal | float,
         snapshot_builder: PortfolioSnapshotBuilder,
     ) -> None:
         self.initial_usdt_balance = initial_usdt_balance
@@ -28,7 +29,7 @@ class PortfolioReconstructionService:
         self,
         *,
         fills: list[FillEvent],
-        price_provider: Callable[[str], float],
+        price_provider: Callable[[str], Decimal],
     ) -> PortfolioSnapshot:
         state = self.rebuild_state(fills)
         return self.snapshot_builder.build(state=state, price_provider=price_provider)

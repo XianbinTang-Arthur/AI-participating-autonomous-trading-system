@@ -117,6 +117,8 @@ class DecisionOrchestrator:
                     baseline_direction=baseline.direction_bias,
                     ai_direction="long" if ai_assessment.directional_edge > 0 else "short" if ai_assessment.directional_edge < 0 else "flat",
                     final_direction=target.target_exposure_side,
+                    ai_execution_suggestion_present=ai_assessment.ai_execution_parameter_suggestion is not None,
+                    ai_execution_suggestion_mode=self.ai_service.status().get("execution_suggestion_mode"),
                 ),
                 source_component="decision_engine",
             )

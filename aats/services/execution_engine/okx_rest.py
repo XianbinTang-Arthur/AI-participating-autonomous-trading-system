@@ -3,11 +3,16 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import json
 from collections.abc import Mapping
+from decimal import Decimal
 from typing import Any
 
 import httpx
-import orjson
+try:
+    import orjson
+except ModuleNotFoundError:  # pragma: no cover - exercised implicitly in environments without orjson.
+    orjson = None
 
 from aats.bootstrap.settings import AATSSettings
 from aats.schemas.common import utc_now
@@ -64,7 +69,7 @@ class OKXRESTClient:
     ) -> dict[str, Any]:
         request_path = self._request_path(path=path, params=params)
         headers = {"Content-Type": "application/json"}
-        body_text = orjson.dumps(json_body).decode("utf-8") if json_body is not None else ""
+        body_text = self._serialize_json_body(json_body) if json_body is not None else ""
         if require_auth:
             headers.update(self._auth_headers(method=method, request_path=request_path, body=body_text))
         if self.settings.okx_simulated_trading:
@@ -105,6 +110,12 @@ class OKXRESTClient:
             )
         return payload
 
+    @staticmethod
+    def _serialize_json_body(json_body: Mapping[str, Any]) -> str:
+        if orjson is not None:
+            return orjson.dumps(json_body).decode("utf-8")
+        return json.dumps(json_body, separators=(",", ":"))
+
     async def get_balance(self) -> dict[str, Any]:
         return await self.request(method="GET", path="/api/v5/account/balance", require_auth=True)
 
@@ -139,6 +150,96 @@ class OKXRESTClient:
         return await self.request(
             method="GET",
             path="/api/v5/account/config",
+            require_auth=True,
+        )
+
+    async def get_trade_fee(
+        self,
+        *,
+        symbol: str | None = None,
+        underlying: str | None = None,
+        instrument_family: str | None = None,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {"instType": self._inst_type()}
+        if self._inst_type() == "SPOT":
+            if symbol is not None:
+                params["instId"] = symbol
+        else:
+            if underlying:
+                params["uly"] = underlying
+            elif instrument_family:
+                params["instFamily"] = instrument_family
+            elif symbol is not None:
+                params["uly"] = self._derive_underlying(symbol)
+        return await self.request(
+            method="GET",
+            path="/api/v5/account/trade-fee",
+            params=params,
+            require_auth=True,
+        )
+
+    @staticmethod
+    def _derive_underlying(symbol: str) -> str:
+        parts = [part for part in str(symbol or "").split("-") if part]
+        if len(parts) >= 2:
+            return f"{parts[0]}-{parts[1]}"
+        return str(symbol or "")
+
+    async def get_max_order_quantity(
+        self,
+        *,
+        symbol: str,
+        td_mode: str,
+        leverage: Decimal | float | None = None,
+        price: Decimal | float | None = None,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {
+            "instId": symbol,
+            "tdMode": td_mode,
+        }
+        if leverage is not None:
+            params["lever"] = leverage
+        if price is not None:
+            params["px"] = price
+        return await self.request(
+            method="GET",
+            path="/api/v5/account/max-size",
+            params=params,
+            require_auth=True,
+        )
+
+    async def get_account_position_risk(self) -> dict[str, Any]:
+        return await self.request(
+            method="GET",
+            path="/api/v5/account/account-position-risk",
+            require_auth=True,
+        )
+
+    async def get_system_status(self) -> dict[str, Any]:
+        return await self.request(
+            method="GET",
+            path="/api/v5/system/status",
+            require_auth=False,
+        )
+
+    async def get_bills_details(
+        self,
+        *,
+        symbol: str | None = None,
+        limit: int | None = None,
+        begin: int | None = None,
+        end: int | None = None,
+    ) -> dict[str, Any]:
+        return await self.request(
+            method="GET",
+            path="/api/v5/account/bills",
+            params={
+                "instType": self._inst_type(),
+                "instId": symbol,
+                "limit": limit,
+                "begin": begin,
+                "end": end,
+            },
             require_auth=True,
         )
 

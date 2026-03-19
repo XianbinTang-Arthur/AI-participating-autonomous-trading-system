@@ -27,6 +27,7 @@ from aats.services.decision_engine.trigger_policy import DecisionTriggerPolicy
 from aats.services.execution_engine.exchange_adapter import ExchangeAdapter
 from aats.services.execution_engine.okx_account import OKXAccountService
 from aats.services.execution_engine.okx_adapter import OKXExecutionAdapter
+from aats.services.execution_engine.okx_private_websocket import OKXPrivateWebSocketClient
 from aats.services.execution_engine.baseline_import import AccountBaselineImportService
 from aats.services.execution_engine.obligations import ExecutionObligationService
 from aats.services.execution_engine.recovery import ExecutionRecoveryService
@@ -35,6 +36,7 @@ from aats.services.execution_engine.order_manager import OrderManager
 from aats.services.execution_engine.outbox import PostgresExecutionOutboxPublisher
 from aats.services.execution_engine.paper_adapter import PaperExecutionAdapter
 from aats.services.execution_engine.planner import ExecutionPlanner
+from aats.services.fee_resolver import EffectiveFeeResolver
 from aats.services.feature_engine.calculator import FeatureCalculator, FeatureEngine
 from aats.services.governance_engine.health import SystemHealthService
 from aats.services.governance_engine.kill_switch import KillSwitch
@@ -96,7 +98,7 @@ from aats.storage.strategy_profile_repo_postgres import PostgresStrategyProfileR
 from aats.storage.session import DatabaseRuntime, create_database_runtime, create_schema
 from aats.schemas.system import RecoveryStatus
 from aats.schemas.common import utc_now
-from aats.schemas.operator import ExecutionErrorSummary
+from aats.schemas.operator import ExecutionErrorSummary, ProcessingFailureRecord
 from aats.schemas.runtime_profiles import RuntimeProfileResolution
 from aats.storage.base import StrategyProfileRepository
 
@@ -118,6 +120,30 @@ def load_yaml_config(environment: str, profile: str, config_dir: str | Path = "c
         if candidate.exists():
             merged.update(yaml.safe_load(candidate.read_text(encoding="utf-8")) or {})
     return merged
+
+
+def resilient_subscription_handler(*, topic: str, name: str, handler):
+    logger = get_logger("aats.event_bus")
+
+    async def wrapped(message: dict) -> None:
+        try:
+            await handler(message)
+        except Exception as exc:
+            payload = message.get("payload") if isinstance(message, dict) else None
+            event_id = payload.get("event_id") if isinstance(payload, dict) else None
+            log_event(
+                logger,
+                "noncritical_subscription_failed",
+                level="error",
+                topic=topic,
+                handler=name,
+                key=message.get("key") if isinstance(message, dict) else None,
+                event_id=event_id,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+
+    return wrapped
 
 
 def load_settings() -> AATSSettings:
@@ -168,6 +194,7 @@ class ApplicationRuntime:
     order_manager: OrderManager
     portfolio_service: PortfolioService
     reconciliation_service: ReconciliationService
+    fee_resolver: EffectiveFeeResolver
     policy_engine: PolicyEngine
     risk_engine: RiskEngine
     kill_switch: KillSwitch
@@ -193,6 +220,10 @@ class ApplicationRuntime:
     async def start_background_tasks(self) -> None:
         if self.settings.market_data_backend == "okx":
             await self.market_gateway.start()
+        if self.environment_capabilities.account_state_source_kind == "exchange":
+            self.background_tasks.append(
+                asyncio.create_task(self.account_service.run_private_ws_forever(), name="aats_okx_private_account_ws")
+            )
         self.background_tasks.append(
             asyncio.create_task(self._refresh_reconciliation_loop(), name="aats_reconciliation_refresh")
         )
@@ -210,6 +241,7 @@ class ApplicationRuntime:
             )
 
     async def stop_background_tasks(self) -> None:
+        await self.account_service.stop_private_ws()
         for task in self.background_tasks:
             task.cancel()
         for task in self.background_tasks:
@@ -245,6 +277,7 @@ class ApplicationRuntime:
         )
         while True:
             try:
+                await self.reconciliation_service.repair_missing_portfolio_snapshot(reason="background_refresh")
                 await self.reconciliation_service.validate_now(reason="background_refresh")
             except Exception as exc:
                 self._record_background_failure(subsystem="reconciliation_refresh", exc=exc)
@@ -274,6 +307,7 @@ class ApplicationRuntime:
             payload = latest.payload
             if payload.get("subsystem") == subsystem and payload.get("message") == message:
                 return
+        latest_processing_failure = self.event_store.latest(topics.PROCESSING_FAILURES, key=subsystem)
         self.event_store.append(
             build_envelope(
                 topic=topics.EXECUTION_ERROR_SUMMARIES,
@@ -283,6 +317,26 @@ class ApplicationRuntime:
                     severity="error",
                     message=message,
                     observed_at=utc_now(),
+                ),
+                source_component="runtime",
+            )
+        )
+        if latest_processing_failure is not None:
+            payload = latest_processing_failure.payload
+            if payload.get("subsystem") == subsystem and payload.get("message") == message:
+                return
+        self.event_store.append(
+            build_envelope(
+                topic=topics.PROCESSING_FAILURES,
+                key=subsystem,
+                payload_model=ProcessingFailureRecord(
+                    subsystem=subsystem,
+                    stage="background_loop",
+                    severity="error",
+                    message=message,
+                    retriable=True,
+                    observed_at=utc_now(),
+                    details={"error_type": type(exc).__name__},
                 ),
                 source_component="runtime",
             )
@@ -333,6 +387,8 @@ def build_storage_backends(settings: AATSSettings) -> StorageBackends:
     database_runtime = create_database_runtime(settings.database_url)
     if settings.database_auto_create_schema:
         create_schema(database_runtime)
+    if settings.database_single_runtime_guard_enabled:
+        database_runtime.acquire_single_runtime_lock(settings.database_runtime_lock_key)
 
     return StorageBackends(
         event_store=PostgresEventStore(database_runtime.session_factory),
@@ -428,7 +484,20 @@ async def build_runtime(
     )
 
     okx_client = OKXRESTClient(settings=runtime_settings)
-    account_service = OKXAccountService(settings=runtime_settings, client=okx_client)
+    private_account_ws_client = (
+        OKXPrivateWebSocketClient(settings=runtime_settings)
+        if runtime_settings.account_backend == "okx" and runtime_settings.account_read_enabled
+        else None
+    )
+    account_service = OKXAccountService(
+        settings=runtime_settings,
+        client=okx_client,
+        private_ws_client=private_account_ws_client,
+    )
+    fee_resolver = EffectiveFeeResolver(
+        settings=runtime_settings,
+        account_service=account_service,
+    )
     baseline_import_service = AccountBaselineImportService(event_store=storage.event_store)
     bootstrap_from_exchange = runtime_layering.recovery_policy.startup_baseline_import_supported
     execution_adapter = _build_execution_adapter(
@@ -462,6 +531,7 @@ async def build_runtime(
         execution_repo=storage.execution_repo,
         prompt_builder=PromptBuilder(),
         validator=AssessmentValidator(),
+        fee_resolver=fee_resolver,
     )
     decision_trigger_policy = DecisionTriggerPolicy(settings=runtime_settings)
     decision_engine = DecisionOrchestrator(
@@ -470,12 +540,13 @@ async def build_runtime(
             settings=runtime_settings,
             event_store=storage.event_store,
             portfolio_repo=storage.portfolio_repo,
+            execution_repo=storage.execution_repo,
             mode_controller=mode_controller,
             health_service=health_service,
         ),
         baseline_strategy=BaselineStrategy(event_store=storage.event_store),
         ai_service=ai_service,
-        target_engine=TargetPositionEngine(settings=runtime_settings),
+        target_engine=TargetPositionEngine(settings=runtime_settings, fee_resolver=fee_resolver),
         metrics=metrics,
     )
     decision_trigger = DecisionCycleTrigger(
@@ -503,6 +574,7 @@ async def build_runtime(
         obligation_repo=storage.obligation_repo,
         environment_capabilities=runtime_layering.environment_capabilities,
         policy_profile=runtime_layering.policy_profile,
+        fee_resolver=fee_resolver,
     )
     execution_planner = ExecutionPlanner(settings=runtime_settings)
     obligation_service = ExecutionObligationService(
@@ -510,6 +582,7 @@ async def build_runtime(
         obligation_repo=storage.obligation_repo,
         account_snapshot_loader=lambda: account_service.refresh(),
         price_provider=market_gateway.latest_price,
+        fee_resolver=fee_resolver,
     )
     execution_outbox_publisher = None
     if (
@@ -589,27 +662,153 @@ async def build_runtime(
     await bus.subscribe(topics.MARKET_SNAPSHOTS, feature_engine.handle_market_snapshot)
     await bus.subscribe(topics.FEATURE_SNAPSHOTS, decision_trigger.handle_feature_snapshot)
 
-    await bus.subscribe(topics.DECISION_CONTEXTS, audit_service.handle_decision_context)
-    await bus.subscribe(topics.BASELINE_ASSESSMENTS, audit_service.handle_baseline_assessment)
-    await bus.subscribe(topics.AI_DECISION_BRIEFS, audit_service.handle_ai_decision_brief)
-    await bus.subscribe(topics.AI_ASSESSMENTS, audit_service.handle_ai_assessment)
-    await bus.subscribe(topics.AI_TAKEOVER_DECISIONS, audit_service.handle_ai_takeover_decision)
-    await bus.subscribe(topics.AI_SHADOW_DECISIONS, audit_service.handle_ai_shadow_decision)
-    await bus.subscribe(topics.AI_SHADOW_EVALUATIONS, audit_service.handle_ai_shadow_evaluation)
-    await bus.subscribe(topics.POSITION_TARGETS, audit_service.handle_position_target)
-    await bus.subscribe(topics.POLICY_DECISIONS, audit_service.handle_policy_decision)
-    await bus.subscribe(topics.RISK_DECISIONS, audit_service.handle_risk_decision)
-    await bus.subscribe(topics.EXECUTION_PLANS, audit_service.handle_execution_plan)
-    await bus.subscribe(topics.ORDER_INTENTS, audit_service.handle_order_intent)
     await bus.subscribe(topics.ORDER_INTENTS, order_manager.handle_order_intent)
-    await bus.subscribe(topics.ORDER_UPDATES, audit_service.handle_order_update)
-    await bus.subscribe(topics.FILL_EVENTS, audit_service.handle_fill_event)
     await bus.subscribe(topics.FILL_EVENTS, portfolio_service.handle_fill_event)
-    await bus.subscribe(topics.PORTFOLIO_SNAPSHOTS, ai_service.handle_portfolio_snapshot)
-    await bus.subscribe(topics.PORTFOLIO_SNAPSHOTS, audit_service.handle_portfolio_snapshot)
     await bus.subscribe(topics.PORTFOLIO_SNAPSHOTS, reconciliation_service.handle_portfolio_snapshot)
-    await bus.subscribe(topics.RECONCILIATION_REPORTS, ai_service.handle_reconciliation_report)
-    await bus.subscribe(topics.RECONCILIATION_REPORTS, audit_service.handle_reconciliation_report)
+    await bus.subscribe(
+        topics.DECISION_CONTEXTS,
+        resilient_subscription_handler(
+            topic=topics.DECISION_CONTEXTS,
+            name="audit.handle_decision_context",
+            handler=audit_service.handle_decision_context,
+        ),
+    )
+    await bus.subscribe(
+        topics.BASELINE_ASSESSMENTS,
+        resilient_subscription_handler(
+            topic=topics.BASELINE_ASSESSMENTS,
+            name="audit.handle_baseline_assessment",
+            handler=audit_service.handle_baseline_assessment,
+        ),
+    )
+    await bus.subscribe(
+        topics.AI_DECISION_BRIEFS,
+        resilient_subscription_handler(
+            topic=topics.AI_DECISION_BRIEFS,
+            name="audit.handle_ai_decision_brief",
+            handler=audit_service.handle_ai_decision_brief,
+        ),
+    )
+    await bus.subscribe(
+        topics.AI_ASSESSMENTS,
+        resilient_subscription_handler(
+            topic=topics.AI_ASSESSMENTS,
+            name="audit.handle_ai_assessment",
+            handler=audit_service.handle_ai_assessment,
+        ),
+    )
+    await bus.subscribe(
+        topics.AI_TAKEOVER_DECISIONS,
+        resilient_subscription_handler(
+            topic=topics.AI_TAKEOVER_DECISIONS,
+            name="audit.handle_ai_takeover_decision",
+            handler=audit_service.handle_ai_takeover_decision,
+        ),
+    )
+    await bus.subscribe(
+        topics.AI_SHADOW_DECISIONS,
+        resilient_subscription_handler(
+            topic=topics.AI_SHADOW_DECISIONS,
+            name="audit.handle_ai_shadow_decision",
+            handler=audit_service.handle_ai_shadow_decision,
+        ),
+    )
+    await bus.subscribe(
+        topics.AI_SHADOW_EVALUATIONS,
+        resilient_subscription_handler(
+            topic=topics.AI_SHADOW_EVALUATIONS,
+            name="audit.handle_ai_shadow_evaluation",
+            handler=audit_service.handle_ai_shadow_evaluation,
+        ),
+    )
+    await bus.subscribe(
+        topics.POSITION_TARGETS,
+        resilient_subscription_handler(
+            topic=topics.POSITION_TARGETS,
+            name="audit.handle_position_target",
+            handler=audit_service.handle_position_target,
+        ),
+    )
+    await bus.subscribe(
+        topics.POLICY_DECISIONS,
+        resilient_subscription_handler(
+            topic=topics.POLICY_DECISIONS,
+            name="audit.handle_policy_decision",
+            handler=audit_service.handle_policy_decision,
+        ),
+    )
+    await bus.subscribe(
+        topics.RISK_DECISIONS,
+        resilient_subscription_handler(
+            topic=topics.RISK_DECISIONS,
+            name="audit.handle_risk_decision",
+            handler=audit_service.handle_risk_decision,
+        ),
+    )
+    await bus.subscribe(
+        topics.EXECUTION_PLANS,
+        resilient_subscription_handler(
+            topic=topics.EXECUTION_PLANS,
+            name="audit.handle_execution_plan",
+            handler=audit_service.handle_execution_plan,
+        ),
+    )
+    await bus.subscribe(
+        topics.ORDER_INTENTS,
+        resilient_subscription_handler(
+            topic=topics.ORDER_INTENTS,
+            name="audit.handle_order_intent",
+            handler=audit_service.handle_order_intent,
+        ),
+    )
+    await bus.subscribe(
+        topics.ORDER_UPDATES,
+        resilient_subscription_handler(
+            topic=topics.ORDER_UPDATES,
+            name="audit.handle_order_update",
+            handler=audit_service.handle_order_update,
+        ),
+    )
+    await bus.subscribe(
+        topics.FILL_EVENTS,
+        resilient_subscription_handler(
+            topic=topics.FILL_EVENTS,
+            name="audit.handle_fill_event",
+            handler=audit_service.handle_fill_event,
+        ),
+    )
+    await bus.subscribe(
+        topics.PORTFOLIO_SNAPSHOTS,
+        resilient_subscription_handler(
+            topic=topics.PORTFOLIO_SNAPSHOTS,
+            name="ai.handle_portfolio_snapshot",
+            handler=ai_service.handle_portfolio_snapshot,
+        ),
+    )
+    await bus.subscribe(
+        topics.PORTFOLIO_SNAPSHOTS,
+        resilient_subscription_handler(
+            topic=topics.PORTFOLIO_SNAPSHOTS,
+            name="audit.handle_portfolio_snapshot",
+            handler=audit_service.handle_portfolio_snapshot,
+        ),
+    )
+    await bus.subscribe(
+        topics.RECONCILIATION_REPORTS,
+        resilient_subscription_handler(
+            topic=topics.RECONCILIATION_REPORTS,
+            name="ai.handle_reconciliation_report",
+            handler=ai_service.handle_reconciliation_report,
+        ),
+    )
+    await bus.subscribe(
+        topics.RECONCILIATION_REPORTS,
+        resilient_subscription_handler(
+            topic=topics.RECONCILIATION_REPORTS,
+            name="audit.handle_reconciliation_report",
+            handler=audit_service.handle_reconciliation_report,
+        ),
+    )
 
     async def handle_position_target(message: dict[str, Any]) -> None:
         target = parse_payload(message, PositionTarget)
@@ -628,6 +827,29 @@ async def build_runtime(
         if kill_switch.halted:
             return
 
+        target_reference_price = (
+            abs(target.target_notional / target.target_position_qty)
+            if abs(target.target_position_qty) > 1e-12
+            else None
+        )
+        current_reference_price = (
+            abs(target.current_notional / target.current_position_qty)
+            if abs(target.current_position_qty) > 1e-12
+            else None
+        )
+        reference_price = next(
+            (
+                candidate
+                for candidate in (
+                    target_reference_price,
+                    current_reference_price,
+                    market_gateway.latest_price(target.symbol),
+                )
+                if candidate is not None and candidate > 0
+            ),
+            None,
+        )
+
         plan = execution_planner.build_plan(
             decision_id=target.decision_id,
             symbol=target.symbol,
@@ -637,9 +859,11 @@ async def build_runtime(
             delta_qty=risk_decision.capped_target_position_qty - target.current_position_qty,
             urgency=target.urgency,
             max_slippage_tolerance_bps=target.max_slippage_tolerance_bps,
+            reference_price=reference_price,
             product_type=target.product_type,
             target_leverage=target.target_leverage,
             margin_mode=target.margin_mode,
+            ai_execution_parameter_suggestion=target.ai_execution_parameter_suggestion,
         )
         if plan is None:
             return
@@ -693,7 +917,9 @@ async def build_runtime(
         and latest_matching_snapshot(storage.portfolio_repo.history(), state_scope) is None
         and not recovery_artifacts.rebuilt_snapshot_saved
     ):
-        await portfolio_service.bootstrap_snapshot()
+        await portfolio_service.bootstrap_snapshot(
+            snapshot_origin="exchange_import" if imported_baseline is not None else "runtime_bootstrap"
+        )
         recovery_status = recovery_artifacts.status.model_copy(
             update={"recovered_snapshot_available": True}
         )
@@ -735,6 +961,7 @@ async def build_runtime(
         order_manager=order_manager,
         portfolio_service=portfolio_service,
         reconciliation_service=reconciliation_service,
+        fee_resolver=fee_resolver,
         policy_engine=policy_engine,
         risk_engine=risk_engine,
         kill_switch=kill_switch,

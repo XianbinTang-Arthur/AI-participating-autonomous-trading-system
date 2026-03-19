@@ -1,16 +1,16 @@
-﻿import { actionButton, callout, kvList, pill, statGrid, surfaceCard, table } from "../components.js";
-import { formatMaybeTimestamp, formatNumber, formatRelativeAge, formatSigned } from "../formatters.js";
-import { localizeError, readableState } from "../terms.js";
+﻿import { actionButton, alertQueue, pill, primaryStatusPanel, responsiveTable, summaryStrip, surfaceCard } from "../components.js";
+import { formatMaybeTimestamp, formatNumber, formatRelativeAge, formatSigned, middleEllipsis } from "../formatters.js";
+import { localizeError, readableState, toneForOrderStatus } from "../terms.js";
 import {
   fillImpactMeta,
   fillRowMeta,
   fillRowTitle,
   fillSceneSummary,
-  fillTableHeaders,
   orderRowMeta,
   orderRowTitle,
   orderSceneSummary,
   orderTableHeaders,
+  fillTableHeaders,
   splitByTradeScene,
 } from "../trade-display.js";
 
@@ -25,37 +25,52 @@ export function renderExecutionSections(data) {
   const recentFills = fillsPayload.fills || [];
   const errors = data.executionErrors?.errors || [];
   const metrics = data.metrics || {};
-  const latestDecision = data.latestDecision || {};
 
   return {
-    executionHero: surfaceCard({
-      title: "委托执行总览",
-      kicker: "最新执行状态",
-      copy: "这里重点回答三件事：最近一笔委托走到了哪一步、最近一笔成交有没有落库、当前是否存在会影响自动交易的执行异常。",
-      classes: "hero-card",
+    executionHero: primaryStatusPanel({
+      eyebrow: "委托与成交",
+      headline: executionHeadline({ latestOrder, latestFill, errors }),
+      summary: latestOrder || latestFill ? "先看最近委托和成交有没有真正落地，再看是否仍有异常在收敛。" : "当前还没有新的委托和成交记录。",
+      tone: executionTone({ latestOrder, errors }),
       actions: latestOrder?.client_order_id ? actionButton("查看最新委托", "inspect-order", latestOrder.client_order_id) : "",
-      content: `
-        ${callout({
-          title: latestOrder ? `最新${orderSceneSummary(latestOrder)}：${readableState(latestOrder.status)}` : "当前还没有新的委托记录",
-          copy: executionNarrative({ latestDecision, latestOrder, latestFill, latestReconciliation }),
-          pills: [
-            pill(`最新成交：${latestFill ? fillSceneSummary(latestFill) : "暂无"}`, latestFill ? "positive" : "outline"),
-            pill(`对账：${readableState(latestReconciliation?.severity || "unknown")}`, latestReconciliation?.halt_required ? "danger" : "info"),
-            pill(`活动委托数：${formatNumber(metrics.current_open_order_count)}`, metrics.current_open_order_count > 0 ? "warning" : "outline"),
-          ],
-        })}
-        ${statGrid([
-          { label: "最新委托", value: readableState(latestOrder?.status || "unknown"), meta: latestOrder?.client_order_id || "暂无委托" },
-          { label: "最近委托量", value: latestOrder ? latestOrder.requested_qty !== undefined ? formatSigned(latestOrder.requested_qty) : "-" : "-", meta: latestOrder ? `${readableState(latestOrder.order_type || "-")} | ${latestOrder.symbol || "-"}` : "-" },
-          { label: "最新成交量", value: formatNumber(latestFill?.fill_qty), meta: latestFill ? `成交价 ${formatNumber(latestFill.fill_price)}` : "暂无成交" },
-          { label: "最近异常数", value: formatNumber(errors.length), meta: errors[0] ? localizeError(errors[0].message || errors[0].status) : "近期没有执行异常" },
-        ])}
-      `,
+      pills: [
+        pill(`最新委托 ${readableState(latestOrder?.status || "unknown")}`, executionTone({ latestOrder, errors })),
+        pill(`活动委托 ${formatNumber(metrics.current_open_order_count, 0)}`, metrics.current_open_order_count > 0 ? "warning" : "outline"),
+        pill(`最近异常 ${formatNumber(errors.length, 0)}`, errors.length > 0 ? "danger" : "positive"),
+      ],
+      metrics: [
+        { label: "最新委托", value: readableState(latestOrder?.status || "unknown"), meta: middleEllipsis(latestOrder?.client_order_id, 10, 6, "暂未生成委托"), tone: toneForOrderStatus(latestOrder?.status) },
+        { label: "最近委托量", value: latestOrder?.requested_qty !== undefined ? formatSigned(latestOrder.requested_qty) : "待确认", meta: latestOrder ? `${readableState(latestOrder.order_type, "委托类型待确认")} | ${latestOrder.symbol || "标的待确认"}` : "当前还没有最新委托" , tone: latestOrder ? "info" : "neutral" },
+        { label: "最新成交", value: latestFill ? formatNumber(latestFill.fill_qty) : "暂未成交", meta: latestFill ? `价格 ${formatNumber(latestFill.fill_price)} | ${middleEllipsis(latestFill.fill_id)}` : "当前还没有成交编号", tone: latestFill ? "positive" : "neutral" },
+        { label: "最新对账", value: readableState(latestReconciliation?.severity || "unknown"), meta: middleEllipsis(latestReconciliation?.reconciliation_id, 10, 6, "暂时没有最新对账"), tone: latestReconciliation?.halt_required ? "danger" : latestReconciliation?.severity ? "warning" : "neutral" },
+      ],
+    }),
+    executionExceptions: surfaceCard({
+      title: "需要优先处理的执行异常",
+      kicker: "异常优先",
+      copy: "先判断执行链路有没有卡住，再去看历史委托和成交明细。",
+      classes: errors.length ? "" : "is-muted",
+      content: errors.length
+        ? alertQueue(
+            errors.slice(0, 6).map((item) => ({
+              title: localizeError(item.message || item.status || "execution_issue"),
+              copy: item.order_id ? `关联委托：${item.order_id}` : "当前没有关联的委托编号。",
+              meta: `${readableState(item.subsystem || "execution")} | ${formatMaybeTimestamp(item.observed_at || item.timestamp)}`,
+              tone: item.severity === "error" ? "danger" : "warning",
+              pill: pill(item.severity === "error" ? "错误" : "告警", item.severity === "error" ? "danger" : "warning"),
+            })),
+            "最近没有新的执行异常。"
+          )
+        : summaryStrip([
+            { label: "异常数", value: "0", meta: "最近没有新的执行异常", tone: "positive" },
+            { label: "最新委托状态", value: readableState(latestOrder?.status || "unknown"), meta: middleEllipsis(latestOrder?.client_order_id, 10, 6, "当前没有委托编号") , tone: toneForOrderStatus(latestOrder?.status) },
+            { label: "最新成交状态", value: latestFill ? "已落库" : "暂无", meta: middleEllipsis(latestFill?.fill_id, 10, 6, "当前没有成交编号"), tone: latestFill ? "positive" : "neutral" },
+          ]),
     }),
     executionOrders: surfaceCard({
       title: "最近委托",
       kicker: "委托状态变化",
-      copy: "按现货和合约分别查看委托，更容易判断到底是现货买卖、合约开平，还是某一类委托在反复失败或卡住。",
+      copy: "按现货和合约分别查看，判断哪类委托在排队、卡住或反复失败。",
       content: `${renderOrderGroups(recentOrders)}${renderPaginationFooter({
         payload: ordersPayload,
         key: "orders",
@@ -67,7 +82,7 @@ export function renderExecutionSections(data) {
     executionFills: surfaceCard({
       title: "最近成交",
       kicker: "成交落库确认",
-      copy: "按现货和合约分别核对成交，便于分清现金买卖、仓位变化、手续费影响和已实现盈亏。",
+      copy: "确认最近成交是否已经稳定落库，并补充对盈亏和手续费的上下文判断。",
       content: `${renderFillGroups(recentFills)}${renderPaginationFooter({
         payload: fillsPayload,
         key: "fills",
@@ -75,36 +90,6 @@ export function renderExecutionSections(data) {
         loadAction: "load-more-fills",
         collapseAction: "collapse-fills",
       })}`,
-    }),
-    executionExceptions: surfaceCard({
-      title: "执行异常与人工处理",
-      kicker: "异常队列",
-      copy: "执行报错不是噪音，而是判断系统还能不能继续自动交易的重要信号。",
-      content: errors.length
-        ? `
-            <div class="alert-list">
-              ${errors
-                .slice(0, 6)
-                .map(
-                  (item) => `
-                    <article class="alert-item">
-                      <div class="panel-head">
-                        <strong>${localizeError(item.message || item.status || "execution_issue")}</strong>
-                        ${pill(item.severity === "error" ? "错误" : "告警", item.severity === "error" ? "danger" : "warning")}
-                      </div>
-                      <p class="meta-copy">${readableState(item.subsystem || "execution")} | ${formatMaybeTimestamp(item.observed_at || item.timestamp)}</p>
-                      <p>${item.order_id ? `关联委托：${item.order_id}` : "当前没有关联委托号。"}</p>
-                    </article>
-                  `
-                )
-                .join("")}
-            </div>
-          `
-        : kvList([
-            ["最近执行异常数", "0", "当前没有新的执行异常"],
-            ["最新委托状态", readableState(latestOrder?.status || "unknown"), latestOrder?.client_order_id || "-"],
-            ["最新成交状态", latestFill ? "已落库" : "暂无", latestFill?.fill_id || "-"],
-          ]),
     }),
   };
 }
@@ -114,9 +99,9 @@ export function renderExecutionView(data) {
   return `
     <div class="panel-grid">
       <div class="span-12">${sections.executionHero}</div>
-      <div class="span-7">${sections.executionOrders}</div>
-      <div class="span-5">${sections.executionFills}</div>
       <div class="span-12">${sections.executionExceptions}</div>
+      <div class="span-12">${sections.executionOrders}</div>
+      <div class="span-12">${sections.executionFills}</div>
     </div>
   `;
 }
@@ -124,7 +109,7 @@ export function renderExecutionView(data) {
 function renderOrderGroups(recentOrders) {
   const groups = splitByTradeScene(recentOrders);
   if (!groups.length) {
-    return '<div class="empty-state">最近还没有委托。</div>';
+    return '<div class="empty-state">最近还没有委托记录。</div>';
   }
   return groups
     .map((group) => {
@@ -137,16 +122,35 @@ function renderOrderGroups(recentOrders) {
               <p class="meta-copy">${group.scene === "derivatives" ? "重点看开仓、减仓、平仓和卡单。" : "重点看买入、卖出和未成交数量。"}</p>
             </div>
           </div>
-          ${table(
+          ${responsiveTable(
             orderTableHeaders(group.scene),
             group.records.map((order) => [
-              `<div><strong>${order.symbol || "-"}</strong><div class="table-meta">${group.scene === "derivatives" ? `${readableState(order.margin_mode || "-")} | ${readableState(order.exposure_side || "-")}` : readableState(order.order_type || "-")}</div></div>`,
+              `<div><strong>${order.symbol || "标的待确认"}</strong><div class="table-meta">${group.scene === "derivatives" ? `${readableState(order.margin_mode, "保证金模式待确认")} | ${readableState(order.exposure_side, "方向待确认")}` : readableState(order.order_type, "委托类型待确认")}</div></div>`,
               `<div><strong>${orderRowTitle(order)}</strong><div class="table-meta">${orderRowMeta(order)}</div></div>`,
               `<div><strong>${readableState(order.status)}</strong><div class="table-meta">${order.exchange_order_id || "等待交易所回执"}</div></div>`,
               `<div><strong>${formatRelativeAge(order.last_update_ts || order.created_at)}</strong><div class="table-meta">${formatMaybeTimestamp(order.last_update_ts || order.created_at)}</div></div>`,
               `<div class="stack-actions">${actionButton("详情", "inspect-order", order.client_order_id)}${stuckButton(order)}</div>`,
             ]),
-            "最近还没有委托。"
+            "最近还没有委托。",
+            group.records.map((order) => ({
+              kicker: group.scene === "derivatives" ? "合约委托" : "现货委托",
+              title: `${order.symbol || "标的待确认"} | ${orderRowTitle(order)}`,
+              meta: `${formatRelativeAge(order.last_update_ts || order.created_at)} | ${formatMaybeTimestamp(order.last_update_ts || order.created_at)}`,
+              tone: ["failed", "rejected"].includes(String(order.status || "").toLowerCase()) ? "danger" : ["created", "submitting", "partially_filled", "cancel_pending"].includes(String(order.status || "").toLowerCase()) ? "warning" : "positive",
+              badge: pill(readableState(order.status), ["failed", "rejected"].includes(String(order.status || "").toLowerCase()) ? "danger" : ["created", "submitting", "partially_filled", "cancel_pending"].includes(String(order.status || "").toLowerCase()) ? "warning" : "positive"),
+              fields: [
+                { label: "交易场景", value: group.scene === "derivatives" ? "合约委托" : "现货委托", meta: group.scene === "derivatives" ? `${readableState(order.margin_mode, "保证金模式待确认")} | ${readableState(order.exposure_side, "方向待确认")}` : readableState(order.order_type, "委托类型待确认") },
+                { label: "委托摘要", value: orderRowTitle(order), meta: orderRowMeta(order) },
+                { label: "交易所回执", value: order.exchange_order_id || "等待回执" },
+              ],
+              details: [
+                { label: "委托状态", value: readableState(order.status), meta: order.exchange_order_id || "等待交易所回执" },
+                { label: "创建时间", value: formatMaybeTimestamp(order.created_at), meta: formatRelativeAge(order.created_at) },
+                { label: "最后更新时间", value: formatMaybeTimestamp(order.last_update_ts || order.created_at), meta: formatRelativeAge(order.last_update_ts || order.created_at) },
+              ],
+              detailLabel: "展开委托详情",
+              action: `<div class="stack-actions">${actionButton("详情", "inspect-order", order.client_order_id)}${stuckButton(order)}</div>`,
+            }))
           )}
         </section>
       `;
@@ -170,16 +174,41 @@ function renderFillGroups(recentFills) {
               <p class="meta-copy">${group.scene === "derivatives" ? "重点看仓位变化、已实现盈亏和手续费。" : "重点看买卖数量、成交金额和手续费。"}</p>
             </div>
           </div>
-          ${table(
+          ${responsiveTable(
             fillTableHeaders(group.scene),
-            group.records.map((fill) => [
-              `<div><strong>${fill.symbol || "-"}</strong><div class="table-meta">${group.scene === "derivatives" ? `${readableState(fill.margin_mode || "-")} | ${readableState(fill.exposure_side || "-")}` : readableState(fill.side || "-")}</div></div>`,
-              `<div><strong>${fillRowTitle(fill)}</strong><div class="table-meta">${fillRowMeta(fill)}</div></div>`,
-              `<div><strong>${group.scene === "derivatives" ? formatSigned(fill.realized_pnl) : fillImpactMeta(fill).split(" | ")[0]}</strong><div class="table-meta">${fillImpactMeta(fill)}</div></div>`,
-              `<div><strong>${formatRelativeAge(fill.ingestion_timestamp)}</strong><div class="table-meta">${formatMaybeTimestamp(fill.ingestion_timestamp)}</div></div>`,
-              actionButton("详情", "inspect-fill", fill.fill_id),
-            ]),
-            "最近还没有成交记录。"
+            group.records.map((fill) => {
+              const impact = fillImpactDisplay(fill, group.scene);
+              return [
+                `<div><strong>${fill.symbol || "标的待确认"}</strong><div class="table-meta">${group.scene === "derivatives" ? `${readableState(fill.margin_mode, "保证金模式待确认")} | ${readableState(fill.exposure_side, "方向待确认")}` : readableState(fill.side, "方向待确认")}</div></div>`,
+                `<div><strong>${fillRowTitle(fill)}</strong><div class="table-meta">${fillRowMeta(fill)}</div></div>`,
+                `<div><strong>${impact.value}</strong><div class="table-meta">${impact.meta}</div></div>`,
+                `<div><strong>${formatRelativeAge(fill.ingestion_timestamp)}</strong><div class="table-meta">${formatMaybeTimestamp(fill.ingestion_timestamp)}</div></div>`,
+                actionButton("详情", "inspect-fill", fill.fill_id),
+              ];
+            }),
+            "最近还没有成交记录。",
+            group.records.map((fill) => {
+              const impact = fillImpactDisplay(fill, group.scene);
+              return {
+                kicker: group.scene === "derivatives" ? "合约成交" : "现货成交",
+                title: `${fill.symbol || "标的待确认"} | ${fillRowTitle(fill)}`,
+                meta: `${formatRelativeAge(fill.ingestion_timestamp)} | ${formatMaybeTimestamp(fill.ingestion_timestamp)}`,
+                tone: group.scene === "derivatives" ? "info" : "positive",
+                badge: pill(group.scene === "derivatives" ? "合约成交" : "现货成交", "info"),
+                fields: [
+                  { label: "成交方向", value: group.scene === "derivatives" ? readableState(fill.exposure_side, "方向待确认") : readableState(fill.side, "方向待确认"), meta: group.scene === "derivatives" ? readableState(fill.margin_mode, "保证金模式待确认") : fillRowMeta(fill) },
+                  { label: "成交摘要", value: fillRowTitle(fill), meta: fillRowMeta(fill) },
+                  { label: "盈亏 / 影响", value: impact.value, meta: impact.meta },
+                ],
+                details: [
+                  { label: "成交时间", value: formatMaybeTimestamp(fill.ingestion_timestamp), meta: formatRelativeAge(fill.ingestion_timestamp) },
+                  { label: "成交编号", value: fill.fill_id || "当前没有编号" },
+                  { label: "补充说明", value: impact.meta },
+                ],
+                detailLabel: "展开成交详情",
+                action: actionButton("详情", "inspect-fill", fill.fill_id),
+              };
+            })
           )}
         </section>
       `;
@@ -195,7 +224,7 @@ function renderPaginationFooter({ payload, key, singular, loadAction, collapseAc
   if (!shown) return "";
   return `
     <div class="history-footer">
-      <p class="meta-copy">当前展示 ${shown} / ${total} 条${singular}记录。</p>
+      <p class="meta-copy">当前显示 ${shown} / ${total} 条${singular}记录。</p>
       <div class="stack-actions">
         ${hasMore ? actionButton(`加载更多${singular}`, loadAction, "", "secondary") : ""}
         ${limit > 8 ? actionButton("收起到最新 8 条", collapseAction, "", "ghost") : ""}
@@ -204,17 +233,46 @@ function renderPaginationFooter({ payload, key, singular, loadAction, collapseAc
   `;
 }
 
-function executionNarrative({ latestDecision, latestOrder, latestFill, latestReconciliation }) {
-  if (!latestOrder) {
-    return "最近没有新的委托，通常表示策略当前仍在继续观望，或者虽然允许交易，但这一轮并没有形成真正需要下单的信号。";
-  }
-  return `最近一笔${orderSceneSummary(latestOrder)}来自决策 ${latestDecision?.decision_id || "-"}，当前状态为 ${readableState(latestOrder.status)}。` +
-    `${latestFill ? ` 最新一笔${fillSceneSummary(latestFill)}已经落库，数量为 ${formatNumber(latestFill.fill_qty)}。` : " 当前还没有新的成交落库。"} ` +
-    `${latestReconciliation ? `最新对账结论为 ${readableState(latestReconciliation.severity)}。` : "当前还没有新的对账结论。"}`;
+function executionHeadline({ latestOrder, latestFill, errors }) {
+  if (errors.length > 0) return "执行链路存在异常";
+  if (!latestOrder) return "当前没有新的委托";
+  if (latestFill) return `最新${fillSceneSummary(latestFill)}已落库`;
+  return `最近一笔${orderSceneSummary(latestOrder)}处于 ${readableState(latestOrder.status)} 阶段`;
+}
+
+function executionTone({ latestOrder, errors }) {
+  if (errors.length > 0) return "danger";
+  if (["created", "submitting", "partially_filled", "cancel_pending"].includes(String(latestOrder?.status || "").toLowerCase())) return "warning";
+  return "positive";
 }
 
 function stuckButton(order) {
   const status = String(order?.status || "").toLowerCase();
   if (!["created", "submitting"].includes(status)) return "";
   return actionButton("处理卡单", "resolve-stuck-order", order.client_order_id, "warning");
+}
+
+function fillImpactDisplay(fill, scene) {
+  if (scene !== "derivatives") {
+    const meta = fillImpactMeta(fill);
+    const [value] = String(meta || "").split(" | ");
+    return {
+      value: value && value !== "当前没有额外说明" ? value : "影响待确认",
+      meta: meta && meta !== "当前没有额外说明" ? meta : "当前还没有足够的成交影响上下文",
+    };
+  }
+
+  const realizedPnl = Number(fill?.realized_pnl);
+  const fee = Number(fill?.fee ?? fill?.fee_amount);
+  const feeText = Number.isFinite(fee) ? `手续费 ${formatSigned(fee)}` : "手续费待同步";
+  if (Number.isFinite(realizedPnl)) {
+    return {
+      value: formatSigned(realizedPnl),
+      meta: feeText,
+    };
+  }
+  return {
+    value: "待结转",
+    meta: `${feeText} | 已实现盈亏还在同步`,
+  };
 }

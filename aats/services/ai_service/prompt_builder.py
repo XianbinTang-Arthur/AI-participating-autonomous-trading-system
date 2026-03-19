@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+from decimal import Decimal
 
 from aats.schemas.ai_brief import AIDecisionBrief
 from aats.schemas.decision import BaselineAssessment, DecisionContext
 from aats.schemas.features import FeatureSnapshot
+from aats.services.portfolio_service.decimals import to_decimal
 
 
 class PromptBuilder:
@@ -15,10 +17,11 @@ class PromptBuilder:
         baseline: BaselineAssessment,
         feature_snapshot: FeatureSnapshot | None,
         margin_mode: str,
-        fee_bps: float,
-        max_slippage_tolerance_bps: float,
-        expected_slippage_proxy_bps: float,
-        min_net_edge_bps: float,
+        fee_bps: Decimal | float,
+        funding_fee_bps: Decimal | float,
+        max_slippage_tolerance_bps: Decimal | float,
+        expected_slippage_proxy_bps: Decimal | float,
+        min_net_edge_bps: Decimal | float,
         degraded: bool,
     ) -> AIDecisionBrief:
         analysis = feature_snapshot.analysis_context if feature_snapshot is not None else None
@@ -63,10 +66,11 @@ class PromptBuilder:
             baseline_confidence=baseline.confidence,
             baseline_suggested_position_scale=baseline.suggested_position_scale,
             baseline_reason_codes=list(baseline.reason_codes),
-            fee_bps=fee_bps,
-            max_slippage_tolerance_bps=max_slippage_tolerance_bps,
-            expected_slippage_proxy_bps=expected_slippage_proxy_bps,
-            min_net_edge_bps=min_net_edge_bps,
+            fee_bps=to_decimal(fee_bps),
+            funding_fee_bps=to_decimal(funding_fee_bps),
+            max_slippage_tolerance_bps=to_decimal(max_slippage_tolerance_bps),
+            expected_slippage_proxy_bps=to_decimal(expected_slippage_proxy_bps),
+            min_net_edge_bps=to_decimal(min_net_edge_bps),
             safe_to_trade=safe_to_trade,
             review_required=review_required,
             halted=halted,
@@ -81,7 +85,30 @@ class PromptBuilder:
         *,
         brief: AIDecisionBrief,
         operating_mode: str,
+        include_execution_suggestion: bool = False,
     ) -> str:
+        response_contract = {
+            "regime": "trend|range|breakout|uncertain",
+            "directional_edge": "float between -1 and 1",
+            "expected_volatility": "non-negative float",
+            "confidence": "float between 0 and 1",
+            "uncertainty": "float between 0 and 1",
+            "expected_holding_horizon": brief.timeframe,
+            "invalidation_conditions": ["string", "string"],
+            "risk_tags": ["string"],
+            "rationale_summary": "short string",
+            "baseline_override_recommended": "boolean",
+            "override_reason_codes": ["string"],
+        }
+        if include_execution_suggestion:
+            response_contract["execution_parameter_suggestion"] = {
+                "passive_bias": "optional float between 0 and 1",
+                "maker_taker_bias": "optional float between -1 and 1",
+                "max_cross_spread_bps": "optional non-negative float",
+                "slice_count": "optional positive integer",
+                "max_participation_rate": "optional float between 0 and 1",
+                "cancel_replace_patience_ms": "optional non-negative integer",
+            }
         payload = {
             "task": "ai_primary_market_assessment",
             "operating_mode": operating_mode,
@@ -96,18 +123,15 @@ class PromptBuilder:
                 ],
             },
             "decision_brief": brief.model_dump(mode="json"),
-            "response_contract": {
-                "regime": "trend|range|breakout|uncertain",
-                "directional_edge": "float between -1 and 1",
-                "expected_volatility": "non-negative float",
-                "confidence": "float between 0 and 1",
-                "uncertainty": "float between 0 and 1",
-                "expected_holding_horizon": brief.timeframe,
-                "invalidation_conditions": ["string", "string"],
-                "risk_tags": ["string"],
-                "rationale_summary": "short string",
-                "baseline_override_recommended": "boolean",
-                "override_reason_codes": ["string"],
-            },
+            "response_contract": response_contract,
         }
+        if include_execution_suggestion:
+            payload["instructions"]["requirements"].insert(
+                -1,
+                "execution_parameter_suggestion must be null unless there is a strong reason to prefer a bounded execution posture.",
+            )
+            payload["instructions"]["requirements"].insert(
+                -1,
+                "If execution_parameter_suggestion is present, only use the whitelisted bounded fields from the response contract.",
+            )
         return json.dumps(payload, ensure_ascii=True, separators=(",", ":"))

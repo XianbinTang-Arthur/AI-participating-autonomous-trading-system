@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal
 from typing import Literal
 
 from pydantic import Field
@@ -28,6 +29,8 @@ class AITakeoverDecision(SchemaBase):
     baseline_direction: str
     ai_direction: str
     final_direction: str
+    ai_execution_suggestion_present: bool = False
+    ai_execution_suggestion_mode: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
 
 
@@ -37,10 +40,10 @@ class AIShadowDecision(SchemaBase):
     symbol: str
     timeframe: str
 
-    baseline_target_qty: float
+    baseline_target_qty: Decimal
     baseline_action: str
 
-    ai_shadow_target_qty: float
+    ai_shadow_target_qty: Decimal
     ai_shadow_action: str
 
     would_override_baseline: bool
@@ -67,15 +70,15 @@ class AIShadowEvaluation(SchemaBase):
     disagreement_count: int
     fallback_count: int
 
-    baseline_gross_pnl: float | None = None
-    baseline_net_pnl: float | None = None
-    baseline_fee_total: float | None = None
+    baseline_gross_pnl: Decimal | None = None
+    baseline_net_pnl: Decimal | None = None
+    baseline_fee_total: Decimal | None = None
     baseline_fee_ratio: float | None = None
     baseline_churn_ratio: float | None = None
 
-    shadow_gross_pnl: float | None = None
-    shadow_net_pnl: float | None = None
-    shadow_fee_total: float | None = None
+    shadow_gross_pnl: Decimal | None = None
+    shadow_net_pnl: Decimal | None = None
+    shadow_fee_total: Decimal | None = None
     shadow_fee_ratio: float | None = None
     shadow_churn_ratio: float | None = None
 

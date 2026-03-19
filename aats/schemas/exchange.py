@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal
 from typing import Any, Literal
 
 from pydantic import Field
@@ -10,18 +11,18 @@ from aats.schemas.common import SchemaBase, new_id
 
 class ExchangeBalance(SchemaBase):
     currency: str
-    total: float
-    available: float
-    frozen: float = 0.0
+    total: Decimal
+    available: Decimal
+    frozen: Decimal = Decimal("0")
 
 
 class ExchangePosition(SchemaBase):
     instrument_id: str
     symbol: str
-    quantity: float
-    average_entry_price: float | None = None
-    mark_price: float | None = None
-    notional_usd: float | None = None
+    quantity: Decimal
+    average_entry_price: Decimal | None = None
+    mark_price: Decimal | None = None
+    notional_usd: Decimal | None = None
     side: str = "net"
 
 
@@ -32,9 +33,9 @@ class ExchangeOpenOrder(SchemaBase):
     side: str
     order_type: str
     status: str
-    quantity: float
-    filled_quantity: float = 0.0
-    price: float | None = None
+    quantity: Decimal
+    filled_quantity: Decimal = Decimal("0")
+    price: Decimal | None = None
     created_ts: datetime | None = None
     updated_ts: datetime | None = None
 
@@ -46,9 +47,9 @@ class ExchangeFill(SchemaBase):
     instrument_id: str
     symbol: str
     side: str
-    fill_qty: float
-    fill_price: float
-    fee_amount: float = 0.0
+    fill_qty: Decimal
+    fill_price: Decimal
+    fee_amount: Decimal = Decimal("0")
     fee_currency: str | None = None
     fill_ts: datetime | None = None
 
@@ -58,10 +59,10 @@ class InstrumentMetadata(SchemaBase):
     symbol: str
     base_currency: str
     quote_currency: str
-    lot_size: float
-    tick_size: float
-    min_size: float
-    contract_value: float = 1.0
+    lot_size: Decimal
+    tick_size: Decimal
+    min_size: Decimal
+    contract_value: Decimal = Decimal("1")
     state: str
     raw: dict[str, Any] = Field(default_factory=dict)
 
@@ -75,6 +76,10 @@ class ExchangeAccountSnapshot(SchemaBase):
     fills: list[ExchangeFill] = Field(default_factory=list)
     instruments: list[InstrumentMetadata] = Field(default_factory=list)
     account_mode: str | None = None
+    position_mode: str | None = None
+    fee_rates: dict[str, Any] = Field(default_factory=dict)
+    account_risk: dict[str, Any] = Field(default_factory=dict)
+    system_status: list[dict[str, Any]] = Field(default_factory=list)
     raw: dict[str, Any] = Field(default_factory=dict)
 
 

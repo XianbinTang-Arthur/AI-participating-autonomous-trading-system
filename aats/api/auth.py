@@ -164,6 +164,9 @@ def require_admin_access(
     x_aats_api_key: str | None = Header(default=None, alias="X-AATS-API-Key"),
 ) -> OperatorPrincipal:
     principal = require_write_access(request, x_aats_api_key)
+    settings = _runtime(request).settings
+    if not principal.auth_enabled and settings.operator_unsafe_write_without_auth:
+        return principal
     if principal.role != "admin":
         raise HTTPException(status_code=403, detail="operator_admin_access_required")
     return principal

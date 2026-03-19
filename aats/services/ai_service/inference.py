@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta
+from decimal import Decimal
 
 from aats.bootstrap.logging import correlation_fields, get_logger, log_event
 from aats.bootstrap.settings import AATSSettings
@@ -9,16 +10,19 @@ from aats.bus.base import EventBus
 from aats.events import topics
 from aats.events.envelopes import build_envelope, publish_model
 from aats.schemas.ai_brief import AIDecisionBrief
+from aats.schemas.ai_reports import AIPerformanceReport, AIPerformanceWindowReport
 from aats.schemas.ai_shadow import AIDegradationEvent, AIShadowEvaluation
 from aats.schemas.common import utc_now
 from aats.schemas.decision import AIMarketAssessment, BaselineAssessment, DecisionContext
 from aats.schemas.features import FeatureSnapshot
 from aats.services.ai_service.evaluator import AIEvaluationTracker
+from aats.services.fee_resolver import EffectiveFeeResolver
 from aats.services.portfolio_service.positions import PortfolioState
 from aats.services.ai_service.openai_provider import OpenAIProvider
 from aats.services.ai_service.provider import AIProvider, AIProviderError, AIProviderTimeoutError
 from aats.services.ai_service.prompt_builder import PromptBuilder
 from aats.services.ai_service.validator import AIOutputValidationError, AssessmentValidator
+from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, to_decimal
 from aats.storage.base import EventStore, ExecutionRepository
 
 
@@ -34,6 +38,7 @@ class AIInferenceService:
         execution_repo: ExecutionRepository | None = None,
         provider: AIProvider | None = None,
         evaluator: AIEvaluationTracker | None = None,
+        fee_resolver: EffectiveFeeResolver | None = None,
     ) -> None:
         self.settings = settings
         self.event_store = event_store
@@ -43,12 +48,21 @@ class AIInferenceService:
         self.validator = validator
         self.provider = provider or self._default_provider()
         self.evaluator = evaluator or AIEvaluationTracker()
+        self.fee_resolver = fee_resolver or EffectiveFeeResolver(settings=settings)
         self.logger = get_logger("aats.ai_service")
         self._consecutive_failures = 0
         self._consecutive_successes = 0
         self._degraded = False
         self._degradation_reason = ""
         self._recovery_probe_after: datetime | None = None
+        self._outcome_review_required = False
+        self._outcome_auto_downgraded = False
+        self._outcome_degradation_reason = ""
+        self._outcome_bad_window_streak = 0
+        self._last_provider_degraded_at: datetime | None = None
+        self._last_provider_recovered_at: datetime | None = None
+        self._last_outcome_degraded_at: datetime | None = None
+        self._last_outcome_recovered_at: datetime | None = None
 
     async def assess(
         self,
@@ -58,12 +72,22 @@ class AIInferenceService:
     ) -> AIMarketAssessment:
         feature_snapshot = self._feature_snapshot(context)
         probe_attempt = self._degraded and self._recovery_probe_ready()
+        brief_fee_bps = self.fee_resolver.estimated_execution_fee_bps_decimal(
+            symbol=context.symbol,
+            execution_style="taker",
+            order_type="market",
+        )
         brief = self.prompt_builder.build_brief(
             context=context,
             baseline=baseline,
             feature_snapshot=feature_snapshot,
             margin_mode=self.settings.margin_mode,
-            fee_bps=self.settings.paper_taker_fee_bps,
+            fee_bps=brief_fee_bps,
+            funding_fee_bps=(
+                self.fee_resolver.funding_fee_bps_decimal(symbol=context.symbol)
+                if context.product_type == "derivatives"
+                else Decimal("0")
+            ),
             max_slippage_tolerance_bps=float(self.settings.max_slippage_tolerance_bps),
             expected_slippage_proxy_bps=self._expected_slippage_proxy_bps(),
             min_net_edge_bps=self.settings.strategy_min_net_edge_bps,
@@ -114,6 +138,7 @@ class AIInferenceService:
         prompt = self.prompt_builder.build(
             brief=brief,
             operating_mode=operating_mode,
+            include_execution_suggestion=self.settings.ai_execution_suggestion_mode != "disabled",
         )
         attempts = max(1, self.settings.ai_max_retries + 1)
         last_reason = "ai_provider_failed"
@@ -122,7 +147,9 @@ class AIInferenceService:
                 response = await asyncio.wait_for(
                     self.provider.generate_assessment(
                         prompt=prompt,
-                        response_schema=self.validator.output_schema(),
+                        response_schema=self.validator.output_schema(
+                            include_execution_suggestion=self.settings.ai_execution_suggestion_mode != "disabled"
+                        ),
                     ),
                     timeout=self.settings.ai_timeout_seconds,
                 )
@@ -281,6 +308,8 @@ class AIInferenceService:
             },
         )
         self.evaluator.record_shadow_evaluation(evaluation)
+        self._publish_performance_report(evaluation=evaluation)
+        self._record_shadow_outcome(evaluation)
         return evaluation, True
 
     async def handle_portfolio_snapshot(self, message: dict) -> None:
@@ -302,19 +331,82 @@ class AIInferenceService:
             or "output_rejected" in item.evaluation_tags
             or not item.output_valid
         )
+        recent_execution_suggestion_count = sum(
+            1 for item in recent_assessments if item.ai_execution_parameter_suggestion is not None
+        )
+        degraded = self._degraded or self._outcome_review_required
+        auto_downgrade_active = (
+            (self._degraded and self.settings.ai_auto_downgrade_enabled)
+            or self._outcome_auto_downgraded
+        )
+        degradation_reason = self._outcome_degradation_reason or self._degradation_reason
+        failure_budget_remaining = max(
+            self.settings.ai_degrade_after_failures - self._consecutive_failures,
+            0,
+        )
+        recovery_budget_remaining = 0
+        if self._degraded:
+            recovery_budget_remaining = max(
+                self.settings.ai_recover_after_successes - self._consecutive_successes,
+                0,
+            )
+        outcome_budget_remaining = max(
+            max(self.settings.ai_outcome_review_bad_window_threshold, 1) - self._outcome_bad_window_streak,
+            0,
+        )
+        provider_state = "healthy"
+        if self._degraded and self._recovery_probe_ready():
+            provider_state = "recovery_probe"
+        elif self._degraded:
+            provider_state = "degraded"
+        outcome_state = "healthy"
+        if self._outcome_auto_downgraded:
+            outcome_state = "auto_downgraded"
+        elif self._outcome_review_required:
+            outcome_state = "review_required"
+        elif self._outcome_bad_window_streak > 0:
+            outcome_state = "monitoring"
         return {
             "configured_operating_mode": self.settings.ai_operating_mode,
             "effective_operating_mode": self.effective_operating_mode(),
             "provider": self.settings.ai_provider,
             "configured": self.settings.ai_provider_configured,
-            "degraded": self._degraded,
-            "auto_downgrade_active": self._degraded and self.settings.ai_auto_downgrade_enabled,
-            "degradation_reason": self._degradation_reason or None,
+            "provider_ready": self.provider is not None,
+            "degraded": degraded,
+            "provider_degraded": self._degraded,
+            "outcome_review_required": self._outcome_review_required,
+            "auto_downgrade_active": auto_downgrade_active,
+            "outcome_auto_downgrade_active": self._outcome_auto_downgraded,
+            "degradation_reason": degradation_reason or None,
+            "outcome_degradation_reason": self._outcome_degradation_reason or None,
             "recovery_probe_after": self._recovery_probe_after,
             "recovery_probe_ready": self._recovery_probe_ready(),
             "consecutive_failures": self._consecutive_failures,
             "consecutive_successes": self._consecutive_successes,
+            "outcome_bad_window_streak": self._outcome_bad_window_streak,
+            "provider_state": provider_state,
+            "outcome_state": outcome_state,
+            "last_provider_degraded_at": self._last_provider_degraded_at,
+            "last_provider_recovered_at": self._last_provider_recovered_at,
+            "last_outcome_degraded_at": self._last_outcome_degraded_at,
+            "last_outcome_recovered_at": self._last_outcome_recovered_at,
             "shadow_mode_enabled": self.settings.ai_shadow_mode_enabled,
+            "execution_suggestion_mode": self.settings.ai_execution_suggestion_mode,
+            "failure_budget": {
+                "degrade_after_failures": self.settings.ai_degrade_after_failures,
+                "recover_after_successes": self.settings.ai_recover_after_successes,
+                "remaining_failures_until_degrade": failure_budget_remaining,
+                "remaining_successes_until_recover": recovery_budget_remaining,
+            },
+            "outcome_policy": {
+                "bad_window_threshold": max(self.settings.ai_outcome_review_bad_window_threshold, 1),
+                "remaining_bad_windows_until_review": outcome_budget_remaining,
+                "max_fee_ratio_delta": self.settings.ai_outcome_max_fee_ratio_delta,
+                "max_churn_ratio_delta": self.settings.ai_outcome_max_churn_ratio_delta,
+            },
+            "recent_assessment_count": len(recent_assessments),
+            "recent_shadow_evaluation_count": len(self.evaluator.shadow_evaluations_recent(limit=25)),
+            "recent_execution_suggestion_count": recent_execution_suggestion_count,
             "recent_fallback_ratio": round(fallback_ratio, 6),
             "recent_timeout_count": recent_timeout_count,
             "recent_invalid_output_count": recent_invalid_output_count,
@@ -369,12 +461,15 @@ class AIInferenceService:
         prompt = self.prompt_builder.build(
             brief=brief,
             operating_mode="ai_primary_shadow",
+            include_execution_suggestion=self.settings.ai_execution_suggestion_mode != "disabled",
         )
         try:
             response = await asyncio.wait_for(
                 self.provider.generate_assessment(
                     prompt=prompt,
-                    response_schema=self.validator.output_schema(),
+                    response_schema=self.validator.output_schema(
+                        include_execution_suggestion=self.settings.ai_execution_suggestion_mode != "disabled"
+                    ),
                 ),
                 timeout=self.settings.ai_timeout_seconds,
             )
@@ -426,6 +521,7 @@ class AIInferenceService:
                 seconds=max(self.settings.ai_recovery_probe_interval_seconds, 0.0)
             )
             if not was_degraded:
+                self._last_provider_degraded_at = utc_now()
                 await self._publish_degradation_event()
 
     def _record_success(self) -> None:
@@ -436,6 +532,7 @@ class AIInferenceService:
             self._degradation_reason = ""
             self._consecutive_successes = 0
             self._recovery_probe_after = None
+            self._last_provider_recovered_at = utc_now()
         elif self._degraded:
             self._recovery_probe_after = utc_now() + timedelta(
                 seconds=max(self.settings.ai_recovery_probe_interval_seconds, 0.0)
@@ -447,6 +544,8 @@ class AIInferenceService:
         return None
 
     def effective_operating_mode(self) -> str:
+        if self._outcome_auto_downgraded:
+            return "baseline_only"
         if self._degraded and self.settings.ai_auto_downgrade_enabled and not self._recovery_probe_ready():
             return "baseline_only"
         return self.settings.ai_operating_mode
@@ -457,9 +556,9 @@ class AIInferenceService:
         return self.effective_operating_mode() != "baseline_only"
 
     def _expected_slippage_proxy_bps(self) -> float:
-        return max(self.settings.max_slippage_tolerance_bps, 0) * max(
-            self.settings.strategy_expected_slippage_bps_fraction,
-            0.0,
+        return float(
+            to_decimal(max(self.settings.max_slippage_tolerance_bps, 0))
+            * max(to_decimal(self.settings.strategy_expected_slippage_bps_fraction), Decimal("0"))
         )
 
     def _recovery_probe_ready(self) -> bool:
@@ -503,6 +602,194 @@ class AIInferenceService:
             )
         )
 
+    def _record_shadow_outcome(self, evaluation: AIShadowEvaluation) -> None:
+        fee_ratio_delta = float(evaluation.shadow_fee_ratio or 0.0) - float(evaluation.baseline_fee_ratio or 0.0)
+        churn_ratio_delta = float(evaluation.shadow_churn_ratio or 0.0) - float(evaluation.baseline_churn_ratio or 0.0)
+        reason_codes: list[str] = []
+        if evaluation.shadow_outperformed is False:
+            reason_codes.append("ai_shadow_underperformed_baseline")
+        if fee_ratio_delta > self.settings.ai_outcome_max_fee_ratio_delta:
+            reason_codes.append("ai_shadow_fee_drag_worse")
+        if churn_ratio_delta > self.settings.ai_outcome_max_churn_ratio_delta:
+            reason_codes.append("ai_shadow_churn_worse")
+
+        if reason_codes:
+            self._outcome_bad_window_streak += 1
+        else:
+            was_review_required = self._outcome_review_required or self._outcome_auto_downgraded
+            self._outcome_bad_window_streak = 0
+            self._outcome_review_required = False
+            self._outcome_auto_downgraded = False
+            self._outcome_degradation_reason = ""
+            if was_review_required:
+                self._last_outcome_recovered_at = utc_now()
+            return
+
+        if self._outcome_bad_window_streak < max(self.settings.ai_outcome_review_bad_window_threshold, 1):
+            return
+
+        self._outcome_review_required = True
+        self._outcome_auto_downgraded = (
+            self.settings.ai_auto_downgrade_enabled and self.settings.ai_operating_mode == "ai_primary"
+        )
+        self._outcome_degradation_reason = reason_codes[0]
+        self._last_outcome_degraded_at = utc_now()
+        self.event_store.append(
+            build_envelope(
+                topic=topics.AI_DEGRADATION_EVENTS,
+                key=evaluation.symbol,
+                payload_model=AIDegradationEvent(
+                    symbol=evaluation.symbol,
+                    timeframe=evaluation.timeframe,
+                    product_type=self.settings.trading_product_type,
+                    margin_mode=self.settings.margin_mode,
+                    allowed_symbols=tuple(self.settings.allowed_symbols),
+                    configured_operating_mode=self.settings.ai_operating_mode,
+                    effective_operating_mode=self.effective_operating_mode(),
+                    degraded=True,
+                    auto_downgrade_active=self._outcome_auto_downgraded,
+                    reason_code=self._outcome_degradation_reason,
+                    consecutive_failures=self._consecutive_failures,
+                    consecutive_successes=self._consecutive_successes,
+                    recovery_probe_after=None,
+                ),
+                source_component="ai_service",
+            )
+        )
+
+    def _publish_performance_report(self, *, evaluation: AIShadowEvaluation) -> None:
+        rows = [
+            item
+            for item in self.evaluator.shadow_evaluations_recent(limit=40)
+            if item.symbol == evaluation.symbol and item.timeframe == evaluation.timeframe
+        ]
+        latest_ref = self.event_store.latest_by_topic_scoped(
+            topics.AI_SHADOW_EVALUATIONS,
+            scope=self._runtime_scope(),
+            key=evaluation.symbol,
+        )
+        report = AIPerformanceReport(
+            symbol=evaluation.symbol,
+            timeframe=evaluation.timeframe,
+            product_type=self.settings.trading_product_type,
+            margin_mode=self.settings.margin_mode,
+            allowed_symbols=tuple(self.settings.allowed_symbols),
+            configured_operating_mode=self.settings.ai_operating_mode,
+            effective_operating_mode=self.effective_operating_mode(),
+            window_count=len(rows),
+            latest_evaluation_ref=None if latest_ref is None else latest_ref.event_id,
+            latest_evaluation_id=evaluation.evaluation_id,
+            latest_status="review_required" if self._outcome_review_required else ("healthy" if evaluation.shadow_outperformed else "underperforming"),
+            review_required=self._outcome_review_required,
+            windows=self._performance_windows(
+                rows,
+                max_fee_ratio_delta=self.settings.ai_outcome_max_fee_ratio_delta,
+                max_churn_ratio_delta=self.settings.ai_outcome_max_churn_ratio_delta,
+            ),
+            summary={
+                "latest_net_pnl_delta": (
+                    Decimal(str(evaluation.shadow_net_pnl or "0")) - Decimal(str(evaluation.baseline_net_pnl or "0"))
+                ),
+                "latest_fee_ratio_delta": round(
+                    float(evaluation.shadow_fee_ratio or 0.0) - float(evaluation.baseline_fee_ratio or 0.0),
+                    6,
+                ),
+                "latest_churn_ratio_delta": round(
+                    float(evaluation.shadow_churn_ratio or 0.0) - float(evaluation.baseline_churn_ratio or 0.0),
+                    6,
+                ),
+                "outperformed_count": sum(1 for item in rows if item.shadow_outperformed is True),
+                "underperformed_count": sum(1 for item in rows if item.shadow_outperformed is False),
+            },
+        )
+        self.event_store.append(
+            build_envelope(
+                topic=topics.AI_PERFORMANCE_REPORTS,
+                key=evaluation.symbol,
+                payload_model=report,
+                source_component="ai_service",
+            )
+        )
+
+    @staticmethod
+    def _performance_windows(
+        rows: list[AIShadowEvaluation],
+        *,
+        max_fee_ratio_delta: float,
+        max_churn_ratio_delta: float,
+    ) -> dict[str, AIPerformanceWindowReport]:
+        windows = {
+            "short": ("recent_3_windows", 3),
+            "medium": ("recent_5_windows", 5),
+            "long": ("recent_10_windows", 10),
+        }
+        reports: dict[str, AIPerformanceWindowReport] = {}
+        for key, (label, sample_size) in windows.items():
+            sample = rows[:sample_size]
+            if not sample:
+                reports[key] = AIPerformanceWindowReport(label=label, sample_size=0)
+                continue
+            baseline_total = sum((Decimal(str(item.baseline_net_pnl or "0")) for item in sample), start=Decimal("0"))
+            shadow_total = sum((Decimal(str(item.shadow_net_pnl or "0")) for item in sample), start=Decimal("0"))
+            fee_deltas = [
+                float(item.shadow_fee_ratio or 0.0) - float(item.baseline_fee_ratio or 0.0)
+                for item in sample
+            ]
+            churn_deltas = [
+                float(item.shadow_churn_ratio or 0.0) - float(item.baseline_churn_ratio or 0.0)
+                for item in sample
+            ]
+            review_required_count = sum(
+                1
+                for item in sample
+                if (
+                    item.shadow_outperformed is False
+                    or (float(item.shadow_fee_ratio or 0.0) - float(item.baseline_fee_ratio or 0.0)) > max_fee_ratio_delta
+                    or (float(item.shadow_churn_ratio or 0.0) - float(item.baseline_churn_ratio or 0.0)) > max_churn_ratio_delta
+                )
+            )
+            reports[key] = AIPerformanceWindowReport(
+                label=label,
+                sample_size=len(sample),
+                outperformed_rate=round(
+                    sum(1 for item in sample if item.shadow_outperformed is True) / len(sample),
+                    6,
+                ),
+                baseline_net_pnl_total=baseline_total,
+                shadow_net_pnl_total=shadow_total,
+                net_pnl_delta_total=shadow_total - baseline_total,
+                avg_fee_ratio_delta=round(sum(fee_deltas) / len(fee_deltas), 6),
+                avg_churn_ratio_delta=round(sum(churn_deltas) / len(churn_deltas), 6),
+                review_required_count=review_required_count,
+            )
+        return reports
+
+    def _runtime_scope(self):
+        from aats.services.runtime_scope import runtime_state_scope
+
+        return runtime_state_scope(self.settings)
+
+    def _estimated_execution_fee_bps_for_assessment(
+        self,
+        *,
+        symbol: str,
+        assessment: AIMarketAssessment | None,
+    ) -> Decimal:
+        envelope = None if assessment is None else assessment.ai_execution_parameter_suggestion
+        suggestion = None if envelope is None else envelope.suggestion
+        execution_style = "taker"
+        order_type = "market"
+        if suggestion is not None and self.settings.ai_execution_suggestion_mode != "disabled":
+            execution_style = "bounded_limit_ioc"
+            order_type = "limit"
+        return self.fee_resolver.estimated_execution_fee_bps_decimal(
+            symbol=symbol,
+            execution_style=execution_style,
+            order_type=order_type,
+            passive_bias=None if suggestion is None else suggestion.passive_bias,
+            maker_taker_bias=None if suggestion is None else suggestion.maker_taker_bias,
+        )
+
     def _decision_fills(self, decision_ids: list[str]) -> dict[str, list]:
         if self.execution_repo is None or not decision_ids:
             return {}
@@ -527,26 +814,26 @@ class AIInferenceService:
         if not fills_by_decision:
             return self._replay_target_path(shadow_rows=shadow_rows, use_shadow_targets=False)
 
-        current_qty = 0.0
-        avg_entry_price = 0.0
-        realized_gross_pnl = 0.0
-        fee_total = 0.0
+        current_qty = Decimal("0")
+        avg_entry_price = Decimal("0")
+        realized_gross_pnl = Decimal("0")
+        fee_total = Decimal("0")
         trade_count = 0
         low_edge_trade_count = 0
-        last_price = 0.0
+        last_price = Decimal("0")
         fill_backed_decision_count = 0
 
         for row in shadow_rows:
             decision_fills = fills_by_decision.get(row.decision_id, [])
             brief = self.latest_brief(row.decision_id)
             if not decision_fills:
-                if brief is not None and brief.last_price > 0.0:
-                    last_price = brief.last_price
+                if brief is not None and brief.last_price is not None and brief.last_price > Decimal("0"):
+                    last_price = to_decimal(brief.last_price)
                 continue
             fill_backed_decision_count += 1
             trade_count += 1
-            decision_realized = 0.0
-            decision_fee_total = 0.0
+            decision_realized = Decimal("0")
+            decision_fee_total = Decimal("0")
             for fill in decision_fills:
                 last_price = fill.fill_price
                 signed_qty = fill.fill_qty if fill.side == "buy" else -fill.fill_qty
@@ -560,24 +847,24 @@ class AIInferenceService:
                 decision_fee_total += PortfolioState.fee_cost_in_quote(fill)
             realized_gross_pnl += decision_realized
             fee_total += decision_fee_total
-            if abs(decision_realized) <= decision_fee_total * 1.25:
+            if abs(decision_realized) <= decision_fee_total * Decimal("1.25"):
                 low_edge_trade_count += 1
-            if brief is not None and brief.last_price > 0.0:
-                last_price = brief.last_price
+            if brief is not None and brief.last_price is not None and brief.last_price > Decimal("0"):
+                last_price = to_decimal(brief.last_price)
 
-        unrealized_pnl = current_qty * (last_price - avg_entry_price) if last_price > 0.0 else 0.0
+        unrealized_pnl = current_qty * (last_price - avg_entry_price) if last_price > 0 else Decimal("0")
         gross_pnl = realized_gross_pnl + unrealized_pnl
         net_pnl = gross_pnl - fee_total
-        fee_ratio = abs(fee_total / gross_pnl) if abs(gross_pnl) > 1e-12 else None
+        fee_ratio = float(abs(fee_total / gross_pnl)) if abs(gross_pnl) > EPSILON_DECIMAL_12 else None
         churn_ratio = (low_edge_trade_count / trade_count) if trade_count else 0.0
         return {
             "trade_count": float(trade_count),
-            "gross_pnl": gross_pnl,
-            "net_pnl": net_pnl,
-            "fee_total": fee_total,
+            "gross_pnl": float(gross_pnl),
+            "net_pnl": float(net_pnl),
+            "fee_total": float(fee_total),
             "fee_ratio": fee_ratio,
             "churn_ratio": churn_ratio,
-            "final_position_qty": current_qty,
+            "final_position_qty": float(current_qty),
             "fill_backed_decision_count": float(fill_backed_decision_count),
             "synthetic_decision_count": 0.0,
         }
@@ -591,53 +878,62 @@ class AIInferenceService:
         if not fills_by_decision:
             return self._replay_target_path(shadow_rows=shadow_rows, use_shadow_targets=True)
 
-        current_qty = 0.0
-        avg_entry_price = 0.0
-        realized_gross_pnl = 0.0
-        fee_total = 0.0
+        current_qty = Decimal("0")
+        avg_entry_price = Decimal("0")
+        realized_gross_pnl = Decimal("0")
+        fee_total = Decimal("0")
         trade_count = 0
         low_edge_trade_count = 0
-        last_price = 0.0
+        last_price = Decimal("0")
         fill_backed_decision_count = 0
         synthetic_decision_count = 0
 
         for row in shadow_rows:
             brief = self.latest_brief(row.decision_id)
-            price = brief.last_price if brief is not None and brief.last_price > 0.0 else last_price
-            target_qty = row.ai_shadow_target_qty
+            price = (
+                to_decimal(brief.last_price)
+                if brief is not None and brief.last_price is not None and brief.last_price > Decimal("0")
+                else last_price
+            )
+            target_qty = to_decimal(row.ai_shadow_target_qty)
             delta_qty = target_qty - current_qty
-            if abs(delta_qty) <= 1e-12:
-                if price > 0.0:
+            if abs(delta_qty) <= EPSILON_DECIMAL_12:
+                if price > 0:
                     last_price = price
                 continue
 
             trade_count += 1
             decision_fills = fills_by_decision.get(row.decision_id, [])
-            decision_fee = 0.0
+            decision_fee = Decimal("0")
             if decision_fills:
-                priced_qty = sum(max(fill.fill_qty, 0.0) for fill in decision_fills)
-                notional = sum(max(fill.fill_qty, 0.0) * fill.fill_price for fill in decision_fills)
-                actual_fee_total = sum(PortfolioState.fee_cost_in_quote(fill) for fill in decision_fills)
-                if priced_qty > 1e-12 and notional > 1e-12:
+                priced_qty = sum((max(fill.fill_qty, Decimal("0")) for fill in decision_fills), start=Decimal("0"))
+                notional = sum((max(fill.fill_qty, Decimal("0")) * fill.fill_price for fill in decision_fills), start=Decimal("0"))
+                actual_fee_total = sum((PortfolioState.fee_cost_in_quote(fill) for fill in decision_fills), start=Decimal("0"))
+                if priced_qty > EPSILON_DECIMAL_12 and notional > EPSILON_DECIMAL_12:
                     execution_price = notional / priced_qty
                     last_price = execution_price
                     fill_backed_decision_count += 1
                     executable_qty = min(abs(delta_qty), priced_qty)
-                    if executable_qty <= 1e-12:
+                    if executable_qty <= EPSILON_DECIMAL_12:
                         continue
                     signed_qty = executable_qty if delta_qty > 0 else -executable_qty
-                    fee_bps = (actual_fee_total / notional) * 10_000.0
-                    decision_fee = executable_qty * execution_price * (fee_bps / 10_000.0)
+                    fee_bps = (actual_fee_total / notional) * Decimal("10000")
+                    decision_fee = executable_qty * execution_price * (fee_bps / Decimal("10000"))
                 else:
                     decision_fills = []
             if not decision_fills:
-                if price <= 0.0:
+                if price <= 0:
                     continue
                 last_price = price
                 execution_price = price
                 signed_qty = delta_qty
                 synthetic_decision_count += 1
-                decision_fee = abs(signed_qty) * execution_price * (self.settings.paper_taker_fee_bps / 10_000.0)
+                decision_fee = abs(signed_qty) * execution_price * (
+                    self._estimated_execution_fee_bps_for_assessment(
+                        symbol=row.symbol,
+                        assessment=self.latest_shadow_assessment(row.decision_id),
+                    ) / Decimal("10000")
+                )
 
             fee_total += decision_fee
             realized_trade_pnl, current_qty, avg_entry_price = self._apply_signed_execution(
@@ -647,24 +943,24 @@ class AIInferenceService:
                 execution_price=execution_price,
             )
             realized_gross_pnl += realized_trade_pnl
-            if abs(realized_trade_pnl) <= decision_fee * 1.25:
+            if abs(realized_trade_pnl) <= decision_fee * Decimal("1.25"):
                 low_edge_trade_count += 1
-            if brief is not None and brief.last_price > 0.0:
-                last_price = brief.last_price
+            if brief is not None and brief.last_price is not None and brief.last_price > Decimal("0"):
+                last_price = to_decimal(brief.last_price)
 
-        unrealized_pnl = current_qty * (last_price - avg_entry_price) if last_price > 0.0 else 0.0
+        unrealized_pnl = current_qty * (last_price - avg_entry_price) if last_price > 0 else Decimal("0")
         gross_pnl = realized_gross_pnl + unrealized_pnl
         net_pnl = gross_pnl - fee_total
-        fee_ratio = abs(fee_total / gross_pnl) if abs(gross_pnl) > 1e-12 else None
+        fee_ratio = float(abs(fee_total / gross_pnl)) if abs(gross_pnl) > EPSILON_DECIMAL_12 else None
         churn_ratio = (low_edge_trade_count / trade_count) if trade_count else 0.0
         return {
             "trade_count": float(trade_count),
-            "gross_pnl": gross_pnl,
-            "net_pnl": net_pnl,
-            "fee_total": fee_total,
+            "gross_pnl": float(gross_pnl),
+            "net_pnl": float(net_pnl),
+            "fee_total": float(fee_total),
             "fee_ratio": fee_ratio,
             "churn_ratio": churn_ratio,
-            "final_position_qty": current_qty,
+            "final_position_qty": float(current_qty),
             "fill_backed_decision_count": float(fill_backed_decision_count),
             "synthetic_decision_count": float(synthetic_decision_count),
         }
@@ -675,26 +971,36 @@ class AIInferenceService:
         shadow_rows: list,
         use_shadow_targets: bool,
     ) -> dict[str, float]:
-        current_qty = 0.0
-        avg_entry_price = 0.0
-        realized_gross_pnl = 0.0
-        fee_total = 0.0
+        current_qty = Decimal("0")
+        avg_entry_price = Decimal("0")
+        realized_gross_pnl = Decimal("0")
+        fee_total = Decimal("0")
         trade_count = 0
         low_edge_trade_count = 0
-        last_price = 0.0
+        last_price = Decimal("0")
 
         for row in shadow_rows:
             brief = self.latest_brief(row.decision_id)
-            price = brief.last_price if brief is not None and brief.last_price > 0.0 else last_price
-            if price <= 0.0:
+            price = (
+                to_decimal(brief.last_price)
+                if brief is not None and brief.last_price is not None and brief.last_price > Decimal("0")
+                else last_price
+            )
+            if price <= 0:
                 continue
             last_price = price
-            target_qty = row.ai_shadow_target_qty if use_shadow_targets else row.baseline_target_qty
+            target_qty = to_decimal(row.ai_shadow_target_qty if use_shadow_targets else row.baseline_target_qty)
             delta_qty = target_qty - current_qty
-            if abs(delta_qty) <= 1e-12:
+            if abs(delta_qty) <= EPSILON_DECIMAL_12:
                 continue
             trade_count += 1
-            fee = abs(delta_qty) * price * (self.settings.paper_taker_fee_bps / 10_000.0)
+            assessment = self.latest_shadow_assessment(row.decision_id) if use_shadow_targets else None
+            fee = abs(delta_qty) * price * (
+                self._estimated_execution_fee_bps_for_assessment(
+                    symbol=row.symbol,
+                    assessment=assessment,
+                ) / Decimal("10000")
+            )
             fee_total += fee
             realized_trade_pnl, current_qty, avg_entry_price = self._apply_signed_execution(
                 current_qty=current_qty,
@@ -703,22 +1009,22 @@ class AIInferenceService:
                 execution_price=price,
             )
             realized_gross_pnl += realized_trade_pnl
-            if abs(realized_trade_pnl) <= fee * 1.25:
+            if abs(realized_trade_pnl) <= fee * Decimal("1.25"):
                 low_edge_trade_count += 1
 
-        unrealized_pnl = current_qty * (last_price - avg_entry_price) if last_price > 0.0 else 0.0
+        unrealized_pnl = current_qty * (last_price - avg_entry_price) if last_price > 0 else Decimal("0")
         gross_pnl = realized_gross_pnl + unrealized_pnl
         net_pnl = gross_pnl - fee_total
-        fee_ratio = abs(fee_total / gross_pnl) if abs(gross_pnl) > 1e-12 else None
+        fee_ratio = float(abs(fee_total / gross_pnl)) if abs(gross_pnl) > EPSILON_DECIMAL_12 else None
         churn_ratio = (low_edge_trade_count / trade_count) if trade_count else 0.0
         return {
             "trade_count": float(trade_count),
-            "gross_pnl": gross_pnl,
-            "net_pnl": net_pnl,
-            "fee_total": fee_total,
+            "gross_pnl": float(gross_pnl),
+            "net_pnl": float(net_pnl),
+            "fee_total": float(fee_total),
             "fee_ratio": fee_ratio,
             "churn_ratio": churn_ratio,
-            "final_position_qty": current_qty,
+            "final_position_qty": float(current_qty),
             "fill_backed_decision_count": 0.0,
             "synthetic_decision_count": float(trade_count),
         }
@@ -726,31 +1032,31 @@ class AIInferenceService:
     @staticmethod
     def _apply_signed_execution(
         *,
-        current_qty: float,
-        avg_entry_price: float,
-        signed_qty: float,
-        execution_price: float,
-    ) -> tuple[float, float, float]:
-        realized_trade_pnl = 0.0
+        current_qty: Decimal,
+        avg_entry_price: Decimal,
+        signed_qty: Decimal,
+        execution_price: Decimal,
+    ) -> tuple[Decimal, Decimal, Decimal]:
+        realized_trade_pnl = Decimal("0")
         next_qty = current_qty + signed_qty
 
-        if abs(current_qty) <= 1e-12:
-            return 0.0, next_qty, execution_price if abs(next_qty) > 1e-12 else 0.0
+        if abs(current_qty) <= EPSILON_DECIMAL_12:
+            return Decimal("0"), next_qty, execution_price if abs(next_qty) > EPSILON_DECIMAL_12 else Decimal("0")
 
         same_direction = current_qty * signed_qty > 0
         if same_direction:
             combined_qty = next_qty
-            if abs(combined_qty) <= 1e-12:
-                return 0.0, 0.0, 0.0
+            if abs(combined_qty) <= EPSILON_DECIMAL_12:
+                return Decimal("0"), Decimal("0"), Decimal("0")
             weighted_notional = (current_qty * avg_entry_price) + (signed_qty * execution_price)
             next_avg = weighted_notional / combined_qty
-            return 0.0, combined_qty, next_avg
+            return Decimal("0"), combined_qty, next_avg
 
         close_qty = min(abs(signed_qty), abs(current_qty))
-        realized_trade_pnl += close_qty * (execution_price - avg_entry_price) * (1.0 if current_qty > 0 else -1.0)
+        realized_trade_pnl += close_qty * (execution_price - avg_entry_price) * (Decimal("1") if current_qty > 0 else Decimal("-1"))
         remaining_qty = next_qty
-        if abs(remaining_qty) <= 1e-12:
-            return realized_trade_pnl, 0.0, 0.0
+        if abs(remaining_qty) <= EPSILON_DECIMAL_12:
+            return realized_trade_pnl, Decimal("0"), Decimal("0")
         if current_qty * remaining_qty > 0:
             return realized_trade_pnl, remaining_qty, avg_entry_price
         return realized_trade_pnl, remaining_qty, execution_price

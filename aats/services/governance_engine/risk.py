@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Callable
 
 from aats.bootstrap.settings import AATSSettings
@@ -11,9 +12,12 @@ from aats.schemas.execution import OrderObligation
 from aats.schemas.governance import RiskDecision
 from aats.services.decision_engine.trigger_policy import DecisionTriggerPolicy
 from aats.services.execution_engine.okx_account import OKXAccountService
+from aats.services.fee_resolver import EffectiveFeeResolver
 from aats.services.governance_engine.health import SystemHealthService
 from aats.services.governance_engine.mode import RuntimeModeController
 from aats.services.governance_engine.runtime_layers import EnvironmentCapabilities, PolicyProfile
+from aats.services.accounting import remaining_obligation_amount, resolve_symbol_currencies, spot_buy_quote_requirement
+from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, to_decimal
 from aats.storage.base import ExecutionObligationRepository
 
 
@@ -25,11 +29,12 @@ class RiskEngine:
         account_service: OKXAccountService,
         health_service: SystemHealthService,
         trigger_policy: DecisionTriggerPolicy,
-        price_provider: Callable[[str], float],
+        price_provider: Callable[[str], Decimal],
         mode_controller: RuntimeModeController,
         obligation_repo: ExecutionObligationRepository | None = None,
         environment_capabilities: EnvironmentCapabilities | None = None,
         policy_profile: PolicyProfile | None = None,
+        fee_resolver: EffectiveFeeResolver | None = None,
     ) -> None:
         self.settings = settings
         self.account_service = account_service
@@ -40,18 +45,25 @@ class RiskEngine:
         self.obligation_repo = obligation_repo
         self.environment_capabilities = environment_capabilities or mode_controller.environment_capabilities
         self.policy_profile = policy_profile or mode_controller.policy_profile
+        self.fee_resolver = fee_resolver or EffectiveFeeResolver(
+            settings=settings,
+            account_service=account_service,
+        )
 
     def evaluate(self, target: PositionTarget) -> RiskDecision:
-        max_abs_qty = self.settings.max_abs_position_qty
-        max_notional = self.settings.max_notional_per_symbol
-        capped_qty = max(min(target.target_position_qty, max_abs_qty), -max_abs_qty)
+        max_abs_qty = to_decimal(self.settings.max_abs_position_qty)
+        max_notional = to_decimal(self.settings.max_notional_per_symbol)
+        target_position_qty = to_decimal(target.target_position_qty)
+        current_position_qty = to_decimal(target.current_position_qty)
+        target_leverage = to_decimal(target.target_leverage)
+        capped_qty = max(min(target_position_qty, max_abs_qty), -max_abs_qty)
         constraints_applied: list[str] = []
-        if capped_qty != target.target_position_qty:
+        if capped_qty != target_position_qty:
             constraints_applied.append("max_abs_qty")
 
-        mark_price = self.price_provider(target.symbol)
+        mark_price = to_decimal(self.price_provider(target.symbol))
         target_notional = abs(capped_qty) * mark_price
-        if target_notional > max_notional and abs(target.target_position_qty) > 1e-12:
+        if target_notional > max_notional and abs(target_position_qty) > EPSILON_DECIMAL_12:
             notional_scale = max_notional / target_notional
             capped_qty *= notional_scale
             target_notional = max_notional
@@ -61,46 +73,52 @@ class RiskEngine:
         approved = True
         rejection_reasons: list[str] = []
         capped_target_leverage = self._capped_target_leverage(target.target_leverage)
-        if abs(capped_target_leverage - target.target_leverage) > 1e-12:
+        if abs(to_decimal(capped_target_leverage) - target_leverage) > EPSILON_DECIMAL_12:
             constraints_applied.append("max_target_leverage")
         if current_open_order_count >= self.settings.max_open_orders:
             approved = False
             rejection_reasons.append("max_open_orders_reached")
 
         if self.policy_profile.balance_checks_required and self.environment_capabilities.account_state_source_kind == "exchange":
-            delta_qty = capped_qty - target.current_position_qty
+            delta_qty = capped_qty - current_position_qty
             base_currency, quote_currency = self._symbol_currencies(target.symbol)
-            fee_multiplier = 1.0 + (self.settings.paper_taker_fee_bps / 10_000.0)
+            taker_fee_bps = self.fee_resolver.taker_fee_bps_decimal(symbol=target.symbol)
+            fee_multiplier = Decimal("1") + (taker_fee_bps / Decimal("10000"))
             if self.environment_capabilities.position_directionality == "bi_directional":
-                if target.target_leverage > self.policy_profile.max_target_leverage + 1e-9:
+                if target_leverage > to_decimal(self.policy_profile.max_target_leverage) + EPSILON_DECIMAL_12:
                     approved = False
                     rejection_reasons.append("max_target_leverage_exceeded")
-                required_margin = abs(delta_qty) * mark_price * fee_multiplier / max(capped_target_leverage, 1.0)
-                available_quote = self._available_balance(quote_currency) if quote_currency is not None else 0.0
-                max_margin_capacity = available_quote * self.settings.max_margin_usage_fraction
-                if max_margin_capacity + 1e-9 < required_margin:
+                required_margin = abs(delta_qty) * mark_price * fee_multiplier / to_decimal(max(capped_target_leverage, 1.0))
+                available_quote = self._available_balance(quote_currency) if quote_currency is not None else Decimal("0")
+                max_margin_capacity = available_quote * to_decimal(self.settings.max_margin_usage_fraction)
+                if max_margin_capacity + EPSILON_DECIMAL_12 < required_margin:
                     approved = False
                     rejection_reasons.append("insufficient_initial_margin")
                 projected_notional = abs(capped_qty) * mark_price
-                if available_quote > 0.0:
+                if available_quote > 0:
                     margin_usage = required_margin / available_quote
-                    if margin_usage > max(self.settings.max_margin_usage_fraction - self.settings.liquidation_buffer_fraction, 0.0):
+                    if margin_usage > to_decimal(max(self.settings.max_margin_usage_fraction - self.settings.liquidation_buffer_fraction, 0.0)):
                         approved = False
                         rejection_reasons.append("liquidation_buffer_breached")
-                if projected_notional > max_notional * max(capped_target_leverage, 1.0):
+                if projected_notional > max_notional * to_decimal(max(capped_target_leverage, 1.0)):
                     approved = False
                     rejection_reasons.append("max_gross_notional_per_symbol_exceeded")
             else:
-                if delta_qty > 1e-12 and quote_currency is not None:
-                    required_quote = abs(delta_qty) * mark_price * fee_multiplier
+                if delta_qty > EPSILON_DECIMAL_12 and quote_currency is not None:
+                    required_quote = spot_buy_quote_requirement(
+                        quantity=abs(delta_qty),
+                        reference_price=mark_price,
+                        max_slippage_tolerance_bps=target.max_slippage_tolerance_bps,
+                        taker_fee_bps=taker_fee_bps,
+                    ) or Decimal("0")
                     available_quote = self._available_balance(quote_currency)
-                    if available_quote + 1e-9 < required_quote:
+                    if available_quote + EPSILON_DECIMAL_12 < required_quote:
                         approved = False
                         rejection_reasons.append("insufficient_quote_balance")
-                elif delta_qty < -1e-12 and base_currency is not None:
+                elif delta_qty < -EPSILON_DECIMAL_12 and base_currency is not None:
                     required_base = abs(delta_qty)
                     available_base = self._available_balance(base_currency)
-                    if available_base + 1e-9 < required_base:
+                    if available_base + EPSILON_DECIMAL_12 < required_base:
                         approved = False
                         rejection_reasons.append("insufficient_base_balance")
 
@@ -111,7 +129,7 @@ class RiskEngine:
                 rejection_reasons.extend(health_blockers)
 
         modified = bool(constraints_applied)
-        risk_score = min(abs(capped_qty) / max_abs_qty, 1.0) if max_abs_qty else 0.0
+        risk_score = min(float(abs(capped_qty) / max_abs_qty), 1.0) if max_abs_qty else 0.0
         halt_required = any(reason.endswith("_halt_required") for reason in rejection_reasons)
         return RiskDecision(
             decision_id=target.decision_id,
@@ -130,18 +148,20 @@ class RiskEngine:
     def _capped_target_leverage(self, leverage: float) -> float:
         return max(1.0, min(leverage, self.policy_profile.max_target_leverage))
 
-    def _available_balance(self, currency: str) -> float:
+    def _available_balance(self, currency: str | None) -> Decimal:
+        if currency is None:
+            return Decimal("0")
         snapshot_getter = getattr(self.account_service, "latest_snapshot", None)
         snapshot = snapshot_getter() if callable(snapshot_getter) else None
         if snapshot is None:
-            return 0.0
+            return Decimal("0")
         exchange_available = sum(balance.available for balance in snapshot.balances if balance.currency == currency)
         local_reserved = sum(
-            self._remaining_obligation_amount(obligation)
+            remaining_obligation_amount(obligation)
             for obligation in self._active_local_obligations()
             if obligation.reserve_currency == currency
         )
-        return max(exchange_available - local_reserved, 0.0)
+        return max(exchange_available - local_reserved, Decimal("0"))
 
     def _current_open_order_count(self, symbol: str) -> int:
         return self.account_service.open_order_count(symbol=symbol) + sum(
@@ -166,26 +186,12 @@ class RiskEngine:
             if obligation.client_order_id not in visible_client_order_ids
         ]
 
-    @staticmethod
-    def _remaining_obligation_amount(obligation: OrderObligation) -> float:
-        return max(
-            obligation.reserved_amount - obligation.consumed_amount - obligation.released_amount,
-            0.0,
-        )
-
     def _symbol_currencies(self, symbol: str) -> tuple[str | None, str | None]:
         instrument_getter = getattr(self.account_service, "instrument_metadata", None)
-        instrument = instrument_getter(symbol) if callable(instrument_getter) else None
-        if instrument is not None:
-            base_currency = (instrument.base_currency or "").strip()
-            quote_currency = (instrument.quote_currency or "").strip()
-            if base_currency and quote_currency:
-                return base_currency, quote_currency
-        if "-" in symbol:
-            parts = [part for part in symbol.split("-") if part]
-            if len(parts) >= 2:
-                return parts[0], parts[1]
-        return None, None
+        return resolve_symbol_currencies(
+            symbol,
+            instrument_lookup=instrument_getter if callable(instrument_getter) else None,
+        )
 
     async def publish_decision(
         self,

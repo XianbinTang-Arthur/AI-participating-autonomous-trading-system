@@ -16,6 +16,7 @@ from aats.services.execution_engine.okx_rest import OKXRESTClient, OKXRequestErr
 from aats.services.governance_engine.health import SystemHealthService
 from aats.services.governance_engine.mode import RuntimeModeController
 from aats.services.governance_engine.runtime_layers import EnvironmentCapabilities, PolicyProfile
+from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, to_decimal
 from aats.bootstrap.logging import correlation_fields, get_logger, log_event
 from aats.storage.base import ExecutionObligationRepository
 
@@ -24,7 +25,7 @@ class OKXOrderPayloadBuilder:
     def build(self, *, intent: OrderIntent, instrument: InstrumentMetadata) -> dict[str, str]:
         quantity = self._exchange_quantity(intent=intent, instrument=instrument)
         quantity = self._round_down(value=quantity, step=instrument.lot_size)
-        if quantity <= 0.0 or quantity < instrument.min_size:
+        if quantity <= 0 or quantity < instrument.min_size:
             raise ValueError(
                 f"Order quantity below OKX minimum size symbol={intent.symbol} quantity={intent.quantity} min_size={instrument.min_size}"
             )
@@ -33,12 +34,12 @@ class OKXOrderPayloadBuilder:
             "instId": instrument.instrument_id,
             "tdMode": "cash" if intent.product_type == "spot" else intent.margin_mode,
             "side": intent.side,
-            "ordType": intent.order_type,
+            "ordType": self._order_type(intent),
             "sz": self._render_decimal(quantity),
             "clOrdId": self._client_order_id(intent),
         }
         if intent.product_type == "derivatives":
-            payload["lever"] = self._render_decimal(max(intent.target_leverage, 1.0))
+            payload["lever"] = self._render_decimal(max(to_decimal(intent.target_leverage), Decimal("1")))
             payload["posSide"] = "long" if intent.exposure_side == "long" else "short"
             if intent.reduce_only:
                 payload["reduceOnly"] = "true"
@@ -50,11 +51,22 @@ class OKXOrderPayloadBuilder:
         return payload
 
     @staticmethod
-    def _exchange_quantity(*, intent: OrderIntent, instrument: InstrumentMetadata) -> float:
+    def _order_type(intent: OrderIntent) -> str:
+        if intent.order_type != "limit":
+            return intent.order_type
+        tif = str(intent.time_in_force or "IOC").upper()
+        if tif == "IOC":
+            return "ioc"
+        if tif == "FOK":
+            return "fok"
+        return "limit"
+
+    @staticmethod
+    def _exchange_quantity(*, intent: OrderIntent, instrument: InstrumentMetadata) -> Decimal:
         if intent.product_type != "derivatives":
             return intent.quantity
-        contract_value = max(instrument.contract_value, 0.0)
-        if contract_value <= 0.0:
+        contract_value = max(instrument.contract_value, Decimal("0"))
+        if contract_value <= 0:
             return intent.quantity
         return intent.quantity / contract_value
 
@@ -71,16 +83,15 @@ class OKXOrderPayloadBuilder:
         return f"cl{digest[:30]}"
 
     @staticmethod
-    def _round_down(*, value: float, step: float) -> float:
-        if step <= 0.0:
+    def _round_down(*, value: Decimal, step: Decimal) -> Decimal:
+        if step <= 0:
             return value
-        ratio = Decimal(str(value)) / Decimal(str(step))
-        rounded = ratio.quantize(Decimal("1"), rounding=ROUND_DOWN) * Decimal(str(step))
-        return float(rounded)
+        ratio = value / step
+        return ratio.quantize(Decimal("1"), rounding=ROUND_DOWN) * step
 
     @staticmethod
-    def _render_decimal(value: float) -> str:
-        rendered = format(Decimal(str(value)).normalize(), "f")
+    def _render_decimal(value: Decimal) -> str:
+        rendered = format(value.normalize(), "f")
         return rendered.rstrip("0").rstrip(".") if "." in rendered else rendered
 
 
@@ -96,7 +107,7 @@ class OKXExecutionAdapter(ExchangeAdapter):
         environment_capabilities: EnvironmentCapabilities | None = None,
         policy_profile: PolicyProfile | None = None,
         health_service: SystemHealthService | None = None,
-        price_provider: Callable[[str], float] | None = None,
+        price_provider: Callable[[str], Decimal] | None = None,
         payload_builder: OKXOrderPayloadBuilder | None = None,
     ) -> None:
         self.settings = settings
@@ -141,6 +152,36 @@ class OKXExecutionAdapter(ExchangeAdapter):
                 ),
             )
             return self._blocked_state(intent=intent, payload=payload, reason=gate_error), []
+        max_size_error = await self._max_size_gate_error(intent=intent, payload=payload)
+        if max_size_error is not None:
+            self._last_error = max_size_error
+            log_event(
+                self.logger,
+                "okx_submit_blocked",
+                level="warning",
+                **correlation_fields(
+                    decision_id=intent.decision_id,
+                    intent_id=intent.intent_id,
+                    symbol=intent.symbol,
+                    reason=max_size_error,
+                ),
+            )
+            return self._blocked_state(intent=intent, payload=payload, reason=max_size_error), []
+        slippage_error = self._slippage_gate_error(intent=intent)
+        if slippage_error is not None:
+            self._last_error = slippage_error
+            log_event(
+                self.logger,
+                "okx_submit_blocked",
+                level="warning",
+                **correlation_fields(
+                    decision_id=intent.decision_id,
+                    intent_id=intent.intent_id,
+                    symbol=intent.symbol,
+                    reason=slippage_error,
+                ),
+            )
+            return self._blocked_state(intent=intent, payload=payload, reason=slippage_error), []
 
         try:
             response = await self.client.place_order(payload)
@@ -191,19 +232,26 @@ class OKXExecutionAdapter(ExchangeAdapter):
                 ), []
 
             try:
-                fills_payload = await self.client.get_fills(
+                exchange_fills = self._latest_private_order_fills(
                     symbol=intent.symbol,
                     order_id=state.exchange_order_id,
-                    limit=self.settings.okx_fill_fetch_limit,
-                )
-                fills = self._map_fill_events(
-                    intent=self._intent_from_state(state),
                     client_order_id=state.client_order_id,
-                    exchange_fills=self._select_exchange_fills(
+                )
+                if not exchange_fills:
+                    fills_payload = await self.client.get_fills(
+                        symbol=intent.symbol,
+                        order_id=state.exchange_order_id,
+                        limit=self.settings.okx_fill_fetch_limit,
+                    )
+                    exchange_fills = self._select_exchange_fills(
                         exchange_fills=self._parse_fill_rows(fills_payload),
                         order_id=state.exchange_order_id,
                         client_order_id=state.client_order_id,
-                    ),
+                    )
+                fills = self._map_fill_events(
+                    intent=self._intent_from_state(state),
+                    client_order_id=state.client_order_id,
+                    exchange_fills=exchange_fills,
                 )
                 self._last_error = None
                 return state, fills
@@ -301,19 +349,26 @@ class OKXExecutionAdapter(ExchangeAdapter):
                     error=str(exc),
                 ), []
             try:
-                fills_payload = await self.client.get_fills(
+                exchange_fills = self._latest_private_order_fills(
                     symbol=order_state.symbol,
                     order_id=order_state.exchange_order_id,
-                    limit=self.settings.okx_fill_fetch_limit,
-                )
-                fills = self._map_fill_events(
-                    intent=self._intent_from_state(state),
                     client_order_id=order_state.client_order_id,
-                    exchange_fills=self._select_exchange_fills(
+                )
+                if not exchange_fills:
+                    fills_payload = await self.client.get_fills(
+                        symbol=order_state.symbol,
+                        order_id=order_state.exchange_order_id,
+                        limit=self.settings.okx_fill_fetch_limit,
+                    )
+                    exchange_fills = self._select_exchange_fills(
                         exchange_fills=self._parse_fill_rows(fills_payload),
                         order_id=order_state.exchange_order_id,
                         client_order_id=order_state.client_order_id,
-                    ),
+                    )
+                fills = self._map_fill_events(
+                    intent=self._intent_from_state(state),
+                    client_order_id=order_state.client_order_id,
+                    exchange_fills=exchange_fills,
                 )
                 self._last_error = None
                 return state, fills
@@ -351,7 +406,8 @@ class OKXExecutionAdapter(ExchangeAdapter):
             # an exchange order id or a post-submit state that can be resolved by
             # client order id.
             if state.status in {"CREATED", "SUBMITTING"} and state.exchange_order_id is None:
-                continue
+                if self._load_private_order_detail_only(symbol=state.symbol, client_order_id=state.client_order_id) is None:
+                    continue
             refreshed_state = state
             try:
                 order_detail = await self._load_order_detail(
@@ -367,20 +423,27 @@ class OKXExecutionAdapter(ExchangeAdapter):
                         order_row=order_detail,
                         submitted_ts=state.submitted_ts or utc_now(),
                     )
-                fills_payload = await self.client.get_fills(
+                exchange_fills = self._latest_private_order_fills(
                     symbol=state.symbol,
-                    order_id=state.exchange_order_id,
-                    limit=self.settings.okx_fill_fetch_limit,
+                    order_id=refreshed_state.exchange_order_id,
+                    client_order_id=refreshed_state.client_order_id,
                 )
+                if not exchange_fills:
+                    fills_payload = await self.client.get_fills(
+                        symbol=state.symbol,
+                        order_id=refreshed_state.exchange_order_id,
+                        limit=self.settings.okx_fill_fetch_limit,
+                    )
+                    exchange_fills = self._select_exchange_fills(
+                        exchange_fills=self._parse_fill_rows(fills_payload),
+                        order_id=refreshed_state.exchange_order_id,
+                        client_order_id=refreshed_state.client_order_id,
+                    )
                 fills.extend(
                     self._map_fill_events(
                         intent=self._intent_from_state(refreshed_state),
                         client_order_id=refreshed_state.client_order_id,
-                        exchange_fills=self._select_exchange_fills(
-                            exchange_fills=self._parse_fill_rows(fills_payload),
-                            order_id=refreshed_state.exchange_order_id,
-                            client_order_id=refreshed_state.client_order_id,
-                        ),
+                        exchange_fills=exchange_fills,
                     )
                 )
                 refreshed_states.append(refreshed_state)
@@ -392,9 +455,26 @@ class OKXExecutionAdapter(ExchangeAdapter):
                 )
         return refreshed_states, fills
 
+    def _load_private_order_detail_only(
+        self,
+        *,
+        symbol: str,
+        client_order_id: str | None,
+    ) -> dict[str, Any] | None:
+        if client_order_id is None:
+            return None
+        private_ws_lookup = getattr(self.account_service, "latest_private_order_row", None)
+        if not callable(private_ws_lookup):
+            return None
+        row = private_ws_lookup(symbol=symbol, order_id=None, client_order_id=client_order_id)
+        return row if isinstance(row, dict) else None
+
     def readiness(self) -> dict[str, Any]:
         account_status = self.account_service.status()
         gate_status = self._gate_status()
+        effective_taker_fee_bps = None
+        if hasattr(self.account_service, "effective_taker_fee_bps"):
+            effective_taker_fee_bps = self.account_service.effective_taker_fee_bps()  # type: ignore[call-arg]
         return {
             "ready": account_status["credentials_configured"] and account_status["enabled"],
             "backend": "okx",
@@ -414,6 +494,8 @@ class OKXExecutionAdapter(ExchangeAdapter):
             "safety_gates": gate_status["safety_gates"],
             "last_error": self._last_error,
             "last_submission_payload": self._last_submission_payload,
+            "okx_max_order_quantity_precheck_enabled": self.settings.okx_max_order_quantity_precheck_enabled,
+            "effective_taker_fee_bps": effective_taker_fee_bps,
             "account_status": account_status,
             "environment_capabilities": self.environment_capabilities.to_dict(),
             "policy_profile": self.policy_profile.to_dict(),
@@ -437,8 +519,8 @@ class OKXExecutionAdapter(ExchangeAdapter):
             return "symbol_not_allowed"
         if self._current_open_order_count(intent.symbol) >= self.settings.max_open_orders:
             return "max_open_orders_reached"
-        price = self.price_provider(intent.symbol) if self.price_provider is not None else 0.0
-        if price > 0.0 and (intent.quantity * price) > self.settings.max_notional_per_symbol:
+        price = to_decimal(self.price_provider(intent.symbol)) if self.price_provider is not None else Decimal("0")
+        if price > 0 and (intent.quantity * price) > to_decimal(self.settings.max_notional_per_symbol):
             return "max_notional_per_symbol_exceeded"
         account_status = self.account_service.status()
         if not account_status.get("ready", False):
@@ -447,6 +529,34 @@ class OKXExecutionAdapter(ExchangeAdapter):
             blockers = self.health_service.execution_blockers()
             if blockers:
                 return blockers[0]
+        return None
+
+    async def _max_size_gate_error(self, *, intent: OrderIntent, payload: dict[str, str]) -> str | None:
+        if not self.settings.okx_max_order_quantity_precheck_enabled:
+            return None
+        requested_size = payload.get("sz")
+        td_mode = payload.get("tdMode")
+        if requested_size in {None, ""} or td_mode in {None, ""}:
+            return None
+        reference_price = intent.limit_price or intent.reference_price
+        if reference_price is None and self.price_provider is not None:
+            reference_price = to_decimal(self.price_provider(intent.symbol))
+        try:
+            response = await self.client.get_max_order_quantity(
+                symbol=intent.symbol,
+                td_mode=str(td_mode),
+                leverage=intent.target_leverage if intent.product_type == "derivatives" else None,
+                price=reference_price,
+            )
+        except Exception as exc:
+            return f"okx_max_order_quantity_precheck_failed:{type(exc).__name__}"
+        row = self._first_row(response)
+        requested = to_decimal(requested_size)
+        max_allowed = self._max_size_from_row(row=row, side=intent.side)
+        if max_allowed is None or max_allowed <= Decimal("0"):
+            return None
+        if requested - max_allowed > Decimal("1e-12"):
+            return f"okx_max_order_quantity_exceeded:{requested}>{max_allowed}"
         return None
 
     def _gate_status(self) -> dict[str, Any]:
@@ -527,10 +637,10 @@ class OKXExecutionAdapter(ExchangeAdapter):
             last_update_ts=now,
             last_exchange_update_ts=now,
             requested_qty=intent.quantity,
-            filled_qty=0.0,
+            filled_qty=Decimal("0"),
             remaining_qty=intent.quantity,
             average_fill_price=None,
-            fees=0.0,
+            fees=Decimal("0"),
             product_type=intent.product_type,
             target_leverage=intent.target_leverage,
             margin_mode=intent.margin_mode,
@@ -565,10 +675,10 @@ class OKXExecutionAdapter(ExchangeAdapter):
             last_update_ts=submitted_ts,
             last_exchange_update_ts=submitted_ts,
             requested_qty=intent.quantity,
-            filled_qty=0.0,
+            filled_qty=Decimal("0"),
             remaining_qty=intent.quantity,
             average_fill_price=None,
-            fees=0.0,
+            fees=Decimal("0"),
             product_type=intent.product_type,
             target_leverage=intent.target_leverage,
             margin_mode=intent.margin_mode,
@@ -602,10 +712,10 @@ class OKXExecutionAdapter(ExchangeAdapter):
             last_update_ts=submitted_ts,
             last_exchange_update_ts=submitted_ts,
             requested_qty=intent.quantity,
-            filled_qty=0.0,
+            filled_qty=Decimal("0"),
             remaining_qty=intent.quantity,
             average_fill_price=None,
-            fees=0.0,
+            fees=Decimal("0"),
             product_type=intent.product_type,
             target_leverage=intent.target_leverage,
             margin_mode=intent.margin_mode,
@@ -639,10 +749,10 @@ class OKXExecutionAdapter(ExchangeAdapter):
             last_update_ts=submitted_ts,
             last_exchange_update_ts=submitted_ts,
             requested_qty=intent.quantity,
-            filled_qty=0.0,
+            filled_qty=Decimal("0"),
             remaining_qty=intent.quantity,
             average_fill_price=None,
-            fees=0.0,
+            fees=Decimal("0"),
             product_type=intent.product_type,
             target_leverage=intent.target_leverage,
             margin_mode=intent.margin_mode,
@@ -673,6 +783,11 @@ class OKXExecutionAdapter(ExchangeAdapter):
         order_id: str | None,
         client_order_id: str | None,
     ) -> dict[str, Any] | None:
+        private_ws_lookup = getattr(self.account_service, "latest_private_order_row", None)
+        if callable(private_ws_lookup):
+            private_row = private_ws_lookup(symbol=symbol, order_id=order_id, client_order_id=client_order_id)
+            if private_row is not None:
+                return private_row
         try:
             response = await self.client.get_order(
                 symbol=symbol,
@@ -687,6 +802,19 @@ class OKXExecutionAdapter(ExchangeAdapter):
         if not data:
             return None
         return dict(data[0])
+
+    def _latest_private_order_fills(
+        self,
+        *,
+        symbol: str,
+        order_id: str | None,
+        client_order_id: str | None,
+    ) -> list[ExchangeFill]:
+        private_ws_lookup = getattr(self.account_service, "latest_private_order_fills", None)
+        if not callable(private_ws_lookup):
+            return []
+        rows = private_ws_lookup(symbol=symbol, order_id=order_id, client_order_id=client_order_id)
+        return rows if isinstance(rows, list) else []
 
     @staticmethod
     def _first_row(response: dict[str, Any]) -> dict[str, Any]:
@@ -707,25 +835,25 @@ class OKXExecutionAdapter(ExchangeAdapter):
         status = self._map_status(exchange_status)
         last_update_ts = self._row_timestamp(order_row.get("uTime")) or utc_now()
         average_fill_price = (
-            float(order_row.get("avgPx"))
+            to_decimal(order_row.get("avgPx"))
             if order_row.get("avgPx") not in {None, ""}
             else None
         )
         instrument = self.account_service.instrument_metadata(intent.symbol)
         requested_qty = self._internal_quantity(
             symbol=intent.symbol,
-            quantity=float(order_row.get("sz", intent.quantity) or intent.quantity),
+            quantity=to_decimal(order_row.get("sz", intent.quantity)),
             instrument=instrument,
             product_type=intent.product_type,
         )
         filled_qty = self._internal_quantity(
             symbol=intent.symbol,
-            quantity=float(order_row.get("accFillSz", 0.0) or 0.0),
+            quantity=to_decimal(order_row.get("accFillSz", "0")),
             instrument=instrument,
             product_type=intent.product_type,
         )
-        remaining_qty = max(requested_qty - filled_qty, 0.0)
-        fees = abs(float(order_row.get("fee", 0.0) or 0.0))
+        remaining_qty = max(requested_qty - filled_qty, Decimal("0"))
+        fees = abs(to_decimal(order_row.get("fee", "0")))
         canceled_ts = last_update_ts if status in {"CANCELED", "EXPIRED"} else None
         return OrderState(
             decision_id=intent.decision_id,
@@ -770,7 +898,7 @@ class OKXExecutionAdapter(ExchangeAdapter):
         exchange_fills: list[ExchangeFill],
     ) -> list[FillEvent]:
         fills: list[FillEvent] = []
-        cumulative_qty = 0.0
+        cumulative_qty = Decimal("0")
         sorted_fills = sorted(
             exchange_fills,
             key=lambda item: (item.fill_ts or datetime.fromtimestamp(0, timezone.utc), item.fill_id or ""),
@@ -803,7 +931,7 @@ class OKXExecutionAdapter(ExchangeAdapter):
                     ingestion_timestamp=utc_now(),
                     order_status_after_fill=(
                         "FILLED"
-                        if abs(cumulative_qty - intent.quantity) < 1e-12
+                        if abs(cumulative_qty - intent.quantity) <= EPSILON_DECIMAL_12
                         else "PARTIALLY_FILLED"
                     ),
                 )
@@ -818,6 +946,10 @@ class OKXExecutionAdapter(ExchangeAdapter):
         state_payload.setdefault("targetLeverage", str(intent.target_leverage))
         state_payload.setdefault("positionIntent", intent.position_intent)
         state_payload.setdefault("posSide", intent.exposure_side)
+        if intent.reference_price is not None:
+            state_payload.setdefault("referencePrice", str(intent.reference_price))
+        if intent.max_slippage_tolerance_bps is not None:
+            state_payload.setdefault("maxSlippageToleranceBps", str(intent.max_slippage_tolerance_bps))
         return state_payload
 
     def _parse_fill_rows(self, payload: dict[str, Any]) -> list[ExchangeFill]:
@@ -839,12 +971,12 @@ class OKXExecutionAdapter(ExchangeAdapter):
                     side=str(row.get("side")),
                     fill_qty=self._internal_quantity(
                         symbol=symbol,
-                        quantity=float(row.get("fillSz", row.get("sz", 0.0)) or 0.0),
+                        quantity=to_decimal(row.get("fillSz", row.get("sz", "0"))),
                         instrument=instrument,
                         product_type="derivatives" if "-SWAP" in symbol else "spot",
                     ),
-                    fill_price=float(row.get("fillPx", row.get("px", 0.0)) or 0.0),
-                    fee_amount=abs(float(row.get("fee", 0.0) or 0.0)),
+                    fill_price=to_decimal(row.get("fillPx", row.get("px", "0"))),
+                    fee_amount=abs(to_decimal(row.get("fee", "0"))),
                     fee_currency=str(row.get("feeCcy")) if row.get("feeCcy") else None,
                     fill_ts=self._row_timestamp(fill_ts),
                 )
@@ -870,14 +1002,14 @@ class OKXExecutionAdapter(ExchangeAdapter):
     def _internal_quantity(
         *,
         symbol: str,
-        quantity: float,
+        quantity: Decimal,
         instrument: InstrumentMetadata | None,
         product_type: str,
-    ) -> float:
+    ) -> Decimal:
         if product_type != "derivatives" or instrument is None or "-SWAP" not in symbol:
             return quantity
-        contract_value = max(instrument.contract_value, 0.0)
-        if contract_value <= 0.0:
+        contract_value = max(instrument.contract_value, Decimal("0"))
+        if contract_value <= 0:
             return quantity
         return quantity * contract_value
 
@@ -926,11 +1058,21 @@ class OKXExecutionAdapter(ExchangeAdapter):
         return datetime_from_ms(str(value))
 
     @staticmethod
+    def _max_size_from_row(*, row: dict[str, Any], side: str) -> Decimal | None:
+        field_names = ("maxBuy", "maxBuySz") if side == "buy" else ("maxSell", "maxSellSz")
+        for field_name in field_names:
+            value = row.get(field_name)
+            if value in {None, ""}:
+                continue
+            return to_decimal(value)
+        return None
+
+    @staticmethod
     def _intent_from_state(state: OrderState) -> OrderIntent:
         payload = state.submission_payload
         side = str(payload.get("side", "buy"))
         order_type = str(payload.get("ordType", "market"))
-        limit_price = float(payload["px"]) if "px" in payload else None
+        limit_price = to_decimal(payload["px"]) if "px" in payload and payload["px"] not in {"", None} else None
         return OrderIntent(
             intent_id=state.intent_id,
             decision_id=state.decision_id,
@@ -938,10 +1080,16 @@ class OKXExecutionAdapter(ExchangeAdapter):
             side="buy" if side == "buy" else "sell",
             quantity=state.requested_qty,
             execution_style="exchange",
-            order_type="limit" if order_type == "limit" else "market",
+            order_type="limit" if order_type in {"limit", "ioc", "fok", "post_only"} else "market",
             limit_price=limit_price,
+            reference_price=to_decimal(payload["referencePrice"])
+            if "referencePrice" in payload and payload["referencePrice"] not in {"", None}
+            else None,
             urgency="medium",
-            time_in_force="IOC",
+            time_in_force="IOC" if order_type in {"ioc", "fok"} else "GTC" if order_type == "limit" else "IOC",
+            max_slippage_tolerance_bps=int(payload["maxSlippageToleranceBps"])
+            if "maxSlippageToleranceBps" in payload and payload["maxSlippageToleranceBps"] not in {"", None}
+            else None,
             reduce_only=str(payload.get("reduceOnly", "false")).lower() == "true",
             close_only=False,
             idempotency_key=state.client_order_id,
@@ -951,3 +1099,26 @@ class OKXExecutionAdapter(ExchangeAdapter):
             exposure_side=state.exposure_side,
             position_intent=state.position_intent,
         )
+
+    def _slippage_gate_error(self, *, intent: OrderIntent) -> str | None:
+        if (
+            self.price_provider is None
+            or intent.reference_price is None
+            or intent.reference_price <= 0
+            or intent.max_slippage_tolerance_bps is None
+            or intent.max_slippage_tolerance_bps <= 0
+        ):
+            return None
+        execution_price = to_decimal(self.price_provider(intent.symbol))
+        if execution_price <= 0:
+            return None
+        slippage_fraction = to_decimal(intent.max_slippage_tolerance_bps) / Decimal("10000")
+        if intent.side == "buy":
+            allowed_price = intent.reference_price * (Decimal("1") + slippage_fraction)
+            if execution_price > allowed_price:
+                return f"slippage_tolerance_exceeded:price={float(execution_price):.12f}>allowed={float(allowed_price):.12f}"
+            return None
+        allowed_price = intent.reference_price * (Decimal("1") - slippage_fraction)
+        if execution_price < allowed_price:
+            return f"slippage_tolerance_exceeded:price={float(execution_price):.12f}<allowed={float(allowed_price):.12f}"
+        return None

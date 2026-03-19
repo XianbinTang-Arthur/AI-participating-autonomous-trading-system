@@ -1,0 +1,866 @@
+Task25: AI Primary 主链加固与策略档位优化任务书
+
+背景
+
+当前系统已经具备 AI 参与交易决策的基础能力，但它是否真正生效，取决于运行配置、provider 可用性、自动降级状态以及策略模式。
+从现有实现看，AI 已经能够参与“目标仓位 / 风险姿态”决策，但还没有进入“受限执行参数建议”阶段；执行层仍然是确定性的。
+
+围绕下一阶段目标，团队已经达成以下共识：
+
+1. 长期目标是让系统能够稳定运行在 `ai_primary`
+2. AI 的职责边界必须首先守住：
+   - AI 决定目标仓位、方向、风险姿态
+   - 执行层决定怎么下单
+   - 不允许 AI 直接变成自由操盘式 child-order 执行器
+3. `ai_primary` 不能只靠“模型会输出”来证明有效，必须用 shadow / replay / outcome 数据验证
+4. AI 的正确性不等于交易可行动性，必须显式校验 edge 是否覆盖 fee、slippage、noise 和 churn 成本
+5. 必须具备可靠的 fail-safe / auto-fallback 机制
+6. 参数优化路径不应走“AI 自由生成任意参数”，而应走：
+   - 先设计 profile space
+   - 再做 replay + shadow 离线优化
+   - 最后让 AI 在预定义 profile 间做选择
+7. 等 profile 和 `ai_primary` 主链稳定后，才考虑把 AI 往执行层下探为“受限执行参数建议”
+
+本任务书的目标
+
+本任务不直接追求“AI 更聪明”，而是把 AI 从“可选增强功能”提升为“可验证、可观测、可回退、可逐步放权的主策略链路候选”。
+
+完成本任务后，系统应具备以下能力：
+
+- 明确知道 AI 当前是否真的在参与决策
+- 明确知道 AI 当前是否处于降级 / fallback / shadow-only 状态
+- 能持续验证 `ai_primary` 是否优于 baseline，而不是主观感觉更先进
+- 能把策略档位管理从人工 heuristic 档位，逐步升级为数据驱动的 profile space
+- 为未来引入“AI 受限执行参数建议”预留安全边界
+
+前端同步原则
+
+本任务不是纯后端整改。凡是涉及 AI 主链状态、takeover、生效模式、shadow 验证、profile 切换、fallback / degrade / rollback 的后端能力，都必须同步进入后台 UI。
+
+前端在本任务中的职责不是“展示已有字段”，而是提供可用于值班、诊断、比较和回顾的操作视图。具体要求如下：
+
+1. 后端新增的 AI 主链诊断信息，必须在 UI 中形成单独的 AI Primary 视图或等价面板
+2. UI 必须能区分：
+   - configured mode
+   - effective mode
+   - AI enabled but degraded
+   - AI disabled / fallback only
+   - AI takeover attempted / applied / blocked
+3. UI 必须能直接展示 shadow 对比结果，而不是要求人工去翻 raw JSON
+4. profile 切换、自动切换、人工切换、回退、冻结、冷却状态必须有可读的前端呈现
+5. 所有关键 AI 状态变更都要能在 UI 中被看见并追踪到上下文
+
+如果后端完成而 UI 未同步，本任务视为未完整交付
+
+重要原则
+
+- 不把 AI 直接推进到底层微观执行
+- 不允许 AI 输出绕过 risk / accounting / policy / execution guardrails
+- 不以单次回测或单次盈利证明 `ai_primary` 可上线
+- 不把 profile auto-tuning 误当成“自由参数自学习”
+- 所有 AI 生效路径都必须可审计、可回放、可解释
+
+实施分组与优先级
+
+本任务按三个层级推进：
+
+1. Must fix before AI-primary rollout
+   这些项不完成，不应长期运行 `ai_primary`
+2. Should fix soon
+   这些项不修，`ai_primary` 即使能运行，也无法高置信度证明优于 baseline
+3. Can defer
+   这些项可延后，但属于未来将 AI 往执行层安全下探的必要准备
+
+==================================================
+一、Must Fix Before AI-Primary Rollout
+==================================================
+
+A. AI Primary 主链可观测性
+
+1. 建立 AI 生效状态总览
+
+- 严重级别：High
+- 置信度：High
+- 影响模块：
+  - `aats/services/ai_service/inference.py`
+  - `aats/services/operator/query_service.py`
+  - `aats/api/routes.py`
+  - `aats/api/static/*`
+- 为什么重要：
+  - 当前只能从零散状态推断 AI 是否在参与决策
+  - 无法一眼判断：
+    - configured mode
+    - effective mode
+    - 当前是否 degraded
+    - 最近是否 fallback
+    - 最近多少决策真正启用了 AI
+- 推荐动作：
+  - 增加 AI primary runtime diagnostics
+  - 后台与 UI 暴露至少以下字段：
+    - configured_operating_mode
+    - effective_operating_mode
+    - provider configured / ready
+    - degraded
+    - consecutive_failures / successes
+    - recent fallback ratio
+    - recent timeout / invalid output count
+    - recent takeover attempted / allowed / applied count
+- 前端要求：
+  - 在首页或 AI 专页增加 “AI Primary 当前状态” 卡片
+  - 用明显视觉区分：
+    - 正常主导
+    - 已降级
+    - fallback 中
+    - 未启用
+  - 当前 effective mode 不能埋在 JSON 或详情页深处
+- 实施规模：Medium
+- 验收方式：
+  - 后台接口可直接回答“AI 现在到底有没有生效”
+  - UI 一眼能看出当前 AI 是否主导、是否降级、最近是否频繁 fallback
+
+2. 建立 AI takeover 审计视图
+
+- 严重级别：High
+- 置信度：High
+- 影响模块：
+  - `aats/services/decision_engine/orchestrator.py`
+  - `aats/services/decision_engine/target_position.py`
+  - `aats/services/operator/query_service.py`
+  - `aats/api/static/*`
+- 为什么重要：
+  - `ai_primary` 的关键不是“AI 给没给意见”，而是“AI 是否实际接管 baseline”
+  - 如果 takeover 发生率、被 gate 拦截率、接管后结果不可见，就无法判断主链是否可信
+- 推荐动作：
+  - 记录并暴露：
+    - takeover attempted
+    - takeover allowed
+    - takeover applied
+    - takeover blockers
+    - AI vs baseline direction disagreement
+    - AI 接管后的 position target 变化
+- 前端要求：
+  - 增加最近 N 次 decision 的 takeover 列表视图
+  - 每条 decision 至少展示：
+    - baseline 方向
+    - AI 方向
+    - final target
+    - 是否接管
+    - blockers
+  - 支持点开查看单次 takeover 详情
+- 实施规模：Medium
+- 验收方式：
+  - 能按 decision_id 查看 AI takeover 全链路
+  - 最近 N 次决策的 takeover 概览可查询、可展示
+
+B. AI Primary 专项 shadow 验证
+
+3. 建立 `ai_primary` 专项 shadow 验证指标
+
+- 严重级别：High
+- 置信度：High
+- 影响模块：
+  - `aats/services/ai_service/inference.py`
+  - `aats/services/operator/query_service.py`
+  - `aats/api/static/*`
+- 为什么重要：
+  - 没有专项验证，就无法证明 `ai_primary` 比 baseline 更好
+  - 甚至可能在看似“更聪明”的情况下，实际 fee-drag / churn 更差
+- 推荐动作：
+  - 为 AI shadow evaluation 增加并长期追踪：
+    - takeover win rate
+    - baseline net pnl vs shadow net pnl
+    - fee-drag delta
+    - churn ratio delta
+    - reversal quality
+    - fallback ratio
+    - disagreement outcome attribution
+  - 区分：
+    - baseline path
+    - ai shadow path
+    - AI 真正接管时的子样本
+- 前端要求：
+  - 增加 shadow 对比面板，至少展示：
+    - baseline net pnl
+    - ai shadow net pnl
+    - fee-drag 对比
+    - churn 对比
+    - win-rate 对比
+    - takeover 子样本表现
+  - 结果必须是运营可读视图，不允许只展示原始结构体
+- 实施规模：Large
+- 验收方式：
+  - 可以输出固定周期的 shadow report
+  - 可证明 `ai_primary` 在至少一组窗口中优于 baseline，或明确证明不优
+
+4. 建立 AI outcome-based rollback 触发依据
+
+- 严重级别：High
+- 置信度：Medium
+- 影响模块：
+  - `aats/services/ai_service/inference.py`
+  - `aats/services/operator/*`
+  - runtime recovery / profile control 相关模块
+- 为什么重要：
+  - 现在回退主要偏 provider 失败维度
+  - 未来长期跑 `ai_primary`，必须把“结果不好”也作为回退依据
+- 推荐动作：
+  - 增加 outcome 级回退触发条件，例如：
+    - 连续多个窗口 shadow 落后 baseline
+    - fee-drag 过高
+    - churn 持续恶化
+    - takeover 后反手质量显著变差
+  - 明确区分：
+    - hard fallback
+    - downgrade to advisory
+    - operator review required
+- 前端要求：
+  - UI 中必须明确显示：
+    - 最近一次回退原因
+    - 最近一次降级时间
+    - 当前是否处于 review required
+    - 当前是否允许重新启用 AI 主导
+- 实施规模：Large
+- 验收方式：
+  - 模拟劣化条件时，系统能自动降级或阻止继续使用 `ai_primary`
+
+C. 更严格的经济可行动性校验
+
+5. 将 AI 专项经济可行动性升级为硬门槛
+
+- 严重级别：High
+- 置信度：High
+- 影响模块：
+  - `aats/services/ai_service/validator.py`
+  - `aats/services/decision_engine/target_position.py`
+  - `aats/services/accounting.py`
+  - `aats/services/strategy_execution_health.py`
+- 为什么重要：
+  - AI 方向判断正确，不代表值得交易
+  - 若没有 AI 专项经济门槛，`ai_primary` 会把边际不足的“聪明噪声”直接转成 churn
+- 推荐动作：
+  - 在 AI 接管前增加更严格硬校验：
+    - expected edge > fee + slippage + noise
+    - reversal edge > opening edge
+    - expected holding horizon 满足兑现窗口
+    - 当前 market / execution condition 允许交易
+    - 历史 churn / fee-drag 未触发 AI 专项熔断
+  - 将这些校验结果结构化写入 blockers / rejection flags
+- 前端要求：
+  - 在 decision 详情页增加 “AI 经济可行动性校验” 区块
+  - 清楚展示：
+    - 预期 edge
+    - fee
+    - slippage
+    - noise buffer
+    - expected net edge
+    - rejection / blocker 原因
+- 实施规模：Large
+- 验收方式：
+  - 弱 edge / 高 fee-drag / 高 churn / 短 holding horizon 情况下，AI takeover 被稳定阻断
+
+==================================================
+二、Should Fix Soon
+==================================================
+
+A. Profile Space 与参数治理
+
+6. 重构 profile space，替换当前 heuristic 档位
+
+- 严重级别：Medium
+- 置信度：High
+- 影响模块：
+  - `aats/schemas/strategy_profiles.py`
+  - `aats/services/operator/strategy_profiles.py`
+  - `aats/bootstrap/settings.py`
+- 为什么重要：
+  - 当前 `trend_normal / trend_strict / range_defensive / high_volatility_defensive / execution_degraded_safe`
+    更像人工 seed 档位，不是最优参数组合
+  - 档位维度还不够结构化，不利于系统化优化
+- 推荐动作：
+  - 把 profile 参数拆成几个稳定维度：
+    - frequency
+    - entry threshold
+    - scale-in threshold
+    - reversal threshold
+    - cost protection
+    - cooldown / fuse
+  - 用 profile lattice 代替零散阈值组合
+- 前端要求：
+  - UI 中 profile 视图不能只显示 profile 名称
+  - 必须展示每个 profile 的关键参数摘要、风险姿态和预期行为
+  - active / pending / frozen / cooldown 状态需要显式可见
+- 实施规模：Large
+- 验收方式：
+  - profile 结构更清晰
+  - 每个 profile 都能解释其风险姿态和预期行为
+
+7. 建立 replay + shadow 驱动的 profile 离线优化流程
+
+- 严重级别：Medium
+- 置信度：High
+- 影响模块：
+  - `aats/services/reconciliation_service/replay.py`
+  - `aats/services/operator/strategy_profiles.py`
+  - `scripts/*`
+  - `docs/*`
+- 为什么重要：
+  - 如果不做离线优化，profile 只能长期靠人工凭经验调整
+  - 这样 AI 自动切档也只是在劣质档位间切换
+- 推荐动作：
+  - 建立 profile evaluation pipeline
+  - 使用 replay / shadow 数据评估 profile：
+    - net pnl
+    - fee-drag
+    - churn
+    - win-rate
+    - drawdown proxy
+    - reversal hit-rate
+  - 输出 profile ranking 和 recommended replacement
+- 前端要求：
+  - 如该流程接入后台管理界面，至少提供 profile comparison 结果视图
+  - 能查看多个 profile 的核心指标对比，而不是只看推荐结论
+- 实施规模：Large
+- 验收方式：
+  - 可重复跑 profile 离线评估
+  - 产生可审阅的 profile 比较结果，而不是主观结论
+
+8. 限制 AI 只做 profile selection，不做自由参数生成
+
+- 严重级别：Medium
+- 置信度：High
+- 影响模块：
+  - `aats/services/operator/strategy_profiles.py`
+  - AI prompt / validation 相关模块
+- 为什么重要：
+  - 直接让 AI 自由生成参数，风险不可控、不可验证、不可回放
+  - AI 选择预定义档位更符合生产工程边界
+- 推荐动作：
+  - 明确禁止 AI 输出未注册 profile
+  - AI recommendation 仅允许在受控 profile space 中选择
+  - 自由参数建议仅作为离线分析输入，不进入实时自动应用链路
+- 实施规模：Small
+- 验收方式：
+  - 实时自动应用路径中，不存在未注册 profile 或自由参数直写 settings
+
+B. AI 与执行边界治理
+
+9. 为未来“受限执行参数建议”定义 schema，但不立即放权
+
+- 严重级别：Medium
+- 置信度：Medium
+- 影响模块：
+  - `aats/schemas/execution.py`
+  - `aats/services/execution_engine/planner.py`
+  - AI prompt / validator 相关模块
+- 为什么重要：
+  - 未来若要让 AI 下探到执行层，必须先有明确受限参数边界
+  - 否则很容易一步跨到不可控的 AI 微观执行
+- 推荐动作：
+  - 先定义受限执行参数 schema，例如：
+    - passive_bias
+    - maker_taker_bias
+    - max_cross_spread_bps
+    - slice_count
+    - max_participation_rate
+    - cancel_replace_patience_ms
+  - 当前阶段只落 schema / validation / audit，不直接启用
+- 前端要求：
+  - 若 UI 暴露该能力，必须明确标记为“未启用 / 仅预留”
+  - 禁止在 UI 上造成“AI 已在微观执行层生效”的误导
+- 实施规模：Medium
+- 验收方式：
+  - 执行参数模型存在且受校验保护
+  - 未启用前不会影响当前执行链
+
+10. 建立 AI-to-execution 参数解释层
+
+- 严重级别：Medium
+- 置信度：Medium
+- 影响模块：
+  - `aats/services/execution_engine/planner.py`
+  - `aats/services/execution_engine/*`
+- 为什么重要：
+  - 即使未来启用受限执行参数，也必须由确定性执行器解释和裁剪
+- 推荐动作：
+  - 设计“AI 参数建议 -> 执行计划模板”的解释层
+  - 明确哪部分可被执行器接受、哪部分必须被忽略或裁剪
+- 实施规模：Large
+- 验收方式：
+  - 所有 AI 执行建议都经过 deterministic translation
+  - 不存在 AI 直接生成 raw exchange order 的路径
+
+==================================================
+三、Can Defer
+==================================================
+
+11. 增加 AI primary 专项 operator forensic 视图
+
+- 严重级别：Low
+- 置信度：High
+- 影响模块：
+  - `aats/services/operator/query_service.py`
+  - `aats/api/static/*`
+- 为什么重要：
+  - 当前可以分散查看 AI / decision / profile / replay，但还缺一个专门围绕 `ai_primary` 的事故视图
+- 推荐动作：
+  - 建立按 decision_id / takeover / fallback / degradation / profile switch 串联的 AI 主链时间线
+- 前端要求：
+  - 提供单页取证视图，能把 decision / AI assessment / takeover / profile switch / rollback 贯穿展示
+- 实施规模：Medium
+- 验收方式：
+  - 单条 AI 主链问题可在一个视图中快速定位
+
+12. 在 profile 优化稳定后，再评估 AI 下探执行层
+
+- 严重级别：Low
+- 置信度：High
+- 影响模块：
+  - execution planning / adapter / UI / audit
+- 为什么重要：
+  - 这属于能力扩展，不应抢在 `ai_primary` 主链验证前面
+- 推荐动作：
+  - 仅在以下条件满足后再立项：
+    - `ai_primary` 经 shadow 验证显著优于 baseline
+    - profile space 已稳定
+    - 回退与审计链已成熟
+- 实施规模：Large
+- 验收方式：
+  - 新立项前具备明确进入条件和退出条件
+
+==================================================
+四、建议实施顺序
+==================================================
+
+阶段 1：把 `ai_primary` 从“能跑”变成“知道自己在怎么跑”
+
+1. AI 生效状态总览
+2. AI takeover 审计视图
+3. AI primary 专项 shadow 验证指标
+4. 同步交付首页 / AI 专页 / 决策详情页中的对应前端面板
+
+阶段 2：把 `ai_primary` 从“可见”变成“可控”
+
+5. outcome-based rollback 触发依据
+6. AI 专项经济可行动性硬门槛
+7. 同步交付 rollback / blockers / economic-actionability UI 视图
+
+阶段 3：把档位管理从 heuristic 变成数据驱动
+
+8. 重构 profile space
+9. 建立 replay + shadow 驱动的 profile 离线优化流程
+10. 严格限制 AI 只做 profile selection
+11. 同步交付 profile comparison / profile 状态管理 UI
+
+阶段 4：为未来 AI 受限执行参数建议做准备
+
+12. 定义受限执行参数 schema
+13. 建立 AI-to-execution 参数解释层
+14. 若前端暴露相关信息，必须保持“预留未启用”状态标识
+
+==================================================
+五、验收原则
+==================================================
+
+本任务完成后，应至少满足以下验收标准：
+
+1. 能明确回答“AI 当前有没有真正参与决策”
+2. 能明确回答“AI 当前是否 degraded / fallback / shadow-only”
+3. 能明确回答“AI 接管 baseline 后的结果是否优于 baseline”
+4. 能明确回答“当前 profile 档位是否由数据支持，而不是只靠经验”
+5. 能证明 AI 不能直接越过执行边界输出不可控下单行为
+6. 能证明 AI 主链在效果变差时会自动降级、阻断或要求人工复核
+7. 后台 UI 能在不翻 raw JSON 的前提下完成值班判断、主链诊断和结果比较
+
+最终要求
+
+在本任务完成前，不建议长期将系统固定运行在 `ai_primary`。
+后续工程实施应优先把本任务拆分为独立 engineering tickets，并为每个 ticket 增加：
+
+- owner
+- milestone
+- acceptance test
+- rollback plan
+- monitoring / alert impact
+
+==================================================
+六、直接开工拆分
+==================================================
+
+以下拆分用于直接进入开发排期。每项都应能独立建单、分配 owner、进入迭代。
+
+一、后端任务
+
+BE-1. AI 主链运行态诊断接口
+
+- 目标：
+  - 提供 `ai_primary` 专项运行态接口
+  - 能直接回答 AI 是否启用、是否降级、当前 effective mode 是什么
+- 主要内容：
+  - 汇总 `configured_operating_mode`
+  - 汇总 `effective_operating_mode`
+  - 汇总 provider readiness
+  - 汇总 degraded / fallback / timeout / invalid-output 统计
+  - 汇总近期 takeover attempted / allowed / applied
+- 建议涉及模块：
+  - `aats/services/ai_service/inference.py`
+  - `aats/services/operator/query_service.py`
+  - `aats/api/routes.py`
+- 验收要点：
+  - 不查日志即可知道 AI 当前是否真在参与决策
+
+BE-2. AI takeover 审计与查询增强
+
+- 目标：
+  - 提供最近 N 次 AI takeover 的结构化查询
+- 主要内容：
+  - 增加 baseline 方向 / AI 方向 / final target 对比
+  - 增加 takeover blockers
+  - 增加是否真正 applied 标记
+  - 增加按 `decision_id` 拉详情的聚合接口
+- 建议涉及模块：
+  - `aats/services/decision_engine/orchestrator.py`
+  - `aats/services/decision_engine/target_position.py`
+  - `aats/services/operator/query_service.py`
+- 验收要点：
+  - 任一 decision 能清楚看出 AI 是否接管以及为什么没接管
+
+BE-3. AI primary shadow 评估扩展
+
+- 目标：
+  - 让 shadow 评估真正能用于判断 `ai_primary` 是否优于 baseline
+- 主要内容：
+  - 增加 takeover 子样本统计
+  - 增加 baseline vs shadow 的 fee-drag / churn / win-rate 对比
+  - 增加 disagreement attribution
+  - 增加固定窗口 shadow report 输出
+- 建议涉及模块：
+  - `aats/services/ai_service/inference.py`
+  - `aats/services/operator/query_service.py`
+  - `aats/schemas/ai_shadow.py`
+- 验收要点：
+  - 可生成明确的 shadow 对比结论，而不是只有 raw replay 结果
+
+BE-4. Outcome-based rollback / downgrade 机制
+
+- 目标：
+  - 让 AI 不仅因 provider 失败而回退，也会因交易结果恶化而回退
+- 主要内容：
+  - 定义劣化触发条件
+  - 引入 rollback / downgrade decision rule
+  - 写入状态和事件
+  - 提供 operator review 所需字段
+- 建议涉及模块：
+  - `aats/services/ai_service/inference.py`
+  - `aats/services/operator/query_service.py`
+  - recovery / control 相关模块
+- 验收要点：
+  - 在模拟劣化数据下，系统会自动降级或要求人工复核
+
+BE-5. AI 专项经济可行动性硬门槛
+
+- 目标：
+  - 把 AI 接管前的“值得交易吗”做成硬门槛
+- 主要内容：
+  - 校验 edge 是否覆盖 fee + slippage + noise
+  - 校验 reversal 额外成本
+  - 校验 holding horizon
+  - 校验 execution condition / churn / fee-drag 状态
+  - 输出结构化 rejection / blocker
+- 建议涉及模块：
+  - `aats/services/ai_service/validator.py`
+  - `aats/services/decision_engine/target_position.py`
+  - `aats/services/accounting.py`
+  - `aats/services/strategy_execution_health.py`
+- 验收要点：
+  - 弱边际情况下 AI takeover 被稳定拒绝，且拒绝原因可解释
+
+BE-6. Profile space 重构
+
+- 目标：
+  - 将当前 heuristic 档位升级为结构化 profile lattice
+- 主要内容：
+  - 明确 profile 维度
+  - 重构 profile payload
+  - 保持向后兼容或提供迁移方案
+- 建议涉及模块：
+  - `aats/schemas/strategy_profiles.py`
+  - `aats/services/operator/strategy_profiles.py`
+  - `aats/bootstrap/settings.py`
+- 验收要点：
+  - 每个 profile 都有清晰风险姿态与预期行为
+
+BE-7. Replay + shadow 驱动的 profile 评估流程
+
+- 目标：
+  - 让 profile 选择建立在数据比较而不是主观判断上
+- 主要内容：
+  - 建立离线评估流程
+  - 输出多个 profile 的对比结果
+  - 生成 profile ranking / recommended replacement
+- 建议涉及模块：
+  - `aats/services/reconciliation_service/replay.py`
+  - `aats/services/operator/strategy_profiles.py`
+  - `scripts/*`
+- 验收要点：
+  - 同一批输入可重复得到一致的 profile 评估结果
+
+BE-8. 限制 AI 只做 profile selection
+
+- 目标：
+  - 阻止 AI 实时自由生成任意新参数
+- 主要内容：
+  - 明确 profile 白名单
+  - 实时自动应用链路只接受已注册 profile
+  - 自由参数输出仅可进入离线分析
+- 建议涉及模块：
+  - `aats/services/operator/strategy_profiles.py`
+  - AI prompt / validator 相关模块
+- 验收要点：
+  - 自动应用路径不存在未注册 profile 或自由参数直写
+
+BE-9. 受限执行参数 schema 预留
+
+- 目标：
+  - 为未来 AI 下探执行层做安全边界准备
+- 主要内容：
+  - 定义受限执行参数 schema
+  - 增加 validation / audit 字段
+  - 暂不启用真实执行
+- 建议涉及模块：
+  - `aats/schemas/execution.py`
+  - `aats/services/execution_engine/planner.py`
+  - AI prompt / validator 相关模块
+- 验收要点：
+  - schema 存在但不影响当前执行主链
+
+BE-10. AI-to-execution 参数解释层预研
+
+- 目标：
+  - 明确未来 AI 执行建议如何被确定性执行器解释
+- 主要内容：
+  - 定义 translation rule
+  - 定义裁剪和拒绝规则
+  - 不启用直接落单
+- 建议涉及模块：
+  - `aats/services/execution_engine/planner.py`
+  - `aats/services/execution_engine/*`
+- 验收要点：
+  - 所有 AI 执行建议都必须经过 deterministic translation
+
+二、前端任务
+
+FE-1. AI Primary 状态总览面板
+
+- 目标：
+  - 在后台首页或 AI 专页增加 AI 主链运行状态卡片
+- 主要内容：
+  - 显示 configured mode / effective mode
+  - 显示 degraded / fallback / disabled / active
+  - 显示近期 fallback ratio / timeout / invalid-output
+- 建议涉及模块：
+  - `aats/api/static/modules/views/overview-view.js`
+  - `aats/api/static/modules/views/ai-view.js`
+  - 相关组件与样式
+- 验收要点：
+  - 值班人员不看 JSON 也能判断 AI 当前是否主导
+
+FE-2. AI takeover 列表与详情视图
+
+- 目标：
+  - 让最近 N 次 decision 的 AI 接管情况可视化
+- 主要内容：
+  - baseline / AI / final direction 对比
+  - 是否接管
+  - blockers
+  - decision drill-down
+- 建议涉及模块：
+  - `aats/api/static/modules/views/strategy-view.js`
+  - `aats/api/static/app.js`
+- 验收要点：
+  - 可以快速看出最近是否频繁被 blocker 拦截或错误接管
+
+FE-3. Shadow 对比面板
+
+- 目标：
+  - 提供 baseline vs shadow 的运营可读比较视图
+- 主要内容：
+  - net pnl 对比
+  - fee-drag 对比
+  - churn 对比
+  - win-rate 对比
+  - takeover 子样本表现
+- 建议涉及模块：
+  - `aats/api/static/modules/views/ai-view.js`
+  - 相关组件
+- 验收要点：
+  - 不依赖 raw JSON 即可判断 AI 是否优于 baseline
+
+FE-4. Rollback / degrade / review 状态可视化
+
+- 目标：
+  - 明确显示 AI 当前是否被回退、为什么被回退、能否重新启用
+- 主要内容：
+  - 最近一次回退原因
+  - 最近一次降级时间
+  - 当前 review required 状态
+  - 当前 resume / re-enable eligibility
+- 建议涉及模块：
+  - `aats/api/static/modules/views/overview-view.js`
+  - `aats/api/static/modules/views/ai-view.js`
+- 验收要点：
+  - 运营侧能快速区分“AI 未启用”和“AI 已被系统降级”
+
+FE-5. 决策详情中的经济可行动性区块
+
+- 目标：
+  - 在 decision 详情页中解释为什么 AI takeover 被允许或被拒绝
+- 主要内容：
+  - 显示 expected edge / fee / slippage / noise / expected net edge
+  - 显示 rejection flags / blockers
+  - 显示当前 churn / fee-drag 对判断的影响
+- 建议涉及模块：
+  - 决策详情 drawer / strategy detail view
+- 验收要点：
+  - 能直接回答“这次 AI 为什么没上”
+
+FE-6. Profile 状态与参数摘要视图
+
+- 目标：
+  - 让 profile 管理从“名字切换”变成“有参数和语义的视图”
+- 主要内容：
+  - 展示 active / pending / cooldown / frozen
+  - 展示关键参数摘要
+  - 展示预期行为与风险姿态
+- 建议涉及模块：
+  - `aats/api/static/modules/views/admin-view.js`
+  - 或独立 strategy profile 视图
+- 验收要点：
+  - 不看后端 payload 也能理解 profile 差异
+
+FE-7. Profile comparison 结果视图
+
+- 目标：
+  - 若接入离线 profile 评估，则前端必须能展示多 profile 比较
+- 主要内容：
+  - 多 profile 指标对比表
+  - 推荐结论
+  - 风险备注
+- 验收要点：
+  - 前端不只显示“推荐哪个”，还要显示“为什么”
+
+FE-8. 受限执行参数预留提示
+
+- 目标：
+  - 避免 UI 误导用户以为 AI 已控制微观执行
+- 主要内容：
+  - 对未来 execution parameter suggestion 做清晰标识：
+    - reserved
+    - not enabled
+    - diagnostic only
+- 验收要点：
+  - UI 不产生“AI 已直接操盘执行层”的误解
+
+三、联调验收任务
+
+INT-1. AI 运行态一致性联调
+
+- 目标：
+  - 确认后端 runtime 状态与前端展示一致
+- 验收内容：
+  - configured / effective mode 一致
+  - degraded / fallback 状态一致
+  - takeover 计数一致
+
+INT-2. Decision 与 takeover 明细联调
+
+- 目标：
+  - 确认单次 decision 的后端数据、审计链和前端展示一致
+- 验收内容：
+  - baseline / AI / final target 一致
+  - blockers 一致
+  - position target 与详情页展示一致
+
+INT-3. Shadow 对比联调
+
+- 目标：
+  - 确认 shadow evaluation 数据可被前端正确解释和展示
+- 验收内容：
+  - baseline / shadow net pnl 一致
+  - fee-drag / churn / win-rate 一致
+  - takeover 子样本统计一致
+
+INT-4. Rollback / degrade 流程联调
+
+- 目标：
+  - 验证 AI 劣化时，后端状态、UI 呈现、操作限制同步变化
+- 验收内容：
+  - rollback / downgrade 事件可见
+  - review required 状态可见
+  - UI 中 re-enable / resume 行为符合后端状态
+
+INT-5. Profile 管理联调
+
+- 目标：
+  - 验证 profile active / pending / staged / auto-switched 在前后端一致
+- 验收内容：
+  - profile 名称、参数摘要、状态一致
+  - 自动切换和人工切换轨迹一致
+
+INT-6. 经济可行动性校验联调
+
+- 目标：
+  - 验证 decision 详情页显示的经济门槛数据与实际决策逻辑一致
+- 验收内容：
+  - expected edge / fee / slippage / noise / net edge 数值一致
+  - blocker / rejection flags 一致
+
+INT-7. 文档与运维说明联调
+
+- 目标：
+  - 让后端、前端、运维对 AI 主链含义一致
+- 验收内容：
+  - 文档中对：
+    - baseline_only
+    - ai_advisory
+    - ai_blended
+    - ai_primary
+    - degraded / fallback / shadow
+    的解释与系统行为一致
+
+建议排期方式
+
+推荐将本任务拆成三个并行泳道：
+
+1. 后端泳道
+   先完成 BE-1 ~ BE-5
+2. 前端泳道
+   跟进 FE-1 ~ FE-5，同步接入后端字段
+3. 联调泳道
+   在后端与前端都具备基础面板后，完成 INT-1 ~ INT-6
+
+推荐最小可交付版本
+
+如果要先做第一阶段 MVP，建议最先交付以下组合：
+
+- 后端：
+  - BE-1
+  - BE-2
+  - BE-3
+  - BE-5
+- 前端：
+  - FE-1
+  - FE-2
+  - FE-3
+  - FE-5
+- 联调：
+  - INT-1
+  - INT-2
+  - INT-3
+  - INT-6
+
+做到这一组后，系统就已经能比较严肃地回答：
+
+- AI 现在有没有真正起作用
+- AI 接管了多少次
+- AI 相比 baseline 到底是更好还是更差
+- AI 为什么被放行或拦截

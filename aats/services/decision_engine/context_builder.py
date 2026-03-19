@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from decimal import Decimal
+
 from aats.bootstrap.settings import AATSSettings
 from aats.events import topics
 from aats.schemas.common import utc_now
@@ -8,8 +10,10 @@ from aats.schemas.portfolio import PortfolioSnapshot
 from aats.schemas.system import HealthSnapshot
 from aats.services.governance_engine.health import SystemHealthService
 from aats.services.governance_engine.mode import RuntimeModeController
+from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, to_decimal
 from aats.services.runtime_scope import latest_matching_snapshot, runtime_state_scope, scoped_portfolio_event
-from aats.storage.base import EventStore, PortfolioRepository
+from aats.services.strategy_execution_health import compute_strategy_execution_health
+from aats.storage.base import EventStore, ExecutionRepository, PortfolioRepository
 
 
 class DecisionContextBuilder:
@@ -19,12 +23,14 @@ class DecisionContextBuilder:
         settings: AATSSettings,
         event_store: EventStore,
         portfolio_repo: PortfolioRepository,
+        execution_repo: ExecutionRepository,
         mode_controller: RuntimeModeController,
         health_service: SystemHealthService,
     ) -> None:
         self.settings = settings
         self.event_store = event_store
         self.portfolio_repo = portfolio_repo
+        self.execution_repo = execution_repo
         self.mode_controller = mode_controller
         self.health_service = health_service
         self.state_scope = runtime_state_scope(settings)
@@ -69,6 +75,26 @@ class DecisionContextBuilder:
 
         current_position_qty = self._position_qty(portfolio_snapshot, symbol, self.settings.trading_product_type)
         current_exposure_side = self._exposure_side(current_position_qty)
+        open_orders = [
+            order.client_order_id
+            for order in self.execution_repo.order_states_for_scope(
+                scope=self.state_scope,
+                open_only=True,
+            )
+            if order.symbol == symbol
+        ]
+        strategy_health = compute_strategy_execution_health(
+            settings=self.settings,
+            symbol=symbol,
+            fills=self.execution_repo.fills_for_scope(scope=self.state_scope),
+            snapshots=self.portfolio_repo.history(),
+            current_position_qty=current_position_qty,
+        )
+        guardrails = strategy_health.active_guardrails(
+            settings=self.settings,
+            as_of=utc_now(),
+            current_position_qty=current_position_qty,
+        )
         return DecisionContext(
             decision_id=decision_id,
             symbol=symbol,
@@ -85,11 +111,11 @@ class DecisionContextBuilder:
             mode=self.mode_controller.mode,
             policy_flags=[],
             risk_budget_state={
-                "max_abs_position_qty": self.settings.max_abs_position_qty,
-                "max_target_leverage": self.settings.max_target_leverage,
+                "max_abs_position_qty": to_decimal(self.settings.max_abs_position_qty),
+                "max_target_leverage": to_decimal(self.settings.max_target_leverage),
             },
             current_position_qty=current_position_qty,
-            current_open_orders=[],
+            current_open_orders=open_orders,
             product_type=self.settings.trading_product_type,
             current_exposure_side=current_exposure_side,
             current_target_leverage=(
@@ -97,6 +123,17 @@ class DecisionContextBuilder:
                 if portfolio_snapshot is not None
                 else 1.0
             ),
+            current_position_opened_at=strategy_health.current_position_opened_at,
+            last_position_closed_at=strategy_health.last_position_closed_at,
+            latest_fill_timestamp=strategy_health.latest_fill_timestamp,
+            recent_closed_trade_count=strategy_health.recent_closed_trade_count,
+            recent_win_rate=strategy_health.recent_win_rate,
+            recent_fee_drag_ratio=strategy_health.recent_fee_drag_ratio,
+            recent_churn_ratio=strategy_health.recent_churn_ratio,
+            recent_low_edge_trade_streak=strategy_health.recent_low_edge_trade_streak,
+            recent_low_edge_trade_at=strategy_health.recent_low_edge_trade_at,
+            strategy_guardrail_flags=list(guardrails["flags"]),
+            strategy_cooldowns=dict(guardrails["cooldowns"]),
         )
 
     @staticmethod
@@ -104,21 +141,21 @@ class DecisionContextBuilder:
         snapshot: PortfolioSnapshot | None,
         symbol: str,
         product_type: str = "spot",
-    ) -> float:
+    ) -> Decimal:
         if snapshot is None:
-            return 0.0
+            return Decimal("0")
         for position in snapshot.positions:
             if position.symbol == symbol:
                 return position.position_qty
         if product_type == "spot" and "-" in symbol:
             base_currency, _quote_currency = symbol.split("-", 1)
-            return snapshot.balances.get(base_currency, 0.0)
-        return 0.0
+            return snapshot.balances.get(base_currency, Decimal("0"))
+        return Decimal("0")
 
     @staticmethod
-    def _exposure_side(quantity: float) -> str:
-        if quantity > 1e-12:
+    def _exposure_side(quantity: Decimal) -> str:
+        if quantity > EPSILON_DECIMAL_12:
             return "long"
-        if quantity < -1e-12:
+        if quantity < -EPSILON_DECIMAL_12:
             return "short"
         return "flat"

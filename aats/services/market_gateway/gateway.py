@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable
+from decimal import Decimal
 from typing import Any
 
 from aats.bootstrap.logging import get_logger, log_event
@@ -18,7 +19,14 @@ from aats.services.market_gateway.publisher import MarketSnapshotPublisher
 
 
 class MarketDataGateway:
-    _PRICE_DELTAS: tuple[float, ...] = (320.0, 260.0, -380.0, -310.0, 240.0, -270.0)
+    _PRICE_DELTAS: tuple[Decimal, ...] = (
+        Decimal("320.0"),
+        Decimal("260.0"),
+        Decimal("-380.0"),
+        Decimal("-310.0"),
+        Decimal("240.0"),
+        Decimal("-270.0"),
+    )
 
     def __init__(
         self,
@@ -86,9 +94,9 @@ class MarketDataGateway:
     def latest_snapshot(self, symbol: str) -> MarketSnapshot | None:
         return self._latest_snapshots.get(symbol)
 
-    def latest_price(self, symbol: str) -> float:
+    def latest_price(self, symbol: str) -> Decimal:
         snapshot = self._latest_snapshots.get(symbol)
-        return snapshot.last_price if snapshot is not None else 0.0
+        return snapshot.last_price if snapshot is not None else Decimal("0")
 
     def is_fresh(self, symbol: str) -> bool:
         snapshot = self._latest_snapshots.get(symbol)
@@ -168,43 +176,49 @@ class MarketDataGateway:
     def _build_local_payload(self, symbol: str) -> dict[str, Any]:
         tick = self._tick_by_symbol.get(symbol, 0)
         previous_snapshot = self._latest_snapshots.get(symbol)
-        previous_price = previous_snapshot.last_price if previous_snapshot is not None else 67_250.0
+        previous_price = previous_snapshot.last_price if previous_snapshot is not None else Decimal("67250.0")
         delta = self._PRICE_DELTAS[tick % len(self._PRICE_DELTAS)]
         last_price = previous_price + delta
-        high = max(previous_price, last_price) + 40.0
-        low = min(previous_price, last_price) - 40.0
+        high = max(previous_price, last_price) + Decimal("40.0")
+        low = min(previous_price, last_price) - Decimal("40.0")
         self._tick_by_symbol[symbol] = tick + 1
         return {
             "symbol": symbol,
             "exchange": self.settings.exchange_name,
             "snapshot_ts": utc_now(),
-            "best_bid": last_price - 5.0,
-            "best_ask": last_price + 5.0,
+            "best_bid": last_price - Decimal("5.0"),
+            "best_ask": last_price + Decimal("5.0"),
             "last_price": last_price,
-            "bid_size": 1.25 + (tick * 0.05),
-            "ask_size": 1.10 + (tick * 0.04),
-            "volume_24h": 128_500_000.0 + (tick * 250_000.0),
+            "bid_size": Decimal("1.25") + (Decimal(tick) * Decimal("0.05")),
+            "ask_size": Decimal("1.10") + (Decimal(tick) * Decimal("0.04")),
+            "volume_24h": Decimal("128500000.0") + (Decimal(tick) * Decimal("250000.0")),
             "kline_15m": {
                 "open": previous_price,
                 "high": high,
                 "low": low,
                 "close": last_price,
-                "volume": 1_250.0 + (tick * 50.0),
+                "volume": Decimal("1250.0") + (Decimal(tick) * Decimal("50.0")),
             },
             "kline_1h": {
-                "open": 67_000.0,
-                "high": max(67_000.0, high),
-                "low": min(67_000.0, low),
+                "open": Decimal("67000.0"),
+                "high": max(Decimal("67000.0"), high),
+                "low": min(Decimal("67000.0"), low),
                 "close": last_price,
-                "volume": 4_800.0 + (tick * 125.0),
+                "volume": Decimal("4800.0") + (Decimal(tick) * Decimal("125.0")),
             },
             "recent_trades": [
-                {"price": last_price - 10.0, "qty": 0.05, "side": "buy"},
-                {"price": last_price, "qty": 0.04, "side": "buy" if delta >= 0 else "sell"},
-                {"price": last_price + 10.0, "qty": 0.03, "side": "sell"},
+                {"price": last_price - Decimal("10.0"), "qty": Decimal("0.05"), "side": "buy"},
+                {"price": last_price, "qty": Decimal("0.04"), "side": "buy" if delta >= 0 else "sell"},
+                {"price": last_price + Decimal("10.0"), "qty": Decimal("0.03"), "side": "sell"},
             ],
             "orderbook_depth": {
-                "bids": [[last_price - 5.0, 1.25], [last_price - 10.0, 1.5]],
-                "asks": [[last_price + 5.0, 1.10], [last_price + 10.0, 1.35]],
+                "bids": [
+                    [last_price - Decimal("5.0"), Decimal("1.25")],
+                    [last_price - Decimal("10.0"), Decimal("1.5")],
+                ],
+                "asks": [
+                    [last_price + Decimal("5.0"), Decimal("1.10")],
+                    [last_price + Decimal("10.0"), Decimal("1.35")],
+                ],
             },
         }

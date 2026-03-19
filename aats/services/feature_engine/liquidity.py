@@ -6,15 +6,18 @@ from aats.schemas.market import MarketSnapshot
 
 class LiquidityAnalyzer:
     def calculate(self, snapshot: MarketSnapshot) -> LiquidityFeatureSet:
-        best_bid = snapshot.best_bid
-        best_ask = snapshot.best_ask
-        mid_price = (best_bid + best_ask) / 2.0 if (best_bid > 0.0 and best_ask > 0.0) else snapshot.last_price
+        best_bid = float(snapshot.best_bid)
+        best_ask = float(snapshot.best_ask)
+        last_price = float(snapshot.last_price)
+        bid_size = float(snapshot.bid_size)
+        ask_size = float(snapshot.ask_size)
+        mid_price = (best_bid + best_ask) / 2.0 if (best_bid > 0.0 and best_ask > 0.0) else last_price
         spread = max(best_ask - best_bid, 0.0)
         spread_bps = (spread / mid_price) * 10_000.0 if mid_price else 0.0
 
-        top_depth = max(snapshot.bid_size + snapshot.ask_size, 0.0)
+        top_depth = max(bid_size + ask_size, 0.0)
         top_of_book_imbalance = (
-            (snapshot.bid_size - snapshot.ask_size) / top_depth if top_depth else 0.0
+            (bid_size - ask_size) / top_depth if top_depth else 0.0
         )
 
         bid_depth = self._depth_total(snapshot.orderbook_depth.get("bids"))

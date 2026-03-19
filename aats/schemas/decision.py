@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal
 from typing import Literal
 
 from pydantic import Field
 from pydantic import BaseModel
 
 from aats.schemas.common import SchemaBase
+from aats.schemas.execution import AIExecutionParameterSuggestionEnvelope
 from aats.schemas.system import MarginModelType, ProductType
 
 
@@ -24,12 +26,23 @@ class DecisionContext(SchemaBase):
     health_snapshot_ref: str
     mode: str
     policy_flags: list[str] = Field(default_factory=list)
-    risk_budget_state: dict[str, float] = Field(default_factory=dict)
-    current_position_qty: float
+    risk_budget_state: dict[str, Decimal] = Field(default_factory=dict)
+    current_position_qty: Decimal
     current_open_orders: list[str] = Field(default_factory=list)
     product_type: ProductType = "spot"
     current_exposure_side: Literal["long", "short", "flat"] = "flat"
     current_target_leverage: float = 1.0
+    current_position_opened_at: datetime | None = None
+    last_position_closed_at: datetime | None = None
+    latest_fill_timestamp: datetime | None = None
+    recent_closed_trade_count: int = 0
+    recent_win_rate: float = 0.0
+    recent_fee_drag_ratio: float = 0.0
+    recent_churn_ratio: float = 0.0
+    recent_low_edge_trade_streak: int = 0
+    recent_low_edge_trade_at: datetime | None = None
+    strategy_guardrail_flags: list[str] = Field(default_factory=list)
+    strategy_cooldowns: dict[str, float] = Field(default_factory=dict)
 
 class BaselineAssessment(SchemaBase):
     decision_id: str
@@ -81,9 +94,19 @@ class AIMarketAssessment(SchemaBase):
     source_mode: Literal["provider", "fallback"] = "fallback"
     execution_condition: str | None = None
     evaluation_tags: list[str] = Field(default_factory=list)
+    ai_execution_parameter_suggestion: AIExecutionParameterSuggestionEnvelope | None = None
     model_name: str
     model_version: str
     prompt_version: str
+
+
+class AIExecutionParameterSuggestionOutput(BaseModel):
+    passive_bias: float | None = None
+    maker_taker_bias: float | None = None
+    max_cross_spread_bps: float | None = None
+    slice_count: int | None = None
+    max_participation_rate: float | None = None
+    cancel_replace_patience_ms: int | None = None
 
 
 class AIProviderAssessmentOutput(BaseModel):
@@ -100,6 +123,10 @@ class AIProviderAssessmentOutput(BaseModel):
     override_reason_codes: list[str] = Field(default_factory=list)
 
 
+class AIProviderAssessmentWithExecutionSuggestionOutput(AIProviderAssessmentOutput):
+    execution_parameter_suggestion: AIExecutionParameterSuggestionOutput | None = None
+
+
 class AIDecisionEvaluation(SchemaBase):
     decision_id: str
     operating_mode: AIOperatingMode
@@ -112,7 +139,7 @@ class AIDecisionEvaluation(SchemaBase):
     portfolio_snapshot_ref: str | None = None
     reconciliation_ref: str | None = None
     reconciliation_severity: str | None = None
-    observed_total_equity: float | None = None
+    observed_total_equity: Decimal | None = None
 
 
 class AIActionProposal(SchemaBase):
@@ -129,11 +156,11 @@ class AIActionProposal(SchemaBase):
 class PositionTarget(SchemaBase):
     decision_id: str
     symbol: str
-    current_position_qty: float
-    target_position_qty: float
-    delta_position_qty: float
-    current_notional: float
-    target_notional: float
+    current_position_qty: Decimal
+    target_position_qty: Decimal
+    delta_position_qty: Decimal
+    current_notional: Decimal
+    target_notional: Decimal
     rebalance_reason: str
     urgency: Literal["low", "medium", "high"]
     max_slippage_tolerance_bps: int
@@ -159,3 +186,8 @@ class PositionTarget(SchemaBase):
     ai_takeover_allowed: bool = False
     ai_takeover_applied: bool = False
     ai_takeover_blockers: list[str] = Field(default_factory=list)
+    expected_signal_edge_bps: float = 0.0
+    expected_cost_bps: float = 0.0
+    expected_net_edge_bps: float = 0.0
+    guardrail_flags: list[str] = Field(default_factory=list)
+    ai_execution_parameter_suggestion: AIExecutionParameterSuggestionEnvelope | None = None

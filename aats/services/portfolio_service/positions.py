@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Callable
 
@@ -9,18 +9,21 @@ from aats.bootstrap.metrics import MetricsRegistry
 from aats.bus.base import EventBus
 from aats.events import topics
 from aats.events.envelopes import parse_payload, publish_model
+from aats.schemas.common import utc_now
 from aats.schemas.execution import FillEvent
 from aats.schemas.exchange import ExchangeAccountSnapshot
-from aats.schemas.portfolio import PortfolioSnapshot
-from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, is_effectively_zero, to_decimal, to_float
+from aats.schemas.operator import ProcessingFailureRecord
+from aats.schemas.portfolio import PortfolioSnapshot, PortfolioSnapshotOrigin
+from aats.services.accounting import fill_fee_cost_in_quote, resolve_symbol_currencies, resolved_fee_currency
+from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, is_effectively_zero, to_decimal
 from aats.storage.base import PortfolioRepository
 from aats.services.portfolio_service.snapshots import PortfolioSnapshotBuilder
 
 
 @dataclass
 class PositionRecord:
-    quantity: float = 0.0
-    avg_entry_price: float = 0.0
+    quantity: Decimal = Decimal("0")
+    avg_entry_price: Decimal = Decimal("0")
     product_type: str = "spot"
     target_leverage: float = 1.0
     margin_mode: str = "cash"
@@ -29,10 +32,19 @@ class PositionRecord:
 @dataclass
 class FillApplicationResult:
     applied: bool
-    starting_quantity: float
-    ending_quantity: float
-    realized_pnl_delta: float
-    fee_delta: float
+    starting_quantity: Decimal
+    ending_quantity: Decimal
+    realized_pnl_delta: Decimal
+    fee_delta: Decimal
+
+
+@dataclass
+class PortfolioStateCheckpoint:
+    positions: dict[str, PositionRecord] = field(default_factory=dict)
+    balances: dict[str, Decimal] = field(default_factory=dict)
+    realized_pnl: Decimal = Decimal("0")
+    total_fees_paid: Decimal = Decimal("0")
+    applied_fill_ids: set[str] = field(default_factory=set)
 
 
 class PortfolioState:
@@ -44,9 +56,9 @@ class PortfolioState:
         default_margin_mode: str = "cash",
     ) -> None:
         self.positions: dict[str, PositionRecord] = {}
-        self.balances: dict[str, float] = {"USDT": to_float(to_decimal(initial_usdt_balance))}
-        self.realized_pnl: float = 0.0
-        self.total_fees_paid: float = 0.0
+        self.balances: dict[str, Decimal] = {"USDT": to_decimal(initial_usdt_balance)}
+        self.realized_pnl: Decimal = Decimal("0")
+        self.total_fees_paid: Decimal = Decimal("0")
         self._applied_fill_ids: set[str] = set()
         self.default_product_type = default_product_type
         self.default_margin_mode = default_margin_mode
@@ -54,30 +66,64 @@ class PortfolioState:
     def has_applied_fill(self, fill_id: str) -> bool:
         return fill_id in self._applied_fill_ids
 
+    def checkpoint(self) -> PortfolioStateCheckpoint:
+        return PortfolioStateCheckpoint(
+            positions={
+                symbol: PositionRecord(
+                    quantity=record.quantity,
+                    avg_entry_price=record.avg_entry_price,
+                    product_type=record.product_type,
+                    target_leverage=record.target_leverage,
+                    margin_mode=record.margin_mode,
+                )
+                for symbol, record in self.positions.items()
+            },
+            balances=dict(self.balances),
+            realized_pnl=self.realized_pnl,
+            total_fees_paid=self.total_fees_paid,
+            applied_fill_ids=set(self._applied_fill_ids),
+        )
+
+    def restore(self, checkpoint: PortfolioStateCheckpoint) -> None:
+        self.positions = {
+            symbol: PositionRecord(
+                quantity=record.quantity,
+                avg_entry_price=record.avg_entry_price,
+                product_type=record.product_type,
+                target_leverage=record.target_leverage,
+                margin_mode=record.margin_mode,
+            )
+            for symbol, record in checkpoint.positions.items()
+        }
+        self.balances = dict(checkpoint.balances)
+        self.realized_pnl = checkpoint.realized_pnl
+        self.total_fees_paid = checkpoint.total_fees_paid
+        self._applied_fill_ids = set(checkpoint.applied_fill_ids)
+
     def load_exchange_snapshot(self, snapshot: ExchangeAccountSnapshot) -> None:
         self.positions = {}
         self.balances = {
-            balance.currency: to_float(to_decimal(balance.total))
+            balance.currency: to_decimal(balance.total)
             for balance in snapshot.balances
             if not is_effectively_zero(balance.total)
         }
         if "USDT" not in self.balances:
-            self.balances["USDT"] = 0.0
+            self.balances["USDT"] = Decimal("0")
         for position in snapshot.positions:
             if is_effectively_zero(position.quantity):
                 continue
             self.positions[position.symbol] = PositionRecord(
-                quantity=to_float(to_decimal(position.quantity)),
-                avg_entry_price=to_float(to_decimal(position.average_entry_price)),
+                quantity=to_decimal(position.quantity),
+                avg_entry_price=to_decimal(position.average_entry_price),
                 product_type=getattr(position, "product_type", self.default_product_type),
                 target_leverage=getattr(position, "target_leverage", 1.0),
                 margin_mode=getattr(position, "margin_mode", self.default_margin_mode),
             )
         if self.default_product_type == "spot" and not snapshot.positions:
             for symbol, quantity in self._synthetic_spot_positions(snapshot).items():
-                self.positions[symbol] = PositionRecord(quantity=quantity, avg_entry_price=0.0)
-        self.realized_pnl = 0.0
-        self.total_fees_paid = 0.0
+                self.positions[symbol] = PositionRecord(quantity=quantity, avg_entry_price=Decimal("0"))
+        self.realized_pnl = Decimal("0")
+        self.total_fees_paid = Decimal("0")
         self._applied_fill_ids.clear()
 
     def load_portfolio_snapshot(
@@ -85,12 +131,12 @@ class PortfolioState:
         snapshot: PortfolioSnapshot,
         *,
         applied_fill_ids: set[str] | None = None,
-        total_fees_paid: float | None = None,
+        total_fees_paid: Decimal | float | None = None,
     ) -> None:
         self.positions = {
             position.symbol: PositionRecord(
-                quantity=to_float(to_decimal(position.position_qty)),
-                avg_entry_price=to_float(to_decimal(position.avg_entry_price)),
+                quantity=to_decimal(position.position_qty),
+                avg_entry_price=to_decimal(position.avg_entry_price),
                 product_type=position.product_type,
                 target_leverage=position.target_leverage,
                 margin_mode=position.margin_mode,
@@ -98,11 +144,11 @@ class PortfolioState:
             for position in snapshot.positions
             if not is_effectively_zero(position.position_qty)
         }
-        self.balances = {currency: to_float(to_decimal(balance)) for currency, balance in snapshot.balances.items()}
+        self.balances = {currency: to_decimal(balance) for currency, balance in snapshot.balances.items()}
         if "USDT" not in self.balances:
-            self.balances["USDT"] = 0.0
-        self.realized_pnl = to_float(to_decimal(snapshot.realized_pnl))
-        self.total_fees_paid = to_float(to_decimal(total_fees_paid if total_fees_paid is not None else 0.0))
+            self.balances["USDT"] = Decimal("0")
+        self.realized_pnl = to_decimal(snapshot.realized_pnl)
+        self.total_fees_paid = to_decimal(total_fees_paid if total_fees_paid is not None else 0)
         self._applied_fill_ids = set(applied_fill_ids or set())
 
     def apply_fill(self, fill: FillEvent) -> FillApplicationResult:
@@ -111,8 +157,8 @@ class PortfolioState:
                 applied=False,
                 starting_quantity=self.positions.get(fill.symbol, PositionRecord()).quantity,
                 ending_quantity=self.positions.get(fill.symbol, PositionRecord()).quantity,
-                realized_pnl_delta=0.0,
-                fee_delta=0.0,
+                realized_pnl_delta=Decimal("0"),
+                fee_delta=Decimal("0"),
             )
 
         record = self.positions.setdefault(fill.symbol, PositionRecord())
@@ -125,14 +171,13 @@ class PortfolioState:
         fee_amount = to_decimal(fill.fee_amount)
         signed_qty = fill_qty if fill.side == "buy" else -fill_qty
         starting_qty = to_decimal(record.quantity)
-        base_currency, quote_currency = self._symbol_currencies(fill.symbol)
+        base_currency, quote_currency = resolve_symbol_currencies(fill.symbol)
         notional = fill_qty * fill_price
-        fee_currency = self._resolved_fee_currency(fill=fill, base_currency=base_currency, quote_currency=quote_currency)
-        fee_quote_amount = self._fee_cost_in_quote(
+        fee_currency = resolved_fee_currency(fill=fill, base_currency=base_currency, quote_currency=quote_currency)
+        fee_quote_amount = fill_fee_cost_in_quote(
             fill=fill,
             base_currency=base_currency,
             quote_currency=quote_currency,
-            fee_currency=fee_currency,
         )
         fee_quote_amount = to_decimal(fee_quote_amount)
         fee_delta = fee_quote_amount
@@ -140,59 +185,59 @@ class PortfolioState:
 
         if product_type != "derivatives":
             if quote_currency is not None:
-                quote_balance = to_decimal(self.balances.get(quote_currency, 0.0))
+                quote_balance = to_decimal(self.balances.get(quote_currency, 0))
                 if fill.side == "buy":
-                    self.balances[quote_currency] = to_float(quote_balance - notional)
+                    self.balances[quote_currency] = quote_balance - notional
                 else:
-                    self.balances[quote_currency] = to_float(quote_balance + notional)
+                    self.balances[quote_currency] = quote_balance + notional
             if base_currency is not None:
-                base_balance = to_decimal(self.balances.get(base_currency, 0.0))
+                base_balance = to_decimal(self.balances.get(base_currency, 0))
                 if fill.side == "buy":
-                    self.balances[base_currency] = to_float(base_balance + fill_qty)
+                    self.balances[base_currency] = base_balance + fill_qty
                 else:
-                    self.balances[base_currency] = to_float(base_balance - fill_qty)
+                    self.balances[base_currency] = base_balance - fill_qty
 
-        if self._same_direction(to_float(starting_qty), to_float(signed_qty)):
+        if self._same_direction(starting_qty, signed_qty):
             ending_qty = starting_qty + signed_qty
-            current_avg_entry_price = to_decimal(record.avg_entry_price)
+            current_avg_entry_price = record.avg_entry_price
             new_total_cost = (abs(starting_qty) * current_avg_entry_price) + (abs(signed_qty) * fill_price)
-            record.quantity = to_float(ending_qty)
-            record.avg_entry_price = to_float(new_total_cost / abs(ending_qty)) if not is_effectively_zero(ending_qty) else 0.0
+            record.quantity = ending_qty
+            record.avg_entry_price = new_total_cost / abs(ending_qty) if not is_effectively_zero(ending_qty) else Decimal("0")
         else:
             closing_qty = min(abs(starting_qty), abs(signed_qty))
-            current_avg_entry_price = to_decimal(record.avg_entry_price)
+            current_avg_entry_price = record.avg_entry_price
             if starting_qty > 0:
                 trading_pnl_delta += (fill_price - current_avg_entry_price) * closing_qty
             else:
                 trading_pnl_delta += (current_avg_entry_price - fill_price) * closing_qty
 
             ending_qty = starting_qty + signed_qty
-            record.quantity = to_float(ending_qty)
+            record.quantity = ending_qty
             if is_effectively_zero(ending_qty):
-                record.avg_entry_price = 0.0
-            elif self._same_direction(to_float(starting_qty), to_float(ending_qty)):
+                record.avg_entry_price = Decimal("0")
+            elif self._same_direction(starting_qty, ending_qty):
                 # Position was reduced but remained on the same side, so cost basis is unchanged.
                 pass
             else:
                 # Position crossed through flat and reopened in the opposite direction.
-                record.avg_entry_price = to_float(fill_price)
+                record.avg_entry_price = fill_price
 
         if product_type == "derivatives" and quote_currency is not None and not is_effectively_zero(trading_pnl_delta):
-            self.balances[quote_currency] = to_float(to_decimal(self.balances.get(quote_currency, 0.0)) + trading_pnl_delta)
+            self.balances[quote_currency] = to_decimal(self.balances.get(quote_currency, 0)) + trading_pnl_delta
         if fee_currency is not None:
-            self.balances[fee_currency] = to_float(to_decimal(self.balances.get(fee_currency, 0.0)) - fee_amount)
+            self.balances[fee_currency] = to_decimal(self.balances.get(fee_currency, 0)) - fee_amount
 
         realized_pnl_delta = trading_pnl_delta - fee_quote_amount
-        self.realized_pnl = to_float(to_decimal(self.realized_pnl) + realized_pnl_delta)
-        self.total_fees_paid = to_float(to_decimal(self.total_fees_paid) + fee_delta)
+        self.realized_pnl = self.realized_pnl + realized_pnl_delta
+        self.total_fees_paid = self.total_fees_paid + fee_delta
         self._applied_fill_ids.add(fill.fill_id)
         self._cleanup_if_flat(fill.symbol)
         return FillApplicationResult(
             applied=True,
-            starting_quantity=to_float(starting_qty),
+            starting_quantity=starting_qty,
             ending_quantity=self.positions.get(fill.symbol, PositionRecord()).quantity,
-            realized_pnl_delta=to_float(realized_pnl_delta),
-            fee_delta=to_float(fee_delta),
+            realized_pnl_delta=realized_pnl_delta,
+            fee_delta=fee_delta,
         )
 
     def _cleanup_if_flat(self, symbol: str) -> None:
@@ -200,81 +245,30 @@ class PortfolioState:
         if record is not None and is_effectively_zero(record.quantity):
             self.positions.pop(symbol, None)
 
-    @staticmethod
-    def _symbol_currencies(symbol: str) -> tuple[str | None, str | None]:
-        if "-" not in symbol:
-            return symbol or None, None
-        parts = symbol.split("-")
-        if len(parts) >= 2:
-            return parts[0] or None, parts[1] or None
-        base_currency, quote_currency = symbol.split("-", 1)
-        return base_currency or None, quote_currency or None
-
-    def _synthetic_spot_positions(self, snapshot: ExchangeAccountSnapshot) -> dict[str, float]:
-        synthetic_positions: dict[str, float] = {}
+    def _synthetic_spot_positions(self, snapshot: ExchangeAccountSnapshot) -> dict[str, Decimal]:
+        synthetic_positions: dict[str, Decimal] = {}
         for instrument in snapshot.instruments:
             if instrument.quote_currency != "USDT":
                 continue
             if instrument.symbol in self.positions:
                 continue
-            quantity = self.balances.get(instrument.base_currency, 0.0)
+            quantity = self.balances.get(instrument.base_currency, Decimal("0"))
             if is_effectively_zero(quantity):
                 continue
             synthetic_positions[instrument.symbol] = quantity
         return synthetic_positions
 
-    @staticmethod
-    def _resolved_fee_currency(
-        *,
-        fill: FillEvent,
-        base_currency: str | None,
-        quote_currency: str | None,
-    ) -> str | None:
-        if fill.fee_currency:
-            return fill.fee_currency
-        if fill.venue == "OKX":
-            return base_currency if fill.side == "buy" else quote_currency
-        return quote_currency
+    @classmethod
+    def fee_cost_in_quote(cls, fill: FillEvent) -> Decimal:
+        return fill_fee_cost_in_quote(fill)
 
     @classmethod
-    def fee_cost_in_quote(cls, fill: FillEvent) -> float:
-        base_currency, quote_currency = cls._symbol_currencies(fill.symbol)
-        fee_currency = cls._resolved_fee_currency(
-            fill=fill,
-            base_currency=base_currency,
-            quote_currency=quote_currency,
-        )
-        return cls._fee_cost_in_quote(
-            fill=fill,
-            base_currency=base_currency,
-            quote_currency=quote_currency,
-            fee_currency=fee_currency,
-        )
-
-    @classmethod
-    def total_fee_cost_in_quote(cls, fills: list[FillEvent]) -> float:
-        return sum(cls.fee_cost_in_quote(fill) for fill in fills)
+    def total_fee_cost_in_quote(cls, fills: list[FillEvent]) -> Decimal:
+        return sum((cls.fee_cost_in_quote(fill) for fill in fills), start=Decimal("0"))
 
     @staticmethod
-    def _fee_cost_in_quote(
-        *,
-        fill: FillEvent,
-        base_currency: str | None,
-        quote_currency: str | None,
-        fee_currency: str | None,
-    ) -> float:
-        fee_amount = to_decimal(fill.fee_amount)
-        if fee_amount <= 0:
-            return 0.0
-        if fee_currency == quote_currency or fee_currency is None:
-            return to_float(fee_amount)
-        if fee_currency == base_currency:
-            return to_float(fee_amount * to_decimal(fill.fill_price))
-        return 0.0
-
-    @staticmethod
-    def _same_direction(left: float, right: float) -> bool:
-        if abs(left) <= float(EPSILON_DECIMAL_12) or abs(right) <= float(EPSILON_DECIMAL_12):
+    def _same_direction(left: Decimal, right: Decimal) -> bool:
+        if abs(left) <= EPSILON_DECIMAL_12 or abs(right) <= EPSILON_DECIMAL_12:
             return True
         return (left > 0 and right > 0) or (left < 0 and right < 0)
 
@@ -287,7 +281,7 @@ class PortfolioService:
         state: PortfolioState,
         snapshot_builder: PortfolioSnapshotBuilder,
         portfolio_repo: PortfolioRepository,
-        price_provider: Callable[[str], float],
+        price_provider: Callable[[str], Decimal],
         metrics: MetricsRegistry | None = None,
     ) -> None:
         self.bus = bus
@@ -298,8 +292,12 @@ class PortfolioService:
         self.metrics = metrics
         self.logger = get_logger("aats.portfolio_service")
 
-    async def bootstrap_snapshot(self) -> None:
-        snapshot = self.snapshot_builder.build(state=self.state, price_provider=self.price_provider)
+    async def bootstrap_snapshot(self, *, snapshot_origin: PortfolioSnapshotOrigin = "runtime_bootstrap") -> None:
+        snapshot = self.snapshot_builder.build(
+            state=self.state,
+            price_provider=self.price_provider,
+            snapshot_origin=snapshot_origin,
+        )
         self.portfolio_repo.save_snapshot(snapshot)
         await publish_model(
             bus=self.bus,
@@ -311,9 +309,29 @@ class PortfolioService:
 
     async def handle_fill_event(self, message: dict) -> None:
         fill = parse_payload(message, FillEvent)
+        checkpoint = self.state.checkpoint()
         result = self.state.apply_fill(fill)
         if not result.applied:
             return
+        try:
+            snapshot = self.snapshot_builder.build(
+                state=self.state,
+                price_provider=self.price_provider,
+                decision_id=fill.decision_id,
+                source_intent_id=fill.intent_id,
+                source_fill_id=fill.fill_id,
+                snapshot_origin="fill_derived",
+            )
+            self.portfolio_repo.save_snapshot(snapshot)
+        except Exception as exc:
+            self.state.restore(checkpoint)
+            await self._emit_processing_failure(
+                stage="portfolio_snapshot_persist",
+                message=str(exc),
+                fill=fill,
+                retriable=True,
+            )
+            raise
         if self.metrics is not None:
             self.metrics.increment("fills_processed")
         log_event(
@@ -330,14 +348,6 @@ class PortfolioService:
                 fee_delta=result.fee_delta,
             ),
         )
-        snapshot = self.snapshot_builder.build(
-            state=self.state,
-            price_provider=self.price_provider,
-            decision_id=fill.decision_id,
-            source_intent_id=fill.intent_id,
-            source_fill_id=fill.fill_id,
-        )
-        self.portfolio_repo.save_snapshot(snapshot)
         await publish_model(
             bus=self.bus,
             topic=topics.PORTFOLIO_SNAPSHOTS,
@@ -345,3 +355,38 @@ class PortfolioService:
             payload_model=snapshot,
             source_component="portfolio_service",
         )
+
+    async def _emit_processing_failure(
+        self,
+        *,
+        stage: str,
+        message: str,
+        fill: FillEvent,
+        retriable: bool,
+    ) -> None:
+        if self.metrics is not None:
+            self.metrics.increment("processing_failures")
+        try:
+            await publish_model(
+                bus=self.bus,
+                topic=topics.PROCESSING_FAILURES,
+                key=fill.symbol,
+                payload_model=ProcessingFailureRecord(
+                    subsystem="portfolio_service",
+                    stage=stage,
+                    severity="error",
+                    message=message,
+                    decision_id=fill.decision_id,
+                    intent_id=fill.intent_id,
+                    order_id=fill.client_order_id,
+                    fill_id=fill.fill_id,
+                    symbol=fill.symbol,
+                    product_type=fill.product_type,
+                    margin_mode=fill.margin_mode,
+                    retriable=retriable,
+                    observed_at=utc_now(),
+                ),
+                source_component="portfolio_service",
+            )
+        except Exception:
+            pass

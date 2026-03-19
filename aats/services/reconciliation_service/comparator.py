@@ -8,6 +8,7 @@ from aats.schemas.execution import FillEvent, OrderState
 from aats.schemas.exchange import ExchangeAccountSnapshot, ExchangeFill, ExchangeOpenOrder
 from aats.schemas.portfolio import PortfolioSnapshot
 from aats.schemas.reconciliation import ReconciliationReport
+from aats.services.execution_engine.okx_bills import explain_okx_bills_for_reconciliation
 from aats.services.execution_engine.state_machine import OrderStateMachine
 from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, EPSILON_DECIMAL_9, to_decimal
 
@@ -30,6 +31,7 @@ class StateComparator:
         compare_exchange_portfolio: bool = False,
         accepted_exchange_fill_ids: set[str] | None = None,
         trusted_exchange_portfolio_baseline: bool = False,
+        exchange_bills_summary: dict[str, object] | None = None,
     ) -> ReconciliationReport:
         exchange_snapshot_covers_local_execution = self._exchange_snapshot_covers_local_execution(
             order_states=order_states,
@@ -76,6 +78,7 @@ class StateComparator:
             balance_diff=balance_diff,
             position_diff=position_diff,
             trusted_exchange_portfolio_baseline=trusted_exchange_portfolio_baseline,
+            exchange_bills_summary=exchange_bills_summary or {},
         )
         severity = self._severity(
             mismatch_categories=mismatch_categories,
@@ -89,8 +92,15 @@ class StateComparator:
             fill_diff=fill_diff,
             balance_diff=balance_diff,
             position_diff=position_diff,
+            mismatch_categories=mismatch_categories,
+            exchange_bills_summary=exchange_bills_summary or {},
         )
         review_required = severity == "REVIEW_REQUIRED"
+        exchange_bills_explanations = explain_okx_bills_for_reconciliation(
+            summary=dict(exchange_bills_summary or {}),
+            mismatch_categories=mismatch_categories,
+            mismatch_reasons=mismatch_reasons,
+        )
         safety_impacts = self._safety_impacts(
             severity=severity,
             mismatch_categories=mismatch_categories,
@@ -98,8 +108,13 @@ class StateComparator:
             fill_diff=fill_diff,
             balance_diff=balance_diff,
             position_diff=position_diff,
+            exchange_bills_summary=exchange_bills_summary or {},
         )
-        recommended_operator_action = self._recommended_operator_action(severity=severity)
+        recommended_operator_action = self._recommended_operator_action(
+            severity=severity,
+            mismatch_categories=mismatch_categories,
+            exchange_bills_summary=exchange_bills_summary or {},
+        )
         remediation_action = recommended_operator_action
         return ReconciliationReport(
             reconciliation_id=new_id("recon"),
@@ -115,6 +130,8 @@ class StateComparator:
             fill_diff=fill_diff,
             balance_diff=balance_diff,
             position_diff=position_diff,
+            exchange_bills_summary=dict(exchange_bills_summary or {}),
+            exchange_bills_explanations=exchange_bills_explanations,
             mismatch_categories=mismatch_categories,
             mismatch_reasons=mismatch_reasons,
             safety_impacts=safety_impacts,
@@ -135,6 +152,7 @@ class StateComparator:
         balance_diff: dict[str, object],
         position_diff: dict[str, object],
         trusted_exchange_portfolio_baseline: bool,
+        exchange_bills_summary: dict[str, object],
     ) -> list[str]:
         categories: list[str] = []
         has_local_execution_state = bool(order_states or fills)
@@ -162,6 +180,11 @@ class StateComparator:
             and not local_portfolio_diff
         ):
             categories.append("external_manual_activity_detected")
+        if (
+            exchange_bills_summary.get("available")
+            and (unexpected_exchange_fills or exchange_balance_diff or exchange_position_diff or exchange_order_diff)
+        ):
+            categories.append("exchange_bills_activity_available")
 
         if fill_diff.get("replayed"):
             categories.append("local_fill_missing")
@@ -191,14 +214,14 @@ class StateComparator:
         exchange_snapshot: ExchangeAccountSnapshot | None,
         exchange_comparison_enabled: bool,
     ) -> dict[str, object]:
-        fill_qty_by_intent: dict[str, float] = defaultdict(float)
+        fill_qty_by_intent: dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
         for fill in fills:
             fill_qty_by_intent[fill.intent_id] += fill.fill_qty
 
-        replay_mismatches: dict[str, dict[str, float]] = {}
+        replay_mismatches: dict[str, dict[str, Decimal]] = {}
         for order_state in order_states:
-            replayed_fill_qty = fill_qty_by_intent.get(order_state.intent_id, 0.0)
-            if abs(replayed_fill_qty - order_state.filled_qty) > 1e-12:
+            replayed_fill_qty = fill_qty_by_intent.get(order_state.intent_id, Decimal("0"))
+            if abs(replayed_fill_qty - order_state.filled_qty) > EPSILON_DECIMAL_12:
                 replay_mismatches[order_state.intent_id] = {
                     "stored_filled_qty": order_state.filled_qty,
                     "replayed_filled_qty": replayed_fill_qty,
@@ -429,6 +452,8 @@ class StateComparator:
         fill_diff: dict[str, object],
         balance_diff: dict[str, object],
         position_diff: dict[str, object],
+        mismatch_categories: list[str],
+        exchange_bills_summary: dict[str, object],
     ) -> list[str]:
         reasons: list[str] = []
         if order_diff.get("reconstructed"):
@@ -447,6 +472,8 @@ class StateComparator:
             reasons.append("stored_position_differs_from_replayed_position")
         if position_diff.get("exchange_mismatches"):
             reasons.append("local_position_differs_from_exchange_position")
+        if "exchange_bills_activity_available" in mismatch_categories and exchange_bills_summary.get("count"):
+            reasons.append("recent_exchange_bills_may_explain_exchange_side_balance_activity")
         return reasons
 
     @staticmethod
@@ -458,6 +485,7 @@ class StateComparator:
         fill_diff: dict[str, object],
         balance_diff: dict[str, object],
         position_diff: dict[str, object],
+        exchange_bills_summary: dict[str, object],
     ) -> list[str]:
         impacts: list[str] = []
         if severity == "HARD_MISMATCH":
@@ -472,14 +500,27 @@ class StateComparator:
             impacts.append("fill_history_visibility_is_incomplete")
         if balance_diff.get("exchange") or position_diff.get("exchange_mismatches"):
             impacts.append("exchange_account_state_differs_from_local_state")
+        if "exchange_bills_activity_available" in mismatch_categories and exchange_bills_summary.get("count"):
+            impacts.append("review_exchange_bills_before_rebaselining")
         return impacts
 
     @staticmethod
-    def _recommended_operator_action(*, severity: str) -> str | None:
+    def _recommended_operator_action(
+        *,
+        severity: str,
+        mismatch_categories: list[str],
+        exchange_bills_summary: dict[str, object],
+    ) -> str | None:
         if severity == "CLEAN":
             return None
         if severity == "INFO":
             return "observe_only"
+        if (
+            severity == "REVIEW_REQUIRED"
+            and "exchange_bills_activity_available" in mismatch_categories
+            and exchange_bills_summary.get("count")
+        ):
+            return "review_exchange_bills_and_rebaseline_if_expected"
         if severity == "SOFT_MISMATCH":
             return "investigate_state_divergence"
         if severity == "REVIEW_REQUIRED":

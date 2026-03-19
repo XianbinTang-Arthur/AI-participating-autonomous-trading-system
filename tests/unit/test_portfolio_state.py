@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 from datetime import datetime, timezone
+from decimal import Decimal
 
 from aats.schemas.exchange import ExchangeAccountSnapshot, ExchangeBalance, InstrumentMetadata
 from aats.schemas.execution import FillEvent
@@ -58,10 +59,10 @@ class TestPortfolioState(unittest.TestCase):
         self.assertTrue(final_sell.applied)
 
         self.assertEqual(state.positions, {})
-        self.assertAlmostEqual(state.balances["USDT"], 10_011.0)
-        self.assertAlmostEqual(state.balances["BTC"], 0.0)
-        self.assertAlmostEqual(state.realized_pnl, 11.0)
-        self.assertAlmostEqual(state.total_fees_paid, 4.0)
+        self.assertEqual(state.balances["USDT"], Decimal("10011.0"))
+        self.assertEqual(state.balances["BTC"], Decimal("0"))
+        self.assertEqual(state.realized_pnl, Decimal("11.0"))
+        self.assertEqual(state.total_fees_paid, Decimal("4.0"))
 
     def test_reversal_sets_new_cost_basis_on_opposite_side(self) -> None:
         state = PortfolioState(initial_usdt_balance=10_000.0)
@@ -71,11 +72,11 @@ class TestPortfolioState(unittest.TestCase):
 
         position = state.positions["BTC-USDT"]
         self.assertTrue(reversal.applied)
-        self.assertAlmostEqual(position.quantity, -1.0)
-        self.assertAlmostEqual(position.avg_entry_price, 90.0)
-        self.assertAlmostEqual(state.balances["BTC"], -1.0)
-        self.assertAlmostEqual(state.realized_pnl, -10.0)
-        self.assertAlmostEqual(state.balances["USDT"], 10_080.0)
+        self.assertEqual(position.quantity, Decimal("-1.0"))
+        self.assertEqual(position.avg_entry_price, Decimal("90.0"))
+        self.assertEqual(state.balances["BTC"], Decimal("-1.0"))
+        self.assertEqual(state.realized_pnl, Decimal("-10.0"))
+        self.assertEqual(state.balances["USDT"], Decimal("10080.0"))
 
     def test_duplicate_fill_is_ignored_idempotently(self) -> None:
         state = PortfolioState(initial_usdt_balance=10_000.0)
@@ -86,11 +87,11 @@ class TestPortfolioState(unittest.TestCase):
 
         self.assertTrue(first.applied)
         self.assertFalse(second.applied)
-        self.assertAlmostEqual(state.positions["BTC-USDT"].quantity, 1.0)
-        self.assertAlmostEqual(state.balances["BTC"], 1.0)
-        self.assertAlmostEqual(state.balances["USDT"], 9_899.5)
-        self.assertAlmostEqual(state.realized_pnl, -0.5)
-        self.assertAlmostEqual(state.total_fees_paid, 0.5)
+        self.assertEqual(state.positions["BTC-USDT"].quantity, Decimal("1.0"))
+        self.assertEqual(state.balances["BTC"], Decimal("1.0"))
+        self.assertEqual(state.balances["USDT"], Decimal("9899.5"))
+        self.assertEqual(state.realized_pnl, Decimal("-0.5"))
+        self.assertEqual(state.total_fees_paid, Decimal("0.5"))
 
     def test_okx_buy_fee_in_base_currency_reduces_base_balance_and_converts_fee_to_quote_pnl(self) -> None:
         state = PortfolioState(initial_usdt_balance=10_000.0)
@@ -107,10 +108,10 @@ class TestPortfolioState(unittest.TestCase):
             )
         )
 
-        self.assertAlmostEqual(state.balances["USDT"], 9_930.0)
-        self.assertAlmostEqual(state.balances["BTC"], 0.0009995)
-        self.assertAlmostEqual(state.realized_pnl, -(0.0000005 * 70_000.0))
-        self.assertAlmostEqual(state.total_fees_paid, 0.0000005 * 70_000.0)
+        self.assertEqual(state.balances["USDT"], Decimal("9930.0"))
+        self.assertEqual(state.balances["BTC"], Decimal("0.0009995"))
+        self.assertEqual(state.realized_pnl, Decimal("-0.035"))
+        self.assertEqual(state.total_fees_paid, Decimal("0.035"))
 
     def test_okx_legacy_fill_without_fee_currency_infers_spot_fee_side(self) -> None:
         state = PortfolioState(initial_usdt_balance=10_000.0)
@@ -126,8 +127,8 @@ class TestPortfolioState(unittest.TestCase):
             )
         )
 
-        self.assertAlmostEqual(state.balances["USDT"], 9_930.0)
-        self.assertAlmostEqual(state.balances["BTC"], 0.0009995)
+        self.assertEqual(state.balances["USDT"], Decimal("9930.0"))
+        self.assertEqual(state.balances["BTC"], Decimal("0.0009995"))
 
     def test_load_exchange_snapshot_synthesizes_spot_positions_from_balances(self) -> None:
         state = PortfolioState(initial_usdt_balance=0.0)
@@ -160,7 +161,7 @@ class TestPortfolioState(unittest.TestCase):
             )
         )
 
-        self.assertAlmostEqual(state.positions["BTC-USDT"].quantity, 0.001)
+        self.assertEqual(state.positions["BTC-USDT"].quantity, Decimal("0.001"))
 
     def test_derivatives_fill_updates_position_without_spot_notional_balance_transfer(self) -> None:
         state = PortfolioState(initial_usdt_balance=10_000.0, default_product_type="derivatives", default_margin_mode="cross")
@@ -180,10 +181,10 @@ class TestPortfolioState(unittest.TestCase):
             )
         )
 
-        self.assertAlmostEqual(state.positions["BTC-USDT-SWAP"].quantity, -0.01)
-        self.assertAlmostEqual(state.balances["USDT"], 9_999.5)
+        self.assertEqual(state.positions["BTC-USDT-SWAP"].quantity, Decimal("-0.01"))
+        self.assertEqual(state.balances["USDT"], Decimal("9999.5"))
         self.assertNotIn("BTC", state.balances)
-        self.assertAlmostEqual(state.realized_pnl, -0.5)
+        self.assertEqual(state.realized_pnl, Decimal("-0.5"))
 
     def test_derivatives_closing_fill_realizes_pnl_into_quote_balance(self) -> None:
         state = PortfolioState(initial_usdt_balance=10_000.0, default_product_type="derivatives", default_margin_mode="cross")
@@ -217,8 +218,8 @@ class TestPortfolioState(unittest.TestCase):
         )
 
         self.assertEqual(state.positions, {})
-        self.assertAlmostEqual(state.balances["USDT"], 10_009.6)
-        self.assertAlmostEqual(state.realized_pnl, 9.6)
+        self.assertEqual(state.balances["USDT"], Decimal("10009.6"))
+        self.assertEqual(state.realized_pnl, Decimal("9.6"))
 
 
 if __name__ == "__main__":

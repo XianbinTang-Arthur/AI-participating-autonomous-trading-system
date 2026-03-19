@@ -4,7 +4,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Callable
 
 from aats.schemas.common import utc_now
-from aats.schemas.portfolio import PortfolioSnapshot, Position
+from aats.schemas.portfolio import PortfolioSnapshot, PortfolioSnapshotOrigin, Position
 from aats.services.portfolio_service.decimals import is_effectively_zero, quantize_decimal, to_decimal
 from aats.services.portfolio_service.pnl import PortfolioPnLCalculator
 
@@ -20,10 +20,11 @@ class PortfolioSnapshotBuilder:
         self,
         *,
         state: "PortfolioState",
-        price_provider: Callable[[str], float],
+        price_provider: Callable[[str], Decimal],
         decision_id: str | None = None,
         source_intent_id: str | None = None,
         source_fill_id: str | None = None,
+        snapshot_origin: PortfolioSnapshotOrigin = "fill_derived",
     ) -> PortfolioSnapshot:
         positions: list[Position] = []
         gross_exposure = Decimal("0")
@@ -52,7 +53,13 @@ class PortfolioSnapshotBuilder:
                     avg_entry_price=quantize_decimal(avg_entry_price),
                     unrealized_pnl=quantize_decimal(position_unrealized),
                     product_type=record.product_type,  # type: ignore[arg-type]
-                    exposure_side=("long" if record.quantity > 1e-12 else "short" if record.quantity < -1e-12 else "flat"),
+                    exposure_side=(
+                        "long"
+                        if record.quantity > Decimal("1e-12")
+                        else "short"
+                        if record.quantity < Decimal("-1e-12")
+                        else "flat"
+                    ),
                     target_leverage=record.target_leverage,
                     margin_mode=record.margin_mode,  # type: ignore[arg-type]
                     margin_allocated=quantize_decimal(
@@ -89,6 +96,7 @@ class PortfolioSnapshotBuilder:
             decision_id=decision_id,
             source_intent_id=source_intent_id,
             source_fill_id=source_fill_id,
+            snapshot_origin=snapshot_origin,
             snapshot_ts=utc_now(),
             balances={currency: quantize_decimal(balance) for currency, balance in balances.items()},
             positions=positions,

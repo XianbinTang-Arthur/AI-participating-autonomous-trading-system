@@ -2,15 +2,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal
 from typing import Callable
 
 from aats.bootstrap.settings import AATSSettings
 from aats.schemas.common import utc_now
 from aats.schemas.exchange import AccountBaselineSnapshot
-from aats.schemas.portfolio import PortfolioSnapshot
+from aats.schemas.portfolio import PortfolioSnapshot, is_trusted_baseline_snapshot
 from aats.schemas.execution import FillEvent, OrderObligation, OrderState
 from aats.schemas.reconciliation import ReconciliationReport
 from aats.schemas.system import RecoveryStatus
+from aats.services.accounting import remaining_obligation_amount
 from aats.services.governance_engine.kill_switch import KillSwitch
 from aats.services.governance_engine.runtime_layers import RecoveryPolicy
 from aats.services.portfolio_service.positions import PortfolioState
@@ -33,7 +35,7 @@ class RecoveryArtifacts:
 
 
 class ExecutionRecoveryService:
-    _RECOVERY_COMPARISON_EPSILON = 1e-8
+    _RECOVERY_COMPARISON_EPSILON = Decimal("1e-8")
 
     def __init__(
         self,
@@ -44,7 +46,7 @@ class ExecutionRecoveryService:
         portfolio_repo: PortfolioRepository,
         reconciliation_repo: ReconciliationRepository,
         reconstruction_service: PortfolioReconstructionService,
-        price_provider: Callable[[str], float],
+        price_provider: Callable[[str], Decimal],
         kill_switch: KillSwitch,
         bootstrap_portfolio_from_exchange: bool,
         reconciliation_stale_after_seconds: float,
@@ -112,28 +114,22 @@ class ExecutionRecoveryService:
                 applied_fill_ids={fill.fill_id for fill in fills},
                 total_fees_paid=PortfolioState.total_fee_cost_in_quote(fills),
             )
-            if self.bootstrap_portfolio_from_exchange:
-                notes.append("reconstruction_validation_skipped_bootstrap_exchange")
-            else:
-                rebuilt = self.reconstruction_service.rebuild_snapshot(
-                    fills=fills,
-                    price_provider=self._recovery_price_provider(latest_snapshot),
-                ).model_copy(
-                    update={
-                        "product_type": self.runtime_scope.product_type,
-                        "margin_mode": self.runtime_scope.margin_mode,
-                    }
+            rebuilt = self._rebuild_snapshot_for_validation(
+                latest_snapshot=latest_snapshot,
+                fills=fills,
+            )
+            divergence_count = self._divergence_count(latest_snapshot, rebuilt)
+            if divergence_count:
+                self._halt_for_recovery(
+                    reason="recovery_portfolio_divergence",
+                    action="halted_for_portfolio_divergence",
+                    notes=notes,
                 )
-                divergence_count = self._divergence_count(latest_snapshot, rebuilt)
-                if divergence_count:
-                    self._halt_for_recovery(
-                        reason="recovery_portfolio_divergence",
-                        action="halted_for_portfolio_divergence",
-                        notes=notes,
-                    )
-                    recovery_action = "halted_for_portfolio_divergence"
-                    safe_startup = False
-                    notes.append("stored_snapshot_differs_from_fill_reconstruction")
+                recovery_action = "halted_for_portfolio_divergence"
+                safe_startup = False
+                notes.append("stored_snapshot_differs_from_fill_reconstruction")
+            elif self.bootstrap_portfolio_from_exchange:
+                notes.append("reconstruction_validation_completed_bootstrap_exchange")
         elif fills:
             if self.bootstrap_portfolio_from_exchange:
                 self._halt_for_recovery(
@@ -150,6 +146,7 @@ class ExecutionRecoveryService:
                     price_provider=self.price_provider,
                 ).model_copy(
                     update={
+                        "snapshot_origin": "recovery_rebuild",
                         "product_type": self.runtime_scope.product_type,
                         "margin_mode": self.runtime_scope.margin_mode,
                     }
@@ -258,6 +255,69 @@ class ExecutionRecoveryService:
             rebuilt_snapshot=rebuilt_snapshot_for_event,
         )
 
+    def _rebuild_snapshot_for_validation(
+        self,
+        *,
+        latest_snapshot: PortfolioSnapshot,
+        fills: list[FillEvent],
+    ) -> PortfolioSnapshot:
+        if not self.bootstrap_portfolio_from_exchange:
+            return self.reconstruction_service.rebuild_snapshot(
+                fills=fills,
+                price_provider=self._recovery_price_provider(latest_snapshot),
+            ).model_copy(
+                update={
+                    "snapshot_origin": "manual_rebuild",
+                    "product_type": self.runtime_scope.product_type,
+                    "margin_mode": self.runtime_scope.margin_mode,
+                }
+            )
+
+        baseline_snapshot = self._trusted_baseline_snapshot()
+        if baseline_snapshot is None:
+            return self.reconstruction_service.rebuild_snapshot(
+                fills=fills,
+                price_provider=self._recovery_price_provider(latest_snapshot),
+            ).model_copy(
+                update={
+                    "snapshot_origin": "manual_rebuild",
+                    "product_type": self.runtime_scope.product_type,
+                    "margin_mode": self.runtime_scope.margin_mode,
+                }
+            )
+
+        state = PortfolioState(
+            initial_usdt_balance=self.reconstruction_service.initial_usdt_balance,
+            default_product_type=self.runtime_scope.product_type,
+            default_margin_mode=self.runtime_scope.margin_mode,
+        )
+        state.load_portfolio_snapshot(baseline_snapshot)
+        baseline_ts = baseline_snapshot.snapshot_ts
+        for fill in sorted(fills, key=lambda item: (item.ingestion_timestamp, item.fill_id)):
+            if fill.ingestion_timestamp >= baseline_ts:
+                state.apply_fill(fill)
+        return self.reconstruction_service.snapshot_builder.build(
+            state=state,
+            price_provider=self._recovery_price_provider(latest_snapshot),
+            snapshot_origin="manual_rebuild",
+        ).model_copy(
+            update={
+                "product_type": self.runtime_scope.product_type,
+                "margin_mode": self.runtime_scope.margin_mode,
+            }
+        )
+
+    def _trusted_baseline_snapshot(self) -> PortfolioSnapshot | None:
+        snapshots = self.portfolio_repo.history_for_scope(scope=self.runtime_scope)
+        candidates = [
+            snapshot
+            for snapshot in snapshots
+            if is_trusted_baseline_snapshot(snapshot)
+        ]
+        if not candidates:
+            return None
+        return max(candidates, key=lambda item: (item.snapshot_ts, item.created_at))
+
     def _cleanup_orphan_obligations(self) -> int:
         order_states = {
             state.client_order_id: state
@@ -304,15 +364,12 @@ class ExecutionRecoveryService:
         obligation: OrderObligation,
         target_status: str,
     ) -> OrderObligation | None:
-        remaining_amount = max(
-            obligation.reserved_amount - obligation.consumed_amount - obligation.released_amount,
-            0.0,
-        )
-        if remaining_amount <= 1e-12 and obligation.status == target_status:
+        remaining_amount = remaining_obligation_amount(obligation)
+        if remaining_amount <= Decimal("1e-12") and obligation.status == target_status:
             return None
         return obligation.model_copy(
             update={
-                "released_amount": obligation.released_amount + max(remaining_amount, 0.0),
+                "released_amount": obligation.released_amount + max(remaining_amount, Decimal("0")),
                 "status": target_status,
                 "last_update_ts": utc_now(),
             }
@@ -403,19 +460,19 @@ class ExecutionRecoveryService:
             ordered.append(note)
         return ordered
 
-    def _recovery_price_provider(self, snapshot: PortfolioSnapshot) -> Callable[[str], float]:
-        snapshot_marks: dict[str, float] = {}
+    def _recovery_price_provider(self, snapshot: PortfolioSnapshot) -> Callable[[str], Decimal]:
+        snapshot_marks: dict[str, Decimal] = {}
         for position in snapshot.positions:
-            if abs(position.position_qty) > 1e-12:
+            if abs(position.position_qty) > self._RECOVERY_COMPARISON_EPSILON:
                 snapshot_marks[position.symbol] = position.position_notional / position.position_qty
-            elif position.avg_entry_price > 0.0:
+            elif position.avg_entry_price > Decimal("0"):
                 snapshot_marks[position.symbol] = position.avg_entry_price
 
-        def provider(symbol: str) -> float:
+        def provider(symbol: str) -> Decimal:
             live_price = self.price_provider(symbol)
-            if live_price > 0.0:
+            if live_price > Decimal("0"):
                 return live_price
-            return snapshot_marks.get(symbol, 0.0)
+            return snapshot_marks.get(symbol, Decimal("0"))
 
         return provider
 
@@ -440,22 +497,22 @@ class ExecutionRecoveryService:
         return count
 
     @staticmethod
-    def _dict_diverges(left: dict[str, float], right: dict[str, float]) -> bool:
+    def _dict_diverges(left: dict[str, Decimal], right: dict[str, Decimal]) -> bool:
         keys = set(left) | set(right)
         return any(
-            abs(left.get(key, 0.0) - right.get(key, 0.0)) > ExecutionRecoveryService._RECOVERY_COMPARISON_EPSILON
+            abs(left.get(key, Decimal("0")) - right.get(key, Decimal("0"))) > ExecutionRecoveryService._RECOVERY_COMPARISON_EPSILON
             for key in keys
         )
 
     @staticmethod
     def _position_diverges(
-        left: dict[str, tuple[float, float]],
-        right: dict[str, tuple[float, float]],
+        left: dict[str, tuple[Decimal, Decimal]],
+        right: dict[str, tuple[Decimal, Decimal]],
     ) -> bool:
         keys = set(left) | set(right)
         for key in keys:
-            left_qty, left_avg = left.get(key, (0.0, 0.0))
-            right_qty, right_avg = right.get(key, (0.0, 0.0))
+            left_qty, left_avg = left.get(key, (Decimal("0"), Decimal("0")))
+            right_qty, right_avg = right.get(key, (Decimal("0"), Decimal("0")))
             if (
                 abs(left_qty - right_qty) > ExecutionRecoveryService._RECOVERY_COMPARISON_EPSILON
                 or abs(left_avg - right_avg) > ExecutionRecoveryService._RECOVERY_COMPARISON_EPSILON

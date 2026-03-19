@@ -13,29 +13,29 @@
 
 ## 新的信息架构
 
-前端拆成 6 个 HTML 页面：
+前端保留一个统一 shell，并在 shell 内拆成 6 个工作区视图：
 
 1. `login.html`
    用于登录和会话建立。
 
-2. `dashboard.html`
-   作为 `/ui` 和 `/ui/overview` 的总览首页，只回答：
+2. `dashboard-shell.html` 中的 `overview` 视图
+   作为 `/ui` 和 `/ui/overview` 的总览视图，只回答：
    - 现在能不能继续自动交易
    - 当前策略到底在做什么
    - 当前是否有持仓或在途委托
    - 当前收益和风险状态如何
    - 如果不能交易，首先要处理什么
 
-3. `strategy.html`
+3. `dashboard-shell.html` 中的 `strategy` 视图
    专门展示策略判断、信号拆解、目标仓位、策略门禁和风控门禁。
 
-4. `execution.html`
+4. `dashboard-shell.html` 中的 `execution` 视图
    专门展示委托、成交、执行异常和卡单处理。
 
-5. `risk.html`
+5. `dashboard-shell.html` 中的 `risk` 视图
    专门展示风险阻断、对账、恢复和 replay/repair 状态。
 
-6. `settings.html`
+6. `dashboard-shell.html` 中的 `admin/settings` 视图
    专门展示账户、权限和运行配置，不再和交易工作台共享同一主视图。
 
 ## 布局原则
@@ -65,7 +65,7 @@
 
 ### 3. 交易与管理分离
 
-`settings.html` 从交易工作流中独立出来。
+`dashboard-shell.html` 中的 `settings/admin` 工作区从交易工作流中独立出来。
 
 原因：
 

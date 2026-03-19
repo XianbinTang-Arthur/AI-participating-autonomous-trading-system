@@ -1,15 +1,21 @@
 from __future__ import annotations
 
+from decimal import Decimal
+
 from pydantic import ValidationError
 
 from aats.schemas.ai_brief import AIDecisionBrief
 from aats.schemas.decision import (
+    AIExecutionParameterSuggestionOutput,
     AIProviderAssessmentOutput,
+    AIProviderAssessmentWithExecutionSuggestionOutput,
     AIMarketAssessment,
     AIOperatingMode,
     BaselineAssessment,
     DecisionContext,
 )
+from aats.schemas.execution import AIExecutionParameterSuggestionEnvelope, ExecutionParameterSuggestion
+from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, to_decimal
 
 
 class AIOutputValidationError(ValueError):
@@ -19,8 +25,13 @@ class AIOutputValidationError(ValueError):
 class AssessmentValidator:
     _ALLOWED_REGIMES = {"trend", "range", "breakout", "uncertain"}
 
-    def output_schema(self) -> dict[str, object]:
-        return AIProviderAssessmentOutput.model_json_schema()
+    def output_schema(self, *, include_execution_suggestion: bool = False) -> dict[str, object]:
+        schema_model = (
+            AIProviderAssessmentWithExecutionSuggestionOutput
+            if include_execution_suggestion
+            else AIProviderAssessmentOutput
+        )
+        return schema_model.model_json_schema()
 
     def validate_provider_output(
         self,
@@ -40,7 +51,12 @@ class AssessmentValidator:
         edge_bps_scale: float,
     ) -> AIMarketAssessment:
         try:
-            payload = AIProviderAssessmentOutput.model_validate(raw_output)
+            schema_model = (
+                AIProviderAssessmentWithExecutionSuggestionOutput
+                if "execution_parameter_suggestion" in raw_output
+                else AIProviderAssessmentOutput
+            )
+            payload = schema_model.model_validate(raw_output)
         except ValidationError as exc:
             raise AIOutputValidationError("ai_output_schema_validation_failed") from exc
 
@@ -56,6 +72,10 @@ class AssessmentValidator:
         )
         validation_flags: list[str] = []
         rejection_flags: list[str] = []
+        execution_parameter_suggestion, execution_suggestion_flags = self._validate_execution_parameter_suggestion(
+            getattr(payload, "execution_parameter_suggestion", None)
+        )
+        validation_flags.extend(execution_suggestion_flags)
 
         regime = payload.regime.lower()
         if regime not in self._ALLOWED_REGIMES:
@@ -77,10 +97,14 @@ class AssessmentValidator:
             rejection_flags.append("override_not_allowed_when_not_safe_to_trade")
 
         expected_volatility = max(float(payload.expected_volatility), 0.0)
-        estimated_edge_bps = abs(directional_edge) * max(edge_bps_scale, 0.0)
-        estimated_cost_bps = max(brief.fee_bps, 0.0) + max(brief.expected_slippage_proxy_bps, 0.0)
+        estimated_edge_bps = abs(to_decimal(directional_edge)) * max(to_decimal(edge_bps_scale), Decimal("0"))
+        estimated_cost_bps = (
+            max(brief.fee_bps, Decimal("0"))
+            + max(brief.funding_fee_bps, Decimal("0"))
+            + max(brief.expected_slippage_proxy_bps, Decimal("0"))
+        )
         estimated_net_edge_bps = estimated_edge_bps - estimated_cost_bps
-        economically_actionable = estimated_net_edge_bps + 1e-12 >= max(brief.min_net_edge_bps, 0.0)
+        economically_actionable = estimated_net_edge_bps + EPSILON_DECIMAL_12 >= max(brief.min_net_edge_bps, Decimal("0"))
         if not economically_actionable:
             validation_flags.append("low_edge")
         if degraded:
@@ -112,14 +136,15 @@ class AssessmentValidator:
             baseline_override_recommended=payload.baseline_override_recommended,
             override_reason_codes=list(payload.override_reason_codes),
             economically_actionable=economically_actionable and not rejection_flags,
-            estimated_edge_bps=estimated_edge_bps,
-            estimated_cost_bps=estimated_cost_bps,
-            estimated_net_edge_bps=estimated_net_edge_bps,
+            estimated_edge_bps=float(estimated_edge_bps),
+            estimated_cost_bps=float(estimated_cost_bps),
+            estimated_net_edge_bps=float(estimated_net_edge_bps),
             validation_flags=validation_flags,
             rejection_flags=rejection_flags,
             source_mode="provider",
             execution_condition=brief.execution_condition,
             evaluation_tags=["output_valid" if not rejection_flags else "output_rejected", "confidence_calibrated"],
+            ai_execution_parameter_suggestion=execution_parameter_suggestion,
             model_name=model_name,
             model_version=model_version,
             prompt_version=prompt_version,
@@ -149,10 +174,22 @@ class AssessmentValidator:
             uncertainty=max(0.0, 1.0 - baseline.confidence),
             baseline_confidence=baseline.confidence,
         )
-        estimated_edge_bps = abs(directional_edge) * 100.0
-        estimated_cost_bps = 0.0 if brief is None else max(brief.fee_bps, 0.0) + max(brief.expected_slippage_proxy_bps, 0.0)
+        estimated_edge_bps = abs(to_decimal(directional_edge)) * Decimal("100")
+        estimated_cost_bps = (
+            Decimal("0")
+            if brief is None
+            else (
+                max(brief.fee_bps, Decimal("0"))
+                + max(brief.funding_fee_bps, Decimal("0"))
+                + max(brief.expected_slippage_proxy_bps, Decimal("0"))
+            )
+        )
         estimated_net_edge_bps = estimated_edge_bps - estimated_cost_bps
-        economically_actionable = estimated_net_edge_bps + 1e-12 >= (0.0 if brief is None else max(brief.min_net_edge_bps, 0.0))
+        economically_actionable = estimated_net_edge_bps + EPSILON_DECIMAL_12 >= (
+            Decimal("0")
+            if brief is None
+            else max(brief.min_net_edge_bps, Decimal("0"))
+        )
         tags = ["fallback", fallback_reason]
         if degraded:
             tags.append("degraded")
@@ -183,14 +220,15 @@ class AssessmentValidator:
             baseline_override_recommended=False,
             override_reason_codes=[],
             economically_actionable=economically_actionable,
-            estimated_edge_bps=estimated_edge_bps,
-            estimated_cost_bps=estimated_cost_bps,
-            estimated_net_edge_bps=estimated_net_edge_bps,
+            estimated_edge_bps=float(estimated_edge_bps),
+            estimated_cost_bps=float(estimated_cost_bps),
+            estimated_net_edge_bps=float(estimated_net_edge_bps),
             validation_flags=validation_flags,
             rejection_flags=[],
             source_mode="fallback",
             execution_condition=None if brief is None else brief.execution_condition,
             evaluation_tags=tags,
+            ai_execution_parameter_suggestion=None,
             model_name=model_name,
             model_version=model_version,
             prompt_version=prompt_version,
@@ -203,3 +241,104 @@ class AssessmentValidator:
     @staticmethod
     def _clamp(value: float) -> float:
         return min(max(value, 0.0), 1.0)
+
+    def _validate_execution_parameter_suggestion(
+        self,
+        suggestion_payload: AIExecutionParameterSuggestionOutput | None,
+    ) -> tuple[AIExecutionParameterSuggestionEnvelope | None, list[str]]:
+        if not suggestion_payload:
+            return None, []
+        suggestion_raw = suggestion_payload.model_dump(mode="python")
+        suggestion = ExecutionParameterSuggestion()
+        clipped_fields: list[str] = []
+        notes: list[str] = []
+
+        def clip_decimal(
+            raw_value: float | int | None,
+            *,
+            lower: Decimal,
+            upper: Decimal,
+            field_name: str,
+        ) -> Decimal | None:
+            if raw_value is None:
+                return None
+            value = to_decimal(raw_value)
+            clipped = min(max(value, lower), upper)
+            if clipped != value:
+                clipped_fields.append(field_name)
+                notes.append(f"{field_name}_clamped")
+            return clipped
+
+        def clip_int(
+            raw_value: float | int | None,
+            *,
+            lower: int,
+            upper: int,
+            field_name: str,
+        ) -> int | None:
+            if raw_value is None:
+                return None
+            value = int(raw_value)
+            clipped = min(max(value, lower), upper)
+            if clipped != value:
+                clipped_fields.append(field_name)
+                notes.append(f"{field_name}_clamped")
+            return clipped
+
+        suggestion.passive_bias = clip_decimal(
+            suggestion_raw.get("passive_bias"),
+            lower=Decimal("0"),
+            upper=Decimal("1"),
+            field_name="passive_bias",
+        )
+        suggestion.maker_taker_bias = clip_decimal(
+            suggestion_raw.get("maker_taker_bias"),
+            lower=Decimal("-1"),
+            upper=Decimal("1"),
+            field_name="maker_taker_bias",
+        )
+        suggestion.max_cross_spread_bps = clip_decimal(
+            suggestion_raw.get("max_cross_spread_bps"),
+            lower=Decimal("0"),
+            upper=Decimal("50"),
+            field_name="max_cross_spread_bps",
+        )
+        suggestion.slice_count = clip_int(
+            suggestion_raw.get("slice_count"),
+            lower=1,
+            upper=20,
+            field_name="slice_count",
+        )
+        suggestion.max_participation_rate = clip_decimal(
+            suggestion_raw.get("max_participation_rate"),
+            lower=Decimal("0"),
+            upper=Decimal("1"),
+            field_name="max_participation_rate",
+        )
+        suggestion.cancel_replace_patience_ms = clip_int(
+            suggestion_raw.get("cancel_replace_patience_ms"),
+            lower=0,
+            upper=60_000,
+            field_name="cancel_replace_patience_ms",
+        )
+
+        if not any(value is not None for value in suggestion.model_dump(mode="python").values()):
+            return None, []
+
+        flags = ["execution_suggestion_present"]
+        if clipped_fields:
+            flags.append("execution_suggestion_clipped")
+        return (
+            AIExecutionParameterSuggestionEnvelope(
+                status="diagnostic_only",
+                diagnostic_only=True,
+                requested_mode="diagnostic_only",
+                suggestion=suggestion,
+                accepted_by_execution_planner=False,
+                applied_to_live_execution=False,
+                clipped_fields=clipped_fields,
+                rejection_reasons=[],
+                notes=notes or ["execution_suggestion_validated"],
+            ),
+            flags,
+        )

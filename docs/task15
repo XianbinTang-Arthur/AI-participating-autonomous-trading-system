@@ -367,7 +367,7 @@ At minimum, expect meaningful work in:
 - `aats/services/operator/query_service.py`
 - `aats/api/routes.py`
 - `aats/api/static/app.js`
-- `aats/api/static/dashboard.html`
+- `aats/api/static/dashboard-shell.html`
 - `README.md`
 
 If new modules are helpful, prefer introducing explicit new types such as:

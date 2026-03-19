@@ -6,7 +6,7 @@ from typing import Any, Literal
 from pydantic import Field
 
 from aats.schemas.common import SchemaBase, new_id, utc_now
-from aats.schemas.system import OperatingState
+from aats.schemas.system import MarginModelType, OperatingState, ProductType
 
 
 RuntimeState = Literal["healthy", "degraded", "blocked", "halted"]
@@ -38,19 +38,51 @@ class ExecutionErrorSummary(SchemaBase):
     observed_at: datetime
 
 
+class ProcessingFailureRecord(SchemaBase):
+    failure_id: str = Field(default_factory=lambda: new_id("procfail"))
+    subsystem: str
+    stage: str
+    severity: Literal["warning", "error"]
+    message: str
+    decision_id: str | None = None
+    intent_id: str | None = None
+    order_id: str | None = None
+    fill_id: str | None = None
+    reconciliation_id: str | None = None
+    symbol: str | None = None
+    product_type: ProductType | None = None
+    margin_mode: MarginModelType | None = None
+    retriable: bool = False
+    observed_at: datetime
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
 class ReplayValidationSummary(SchemaBase):
     validation_id: str = Field(default_factory=lambda: new_id("replay"))
     validated_at: datetime
     decision_id: str | None = None
+    symbol: str | None = None
+    regime: str | None = None
+    active_profile_id: str | None = None
+    product_type: ProductType | None = None
+    margin_mode: MarginModelType | None = None
+    allowed_symbols: tuple[str, ...] = Field(default_factory=tuple)
     replayed_event_count: int
     stored_snapshot_count: int
     divergence_count: int
     portfolio_issues: list[str] = Field(default_factory=list)
+    portfolio_issue_count: int = 0
     decision_chain_issues: list[str] = Field(default_factory=list)
+    decision_chain_issue_count: int = 0
     execution_chain_issues: list[str] = Field(default_factory=list)
+    execution_chain_issue_count: int = 0
     audit_issues: list[str] = Field(default_factory=list)
+    audit_issue_count: int = 0
     baseline_switch_count: int = 0
     baseline_switch_issues: list[str] = Field(default_factory=list)
+    baseline_switch_issue_count: int = 0
+    divergence_density: float = 0.0
+    chain_health_score: float = 0.0
     healthy: bool
 
 
@@ -105,6 +137,7 @@ class OperatorActionRecord(SchemaBase):
         "strategy_profile_reject",
         "strategy_profile_activate_pending",
         "strategy_profile_rollback",
+        "strategy_profile_activation_policy",
         "ai_shadow_evaluate",
     ]
     actor_role: OperatorRole

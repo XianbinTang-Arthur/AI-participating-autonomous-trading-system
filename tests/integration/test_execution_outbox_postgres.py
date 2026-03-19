@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import unittest
 import uuid
+from decimal import Decimal
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
@@ -156,7 +157,7 @@ class TestExecutionOutboxPostgres(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(execution_repo.fills_for_order("clord_fill_atomic")), 1)
             stored_obligation = obligation_repo.get_obligation("clord_fill_atomic")
             self.assertIsNotNone(stored_obligation)
-            self.assertAlmostEqual(stored_obligation.consumed_amount, 60.0)
+            self.assertEqual(stored_obligation.consumed_amount, Decimal("60.0"))
             self.assertEqual(stored_obligation.status, "RELEASED")
             self.assertEqual(event_store.count(topic=topics.FILL_EVENTS), 1)
             self.assertEqual(outbox_repo.counts(), {"pending": 0, "published": 1})

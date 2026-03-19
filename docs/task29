@@ -1,0 +1,117 @@
+Task29: 交易手续费动态化专项整改任务书
+
+背景
+
+当前系统已经接入 OKX `trade-fee` 查询与账户费率缓存，但关键业务链路仍大量使用静态配置 `AATS_PAPER_TAKER_FEE_BPS`。
+这会导致以下问题：
+
+1. AI 决策提示词中的手续费假设与真实交易所费率不一致
+2. 风控的现货买入 quote 预算与交易所真实成本不一致
+3. 本地 obligation 预留与真实可执行成本不一致
+4. AI 经济可行动性、shadow/replay、fee-drag 判断被静态费率污染
+5. UI 展示与真实交易所成本口径不一致
+
+本任务目标
+
+建立一条统一的“有效手续费解析链”，并将其接入以下主链：
+
+- AI 决策提示与 shadow/replay
+- TargetPosition 成本估算
+- RiskEngine quote 需求估算
+- ExecutionObligationService 资金预留
+- Operator / UI 的 AI 经济可行动性展示
+
+统一原则
+
+手续费解析优先级固定为：
+
+1. 真实成交 fill fee
+2. OKX 动态手续费 `trade-fee`
+3. 静态回退值 `AATS_PAPER_TAKER_FEE_BPS`
+
+说明：
+
+- `paper` 路径允许继续使用静态费率
+- `okx` 路径必须优先使用动态费率
+- UI 与风控必须和主链使用同一口径
+
+实施项
+
+1. 新增统一 fee resolver
+
+- 位置：
+  - `aats/services/fee_resolver.py`
+- 要求：
+  - 统一解析有效 taker fee bps
+  - 支持按 symbol 查询
+  - 支持回退到静态配置
+
+2. 接入 AIInferenceService
+
+- 位置：
+  - `aats/services/ai_service/inference.py`
+- 要求：
+  - `build_brief()` 使用动态 fee
+  - shadow/replay 的 synthetic fee 使用同一 resolver
+
+3. 接入 TargetPositionEngine
+
+- 位置：
+  - `aats/services/decision_engine/target_position.py`
+- 要求：
+  - `expected_cost_bps` 不再固定使用 `paper_taker_fee_bps`
+
+4. 接入 RiskEngine
+
+- 位置：
+  - `aats/services/governance_engine/risk.py`
+- 要求：
+  - 现货买入 quote requirement 使用统一 fee resolver
+  - 保证 quote 预算与 UI/AI 一致
+
+5. 接入 ExecutionObligationService
+
+- 位置：
+  - `aats/services/execution_engine/obligations.py`
+- 要求：
+  - 本地 reservation 使用统一 fee resolver
+  - 避免 reservation 低估真实成本
+
+6. 接入 OperatorQueryService / UI
+
+- 位置：
+  - `aats/services/operator/query_service.py`
+- 要求：
+  - `AI 经济可行动性` 使用动态 fee
+  - 返回当前使用的 `effective_taker_fee_bps`
+  - 让 UI 能解释“当前 required_total_edge_bps 为什么是这个值”
+
+7. Runtime 注入与测试
+
+- 位置：
+  - `aats/bootstrap/config.py`
+  - `tests/unit/*`
+  - `tests/integration/*`
+- 要求：
+  - 在 runtime 中构建 fee resolver 并注入各服务
+  - 增加动态 fee 生效测试
+  - 增加静态 fallback 测试
+
+验收标准
+
+1. 在 OKX 账户费率可用时：
+- AI brief、risk、reservation、UI 展示都使用同一动态 taker fee
+
+2. 在 OKX 费率不可用时：
+- 全链稳定回退到 `AATS_PAPER_TAKER_FEE_BPS`
+
+3. shadow/replay 与主链口径一致：
+- synthetic fee 不再硬编码静态值
+
+4. 不破坏 `paper` 路径：
+- paper adapter 行为保持兼容
+
+5. 测试通过：
+- 动态费率优先
+- 静态回退
+- risk / reservation / ai economic actionability 结果一致

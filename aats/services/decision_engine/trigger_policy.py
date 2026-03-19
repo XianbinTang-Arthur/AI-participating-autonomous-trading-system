@@ -3,18 +3,20 @@ from __future__ import annotations
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal
 
 from aats.bootstrap.settings import AATSSettings
 from aats.schemas.features import FeatureSnapshot
 from aats.schemas.market import MarketSnapshot
 from aats.schemas.common import utc_now
+from aats.services.portfolio_service.decimals import to_decimal
 
 
 @dataclass(slots=True)
 class TriggerState:
     last_trigger_ts: datetime | None = None
     last_market_snapshot_ts: datetime | None = None
-    last_price: float | None = None
+    last_price: Decimal | None = None
     last_momentum_score: float | None = None
     last_regime: str | None = None
 
@@ -116,10 +118,10 @@ class DecisionTriggerPolicy:
             >= self.settings.decision_min_momentum_delta
         ):
             return True
-        if state.last_price == 0.0:
+        if state.last_price == Decimal("0"):
             return False
-        price_move_bps = abs((market_snapshot.last_price - state.last_price) / state.last_price) * 10_000.0
-        return price_move_bps >= self.settings.decision_min_price_move_bps
+        price_move_bps = abs((market_snapshot.last_price - state.last_price) / state.last_price) * Decimal("10000")
+        return price_move_bps >= to_decimal(self.settings.decision_min_price_move_bps)
 
     def _min_interval_seconds(self, timeframe: str) -> float:
         if timeframe == "15m":

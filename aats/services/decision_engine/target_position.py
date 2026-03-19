@@ -1,16 +1,25 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from decimal import Decimal
 
 from aats.bootstrap.settings import AATSSettings
 from aats.schemas.ai_shadow import AIShadowDecision
 from aats.schemas.common import utc_now
 from aats.schemas.decision import AIMarketAssessment, BaselineAssessment, DecisionContext, PositionTarget
+from aats.services.fee_resolver import EffectiveFeeResolver
+from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, to_decimal
 
 
 class TargetPositionEngine:
-    def __init__(self, *, settings: AATSSettings) -> None:
+    def __init__(
+        self,
+        *,
+        settings: AATSSettings,
+        fee_resolver: EffectiveFeeResolver | None = None,
+    ) -> None:
         self.settings = settings
+        self.fee_resolver = fee_resolver or EffectiveFeeResolver(settings=settings)
 
     def build(
         self,
@@ -49,7 +58,7 @@ class TargetPositionEngine:
             ai_shadow_target_qty=shadow_target.target_position_qty,
             ai_shadow_action=shadow_target.position_intent,
             would_override_baseline=(
-                abs(actual_target.target_position_qty - shadow_target.target_position_qty) > 1e-12
+                abs(actual_target.target_position_qty - shadow_target.target_position_qty) > EPSILON_DECIMAL_12
                 or actual_target.position_intent != shadow_target.position_intent
             ),
             shadow_action_type=self._shadow_action_type(
@@ -67,6 +76,14 @@ class TargetPositionEngine:
         ai_assessment: AIMarketAssessment | None,
         operating_mode: str,
     ) -> PositionTarget:
+        signal_edge_bps = self._signal_edge_bps(baseline=baseline, ai_assessment=ai_assessment)
+        expected_cost_bps = self._estimated_trade_cost_bps(
+            symbol=context.symbol,
+            product_type=context.product_type,
+            ai_assessment=ai_assessment,
+        )
+        expected_net_edge_bps = signal_edge_bps - expected_cost_bps - max(self.settings.strategy_edge_noise_buffer_bps, 0.0)
+        guardrail_flags = list(context.strategy_guardrail_flags)
         ai_takeover_allowed, ai_takeover_blockers = self._ai_takeover_gate(
             context=context,
             baseline=baseline,
@@ -74,12 +91,14 @@ class TargetPositionEngine:
             operating_mode=operating_mode,
         )
         target_qty = self._target_quantity(
-            current_position_qty=context.current_position_qty,
+            context=context,
             baseline=baseline,
             ai_assessment=ai_assessment,
             product_type=context.product_type,
             operating_mode=operating_mode,
             ai_takeover_allowed=ai_takeover_allowed,
+            signal_edge_bps=signal_edge_bps,
+            guardrail_flags=guardrail_flags,
         )
         if not self._short_bias_allowed(context.product_type):
             target_qty = self._normalize_long_only_target(
@@ -109,8 +128,8 @@ class TargetPositionEngine:
             current_position_qty=context.current_position_qty,
             target_position_qty=target_qty,
             delta_position_qty=target_qty - context.current_position_qty,
-            current_notional=0.0,
-            target_notional=0.0,
+            current_notional=Decimal("0"),
+            target_notional=Decimal("0"),
             rebalance_reason=rebalance_reason,
             urgency=self._urgency(
                 current_position_qty=context.current_position_qty,
@@ -132,123 +151,162 @@ class TargetPositionEngine:
             ai_takeover_allowed=ai_takeover_allowed,
             ai_takeover_applied=ai_takeover_applied,
             ai_takeover_blockers=ai_takeover_blockers,
+            expected_signal_edge_bps=signal_edge_bps,
+            expected_cost_bps=expected_cost_bps,
+            expected_net_edge_bps=expected_net_edge_bps,
+            guardrail_flags=list(dict.fromkeys(guardrail_flags)),
+            ai_execution_parameter_suggestion=(
+                None
+                if ai_assessment is None
+                else ai_assessment.ai_execution_parameter_suggestion
+            ),
         )
 
     def _target_quantity(
         self,
         *,
-        current_position_qty: float,
+        context: DecisionContext,
         baseline: BaselineAssessment,
         ai_assessment: AIMarketAssessment | None,
         product_type: str,
         operating_mode: str,
         ai_takeover_allowed: bool,
-    ) -> float:
+        signal_edge_bps: float,
+        guardrail_flags: list[str],
+    ) -> Decimal:
         mode = operating_mode
         baseline_qty = self._baseline_target_qty(baseline=baseline, product_type=product_type)
         baseline_qty = self._apply_entry_edge_gate(
-            current_position_qty=current_position_qty,
+            context=context,
             desired_target_qty=baseline_qty,
             baseline=baseline,
             ai_assessment=ai_assessment,
             product_type=product_type,
+            signal_edge_bps=signal_edge_bps,
+            guardrail_flags=guardrail_flags,
+        )
+        baseline_qty = self._apply_strategy_execution_guards(
+            context=context,
+            desired_target_qty=baseline_qty,
+            baseline=baseline,
+            ai_assessment=ai_assessment,
+            signal_edge_bps=signal_edge_bps,
+            product_type=product_type,
+            guardrail_flags=guardrail_flags,
         )
         if mode in {"baseline_only", "ai_advisory"}:
             if self._should_hold_on_flat_signal(
-                current_position_qty=current_position_qty,
+                current_position_qty=context.current_position_qty,
                 desired_target_qty=baseline_qty,
                 baseline=baseline,
                 ai_assessment=None if mode == "baseline_only" else ai_assessment,
                 product_type=product_type,
             ):
-                return current_position_qty
+                guardrail_flags.append("flat_signal_hold")
+                return context.current_position_qty
             return self._apply_position_management(
-                current_position_qty=current_position_qty,
+                current_position_qty=context.current_position_qty,
                 desired_target_qty=baseline_qty,
                 product_type=product_type,
             )
         if mode == "ai_blended":
             if baseline.direction_bias == "long" and ai_assessment.directional_edge >= 0.0:
                 return self._apply_position_management(
-                    current_position_qty=current_position_qty,
+                    current_position_qty=context.current_position_qty,
                     desired_target_qty=baseline_qty,
                     product_type=product_type,
                 )
             if baseline.direction_bias == "short" and ai_assessment.directional_edge <= 0.0:
                 return self._apply_position_management(
-                    current_position_qty=current_position_qty,
+                    current_position_qty=context.current_position_qty,
                     desired_target_qty=baseline_qty,
                     product_type=product_type,
                 )
-            return 0.0
+            return Decimal("0")
         if mode == "ai_primary":
             if ai_takeover_allowed:
                 if ai_assessment.directional_edge > 0.0:
                     return self._apply_position_management(
-                        current_position_qty=current_position_qty,
-                        desired_target_qty=abs(baseline_qty) or self.settings.default_order_qty * 0.35,
+                        current_position_qty=context.current_position_qty,
+                        desired_target_qty=abs(baseline_qty) or (to_decimal(self.settings.default_order_qty) * Decimal("0.35")),
                         product_type=product_type,
                     )
                 if ai_assessment.directional_edge < 0.0:
                     return self._apply_position_management(
-                        current_position_qty=current_position_qty,
-                        desired_target_qty=-(abs(baseline_qty) or self.settings.default_order_qty * 0.35),
+                        current_position_qty=context.current_position_qty,
+                        desired_target_qty=-(abs(baseline_qty) or (to_decimal(self.settings.default_order_qty) * Decimal("0.35"))),
                         product_type=product_type,
                     )
             return self._apply_position_management(
-                current_position_qty=current_position_qty,
+                current_position_qty=context.current_position_qty,
                 desired_target_qty=baseline_qty,
                 product_type=product_type,
             )
         return self._apply_position_management(
-            current_position_qty=current_position_qty,
+            current_position_qty=context.current_position_qty,
             desired_target_qty=baseline_qty,
             product_type=product_type,
         )
 
-    def _baseline_target_qty(self, *, baseline: BaselineAssessment, product_type: str) -> float:
-        scale = self._clamp(baseline.suggested_position_scale, 0.0, 1.0)
+    def _baseline_target_qty(self, *, baseline: BaselineAssessment, product_type: str) -> Decimal:
+        scale = to_decimal(self._clamp(baseline.suggested_position_scale, 0.0, 1.0))
         target_qty = self._qty_from_bias(baseline.direction_bias, product_type=product_type) * scale
         if baseline.volatility_target_scale < 0.55:
-            target_qty *= baseline.volatility_target_scale
+            target_qty *= to_decimal(baseline.volatility_target_scale)
         return target_qty
 
     def _apply_entry_edge_gate(
         self,
         *,
-        current_position_qty: float,
-        desired_target_qty: float,
+        context: DecisionContext,
+        desired_target_qty: Decimal,
         baseline: BaselineAssessment,
         ai_assessment: AIMarketAssessment | None,
         product_type: str,
-    ) -> float:
+        signal_edge_bps: float,
+        guardrail_flags: list[str],
+    ) -> Decimal:
         desired_target_qty = self._apply_trade_qualification_gate(
-            current_position_qty=current_position_qty,
+            current_position_qty=context.current_position_qty,
             desired_target_qty=desired_target_qty,
             baseline=baseline,
+            ai_assessment=ai_assessment,
             product_type=product_type,
+            signal_edge_bps=signal_edge_bps,
+            guardrail_flags=guardrail_flags,
         )
         if not self.settings.strategy_cost_guard_enabled:
             return desired_target_qty
-        if abs(desired_target_qty) < 1e-12:
+        if abs(desired_target_qty) < EPSILON_DECIMAL_12:
             return desired_target_qty
-        if self._same_direction(current_position_qty, desired_target_qty) and abs(desired_target_qty) <= abs(current_position_qty):
+        if self._same_direction(context.current_position_qty, desired_target_qty) and abs(desired_target_qty) <= abs(context.current_position_qty):
             return desired_target_qty
-        estimated_cost_bps = self._estimated_trade_cost_bps()
-        required_edge_bps = estimated_cost_bps + max(self.settings.strategy_min_net_edge_bps, 0.0)
-        signal_edge_bps = self._signal_edge_bps(baseline=baseline, ai_assessment=ai_assessment)
-        if signal_edge_bps + 1e-12 >= required_edge_bps:
+        estimated_cost_bps = self._estimated_trade_cost_bps(
+            symbol=context.symbol,
+            product_type=product_type,
+            ai_assessment=ai_assessment,
+        )
+        required_edge_bps = (
+            estimated_cost_bps
+            + max(self.settings.strategy_edge_noise_buffer_bps, 0.0)
+            + max(self.settings.strategy_min_net_edge_bps, 0.0)
+        )
+        if signal_edge_bps + float(EPSILON_DECIMAL_12) >= required_edge_bps:
             return desired_target_qty
-        return current_position_qty
+        guardrail_flags.append("expected_edge_below_cost_buffer")
+        return context.current_position_qty
 
     def _apply_trade_qualification_gate(
         self,
         *,
-        current_position_qty: float,
-        desired_target_qty: float,
+        current_position_qty: Decimal,
+        desired_target_qty: Decimal,
         baseline: BaselineAssessment,
+        ai_assessment: AIMarketAssessment | None,
         product_type: str,
-    ) -> float:
+        signal_edge_bps: float,
+        guardrail_flags: list[str],
+    ) -> Decimal:
         if product_type != "derivatives":
             return desired_target_qty
         trade_kind = self._trade_kind(
@@ -262,39 +320,98 @@ class TargetPositionEngine:
         alpha = abs(baseline.composite_alpha_score)
         confidence = baseline.confidence
         if trade_kind == "entry":
-            if alpha + 1e-12 < self.settings.strategy_entry_alpha_min:
+            if alpha + float(EPSILON_DECIMAL_12) < self.settings.strategy_entry_alpha_min:
+                guardrail_flags.append("entry_alpha_below_threshold")
                 return current_position_qty
-            if confidence + 1e-12 < self.settings.strategy_entry_confidence_min:
+            if confidence + float(EPSILON_DECIMAL_12) < self.settings.strategy_entry_confidence_min:
+                guardrail_flags.append("entry_confidence_below_threshold")
+                return current_position_qty
+            if signal_edge_bps + float(EPSILON_DECIMAL_12) < self.settings.strategy_entry_min_signal_edge_bps:
+                guardrail_flags.append("entry_signal_edge_below_threshold")
                 return current_position_qty
             return desired_target_qty
         if trade_kind == "scale_in":
-            if alpha + 1e-12 < self.settings.strategy_scale_in_alpha_min:
+            if alpha + float(EPSILON_DECIMAL_12) < self.settings.strategy_scale_in_alpha_min:
+                guardrail_flags.append("scale_in_alpha_below_threshold")
                 return current_position_qty
-            if confidence + 1e-12 < self.settings.strategy_scale_in_confidence_min:
+            if confidence + float(EPSILON_DECIMAL_12) < self.settings.strategy_scale_in_confidence_min:
+                guardrail_flags.append("scale_in_confidence_below_threshold")
+                return current_position_qty
+            if signal_edge_bps + float(EPSILON_DECIMAL_12) < self.settings.strategy_scale_in_min_signal_edge_bps:
+                guardrail_flags.append("scale_in_signal_edge_below_threshold")
                 return current_position_qty
             return desired_target_qty
         if trade_kind == "reversal":
-            if alpha + 1e-12 < self.settings.strategy_reversal_alpha_min:
+            if alpha + float(EPSILON_DECIMAL_12) < self.settings.strategy_reversal_alpha_min:
+                guardrail_flags.append("reversal_alpha_below_threshold")
                 return current_position_qty
-            if confidence + 1e-12 < self.settings.strategy_reversal_confidence_min:
+            if confidence + float(EPSILON_DECIMAL_12) < self.settings.strategy_reversal_confidence_min:
+                guardrail_flags.append("reversal_confidence_below_threshold")
+                return current_position_qty
+            if signal_edge_bps + float(EPSILON_DECIMAL_12) < self.settings.strategy_reversal_min_signal_edge_bps:
+                guardrail_flags.append("reversal_signal_edge_below_threshold")
+                return current_position_qty
+        return desired_target_qty
+
+    def _apply_strategy_execution_guards(
+        self,
+        *,
+        context: DecisionContext,
+        desired_target_qty: Decimal,
+        baseline: BaselineAssessment,
+        ai_assessment: AIMarketAssessment | None,
+        signal_edge_bps: float,
+        product_type: str,
+        guardrail_flags: list[str],
+    ) -> Decimal:
+        current_position_qty = context.current_position_qty
+        if abs(desired_target_qty - current_position_qty) < EPSILON_DECIMAL_12:
+            return desired_target_qty
+
+        trade_kind = self._trade_kind(
+            current_position_qty=current_position_qty,
+            desired_target_qty=desired_target_qty,
+        )
+        if self._min_hold_blocks_adjustment(
+            context=context,
+            current_position_qty=current_position_qty,
+            desired_target_qty=desired_target_qty,
+            baseline=baseline,
+            ai_assessment=ai_assessment,
+        ):
+            guardrail_flags.append("min_hold_blocks_exit")
+            return current_position_qty
+
+        if trade_kind in {"entry", "scale_in", "reversal"}:
+            if self._post_close_cooldown_active(context):
+                guardrail_flags.append("post_close_cooldown_blocks_entry")
+                return current_position_qty
+            if self._low_edge_cooldown_active(context):
+                guardrail_flags.append("low_edge_cooldown_blocks_entry")
+                return current_position_qty
+            if self._performance_degraded(context):
+                guardrail_flags.append("execution_churn_guard_active")
+                return current_position_qty
+            if trade_kind == "reversal" and self._reversal_requires_additional_edge(signal_edge_bps):
+                guardrail_flags.append("reversal_edge_not_strong_enough")
                 return current_position_qty
         return desired_target_qty
 
     def _trade_kind(
         self,
         *,
-        current_position_qty: float,
-        desired_target_qty: float,
+        current_position_qty: Decimal,
+        desired_target_qty: Decimal,
     ) -> str | None:
-        if abs(desired_target_qty) < 1e-12:
+        if abs(desired_target_qty) < EPSILON_DECIMAL_12:
             return None
-        if abs(current_position_qty) < 1e-12:
+        if abs(current_position_qty) < EPSILON_DECIMAL_12:
             return "entry"
         if self._same_direction(current_position_qty, desired_target_qty):
-            if abs(desired_target_qty) > abs(current_position_qty) + 1e-12:
+            if abs(desired_target_qty) > abs(current_position_qty) + EPSILON_DECIMAL_12:
                 return "scale_in"
             return None
-        if abs(desired_target_qty) + 1e-12 >= self._reverse_threshold(current_position_qty=current_position_qty):
+        if abs(desired_target_qty) + EPSILON_DECIMAL_12 >= self._reverse_threshold(current_position_qty=current_position_qty):
             return "reversal"
         return None
 
@@ -307,17 +424,17 @@ class TargetPositionEngine:
     def _should_hold_on_flat_signal(
         self,
         *,
-        current_position_qty: float,
-        desired_target_qty: float,
+        current_position_qty: Decimal,
+        desired_target_qty: Decimal,
         baseline: BaselineAssessment,
-        ai_assessment: AIMarketAssessment,
+        ai_assessment: AIMarketAssessment | None,
         product_type: str,
     ) -> bool:
         if not self.settings.strategy_flat_signal_hold_enabled:
             return False
         if product_type != "derivatives":
             return False
-        if abs(current_position_qty) < 1e-12 or abs(desired_target_qty) > 1e-12:
+        if abs(current_position_qty) < EPSILON_DECIMAL_12 or abs(desired_target_qty) > EPSILON_DECIMAL_12:
             return False
         if baseline.direction_bias != "flat":
             return False
@@ -327,22 +444,96 @@ class TargetPositionEngine:
             ai_assessment=ai_assessment,
         )
 
+    def _min_hold_blocks_adjustment(
+        self,
+        *,
+        context: DecisionContext,
+        current_position_qty: Decimal,
+        desired_target_qty: Decimal,
+        baseline: BaselineAssessment,
+        ai_assessment: AIMarketAssessment | None,
+    ) -> bool:
+        if (
+            self.settings.strategy_min_hold_seconds <= 0
+            or context.current_position_opened_at is None
+            or abs(current_position_qty) < EPSILON_DECIMAL_12
+        ):
+            return False
+        held_for = max((utc_now() - context.current_position_opened_at).total_seconds(), 0.0)
+        if held_for + float(EPSILON_DECIMAL_12) >= self.settings.strategy_min_hold_seconds:
+            return False
+        if not self._is_reducing_or_closing(
+            current_position_qty=current_position_qty,
+            desired_target_qty=desired_target_qty,
+        ):
+            return False
+        return not self._explicit_flat_exit_required(
+            current_position_qty=current_position_qty,
+            baseline=baseline,
+            ai_assessment=ai_assessment,
+        )
+
+    def _post_close_cooldown_active(self, context: DecisionContext) -> bool:
+        if (
+            context.last_position_closed_at is None
+            or self.settings.strategy_post_close_cooldown_seconds <= 0
+        ):
+            return False
+        return max((utc_now() - context.last_position_closed_at).total_seconds(), 0.0) < self.settings.strategy_post_close_cooldown_seconds
+
+    def _low_edge_cooldown_active(self, context: DecisionContext) -> bool:
+        if (
+            context.recent_low_edge_trade_streak < self.settings.strategy_low_edge_streak_limit
+            or context.recent_low_edge_trade_at is None
+            or self.settings.strategy_low_edge_cooldown_seconds <= 0
+        ):
+            return False
+        return max((utc_now() - context.recent_low_edge_trade_at).total_seconds(), 0.0) < self.settings.strategy_low_edge_cooldown_seconds
+
+    def _performance_degraded(self, context: DecisionContext) -> bool:
+        if context.recent_closed_trade_count < self.settings.strategy_performance_guard_min_closed_trades:
+            return False
+        return (
+            context.recent_fee_drag_ratio > self.settings.strategy_max_fee_drag_ratio
+            or context.recent_churn_ratio > self.settings.strategy_max_churn_ratio
+        )
+
+    def _reversal_requires_additional_edge(self, signal_edge_bps: float) -> bool:
+        required = self.settings.strategy_reversal_min_signal_edge_bps + max(self.settings.strategy_edge_noise_buffer_bps, 0.0)
+        return signal_edge_bps + float(EPSILON_DECIMAL_12) < required
+
+    @staticmethod
+    def _is_reducing_or_closing(
+        *,
+        current_position_qty: Decimal,
+        desired_target_qty: Decimal,
+    ) -> bool:
+        if abs(current_position_qty) < EPSILON_DECIMAL_12:
+            return False
+        if abs(desired_target_qty) < EPSILON_DECIMAL_12:
+            return True
+        if current_position_qty * desired_target_qty < 0:
+            return True
+        if (current_position_qty > 0 and desired_target_qty > 0) or (current_position_qty < 0 and desired_target_qty < 0):
+            return abs(desired_target_qty) + EPSILON_DECIMAL_12 < abs(current_position_qty)
+        return False
+
     def _explicit_flat_exit_required(
         self,
         *,
-        current_position_qty: float,
+        current_position_qty: Decimal,
         baseline: BaselineAssessment,
         ai_assessment: AIMarketAssessment | None,
     ) -> bool:
         side_sign = self._sign(current_position_qty)
-        microstructure = baseline.factor_scores.get("microstructure_alpha", 0.0)
-        momentum_alpha = baseline.factor_scores.get("momentum_alpha", 0.0)
-        trend_alpha = baseline.factor_scores.get("trend_alpha", 0.0)
-        ai_edge = 0.0 if ai_assessment is None else ai_assessment.directional_edge
-        adverse_microstructure = (side_sign * microstructure) <= -abs(self.settings.strategy_flat_exit_microstructure_threshold)
-        adverse_momentum = (side_sign * momentum_alpha) <= -abs(self.settings.strategy_flat_exit_factor_threshold)
-        adverse_trend = (side_sign * trend_alpha) <= -abs(self.settings.strategy_flat_exit_factor_threshold)
-        adverse_ai = (side_sign * ai_edge) <= -abs(self.settings.strategy_flat_exit_ai_edge_threshold)
+        microstructure = to_decimal(baseline.factor_scores.get("microstructure_alpha", 0.0))
+        momentum_alpha = to_decimal(baseline.factor_scores.get("momentum_alpha", 0.0))
+        trend_alpha = to_decimal(baseline.factor_scores.get("trend_alpha", 0.0))
+        ai_edge = Decimal("0") if ai_assessment is None else to_decimal(ai_assessment.directional_edge)
+        adverse_microstructure = (side_sign * microstructure) <= -abs(to_decimal(self.settings.strategy_flat_exit_microstructure_threshold))
+        adverse_momentum = (side_sign * momentum_alpha) <= -abs(to_decimal(self.settings.strategy_flat_exit_factor_threshold))
+        adverse_trend = (side_sign * trend_alpha) <= -abs(to_decimal(self.settings.strategy_flat_exit_factor_threshold))
+        adverse_ai = (side_sign * ai_edge) <= -abs(to_decimal(self.settings.strategy_flat_exit_ai_edge_threshold))
         adverse_count = sum((adverse_microstructure, adverse_momentum, adverse_trend, adverse_ai))
         if adverse_count >= 2:
             return True
@@ -350,12 +541,12 @@ class TargetPositionEngine:
             return True
         return False
 
-    def _qty_from_bias(self, direction_bias: str, *, product_type: str) -> float:
+    def _qty_from_bias(self, direction_bias: str, *, product_type: str) -> Decimal:
         if direction_bias == "long":
-            return self.settings.default_order_qty
+            return to_decimal(self.settings.default_order_qty)
         if direction_bias == "short" and self._short_bias_allowed(product_type):
-            return -self.settings.default_order_qty
-        return 0.0
+            return -to_decimal(self.settings.default_order_qty)
+        return Decimal("0")
 
     def _target_leverage(
         self,
@@ -363,9 +554,9 @@ class TargetPositionEngine:
         context: DecisionContext,
         baseline: BaselineAssessment,
         ai_assessment: AIMarketAssessment | None,
-        target_qty: float,
+        target_qty: Decimal,
     ) -> float:
-        if abs(target_qty) < 1e-12:
+        if abs(target_qty) < EPSILON_DECIMAL_12:
             return 1.0
         if context.product_type != "derivatives":
             return 1.0
@@ -414,40 +605,40 @@ class TargetPositionEngine:
     def _normalize_long_only_target(
         self,
         *,
-        current_position_qty: float,
-        target_qty: float,
+        current_position_qty: Decimal,
+        target_qty: Decimal,
         baseline: BaselineAssessment,
         ai_assessment: AIMarketAssessment | None,
-    ) -> float:
-        if target_qty >= 0.0:
+    ) -> Decimal:
+        if target_qty >= 0:
             bearish_signal = baseline.direction_bias == "short" or self._ai_directional_edge(ai_assessment) < 0.0
-            if current_position_qty > 1e-12 and bearish_signal and target_qty < current_position_qty:
+            if current_position_qty > EPSILON_DECIMAL_12 and bearish_signal and target_qty < current_position_qty:
                 return current_position_qty
-            if current_position_qty > 1e-12 and baseline.direction_bias == "flat" and target_qty <= 1e-12:
+            if current_position_qty > EPSILON_DECIMAL_12 and baseline.direction_bias == "flat" and target_qty <= EPSILON_DECIMAL_12:
                 if current_position_qty <= self._flat_cleanup_threshold():
-                    return 0.0
-                return max(current_position_qty * 0.5, 0.0)
+                    return Decimal("0")
+                return max(current_position_qty * Decimal("0.5"), Decimal("0"))
             return target_qty
-        if current_position_qty > 1e-12 and (baseline.direction_bias == "short" or self._ai_directional_edge(ai_assessment) < 0.0):
+        if current_position_qty > EPSILON_DECIMAL_12 and (baseline.direction_bias == "short" or self._ai_directional_edge(ai_assessment) < 0.0):
             # Long-only spot should treat bearish reversal signals as "stop adding"
             # rather than forcing churn into immediate flat on every negative flip.
             return current_position_qty
-        return 0.0
+        return Decimal("0")
 
     def _apply_position_management(
         self,
         *,
-        current_position_qty: float,
-        desired_target_qty: float,
+        current_position_qty: Decimal,
+        desired_target_qty: Decimal,
         product_type: str,
-    ) -> float:
+    ) -> Decimal:
         rebalance_band = self._rebalance_band(
             current_position_qty=current_position_qty,
             desired_target_qty=desired_target_qty,
         )
         delta_qty = desired_target_qty - current_position_qty
-        if abs(desired_target_qty) < 1e-12 and abs(current_position_qty) <= rebalance_band:
-            return 0.0
+        if abs(desired_target_qty) < EPSILON_DECIMAL_12 and abs(current_position_qty) <= rebalance_band:
+            return Decimal("0")
         if abs(delta_qty) <= rebalance_band:
             return current_position_qty
 
@@ -463,58 +654,58 @@ class TargetPositionEngine:
                 return current_position_qty
             return desired_target_qty
 
-        if abs(current_position_qty) > 1e-12 and abs(desired_target_qty) > 1e-12:
+        if abs(current_position_qty) > EPSILON_DECIMAL_12 and abs(desired_target_qty) > EPSILON_DECIMAL_12:
             if abs(desired_target_qty) < self._reverse_threshold(current_position_qty=current_position_qty):
                 if product_type == "derivatives":
                     return self._derivatives_reversal_step(current_position_qty=current_position_qty)
-                return 0.0
+                return Decimal("0")
         return desired_target_qty
 
-    def _rebalance_band(self, *, current_position_qty: float, desired_target_qty: float) -> float:
+    def _rebalance_band(self, *, current_position_qty: Decimal, desired_target_qty: Decimal) -> Decimal:
         return max(
-            self.settings.default_order_qty * 0.12,
-            abs(desired_target_qty) * 0.08,
-            abs(current_position_qty) * 0.08,
-            1e-12,
+            to_decimal(self.settings.default_order_qty) * Decimal("0.12"),
+            abs(desired_target_qty) * Decimal("0.08"),
+            abs(current_position_qty) * Decimal("0.08"),
+            EPSILON_DECIMAL_12,
         )
 
-    def _reduce_threshold(self, *, current_position_qty: float, desired_target_qty: float) -> float:
+    def _reduce_threshold(self, *, current_position_qty: Decimal, desired_target_qty: Decimal) -> Decimal:
         return max(
-            self.settings.default_order_qty * 0.1,
-            abs(current_position_qty) * 0.12,
-            abs(desired_target_qty) * 0.12,
+            to_decimal(self.settings.default_order_qty) * Decimal("0.1"),
+            abs(current_position_qty) * Decimal("0.12"),
+            abs(desired_target_qty) * Decimal("0.12"),
         )
 
-    def _reverse_threshold(self, *, current_position_qty: float) -> float:
+    def _reverse_threshold(self, *, current_position_qty: Decimal) -> Decimal:
         return max(
-            self.settings.default_order_qty * 0.45,
-            abs(current_position_qty) * 0.35,
+            to_decimal(self.settings.default_order_qty) * Decimal("0.45"),
+            abs(current_position_qty) * Decimal("0.35"),
         )
 
-    def _max_scale_step(self, desired_target_qty: float) -> float:
-        return max(self.settings.default_order_qty * 0.4, abs(desired_target_qty) * 0.45)
+    def _max_scale_step(self, desired_target_qty: Decimal) -> Decimal:
+        return max(to_decimal(self.settings.default_order_qty) * Decimal("0.4"), abs(desired_target_qty) * Decimal("0.45"))
 
     @staticmethod
-    def _derivatives_reversal_step(*, current_position_qty: float) -> float:
-        return current_position_qty * 0.35
+    def _derivatives_reversal_step(*, current_position_qty: Decimal) -> Decimal:
+        return current_position_qty * Decimal("0.35")
 
-    def _urgency(self, *, current_position_qty: float, target_position_qty: float) -> str:
+    def _urgency(self, *, current_position_qty: Decimal, target_position_qty: Decimal) -> str:
         delta_qty = abs(target_position_qty - current_position_qty)
-        if delta_qty < 1e-12:
+        if delta_qty < EPSILON_DECIMAL_12:
             return "low"
-        if current_position_qty * target_position_qty < 0.0:
+        if current_position_qty * target_position_qty < 0:
             return "high"
-        if delta_qty >= self.settings.default_order_qty * 0.75:
+        if delta_qty >= to_decimal(self.settings.default_order_qty) * Decimal("0.75"):
             return "high"
         return "medium"
 
     def _position_intent(
         self,
         *,
-        current_position_qty: float,
-        target_position_qty: float,
+        current_position_qty: Decimal,
+        target_position_qty: Decimal,
     ) -> str:
-        if abs(target_position_qty - current_position_qty) < 1e-12:
+        if abs(target_position_qty - current_position_qty) < EPSILON_DECIMAL_12:
             return "hold"
         current_side = self._exposure_side(current_position_qty)
         target_side = self._exposure_side(target_position_qty)
@@ -533,10 +724,10 @@ class TargetPositionEngine:
         return "reduce_short"
 
     @staticmethod
-    def _exposure_side(quantity: float) -> str:
-        if quantity > 1e-12:
+    def _exposure_side(quantity: Decimal) -> str:
+        if quantity > EPSILON_DECIMAL_12:
             return "long"
-        if quantity < -1e-12:
+        if quantity < -EPSILON_DECIMAL_12:
             return "short"
         return "flat"
 
@@ -576,11 +767,11 @@ class TargetPositionEngine:
         blockers.extend(ai_assessment.rejection_flags)
         if ai_assessment.degraded:
             blockers.append("ai_degraded")
-        if ai_assessment.calibrated_confidence + 1e-12 < self.settings.ai_primary_min_confidence:
+        if ai_assessment.calibrated_confidence + float(EPSILON_DECIMAL_12) < self.settings.ai_primary_min_confidence:
             blockers.append("ai_confidence_below_threshold")
-        if ai_assessment.uncertainty - 1e-12 > self.settings.ai_primary_max_uncertainty:
+        if ai_assessment.uncertainty - float(EPSILON_DECIMAL_12) > self.settings.ai_primary_max_uncertainty:
             blockers.append("ai_uncertainty_above_threshold")
-        if abs(ai_assessment.directional_edge) + 1e-12 < self.settings.ai_primary_min_directional_edge:
+        if abs(ai_assessment.directional_edge) + float(EPSILON_DECIMAL_12) < self.settings.ai_primary_min_directional_edge:
             blockers.append("ai_directional_edge_too_small")
         if not ai_assessment.baseline_override_recommended:
             blockers.append("ai_override_not_recommended")
@@ -591,6 +782,12 @@ class TargetPositionEngine:
             blockers.append("ai_regime_not_allowed")
         if context.current_open_orders:
             blockers.append("ai_open_orders_present")
+        if self._post_close_cooldown_active(context):
+            blockers.append("ai_post_close_cooldown_active")
+        if self._low_edge_cooldown_active(context):
+            blockers.append("ai_low_edge_cooldown_active")
+        if self._performance_degraded(context):
+            blockers.append("ai_execution_performance_guard_active")
         if baseline.direction_bias == "flat" and abs(ai_assessment.directional_edge) < self.settings.ai_primary_min_directional_edge + 0.05:
             blockers.append("ai_flat_context_requires_stronger_edge")
         return not blockers, blockers
@@ -608,32 +805,48 @@ class TargetPositionEngine:
         return "exit_override"
 
     @staticmethod
-    def _same_direction(left: float, right: float) -> bool:
-        if abs(left) < 1e-12 or abs(right) < 1e-12:
+    def _same_direction(left: Decimal, right: Decimal) -> bool:
+        if abs(left) < EPSILON_DECIMAL_12 or abs(right) < EPSILON_DECIMAL_12:
             return True
         return (left > 0 and right > 0) or (left < 0 and right < 0)
 
     @staticmethod
-    def _sign(value: float) -> float:
-        if value > 0.0:
-            return 1.0
-        if value < 0.0:
-            return -1.0
-        return 0.0
+    def _sign(value: Decimal) -> Decimal:
+        if value > 0:
+            return Decimal("1")
+        if value < 0:
+            return Decimal("-1")
+        return Decimal("0")
 
     @staticmethod
     def _clamp(value: float, lower: float, upper: float) -> float:
         return max(lower, min(value, upper))
 
-    def _flat_cleanup_threshold(self) -> float:
-        return max(self.settings.default_order_qty * 0.15, 1e-12)
+    def _flat_cleanup_threshold(self) -> Decimal:
+        return max(to_decimal(self.settings.default_order_qty) * Decimal("0.15"), EPSILON_DECIMAL_12)
 
-    def _estimated_trade_cost_bps(self) -> float:
+    def _estimated_trade_cost_bps(
+        self,
+        *,
+        symbol: str | None = None,
+        product_type: str = "spot",
+        ai_assessment: AIMarketAssessment | None = None,
+    ) -> float:
         expected_slippage_bps = max(self.settings.max_slippage_tolerance_bps, 0) * max(
             self.settings.strategy_expected_slippage_bps_fraction,
             0.0,
         )
-        return max(self.settings.paper_taker_fee_bps, 0.0) + expected_slippage_bps
+        envelope = None if ai_assessment is None else ai_assessment.ai_execution_parameter_suggestion
+        suggestion = None if envelope is None else envelope.suggestion
+        estimated_fee_bps = self.fee_resolver.estimated_execution_fee_bps(
+            symbol=symbol,
+            execution_style="bounded_limit_ioc" if suggestion is not None else "taker",
+            order_type="limit" if suggestion is not None else "market",
+            passive_bias=None if suggestion is None else suggestion.passive_bias,
+            maker_taker_bias=None if suggestion is None else suggestion.maker_taker_bias,
+        )
+        funding_fee_bps = self.fee_resolver.funding_fee_bps(symbol=symbol) if product_type == "derivatives" else 0.0
+        return estimated_fee_bps + expected_slippage_bps + funding_fee_bps
 
     def _signal_edge_bps(
         self,

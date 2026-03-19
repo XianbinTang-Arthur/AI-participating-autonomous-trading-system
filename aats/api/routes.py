@@ -5,7 +5,7 @@ from typing import Any, cast
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 
-from aats.api.auth import OperatorPrincipal, require_read_access, require_write_access
+from aats.api.auth import OperatorPrincipal, require_admin_access, require_read_access, require_write_access
 from aats.bootstrap.config import ApplicationRuntime
 from aats.schemas.system import RuntimeModeState
 from aats.services.operator.query_service import OperatorQueryService
@@ -53,12 +53,17 @@ def _query(request: Request) -> OperatorQueryService:
 async def system_health(request: Request) -> dict[str, Any]:
     query = _query(request)
     health = query.system_health()
+    operator_metrics = query.metrics()
     health["execution_summary"] = {
         "order_count": len(query._scoped_order_states()),
         "fill_count": len(query._scoped_fills()),
         "open_order_count": len(query._scoped_open_order_states()),
         "order_intents_generated": _runtime(request).metrics.snapshot().get("order_intents_generated", 0),
         "fills_processed": _runtime(request).metrics.snapshot().get("fills_processed", 0),
+        "processing_failures": operator_metrics.get("processing_failure_count", 0),
+        "portfolio_snapshot_repairs": operator_metrics.get("portfolio_snapshot_repair_count", 0),
+        "fills_without_snapshot": operator_metrics.get("fill_without_snapshot_count", 0),
+        "snapshots_without_reconciliation": operator_metrics.get("snapshot_without_reconciliation_count", 0),
     }
     return health
 
@@ -123,7 +128,7 @@ async def halt(
     request: Request,
     payload: HaltRequest | None = None,
     reason: str | None = None,
-    principal: OperatorPrincipal = Depends(require_write_access),
+    principal: OperatorPrincipal = Depends(require_admin_access),
 ) -> dict[str, Any]:
     halt_reason = reason or (payload.reason if payload is not None else "manual_halt")
     result = _query(request).halt(
@@ -142,7 +147,7 @@ async def halt(
 async def resume(
     request: Request,
     payload: ResumeRequest | None = None,
-    principal: OperatorPrincipal = Depends(require_write_access),
+    principal: OperatorPrincipal = Depends(require_admin_access),
 ) -> dict[str, Any]:
     resume_reason = payload.reason if payload is not None else "manual_resume"
     result = await _query(request).resume(
@@ -164,7 +169,7 @@ async def system_recovery(request: Request) -> dict[str, Any]:
 async def system_rebaseline(
     request: Request,
     payload: RebaselineRequest | None = None,
-    principal: OperatorPrincipal = Depends(require_write_access),
+    principal: OperatorPrincipal = Depends(require_admin_access),
 ) -> dict[str, Any]:
     reason = payload.reason if payload is not None else "operator_rebaseline"
     try:
@@ -205,6 +210,16 @@ async def ai_runtime(request: Request) -> dict[str, Any]:
     return _query(request).ai_runtime()
 
 
+@router.get("/ai/overview")
+async def ai_overview(request: Request) -> dict[str, Any]:
+    return _query(request).ai_overview()
+
+
+@router.get("/ai/performance/overview")
+async def ai_performance_overview(request: Request) -> dict[str, Any]:
+    return _query(request).ai_performance_overview()
+
+
 @router.get("/ai/latest")
 async def ai_latest(request: Request) -> dict[str, Any]:
     return _query(request).ai_latest()
@@ -240,6 +255,24 @@ async def ai_shadow_evaluations(
     offset: int = Query(default=0, ge=0, le=5000),
 ) -> dict[str, Any]:
     return _query(request).ai_shadow_evaluations(limit=limit, offset=offset)
+
+
+@router.get("/ai/performance/reports")
+async def ai_performance_reports(
+    request: Request,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0, le=5000),
+) -> dict[str, Any]:
+    return _query(request).ai_performance_reports(limit=limit, offset=offset)
+
+
+@router.get("/ai/takeovers/recent")
+async def ai_takeovers_recent(
+    request: Request,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0, le=5000),
+) -> dict[str, Any]:
+    return _query(request).ai_takeovers_recent(limit=limit, offset=offset)
 
 
 @router.post("/ai/shadow/evaluate-now")
@@ -320,6 +353,14 @@ async def account_recent_fills(request: Request) -> dict[str, Any]:
     return _query(request).account_recent_fills()
 
 
+@router.get("/account/recent-bills")
+async def account_recent_bills(
+    request: Request,
+    limit: int = Query(default=50, ge=1, le=200),
+) -> dict[str, Any]:
+    return await _query(request).account_recent_bills(limit=limit)
+
+
 @router.get("/orders/open")
 async def open_orders(request: Request) -> dict[str, Any]:
     return _query(request).orders_open()
@@ -394,7 +435,7 @@ async def resolve_stuck_submission(
     request: Request,
     client_order_id: str,
     payload: ResolveStuckSubmissionRequest | None = None,
-    principal: OperatorPrincipal = Depends(require_write_access),
+    principal: OperatorPrincipal = Depends(require_admin_access),
 ) -> dict[str, Any]:
     try:
         return await _query(request).resolve_stuck_submission(

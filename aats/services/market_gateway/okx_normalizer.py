@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any
 
 from aats.schemas.market import MarketSnapshot
+from aats.services.portfolio_service.decimals import to_decimal
 
 
 def _parse_ms_timestamp(value: str) -> datetime:
@@ -15,26 +17,26 @@ def _parse_ms_timestamp(value: str) -> datetime:
 class OKXTickerState:
     symbol: str
     snapshot_ts: datetime
-    best_bid: float
-    best_ask: float
-    last_price: float
-    bid_size: float
-    ask_size: float
-    volume_24h: float
+    best_bid: Decimal
+    best_ask: Decimal
+    last_price: Decimal
+    bid_size: Decimal
+    ask_size: Decimal
+    volume_24h: Decimal
 
 
 @dataclass(slots=True)
 class OKXCandleState:
     channel: str
     snapshot_ts: datetime
-    open_price: float
-    high_price: float
-    low_price: float
-    close_price: float
-    volume: float
+    open_price: Decimal
+    high_price: Decimal
+    low_price: Decimal
+    close_price: Decimal
+    volume: Decimal
     confirm: bool
 
-    def to_market_kline(self) -> dict[str, float]:
+    def to_market_kline(self) -> dict[str, Decimal]:
         return {
             "open": self.open_price,
             "high": self.high_price,
@@ -105,23 +107,23 @@ class OKXMarketSnapshotNormalizer:
         return OKXTickerState(
             symbol=symbol,
             snapshot_ts=_parse_ms_timestamp(str(payload["ts"])),
-            best_bid=float(payload["bidPx"]),
-            best_ask=float(payload["askPx"]),
-            last_price=float(payload["last"]),
-            bid_size=float(payload.get("bidSz", 0.0)),
-            ask_size=float(payload.get("askSz", 0.0)),
-            volume_24h=float(payload.get("vol24h", 0.0)),
+            best_bid=to_decimal(payload["bidPx"]),
+            best_ask=to_decimal(payload["askPx"]),
+            last_price=to_decimal(payload["last"]),
+            bid_size=to_decimal(payload.get("bidSz", 0)),
+            ask_size=to_decimal(payload.get("askSz", 0)),
+            volume_24h=to_decimal(payload.get("vol24h", 0)),
         )
 
     def _parse_candle(self, *, channel: str, payload: list[str]) -> OKXCandleState:
         return OKXCandleState(
             channel=channel,
             snapshot_ts=_parse_ms_timestamp(str(payload[0])),
-            open_price=float(payload[1]),
-            high_price=float(payload[2]),
-            low_price=float(payload[3]),
-            close_price=float(payload[4]),
-            volume=float(payload[5]),
+            open_price=to_decimal(payload[1]),
+            high_price=to_decimal(payload[2]),
+            low_price=to_decimal(payload[3]),
+            close_price=to_decimal(payload[4]),
+            volume=to_decimal(payload[5]),
             confirm=str(payload[8]) == "1" if len(payload) > 8 else False,
         )
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from decimal import Decimal
 
 from aats.bootstrap.settings import AATSSettings
 from aats.schemas.common import utc_now
@@ -169,6 +170,13 @@ class FakeOKXClient:
     async def cancel_order(self, payload):
         return {"code": "0", "data": [{"ordId": payload["ordId"], "clOrdId": payload["clOrdId"], "sCode": "0"}]}
 
+    async def get_max_order_quantity(self, *, symbol: str, td_mode: str, leverage=None, price=None):
+        _ = symbol
+        _ = td_mode
+        _ = leverage
+        _ = price
+        return {"code": "0", "data": [{"maxBuy": "100", "maxSell": "100"}]}
+
 
 class FakeRejectedOKXClient(FakeOKXClient):
     async def place_order(self, payload):
@@ -274,6 +282,15 @@ class FakePartialFillOKXClient(FakeOKXClient):
                 }
             ],
         }
+
+
+class FakeTightMaxSizeOKXClient(FakeOKXClient):
+    async def get_max_order_quantity(self, *, symbol: str, td_mode: str, leverage=None, price=None):
+        _ = symbol
+        _ = td_mode
+        _ = leverage
+        _ = price
+        return {"code": "0", "data": [{"maxBuy": "0.0005", "maxSell": "0.0005"}]}
 
 
 class FakeUnfilteredFillsOKXClient(FakeOKXClient):
@@ -648,6 +665,42 @@ class TestGuardedSimulatedExecution(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("_", payload["clOrdId"])
         self.assertNotEqual(payload["clOrdId"], f"cl{intent.idempotency_key}".replace("_", "")[:32])
 
+    def test_limit_ioc_payload_uses_ioc_order_type_and_price_cap(self) -> None:
+        intent = OrderIntent(
+            intent_id="intent_limit_ioc",
+            decision_id="decision_limit_ioc",
+            symbol="BTC-USDT",
+            side="buy",
+            quantity=Decimal("0.01"),
+            execution_style="bounded_limit_ioc",
+            order_type="limit",
+            limit_price=Decimal("100.1"),
+            reference_price=Decimal("100"),
+            urgency="medium",
+            time_in_force="IOC",
+            max_slippage_tolerance_bps=20,
+            idempotency_key="intent_limit_ioc",
+            product_type="spot",
+            exposure_side="long",
+            position_intent="open_long",
+        )
+        payload = OKXOrderPayloadBuilder().build(
+            intent=intent,
+            instrument=InstrumentMetadata(
+                instrument_id="BTC-USDT",
+                symbol="BTC-USDT",
+                base_currency="BTC",
+                quote_currency="USDT",
+                lot_size=0.0001,
+                tick_size=0.1,
+                min_size=0.0001,
+                state="live",
+            ),
+        )
+
+        self.assertEqual(payload["ordType"], "ioc")
+        self.assertEqual(payload["px"], "100.1")
+
     async def test_submit_omits_pos_side_for_net_mode_derivatives_accounts(self) -> None:
         settings = make_settings(
             {
@@ -712,6 +765,33 @@ class TestGuardedSimulatedExecution(unittest.IsolatedAsyncioTestCase):
         await adapter.submit(intent)
 
         self.assertNotIn("posSide", client.place_order_calls[0])
+
+    async def test_submit_blocks_when_okx_max_order_quantity_is_exceeded(self) -> None:
+        settings = make_settings(
+            {
+                "live_submit_enabled": True,
+                "guarded_execution_dry_run": False,
+                "okx_max_order_quantity_precheck_enabled": True,
+                "max_notional_per_symbol": 10_000.0,
+            }
+        )
+        mode_controller = RuntimeModeController(settings=settings, kill_switch=KillSwitch())
+        client = FakeTightMaxSizeOKXClient()
+        adapter = OKXExecutionAdapter(
+            settings=settings,
+            client=client,  # type: ignore[arg-type]
+            account_service=FakeAccountService(),  # type: ignore[arg-type]
+            mode_controller=mode_controller,
+            health_service=FakeHealthService(),
+            price_provider=lambda _symbol: Decimal("68000"),
+        )
+
+        state, fills = await adapter.submit(make_intent())
+
+        self.assertEqual(state.status, "BLOCKED")
+        self.assertIn("okx_max_order_quantity_exceeded", state.execution_error or "")
+        self.assertEqual(fills, [])
+        self.assertEqual(client.place_order_calls, [])
 
     async def test_submit_marks_fill_complete_when_derivatives_size_is_rounded_down(self) -> None:
         settings = make_settings(
@@ -778,9 +858,9 @@ class TestGuardedSimulatedExecution(unittest.IsolatedAsyncioTestCase):
         state, fills = await adapter.submit(intent)
 
         self.assertEqual(state.status, "FILLED")
-        self.assertAlmostEqual(state.requested_qty, 0.0007)
+        self.assertEqual(state.requested_qty, Decimal("0.0007"))
         self.assertEqual(len(fills), 1)
-        self.assertAlmostEqual(fills[0].fill_qty, 0.0007)
+        self.assertEqual(fills[0].fill_qty, Decimal("0.0007"))
         self.assertEqual(fills[0].order_status_after_fill, "FILLED")
 
     async def test_submit_filters_out_unrelated_recent_exchange_fills(self) -> None:
@@ -907,7 +987,7 @@ class TestGuardedSimulatedExecution(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(state.status, "PARTIALLY_FILLED")
         self.assertEqual(state.exchange_order_id, "ord_1")
-        self.assertAlmostEqual(state.filled_qty, 0.0004)
+        self.assertEqual(state.filled_qty, Decimal("0.0004"))
         self.assertEqual(state.execution_error, "fill_lookup_failed_after_partial_order_detail")
         self.assertEqual(fills, [])
 
@@ -938,6 +1018,177 @@ class TestGuardedSimulatedExecution(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(refreshed_fills), 1)
         self.assertEqual(refreshed_fills[0].fill_id, "trade_1")
         self.assertEqual(refreshed_fills[0].fee_currency, "USDT")
+
+    async def test_sync_prefers_private_ws_order_confirmation_when_available(self) -> None:
+        settings = make_settings(
+            {
+                "live_submit_enabled": True,
+                "guarded_execution_dry_run": False,
+            }
+        )
+        mode_controller = RuntimeModeController(settings=settings, kill_switch=KillSwitch())
+
+        class _AccountWithPrivateOrders(FakeAccountService):
+            def latest_private_order_row(self, *, symbol: str, order_id: str | None = None, client_order_id: str | None = None):
+                _ = symbol
+                _ = order_id
+                _ = client_order_id
+                return {
+                    "instId": "BTC-USDT",
+                    "ordId": "ord_ws_1",
+                    "clOrdId": "clord_sync_1",
+                    "side": "buy",
+                    "ordType": "limit",
+                    "state": "filled",
+                    "sz": "0.001",
+                    "accFillSz": "0.001",
+                    "avgPx": "68000",
+                    "fee": "-0.068",
+                    "uTime": "1700000002000",
+                    "cTime": "1700000001000",
+                }
+
+            def latest_private_order_fills(self, *, symbol: str, order_id: str | None = None, client_order_id: str | None = None):
+                _ = symbol
+                _ = order_id
+                _ = client_order_id
+                return [
+                    ExchangeFill(
+                        fill_id="trade_ws_sync_1",
+                        exchange_order_id="ord_ws_1",
+                        client_order_id="clord_sync_1",
+                        instrument_id="BTC-USDT",
+                        symbol="BTC-USDT",
+                        side="buy",
+                        fill_qty=Decimal("0.001"),
+                        fill_price=Decimal("68000"),
+                        fee_amount=Decimal("0.068"),
+                        fee_currency="USDT",
+                        fill_ts=utc_now(),
+                    )
+                ]
+
+        client = FakeOKXClient()
+        adapter = OKXExecutionAdapter(
+            settings=settings,
+            client=client,  # type: ignore[arg-type]
+            account_service=_AccountWithPrivateOrders(),  # type: ignore[arg-type]
+            mode_controller=mode_controller,
+            health_service=FakeHealthService(),
+            price_provider=lambda _symbol: 68_000.0,
+        )
+        now = utc_now()
+        state = OrderState(
+            decision_id="decision_1",
+            intent_id="intent_1",
+            symbol="BTC-USDT",
+            client_order_id="clord_sync_1",
+            venue="OKX",
+            exchange_order_id="ord_ws_1",
+            status="SUBMITTED",
+            submission_mode="guarded_simulated_submit",
+            submitted_ts=now,
+            last_update_ts=now,
+            last_exchange_update_ts=now,
+            requested_qty=Decimal("0.001"),
+            filled_qty=Decimal("0"),
+            remaining_qty=Decimal("0.001"),
+            average_fill_price=None,
+            fees=Decimal("0"),
+            product_type="spot",
+            target_leverage=1.0,
+            margin_mode="cash",
+            exposure_side="long",
+            position_intent="open_long",
+            submission_payload={"instId": "BTC-USDT", "clOrdId": "clord_sync_1"},
+        )
+
+        refreshed_states, refreshed_fills = await adapter.sync([state])
+
+        self.assertEqual(len(refreshed_states), 1)
+        self.assertEqual(refreshed_states[0].status, "FILLED")
+        self.assertEqual(len(refreshed_fills), 1)
+        self.assertEqual(refreshed_fills[0].fill_id, "trade_ws_sync_1")
+        self.assertEqual(client.order_queries, [])
+        self.assertEqual(client.fill_queries, [])
+
+    async def test_sync_uses_private_ws_for_submitting_order_without_exchange_id(self) -> None:
+        settings = make_settings(
+            {
+                "live_submit_enabled": True,
+                "guarded_execution_dry_run": False,
+            }
+        )
+        mode_controller = RuntimeModeController(settings=settings, kill_switch=KillSwitch())
+
+        class _AccountWithPendingPrivateOrder(FakeAccountService):
+            def latest_private_order_row(self, *, symbol: str, order_id: str | None = None, client_order_id: str | None = None):
+                _ = symbol
+                _ = order_id
+                _ = client_order_id
+                return {
+                    "instId": "BTC-USDT",
+                    "ordId": "ord_ws_pending_1",
+                    "clOrdId": "clord_ws_pending_1",
+                    "side": "buy",
+                    "ordType": "limit",
+                    "state": "live",
+                    "sz": "0.001",
+                    "accFillSz": "0",
+                    "uTime": "1700000002000",
+                    "cTime": "1700000001000",
+                }
+
+            def latest_private_order_fills(self, *, symbol: str, order_id: str | None = None, client_order_id: str | None = None):
+                _ = symbol
+                _ = order_id
+                _ = client_order_id
+                return []
+
+        client = FakeOKXClient()
+        adapter = OKXExecutionAdapter(
+            settings=settings,
+            client=client,  # type: ignore[arg-type]
+            account_service=_AccountWithPendingPrivateOrder(),  # type: ignore[arg-type]
+            mode_controller=mode_controller,
+            health_service=FakeHealthService(),
+            price_provider=lambda _symbol: 68_000.0,
+        )
+        now = utc_now()
+        state = OrderState(
+            decision_id="decision_1",
+            intent_id="intent_1",
+            symbol="BTC-USDT",
+            client_order_id="clord_ws_pending_1",
+            venue="OKX",
+            exchange_order_id=None,
+            status="SUBMITTING",
+            submission_mode="guarded_simulated_submit",
+            submitted_ts=now,
+            last_update_ts=now,
+            last_exchange_update_ts=now,
+            requested_qty=Decimal("0.001"),
+            filled_qty=Decimal("0"),
+            remaining_qty=Decimal("0.001"),
+            average_fill_price=None,
+            fees=Decimal("0"),
+            product_type="spot",
+            target_leverage=1.0,
+            margin_mode="cash",
+            exposure_side="long",
+            position_intent="open_long",
+            submission_payload={"instId": "BTC-USDT", "clOrdId": "clord_ws_pending_1"},
+        )
+
+        refreshed_states, refreshed_fills = await adapter.sync([state])
+
+        self.assertEqual(len(refreshed_states), 1)
+        self.assertEqual(refreshed_states[0].status, "SUBMITTED")
+        self.assertEqual(refreshed_states[0].exchange_order_id, "ord_ws_pending_1")
+        self.assertEqual(len(refreshed_fills), 1)
+        self.assertEqual(refreshed_fills[0].exchange_order_id, "ord_ws_pending_1")
+        self.assertEqual(client.order_queries, [])
+        self.assertEqual(client.fill_queries, [{"symbol": "BTC-USDT", "order_id": "ord_ws_pending_1", "limit": 100}])
 
     async def test_sync_skips_local_submitting_orders_without_exchange_identity(self) -> None:
         settings = make_settings(
@@ -1087,7 +1338,7 @@ class TestGuardedSimulatedExecution(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(refreshed_states), 1)
         self.assertEqual(refreshed_states[0].status, "PARTIALLY_FILLED")
-        self.assertAlmostEqual(refreshed_states[0].filled_qty, 0.0004)
+        self.assertEqual(refreshed_states[0].filled_qty, Decimal("0.0004"))
         self.assertEqual(refreshed_states[0].execution_error, "fill_lookup_failed_after_partial_order_detail")
         self.assertEqual(refreshed_states[0].last_exchange_update_ts, datetime_from_ms("1700000001000"))
         self.assertEqual(refreshed_fills, [])
@@ -1115,7 +1366,7 @@ class TestGuardedSimulatedExecution(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(fills), 1)
         first = portfolio.apply_fill(fills[0])
         self.assertTrue(first.applied)
-        self.assertAlmostEqual(portfolio.positions["BTC-USDT"].quantity, 0.0004)
+        self.assertEqual(portfolio.positions["BTC-USDT"].quantity, Decimal("0.0004"))
 
         refreshed_states, refreshed_fills = await adapter.sync([state])
         self.assertEqual(refreshed_states[0].status, "FILLED")
@@ -1124,7 +1375,7 @@ class TestGuardedSimulatedExecution(unittest.IsolatedAsyncioTestCase):
             if portfolio.apply_fill(fill).applied:
                 applied_count += 1
         self.assertEqual(applied_count, 1)
-        self.assertAlmostEqual(portfolio.positions["BTC-USDT"].quantity, 0.001)
+        self.assertEqual(portfolio.positions["BTC-USDT"].quantity, Decimal("0.001"))
 
     async def test_cancel_returns_canceled_state(self) -> None:
         settings = make_settings(

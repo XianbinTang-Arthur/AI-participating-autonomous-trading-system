@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+from decimal import Decimal
 from datetime import datetime
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, Index, Integer, String
+from sqlalchemy import JSON, Boolean, DateTime, Float, Index, Integer, Numeric, String
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
 class Base(DeclarativeBase):
     pass
+
+
+DECIMAL_36_18 = Numeric(36, 18, asdecimal=True)
 
 
 class EventEnvelopeModel(Base):
@@ -43,9 +47,9 @@ class PortfolioSnapshotModel(Base):
     sequence_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     snapshot_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    total_equity: Mapped[float] = mapped_column(Float, nullable=False)
-    realized_pnl: Mapped[float] = mapped_column(Float, nullable=False)
-    unrealized_pnl: Mapped[float] = mapped_column(Float, nullable=False)
+    total_equity: Mapped[Decimal] = mapped_column(DECIMAL_36_18, nullable=False)
+    realized_pnl: Mapped[Decimal] = mapped_column(DECIMAL_36_18, nullable=False)
+    unrealized_pnl: Mapped[Decimal] = mapped_column(DECIMAL_36_18, nullable=False)
     product_type: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
     margin_mode: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
     primary_symbol: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
@@ -68,11 +72,11 @@ class OrderStateModel(Base):
     status: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     submitted_ts: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_update_ts: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    requested_qty: Mapped[float] = mapped_column(Float, nullable=False)
-    filled_qty: Mapped[float] = mapped_column(Float, nullable=False)
-    remaining_qty: Mapped[float] = mapped_column(Float, nullable=False)
-    average_fill_price: Mapped[float | None] = mapped_column(Float, nullable=True)
-    fees: Mapped[float] = mapped_column(Float, nullable=False)
+    requested_qty: Mapped[Decimal] = mapped_column(DECIMAL_36_18, nullable=False)
+    filled_qty: Mapped[Decimal] = mapped_column(DECIMAL_36_18, nullable=False)
+    remaining_qty: Mapped[Decimal] = mapped_column(DECIMAL_36_18, nullable=False)
+    average_fill_price: Mapped[Decimal | None] = mapped_column(DECIMAL_36_18, nullable=True)
+    fees: Mapped[Decimal] = mapped_column(DECIMAL_36_18, nullable=False)
     product_type: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
     margin_mode: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
     position_intent: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
@@ -92,9 +96,9 @@ class FillEventModel(Base):
     exchange_order_id: Mapped[str] = mapped_column(String(64), nullable=False)
     symbol: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     side: Mapped[str] = mapped_column(String(8), nullable=False)
-    fill_qty: Mapped[float] = mapped_column(Float, nullable=False)
-    fill_price: Mapped[float] = mapped_column(Float, nullable=False)
-    fee_amount: Mapped[float] = mapped_column(Float, nullable=False)
+    fill_qty: Mapped[Decimal] = mapped_column(DECIMAL_36_18, nullable=False)
+    fill_price: Mapped[Decimal] = mapped_column(DECIMAL_36_18, nullable=False)
+    fee_amount: Mapped[Decimal] = mapped_column(DECIMAL_36_18, nullable=False)
     product_type: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
     margin_mode: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
     position_intent: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
@@ -118,9 +122,9 @@ class OrderObligationModel(Base):
     symbol: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     reserve_currency: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
-    reserved_amount: Mapped[float] = mapped_column(Float, nullable=False)
-    consumed_amount: Mapped[float] = mapped_column(Float, nullable=False)
-    released_amount: Mapped[float] = mapped_column(Float, nullable=False)
+    reserved_amount: Mapped[Decimal] = mapped_column(DECIMAL_36_18, nullable=False)
+    consumed_amount: Mapped[Decimal] = mapped_column(DECIMAL_36_18, nullable=False)
+    released_amount: Mapped[Decimal] = mapped_column(DECIMAL_36_18, nullable=False)
     product_type: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
     margin_mode: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
     last_update_ts: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

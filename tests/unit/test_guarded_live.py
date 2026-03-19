@@ -120,6 +120,13 @@ class FakeOKXClient:
         self.place_order_calls.append(dict(payload))
         return {"code": "0", "data": [{"ordId": "1"}]}
 
+    async def get_max_order_quantity(self, *, symbol: str, td_mode: str, leverage=None, price=None):
+        _ = symbol
+        _ = td_mode
+        _ = leverage
+        _ = price
+        return {"code": "0", "data": [{"maxBuy": "100", "maxSell": "100"}]}
+
 
 class TestGuardedLive(unittest.IsolatedAsyncioTestCase):
     def test_mode_snapshot_makes_guarded_simulated_boundaries_explicit(self) -> None:
@@ -421,6 +428,56 @@ class TestGuardedLive(unittest.IsolatedAsyncioTestCase):
         decision = risk.evaluate(
             PositionTarget(
                 decision_id="decision_buy_balance",
+                symbol="BTC-USDT",
+                current_position_qty=0.0,
+                target_position_qty=0.001,
+                delta_position_qty=0.001,
+                current_notional=0.0,
+                target_notional=67.0,
+                rebalance_reason="test",
+                urgency="medium",
+                max_slippage_tolerance_bps=20,
+                source_mix={"baseline": 1.0},
+                decision_expiry_ts=utc_now(),
+            )
+        )
+
+        self.assertFalse(decision.approved)
+        self.assertIn("insufficient_quote_balance", decision.rejection_reasons)
+
+    def test_risk_uses_slippage_and_fee_budget_for_spot_buy_balance_check(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "mode": "guarded_live",
+                "execution_backend": "okx",
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "okx_simulated_trading": True,
+            }
+        )
+        kill_switch = KillSwitch()
+        mode_controller = RuntimeModeController(settings=settings, kill_switch=kill_switch)
+        health_service = SystemHealthService(
+            settings=settings,
+            mode_controller=mode_controller,
+            kill_switch=kill_switch,
+            market_provider=FakeHealthyMarketProvider(),  # type: ignore[arg-type]
+            account_provider=FakeAccountService(usdt_available=67.05),  # type: ignore[arg-type]
+            execution_provider=FakeExecutionProvider(),  # type: ignore[arg-type]
+            reconciliation_repo=FakeReconciliationRepo(),  # type: ignore[arg-type]
+        )
+        risk = RiskEngine(
+            settings=settings,
+            account_service=FakeAccountService(usdt_available=67.05),  # type: ignore[arg-type]
+            health_service=health_service,
+            trigger_policy=DecisionTriggerPolicy(settings=settings),
+            price_provider=lambda _symbol: 67_000.0,
+            mode_controller=mode_controller,
+        )
+
+        decision = risk.evaluate(
+            PositionTarget(
+                decision_id="decision_buy_slippage_budget",
                 symbol="BTC-USDT",
                 current_position_qty=0.0,
                 target_position_qty=0.001,

@@ -1,0 +1,200 @@
+Task27: Restricted Execution Suggestion 进入 Bounded Live Translation
+
+背景
+
+`task26` 已经完成了以下能力：
+- AI 可以输出 restricted execution suggestion
+- planner 可以做白名单校验、裁剪和 translator
+- 后台与 UI 可以看到 suggestion / translation / rejection / clipped 信息
+- 当前模式仍停留在：
+  - `disabled`
+  - `diagnostic_only`
+  - `shadow_translation`
+
+现阶段还没有真正把 suggestion 转化为真实执行字段。
+本任务的目标，是把 suggestion 从“只诊断/只影子翻译”推进到“有限放权的 live translation”。
+
+本任务的放权边界必须非常严格：
+- 不允许 AI 直接生成原始交易所订单
+- 不允许 AI 自由决定 child-order 序列
+- 不允许 AI 自由决定 TWAP / 冰山 / 无限追价 / 自由撤改单
+- 只允许在现有单笔订单执行链上，应用少量受限、可审计、可回退的执行参数
+
+本任务允许的 live 放权范围
+
+只允许以下 bounded live translation：
+
+1. 将 `market` 转换为“带价格保护的 `limit IOC`”
+2. 将 `execution_style` 从默认 `taker` 标记为：
+   - `bounded_taker_cap`
+   - `bounded_limit_ioc`
+3. 使用 `reference_price + bounded limit offset` 计算真实 `limit_price`
+4. 保留以下 suggestion 字段为“仅审计/仅影子”：
+   - `slice_count`
+   - `max_participation_rate`
+   - `cancel_replace_patience_ms`
+
+换句话说，本任务只放权“单笔订单的价格上限/下限保护”，不放权“多子单执行算法”。
+
+目标
+
+完成本任务后，系统应具备：
+
+1. `enabled_live` 模式下，planner 可以在严格边界内把 suggestion 转成真实执行字段
+2. live translation 必须满足：
+   - 有 `reference_price`
+   - 有明确上限/下限
+   - 不突破 slippage guard
+   - 不引入长时间挂单
+3. paper adapter 与 OKX adapter 都能正确理解 bounded live translation
+4. 后台和 UI 能明确区分：
+   - 仅诊断
+   - 仅影子翻译
+   - 已 bounded live apply
+
+重要原则
+
+- 所有 live translation 都必须是“保守收敛”，不能比默认市场单更激进
+- live translation 的本质是“增加价格保护”，不是“增加执行复杂度”
+- 如果缺少 `reference_price` 或建议无法安全翻译，必须自动回退到 shadow/diagnostic，而不是勉强 live apply
+- paper 与 real adapter 的行为语义必须一致，不能出现“纸面可成交，真实会挂单”或反之
+
+==================================================
+一、Must Fix Before Enabling Live Translation
+==================================================
+
+BE-1. 定义 bounded live translation 规范
+
+- 影响模块
+  - `aats/schemas/execution.py`
+  - `aats/bootstrap/settings.py`
+- 要求
+  - 明确 `enabled_live` 的真实含义
+  - 增加结构化字段：
+    - `applied_live_fields`
+    - `live_translation_reason`
+    - `live_translation_fallback_reason`
+- 验收
+  - 仅通过 envelope 就能知道哪些字段真正进入 live execution
+
+BE-2. 在 planner 中实现 bounded live translation
+
+- 影响模块
+  - `aats/services/execution_engine/planner.py`
+- 要求
+  - 仅允许把 suggestion 转成：
+    - `order_type=limit`
+    - `time_in_force=IOC`
+    - `limit_price` capped by reference price and bounded offset
+  - 若无法安全翻译：
+    - 自动降回 `shadow_translation`
+    - 写明 fallback 原因
+- 验收
+  - `enabled_live` 不再只是展示状态，而是真正生成受限 live fields
+
+BE-3. 让 OrderIntent 真正承接 bounded live fields
+
+- 影响模块
+  - `aats/schemas/execution.py`
+  - `aats/services/execution_engine/planner.py`
+- 要求
+  - `OrderIntent` 中真实写入：
+    - `order_type`
+    - `time_in_force`
+    - `limit_price`
+    - `execution_style`
+  - 并保留原始 suggestion envelope
+- 验收
+  - 订单意图中可以看出“这笔单已经 bounded live apply”
+
+BE-4. 让 paper adapter 正确模拟 `limit IOC`
+
+- 影响模块
+  - `aats/services/execution_engine/paper_adapter.py`
+- 要求
+  - 如果当前价格满足 limit cap，则成交
+  - 如果不满足，则返回 `EXPIRED` / 无 fill
+  - 不允许无限挂单
+- 验收
+  - paper 行为与 bounded live translation 语义一致
+
+BE-5. 让 OKX adapter 正确映射 bounded live translation
+
+- 影响模块
+  - `aats/services/execution_engine/okx_adapter.py`
+- 要求
+  - `limit + IOC` 要正确映射到交易所 payload
+  - 反向同步时能够识别该类型订单
+- 验收
+  - payload 与回读 state 一致，不丢失 `limit/IOC` 语义
+
+==================================================
+二、Should Fix Soon
+==================================================
+
+FE-1. AI 页面新增 bounded live translation 状态
+
+- 影响模块
+  - `aats/api/static/modules/views/ai-view.js`
+- 要求
+  - UI 区分：
+    - diagnostic only
+    - shadow translation
+    - bounded live apply
+  - 显示：
+    - applied live fields
+    - fallback reason
+    - 真实 `limit_price`
+
+FE-2. decision 详情新增 live translation 解释
+
+- 影响模块
+  - `aats/api/static/app.js`
+- 要求
+  - 单笔 decision 中清楚展示：
+    - 原始 suggestion
+    - translator preview
+    - 最终 live applied fields
+    - fallback reason
+
+==================================================
+三、Integration And Verification
+==================================================
+
+INT-1. Planner 单元验证
+
+- 验证
+  - `enabled_live` 时能生成 bounded live fields
+  - 无 `reference_price` 时自动退回 shadow translation
+
+INT-2. Adapter 单元验证
+
+- 验证
+  - paper `limit IOC`：
+    - 价格可成交 -> `FILLED`
+    - 价格不可成交 -> `EXPIRED`
+  - OKX payload:
+    - 正确编码 bounded live translation
+
+INT-3. API / UI 联调
+
+- 验证
+  - `/ai/overview`
+  - `/ai/latest`
+  - `/decision/{id}`
+  中能看出 bounded live apply
+  - UI 不需要翻 raw JSON 就能看出是否真的放权
+
+建议实施顺序
+
+1. 写 schema 和 settings
+2. planner 落 bounded live translation
+3. 补 paper / OKX adapter
+4. 补 API / UI
+5. 补单元和集成测试
+
+验收原则
+
+- 本任务完成后，AI 可以在严格白名单内影响真实执行字段
+- 这种影响必须始终是“增加价格保护”，而不是“增加执行自由度”
+- 若无法安全翻译，系统必须自动退回非 live 模式

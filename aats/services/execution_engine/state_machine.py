@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal
 
 from aats.schemas.execution import OrderLifecycleStatus, OrderState
+from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12
 
 
 TERMINAL_ORDER_STATES: set[OrderLifecycleStatus] = {
@@ -89,13 +91,13 @@ class OrderStateMachine:
         if not validation.accepted:
             return self._merge_without_regression(current=current, incoming=incoming)
 
-        requested_qty = incoming.requested_qty if incoming.requested_qty > 0.0 else current.requested_qty
+        requested_qty = incoming.requested_qty if incoming.requested_qty > Decimal("0") else current.requested_qty
         filled_qty = min(max(current.filled_qty, incoming.filled_qty), requested_qty)
-        remaining_floor = max(requested_qty - filled_qty, 0.0)
+        remaining_floor = max(requested_qty - filled_qty, Decimal("0"))
         remaining_candidates = [remaining_floor]
-        if current.remaining_qty >= 0.0:
+        if current.remaining_qty >= Decimal("0"):
             remaining_candidates.append(current.remaining_qty)
-        if incoming.remaining_qty >= 0.0:
+        if incoming.remaining_qty >= Decimal("0"):
             remaining_candidates.append(incoming.remaining_qty)
         remaining_qty = min(remaining_candidates)
         average_fill_price = incoming.average_fill_price
@@ -185,14 +187,14 @@ class OrderStateMachine:
         )
 
     def _normalize(self, state: OrderState) -> OrderState:
-        filled_qty = min(max(state.filled_qty, 0.0), state.requested_qty)
-        remaining_qty = max(min(state.remaining_qty, state.requested_qty), 0.0)
-        if filled_qty >= state.requested_qty - 1e-12 and state.requested_qty > 0.0:
+        filled_qty = min(max(state.filled_qty, Decimal("0")), state.requested_qty)
+        remaining_qty = max(min(state.remaining_qty, state.requested_qty), Decimal("0"))
+        if filled_qty >= state.requested_qty - EPSILON_DECIMAL_12 and state.requested_qty > Decimal("0"):
             normalized_status: OrderLifecycleStatus = "FILLED"
-            remaining_qty = 0.0
-        elif state.status in {"SUBMITTED", "PARTIALLY_FILLED"} and filled_qty > 1e-12:
+            remaining_qty = Decimal("0")
+        elif state.status in {"SUBMITTED", "PARTIALLY_FILLED"} and filled_qty > EPSILON_DECIMAL_12:
             normalized_status = "PARTIALLY_FILLED"
-            remaining_qty = max(state.requested_qty - filled_qty, 0.0)
+            remaining_qty = max(state.requested_qty - filled_qty, Decimal("0"))
         else:
             normalized_status = state.status
         if normalized_status == "CANCELED" and state.canceled_ts is None:

@@ -1,5 +1,5 @@
 ﻿import { fetchPanels, requestJson } from "./modules/api-client.js";
-import { actionButton, kvList, notice, pill, statusCard, surfaceCard } from "./modules/components.js";
+import { actionButton, kvList, notice, pill, primaryStatusPanel, surfaceCard } from "./modules/components.js";
 import {
   booleanWord,
   emptyState,
@@ -9,6 +9,7 @@ import {
   formatRelativeAge,
   formatSigned,
   listOrDash,
+  middleEllipsis,
   rawJson,
 } from "./modules/formatters.js";
 import { AUTO_REFRESH_MS, CORE_SPECS, DEFAULT_PAGE_LIMITS, PAGE_LOAD_STEP, createState, viewSpecs } from "./modules/store.js";
@@ -21,19 +22,96 @@ import {
   orderSceneSummary,
 } from "./modules/trade-display.js";
 import { renderAISections, renderAIView } from "./modules/views/ai-view.js";
+import { renderAIConfigView } from "./modules/views/ai-config-view.js";
 import { renderAdminView } from "./modules/views/admin-view.js";
 import { renderExecutionSections, renderExecutionView } from "./modules/views/execution-view.js";
+import { renderHomeView } from "./modules/views/home-view.js";
 import { renderOverviewView } from "./modules/views/overview-view.js";
 import { renderRiskSections, renderRiskView } from "./modules/views/risk-view.js";
 import { renderStrategySections, renderStrategyView } from "./modules/views/strategy-view.js";
 
-const state = createState();
-state.activeView = document.body.dataset.view || "overview";
+const VIEW_ROUTES = {
+  home: "/ui",
+  overview: "/ui/overview",
+  strategy: "/ui/strategy",
+  execution: "/ui/execution",
+  risk: "/ui/risk",
+  ai: "/ui/ai",
+  aiConfig: "/ui/ai-config",
+  admin: "/ui/settings",
+};
 
-const viewTabs = Array.from(document.querySelectorAll(".workspace-tab"));
+const VIEW_META = {
+  home: {
+    docTitle: "AATS 自动交易监控台 | 主页",
+    eyebrow: "主页",
+    heading: "系统主控台",
+    copy: "这里集中查看状态、执行路径和最新风险提示。",
+    hidePageHead: true,
+  },
+  overview: {
+    docTitle: "AATS 自动交易监控台 | 交易总览",
+    eyebrow: "交易总览",
+    heading: "交易总览",
+    copy: "",
+    hidePageHead: false,
+  },
+  strategy: {
+    docTitle: "AATS 自动交易监控台 | 策略判断",
+    eyebrow: "策略解释",
+    heading: "为什么现在不做或要做这笔交易",
+    copy: "先看策略结论，再看门禁和阻断原因。",
+    hidePageHead: false,
+  },
+  execution: {
+    docTitle: "AATS 自动交易监控台 | 委托与成交",
+    eyebrow: "委托与成交",
+    heading: "",
+    copy: "查看最近委托、成交、报错和卡单，确认执行链路有没有真正闭环。",
+    hidePageHead: false,
+  },
+  risk: {
+    docTitle: "AATS 自动交易监控台 | 风险与恢复",
+    eyebrow: "风险、对账、恢复",
+    heading: "系统现在为什么能交易或不能交易",
+    copy: "关注阻断原因、对账结论、恢复状态、账户快照和是否需要人工确认。",
+    hidePageHead: false,
+  },
+  ai: {
+    docTitle: "AATS 自动交易监控台 | AI 工作台",
+    eyebrow: "AI 主链",
+    heading: "AI 当前有效模式、接管门禁和影子回放",
+    copy: "先看模式与接管结果，再看影子回放是否真的优于基础策略。",
+    hidePageHead: false,
+  },
+  aiConfig: {
+    docTitle: "AATS 自动交易监控台 | AI 配置",
+    eyebrow: "AI 配置",
+    heading: "",
+    copy: "",
+    hidePageHead: true,
+  },
+  admin: {
+    docTitle: "AATS 自动交易控制台 | 账户与权限",
+    eyebrow: "控制面",
+    heading: "账户与权限工作区",
+    copy: "这里专门处理登录、角色、账号启停和控制台访问权限。",
+    hidePageHead: false,
+  },
+};
+
+const state = createState();
+state.activeView = resolveViewFromLocation();
+state.loadingView = state.activeView;
+
+const viewLinks = Array.from(document.querySelectorAll(".workspace-link[data-view]"));
 const viewSections = Array.from(document.querySelectorAll(".workspace-view"));
 
 const nodes = {
+  pageHead: document.getElementById("pageHead"),
+  pageEyebrow: document.getElementById("pageEyebrow"),
+  pageHeading: document.getElementById("pageHeading"),
+  pageCopy: document.getElementById("pageCopy"),
   statusRibbon: document.getElementById("statusRibbon"),
   bannerContainer: document.getElementById("bannerContainer"),
   sessionIdentityValue: document.getElementById("sessionIdentityValue"),
@@ -48,12 +126,14 @@ const nodes = {
   autoRefreshToggle: document.getElementById("autoRefreshToggle"),
   actionPermissionHint: document.getElementById("actionPermissionHint"),
   lastRefreshLabel: document.getElementById("lastRefreshLabel"),
+  refreshStateChip: document.getElementById("refreshStateChip"),
   homeContent: document.getElementById("homeContent"),
   overviewContent: document.getElementById("overviewContent"),
   strategyContent: document.getElementById("strategyContent"),
   executionContent: document.getElementById("executionContent"),
   riskContent: document.getElementById("riskContent"),
   aiContent: document.getElementById("aiContent"),
+  aiConfigContent: document.getElementById("aiConfigContent"),
   adminContent: document.getElementById("adminContent"),
   detailDrawer: document.getElementById("detailDrawer"),
   drawerBackdrop: document.getElementById("drawerBackdrop"),
@@ -74,10 +154,21 @@ function init() {
 }
 
 function bindEvents() {
-  viewTabs.forEach((tab) => {
-    tab.addEventListener("click", () => {
-      setActiveView(tab.dataset.view || "overview");
+  viewLinks.forEach((link) => {
+    link.addEventListener("click", (event) => {
+      if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+      event.preventDefault();
+      setActiveView(link.dataset.view || "overview", { pushHistory: true });
     });
+  });
+
+  window.addEventListener("popstate", () => {
+    setActiveView(resolveViewFromLocation(), { refresh: true });
+  });
+
+  window.addEventListener("pageshow", (event) => {
+    if (!event.persisted) return;
+    setActiveView(resolveViewFromLocation(), { refresh: true });
   });
 
   nodes.refreshButton?.addEventListener("click", () => void refreshDashboard({ manual: true }));
@@ -120,29 +211,46 @@ function bindEvents() {
     const action = target.dataset.action;
     const value = target.dataset.value || "";
     if (!action) return;
-    void dispatchAction(action, value);
+    void dispatchAction(action, value, target);
   });
 
   document.addEventListener("submit", (event) => {
     const form = event.target;
     if (!(form instanceof HTMLFormElement)) return;
-    if (form.id !== "operatorCreateForm") return;
-    event.preventDefault();
-    void createOperatorUser();
+    if (form.id === "operatorCreateForm") {
+      event.preventDefault();
+      void createOperatorUser();
+      return;
+    }
+    if (form.id === "autoRollbackPolicyForm") {
+      event.preventDefault();
+      void stageAutoRollbackPolicy();
+      return;
+    }
+    if (form.id === "activationPolicyForm") {
+      event.preventDefault();
+      void stageActivationPolicy();
+    }
   });
 }
 
 async function refreshDashboard({ manual = false } = {}) {
-  if (state.refreshing) return;
+  if (state.refreshing) {
+    state.pendingRefresh = true;
+    return;
+  }
+  const refreshingView = state.activeView;
+  cancelScheduledRefresh();
   state.refreshing = true;
   renderShell();
   try {
-    const specs = dedupeSpecs([...CORE_SPECS, ...viewSpecs(state.activeView, state)]);
+    const specs = dedupeSpecs([...CORE_SPECS, ...viewSpecs(refreshingView, state)]);
     const results = await fetchPanels(specs);
     for (const [key, result] of Object.entries(results)) {
       state.data[key] = result.data;
       state.errors[key] = result.error;
     }
+    state.readyViews[refreshingView] = true;
     if (shouldRedirectToLogin()) {
       window.location.replace("/login");
       return;
@@ -153,18 +261,39 @@ async function refreshDashboard({ manual = false } = {}) {
     }
   } finally {
     state.refreshing = false;
+    if (state.loadingView === refreshingView) {
+      state.loadingView = null;
+    }
     renderShell();
+    if (state.pendingRefresh) {
+      state.pendingRefresh = false;
+      void refreshDashboard();
+      return;
+    }
     scheduleRefresh();
   }
 }
 
 function renderShell() {
+  viewLinks.forEach((link) => link.classList.toggle("is-active", link.dataset.view === state.activeView));
+  viewSections.forEach((section) => section.classList.toggle("is-active", section.dataset.view === state.activeView));
+  renderPageChrome();
   renderSessionSummary();
   renderStatusRibbon();
   renderBanners();
   renderActiveView();
+  renderRefreshIndicators();
   updateActionAccess();
   updateRefreshLabel();
+}
+
+function renderPageChrome() {
+  const meta = VIEW_META[state.activeView] || VIEW_META.home;
+  document.title = meta.docTitle;
+  patchText(nodes.pageEyebrow, meta.eyebrow);
+  patchText(nodes.pageHeading, meta.heading);
+  patchText(nodes.pageCopy, meta.copy);
+  patchClassName(nodes.pageHead, meta.hidePageHead ? "page-head is-hidden" : "page-head");
 }
 
 function renderSessionSummary() {
@@ -176,6 +305,17 @@ function renderSessionSummary() {
 }
 
 function renderStatusRibbon() {
+  if (state.activeView !== "home") {
+    patchClassName(nodes.statusRibbon, "status-ribbon is-hidden");
+    return;
+  }
+
+  if (shouldRenderLoadingState("home")) {
+    patchClassName(nodes.statusRibbon, "status-ribbon status-ribbon--home");
+    patchHtml(nodes.statusRibbon, renderHomeRibbonSkeleton());
+    return;
+  }
+
   const health = state.data.health || {};
   const mode = state.data.mode || {};
   const runtime = state.data.runtime || {};
@@ -183,52 +323,66 @@ function renderStatusRibbon() {
   const account = state.data.accountState || {};
   const reconciliation = state.data.reconciliationLatest?.reconciliation || null;
   const portfolio = state.data.portfolio?.portfolio || {};
+  const blockers = state.data.blockers?.blockers || [];
+  const latestDecision = state.data.latestDecision || {};
+  const latestOrder = state.data.executionLatest?.latest_order || null;
+  const metrics = state.data.metrics || {};
 
   if (!nodes.statusRibbon) return;
+  patchClassName(nodes.statusRibbon, "status-ribbon status-ribbon--home");
   patchHtml(nodes.statusRibbon, [
-    statusCard({
-      title: "系统状态",
-      value: readableState(health.runtime_state || health.overall_status),
-      meta: `整体状态：${readableState(health.overall_status)}`,
-      pills: [pill(`运行模式 ${readableState(mode.operating_state || "unknown")}`, toneForRuntimeState(health.runtime_state || health.overall_status))],
-    }),
-    statusCard({
-      title: "交易资格",
-      value: recovery.safe_to_trade ? "允许自动交易" : "当前不允许自动交易",
-      meta: recovery.safe_to_trade ? "恢复检查已通过，可以继续自动交易。" : localizedRecoveryReasons(),
+    `<div class="status-ribbon__primary">${primaryStatusPanel({
+      eyebrow: "主页状态总览",
+      title: "",
+      headline: homeRibbonHeadline({ health, recovery, blockers, reconciliation }),
+      summary: "",
+      tone: homeRibbonTone({ health, recovery, blockers, reconciliation }),
       pills: [
-        pill(`已暂停 ${booleanWord(health.halted)}`, health.halted ? "danger" : "outline"),
-        pill(`需要人工复核 ${booleanWord(recovery.review_required)}`, recovery.review_required ? "warning" : "outline"),
+        pill(`运行状态 ${readableState(health.runtime_state || health.overall_status)}`, toneForRuntimeState(health.runtime_state || health.overall_status)),
+        pill(`自动交易 ${recovery.safe_to_trade ? "已放行" : "已阻断"}`, recovery.safe_to_trade ? "positive" : "danger"),
+        pill(`人工复核 ${booleanWord(recovery.review_required)}`, recovery.review_required ? "warning" : "outline"),
       ],
-    }),
-    statusCard({
-      title: "执行线路",
-      value: readableState(runtime.environment_capabilities?.exchange_submission_target || mode.execution_route || "unknown"),
-      meta: `执行路由 ${runtime.environment_capabilities?.execution_route || mode.execution_route || "-"}`,
-      pills: [pill(`允许向交易所报单 ${booleanWord(mode.exchange_submit_allowed)}`, mode.exchange_submit_allowed ? "positive" : "outline")],
-    }),
-    statusCard({
-      title: "账户同步",
-      value: account.ready ? "正常" : "异常",
-      meta: account.ready ? "账户快照已同步，可用于风控和展示。" : listOrDash(account.blockers),
-      pills: [
-        pill(`交易所连接 ${booleanWord(account.connected)}`, account.connected ? "positive" : "warning"),
-        pill(`账户快照新鲜 ${booleanWord(account.fresh)}`, account.fresh ? "positive" : "warning"),
+      metrics: [
+        { label: "最近决策", value: latestDecision.decision_id ? readableState(latestDecision.position_target?.position_intent || "hold") : "暂无", meta: formatMaybeTimestamp(latestDecision.decision_time || latestDecision.decision_context?.as_of_ts), tone: latestDecision.decision_id ? "info" : "neutral" },
+        { label: "最新委托", value: readableState(latestOrder?.status || "unknown"), meta: middleEllipsis(latestOrder?.client_order_id, 10, 6, "暂未生成委托"), tone: toneForOrderStatus(latestOrder?.status) },
+        { label: "恢复限制", value: blockers.length > 0 ? localizeError(blockers[0].blocker) : recovery.safe_to_trade ? "当前无硬阻断" : localizedRecoveryReasons(), meta: middleEllipsis(reconciliation?.reconciliation_id, 10, 6, "恢复与对账共同决定交易资格"), tone: blockers.length > 0 || reconciliation?.halt_required ? "danger" : recovery.safe_to_trade ? "positive" : "warning" },
+        { label: "账户权益", value: formatNumber(portfolio.total_equity), meta: `活动委托 ${formatNumber(metrics.current_open_order_count)}`, tone: "info" },
       ],
-    }),
-    statusCard({
-      title: "对账结果",
-      value: readableState(reconciliation?.severity || "unknown"),
-      meta: reconciliation?.reconciliation_id || "最近还没有对账记录",
-      pills: [pill(`要求停机 ${booleanWord(reconciliation?.halt_required)}`, reconciliation?.halt_required ? "danger" : "outline")],
-    }),
-    statusCard({
-      title: "账户权益",
-      value: formatNumber(portfolio.total_equity),
-      meta: `已实现 ${formatSigned(portfolio.realized_pnl)} / 未实现 ${formatSigned(portfolio.unrealized_pnl)}`,
-      pills: [pill(`总敞口 ${formatNumber(portfolio.gross_exposure)}`, "info")],
-    }),
+    })}</div>`,
   ].join(""));
+}
+
+function renderHomeRibbonSkeleton() {
+  return [
+    `<div class="status-ribbon__primary">
+      <section class="primary-status-panel skeleton-surface skeleton-panel" aria-hidden="true">
+        <div class="skeleton-stack">
+          <span class="skeleton-line skeleton-line--kicker"></span>
+          <span class="skeleton-line skeleton-line--title"></span>
+          <span class="skeleton-line skeleton-line--headline"></span>
+          <span class="skeleton-line skeleton-line--body"></span>
+        </div>
+        <div class="skeleton-inline">
+          ${Array.from({ length: 3 }, () => '<span class="skeleton-pill"></span>').join("")}
+        </div>
+        ${loadingTileGrid(3)}
+      </section>
+    </div>`,
+  ].join("");
+}
+
+function homeRibbonHeadline({ health, recovery, blockers, reconciliation }) {
+  if (health.halted) return "系统已暂停";
+  if (blockers.length > 0) return "当前存在阻断";
+  if (reconciliation?.halt_required) return "需先完成对账";
+  if (!recovery.safe_to_trade) return "暂不允许恢复";
+  return "允许自动交易";
+}
+
+function homeRibbonTone({ health, recovery, blockers, reconciliation }) {
+  if (health.halted || blockers.length > 0 || reconciliation?.halt_required) return "danger";
+  if (!recovery.safe_to_trade || recovery.review_required) return "warning";
+  return "positive";
 }
 
 function renderBanners() {
@@ -238,7 +392,11 @@ function renderBanners() {
   const controlsMessage = controlPermissionMessage();
 
   if (!nodes.bannerContainer) return;
-  if (!recovery.safe_to_trade) {
+  if (isBootstrapping()) {
+    patchHtml(nodes.bannerContainer, "");
+    return;
+  }
+  if (hasResolvedPanel("systemRecovery") && recovery.safe_to_trade === false) {
     banners.push(notice(`当前还不能恢复自动交易：${localizedRecoveryReasons()}`, "warning"));
   }
   if (blockers.length > 0) {
@@ -255,6 +413,11 @@ function renderBanners() {
 }
 
 function renderActiveView() {
+  if (shouldRenderLoadingState(state.activeView)) {
+    renderLoadingView();
+    return;
+  }
+
   const viewData = {
     ...state.data,
     errors: state.errors,
@@ -268,7 +431,7 @@ function renderActiveView() {
     return;
   }
   if (state.activeView === "home" && nodes.homeContent) {
-    patchHtml(nodes.homeContent, renderOverviewView(viewData));
+    patchHtml(nodes.homeContent, renderHomeView(viewData));
     return;
   }
   if (state.activeView === "strategy") {
@@ -285,6 +448,10 @@ function renderActiveView() {
   }
   if (state.activeView === "ai") {
     patchRenderedSections(renderAISections(viewData), () => nodes.aiContent, () => renderAIView(viewData));
+    return;
+  }
+  if (state.activeView === "aiConfig" && nodes.aiConfigContent) {
+    patchHtml(nodes.aiConfigContent, renderAIConfigView(viewData));
     return;
   }
   if (state.activeView === "admin" && nodes.adminContent) {
@@ -323,22 +490,59 @@ function updateActionAccess() {
 
 function updateRefreshLabel() {
   if (state.refreshing) {
+    patchClassName(nodes.refreshStateChip, "status-pill tone-info refresh-state-chip is-loading");
+    patchText(nodes.refreshStateChip, "刷新中");
+    if (nodes.refreshStateChip) {
+      nodes.refreshStateChip.setAttribute("aria-label", "正在刷新页面数据");
+    }
+    if (nodes.refreshButton) {
+      nodes.refreshButton.disabled = true;
+    }
     patchText(nodes.lastRefreshLabel, "正在刷新最新状态…");
     return;
   }
   if (!state.lastRefreshAt) {
+    patchClassName(nodes.refreshStateChip, "status-pill tone-neutral refresh-state-chip");
+    patchText(nodes.refreshStateChip, "待刷新");
+    if (nodes.refreshStateChip) {
+      nodes.refreshStateChip.setAttribute("aria-label", "页面尚未完成首次刷新");
+    }
+    if (nodes.refreshButton) {
+      nodes.refreshButton.disabled = false;
+    }
     patchText(nodes.lastRefreshLabel, "尚未刷新");
     return;
+  }
+  patchClassName(nodes.refreshStateChip, "status-pill tone-positive refresh-state-chip");
+  patchText(nodes.refreshStateChip, "已同步");
+  if (nodes.refreshStateChip) {
+    nodes.refreshStateChip.setAttribute("aria-label", "页面数据已同步");
+  }
+  if (nodes.refreshButton) {
+    nodes.refreshButton.disabled = false;
   }
   patchText(nodes.lastRefreshLabel, `最近刷新：${formatMaybeTimestamp(state.lastRefreshAt)}（${formatRelativeAge(state.lastRefreshAt)}）`);
 }
 
-function setActiveView(view) {
-  state.activeView = view;
-  viewTabs.forEach((tab) => tab.classList.toggle("is-active", tab.dataset.view === view));
-  viewSections.forEach((section) => section.classList.toggle("is-active", section.dataset.view === view));
-  renderActiveView();
-  void refreshDashboard();
+function setActiveView(view, { pushHistory = false, refresh = true } = {}) {
+  const nextView = VIEW_ROUTES[view] ? view : "home";
+  const changed = state.activeView !== nextView;
+  if (changed) {
+    state.activeView = nextView;
+    state.loadingView = state.readyViews[nextView] ? null : nextView;
+  }
+  if (pushHistory) {
+    const targetPath = VIEW_ROUTES[nextView];
+    if (window.location.pathname !== targetPath) {
+      window.history.pushState({ view: nextView }, "", targetPath);
+    }
+  }
+  viewLinks.forEach((link) => link.classList.toggle("is-active", link.dataset.view === nextView));
+  viewSections.forEach((section) => section.classList.toggle("is-active", section.dataset.view === nextView));
+  renderShell();
+  if (refresh) {
+    void refreshDashboard();
+  }
 }
 
 async function runAction(path, body, successMessage) {
@@ -367,13 +571,13 @@ async function logoutOperator() {
   }
 }
 
-async function dispatchAction(action, value) {
+async function dispatchAction(action, value, target = null) {
   if (action === "inspect-decision") return inspectDecision(value);
   if (action === "inspect-order") return inspectOrder(value);
   if (action === "inspect-fill") return inspectFill(value);
   if (action === "inspect-reconciliation") return inspectReconciliation(value);
   if (action === "resolve-stuck-order") return resolveStuckOrder(value);
-  if (action === "evaluate-strategy-profile") return evaluateStrategyProfile();
+  if (action === "evaluate-strategy-profile") return evaluateStrategyProfile(target);
   if (action === "accept-strategy-profile-now") return acceptStrategyProfileRecommendation(value, "manual_now");
   if (action === "stage-strategy-profile") return acceptStrategyProfileRecommendation(value, "stage_only");
   if (action === "reject-strategy-profile") return rejectStrategyProfileRecommendation(value);
@@ -393,11 +597,17 @@ async function dispatchAction(action, value) {
   if (action === "collapse-replay-validations") return resetPageLimit("replayValidations");
   if (action === "load-more-ai-assessments") return adjustPageLimit("recentAIAssessments", PAGE_LOAD_STEP);
   if (action === "collapse-ai-assessments") return resetPageLimit("recentAIAssessments");
+  if (action === "load-more-ai-takeovers") return adjustPageLimit("recentAITakeovers", PAGE_LOAD_STEP);
+  if (action === "collapse-ai-takeovers") return resetPageLimit("recentAITakeovers");
   if (action === "load-more-ai-shadow-decisions") return adjustPageLimit("recentAIShadowDecisions", PAGE_LOAD_STEP);
   if (action === "collapse-ai-shadow-decisions") return resetPageLimit("recentAIShadowDecisions");
   if (action === "load-more-ai-shadow-evaluations") return adjustPageLimit("recentAIShadowEvaluations", PAGE_LOAD_STEP);
   if (action === "collapse-ai-shadow-evaluations") return resetPageLimit("recentAIShadowEvaluations");
   if (action === "evaluate-ai-shadow") return evaluateAIShadow();
+  if (action === "approve-auto-rollback-policy") return approveAutoRollbackPolicy(value);
+  if (action === "toggle-freeze-auto-rollback-policy") return freezeAutoRollbackPolicy(value === "true");
+  if (action === "approve-activation-policy") return approveActivationPolicy(value);
+  if (action === "toggle-freeze-activation-policy") return freezeActivationPolicy(value === "true");
   if (action === "toggle-user") return toggleOperatorUser(value);
   if (action === "change-user-role") return updateOperatorUserRole(value);
   if (action === "reset-user-password") return resetOperatorPassword(value);
@@ -408,6 +618,41 @@ async function inspectDecision(decisionId) {
   if (!decisionId) return;
   try {
     const detail = await requestJson(`/decision/${encodeURIComponent(decisionId)}`);
+    const aiEconomic = detail.ai_economic_actionability || null;
+    const aiDecisionAudit = detail.ai_decision_audit || null;
+    const aiExecutionSuggestion = detail.ai_execution_suggestion || null;
+    const aiEconomicRows = aiEconomic
+      ? [
+          ["AI 经济可执行性", booleanWord(aiEconomic.economically_actionable), `最低净边际 ${formatNumber(aiEconomic.min_required_net_edge_bps ?? 0, 2)} 个基点`],
+          ["本轮评估边际", `${formatNumber(aiEconomic.estimated_edge_bps ?? 0, 2)} 个基点`, `成本 ${formatNumber(aiEconomic.estimated_cost_bps ?? 0, 2)} / 净边际 ${formatNumber(aiEconomic.estimated_net_edge_bps ?? 0, 2)} 个基点`],
+          ["目标边际估计", `${formatNumber(aiEconomic.target_expected_signal_edge_bps ?? 0, 2)} 个基点`, `成本 ${formatNumber(aiEconomic.target_expected_cost_bps ?? 0, 2)} / 净边际 ${formatNumber(aiEconomic.target_expected_net_edge_bps ?? 0, 2)} 个基点`],
+          ["总门槛", `${formatNumber(aiEconomic.required_total_edge_bps ?? 0, 2)} 个基点`, `噪声缓冲 ${formatNumber(aiEconomic.noise_buffer_bps ?? 0, 2)} / 最低净边际 ${formatNumber(aiEconomic.min_required_net_edge_bps ?? 0, 2)} 个基点`],
+          ["接管结果", booleanWord(aiEconomic.takeover_applied), drawerListText(aiEconomic.takeover_blockers, "当前没有额外接管阻断项")],
+          ["新鲜度与安全", `市场快照 ${booleanWord(aiEconomic.market_snapshot_fresh)} / 账户快照 ${booleanWord(aiEconomic.account_snapshot_fresh)}`, `允许交易 ${booleanWord(aiEconomic.safe_to_trade)} / ${drawerText(aiEconomic.execution_condition, "当前没有额外执行条件")}`],
+          ["近期执行健康", `手续费拖累 ${formatNumber(aiEconomic.recent_fee_drag_ratio ?? 0, 3)} / 来回交易 ${formatNumber(aiEconomic.recent_churn_ratio ?? 0, 3)}`, `低边际连续次数 ${formatNumber(aiEconomic.recent_low_edge_trade_streak ?? 0, 0)} / 活动委托 ${formatNumber(aiEconomic.current_open_order_count ?? 0, 0)}`],
+          ["校验标记", drawerListText(aiEconomic.validation_flags, "当前没有额外校验标记"), drawerListText(aiEconomic.rejection_flags, "当前没有额外拒绝标记")],
+        ]
+      : [];
+    const aiAuditRows = aiDecisionAudit
+      ? [
+          ["配置与评估模式", `${readableState(aiDecisionAudit.configured_mode || "unknown")} / ${readableState(aiDecisionAudit.assessment_operating_mode || "unknown")}`, drawerText(aiDecisionAudit.provider_name, "当前没有模型服务说明")],
+          ["方向链", `基础策略 ${readableState(aiDecisionAudit.baseline_direction || "unknown")} / AI ${readableState(aiDecisionAudit.ai_direction || "unknown")}`, `最终结论 ${readableState(aiDecisionAudit.final_direction || "unknown")}`],
+          ["接管尝试", aiDecisionAudit.takeover_attempted ? "已尝试" : "未尝试", `允许 ${booleanWord(aiDecisionAudit.takeover_allowed)} / 已应用 ${booleanWord(aiDecisionAudit.takeover_applied)}`],
+          ["阻断项", drawerListText(aiDecisionAudit.takeover_blockers, "当前没有接管阻断项"), drawerListText(aiDecisionAudit.guardrail_flags, "当前没有额外保护规则")],
+          ["新鲜度与安全", `市场快照 ${booleanWord(aiDecisionAudit.market_snapshot_fresh)} / 账户快照 ${booleanWord(aiDecisionAudit.account_snapshot_fresh)}`, `允许交易 ${booleanWord(aiDecisionAudit.safe_to_trade)} / ${drawerText(aiDecisionAudit.execution_condition, "当前没有额外执行条件")}`],
+          ["近期执行健康", `手续费拖累 ${formatNumber(aiDecisionAudit.recent_fee_drag_ratio ?? 0, 3)} / 来回交易 ${formatNumber(aiDecisionAudit.recent_churn_ratio ?? 0, 3)}`, `低边际连续次数 ${formatNumber(aiDecisionAudit.recent_low_edge_trade_streak ?? 0, 0)} / 活动委托 ${formatNumber(aiDecisionAudit.current_open_order_count ?? 0, 0)}`],
+        ]
+      : [];
+    const aiExecutionRows = aiExecutionSuggestion
+      ? [
+          ["建议模式", readableState(aiExecutionSuggestion.configured_mode || "disabled"), aiExecutionSuggestion.translation_present ? "已有翻译结果" : aiExecutionSuggestion.suggestion_present ? "已有建议结果" : "最近没有生成建议"],
+          ["翻译器状态", readableState(aiExecutionSuggestion.status || "absent"), aiExecutionSuggestion.latest_translation?.applied_to_live_execution ? "已进入真实执行" : "当前不会改写真实执行"],
+          ["实盘应用", booleanWord(aiExecutionSuggestion.latest_translation?.applied_to_live_execution), aiExecutionSuggestion.latest_translation?.applied_to_live_execution ? drawerListText(aiExecutionSuggestion.latest_translation?.applied_live_fields, "当前没有额外实盘字段") : drawerListText([aiExecutionSuggestion.latest_translation?.live_translation_fallback_reason], "当前没有进入实盘应用")],
+          ["建议姿态", drawerListText(Object.entries(aiExecutionSuggestion.assessment_suggestion?.suggestion || {}).filter(([, value]) => value !== null && value !== undefined).map(([key, value]) => `${key}=${value}`), "当前没有额外建议姿态"), drawerListText(aiExecutionSuggestion.latest_translation?.clipped_fields, "当前没有裁剪字段")],
+          ["翻译预览", drawerListText(Object.entries(aiExecutionSuggestion.latest_translation?.translation_preview || {}).filter(([, value]) => value !== null && value !== undefined).map(([key, value]) => `${key}=${value}`), "当前没有翻译预览"), drawerListText(aiExecutionSuggestion.latest_translation?.rejection_reasons, "当前没有拒绝原因")],
+          ["实盘字段", `订单类型=${drawerText(aiExecutionSuggestion.live_order_type, "待确认")} / 时效=${drawerText(aiExecutionSuggestion.live_time_in_force, "待确认")} / 限价=${formatNumber(aiExecutionSuggestion.live_limit_price ?? 0, 2)}`, drawerText(aiExecutionSuggestion.live_execution_style, "当前没有执行风格说明")],
+        ]
+      : [];
     openDrawer({
       eyebrow: "决策详情",
       title: detail.decision_id || "决策详情",
@@ -421,6 +666,24 @@ async function inspectDecision(decisionId) {
           title: "交易解释",
           content: `<div class="callout"><p>${escapeHtml(strategySummary(detail))}</p></div>`,
         }),
+        aiEconomic
+          ? surfaceCard({
+              title: "AI 经济可行动性",
+              content: kvList(aiEconomicRows),
+            })
+          : "",
+        aiDecisionAudit
+          ? surfaceCard({
+              title: "AI 决策审计链",
+              content: kvList(aiAuditRows),
+            })
+          : "",
+        aiExecutionSuggestion
+          ? surfaceCard({
+              title: "AI 受限执行建议",
+              content: kvList(aiExecutionRows),
+            })
+          : "",
         surfaceCard({
           title: "原始记录",
           content: rawJson(detail),
@@ -456,7 +719,7 @@ async function inspectOrder(orderId) {
           content: fills.length
             ? kvList(
                 fills.map((fill) => [
-                  fill.fill_id || "-",
+                  fill.fill_id || "成交编号待同步",
                   `${formatNumber(fill.fill_qty)} @ ${formatNumber(fill.fill_price)}`,
                   `${readableState(fill.side)} | 手续费 ${formatNumber(fill.fee_amount)} ${fill.fee_currency || ""}`,
                 ])
@@ -509,6 +772,8 @@ async function inspectReconciliation(reconciliationId) {
   try {
     const detail = await requestJson(`/reconciliation/${encodeURIComponent(reconciliationId)}`);
     const reconciliation = detail.reconciliation || {};
+    const billsSummary = detail.exchange_bills_summary || {};
+    const billsExplanations = Array.isArray(detail.exchange_bills_explanations) ? detail.exchange_bills_explanations : [];
     openDrawer({
       eyebrow: "对账详情",
       title: reconciliation.reconciliation_id || "对账详情",
@@ -519,9 +784,18 @@ async function inspectReconciliation(reconciliationId) {
           content: kvList([
             ["核对级别", readableState(reconciliation.severity), reconciliation.exchange_comparison_enabled ? "已比对交易所" : "仅校验本地记录"],
             ["是否要求停机", booleanWord(reconciliation.halt_required), booleanWord(reconciliation.review_required)],
-            ["差异原因", listOrDash(detail.mismatch_summary?.mismatch_reasons), listOrDash(detail.mismatch_summary?.mismatch_categories)],
-            ["建议动作", localizeError(detail.mismatch_summary?.recommended_operator_action || "-"), listOrDash(detail.mismatch_summary?.safety_impacts)],
+            ["差异原因", drawerListText(detail.mismatch_summary?.mismatch_reasons, "当前没有额外差异原因"), drawerListText(detail.mismatch_summary?.mismatch_categories, "当前没有额外差异分类")],
+            ["建议动作", detail.mismatch_summary?.recommended_operator_action ? localizeError(detail.mismatch_summary.recommended_operator_action) : "当前没有额外建议动作", drawerListText(detail.mismatch_summary?.safety_impacts, "当前没有额外安全影响说明")],
             ["核对时间", formatMaybeTimestamp(reconciliation.as_of_ts), formatRelativeAge(reconciliation.as_of_ts)],
+          ]),
+        }),
+        surfaceCard({
+          title: "账单解释链",
+          content: kvList([
+            ["最近账单数量", formatNumber(billsSummary.count || 0), drawerText(billsSummary.latest_bill_id, "当前还没有最新账单编号")],
+            ["涉及币种", drawerListText(billsSummary.currencies, "当前没有账单币种摘要"), "最近交易所侧账务变动范围"],
+            ["高频账务类别", renderReconciliationBillsCategories(billsSummary.top_categories), "已按类型、子类型和币种聚合"],
+            ["可能解释当前差异", renderReconciliationBillExplanations(billsExplanations), billsExplanations.length ? "这些账务事件更可能解释余额、仓位或执行偏差" : "当前没有明确的账单解释链"],
           ]),
         }),
         surfaceCard({
@@ -534,6 +808,36 @@ async function inspectReconciliation(reconciliationId) {
     state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
     renderBanners();
   }
+}
+
+function renderReconciliationBillsCategories(rows) {
+  if (!Array.isArray(rows) || rows.length === 0) return "当前没有账单分类";
+  return rows
+    .slice(0, 4)
+    .map((item) => `${item.human_label || `${item.type}/${item.sub_type}`}${item.count ? ` x${formatNumber(item.count)}` : ""}`)
+    .join(" | ");
+}
+
+function renderReconciliationBillExplanations(rows) {
+  if (!Array.isArray(rows) || rows.length === 0) return "当前没有账单解释";
+  return rows
+    .slice(0, 3)
+    .map((item) => `${item.title}: ${drawerListText(item.likely_explains, "当前没有额外解释")}`)
+    .join(" | ");
+}
+
+function drawerText(value, fallback = "待确认") {
+  if (value === null || value === undefined) return fallback;
+  const text = String(value).trim();
+  return text ? text : fallback;
+}
+
+function drawerListText(value, fallback = "当前没有额外说明") {
+  if (Array.isArray(value)) {
+    const filtered = value.map((item) => String(item ?? "").trim()).filter(Boolean);
+    return filtered.length ? filtered.join(" / ") : fallback;
+  }
+  return drawerText(value, fallback);
 }
 
 async function resolveStuckOrder(orderId) {
@@ -557,7 +861,27 @@ async function resetPageLimit(key) {
   await refreshDashboard();
 }
 
-async function evaluateStrategyProfile() {
+function setActionPending(target, pendingLabel) {
+  if (!(target instanceof HTMLElement)) return () => {};
+  const originalLabel = target.textContent || "";
+  target.classList.add("is-pending");
+  target.setAttribute("aria-busy", "true");
+  if ("disabled" in target) {
+    target.disabled = true;
+  }
+  target.textContent = pendingLabel;
+  return () => {
+    target.classList.remove("is-pending");
+    target.removeAttribute("aria-busy");
+    if ("disabled" in target) {
+      target.disabled = false;
+    }
+    target.textContent = originalLabel;
+  };
+}
+
+async function evaluateStrategyProfile(target = null) {
+  const clearPending = setActionPending(target, "正在评估并生成建议…");
   try {
     const result = await requestJson("/strategy-profiles/auto-tuning/evaluate-now", { method: "POST" });
     const profileId = result?.recommendation?.recommended_profile_id || "未知档位";
@@ -572,6 +896,8 @@ async function evaluateStrategyProfile() {
   } catch (error) {
     state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
     renderBanners();
+  } finally {
+    clearPending();
   }
 }
 
@@ -581,7 +907,7 @@ async function evaluateAIShadow() {
     const evaluation = result?.evaluation || {};
     state.flash = {
       tone: "info",
-      message: `已完成 shadow 收益回放。baseline 净收益 ${formatNumber(evaluation.baseline_net_pnl ?? 0)}，shadow 净收益 ${formatNumber(evaluation.shadow_net_pnl ?? 0)}。`,
+      message: `已完成影子收益回放。基础策略净收益 ${formatNumber(evaluation.baseline_net_pnl ?? 0)}，影子结果净收益 ${formatNumber(evaluation.shadow_net_pnl ?? 0)}。`,
     };
     await refreshDashboard({ manual: true });
   } catch (error) {
@@ -668,6 +994,136 @@ async function rollbackStrategyProfile() {
       tone: "warning",
       message: `策略档位已回滚到 ${result?.active_revision?.profile_label || result?.active_revision?.profile_id || "未知档位"}。`,
     };
+    await refreshDashboard({ manual: true });
+  } catch (error) {
+    state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
+    renderBanners();
+  }
+}
+
+function csvValues(elementId) {
+  const raw = document.getElementById(elementId)?.value || "";
+  return raw
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+async function stageAutoRollbackPolicy() {
+  try {
+    await requestJson("/strategy-profiles/auto-rollback-policy", {
+      method: "POST",
+      body: {
+        enabled: document.getElementById("autoRollbackEnabled")?.value === "true",
+        review_required_only: document.getElementById("autoRollbackReviewOnly")?.value !== "false",
+        min_trade_count: Number(document.getElementById("autoRollbackMinTrades")?.value || 0),
+        cooldown_seconds: Number(document.getElementById("autoRollbackCooldown")?.value || 0),
+        matrix_allowed_symbols: csvValues("autoRollbackSymbols"),
+        matrix_allowed_regimes: csvValues("autoRollbackRegimes"),
+        matrix_allowed_profiles: csvValues("autoRollbackProfiles"),
+        reason: document.getElementById("autoRollbackReason")?.value || "ui_stage_auto_rollback_policy",
+      },
+    });
+    state.flash = { tone: "info", message: "自动回滚策略已进入待审批状态。" };
+    await refreshDashboard({ manual: true });
+  } catch (error) {
+    state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
+    renderBanners();
+  }
+}
+
+async function approveAutoRollbackPolicy(policyId) {
+  if (!window.confirm("确认批准当前待审批的自动回滚策略并立即生效吗？")) return;
+  try {
+    await requestJson("/strategy-profiles/auto-rollback-policy/approve", {
+      method: "POST",
+      body: {
+        policy_id: policyId || null,
+        reason: "ui_approve_auto_rollback_policy",
+      },
+    });
+    state.flash = { tone: "info", message: "自动回滚策略已批准，并更新为当前生效版本。" };
+    await refreshDashboard({ manual: true });
+  } catch (error) {
+    state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
+    renderBanners();
+  }
+}
+
+async function freezeAutoRollbackPolicy(frozen) {
+  const confirmMessage = frozen ? "确认冻结当前自动回滚策略吗？" : "确认解除当前自动回滚策略的冻结吗？";
+  if (!window.confirm(confirmMessage)) return;
+  try {
+    await requestJson("/strategy-profiles/auto-rollback-policy/freeze", {
+      method: "POST",
+      body: {
+        frozen,
+        reason: frozen ? "ui_freeze_auto_rollback_policy" : "ui_unfreeze_auto_rollback_policy",
+      },
+    });
+    state.flash = { tone: "info", message: frozen ? "自动回滚策略已冻结。" : "自动回滚策略已解除冻结。" };
+    await refreshDashboard({ manual: true });
+  } catch (error) {
+    state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
+    renderBanners();
+  }
+}
+
+async function stageActivationPolicy() {
+  try {
+    await requestJson("/strategy-profiles/activation-policy", {
+      method: "POST",
+      body: {
+        enabled: document.getElementById("activationPolicyEnabled")?.value === "true",
+        min_composite_score: Number(document.getElementById("activationPolicyComposite")?.value || 0),
+        min_offline_replay_score: Number(document.getElementById("activationPolicyReplay")?.value || 0),
+        min_recommendation_strength: Number(document.getElementById("activationPolicyStrength")?.value || 0),
+        require_positive_replay_consensus: document.getElementById("activationPolicyReplayConsensus")?.value === "true",
+        disallow_when_shadow_review_required: document.getElementById("activationPolicyShadowReview")?.value === "true",
+        matrix_allowed_symbols: csvValues("activationPolicySymbols"),
+        matrix_allowed_regimes: csvValues("activationPolicyRegimes"),
+        matrix_allowed_profiles: csvValues("activationPolicyProfiles"),
+        reason: document.getElementById("activationPolicyReason")?.value || "ui_stage_activation_policy",
+      },
+    });
+    state.flash = { tone: "info", message: "激活策略已进入待审批状态。" };
+    await refreshDashboard({ manual: true });
+  } catch (error) {
+    state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
+    renderBanners();
+  }
+}
+
+async function approveActivationPolicy(policyId) {
+  if (!window.confirm("确认批准当前待审批的激活策略，并允许优胜档位进入独立激活链吗？")) return;
+  try {
+    await requestJson("/strategy-profiles/activation-policy/approve", {
+      method: "POST",
+      body: {
+        policy_id: policyId || null,
+        reason: "ui_approve_activation_policy",
+      },
+    });
+    state.flash = { tone: "info", message: "激活策略已批准，可用于独立的档位激活流程。" };
+    await refreshDashboard({ manual: true });
+  } catch (error) {
+    state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
+    renderBanners();
+  }
+}
+
+async function freezeActivationPolicy(frozen) {
+  const confirmMessage = frozen ? "确认冻结当前激活策略吗？" : "确认解除当前激活策略的冻结吗？";
+  if (!window.confirm(confirmMessage)) return;
+  try {
+    await requestJson("/strategy-profiles/activation-policy/freeze", {
+      method: "POST",
+      body: {
+        frozen,
+        reason: frozen ? "ui_freeze_activation_policy" : "ui_unfreeze_activation_policy",
+      },
+    });
+    state.flash = { tone: "info", message: frozen ? "激活策略已冻结。" : "激活策略已解除冻结。" };
     await refreshDashboard({ manual: true });
   } catch (error) {
     state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
@@ -771,6 +1227,199 @@ function operatorCanWrite() {
 
 function hasResolvedAuthContext() {
   return Object.prototype.hasOwnProperty.call(state.data, "authProviders") && Object.prototype.hasOwnProperty.call(state.data, "session");
+}
+
+function hasResolvedPanel(key) {
+  return Object.prototype.hasOwnProperty.call(state.data, key) || Object.prototype.hasOwnProperty.call(state.errors, key);
+}
+
+function hasReadyView(view) {
+  return Boolean(state.readyViews[view]);
+}
+
+function isBackgroundRefreshingView(view) {
+  return Boolean(view) && state.refreshing && !shouldRenderLoadingState(view) && hasReadyView(view) && state.activeView === view;
+}
+
+function isBootstrapping() {
+  return !state.lastRefreshAt && state.refreshing;
+}
+
+function shouldRenderLoadingState(view) {
+  if (!view) return false;
+  if (state.loadingView === view) return true;
+  return isBootstrapping() && !hasReadyView(view);
+}
+
+function renderLoadingView() {
+  const html = loadingMarkupForView(state.activeView);
+  if (state.activeView === "overview" && nodes.overviewContent) {
+    patchHtml(nodes.overviewContent, html);
+    return;
+  }
+  if (state.activeView === "home" && nodes.homeContent) {
+    patchHtml(nodes.homeContent, html);
+    return;
+  }
+  if (state.activeView === "strategy" && nodes.strategyContent) {
+    patchHtml(nodes.strategyContent, html);
+    return;
+  }
+  if (state.activeView === "execution" && nodes.executionContent) {
+    patchHtml(nodes.executionContent, html);
+    return;
+  }
+  if (state.activeView === "risk" && nodes.riskContent) {
+    patchHtml(nodes.riskContent, html);
+    return;
+  }
+  if (state.activeView === "ai" && nodes.aiContent) {
+    patchHtml(nodes.aiContent, html);
+    return;
+  }
+  if (state.activeView === "aiConfig" && nodes.aiConfigContent) {
+    patchHtml(nodes.aiConfigContent, html);
+    return;
+  }
+  if (state.activeView === "admin" && nodes.adminContent) {
+    patchHtml(nodes.adminContent, html);
+  }
+}
+
+function renderRefreshIndicators() {
+  const contentNodes = [
+    ["home", nodes.homeContent],
+    ["overview", nodes.overviewContent],
+    ["strategy", nodes.strategyContent],
+    ["execution", nodes.executionContent],
+    ["risk", nodes.riskContent],
+    ["ai", nodes.aiContent],
+    ["aiConfig", nodes.aiConfigContent],
+    ["admin", nodes.adminContent],
+  ];
+  contentNodes.forEach(([view, node]) => {
+    patchClassName(node, isBackgroundRefreshingView(view) ? "view-layout is-refreshing" : "view-layout");
+  });
+  if (nodes.statusRibbon) {
+    nodes.statusRibbon.classList.toggle("is-refreshing", isBackgroundRefreshingView("home") && !shouldRenderLoadingState("home"));
+  }
+}
+
+function loadingMarkupForView(view) {
+  if (view === "home" || view === "overview") {
+    return `
+      <div class="panel-grid skeleton-grid" aria-hidden="true">
+        <section class="primary-status-panel skeleton-surface skeleton-panel span-12">
+          <div class="skeleton-stack">
+            <span class="skeleton-line skeleton-line--kicker"></span>
+            <span class="skeleton-line skeleton-line--title"></span>
+            <span class="skeleton-line skeleton-line--headline"></span>
+            <span class="skeleton-line skeleton-line--body"></span>
+            <span class="skeleton-line skeleton-line--body-short"></span>
+          </div>
+          <div class="skeleton-inline">
+            ${Array.from({ length: 3 }, () => '<span class="skeleton-pill"></span>').join("")}
+          </div>
+          ${loadingTileGrid(4)}
+        </section>
+        <section class="surface-card skeleton-surface skeleton-card span-4">
+          <div class="skeleton-stack">
+            <span class="skeleton-line skeleton-line--kicker"></span>
+            <span class="skeleton-line skeleton-line--title"></span>
+            <span class="skeleton-line skeleton-line--body"></span>
+          </div>
+          ${loadingList(3)}
+        </section>
+        <section class="surface-card skeleton-surface skeleton-card span-4">
+          <div class="skeleton-stack">
+            <span class="skeleton-line skeleton-line--kicker"></span>
+            <span class="skeleton-line skeleton-line--title"></span>
+            <span class="skeleton-line skeleton-line--body-short"></span>
+          </div>
+          ${loadingTileGrid(4)}
+        </section>
+        <section class="surface-card skeleton-surface skeleton-card span-4">
+          <div class="skeleton-stack">
+            <span class="skeleton-line skeleton-line--kicker"></span>
+            <span class="skeleton-line skeleton-line--title"></span>
+            <span class="skeleton-line skeleton-line--body-short"></span>
+          </div>
+          ${loadingTileGrid(4)}
+        </section>
+      </div>
+    `;
+  }
+
+  if (view === "strategy" || view === "execution" || view === "risk" || view === "ai" || view === "aiConfig" || view === "admin") {
+    return `
+      <div class="panel-grid skeleton-grid" aria-hidden="true">
+        <section class="surface-card hero-card skeleton-surface skeleton-card span-7">
+          <div class="skeleton-stack">
+            <span class="skeleton-line skeleton-line--kicker"></span>
+            <span class="skeleton-line skeleton-line--title"></span>
+            <span class="skeleton-line skeleton-line--headline"></span>
+            <span class="skeleton-line skeleton-line--body"></span>
+          </div>
+          ${loadingTileGrid(4)}
+        </section>
+        <section class="surface-card skeleton-surface skeleton-card span-5">
+          <div class="skeleton-stack">
+            <span class="skeleton-line skeleton-line--kicker"></span>
+            <span class="skeleton-line skeleton-line--title"></span>
+            <span class="skeleton-line skeleton-line--body-short"></span>
+          </div>
+          ${loadingList(4)}
+        </section>
+        <section class="surface-card skeleton-surface skeleton-card span-12">
+          <div class="skeleton-stack">
+            <span class="skeleton-line skeleton-line--kicker"></span>
+            <span class="skeleton-line skeleton-line--title"></span>
+          </div>
+          ${loadingList(4)}
+        </section>
+      </div>
+    `;
+  }
+
+  return emptyState("正在刷新页面数据…");
+}
+
+function loadingTileGrid(count) {
+  return `
+    <div class="skeleton-tile-grid">
+      ${Array.from({ length: count }, () => `
+        <article class="skeleton-tile">
+          <span class="skeleton-tile__label"></span>
+          <span class="skeleton-line skeleton-tile__value"></span>
+          <span class="skeleton-line skeleton-tile__meta"></span>
+        </article>
+      `).join("")}
+    </div>
+  `;
+}
+
+function loadingList(count) {
+  return `
+    <div class="skeleton-list">
+      ${Array.from({ length: count }, () => `
+        <article class="skeleton-row">
+          <div class="skeleton-row__head">
+            <span class="skeleton-row__title"></span>
+            <span class="skeleton-row__badge"></span>
+          </div>
+          <span class="skeleton-row__value"></span>
+          <span class="skeleton-row__value is-short"></span>
+        </article>
+      `).join("")}
+    </div>
+  `;
+}
+
+function resolveViewFromLocation() {
+  const pathname = window.location.pathname.replace(/\/+$/, "") || "/ui";
+  if (pathname === "/" || pathname === "/ui" || pathname === "/ui/home") return "home";
+  const match = Object.entries(VIEW_ROUTES).find(([, route]) => route === pathname);
+  return match?.[0] || "home";
 }
 
 function shouldRedirectToLogin() {

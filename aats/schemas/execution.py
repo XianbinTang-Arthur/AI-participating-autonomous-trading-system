@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from decimal import Decimal
 from datetime import datetime
 from typing import Literal
 
@@ -31,18 +32,60 @@ ObligationStatus = Literal[
     "FAILED",
 ]
 
+ExecutionParameterSuggestionStatus = Literal["reserved_not_enabled", "diagnostic_only", "shadow_translation", "enabled"]
+ExecutionSuggestionMode = Literal["disabled", "diagnostic_only", "shadow_translation", "enabled_live"]
+
+
+class ExecutionParameterSuggestion(SchemaBase):
+    passive_bias: Decimal | None = None
+    maker_taker_bias: Decimal | None = None
+    max_cross_spread_bps: Decimal | None = None
+    slice_count: int | None = None
+    max_participation_rate: Decimal | None = None
+    cancel_replace_patience_ms: int | None = None
+
+
+class ExecutionParameterTranslationPreview(SchemaBase):
+    execution_style: str = "taker"
+    order_type: Literal["market", "limit"] = "market"
+    time_in_force: str = "IOC"
+    limit_offset_bps: Decimal | None = None
+    slice_count: int | None = None
+    max_participation_rate: Decimal | None = None
+    cancel_replace_patience_ms: int | None = None
+    passive_bias: Decimal | None = None
+    maker_taker_bias: Decimal | None = None
+
+
+class AIExecutionParameterSuggestionEnvelope(SchemaBase):
+    status: ExecutionParameterSuggestionStatus = "reserved_not_enabled"
+    diagnostic_only: bool = True
+    requested_mode: ExecutionSuggestionMode = "disabled"
+    suggestion: ExecutionParameterSuggestion = Field(default_factory=ExecutionParameterSuggestion)
+    translation_preview: ExecutionParameterTranslationPreview | None = None
+    accepted_by_execution_planner: bool = False
+    applied_to_live_execution: bool = False
+    applied_live_fields: list[str] = Field(default_factory=list)
+    clipped_fields: list[str] = Field(default_factory=list)
+    rejection_reasons: list[str] = Field(default_factory=lambda: ["execution_parameter_suggestions_not_enabled"])
+    notes: list[str] = Field(default_factory=list)
+    live_translation_reason: str | None = None
+    live_translation_fallback_reason: str | None = None
+
 
 class OrderIntent(SchemaBase):
     intent_id: str
     decision_id: str
     symbol: str
     side: Literal["buy", "sell"]
-    quantity: float
+    quantity: Decimal
     execution_style: str
     order_type: Literal["market", "limit"]
-    limit_price: float | None = None
+    limit_price: Decimal | None = None
+    reference_price: Decimal | None = None
     urgency: Literal["low", "medium", "high"]
     time_in_force: str
+    max_slippage_tolerance_bps: int | None = None
     reduce_only: bool = False
     close_only: bool = False
     idempotency_key: str
@@ -60,21 +103,25 @@ class OrderIntent(SchemaBase):
         "reverse_to_long",
         "reverse_to_short",
     ] = "open_long"
+    ai_execution_parameter_suggestion: AIExecutionParameterSuggestionEnvelope | None = None
 
 
 class ExecutionPlan(SchemaBase):
     plan_id: str
     decision_id: str
     symbol: str
-    current_position_qty: float
-    target_position_qty: float
-    approved_target_position_qty: float
-    delta_qty: float
+    current_position_qty: Decimal
+    target_position_qty: Decimal
+    approved_target_position_qty: Decimal
+    delta_qty: Decimal
     side: Literal["buy", "sell"]
     execution_style: str
     order_type: Literal["market", "limit"]
+    limit_price: Decimal | None = None
+    time_in_force: str = "IOC"
     urgency: Literal["low", "medium", "high"]
     max_slippage_tolerance_bps: int
+    reference_price: Decimal | None = None
     product_type: ProductType = "spot"
     target_leverage: float = 1.0
     margin_mode: MarginModelType = "cash"
@@ -89,6 +136,7 @@ class ExecutionPlan(SchemaBase):
         "reverse_to_long",
         "reverse_to_short",
     ] = "open_long"
+    ai_execution_parameter_suggestion: AIExecutionParameterSuggestionEnvelope | None = None
 
 
 class OrderState(SchemaBase):
@@ -107,11 +155,11 @@ class OrderState(SchemaBase):
     last_exchange_update_ts: datetime | None = None
     cancellation_requested_ts: datetime | None = None
     canceled_ts: datetime | None = None
-    requested_qty: float
-    filled_qty: float = 0.0
-    remaining_qty: float
-    average_fill_price: float | None = None
-    fees: float = 0.0
+    requested_qty: Decimal
+    filled_qty: Decimal = Decimal("0")
+    remaining_qty: Decimal
+    average_fill_price: Decimal | None = None
+    fees: Decimal = Decimal("0")
     product_type: ProductType = "spot"
     target_leverage: float = 1.0
     margin_mode: MarginModelType = "cash"
@@ -140,9 +188,9 @@ class FillEvent(SchemaBase):
     symbol: str
     venue: str = "PAPER"
     side: Literal["buy", "sell"]
-    fill_qty: float
-    fill_price: float
-    fee_amount: float
+    fill_qty: Decimal
+    fill_price: Decimal
+    fee_amount: Decimal
     fee_currency: str | None = None
     product_type: ProductType = "spot"
     target_leverage: float = 1.0
@@ -172,11 +220,12 @@ class OrderObligation(SchemaBase):
     symbol: str
     side: Literal["buy", "sell"]
     reserve_currency: str
-    reserved_amount: float
-    consumed_amount: float = 0.0
-    released_amount: float = 0.0
+    reserved_amount: Decimal
+    consumed_amount: Decimal = Decimal("0")
+    released_amount: Decimal = Decimal("0")
+    consumed_fill_ids: list[str] = Field(default_factory=list)
     status: ObligationStatus = "ACTIVE"
     product_type: ProductType = "spot"
     margin_mode: MarginModelType = "cash"
-    reference_price: float | None = None
+    reference_price: Decimal | None = None
     last_update_ts: datetime | None = None

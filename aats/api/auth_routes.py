@@ -79,6 +79,50 @@ class StrategyProfileRollbackRequest(BaseModel):
     reason: str = "rollback_strategy_profile"
 
 
+class StrategyProfileAutoRollbackPolicyUpdateRequest(BaseModel):
+    enabled: bool
+    review_required_only: bool = True
+    min_trade_count: int = 3
+    cooldown_seconds: float = 1800.0
+    matrix_allowed_symbols: tuple[str, ...] = ()
+    matrix_allowed_regimes: tuple[str, ...] = ()
+    matrix_allowed_profiles: tuple[str, ...] = ()
+    reason: str = "update_strategy_profile_auto_rollback_policy"
+
+
+class StrategyProfileAutoRollbackPolicyApproveRequest(BaseModel):
+    policy_id: str | None = None
+    reason: str = "approve_strategy_profile_auto_rollback_policy"
+
+
+class StrategyProfileAutoRollbackPolicyFreezeRequest(BaseModel):
+    frozen: bool = True
+    reason: str = "freeze_strategy_profile_auto_rollback_policy"
+
+
+class StrategyProfileActivationPolicyUpdateRequest(BaseModel):
+    enabled: bool
+    min_composite_score: float = 0.0
+    min_offline_replay_score: float = -10.0
+    min_recommendation_strength: float = 0.0
+    require_positive_replay_consensus: bool = False
+    disallow_when_shadow_review_required: bool = False
+    matrix_allowed_symbols: tuple[str, ...] = ()
+    matrix_allowed_regimes: tuple[str, ...] = ()
+    matrix_allowed_profiles: tuple[str, ...] = ()
+    reason: str = "update_strategy_profile_activation_policy"
+
+
+class StrategyProfileActivationPolicyApproveRequest(BaseModel):
+    policy_id: str | None = None
+    reason: str = "approve_strategy_profile_activation_policy"
+
+
+class StrategyProfileActivationPolicyFreezeRequest(BaseModel):
+    frozen: bool = True
+    reason: str = "freeze_strategy_profile_activation_policy"
+
+
 def _runtime(request: Request) -> ApplicationRuntime:
     return request.app.state.runtime
 
@@ -436,6 +480,172 @@ async def strategy_profile_evaluations(
 ) -> dict[str, Any]:
     _ = principal
     return _query(request).strategy_profile_evaluations(limit=limit, offset=offset)
+
+
+@auth_router.get("/strategy-profiles/optimization/reports")
+async def strategy_profile_optimization_reports(
+    request: Request,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0, le=5000),
+    principal: OperatorPrincipal = Depends(require_admin_access),
+) -> dict[str, Any]:
+    _ = principal
+    return _query(request).strategy_profile_optimization_reports(limit=limit, offset=offset)
+
+
+@auth_router.get("/strategy-profiles/selection-decisions")
+async def strategy_profile_selection_decisions(
+    request: Request,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0, le=5000),
+    principal: OperatorPrincipal = Depends(require_admin_access),
+) -> dict[str, Any]:
+    _ = principal
+    return _query(request).strategy_profile_selection_decisions(limit=limit, offset=offset)
+
+
+@auth_router.get("/strategy-profiles/auto-rollback-policy")
+async def strategy_profile_auto_rollback_policy(
+    request: Request,
+    principal: OperatorPrincipal = Depends(require_admin_access),
+) -> dict[str, Any]:
+    _ = principal
+    return _query(request).strategy_profile_auto_rollback_policy()
+
+
+@auth_router.get("/strategy-profiles/auto-rollback-policy/history")
+async def strategy_profile_auto_rollback_policy_history(
+    request: Request,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0, le=5000),
+    principal: OperatorPrincipal = Depends(require_admin_access),
+) -> dict[str, Any]:
+    _ = principal
+    return _query(request).strategy_profile_auto_rollback_policy_history(limit=limit, offset=offset)
+
+
+@auth_router.post("/strategy-profiles/auto-rollback-policy")
+async def update_strategy_profile_auto_rollback_policy(
+    request: Request,
+    payload: StrategyProfileAutoRollbackPolicyUpdateRequest,
+    principal: OperatorPrincipal = Depends(require_admin_access),
+) -> dict[str, Any]:
+    return _query(request).update_strategy_profile_auto_rollback_policy(
+        enabled=payload.enabled,
+        review_required_only=payload.review_required_only,
+        min_trade_count=payload.min_trade_count,
+        cooldown_seconds=payload.cooldown_seconds,
+        matrix_allowed_symbols=payload.matrix_allowed_symbols,
+        matrix_allowed_regimes=payload.matrix_allowed_regimes,
+        matrix_allowed_profiles=payload.matrix_allowed_profiles,
+        reason=payload.reason,
+        actor_role=principal.role,
+        actor_identity=principal.identity,
+        auth_source=principal.auth_source,
+    )
+
+
+@auth_router.post("/strategy-profiles/auto-rollback-policy/approve")
+async def approve_strategy_profile_auto_rollback_policy(
+    request: Request,
+    payload: StrategyProfileAutoRollbackPolicyApproveRequest,
+    principal: OperatorPrincipal = Depends(require_admin_access),
+) -> dict[str, Any]:
+    return _query(request).approve_strategy_profile_auto_rollback_policy(
+        policy_id=payload.policy_id,
+        reason=payload.reason,
+        actor_role=principal.role,
+        actor_identity=principal.identity,
+        auth_source=principal.auth_source,
+    )
+
+
+@auth_router.post("/strategy-profiles/auto-rollback-policy/freeze")
+async def freeze_strategy_profile_auto_rollback_policy(
+    request: Request,
+    payload: StrategyProfileAutoRollbackPolicyFreezeRequest,
+    principal: OperatorPrincipal = Depends(require_admin_access),
+) -> dict[str, Any]:
+    return _query(request).freeze_strategy_profile_auto_rollback_policy(
+        frozen=payload.frozen,
+        reason=payload.reason,
+        actor_role=principal.role,
+        actor_identity=principal.identity,
+        auth_source=principal.auth_source,
+    )
+
+
+@auth_router.get("/strategy-profiles/activation-policy")
+async def strategy_profile_activation_policy(
+    request: Request,
+    principal: OperatorPrincipal = Depends(require_admin_access),
+) -> dict[str, Any]:
+    _ = principal
+    return _query(request).strategy_profile_activation_policy()
+
+
+@auth_router.get("/strategy-profiles/activation-policy/history")
+async def strategy_profile_activation_policy_history(
+    request: Request,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0, le=5000),
+    principal: OperatorPrincipal = Depends(require_admin_access),
+) -> dict[str, Any]:
+    _ = principal
+    return _query(request).strategy_profile_activation_policy_history(limit=limit, offset=offset)
+
+
+@auth_router.post("/strategy-profiles/activation-policy")
+async def update_strategy_profile_activation_policy(
+    request: Request,
+    payload: StrategyProfileActivationPolicyUpdateRequest,
+    principal: OperatorPrincipal = Depends(require_admin_access),
+) -> dict[str, Any]:
+    return _query(request).update_strategy_profile_activation_policy(
+        enabled=payload.enabled,
+        min_composite_score=payload.min_composite_score,
+        min_offline_replay_score=payload.min_offline_replay_score,
+        min_recommendation_strength=payload.min_recommendation_strength,
+        require_positive_replay_consensus=payload.require_positive_replay_consensus,
+        disallow_when_shadow_review_required=payload.disallow_when_shadow_review_required,
+        matrix_allowed_symbols=payload.matrix_allowed_symbols,
+        matrix_allowed_regimes=payload.matrix_allowed_regimes,
+        matrix_allowed_profiles=payload.matrix_allowed_profiles,
+        reason=payload.reason,
+        actor_role=principal.role,
+        actor_identity=principal.identity,
+        auth_source=principal.auth_source,
+    )
+
+
+@auth_router.post("/strategy-profiles/activation-policy/approve")
+async def approve_strategy_profile_activation_policy(
+    request: Request,
+    payload: StrategyProfileActivationPolicyApproveRequest,
+    principal: OperatorPrincipal = Depends(require_admin_access),
+) -> dict[str, Any]:
+    return _query(request).approve_strategy_profile_activation_policy(
+        policy_id=payload.policy_id,
+        reason=payload.reason,
+        actor_role=principal.role,
+        actor_identity=principal.identity,
+        auth_source=principal.auth_source,
+    )
+
+
+@auth_router.post("/strategy-profiles/activation-policy/freeze")
+async def freeze_strategy_profile_activation_policy(
+    request: Request,
+    payload: StrategyProfileActivationPolicyFreezeRequest,
+    principal: OperatorPrincipal = Depends(require_admin_access),
+) -> dict[str, Any]:
+    return _query(request).freeze_strategy_profile_activation_policy(
+        frozen=payload.frozen,
+        reason=payload.reason,
+        actor_role=principal.role,
+        actor_identity=principal.identity,
+        auth_source=principal.auth_source,
+    )
 
 
 @auth_router.post("/strategy-profiles/auto-tuning/evaluate-now")

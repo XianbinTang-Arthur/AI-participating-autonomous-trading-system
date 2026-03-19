@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Callable
 from dataclasses import dataclass
 
@@ -10,7 +11,8 @@ from aats.events import topics
 from aats.events.envelopes import parse_envelope, publish_model
 from aats.schemas.execution import FillEvent, OrderState
 from aats.schemas.exchange import ExchangeAccountSnapshot
-from aats.schemas.portfolio import PortfolioSnapshot
+from aats.schemas.operator import ProcessingFailureRecord
+from aats.schemas.portfolio import PortfolioSnapshot, is_baseline_snapshot
 from aats.schemas.reconciliation import ReconciliationReport
 from aats.services.portfolio_service.positions import PortfolioState
 from aats.services.portfolio_service.reconstruction import PortfolioReconstructionService
@@ -36,7 +38,7 @@ class ReconciliationRepairService:
     portfolio_repo: PortfolioRepository | None = None
     execution_repo: ExecutionRepository | None = None
     reconstruction_service: PortfolioReconstructionService | None = None
-    price_provider: Callable[[str], float] | None = None
+    price_provider: Callable[[str], Decimal] | None = None
     runtime_scope: object | None = None
 
     def configure(
@@ -45,7 +47,7 @@ class ReconciliationRepairService:
         portfolio_repo: PortfolioRepository,
         execution_repo: ExecutionRepository,
         reconstruction_service: PortfolioReconstructionService,
-        price_provider: Callable[[str], float],
+        price_provider: Callable[[str], Decimal],
         runtime_scope,
     ) -> None:
         self.portfolio_repo = portfolio_repo
@@ -77,6 +79,7 @@ class ReconciliationRepairService:
         ).model_copy(
             update={
                 "decision_id": report.decision_id,
+                "snapshot_origin": "local_repair",
                 "product_type": self.runtime_scope.product_type,
                 "margin_mode": self.runtime_scope.margin_mode,
             }
@@ -102,7 +105,7 @@ class ReconciliationService:
         portfolio_repo: PortfolioRepository,
         event_store: EventStore,
         reconstruction_service: PortfolioReconstructionService,
-        price_provider: Callable[[str], float],
+        price_provider: Callable[[str], Decimal],
         bootstrap_portfolio_from_exchange: bool = False,
         recovery_policy: RecoveryPolicy | None = None,
         metrics: MetricsRegistry | None = None,
@@ -144,6 +147,64 @@ class ReconciliationService:
         )
         await self._persist_report(report)
 
+    async def repair_missing_portfolio_snapshot(
+        self,
+        *,
+        reason: str = "background_refresh",
+    ) -> PortfolioSnapshot | None:
+        fills = fills_for_scope(self.execution_repo, self.runtime_scope)
+        if not fills:
+            return None
+
+        latest_fill = max(fills, key=lambda item: (item.ingestion_timestamp, item.fill_id))
+        latest_snapshot = latest_snapshot_for_scope(self.portfolio_repo, self.runtime_scope)
+        if latest_snapshot is not None:
+            if (
+                latest_snapshot.source_fill_id == latest_fill.fill_id
+                and latest_snapshot.snapshot_ts >= latest_fill.ingestion_timestamp
+            ):
+                return None
+            newer_fills = [
+                fill
+                for fill in fills
+                if fill.ingestion_timestamp > latest_snapshot.snapshot_ts
+            ]
+            if not newer_fills and latest_snapshot.snapshot_ts >= latest_fill.ingestion_timestamp:
+                return None
+
+        repaired_snapshot = self._rebuild_snapshot_for_comparison(
+            stored_snapshot=latest_snapshot,
+            fills=fills,
+        ).model_copy(
+            update={
+                "decision_id": latest_fill.decision_id,
+                "source_intent_id": latest_fill.intent_id,
+                "source_fill_id": latest_fill.fill_id,
+                "snapshot_origin": "recovery_rebuild",
+                "product_type": self.runtime_scope.product_type,
+                "margin_mode": self.runtime_scope.margin_mode,
+            }
+        )
+        try:
+            self.portfolio_repo.save_snapshot(repaired_snapshot)
+            if self.metrics is not None:
+                self.metrics.increment("portfolio_snapshot_repairs")
+            await publish_model(
+                bus=self.bus,
+                topic=topics.PORTFOLIO_SNAPSHOTS,
+                key="portfolio",
+                payload_model=repaired_snapshot,
+                source_component="reconciliation_service",
+            )
+        except Exception as exc:
+            await self._emit_snapshot_repair_failure(
+                latest_fill=latest_fill,
+                stage="portfolio_snapshot_repair",
+                message=f"{reason}: {exc}",
+            )
+            raise
+        return repaired_snapshot
+
     async def validate_now(self, *, reason: str = "operator_validate") -> ReconciliationReport:
         latest_snapshot = latest_snapshot_for_scope(self.portfolio_repo, self.runtime_scope)
         latest_snapshot_event = latest_topic_event_for_scope(
@@ -164,6 +225,7 @@ class ReconciliationService:
                         if scoped_order_states
                         else None
                     ),
+                    "snapshot_origin": "manual_rebuild",
                     "product_type": self.runtime_scope.product_type,
                     "margin_mode": self.runtime_scope.margin_mode,
                 }
@@ -226,13 +288,21 @@ class ReconciliationService:
                 local_fills=fills,
             ),
             trusted_exchange_portfolio_baseline=trusted_exchange_portfolio_baseline,
+            exchange_bills_summary=self._exchange_bills_summary(),
         )
         return report
+
+    def _exchange_bills_summary(self) -> dict[str, object]:
+        summary_getter = getattr(getattr(self.fetcher, "account_service", None), "recent_bills_summary", None)
+        if not callable(summary_getter):
+            return {}
+        summary = summary_getter()
+        return summary if isinstance(summary, dict) else {}
 
     def _rebuild_snapshot_for_comparison(
         self,
         *,
-        stored_snapshot: PortfolioSnapshot,
+        stored_snapshot: PortfolioSnapshot | None,
         fills: list[FillEvent],
     ) -> PortfolioSnapshot:
         if not self.bootstrap_portfolio_from_exchange:
@@ -241,6 +311,7 @@ class ReconciliationService:
                 price_provider=self.price_provider,
             ).model_copy(
                 update={
+                    "snapshot_origin": "manual_rebuild",
                     "product_type": self.runtime_scope.product_type,
                     "margin_mode": self.runtime_scope.margin_mode,
                 }
@@ -253,6 +324,7 @@ class ReconciliationService:
                 price_provider=self.price_provider,
             ).model_copy(
                 update={
+                    "snapshot_origin": "manual_rebuild",
                     "product_type": self.runtime_scope.product_type,
                     "margin_mode": self.runtime_scope.margin_mode,
                 }
@@ -277,7 +349,7 @@ class ReconciliationService:
         candidates = [
             snapshot
             for snapshot in snapshots_for_scope(self.portfolio_repo, self.runtime_scope)
-            if snapshot.source_fill_id is None and snapshot.source_intent_id is None
+            if is_baseline_snapshot(snapshot)
         ]
         if not candidates:
             return None
@@ -333,24 +405,93 @@ class ReconciliationService:
         )
 
     async def _persist_report(self, report: ReconciliationReport) -> None:
-        self.reconciliation_repo.save_report(report)
-        repaired_snapshot: PortfolioSnapshot | None = None
-        if report.severity != "CLEAN":
-            if self.metrics is not None:
-                self.metrics.increment("reconciliation_mismatches")
-            repaired_snapshot = self.repair_service.repair(report)
-        await publish_model(
-            bus=self.bus,
-            topic=topics.RECONCILIATION_REPORTS,
-            key="portfolio",
-            payload_model=report,
-            source_component="reconciliation_service",
-        )
-        if repaired_snapshot is not None:
+        try:
+            self.reconciliation_repo.save_report(report)
+            repaired_snapshot: PortfolioSnapshot | None = None
+            if report.severity != "CLEAN":
+                if self.metrics is not None:
+                    self.metrics.increment("reconciliation_mismatches")
+                repaired_snapshot = self.repair_service.repair(report)
             await publish_model(
                 bus=self.bus,
-                topic=topics.PORTFOLIO_SNAPSHOTS,
+                topic=topics.RECONCILIATION_REPORTS,
                 key="portfolio",
-                payload_model=repaired_snapshot,
+                payload_model=report,
                 source_component="reconciliation_service",
             )
+            if repaired_snapshot is not None:
+                await publish_model(
+                    bus=self.bus,
+                    topic=topics.PORTFOLIO_SNAPSHOTS,
+                    key="portfolio",
+                    payload_model=repaired_snapshot,
+                    source_component="reconciliation_service",
+                )
+        except Exception as exc:
+            await self._emit_processing_failure(report=report, stage="reconciliation_persist", message=str(exc))
+            raise
+
+    async def _emit_processing_failure(
+        self,
+        *,
+        report: ReconciliationReport,
+        stage: str,
+        message: str,
+    ) -> None:
+        if self.metrics is not None:
+            self.metrics.increment("processing_failures")
+        try:
+            await publish_model(
+                bus=self.bus,
+                topic=topics.PROCESSING_FAILURES,
+                key="portfolio",
+                payload_model=ProcessingFailureRecord(
+                    subsystem="reconciliation_service",
+                    stage=stage,
+                    severity="error",
+                    message=message,
+                    decision_id=report.decision_id,
+                    reconciliation_id=report.reconciliation_id,
+                    product_type=report.product_type,
+                    margin_mode=report.margin_mode,
+                    retriable=True,
+                    observed_at=utc_now(),
+                ),
+                source_component="reconciliation_service",
+            )
+        except Exception:
+            pass
+
+    async def _emit_snapshot_repair_failure(
+        self,
+        *,
+        latest_fill: FillEvent,
+        stage: str,
+        message: str,
+    ) -> None:
+        if self.metrics is not None:
+            self.metrics.increment("processing_failures")
+        try:
+            await publish_model(
+                bus=self.bus,
+                topic=topics.PROCESSING_FAILURES,
+                key=latest_fill.symbol,
+                payload_model=ProcessingFailureRecord(
+                    subsystem="reconciliation_service",
+                    stage=stage,
+                    severity="error",
+                    message=message,
+                    decision_id=latest_fill.decision_id,
+                    intent_id=latest_fill.intent_id,
+                    order_id=latest_fill.client_order_id,
+                    fill_id=latest_fill.fill_id,
+                    symbol=latest_fill.symbol,
+                    product_type=latest_fill.product_type,
+                    margin_mode=latest_fill.margin_mode,
+                    retriable=True,
+                    observed_at=utc_now(),
+                ),
+                source_component="reconciliation_service",
+            )
+        except Exception:
+            pass

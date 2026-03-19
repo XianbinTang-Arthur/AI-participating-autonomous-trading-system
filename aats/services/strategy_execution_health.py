@@ -1,0 +1,278 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime
+from decimal import Decimal
+
+from aats.bootstrap.settings import AATSSettings
+from aats.schemas.execution import FillEvent
+from aats.schemas.portfolio import PortfolioSnapshot
+from aats.services.accounting import fill_fee_cost_in_quote, resolve_symbol_currencies
+from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, is_effectively_zero, to_decimal
+
+_SMALL_PNL_CHURN_MULTIPLIER = Decimal("1.25")
+_BPS_SCALE = Decimal("10000")
+
+
+@dataclass(frozen=True, slots=True)
+class ClosedTradeOutcome:
+    timestamp: datetime
+    fill_id: str
+    net_realized_pnl: Decimal
+    gross_realized_pnl: Decimal
+    fee_cost_quote: Decimal
+    close_notional: Decimal
+    net_edge_bps: Decimal
+    is_win: bool
+    is_small_churn: bool
+    is_low_edge: bool
+
+
+@dataclass(frozen=True, slots=True)
+class StrategyExecutionHealthSnapshot:
+    symbol: str
+    current_position_opened_at: datetime | None
+    last_position_closed_at: datetime | None
+    latest_fill_timestamp: datetime | None
+    recent_closed_trade_count: int
+    recent_win_rate: float
+    recent_fee_drag_ratio: float
+    recent_churn_ratio: float
+    recent_low_edge_trade_streak: int
+    recent_low_edge_trade_at: datetime | None
+    recent_gross_realized_pnl: Decimal
+    recent_net_realized_pnl: Decimal
+    recent_fee_total: Decimal
+
+    def active_guardrails(
+        self,
+        *,
+        settings: AATSSettings,
+        as_of: datetime,
+        current_position_qty: Decimal,
+    ) -> dict[str, object]:
+        flags: list[str] = []
+        cooldowns: dict[str, float] = {}
+
+        if (
+            not is_effectively_zero(current_position_qty)
+            and self.current_position_opened_at is not None
+            and settings.strategy_min_hold_seconds > 0
+        ):
+            held_for = max((as_of - self.current_position_opened_at).total_seconds(), 0.0)
+            remaining = max(settings.strategy_min_hold_seconds - held_for, 0.0)
+            if remaining > 0:
+                flags.append("min_hold_active")
+                cooldowns["min_hold_remaining_seconds"] = remaining
+
+        if self.last_position_closed_at is not None and settings.strategy_post_close_cooldown_seconds > 0:
+            since_close = max((as_of - self.last_position_closed_at).total_seconds(), 0.0)
+            remaining = max(settings.strategy_post_close_cooldown_seconds - since_close, 0.0)
+            if remaining > 0:
+                flags.append("post_close_cooldown_active")
+                cooldowns["post_close_cooldown_remaining_seconds"] = remaining
+
+        if (
+            self.recent_low_edge_trade_streak >= settings.strategy_low_edge_streak_limit > 0
+            and self.recent_low_edge_trade_at is not None
+            and settings.strategy_low_edge_cooldown_seconds > 0
+        ):
+            since_low_edge = max((as_of - self.recent_low_edge_trade_at).total_seconds(), 0.0)
+            remaining = max(settings.strategy_low_edge_cooldown_seconds - since_low_edge, 0.0)
+            if remaining > 0:
+                flags.append("low_edge_cooldown_active")
+                cooldowns["low_edge_cooldown_remaining_seconds"] = remaining
+
+        if self.recent_closed_trade_count >= settings.strategy_performance_guard_min_closed_trades:
+            if self.recent_fee_drag_ratio > settings.strategy_max_fee_drag_ratio:
+                flags.append("fee_drag_elevated")
+            if self.recent_churn_ratio > settings.strategy_max_churn_ratio:
+                flags.append("churn_elevated")
+
+        return {
+            "flags": flags,
+            "cooldowns": cooldowns,
+        }
+
+    def as_payload(
+        self,
+        *,
+        settings: AATSSettings,
+        as_of: datetime,
+        current_position_qty: Decimal,
+    ) -> dict[str, object]:
+        guardrails = self.active_guardrails(
+            settings=settings,
+            as_of=as_of,
+            current_position_qty=current_position_qty,
+        )
+        return {
+            "symbol": self.symbol,
+            "current_position_opened_at": self.current_position_opened_at,
+            "last_position_closed_at": self.last_position_closed_at,
+            "latest_fill_timestamp": self.latest_fill_timestamp,
+            "recent_closed_trade_count": self.recent_closed_trade_count,
+            "recent_win_rate": self.recent_win_rate,
+            "recent_fee_drag_ratio": self.recent_fee_drag_ratio,
+            "recent_churn_ratio": self.recent_churn_ratio,
+            "recent_low_edge_trade_streak": self.recent_low_edge_trade_streak,
+            "recent_low_edge_trade_at": self.recent_low_edge_trade_at,
+            "recent_gross_realized_pnl": float(self.recent_gross_realized_pnl),
+            "recent_net_realized_pnl": float(self.recent_net_realized_pnl),
+            "recent_fee_total": float(self.recent_fee_total),
+            "guardrail_flags": guardrails["flags"],
+            "cooldowns": guardrails["cooldowns"],
+        }
+
+
+def compute_strategy_execution_health(
+    *,
+    settings: AATSSettings,
+    symbol: str,
+    fills: list[FillEvent],
+    snapshots: list[PortfolioSnapshot],
+    current_position_qty: Decimal,
+) -> StrategyExecutionHealthSnapshot:
+    ordered_fills = sorted(
+        [fill for fill in fills if fill.symbol == symbol],
+        key=lambda item: (item.ingestion_timestamp, item.fill_id),
+    )
+    ordered_snapshots = sorted(snapshots, key=lambda item: item.snapshot_ts)
+    realized_delta_by_fill_id = _realized_delta_by_fill_id(ordered_snapshots)
+
+    current_position_opened_at, last_position_closed_at, outcomes = _walk_symbol_fills(
+        settings=settings,
+        fills=ordered_fills,
+        realized_delta_by_fill_id=realized_delta_by_fill_id,
+        current_position_qty=current_position_qty,
+    )
+
+    lookback = max(settings.strategy_health_lookback_trades, 1)
+    recent_outcomes = outcomes[-lookback:]
+    recent_fee_total = sum((item.fee_cost_quote for item in recent_outcomes), Decimal("0"))
+    recent_net_realized = sum((item.net_realized_pnl for item in recent_outcomes), Decimal("0"))
+    recent_gross_realized = sum((item.gross_realized_pnl for item in recent_outcomes), Decimal("0"))
+    recent_win_rate = (
+        float(sum(1 for item in recent_outcomes if item.is_win) / len(recent_outcomes))
+        if recent_outcomes
+        else 0.0
+    )
+    if recent_gross_realized > 0:
+        fee_drag_ratio = float(recent_fee_total / recent_gross_realized)
+    else:
+        fee_drag_ratio = 1.0 if recent_fee_total > 0 else 0.0
+    churn_ratio = (
+        float(sum(1 for item in recent_outcomes if item.is_small_churn) / len(recent_outcomes))
+        if recent_outcomes
+        else 0.0
+    )
+    low_edge_streak = 0
+    recent_low_edge_trade_at = None
+    for item in reversed(recent_outcomes):
+        if not item.is_low_edge:
+            break
+        low_edge_streak += 1
+        recent_low_edge_trade_at = item.timestamp
+
+    return StrategyExecutionHealthSnapshot(
+        symbol=symbol,
+        current_position_opened_at=current_position_opened_at,
+        last_position_closed_at=last_position_closed_at,
+        latest_fill_timestamp=ordered_fills[-1].ingestion_timestamp if ordered_fills else None,
+        recent_closed_trade_count=len(recent_outcomes),
+        recent_win_rate=recent_win_rate,
+        recent_fee_drag_ratio=fee_drag_ratio,
+        recent_churn_ratio=churn_ratio,
+        recent_low_edge_trade_streak=low_edge_streak,
+        recent_low_edge_trade_at=recent_low_edge_trade_at,
+        recent_gross_realized_pnl=recent_gross_realized,
+        recent_net_realized_pnl=recent_net_realized,
+        recent_fee_total=recent_fee_total,
+    )
+
+
+def _walk_symbol_fills(
+    *,
+    settings: AATSSettings,
+    fills: list[FillEvent],
+    realized_delta_by_fill_id: dict[str, Decimal],
+    current_position_qty: Decimal,
+) -> tuple[datetime | None, datetime | None, list[ClosedTradeOutcome]]:
+    position_qty = Decimal("0")
+    current_position_opened_at: datetime | None = None
+    last_position_closed_at: datetime | None = None
+    outcomes: list[ClosedTradeOutcome] = []
+
+    for fill in fills:
+        fill_qty = to_decimal(fill.fill_qty)
+        signed_qty = fill_qty if fill.side == "buy" else -fill_qty
+        previous_qty = position_qty
+        position_qty = previous_qty + signed_qty
+        close_qty = Decimal("0")
+        if not is_effectively_zero(previous_qty) and previous_qty * signed_qty < 0:
+            close_qty = min(abs(previous_qty), abs(signed_qty))
+
+        if is_effectively_zero(previous_qty) and not is_effectively_zero(position_qty):
+            current_position_opened_at = fill.ingestion_timestamp
+        elif not is_effectively_zero(previous_qty) and is_effectively_zero(position_qty):
+            last_position_closed_at = fill.ingestion_timestamp
+            current_position_opened_at = None
+        elif not is_effectively_zero(previous_qty) and previous_qty * position_qty < 0:
+            last_position_closed_at = fill.ingestion_timestamp
+            current_position_opened_at = fill.ingestion_timestamp
+
+        if close_qty <= EPSILON_DECIMAL_12:
+            continue
+        base_currency, quote_currency = resolve_symbol_currencies(fill.symbol)
+        fee_cost_quote = to_decimal(
+            fill_fee_cost_in_quote(
+                fill=fill,
+                base_currency=base_currency,
+                quote_currency=quote_currency,
+            )
+        )
+        close_fee_quote = fee_cost_quote
+        if fill_qty > EPSILON_DECIMAL_12 and close_qty < fill_qty:
+            close_fee_quote = fee_cost_quote * (close_qty / fill_qty)
+        net_realized_pnl = to_decimal(realized_delta_by_fill_id.get(fill.fill_id, Decimal("0")))
+        gross_realized_pnl = net_realized_pnl + close_fee_quote
+        close_notional = close_qty * to_decimal(fill.fill_price)
+        net_edge_bps = (
+            (net_realized_pnl / close_notional) * _BPS_SCALE
+            if close_notional > EPSILON_DECIMAL_12
+            else Decimal("0")
+        )
+        churn_cutoff = close_fee_quote * _SMALL_PNL_CHURN_MULTIPLIER
+        outcomes.append(
+            ClosedTradeOutcome(
+                timestamp=fill.ingestion_timestamp,
+                fill_id=fill.fill_id,
+                net_realized_pnl=net_realized_pnl,
+                gross_realized_pnl=gross_realized_pnl,
+                fee_cost_quote=close_fee_quote,
+                close_notional=close_notional,
+                net_edge_bps=net_edge_bps,
+                is_win=net_realized_pnl > 0,
+                is_small_churn=abs(net_realized_pnl) <= churn_cutoff if churn_cutoff > 0 else is_effectively_zero(net_realized_pnl),
+                is_low_edge=net_edge_bps <= Decimal(str(settings.strategy_low_edge_threshold_bps)),
+            )
+        )
+
+    if is_effectively_zero(current_position_qty):
+        current_position_opened_at = None
+    elif is_effectively_zero(position_qty) or (position_qty > 0) != (current_position_qty > 0):
+        current_position_opened_at = None
+    return current_position_opened_at, last_position_closed_at, outcomes
+
+
+def _realized_delta_by_fill_id(snapshots: list[PortfolioSnapshot]) -> dict[str, Decimal]:
+    rows: dict[str, Decimal] = {}
+    previous_realized = None
+    for snapshot in snapshots:
+        delta = Decimal("0")
+        if previous_realized is not None:
+            delta = to_decimal(snapshot.realized_pnl) - previous_realized
+        previous_realized = to_decimal(snapshot.realized_pnl)
+        if snapshot.source_fill_id:
+            rows[snapshot.source_fill_id] = delta
+    return rows

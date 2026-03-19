@@ -1,0 +1,477 @@
+Task24: 基于 Round 1 / Round 2 审计结果的生产整改任务书
+
+背景
+
+当前仓库已经具备可运行的本地化交易原型，但根据前两轮正式工程审计，系统距离“可进入真实资金或高信任生产环境”仍存在明显差距。
+
+当前最关键的问题不在于策略收益，而在于以下四类风险：
+
+1. 凭据、会话密钥与高危控制面存在明显安全暴露
+2. fill -> order -> portfolio -> reconciliation 链路在失败时可能出现状态分叉
+3. 资金预留、重复 fill、恢复与重放路径的幂等性边界不够扎实
+4. 交易系统关键不变量分散在多个模块中，缺少统一、可证明的一致性约束
+
+本任务的目标不是继续扩展交易能力，而是把当前审计发现收敛为一份按生产风险排序的整改任务书，供后续工程实施直接使用。
+
+重要约束
+
+- 先修生产安全问题，再谈功能扩展
+- 不引入不必要的新基础设施
+- 不扩大产品边界到未实现的提现、入金、内部转账等新域
+- 优先修复资金安全、状态一致性、权限边界、恢复可靠性
+- 所有整改都应能通过自动化验证，而不是依赖人工判断
+
+交付目标
+
+本轮整改完成后，至少应达到以下目标：
+
+- 仓库和部署环境中不再存在已提交的真实敏感凭据
+- fill、reservation、portfolio snapshot、reconciliation 不再轻易出现半成功状态
+- 重复 fill、重试、重放、恢复不再产生重复财务效果
+- 高危操作具备更严格的权限控制和审计留痕
+- 关键状态链路具备可观测性，能快速发现“事件到了但账没有落完”的问题
+
+任务分组与优先级
+
+本任务按三个实施层级推进：
+
+1. Must fix before production
+   这些问题不修，不应进入真实交易或高信任生产环境
+2. Should fix soon
+   这些问题短期内未必立刻出事故，但在波动、故障、恢复、人工介入时会快速放大
+3. Can defer
+   这些问题可以延后，但越晚处理，后续维护和继续加功能的成本越高
+
+==================================================
+一、Must Fix Before Production
+==================================================
+
+A. Immediate financial / security / state-integrity risks
+
+1. 移除已提交敏感凭据并完成全量轮换
+
+- 严重级别：Critical
+- 置信度：High
+- 影响文件：
+  - `.env`
+  - `.env.spot`
+  - `.env.derivatives`
+  - 相关 auth / config 加载逻辑
+- 为什么重要：
+  - 已提交的交易所凭据、数据库凭据、OpenAI key、session secret 会直接导致账户接管、伪造会话、审计链失信
+- 推荐动作：
+  - 立即撤销并轮换所有已暴露凭据
+  - 删除仓库中的真实值，改为 `.env.example`
+  - 将 secrets 全部迁移到部署环境变量或 secret manager
+  - 轮换 operator session secret 并使现有 session 失效
+- 实施规模：Small
+- 修复后验证：
+  - 仓库扫描不再发现真实密钥
+  - 旧 token/session 全部失效
+  - 新部署仅从受控环境注入 secrets
+
+2. 修复 fill 到 portfolio 快照之间的原子性缺失
+
+- 严重级别：Critical
+- 置信度：High
+- 影响文件：
+  - `aats/services/portfolio_service/positions.py`
+  - `aats/bootstrap/config.py`
+  - portfolio persistence 相关实现
+- 为什么重要：
+  - 当前 fill 处理会先修改内存 `PortfolioState`，再保存 snapshot
+  - 一旦 `save_snapshot` 失败，会出现“进程内状态已变、数据库状态未变”的分叉
+- 推荐动作：
+  - 将 `apply_fill + save_snapshot + downstream publish` 纳入统一事务性处理模型
+  - 或者改为“先持久化事件 / delta，再派生内存状态”
+  - 明确失败时的回滚或 fail-stop 语义
+- 实施规模：Large
+- 修复后验证：
+  - 故障注入测试中 `save_snapshot` 抛错时，内存状态与持久化状态保持一致
+  - 重启恢复后状态与运行中状态一致
+
+3. 修复 obligation 对重复 fill 的非幂等消费
+
+- 严重级别：High
+- 置信度：High
+- 影响文件：
+  - `aats/services/execution_engine/order_manager.py`
+  - `aats/services/execution_engine/obligations.py`
+  - `aats/storage/execution_repo.py`
+- 为什么重要：
+  - 当前路径里 obligation 会先 `consume_for_fill`，之后才由 repo 依据 `fill_id` 去重
+  - 这意味着重复 fill 会重复消耗预留资金，即使 fill 本身被拒绝持久化
+- 推荐动作：
+  - 让 obligation consumption 以 `fill_id` 为幂等键
+  - 调整执行顺序为“先确认 fill 新增成功，再应用 reservation side effect”
+  - 或将 fill 持久化与 obligation update 放入同一事务
+- 实施规模：Medium
+- 修复后验证：
+  - 增加重复 fill 回放测试
+  - 验证 `reserved / consumed / released` 在重复 fill 下不变化
+
+4. 在执行层强制落地滑点 / quote spend 上限
+
+- 严重级别：High
+- 置信度：High
+- 影响文件：
+  - `aats/services/execution_engine/planner.py`
+  - `aats/schemas/execution.py`
+  - `aats/services/execution_engine/okx_adapter.py`
+- 为什么重要：
+  - 当前策略层产生了 `max_slippage_tolerance_bps`，但没有被带到 `OrderIntent` 和实际执行层
+  - 市价单在波动时可能超出策略批准的价格或 quote 预算
+- 推荐动作：
+  - 将滑点约束下传到 `OrderIntent`
+  - 对现货买单引入 worst-case quote spend 校验
+  - 如果交易所无法原生保证，则改用 IOC/FOK limit 或显式 notional 控制
+- 实施规模：Medium
+- 修复后验证：
+  - 价格跳变测试下，系统会拒绝超预算执行
+  - 策略批准约束与执行结果一致
+
+5. 将 rebaseline / resume / resolve-stuck-submission 收紧到管理员权限
+
+- 严重级别：High
+- 置信度：Medium
+- 影响文件：
+  - `aats/api/auth.py`
+  - `aats/api/routes.py`
+  - `aats/services/operator/*`
+- 为什么重要：
+  - 这些动作会改变系统可信基线、恢复状态、订单终态
+  - 如果普通 operator 即可执行，容易把人工误操作升级为系统级状态污染
+- 推荐动作：
+  - 高危路径改用 `require_admin_access`
+  - 必要时增加双人审批或显式二次确认
+  - 所有高危操作必须落审计记录并写明理由
+- 实施规模：Small
+- 修复后验证：
+  - 权限矩阵测试覆盖 viewer / operator / admin
+  - 高危接口仅 admin 可用
+
+B. Concurrency / idempotency / recovery risks
+
+6. 让关键交易链路不再被非关键订阅者失败阻断
+
+- 严重级别：High
+- 置信度：High
+- 影响文件：
+  - `aats/bus/memory_bus.py`
+  - `aats/bootstrap/config.py`
+- 为什么重要：
+  - 当前 event bus 顺序 await 所有订阅者
+  - audit、AI、次级处理器抛错时，会阻断 portfolio、reconciliation 等关键处理链
+- 推荐动作：
+  - 将关键处理链与非关键处理链解耦
+  - 至少保证 audit / AI 等旁路失败时，不阻断 order / fill / portfolio / reconciliation 主链
+  - 对失败订阅者加入隔离、重试或异步补偿
+- 实施规模：Large
+- 修复后验证：
+  - 故障注入下，audit 或 AI handler 失败不会阻断主链
+  - fill 仍能稳定落到 portfolio snapshot 与 reconciliation
+
+7. 启动恢复时重新校验 stored snapshot 与 baseline + fills 重建结果
+
+- 严重级别：Medium
+- 置信度：Medium
+- 影响文件：
+  - `aats/services/execution_engine/recovery.py`
+  - `aats/services/reconciliation_service/repair.py`
+- 为什么重要：
+  - 当前 exchange bootstrap 模式下会跳过关键 reconstruction validation
+  - 这会让损坏的本地 snapshot 在启动后继续被信任
+- 推荐动作：
+  - 无论 bootstrap 模式如何，启动时都执行“导入基线 + fills”的重建校验
+  - 不一致则进入 halt / review-required
+- 实施规模：Medium
+- 修复后验证：
+  - 篡改 snapshot 后重启，系统必须检测异常并拒绝无条件恢复
+
+==================================================
+二、Should Fix Soon
+==================================================
+
+A. Immediate financial / security / state-integrity risks
+
+8. 显式标记 snapshot origin，避免 repair snapshot 被当成 trusted baseline
+
+- 严重级别：Medium
+- 置信度：High
+- 影响文件：
+  - `aats/services/reconciliation_service/repair.py`
+  - `aats/services/portfolio_service/*`
+  - portfolio snapshot schema / storage model
+- 为什么重要：
+  - 当前 baseline 候选快照是通过“没有 source_fill/source_intent”来推断
+  - local repair 生成的 snapshot 也可能满足这个条件，从而污染信任边界
+- 推荐动作：
+  - 为 snapshot 增加显式 `origin`
+  - 至少区分：
+    - `exchange_import`
+    - `operator_rebaseline`
+    - `local_repair`
+    - `fill_derived`
+  - bootstrap baseline 只允许从特定 origin 中选取
+- 实施规模：Medium
+- 修复后验证：
+  - 单元测试覆盖 baseline 选择逻辑
+  - repair snapshot 不再被识别为 trusted baseline
+
+9. 补齐 execution outbox 之外的部分持久化断裂面
+
+- 严重级别：High
+- 置信度：Medium
+- 影响文件：
+  - `aats/services/execution_engine/outbox.py`
+  - portfolio / audit / reconciliation 持久化链路
+- 为什么重要：
+  - 当前 order/fill 有 outbox，但 portfolio、audit、reconciliation 仍是链式分步写入
+  - 进程崩溃时仍可能出现半链路完成
+- 推荐动作：
+  - 为关键下游阶段设计 durable staged processing
+  - 增加可补齐、可重放、可幂等的异步恢复任务
+- 实施规模：Large
+- 修复后验证：
+  - 中途崩溃恢复测试通过
+  - 恢复任务能够补齐缺失步骤且不重复产生财务效果
+
+B. Concurrency / idempotency / recovery risks
+
+10. 明确单实例运行契约，或补充多实例互斥保护
+
+- 严重级别：Medium
+- 置信度：Medium
+- 影响文件：
+  - runtime bootstrap
+  - execution repo
+  - obligation / recovery 路径
+- 为什么重要：
+  - 当前代码大量默认“单进程、单 runtime”
+  - 一旦未来出现多实例共享数据库，重复处理、重复预留、重复恢复风险会显著上升
+- 推荐动作：
+  - 若当前只支持单实例，加入 leader lock 或启动时实例互斥保护
+  - 若准备支持多实例，则设计 DB-level ownership / lock 策略
+- 实施规模：Medium
+- 修复后验证：
+  - 双实例测试下不会出现重复处理或双重 reservation
+
+11. 收紧 stuck submission 人工处理前后的状态校验
+
+- 严重级别：Medium
+- 置信度：Medium
+- 影响文件：
+  - `aats/services/operator/query_service.py`
+  - `aats/api/routes.py`
+- 为什么重要：
+  - 这是直接修改订单终态的人工兜底操作
+  - 如果执行前后缺少 exchange proof、snapshot 上下文和更严格限制，容易误伤正常订单
+- 推荐动作：
+  - 增加执行前条件校验
+  - 要求记录 operator note、exchange 证据、当前 reconciliation 结果
+  - 将其纳入高危控制流
+- 实施规模：Small
+- 修复后验证：
+  - 集成测试覆盖误操作防护
+  - 不满足前置条件时接口明确拒绝
+
+C. Observability / auditability gaps
+
+12. 增加 fill -> snapshot -> reconciliation 的链路完整性健康检查
+
+- 严重级别：Medium
+- 置信度：High
+- 影响文件：
+  - metrics / health / operator diagnostics
+  - portfolio / reconciliation services
+- 为什么重要：
+  - 当前缺少“一个 fill 是否完整走完账务链”的系统级可观测性
+  - 出问题时只能靠人工翻日志和记录排查
+- 推荐动作：
+  - 增加链路指标：
+    - 未配对 fill 数
+    - 无 snapshot 对应的 fill 数
+    - 无 reconciliation 对应的 snapshot 数
+    - 关键链路延迟
+  - 将其暴露到 operator diagnostics 或 health endpoint
+- 实施规模：Medium
+- 修复后验证：
+  - 故障注入能触发指标异常和告警
+
+13. 为部分成功 / 部分失败的关键链路增加结构化失败事件
+
+- 严重级别：Medium
+- 置信度：Medium
+- 影响文件：
+  - portfolio service
+  - reconciliation service
+  - runtime background jobs
+- 为什么重要：
+  - 当前部分失败往往只表现为异常或 summary 文本，恢复和排障成本高
+- 推荐动作：
+  - 引入结构化 failure event，至少包含：
+    - stage
+    - decision_id
+    - order_id
+    - fill_id
+    - error
+    - retriable
+  - 作为恢复、告警、审计的标准输入
+- 实施规模：Small
+- 修复后验证：
+  - 失败场景测试能生成并消费 failure event
+
+D. Design / refactoring items
+
+14. 统一财务数值模型，减少 float / Decimal 混用
+
+- 严重级别：Medium
+- 置信度：High
+- 影响文件：
+  - `aats/schemas/*`
+  - `aats/services/governance_engine/risk.py`
+  - `aats/services/execution_engine/*`
+  - `aats/services/portfolio_service/*`
+  - `aats/storage/sqlalchemy_models.py`
+- 为什么重要：
+  - 不同模块采用 float 和 Decimal 混用，容易导致阈值漂移、对账误差、边界条件不一致
+- 推荐动作：
+  - 全链路统一到 Decimal 或最小单位整数
+  - 在 schema、DB、risk、accounting、adapter 层统一量化规则
+- 实施规模：Large
+- 修复后验证：
+  - 增加回放、精度、阈值回归测试
+  - 同一 fill 在不同模块计算结果保持一致
+
+15. 将资金预留、风险校验、组合账务抽象为统一 accounting boundary
+
+- 严重级别：Medium
+- 置信度：Medium
+- 影响文件：
+  - `aats/services/governance_engine/risk.py`
+  - `aats/services/execution_engine/obligations.py`
+  - `aats/services/portfolio_service/*`
+  - `aats/services/reconciliation_service/*`
+- 为什么重要：
+  - 当前关键财务不变量分散在多个模块里
+  - 局部修复容易造成另一处逻辑继续漂移
+- 推荐动作：
+  - 抽出统一 accounting / reservation interface
+  - 明确定义 reserve / fill / cancel / reject / replay / recover 的单一不变量模型
+- 实施规模：Large
+- 修复后验证：
+  - 用领域级测试覆盖完整资金生命周期
+
+==================================================
+三、Can Defer
+==================================================
+
+A. Observability / auditability gaps
+
+16. 增强 operator 取证视图与事故时间线
+
+- 严重级别：Low
+- 置信度：Medium
+- 影响文件：
+  - `aats/services/operator/query_service.py`
+  - `aats/api/static/*`
+- 为什么重要：
+  - 当前已有一定查询能力，但事故调查仍需在多个视图之间跳转
+- 推荐动作：
+  - 增加以 `decision_id / order_id / fill_id` 串联的统一取证视图
+  - 增加 baseline 切换、恢复动作、人工处置时间线
+- 实施规模：Medium
+- 修复后验证：
+  - UI / API 能单点串起 order -> fill -> snapshot -> reconciliation -> operator action
+
+B. Design / refactoring items
+
+17. 将 AI / audit 副作用从核心交易主链进一步旁路化
+
+- 严重级别：Low
+- 置信度：High
+- 影响文件：
+  - `aats/bootstrap/config.py`
+  - eventing / audit wiring
+- 为什么重要：
+  - 当前 AI、audit 与主交易链耦合较深，后续扩展容易再次引入阻断点
+- 推荐动作：
+  - 让 AI / audit 彻底成为旁路消费者
+  - 降低其对核心交易状态流的同步依赖
+- 实施规模：Large
+- 修复后验证：
+  - 压测和故障注入下，AI / audit 延迟不影响主链
+
+18. 清理当前名存实亡的 runtime profile 控制面
+
+- 严重级别：Low
+- 置信度：High
+- 影响文件：
+  - `aats/services/operator/runtime_profiles.py`
+  - 相关 API / UI 路由
+- 为什么重要：
+  - 当前存在看似可用但实际被禁用的控制面，容易误导运维和后续开发
+- 推荐动作：
+  - 明确删除、隐藏，或补齐 runtime profile 能力
+  - 让代码、文档、UI 对其状态保持一致
+- 实施规模：Small
+- 修复后验证：
+  - 文档、接口、UI 呈现完全一致，不再出现“显示可用但实际无效”
+
+==================================================
+四、建议实施顺序
+==================================================
+
+第 1 阶段：立即处理生产阻断项
+
+1. 移除已提交敏感凭据并完成全量轮换
+2. 修复 fill -> portfolio snapshot 原子性
+3. 修复 obligation 对重复 fill 的非幂等消费
+4. 在执行层强制落地滑点 / quote spend 上限
+5. 收紧高危 operator 权限
+6. 解耦关键主链与非关键订阅者失败
+7. 启动恢复时重新做 reconstruction validation
+
+第 2 阶段：修复恢复、重放、持久化断裂面
+
+8. 显式标记 snapshot origin
+9. 补齐 outbox 之外的关键持久化链路
+10. 明确单实例或多实例运行契约
+11. 收紧 stuck submission 人工处理不变量
+
+第 3 阶段：提升可观测性与结构稳定性
+
+12. 增加链路完整性健康检查
+13. 增加结构化 failure event
+14. 统一财务数值模型
+15. 建立统一 accounting boundary
+
+第 4 阶段：优化运营体验与长期结构
+
+16. 增强 operator 取证视图
+17. 旁路化 AI / audit 副作用
+18. 清理 runtime profile 控制面
+
+==================================================
+五、验收原则
+==================================================
+
+所有整改项完成后，验收不应只看“测试是否通过”，还应明确验证以下生产级不变量：
+
+1. 同一个 fill 不会产生两次资金效果
+2. 任何 fill 要么完整走完账务链，要么系统明确进入可恢复失败态
+3. 关键状态变化都可追踪、可解释、可重建
+4. 高危操作都具备正确权限、审计、结果回执
+5. 重启、恢复、重放不会默默接受错误快照或错误基线
+
+最终要求
+
+在本任务完成之前，不建议将当前系统用于真实资金交易。
+
+下一步实施时，应优先基于本任务创建具体 engineering tickets，并为每个 ticket 增加：
+
+- owner
+- target milestone
+- acceptance test
+- rollback plan
+- incident impact note

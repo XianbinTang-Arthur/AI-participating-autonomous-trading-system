@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal
 from typing import Literal
 
 from pydantic import Field
@@ -14,10 +15,10 @@ DirectionalBias = Literal["long", "short", "flat", "mixed"]
 
 class TimeframeFeatureSet(SchemaBase):
     timeframe: Literal["15m", "1h"]
-    open_price: float
-    high_price: float
-    low_price: float
-    close_price: float
+    open_price: Decimal
+    high_price: Decimal
+    low_price: Decimal
+    close_price: Decimal
     momentum_score: float
     trend_strength: float
     volatility_value: float

@@ -1,0 +1,232 @@
+Task26: AI Primary 主链加固与 Restricted Execution Suggestion 落地任务书
+
+背景
+
+当前系统已经具备：
+- AI 参与市场判断、接管 `baseline` 方向与目标仓位的能力
+- `ai_primary` 的降级、shadow、回放和 UI 基础观测
+- profile space 与 “仅允许已注册 profile” 的选择边界
+
+但系统仍缺少两类关键能力：
+
+1. `ai_primary` 主链还没有被加固成一个长期可运行、可审计、可回退的主策略链
+2. “AI 更深一层能力” 还停留在保留字段阶段，没有进入受限执行建议的诊断与 shadow 翻译阶段
+
+本任务不允许让 AI 直接生成自由订单或 child-order 序列。
+本任务的目标是把系统推进到这条边界：
+
+- AI 可以主导方向、目标仓位和风险姿态
+- AI 可以提出受限执行参数建议
+- 执行器只能以确定性方式翻译和裁剪这些建议
+- 默认只允许 `diagnostic_only` 和 `shadow_translation`
+- 不允许 AI 原始建议直接影响真实下单字段
+
+目标
+
+完成本任务后，系统应具备以下能力：
+
+1. 可以明确回答 `ai_primary` 当前是否真正主导主链，以及为什么主导或为什么被阻断
+2. 可以明确回答 AI 最近的接管表现、shadow 表现、降级原因、回退原因
+3. AI 可以输出受限执行建议，但这些建议必须经过确定性 translator
+4. translator 可以在 `diagnostic_only` 和 `shadow_translation` 模式下产生结构化结果并被后台/UI 查看
+5. 真正的 live execution 仍然只接受现有确定性执行计划，不直接接纳 AI suggestion
+
+重要原则
+
+- 不把 AI 直接推进到底层微观执行
+- 不允许 AI suggestion 绕过 risk / policy / accounting / execution guardrails
+- `shadow_translation` 只做审计和对照，不改变真实委托
+- 所有 AI execution suggestion 都必须有：
+  - 原始 suggestion
+  - translator 裁剪结果
+  - 拒绝原因或裁剪原因
+  - 是否被 live execution 接纳
+- UI 必须同步交付，不能只在后端 payload 中隐藏新能力
+
+分组与优先级
+
+==================================================
+一、Must Fix Before Enabling Deeper AI Capability
+==================================================
+
+BE-1. 建立 task26 范围内的 execution suggestion 模式开关
+
+- 影响模块
+  - `aats/bootstrap/settings.py`
+- 要求
+  - 增加 `ai_execution_suggestion_mode`
+  - 只允许：
+    - `disabled`
+    - `diagnostic_only`
+    - `shadow_translation`
+  - 增加 suggestion 白名单边界和裁剪上限配置
+- 验收
+  - 未配置时默认关闭
+  - 配置变更能反映在 runtime / overview / UI
+
+BE-2. 扩展 AI 输出契约，允许 AI 返回 restricted execution suggestion
+
+- 影响模块
+  - `aats/schemas/decision.py`
+  - `aats/services/ai_service/prompt_builder.py`
+  - `aats/services/ai_service/validator.py`
+  - `aats/services/ai_service/openai_provider.py`
+- 要求
+  - 在 AI 输出 schema 中加入可选 execution suggestion
+  - suggestion 只允许白名单字段
+  - validator 负责结构校验、范围裁剪、拒绝原因写回
+- 验收
+  - provider 输出 suggestion 时能进入 assessment
+  - suggestion 越界时不会穿透为 live order 字段
+
+BE-3. 把 `ai_primary` 主链加固成可审计的 takeover + outcome gate 链
+
+- 影响模块
+  - `aats/services/ai_service/inference.py`
+  - `aats/services/decision_engine/target_position.py`
+  - `aats/services/decision_engine/orchestrator.py`
+  - `aats/services/operator/query_service.py`
+- 要求
+  - 明确输出：
+    - configured mode
+    - effective mode
+    - provider ready
+    - outcome review required
+    - recent takeover attempted / allowed / applied
+    - recent fallback / invalid / timeout
+  - 输出 `ai_primary` 专项 blockers 和 degradation signals
+- 验收
+  - 后台和 UI 能明确回答 AI 为什么接管、为什么没接管、为什么回退
+
+BE-4. 实现 deterministic execution suggestion translator
+
+- 影响模块
+  - `aats/schemas/execution.py`
+  - `aats/services/execution_engine/planner.py`
+- 要求
+  - translator 只翻译白名单字段：
+    - `passive_bias`
+    - `maker_taker_bias`
+    - `max_cross_spread_bps`
+    - `slice_count`
+    - `max_participation_rate`
+    - `cancel_replace_patience_ms`
+  - 输出结构化 translation result：
+    - source suggestion
+    - effective mode
+    - translated preview
+    - clipped fields
+    - rejection reasons
+    - `applied_to_live_execution=false`
+  - 在 `diagnostic_only` 模式下只保留 suggestion 和拒绝/保留原因
+  - 在 `shadow_translation` 模式下生成 shadow translation preview
+- 验收
+  - translator 结果可被审计
+  - live `OrderIntent` 仍保持确定性执行字段，不被 AI suggestion 直接改写
+
+BE-5. 将 execution suggestion 诊断结果接入 decision / AI overview 查询
+
+- 影响模块
+  - `aats/services/operator/query_service.py`
+  - `aats/api/routes.py`
+- 要求
+  - 在 AI overview / latest / decision detail 中输出：
+    - execution suggestion mode
+    - latest suggestion
+    - latest translation
+    - translator accepted/rejected/clipped
+    - live execution accepted 标记
+- 验收
+  - 不看 raw JSON 也能判断当前 suggestion 只在诊断层还是已做 shadow translation
+
+==================================================
+二、Should Fix Soon
+==================================================
+
+FE-1. 新增 AI Execution Suggestion 可视化面板
+
+- 影响模块
+  - `aats/api/static/modules/views/ai-view.js`
+  - `aats/api/static/app.js`
+  - `aats/api/static/modules/store.js`
+- 要求
+  - 展示当前 execution suggestion mode
+  - 展示最新 AI suggestion
+  - 展示 translator 产物
+  - 展示 rejected / clipped 原因
+  - 明确显示“未接入 live execution”
+- 验收
+  - 值班人员可以一眼看出 suggestion 是否只用于诊断，还是已经生成 shadow translation
+
+FE-2. 在 decision 详情中展示 AI takeover + execution suggestion 联动解释
+
+- 影响模块
+  - decision detail 前端视图
+  - AI 视图或策略视图联动区域
+- 要求
+  - 清楚展示：
+    - AI assessment
+    - takeover blockers
+    - economic actionability
+    - execution suggestion
+    - translation result
+- 验收
+  - 单个 decision 可以串起来看完整 AI 主链
+
+FE-3. 在 AI 页面展示 outcome gate / rollback / degradation 说明
+
+- 影响模块
+  - `aats/api/static/modules/views/ai-view.js`
+- 要求
+  - UI 明确显示：
+    - 最近一次 degrade
+    - 最近一次 outcome review trigger
+    - 最近一次 auto downgrade
+    - 当前是否允许继续运行 `ai_primary`
+- 验收
+  - 前端不需要翻日志就能回答 AI 是否仍被允许主导
+
+==================================================
+三、Integration And Verification
+==================================================
+
+INT-1. API 联调
+
+- 验证
+  - `/ai/runtime`
+  - `/ai/overview`
+  - `/ai/latest`
+  - `/decision/{decision_id}`
+  返回的 suggestion / translation / takeover / degradation 字段一致
+
+INT-2. Planner 联调
+
+- 验证
+  - `diagnostic_only` 下 suggestion 被保留，但不影响 live intent
+  - `shadow_translation` 下有 preview，但 live intent 仍不改写执行字段
+
+INT-3. UI 联调
+
+- 验证
+  - AI 页面能展示 execution suggestion 模式与 translation 状态
+  - decision 详情能串起 takeover 与 execution suggestion
+
+INT-4. Fail-safe 验证
+
+- 验证
+  - AI suggestion 缺失、越界、非法时，系统不会写坏执行字段
+  - provider fallback / degraded 时，UI 与 API 状态一致
+
+建议实施顺序
+
+1. 写入设置与 schema
+2. 完成 validator 和 translator
+3. 接入 AI runtime / decision / overview 查询
+4. 补前端 AI 面板和 decision 联动展示
+5. 补单元测试、接口测试、UI 测试
+
+验收原则
+
+- 本任务完成后，系统允许“AI 给受限执行建议”，但不允许“AI 直接控制真实执行”
+- 若 suggestion 模式不是未来明确放权的实验环境，`applied_to_live_execution` 必须为 `false`
+- 任何越界 suggestion 都必须被裁剪或拒绝，并留下可读审计信息

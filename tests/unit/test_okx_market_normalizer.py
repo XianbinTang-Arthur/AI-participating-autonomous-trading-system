@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from decimal import Decimal
 
 from aats.services.market_gateway.okx_normalizer import OKXMarketSnapshotNormalizer
 
@@ -47,12 +48,12 @@ class TestOKXMarketSnapshotNormalizer(unittest.TestCase):
         snapshot = snapshots[0]
         self.assertEqual(snapshot.symbol, "BTC-USDT")
         self.assertEqual(snapshot.exchange, "OKX")
-        self.assertAlmostEqual(snapshot.best_bid, 67250.0)
-        self.assertAlmostEqual(snapshot.best_ask, 67250.2)
-        self.assertAlmostEqual(snapshot.last_price, 67250.1)
-        self.assertAlmostEqual(snapshot.volume_24h, 1234.5)
-        self.assertEqual(snapshot.kline_15m["close"], 67250.1)
-        self.assertEqual(snapshot.kline_1h["high"], 67400.0)
+        self.assertEqual(snapshot.best_bid, Decimal("67250.0"))
+        self.assertEqual(snapshot.best_ask, Decimal("67250.2"))
+        self.assertEqual(snapshot.last_price, Decimal("67250.1"))
+        self.assertEqual(snapshot.volume_24h, Decimal("1234.5"))
+        self.assertEqual(snapshot.kline_15m["close"], Decimal("67250.1"))
+        self.assertEqual(snapshot.kline_1h["high"], Decimal("67400.0"))
 
 
 if __name__ == "__main__":

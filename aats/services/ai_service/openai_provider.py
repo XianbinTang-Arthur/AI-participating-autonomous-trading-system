@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import hashlib
 import json
+import re
 from time import perf_counter
 
 import httpx
@@ -29,6 +31,7 @@ class OpenAIProvider:
             "Content-Type": "application/json",
         }
         strict_schema = self._strict_json_schema(response_schema)
+        self._assert_openai_compatible_schema(strict_schema)
         payload = {
             "model": self.settings.ai_model_name,
             "temperature": 0,
@@ -45,7 +48,7 @@ class OpenAIProvider:
             "text": {
                 "format": {
                     "type": "json_schema",
-                    "name": "ai_market_assessment",
+                    "name": self._schema_name(response_schema),
                     "strict": True,
                     "schema": strict_schema,
                 },
@@ -128,9 +131,26 @@ class OpenAIProvider:
         cls._normalize_schema_node(normalized)
         return normalized
 
+    @staticmethod
+    def _schema_name(schema: dict[str, object]) -> str:
+        raw_name = str(schema.get("title") or "json_schema")
+        normalized = re.sub(r"[^a-zA-Z0-9_-]+", "_", raw_name).strip("_")
+        canonical = json.dumps(schema, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
+        digest = hashlib.sha1(canonical.encode("utf-8")).hexdigest()[:10]
+        base = normalized[:48] or "json_schema"
+        return f"{base}_{digest}"
+
+    @classmethod
+    def _assert_openai_compatible_schema(cls, schema: dict[str, object]) -> None:
+        errors: list[str] = []
+        cls._collect_schema_errors(schema, path=(), errors=errors)
+        if errors:
+            raise AIProviderError("openai_schema_invalid:" + "; ".join(errors))
+
     @classmethod
     def _normalize_schema_node(cls, node: object) -> None:
         if isinstance(node, dict):
+            node.pop("default", None)
             properties = node.get("properties")
             if isinstance(properties, dict):
                 node["required"] = list(properties.keys())
@@ -167,3 +187,35 @@ class OpenAIProvider:
         elif isinstance(node, list):
             for item in node:
                 cls._normalize_schema_node(item)
+
+    @classmethod
+    def _collect_schema_errors(cls, node: object, *, path: tuple[str, ...], errors: list[str]) -> None:
+        if isinstance(node, dict):
+            properties = node.get("properties")
+            if isinstance(properties, dict):
+                required = node.get("required")
+                property_keys = list(properties.keys())
+                if not isinstance(required, list):
+                    errors.append(f"{'.'.join(path) or '<root>'}:required_missing")
+                else:
+                    missing = [key for key in property_keys if key not in required]
+                    extra = [key for key in required if key not in property_keys]
+                    if missing:
+                        errors.append(f"{'.'.join(path) or '<root>'}:required_missing_keys={','.join(missing)}")
+                    if extra:
+                        errors.append(f"{'.'.join(path) or '<root>'}:required_extra_keys={','.join(extra)}")
+                for key, child in properties.items():
+                    cls._collect_schema_errors(child, path=(*path, "properties", key), errors=errors)
+
+            for key in ("items", "additionalProperties", "contains", "if", "then", "else", "not"):
+                if key in node:
+                    cls._collect_schema_errors(node[key], path=(*path, key), errors=errors)
+
+            for key in ("allOf", "anyOf", "oneOf", "prefixItems"):
+                value = node.get(key)
+                if isinstance(value, list):
+                    for index, item in enumerate(value):
+                        cls._collect_schema_errors(item, path=(*path, f"{key}[{index}]"), errors=errors)
+        elif isinstance(node, list):
+            for index, item in enumerate(node):
+                cls._collect_schema_errors(item, path=(*path, f"[{index}]"), errors=errors)

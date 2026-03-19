@@ -10,19 +10,12 @@ from aats.api.auth import session_principal
 
 UI_DIR = Path(__file__).resolve().parent / "static"
 MODULES_DIR = UI_DIR / "modules"
-PAGE_FILES = {
-    "home": UI_DIR / "home.html",
-    "overview": UI_DIR / "dashboard.html",
-    "strategy": UI_DIR / "strategy.html",
-    "execution": UI_DIR / "execution.html",
-    "risk": UI_DIR / "risk.html",
-    "ai": UI_DIR / "ai.html",
-    "settings": UI_DIR / "settings.html",
-}
+DASHBOARD_SHELL = UI_DIR / "dashboard-shell.html"
 
 ui_router = APIRouter(include_in_schema=False)
 
-NO_STORE_HEADERS = {"Cache-Control": "no-store"}
+PAGE_NO_STORE_HEADERS = {"Cache-Control": "no-store"}
+STATIC_ASSET_HEADERS = {"Cache-Control": "public, max-age=120"}
 
 
 def _auth_enabled(request: Request) -> bool:
@@ -39,10 +32,9 @@ def _dashboard_allowed(request: Request) -> bool:
 def _serve_dashboard_page(request: Request, page_name: str) -> FileResponse | RedirectResponse:
     if not _dashboard_allowed(request):
         return RedirectResponse(url="/login", status_code=303)
-    page = PAGE_FILES.get(page_name)
-    if page is None:
+    if page_name not in {"home", "overview", "strategy", "execution", "risk", "ai", "ai-config", "settings"}:
         raise HTTPException(status_code=404, detail="ui_page_not_found")
-    return FileResponse(page, media_type="text/html; charset=utf-8", headers=NO_STORE_HEADERS)
+    return FileResponse(DASHBOARD_SHELL, media_type="text/html; charset=utf-8", headers=PAGE_NO_STORE_HEADERS)
 
 
 @ui_router.get("/")
@@ -81,6 +73,11 @@ async def ai_index(request: Request):
     return _serve_dashboard_page(request, "ai")
 
 
+@ui_router.get("/ui/ai-config")
+async def ai_config_index(request: Request):
+    return _serve_dashboard_page(request, "ai-config")
+
+
 @ui_router.get("/ui/settings")
 async def settings_index(request: Request):
     return _serve_dashboard_page(request, "settings")
@@ -90,22 +87,22 @@ async def settings_index(request: Request):
 async def login_index(request: Request):
     if _dashboard_allowed(request):
         return RedirectResponse(url="/ui", status_code=303)
-    return FileResponse(UI_DIR / "login.html", media_type="text/html; charset=utf-8", headers=NO_STORE_HEADERS)
+    return FileResponse(UI_DIR / "login.html", media_type="text/html; charset=utf-8", headers=PAGE_NO_STORE_HEADERS)
 
 
 @ui_router.get("/ui/app.css")
 async def dashboard_css() -> FileResponse:
-    return FileResponse(UI_DIR / "app.css", media_type="text/css; charset=utf-8", headers=NO_STORE_HEADERS)
+    return FileResponse(UI_DIR / "app.css", media_type="text/css; charset=utf-8", headers=STATIC_ASSET_HEADERS)
 
 
 @ui_router.get("/ui/app.js")
 async def dashboard_js() -> FileResponse:
-    return FileResponse(UI_DIR / "app.js", media_type="application/javascript; charset=utf-8", headers=NO_STORE_HEADERS)
+    return FileResponse(UI_DIR / "app.js", media_type="application/javascript; charset=utf-8", headers=STATIC_ASSET_HEADERS)
 
 
 @ui_router.get("/ui/login.js")
 async def login_js() -> FileResponse:
-    return FileResponse(UI_DIR / "login.js", media_type="application/javascript; charset=utf-8", headers=NO_STORE_HEADERS)
+    return FileResponse(UI_DIR / "login.js", media_type="application/javascript; charset=utf-8", headers=STATIC_ASSET_HEADERS)
 
 
 @ui_router.get("/ui/modules/{module_path:path}")
@@ -113,4 +110,4 @@ async def dashboard_module(module_path: str) -> FileResponse:
     resolved = (MODULES_DIR / module_path).resolve()
     if MODULES_DIR.resolve() not in resolved.parents or not resolved.is_file():
         raise HTTPException(status_code=404, detail="ui_module_not_found")
-    return FileResponse(resolved, media_type="application/javascript; charset=utf-8", headers=NO_STORE_HEADERS)
+    return FileResponse(resolved, media_type="application/javascript; charset=utf-8", headers=STATIC_ASSET_HEADERS)

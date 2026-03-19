@@ -1,4 +1,6 @@
-﻿const nodes = {
+import { requestJson } from "./modules/api-client.js";
+
+const nodes = {
   form: document.getElementById("loginForm"),
   username: document.getElementById("loginUsername"),
   password: document.getElementById("loginPassword"),
@@ -22,7 +24,7 @@ async function renderProviders() {
     updateLoginAvailability(payload);
   } catch (error) {
     updateLoginAvailability({ auth_enabled: false, session_enabled: false });
-    setMessage(error.message || "登录能力检查失败。", "danger");
+    setMessage(localizeLoginError(error.message || "登录能力检查失败。"), "danger");
   }
 }
 
@@ -40,7 +42,7 @@ async function login() {
     });
     window.location.assign("/ui");
   } catch (error) {
-    setMessage(error.message || "登录失败，请检查账号、密码和权限。", "danger");
+    setMessage(localizeLoginError(error.message || "登录失败，请检查账号、密码和权限。"), "danger");
     nodes.button.disabled = false;
     nodes.button.textContent = "登录";
   }
@@ -55,41 +57,13 @@ function updateLoginAvailability(payload) {
 
   if (!payload.auth_enabled) {
     setMessage("当前环境没有启用登录认证。本地开发模式下可直接访问 /ui。", "info");
-  } else if (!payload.session_enabled) {
+    return;
+  }
+  if (!payload.session_enabled) {
     setMessage("当前没有启用浏览器会话登录，请先补齐 operator session 配置。", "warning");
-  } else {
-    setMessage("请输入账号和密码后继续。", "info");
+    return;
   }
-}
-
-async function requestJson(path, options = {}) {
-  const headers = new Headers(options.headers || {});
-  if (options.body !== undefined) {
-    headers.set("Content-Type", "application/json");
-  }
-  const response = await fetch(path, {
-    method: options.method || "GET",
-    headers,
-    body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
-  });
-  const text = await response.text();
-  const payload = text ? safeJsonParse(text) : null;
-  if (!response.ok) {
-    const detail =
-      typeof payload === "object" && payload !== null && "detail" in payload
-        ? payload.detail
-        : text || response.statusText;
-    throw new Error(localizeLoginError(typeof detail === "string" ? detail : JSON.stringify(detail)));
-  }
-  return payload;
-}
-
-function safeJsonParse(text) {
-  try {
-    return JSON.parse(text);
-  } catch {
-    return text;
-  }
+  setMessage("请输入账号和密码后继续。", "info");
 }
 
 function setMessage(message, tone) {

@@ -550,7 +550,7 @@ aats/api/static/
 
 你正在重构一个加密交易系统的 operator UI。当前系统已有可运行的静态前端页面，位于：
 
-- `aats/api/static/dashboard.html`
+- `aats/api/static/dashboard-shell.html`
 - `aats/api/static/app.css`
 - `aats/api/static/app.js`
 - `aats/api/static/login.html`

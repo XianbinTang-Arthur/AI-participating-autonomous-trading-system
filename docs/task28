@@ -1,0 +1,146 @@
+Task28: OKX 交易语义吸收改造
+
+背景
+
+前两轮 OKX 知识吸收结论已经明确：
+- `ai_primary` 想长期稳定运行，不能只依赖本地策略、风控和账户快照
+- 系统必须吸收 OKX 的真实交易语义，包括账户模式、持仓模式、杠杆作用域、最大可下单量、动态手续费、交易所状态、账务回补和 WebSocket 确认语义
+
+本任务按三层推进：
+1. 必须进入 `ai_primary` 前置能力
+2. 应进入恢复 / 对账能力
+3. 可作为未来扩展能力
+
+本轮实现范围
+
+本轮代码实现只覆盖第一层里最直接、改动面可控的 Phase 1：
+- OKX 账户配置漂移检测
+- OKX 动态手续费抓取与运行态暴露
+- OKX 最大可下单量 preflight
+- OKX 系统状态 gate
+
+`balance and position` 私有 WebSocket、Bills 对账链、资金账户编排、spread trading、期权 MMP 等内容保留在后续阶段，不在本轮混入。
+
+==================================================
+一、Must Fix Before AI-Primary Rollout
+==================================================
+
+BE-1. OKX REST 客户端补齐 Phase 1 前置接口
+
+- 影响模块
+  - `aats/services/execution_engine/okx_rest.py`
+- 目标
+  - 增加：
+    - `get_trade_fee`
+    - `get_max_order_quantity`
+    - `get_account_position_risk`
+    - `get_system_status`
+- 验收
+  - 运行时无需新增外部 SDK，即可拉取 Phase 1 所需 OKX 前置数据
+
+BE-2. 账户服务吸收账户配置 / 动态手续费 / 风险快照 / 系统状态
+
+- 影响模块
+  - `aats/services/execution_engine/okx_account.py`
+  - `aats/schemas/exchange.py`
+- 目标
+  - 在 `ExchangeAccountSnapshot` 中记录：
+    - `account_mode`
+    - `position_mode`
+    - `fee_rates`
+    - `account_risk`
+    - `system_status`
+  - `status()` 中显式暴露：
+    - account config drift
+    - system status incident
+    - fee rate availability
+- 验收
+  - operator / health 侧能直接看出 OKX 账户是否与系统预期一致
+
+BE-3. 启动与运行时的账户配置漂移检测
+
+- 影响模块
+  - `aats/services/execution_engine/okx_account.py`
+  - `aats/services/execution_engine/okx_adapter.py`
+- 目标
+  - 至少识别以下风险：
+    - derivatives 运行在明显不兼容的账户模式
+    - position mode 缺失
+    - system status 存在进行中的交易相关事件
+  - 配置漂移时，不允许真实提交
+- 验收
+  - `account_status.ready == false`
+  - `submit_blocked_reasons` 能体现明确 blocker
+
+BE-4. 下单前增加最大可下单量 preflight
+
+- 影响模块
+  - `aats/services/execution_engine/okx_adapter.py`
+- 目标
+  - 在真实 OKX 提交前调用 `max-size`
+  - 若请求数量超出交易所当前允许值，则阻断提交
+  - 若 preflight 失败，则返回结构化 blocker
+- 验收
+  - 不再仅靠交易所下单拒绝才发现超量
+
+BE-5. 动态手续费进入运行态可见性
+
+- 影响模块
+  - `aats/services/execution_engine/okx_account.py`
+  - `aats/services/execution_engine/okx_adapter.py`
+  - `aats/services/operator/query_service.py`
+- 目标
+  - 暴露 maker / taker fee 是否已拉取
+  - 暴露当前默认 taker fee bps 来源：
+    - settings fallback
+    - okx account fee rates
+- 验收
+  - 后台可直接看到当前交易成本基线是否来自交易所实时费率
+
+==================================================
+二、Should Fix Soon
+==================================================
+
+BE-6. `balance and position` WebSocket 进入主状态源
+- 目标
+  - 账户状态新鲜度由私有 WS 主导，REST 退居快照/恢复
+
+BE-7. 订单确认语义切到 WS 订单频道为准
+- 目标
+  - REST 成功仅视为已接收，终态以订单频道状态流为准
+
+BE-8. 交易限流调度
+- 目标
+  - 按 instId / instFamily 分桶
+  - REST / WS 共享限流预算
+
+==================================================
+三、Recovery / Reconciliation
+==================================================
+
+RC-1. Bills 进入对账链
+RC-2. `account-position-risk` 进入恢复基线
+RC-3. 按 OKX 语义实现分页回补
+RC-4. position history 进入事件后审计
+RC-5. funding account 进入账户边界视图
+
+==================================================
+四、Future Extensions
+==================================================
+
+FE-1. 借币利息 / 融资成本进入经济模型
+FE-2. 账户配置自动治理
+FE-3. 期权能力边界：activate option / Greeks / MMP
+FE-4. spread trading 独立策略域
+FE-5. auto earn / 资产编排
+
+==================================================
+五、本轮验收原则
+==================================================
+
+- 不修改现有交易策略逻辑的核心判断链
+- 优先补 OKX 前置能力和结构化 blocker
+- 所有新增 blocker 必须：
+  - 能在 `account_status` 或 `execution readiness` 中直接看到
+  - 能被测试覆盖
+- 不把未来阶段的大规模私有 WS、Bills、资金账户改造强行混进本轮

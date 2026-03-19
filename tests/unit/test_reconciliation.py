@@ -1139,6 +1139,131 @@ class TestReconciliationComparator(unittest.TestCase):
         self.assertIn("external_manual_activity_detected", report.mismatch_categories)
         self.assertEqual(report.recommended_operator_action, "review_and_rebaseline_if_expected")
 
+    def test_compare_uses_bills_summary_as_auxiliary_reconciliation_evidence(self) -> None:
+        comparator = StateComparator()
+        now = utc_now()
+        report = comparator.compare(
+            decision_id="decision_manual_bills",
+            portfolio_snapshot_ref="evt_portfolio_manual_bills",
+            order_states=[
+                OrderState(
+                    decision_id="decision_manual_bills",
+                    intent_id="intent_manual_bills",
+                    symbol="BTC-USDT",
+                    client_order_id="clord_manual_bills",
+                    venue="OKX",
+                    exchange_order_id="ord_manual_bills",
+                    status="FILLED",
+                    exchange_status="filled",
+                    submitted_ts=now,
+                    last_update_ts=now,
+                    last_exchange_update_ts=now,
+                    requested_qty=0.001,
+                    filled_qty=0.001,
+                    remaining_qty=0.0,
+                    average_fill_price=100.0,
+                    fees=0.1,
+                )
+            ],
+            fills=[
+                FillEvent(
+                    fill_id="local_fill_bills_1",
+                    decision_id="decision_manual_bills",
+                    intent_id="intent_manual_bills",
+                    client_order_id="clord_manual_bills",
+                    exchange_order_id="ord_manual_bills",
+                    symbol="BTC-USDT",
+                    venue="OKX",
+                    side="buy",
+                    fill_qty=0.001,
+                    fill_price=100.0,
+                    fee_amount=0.1,
+                    liquidity_role="taker",
+                    exchange_timestamp=now,
+                    ingestion_timestamp=now,
+                )
+            ],
+            stored_snapshot=PortfolioSnapshot(
+                snapshot_ts=now,
+                balances={"USDT": 900.0, "BTC": 0.001},
+                positions=[],
+                cost_basis={},
+                realized_pnl=0.0,
+                unrealized_pnl=0.0,
+                total_equity=900.0,
+                gross_exposure=0.0,
+                net_exposure=0.0,
+                risk_budget_usage={},
+            ),
+            reconstructed_snapshot=PortfolioSnapshot(
+                snapshot_ts=now,
+                balances={"USDT": 900.0, "BTC": 0.001},
+                positions=[],
+                cost_basis={},
+                realized_pnl=0.0,
+                unrealized_pnl=0.0,
+                total_equity=900.0,
+                gross_exposure=0.0,
+                net_exposure=0.0,
+                risk_budget_usage={},
+            ),
+            exchange_snapshot=ExchangeAccountSnapshot(
+                account_source="okx",
+                fetched_at=now,
+                balances=[
+                    ExchangeBalance(currency="USDT", total=850.0, available=850.0, frozen=0.0),
+                    ExchangeBalance(currency="BTC", total=0.002, available=0.002, frozen=0.0),
+                ],
+                positions=[],
+                open_orders=[],
+                fills=[
+                    ExchangeFill(
+                        fill_id="local_fill_bills_1",
+                        exchange_order_id="ord_manual_bills",
+                        client_order_id="clord_manual_bills",
+                        instrument_id="BTC-USDT",
+                        symbol="BTC-USDT",
+                        side="buy",
+                        fill_qty=0.001,
+                        fill_price=100.0,
+                        fee_amount=0.1,
+                        fill_ts=now,
+                    ),
+                    ExchangeFill(
+                        fill_id="manual_fill_bills_2",
+                        exchange_order_id="ord_ext_bills_2",
+                        client_order_id=None,
+                        instrument_id="BTC-USDT",
+                        symbol="BTC-USDT",
+                        side="buy",
+                        fill_qty=0.001,
+                        fill_price=101.0,
+                        fee_amount=0.1,
+                        fill_ts=now,
+                    ),
+                ],
+                instruments=[],
+            ),
+            exchange_comparison_enabled=True,
+            compare_exchange_portfolio=True,
+            exchange_bills_summary={
+                "available": True,
+                "count": 2,
+                "latest_bill_id": "bill_2",
+                "currencies": ["USDT"],
+                "top_categories": [{"type": "1", "sub_type": "173", "currency": "USDT", "count": 2}],
+            },
+        )
+
+        self.assertIn("exchange_bills_activity_available", report.mismatch_categories)
+        self.assertIn("recent_exchange_bills_may_explain_exchange_side_balance_activity", report.mismatch_reasons)
+        self.assertIn("review_exchange_bills_before_rebaselining", report.safety_impacts)
+        self.assertEqual(report.recommended_operator_action, "review_exchange_bills_and_rebaseline_if_expected")
+        self.assertEqual(report.exchange_bills_summary["count"], 2)
+        self.assertTrue(report.exchange_bills_explanations)
+        self.assertEqual(report.exchange_bills_explanations[0]["semantic_group"], "funding_fee")
+        self.assertIn("balance_divergence", report.exchange_bills_explanations[0]["likely_explains"])
+
     def test_service_uses_exchange_bootstrap_snapshot_as_reconstruction_baseline(self) -> None:
         now = utc_now()
         baseline_snapshot = PortfolioSnapshot(
@@ -1615,6 +1740,122 @@ class TestReconciliationServiceIdempotency(unittest.IsolatedAsyncioTestCase):
         report = reconciliation_repo.latest()
         self.assertIsNotNone(report)
         self.assertEqual(report.portfolio_snapshot_ref, envelope.event_id)
+
+    async def test_repair_missing_portfolio_snapshot_rebuilds_and_publishes_snapshot(self) -> None:
+        now = utc_now()
+        event_store = InMemoryEventStore()
+        bus = InMemoryEventBus(event_store=event_store, persistence_mode="strict")
+        execution_repo = InMemoryExecutionRepository()
+        portfolio_repo = InMemoryPortfolioRepository()
+        reconciliation_repo = InMemoryReconciliationRepository()
+        service = ReconciliationService(
+            settings=AATSSettings.model_validate({}),
+            bus=bus,
+            fetcher=ExchangeStateFetcher(account_service=None),
+            comparator=StateComparator(),
+            repair_service=ReconciliationRepairService(),
+            reconciliation_repo=reconciliation_repo,
+            execution_repo=execution_repo,
+            portfolio_repo=portfolio_repo,
+            event_store=event_store,
+            reconstruction_service=PortfolioReconstructionService(
+                initial_usdt_balance=10_000.0,
+                snapshot_builder=PortfolioSnapshotBuilder(pnl_calculator=PortfolioPnLCalculator()),
+            ),
+            price_provider=lambda _symbol: 100.0,
+            bootstrap_portfolio_from_exchange=False,
+            metrics=None,
+        )
+        await bus.subscribe(topics.PORTFOLIO_SNAPSHOTS, service.handle_portfolio_snapshot)
+        execution_repo.save_fill(
+            FillEvent(
+                fill_id="fill_chain_repair_1",
+                decision_id="decision_chain_repair_1",
+                intent_id="intent_chain_repair_1",
+                client_order_id="clord_chain_repair_1",
+                exchange_order_id="paper_chain_repair_1",
+                symbol="BTC-USDT",
+                venue="PAPER",
+                side="buy",
+                fill_qty=0.001,
+                fill_price=100.0,
+                fee_amount=0.001,
+                fee_currency="USDT",
+                liquidity_role="taker",
+                exchange_timestamp=now,
+                ingestion_timestamp=now,
+                product_type="spot",
+                margin_mode="cash",
+            )
+        )
+
+        snapshot = await service.repair_missing_portfolio_snapshot(reason="unit_test")
+
+        self.assertIsNotNone(snapshot)
+        latest_snapshot = portfolio_repo.latest()
+        self.assertIsNotNone(latest_snapshot)
+        self.assertEqual(latest_snapshot.source_fill_id, "fill_chain_repair_1")
+        self.assertEqual(latest_snapshot.snapshot_origin, "recovery_rebuild")
+        self.assertEqual(event_store.count(topic=topics.PORTFOLIO_SNAPSHOTS), 1)
+        self.assertEqual(event_store.count(topic=topics.RECONCILIATION_REPORTS), 1)
+        report = reconciliation_repo.latest()
+        self.assertIsNotNone(report)
+        self.assertEqual(report.decision_id, "decision_chain_repair_1")
+
+    async def test_repair_missing_portfolio_snapshot_is_noop_when_latest_fill_already_snapshotted(self) -> None:
+        now = utc_now()
+        event_store = InMemoryEventStore()
+        bus = InMemoryEventBus(event_store=event_store, persistence_mode="strict")
+        execution_repo = InMemoryExecutionRepository()
+        portfolio_repo = InMemoryPortfolioRepository()
+        reconciliation_repo = InMemoryReconciliationRepository()
+        service = ReconciliationService(
+            settings=AATSSettings.model_validate({}),
+            bus=bus,
+            fetcher=ExchangeStateFetcher(account_service=None),
+            comparator=StateComparator(),
+            repair_service=ReconciliationRepairService(),
+            reconciliation_repo=reconciliation_repo,
+            execution_repo=execution_repo,
+            portfolio_repo=portfolio_repo,
+            event_store=event_store,
+            reconstruction_service=PortfolioReconstructionService(
+                initial_usdt_balance=10_000.0,
+                snapshot_builder=PortfolioSnapshotBuilder(pnl_calculator=PortfolioPnLCalculator()),
+            ),
+            price_provider=lambda _symbol: 100.0,
+            bootstrap_portfolio_from_exchange=False,
+            metrics=None,
+        )
+        await bus.subscribe(topics.PORTFOLIO_SNAPSHOTS, service.handle_portfolio_snapshot)
+        fill = FillEvent(
+            fill_id="fill_chain_repair_noop",
+            decision_id="decision_chain_repair_noop",
+            intent_id="intent_chain_repair_noop",
+            client_order_id="clord_chain_repair_noop",
+            exchange_order_id="paper_chain_repair_noop",
+            symbol="BTC-USDT",
+            venue="PAPER",
+            side="buy",
+            fill_qty=0.001,
+            fill_price=100.0,
+            fee_amount=0.001,
+            fee_currency="USDT",
+            liquidity_role="taker",
+            exchange_timestamp=now,
+            ingestion_timestamp=now,
+            product_type="spot",
+            margin_mode="cash",
+        )
+        execution_repo.save_fill(fill)
+        first_snapshot = await service.repair_missing_portfolio_snapshot(reason="unit_test")
+
+        second_snapshot = await service.repair_missing_portfolio_snapshot(reason="unit_test")
+
+        self.assertIsNotNone(first_snapshot)
+        self.assertIsNone(second_snapshot)
+        self.assertEqual(len(portfolio_repo.history()), 1)
+        self.assertEqual(event_store.count(topic=topics.PORTFOLIO_SNAPSHOTS), 1)
 
 
 if __name__ == "__main__":

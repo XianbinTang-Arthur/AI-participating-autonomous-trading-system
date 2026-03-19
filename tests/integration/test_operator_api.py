@@ -19,22 +19,26 @@ from aats.schemas.ai_brief import AIDecisionBrief
 from aats.schemas.ai_shadow import AIDegradationEvent, AITakeoverDecision
 from aats.schemas.common import utc_now
 from aats.schemas.decision import AIMarketAssessment
-from aats.schemas.execution import OrderState
+from aats.schemas.execution import FillEvent, OrderState
 from aats.schemas.exchange import AccountBaselineSnapshot, ExchangeAccountSnapshot, ExchangeBalance, ExchangeOpenOrder
 from aats.events import topics
-from aats.schemas.operator import ExecutionErrorSummary
+from aats.schemas.operator import ExecutionErrorSummary, ReplayValidationSummary
 from aats.schemas.operator import OperatorUserRecord
 from aats.schemas.strategy_profiles import StrategyProfileMarketRegimeAssessment, StrategyProfileRecommendation
 from aats.services.ai_service.provider import AIProviderResponse
+from aats.services.operator.strategy_profiles import StrategyProfileControlService
 from aats.services.operator.passwords import hash_password
 
 
 class FakeOperatorAccountService:
     SNAPSHOT: ExchangeAccountSnapshot | None = None
+    PRIVATE_ORDER_ROW: dict | None = None
+    PRIVATE_ORDER_FILLS: list | None = None
 
-    def __init__(self, *, settings, client) -> None:
+    def __init__(self, *, settings, client, private_ws_client=None) -> None:
         self.settings = settings
         self.client = client
+        self.private_ws_client = private_ws_client
         self._snapshot = self.SNAPSHOT
 
     async def refresh(self, *, force: bool = False):
@@ -51,6 +55,48 @@ class FakeOperatorAccountService:
 
     def recent_fills(self, symbol: str | None = None):
         return list(self._snapshot.fills) if self._snapshot is not None else []
+
+    async def recent_bills(self, *, symbol: str | None = None, limit: int | None = None):
+        _ = symbol
+        _ = limit
+        return [
+            {"billId": "bill_1", "type": "1", "subType": "173", "ccy": "USDT", "bal": "1000"},
+            {"billId": "bill_2", "type": "2", "subType": "174", "ccy": "USDT", "bal": "998"},
+        ]
+
+    def recent_bills_summary(self):
+        return {
+            "available": True,
+            "count": 2,
+            "latest_bill_id": "bill_2",
+            "latest_bill_ts": utc_now(),
+            "currencies": ["USDT"],
+            "top_categories": [
+                {
+                    "type": "1",
+                    "sub_type": "173",
+                    "currency": "USDT",
+                    "count": 1,
+                    "type_label": "transfer",
+                    "sub_type_label": "funding_fee_expense",
+                    "semantic_group": "funding_fee",
+                    "human_label": "transfer:funding_fee_expense:USDT",
+                }
+            ],
+            "last_error": None,
+        }
+
+    def latest_private_order_row(self, *, symbol: str, order_id: str | None = None, client_order_id: str | None = None):
+        _ = symbol
+        _ = order_id
+        _ = client_order_id
+        return self.PRIVATE_ORDER_ROW
+
+    def latest_private_order_fills(self, *, symbol: str, order_id: str | None = None, client_order_id: str | None = None):
+        _ = symbol
+        _ = order_id
+        _ = client_order_id
+        return list(self.PRIVATE_ORDER_FILLS or [])
 
     def status(self):
         return {
@@ -87,6 +133,13 @@ class FakeShadowProvider:
                 "rationale_summary": "shadow_primary_signal",
                 "baseline_override_recommended": True,
                 "override_reason_codes": ["ai_trend_override"],
+                "execution_parameter_suggestion": {
+                    "passive_bias": 0.78,
+                    "maker_taker_bias": -0.3,
+                    "max_cross_spread_bps": 3.5,
+                    "slice_count": 2,
+                    "max_participation_rate": 0.2,
+                },
             },
         )
 
@@ -118,8 +171,10 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("overall_status", health_payload)
         self.assertIn("subsystems", health_payload)
+        self.assertIn("execution_summary", health_payload)
         self.assertIn("storage", health_payload["subsystems"])
         self.assertIn("audit_replay", health_payload["subsystems"])
+        self.assertIn("portfolio_snapshot_repairs", health_payload["execution_summary"])
         self.assertEqual(mode_payload["config_profile"], "local_demo")
         self.assertEqual(mode_payload["market_data_backend"], "demo")
         self.assertEqual(mode_payload["execution_backend"], "paper")
@@ -142,6 +197,9 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertIn("decision_cycle_count", metrics_payload)
         self.assertIn("recent_execution_errors", metrics_payload)
         self.assertIn("exposure_summary", metrics_payload)
+        self.assertIn("portfolio_snapshot_repair_count", metrics_payload)
+        self.assertIn("strategy_execution_health", metrics_payload)
+        self.assertIn("recent_churn_ratio", metrics_payload["strategy_execution_health"])
         self.assertIsInstance(blockers_payload["blockers"], list)
         self.assertTrue(any(item["submit_only"] for item in blockers_payload["blockers"]))
         self.assertIn("history", blocker_history_payload)
@@ -185,6 +243,8 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             replay_recent = client.get("/replay/recent-validations?limit=5").json()
 
         self.assertIsNotNone(decision_id)
+        self.assertIn("strategy_execution_health", latest_decision)
+        self.assertIn("strategy_execution_health", decision_detail)
         self.assertEqual(decision_detail["decision_id"], decision_id)
         self.assertTrue(recent_decisions["decisions"])
         self.assertIn("total_available", recent_decisions)
@@ -210,18 +270,28 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(execution_latest["latest_order"])
         self.assertIsNotNone(reconciliation_latest["reconciliation"])
         self.assertIn("mismatch_categories", reconciliation_latest["mismatch_summary"])
+        self.assertIn("exchange_bills_summary", reconciliation_latest)
         self.assertTrue(reconciliation_recent["reconciliations"])
         self.assertIn("total_available", reconciliation_recent)
         self.assertIn("has_more", reconciliation_recent)
+        self.assertIn("exchange_bills_summary", reconciliation_recent)
         self.assertIsInstance(reconciliation_mismatches["mismatches"], list)
         self.assertEqual(
             reconciliation_detail["reconciliation"]["reconciliation_id"],
             latest_reconciliation_id,
         )
+        self.assertIn("exchange_bills_summary", reconciliation_detail)
+        self.assertIn("exchange_bills_explanations", reconciliation_detail)
         self.assertIsNotNone(audit_latest["audit"])
         self.assertEqual(audit_detail["audit"]["decision_id"], decision_id)
         self.assertIsNone(replay_status_before["last_validation"])
         self.assertEqual(replay_validation["decision_id"], decision_id)
+        self.assertEqual(replay_validation["symbol"], runtime.settings.default_symbol)
+        self.assertIsNotNone(replay_validation["regime"])
+        self.assertIsNotNone(replay_validation["active_profile_id"])
+        self.assertIn("chain_health_score", replay_validation)
+        self.assertIn("execution_chain_issue_count", replay_validation)
+        self.assertEqual(replay_validation["product_type"], runtime.settings.trading_product_type)
         self.assertTrue(replay_status_after["recent_validations"])
         self.assertTrue(replay_recent["validations"])
         self.assertIn("total_available", replay_recent)
@@ -229,8 +299,9 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
 
     async def test_ai_endpoints_expose_latest_assessment_and_shadow_decisions(self) -> None:
         runtime = await self._runtime(
-            ai_operating_mode="ai_blended",
+            ai_operating_mode="ai_primary",
             ai_shadow_mode_enabled=True,
+            ai_execution_suggestion_mode="shadow_translation",
             ai_provider="openai",
             openai_api_key="test-key",
             trading_product_type="derivatives",
@@ -246,46 +317,99 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         await runtime.decision_engine.run_cycle(runtime.settings.default_symbol, runtime.settings.primary_timeframe)
         app = self._app(runtime)
         with TestClient(app) as client:
+            overview = client.get("/ai/overview")
+            performance_overview_before = client.get("/ai/performance/overview")
             latest = client.get("/ai/latest")
             recent = client.get("/ai/recent?limit=5")
+            takeovers = client.get("/ai/takeovers/recent?limit=5")
             shadow_latest = client.get("/ai/shadow/latest")
             shadow_recent = client.get("/ai/shadow/recent?limit=5")
             runtime_status = client.get("/ai/runtime")
             evaluation = client.post("/ai/shadow/evaluate-now")
             evaluation_reused = client.post("/ai/shadow/evaluate-now")
             evaluations = client.get("/ai/shadow/evaluations?limit=5")
+            performance_reports = client.get("/ai/performance/reports?limit=5")
+            performance_overview = client.get("/ai/performance/overview")
             decision_id = client.get("/decision/latest").json()["decision_id"]
             decision_detail = client.get(f"/decision/{decision_id}")
             replay_validation = client.post(f"/replay/validate/{decision_id}")
 
+        self.assertEqual(overview.status_code, 200)
+        self.assertEqual(performance_overview_before.status_code, 200)
+        self.assertEqual(performance_overview.status_code, 200)
         self.assertEqual(latest.status_code, 200)
         self.assertEqual(recent.status_code, 200)
+        self.assertEqual(takeovers.status_code, 200)
         self.assertEqual(shadow_latest.status_code, 200)
         self.assertEqual(shadow_recent.status_code, 200)
         self.assertEqual(runtime_status.status_code, 200)
         self.assertEqual(evaluation.status_code, 200)
         self.assertEqual(evaluation_reused.status_code, 200)
         self.assertEqual(evaluations.status_code, 200)
+        self.assertEqual(performance_reports.status_code, 200)
         self.assertEqual(decision_detail.status_code, 200)
         self.assertEqual(replay_validation.status_code, 200)
 
+        self.assertTrue(overview.json()["runtime"]["provider_ready"])
+        self.assertEqual(overview.json()["runtime"]["execution_suggestion_mode"], "shadow_translation")
+        self.assertIn("takeover_summary", overview.json())
+        self.assertIn("shadow_summary", overview.json())
+        self.assertIn("performance_windows", overview.json())
+        self.assertIn("downgrade_state", overview.json())
+        self.assertIn("performance_view", overview.json())
+        self.assertIn("latest_execution_suggestion", overview.json())
+        self.assertIn("recent_reports", performance_overview.json())
+        self.assertIn("replay_context", performance_overview.json())
+        self.assertIsNone(performance_overview_before.json()["latest_report"])
         self.assertIsNotNone(latest.json()["assessment"])
+        self.assertIsNotNone(latest.json()["execution_suggestion"])
         self.assertIsNotNone(shadow_latest.json()["shadow_decision"])
         self.assertIsNotNone(decision_detail.json()["ai_decision_brief"])
         self.assertIsNotNone(decision_detail.json()["ai_assessment"])
         self.assertIsNotNone(decision_detail.json()["ai_takeover_decision"])
+        self.assertIsNotNone(decision_detail.json()["ai_decision_audit"])
+        self.assertIsNotNone(decision_detail.json()["ai_economic_actionability"])
+        self.assertIsNotNone(decision_detail.json()["ai_execution_suggestion"])
         self.assertTrue(decision_detail.json()["ai_shadow_decisions"])
         self.assertTrue(decision_detail.json()["ai_shadow_evaluations"])
+        self.assertTrue(takeovers.json()["takeovers"])
+        self.assertIn("direction_disagreement", takeovers.json()["takeovers"][0])
+        self.assertTrue(takeovers.json()["takeovers"][0]["ai_execution_suggestion_present"])
         self.assertIn(
             shadow_latest.json()["shadow_decision"]["shadow_action_type"],
             {"same_as_baseline", "hold_instead", "entry_override", "exit_override", "reverse_override"},
+        )
+        self.assertEqual(
+            decision_detail.json()["ai_execution_suggestion"]["latest_translation"]["status"],
+            "shadow_translation",
+        )
+        self.assertIn(
+            "required_total_edge_bps",
+            decision_detail.json()["ai_economic_actionability"],
+        )
+        self.assertIn(
+            "market_snapshot_fresh",
+            decision_detail.json()["ai_decision_audit"],
+        )
+        self.assertFalse(
+            decision_detail.json()["ai_execution_suggestion"]["latest_translation"]["applied_to_live_execution"]
         )
         self.assertTrue(recent.json()["assessments"])
         self.assertTrue(shadow_recent.json()["shadow_decisions"])
         self.assertEqual(evaluation.json()["status"], "evaluation_created")
         self.assertEqual(evaluation_reused.json()["status"], "evaluation_reused")
         self.assertTrue(evaluations.json()["evaluations"])
+        self.assertTrue(performance_reports.json()["reports"])
+        self.assertEqual(
+            performance_reports.json()["reports"][0]["effective_operating_mode"],
+            overview.json()["runtime"]["effective_operating_mode"],
+        )
+        self.assertEqual(
+            performance_overview.json()["latest_report"]["report_id"],
+            performance_reports.json()["reports"][0]["report_id"],
+        )
         self.assertEqual(len(runtime.event_store.by_topic(topics.AI_SHADOW_EVALUATIONS)), 1)
+        self.assertEqual(len(runtime.event_store.by_topic(topics.AI_PERFORMANCE_REPORTS)), 1)
         self.assertFalse(
             any("ai_" in issue for issue in replay_validation.json()["decision_chain_issues"]),
             replay_validation.json()["decision_chain_issues"],
@@ -306,21 +430,62 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         await runtime.decision_engine.run_cycle(runtime.settings.default_symbol, runtime.settings.primary_timeframe)
         app = self._app(runtime)
         with TestClient(app) as client:
+            overview = client.get("/ai/overview")
             latest = client.get("/ai/latest")
             recent = client.get("/ai/recent?limit=5")
+            takeovers = client.get("/ai/takeovers/recent?limit=5")
             shadow_latest = client.get("/ai/shadow/latest")
             shadow_recent = client.get("/ai/shadow/recent?limit=5")
 
+        self.assertEqual(overview.status_code, 200)
         self.assertEqual(latest.status_code, 200)
+        self.assertEqual(takeovers.status_code, 200)
+        self.assertEqual(overview.json()["takeover_summary"]["attempted_count"], 0)
+        self.assertEqual(overview.json()["shadow_summary"]["window_count"], 0)
         self.assertIsNone(latest.json()["brief"])
         self.assertIsNone(latest.json()["assessment"])
         self.assertIsNone(latest.json()["takeover"])
         self.assertEqual(recent.json()["assessments"], [])
+        self.assertEqual(takeovers.json()["takeovers"], [])
         self.assertIsNone(shadow_latest.json()["shadow_decision"])
         self.assertEqual(shadow_recent.json()["shadow_decisions"], [])
         self.assertEqual(len(runtime.event_store.by_topic(topics.AI_DECISION_BRIEFS)), 0)
         self.assertEqual(len(runtime.event_store.by_topic(topics.AI_ASSESSMENTS)), 0)
         self.assertEqual(len(runtime.event_store.by_topic(topics.AI_SHADOW_DECISIONS)), 0)
+
+    async def test_ai_endpoints_expose_bounded_live_translation_when_enabled(self) -> None:
+        runtime = await self._runtime(
+            ai_operating_mode="ai_primary",
+            ai_shadow_mode_enabled=True,
+            ai_execution_suggestion_mode="enabled_live",
+            trading_product_type="derivatives",
+            margin_mode="cross",
+            strategy_short_bias_enabled=True,
+            default_symbol="BTC-USDT-SWAP",
+            allowed_symbols=("BTC-USDT-SWAP",),
+        )
+        runtime.ai_service.provider = FakeShadowProvider()
+        runtime.ai_service._degraded = False
+        runtime.ai_service._consecutive_failures = 0
+        runtime.ai_service._consecutive_successes = 0
+        runtime.ai_service._outcome_review_required = False
+        runtime.ai_service._outcome_auto_downgraded = False
+        await runtime.decision_engine.run_cycle(runtime.settings.default_symbol, runtime.settings.primary_timeframe)
+        app = self._app(runtime)
+        with TestClient(app) as client:
+            latest = client.get("/ai/latest").json()
+            detail = client.get(f"/decision/{client.get('/decision/latest').json()['decision_id']}").json()
+
+        latest_translation = latest["execution_suggestion"]["latest_translation"]
+        self.assertEqual(latest_translation["status"], "enabled")
+        self.assertTrue(latest_translation["applied_to_live_execution"])
+        self.assertEqual(latest["execution_suggestion"]["live_order_type"], "limit")
+        self.assertEqual(latest["execution_suggestion"]["live_time_in_force"], "IOC")
+        self.assertIsNotNone(latest["execution_suggestion"]["live_limit_price"])
+        self.assertEqual(
+            detail["ai_execution_suggestion"]["latest_translation"]["applied_live_fields"],
+            ["execution_style", "order_type", "limit_price", "time_in_force"],
+        )
 
     async def test_baseline_only_hides_historical_ai_events(self) -> None:
         runtime = await self._runtime(ai_operating_mode="baseline_only")
@@ -610,7 +775,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         runtime = await self._runtime(
             operator_auth_enabled=True,
             operator_session_secret="session-secret",
-            operator_users=[("viewer", "viewer-pass"), ("operator", "operator-pass")],
+            operator_users=[("viewer", "viewer-pass"), ("operator", "operator-pass"), ("admin", "admin-pass")],
         )
         app = self._app(runtime)
         with TestClient(app) as viewer_client:
@@ -621,18 +786,25 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
 
         with TestClient(app) as operator_client:
             login_operator = operator_client.post("/auth/login", json={"username": "operator", "password": "operator-pass"})
-            halt_allowed = operator_client.post("/system/halt", json={"reason": "operator_should_work"})
+            halt_denied_operator = operator_client.post("/system/halt", json={"reason": "operator_should_fail"})
             session = operator_client.get("/auth/session")
+
+        with TestClient(app) as admin_client:
+            login_admin = admin_client.post("/auth/login", json={"username": "admin", "password": "admin-pass"})
+            halt_allowed_admin = admin_client.post("/system/halt", json={"reason": "admin_should_work"})
 
         self.assertEqual(login.status_code, 200)
         self.assertEqual(health.status_code, 200)
         self.assertEqual(halt_denied.status_code, 403)
         self.assertEqual(logout.status_code, 200)
         self.assertEqual(login_operator.status_code, 200)
-        self.assertEqual(halt_allowed.status_code, 200)
+        self.assertEqual(halt_denied_operator.status_code, 403)
+        self.assertEqual(halt_denied_operator.json()["detail"], "operator_admin_access_required")
         self.assertEqual(session.status_code, 200)
         self.assertTrue(session.json()["authenticated"])
         self.assertEqual(session.json()["role"], "operator")
+        self.assertEqual(login_admin.status_code, 200)
+        self.assertEqual(halt_allowed_admin.status_code, 200)
 
     async def test_session_login_rejects_invalid_credentials(self) -> None:
         runtime = await self._runtime(
@@ -777,21 +949,58 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             login = client.post("/auth/login", json={"username": "admin", "password": "admin-pass"})
             evaluated = client.post("/strategy-profiles/auto-tuning/evaluate-now")
             snapshot = client.get("/strategy-profiles")
+            optimization_reports = client.get("/strategy-profiles/optimization/reports?limit=5&offset=0")
+            selection_decisions = client.get("/strategy-profiles/selection-decisions?limit=5&offset=0")
+            auto_rollback_policy = client.get("/strategy-profiles/auto-rollback-policy")
+            activation_policy = client.get("/strategy-profiles/activation-policy")
             recommendations = client.get("/strategy-profiles/recommendations?limit=5&offset=0")
 
         self.assertEqual(login.status_code, 200)
         self.assertEqual(snapshot.status_code, 200)
         self.assertEqual(evaluated.status_code, 200)
+        self.assertEqual(optimization_reports.status_code, 200)
+        self.assertEqual(selection_decisions.status_code, 200)
+        self.assertEqual(auto_rollback_policy.status_code, 200)
+        self.assertEqual(activation_policy.status_code, 200)
         self.assertEqual(recommendations.status_code, 200)
         snapshot_payload = snapshot.json()
         self.assertEqual(snapshot_payload["activation"]["active_profile_id"], "range_defensive")
         self.assertTrue(snapshot_payload["revisions"])
         self.assertIn("safety_state", snapshot_payload)
         self.assertIn("evaluations", snapshot_payload)
+        self.assertIn("profile_space", snapshot_payload)
+        self.assertIn("comparison_report", snapshot_payload)
+        self.assertIn("latest_optimization_report", snapshot_payload)
+        self.assertIn("latest_selection_decision", snapshot_payload)
+        self.assertIn("auto_rollback_policy", snapshot_payload)
+        self.assertIn("activation_policy", snapshot_payload)
+        self.assertIn("execution_parameter_suggestion_capability", snapshot_payload)
+        self.assertEqual(snapshot_payload["profile_space"]["selection_mode"], "registered_profile_only")
+        self.assertFalse(snapshot_payload["profile_space"]["free_form_parameter_generation_enabled"])
+        self.assertFalse(snapshot_payload["execution_parameter_suggestion_capability"]["enabled"])
+        self.assertTrue(snapshot_payload["comparison_report"]["rows"])
         evaluated_payload = evaluated.json()
         recommendation_payload = evaluated_payload["recommendation"]
         self.assertIn("safety_state", evaluated_payload)
         self.assertIn("current_evaluation", evaluated_payload)
+        self.assertIn("evaluation_pipeline", evaluated_payload)
+        self.assertIn("comparison_report", evaluated_payload)
+        self.assertIn("optimization_report", evaluated_payload)
+        self.assertIn("selection_decision", evaluated_payload)
+        self.assertIn("bucket_scores", evaluated_payload["optimization_report"]["replay_summary"])
+        self.assertIn("cross_bucket_scores", evaluated_payload["optimization_report"]["replay_summary"])
+        self.assertIn("current_cross_bucket", evaluated_payload["optimization_report"]["replay_summary"])
+        self.assertIn("offline_replay_pipeline", evaluated_payload["optimization_report"])
+        self.assertIn("winner_selection_policy", evaluated_payload["optimization_report"])
+        self.assertIn("version_experiments", evaluated_payload["optimization_report"])
+        self.assertIn("window_reports", evaluated_payload["optimization_report"]["offline_replay_pipeline"])
+        self.assertGreaterEqual(
+            len(evaluated_payload["evaluation_pipeline"]),
+            len(snapshot_payload["revisions"]),
+        )
+        self.assertTrue(
+            any(item["summary"]["evaluation_mode"] == "heuristic_projection_v1" for item in evaluated_payload["evaluation_pipeline"])
+        )
         self.assertIn(
             recommendation_payload["recommended_profile_id"],
             {"trend_normal", "trend_strict", "range_defensive", "high_volatility_defensive", "execution_degraded_safe"},
@@ -800,10 +1009,602 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(evaluated_payload["auto_activation"]["status"], "auto_applied")
         self.assertEqual(recommendations.json()["total_available"], 1)
         self.assertFalse(recommendations.json()["has_more"])
+        self.assertTrue(optimization_reports.json()["reports"])
+        self.assertTrue(selection_decisions.json()["decisions"])
+        self.assertEqual(
+            optimization_reports.json()["reports"][0]["recommended_profile_id"],
+            evaluated_payload["optimization_report"]["recommended_profile_id"],
+        )
+        self.assertEqual(
+            optimization_reports.json()["reports"][0]["winner_selection_policy"]["winner_profile_id"],
+            evaluated_payload["optimization_report"]["winner_selection_policy"]["winner_profile_id"],
+        )
+        self.assertEqual(
+            selection_decisions.json()["decisions"][0]["candidate_profile_id"],
+            evaluated_payload["selection_decision"]["candidate_profile_id"],
+        )
         stored = runtime.event_store.by_topic(topics.STRATEGY_PROFILE_RECOMMENDATIONS)
         self.assertEqual(len(stored), 1)
+        comparison_reports = runtime.event_store.by_topic(topics.STRATEGY_PROFILE_COMPARISON_REPORTS)
+        self.assertEqual(len(comparison_reports), 1)
+        optimization_report_events = runtime.event_store.by_topic(topics.STRATEGY_PROFILE_OPTIMIZATION_REPORTS)
+        self.assertEqual(len(optimization_report_events), 1)
+        selection_decision_events = runtime.event_store.by_topic(topics.STRATEGY_PROFILE_SELECTION_DECISIONS)
+        self.assertGreaterEqual(len(selection_decision_events), 1)
         activations = runtime.event_store.by_topic(topics.STRATEGY_PROFILE_ACTIVATIONS)
         self.assertEqual(len(activations), 1)
+
+    async def test_strategy_profile_provider_output_is_limited_to_registered_profiles(self) -> None:
+        runtime = await self._runtime(
+            operator_auth_enabled=True,
+            operator_session_secret="session-secret",
+            operator_users=[("admin", "admin-pass")],
+            ai_provider="openai",
+            openai_api_key="test-key",
+        )
+        app = self._app(runtime)
+
+        async def _bad_profile_response(*args, **kwargs):
+            _ = args
+            _ = kwargs
+            return AIProviderResponse(
+                provider_name="test_provider",
+                request_id="req_bad_profile",
+                latency_ms=12.0,
+                payload={
+                    "recommended_profile_id": "unregistered_profile",
+                    "fallback_profile_id": "trend_normal",
+                    "confidence": 0.95,
+                    "market_regime_assessment": {
+                        "regime": "trend",
+                        "volatility_state": "medium",
+                        "execution_condition": "normal",
+                    },
+                    "reason_codes": ["bad_profile_test"],
+                    "human_summary": "provider proposed an unknown profile",
+                    "risk_notes": ["should_fallback"],
+                    "valid_for_minutes": 60,
+                },
+            )
+
+        with patch(
+            "aats.services.ai_service.openai_provider.OpenAIProvider.generate_assessment",
+            new=AsyncMock(side_effect=_bad_profile_response),
+        ):
+            with TestClient(app) as client:
+                client.post("/auth/login", json={"username": "admin", "password": "admin-pass"})
+                evaluated = client.post("/strategy-profiles/auto-tuning/evaluate-now")
+
+        self.assertEqual(evaluated.status_code, 200)
+        recommendation = evaluated.json()["recommendation"]
+        self.assertIn(
+            recommendation["recommended_profile_id"],
+            {"trend_normal", "trend_strict", "range_defensive", "high_volatility_defensive", "execution_degraded_safe"},
+        )
+        self.assertNotEqual(recommendation["recommended_profile_id"], "unregistered_profile")
+        self.assertEqual(recommendation["generated_by"], "rule_fallback")
+
+    async def test_strategy_profile_optimization_and_selection_reports_are_versioned(self) -> None:
+        runtime = await self._runtime(
+            operator_auth_enabled=True,
+            operator_session_secret="session-secret",
+            operator_users=[("admin", "admin-pass")],
+        )
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            client.post("/auth/login", json={"username": "admin", "password": "admin-pass"})
+            first = client.post("/strategy-profiles/auto-tuning/evaluate-now").json()
+            second = client.post("/strategy-profiles/auto-tuning/evaluate-now").json()
+
+        first_report = first["optimization_report"]
+        second_report = second["optimization_report"]
+        first_decision = first["selection_decision"]
+        second_decision = second["selection_decision"]
+
+        self.assertEqual(first_report["version"], 1)
+        self.assertEqual(second_report["version"], 2)
+        self.assertEqual(second_report["parent_report_id"], first_report["report_id"])
+        self.assertIn(first_decision["decision_status"], {"auto_activation_executed", "stable_keep_active", "recommended_not_executed", "auto_rollback_recommended", "execution_outcome_recorded"})
+        self.assertIn(second_decision["decision_status"], {"auto_activation_executed", "stable_keep_active", "recommended_not_executed", "execution_outcome_recorded", "auto_rollback_recommended"})
+        self.assertIn("execution_state", second_decision)
+        self.assertGreater(second_decision["version"], first_decision["version"])
+        self.assertIsNotNone(second_decision["parent_decision_id"])
+
+    async def test_strategy_profile_selection_outcome_and_auto_rollback_are_written_back(self) -> None:
+        runtime = await self._runtime(
+            operator_auth_enabled=True,
+            operator_session_secret="session-secret",
+            operator_users=[("admin", "admin-pass")],
+        )
+        recommendation = StrategyProfileRecommendation(
+            product_type=runtime.settings.trading_product_type,
+            margin_mode=runtime.settings.margin_mode,
+            allowed_symbols=runtime.settings.allowed_symbols,
+            active_profile_id="trend_normal",
+            recommended_profile_id="range_defensive",
+            confidence=0.85,
+            market_regime_assessment=StrategyProfileMarketRegimeAssessment(
+                regime="range",
+                volatility_state="medium",
+                execution_condition="normal",
+            ),
+            reason_codes=["manual_activation_for_outcome_writeback"],
+            human_summary="activate defensive profile",
+            risk_notes=[],
+            valid_for_minutes=120,
+            generated_by="test",
+            input_digest="digest_outcome",
+            input_snapshot={"source": "test"},
+            expires_at=utc_now() + timedelta(minutes=120),
+        )
+        runtime.strategy_profile_repo.save_recommendation(recommendation)
+        for index in range(3):
+            runtime.execution_repo.save_fill(
+                FillEvent(
+                    fill_id=f"fill_outcome_{index}",
+                    decision_id=f"decision_outcome_{index}",
+                    intent_id=f"intent_outcome_{index}",
+                    client_order_id=f"clord_outcome_{index}",
+                    exchange_order_id=f"ex_outcome_{index}",
+                    symbol=runtime.settings.default_symbol,
+                    venue="PAPER",
+                    side="buy",
+                    fill_qty=0.001,
+                    fill_price=100_000.0,
+                    fee_amount=1.0,
+                    fee_currency="USDT",
+                    liquidity_role="taker",
+                    exchange_timestamp=utc_now(),
+                    ingestion_timestamp=utc_now(),
+                    order_status_after_fill="FILLED",
+                )
+            )
+        runtime.recovery_status = runtime.recovery_status.model_copy(
+            update={
+                "safe_to_trade": False,
+                "review_required": True,
+            }
+        )
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            client.post("/auth/login", json={"username": "admin", "password": "admin-pass"})
+            activated = client.post(
+                f"/strategy-profiles/recommendations/{recommendation.recommendation_id}/accept",
+                json={"reason": "activate_now", "activation_mode": "manual_now"},
+            )
+            evaluated = client.post("/strategy-profiles/auto-tuning/evaluate-now")
+
+        self.assertEqual(activated.status_code, 200)
+        self.assertEqual(evaluated.status_code, 200)
+        selection = evaluated.json()["selection_decision"]
+        self.assertEqual(selection["decision_status"], "auto_rollback_recommended")
+        self.assertEqual(selection["execution_state"], "executed")
+        self.assertEqual(selection["execution_outcome"]["evaluation_status"], "degraded")
+        self.assertTrue(selection["auto_rollback_recommendation"]["recommended"])
+        self.assertEqual(selection["auto_rollback_recommendation"]["target_profile_id"], "trend_normal")
+
+    async def test_strategy_profile_auto_rollback_policy_can_execute_rollback(self) -> None:
+        runtime = await self._runtime(
+            operator_auth_enabled=True,
+            operator_session_secret="session-secret",
+            operator_users=[("admin", "admin-pass")],
+            strategy_profile_auto_rollback_enabled=True,
+            strategy_profile_auto_rollback_review_required_only=False,
+            strategy_profile_auto_rollback_min_trade_count=1,
+            strategy_profile_auto_rollback_cooldown_seconds=0.0,
+        )
+        recommendation = StrategyProfileRecommendation(
+            product_type=runtime.settings.trading_product_type,
+            margin_mode=runtime.settings.margin_mode,
+            allowed_symbols=runtime.settings.allowed_symbols,
+            active_profile_id="trend_normal",
+            recommended_profile_id="range_defensive",
+            confidence=0.85,
+            market_regime_assessment=StrategyProfileMarketRegimeAssessment(
+                regime="range",
+                volatility_state="medium",
+                execution_condition="normal",
+            ),
+            reason_codes=["manual_activation_for_auto_rollback"],
+            human_summary="activate defensive profile",
+            risk_notes=[],
+            valid_for_minutes=120,
+            generated_by="test",
+            input_digest="digest_auto_rollback",
+            input_snapshot={"source": "test"},
+            expires_at=utc_now() + timedelta(minutes=120),
+        )
+        runtime.strategy_profile_repo.save_recommendation(recommendation)
+        runtime.execution_repo.save_fill(
+            FillEvent(
+                fill_id="fill_auto_rollback",
+                decision_id="decision_auto_rollback",
+                intent_id="intent_auto_rollback",
+                client_order_id="clord_auto_rollback",
+                exchange_order_id="ex_auto_rollback",
+                symbol=runtime.settings.default_symbol,
+                venue="PAPER",
+                side="buy",
+                fill_qty=0.001,
+                fill_price=100_000.0,
+                fee_amount=1.0,
+                fee_currency="USDT",
+                liquidity_role="taker",
+                exchange_timestamp=utc_now(),
+                ingestion_timestamp=utc_now(),
+                order_status_after_fill="FILLED",
+            )
+        )
+        runtime.recovery_status = runtime.recovery_status.model_copy(
+            update={"safe_to_trade": False, "review_required": True}
+        )
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            client.post("/auth/login", json={"username": "admin", "password": "admin-pass"})
+            activated = client.post(
+                f"/strategy-profiles/recommendations/{recommendation.recommendation_id}/accept",
+                json={"reason": "activate_now", "activation_mode": "manual_now"},
+            )
+            evaluated = client.post("/strategy-profiles/auto-tuning/evaluate-now")
+
+        self.assertEqual(activated.status_code, 200)
+        self.assertEqual(evaluated.status_code, 200)
+        self.assertEqual(evaluated.json()["auto_rollback"]["status"], "auto_rollback_executed")
+        latest_selection = evaluated.json()["selection_decision"]
+        self.assertEqual(latest_selection["decision_status"], "auto_rollback_executed")
+        self.assertEqual(latest_selection["execution_state"], "rolled_back")
+        self.assertTrue(latest_selection["auto_rollback_recommendation"]["executed"])
+        self.assertEqual(runtime.strategy_profile_repo.activation_state(
+            product_type=runtime.settings.trading_product_type,
+            margin_mode=runtime.settings.margin_mode,
+            allowed_symbols=runtime.settings.allowed_symbols,
+        ).active_profile_id, "trend_normal")
+
+    async def test_strategy_profile_optimization_uses_cross_bucket_replay_scoring(self) -> None:
+        runtime = await self._runtime(
+            operator_auth_enabled=True,
+            operator_session_secret="session-secret",
+            operator_users=[("admin", "admin-pass")],
+        )
+        control = StrategyProfileControlService(runtime)
+        regime = str((control._tuning_context().get("baseline") or {}).get("regime") or "uncertain")
+        for validation_id, healthy in (("replay_a", True), ("replay_b", True), ("replay_c", False)):
+            runtime.event_store.append(
+                build_envelope(
+                    topic=topics.REPLAY_VALIDATIONS,
+                    key=runtime.settings.default_symbol,
+                    payload_model=ReplayValidationSummary(
+                        validation_id=validation_id,
+                        validated_at=utc_now(),
+                        decision_id=f"decision_{validation_id}",
+                        symbol=runtime.settings.default_symbol,
+                        regime=regime,
+                        active_profile_id="trend_normal" if validation_id != "replay_c" else "trend_strict",
+                        product_type=runtime.settings.trading_product_type,
+                        margin_mode=runtime.settings.margin_mode,
+                        allowed_symbols=runtime.settings.allowed_symbols,
+                        replayed_event_count=10,
+                        stored_snapshot_count=5,
+                        divergence_count=0 if healthy else 2,
+                        divergence_density=0.0 if healthy else 0.2,
+                        chain_health_score=0.98 if healthy else 0.6,
+                        healthy=healthy,
+                    ),
+                    source_component="test",
+                )
+            )
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            client.post("/auth/login", json={"username": "admin", "password": "admin-pass"})
+            evaluated = client.post("/strategy-profiles/auto-tuning/evaluate-now")
+
+        self.assertEqual(evaluated.status_code, 200)
+        replay_summary = evaluated.json()["optimization_report"]["replay_summary"]
+        self.assertEqual(replay_summary["current_cross_bucket"]["count"], 2)
+        self.assertEqual(
+            evaluated.json()["optimization_report"]["offline_replay_pipeline"]["pipeline_version"],
+            "offline_replay_pipeline_v2",
+        )
+        self.assertEqual(
+            [item["window"] for item in evaluated.json()["optimization_report"]["offline_replay_pipeline"]["window_reports"]],
+            [10, 20, 50],
+        )
+        self.assertTrue(
+            any(
+                item["symbol"] == runtime.settings.default_symbol
+                and item["regime"] == regime
+                and item["profile_id"] == "trend_normal"
+                for item in replay_summary["cross_bucket_scores"]
+            )
+        )
+        trend_normal = next(
+            item for item in evaluated.json()["optimization_report"]["candidates"] if item["profile_id"] == "trend_normal"
+        )
+        self.assertIn("replay_symbol_regime_profile_bucket_available", trend_normal["reasons"])
+        self.assertIn("offline_replay_breakdown", trend_normal)
+        self.assertIn("experiments", trend_normal["offline_replay_breakdown"])
+        self.assertIn("winner_selection_policy", evaluated.json()["optimization_report"])
+        self.assertIn("auto_activation", evaluated.json()["optimization_report"]["winner_selection_policy"])
+
+    async def test_strategy_profile_auto_rollback_policy_can_be_persisted_by_scope(self) -> None:
+        runtime = await self._runtime(
+            operator_auth_enabled=True,
+            operator_session_secret="session-secret",
+            operator_users=[("admin", "admin-pass")],
+            strategy_profile_auto_rollback_enabled=False,
+        )
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            client.post("/auth/login", json={"username": "admin", "password": "admin-pass"})
+            updated = client.post(
+                "/strategy-profiles/auto-rollback-policy",
+                json={
+                    "enabled": True,
+                    "review_required_only": False,
+                    "min_trade_count": 2,
+                    "cooldown_seconds": 60.0,
+                    "matrix_allowed_symbols": [runtime.settings.default_symbol],
+                    "matrix_allowed_regimes": ["range"],
+                    "matrix_allowed_profiles": ["range_defensive"],
+                    "reason": "persist_policy",
+                },
+            )
+            fetched = client.get("/strategy-profiles/auto-rollback-policy")
+            snapshot = client.get("/strategy-profiles")
+
+        self.assertEqual(updated.status_code, 200)
+        self.assertEqual(fetched.status_code, 200)
+        self.assertEqual(fetched.json()["policy_status"], "settings_fallback")
+        self.assertFalse(fetched.json()["enabled"])
+
+        with TestClient(app) as client:
+            client.post("/auth/login", json={"username": "admin", "password": "admin-pass"})
+            approved = client.post(
+                "/strategy-profiles/auto-rollback-policy/approve",
+                json={"reason": "approve_policy"},
+            )
+            history = client.get("/strategy-profiles/auto-rollback-policy/history?limit=10&offset=0")
+            frozen = client.post(
+                "/strategy-profiles/auto-rollback-policy/freeze",
+                json={"frozen": True, "reason": "freeze_policy"},
+            )
+            unfrozen = client.post(
+                "/strategy-profiles/auto-rollback-policy/freeze",
+                json={"frozen": False, "reason": "unfreeze_policy"},
+            )
+            fetched_after = client.get("/strategy-profiles/auto-rollback-policy")
+            snapshot_after = client.get("/strategy-profiles")
+
+        self.assertEqual(approved.status_code, 200)
+        self.assertEqual(frozen.status_code, 200)
+        self.assertEqual(unfrozen.status_code, 200)
+        self.assertTrue(fetched_after.json()["enabled"])
+        self.assertEqual(fetched_after.json()["matrix_allowed_profiles"], ["range_defensive"])
+        self.assertEqual(history.json()["history"][0]["policy_status"], "approved")
+        self.assertTrue(snapshot_after.json()["auto_rollback_policy"]["enabled"])
+        self.assertEqual(snapshot_after.json()["auto_rollback_policy"]["matrix_allowed_regimes"], ["range"])
+        self.assertFalse(snapshot_after.json()["auto_rollback_policy"]["frozen"])
+
+    async def test_strategy_profile_winner_selection_policy_exposes_blocked_auto_activation_thresholds(self) -> None:
+        runtime = await self._runtime(
+            operator_auth_enabled=True,
+            operator_session_secret="session-secret",
+            operator_users=[("admin", "admin-pass")],
+            strategy_profile_auto_activation_min_composite_score=9999.0,
+        )
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            client.post("/auth/login", json={"username": "admin", "password": "admin-pass"})
+            evaluated = client.post("/strategy-profiles/auto-tuning/evaluate-now")
+
+        self.assertEqual(evaluated.status_code, 200)
+        self.assertIn(
+            "winner_composite_score_below_threshold",
+            evaluated.json()["optimization_report"]["winner_selection_policy"]["auto_activation"]["blocked_reasons"],
+        )
+
+    async def test_strategy_profile_activation_policy_can_be_persisted_by_scope(self) -> None:
+        runtime = await self._runtime(
+            operator_auth_enabled=True,
+            operator_session_secret="session-secret",
+            operator_users=[("admin", "admin-pass")],
+            strategy_profile_activation_policy_enabled=False,
+        )
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            client.post("/auth/login", json={"username": "admin", "password": "admin-pass"})
+            updated = client.post(
+                "/strategy-profiles/activation-policy",
+                json={
+                    "enabled": True,
+                    "min_composite_score": 0.1,
+                    "min_offline_replay_score": -0.5,
+                    "min_recommendation_strength": 0.2,
+                    "require_positive_replay_consensus": True,
+                    "disallow_when_shadow_review_required": True,
+                    "matrix_allowed_symbols": [runtime.settings.default_symbol],
+                    "matrix_allowed_regimes": ["trend"],
+                    "matrix_allowed_profiles": ["trend_normal"],
+                    "reason": "persist_activation_policy",
+                },
+            )
+            fetched = client.get("/strategy-profiles/activation-policy")
+            snapshot = client.get("/strategy-profiles")
+
+        self.assertEqual(updated.status_code, 200)
+        self.assertEqual(fetched.status_code, 200)
+        self.assertEqual(fetched.json()["policy_status"], "settings_fallback")
+        self.assertFalse(fetched.json()["enabled"])
+
+        with TestClient(app) as client:
+            client.post("/auth/login", json={"username": "admin", "password": "admin-pass"})
+            approved = client.post(
+                "/strategy-profiles/activation-policy/approve",
+                json={"reason": "approve_activation_policy"},
+            )
+            history = client.get("/strategy-profiles/activation-policy/history?limit=10&offset=0")
+            frozen = client.post(
+                "/strategy-profiles/activation-policy/freeze",
+                json={"frozen": True, "reason": "freeze_activation_policy"},
+            )
+            unfrozen = client.post(
+                "/strategy-profiles/activation-policy/freeze",
+                json={"frozen": False, "reason": "unfreeze_activation_policy"},
+            )
+            fetched_after = client.get("/strategy-profiles/activation-policy")
+            snapshot_after = client.get("/strategy-profiles")
+
+        self.assertEqual(approved.status_code, 200)
+        self.assertEqual(frozen.status_code, 200)
+        self.assertEqual(unfrozen.status_code, 200)
+        self.assertTrue(fetched_after.json()["enabled"])
+        self.assertEqual(fetched_after.json()["matrix_allowed_profiles"], ["trend_normal"])
+        self.assertEqual(history.json()["history"][0]["policy_status"], "approved")
+        self.assertTrue(snapshot_after.json()["activation_policy"]["enabled"])
+        self.assertEqual(snapshot_after.json()["activation_policy"]["matrix_allowed_regimes"], ["trend"])
+        self.assertFalse(snapshot_after.json()["activation_policy"]["frozen"])
+
+    async def test_strategy_profile_activation_policy_can_execute_winner_auto_activation_independently(self) -> None:
+        runtime = await self._runtime(
+            operator_auth_enabled=True,
+            operator_session_secret="session-secret",
+            operator_users=[("admin", "admin-pass")],
+            strategy_profile_activation_policy_enabled=True,
+        )
+        conservative = runtime.strategy_profile_repo.list_revisions(
+            product_type=runtime.settings.trading_product_type,
+            margin_mode=runtime.settings.margin_mode,
+            profile_id="range_defensive",
+        )[0]
+        state = runtime.strategy_profile_repo.activation_state(
+            product_type=runtime.settings.trading_product_type,
+            margin_mode=runtime.settings.margin_mode,
+            allowed_symbols=runtime.settings.allowed_symbols,
+        )
+        runtime.strategy_profile_repo.save_activation_state(
+            state.model_copy(
+                update={
+                    "active_revision_id": conservative.revision_id,
+                    "active_profile_id": conservative.profile_id,
+                    "auto_switch_enabled": False,
+                }
+            )
+        )
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            client.post("/auth/login", json={"username": "admin", "password": "admin-pass"})
+            client.post(
+                "/strategy-profiles/activation-policy",
+                json={
+                    "enabled": True,
+                    "min_composite_score": -999.0,
+                    "min_offline_replay_score": -999.0,
+                    "min_recommendation_strength": -999.0,
+                    "require_positive_replay_consensus": False,
+                    "disallow_when_shadow_review_required": False,
+                    "matrix_allowed_symbols": [runtime.settings.default_symbol],
+                    "matrix_allowed_regimes": ["trend", "breakout", "range", "high_volatility", "execution_degraded", "unknown"],
+                    "matrix_allowed_profiles": ["trend_normal", "trend_strict", "range_defensive", "high_volatility_defensive", "execution_degraded_safe"],
+                    "reason": "allow_independent_activation",
+                },
+            )
+            client.post(
+                "/strategy-profiles/activation-policy/approve",
+                json={"reason": "approve_independent_activation"},
+            )
+            evaluated = client.post("/strategy-profiles/auto-tuning/evaluate-now")
+            snapshot = client.get("/strategy-profiles")
+
+        self.assertEqual(evaluated.status_code, 200)
+        self.assertFalse(evaluated.json()["validation"]["auto_apply_allowed"])
+        self.assertIn("profile_activation_policy", evaluated.json())
+        self.assertEqual(
+            evaluated.json()["profile_activation_policy"]["status"],
+            "winner_policy_auto_activation_executed",
+        )
+        self.assertIn(
+            evaluated.json()["selection_decision"]["decision_status"],
+            {"winner_policy_auto_activation_executed", "execution_outcome_recorded"},
+        )
+        self.assertNotEqual(snapshot.json()["activation"]["active_profile_id"], "range_defensive")
+
+    async def test_strategy_profile_auto_rollback_matrix_can_block_by_symbol(self) -> None:
+        runtime = await self._runtime(
+            operator_auth_enabled=True,
+            operator_session_secret="session-secret",
+            operator_users=[("admin", "admin-pass")],
+            strategy_profile_auto_rollback_enabled=True,
+            strategy_profile_auto_rollback_review_required_only=False,
+            strategy_profile_auto_rollback_min_trade_count=1,
+            strategy_profile_auto_rollback_cooldown_seconds=0.0,
+            strategy_profile_auto_rollback_allowed_symbols=("ETH-USDT",),
+        )
+        recommendation = StrategyProfileRecommendation(
+            product_type=runtime.settings.trading_product_type,
+            margin_mode=runtime.settings.margin_mode,
+            allowed_symbols=runtime.settings.allowed_symbols,
+            active_profile_id="trend_normal",
+            recommended_profile_id="range_defensive",
+            confidence=0.85,
+            market_regime_assessment=StrategyProfileMarketRegimeAssessment(
+                regime="range",
+                volatility_state="medium",
+                execution_condition="normal",
+            ),
+            reason_codes=["manual_activation_for_matrix_block"],
+            human_summary="activate defensive profile",
+            risk_notes=[],
+            valid_for_minutes=120,
+            generated_by="test",
+            input_digest="digest_matrix_block",
+            input_snapshot={"source": "test"},
+            expires_at=utc_now() + timedelta(minutes=120),
+        )
+        runtime.strategy_profile_repo.save_recommendation(recommendation)
+        runtime.execution_repo.save_fill(
+            FillEvent(
+                fill_id="fill_matrix_block",
+                decision_id="decision_matrix_block",
+                intent_id="intent_matrix_block",
+                client_order_id="clord_matrix_block",
+                exchange_order_id="ex_matrix_block",
+                symbol=runtime.settings.default_symbol,
+                venue="PAPER",
+                side="buy",
+                fill_qty=0.001,
+                fill_price=100_000.0,
+                fee_amount=1.0,
+                fee_currency="USDT",
+                liquidity_role="taker",
+                exchange_timestamp=utc_now(),
+                ingestion_timestamp=utc_now(),
+                order_status_after_fill="FILLED",
+            )
+        )
+        runtime.recovery_status = runtime.recovery_status.model_copy(
+            update={"safe_to_trade": False, "review_required": True}
+        )
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            client.post("/auth/login", json={"username": "admin", "password": "admin-pass"})
+            client.post(
+                f"/strategy-profiles/recommendations/{recommendation.recommendation_id}/accept",
+                json={"reason": "activate_now", "activation_mode": "manual_now"},
+            )
+            evaluated = client.post("/strategy-profiles/auto-tuning/evaluate-now")
+
+        self.assertEqual(evaluated.status_code, 200)
+        self.assertNotIn("auto_rollback", evaluated.json())
+        self.assertEqual(evaluated.json()["selection_decision"]["decision_status"], "auto_rollback_recommended")
 
     async def test_strategy_profile_auto_apply_is_blocked_when_review_required(self) -> None:
         runtime = await self._runtime(
@@ -1092,6 +1893,9 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(activated.status_code, 200)
         self.assertEqual(staged.json()["status"], "accepted_and_staged")
         self.assertEqual(activated.json()["active_revision"]["profile_id"], "range_defensive")
+        selection_decisions = [item.payload for item in runtime.event_store.by_topic(topics.STRATEGY_PROFILE_SELECTION_DECISIONS)]
+        self.assertTrue(any(item["decision_status"] == "staged_for_activation" for item in selection_decisions))
+        self.assertTrue(any(item["decision_status"] == "pending_activation_executed" for item in selection_decisions))
         actions = [item.payload for item in runtime.event_store.by_topic(topics.OPERATOR_ACTIONS)]
         accept_action = next(item for item in reversed(actions) if item["action"] == "strategy_profile_accept")
         activate_action = next(item for item in reversed(actions) if item["action"] == "strategy_profile_activate_pending")
@@ -1119,6 +1923,8 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rejected.json()["status"], "rejected")
         rejections = runtime.event_store.by_topic(topics.STRATEGY_PROFILE_REJECTIONS)
         self.assertEqual(len(rejections), 1)
+        selection_decisions = [item.payload for item in runtime.event_store.by_topic(topics.STRATEGY_PROFILE_SELECTION_DECISIONS)]
+        self.assertTrue(any(item["decision_status"] == "recommendation_rejected" for item in selection_decisions))
 
     async def test_strategy_profile_activation_is_blocked_when_open_orders_exist(self) -> None:
         runtime = await self._runtime(
@@ -1631,6 +2437,88 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             response.json()["detail"],
             "stuck_submission_resolution_blocked:exchange_order_still_open",
         )
+
+    async def test_stuck_submission_resolution_is_rejected_when_private_ws_saw_order(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "config_profile": "guarded_simulated_submit_dry_run",
+                "mode": "guarded_live",
+                "market_data_backend": "demo",
+                "execution_backend": "okx",
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "okx_simulated_trading": True,
+                "live_submit_enabled": False,
+                "guarded_execution_dry_run": False,
+                "bootstrap_portfolio_from_exchange": True,
+                "storage_mode": "memory",
+                "event_persistence_mode": "strict",
+                "operator_unsafe_write_without_auth": True,
+            }
+        )
+        FakeOperatorAccountService.SNAPSHOT = ExchangeAccountSnapshot(
+            account_source="okx",
+            fetched_at=utc_now(),
+            balances=[ExchangeBalance(currency="USDT", total=1000.0, available=1000.0, frozen=0.0)],
+            positions=[],
+            open_orders=[],
+            fills=[],
+            instruments=[],
+            account_mode="cross",
+        )
+        FakeOperatorAccountService.PRIVATE_ORDER_ROW = {
+            "instId": settings.default_symbol,
+            "ordId": "ord_ws_seen",
+            "clOrdId": "cl_restart_ws_seen",
+            "state": "live",
+            "side": "buy",
+            "ordType": "limit",
+            "sz": "0.1",
+            "accFillSz": "0",
+            "uTime": "1700000002000",
+            "cTime": "1700000001000",
+        }
+        FakeOperatorAccountService.PRIVATE_ORDER_FILLS = []
+        with patch("aats.bootstrap.config.OKXAccountService", FakeOperatorAccountService):
+            runtime = await build_runtime(settings)
+        runtime.execution_repo.save_order_state(
+            OrderState(
+                decision_id="decision_restart_ws_seen",
+                intent_id="intent_restart_ws_seen",
+                symbol=settings.default_symbol,
+                client_order_id="cl_restart_ws_seen",
+                venue="OKX",
+                exchange_order_id=None,
+                status="SUBMITTING",
+                submission_mode="local_order_manager",
+                submitted_ts=None,
+                last_update_ts=utc_now() - timedelta(minutes=10),
+                requested_qty=0.1,
+                filled_qty=0.0,
+                remaining_qty=0.1,
+                product_type="spot",
+                margin_mode="cash",
+                submission_payload={},
+            )
+        )
+        runtime.started_at = utc_now()
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/orders/cl_restart_ws_seen/resolve-stuck-submission",
+                json={"reason": "ui_resolve_stuck_submission"},
+            )
+            detail = client.get("/orders/cl_restart_ws_seen").json()
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            response.json()["detail"],
+            "stuck_submission_resolution_blocked:exchange_order_seen_via_private_ws",
+        )
+        self.assertTrue(detail["stuck_submission_resolution"]["private_ws_order_present"])
+        FakeOperatorAccountService.PRIVATE_ORDER_ROW = None
+        FakeOperatorAccountService.PRIVATE_ORDER_FILLS = None
 
     async def test_orders_recent_returns_latest_orders_first(self) -> None:
         runtime = await self._runtime()

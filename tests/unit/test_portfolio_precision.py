@@ -52,8 +52,8 @@ class TestPortfolioPrecision(unittest.TestCase):
         state.apply_fill(build_fill(fill_id="fill_2", side="buy", qty=0.00000001, price=70_000.12345678))
         state.apply_fill(build_fill(fill_id="fill_3", side="buy", qty=0.00000001, price=70_000.12345678))
 
-        self.assertAlmostEqual(state.balances["BTC"], 0.00000003, places=16)
-        self.assertAlmostEqual(state.positions["BTC-USDT"].quantity, 0.00000003, places=16)
+        self.assertEqual(state.balances["BTC"], Decimal("0.00000003"))
+        self.assertEqual(state.positions["BTC-USDT"].quantity, Decimal("0.00000003"))
 
     def test_snapshot_counts_off_position_assets_in_collateral(self) -> None:
         state = PortfolioState(initial_usdt_balance=1_000.0)

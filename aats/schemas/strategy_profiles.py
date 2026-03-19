@@ -14,6 +14,7 @@ StrategyRiskLevel = Literal["conservative", "normal", "aggressive"]
 StrategyMarketIntent = Literal["trend", "range", "high_volatility", "execution_degraded"]
 StrategyProfileStatus = Literal["draft", "pending", "active", "superseded", "rejected", "rolled_back"]
 StrategyActivationMode = Literal["manual", "auto", "rollback", "staged"]
+StrategyProfileAxisLevel = Literal["relaxed", "balanced", "strict", "defensive"]
 StrategyActivationResult = Literal[
     "none",
     "activation_succeeded",
@@ -73,6 +74,46 @@ class StrategyProfilePayload(SchemaBase):
     strategy_reversal_alpha_min: float
     strategy_reversal_confidence_min: float
     strategy_transient_close_retry_cooldown_seconds: float
+
+
+class StrategyProfileAxes(SchemaBase):
+    frequency: StrategyProfileAxisLevel
+    entry_threshold: StrategyProfileAxisLevel
+    scale_in_threshold: StrategyProfileAxisLevel
+    reversal_threshold: StrategyProfileAxisLevel
+    cost_protection: StrategyProfileAxisLevel
+    cooldown_fuse: StrategyProfileAxisLevel
+
+
+class StrategyProfileComparisonRow(SchemaBase):
+    profile_id: str
+    profile_label: str
+    risk_level: StrategyRiskLevel
+    market_intent: StrategyMarketIntent
+    axes: StrategyProfileAxes
+    evaluation_count: int = 0
+    total_trade_count: int = 0
+    avg_net_realized_pnl: float = 0.0
+    avg_fee_to_gross_pnl_ratio: float = 0.0
+    avg_small_pnl_churn_ratio: float = 0.0
+    avg_win_rate: float = 0.0
+    latest_status: StrategyEvaluationStatus | None = None
+    active: bool = False
+    pending: bool = False
+    score: float = 0.0
+    score_breakdown: dict[str, float] = Field(default_factory=dict)
+    expected_behavior: list[str] = Field(default_factory=list)
+    summary: dict[str, Any] = Field(default_factory=dict)
+
+
+class StrategyProfileComparisonReport(SchemaBase):
+    report_id: str = Field(default_factory=lambda: new_id("strp_cmp"))
+    scope: dict[str, Any] = Field(default_factory=dict)
+    generated_at: datetime = Field(default_factory=utc_now)
+    ranking_method: str = "historical_eval_plus_shadow_guard"
+    shadow_summary: dict[str, Any] = Field(default_factory=dict)
+    active_profile_id: str | None = None
+    rows: list[StrategyProfileComparisonRow] = Field(default_factory=list)
 
 
 class StrategyProfileGuardrails(SchemaBase):
@@ -251,6 +292,7 @@ def apply_strategy_profile_payload(settings: AATSSettings, payload: StrategyProf
 def summarize_strategy_profile_payload(payload: StrategyProfilePayload | dict[str, Any]) -> dict[str, Any]:
     raw = payload.model_dump(mode="python") if isinstance(payload, StrategyProfilePayload) else dict(payload)
     return {
+        "axes": strategy_profile_axes_from_payload(raw).model_dump(mode="json"),
         "decision_min_interval_seconds_15m": raw.get("decision_min_interval_seconds_15m"),
         "max_decisions_per_minute": raw.get("max_decisions_per_minute"),
         "decision_min_price_move_bps": raw.get("decision_min_price_move_bps"),
@@ -261,6 +303,48 @@ def summarize_strategy_profile_payload(payload: StrategyProfilePayload | dict[st
         "strategy_scale_in_alpha_min": raw.get("strategy_scale_in_alpha_min"),
         "strategy_reversal_alpha_min": raw.get("strategy_reversal_alpha_min"),
     }
+
+
+def strategy_profile_axes_from_payload(payload: StrategyProfilePayload | dict[str, Any]) -> StrategyProfileAxes:
+    raw = payload.model_dump(mode="python") if isinstance(payload, StrategyProfilePayload) else dict(payload)
+
+    def level(
+        value: float,
+        *,
+        low: float,
+        medium: float,
+        high: float,
+        invert: bool = False,
+    ) -> StrategyProfileAxisLevel:
+        compare = -float(value) if invert else float(value)
+        threshold_low = -high if invert else low
+        threshold_medium = -medium if invert else medium
+        threshold_high = -low if invert else high
+        if compare <= threshold_low:
+            return "relaxed"
+        if compare <= threshold_medium:
+            return "balanced"
+        if compare <= threshold_high:
+            return "strict"
+        return "defensive"
+
+    frequency_signal = max(
+        float(raw.get("decision_min_interval_seconds_15m", 0.0) or 0.0) / 60.0,
+        float(raw.get("max_decisions_per_minute", 0) or 0),
+    )
+    cost_signal = max(
+        float(raw.get("strategy_min_net_edge_bps", 0.0) or 0.0),
+        float(raw.get("decision_min_price_move_bps", 0.0) or 0.0),
+    )
+    cooldown_signal = float(raw.get("strategy_transient_close_retry_cooldown_seconds", 0.0) or 0.0)
+    return StrategyProfileAxes(
+        frequency=level(frequency_signal, low=1.5, medium=2.5, high=4.0),
+        entry_threshold=level(float(raw.get("strategy_entry_alpha_min", 0.0) or 0.0), low=0.16, medium=0.22, high=0.28),
+        scale_in_threshold=level(float(raw.get("strategy_scale_in_alpha_min", 0.0) or 0.0), low=0.2, medium=0.28, high=0.34),
+        reversal_threshold=level(float(raw.get("strategy_reversal_alpha_min", 0.0) or 0.0), low=0.26, medium=0.34, high=0.4),
+        cost_protection=level(cost_signal, low=5.0, medium=8.0, high=12.0),
+        cooldown_fuse=level(cooldown_signal, low=90.0, medium=180.0, high=300.0),
+    )
 
 
 def diff_strategy_profile_payload(

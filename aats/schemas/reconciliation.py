@@ -23,6 +23,8 @@ class ReconciliationReport(SchemaBase):
     fill_diff: dict[str, Any]
     balance_diff: dict[str, Any]
     position_diff: dict[str, Any]
+    exchange_bills_summary: dict[str, Any] = Field(default_factory=dict)
+    exchange_bills_explanations: list[dict[str, Any]] = Field(default_factory=list)
     mismatch_categories: list[str] = Field(default_factory=list)
     mismatch_reasons: list[str] = Field(default_factory=list)
     safety_impacts: list[str] = Field(default_factory=list)

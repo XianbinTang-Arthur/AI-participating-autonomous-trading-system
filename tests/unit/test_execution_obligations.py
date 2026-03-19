@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from decimal import Decimal
 
 from aats.bus.memory_bus import InMemoryEventBus
 from aats.events import topics
@@ -15,6 +16,15 @@ from aats.services.governance_engine.kill_switch import KillSwitch
 from aats.storage.event_store import InMemoryEventStore
 from aats.storage.execution_repo import InMemoryExecutionRepository
 from aats.storage.obligation_repo import InMemoryExecutionObligationRepository
+
+
+class _FixedFeeResolver:
+    def __init__(self, fee_bps: str) -> None:
+        self.fee_bps = Decimal(fee_bps)
+
+    def taker_fee_bps_decimal(self, *, symbol: str | None = None) -> Decimal:
+        _ = symbol
+        return self.fee_bps
 
 
 class _SubmittedAdapter:
@@ -217,8 +227,8 @@ class TestExecutionObligations(unittest.IsolatedAsyncioTestCase):
         obligation = obligation_repo.get_obligation("clclient_failed")
         self.assertIsNotNone(obligation)
         self.assertEqual(obligation.status, "FAILED")
-        self.assertAlmostEqual(obligation.released_amount, 60.0)
-        self.assertAlmostEqual(ExecutionObligationService.remaining_amount(obligation), 0.0)
+        self.assertEqual(obligation.released_amount, Decimal("60.03"))
+        self.assertEqual(ExecutionObligationService.remaining_amount(obligation), Decimal("0"))
 
     async def test_filled_order_consumes_reserved_amount(self) -> None:
         snapshot = ExchangeAccountSnapshot(
@@ -247,8 +257,32 @@ class TestExecutionObligations(unittest.IsolatedAsyncioTestCase):
         obligation = obligation_repo.get_obligation("clclient_filled")
         self.assertIsNotNone(obligation)
         self.assertEqual(obligation.status, "RELEASED")
-        self.assertAlmostEqual(obligation.consumed_amount, 60.0)
-        self.assertAlmostEqual(obligation.released_amount, 0.0)
+        self.assertEqual(obligation.consumed_amount, Decimal("60.0"))
+        self.assertEqual(obligation.released_amount, Decimal("0.03"))
+
+    async def test_spot_buy_reservation_prefers_dynamic_fee_resolver(self) -> None:
+        snapshot = ExchangeAccountSnapshot(
+            account_source="okx",
+            fetched_at=utc_now(),
+            balances=[ExchangeBalance(currency="USDT", total=100.0, available=100.0, frozen=0.0)],
+        )
+        obligation_repo = InMemoryExecutionObligationRepository()
+        settings = AATSSettings.model_validate({"account_backend": "okx", "account_read_enabled": True})
+        service = ExecutionObligationService(
+            settings=settings,
+            obligation_repo=obligation_repo,
+            account_snapshot_loader=lambda: _return_snapshot(snapshot),
+            price_provider=lambda _symbol: 60_000.0,
+            fee_resolver=_FixedFeeResolver("10"),
+        )
+
+        obligation = await service.preview_reservation_for_intent(
+            intent=_intent("intent_dynamic_fee", "decision_dynamic_fee", "client_dynamic_fee"),
+            client_order_id="clclient_dynamic_fee",
+        )
+
+        self.assertIsNotNone(obligation)
+        self.assertEqual(obligation.reserved_amount, Decimal("60.06"))
 
     async def test_outbox_path_does_not_finalize_obligation_before_fill_consumption(self) -> None:
         snapshot = ExchangeAccountSnapshot(
@@ -283,11 +317,11 @@ class TestExecutionObligations(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(outbox.order_state_obligations[0].client_order_id, "clclient_outbox_filled")
         self.assertEqual(outbox.order_state_obligations[1:], [None, None])
         self.assertEqual(len(outbox.fill_obligations), 1)
-        self.assertAlmostEqual(outbox.fill_obligations[0].consumed_amount, 60.0)
-        self.assertAlmostEqual(outbox.fill_obligations[0].released_amount, 0.0)
+        self.assertEqual(outbox.fill_obligations[0].consumed_amount, Decimal("60.0"))
+        self.assertEqual(outbox.fill_obligations[0].released_amount, Decimal("0"))
         self.assertEqual(obligation.status, "RELEASED")
-        self.assertAlmostEqual(obligation.consumed_amount, 60.0)
-        self.assertAlmostEqual(obligation.released_amount, 0.0)
+        self.assertEqual(obligation.consumed_amount, Decimal("60.0"))
+        self.assertEqual(obligation.released_amount, Decimal("0.03"))
 
     async def test_outbox_path_finalizes_failed_zero_fill_obligation_with_terminal_state(self) -> None:
         snapshot = ExchangeAccountSnapshot(
@@ -322,9 +356,9 @@ class TestExecutionObligations(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(outbox.order_state_obligations[1], None)
         self.assertIsNotNone(outbox.order_state_obligations[2])
         self.assertEqual(outbox.order_state_obligations[2].status, "FAILED")
-        self.assertAlmostEqual(outbox.order_state_obligations[2].released_amount, 60.0)
+        self.assertEqual(outbox.order_state_obligations[2].released_amount, Decimal("60.03"))
         self.assertEqual(obligation.status, "FAILED")
-        self.assertAlmostEqual(obligation.released_amount, 60.0)
+        self.assertEqual(obligation.released_amount, Decimal("60.03"))
 
 
 async def _return_snapshot(snapshot: ExchangeAccountSnapshot) -> ExchangeAccountSnapshot:

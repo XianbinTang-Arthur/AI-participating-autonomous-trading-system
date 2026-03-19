@@ -16,6 +16,7 @@ from aats.services.feature_engine.liquidity import LiquidityAnalyzer
 from aats.services.feature_engine.regime import RegimeClassifier
 from aats.services.feature_engine.trend import TrendCalculator
 from aats.services.feature_engine.volatility import VolatilityAnalyzer
+from aats.services.portfolio_service.decimals import to_decimal
 
 
 class FeatureCalculator:
@@ -122,10 +123,10 @@ class FeatureCalculator:
         return TimeframeFeatureSet(
             created_at=snapshot.snapshot_ts,
             timeframe=timeframe,  # type: ignore[arg-type]
-            open_price=float(kline["open"]),
-            high_price=float(kline["high"]),
-            low_price=float(kline["low"]),
-            close_price=float(kline["close"]),
+            open_price=to_decimal(kline["open"]),
+            high_price=to_decimal(kline["high"]),
+            low_price=to_decimal(kline["low"]),
+            close_price=to_decimal(kline["close"]),
             momentum_score=trend_metrics.momentum_score,
             trend_strength=trend_metrics.trend_strength,
             volatility_value=volatility_metrics.volatility_value,

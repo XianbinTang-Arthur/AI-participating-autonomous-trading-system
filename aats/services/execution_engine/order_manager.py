@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from decimal import Decimal
 from datetime import timedelta
 
 from aats.bootstrap.settings import AATSSettings
@@ -18,7 +19,7 @@ from aats.storage.base import ExecutionRepository
 
 
 class OrderManager:
-    _OBLIGATION_ATOMIC_FINALIZE_EPSILON = 1e-12
+    _OBLIGATION_ATOMIC_FINALIZE_EPSILON = Decimal("1e-12")
     _FILL_BACKFILL_RECENT_LIMIT = 100
     _FILL_BACKFILL_TERMINAL_STATUSES = ("FILLED", "CANCELED", "EXPIRED")
     _TRANSIENT_RETRY_PATTERNS = ("50013", "systems are busy", "service busy", "temporarily unavailable")
@@ -108,10 +109,10 @@ class OrderManager:
                 submitted_ts=None,
                 last_update_ts=utc_now(),
                 requested_qty=intent.quantity,
-                filled_qty=0.0,
+                filled_qty=Decimal("0"),
                 remaining_qty=intent.quantity,
                 average_fill_price=None,
-                fees=0.0,
+                fees=Decimal("0"),
                 product_type=intent.product_type,
                 target_leverage=intent.target_leverage,
                 margin_mode=intent.margin_mode,
@@ -134,10 +135,10 @@ class OrderManager:
             submitted_ts=None,
             last_update_ts=utc_now(),
             requested_qty=intent.quantity,
-            filled_qty=0.0,
+            filled_qty=Decimal("0"),
             remaining_qty=intent.quantity,
             average_fill_price=None,
-            fees=0.0,
+            fees=Decimal("0"),
             product_type=intent.product_type,
             target_leverage=intent.target_leverage,
             margin_mode=intent.margin_mode,
@@ -173,10 +174,10 @@ class OrderManager:
                 submitted_ts=utc_now(),
                 last_update_ts=utc_now(),
                 requested_qty=intent.quantity,
-                filled_qty=0.0,
+                filled_qty=Decimal("0"),
                 remaining_qty=intent.quantity,
                 average_fill_price=None,
-                fees=0.0,
+                fees=Decimal("0"),
                 product_type=intent.product_type,
                 target_leverage=intent.target_leverage,
                 margin_mode=intent.margin_mode,
@@ -320,17 +321,16 @@ class OrderManager:
 
     async def _persist_fill(self, fill) -> None:
         obligation = None
-        if self.obligation_service is not None:
-            if self.execution_outbox_publisher is not None:
-                obligation = self.obligation_service.preview_obligation_for_fill(fill)
-            else:
-                obligation = self.obligation_service.consume_for_fill(fill)
+        if self.obligation_service is not None and self.execution_outbox_publisher is not None:
+            obligation = self.obligation_service.preview_obligation_for_fill(fill)
         if self.execution_outbox_publisher is not None:
             saved = await self.execution_outbox_publisher.persist_fill(fill=fill, obligation=obligation)
             if not saved:
                 return
         elif not self.execution_repo.save_fill(fill):
             return
+        elif self.obligation_service is not None:
+            self.obligation_service.consume_for_fill(fill)
         log_event(
             self.logger,
             "fill_event_created",
@@ -414,7 +414,7 @@ class OrderManager:
             observed_at = state.last_update_ts or state.created_at
             if observed_at < cutoff:
                 continue
-            if abs(state.requested_qty - intent.quantity) > max(intent.quantity * 0.2, 1e-8):
+            if abs(state.requested_qty - intent.quantity) > max(intent.quantity * Decimal("0.2"), Decimal("1e-8")):
                 continue
             error_text = f"{state.execution_error or ''} {state.cancel_reason or ''}".lower()
             if not any(pattern in error_text for pattern in self._TRANSIENT_RETRY_PATTERNS):
@@ -431,10 +431,10 @@ class OrderManager:
                 submitted_ts=None,
                 last_update_ts=utc_now(),
                 requested_qty=intent.quantity,
-                filled_qty=0.0,
+                filled_qty=Decimal("0"),
                 remaining_qty=intent.quantity,
                 average_fill_price=None,
-                fees=0.0,
+                fees=Decimal("0"),
                 product_type=intent.product_type,
                 target_leverage=intent.target_leverage,
                 margin_mode=intent.margin_mode,

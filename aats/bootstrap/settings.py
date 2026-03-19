@@ -27,6 +27,7 @@ ConfigProfile = Literal[
 MarketDataBackend = Literal["demo", "okx"]
 ExecutionBackend = Literal["paper", "okx"]
 AccountBackend = Literal["disabled", "okx"]
+AIExecutionSuggestionMode = Literal["disabled", "diagnostic_only", "shadow_translation", "enabled_live"]
 
 
 class AATSSettings(BaseSettings):
@@ -55,6 +56,8 @@ class AATSSettings(BaseSettings):
     bootstrap_portfolio_from_exchange: bool = False
     database_url: str | None = None
     database_auto_create_schema: bool = True
+    database_single_runtime_guard_enabled: bool = True
+    database_runtime_lock_key: int = 42_420_001
     max_abs_position_qty: float = 0.01
     max_notional_per_symbol: float = 1_000.0
     max_open_orders: int = 5
@@ -84,6 +87,17 @@ class AATSSettings(BaseSettings):
     ai_primary_min_directional_edge: float = 0.2
     ai_shadow_mode_enabled: bool = False
     ai_shadow_evaluation_window: int = 50
+    ai_outcome_review_bad_window_threshold: int = 2
+    ai_outcome_max_fee_ratio_delta: float = 0.05
+    ai_outcome_max_churn_ratio_delta: float = 0.08
+    ai_execution_suggestion_mode: AIExecutionSuggestionMode = "disabled"
+    ai_execution_max_passive_bias: float = 1.0
+    ai_execution_max_maker_taker_bias: float = 1.0
+    ai_execution_max_cross_spread_bps: float = 6.0
+    ai_execution_max_slice_count: int = 4
+    ai_execution_max_participation_rate: float = 0.35
+    ai_execution_max_cancel_replace_patience_ms: int = 4_000
+    ai_execution_live_limit_offset_fraction_of_slippage: float = 0.5
     openai_api_key: str | None = None
     openai_base_url: str = "https://api.openai.com"
     market_data_stale_after_seconds: float = 30.0
@@ -92,6 +106,7 @@ class AATSSettings(BaseSettings):
     okx_rest_url: str = "https://www.okx.com"
     okx_public_ws_url: str = "wss://ws.okx.com:8443/ws/v5/public"
     okx_business_ws_url: str = "wss://ws.okx.com:8443/ws/v5/business"
+    okx_private_ws_url: str = "wss://ws.okx.com:8443/ws/v5/private"
     okx_api_key: str | None = None
     okx_api_secret: str | None = None
     okx_api_passphrase: str | None = None
@@ -101,6 +116,34 @@ class AATSSettings(BaseSettings):
     okx_account_refresh_interval_seconds: float = 15.0
     okx_execution_sync_interval_seconds: float = 5.0
     okx_fill_fetch_limit: int = 100
+    okx_bills_fetch_limit: int = 100
+    okx_trade_fee_refresh_interval_seconds: float = 300.0
+    okx_system_status_refresh_interval_seconds: float = 60.0
+    okx_max_order_quantity_precheck_enabled: bool = True
+    okx_account_config_validation_enabled: bool = True
+    okx_system_status_gate_enabled: bool = True
+    okx_private_balance_position_ws_enabled: bool = True
+    strategy_profile_auto_rollback_enabled: bool = False
+    strategy_profile_auto_rollback_review_required_only: bool = True
+    strategy_profile_auto_rollback_min_trade_count: int = 3
+    strategy_profile_auto_rollback_cooldown_seconds: float = 1_800.0
+    strategy_profile_auto_rollback_allowed_symbols: tuple[str, ...] = Field(default=tuple())
+    strategy_profile_auto_rollback_allowed_regimes: tuple[str, ...] = Field(default=tuple())
+    strategy_profile_auto_rollback_allowed_profiles: tuple[str, ...] = Field(default=tuple())
+    strategy_profile_offline_replay_windows: tuple[int, ...] = Field(default=(10, 20, 50))
+    strategy_profile_offline_replay_pipeline_version: str = "offline_replay_pipeline_v2"
+    strategy_profile_auto_activation_min_composite_score: float = 0.0
+    strategy_profile_auto_activation_min_offline_replay_score: float = -10.0
+    strategy_profile_auto_activation_min_recommendation_strength: float = 0.0
+    strategy_profile_auto_activation_require_positive_replay_consensus: bool = False
+    strategy_profile_auto_activation_disallow_when_shadow_review_required: bool = False
+    strategy_profile_activation_policy_enabled: bool = False
+    strategy_profile_activation_policy_allowed_symbols: tuple[str, ...] = Field(default=tuple())
+    strategy_profile_activation_policy_allowed_regimes: tuple[str, ...] = Field(default=tuple())
+    strategy_profile_activation_policy_allowed_profiles: tuple[str, ...] = Field(default=tuple())
+    strategy_profile_failure_rollback_on_degraded_evaluation: bool = True
+    strategy_profile_failure_rollback_on_shadow_review_required: bool = True
+    strategy_profile_failure_rollback_on_alternative_winner: bool = True
     trading_product_type: TradingProductType = "spot"
     margin_mode: MarginMode = "cash"
     max_target_leverage: float = 1.0
@@ -114,14 +157,27 @@ class AATSSettings(BaseSettings):
     strategy_cost_guard_enabled: bool = True
     strategy_alpha_edge_bps_scale: float = 100.0
     strategy_expected_slippage_bps_fraction: float = 0.25
+    strategy_edge_noise_buffer_bps: float = 3.0
     strategy_min_net_edge_bps: float = 2.0
     strategy_entry_allowed_regimes: tuple[str, ...] = Field(default=("trend", "breakout"))
+    strategy_entry_min_signal_edge_bps: float = 10.0
     strategy_entry_alpha_min: float = 0.18
     strategy_entry_confidence_min: float = 0.62
+    strategy_scale_in_min_signal_edge_bps: float = 12.0
     strategy_scale_in_alpha_min: float = 0.24
     strategy_scale_in_confidence_min: float = 0.68
+    strategy_reversal_min_signal_edge_bps: float = 15.0
     strategy_reversal_alpha_min: float = 0.3
     strategy_reversal_confidence_min: float = 0.75
+    strategy_min_hold_seconds: float = 900.0
+    strategy_post_close_cooldown_seconds: float = 600.0
+    strategy_health_lookback_trades: int = 12
+    strategy_performance_guard_min_closed_trades: int = 4
+    strategy_max_fee_drag_ratio: float = 0.55
+    strategy_max_churn_ratio: float = 0.6
+    strategy_low_edge_threshold_bps: float = 3.0
+    strategy_low_edge_streak_limit: int = 3
+    strategy_low_edge_cooldown_seconds: float = 1_800.0
     strategy_transient_close_retry_cooldown_seconds: float = 90.0
     max_margin_usage_fraction: float = 0.85
     liquidation_buffer_fraction: float = 0.15

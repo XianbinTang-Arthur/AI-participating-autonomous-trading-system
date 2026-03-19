@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 
+from aats.bootstrap.config import resilient_subscription_handler
 from aats.bus.memory_bus import InMemoryEventBus
 from aats.events.envelopes import build_envelope, publish_model
 from aats.schemas.market import MarketSnapshot
@@ -163,6 +164,54 @@ class TestInMemoryEventBus(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(received), 1)
         self.assertEqual(event_store.count(), 0)
+
+    async def test_resilient_subscription_handler_logs_and_does_not_abort_publish(self) -> None:
+        event_store = InMemoryEventStore()
+        bus = InMemoryEventBus(event_store=event_store)
+        received: list[str] = []
+
+        async def critical_handler(message: dict) -> None:
+            _ = message
+            received.append("critical")
+
+        async def noncritical_handler(message: dict) -> None:
+            _ = message
+            raise RuntimeError("boom")
+
+        await bus.subscribe("market.snapshots", critical_handler)
+        await bus.subscribe(
+            "market.snapshots",
+            resilient_subscription_handler(
+                topic="market.snapshots",
+                name="test.noncritical_handler",
+                handler=noncritical_handler,
+            ),
+        )
+        snapshot = MarketSnapshot(
+            symbol="BTC-USDT",
+            exchange="PAPER",
+            snapshot_ts=utc_now(),
+            best_bid=1.0,
+            best_ask=1.1,
+            last_price=1.05,
+            bid_size=1.0,
+            ask_size=1.0,
+            volume_24h=10.0,
+            kline_15m={"open": 1.0, "high": 1.1, "low": 0.9, "close": 1.05},
+            kline_1h={"open": 1.0, "high": 1.1, "low": 0.9, "close": 1.05},
+        )
+
+        with self.assertLogs("aats.event_bus", level="ERROR") as captured:
+            await publish_model(
+                bus=bus,
+                topic="market.snapshots",
+                key="BTC-USDT",
+                payload_model=snapshot,
+                source_component="test",
+            )
+
+        self.assertEqual(received, ["critical"])
+        self.assertTrue(any("noncritical_subscription_failed" in line for line in captured.output))
 
 
 if __name__ == "__main__":

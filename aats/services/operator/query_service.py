@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 from aats.bootstrap.logging import get_logger, log_event
@@ -40,6 +41,7 @@ from aats.services.runtime_scope import (
     runtime_state_scope,
     latest_topic_event_for_scope,
 )
+from aats.services.strategy_execution_health import compute_strategy_execution_health
 
 if TYPE_CHECKING:
     from aats.bootstrap.config import ApplicationRuntime
@@ -92,6 +94,33 @@ class OperatorQueryService:
         return self._cached(
             "latest_scoped_snapshot",
             lambda: latest_snapshot_for_scope(self.runtime.portfolio_repo, self.state_scope),
+        )
+
+    def _current_symbol_position_qty(self, symbol: str) -> Any:
+        snapshot = self._latest_scoped_snapshot()
+        if snapshot is None:
+            return Decimal("0")
+        for position in snapshot.positions:
+            if position.symbol == symbol:
+                return position.position_qty
+        if snapshot.product_type == "spot" and "-" in symbol:
+            base_currency, _quote_currency = symbol.split("-", 1)
+            return snapshot.balances.get(base_currency, Decimal("0"))
+        return Decimal("0")
+
+    def strategy_execution_health(self, symbol: str | None = None) -> dict[str, Any]:
+        target_symbol = symbol or self.runtime.settings.default_symbol
+        snapshot = compute_strategy_execution_health(
+            settings=self.runtime.settings,
+            symbol=target_symbol,
+            fills=self._scoped_fills(),
+            snapshots=snapshots_for_scope(self.runtime.portfolio_repo, self.state_scope),
+            current_position_qty=self._current_symbol_position_qty(target_symbol),
+        )
+        return snapshot.as_payload(
+            settings=self.runtime.settings,
+            as_of=utc_now(),
+            current_position_qty=self._current_symbol_position_qty(target_symbol),
         )
 
     def _current_runtime_started_at(self) -> datetime:
@@ -191,19 +220,388 @@ class OperatorQueryService:
     def ai_runtime(self) -> dict[str, Any]:
         return self.runtime.ai_service.status()
 
+    def _recent_ai_takeover_events(self, *, limit: int | None = None):
+        if not self._ai_history_visible():
+            return []
+        rows = list(
+            reversed(
+                self.runtime.event_store.by_topic_scoped(
+                    topics.AI_TAKEOVER_DECISIONS,
+                    scope=self.state_scope,
+                )
+            )
+        )
+        if limit is None:
+            return rows
+        return rows[:limit]
+
+    def _recent_ai_shadow_evaluation_events(self, *, limit: int | None = None):
+        if not self._ai_history_visible():
+            return []
+        rows = list(
+            reversed(
+                self.runtime.event_store.by_topic_scoped(
+                    topics.AI_SHADOW_EVALUATIONS,
+                    scope=self.state_scope,
+                )
+            )
+        )
+        if limit is None:
+            return rows
+        return rows[:limit]
+
+    def _recent_ai_performance_report_events(self, *, limit: int | None = None):
+        if not self._ai_history_visible():
+            return []
+        rows = list(
+            reversed(
+                self.runtime.event_store.by_topic_scoped(
+                    topics.AI_PERFORMANCE_REPORTS,
+                    scope=self.state_scope,
+                )
+            )
+        )
+        if limit is None:
+            return rows
+        return rows[:limit]
+
+    def _recent_strategy_profile_optimization_report_events(self, *, limit: int | None = None):
+        rows = list(
+            reversed(
+                self.runtime.event_store.by_topic_scoped(
+                    topics.STRATEGY_PROFILE_OPTIMIZATION_REPORTS,
+                    scope=self.state_scope,
+                )
+            )
+        )
+        if limit is None:
+            return rows
+        return rows[:limit]
+
+    def _recent_strategy_profile_selection_decision_events(self, *, limit: int | None = None):
+        rows = list(
+            reversed(
+                self.runtime.event_store.by_topic_scoped(
+                    topics.STRATEGY_PROFILE_SELECTION_DECISIONS,
+                    scope=self.state_scope,
+                )
+            )
+        )
+        if limit is None:
+            return rows
+        return rows[:limit]
+
+    @staticmethod
+    def _ratio(numerator: int, denominator: int) -> float:
+        if denominator <= 0:
+            return 0.0
+        return round(numerator / denominator, 6)
+
+    def _ai_takeover_summary(self, *, limit: int = 50) -> dict[str, Any]:
+        payloads = [self.payload(item) for item in self._recent_ai_takeover_events(limit=limit)]
+        payloads = [item for item in payloads if item is not None]
+        attempted = len(payloads)
+        allowed = sum(1 for item in payloads if item.get("ai_takeover_allowed"))
+        applied = sum(1 for item in payloads if item.get("ai_takeover_applied"))
+        disagreement = sum(
+            1
+            for item in payloads
+            if item.get("baseline_direction") not in {None, ""}
+            and item.get("ai_direction") not in {None, ""}
+            and item.get("baseline_direction") != item.get("ai_direction")
+        )
+        blocker_counts: dict[str, int] = {}
+        for item in payloads:
+            for blocker in item.get("ai_takeover_blockers", []):
+                blocker_counts[str(blocker)] = blocker_counts.get(str(blocker), 0) + 1
+        top_blockers = sorted(
+            (
+                {"blocker": blocker, "count": count}
+                for blocker, count in blocker_counts.items()
+            ),
+            key=lambda row: (-row["count"], row["blocker"]),
+        )[:5]
+        latest = payloads[0] if payloads else None
+        return {
+            "window_size": attempted,
+            "attempted_count": attempted,
+            "allowed_count": allowed,
+            "applied_count": applied,
+            "blocked_count": max(attempted - applied, 0),
+            "disagreement_count": disagreement,
+            "allowed_rate": self._ratio(allowed, attempted),
+            "applied_rate": self._ratio(applied, attempted),
+            "blocked_rate": self._ratio(max(attempted - applied, 0), attempted),
+            "disagreement_rate": self._ratio(disagreement, attempted),
+            "top_blockers": top_blockers,
+            "latest_takeover_at": latest.get("created_at") if latest is not None else None,
+        }
+
+    def _ai_shadow_summary(self, *, limit: int = 10) -> dict[str, Any]:
+        payloads = [self.payload(item) for item in self._recent_ai_shadow_evaluation_events(limit=limit)]
+        payloads = [item for item in payloads if item is not None]
+        latest = payloads[0] if payloads else None
+        outperformed_count = sum(1 for item in payloads if item.get("shadow_outperformed") is True)
+        underperformed_count = sum(1 for item in payloads if item.get("shadow_outperformed") is False)
+        if latest is None:
+            return {
+                "window_count": 0,
+                "status": "insufficient_data",
+                "review_required": False,
+                "outperformed_count": 0,
+                "underperformed_count": 0,
+                "outperformed_rate": 0.0,
+                "latest_evaluation": None,
+                "latest_net_pnl_delta": None,
+                "latest_fee_ratio_delta": None,
+                "latest_churn_ratio_delta": None,
+            }
+        latest_net_pnl_delta = (
+            Decimal(str(latest.get("shadow_net_pnl") or "0"))
+            - Decimal(str(latest.get("baseline_net_pnl") or "0"))
+        )
+        latest_fee_ratio_delta = round(
+            float(latest.get("shadow_fee_ratio") or 0.0) - float(latest.get("baseline_fee_ratio") or 0.0),
+            6,
+        )
+        latest_churn_ratio_delta = round(
+            float(latest.get("shadow_churn_ratio") or 0.0) - float(latest.get("baseline_churn_ratio") or 0.0),
+            6,
+        )
+        review_required = (
+            len(payloads) >= 2
+            and (
+                underperformed_count >= min(2, len(payloads))
+                or latest_fee_ratio_delta > 0.05
+                or latest_churn_ratio_delta > 0.08
+            )
+        )
+        status = "healthy"
+        if review_required:
+            status = "review_required"
+        elif latest.get("shadow_outperformed") is False:
+            status = "underperforming"
+        elif outperformed_count and underperformed_count:
+            status = "mixed"
+        return {
+            "window_count": len(payloads),
+            "status": status,
+            "review_required": review_required,
+            "outperformed_count": outperformed_count,
+            "underperformed_count": underperformed_count,
+            "outperformed_rate": self._ratio(outperformed_count, len(payloads)),
+            "latest_evaluation": latest,
+            "latest_net_pnl_delta": latest_net_pnl_delta,
+            "latest_fee_ratio_delta": latest_fee_ratio_delta,
+            "latest_churn_ratio_delta": latest_churn_ratio_delta,
+        }
+
+    def _ai_shadow_performance_windows(self) -> dict[str, Any]:
+        latest_report_payload = self._latest_ai_performance_report_payload()
+        if latest_report_payload is not None and isinstance(latest_report_payload.get("windows"), dict):
+            return latest_report_payload["windows"]
+        evaluations = [self.payload(item) for item in self._recent_ai_shadow_evaluation_events(limit=40)]
+        evaluations = [item for item in evaluations if item is not None]
+        windows = {
+            "short": {"sample_size": 3, "label": "recent_3_windows"},
+            "medium": {"sample_size": 5, "label": "recent_5_windows"},
+            "long": {"sample_size": 10, "label": "recent_10_windows"},
+        }
+        result: dict[str, Any] = {}
+        for key, config in windows.items():
+            sample_size = config["sample_size"]
+            rows = evaluations[:sample_size]
+            if not rows:
+                result[key] = {
+                    "label": config["label"],
+                    "sample_size": 0,
+                    "outperformed_rate": 0.0,
+                    "baseline_net_pnl_total": None,
+                    "shadow_net_pnl_total": None,
+                    "net_pnl_delta_total": None,
+                    "avg_fee_ratio_delta": None,
+                    "avg_churn_ratio_delta": None,
+                    "review_required_count": 0,
+                }
+                continue
+            baseline_net_total = sum(Decimal(str(item.get("baseline_net_pnl") or "0")) for item in rows)
+            shadow_net_total = sum(Decimal(str(item.get("shadow_net_pnl") or "0")) for item in rows)
+            fee_ratio_deltas = [
+                float(item.get("shadow_fee_ratio") or 0.0) - float(item.get("baseline_fee_ratio") or 0.0)
+                for item in rows
+            ]
+            churn_ratio_deltas = [
+                float(item.get("shadow_churn_ratio") or 0.0) - float(item.get("baseline_churn_ratio") or 0.0)
+                for item in rows
+            ]
+            outperformed = sum(1 for item in rows if item.get("shadow_outperformed") is True)
+            review_required_count = sum(
+                1
+                for item in rows
+                if (
+                    (float(item.get("shadow_fee_ratio") or 0.0) - float(item.get("baseline_fee_ratio") or 0.0))
+                    > self.runtime.settings.ai_outcome_max_fee_ratio_delta
+                )
+                or (
+                    (float(item.get("shadow_churn_ratio") or 0.0) - float(item.get("baseline_churn_ratio") or 0.0))
+                    > self.runtime.settings.ai_outcome_max_churn_ratio_delta
+                )
+                or item.get("shadow_outperformed") is False
+            )
+            result[key] = {
+                "label": config["label"],
+                "sample_size": len(rows),
+                "outperformed_rate": self._ratio(outperformed, len(rows)),
+                "baseline_net_pnl_total": baseline_net_total,
+                "shadow_net_pnl_total": shadow_net_total,
+                "net_pnl_delta_total": shadow_net_total - baseline_net_total,
+                "avg_fee_ratio_delta": round(sum(fee_ratio_deltas) / len(fee_ratio_deltas), 6),
+                "avg_churn_ratio_delta": round(sum(churn_ratio_deltas) / len(churn_ratio_deltas), 6),
+                "review_required_count": review_required_count,
+            }
+        return result
+
+    def _latest_ai_performance_report_payload(self) -> dict[str, Any] | None:
+        rows = [self.payload(item) for item in self._recent_ai_performance_report_events(limit=1)]
+        rows = [item for item in rows if item is not None]
+        return rows[0] if rows else None
+
+    def ai_performance_overview(self) -> dict[str, Any]:
+        reports = [self.payload(item) for item in self._recent_ai_performance_report_events(limit=20)]
+        reports = [item for item in reports if item is not None]
+        latest = reports[0] if reports else None
+        recent_replay = self.replay_recent_validations(limit=10, offset=0)["validations"]
+        if latest is None:
+            return {
+                "latest_report": None,
+                "report_count": 0,
+                "status_counts": {},
+                "trend": {
+                    "avg_short_net_pnl_delta": None,
+                    "avg_medium_net_pnl_delta": None,
+                    "avg_long_net_pnl_delta": None,
+                    "review_required_rate": 0.0,
+                },
+                "recent_reports": [],
+                "replay_context": {
+                    "validation_count": len(recent_replay),
+                    "healthy_rate": self._ratio(
+                        sum(1 for item in recent_replay if item.get("healthy")),
+                        len(recent_replay),
+                    ),
+                    "latest_validation": recent_replay[0] if recent_replay else None,
+                },
+            }
+        status_counts: dict[str, int] = {}
+        short_deltas: list[Decimal] = []
+        medium_deltas: list[Decimal] = []
+        long_deltas: list[Decimal] = []
+        review_required_count = 0
+        for report in reports:
+            status = str(report.get("latest_status") or "insufficient_data")
+            status_counts[status] = status_counts.get(status, 0) + 1
+            if report.get("review_required"):
+                review_required_count += 1
+            windows = report.get("windows") or {}
+            for target, bucket in (("short", short_deltas), ("medium", medium_deltas), ("long", long_deltas)):
+                value = ((windows.get(target) or {}).get("net_pnl_delta_total"))
+                if value is not None:
+                    bucket.append(Decimal(str(value)))
+        return {
+            "latest_report": latest,
+            "report_count": len(reports),
+            "status_counts": status_counts,
+            "trend": {
+                "avg_short_net_pnl_delta": (sum(short_deltas, start=Decimal("0")) / Decimal(len(short_deltas))) if short_deltas else None,
+                "avg_medium_net_pnl_delta": (sum(medium_deltas, start=Decimal("0")) / Decimal(len(medium_deltas))) if medium_deltas else None,
+                "avg_long_net_pnl_delta": (sum(long_deltas, start=Decimal("0")) / Decimal(len(long_deltas))) if long_deltas else None,
+                "review_required_rate": self._ratio(review_required_count, len(reports)),
+            },
+            "recent_reports": reports[:10],
+            "replay_context": {
+                "validation_count": len(recent_replay),
+                "healthy_rate": self._ratio(
+                    sum(1 for item in recent_replay if item.get("healthy")),
+                    len(recent_replay),
+                ),
+                "latest_validation": recent_replay[0] if recent_replay else None,
+            },
+        }
+
+    def _ai_downgrade_state(self) -> dict[str, Any]:
+        runtime = self.ai_runtime()
+        return {
+            "configured_mode": runtime.get("configured_operating_mode"),
+            "effective_mode": runtime.get("effective_operating_mode"),
+            "provider_state": runtime.get("provider_state"),
+            "outcome_state": runtime.get("outcome_state"),
+            "degraded": runtime.get("degraded"),
+            "provider_degraded": runtime.get("provider_degraded"),
+            "outcome_review_required": runtime.get("outcome_review_required"),
+            "outcome_auto_downgrade_active": runtime.get("outcome_auto_downgrade_active"),
+            "degradation_reason": runtime.get("degradation_reason"),
+            "outcome_degradation_reason": runtime.get("outcome_degradation_reason"),
+            "last_provider_degraded_at": runtime.get("last_provider_degraded_at"),
+            "last_provider_recovered_at": runtime.get("last_provider_recovered_at"),
+            "last_outcome_degraded_at": runtime.get("last_outcome_degraded_at"),
+            "last_outcome_recovered_at": runtime.get("last_outcome_recovered_at"),
+            "recovery_probe_after": runtime.get("recovery_probe_after"),
+            "recovery_probe_ready": runtime.get("recovery_probe_ready"),
+            "failure_budget": runtime.get("failure_budget"),
+            "outcome_policy": runtime.get("outcome_policy"),
+        }
+
+    def ai_overview(self) -> dict[str, Any]:
+        latest = self.ai_latest()
+        shadow_latest = self.ai_shadow_latest()
+        latest_decision_id = self.latest_decision_id()
+        latest_decision_detail = self.decision_view(latest_decision_id) if latest_decision_id is not None else None
+        latest_degradation = latest_topic_event_for_scope(
+            self.runtime.event_store,
+            topics.AI_DEGRADATION_EVENTS,
+            self.state_scope,
+        )
+        if not self._ai_history_visible():
+            latest_degradation = None
+        return {
+            "runtime": self.ai_runtime(),
+            "latest_brief": latest.get("brief"),
+            "latest_assessment": latest.get("assessment"),
+            "latest_takeover": latest.get("takeover"),
+            "latest_shadow_decision": shadow_latest.get("shadow_decision"),
+            "latest_degradation": self.payload(latest_degradation),
+            "takeover_summary": self._ai_takeover_summary(),
+            "shadow_summary": self._ai_shadow_summary(),
+            "performance_windows": self._ai_shadow_performance_windows(),
+            "latest_performance_report": self._latest_ai_performance_report_payload(),
+            "performance_view": self.ai_performance_overview(),
+            "downgrade_state": self._ai_downgrade_state(),
+            "latest_execution_suggestion": None if latest_decision_detail is None else latest_decision_detail.get("ai_execution_suggestion"),
+        }
+
     def _ai_history_visible(self) -> bool:
         return self.runtime.settings.ai_operating_mode != "baseline_only"
 
     def ai_latest(self) -> dict[str, Any]:
         if not self._ai_history_visible():
-            return {"brief": None, "assessment": None, "takeover": None}
+            return {"brief": None, "assessment": None, "takeover": None, "execution_suggestion": None}
         brief = latest_topic_event_for_scope(self.runtime.event_store, topics.AI_DECISION_BRIEFS, self.state_scope)
         assessment = latest_topic_event_for_scope(self.runtime.event_store, topics.AI_ASSESSMENTS, self.state_scope)
         takeover = latest_topic_event_for_scope(self.runtime.event_store, topics.AI_TAKEOVER_DECISIONS, self.state_scope)
+        execution_plan = latest_topic_event_for_scope(self.runtime.event_store, topics.EXECUTION_PLANS, self.state_scope)
+        order_intent = latest_topic_event_for_scope(self.runtime.event_store, topics.ORDER_INTENTS, self.state_scope)
+        assessment_payload = self.payload(assessment)
+        execution_plan_payload = self.payload(execution_plan)
+        order_intent_payload = self.payload(order_intent)
         return {
             "brief": self.payload(brief),
-            "assessment": self.payload(assessment),
+            "assessment": assessment_payload,
             "takeover": self.payload(takeover),
+            "execution_suggestion": self._ai_execution_suggestion_summary(
+                ai_assessment=assessment_payload,
+                execution_plan=execution_plan_payload,
+                latest_order_intent=order_intent_payload,
+            ),
         }
 
     def ai_recent(self, *, limit: int, offset: int) -> dict[str, Any]:
@@ -249,6 +647,37 @@ class OperatorQueryService:
             offset=offset,
             key="evaluations",
             serializer=self.payload,
+        )
+
+    def ai_performance_reports(self, *, limit: int, offset: int) -> dict[str, Any]:
+        if not self._ai_history_visible():
+            return {"reports": [], "limit": limit, "offset": offset, "total_available": 0, "has_more": False}
+        rows = self._recent_ai_performance_report_events()
+        return self._paginate_rows(
+            rows,
+            limit=limit,
+            offset=offset,
+            key="reports",
+            serializer=self.payload,
+        )
+
+    def ai_takeovers_recent(self, *, limit: int, offset: int) -> dict[str, Any]:
+        if not self._ai_history_visible():
+            return {"takeovers": [], "limit": limit, "offset": offset, "total_available": 0, "has_more": False}
+        rows = self._recent_ai_takeover_events()
+        return self._paginate_rows(
+            rows,
+            limit=limit,
+            offset=offset,
+            key="takeovers",
+            serializer=lambda envelope: {
+                **(self.payload(envelope) or {}),
+                "direction_disagreement": (
+                    envelope.payload.get("baseline_direction") != envelope.payload.get("ai_direction")
+                    if isinstance(envelope.payload, dict)
+                    else False
+                ),
+            },
         )
 
     async def evaluate_ai_shadow(
@@ -399,6 +828,40 @@ class OperatorQueryService:
 
     def strategy_profile_snapshot(self) -> dict[str, Any]:
         return self._cached("strategy_profile_snapshot", self.strategy_profiles.snapshot)
+
+    def strategy_profile_optimization_reports(self, *, limit: int, offset: int) -> dict[str, Any]:
+        rows = self._recent_strategy_profile_optimization_report_events()
+        return self._paginate_rows(
+            rows,
+            limit=limit,
+            offset=offset,
+            key="reports",
+            serializer=self.payload,
+        )
+
+    def strategy_profile_selection_decisions(self, *, limit: int, offset: int) -> dict[str, Any]:
+        rows = self._recent_strategy_profile_selection_decision_events()
+        return self._paginate_rows(
+            rows,
+            limit=limit,
+            offset=offset,
+            key="decisions",
+            serializer=self.payload,
+        )
+
+    def strategy_profile_auto_rollback_policy(self) -> dict[str, Any]:
+        return self.strategy_profiles.snapshot().get("auto_rollback_policy", {})
+
+    def strategy_profile_auto_rollback_policy_history(self, *, limit: int, offset: int) -> dict[str, Any]:
+        rows = self.strategy_profiles.snapshot().get("auto_rollback_policy_history", [])
+        return self._paginate_rows(rows, limit=limit, offset=offset, key="history")
+
+    def strategy_profile_activation_policy(self) -> dict[str, Any]:
+        return self.strategy_profiles.snapshot().get("activation_policy", {})
+
+    def strategy_profile_activation_policy_history(self, *, limit: int, offset: int) -> dict[str, Any]:
+        rows = self.strategy_profiles.snapshot().get("activation_policy_history", [])
+        return self._paginate_rows(rows, limit=limit, offset=offset, key="history")
 
     def strategy_profile_recommendations(self, *, limit: int, offset: int) -> dict[str, Any]:
         rows = self.runtime.strategy_profile_repo.list_recommendations(
@@ -602,6 +1065,208 @@ class OperatorQueryService:
         self._invalidate_cache()
         return result
 
+    def update_strategy_profile_auto_rollback_policy(
+        self,
+        *,
+        enabled: bool,
+        review_required_only: bool,
+        min_trade_count: int,
+        cooldown_seconds: float,
+        matrix_allowed_symbols: tuple[str, ...],
+        matrix_allowed_regimes: tuple[str, ...],
+        matrix_allowed_profiles: tuple[str, ...],
+        reason: str,
+        actor_role: OperatorRole,
+        actor_identity: str | None,
+        auth_source: AuthSource,
+    ) -> dict[str, Any]:
+        policy = self.strategy_profiles.update_auto_rollback_policy(
+            enabled=enabled,
+            review_required_only=review_required_only,
+            min_trade_count=min_trade_count,
+            cooldown_seconds=cooldown_seconds,
+            matrix_allowed_symbols=matrix_allowed_symbols,
+            matrix_allowed_regimes=matrix_allowed_regimes,
+            matrix_allowed_profiles=matrix_allowed_profiles,
+            reason=reason,
+            actor_identity=actor_identity,
+        )
+        self._append_event(
+            topic=topics.OPERATOR_ACTIONS,
+            key="strategy_profile",
+            payload_model=self.strategy_profiles.audit_payload(
+                action="strategy_profile_rollback",
+                actor_role=actor_role,
+                actor_identity=actor_identity,
+                auth_source=auth_source,
+                status="auto_rollback_policy_updated",
+                details=policy,
+            ),
+        )
+        self._invalidate_cache()
+        return {"policy": policy}
+
+    def approve_strategy_profile_auto_rollback_policy(
+        self,
+        *,
+        policy_id: str | None,
+        reason: str,
+        actor_role: OperatorRole,
+        actor_identity: str | None,
+        auth_source: AuthSource,
+    ) -> dict[str, Any]:
+        policy = self.strategy_profiles.approve_auto_rollback_policy(
+            policy_id=policy_id,
+            actor_identity=actor_identity,
+            reason=reason,
+        )
+        self._append_event(
+            topic=topics.OPERATOR_ACTIONS,
+            key="strategy_profile",
+            payload_model=self.strategy_profiles.audit_payload(
+                action="strategy_profile_rollback",
+                actor_role=actor_role,
+                actor_identity=actor_identity,
+                auth_source=auth_source,
+                status="auto_rollback_policy_approved",
+                details=policy,
+            ),
+        )
+        self._invalidate_cache()
+        return {"policy": policy}
+
+    def freeze_strategy_profile_auto_rollback_policy(
+        self,
+        *,
+        frozen: bool,
+        reason: str,
+        actor_role: OperatorRole,
+        actor_identity: str | None,
+        auth_source: AuthSource,
+    ) -> dict[str, Any]:
+        policy = self.strategy_profiles.freeze_auto_rollback_policy(
+            frozen=frozen,
+            actor_identity=actor_identity,
+            reason=reason,
+        )
+        self._append_event(
+            topic=topics.OPERATOR_ACTIONS,
+            key="strategy_profile",
+            payload_model=self.strategy_profiles.audit_payload(
+                action="strategy_profile_rollback",
+                actor_role=actor_role,
+                actor_identity=actor_identity,
+                auth_source=auth_source,
+                status="auto_rollback_policy_frozen" if frozen else "auto_rollback_policy_unfrozen",
+                details=policy,
+            ),
+        )
+        self._invalidate_cache()
+        return {"policy": policy}
+
+    def update_strategy_profile_activation_policy(
+        self,
+        *,
+        enabled: bool,
+        min_composite_score: float,
+        min_offline_replay_score: float,
+        min_recommendation_strength: float,
+        require_positive_replay_consensus: bool,
+        disallow_when_shadow_review_required: bool,
+        matrix_allowed_symbols: tuple[str, ...],
+        matrix_allowed_regimes: tuple[str, ...],
+        matrix_allowed_profiles: tuple[str, ...],
+        reason: str,
+        actor_role: OperatorRole,
+        actor_identity: str | None,
+        auth_source: AuthSource,
+    ) -> dict[str, Any]:
+        policy = self.strategy_profiles.update_activation_policy(
+            enabled=enabled,
+            min_composite_score=min_composite_score,
+            min_offline_replay_score=min_offline_replay_score,
+            min_recommendation_strength=min_recommendation_strength,
+            require_positive_replay_consensus=require_positive_replay_consensus,
+            disallow_when_shadow_review_required=disallow_when_shadow_review_required,
+            matrix_allowed_symbols=matrix_allowed_symbols,
+            matrix_allowed_regimes=matrix_allowed_regimes,
+            matrix_allowed_profiles=matrix_allowed_profiles,
+            reason=reason,
+            actor_identity=actor_identity,
+        )
+        self._append_event(
+            topic=topics.OPERATOR_ACTIONS,
+            key="strategy_profile",
+            payload_model=self.strategy_profiles.audit_payload(
+                action="strategy_profile_activation_policy",
+                actor_role=actor_role,
+                actor_identity=actor_identity,
+                auth_source=auth_source,
+                status="activation_policy_updated",
+                details=policy,
+            ),
+        )
+        self._invalidate_cache()
+        return {"policy": policy}
+
+    def approve_strategy_profile_activation_policy(
+        self,
+        *,
+        policy_id: str | None,
+        reason: str,
+        actor_role: OperatorRole,
+        actor_identity: str | None,
+        auth_source: AuthSource,
+    ) -> dict[str, Any]:
+        policy = self.strategy_profiles.approve_activation_policy(
+            policy_id=policy_id,
+            actor_identity=actor_identity,
+            reason=reason,
+        )
+        self._append_event(
+            topic=topics.OPERATOR_ACTIONS,
+            key="strategy_profile",
+            payload_model=self.strategy_profiles.audit_payload(
+                action="strategy_profile_activation_policy",
+                actor_role=actor_role,
+                actor_identity=actor_identity,
+                auth_source=auth_source,
+                status="activation_policy_approved",
+                details=policy,
+            ),
+        )
+        self._invalidate_cache()
+        return {"policy": policy}
+
+    def freeze_strategy_profile_activation_policy(
+        self,
+        *,
+        frozen: bool,
+        reason: str,
+        actor_role: OperatorRole,
+        actor_identity: str | None,
+        auth_source: AuthSource,
+    ) -> dict[str, Any]:
+        policy = self.strategy_profiles.freeze_activation_policy(
+            frozen=frozen,
+            actor_identity=actor_identity,
+            reason=reason,
+        )
+        self._append_event(
+            topic=topics.OPERATOR_ACTIONS,
+            key="strategy_profile",
+            payload_model=self.strategy_profiles.audit_payload(
+                action="strategy_profile_activation_policy",
+                actor_role=actor_role,
+                actor_identity=actor_identity,
+                auth_source=auth_source,
+                status="activation_policy_frozen" if frozen else "activation_policy_unfrozen",
+                details=policy,
+            ),
+        )
+        self._invalidate_cache()
+        return {"policy": policy}
+
     def create_operator_user(
         self,
         *,
@@ -789,6 +1454,214 @@ class OperatorQueryService:
         snapshot["pending_profile_revision_id"] = self.runtime.runtime_profile_resolution.activation_state.pending_revision_id
         snapshot["restart_required"] = self.runtime.runtime_profile_resolution.activation_state.restart_required
         return snapshot
+
+    def _effective_taker_fee_bps(self, *, symbol: str | None = None) -> float:
+        resolver = getattr(self.runtime, "fee_resolver", None)
+        if resolver is not None and hasattr(resolver, "taker_fee_bps"):
+            return float(resolver.taker_fee_bps(symbol=symbol))
+        getter = getattr(self.runtime.account_service, "effective_taker_fee_bps", None)
+        if callable(getter):
+            try:
+                resolved = getter(symbol=symbol)
+            except TypeError:
+                resolved = getter(symbol) if symbol is not None else getter()
+            if resolved is not None:
+                return max(float(resolved), 0.0)
+        return max(self.runtime.settings.paper_taker_fee_bps, 0.0)
+
+    def _effective_maker_fee_bps(self, *, symbol: str | None = None) -> float:
+        resolver = getattr(self.runtime, "fee_resolver", None)
+        if resolver is not None and hasattr(resolver, "maker_fee_bps"):
+            return float(resolver.maker_fee_bps(symbol=symbol))
+        return self._effective_taker_fee_bps(symbol=symbol)
+
+    def _funding_fee_bps(self, *, symbol: str | None = None) -> float:
+        resolver = getattr(self.runtime, "fee_resolver", None)
+        if resolver is not None and hasattr(resolver, "funding_fee_bps"):
+            return float(resolver.funding_fee_bps(symbol=symbol))
+        return 0.0
+
+    @staticmethod
+    def _execution_suggestion_payload(ai_assessment: dict[str, Any] | None) -> dict[str, Any] | None:
+        envelope = None if ai_assessment is None else ai_assessment.get("ai_execution_parameter_suggestion")
+        if not isinstance(envelope, dict):
+            return None
+        suggestion = envelope.get("suggestion")
+        return suggestion if isinstance(suggestion, dict) else None
+
+    def _estimated_execution_fee_bps(self, *, symbol: str | None, ai_assessment: dict[str, Any] | None) -> float:
+        resolver = getattr(self.runtime, "fee_resolver", None)
+        if resolver is None or not hasattr(resolver, "estimated_execution_fee_bps"):
+            return self._effective_taker_fee_bps(symbol=symbol)
+        suggestion = self._execution_suggestion_payload(ai_assessment)
+        return float(
+            resolver.estimated_execution_fee_bps(
+                symbol=symbol,
+                execution_style="bounded_limit_ioc" if suggestion is not None else "taker",
+                order_type="limit" if suggestion is not None else "market",
+                passive_bias=None if suggestion is None else suggestion.get("passive_bias"),
+                maker_taker_bias=None if suggestion is None else suggestion.get("maker_taker_bias"),
+            )
+        )
+
+    def _ai_economic_actionability(
+        self,
+        *,
+        ai_assessment: dict[str, Any] | None,
+        ai_takeover_decision: dict[str, Any] | None,
+        position_target: dict[str, Any] | None,
+        ai_decision_brief: dict[str, Any] | None,
+        strategy_execution_health: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if ai_assessment is None:
+            return None
+        symbol = None
+        if position_target is not None:
+            symbol = position_target.get("symbol")
+        if not symbol:
+            symbol = ai_assessment.get("symbol")
+        effective_taker_fee_bps = self._effective_taker_fee_bps(symbol=symbol)
+        effective_maker_fee_bps = self._effective_maker_fee_bps(symbol=symbol)
+        estimated_execution_fee_bps = self._estimated_execution_fee_bps(symbol=symbol, ai_assessment=ai_assessment)
+        funding_fee_bps = (
+            self._funding_fee_bps(symbol=symbol)
+            if self.runtime.settings.trading_product_type == "derivatives"
+            else 0.0
+        )
+        required_total_edge_bps = (
+            estimated_execution_fee_bps
+            + (
+                max(self.runtime.settings.max_slippage_tolerance_bps, 0)
+                * max(self.runtime.settings.strategy_expected_slippage_bps_fraction, 0.0)
+            )
+            + funding_fee_bps
+            + max(self.runtime.settings.strategy_edge_noise_buffer_bps, 0.0)
+            + max(self.runtime.settings.strategy_min_net_edge_bps, 0.0)
+        )
+        funding_fee_summary = None
+        if hasattr(self.runtime.account_service, "recent_funding_fee_summary"):
+            funding_fee_summary = self.runtime.account_service.recent_funding_fee_summary(symbol=symbol)
+        return {
+            "economically_actionable": ai_assessment.get("economically_actionable"),
+            "fallback_used": ai_assessment.get("fallback_used"),
+            "degraded": ai_assessment.get("degraded"),
+            "estimated_edge_bps": ai_assessment.get("estimated_edge_bps"),
+            "estimated_cost_bps": ai_assessment.get("estimated_cost_bps"),
+            "estimated_net_edge_bps": ai_assessment.get("estimated_net_edge_bps"),
+            "effective_taker_fee_bps": effective_taker_fee_bps,
+            "effective_maker_fee_bps": effective_maker_fee_bps,
+            "estimated_execution_fee_bps": estimated_execution_fee_bps,
+            "funding_fee_bps": funding_fee_bps,
+            "funding_fee_summary": funding_fee_summary,
+            "min_required_net_edge_bps": self.runtime.settings.strategy_min_net_edge_bps,
+            "noise_buffer_bps": self.runtime.settings.strategy_edge_noise_buffer_bps,
+            "required_total_edge_bps": required_total_edge_bps,
+            "target_expected_signal_edge_bps": position_target.get("expected_signal_edge_bps") if position_target else None,
+            "target_expected_cost_bps": position_target.get("expected_cost_bps") if position_target else None,
+            "target_expected_net_edge_bps": position_target.get("expected_net_edge_bps") if position_target else None,
+            "validation_flags": list(ai_assessment.get("validation_flags") or []),
+            "rejection_flags": list(ai_assessment.get("rejection_flags") or []),
+            "takeover_allowed": None if ai_takeover_decision is None else ai_takeover_decision.get("ai_takeover_allowed"),
+            "takeover_applied": None if ai_takeover_decision is None else ai_takeover_decision.get("ai_takeover_applied"),
+            "takeover_blockers": [] if ai_takeover_decision is None else list(ai_takeover_decision.get("ai_takeover_blockers") or []),
+            "market_snapshot_fresh": None if ai_decision_brief is None else ai_decision_brief.get("market_snapshot_fresh"),
+            "account_snapshot_fresh": None if ai_decision_brief is None else ai_decision_brief.get("account_snapshot_fresh"),
+            "safe_to_trade": None if ai_decision_brief is None else ai_decision_brief.get("safe_to_trade"),
+            "execution_condition": ai_assessment.get("execution_condition"),
+            "current_open_order_count": None if ai_decision_brief is None else ai_decision_brief.get("current_open_order_count"),
+            "recent_fee_drag_ratio": None if strategy_execution_health is None else strategy_execution_health.get("recent_fee_drag_ratio"),
+            "recent_churn_ratio": None if strategy_execution_health is None else strategy_execution_health.get("recent_churn_ratio"),
+            "recent_low_edge_trade_streak": None if strategy_execution_health is None else strategy_execution_health.get("recent_low_edge_trade_streak"),
+            "guardrail_flags": [] if position_target is None else list(position_target.get("guardrail_flags") or []),
+        }
+
+    @staticmethod
+    def _direction_from_edge(edge: Any) -> str:
+        try:
+            numeric = float(edge or 0.0)
+        except (TypeError, ValueError):
+            return "flat"
+        if numeric > 0:
+            return "long"
+        if numeric < 0:
+            return "short"
+        return "flat"
+
+    def _ai_decision_audit(
+        self,
+        *,
+        audit,
+        decision_context: dict[str, Any] | None,
+        ai_decision_brief: dict[str, Any] | None,
+        baseline_assessment: dict[str, Any] | None,
+        ai_assessment: dict[str, Any] | None,
+        ai_takeover_decision: dict[str, Any] | None,
+        position_target: dict[str, Any] | None,
+        strategy_execution_health: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if ai_assessment is None and ai_takeover_decision is None:
+            return None
+        return {
+            "configured_mode": self.runtime.settings.ai_operating_mode,
+            "assessment_operating_mode": None if ai_assessment is None else ai_assessment.get("operating_mode"),
+            "provider_name": None if ai_assessment is None else ai_assessment.get("provider_name"),
+            "provider_request_id": None if ai_assessment is None else ai_assessment.get("provider_request_id"),
+            "fallback_used": None if ai_assessment is None else ai_assessment.get("fallback_used"),
+            "degraded": None if ai_assessment is None else ai_assessment.get("degraded"),
+            "baseline_direction": None if baseline_assessment is None else baseline_assessment.get("direction_bias"),
+            "ai_direction": self._direction_from_edge(None if ai_assessment is None else ai_assessment.get("directional_edge")),
+            "final_direction": None if position_target is None else position_target.get("target_exposure_side"),
+            "takeover_attempted": ai_takeover_decision is not None,
+            "takeover_allowed": None if ai_takeover_decision is None else ai_takeover_decision.get("ai_takeover_allowed"),
+            "takeover_applied": None if ai_takeover_decision is None else ai_takeover_decision.get("ai_takeover_applied"),
+            "takeover_blockers": [] if ai_takeover_decision is None else list(ai_takeover_decision.get("ai_takeover_blockers") or []),
+            "market_snapshot_fresh": None if ai_decision_brief is None else ai_decision_brief.get("market_snapshot_fresh"),
+            "account_snapshot_fresh": None if ai_decision_brief is None else ai_decision_brief.get("account_snapshot_fresh"),
+            "safe_to_trade": None if ai_decision_brief is None else ai_decision_brief.get("safe_to_trade"),
+            "execution_condition": None if ai_assessment is None else ai_assessment.get("execution_condition"),
+            "current_open_order_count": None if ai_decision_brief is None else ai_decision_brief.get("current_open_order_count"),
+            "guardrail_flags": [] if position_target is None else list(position_target.get("guardrail_flags") or []),
+            "strategy_guardrail_flags": [] if decision_context is None else list(decision_context.get("strategy_guardrail_flags") or []),
+            "recent_fee_drag_ratio": None if strategy_execution_health is None else strategy_execution_health.get("recent_fee_drag_ratio"),
+            "recent_churn_ratio": None if strategy_execution_health is None else strategy_execution_health.get("recent_churn_ratio"),
+            "recent_low_edge_trade_streak": None if strategy_execution_health is None else strategy_execution_health.get("recent_low_edge_trade_streak"),
+            "audit_ref_counts": {
+                "order_intents": len(audit.order_intent_refs),
+                "order_updates": len(audit.order_state_refs),
+                "fills": len(audit.fill_event_refs),
+                "reconciliations": len(audit.reconciliation_refs),
+                "shadow_decisions": len(audit.ai_shadow_decision_refs),
+                "shadow_evaluations": len(audit.ai_shadow_evaluation_refs),
+            },
+        }
+
+    def _ai_execution_suggestion_summary(
+        self,
+        *,
+        ai_assessment: dict[str, Any] | None,
+        execution_plan: dict[str, Any] | None,
+        latest_order_intent: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        assessment_suggestion = None if ai_assessment is None else ai_assessment.get("ai_execution_parameter_suggestion")
+        plan_translation = None if execution_plan is None else execution_plan.get("ai_execution_parameter_suggestion")
+        intent_translation = (
+            None if latest_order_intent is None else latest_order_intent.get("ai_execution_parameter_suggestion")
+        )
+        latest_translation = intent_translation or plan_translation or assessment_suggestion
+        return {
+            "configured_mode": self.runtime.settings.ai_execution_suggestion_mode,
+            "assessment_suggestion": assessment_suggestion,
+            "execution_plan_translation": plan_translation,
+            "latest_order_intent_translation": intent_translation,
+            "latest_translation": latest_translation,
+            "live_order_type": None if latest_order_intent is None else latest_order_intent.get("order_type"),
+            "live_time_in_force": None if latest_order_intent is None else latest_order_intent.get("time_in_force"),
+            "live_limit_price": None if latest_order_intent is None else latest_order_intent.get("limit_price"),
+            "live_execution_style": None if latest_order_intent is None else latest_order_intent.get("execution_style"),
+            "suggestion_present": assessment_suggestion is not None,
+            "translation_present": plan_translation is not None or intent_translation is not None,
+            "status": "absent" if latest_translation is None else latest_translation.get("status"),
+        }
 
     def system_health(self) -> dict[str, Any]:
         snapshot = self.runtime.health_service.snapshot()
@@ -980,20 +1853,29 @@ class OperatorQueryService:
         fills = self.payloads_by_refs(audit.fill_event_refs)
         reconciliations = self.payloads_by_refs(audit.reconciliation_refs)
         ai_visible = self._ai_history_visible()
+        ai_decision_brief = self.payload_by_ref(audit.ai_decision_brief_ref) if ai_visible else None
+        ai_assessment = self.payload_by_ref(audit.ai_market_assessment_ref) if ai_visible else None
+        ai_takeover_decision = self.payload_by_ref(audit.ai_takeover_decision_ref) if ai_visible else None
+        baseline_assessment = self.payload_by_ref(audit.baseline_assessment_ref)
+        position_target = self.payload_by_ref(audit.position_target_ref)
+        execution_plan = self.payload_by_ref(audit.execution_plan_ref)
+        strategy_execution_health = self.strategy_execution_health(
+            decision_context.get("symbol") if decision_context is not None else None
+        )
         return {
             "decision_id": decision_id,
             "health_snapshot": health_snapshot,
             "decision_context": decision_context,
-            "baseline_assessment": self.payload_by_ref(audit.baseline_assessment_ref),
-            "ai_decision_brief": self.payload_by_ref(audit.ai_decision_brief_ref) if ai_visible else None,
-            "ai_assessment": self.payload_by_ref(audit.ai_market_assessment_ref) if ai_visible else None,
-            "ai_takeover_decision": self.payload_by_ref(audit.ai_takeover_decision_ref) if ai_visible else None,
+            "baseline_assessment": baseline_assessment,
+            "ai_decision_brief": ai_decision_brief,
+            "ai_assessment": ai_assessment,
+            "ai_takeover_decision": ai_takeover_decision,
             "ai_shadow_decisions": self.payloads_by_refs(audit.ai_shadow_decision_refs) if ai_visible else [],
             "ai_shadow_evaluations": self.payloads_by_refs(audit.ai_shadow_evaluation_refs) if ai_visible else [],
-            "position_target": self.payload_by_ref(audit.position_target_ref),
+            "position_target": position_target,
             "policy_decision": self.payload_by_ref(audit.policy_decision_ref),
             "risk_decision": self.payload_by_ref(audit.risk_decision_ref),
-            "execution_plan": self.payload_by_ref(audit.execution_plan_ref),
+            "execution_plan": execution_plan,
             "audit": audit.model_dump(mode="json"),
             "latest_order_intent": order_intents[-1] if order_intents else None,
             "latest_order_update": order_updates[-1] if order_updates else None,
@@ -1004,6 +1886,29 @@ class OperatorQueryService:
             "fills": fills,
             "portfolio_snapshot": self.payload_by_ref(audit.portfolio_delta_ref),
             "reconciliations": reconciliations,
+            "strategy_execution_health": strategy_execution_health,
+            "ai_decision_audit": self._ai_decision_audit(
+                audit=audit,
+                decision_context=decision_context,
+                ai_decision_brief=ai_decision_brief,
+                baseline_assessment=baseline_assessment,
+                ai_assessment=ai_assessment,
+                ai_takeover_decision=ai_takeover_decision,
+                position_target=position_target,
+                strategy_execution_health=strategy_execution_health,
+            ),
+            "ai_economic_actionability": self._ai_economic_actionability(
+                ai_assessment=ai_assessment,
+                ai_takeover_decision=ai_takeover_decision,
+                position_target=position_target,
+                ai_decision_brief=ai_decision_brief,
+                strategy_execution_health=strategy_execution_health,
+            ),
+            "ai_execution_suggestion": self._ai_execution_suggestion_summary(
+                ai_assessment=ai_assessment,
+                execution_plan=execution_plan,
+                latest_order_intent=order_intents[-1] if order_intents else None,
+            ),
         }
 
     def recent_decisions(self, *, limit: int = 20, offset: int = 0) -> dict[str, Any]:
@@ -1036,6 +1941,8 @@ class OperatorQueryService:
                     "target_position_qty": target.get("target_position_qty") if target else None,
                     "delta_position_qty": target.get("delta_position_qty") if target else None,
                     "target_delta_qty": target.get("delta_position_qty") if target else None,
+                    "guardrail_flags": target.get("guardrail_flags") if target else [],
+                    "expected_net_edge_bps": target.get("expected_net_edge_bps") if target else None,
                     "policy_result": policy.get("execution_allowed") if policy else None,
                     "risk_result": risk.get("approved") if risk else None,
                     "execution_result": {
@@ -1073,9 +1980,13 @@ class OperatorQueryService:
                 "portfolio_snapshot": None,
                 "reconciliations": [],
                 "summary": None,
+                "strategy_execution_health": self.strategy_execution_health(),
             }
         detail = self.decision_view(decision_id)
         detail["summary"] = next((item for item in self.recent_decisions(limit=1)["decisions"] if item["decision_id"] == decision_id), None)
+        detail["strategy_execution_health"] = self.strategy_execution_health(
+            detail["decision_context"]["symbol"] if detail["decision_context"] else None
+        )
         return detail
 
     def latest_risk(self) -> dict[str, Any]:
@@ -1139,10 +2050,27 @@ class OperatorQueryService:
     def metrics(self) -> dict[str, Any]:
         snapshot = self._latest_scoped_snapshot()
         metrics = self.runtime.metrics.snapshot()
+        fills = self._scoped_fills()
+        snapshot_events = [
+            event
+            for event in self.runtime.event_store.by_topic_scoped(
+                topics.PORTFOLIO_SNAPSHOTS,
+                scope=self.state_scope,
+            )
+        ]
+        snapshot_fill_ids = {
+            event.payload.get("source_fill_id")
+            for event in snapshot_events
+            if isinstance(event.payload, dict) and event.payload.get("source_fill_id")
+        }
+        reconciliation_refs = {
+            report.portfolio_snapshot_ref
+            for report in self.runtime.reconciliation_repo.history_for_scope(scope=self.state_scope)
+        }
         return {
             "decision_cycle_count": metrics.get("decision_cycles", 0),
             "order_intent_count": metrics.get("order_intents_generated", 0),
-            "fill_count": len(self._scoped_fills()),
+            "fill_count": len(fills),
             "rejection_count": len(
                 order_states_for_scope(
                     self.runtime.execution_repo,
@@ -1152,13 +2080,21 @@ class OperatorQueryService:
                 )
             ),
             "reconciliation_mismatch_count": metrics.get("reconciliation_mismatches", 0),
+            "processing_failure_count": metrics.get("processing_failures", 0),
+            "portfolio_snapshot_repair_count": metrics.get("portfolio_snapshot_repairs", 0),
             "current_open_order_count": len(self._scoped_open_order_states()),
+            "portfolio_snapshot_count": len(snapshot_events),
+            "fill_without_snapshot_count": sum(1 for fill in fills if fill.fill_id not in snapshot_fill_ids),
+            "snapshot_without_reconciliation_count": sum(
+                1 for event in snapshot_events if event.event_id not in reconciliation_refs
+            ),
             "recent_execution_errors": self.execution_errors()["errors"][:10],
             "exposure_summary": None if snapshot is None else {
                 "gross_exposure": snapshot.gross_exposure,
                 "net_exposure": snapshot.net_exposure,
                 "total_equity": snapshot.total_equity,
             },
+            "strategy_execution_health": self.strategy_execution_health(),
         }
 
     def portfolio_latest(self) -> dict[str, Any]:
@@ -1202,6 +2138,15 @@ class OperatorQueryService:
             "connected": status.get("connected", False),
             "ready": status.get("ready", False),
             "last_error": status.get("last_error"),
+            "private_ws_connected": status.get("private_ws_connected", False),
+            "private_ws_last_message_ts": status.get("private_ws_last_message_ts"),
+            "private_ws_last_error": status.get("private_ws_last_error"),
+            "private_ws_fresh": status.get("private_ws_fresh", False),
+            "maker_fee_rate": status.get("maker_fee_rate"),
+            "taker_fee_rate": status.get("taker_fee_rate"),
+            "fee_rates_source": status.get("fee_rates_source"),
+            "recent_bills_count": status.get("recent_bills_count", 0),
+            "last_bills_error": status.get("last_bills_error"),
             "blockers": status.get("blockers", []),
             "current_blocking_reason": next(iter(status.get("blockers", [])), None),
             "detail": status.get("detail"),
@@ -1225,6 +2170,18 @@ class OperatorQueryService:
                 "fill_count": self.runtime.recovery_status.baseline_fill_count,
                 "event_ref": self.runtime.recovery_status.baseline_event_ref,
             },
+        }
+
+    async def account_recent_bills(self, *, limit: int = 50) -> dict[str, Any]:
+        rows = await self.runtime.account_service.recent_bills(
+            symbol=self.runtime.settings.default_symbol,
+            limit=limit,
+        )
+        return {
+            "bills": rows[:limit],
+            "total_available": len(rows),
+            "limit": limit,
+            "latest_bill": rows[0] if rows else None,
         }
 
     def account_open_orders(self) -> dict[str, Any]:
@@ -1346,6 +2303,7 @@ class OperatorQueryService:
         return {
             "reconciliation": report.model_dump(mode="json") if report is not None else None,
             "mismatch_summary": self._reconciliation_mismatch_summary(report),
+            "exchange_bills_summary": self._exchange_bills_summary(),
             "latest_validation": latest_validation.payload if latest_validation is not None else None,
             "recovery": self.recovery_view(),
         }
@@ -1358,7 +2316,7 @@ class OperatorQueryService:
             offset=offset,
             key="reconciliations",
             serializer=lambda report: report.model_dump(mode="json"),
-        )
+        ) | {"exchange_bills_summary": self._exchange_bills_summary()}
 
     def reconciliation_mismatches(self, *, limit: int = 20) -> dict[str, Any]:
         reports = [
@@ -1366,7 +2324,10 @@ class OperatorQueryService:
             for report in reconciliation_reports_for_scope(self.runtime.reconciliation_repo, self.state_scope, limit=limit * 4)
             if report.severity != "CLEAN"
         ][-limit:]
-        return {"mismatches": [self._reconciliation_mismatch_summary(report) for report in reports]}
+        return {
+            "mismatches": [self._reconciliation_mismatch_summary(report) for report in reports],
+            "exchange_bills_summary": self._exchange_bills_summary(),
+        }
 
     def reconciliation_detail(self, reconciliation_id: str) -> dict[str, Any]:
         report = next(
@@ -1382,6 +2343,8 @@ class OperatorQueryService:
         return {
             "reconciliation": report.model_dump(mode="json"),
             "mismatch_summary": self._reconciliation_mismatch_summary(report),
+            "exchange_bills_summary": self._exchange_bills_summary(),
+            "exchange_bills_explanations": report.exchange_bills_explanations,
         }
 
     def audit_latest(self) -> dict[str, Any]:
@@ -1444,7 +2407,16 @@ class OperatorQueryService:
             scope=self.state_scope,
         )
         result = engine.replay(decision_id=decision_id)
-        summary = self._replay_summary(result)
+        detail = self.decision_view(decision_id)
+        baseline = detail.get("baseline_assessment") or {}
+        context = detail.get("decision_context") or {}
+        profile_state = self.strategy_profiles.snapshot().get("activation", {})
+        summary = self._replay_summary(
+            result,
+            symbol=context.get("symbol"),
+            regime=baseline.get("regime"),
+            active_profile_id=profile_state.get("active_profile_id"),
+        )
         self._append_event(
             topic=topics.REPLAY_VALIDATIONS,
             key=decision_id or "all",
@@ -1726,7 +2698,7 @@ class OperatorQueryService:
             operator_action_ref=action_envelope.event_id,
             trigger_reason=reason,
         )
-        await self.runtime.portfolio_service.bootstrap_snapshot()
+        await self.runtime.portfolio_service.bootstrap_snapshot(snapshot_origin="operator_rebaseline")
         report = await self.runtime.reconciliation_service.validate_now(reason="operator_rebaseline")
 
         recovery_state = (
@@ -1985,20 +2957,62 @@ class OperatorQueryService:
             "exchange_comparison_enabled": report.exchange_comparison_enabled,
         }
 
-    @staticmethod
-    def _replay_summary(result: ReplayResult) -> dict[str, Any]:
+    def _exchange_bills_summary(self) -> dict[str, Any] | None:
+        report = self._latest_scoped_reconciliation()
+        if report is not None and report.exchange_bills_summary:
+            return report.exchange_bills_summary
+        summary_getter = getattr(self.runtime.account_service, "recent_bills_summary", None)
+        if not callable(summary_getter):
+            return None
+        summary = summary_getter()
+        return summary if isinstance(summary, dict) else None
+
+    def _replay_summary(
+        self,
+        result: ReplayResult,
+        *,
+        symbol: str | None = None,
+        regime: str | None = None,
+        active_profile_id: str | None = None,
+    ) -> dict[str, Any]:
+        replayed_event_count = max(result.replayed_event_count, 1)
+        portfolio_issue_count = len(result.portfolio_issues)
+        decision_chain_issue_count = len(result.decision_chain_issues)
+        execution_chain_issue_count = len(result.execution_chain_issues)
+        audit_issue_count = len(result.audit_issues)
+        baseline_switch_issue_count = len(result.baseline_switch_issues)
+        total_issues = (
+            portfolio_issue_count
+            + decision_chain_issue_count
+            + execution_chain_issue_count
+            + audit_issue_count
+            + baseline_switch_issue_count
+        )
         return {
             "validated_at": utc_now(),
             "decision_id": result.selected_decision_id,
+            "symbol": symbol,
+            "regime": regime,
+            "active_profile_id": active_profile_id,
+            "product_type": self.runtime.settings.trading_product_type,
+            "margin_mode": self.runtime.settings.margin_mode,
+            "allowed_symbols": tuple(self.runtime.settings.allowed_symbols),
             "replayed_event_count": result.replayed_event_count,
             "stored_snapshot_count": result.stored_snapshot_count,
             "divergence_count": result.divergence_count,
             "portfolio_issues": result.portfolio_issues,
+            "portfolio_issue_count": portfolio_issue_count,
             "decision_chain_issues": result.decision_chain_issues,
+            "decision_chain_issue_count": decision_chain_issue_count,
             "execution_chain_issues": result.execution_chain_issues,
+            "execution_chain_issue_count": execution_chain_issue_count,
             "audit_issues": result.audit_issues,
+            "audit_issue_count": audit_issue_count,
             "baseline_switch_count": result.baseline_switch_count,
             "baseline_switch_issues": result.baseline_switch_issues,
+            "baseline_switch_issue_count": baseline_switch_issue_count,
+            "divergence_density": round(result.divergence_count / replayed_event_count, 6),
+            "chain_health_score": round(max(0.0, 1.0 - (total_issues / replayed_event_count)), 6),
             "healthy": result.divergence_count == 0,
         }
 
@@ -2037,9 +3051,24 @@ class OperatorQueryService:
         last_update = order.last_update_ts or order.created_at
         runtime_started_at = self._current_runtime_started_at()
         runtime_restarted_after_order = last_update is not None and last_update < runtime_started_at
+        latest_reconciliation = self.runtime.reconciliation_repo.latest_for_scope(scope=self.state_scope)
         exchange_order_present: bool | None = None
         exchange_fill_present: bool | None = None
+        private_ws_order_present: bool | None = None
+        private_ws_fill_present: bool | None = None
         reason_code: str | None = None
+
+        private_order_lookup = getattr(self.runtime.account_service, "latest_private_order_row", None)
+        if callable(private_order_lookup):
+            private_ws_order_present = (
+                private_order_lookup(symbol=order.symbol, order_id=order.exchange_order_id, client_order_id=order.client_order_id)
+                is not None
+            )
+        private_fill_lookup = getattr(self.runtime.account_service, "latest_private_order_fills", None)
+        if callable(private_fill_lookup):
+            private_ws_fill_present = bool(
+                private_fill_lookup(symbol=order.symbol, order_id=order.exchange_order_id, client_order_id=order.client_order_id)
+            )
 
         if order.venue != "OKX":
             reason_code = "venue_not_exchange_coupled"
@@ -2051,6 +3080,10 @@ class OperatorQueryService:
             reason_code = "local_fills_present"
         elif not runtime_restarted_after_order:
             reason_code = "order_belongs_to_current_runtime"
+        elif private_ws_order_present:
+            reason_code = "exchange_order_seen_via_private_ws"
+        elif private_ws_fill_present:
+            reason_code = "exchange_fill_seen_via_private_ws"
         elif self.runtime.settings.account_backend != "okx" or not self.runtime.settings.account_read_enabled:
             reason_code = "exchange_confirmation_unavailable"
         elif exchange_snapshot is None:
@@ -2076,6 +3109,10 @@ class OperatorQueryService:
                 reason_code = "exchange_order_still_open"
             elif exchange_fill_present:
                 reason_code = "exchange_fill_detected"
+            elif latest_reconciliation is not None and (
+                latest_reconciliation.halt_required or latest_reconciliation.review_required
+            ):
+                reason_code = "latest_reconciliation_not_clean"
 
         eligible = reason_code is None
         summary = (
@@ -2092,8 +3129,17 @@ class OperatorQueryService:
             "runtime_started_at": runtime_started_at,
             "runtime_restarted_after_order": runtime_restarted_after_order,
             "local_fill_count": len(local_fills),
+            "exchange_snapshot_fetched_at": exchange_snapshot.fetched_at if exchange_snapshot is not None else None,
+            "latest_reconciliation_id": (
+                latest_reconciliation.reconciliation_id if latest_reconciliation is not None else None
+            ),
+            "latest_reconciliation_severity": (
+                latest_reconciliation.severity if latest_reconciliation is not None else None
+            ),
             "exchange_order_present": exchange_order_present,
             "exchange_fill_present": exchange_fill_present,
+            "private_ws_order_present": private_ws_order_present,
+            "private_ws_fill_present": private_ws_fill_present,
         }
 
     @staticmethod
@@ -2104,6 +3150,9 @@ class OperatorQueryService:
             "exchange_order_id_present": "This order already has an exchange order id. Use normal exchange refresh or cancel flows instead.",
             "local_fills_present": "Local fills already exist for this order, so manual stuck submission resolution is unsafe.",
             "order_belongs_to_current_runtime": "This order belongs to the current runtime and may still be progressing normally.",
+            "exchange_order_seen_via_private_ws": "A recent private websocket order confirmation exists for this order, so it must not be force-resolved locally.",
+            "exchange_fill_seen_via_private_ws": "A recent private websocket fill confirmation exists for this order, so manual stuck submission resolution is unsafe.",
+            "latest_reconciliation_not_clean": "The latest reconciliation still requires review or halt. Resolve that state before force-resolving submissions.",
             "exchange_confirmation_unavailable": "Exchange confirmation is unavailable, so the runtime cannot safely resolve this submission.",
             "exchange_snapshot_unavailable": "No fresh exchange snapshot is available to confirm the order is absent.",
             "exchange_order_still_open": "The order is still visible on the exchange, so it must not be force-resolved locally.",

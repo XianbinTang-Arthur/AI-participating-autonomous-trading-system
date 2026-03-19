@@ -1,21 +1,24 @@
 ﻿const TERM_MAP = {
   anonymous: "未登录",
   authenticated: "已登录",
-  unknown: "未知",
+  unknown: "待确认",
+  none: "暂无",
   ok: "正常",
   healthy: "运行正常",
-  degraded: "降级",
+  degraded: "已降级",
   blocked: "已阻断",
   halted: "已暂停",
-  ready: "就绪",
+  ready: "已放行",
   enabled: "已启用",
   disabled: "未启用",
   active: "当前生效",
   pending: "待处理",
   accepted: "已采纳",
+  applied: "已生效",
   rejected: "已拒绝",
   expired: "已过期",
   staged: "待审批",
+  available: "可选",
   review_required: "等待人工确认",
   resume_blocked: "暂不允许恢复",
   normal_operation: "正常运行",
@@ -66,18 +69,39 @@
   operator: "操作员",
   admin: "管理员",
   viewer: "只读用户",
+  observing: "观察中",
+  no_data: "暂无数据",
   conservative: "保守",
   normal: "常规",
   aggressive: "激进",
   session: "浏览器会话",
   api_key: "API 密钥",
-  env_fallback: "环境配置",
+  env_fallback: "环境文件",
   ai_auto: "AI 自动切换",
   rollback: "回滚",
   system_guard: "系统保护",
+  registered_profile_only: "只允许已登记档位",
+  reserved_not_enabled: "保留未启用",
+  historical_eval_plus_shadow_guard: "历史对比加影子保护",
+  absent: "暂未提供",
   system: "系统",
   yes: "是",
   no: "否",
+  baseline_only: "仅按基础策略运行",
+  ai_advisory: "AI 参与评估",
+  ai_blended: "AI 一致性过滤",
+  ai_primary: "AI 主导判断",
+  ai_primary_shadow: "AI 影子主导",
+  diagnostic_only: "仅用于诊断",
+  shadow_translation: "影子翻译",
+  enabled_live: "允许进入实盘执行",
+  provider_ready: "模型已就绪",
+  provider_not_ready: "模型未就绪",
+  maker_bias: "偏被动",
+  taker_bias: "偏主动",
+  bounded_limit_ioc: "受限限价成交",
+  bounded_taker_cap: "受限主动成交",
+  not_requested: "未请求",
 };
 
 const ERROR_MAP = {
@@ -126,7 +150,7 @@ const ERROR_MAP = {
   strategy_profile_auto_switch_aggressive_confidence_too_low: "切向更激进档位需要更高置信度，当前暂不自动切换。",
   strategy_profile_auto_switch_not_allowed: "这套档位不允许自动生效，只能人工审批。",
   strategy_profile_manual_approval_required: "这套档位要求人工审批后才能生效。",
-  strategy_profile_auto_switch_requires_more_conservative_target: "旧规则：自动切换只允许切向更保守的策略档位。",
+  strategy_profile_auto_switch_requires_more_conservative_target: "自动切换只允许切向更保守的策略档位。",
   strategy_profile_auto_switch_frozen: "当前策略档位自动切换已被冻结。",
   strategy_profile_runtime_not_safe_to_trade: "当前运行态并不适合自动调整策略档位。",
   strategy_profile_review_required: "当前仍需人工复核，不能自动切换策略档位。",
@@ -136,15 +160,40 @@ const ERROR_MAP = {
   ai_recommended_more_conservative_profile: "AI 建议切到更保守的策略档位，系统已自动采纳。",
   ai_recommended_same_risk_profile: "AI 建议切换到同风险级别但更匹配当前市场的策略档位，系统已自动采纳。",
   ai_recommended_more_aggressive_profile: "AI 建议切换到更积极的策略档位，系统已自动采纳。",
+  ai_degraded_requires_manual_review: "AI 已降级且未开启自动回退，需要人工确认后再恢复 AI 主链。",
+  ai_auto_downgraded: "AI 已自动降级，当前只保留基础策略主链。",
+  output_rejected: "AI 输出结构有效，但没有通过交易语义校验。",
+  ai_fallback_used: "本轮使用了回退结果，不能让 AI 接管。",
+  ai_output_invalid: "AI 输出没有通过校验。",
+  ai_confidence_below_threshold: "校准置信度低于 AI 主导模式最低门槛。",
+  ai_uncertainty_above_threshold: "不确定性高于 AI 主导模式允许阈值。",
+  ai_directional_edge_too_small: "方向优势不够，暂不允许 AI 接管。",
+  ai_override_not_recommended: "AI 自己也不建议覆盖基础策略。",
+  ai_not_economically_actionable: "预期净优势覆盖不了成本和噪声。",
+  ai_regime_not_allowed: "当前市场状态不允许 AI 直接接管。",
+  ai_open_orders_present: "当前还有活动委托，不允许 AI 改写方向。",
+  ai_flat_context_requires_stronger_edge: "空仓场景下需要更强的方向优势才能开仓。",
+  execution_parameter_suggestions_disabled: "执行建议功能当前关闭。",
+  diagnostic_only_no_live_execution: "当前只记录建议，不允许进入真实执行。",
+  shadow_translation_preview_only: "当前只生成影子翻译结果，不改写真实委托。",
+  planner_boundary_disabled: "执行器边界关闭了 AI 建议下探。",
+  planner_recorded_suggestion_only: "执行器只保留建议供诊断使用。",
+  planner_translated_execution_preview: "执行器已生成影子翻译预览。",
+  bounded_live_translation_applied: "执行器已经把建议限制性地转成真实下单字段。",
+  live_translation_not_enabled: "当前没有启用真实执行放权。",
+  live_translation_requires_limit_cap: "只有能转成价格保护型限价保护的建议才允许实盘放权。",
+  live_translation_requires_reference_price: "缺少参考价格，不能安全生成实盘价格保护。",
+  live_translation_requires_limit_offset: "缺少有效价格偏移，不能生成实盘限价保护。",
+  live_translation_requires_slippage_guard: "缺少滑点保护，不能启用受限实盘翻译。",
 };
 
-export function readableState(value) {
-  if (value === null || value === undefined || value === "") return "-";
+export function readableState(value, fallback = "待确认") {
+  if (value === null || value === undefined || value === "") return fallback;
   return TERM_MAP[String(value).toLowerCase()] || String(value);
 }
 
-export function localizeError(value) {
-  if (!value) return "-";
+export function localizeError(value, fallback = "当前没有额外说明") {
+  if (!value) return fallback;
   const normalized = String(value).trim();
   return ERROR_MAP[normalized] || TERM_MAP[normalized.toLowerCase()] || normalized;
 }

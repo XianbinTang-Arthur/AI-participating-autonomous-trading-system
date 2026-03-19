@@ -1,4 +1,4 @@
-﻿export const AUTO_REFRESH_MS = 15000;
+﻿export const AUTO_REFRESH_MS = 10000;
 export const DEFAULT_PAGE_LIMITS = {
   recentDecisions: 8,
   recentOrders: 8,
@@ -7,6 +7,7 @@ export const DEFAULT_PAGE_LIMITS = {
   blockerHistory: 8,
   replayValidations: 8,
   recentAIAssessments: 8,
+  recentAITakeovers: 8,
   recentAIShadowDecisions: 8,
   recentAIShadowEvaluations: 8,
 };
@@ -25,6 +26,9 @@ export function createState() {
   return {
     activeView: "home",
     refreshing: false,
+    pendingRefresh: false,
+    loadingView: null,
+    readyViews: {},
     refreshTimer: null,
     lastRefreshAt: null,
     flash: null,
@@ -80,17 +84,23 @@ export function viewSpecs(view, state = null) {
       ["replayRecentValidations", `/replay/recent-validations?limit=${limits.replayValidations}&offset=0`],
     ],
     ai: [
+      ["aiOverview", "/ai/overview"],
       ["aiRuntime", "/ai/runtime"],
       ["aiLatest", "/ai/latest"],
       ["aiRecent", `/ai/recent?limit=${limits.recentAIAssessments}&offset=0`],
+      ["aiTakeoversRecent", `/ai/takeovers/recent?limit=${limits.recentAITakeovers}&offset=0`],
       ["aiShadowLatest", "/ai/shadow/latest"],
       ["aiShadowRecent", `/ai/shadow/recent?limit=${limits.recentAIShadowDecisions}&offset=0`],
       ["aiShadowEvaluations", `/ai/shadow/evaluations?limit=${limits.recentAIShadowEvaluations}&offset=0`],
     ],
-    admin: [
-      ["operatorUsers", "/auth/users"],
+    aiConfig: [
+      ["aiOverview", "/ai/overview"],
+      ["aiRuntime", "/ai/runtime"],
       ["runtimeProfiles", "/runtime-profiles"],
       ["strategyProfiles", "/strategy-profiles"],
+    ],
+    admin: [
+      ["operatorUsers", "/auth/users"],
     ],
   };
   return specs[view] || [];
