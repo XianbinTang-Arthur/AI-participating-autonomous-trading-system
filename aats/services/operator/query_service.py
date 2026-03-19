@@ -918,11 +918,12 @@ class OperatorQueryService:
     async def evaluate_strategy_profile(
         self,
         *,
+        allow_auto_activation: bool = True,
         actor_role: OperatorRole,
         actor_identity: str | None,
         auth_source: AuthSource,
     ) -> dict[str, Any]:
-        result = await self.strategy_profiles.evaluate_now()
+        result = await self.strategy_profiles.evaluate_now(allow_auto_activation=allow_auto_activation)
         self._append_event(
             topic=topics.OPERATOR_ACTIONS,
             key="strategy_profile",
@@ -932,7 +933,11 @@ class OperatorQueryService:
                 actor_identity=actor_identity,
                 auth_source=auth_source,
                 status="recommendation_generated",
-                details={"recommended_profile_id": result["recommendation"]["recommended_profile_id"]},
+                details={
+                    "recommended_profile_id": result["recommendation"]["recommended_profile_id"],
+                    "allow_auto_activation": allow_auto_activation,
+                    "auto_activation_executed": bool(result.get("auto_activation") or result.get("profile_activation_policy") or result.get("auto_rollback")),
+                },
             ),
         )
         self._invalidate_cache()

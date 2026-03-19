@@ -1003,7 +1003,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn(
             recommendation_payload["recommended_profile_id"],
-            {"trend_normal", "trend_strict", "range_defensive", "high_volatility_defensive", "execution_degraded_safe"},
+            {"trend_aggressive", "trend_normal", "trend_strict", "range_defensive", "high_volatility_defensive", "execution_degraded_safe"},
         )
         self.assertTrue(evaluated_payload["validation"]["auto_apply_allowed"])
         self.assertEqual(evaluated_payload["auto_activation"]["status"], "auto_applied")
@@ -1079,10 +1079,60 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         recommendation = evaluated.json()["recommendation"]
         self.assertIn(
             recommendation["recommended_profile_id"],
-            {"trend_normal", "trend_strict", "range_defensive", "high_volatility_defensive", "execution_degraded_safe"},
+            {"trend_aggressive", "trend_normal", "trend_strict", "range_defensive", "high_volatility_defensive", "execution_degraded_safe"},
         )
         self.assertNotEqual(recommendation["recommended_profile_id"], "unregistered_profile")
         self.assertEqual(recommendation["generated_by"], "rule_fallback")
+
+    async def test_strategy_profile_evaluate_now_can_generate_recommendation_without_auto_switch(self) -> None:
+        runtime = await self._runtime(
+            operator_auth_enabled=True,
+            operator_session_secret="session-secret",
+            operator_users=[("admin", "admin-pass")],
+        )
+        app = self._app(runtime)
+        recommendation = StrategyProfileRecommendation(
+            product_type=runtime.settings.trading_product_type,
+            margin_mode=runtime.settings.margin_mode,
+            allowed_symbols=runtime.settings.allowed_symbols,
+            active_profile_id="trend_normal",
+            recommended_profile_id="range_defensive",
+            confidence=0.95,
+            market_regime_assessment=StrategyProfileMarketRegimeAssessment(
+                regime="range",
+                volatility_state="medium",
+                execution_condition="normal",
+            ),
+            reason_codes=["range_regime_detected"],
+            human_summary="range conditions favor defensive profile",
+            risk_notes=["financial_safety_priority"],
+            valid_for_minutes=120,
+            generated_by="test",
+            input_digest="digest_no_auto_switch",
+            input_snapshot={"source": "test"},
+            expires_at=utc_now() + timedelta(minutes=120),
+        )
+
+        with patch(
+            "aats.services.operator.strategy_profiles.StrategyProfileControlService._generate_recommendation",
+            new=AsyncMock(return_value=recommendation),
+        ):
+            with TestClient(app) as client:
+                client.post("/auth/login", json={"username": "admin", "password": "admin-pass"})
+                evaluated = client.post(
+                    "/strategy-profiles/auto-tuning/evaluate-now",
+                    json={"allow_auto_activation": False},
+                )
+                snapshot = client.get("/strategy-profiles")
+
+        self.assertEqual(evaluated.status_code, 200)
+        self.assertEqual(snapshot.status_code, 200)
+        self.assertTrue(evaluated.json()["validation"]["auto_apply_allowed"])
+        self.assertNotIn("auto_activation", evaluated.json())
+        self.assertNotIn("profile_activation_policy", evaluated.json())
+        self.assertNotIn("auto_rollback", evaluated.json())
+        self.assertEqual(evaluated.json()["recommendation"]["recommended_profile_id"], "range_defensive")
+        self.assertEqual(snapshot.json()["activation"]["active_profile_id"], "trend_normal")
 
     async def test_strategy_profile_optimization_and_selection_reports_are_versioned(self) -> None:
         runtime = await self._runtime(
@@ -1512,7 +1562,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
                     "disallow_when_shadow_review_required": False,
                     "matrix_allowed_symbols": [runtime.settings.default_symbol],
                     "matrix_allowed_regimes": ["trend", "breakout", "range", "high_volatility", "execution_degraded", "unknown"],
-                    "matrix_allowed_profiles": ["trend_normal", "trend_strict", "range_defensive", "high_volatility_defensive", "execution_degraded_safe"],
+                    "matrix_allowed_profiles": ["trend_aggressive", "trend_normal", "trend_strict", "range_defensive", "high_volatility_defensive", "execution_degraded_safe"],
                     "reason": "allow_independent_activation",
                 },
             )
@@ -1535,6 +1585,118 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             {"winner_policy_auto_activation_executed", "execution_outcome_recorded"},
         )
         self.assertNotEqual(snapshot.json()["activation"]["active_profile_id"], "range_defensive")
+
+    async def test_strategy_profile_activation_policy_does_not_auto_activate_manual_only_profile(self) -> None:
+        runtime = await self._runtime(
+            operator_auth_enabled=True,
+            operator_session_secret="session-secret",
+            operator_users=[("admin", "admin-pass")],
+            strategy_profile_activation_policy_enabled=True,
+        )
+        conservative = runtime.strategy_profile_repo.list_revisions(
+            product_type=runtime.settings.trading_product_type,
+            margin_mode=runtime.settings.margin_mode,
+            profile_id="range_defensive",
+        )[0]
+        state = runtime.strategy_profile_repo.activation_state(
+            product_type=runtime.settings.trading_product_type,
+            margin_mode=runtime.settings.margin_mode,
+            allowed_symbols=runtime.settings.allowed_symbols,
+        )
+        runtime.strategy_profile_repo.save_activation_state(
+            state.model_copy(
+                update={
+                    "active_revision_id": conservative.revision_id,
+                    "active_profile_id": conservative.profile_id,
+                    "auto_switch_enabled": False,
+                }
+            )
+        )
+        app = self._app(runtime)
+        original_build_optimization_report = StrategyProfileControlService._build_optimization_report
+        manual_only_recommendation = StrategyProfileRecommendation(
+            product_type=runtime.settings.trading_product_type,
+            margin_mode=runtime.settings.margin_mode,
+            allowed_symbols=runtime.settings.allowed_symbols,
+            active_profile_id="range_defensive",
+            recommended_profile_id="range_defensive",
+            confidence=0.4,
+            market_regime_assessment=StrategyProfileMarketRegimeAssessment(
+                regime="range",
+                volatility_state="medium",
+                execution_condition="normal",
+            ),
+            reason_codes=["keep_current_profile"],
+            human_summary="keep the current conservative profile",
+            risk_notes=[],
+            valid_for_minutes=120,
+            generated_by="test",
+            input_digest="digest_manual_only_policy",
+            input_snapshot={"source": "test"},
+            expires_at=utc_now() + timedelta(minutes=120),
+        )
+
+        def _force_aggressive_winner(self, *, state, comparison_report, evaluations):
+            report = original_build_optimization_report(self, state=state, comparison_report=comparison_report, evaluations=evaluations)
+            return report.model_copy(
+                update={
+                    "recommended_profile_id": "trend_aggressive",
+                    "replay_summary": {
+                        **(report.replay_summary or {}),
+                        "target_symbol": runtime.settings.default_symbol,
+                        "target_regime": "trend",
+                    },
+                    "winner_selection_policy": {
+                        **(report.winner_selection_policy or {}),
+                        "winner_profile_id": "trend_aggressive",
+                        "auto_activation": {"blocked_reasons": []},
+                    },
+                }
+            )
+
+        with patch(
+            "aats.services.operator.strategy_profiles.StrategyProfileControlService._build_optimization_report",
+            new=_force_aggressive_winner,
+        ), patch(
+            "aats.services.operator.strategy_profiles.StrategyProfileControlService._generate_recommendation",
+            new=AsyncMock(return_value=manual_only_recommendation),
+        ):
+            with TestClient(app) as client:
+                client.post("/auth/login", json={"username": "admin", "password": "admin-pass"})
+                client.post(
+                    "/strategy-profiles/activation-policy",
+                    json={
+                        "enabled": True,
+                        "min_composite_score": -999.0,
+                        "min_offline_replay_score": -999.0,
+                        "min_recommendation_strength": -999.0,
+                        "require_positive_replay_consensus": False,
+                        "disallow_when_shadow_review_required": False,
+                        "matrix_allowed_symbols": [runtime.settings.default_symbol],
+                        "matrix_allowed_regimes": ["trend", "breakout", "range", "high_volatility", "execution_degraded", "unknown"],
+                        "matrix_allowed_profiles": ["trend_aggressive", "trend_normal", "trend_strict", "range_defensive", "high_volatility_defensive", "execution_degraded_safe"],
+                        "reason": "allow_manual_only_candidate_for_policy_test",
+                    },
+                )
+                client.post(
+                    "/strategy-profiles/activation-policy/approve",
+                    json={"reason": "approve_manual_only_candidate_for_policy_test"},
+                )
+                evaluated = client.post("/strategy-profiles/auto-tuning/evaluate-now")
+                snapshot = client.get("/strategy-profiles")
+
+        self.assertEqual(evaluated.status_code, 200)
+        self.assertIn("profile_activation_policy", evaluated.json())
+        self.assertEqual(evaluated.json()["profile_activation_policy"]["status"], "blocked")
+        self.assertIn(
+            "strategy_profile_manual_approval_required",
+            evaluated.json()["profile_activation_policy"]["blocked_reasons"],
+        )
+        self.assertIn(
+            "strategy_profile_auto_switch_not_allowed",
+            evaluated.json()["profile_activation_policy"]["blocked_reasons"],
+        )
+        self.assertEqual(snapshot.json()["activation"]["active_profile_id"], "range_defensive")
 
     async def test_strategy_profile_auto_rollback_matrix_can_block_by_symbol(self) -> None:
         runtime = await self._runtime(

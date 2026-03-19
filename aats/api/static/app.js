@@ -577,7 +577,8 @@ async function dispatchAction(action, value, target = null) {
   if (action === "inspect-fill") return inspectFill(value);
   if (action === "inspect-reconciliation") return inspectReconciliation(value);
   if (action === "resolve-stuck-order") return resolveStuckOrder(value);
-  if (action === "evaluate-strategy-profile") return evaluateStrategyProfile(target);
+  if (action === "evaluate-strategy-profile") return evaluateStrategyProfile(target, false);
+  if (action === "evaluate-strategy-profile-with-auto-switch") return evaluateStrategyProfile(target, true);
   if (action === "accept-strategy-profile-now") return acceptStrategyProfileRecommendation(value, "manual_now");
   if (action === "stage-strategy-profile") return acceptStrategyProfileRecommendation(value, "stage_only");
   if (action === "reject-strategy-profile") return rejectStrategyProfileRecommendation(value);
@@ -881,17 +882,28 @@ function setActionPending(target, pendingLabel) {
   };
 }
 
-async function evaluateStrategyProfile(target = null) {
-  const clearPending = setActionPending(target, "正在评估并生成建议…");
+async function evaluateStrategyProfile(target = null, allowAutoActivation = false) {
+  const clearPending = setActionPending(target, allowAutoActivation ? "正在评估并尝试自动切换…" : "正在评估并生成建议…");
   try {
-    const result = await requestJson("/strategy-profiles/auto-tuning/evaluate-now", { method: "POST" });
+    const result = await requestJson("/strategy-profiles/auto-tuning/evaluate-now", {
+      method: "POST",
+      body: { allow_auto_activation: allowAutoActivation },
+    });
     const profileId = readableProfileName(result?.recommendation?.recommended_profile_id);
-    const autoApplied = Boolean(result?.auto_activation);
+    const autoApplied = Boolean(result?.auto_activation || result?.profile_activation_policy || result?.auto_rollback);
+    const changedProfileId =
+      result?.auto_activation?.active_revision?.profile_label ||
+      result?.auto_activation?.active_revision?.profile_id ||
+      result?.profile_activation_policy?.candidate_profile_id ||
+      result?.auto_rollback?.target_profile_id ||
+      profileId;
     state.flash = {
-      tone: autoApplied ? "info" : "warning",
-      message: autoApplied
-        ? `AI 调参建议已自动生效，当前档位切换到 ${profileId}。`
-        : `AI 已生成新的调参建议：${profileId}，但当前还未自动生效。`,
+      tone: autoApplied ? "info" : allowAutoActivation ? "warning" : "info",
+      message: allowAutoActivation
+        ? autoApplied
+          ? `已完成评估并执行自动切换，当前档位为 ${readableProfileName(changedProfileId)}。`
+          : `已完成评估，但这次没有自动切换；最新建议是 ${profileId}。`
+        : `已生成新的调参建议：${profileId}。本次只评估，不会自动切换当前档位。`,
     };
     await refreshDashboard({ manual: true });
   } catch (error) {
@@ -921,7 +933,7 @@ async function acceptStrategyProfileRecommendation(recommendationId, activationM
   if (!recommendationId) return;
   const confirmMessage =
     activationMode === "stage_only"
-      ? "确认先把这条 AI 调参建议转为待审批档位吗？"
+      ? "确认先把这条 AI 调参建议保存为待审批档位吗？这样不会立即切换，后续可单独激活。"
       : "确认立即采纳这条 AI 调参建议并切换当前策略档位吗？";
   if (!window.confirm(confirmMessage)) return;
   try {
@@ -936,7 +948,7 @@ async function acceptStrategyProfileRecommendation(recommendationId, activationM
       tone: "info",
       message:
         activationMode === "stage_only"
-          ? `这条建议已转为待审批档位：${readableProfileName(result?.activation?.pending_profile_id)}。`
+          ? `这条建议已保存为待审批档位：${readableProfileName(result?.activation?.pending_profile_id)}。`
           : `当前策略档位已切换为 ${readableProfileName(result?.active_revision?.profile_label || result?.active_revision?.profile_id)}。`,
     };
     await refreshDashboard({ manual: true });

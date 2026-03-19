@@ -17,6 +17,7 @@ const CAPABILITY_STATUS_LABELS = {
 };
 
 const MANUAL_PROFILE_OPTIONS = [
+  { profileId: "trend_aggressive", label: "趋势激进", tone: "primary" },
   { profileId: "trend_normal", label: "趋势标准", tone: "secondary" },
   { profileId: "trend_strict", label: "趋势严格", tone: "secondary" },
   { profileId: "range_defensive", label: "范围防御", tone: "warning" },
@@ -199,13 +200,21 @@ function renderStrategyActions({ canAdmin, latestRecommendation, pendingRevision
         latestRecommendation?.decision_status === "pending" ? "重新评估并生成建议" : "立即评估并生成建议",
         "evaluate-strategy-profile",
         "",
-        latestRecommendation?.decision_status === "pending" ? "secondary" : "primary"
+        "primary"
+      )
+    );
+    actions.push(
+      actionButton(
+        latestRecommendation?.decision_status === "pending" ? "重新评估并允许自动切换" : "评估并允许自动切换",
+        "evaluate-strategy-profile-with-auto-switch",
+        "",
+        "warning"
       )
     );
   }
   if (canAdmin && latestRecommendation?.recommendation_id && latestRecommendation.decision_status === "pending") {
     actions.push(actionButton("立即采纳建议", "accept-strategy-profile-now", latestRecommendation.recommendation_id, "primary"));
-    actions.push(actionButton("转为待审批", "stage-strategy-profile", latestRecommendation.recommendation_id, "secondary"));
+    actions.push(actionButton("保存为待审批", "stage-strategy-profile", latestRecommendation.recommendation_id, "secondary"));
   }
   if (canAdmin && pendingRevision?.revision_id) {
     actions.push(actionButton("激活待审批档位", "activate-pending-strategy-profile", pendingRevision.revision_id, "secondary"));
@@ -225,7 +234,7 @@ function renderAutoRollbackPolicyPanel(policy, stagedPolicy = null, history = []
         ["复核与阈值", `仅在需复核时触发 ${booleanWord(policy.review_required_only)}`, `最少成交 ${formatNumber(policy.min_trade_count || 0, 0)} / 冷却 ${formatNumber(policy.cooldown_seconds || 0, 0)} 秒`],
       ])}
       ${kvList([
-        ["放权矩阵", `允许标的 ${listText(policy.matrix_allowed_symbols, "当前没有限制标的")}`, `市场状态 ${listText(policy.matrix_allowed_regimes, "当前没有限制市场状态")} / 档位 ${listText(policy.matrix_allowed_profiles, "当前没有限制档位")}`],
+        ["放权矩阵", `允许标的 ${listText(policy.matrix_allowed_symbols, "当前没有限制标的")}`, `市场状态 ${readableCodeList(policy.matrix_allowed_regimes, "当前没有限制市场状态")} / 档位 ${readableCodeList(policy.matrix_allowed_profiles, "当前没有限制档位")}`],
         ["审批 / 冻结", `${textOrFallback(policy.approved_by, "待审批")} / ${policy.frozen ? "已冻结" : "正常"}`, policy.frozen ? `冻结原因 ${textOrFallback(policy.freeze_reason, "未填写")}` : `历史记录 ${formatNumber(history.length || 0, 0)} 条`],
       ])}
     </div>
@@ -259,7 +268,7 @@ function renderActivationPolicyPanel(policy, stagedPolicy = null, history = [], 
       ])}
       ${kvList([
         ["安全保护", `要求正向回放 ${booleanWord(policy.require_positive_replay_consensus)}`, `影子复核阻断 ${booleanWord(policy.disallow_when_shadow_review_required)}`],
-        ["放权矩阵", `允许标的 ${listText(policy.matrix_allowed_symbols, "当前没有限制标的")}`, `市场状态 ${listText(policy.matrix_allowed_regimes, "当前没有限制市场状态")} / 档位 ${listText(policy.matrix_allowed_profiles, "当前没有限制档位")}`],
+        ["放权矩阵", `允许标的 ${listText(policy.matrix_allowed_symbols, "当前没有限制标的")}`, `市场状态 ${readableCodeList(policy.matrix_allowed_regimes, "当前没有限制市场状态")} / 档位 ${readableCodeList(policy.matrix_allowed_profiles, "当前没有限制档位")}`],
         ["审批 / 冻结", `${textOrFallback(policy.approved_by, "待审批")} / ${policy.frozen ? "已冻结" : "正常"}`, policy.frozen ? `冻结原因 ${textOrFallback(policy.freeze_reason, "未填写")}` : `历史记录 ${formatNumber(history.length || 0, 0)} 条`],
       ])}
     </div>
@@ -369,14 +378,28 @@ function readableProfile(value, fallback = "待确认") {
   return readableState(String(value), fallback);
 }
 
+function readableCodeItem(value, fallback = "当前没有额外说明") {
+  const text = String(value ?? "").trim();
+  if (!text) return fallback;
+  if (text.includes("=")) {
+    const [rawKey, ...rest] = text.split("=");
+    const rawValue = rest.join("=").trim();
+    const key = String(rawKey || "").trim().toLowerCase();
+    if (key === "evaluation_ref") return rawValue ? `评估记录 ${rawValue}` : "评估记录";
+    if (key === "winner_selection_policy") return rawValue ? `激活策略版本 ${rawValue}` : "激活策略版本";
+    if (key === "activation_policy_id") return rawValue ? `激活策略编号 ${rawValue}` : "激活策略编号";
+  }
+  return readableState(text, fallback);
+}
+
 function readableCodeList(value, fallback = "当前没有额外说明") {
   if (!value) return fallback;
   if (Array.isArray(value)) {
-    const items = value.map((item) => readableState(String(item ?? "").trim())).filter(Boolean);
+    const items = value.map((item) => readableCodeItem(item, "")).filter(Boolean);
     return items.length ? items.join("、") : fallback;
   }
-  const text = String(value).trim();
-  return text ? readableState(text, fallback) : fallback;
+  const text = readableCodeItem(value, "");
+  return text || fallback;
 }
 
 function describeOverlaySource({ activation, activationHistory, activeRevision }) {

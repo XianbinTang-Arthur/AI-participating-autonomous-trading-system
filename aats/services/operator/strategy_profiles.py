@@ -109,6 +109,34 @@ def _seed_revisions(*, settings: AATSSettings, payload: StrategyProfilePayload) 
     }
     return [
         StrategyProfileRevision(
+            profile_id="trend_aggressive",
+            profile_label="Trend Aggressive",
+            risk_level="aggressive",
+            market_intent="trend",
+            payload=_copy_payload(
+                payload,
+                decision_min_interval_seconds_15m=min(payload.decision_min_interval_seconds_15m, 45.0),
+                max_decisions_per_minute=max(payload.max_decisions_per_minute, 4),
+                decision_min_price_move_bps=min(payload.decision_min_price_move_bps, 3.0),
+                decision_min_momentum_delta=min(payload.decision_min_momentum_delta, 0.00025),
+                strategy_min_net_edge_bps=min(payload.strategy_min_net_edge_bps, 4.0),
+                strategy_entry_alpha_min=min(payload.strategy_entry_alpha_min, 0.16),
+                strategy_entry_confidence_min=min(payload.strategy_entry_confidence_min, 0.60),
+                strategy_scale_in_alpha_min=min(payload.strategy_scale_in_alpha_min, 0.22),
+                strategy_scale_in_confidence_min=min(payload.strategy_scale_in_confidence_min, 0.68),
+                strategy_reversal_alpha_min=min(payload.strategy_reversal_alpha_min, 0.30),
+                strategy_reversal_confidence_min=min(payload.strategy_reversal_confidence_min, 0.78),
+                strategy_transient_close_retry_cooldown_seconds=min(
+                    payload.strategy_transient_close_retry_cooldown_seconds, 90.0
+                ),
+            ),
+            description="Use when trend quality is strong and the system can tolerate a more proactive posture.",
+            expected_behavior=["enter earlier on clean trend signals", "accept more trend continuation trades"],
+            auto_switch_allowed=False,
+            manual_approval_required=True,
+            **common,
+        ),
+        StrategyProfileRevision(
             profile_id="trend_normal",
             profile_label="Trend Normal",
             status="active",
@@ -128,17 +156,20 @@ def _seed_revisions(*, settings: AATSSettings, payload: StrategyProfilePayload) 
             market_intent="trend",
             payload=_copy_payload(
                 payload,
-                decision_min_interval_seconds_15m=max(payload.decision_min_interval_seconds_15m, 60.0),
-                max_decisions_per_minute=min(payload.max_decisions_per_minute, 3),
+                decision_min_interval_seconds_15m=max(payload.decision_min_interval_seconds_15m, 75.0),
+                max_decisions_per_minute=min(payload.max_decisions_per_minute, 2),
                 decision_min_price_move_bps=max(payload.decision_min_price_move_bps, 5.0),
-                decision_min_momentum_delta=max(payload.decision_min_momentum_delta, 0.0005),
+                decision_min_momentum_delta=max(payload.decision_min_momentum_delta, 0.00045),
                 strategy_min_net_edge_bps=max(payload.strategy_min_net_edge_bps, 8.0),
-                strategy_entry_alpha_min=max(payload.strategy_entry_alpha_min, 0.2),
-                strategy_entry_confidence_min=max(payload.strategy_entry_confidence_min, 0.68),
+                strategy_entry_alpha_min=max(payload.strategy_entry_alpha_min, 0.22),
+                strategy_entry_confidence_min=max(payload.strategy_entry_confidence_min, 0.70),
                 strategy_scale_in_alpha_min=max(payload.strategy_scale_in_alpha_min, 0.28),
-                strategy_scale_in_confidence_min=max(payload.strategy_scale_in_confidence_min, 0.74),
-                strategy_reversal_alpha_min=max(payload.strategy_reversal_alpha_min, 0.34),
-                strategy_reversal_confidence_min=max(payload.strategy_reversal_confidence_min, 0.82),
+                strategy_scale_in_confidence_min=max(payload.strategy_scale_in_confidence_min, 0.76),
+                strategy_reversal_alpha_min=max(payload.strategy_reversal_alpha_min, 0.36),
+                strategy_reversal_confidence_min=max(payload.strategy_reversal_confidence_min, 0.84),
+                strategy_transient_close_retry_cooldown_seconds=max(
+                    payload.strategy_transient_close_retry_cooldown_seconds, 120.0
+                ),
             ),
             description="Keep trend trading enabled while raising entry, scale-in, and reversal thresholds.",
             expected_behavior=["reduce weak-trend entries", "preserve trend-following capability"],
@@ -153,18 +184,18 @@ def _seed_revisions(*, settings: AATSSettings, payload: StrategyProfilePayload) 
             market_intent="range",
             payload=_copy_payload(
                 payload,
-                decision_min_interval_seconds_15m=max(payload.decision_min_interval_seconds_15m, 90.0),
+                decision_min_interval_seconds_15m=max(payload.decision_min_interval_seconds_15m, 105.0),
                 max_decisions_per_minute=min(payload.max_decisions_per_minute, 2),
                 decision_min_price_move_bps=max(payload.decision_min_price_move_bps, 6.0),
-                decision_min_momentum_delta=max(payload.decision_min_momentum_delta, 0.0008),
+                decision_min_momentum_delta=max(payload.decision_min_momentum_delta, 0.0007),
                 strategy_min_net_edge_bps=max(payload.strategy_min_net_edge_bps, 10.0),
                 strategy_entry_allowed_regimes=("breakout",),
                 strategy_entry_alpha_min=max(payload.strategy_entry_alpha_min, 0.24),
-                strategy_entry_confidence_min=max(payload.strategy_entry_confidence_min, 0.7),
-                strategy_scale_in_alpha_min=max(payload.strategy_scale_in_alpha_min, 0.3),
-                strategy_scale_in_confidence_min=max(payload.strategy_scale_in_confidence_min, 0.76),
-                strategy_reversal_alpha_min=max(payload.strategy_reversal_alpha_min, 0.38),
-                strategy_reversal_confidence_min=max(payload.strategy_reversal_confidence_min, 0.84),
+                strategy_entry_confidence_min=max(payload.strategy_entry_confidence_min, 0.72),
+                strategy_scale_in_alpha_min=max(payload.strategy_scale_in_alpha_min, 0.30),
+                strategy_scale_in_confidence_min=max(payload.strategy_scale_in_confidence_min, 0.80),
+                strategy_reversal_alpha_min=max(payload.strategy_reversal_alpha_min, 0.40),
+                strategy_reversal_confidence_min=max(payload.strategy_reversal_confidence_min, 0.86),
                 strategy_transient_close_retry_cooldown_seconds=max(
                     payload.strategy_transient_close_retry_cooldown_seconds, 180.0
                 ),
@@ -183,17 +214,17 @@ def _seed_revisions(*, settings: AATSSettings, payload: StrategyProfilePayload) 
             payload=_copy_payload(
                 payload,
                 decision_min_interval_seconds_15m=max(payload.decision_min_interval_seconds_15m, 120.0),
-                max_decisions_per_minute=min(payload.max_decisions_per_minute, 2),
+                max_decisions_per_minute=min(payload.max_decisions_per_minute, 1),
                 decision_min_price_move_bps=max(payload.decision_min_price_move_bps, 8.0),
-                decision_min_momentum_delta=max(payload.decision_min_momentum_delta, 0.001),
+                decision_min_momentum_delta=max(payload.decision_min_momentum_delta, 0.0009),
                 strategy_min_net_edge_bps=max(payload.strategy_min_net_edge_bps, 12.0),
                 strategy_entry_allowed_regimes=("breakout",),
-                strategy_entry_alpha_min=max(payload.strategy_entry_alpha_min, 0.26),
-                strategy_entry_confidence_min=max(payload.strategy_entry_confidence_min, 0.74),
-                strategy_scale_in_alpha_min=max(payload.strategy_scale_in_alpha_min, 0.32),
-                strategy_scale_in_confidence_min=max(payload.strategy_scale_in_confidence_min, 0.8),
-                strategy_reversal_alpha_min=max(payload.strategy_reversal_alpha_min, 0.4),
-                strategy_reversal_confidence_min=max(payload.strategy_reversal_confidence_min, 0.88),
+                strategy_entry_alpha_min=max(payload.strategy_entry_alpha_min, 0.28),
+                strategy_entry_confidence_min=max(payload.strategy_entry_confidence_min, 0.78),
+                strategy_scale_in_alpha_min=max(payload.strategy_scale_in_alpha_min, 0.34),
+                strategy_scale_in_confidence_min=max(payload.strategy_scale_in_confidence_min, 0.84),
+                strategy_reversal_alpha_min=max(payload.strategy_reversal_alpha_min, 0.44),
+                strategy_reversal_confidence_min=max(payload.strategy_reversal_confidence_min, 0.90),
                 strategy_transient_close_retry_cooldown_seconds=max(
                     payload.strategy_transient_close_retry_cooldown_seconds, 240.0
                 ),
@@ -213,16 +244,16 @@ def _seed_revisions(*, settings: AATSSettings, payload: StrategyProfilePayload) 
                 payload,
                 decision_min_interval_seconds_15m=max(payload.decision_min_interval_seconds_15m, 180.0),
                 max_decisions_per_minute=1,
-                decision_min_price_move_bps=max(payload.decision_min_price_move_bps, 8.0),
-                decision_min_momentum_delta=max(payload.decision_min_momentum_delta, 0.001),
+                decision_min_price_move_bps=max(payload.decision_min_price_move_bps, 10.0),
+                decision_min_momentum_delta=max(payload.decision_min_momentum_delta, 0.0011),
                 strategy_min_net_edge_bps=max(payload.strategy_min_net_edge_bps, 14.0),
                 strategy_entry_allowed_regimes=("breakout",),
-                strategy_entry_alpha_min=max(payload.strategy_entry_alpha_min, 0.28),
-                strategy_entry_confidence_min=max(payload.strategy_entry_confidence_min, 0.8),
-                strategy_scale_in_alpha_min=max(payload.strategy_scale_in_alpha_min, 0.34),
-                strategy_scale_in_confidence_min=max(payload.strategy_scale_in_confidence_min, 0.84),
-                strategy_reversal_alpha_min=max(payload.strategy_reversal_alpha_min, 0.42),
-                strategy_reversal_confidence_min=max(payload.strategy_reversal_confidence_min, 0.9),
+                strategy_entry_alpha_min=max(payload.strategy_entry_alpha_min, 0.32),
+                strategy_entry_confidence_min=max(payload.strategy_entry_confidence_min, 0.82),
+                strategy_scale_in_alpha_min=max(payload.strategy_scale_in_alpha_min, 0.38),
+                strategy_scale_in_confidence_min=max(payload.strategy_scale_in_confidence_min, 0.88),
+                strategy_reversal_alpha_min=max(payload.strategy_reversal_alpha_min, 0.48),
+                strategy_reversal_confidence_min=max(payload.strategy_reversal_confidence_min, 0.92),
                 strategy_transient_close_retry_cooldown_seconds=max(
                     payload.strategy_transient_close_retry_cooldown_seconds, 300.0
                 ),
@@ -358,7 +389,7 @@ class StrategyProfileControlService:
             ],
         }
 
-    async def evaluate_now(self) -> dict[str, Any]:
+    async def evaluate_now(self, *, allow_auto_activation: bool = True) -> dict[str, Any]:
         self.ensure_seed_profiles()
         context = self._tuning_context()
         state = self._activation_state()
@@ -449,13 +480,13 @@ class StrategyProfileControlService:
         }
         if current_evaluation is not None:
             result["current_evaluation"] = current_evaluation.model_dump(mode="json")
-        if validation["auto_apply_allowed"]:
+        if allow_auto_activation and validation["auto_apply_allowed"]:
             activation = self._auto_apply_recommendation(recommendation=recommendation)
             result["auto_activation"] = activation
             latest_selection = self._latest_selection_decision_payload()
             if latest_selection is not None:
                 result["selection_decision"] = latest_selection
-        elif not result.get("auto_activation"):
+        elif allow_auto_activation and not result.get("auto_activation"):
             policy_activation = self._maybe_auto_execute_activation_policy(
                 optimization_report=optimization_report,
                 selection_decision=selection_decision,
@@ -472,12 +503,13 @@ class StrategyProfileControlService:
         )
         if outcome_decision is not None:
             result["selection_decision"] = outcome_decision.model_dump(mode="json")
-            auto_rollback = self._maybe_auto_execute_rollback(decision=outcome_decision)
-            if auto_rollback is not None:
-                result["auto_rollback"] = auto_rollback
-                latest_selection = self._latest_selection_decision_payload()
-                if latest_selection is not None:
-                    result["selection_decision"] = latest_selection
+            if allow_auto_activation:
+                auto_rollback = self._maybe_auto_execute_rollback(decision=outcome_decision)
+                if auto_rollback is not None:
+                    result["auto_rollback"] = auto_rollback
+                    latest_selection = self._latest_selection_decision_payload()
+                    if latest_selection is not None:
+                        result["selection_decision"] = latest_selection
         return result
 
     def accept_recommendation(
@@ -2765,12 +2797,19 @@ class StrategyProfileControlService:
         candidate_profile_id = optimization_report.recommended_profile_id
         if candidate_profile_id is None:
             return None
+        revision = self._revision_for_profile(candidate_profile_id)
+        if revision is None:
+            return None
         if not policy.enabled or not policy.effective or policy.frozen:
             return None
         state = self._activation_state()
         if state.active_profile_id == candidate_profile_id:
             return None
         blocked_reasons = list(((winner_policy.get("auto_activation") or {}).get("blocked_reasons")) or [])
+        if revision.manual_approval_required:
+            blocked_reasons.append("strategy_profile_manual_approval_required")
+        if not revision.auto_switch_allowed:
+            blocked_reasons.append("strategy_profile_auto_switch_not_allowed")
         replay_summary = optimization_report.replay_summary or {}
         target_symbol = str(replay_summary.get("target_symbol") or self.settings.default_symbol)
         target_regime = str(replay_summary.get("target_regime") or "unknown")
@@ -2801,9 +2840,6 @@ class StrategyProfileControlService:
                 "policy_id": policy.policy_id,
                 "blocked_reasons": blocked_reasons,
             }
-        revision = self._revision_for_profile(candidate_profile_id)
-        if revision is None:
-            return None
         record = self._activate_revision(
             target=revision,
             state=state,

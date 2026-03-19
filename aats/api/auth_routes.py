@@ -66,6 +66,10 @@ class StrategyProfileAcceptRequest(BaseModel):
     activation_mode: str = "manual_now"
 
 
+class StrategyProfileEvaluateRequest(BaseModel):
+    allow_auto_activation: bool = True
+
+
 class StrategyProfileRejectRequest(BaseModel):
     reason_code: str = "operator_rejected_strategy_profile_recommendation"
     reason_detail: str | None = None
@@ -655,9 +659,11 @@ async def freeze_strategy_profile_activation_policy(
 @auth_router.post("/strategy-profiles/auto-tuning/evaluate-now")
 async def evaluate_strategy_profile(
     request: Request,
+    payload: StrategyProfileEvaluateRequest | None = None,
     principal: OperatorPrincipal = Depends(require_admin_access),
 ) -> dict[str, Any]:
     return await _query(request).evaluate_strategy_profile(
+        allow_auto_activation=True if payload is None else payload.allow_auto_activation,
         actor_role=principal.role,
         actor_identity=principal.identity,
         auth_source=principal.auth_source,
