@@ -150,8 +150,8 @@ export function renderAIConfigView(data) {
                   },
                 ])}
                 ${kvList([
-                  ["推荐理由", listText(latestRecommendation?.reason_codes, "当前没有额外推荐理由"), listText(latestRecommendation?.risk_notes, "当前没有额外风险提示")],
-                  ["下一步动作", readableState(selectionDecision.recommended_action || "unknown"), listText(selectionDecision.notes, "当前没有额外决策说明")],
+                  ["推荐理由", readableCodeList(latestRecommendation?.reason_codes, "当前没有额外推荐理由"), readableCodeList(latestRecommendation?.risk_notes, "当前没有额外风险提示")],
+                  ["下一步动作", readableState(selectionDecision.recommended_action || "unknown"), readableCodeList(selectionDecision.notes, "当前没有额外决策说明")],
                   ["当前档位摘要", profileSummary(activeRevision), "这里展示当前档位最关键的决策门槛与节奏参数"],
                   ["档位空间", `${formatNumber((profileSpace.registered_profiles || []).length || 0, 0)} 个已注册档位`, comparisonReport.recommended_profile_id ? `最近对比建议：${readableProfile(comparisonReport.recommended_profile_id)}` : "当前还没有最新对比建议"],
                 ])}
@@ -367,6 +367,16 @@ function listText(value, fallback = "当前没有额外说明") {
 function readableProfile(value, fallback = "待确认") {
   if (value === null || value === undefined || value === "") return fallback;
   return readableState(String(value), fallback);
+}
+
+function readableCodeList(value, fallback = "当前没有额外说明") {
+  if (!value) return fallback;
+  if (Array.isArray(value)) {
+    const items = value.map((item) => readableState(String(item ?? "").trim())).filter(Boolean);
+    return items.length ? items.join("、") : fallback;
+  }
+  const text = String(value).trim();
+  return text ? readableState(text, fallback) : fallback;
 }
 
 function describeOverlaySource({ activation, activationHistory, activeRevision }) {
