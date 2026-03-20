@@ -7,6 +7,10 @@ from pathlib import Path
 
 import uvicorn
 
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 from aats.bootstrap.env_profiles import load_profiled_dotenv_into_process
 
 
@@ -15,15 +19,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--profile",
         choices=("spot", "derivatives"),
-        default=None,
-        help="加载对应的环境模板；不传时优先读取根目录 .env。",
+        required=True,
+        help="必填。选择启动时加载的环境模板。",
     )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    project_root = Path(__file__).resolve().parent.parent
+    project_root = ROOT
     load_profiled_dotenv_into_process(project_root, args.profile)
     os.chdir(project_root)
     project_root_str = str(project_root)

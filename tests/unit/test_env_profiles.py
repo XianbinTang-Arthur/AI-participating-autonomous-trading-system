@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import pytest
 
 from aats.bootstrap.env_profiles import load_profiled_dotenv_into_process, resolve_profile_dotenv_path
 from aats.bootstrap.settings import AATSSettings
@@ -10,6 +11,11 @@ from aats.bootstrap.settings import AATSSettings
 def test_resolve_profile_dotenv_path_uses_named_profile(tmp_path: Path) -> None:
     assert resolve_profile_dotenv_path(tmp_path, "spot") == tmp_path / ".env.spot"
     assert resolve_profile_dotenv_path(tmp_path, "derivatives") == tmp_path / ".env.derivatives"
+
+
+def test_resolve_profile_dotenv_path_requires_profile(tmp_path: Path) -> None:
+    with pytest.raises(FileNotFoundError, match="startup_profile_required"):
+        resolve_profile_dotenv_path(tmp_path, None)
 
 
 def test_load_profiled_dotenv_into_process_clears_previous_aats_keys(tmp_path: Path) -> None:

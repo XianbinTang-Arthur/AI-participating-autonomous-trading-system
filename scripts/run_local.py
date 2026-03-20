@@ -26,8 +26,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--profile",
         choices=("spot", "derivatives"),
-        default=None,
-        help="加载对应的环境模板；不传时优先读取根目录 .env。",
+        required=True,
+        help="必填。选择启动时加载的环境模板。",
     )
     return parser.parse_args()
 

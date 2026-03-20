@@ -17,9 +17,6 @@ PROFILE_ENV_FILES: dict[StartupProfile, str] = {
 
 def resolve_profile_dotenv_path(project_root: Path, profile: StartupProfile | None = None) -> Path:
     if profile is None:
-        default_path = project_root / ".env"
-        if default_path.exists():
-            return default_path
         raise FileNotFoundError("startup_profile_required")
     return project_root / PROFILE_ENV_FILES[profile]
 

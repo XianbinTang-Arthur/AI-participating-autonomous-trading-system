@@ -32,7 +32,6 @@ AIExecutionSuggestionMode = Literal["disabled", "diagnostic_only", "shadow_trans
 
 class AATSSettings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env",
         env_prefix="AATS_",
         extra="ignore",
     )
