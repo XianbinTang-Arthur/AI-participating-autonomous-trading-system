@@ -311,7 +311,9 @@ function renderStatusRibbon() {
   const account = state.data.accountState || {};
   const reconciliation = state.data.reconciliationLatest?.reconciliation || null;
   const portfolio = state.data.portfolio?.portfolio || {};
-  const blockers = state.data.blockers?.blockers || [];
+  const blockerControl = state.data.blockerControl || {};
+  const blockers = blockerControl.blockers || state.data.blockers?.blockers || [];
+  const primaryBlocker = blockerControl.primary_blocker || blockers[0] || null;
   const latestDecision = state.data.latestDecision || {};
   const latestOrder = state.data.executionLatest?.latest_order || null;
   const metrics = state.data.metrics || {};
@@ -333,7 +335,7 @@ function renderStatusRibbon() {
       metrics: [
         { label: "最近决策", value: latestDecision.decision_id ? readableState(latestDecision.position_target?.position_intent || "hold") : "暂无", meta: formatMaybeTimestamp(latestDecision.decision_time || latestDecision.decision_context?.as_of_ts), tone: latestDecision.decision_id ? "info" : "neutral" },
         { label: "最新委托", value: readableState(latestOrder?.status || "unknown"), meta: middleEllipsis(latestOrder?.client_order_id, 10, 6, "暂未生成委托"), tone: toneForOrderStatus(latestOrder?.status) },
-        { label: "恢复限制", value: isPausedAwaitingResume(recovery) ? "当前可手动恢复" : blockers.length > 0 ? localizeError(blockers[0].blocker) : recovery.safe_to_trade ? "当前无硬阻断" : localizedRecoveryReasons(), meta: middleEllipsis(reconciliation?.reconciliation_id, 10, 6, "恢复与对账共同决定交易资格"), tone: isPausedAwaitingResume(recovery) ? "warning" : blockers.length > 0 || reconciliation?.halt_required ? "danger" : recovery.safe_to_trade ? "positive" : "warning" },
+        { label: "恢复限制", value: isPausedAwaitingResume(recovery) ? "当前可手动恢复" : primaryBlocker ? (primaryBlocker.title || localizeError(primaryBlocker.blocker)) : recovery.safe_to_trade ? "当前无硬阻断" : localizedRecoveryReasons(), meta: middleEllipsis(reconciliation?.reconciliation_id, 10, 6, "恢复与对账共同决定交易资格"), tone: isPausedAwaitingResume(recovery) ? "warning" : blockers.length > 0 || reconciliation?.halt_required ? "danger" : recovery.safe_to_trade ? "positive" : "warning" },
         { label: "账户权益", value: formatNumber(portfolio.total_equity), meta: `活动委托 ${formatNumber(metrics.current_open_order_count)}`, tone: "info" },
       ],
     })}</div>`,
@@ -372,7 +374,9 @@ function homeRibbonTone({ health, recovery, blockers, reconciliation }) {
 function renderBanners() {
   const banners = [];
   const recovery = state.data.systemRecovery?.recovery || {};
-  const blockers = state.data.blockers?.blockers || [];
+  const blockerControl = state.data.blockerControl || {};
+  const blockers = blockerControl.blockers || state.data.blockers?.blockers || [];
+  const primaryBlocker = blockerControl.primary_blocker || blockers[0] || null;
   const controlsMessage = controlPermissionMessage();
 
   if (!nodes.bannerContainer) return;
@@ -393,7 +397,9 @@ function renderBanners() {
     }
   }
   if (blockers.length > 0) {
-    banners.push(notice(`当前主要阻断原因：${localizeError(blockers[0].blocker)}`, blockers[0].affects_execution ? "danger" : "warning"));
+    const headline = primaryBlocker?.title || localizeError(primaryBlocker?.blocker || blockers[0].blocker);
+    const detail = primaryBlocker?.recommended_next_step || localizeError(primaryBlocker?.blocker || blockers[0].blocker);
+    banners.push(notice(`当前主要阻断原因：${headline}。${detail}`, (primaryBlocker || blockers[0]).affects_execution ? "danger" : "warning"));
   }
   if (controlsMessage) {
     banners.push(notice(controlsMessage, "info"));
@@ -674,6 +680,8 @@ async function logoutOperator() {
 }
 
 async function dispatchAction(action, value, target = null) {
+  if (action === "refresh-dashboard") return refreshDashboard({ manual: true });
+  if (action === "navigate-view") return setActiveView(value || "home", { pushHistory: true });
   if (action === "inspect-decision") return inspectDecision(value);
   if (action === "inspect-order") return inspectOrder(value);
   if (action === "inspect-fill") return inspectFill(value);
@@ -682,6 +690,7 @@ async function dispatchAction(action, value, target = null) {
   if (action === "trigger-rebaseline") return triggerRebaseline(target);
   if (action === "trigger-resume") return triggerResume(target);
   if (action === "trigger-halt") return triggerHalt(target);
+  if (action === "trigger-blocker-action") return triggerBlockerAction(value, target);
   if (action === "resolve-stuck-order") return resolveStuckOrder(value);
   if (action === "manual-activate-strategy-profile") return activateStrategyProfile(value, target);
   if (action === "load-more-orders") return adjustPageLimit("recentOrders", PAGE_LOAD_STEP);
@@ -935,6 +944,29 @@ function renderReconciliationBillExplanations(rows) {
     .slice(0, 3)
     .map((item) => `${item.title}: ${drawerListText(item.likely_explains, "当前没有额外解释")}`)
     .join(" | ");
+}
+
+async function triggerBlockerAction(value, target = null) {
+  if (!value) return;
+  const [actionId, blocker] = String(value).split("::");
+  if (!actionId) return;
+  const confirmMessage = blockerActionConfirmMessage(actionId);
+  if (confirmMessage && !window.confirm(confirmMessage)) return;
+  const blockerControl = state.data.blockerControl || {};
+  const reason = defaultBlockerActionReason(actionId);
+  await runAction(
+    `/system/blocker-actions/${encodeURIComponent(actionId)}`,
+    {
+      panel_version: blockerControl.panel_version || null,
+      blocker: blocker || null,
+      reason,
+    },
+    blockerActionSuccessMessage(actionId),
+    {
+      target,
+      pendingLabel: blockerActionPendingLabel(actionId),
+    }
+  );
 }
 
 function renderReconciliationBillCases(rows) {
@@ -1359,6 +1391,10 @@ function effectiveRecoveryReasons() {
   if (explicitReasons.length > 0) {
     return explicitReasons;
   }
+  const blockerControl = state.data.blockerControl || {};
+  if (blockerControl.primary_blocker?.blocker) {
+    return [blockerControl.primary_blocker.blocker];
+  }
   if (recovery.resume_eligible) {
     return [];
   }
@@ -1385,6 +1421,52 @@ function scheduleRefresh() {
   if (state.actionInFlight) return;
   if (nodes.autoRefreshToggle && !nodes.autoRefreshToggle.checked) return;
   state.refreshTimer = window.setTimeout(() => void refreshDashboard(), AUTO_REFRESH_MS);
+}
+
+function defaultBlockerActionReason(actionId) {
+  const map = {
+    "reconcile-now": "operator_validate_from_blocker_panel",
+    "accept-rebaseline": "operator_rebaseline_from_blocker_panel",
+    "resume-system": "operator_resume_from_blocker_panel",
+    "halt-system": "operator_keep_halted_from_blocker_panel",
+    "ai-review-restore": "operator_restore_ai_from_blocker_panel",
+    "ai-review-degrade-to-baseline": "operator_degrade_to_baseline_from_blocker_panel",
+  };
+  return map[actionId] || `operator_${actionId}`;
+}
+
+function blockerActionPendingLabel(actionId) {
+  const map = {
+    "reconcile-now": "正在重新对账…",
+    "accept-rebaseline": "正在确认新基线…",
+    "resume-system": "正在恢复自动运行…",
+    "halt-system": "正在保持暂停状态…",
+    "ai-review-restore": "正在恢复 AI 决策…",
+    "ai-review-degrade-to-baseline": "正在切到仅基础策略运行…",
+  };
+  return map[actionId] || "正在执行阻断处理动作…";
+}
+
+function blockerActionSuccessMessage(actionId) {
+  const map = {
+    "reconcile-now": "对账已刷新。",
+    "accept-rebaseline": "新基线已确认。",
+    "resume-system": "恢复自动运行请求已提交。",
+    "halt-system": "系统会继续保持暂停状态。",
+    "ai-review-restore": "AI 复核已处理，已恢复 AI 决策资格。",
+    "ai-review-degrade-to-baseline": "AI 复核已处理，系统将以仅基础策略继续运行。",
+  };
+  return map[actionId] || "阻断处理动作已完成。";
+}
+
+function blockerActionConfirmMessage(actionId) {
+  const map = {
+    "accept-rebaseline": "确认把当前状态接受为新基线吗？这会覆盖旧的恢复参照。",
+    "halt-system": "确认继续保持暂停状态吗？这会阻止系统继续自动交易。",
+    "ai-review-restore": "确认恢复 AI 决策链路吗？这会清除当前 AI 结果复核阻断。",
+    "ai-review-degrade-to-baseline": "确认改为仅基础策略继续运行吗？这会解除当前 AI 复核阻断，并把 AI 决策权降为仅基础策略。",
+  };
+  return map[actionId] || "";
 }
 
 function cancelScheduledRefresh() {

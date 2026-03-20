@@ -933,6 +933,146 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(recovery.json()["recovery"]["review_required"])
         self.assertNotIn("ai_degraded_requires_manual_review", recovery.json()["recovery"]["resume_blocked_reasons"])
 
+    async def test_blocker_control_prioritizes_ai_review_over_surface_halt_and_exposes_actions(self) -> None:
+        runtime = await self._runtime(
+            ai_operating_mode="ai_primary",
+            ai_auto_downgrade_enabled=False,
+            ai_provider="openai",
+            openai_api_key="test-key",
+        )
+        runtime.ai_service.provider = FakeShadowProvider()
+        runtime.ai_service._degraded = False
+        runtime.ai_service._degradation_reason = ""
+        runtime.ai_service._outcome_review_required = True
+        runtime.ai_service._outcome_degradation_reason = "ai_shadow_underperformed_baseline"
+        runtime.kill_switch.halt("operator_test_halt")
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            response = client.get("/system/blocker-control")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["primary_blocker"]["blocker"], "ai_degraded_requires_manual_review")
+        self.assertTrue(payload["primary_blocker"]["root_cause"])
+        self.assertIn("确认恢复 AI 决策", [item["label"] for item in payload["primary_blocker"]["actions"]])
+        self.assertIn("改为仅基础策略继续运行", [item["label"] for item in payload["primary_blocker"]["actions"]])
+        self.assertTrue(any(item["blocker"] == "kill_switch_active" for item in payload["secondary_blockers"]))
+
+    async def test_blocker_action_degrade_to_baseline_clears_review_requirement_and_keeps_system_resumable(self) -> None:
+        runtime = await self._runtime(
+            ai_operating_mode="ai_primary",
+            ai_auto_downgrade_enabled=False,
+            ai_provider="openai",
+            openai_api_key="test-key",
+        )
+        runtime.ai_service.provider = FakeShadowProvider()
+        runtime.ai_service._degraded = False
+        runtime.ai_service._degradation_reason = ""
+        runtime.ai_service._outcome_review_required = True
+        runtime.ai_service._outcome_degradation_reason = "ai_shadow_underperformed_baseline"
+        runtime.kill_switch.halt("operator_test_halt")
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            blocker_control = client.get("/system/blocker-control").json()
+            response = client.post(
+                "/system/blocker-actions/ai-review-degrade-to-baseline",
+                json={
+                    "panel_version": blocker_control["panel_version"],
+                    "blocker": "ai_degraded_requires_manual_review",
+                    "reason": "operator_reject_ai_and_continue_with_baseline",
+                },
+            )
+            recovery = client.get("/system/recovery").json()
+            ai_runtime = client.get("/ai/runtime").json()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "completed")
+        self.assertFalse(recovery["recovery"]["review_required"])
+        self.assertTrue(recovery["recovery"]["resume_eligible"])
+        self.assertEqual(ai_runtime["manual_override_mode"], "baseline_only")
+
+    async def test_blocker_action_restore_ai_clears_review_requirement_without_baseline_override(self) -> None:
+        runtime = await self._runtime(
+            ai_operating_mode="ai_primary",
+            ai_auto_downgrade_enabled=False,
+            ai_provider="openai",
+            openai_api_key="test-key",
+        )
+        runtime.ai_service.provider = FakeShadowProvider()
+        runtime.ai_service._degraded = False
+        runtime.ai_service._degradation_reason = ""
+        runtime.ai_service._outcome_review_required = True
+        runtime.ai_service._outcome_degradation_reason = "ai_shadow_underperformed_baseline"
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            blocker_control = client.get("/system/blocker-control").json()
+            response = client.post(
+                "/system/blocker-actions/ai-review-restore",
+                json={
+                    "panel_version": blocker_control["panel_version"],
+                    "blocker": "ai_degraded_requires_manual_review",
+                    "reason": "operator_restore_ai_after_review",
+                },
+            )
+            recovery = client.get("/system/recovery").json()
+            ai_runtime = client.get("/ai/runtime").json()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(recovery["recovery"]["review_required"])
+        self.assertIsNone(ai_runtime["manual_override_mode"])
+        self.assertEqual(ai_runtime["review_resolution"], "operator_restore_ai")
+
+    async def test_blocker_action_rejects_stale_panel_version(self) -> None:
+        runtime = await self._runtime(
+            ai_operating_mode="ai_primary",
+            ai_auto_downgrade_enabled=False,
+            ai_provider="openai",
+            openai_api_key="test-key",
+        )
+        runtime.ai_service.provider = FakeShadowProvider()
+        runtime.ai_service._degraded = False
+        runtime.ai_service._degradation_reason = ""
+        runtime.ai_service._outcome_review_required = True
+        runtime.ai_service._outcome_degradation_reason = "ai_shadow_underperformed_baseline"
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/system/blocker-actions/ai-review-restore",
+                json={
+                    "panel_version": "stale-version",
+                    "blocker": "ai_degraded_requires_manual_review",
+                    "reason": "operator_restore_ai_after_review",
+                },
+            )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["detail"], "blocker_control_state_changed")
+
+    async def test_provider_degraded_blocker_does_not_offer_manual_review_resolution_buttons(self) -> None:
+        runtime = await self._runtime(
+            ai_operating_mode="ai_primary",
+            ai_auto_downgrade_enabled=False,
+            ai_provider="openai",
+            openai_api_key="test-key",
+        )
+        runtime.ai_service._degraded = True
+        runtime.ai_service._degradation_reason = "ai_timeout"
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            payload = client.get("/system/blocker-control").json()
+
+        primary = payload["primary_blocker"]
+        self.assertEqual(primary["blocker"], "ai_degraded_requires_manual_review")
+        action_ids = [item["action_id"] for item in primary["actions"]]
+        self.assertNotIn("ai-review-restore", action_ids)
+        self.assertNotIn("ai-review-degrade-to-baseline", action_ids)
+        self.assertIn("open-ai-workbench", action_ids)
+
     async def test_halt_resume_and_stale_market_blocker_are_visible(self) -> None:
         runtime = await self._runtime()
         app = self._app(runtime)

@@ -19,6 +19,7 @@ export const CORE_SPECS = [
   ["mode", "/system/mode"],
   ["runtime", "/system/runtime"],
   ["systemRecovery", "/system/recovery"],
+  ["blockerControl", "/system/blocker-control"],
 ];
 
 export function createState() {

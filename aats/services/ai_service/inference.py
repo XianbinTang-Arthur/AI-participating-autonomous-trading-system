@@ -65,6 +65,8 @@ class AIInferenceService:
         self._outcome_auto_downgraded = False
         self._outcome_degradation_reason = ""
         self._outcome_bad_window_streak = 0
+        self._manual_operating_mode_override: CanonicalAIOperatingMode | None = None
+        self._review_resolution: str | None = None
         self._last_provider_degraded_at: datetime | None = None
         self._last_provider_recovered_at: datetime | None = None
         self._last_outcome_degraded_at: datetime | None = None
@@ -388,6 +390,9 @@ class AIInferenceService:
             "canonical_configured_operating_mode": self.settings.canonical_ai_operating_mode,
             "effective_operating_mode": self.effective_operating_mode(),
             "canonical_effective_operating_mode": self.canonical_effective_operating_mode(),
+            "manual_override_mode": self._manual_operating_mode_override,
+            "manual_override_active": self._manual_operating_mode_override is not None,
+            "review_resolution": self._review_resolution,
             "provider": self.settings.ai_provider,
             "configured": self.settings.ai_provider_configured,
             "provider_ready": self.provider is not None,
@@ -564,6 +569,8 @@ class AIInferenceService:
         return None
 
     def effective_operating_mode(self) -> str:
+        if self._manual_operating_mode_override is not None:
+            return self._manual_operating_mode_override
         if self._outcome_auto_downgraded:
             return "baseline_only"
         if self._degraded and self.settings.ai_auto_downgrade_enabled and not self._recovery_probe_ready():
@@ -597,6 +604,7 @@ class AIInferenceService:
         reason_code: str,
         symbol: str | None = None,
         timeframe: str | None = None,
+        review_resolution: str | None = None,
     ) -> None:
         event = AIDegradationEvent(
             symbol=symbol or self.settings.default_symbol,
@@ -613,6 +621,8 @@ class AIInferenceService:
                 (self._degraded and self.settings.ai_auto_downgrade_enabled)
                 or self._outcome_auto_downgraded
             ),
+            manual_override_mode=self._manual_operating_mode_override,
+            review_resolution=review_resolution or self._review_resolution,
             reason_code=reason_code,
             consecutive_failures=self._consecutive_failures,
             consecutive_successes=self._consecutive_successes,
@@ -635,6 +645,8 @@ class AIInferenceService:
         self._degraded = bool(payload.get("provider_degraded", payload.get("degraded", False)))
         self._outcome_review_required = bool(payload.get("outcome_review_required", False))
         self._outcome_auto_downgraded = bool(payload.get("auto_downgrade_active", False)) and self._outcome_review_required
+        self._manual_operating_mode_override = normalize_ai_operating_mode(payload.get("manual_override_mode")) if payload.get("manual_override_mode") else None
+        self._review_resolution = str(payload.get("review_resolution") or "") or None
         self._degradation_reason = str(payload.get("reason_code") or "") if self._degraded else ""
         self._outcome_degradation_reason = (
             str(payload.get("reason_code") or "") if self._outcome_review_required else ""
@@ -684,10 +696,12 @@ class AIInferenceService:
             self._outcome_degradation_reason = ""
             if was_review_required:
                 self._last_outcome_recovered_at = utc_now()
+                self._review_resolution = "auto_recovered"
                 self._append_degradation_event(
                     reason_code="outcome_review_recovered",
                     symbol=evaluation.symbol,
                     timeframe=evaluation.timeframe,
+                    review_resolution="auto_recovered",
                 )
             return
 
@@ -698,6 +712,7 @@ class AIInferenceService:
         self._outcome_auto_downgraded = (
             self.settings.ai_auto_downgrade_enabled and self.settings.canonical_ai_operating_mode == "ai_decision_maker"
         )
+        self._review_resolution = None
         self._outcome_degradation_reason = reason_codes[0]
         self._last_outcome_degraded_at = utc_now()
         self._append_degradation_event(
@@ -705,6 +720,36 @@ class AIInferenceService:
             symbol=evaluation.symbol,
             timeframe=evaluation.timeframe,
         )
+
+    def resolve_outcome_review_restore_ai(self) -> dict[str, object]:
+        had_review = self._outcome_review_required or self._outcome_auto_downgraded or self._manual_operating_mode_override is not None
+        self._outcome_review_required = False
+        self._outcome_auto_downgraded = False
+        self._outcome_degradation_reason = ""
+        self._outcome_bad_window_streak = 0
+        self._manual_operating_mode_override = None
+        self._review_resolution = "operator_restore_ai"
+        self._last_outcome_recovered_at = utc_now()
+        if had_review:
+            self._append_degradation_event(
+                reason_code="operator_review_restore_ai",
+                review_resolution="operator_restore_ai",
+            )
+        return self.status()
+
+    def resolve_outcome_review_degrade_to_baseline(self) -> dict[str, object]:
+        self._outcome_review_required = False
+        self._outcome_auto_downgraded = False
+        self._outcome_degradation_reason = ""
+        self._outcome_bad_window_streak = 0
+        self._manual_operating_mode_override = "baseline_only"
+        self._review_resolution = "operator_degrade_to_baseline"
+        self._last_outcome_recovered_at = utc_now()
+        self._append_degradation_event(
+            reason_code="operator_review_degrade_to_baseline",
+            review_resolution="operator_degrade_to_baseline",
+        )
+        return self.status()
 
     def _publish_performance_report(
         self,

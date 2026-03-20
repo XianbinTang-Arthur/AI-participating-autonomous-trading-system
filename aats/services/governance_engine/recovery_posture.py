@@ -45,6 +45,8 @@ class RecoveryPostureEvaluator:
         if self.runtime.settings.ai_operating_mode == "baseline_only":
             return False
         ai_runtime = self.runtime.ai_service.status()
+        if ai_runtime.get("manual_override_mode") == "baseline_only":
+            return False
         return bool(ai_runtime.get("degraded")) and not bool(ai_runtime.get("auto_downgrade_active"))
 
     def resume_check(

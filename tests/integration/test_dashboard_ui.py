@@ -80,12 +80,17 @@ class TestDashboardUI(unittest.TestCase):
         store_text = responses["store_js"].text
         self.assertIn("AUTO_REFRESH_MS", store_text)
         self.assertIn("readyViews", store_text)
-        self.assertIn("aiOverview", store_text)
+        self.assertIn("blockerControl", store_text)
         self.assertIn("aiConfigModel", store_text)
 
         ai_text = responses["ai_view_js"].text
         self.assertIn("AI 决策链路", ai_text)
+        self.assertIn("AI 复核处置", ai_text)
         self.assertIn("executionSuggestionRows", ai_text)
+
+        risk_text = responses["risk"].text
+        self.assertIn("风险与恢复", risk_text)
+        self.assertIn("trigger-blocker-action", responses["js"].text)
 
         ai_config_text = responses["ai_config_js"].text
         self.assertIn("运行参数概览", ai_config_text)

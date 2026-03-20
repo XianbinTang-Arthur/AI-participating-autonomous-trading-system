@@ -339,6 +339,7 @@ function performanceReportCards(reports = [], replayContext = {}) {
 }
 
 export function renderAISections(data) {
+  const blockerControl = data.blockerControl || {};
   const overview = data.aiOverview || {};
   const performanceView = overview.performance_view || {};
   const runtime = overview.runtime || data.aiRuntime || {};
@@ -360,6 +361,7 @@ export function renderAISections(data) {
   const performanceWindows = overview.performance_windows || {};
   const downgradeState = overview.downgrade_state || {};
   const executionSuggestion = overview.latest_execution_suggestion || latest.execution_suggestion || {};
+  const aiReviewBlocker = (blockerControl.blockers || []).find((item) => item?.blocker === "ai_degraded_requires_manual_review") || null;
 
   return {
     aiHero: surfaceCard({
@@ -479,6 +481,34 @@ export function renderAISections(data) {
       classes: "ai-side-panel",
       content: kvList(executionSuggestionRows(executionSuggestion)),
     }),
+    aiReview: aiReviewBlocker
+      ? surfaceCard({
+          title: "AI 复核处置",
+          kicker: "人工动作",
+          copy: "这里处理 AI 结果复核，不直接下单，也不会自动修改仓位；它只决定后续是否继续信任 AI 决策链路。",
+          content: `
+            ${summaryStrip([
+              {
+                label: "当前阻断",
+                value: textOrFallback(aiReviewBlocker.title, humanError(aiReviewBlocker.blocker)),
+                meta: textOrFallback(aiReviewBlocker.impact, "当前阻断会影响 AI 决策链路恢复。"),
+                tone: "danger",
+              },
+              {
+                label: "当前建议",
+                value: textOrFallback(aiReviewBlocker.recommended_next_step, "请先完成这次人工复核。"),
+                meta: "复核通过后可恢复 AI，复核不通过则改为仅基础策略继续运行。",
+                tone: "warning",
+              },
+            ])}
+            ${kvList([
+              ["复核原因", textOrFallback(aiReviewBlocker.description, "当前已触发 AI 结果复核。"), textOrFallback(latestDegradation?.reason_code, "当前没有额外降级原因说明")],
+              ["最近影子评估", readableShadowMeta(shadowSummary), shadowSummary.review_required ? "当前已进入人工复核状态。" : "当前没有新的结果复核。"],
+            ])}
+            ${renderReviewActions(aiReviewBlocker)}
+          `,
+        })
+      : null,
     aiHistory: surfaceCard({
       title: "AI 记录",
       kicker: "历史记录",
@@ -670,10 +700,44 @@ export function renderAIView(data) {
   return `
     <div class="panel-grid">
       <div class="span-12">${sections.aiHero}</div>
+      ${sections.aiReview ? `<div class="span-12">${sections.aiReview}</div>` : ""}
       <div class="span-7">${sections.aiLatest}</div>
       <div class="span-5">${sections.aiExecutionSuggestion}</div>
       <div class="span-12">${sections.aiPerformanceReports}</div>
       <div class="span-12">${sections.aiHistory}</div>
+    </div>
+  `;
+}
+
+function renderReviewActions(blocker) {
+  const actions = Array.isArray(blocker?.actions) ? blocker.actions : [];
+  if (!actions.length) return "";
+  return `
+    <div class="stack-actions">
+      ${actions.map((action) => {
+        if (action.kind === "client") {
+          return actionButton(
+            action.label,
+            action.client_action || "refresh-dashboard",
+            action.value || "",
+            action.tone || "ghost",
+            {
+              disabled: action.enabled === false,
+              title: action.disabled_reason || action.expected_effect || "",
+            },
+          );
+        }
+        return actionButton(
+          action.label,
+          "trigger-blocker-action",
+          `${action.action_id}::${blocker.blocker}`,
+          action.tone || "secondary",
+          {
+            disabled: action.enabled === false,
+            title: action.disabled_reason || action.expected_effect || "",
+          },
+        );
+      }).join("")}
     </div>
   `;
 }

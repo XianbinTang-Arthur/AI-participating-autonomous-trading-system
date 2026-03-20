@@ -83,6 +83,8 @@ class AIDegradationEvent(SchemaBase):
     provider_degraded: bool = False
     outcome_review_required: bool = False
     auto_downgrade_active: bool = False
+    manual_override_mode: str | None = None
+    review_resolution: str | None = None
 
     reason_code: str
     consecutive_failures: int

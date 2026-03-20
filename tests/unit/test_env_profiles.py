@@ -3,8 +3,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from aats.bootstrap.settings import AATSSettings
 from aats.bootstrap.env_profiles import load_profiled_dotenv_into_process, resolve_profile_dotenv_path
+from aats.bootstrap.settings import AATSSettings
 
 
 def test_resolve_profile_dotenv_path_uses_named_profile(tmp_path: Path) -> None:

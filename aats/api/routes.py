@@ -41,6 +41,12 @@ class RebaselineRequest(BaseModel):
     reason: str = "operator_rebaseline"
 
 
+class BlockerActionRequest(BaseModel):
+    panel_version: str | None = None
+    blocker: str | None = None
+    reason: str | None = None
+
+
 def _runtime(request: Request) -> ApplicationRuntime:
     return cast(ApplicationRuntime, request.app.state.runtime)
 
@@ -87,6 +93,11 @@ async def system_blockers(request: Request) -> dict[str, Any]:
         "blockers": blockers,
         "recent_history": _query(request).blocker_history(limit=20, offset=0)["history"],
     }
+
+
+@router.get("/system/blocker-control")
+async def system_blocker_control(request: Request) -> dict[str, Any]:
+    return _query(request).blocker_control()
 
 
 @router.get("/system/blocker-history")
@@ -181,6 +192,68 @@ async def system_rebaseline(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/system/ai-review/restore")
+async def system_ai_review_restore(
+    request: Request,
+    payload: ResumeRequest | None = None,
+    principal: OperatorPrincipal = Depends(require_admin_access),
+) -> dict[str, Any]:
+    reason = payload.reason if payload is not None else "operator_restore_ai_review"
+    return _query(request).ai_review_restore(
+        reason=reason,
+        actor_role=principal.role,
+        actor_identity=principal.identity,
+        auth_source=principal.auth_source,
+    )
+
+
+@router.post("/system/ai-review/degrade-to-baseline")
+async def system_ai_review_degrade_to_baseline(
+    request: Request,
+    payload: ResumeRequest | None = None,
+    principal: OperatorPrincipal = Depends(require_admin_access),
+) -> dict[str, Any]:
+    reason = payload.reason if payload is not None else "operator_degrade_ai_review_to_baseline"
+    return _query(request).ai_review_degrade_to_baseline(
+        reason=reason,
+        actor_role=principal.role,
+        actor_identity=principal.identity,
+        auth_source=principal.auth_source,
+    )
+
+
+@router.post("/system/blocker-actions/{action_id}")
+async def system_blocker_action(
+    request: Request,
+    action_id: str,
+    payload: BlockerActionRequest | None = None,
+    principal: OperatorPrincipal = Depends(require_admin_access),
+) -> dict[str, Any]:
+    body = payload or BlockerActionRequest()
+    default_reason_map = {
+        "reconcile-now": "blocker_reconcile_now",
+        "accept-rebaseline": "blocker_accept_rebaseline",
+        "resume-system": "blocker_resume_system",
+        "halt-system": "blocker_keep_halted",
+        "ai-review-restore": "blocker_ai_review_restore",
+        "ai-review-degrade-to-baseline": "blocker_ai_review_degrade_to_baseline",
+    }
+    try:
+        return await _query(request).perform_blocker_action(
+            action_id=action_id,
+            panel_version=body.panel_version,
+            blocker=body.blocker,
+            reason=body.reason or default_reason_map.get(action_id, f"blocker_action:{action_id}"),
+            actor_role=principal.role,
+            actor_identity=principal.identity,
+            auth_source=principal.auth_source,
+        )
+    except ValueError as exc:
+        detail = str(exc)
+        status = 409 if detail in {"blocker_control_state_changed"} or detail.startswith("blocker_not_active:") else 400
+        raise HTTPException(status_code=status, detail=detail) from exc
 
 
 @router.get("/decision/latest")

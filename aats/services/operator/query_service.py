@@ -8,6 +8,7 @@ from aats.bootstrap.logging import get_logger
 from aats.events import topics
 from aats.events.envelopes import build_envelope
 from aats.schemas.common import EventEnvelope, utc_now
+from aats.schemas.blocker_control import BlockerControlSnapshot
 from aats.schemas.decision import AIDecisionIntent, BaselineReference, DecisionOutcome, normalize_ai_operating_mode
 from aats.schemas.execution import OrderState, execution_action_from_position_intent
 from aats.schemas.operator import (
@@ -17,6 +18,8 @@ from aats.schemas.operator import (
     OperatorRole,
     OperatorUserRecord,
 )
+from aats.services.blocker_control import BlockerControlService
+from aats.services.blocker_control.actions import BlockerActionService
 from aats.services.governance_engine.recovery_posture import RecoveryPostureEvaluator
 from aats.services.operator.audit_replay_queries import AuditReplayQueryFacade
 from aats.services.operator.accounts import (
@@ -58,6 +61,8 @@ class OperatorQueryService:
         self.state_scope = runtime_state_scope(runtime.settings)
         self._cache: dict[str, Any] = {}
         self.strategy_profiles = StrategyProfileControlService(runtime)
+        self.blocker_control_service = BlockerControlService(self)
+        self.blocker_action_service = BlockerActionService(self)
         self.runtime_queries = RuntimeQueryFacade(self)
         self.reconciliation_system_queries = ReconciliationSystemQueryFacade(self)
         self.strategy_profile_queries = StrategyProfileQueryFacade(self)
@@ -827,6 +832,32 @@ class OperatorQueryService:
 
     def blockers(self) -> list[dict[str, Any]]:
         return self.runtime_queries.blockers()
+
+    def blocker_control(self) -> dict[str, Any]:
+        return self.runtime_queries.blocker_control()
+
+    async def perform_blocker_action(
+        self,
+        *,
+        action_id: str,
+        panel_version: str | None,
+        blocker: str | None,
+        reason: str,
+        actor_role: OperatorRole,
+        actor_identity: str | None = None,
+        auth_source: AuthSource = "anonymous",
+    ) -> dict[str, Any]:
+        return (
+            await self.blocker_action_service.execute(
+                action_id=action_id,
+                panel_version=panel_version,
+                blocker=blocker,
+                reason=reason,
+                actor_role=actor_role,
+                actor_identity=actor_identity,
+                auth_source=auth_source,
+            )
+        ).model_dump(mode="json")
 
     def blocker_history(self, *, limit: int = 20, offset: int = 0) -> dict[str, Any]:
         return self.runtime_queries.blocker_history(limit=limit, offset=offset)
@@ -1688,44 +1719,29 @@ class OperatorQueryService:
         return self._paginate_rows(rows, limit=limit, offset=offset, key="policies", serializer=lambda item: item.payload)
 
     def _build_blockers(self) -> list[dict[str, Any]]:
-        snapshot = self.runtime.health_service.snapshot()
-        recovery = self.recovery_view()
-        rows: list[dict[str, Any]] = []
-        seen: set[str] = set()
-        for blocker in snapshot.blockers:
-            subsystem = "system"
-            if blocker.startswith("market_"):
-                subsystem = "market_data"
-            elif blocker.startswith("account_"):
-                subsystem = "account_state"
-            elif blocker.startswith("reconciliation_"):
-                subsystem = "reconciliation"
-            elif blocker.startswith("kill_switch"):
-                subsystem = "execution_control"
-            elif blocker.startswith("guarded_") or blocker.startswith("live_submit"):
-                subsystem = "execution_adapter"
-            rows.append(self._blocker_entry(blocker=blocker, subsystem=subsystem))
-            seen.add(blocker)
-        if self.runtime.kill_switch.halted and "kill_switch_active" not in seen:
-            rows.insert(0, self._blocker_entry(blocker="kill_switch_active", subsystem="execution_control"))
-            seen.add("kill_switch_active")
-        for blocker in self.system_mode()["submit_blocked_reasons"]:
-            if blocker in seen:
-                continue
-            subsystem = "execution_adapter"
-            if blocker in {"local_demo_no_exchange_submission", "real_market_paper_uses_local_paper_execution"}:
-                subsystem = "mode"
-            rows.append(self._blocker_entry(blocker=blocker, subsystem=subsystem, submit_only=True))
-            seen.add(blocker)
-        for blocker in recovery["resume_blocked_reasons"]:
-            if blocker in seen:
-                continue
-            subsystem = "recovery"
-            if blocker.startswith("reconciliation_"):
-                subsystem = "reconciliation"
-            rows.append(self._blocker_entry(blocker=blocker, subsystem=subsystem))
-            seen.add(blocker)
-        return rows
+        snapshot = self._build_blocker_control()
+        return [
+            {
+                "blocker": item.blocker,
+                "subsystem": item.subsystem,
+                "affects_execution": item.affects_execution,
+                "affects_account_synchronization": item.subsystem == "account_state",
+                "submit_only": item.submit_only,
+                "recommended_action": item.recommended_next_step,
+                "title": item.title,
+                "description": item.description,
+                "impact": item.impact,
+                "priority": item.priority,
+                "root_cause": item.root_cause,
+                "derived_from": item.derived_from,
+                "resolution_mode": item.resolution_mode,
+                "actions": [action.model_dump(mode="json") for action in item.actions],
+            }
+            for item in snapshot.blockers
+        ]
+
+    def _build_blocker_control(self) -> BlockerControlSnapshot:
+        return self.blocker_control_service.snapshot()
 
     def _build_metrics(self) -> dict[str, Any]:
         snapshot = self._latest_scoped_snapshot()
@@ -2111,6 +2127,97 @@ class OperatorQueryService:
             actor_identity=actor_identity,
             auth_source=auth_source,
         )
+
+    def ai_review_restore(
+        self,
+        *,
+        reason: str,
+        actor_role: OperatorRole,
+        actor_identity: str | None = None,
+        auth_source: AuthSource = "anonymous",
+    ) -> dict[str, Any]:
+        recovery_before = self.recovery_view()["recovery_state"]
+        ai_before = dict(self.runtime.ai_service.status())
+        ai_after = self.runtime.ai_service.resolve_outcome_review_restore_ai()
+        self._invalidate_cache()
+        self.runtime.recovery_status = self.recovery_posture.finalize_status()
+        self._invalidate_cache()
+        recovery_after = self.recovery_view()["recovery_state"]
+        self._append_event(
+            topic=topics.OPERATOR_ACTIONS,
+            key="system",
+            payload_model=OperatorActionRecord(
+                action="ai_review_restore",
+                actor_role=actor_role,
+                actor_identity=actor_identity,
+                auth_source=auth_source,
+                reason=reason,
+                status="completed",
+                recovery_state_before=recovery_before,
+                recovery_state_after=recovery_after,
+                details={
+                    "ai_before": ai_before,
+                    "ai_after": ai_after,
+                },
+            ),
+        )
+        self._persist_blocker_snapshot(
+            source="ai_review_restore",
+            runtime_state=self.system_health()["runtime_state"],
+            mode_snapshot=self.system_mode(),
+            blockers=self.blockers(),
+        )
+        return {
+            "status": "completed",
+            "recovery": self.recovery_view(),
+            "ai_runtime": self.ai_runtime(),
+        }
+
+    def ai_review_degrade_to_baseline(
+        self,
+        *,
+        reason: str,
+        actor_role: OperatorRole,
+        actor_identity: str | None = None,
+        auth_source: AuthSource = "anonymous",
+    ) -> dict[str, Any]:
+        recovery_before = self.recovery_view()["recovery_state"]
+        ai_before = dict(self.runtime.ai_service.status())
+        ai_after = self.runtime.ai_service.resolve_outcome_review_degrade_to_baseline()
+        self._invalidate_cache()
+        self.runtime.recovery_status = self.recovery_posture.finalize_status()
+        self._invalidate_cache()
+        recovery_after = self.recovery_view()["recovery_state"]
+        self._append_event(
+            topic=topics.OPERATOR_ACTIONS,
+            key="system",
+            payload_model=OperatorActionRecord(
+                action="ai_review_degrade_to_baseline",
+                actor_role=actor_role,
+                actor_identity=actor_identity,
+                auth_source=auth_source,
+                reason=reason,
+                status="completed",
+                recovery_state_before=recovery_before,
+                recovery_state_after=recovery_after,
+                details={
+                    "ai_before": ai_before,
+                    "ai_after": ai_after,
+                    "target_mode": "baseline_only",
+                },
+            ),
+        )
+        self._persist_blocker_snapshot(
+            source="ai_review_degrade_to_baseline",
+            runtime_state=self.system_health()["runtime_state"],
+            mode_snapshot=self.system_mode(),
+            blockers=self.blockers(),
+        )
+        return {
+            "status": "completed",
+            "recovery": self.recovery_view(),
+            "ai_runtime": self.ai_runtime(),
+        }
 
     def _latest_topic_summary(self, topic: str) -> dict[str, Any]:
         envelope = self.runtime.event_store.latest(topic)

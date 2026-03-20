@@ -140,6 +140,8 @@ class OperatorActionRecord(SchemaBase):
         "strategy_profile_rollback",
         "strategy_profile_activation_policy",
         "ai_shadow_evaluate",
+        "ai_review_restore",
+        "ai_review_degrade_to_baseline",
     ]
     actor_role: OperatorRole
     actor_identity: str | None = None
