@@ -17,23 +17,6 @@ ShadowActionType = Literal[
     "reverse_override",
 ]
 
-
-class AITakeoverDecision(SchemaBase):
-    takeover_id: str = Field(default_factory=lambda: new_id("ai_takeover"))
-    decision_id: str
-    symbol: str
-    timeframe: str
-    ai_takeover_allowed: bool = False
-    ai_takeover_applied: bool = False
-    ai_takeover_blockers: list[str] = Field(default_factory=list)
-    baseline_direction: str
-    ai_direction: str
-    final_direction: str
-    ai_execution_suggestion_present: bool = False
-    ai_execution_suggestion_mode: str | None = None
-    created_at: datetime = Field(default_factory=utc_now)
-
-
 class AIShadowDecision(SchemaBase):
     shadow_decision_id: str = Field(default_factory=lambda: new_id("ai_shadow"))
     decision_id: str

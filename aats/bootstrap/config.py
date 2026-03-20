@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -13,7 +14,7 @@ from aats.bootstrap.settings import AATSSettings
 from aats.bus.memory_bus import InMemoryEventBus
 from aats.events import topics
 from aats.events.envelopes import build_envelope, parse_payload, publish_model
-from aats.schemas.decision import PositionTarget
+from aats.schemas.decision import DecisionOutcome, PositionTarget
 from aats.services.ai_service.inference import AIInferenceService
 from aats.services.ai_service.prompt_builder import PromptBuilder
 from aats.services.ai_service.validator import AssessmentValidator
@@ -57,7 +58,7 @@ from aats.services.market_gateway.okx_websocket import OKXPublicWebSocketClient
 from aats.services.market_gateway.publisher import MarketSnapshotPublisher
 from aats.services.operator.accounts import enabled_admin_count
 from aats.services.operator.runtime_profiles import runtime_profile_resolution
-from aats.services.operator.strategy_profiles import seed_strategy_profiles
+from aats.services.operator.strategy_profiles import StrategyProfileControlService, seed_strategy_profiles
 from aats.services.runtime_scope import latest_matching_snapshot, runtime_state_scope, scoped_portfolio_event
 from aats.services.portfolio_service.pnl import PortfolioPnLCalculator
 from aats.services.portfolio_service.positions import PortfolioService, PortfolioState
@@ -458,6 +459,85 @@ def _build_position_target_handler(
     metrics: MetricsRegistry,
     bus: InMemoryEventBus,
 ):
+    def _exposure_side(quantity: Decimal) -> str:
+        if quantity > Decimal("1e-12"):
+            return "long"
+        if quantity < Decimal("-1e-12"):
+            return "short"
+        return "flat"
+
+    def _final_action(*, current_qty: Decimal, target_qty: Decimal) -> str:
+        current_side = _exposure_side(current_qty)
+        target_side = _exposure_side(target_qty)
+        if target_side == current_side:
+            if target_side == "flat":
+                return "hold"
+            if abs(target_qty) > abs(current_qty) + Decimal("1e-12"):
+                return "scale_in"
+            if abs(target_qty) + Decimal("1e-12") < abs(current_qty):
+                return "reduce"
+            return "hold"
+        if target_side == "flat":
+            return "exit"
+        if current_side == "flat":
+            return "enter"
+        return "reverse"
+
+    def _finalize_decision_outcome(
+        *,
+        target: PositionTarget,
+        policy_decision,
+        risk_decision,
+        execution_continues: bool,
+        extra_blocked_reasons: list[str] | None = None,
+    ) -> DecisionOutcome | None:
+        outcome = target.decision_outcome
+        if outcome is None:
+            return None
+        current_position_qty = target.current_position_qty
+        continued_target_qty = (
+            outcome.final_target_qty
+            if risk_decision is None
+            else risk_decision.capped_target_position_qty
+        )
+        final_target_qty = continued_target_qty if execution_continues else current_position_qty
+        blocked_reasons = list(outcome.decision_blocked_reasons)
+        blocked_reasons.extend(list(policy_decision.rejection_reasons or []))
+        if risk_decision is not None:
+            blocked_reasons.extend(list(risk_decision.rejection_reasons or []))
+            blocked_reasons.extend(list(risk_decision.constraints_applied or []))
+        blocked_reasons.extend(list(extra_blocked_reasons or []))
+        policy_blocked = (not policy_decision.execution_allowed) or ("kill_switch_active" in blocked_reasons)
+        return outcome.model_copy(
+            update={
+                "finalized": True,
+                "final_target_qty": final_target_qty,
+                "final_direction": _exposure_side(final_target_qty),
+                "final_action": _final_action(
+                    current_qty=target.current_position_qty,
+                    target_qty=final_target_qty,
+                ),
+                "decision_blocked_reasons": list(dict.fromkeys(item for item in blocked_reasons if item)),
+                "policy_blocked": policy_blocked,
+                "policy_blocked_reasons": list(dict.fromkeys([
+                    *(policy_decision.rejection_reasons or []),
+                    *([item for item in (extra_blocked_reasons or []) if item == "kill_switch_active"]),
+                ])),
+                "risk_capped": False
+                if risk_decision is None
+                else bool(
+                    risk_decision.modified
+                    or risk_decision.rejection_reasons
+                    or risk_decision.constraints_applied
+                ),
+                "risk_capped_reasons": []
+                if risk_decision is None
+                else list(risk_decision.rejection_reasons or [])
+                + list(risk_decision.constraints_applied or []),
+                "risk_capped_target_qty": None if risk_decision is None else risk_decision.capped_target_position_qty,
+            }
+        )
+
     async def handle_position_target(message: dict[str, Any]) -> None:
         target = parse_payload(message, PositionTarget)
         if runtime_layering.environment_capabilities.account_state_source_kind == "exchange":
@@ -466,14 +546,72 @@ def _build_position_target_handler(
         policy_decision = policy_engine.evaluate(target=target)
         await policy_engine.publish_decision(bus=bus, target=target, decision=policy_decision)
         if not policy_decision.execution_allowed:
+            finalized_outcome = _finalize_decision_outcome(
+                target=target,
+                policy_decision=policy_decision,
+                risk_decision=None,
+                execution_continues=False,
+            )
+            if finalized_outcome is not None:
+                await publish_model(
+                    bus=bus,
+                    topic=topics.DECISION_OUTCOMES,
+                    key=target.symbol,
+                    payload_model=finalized_outcome,
+                    source_component="decision_engine",
+                )
             return
 
         risk_decision = risk_engine.evaluate(target=target)
         await risk_engine.publish_decision(bus=bus, target=target, decision=risk_decision)
         if not risk_decision.approved or risk_decision.halt_required:
+            finalized_outcome = _finalize_decision_outcome(
+                target=target,
+                policy_decision=policy_decision,
+                risk_decision=risk_decision,
+                execution_continues=False,
+            )
+            if finalized_outcome is not None:
+                await publish_model(
+                    bus=bus,
+                    topic=topics.DECISION_OUTCOMES,
+                    key=target.symbol,
+                    payload_model=finalized_outcome,
+                    source_component="decision_engine",
+                )
             return
         if kill_switch.halted:
+            finalized_outcome = _finalize_decision_outcome(
+                target=target,
+                policy_decision=policy_decision,
+                risk_decision=risk_decision,
+                execution_continues=False,
+                extra_blocked_reasons=["kill_switch_active"],
+            )
+            if finalized_outcome is not None:
+                await publish_model(
+                    bus=bus,
+                    topic=topics.DECISION_OUTCOMES,
+                    key=target.symbol,
+                    payload_model=finalized_outcome,
+                    source_component="decision_engine",
+                )
             return
+
+        finalized_outcome = _finalize_decision_outcome(
+            target=target,
+            policy_decision=policy_decision,
+            risk_decision=risk_decision,
+            execution_continues=True,
+        )
+        if finalized_outcome is not None:
+            await publish_model(
+                bus=bus,
+                topic=topics.DECISION_OUTCOMES,
+                key=target.symbol,
+                payload_model=finalized_outcome,
+                source_component="decision_engine",
+            )
 
         target_reference_price = (
             abs(target.target_notional / target.target_position_qty)
@@ -555,10 +693,10 @@ def _observer_subscription_specs(
         ObserverSubscriptionSpec(topics.BASELINE_ASSESSMENTS, "audit.handle_baseline_assessment", audit_service.handle_baseline_assessment),
         ObserverSubscriptionSpec(topics.AI_DECISION_BRIEFS, "audit.handle_ai_decision_brief", audit_service.handle_ai_decision_brief),
         ObserverSubscriptionSpec(topics.AI_ASSESSMENTS, "audit.handle_ai_assessment", audit_service.handle_ai_assessment),
-        ObserverSubscriptionSpec(topics.AI_TAKEOVER_DECISIONS, "audit.handle_ai_takeover_decision", audit_service.handle_ai_takeover_decision),
         ObserverSubscriptionSpec(topics.AI_SHADOW_DECISIONS, "audit.handle_ai_shadow_decision", audit_service.handle_ai_shadow_decision),
         ObserverSubscriptionSpec(topics.AI_SHADOW_EVALUATIONS, "audit.handle_ai_shadow_evaluation", audit_service.handle_ai_shadow_evaluation),
         ObserverSubscriptionSpec(topics.POSITION_TARGETS, "audit.handle_position_target", audit_service.handle_position_target),
+        ObserverSubscriptionSpec(topics.DECISION_OUTCOMES, "audit.handle_decision_outcome", audit_service.handle_decision_outcome),
         ObserverSubscriptionSpec(topics.POLICY_DECISIONS, "audit.handle_policy_decision", audit_service.handle_policy_decision),
         ObserverSubscriptionSpec(topics.RISK_DECISIONS, "audit.handle_risk_decision", audit_service.handle_risk_decision),
         ObserverSubscriptionSpec(topics.EXECUTION_PLANS, "audit.handle_execution_plan", audit_service.handle_execution_plan),
@@ -902,7 +1040,7 @@ async def build_runtime(
             source_component="runtime",
         )
 
-    return ApplicationRuntime(
+    runtime = ApplicationRuntime(
         started_at=utc_now(),
         settings=runtime_settings,
         runtime_profile_resolution=profile_resolution,
@@ -944,3 +1082,5 @@ async def build_runtime(
         database_runtime=storage.database_runtime,
         execution_outbox_publisher=execution_outbox_publisher,
     )
+    runtime.decision_engine.strategy_profile_service = StrategyProfileControlService(runtime)
+    return runtime

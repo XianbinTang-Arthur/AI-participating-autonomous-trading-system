@@ -6,7 +6,17 @@ from decimal import Decimal
 from aats.bootstrap.settings import AATSSettings
 from aats.schemas.ai_shadow import AIShadowDecision
 from aats.schemas.common import utc_now
-from aats.schemas.decision import AIMarketAssessment, BaselineAssessment, DecisionContext, PositionTarget
+from aats.schemas.decision import (
+    AIDecisionIntent,
+    AIMarketAssessment,
+    BaselineAssessment,
+    CanonicalAIOperatingMode,
+    DecisionContext,
+    DecisionOutcome,
+    ProfileControlDecision,
+    PositionTarget,
+    normalize_ai_operating_mode,
+)
 from aats.services.fee_resolver import EffectiveFeeResolver
 from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, to_decimal
 
@@ -26,14 +36,25 @@ class TargetPositionEngine:
         context: DecisionContext,
         baseline: BaselineAssessment,
         ai_assessment: AIMarketAssessment | None,
+        ai_decision_intent: AIDecisionIntent | None = None,
+        profile_control_decision: ProfileControlDecision | None = None,
         *,
         operating_mode: str | None = None,
     ) -> PositionTarget:
+        effective_mode = operating_mode or self.settings.ai_operating_mode
+        ai_decision_intent = ai_decision_intent or self.build_ai_decision_intent(
+            context=context,
+            baseline=baseline,
+            ai_assessment=ai_assessment,
+            operating_mode=effective_mode,
+        )
         return self._build(
             context=context,
             baseline=baseline,
             ai_assessment=ai_assessment,
-            operating_mode=operating_mode or self.settings.ai_operating_mode,
+            ai_decision_intent=ai_decision_intent,
+            profile_control_decision=profile_control_decision,
+            operating_mode=effective_mode,
         )
 
     def build_shadow(
@@ -42,12 +63,25 @@ class TargetPositionEngine:
         baseline: BaselineAssessment,
         ai_assessment: AIMarketAssessment,
         actual_target: PositionTarget,
+        *,
+        operating_mode: str | None = None,
     ) -> AIShadowDecision:
+        shadow_mode = normalize_ai_operating_mode(operating_mode or self.settings.ai_operating_mode)
+        if shadow_mode == "baseline_only":
+            shadow_mode = "ai_decision_maker"
+        shadow_intent = self.build_ai_decision_intent(
+            context=context,
+            baseline=baseline,
+            ai_assessment=ai_assessment,
+            operating_mode=shadow_mode,
+        )
         shadow_target = self._build(
             context=context,
             baseline=baseline,
             ai_assessment=ai_assessment,
-            operating_mode="ai_primary",
+            ai_decision_intent=shadow_intent,
+            profile_control_decision=None,
+            operating_mode=shadow_mode,
         )
         return AIShadowDecision(
             decision_id=context.decision_id,
@@ -68,14 +102,66 @@ class TargetPositionEngine:
             reason_codes=list(ai_assessment.override_reason_codes),
         )
 
+    def build_ai_decision_intent(
+        self,
+        *,
+        context: DecisionContext,
+        baseline: BaselineAssessment,
+        ai_assessment: AIMarketAssessment | None,
+        operating_mode: str | None,
+    ) -> AIDecisionIntent | None:
+        canonical_mode = normalize_ai_operating_mode(operating_mode)
+        if canonical_mode == "baseline_only" or ai_assessment is None:
+            return None
+        direction = self._direction_from_assessment(ai_assessment)
+        baseline_qty = self._baseline_target_qty(baseline=baseline, product_type=context.product_type)
+        default_qty = to_decimal(self.settings.default_order_qty) * Decimal("0.35")
+        desired_abs_qty = max(abs(baseline_qty), default_qty)
+        current_side = self._exposure_side(context.current_position_qty)
+        if direction == "flat" or not ai_assessment.economically_actionable:
+            action = "hold"
+            target_qty = context.current_position_qty
+        elif current_side == "flat":
+            action = "enter"
+            target_qty = desired_abs_qty if direction == "long" else -desired_abs_qty
+        elif current_side != direction:
+            action = "reverse"
+            target_qty = desired_abs_qty if direction == "long" else -desired_abs_qty
+        else:
+            current_abs = abs(context.current_position_qty)
+            desired_abs_qty = max(current_abs, desired_abs_qty)
+            action = "hold" if desired_abs_qty <= current_abs + EPSILON_DECIMAL_12 else "scale_in"
+            target_qty = desired_abs_qty if direction == "long" else -desired_abs_qty
+        return AIDecisionIntent(
+            decision_id=context.decision_id,
+            symbol=context.symbol,
+            timeframe=context.timeframe,
+            direction=direction,
+            action=action,
+            target_qty=target_qty,
+            confidence=max(ai_assessment.calibrated_confidence, ai_assessment.confidence),
+            economically_actionable=ai_assessment.economically_actionable,
+            reason_codes=list(ai_assessment.override_reason_codes or ai_assessment.validation_flags),
+            fallback_used=ai_assessment.fallback_used,
+            degraded=ai_assessment.degraded,
+            provider_name=ai_assessment.provider_name,
+            provider_request_id=ai_assessment.provider_request_id,
+            requested_profile_id=None,
+            requested_profile_reason_codes=[],
+            raw_assessment_ref=ai_assessment.model_dump(mode="json"),
+        )
+
     def _build(
         self,
         *,
         context: DecisionContext,
         baseline: BaselineAssessment,
         ai_assessment: AIMarketAssessment | None,
+        ai_decision_intent: AIDecisionIntent | None,
+        profile_control_decision: ProfileControlDecision | None,
         operating_mode: str,
     ) -> PositionTarget:
+        canonical_mode = normalize_ai_operating_mode(operating_mode)
         signal_edge_bps = self._signal_edge_bps(baseline=baseline, ai_assessment=ai_assessment)
         expected_cost_bps = self._estimated_trade_cost_bps(
             symbol=context.symbol,
@@ -84,19 +170,21 @@ class TargetPositionEngine:
         )
         expected_net_edge_bps = signal_edge_bps - expected_cost_bps - max(self.settings.strategy_edge_noise_buffer_bps, 0.0)
         guardrail_flags = list(context.strategy_guardrail_flags)
-        ai_takeover_allowed, ai_takeover_blockers = self._ai_takeover_gate(
+        ai_decision_authorized, ai_decision_blockers = self._ai_decision_gate(
             context=context,
             baseline=baseline,
             ai_assessment=ai_assessment,
-            operating_mode=operating_mode,
+            ai_decision_intent=ai_decision_intent,
+            operating_mode=canonical_mode,
         )
         target_qty = self._target_quantity(
             context=context,
             baseline=baseline,
             ai_assessment=ai_assessment,
+            ai_decision_intent=ai_decision_intent,
             product_type=context.product_type,
             operating_mode=operating_mode,
-            ai_takeover_allowed=ai_takeover_allowed,
+            ai_decision_authorized=ai_decision_authorized,
             signal_edge_bps=signal_edge_bps,
             guardrail_flags=guardrail_flags,
         )
@@ -118,9 +206,32 @@ class TargetPositionEngine:
             ai_assessment=ai_assessment,
             target_qty=target_qty,
         )
-        source_mix = self._source_mix(ai_assessment=ai_assessment, operating_mode=operating_mode, ai_takeover_allowed=ai_takeover_allowed)
-        rebalance_reason = f"{operating_mode}_decision"
-        ai_takeover_applied = operating_mode == "ai_primary" and ai_takeover_allowed and ai_takeover_blockers == []
+        source_mix = self._source_mix(
+            ai_assessment=ai_assessment,
+            ai_decision_intent=ai_decision_intent,
+            operating_mode=operating_mode,
+            ai_decision_authorized=ai_decision_authorized,
+        )
+        rebalance_reason = f"{canonical_mode}_decision"
+        ai_decision_applied = canonical_mode in {
+            "ai_decision_maker",
+            "ai_decision_maker_with_profile_control",
+        } and ai_decision_authorized and ai_decision_blockers == []
+        decision_outcome = self._decision_outcome(
+            context=context,
+            baseline=baseline,
+            ai_assessment=ai_assessment,
+            ai_decision_intent=ai_decision_intent,
+            profile_control_decision=profile_control_decision,
+            canonical_mode=canonical_mode,
+            target_qty=target_qty,
+            target_exposure_side=target_exposure_side,
+            position_intent=position_intent,
+            ai_decision_authorized=ai_decision_authorized,
+            ai_decision_applied=ai_decision_applied,
+            ai_decision_blockers=ai_decision_blockers,
+            guardrail_flags=guardrail_flags,
+        )
 
         return PositionTarget(
             decision_id=context.decision_id,
@@ -148,9 +259,6 @@ class TargetPositionEngine:
                 baseline=baseline,
                 ai_assessment=ai_assessment,
             ),
-            ai_takeover_allowed=ai_takeover_allowed,
-            ai_takeover_applied=ai_takeover_applied,
-            ai_takeover_blockers=ai_takeover_blockers,
             expected_signal_edge_bps=signal_edge_bps,
             expected_cost_bps=expected_cost_bps,
             expected_net_edge_bps=expected_net_edge_bps,
@@ -160,6 +268,9 @@ class TargetPositionEngine:
                 if ai_assessment is None
                 else ai_assessment.ai_execution_parameter_suggestion
             ),
+            ai_decision_intent=ai_decision_intent,
+            profile_control_decision=profile_control_decision,
+            decision_outcome=decision_outcome,
         )
 
     def _target_quantity(
@@ -168,85 +279,193 @@ class TargetPositionEngine:
         context: DecisionContext,
         baseline: BaselineAssessment,
         ai_assessment: AIMarketAssessment | None,
+        ai_decision_intent: AIDecisionIntent | None,
         product_type: str,
         operating_mode: str,
-        ai_takeover_allowed: bool,
+        ai_decision_authorized: bool,
         signal_edge_bps: float,
         guardrail_flags: list[str],
     ) -> Decimal:
-        mode = operating_mode
-        baseline_qty = self._baseline_target_qty(baseline=baseline, product_type=product_type)
-        baseline_qty = self._apply_entry_edge_gate(
+        legacy_mode = (operating_mode or "").strip()
+        mode = normalize_ai_operating_mode(operating_mode)
+        baseline_qty_raw = self._baseline_target_qty(baseline=baseline, product_type=product_type)
+        baseline_fallback_qty = self._apply_entry_edge_gate(
             context=context,
-            desired_target_qty=baseline_qty,
+            desired_target_qty=baseline_qty_raw,
             baseline=baseline,
             ai_assessment=ai_assessment,
             product_type=product_type,
             signal_edge_bps=signal_edge_bps,
             guardrail_flags=guardrail_flags,
         )
-        baseline_qty = self._apply_strategy_execution_guards(
+        baseline_fallback_qty = self._apply_strategy_execution_guards(
             context=context,
-            desired_target_qty=baseline_qty,
+            desired_target_qty=baseline_fallback_qty,
             baseline=baseline,
             ai_assessment=ai_assessment,
             signal_edge_bps=signal_edge_bps,
             product_type=product_type,
             guardrail_flags=guardrail_flags,
         )
-        if mode in {"baseline_only", "ai_advisory"}:
-            if self._should_hold_on_flat_signal(
-                current_position_qty=context.current_position_qty,
-                desired_target_qty=baseline_qty,
+        if mode == "baseline_only":
+            return self._target_quantity_baseline_only(
+                context=context,
                 baseline=baseline,
-                ai_assessment=None if mode == "baseline_only" else ai_assessment,
+                ai_assessment=ai_assessment,
                 product_type=product_type,
-            ):
-                guardrail_flags.append("flat_signal_hold")
-                return context.current_position_qty
-            return self._apply_position_management(
-                current_position_qty=context.current_position_qty,
-                desired_target_qty=baseline_qty,
-                product_type=product_type,
+                baseline_qty=baseline_fallback_qty,
+                guardrail_flags=guardrail_flags,
             )
-        if mode == "ai_blended":
-            if baseline.direction_bias == "long" and ai_assessment.directional_edge >= 0.0:
-                return self._apply_position_management(
-                    current_position_qty=context.current_position_qty,
-                    desired_target_qty=baseline_qty,
-                    product_type=product_type,
-                )
-            if baseline.direction_bias == "short" and ai_assessment.directional_edge <= 0.0:
-                return self._apply_position_management(
-                    current_position_qty=context.current_position_qty,
-                    desired_target_qty=baseline_qty,
-                    product_type=product_type,
-                )
-            return Decimal("0")
-        if mode == "ai_primary":
-            if ai_takeover_allowed:
-                if ai_assessment.directional_edge > 0.0:
-                    return self._apply_position_management(
-                        current_position_qty=context.current_position_qty,
-                        desired_target_qty=abs(baseline_qty) or (to_decimal(self.settings.default_order_qty) * Decimal("0.35")),
-                        product_type=product_type,
-                    )
-                if ai_assessment.directional_edge < 0.0:
-                    return self._apply_position_management(
-                        current_position_qty=context.current_position_qty,
-                        desired_target_qty=-(abs(baseline_qty) or (to_decimal(self.settings.default_order_qty) * Decimal("0.35"))),
-                        product_type=product_type,
-                    )
-            return self._apply_position_management(
-                current_position_qty=context.current_position_qty,
-                desired_target_qty=baseline_qty,
+        if mode == "ai_assisted":
+            return self._target_quantity_ai_assisted(
+                context=context,
+                baseline=baseline,
+                ai_assessment=ai_assessment,
                 product_type=product_type,
+                baseline_qty=baseline_fallback_qty,
+                guardrail_flags=guardrail_flags,
+                legacy_mode=legacy_mode,
             )
+        if mode == "ai_decision_maker":
+            return self._target_quantity_ai_decision_maker(
+                context=context,
+                ai_decision_intent=ai_decision_intent,
+                product_type=product_type,
+                baseline_fallback_qty=baseline_fallback_qty,
+                ai_decision_authorized=ai_decision_authorized,
+            )
+        if mode == "ai_decision_maker_with_profile_control":
+            return self._target_quantity_ai_decision_maker(
+                context=context,
+                ai_decision_intent=ai_decision_intent,
+                product_type=product_type,
+                baseline_fallback_qty=baseline_fallback_qty,
+                ai_decision_authorized=ai_decision_authorized,
+            )
+        return self._apply_position_management(
+            current_position_qty=context.current_position_qty,
+            desired_target_qty=baseline_fallback_qty,
+            product_type=product_type,
+        )
+
+    def _target_quantity_baseline_only(
+        self,
+        *,
+        context: DecisionContext,
+        baseline: BaselineAssessment,
+        ai_assessment: AIMarketAssessment | None,
+        product_type: str,
+        baseline_qty: Decimal,
+        guardrail_flags: list[str],
+    ) -> Decimal:
+        if self._should_hold_on_flat_signal(
+            current_position_qty=context.current_position_qty,
+            desired_target_qty=baseline_qty,
+            baseline=baseline,
+            ai_assessment=None,
+            product_type=product_type,
+        ):
+            guardrail_flags.append("flat_signal_hold")
+            return context.current_position_qty
         return self._apply_position_management(
             current_position_qty=context.current_position_qty,
             desired_target_qty=baseline_qty,
             product_type=product_type,
         )
+
+    def _target_quantity_ai_assisted(
+        self,
+        *,
+        context: DecisionContext,
+        baseline: BaselineAssessment,
+        ai_assessment: AIMarketAssessment | None,
+        product_type: str,
+        baseline_qty: Decimal,
+        guardrail_flags: list[str],
+        legacy_mode: str,
+    ) -> Decimal:
+        if legacy_mode == "ai_blended" and self._legacy_ai_blended_blocks_baseline(
+            context=context,
+            baseline=baseline,
+            ai_assessment=ai_assessment,
+            desired_target_qty=baseline_qty,
+        ):
+            guardrail_flags.append("ai_consistency_filter_blocked")
+            return context.current_position_qty
+        if self._should_hold_on_flat_signal(
+            current_position_qty=context.current_position_qty,
+            desired_target_qty=baseline_qty,
+            baseline=baseline,
+            ai_assessment=ai_assessment,
+            product_type=product_type,
+        ):
+            guardrail_flags.append("flat_signal_hold")
+            return context.current_position_qty
+        return self._apply_position_management(
+            current_position_qty=context.current_position_qty,
+            desired_target_qty=baseline_qty,
+            product_type=product_type,
+        )
+
+    def _legacy_ai_blended_blocks_baseline(
+        self,
+        *,
+        context: DecisionContext,
+        baseline: BaselineAssessment,
+        ai_assessment: AIMarketAssessment | None,
+        desired_target_qty: Decimal,
+    ) -> bool:
+        if ai_assessment is None:
+            return False
+        if not ai_assessment.output_valid or ai_assessment.fallback_used or ai_assessment.degraded:
+            return False
+        if abs(desired_target_qty - context.current_position_qty) < EPSILON_DECIMAL_12:
+            return False
+        if not ai_assessment.economically_actionable:
+            return True
+        ai_direction = self._direction_from_assessment(ai_assessment)
+        if ai_direction == "flat":
+            return True
+        if ai_direction != baseline.direction_bias:
+            return True
+        return False
+
+    def _target_quantity_ai_decision_maker(
+        self,
+        *,
+        context: DecisionContext,
+        ai_decision_intent: AIDecisionIntent | None,
+        product_type: str,
+        baseline_fallback_qty: Decimal,
+        ai_decision_authorized: bool,
+    ) -> Decimal:
+        if ai_decision_intent is not None and ai_decision_authorized:
+            desired_target_qty = self._desired_target_qty_from_ai_decision_intent(
+                context=context,
+                ai_decision_intent=ai_decision_intent,
+            )
+            return self._apply_position_management(
+                current_position_qty=context.current_position_qty,
+                desired_target_qty=desired_target_qty,
+                product_type=product_type,
+            )
+        return self._apply_position_management(
+            current_position_qty=context.current_position_qty,
+            desired_target_qty=baseline_fallback_qty,
+            product_type=product_type,
+        )
+
+    def _desired_target_qty_from_ai_decision_intent(
+        self,
+        *,
+        context: DecisionContext,
+        ai_decision_intent: AIDecisionIntent,
+    ) -> Decimal:
+        if ai_decision_intent.action == "hold":
+            return context.current_position_qty
+        if ai_decision_intent.action == "exit":
+            return Decimal("0")
+        return ai_decision_intent.target_qty
 
     def _baseline_target_qty(self, *, baseline: BaselineAssessment, product_type: str) -> Decimal:
         scale = to_decimal(self._clamp(baseline.suggested_position_scale, 0.0, 1.0))
@@ -736,43 +955,50 @@ class TargetPositionEngine:
         self,
         *,
         ai_assessment: AIMarketAssessment | None,
+        ai_decision_intent: AIDecisionIntent | None,
         operating_mode: str,
-        ai_takeover_allowed: bool,
+        ai_decision_authorized: bool,
     ) -> dict[str, float]:
-        mode = operating_mode
-        if mode in {"baseline_only", "ai_advisory"}:
+        mode = normalize_ai_operating_mode(operating_mode)
+        if mode == "baseline_only":
             return {"baseline": 1.0, "ai": 0.0}
-        if mode == "ai_blended":
+        if mode == "ai_assisted":
             return {"baseline": 0.6, "ai": 0.4}
-        if mode == "ai_primary" and ai_takeover_allowed and ai_assessment is not None and not ai_assessment.fallback_used:
+        if (
+            mode in {"ai_decision_maker", "ai_decision_maker_with_profile_control"}
+            and ai_decision_authorized
+            and ai_decision_intent is not None
+            and not ai_decision_intent.fallback_used
+        ):
             return {"baseline": 0.2, "ai": 0.8}
         return {"baseline": 1.0, "ai": 0.0}
 
-    def _ai_takeover_gate(
+    def _ai_decision_gate(
         self,
         *,
         context: DecisionContext,
         baseline: BaselineAssessment,
         ai_assessment: AIMarketAssessment | None,
-        operating_mode: str,
+        ai_decision_intent: AIDecisionIntent | None,
+        operating_mode: CanonicalAIOperatingMode,
     ) -> tuple[bool, list[str]]:
-        if operating_mode != "ai_primary":
+        if operating_mode not in {"ai_decision_maker", "ai_decision_maker_with_profile_control"}:
             return False, []
-        if ai_assessment is None:
-            return False, ["ai_assessment_missing"]
+        if ai_assessment is None or ai_decision_intent is None:
+            return False, ["ai_decision_intent_missing"]
         blockers: list[str] = []
-        if ai_assessment.fallback_used:
+        if ai_decision_intent.fallback_used:
             blockers.append("ai_fallback_used")
         if not ai_assessment.output_valid:
             blockers.append("ai_output_invalid")
         blockers.extend(ai_assessment.rejection_flags)
-        if ai_assessment.degraded:
+        if ai_decision_intent.degraded:
             blockers.append("ai_degraded")
-        if ai_assessment.calibrated_confidence + float(EPSILON_DECIMAL_12) < self.settings.ai_primary_min_confidence:
+        if ai_decision_intent.confidence + float(EPSILON_DECIMAL_12) < self.settings.ai_decision_min_confidence:
             blockers.append("ai_confidence_below_threshold")
-        if ai_assessment.uncertainty - float(EPSILON_DECIMAL_12) > self.settings.ai_primary_max_uncertainty:
+        if ai_assessment.uncertainty - float(EPSILON_DECIMAL_12) > self.settings.ai_decision_max_uncertainty:
             blockers.append("ai_uncertainty_above_threshold")
-        if abs(ai_assessment.directional_edge) + float(EPSILON_DECIMAL_12) < self.settings.ai_primary_min_directional_edge:
+        if abs(ai_assessment.directional_edge) + float(EPSILON_DECIMAL_12) < self.settings.ai_decision_min_directional_edge:
             blockers.append("ai_directional_edge_too_small")
         if not ai_assessment.baseline_override_recommended:
             blockers.append("ai_override_not_recommended")
@@ -789,9 +1015,106 @@ class TargetPositionEngine:
             blockers.append("ai_low_edge_cooldown_active")
         if self._performance_degraded(context):
             blockers.append("ai_execution_performance_guard_active")
-        if baseline.direction_bias == "flat" and abs(ai_assessment.directional_edge) < self.settings.ai_primary_min_directional_edge + 0.05:
+        if baseline.direction_bias == "flat" and abs(ai_assessment.directional_edge) < self.settings.ai_decision_min_directional_edge + 0.05:
             blockers.append("ai_flat_context_requires_stronger_edge")
         return not blockers, blockers
+
+    def _decision_outcome(
+        self,
+        *,
+        context: DecisionContext,
+        baseline: BaselineAssessment,
+        ai_assessment: AIMarketAssessment | None,
+        ai_decision_intent: AIDecisionIntent | None,
+        profile_control_decision: ProfileControlDecision | None,
+        canonical_mode: CanonicalAIOperatingMode,
+        target_qty: Decimal,
+        target_exposure_side: str,
+        position_intent: str,
+        ai_decision_authorized: bool,
+        ai_decision_applied: bool,
+        ai_decision_blockers: list[str],
+        guardrail_flags: list[str],
+    ) -> DecisionOutcome:
+        authority_map = {
+            "baseline_only": "reference_only",
+            "ai_assisted": "advisory",
+            "ai_decision_maker": "final_decision",
+            "ai_decision_maker_with_profile_control": "final_decision_with_profile_control",
+        }
+        if canonical_mode in {"ai_decision_maker", "ai_decision_maker_with_profile_control"}:
+            decision_source = "ai" if ai_decision_applied else "baseline_fallback"
+        else:
+            decision_source = "baseline"
+        profile_control_source = "env_default"
+        active_profile_id = None
+        if profile_control_decision is not None:
+            active_profile_id = (
+                profile_control_decision.requested_profile_id
+                if profile_control_decision.applied
+                else profile_control_decision.current_profile_id
+            )
+            profile_control_source = (
+                "ai"
+                if profile_control_decision.applied
+                else "admin" if profile_control_decision.frozen_by_admin_override else "system"
+            )
+        action_map = {
+            "hold": "hold",
+            "open_long": "enter",
+            "open_short": "enter",
+            "reduce_long": "reduce",
+            "reduce_short": "reduce",
+            "close_long": "exit",
+            "close_short": "exit",
+            "reverse_to_long": "reverse",
+            "reverse_to_short": "reverse",
+        }
+        blocked_reasons = list(dict.fromkeys([*guardrail_flags, *ai_decision_blockers]))
+        return DecisionOutcome(
+            decision_id=context.decision_id,
+            symbol=context.symbol,
+            ai_operating_mode=canonical_mode,
+            finalized=False,
+            decision_source=decision_source,
+            decision_authority=authority_map[canonical_mode],
+            final_direction=target_exposure_side,
+            final_action=action_map.get(position_intent, "hold"),
+            final_target_qty=target_qty,
+            baseline_reference={
+                "direction_bias": baseline.direction_bias,
+                "confidence": baseline.confidence,
+                "regime": baseline.regime,
+                "volatility_state": baseline.volatility_state,
+                "composite_alpha_score": baseline.composite_alpha_score,
+                "suggested_position_scale": baseline.suggested_position_scale,
+                "reason_codes": list(baseline.reason_codes),
+            },
+            baseline_disagreement=None if ai_assessment is None else {
+                "disagreed": (ai_decision_intent.direction if ai_decision_intent is not None else self._direction_from_assessment(ai_assessment)) != baseline.direction_bias,
+                "baseline_direction": baseline.direction_bias,
+                "ai_direction": ai_decision_intent.direction if ai_decision_intent is not None else self._direction_from_assessment(ai_assessment),
+            },
+            decision_blocked_reasons=blocked_reasons,
+            guardrail_flags=list(dict.fromkeys(guardrail_flags)),
+            policy_blocked=False,
+            policy_blocked_reasons=[],
+            risk_capped=False,
+            risk_capped_reasons=[],
+            risk_capped_target_qty=None,
+            active_profile_id=active_profile_id,
+            profile_control_source=profile_control_source,
+            ai_fallback_used=False if ai_decision_intent is None else ai_decision_intent.fallback_used,
+            ai_degraded=False if ai_decision_intent is None else ai_decision_intent.degraded,
+        )
+
+    @staticmethod
+    def _direction_from_assessment(ai_assessment: AIMarketAssessment) -> str:
+        if ai_assessment.directional_edge > 0.0:
+            return "long"
+        if ai_assessment.directional_edge < 0.0:
+            return "short"
+        return "flat"
 
     @staticmethod
     def _shadow_action_type(*, baseline_action: str, shadow_action: str) -> str:

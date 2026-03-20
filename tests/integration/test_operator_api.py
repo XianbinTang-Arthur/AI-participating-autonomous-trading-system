@@ -4,7 +4,8 @@ import tempfile
 import unittest
 from pathlib import Path
 from datetime import timedelta
-from unittest.mock import AsyncMock, patch
+from decimal import Decimal
+from unittest.mock import AsyncMock, Mock, patch
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -16,11 +17,12 @@ from aats.bootstrap.settings import AATSSettings
 from aats.events.envelopes import build_envelope
 from aats.schemas.audit import DecisionAuditRecord
 from aats.schemas.ai_brief import AIDecisionBrief
-from aats.schemas.ai_shadow import AIDegradationEvent, AITakeoverDecision
+from aats.schemas.ai_shadow import AIDegradationEvent
 from aats.schemas.common import utc_now
-from aats.schemas.decision import AIMarketAssessment
+from aats.schemas.decision import AIMarketAssessment, ProfileControlDecision
 from aats.schemas.execution import FillEvent, OrderState
 from aats.schemas.exchange import AccountBaselineSnapshot, ExchangeAccountSnapshot, ExchangeBalance, ExchangeOpenOrder
+from aats.schemas.governance import PolicyDecision, RiskDecision
 from aats.events import topics
 from aats.schemas.operator import ExecutionErrorSummary, ReplayValidationSummary
 from aats.schemas.operator import OperatorUserRecord
@@ -265,11 +267,14 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertIn("total_available", orders_recent)
         self.assertIn("has_more", orders_recent)
         self.assertEqual(order_detail["order"]["client_order_id"], latest_order_id)
+        self.assertIn("execution_action", order_detail["order"])
         self.assertTrue(fills_recent["fills"])
         self.assertIn("total_available", fills_recent)
         self.assertIn("has_more", fills_recent)
         self.assertEqual(fill_detail["fill"]["fill_id"], latest_fill_id)
+        self.assertIn("execution_action", fill_detail["fill"])
         self.assertIsNotNone(execution_latest["latest_order"])
+        self.assertIn("execution_action", execution_latest["latest_order"])
         self.assertIsNotNone(reconciliation_latest["reconciliation"])
         self.assertIn("mismatch_categories", reconciliation_latest["mismatch_summary"])
         self.assertIn("exchange_bills_summary", reconciliation_latest)
@@ -323,12 +328,11 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             performance_overview_before = client.get("/ai/performance/overview")
             latest = client.get("/ai/latest")
             recent = client.get("/ai/recent?limit=5")
-            takeovers = client.get("/ai/takeovers/recent?limit=5")
+            removed_takeovers_route = client.get("/ai/takeovers/recent?limit=5")
             shadow_latest = client.get("/ai/shadow/latest")
             shadow_recent = client.get("/ai/shadow/recent?limit=5")
             runtime_status = client.get("/ai/runtime")
-            evaluation = client.post("/ai/shadow/evaluate-now")
-            evaluation_reused = client.post("/ai/shadow/evaluate-now")
+            removed_shadow_evaluate_route = client.post("/ai/shadow/evaluate-now")
             evaluations = client.get("/ai/shadow/evaluations?limit=5")
             performance_reports = client.get("/ai/performance/reports?limit=5")
             performance_overview = client.get("/ai/performance/overview")
@@ -341,12 +345,11 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(performance_overview.status_code, 200)
         self.assertEqual(latest.status_code, 200)
         self.assertEqual(recent.status_code, 200)
-        self.assertEqual(takeovers.status_code, 200)
+        self.assertEqual(removed_takeovers_route.status_code, 404)
         self.assertEqual(shadow_latest.status_code, 200)
         self.assertEqual(shadow_recent.status_code, 200)
         self.assertEqual(runtime_status.status_code, 200)
-        self.assertEqual(evaluation.status_code, 200)
-        self.assertEqual(evaluation_reused.status_code, 200)
+        self.assertEqual(removed_shadow_evaluate_route.status_code, 404)
         self.assertEqual(evaluations.status_code, 200)
         self.assertEqual(performance_reports.status_code, 200)
         self.assertEqual(decision_detail.status_code, 200)
@@ -354,7 +357,6 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(overview.json()["runtime"]["provider_ready"])
         self.assertEqual(overview.json()["runtime"]["execution_suggestion_mode"], "shadow_translation")
-        self.assertIn("takeover_summary", overview.json())
         self.assertIn("shadow_summary", overview.json())
         self.assertIn("performance_windows", overview.json())
         self.assertIn("downgrade_state", overview.json())
@@ -362,21 +364,31 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertIn("latest_execution_suggestion", overview.json())
         self.assertIn("recent_reports", performance_overview.json())
         self.assertIn("replay_context", performance_overview.json())
-        self.assertIsNone(performance_overview_before.json()["latest_report"])
+        self.assertIsNotNone(performance_overview_before.json()["latest_report"])
         self.assertIsNotNone(latest.json()["assessment"])
+        self.assertIsNotNone(latest.json()["baseline_reference"])
+        self.assertIsNotNone(latest.json()["ai_decision_intent"])
+        self.assertIsNotNone(latest.json()["decision_outcome"])
         self.assertIsNotNone(latest.json()["execution_suggestion"])
+        self.assertNotIn("legacy_takeover", latest.json())
         self.assertIsNotNone(shadow_latest.json()["shadow_decision"])
+        self.assertTrue(evaluations.json()["evaluations"])
+        self.assertTrue(performance_reports.json()["reports"])
         self.assertIsNotNone(decision_detail.json()["ai_decision_brief"])
         self.assertIsNotNone(decision_detail.json()["ai_assessment"])
-        self.assertIsNotNone(decision_detail.json()["ai_takeover_decision"])
+        self.assertIsNotNone(decision_detail.json()["baseline_reference"])
+        self.assertIsNotNone(decision_detail.json()["ai_decision_intent"])
+        self.assertIsNotNone(decision_detail.json()["decision_outcome"])
+        self.assertNotIn("legacy_ai_takeover_decision", decision_detail.json())
+        self.assertEqual(decision_detail.json()["decision_outcome"]["decision_source"], "ai")
         self.assertIsNotNone(decision_detail.json()["ai_decision_audit"])
         self.assertIsNotNone(decision_detail.json()["ai_economic_actionability"])
         self.assertIsNotNone(decision_detail.json()["ai_execution_suggestion"])
+        self.assertIsNotNone(overview.json()["latest_baseline_reference"])
+        self.assertIsNotNone(overview.json()["latest_ai_decision_intent"])
+        self.assertIsNotNone(overview.json()["latest_decision_outcome"])
         self.assertTrue(decision_detail.json()["ai_shadow_decisions"])
         self.assertTrue(decision_detail.json()["ai_shadow_evaluations"])
-        self.assertTrue(takeovers.json()["takeovers"])
-        self.assertIn("direction_disagreement", takeovers.json()["takeovers"][0])
-        self.assertTrue(takeovers.json()["takeovers"][0]["ai_execution_suggestion_present"])
         self.assertIn(
             shadow_latest.json()["shadow_decision"]["shadow_action_type"],
             {"same_as_baseline", "hold_instead", "entry_override", "exit_override", "reverse_override"},
@@ -398,8 +410,6 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(recent.json()["assessments"])
         self.assertTrue(shadow_recent.json()["shadow_decisions"])
-        self.assertEqual(evaluation.json()["status"], "evaluation_created")
-        self.assertEqual(evaluation_reused.json()["status"], "evaluation_reused")
         self.assertTrue(evaluations.json()["evaluations"])
         self.assertTrue(performance_reports.json()["reports"])
         self.assertEqual(
@@ -421,6 +431,293 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             replay_validation.json()["audit_issues"],
         )
 
+    async def test_ai_profile_control_decision_is_exposed_in_mainline_and_operator_views(self) -> None:
+        runtime = await self._runtime(
+            ai_operating_mode="ai_decision_maker_with_profile_control",
+            ai_provider="openai",
+            openai_api_key="test-key",
+            trading_product_type="derivatives",
+            margin_mode="cross",
+            strategy_short_bias_enabled=True,
+            default_symbol="BTC-USDT-SWAP",
+            allowed_symbols=("BTC-USDT-SWAP",),
+        )
+        runtime.ai_service.provider = FakeShadowProvider()
+        runtime.ai_service._degraded = False
+        runtime.ai_service._consecutive_failures = 0
+        runtime.ai_service._consecutive_successes = 0
+        self.assertIsNotNone(runtime.decision_engine.strategy_profile_service)
+        runtime.decision_engine.strategy_profile_service.evaluate_mainline_profile_control = AsyncMock(
+            return_value=ProfileControlDecision(
+                decision_id="decision_profile_control",
+                requested_by="ai",
+                requested_profile_id="trend_strict",
+                current_profile_id="trend_normal",
+                applied=True,
+                blocked_reasons=[],
+                decision_reason_codes=["ai_profile_adjustment_accepted"],
+            )
+        )
+
+        await runtime.decision_engine.run_cycle(runtime.settings.default_symbol, runtime.settings.primary_timeframe)
+        app = self._app(runtime)
+        with TestClient(app) as client:
+            overview = client.get("/ai/overview")
+            latest = client.get("/ai/latest")
+            decision_id = client.get("/decision/latest").json()["decision_id"]
+            decision_detail = client.get(f"/decision/{decision_id}")
+
+        self.assertEqual(overview.status_code, 200)
+        self.assertEqual(latest.status_code, 200)
+        self.assertEqual(decision_detail.status_code, 200)
+        self.assertIsNotNone(overview.json()["latest_profile_control_decision"])
+        self.assertEqual(
+            overview.json()["latest_profile_control_decision"]["requested_profile_id"],
+            "trend_strict",
+        )
+        self.assertIsNotNone(latest.json()["profile_control_decision"])
+        self.assertEqual(latest.json()["profile_control_decision"]["requested_by"], "ai")
+        self.assertEqual(
+            decision_detail.json()["decision_outcome"]["decision_authority"],
+            "final_decision_with_profile_control",
+        )
+        self.assertEqual(
+            decision_detail.json()["decision_outcome"]["profile_control_source"],
+            "ai",
+        )
+        self.assertEqual(
+            decision_detail.json()["decision_outcome"]["active_profile_id"],
+            "trend_strict",
+        )
+        self.assertTrue(decision_detail.json()["decision_outcome"]["finalized"])
+
+    async def test_shadow_evaluation_failure_does_not_block_position_target_publication(self) -> None:
+        runtime = await self._runtime(
+            ai_operating_mode="ai_decision_maker",
+            ai_shadow_mode_enabled=True,
+            ai_provider="openai",
+            openai_api_key="test-key",
+            trading_product_type="derivatives",
+            margin_mode="cross",
+            strategy_short_bias_enabled=True,
+            default_symbol="BTC-USDT-SWAP",
+            allowed_symbols=("BTC-USDT-SWAP",),
+        )
+        runtime.ai_service.provider = FakeShadowProvider()
+        runtime.ai_service.evaluate_shadow_window = Mock(side_effect=RuntimeError("shadow_eval_failed"))
+        position_targets_before = len(runtime.event_store.by_topic(topics.POSITION_TARGETS))
+        shadow_evaluations_before = len(runtime.event_store.by_topic(topics.AI_SHADOW_EVALUATIONS))
+        performance_reports_before = len(runtime.event_store.by_topic(topics.AI_PERFORMANCE_REPORTS))
+
+        target = await runtime.decision_engine.run_cycle(runtime.settings.default_symbol, runtime.settings.primary_timeframe)
+
+        self.assertIsNotNone(target)
+        self.assertEqual(len(runtime.event_store.by_topic(topics.POSITION_TARGETS)), position_targets_before + 1)
+        self.assertEqual(len(runtime.event_store.by_topic(topics.AI_SHADOW_EVALUATIONS)), shadow_evaluations_before)
+        self.assertEqual(len(runtime.event_store.by_topic(topics.AI_PERFORMANCE_REPORTS)), performance_reports_before)
+
+    async def test_shadow_evaluation_publish_failure_does_not_block_position_target_publication(self) -> None:
+        runtime = await self._runtime(
+            ai_operating_mode="ai_decision_maker",
+            ai_shadow_mode_enabled=True,
+            ai_provider="openai",
+            openai_api_key="test-key",
+            trading_product_type="derivatives",
+            margin_mode="cross",
+            strategy_short_bias_enabled=True,
+            default_symbol="BTC-USDT-SWAP",
+            allowed_symbols=("BTC-USDT-SWAP",),
+        )
+        runtime.ai_service.provider = FakeShadowProvider()
+        from aats.services.decision_engine import orchestrator as orchestrator_module
+
+        original_publish_model = orchestrator_module.publish_model
+        position_targets_before = len(runtime.event_store.by_topic(topics.POSITION_TARGETS))
+        shadow_evaluations_before = len(runtime.event_store.by_topic(topics.AI_SHADOW_EVALUATIONS))
+        performance_reports_before = len(runtime.event_store.by_topic(topics.AI_PERFORMANCE_REPORTS))
+
+        async def failing_publish_model(*args, **kwargs):
+            if kwargs.get("topic") == topics.AI_SHADOW_EVALUATIONS:
+                raise RuntimeError("shadow_publish_failed")
+            return await original_publish_model(*args, **kwargs)
+
+        with patch("aats.services.decision_engine.orchestrator.publish_model", new=failing_publish_model):
+            target = await runtime.decision_engine.run_cycle(runtime.settings.default_symbol, runtime.settings.primary_timeframe)
+
+        self.assertIsNotNone(target)
+        self.assertEqual(len(runtime.event_store.by_topic(topics.POSITION_TARGETS)), position_targets_before + 1)
+        self.assertEqual(len(runtime.event_store.by_topic(topics.AI_SHADOW_EVALUATIONS)), shadow_evaluations_before)
+        self.assertEqual(len(runtime.event_store.by_topic(topics.AI_PERFORMANCE_REPORTS)), performance_reports_before)
+
+    async def test_profile_control_is_not_evaluated_when_ai_degrades_to_baseline_during_cycle(self) -> None:
+        runtime = await self._runtime(
+            ai_operating_mode="ai_decision_maker_with_profile_control",
+            ai_provider="openai",
+            openai_api_key="test-key",
+            trading_product_type="derivatives",
+            margin_mode="cross",
+            strategy_short_bias_enabled=True,
+            default_symbol="BTC-USDT-SWAP",
+            allowed_symbols=("BTC-USDT-SWAP",),
+        )
+        self.assertIsNotNone(runtime.decision_engine.strategy_profile_service)
+        runtime.ai_service.should_attempt_assessment = Mock(return_value=True)
+        runtime.ai_service.effective_operating_mode = Mock(
+            side_effect=["ai_decision_maker_with_profile_control", "baseline_only"]
+        )
+        runtime.ai_service.canonical_effective_operating_mode = Mock(return_value="baseline_only")
+        runtime.ai_service.assess = AsyncMock(
+            return_value=AIMarketAssessment(
+                decision_id="decision_profile_degraded",
+                symbol="BTC-USDT-SWAP",
+                regime="trend",
+                directional_edge=0.4,
+                expected_volatility=0.1,
+                confidence=0.8,
+                uncertainty=0.2,
+                expected_holding_horizon="15m",
+                invalidation_conditions=[],
+                risk_tags=[],
+                rationale_summary="degraded_after_assess",
+                operating_mode="ai_decision_maker_with_profile_control",
+                provider_name="fake",
+                output_valid=True,
+                fallback_used=False,
+                degraded=True,
+                calibrated_confidence=0.82,
+                baseline_override_recommended=True,
+                override_reason_codes=["ai_trend_override"],
+                economically_actionable=True,
+                estimated_edge_bps=30.0,
+                estimated_cost_bps=6.0,
+                estimated_net_edge_bps=24.0,
+                source_mode="provider",
+                execution_condition="normal",
+                model_name="fake",
+                model_version="1",
+                prompt_version="1",
+            )
+        )
+        runtime.ai_service.latest_brief = Mock(return_value=None)
+        runtime.ai_service.latest_shadow_assessment = Mock(return_value=None)
+        runtime.decision_engine.strategy_profile_service.evaluate_mainline_profile_control = AsyncMock(
+            return_value=ProfileControlDecision(
+                decision_id="decision_profile_degraded",
+                requested_by="ai",
+                requested_profile_id="trend_strict",
+                current_profile_id="trend_normal",
+                applied=True,
+            )
+        )
+
+        await runtime.decision_engine.run_cycle(runtime.settings.default_symbol, runtime.settings.primary_timeframe)
+
+        runtime.decision_engine.strategy_profile_service.evaluate_mainline_profile_control.assert_not_awaited()
+
+    async def test_finalized_decision_outcome_collapses_to_hold_when_policy_blocks(self) -> None:
+        runtime = await self._runtime()
+        original_policy_evaluate = runtime.policy_engine.evaluate
+
+        def blocked_policy(*, target):
+            base = original_policy_evaluate(target=target)
+            return PolicyDecision(
+                decision_id=target.decision_id,
+                mode=base.mode,
+                allowed=False,
+                execution_allowed=False,
+                submission_allowed=False,
+                dry_run_only=base.dry_run_only,
+                requires_human_approval=base.requires_human_approval,
+                allowed_symbols=base.allowed_symbols,
+                allowed_execution_styles=base.allowed_execution_styles,
+                max_notional_override=base.max_notional_override,
+                forced_degrade_mode=base.forced_degrade_mode,
+                rejection_reasons=["policy_test_block"],
+            )
+
+        runtime.policy_engine.evaluate = blocked_policy
+        await runtime.decision_engine.run_cycle(runtime.settings.default_symbol, runtime.settings.primary_timeframe)
+        decision_id = runtime.audit_repo.recent(limit=1)[0].decision_id
+
+        app = self._app(runtime)
+        with TestClient(app) as client:
+            decision_detail = client.get(f"/decision/{decision_id}")
+
+        payload = decision_detail.json()
+        outcome = payload["decision_outcome"]
+        target = payload["position_target"]
+        self.assertTrue(outcome["finalized"])
+        self.assertTrue(outcome["policy_blocked"])
+        self.assertIn("policy_test_block", outcome["policy_blocked_reasons"])
+        self.assertEqual(outcome["final_action"], "hold")
+        self.assertEqual(outcome["final_target_qty"], target["current_position_qty"])
+        self.assertIsNone(payload["execution_plan"])
+
+    async def test_finalized_decision_outcome_collapses_to_hold_when_risk_rejects(self) -> None:
+        runtime = await self._runtime()
+
+        def rejected_risk(*, target):
+            return RiskDecision(
+                decision_id=target.decision_id,
+                approved=False,
+                modified=True,
+                capped_target_position_qty=Decimal("0.001"),
+                capped_target_notional=Decimal("10"),
+                current_open_order_count=0,
+                constraints_applied=["risk_test_cap"],
+                risk_score=0.9,
+                flatten_required=False,
+                halt_required=False,
+                rejection_reasons=["risk_test_reject"],
+            )
+
+        runtime.risk_engine.evaluate = rejected_risk
+        await runtime.decision_engine.run_cycle(runtime.settings.default_symbol, runtime.settings.primary_timeframe)
+        decision_id = runtime.audit_repo.recent(limit=1)[0].decision_id
+
+        app = self._app(runtime)
+        with TestClient(app) as client:
+            decision_detail = client.get(f"/decision/{decision_id}")
+
+        payload = decision_detail.json()
+        outcome = payload["decision_outcome"]
+        target = payload["position_target"]
+        self.assertTrue(outcome["finalized"])
+        self.assertTrue(outcome["risk_capped"])
+        self.assertIn("risk_test_reject", outcome["risk_capped_reasons"])
+        self.assertEqual(Decimal(str(outcome["risk_capped_target_qty"])), Decimal("0.001"))
+        self.assertEqual(outcome["final_action"], "hold")
+        self.assertEqual(outcome["final_target_qty"], target["current_position_qty"])
+        self.assertIsNone(payload["execution_plan"])
+
+    async def test_finalized_decision_outcome_collapses_to_hold_when_kill_switch_halts_after_risk(self) -> None:
+        runtime = await self._runtime()
+        original_risk_evaluate = runtime.risk_engine.evaluate
+
+        def halting_risk(*, target):
+            decision = original_risk_evaluate(target=target)
+            runtime.kill_switch.halt(reason="test_halt_after_risk")
+            return decision
+
+        runtime.risk_engine.evaluate = halting_risk
+        await runtime.decision_engine.run_cycle(runtime.settings.default_symbol, runtime.settings.primary_timeframe)
+        decision_id = runtime.audit_repo.recent(limit=1)[0].decision_id
+
+        app = self._app(runtime)
+        with TestClient(app) as client:
+            decision_detail = client.get(f"/decision/{decision_id}")
+
+        payload = decision_detail.json()
+        outcome = payload["decision_outcome"]
+        target = payload["position_target"]
+        self.assertTrue(outcome["finalized"])
+        self.assertTrue(outcome["policy_blocked"])
+        self.assertIn("kill_switch_active", outcome["policy_blocked_reasons"])
+        self.assertIn("kill_switch_active", outcome["decision_blocked_reasons"])
+        self.assertEqual(outcome["final_action"], "hold")
+        self.assertEqual(outcome["final_target_qty"], target["current_position_qty"])
+        self.assertIsNone(payload["execution_plan"])
+
     async def test_baseline_only_does_not_emit_ai_chain_events(self) -> None:
         runtime = await self._runtime(
             ai_operating_mode="baseline_only",
@@ -435,20 +732,21 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             overview = client.get("/ai/overview")
             latest = client.get("/ai/latest")
             recent = client.get("/ai/recent?limit=5")
-            takeovers = client.get("/ai/takeovers/recent?limit=5")
+            removed_takeovers_route = client.get("/ai/takeovers/recent?limit=5")
             shadow_latest = client.get("/ai/shadow/latest")
             shadow_recent = client.get("/ai/shadow/recent?limit=5")
 
         self.assertEqual(overview.status_code, 200)
         self.assertEqual(latest.status_code, 200)
-        self.assertEqual(takeovers.status_code, 200)
-        self.assertEqual(overview.json()["takeover_summary"]["attempted_count"], 0)
+        self.assertEqual(removed_takeovers_route.status_code, 404)
         self.assertEqual(overview.json()["shadow_summary"]["window_count"], 0)
         self.assertIsNone(latest.json()["brief"])
         self.assertIsNone(latest.json()["assessment"])
-        self.assertIsNone(latest.json()["takeover"])
+        self.assertNotIn("legacy_takeover", latest.json())
+        self.assertIsNone(latest.json()["baseline_reference"])
+        self.assertIsNone(latest.json()["ai_decision_intent"])
+        self.assertIsNone(latest.json()["decision_outcome"])
         self.assertEqual(recent.json()["assessments"], [])
-        self.assertEqual(takeovers.json()["takeovers"], [])
         self.assertIsNone(shadow_latest.json()["shadow_decision"])
         self.assertEqual(shadow_recent.json()["shadow_decisions"], [])
         self.assertEqual(len(runtime.event_store.by_topic(topics.AI_DECISION_BRIEFS)), 0)
@@ -552,16 +850,6 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             model_version="1",
             prompt_version="1",
         )
-        takeover = AITakeoverDecision(
-            decision_id="decision_ai_hidden",
-            symbol=runtime.settings.default_symbol,
-            timeframe=runtime.settings.primary_timeframe,
-            ai_takeover_allowed=True,
-            ai_takeover_applied=True,
-            baseline_direction="long",
-            ai_direction="long",
-            final_direction="long",
-        )
         brief_event = build_envelope(
             topic=topics.AI_DECISION_BRIEFS,
             key=runtime.settings.default_symbol,
@@ -574,22 +862,14 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             payload_model=assessment,
             source_component="test",
         )
-        takeover_event = build_envelope(
-            topic=topics.AI_TAKEOVER_DECISIONS,
-            key=runtime.settings.default_symbol,
-            payload_model=takeover,
-            source_component="test",
-        )
         runtime.event_store.append(brief_event)
         runtime.event_store.append(assessment_event)
-        runtime.event_store.append(takeover_event)
         runtime.audit_repo.upsert(
             DecisionAuditRecord(
                 decision_id="decision_ai_hidden",
                 decision_context_ref=brief_event.event_id,
                 ai_decision_brief_ref=brief_event.event_id,
                 ai_market_assessment_ref=assessment_event.event_id,
-                ai_takeover_decision_ref=takeover_event.event_id,
             )
         )
         app = self._app(runtime)
@@ -602,11 +882,17 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(latest.status_code, 200)
         self.assertIsNone(latest.json()["brief"])
         self.assertIsNone(latest.json()["assessment"])
-        self.assertIsNone(latest.json()["takeover"])
+        self.assertNotIn("legacy_takeover", latest.json())
+        self.assertIsNone(latest.json()["baseline_reference"])
+        self.assertIsNone(latest.json()["ai_decision_intent"])
+        self.assertIsNone(latest.json()["decision_outcome"])
         self.assertEqual(recent.json()["assessments"], [])
         self.assertIsNone(decision.json()["ai_decision_brief"])
         self.assertIsNone(decision.json()["ai_assessment"])
-        self.assertIsNone(decision.json()["ai_takeover_decision"])
+        self.assertNotIn("legacy_ai_takeover_decision", decision.json())
+        self.assertIsNone(decision.json()["baseline_reference"])
+        self.assertIsNone(decision.json()["ai_decision_intent"])
+        self.assertIsNone(decision.json()["decision_outcome"])
 
     async def test_recovery_blocks_when_ai_is_degraded_without_auto_downgrade(self) -> None:
         runtime = await self._runtime(
@@ -673,7 +959,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         stale_blockers = [item["blocker"] for item in stale_health["blockers"]]
         self.assertIn("market_data_stale", stale_blockers)
 
-    async def test_manual_halt_marks_recovery_as_resume_blocked(self) -> None:
+    async def test_manual_halt_marks_recovery_as_manually_halted_and_resume_eligible(self) -> None:
         runtime = await self._runtime()
         app = self._app(runtime)
         with TestClient(app) as client:
@@ -682,7 +968,9 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(halted.status_code, 200)
         self.assertEqual(recovery.status_code, 200)
-        self.assertEqual(recovery.json()["recovery"]["recovery_state"], "resume_blocked")
+        self.assertEqual(recovery.json()["recovery"]["recovery_state"], "manually_halted")
+        self.assertTrue(recovery.json()["recovery"]["resume_eligible"])
+        self.assertFalse(recovery.json()["recovery"]["safe_to_trade"])
 
     async def test_resume_ignores_kill_switch_as_the_only_blocker(self) -> None:
         runtime = await self._runtime()
@@ -901,12 +1189,18 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         with TestClient(app) as client:
             login = client.post("/auth/login", json={"username": "admin", "password": "admin-pass"})
             listing = client.get("/runtime-profiles")
+            summary = client.get("/runtime-profiles/summary")
             created = client.post("/runtime-profiles/drafts", json={"profile_label": "derivatives primary"})
 
         self.assertEqual(login.status_code, 200)
         self.assertEqual(listing.status_code, 200)
+        self.assertEqual(summary.status_code, 200)
         self.assertEqual(listing.json()["profile_source"], "env_fallback")
         self.assertFalse(listing.json()["management_enabled"])
+        self.assertEqual(
+            set(summary.json().keys()),
+            {"profile_source", "control_plane_status", "current_runtime_payload"},
+        )
         self.assertEqual(created.status_code, 409)
         self.assertEqual(created.json()["detail"], "runtime_profile_control_disabled")
 
@@ -940,6 +1234,99 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(restart.json()["detail"], "runtime_profile_control_disabled")
 
     async def test_strategy_profile_routes_seed_snapshot_and_generate_recommendation(self) -> None:
+        runtime = await self._runtime(
+            operator_auth_enabled=True,
+            operator_session_secret="session-secret",
+            operator_users=[("admin", "admin-pass")],
+        )
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            login = client.post("/auth/login", json={"username": "admin", "password": "admin-pass"})
+            snapshot = client.get("/strategy-profiles")
+            summary = client.get("/strategy-profiles/summary")
+            optimization_reports = client.get("/strategy-profiles/optimization/reports?limit=5&offset=0")
+            selection_decisions = client.get("/strategy-profiles/selection-decisions?limit=5&offset=0")
+            activation_history = client.get("/strategy-profiles/activation-history?limit=5&offset=0")
+
+        self.assertEqual(login.status_code, 200)
+        self.assertEqual(snapshot.status_code, 200)
+        self.assertEqual(summary.status_code, 200)
+        self.assertEqual(optimization_reports.status_code, 200)
+        self.assertEqual(selection_decisions.status_code, 200)
+        self.assertEqual(activation_history.status_code, 200)
+        snapshot_payload = snapshot.json()
+        summary_payload = summary.json()
+        self.assertIn("scope", snapshot_payload)
+        self.assertIn("safety_state", snapshot_payload)
+        self.assertIn("activation", snapshot_payload)
+        self.assertIn("active_revision", snapshot_payload)
+        self.assertIn("profile_space", snapshot_payload)
+        self.assertIn("comparison_report", snapshot_payload)
+        self.assertIn("latest_optimization_report", snapshot_payload)
+        self.assertIn("latest_selection_decision", snapshot_payload)
+        self.assertIn("execution_parameter_suggestion_capability", snapshot_payload)
+        self.assertIn("activation_history", snapshot_payload)
+        self.assertNotIn("latest_recommendation", snapshot_payload)
+        self.assertNotIn("evaluations", snapshot_payload)
+        self.assertNotIn("rejections", snapshot_payload)
+        self.assertNotIn("auto_rollback_policy", snapshot_payload)
+        self.assertNotIn("activation_policy", snapshot_payload)
+        self.assertEqual(snapshot_payload["profile_space"]["selection_mode"], "registered_profile_only")
+        self.assertFalse(snapshot_payload["profile_space"]["free_form_parameter_generation_enabled"])
+        self.assertEqual(
+            set(summary_payload.keys()),
+            {"activation", "active_revision", "latest_selection_decision", "activation_history"},
+        )
+        self.assertNotIn("comparison_report", summary_payload)
+        self.assertNotIn("latest_optimization_report", summary_payload)
+        self.assertNotIn("execution_parameter_suggestion_capability", summary_payload)
+        self.assertEqual(optimization_reports.json()["reports"], [])
+        self.assertEqual(selection_decisions.json()["decisions"], [])
+        self.assertIn("history", activation_history.json())
+        return
+
+    async def test_ai_config_summary_route_returns_only_ai_config_page_fields(self) -> None:
+        runtime = await self._runtime(
+            operator_auth_enabled=True,
+            operator_session_secret="session-secret",
+            operator_users=[("admin", "admin-pass")],
+            ai_operating_mode="ai_decision_maker_with_profile_control",
+            ai_shadow_mode_enabled=True,
+        )
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            login = client.post("/auth/login", json={"username": "admin", "password": "admin-pass"})
+            summary = client.get("/ai-config/summary")
+
+        self.assertEqual(login.status_code, 200)
+        self.assertEqual(summary.status_code, 200)
+        payload = summary.json()
+        self.assertEqual(set(payload.keys()), {"runtime_profile", "strategy_profile", "ai"})
+        self.assertEqual(
+            set(payload["runtime_profile"].keys()),
+            {"profile_source", "control_plane_status", "current_runtime_payload"},
+        )
+        self.assertEqual(
+            set(payload["strategy_profile"].keys()),
+            {"activation", "active_revision", "latest_selection_decision", "activation_history"},
+        )
+        if payload["strategy_profile"]["activation_history"]:
+            self.assertIn("executed_at", payload["strategy_profile"]["activation_history"][0])
+            self.assertNotIn("activated_at", payload["strategy_profile"]["activation_history"][0])
+        self.assertEqual(
+            set(payload["ai"].keys()),
+            {
+                "configured_operating_mode",
+                "effective_operating_mode",
+                "shadow_mode_enabled",
+                "shadow_summary",
+                "latest_profile_control_decision",
+            },
+        )
+        return
+
         runtime = await self._runtime(
             operator_auth_enabled=True,
             operator_session_secret="session-secret",
@@ -1054,6 +1441,28 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             operator_auth_enabled=True,
             operator_session_secret="session-secret",
             operator_users=[("admin", "admin-pass")],
+        )
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            client.post("/auth/login", json={"username": "admin", "password": "admin-pass"})
+            removed = {
+                "evaluate_now": client.post("/strategy-profiles/auto-tuning/evaluate-now"),
+                "recommendations": client.get("/strategy-profiles/recommendations?limit=5&offset=0"),
+                "pending_activate": client.post("/strategy-profiles/pending/activate", json={"reason": "obsolete"}),
+                "rollback": client.post("/strategy-profiles/rollback", json={"reason": "obsolete"}),
+                "auto_rollback_policy": client.get("/strategy-profiles/auto-rollback-policy"),
+                "activation_policy": client.get("/strategy-profiles/activation-policy"),
+            }
+
+        for response in removed.values():
+            self.assertEqual(response.status_code, 404)
+        return
+
+        runtime = await self._runtime(
+            operator_auth_enabled=True,
+            operator_session_secret="session-secret",
+            operator_users=[("admin", "admin-pass")],
             ai_provider="openai",
             openai_api_key="test-key",
         )
@@ -1142,6 +1551,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_strategy_profile_evaluate_now_can_generate_recommendation_without_auto_switch(self) -> None:
+        self.skipTest("旧策略档位建议控制面已删除，只保留主链自动切换与管理员手动切换。")
         runtime = await self._runtime(
             operator_auth_enabled=True,
             operator_session_secret="session-secret",
@@ -1194,6 +1604,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot.json()["activation"]["active_profile_id"], "trend_normal")
 
     async def test_strategy_profile_optimization_and_selection_reports_are_versioned(self) -> None:
+        self.skipTest("旧 evaluate-now 路由已删除，不再通过页面触发 recommendation 流。")
         runtime = await self._runtime(
             operator_auth_enabled=True,
             operator_session_secret="session-secret",
@@ -1221,6 +1632,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(second_decision["parent_decision_id"])
 
     async def test_strategy_profile_selection_outcome_and_auto_rollback_are_written_back(self) -> None:
+        self.skipTest("自动回滚 recommendation 流已删除。")
         runtime = await self._runtime(
             operator_auth_enabled=True,
             operator_session_secret="session-secret",
@@ -1295,6 +1707,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(selection["auto_rollback_recommendation"]["target_profile_id"], "trend_normal")
 
     async def test_strategy_profile_auto_rollback_policy_can_execute_rollback(self) -> None:
+        self.skipTest("自动回滚策略生命周期已从公开控制面移除。")
         runtime = await self._runtime(
             operator_auth_enabled=True,
             operator_session_secret="session-secret",
@@ -1373,6 +1786,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         ).active_profile_id, "trend_normal")
 
     async def test_strategy_profile_optimization_uses_cross_bucket_replay_scoring(self) -> None:
+        self.skipTest("旧 evaluate-now 路由已删除，不再通过公开接口触发优化报告。")
         runtime = await self._runtime(
             operator_auth_enabled=True,
             operator_session_secret="session-secret",
@@ -1440,6 +1854,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertIn("auto_activation", evaluated.json()["optimization_report"]["winner_selection_policy"])
 
     async def test_strategy_profile_auto_rollback_policy_can_be_persisted_by_scope(self) -> None:
+        self.skipTest("自动回滚策略生命周期已从公开控制面移除。")
         runtime = await self._runtime(
             operator_auth_enabled=True,
             operator_session_secret="session-secret",
@@ -1500,6 +1915,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(snapshot_after.json()["auto_rollback_policy"]["frozen"])
 
     async def test_strategy_profile_winner_selection_policy_exposes_blocked_auto_activation_thresholds(self) -> None:
+        self.skipTest("旧 evaluate-now 路由已删除，不再通过公开接口暴露 activation policy 细节。")
         runtime = await self._runtime(
             operator_auth_enabled=True,
             operator_session_secret="session-secret",
@@ -1519,6 +1935,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_strategy_profile_activation_policy_can_be_persisted_by_scope(self) -> None:
+        self.skipTest("策略档位激活策略已从公开控制面移除。")
         runtime = await self._runtime(
             operator_auth_enabled=True,
             operator_session_secret="session-secret",
@@ -1581,6 +1998,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(snapshot_after.json()["activation_policy"]["frozen"])
 
     async def test_strategy_profile_activation_policy_can_execute_winner_auto_activation_independently(self) -> None:
+        self.skipTest("策略档位激活策略已从公开控制面移除。")
         runtime = await self._runtime(
             operator_auth_enabled=True,
             operator_session_secret="session-secret",
@@ -1644,6 +2062,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot.json()["activation"]["active_profile_id"], "range_defensive")
 
     async def test_strategy_profile_activation_policy_does_not_auto_activate_manual_only_profile(self) -> None:
+        self.skipTest("策略档位激活策略已从公开控制面移除。")
         runtime = await self._runtime(
             operator_auth_enabled=True,
             operator_session_secret="session-secret",
@@ -1762,6 +2181,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot.json()["activation"]["active_profile_id"], "range_defensive")
 
     async def test_strategy_profile_auto_rollback_matrix_can_block_by_symbol(self) -> None:
+        self.skipTest("自动回滚策略生命周期已从公开控制面移除。")
         runtime = await self._runtime(
             operator_auth_enabled=True,
             operator_session_secret="session-secret",
@@ -1832,6 +2252,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(evaluated.json()["selection_decision"]["decision_status"], "auto_rollback_recommended")
 
     async def test_strategy_profile_auto_apply_is_blocked_when_review_required(self) -> None:
+        self.skipTest("旧 evaluate-now 路由已删除，不再通过页面驱动自动切换评估。")
         runtime = await self._runtime(
             operator_auth_enabled=True,
             operator_session_secret="session-secret",
@@ -1862,6 +2283,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot.json()["activation"]["active_profile_id"], "trend_normal")
 
     async def test_strategy_profile_auto_apply_allows_same_risk_target_when_confidence_high(self) -> None:
+        self.skipTest("旧 evaluate-now 路由已删除，不再通过页面驱动自动切换评估。")
         runtime = await self._runtime(
             operator_auth_enabled=True,
             operator_session_secret="session-secret",
@@ -1937,6 +2359,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot.json()["activation"]["active_profile_id"], "trend_strict")
 
     async def test_strategy_profile_auto_apply_blocks_more_aggressive_target_when_confidence_too_low(self) -> None:
+        self.skipTest("旧 evaluate-now 路由已删除，不再通过页面驱动自动切换评估。")
         runtime = await self._runtime(
             operator_auth_enabled=True,
             operator_session_secret="session-secret",
@@ -2028,6 +2451,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot.json()["activation"]["active_profile_id"], "range_defensive")
 
     async def test_strategy_profile_auto_apply_allows_more_aggressive_target_when_confidence_high(self) -> None:
+        self.skipTest("旧 evaluate-now 路由已删除，不再通过页面驱动自动切换评估。")
         runtime = await self._runtime(
             operator_auth_enabled=True,
             operator_session_secret="session-secret",
@@ -2122,6 +2546,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot.json()["activation"]["active_profile_id"], "trend_normal")
 
     async def test_strategy_profile_auto_apply_is_blocked_when_open_orders_exist(self) -> None:
+        self.skipTest("旧 evaluate-now 路由已删除，不再通过页面驱动自动切换评估。")
         runtime = await self._runtime(
             operator_auth_enabled=True,
             operator_session_secret="session-secret",
@@ -2152,6 +2577,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot.json()["activation"]["active_profile_id"], "trend_normal")
 
     async def test_strategy_profile_accept_stage_activate_and_reject_are_audited(self) -> None:
+        self.skipTest("旧 recommendation 审批流已删除，只保留管理员手动切档。")
         runtime = await self._runtime(
             operator_auth_enabled=True,
             operator_session_secret="session-secret",
@@ -2259,6 +2685,35 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(activate_action["details"]["active_profile_id"], "trend_strict")
 
     async def test_strategy_profile_activation_is_blocked_when_open_orders_exist(self) -> None:
+        runtime = await self._runtime(
+            operator_auth_enabled=True,
+            operator_session_secret="session-secret",
+            operator_users=[("admin", "admin-pass")],
+        )
+        runtime.execution_repo.save_order_state(
+            OrderState(
+                decision_id="decision_strategy_profile",
+                intent_id="intent_strategy_profile",
+                symbol=runtime.settings.default_symbol,
+                client_order_id="order_strategy_profile",
+                status="SUBMITTED",
+                requested_qty=0.001,
+                remaining_qty=0.001,
+            )
+        )
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            client.post("/auth/login", json={"username": "admin", "password": "admin-pass"})
+            blocked = client.post(
+                "/strategy-profiles/profiles/trend_strict/activate",
+                json={"reason": "manual_switch_with_open_orders"},
+            )
+
+        self.assertEqual(blocked.status_code, 409)
+        self.assertEqual(blocked.json()["detail"], "strategy_profile_open_orders_present")
+        return
+
         runtime = await self._runtime(
             operator_auth_enabled=True,
             operator_session_secret="session-secret",
@@ -2927,7 +3382,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             execution.json()["recovery"]["recovery_state"],
             recovery.json()["recovery"]["recovery_state"],
         )
-        self.assertEqual(execution.json()["recovery"]["recovery_state"], "resume_blocked")
+        self.assertEqual(execution.json()["recovery"]["recovery_state"], "manually_halted")
 
     async def test_execution_errors_hide_stale_failures_from_previous_runtime(self) -> None:
         runtime = await self._runtime()

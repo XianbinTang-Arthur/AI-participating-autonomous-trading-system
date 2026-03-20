@@ -11,6 +11,7 @@ from aats.schemas.execution import (
     AIExecutionParameterSuggestionEnvelope,
     ExecutionParameterTranslationPreview,
     ExecutionParameterSuggestion,
+    ExecutionAction,
     ExecutionPlan,
     OrderIntent,
 )
@@ -43,6 +44,10 @@ class ExecutionPlanner:
 
         normalized_urgency = urgency if urgency in {"low", "medium", "high"} else "medium"
         side = "buy" if delta_qty > 0 else "sell"
+        execution_action = self._execution_action(
+            current_position_qty=current_position_qty,
+            target_position_qty=approved_target_position_qty,
+        )
         position_intent = self._position_intent(
             current_position_qty=current_position_qty,
             target_position_qty=approved_target_position_qty,
@@ -92,6 +97,7 @@ class ExecutionPlanner:
             target_leverage=target_leverage,
             margin_mode=margin_mode,  # type: ignore[arg-type]
             exposure_side=exposure_side,  # type: ignore[arg-type]
+            execution_action=execution_action,
             position_intent=position_intent,  # type: ignore[arg-type]
             ai_execution_parameter_suggestion=translated_suggestion,
         )
@@ -122,6 +128,7 @@ class ExecutionPlanner:
             target_leverage=plan.target_leverage,
             margin_mode=plan.margin_mode,
             exposure_side=plan.exposure_side,
+            execution_action=plan.execution_action,
             position_intent=plan.position_intent,
             ai_execution_parameter_suggestion=plan.ai_execution_parameter_suggestion,
         )
@@ -143,6 +150,28 @@ class ExecutionPlanner:
             payload_model=intent,
             source_component="execution_engine",
         )
+
+    @staticmethod
+    def _execution_action(
+        *,
+        current_position_qty: Decimal | float,
+        target_position_qty: Decimal | float,
+    ) -> ExecutionAction:
+        current_qty = to_decimal(current_position_qty)
+        target_qty = to_decimal(target_position_qty)
+        if abs(target_qty - current_qty) < EPSILON_DECIMAL_12:
+            return "hold"
+        current_side = "long" if current_qty > EPSILON_DECIMAL_12 else "short" if current_qty < -EPSILON_DECIMAL_12 else "flat"
+        target_side = "long" if target_qty > EPSILON_DECIMAL_12 else "short" if target_qty < -EPSILON_DECIMAL_12 else "flat"
+        if current_side == "flat":
+            return "enter"
+        if target_side == "flat":
+            return "exit"
+        if current_side != target_side:
+            return "reverse"
+        if abs(target_qty) > abs(current_qty):
+            return "scale_in"
+        return "reduce"
 
     @staticmethod
     def _position_intent(*, current_position_qty: Decimal | float, target_position_qty: Decimal | float) -> str:

@@ -215,6 +215,11 @@ async def ai_overview(request: Request) -> dict[str, Any]:
     return _query(request).ai_overview()
 
 
+@router.get("/ai-config/summary")
+async def ai_config_summary(request: Request) -> dict[str, Any]:
+    return _query(request).ai_config_summary()
+
+
 @router.get("/ai/performance/overview")
 async def ai_performance_overview(request: Request) -> dict[str, Any]:
     return _query(request).ai_performance_overview()
@@ -264,27 +269,6 @@ async def ai_performance_reports(
     offset: int = Query(default=0, ge=0, le=5000),
 ) -> dict[str, Any]:
     return _query(request).ai_performance_reports(limit=limit, offset=offset)
-
-
-@router.get("/ai/takeovers/recent")
-async def ai_takeovers_recent(
-    request: Request,
-    limit: int = Query(default=20, ge=1, le=100),
-    offset: int = Query(default=0, ge=0, le=5000),
-) -> dict[str, Any]:
-    return _query(request).ai_takeovers_recent(limit=limit, offset=offset)
-
-
-@router.post("/ai/shadow/evaluate-now")
-async def ai_shadow_evaluate_now(
-    request: Request,
-    principal: OperatorPrincipal = Depends(require_write_access),
-) -> dict[str, Any]:
-    return await _query(request).evaluate_ai_shadow(
-        actor_role=principal.role,
-        actor_identity=principal.identity,
-        auth_source=principal.auth_source,
-    )
 
 
 @router.get("/risk/latest")

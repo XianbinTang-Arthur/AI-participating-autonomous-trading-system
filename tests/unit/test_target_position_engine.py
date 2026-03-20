@@ -6,7 +6,7 @@ from decimal import Decimal
 
 from aats.bootstrap.settings import AATSSettings
 from aats.schemas.common import utc_now
-from aats.schemas.decision import AIMarketAssessment, BaselineAssessment, DecisionContext
+from aats.schemas.decision import AIMarketAssessment, BaselineAssessment, DecisionContext, ProfileControlDecision
 from aats.services.decision_engine.target_position import TargetPositionEngine
 
 
@@ -603,8 +603,9 @@ class TestTargetPositionEngine(unittest.TestCase):
         )
 
         self.assertGreater(target.target_position_qty, 0.0)
-        self.assertFalse(target.ai_takeover_allowed)
-        self.assertIn("ai_override_not_recommended", target.ai_takeover_blockers)
+        self.assertIsNotNone(target.decision_outcome)
+        self.assertEqual(target.decision_outcome.decision_source, "baseline_fallback")
+        self.assertIn("ai_override_not_recommended", target.decision_outcome.decision_blocked_reasons)
 
     def test_ai_primary_can_take_over_direction_when_all_gates_pass(self) -> None:
         engine = TargetPositionEngine(
@@ -634,8 +635,207 @@ class TestTargetPositionEngine(unittest.TestCase):
         )
 
         self.assertLess(target.target_position_qty, 0.0)
-        self.assertTrue(target.ai_takeover_allowed)
-        self.assertTrue(target.ai_takeover_applied)
+        self.assertIsNotNone(target.decision_outcome)
+        self.assertEqual(target.decision_outcome.decision_source, "ai")
+        self.assertEqual(target.decision_outcome.ai_operating_mode, "ai_decision_maker")
+
+    def test_canonical_ai_decision_maker_emits_native_decision_outcome(self) -> None:
+        engine = TargetPositionEngine(
+            settings=AATSSettings.model_validate(
+                {
+                    "default_order_qty": 0.01,
+                    "trading_product_type": "derivatives",
+                    "ai_operating_mode": "ai_decision_maker",
+                    "strategy_short_bias_enabled": True,
+                    "ai_primary_min_confidence": 0.75,
+                    "ai_primary_min_directional_edge": 0.2,
+                }
+            )
+        )
+        context = self._context(product_type="derivatives", current_exposure_side="flat")
+        baseline = self._baseline(
+            direction_bias="long",
+            confidence=0.84,
+            suggested_position_scale=0.8,
+            volatility_target_scale=1.0,
+        )
+
+        target = engine.build(
+            context,
+            baseline,
+            self._ai_assessment(direction=-0.45, confidence=0.9, fallback_used=False, override=True, actionable=True),
+            operating_mode="ai_decision_maker",
+        )
+
+        self.assertIsNotNone(target.decision_outcome)
+        self.assertIsNotNone(target.ai_decision_intent)
+        self.assertEqual(target.decision_outcome.ai_operating_mode, "ai_decision_maker")
+        self.assertEqual(target.decision_outcome.decision_authority, "final_decision")
+        self.assertEqual(target.decision_outcome.final_target_qty, target.target_position_qty)
+        self.assertEqual(target.ai_decision_intent.direction, "short")
+        self.assertEqual(target.ai_decision_intent.action, "enter")
+
+    def test_canonical_ai_assisted_uses_advisory_authority(self) -> None:
+        engine = TargetPositionEngine(
+            settings=AATSSettings.model_validate(
+                {
+                    "default_order_qty": 0.001,
+                    "ai_operating_mode": "ai_assisted",
+                }
+            )
+        )
+
+        target = engine.build(
+            self._context(),
+            self._baseline(volatility_target_scale=1.0, suggested_position_scale=0.4),
+            self._ai_assessment(direction=-0.4, confidence=0.88, fallback_used=False, override=True, actionable=True),
+            operating_mode="ai_assisted",
+        )
+
+        self.assertIsNotNone(target.decision_outcome)
+        self.assertEqual(target.decision_outcome.ai_operating_mode, "ai_assisted")
+        self.assertEqual(target.decision_outcome.decision_authority, "advisory")
+        self.assertEqual(target.decision_outcome.decision_source, "baseline")
+
+    def test_legacy_ai_blended_preserves_consistency_filter_behavior(self) -> None:
+        engine = TargetPositionEngine(
+            settings=AATSSettings.model_validate(
+                {
+                    "default_order_qty": 0.001,
+                    "ai_operating_mode": "ai_blended",
+                }
+            )
+        )
+
+        target = engine.build(
+            self._context(),
+            self._baseline(volatility_target_scale=1.0, suggested_position_scale=0.4, direction_bias="long"),
+            self._ai_assessment(direction=-0.4, confidence=0.88, fallback_used=False, override=True, actionable=True),
+            operating_mode="ai_blended",
+        )
+
+        self.assertEqual(target.target_position_qty, Decimal("0"))
+        self.assertIsNotNone(target.decision_outcome)
+        self.assertIn("ai_consistency_filter_blocked", target.decision_outcome.decision_blocked_reasons)
+        self.assertEqual(target.decision_outcome.ai_operating_mode, "ai_assisted")
+
+    def test_ai_decision_maker_uses_baseline_only_as_fallback_source_when_ai_blocked(self) -> None:
+        engine = TargetPositionEngine(
+            settings=AATSSettings.model_validate(
+                {
+                    "default_order_qty": 0.01,
+                    "trading_product_type": "derivatives",
+                    "ai_operating_mode": "ai_decision_maker",
+                    "strategy_short_bias_enabled": True,
+                    "ai_primary_min_confidence": 0.75,
+                    "ai_primary_min_directional_edge": 0.2,
+                }
+            )
+        )
+        context = self._context(product_type="derivatives", current_exposure_side="flat")
+        baseline = self._baseline(
+            direction_bias="long",
+            confidence=0.84,
+            suggested_position_scale=0.8,
+            volatility_target_scale=1.0,
+        )
+
+        target = engine.build(
+            context,
+            baseline,
+            self._ai_assessment(direction=-0.45, confidence=0.9, fallback_used=False, override=False, actionable=False),
+            operating_mode="ai_decision_maker",
+        )
+
+        self.assertIsNotNone(target.ai_decision_intent)
+        self.assertIsNotNone(target.decision_outcome)
+        self.assertEqual(target.decision_outcome.decision_source, "baseline_fallback")
+        self.assertIn("ai_override_not_recommended", target.decision_outcome.decision_blocked_reasons)
+        self.assertGreater(target.target_position_qty, Decimal("0"))
+
+    def test_shadow_build_uses_canonical_ai_decision_maker_path(self) -> None:
+        engine = TargetPositionEngine(
+            settings=AATSSettings.model_validate(
+                {
+                    "default_order_qty": 0.01,
+                    "trading_product_type": "derivatives",
+                    "ai_operating_mode": "ai_decision_maker",
+                    "strategy_short_bias_enabled": True,
+                    "ai_primary_min_confidence": 0.75,
+                    "ai_primary_min_directional_edge": 0.2,
+                }
+            )
+        )
+        context = self._context(product_type="derivatives", current_exposure_side="flat")
+        baseline = self._baseline(
+            direction_bias="long",
+            confidence=0.84,
+            suggested_position_scale=0.8,
+            volatility_target_scale=1.0,
+        )
+        actual_target = engine.build(
+            context,
+            baseline,
+            self._ai_assessment(direction=0.3, confidence=0.88, fallback_used=False, override=True, actionable=True),
+            operating_mode="baseline_only",
+        )
+
+        shadow = engine.build_shadow(
+            context=context,
+            baseline=baseline,
+            ai_assessment=self._ai_assessment(direction=-0.45, confidence=0.9, fallback_used=False, override=True, actionable=True),
+            actual_target=actual_target,
+            operating_mode="ai_decision_maker",
+        )
+
+        self.assertTrue(shadow.would_override_baseline)
+        self.assertIn(shadow.shadow_action_type, {"entry_override", "exit_override", "reverse_override"})
+
+    def test_ai_decision_maker_with_profile_control_emits_native_profile_control_decision(self) -> None:
+        engine = TargetPositionEngine(
+            settings=AATSSettings.model_validate(
+                {
+                    "default_order_qty": 0.01,
+                    "trading_product_type": "derivatives",
+                    "ai_operating_mode": "ai_decision_maker_with_profile_control",
+                    "strategy_short_bias_enabled": True,
+                    "ai_primary_min_confidence": 0.75,
+                    "ai_primary_min_directional_edge": 0.2,
+                }
+            )
+        )
+        context = self._context(product_type="derivatives", current_exposure_side="flat")
+        baseline = self._baseline(
+            direction_bias="long",
+            confidence=0.84,
+            suggested_position_scale=0.8,
+            volatility_target_scale=1.0,
+        )
+        profile_control = ProfileControlDecision(
+            decision_id=context.decision_id,
+            requested_by="ai",
+            requested_profile_id="trend_strict",
+            current_profile_id="trend_normal",
+            applied=True,
+            blocked_reasons=[],
+            decision_reason_codes=["ai_profile_adjustment_accepted"],
+        )
+
+        target = engine.build(
+            context,
+            baseline,
+            self._ai_assessment(direction=-0.45, confidence=0.9, fallback_used=False, override=True, actionable=True),
+            profile_control_decision=profile_control,
+            operating_mode="ai_decision_maker_with_profile_control",
+        )
+
+        self.assertIsNotNone(target.profile_control_decision)
+        self.assertEqual(target.profile_control_decision.requested_profile_id, "trend_strict")
+        self.assertIsNotNone(target.decision_outcome)
+        self.assertEqual(target.decision_outcome.ai_operating_mode, "ai_decision_maker_with_profile_control")
+        self.assertEqual(target.decision_outcome.decision_authority, "final_decision_with_profile_control")
+        self.assertEqual(target.decision_outcome.active_profile_id, "trend_strict")
+        self.assertEqual(target.decision_outcome.profile_control_source, "ai")
 
     def test_derivatives_leverage_reduces_when_microstructure_conflicts(self) -> None:
         settings = AATSSettings.model_validate(

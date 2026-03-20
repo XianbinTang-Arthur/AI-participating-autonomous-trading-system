@@ -8,7 +8,7 @@ from decimal import Decimal
 from aats.events import topics
 from aats.schemas.audit import DecisionAuditRecord
 from aats.schemas.common import EventEnvelope
-from aats.schemas.decision import DecisionContext, PositionTarget
+from aats.schemas.decision import DecisionContext, DecisionOutcome, PositionTarget
 from aats.schemas.execution import ExecutionPlan, FillEvent, OrderIntent, OrderState
 from aats.schemas.exchange import AccountBaselineSnapshot
 from aats.schemas.governance import PolicyDecision, RiskDecision
@@ -60,11 +60,11 @@ class ReplayEngine:
         topics.BASELINE_ASSESSMENTS,
         topics.AI_DECISION_BRIEFS,
         topics.AI_ASSESSMENTS,
-        topics.AI_TAKEOVER_DECISIONS,
         topics.AI_SHADOW_DECISIONS,
         topics.AI_SHADOW_EVALUATIONS,
         topics.AI_DEGRADATION_EVENTS,
         topics.POSITION_TARGETS,
+        topics.DECISION_OUTCOMES,
         topics.POLICY_DECISIONS,
         topics.RISK_DECISIONS,
         topics.EXECUTION_PLANS,
@@ -388,7 +388,6 @@ class ReplayEngine:
                             record.baseline_assessment_ref,
                             record.ai_decision_brief_ref,
                             record.ai_market_assessment_ref,
-                            record.ai_takeover_decision_ref,
                             record.position_target_ref,
                             record.policy_decision_ref,
                             record.risk_decision_ref,
@@ -611,9 +610,18 @@ class ReplayEngine:
                 issues=issues,
                 decision_id=decision_id,
                 events_by_id=events_by_id,
-                ref=record.ai_takeover_decision_ref,
-                ref_name="ai_takeover_decision_ref",
-                expected_topic=topics.AI_TAKEOVER_DECISIONS,
+                ref=record.position_target_ref,
+                ref_name="position_target_ref",
+                expected_topic=topics.POSITION_TARGETS,
+                required=True,
+            )
+            self._validate_ref(
+                issues=issues,
+                decision_id=decision_id,
+                events_by_id=events_by_id,
+                ref=record.decision_outcome_ref,
+                ref_name="decision_outcome_ref",
+                expected_topic=topics.DECISION_OUTCOMES,
                 required=False,
             )
 
@@ -678,6 +686,20 @@ class ReplayEngine:
             target = (
                 PositionTarget.model_validate(target_event.payload)
                 if target_event is not None
+                else None
+            )
+            outcome_event = self._validate_ref(
+                issues=issues,
+                decision_id=decision_id,
+                events_by_id=events_by_id,
+                ref=record.decision_outcome_ref,
+                ref_name="decision_outcome_ref",
+                expected_topic=topics.DECISION_OUTCOMES,
+                required=False,
+            )
+            final_outcome = (
+                DecisionOutcome.model_validate(outcome_event.payload)
+                if outcome_event is not None
                 else None
             )
             policy = (
@@ -817,6 +839,10 @@ class ReplayEngine:
                 issues.append(
                     f"decision_chain_policy_blocked_but_intent_emitted decision_id={decision_id}"
                 )
+            if final_outcome is not None and not final_outcome.finalized:
+                issues.append(
+                    f"decision_chain_outcome_not_finalized decision_id={decision_id}"
+                )
             if risk is not None and (not risk.approved or risk.halt_required) and record.order_intent_refs:
                 issues.append(
                     f"decision_chain_risk_blocked_but_intent_emitted decision_id={decision_id}"
@@ -913,7 +939,6 @@ class ReplayEngine:
                 ("baseline_assessment_ref", record.baseline_assessment_ref),
                 ("ai_decision_brief_ref", record.ai_decision_brief_ref),
                 ("ai_market_assessment_ref", record.ai_market_assessment_ref),
-                ("ai_takeover_decision_ref", record.ai_takeover_decision_ref),
                 ("position_target_ref", record.position_target_ref),
                 ("policy_decision_ref", record.policy_decision_ref),
                 ("risk_decision_ref", record.risk_decision_ref),

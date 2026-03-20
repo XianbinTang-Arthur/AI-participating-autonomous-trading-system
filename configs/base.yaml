@@ -123,7 +123,9 @@ ai_degrade_after_failures: 3
 ai_recover_after_successes: 2
 
 # 指定 AI 主决策最小置信度。
-ai_primary_min_confidence: 0.6
+ai_decision_min_confidence: 0.6
+ai_decision_max_uncertainty: 0.35
+ai_decision_min_directional_edge: 0.2
 
 # 指定 OpenAI 接口基地址。
 openai_base_url: https://api.openai.com

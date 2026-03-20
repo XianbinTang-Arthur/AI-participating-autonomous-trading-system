@@ -122,12 +122,15 @@ class RecoveryPostureEvaluator:
             base_status=normalized,
             latest_reconciliation=report,
         )
+        if self.runtime.kill_switch.halted and resume_check.runnable and recovery_state == "resume_blocked":
+            recovery_state = "manually_halted"
+
         review_required = recovery_state == "review_required"
         rebaseline_available = (
             self.runtime.recovery_policy.operator_rebaseline_supported
             and recovery_state in {"review_required", "resume_blocked"}
         )
-        resume_eligible = recovery_state in {"normal_operation", "rebaseline_completed"} and resume_check.runnable
+        resume_eligible = recovery_state in {"normal_operation", "rebaseline_completed", "manually_halted"} and resume_check.runnable
         safe_to_trade = resume_eligible and not self.runtime.kill_switch.halted
         return RecoveryAssessment(
             recovery_state=recovery_state,

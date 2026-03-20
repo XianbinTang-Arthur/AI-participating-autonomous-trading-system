@@ -8,7 +8,7 @@ from typing import Any
 
 from aats.bootstrap.settings import AATSSettings
 from aats.schemas.common import new_id, utc_now
-from aats.schemas.execution import FillEvent, OrderIntent, OrderState
+from aats.schemas.execution import FillEvent, OrderIntent, OrderState, execution_action_from_position_intent
 from aats.schemas.exchange import ExchangeFill, InstrumentMetadata
 from aats.services.execution_engine.exchange_adapter import ExchangeAdapter
 from aats.services.execution_engine.okx_account import OKXAccountService, datetime_from_ms
@@ -645,6 +645,7 @@ class OKXExecutionAdapter(ExchangeAdapter):
             target_leverage=intent.target_leverage,
             margin_mode=intent.margin_mode,
             exposure_side=intent.exposure_side,
+            execution_action=intent.execution_action,
             position_intent=intent.position_intent,
             cancel_reason=reason,
             execution_error=reason,
@@ -683,6 +684,7 @@ class OKXExecutionAdapter(ExchangeAdapter):
             target_leverage=intent.target_leverage,
             margin_mode=intent.margin_mode,
             exposure_side=intent.exposure_side,
+            execution_action=intent.execution_action,
             position_intent=intent.position_intent,
             cancel_reason=None,
             execution_error=None,
@@ -720,6 +722,7 @@ class OKXExecutionAdapter(ExchangeAdapter):
             target_leverage=intent.target_leverage,
             margin_mode=intent.margin_mode,
             exposure_side=intent.exposure_side,
+            execution_action=intent.execution_action,
             position_intent=intent.position_intent,
             cancel_reason=error,
             execution_error=error,
@@ -757,6 +760,7 @@ class OKXExecutionAdapter(ExchangeAdapter):
             target_leverage=intent.target_leverage,
             margin_mode=intent.margin_mode,
             exposure_side=intent.exposure_side,
+            execution_action=intent.execution_action,
             position_intent=intent.position_intent,
             cancel_reason=error,
             execution_error=error,
@@ -884,6 +888,7 @@ class OKXExecutionAdapter(ExchangeAdapter):
             target_leverage=intent.target_leverage,
             margin_mode=intent.margin_mode,
             exposure_side=intent.exposure_side,
+            execution_action=intent.execution_action,
             position_intent=intent.position_intent,
             cancel_reason=str(order_row.get("cancelSource")) if order_row.get("cancelSource") else None,
             execution_error=None,
@@ -925,6 +930,7 @@ class OKXExecutionAdapter(ExchangeAdapter):
                     target_leverage=intent.target_leverage,
                     margin_mode=intent.margin_mode,
                     exposure_side=intent.exposure_side,
+                    execution_action=intent.execution_action,
                     position_intent=intent.position_intent,
                     liquidity_role="taker",
                     exchange_timestamp=fill.fill_ts or utc_now(),
@@ -944,6 +950,8 @@ class OKXExecutionAdapter(ExchangeAdapter):
         state_payload.setdefault("productType", intent.product_type)
         state_payload.setdefault("marginMode", intent.margin_mode)
         state_payload.setdefault("targetLeverage", str(intent.target_leverage))
+        if intent.execution_action is not None:
+            state_payload.setdefault("executionAction", intent.execution_action)
         state_payload.setdefault("positionIntent", intent.position_intent)
         state_payload.setdefault("posSide", intent.exposure_side)
         if intent.reference_price is not None:
@@ -1097,6 +1105,11 @@ class OKXExecutionAdapter(ExchangeAdapter):
             target_leverage=state.target_leverage,
             margin_mode=state.margin_mode,
             exposure_side=state.exposure_side,
+            execution_action=(
+                state.execution_action
+                or (str(payload.get("executionAction")) if payload.get("executionAction") not in {"", None} else None)
+                or execution_action_from_position_intent(state.position_intent)
+            ),
             position_intent=state.position_intent,
         )
 

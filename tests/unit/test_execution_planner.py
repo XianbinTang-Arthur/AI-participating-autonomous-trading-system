@@ -9,6 +9,30 @@ from aats.services.execution_engine.planner import ExecutionPlanner
 
 
 class TestExecutionPlanner(unittest.TestCase):
+    def test_build_plan_exposes_abstract_execution_action_for_scale_in(self) -> None:
+        planner = ExecutionPlanner(settings=AATSSettings.model_validate({}))
+
+        plan = planner.build_plan(
+            decision_id="decision_scale_in",
+            symbol="BTC-USDT",
+            current_position_qty=Decimal("1"),
+            target_position_qty=Decimal("2"),
+            approved_target_position_qty=Decimal("2"),
+            delta_qty=Decimal("1"),
+            urgency="medium",
+            max_slippage_tolerance_bps=25,
+        )
+
+        self.assertIsNotNone(plan)
+        self.assertEqual(plan.execution_action, "scale_in")
+        self.assertEqual(plan.position_intent, "open_long")
+
+        intent = planner.build_intent(plan=plan)
+
+        self.assertIsNotNone(intent)
+        self.assertEqual(intent.execution_action, "scale_in")
+        self.assertEqual(intent.position_intent, "open_long")
+
     def test_build_intent_preserves_disabled_ai_execution_suggestion_boundary(self) -> None:
         planner = ExecutionPlanner(settings=AATSSettings.model_validate({}))
         plan = ExecutionPlan(
@@ -51,6 +75,7 @@ class TestExecutionPlanner(unittest.TestCase):
         intent = planner.build_intent(plan=translated_plan)
 
         self.assertIsNotNone(intent)
+        self.assertEqual(intent.execution_action, "enter")
         self.assertIsNotNone(intent.ai_execution_parameter_suggestion)
         self.assertEqual(intent.ai_execution_parameter_suggestion.status, "reserved_not_enabled")
         self.assertFalse(intent.ai_execution_parameter_suggestion.accepted_by_execution_planner)
@@ -96,6 +121,7 @@ class TestExecutionPlanner(unittest.TestCase):
         )
 
         self.assertIsNotNone(plan)
+        self.assertEqual(plan.execution_action, "enter")
         self.assertIsNotNone(plan.ai_execution_parameter_suggestion)
         self.assertEqual(plan.ai_execution_parameter_suggestion.status, "shadow_translation")
         self.assertTrue(plan.ai_execution_parameter_suggestion.accepted_by_execution_planner)
@@ -142,6 +168,7 @@ class TestExecutionPlanner(unittest.TestCase):
         )
 
         self.assertIsNotNone(plan)
+        self.assertEqual(plan.execution_action, "enter")
         self.assertEqual(plan.order_type, "limit")
         self.assertEqual(plan.time_in_force, "IOC")
         self.assertEqual(plan.execution_style, "bounded_limit_ioc")
@@ -155,6 +182,7 @@ class TestExecutionPlanner(unittest.TestCase):
         intent = planner.build_intent(plan=plan)
 
         self.assertIsNotNone(intent)
+        self.assertEqual(intent.execution_action, "enter")
         self.assertEqual(intent.order_type, "limit")
         self.assertEqual(intent.time_in_force, "IOC")
         self.assertEqual(intent.limit_price, Decimal("100.0600"))
@@ -194,6 +222,7 @@ class TestExecutionPlanner(unittest.TestCase):
         )
 
         self.assertIsNotNone(plan)
+        self.assertEqual(plan.execution_action, "enter")
         self.assertEqual(plan.order_type, "market")
         self.assertIsNone(plan.limit_price)
         self.assertFalse(plan.ai_execution_parameter_suggestion.applied_to_live_execution)

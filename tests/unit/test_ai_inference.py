@@ -335,7 +335,7 @@ class TestAIInferenceService(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(event)
         self.assertEqual(event.payload["reason_code"], "ai_output_schema_validation_failed")
         self.assertIn("recovery_probe_after", event.payload)
-        self.assertEqual(event.payload["configured_operating_mode"], "ai_primary")
+        self.assertEqual(event.payload["configured_operating_mode"], "ai_decision_maker")
 
     async def test_shadow_outcome_can_trigger_ai_primary_review_and_auto_downgrade(self) -> None:
         service, _context, _baseline, _provider = self._service(
@@ -490,10 +490,15 @@ class TestAIInferenceService(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(evaluation.shadow_gross_pnl, Decimal("5.0"))
         self.assertEqual(evaluation.summary["baseline_fill_backed_decision_count"], 1.0)
         self.assertEqual(evaluation.summary["shadow_fill_backed_decision_count"], 1.0)
+        service.publish_shadow_performance_report(
+            evaluation=evaluation,
+            latest_evaluation_ref="evt_shadow_eval",
+        )
         performance_report = service.event_store.latest(topics.AI_PERFORMANCE_REPORTS)
         self.assertIsNotNone(performance_report)
         self.assertEqual(performance_report.payload["symbol"], "BTC-USDT-SWAP")
         self.assertEqual(performance_report.payload["product_type"], "derivatives")
+        self.assertEqual(performance_report.payload["latest_evaluation_ref"], "evt_shadow_eval")
         self.assertIn("short", performance_report.payload["windows"])
         self.assertEqual(performance_report.payload["summary"]["outperformed_count"], 0)
 
@@ -587,7 +592,7 @@ class TestAIInferenceService(unittest.IsolatedAsyncioTestCase):
 
 
 class TestAIOperatingModes(unittest.TestCase):
-    def test_target_engine_respects_modes(self) -> None:
+    def test_target_engine_respects_canonical_modes(self) -> None:
         baseline = BaselineAssessment(
             decision_id="decision_ai_mode",
             symbol="BTC-USDT",
@@ -617,7 +622,7 @@ class TestAIOperatingModes(unittest.TestCase):
             invalidation_conditions=[],
             risk_tags=[],
             rationale_summary="test",
-            operating_mode="ai_blended",
+            operating_mode="ai_assisted",
             provider_name="fake",
             output_valid=True,
             fallback_used=False,
@@ -648,19 +653,17 @@ class TestAIOperatingModes(unittest.TestCase):
             current_position_qty=0.0,
         )
 
-        advisory_settings = AATSSettings.model_validate({"ai_operating_mode": "ai_advisory", "default_order_qty": 0.001})
-        blended_settings = AATSSettings.model_validate({"ai_operating_mode": "ai_blended", "default_order_qty": 0.001})
-        primary_settings = AATSSettings.model_validate(
-            {"ai_operating_mode": "ai_primary", "default_order_qty": 0.001, "ai_primary_min_confidence": 0.6}
+        assisted_settings = AATSSettings.model_validate({"ai_operating_mode": "ai_assisted", "default_order_qty": 0.001})
+        decision_maker_settings = AATSSettings.model_validate(
+            {"ai_operating_mode": "ai_decision_maker", "default_order_qty": 0.001, "ai_primary_min_confidence": 0.6}
         )
 
-        advisory_target = TargetPositionEngine(settings=advisory_settings).build(context, baseline, ai_short)
-        blended_target = TargetPositionEngine(settings=blended_settings).build(context, baseline, ai_short)
-        primary_target = TargetPositionEngine(settings=primary_settings).build(context, baseline, ai_short)
-        primary_derivatives_target = TargetPositionEngine(
+        assisted_target = TargetPositionEngine(settings=assisted_settings).build(context, baseline, ai_short)
+        decision_maker_target = TargetPositionEngine(settings=decision_maker_settings).build(context, baseline, ai_short)
+        decision_maker_derivatives_target = TargetPositionEngine(
             settings=AATSSettings.model_validate(
                 {
-                    "ai_operating_mode": "ai_primary",
+                    "ai_operating_mode": "ai_decision_maker",
                     "default_order_qty": 0.001,
                     "ai_primary_min_confidence": 0.6,
                     "trading_product_type": "derivatives",
@@ -673,10 +676,9 @@ class TestAIOperatingModes(unittest.TestCase):
             ai_short,
         )
 
-        self.assertGreater(advisory_target.target_position_qty, 0.0)
-        self.assertEqual(blended_target.target_position_qty, 0.0)
-        self.assertEqual(primary_target.target_position_qty, 0.0)
-        self.assertLess(primary_derivatives_target.target_position_qty, 0.0)
+        self.assertGreater(assisted_target.target_position_qty, 0.0)
+        self.assertEqual(decision_maker_target.target_position_qty, 0.0)
+        self.assertLess(decision_maker_derivatives_target.target_position_qty, 0.0)
 
     def test_ai_primary_takeover_is_blocked_by_execution_cooldown(self) -> None:
         baseline = BaselineAssessment(
@@ -761,10 +763,11 @@ class TestAIOperatingModes(unittest.TestCase):
 
         target = TargetPositionEngine(settings=settings).build(context, baseline, ai_long)
 
-        self.assertFalse(target.ai_takeover_allowed)
-        self.assertIn("ai_post_close_cooldown_active", target.ai_takeover_blockers)
-        self.assertIn("ai_low_edge_cooldown_active", target.ai_takeover_blockers)
-        self.assertIn("ai_execution_performance_guard_active", target.ai_takeover_blockers)
+        self.assertIsNotNone(target.decision_outcome)
+        self.assertEqual(target.decision_outcome.decision_source, "baseline_fallback")
+        self.assertIn("ai_post_close_cooldown_active", target.decision_outcome.decision_blocked_reasons)
+        self.assertIn("ai_low_edge_cooldown_active", target.decision_outcome.decision_blocked_reasons)
+        self.assertIn("ai_execution_performance_guard_active", target.decision_outcome.decision_blocked_reasons)
 
 
 if __name__ == "__main__":

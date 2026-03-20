@@ -13,7 +13,13 @@ from aats.schemas.ai_brief import AIDecisionBrief
 from aats.schemas.ai_reports import AIPerformanceReport, AIPerformanceWindowReport
 from aats.schemas.ai_shadow import AIDegradationEvent, AIShadowEvaluation
 from aats.schemas.common import utc_now
-from aats.schemas.decision import AIMarketAssessment, BaselineAssessment, DecisionContext
+from aats.schemas.decision import (
+    AIMarketAssessment,
+    BaselineAssessment,
+    CanonicalAIOperatingMode,
+    DecisionContext,
+    normalize_ai_operating_mode,
+)
 from aats.schemas.features import FeatureSnapshot
 from aats.services.ai_service.evaluator import AIEvaluationTracker
 from aats.services.fee_resolver import EffectiveFeeResolver
@@ -309,9 +315,19 @@ class AIInferenceService:
             },
         )
         self.evaluator.record_shadow_evaluation(evaluation)
-        self._publish_performance_report(evaluation=evaluation)
         self._record_shadow_outcome(evaluation)
         return evaluation, True
+
+    def publish_shadow_performance_report(
+        self,
+        *,
+        evaluation: AIShadowEvaluation,
+        latest_evaluation_ref: str | None,
+    ) -> None:
+        self._publish_performance_report(
+            evaluation=evaluation,
+            latest_evaluation_ref=latest_evaluation_ref,
+        )
 
     async def handle_portfolio_snapshot(self, message: dict) -> None:
         await self.evaluator.handle_portfolio_snapshot(message)
@@ -369,7 +385,9 @@ class AIInferenceService:
             outcome_state = "monitoring"
         return {
             "configured_operating_mode": self.settings.ai_operating_mode,
+            "canonical_configured_operating_mode": self.settings.canonical_ai_operating_mode,
             "effective_operating_mode": self.effective_operating_mode(),
+            "canonical_effective_operating_mode": self.canonical_effective_operating_mode(),
             "provider": self.settings.ai_provider,
             "configured": self.settings.ai_provider_configured,
             "provider_ready": self.provider is not None,
@@ -461,7 +479,7 @@ class AIInferenceService:
             return
         prompt = self.prompt_builder.build(
             brief=brief,
-            operating_mode="ai_primary_shadow",
+            operating_mode="ai_decision_maker",
             include_execution_suggestion=self.settings.ai_execution_suggestion_mode != "disabled",
         )
         try:
@@ -479,7 +497,7 @@ class AIInferenceService:
                 brief=brief,
                 context=context,
                 baseline=baseline,
-                operating_mode="ai_primary",
+                operating_mode="ai_decision_maker",
                 provider_name=response.provider_name,
                 provider_request_id=response.request_id,
                 provider_latency_ms=response.latency_ms,
@@ -495,7 +513,7 @@ class AIInferenceService:
                 brief=brief,
                 context=context,
                 baseline=baseline,
-                operating_mode="ai_primary",
+                operating_mode="ai_decision_maker",
                 fallback_reason="ai_shadow_fallback",
                 degraded=self._degraded,
                 output_valid=False,
@@ -552,6 +570,9 @@ class AIInferenceService:
             return "baseline_only"
         return self.settings.ai_operating_mode
 
+    def canonical_effective_operating_mode(self) -> CanonicalAIOperatingMode:
+        return normalize_ai_operating_mode(self.effective_operating_mode())
+
     def should_attempt_assessment(self) -> bool:
         if self.settings.ai_operating_mode == "baseline_only":
             return False
@@ -583,8 +604,8 @@ class AIInferenceService:
             product_type=self.settings.trading_product_type,
             margin_mode=self.settings.margin_mode,
             allowed_symbols=tuple(self.settings.allowed_symbols),
-            configured_operating_mode=self.settings.ai_operating_mode,
-            effective_operating_mode=self.effective_operating_mode(),
+            configured_operating_mode=self.settings.canonical_ai_operating_mode,
+            effective_operating_mode=self.canonical_effective_operating_mode(),
             degraded=self._degraded or self._outcome_review_required,
             provider_degraded=self._degraded,
             outcome_review_required=self._outcome_review_required,
@@ -675,7 +696,7 @@ class AIInferenceService:
 
         self._outcome_review_required = True
         self._outcome_auto_downgraded = (
-            self.settings.ai_auto_downgrade_enabled and self.settings.ai_operating_mode == "ai_primary"
+            self.settings.ai_auto_downgrade_enabled and self.settings.canonical_ai_operating_mode == "ai_decision_maker"
         )
         self._outcome_degradation_reason = reason_codes[0]
         self._last_outcome_degraded_at = utc_now()
@@ -685,27 +706,27 @@ class AIInferenceService:
             timeframe=evaluation.timeframe,
         )
 
-    def _publish_performance_report(self, *, evaluation: AIShadowEvaluation) -> None:
+    def _publish_performance_report(
+        self,
+        *,
+        evaluation: AIShadowEvaluation,
+        latest_evaluation_ref: str | None,
+    ) -> None:
         rows = [
             item
             for item in self.evaluator.shadow_evaluations_recent(limit=40)
             if item.symbol == evaluation.symbol and item.timeframe == evaluation.timeframe
         ]
-        latest_ref = self.event_store.latest_by_topic_scoped(
-            topics.AI_SHADOW_EVALUATIONS,
-            scope=self._runtime_scope(),
-            key=evaluation.symbol,
-        )
         report = AIPerformanceReport(
             symbol=evaluation.symbol,
             timeframe=evaluation.timeframe,
             product_type=self.settings.trading_product_type,
             margin_mode=self.settings.margin_mode,
             allowed_symbols=tuple(self.settings.allowed_symbols),
-            configured_operating_mode=self.settings.ai_operating_mode,
-            effective_operating_mode=self.effective_operating_mode(),
+            configured_operating_mode=self.settings.canonical_ai_operating_mode,
+            effective_operating_mode=self.canonical_effective_operating_mode(),
             window_count=len(rows),
-            latest_evaluation_ref=None if latest_ref is None else latest_ref.event_id,
+            latest_evaluation_ref=latest_evaluation_ref,
             latest_evaluation_id=evaluation.evaluation_id,
             latest_status="review_required" if self._outcome_review_required else ("healthy" if evaluation.shadow_outperformed else "underperforming"),
             review_required=self._outcome_review_required,

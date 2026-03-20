@@ -1,357 +1,232 @@
-﻿import { actionButton, callout, kvList, pill, summaryStrip, surfaceCard } from "../components.js";
-import { booleanWord, escapeHtml, formatMaybeTimestamp, formatNumber, listOrDash } from "../formatters.js";
-import { localizeError, readableState } from "../terms.js";
+import { callout, kvList, summaryStrip, surfaceCard } from "../components.js";
+import { escapeHtml, formatMaybeTimestamp, formatNumber, listOrDash } from "../formatters.js";
+import { readableState } from "../terms.js";
 
-const RISK_LEVEL_LABELS = {
-  conservative: "保守",
-  normal: "常规",
-  aggressive: "激进",
-};
-
-const CAPABILITY_STATUS_LABELS = {
-  reserved_not_enabled: "保留未启用",
-  diagnostic_only: "仅用于诊断",
-  planner_recorded_suggestion_only: "仅记录建议",
-  planner_translated_execution_preview: "仅生成影子翻译",
-  enabled_live: "允许进入实盘执行",
-};
-
-const MANUAL_PROFILE_OPTIONS = [
-  { profileId: "trend_aggressive", label: "趋势激进", tone: "primary" },
-  { profileId: "trend_normal", label: "趋势标准", tone: "secondary" },
-  { profileId: "trend_strict", label: "趋势严格", tone: "secondary" },
-  { profileId: "range_defensive", label: "范围防御", tone: "warning" },
-  { profileId: "high_volatility_defensive", label: "高波动防御", tone: "warning" },
-  { profileId: "execution_degraded_safe", label: "执行降级安全", tone: "warning" },
+const PROFILE_OPTIONS = [
+  ["trend_aggressive", "趋势激进", "primary"],
+  ["trend_normal", "趋势标准", "secondary"],
+  ["trend_strict", "趋势严格", "secondary"],
+  ["range_defensive", "范围防御", "warning"],
+  ["high_volatility_defensive", "高波动防御", "warning"],
+  ["execution_degraded_safe", "执行降级安全", "warning"],
 ];
 
 export function renderAIConfigView(data) {
   const session = data.session || {};
-  const runtimeProfiles = data.runtimeProfiles || {};
+  const summary = data.summary || {};
+  const aiState = summary.ai || {};
+  const runtimeProfiles = summary.runtime_profile || {};
   const runtimePayload = runtimeProfiles.current_runtime_payload || {};
-  const strategyProfiles = data.strategyProfiles || {};
+  const strategyProfiles = summary.strategy_profile || {};
   const activation = strategyProfiles.activation || {};
   const activeRevision = strategyProfiles.active_revision || null;
-  const pendingRevision = strategyProfiles.pending_revision || null;
-  const latestRecommendation = strategyProfiles.latest_recommendation || null;
-  const aiAdvice = latestRecommendation?.ai_advice || null;
-  const optimizationReport = strategyProfiles.latest_optimization_report || {};
-  const selectionDecision = strategyProfiles.latest_selection_decision || {};
-  const autoRollbackPolicy = strategyProfiles.auto_rollback_policy || {};
-  const stagedAutoRollbackPolicy = strategyProfiles.auto_rollback_policy_staged || null;
-  const autoRollbackPolicyHistory = strategyProfiles.auto_rollback_policy_history || [];
-  const activationPolicy = strategyProfiles.activation_policy || {};
-  const stagedActivationPolicy = strategyProfiles.activation_policy_staged || null;
-  const activationPolicyHistory = strategyProfiles.activation_policy_history || [];
-  const executionSuggestionCapability = strategyProfiles.execution_parameter_suggestion_capability || {};
-  const profileSpace = strategyProfiles.profile_space || {};
-  const comparisonReport = strategyProfiles.comparison_report || {};
+  const latestSelectionDecision = strategyProfiles.latest_selection_decision || null;
+  const latestProfileControl = aiState.latest_profile_control_decision || null;
   const activationHistory = Array.isArray(strategyProfiles.activation_history) ? strategyProfiles.activation_history : [];
+  const summaryError = data.error || null;
+  const overlay = describeOverlay({ activationHistory, activeRevision });
   const canAdmin = session.role === "admin" || session.identity === "api_key_write";
-  const runtimeProfilesError = data.errors?.runtimeProfiles || null;
-  const strategyProfilesError = data.errors?.strategyProfiles || null;
-  const overlaySource = describeOverlaySource({ activation, activationHistory, activeRevision });
 
   return `
     <div class="panel-grid ai-config-layout">
       <div class="span-6 workspace-stack">
         ${surfaceCard({
-          title: "当前运行参数",
-          kicker: "生效中的档位上下文",
-          copy: "先确认当前真正生效的参数和产品范围，再决定是否要调整档位、回滚策略或激活策略。",
-          content: runtimeProfilesError
-            ? callout({ title: "暂时无法读取运行参数", copy: runtimeProfilesError, pills: [pill("需要管理员权限", "warning")] })
-            : summaryStrip([
-                {
-                  label: "运行基础来源",
-                  value: readableState(runtimeProfiles.profile_source || "env_fallback"),
-                  meta: "这里显示基础运行参数从哪里来；不会因为右侧档位切换而改写环境文件",
-                  tone: runtimeProfiles.management_enabled ? "positive" : "warning",
-                },
-                {
-                  label: "当前覆盖来源",
-                  value: overlaySource.label,
-                  meta: overlaySource.meta,
-                  tone: overlaySource.tone,
-                },
-                {
-                  label: "当前治理档位",
-                  value: readableProfile(activeRevision?.profile_label || latestRecommendation?.recommended_profile_id, "暂无已采纳档位"),
-                  meta: latestRecommendation
-                    ? `最近建议 ${readableState(latestRecommendation.decision_status || "pending")}；可在右侧继续采纳、回滚或手动切换`
-                    : "当前没有新的 AI 档位建议",
-                  tone: activeRevision || latestRecommendation ? "info" : "neutral",
-                },
-                {
-                  label: "主交易标的",
-                  value: textOrFallback(runtimePayload.default_symbol, "待配置"),
-                  meta: listText(runtimePayload.allowed_symbols, "当前没有额外允许标的"),
-                  tone: "info",
-                },
-                {
-                  label: "产品类型",
-                  value: readableState(runtimePayload.trading_product_type || "unknown"),
-                  meta: readableState(runtimePayload.margin_mode || "unknown"),
-                  tone: "info",
-                },
-                {
-                  label: "基础下单量",
-                  value: formatNumber(runtimePayload.default_order_qty),
-                  meta: `名义上限 ${formatNumber(runtimePayload.max_notional_per_symbol)}`,
-                  tone: "info",
-                },
-              ]),
+          title: "运行参数概览",
+          kicker: "运行状态",
+          copy: "这里只保留当前真实生效的运行参数与档位来源，避免把说明性信息和控制面混在一起。",
+          content: summaryError
+            ? callout({ title: "暂时无法读取 AI 配置摘要", copy: summaryError })
+            : `
+                ${summaryStrip([
+                  {
+                    label: "参数来源",
+                    value: readableState(runtimeProfiles.profile_source || "env_fallback"),
+                    meta: runtimeProfiles.control_plane_status === "deprecated_readonly"
+                      ? "运行时参数仍由环境文件决定，页面只读展示。"
+                      : "页面当前只读展示已经生效的参数。",
+                    tone: "info",
+                  },
+                  {
+                    label: "当前覆盖来源",
+                    value: overlay.label,
+                    meta: overlay.meta,
+                    tone: overlay.tone,
+                  },
+                  {
+                    label: "当前策略档位",
+                    value: readableProfile(activeRevision?.profile_label || activation.active_profile_id, "待确认"),
+                    meta: activeRevision?.profile_id || "当前暂无已登记的活动策略档位。",
+                    tone: activeRevision ? "positive" : "neutral",
+                  },
+                  {
+                    label: "主交易标的",
+                    value: textOrFallback(runtimePayload.default_symbol, "待配置"),
+                    meta: listText(runtimePayload.allowed_symbols, "当前没有额外允许交易的标的。"),
+                    tone: "info",
+                  },
+                  {
+                    label: "产品与保证金",
+                    value: readableState(runtimePayload.trading_product_type || "unknown"),
+                    meta: readableState(runtimePayload.margin_mode || "unknown"),
+                    tone: "info",
+                  },
+                  {
+                    label: "基础下单量",
+                    value: formatNumber(runtimePayload.default_order_qty),
+                    meta: `单标的名义上限 ${formatNumber(runtimePayload.max_notional_per_symbol)}`,
+                    tone: "info",
+                  },
+                ])}
+                ${kvList([
+                  ["AI 运行模式", readableState(aiState.effective_operating_mode || "baseline_only"), `配置值 ${readableState(aiState.configured_operating_mode || "baseline_only")}`],
+                  ["影子评估", aiState.shadow_mode_enabled ? "常开" : "未开启", readableShadowMeta(aiState.shadow_summary)],
+                ])}
+              `,
         })}
+
         ${surfaceCard({
-          title: "管理员手动切换档位",
-          kicker: "安全入口",
-          copy: "这里直接切换已注册档位，只覆盖运行时内存参数，不回写环境文件。",
-          classes: "manual-profile-card",
-          content: strategyProfilesError
-            ? ""
-            : renderManualProfileSwitchPanel({
-                canAdmin,
-                activeRevision,
-              }),
+          title: "策略档位切换",
+          kicker: "人工入口",
+          copy: "管理员手动切换仍是最高优先级入口。切换前会检查安全门槛，并留下审计记录。",
+          content: summaryError
+            ? callout({ title: "暂时无法读取 AI 配置摘要", copy: summaryError })
+            : renderManualProfilePanel({ activeRevision, canAdmin }),
         })}
       </div>
 
       <div class="span-6 workspace-stack">
         ${surfaceCard({
-          title: "当前档位与激活结论",
-          kicker: "当前档位 / AI 推荐",
-          copy: "这里只保留一条主链结论：系统候选档位、AI 辅助意见，以及这次是否允许自动切换。",
-          actions: renderStrategyActions({ canAdmin, latestRecommendation, pendingRevision, activation }),
-          content: strategyProfilesError
-            ? callout({ title: "暂时无法读取 AI 配置状态", copy: strategyProfilesError, pills: [pill("需要管理员权限", "warning")] })
+          title: "档位概览",
+          kicker: "档位状态",
+          copy: "这里只展示当前档位、最近一次自动切换结论和阻断原因，供当前判断使用。",
+          content: summaryError
+            ? callout({
+                title: "暂时无法读取 AI 配置状态",
+                copy: summaryError,
+              })
             : `
                 ${summaryStrip([
                   {
                     label: "当前档位",
-                    value: readableProfile(activeRevision?.profile_label || activeRevision?.profile_id, "待确认"),
-                    meta: readableRiskLevel(activeRevision?.risk_level),
+                    value: readableProfile(activeRevision?.profile_label || activation.active_profile_id, "待确认"),
+                    meta: activeRevision?.profile_id || "尚未读取到活动策略档位。",
                     tone: activeRevision ? "positive" : "neutral",
                   },
                   {
-                    label: "系统候选档位",
-                    value: readableProfile(optimizationReport.recommended_profile_id, "暂无候选"),
-                    meta: optimizationReport.created_at ? `快照 ${formatMaybeTimestamp(optimizationReport.created_at)}` : "当前还没有最新对比结果",
-                    tone: optimizationReport.recommended_profile_id ? "warning" : "neutral",
+                    label: "最近一次自动切换结论",
+                    value: latestProfileControl
+                      ? latestProfileControl.applied
+                        ? "AI 自动切换已执行"
+                        : "AI 自动切换未执行"
+                      : readableState(latestSelectionDecision?.decision_status || "none"),
+                    meta: latestProfileControl
+                      ? readableProfile(latestProfileControl.requested_profile_id, "当前暂无新的自动切换请求")
+                      : readableSelectionMeta(latestSelectionDecision),
+                    tone: latestProfileControl?.applied ? "info" : "neutral",
                   },
                   {
-                    label: "AI 辅助意见",
-                    value: readableProfile(aiAdvice?.preferred_profile_id, "当前没有 AI 辅助意见"),
-                    meta: readableAIAdviceMeta(aiAdvice, latestRecommendation),
-                    tone: aiAdvice?.preferred_profile_id ? "info" : "neutral",
+                    label: "当前档位来源",
+                    value: overlay.label,
+                    meta: overlay.meta,
+                    tone: overlay.tone,
                   },
                   {
-                    label: "激活结论",
-                    value: readableState(selectionDecision.decision_status || "unknown"),
-                    meta: readableActivationMeta(selectionDecision),
-                    tone: selectionDecision.candidate_profile_id ? "positive" : "neutral",
+                    label: "影子评估状态",
+                    value: aiState.shadow_mode_enabled ? "自动常开" : "未开启",
+                    meta: readableShadowMeta(aiState.shadow_summary),
+                    tone: aiState.shadow_mode_enabled ? "info" : "neutral",
                   },
                 ])}
                 ${kvList([
-                  ["推荐来源", readableRecommendationSource(latestRecommendation), readableActivationSource(selectionDecision)],
-                  ["推荐理由", readableReasonSummary(latestRecommendation, optimizationReport), readableAIAdviceSummary(aiAdvice)],
-                  ["未切换原因", readableCodeList(selectionDecision.blocked_reasons, "当前没有记录阻断原因"), readableCodeList(latestRecommendation?.fallback_reason_code ? [latestRecommendation.fallback_reason_code, latestRecommendation.fallback_reason_detail].filter(Boolean) : [], "当前没有回退原因")],
-                  ["下一步动作", readableState(selectionDecision.recommended_action || "unknown"), readableCodeList(selectionDecision.notes, "当前没有额外决策说明")],
-                  ["当前档位摘要", profileSummary(activeRevision), "这里展示当前档位最关键的决策门槛与节奏参数"],
-                  ["档位空间", `${formatNumber((profileSpace.registered_profiles || []).length || 0, 0)} 个已注册档位`, optimizationReport.score_delta_vs_active !== undefined ? `候选相对当前领先 ${formatNumber(optimizationReport.score_delta_vs_active || 0, 3)}` : "当前还没有最新领先分差"],
+                  [
+                    "自动切换阻断原因",
+                    latestProfileControl
+                      ? readableReasons(latestProfileControl.blocked_reasons)
+                      : readableReasons(latestSelectionDecision?.blocked_reasons),
+                    latestProfileControl?.frozen_by_admin_override
+                      ? `管理员覆盖冻结到 ${formatMaybeTimestamp(latestProfileControl.freeze_until)}`
+                      : "当前没有额外冻结说明。",
+                  ],
+                  [
+                    "当前档位摘要",
+                    profileSummary(activeRevision),
+                    "展示当前档位最关键的节奏、门槛和风控参数。",
+                  ],
                 ])}
               `,
         })}
       </div>
-
-      <div class="span-12">
-        ${surfaceCard({
-          title: "自动回滚策略生命周期",
-          kicker: "暂存 / 审批 / 冻结",
-          copy: "自动回滚策略单独成卡，明确展示暂存、审批和冻结状态。",
-          classes: "policy-card",
-          content: strategyProfilesError ? "" : renderAutoRollbackPolicyPanel(autoRollbackPolicy, stagedAutoRollbackPolicy, autoRollbackPolicyHistory, canAdmin),
-        })}
-      </div>
-
-      <div class="span-12">
-        ${surfaceCard({
-          title: "档位激活策略",
-          kicker: "真实放权边界",
-          copy: "这里控制胜出档位何时允许真正进入激活链路。",
-          classes: "policy-card",
-          content: strategyProfilesError ? "" : renderActivationPolicyPanel(activationPolicy, stagedActivationPolicy, activationPolicyHistory, canAdmin),
-        })}
-      </div>
-
-      <div class="span-12">
-        ${surfaceCard({
-          title: "受限执行建议",
-          kicker: "AI 执行边界",
-          copy: "明确告诉用户当前执行建议处于哪一层，避免把诊断能力误解成真实自动执行。",
-          content: strategyProfilesError ? callout({ title: "暂时无法读取执行边界", copy: strategyProfilesError, pills: [pill("等待数据", "warning")] }) : renderExecutionSuggestionCapability(executionSuggestionCapability),
-        })}
-      </div>
     </div>
   `;
 }
 
-function renderStrategyActions({ canAdmin, latestRecommendation, pendingRevision, activation }) {
-  const actions = [];
-  if (canAdmin) {
-    actions.push(
-      actionButton(
-        latestRecommendation?.decision_status === "pending" ? "重新评估并生成建议" : "立即评估并生成建议",
-        "evaluate-strategy-profile",
-        "",
-        "primary"
-      )
-    );
-    actions.push(
-      actionButton(
-        latestRecommendation?.decision_status === "pending" ? "重新评估并允许自动切换" : "评估并允许自动切换",
-        "evaluate-strategy-profile-with-auto-switch",
-        "",
-        "warning"
-      )
-    );
-  }
-  if (canAdmin && latestRecommendation?.recommendation_id && latestRecommendation.decision_status === "pending") {
-    actions.push(actionButton("立即采纳建议", "accept-strategy-profile-now", latestRecommendation.recommendation_id, "primary"));
-    actions.push(actionButton("保存为待审批", "stage-strategy-profile", latestRecommendation.recommendation_id, "secondary"));
-  }
-  if (canAdmin && pendingRevision?.revision_id) {
-    actions.push(actionButton("激活待审批档位", "activate-pending-strategy-profile", pendingRevision.revision_id, "secondary"));
-  }
-  if (canAdmin && activation?.previous_active_revision_id) {
-    actions.push(actionButton("回滚到上一稳定档位", "rollback-strategy-profile", activation.previous_active_revision_id, "warning"));
-  }
-  return actions.length ? `<div class="table-actions">${actions.join("")}</div>` : "";
-}
-
-function renderAutoRollbackPolicyPanel(policy, stagedPolicy = null, history = [], canAdmin = false) {
-  const editable = stagedPolicy || policy || {};
-  return `
-    <div class="policy-summary-grid">
-      ${kvList([
-        ["自动回滚开关", policy.enabled ? "已启用" : "未启用", `${readableState(policy.policy_status || "unknown")} / ${Boolean(policy.effective) ? "当前生效" : "尚未生效"}`],
-        ["复核与阈值", `仅在需复核时触发 ${booleanWord(policy.review_required_only)}`, `最少成交 ${formatNumber(policy.min_trade_count || 0, 0)} / 冷却 ${formatNumber(policy.cooldown_seconds || 0, 0)} 秒`],
-      ])}
-      ${kvList([
-        ["放权矩阵", `允许标的 ${listText(policy.matrix_allowed_symbols, "当前没有限制标的")}`, `市场状态 ${readableCodeList(policy.matrix_allowed_regimes, "当前没有限制市场状态")} / 档位 ${readableCodeList(policy.matrix_allowed_profiles, "当前没有限制档位")}`],
-        ["审批 / 冻结", `${textOrFallback(policy.approved_by, "待审批")} / ${policy.frozen ? "已冻结" : "正常"}`, policy.frozen ? `冻结原因 ${textOrFallback(policy.freeze_reason, "未填写")}` : `历史记录 ${formatNumber(history.length || 0, 0)} 条`],
-      ])}
-    </div>
-    <form id="autoRollbackPolicyForm" class="field-grid policy-form-grid">
-      <div class="panel-grid policy-form-panel">
-        <div class="span-3"><label class="field-label" for="autoRollbackEnabled">是否启用</label><select id="autoRollbackEnabled" ${canAdmin ? "" : "disabled"}><option value="true" ${editable.enabled ? "selected" : ""}>已启用</option><option value="false" ${editable.enabled ? "" : "selected"}>已关闭</option></select></div>
-        <div class="span-3"><label class="field-label" for="autoRollbackReviewOnly">仅在需复核时触发</label><select id="autoRollbackReviewOnly" ${canAdmin ? "" : "disabled"}><option value="true" ${editable.review_required_only !== false ? "selected" : ""}>是</option><option value="false" ${editable.review_required_only === false ? "selected" : ""}>否</option></select></div>
-        <div class="span-3"><label class="field-label" for="autoRollbackMinTrades">最少成交笔数</label><input id="autoRollbackMinTrades" type="number" step="1" min="0" value="${formatNumber(editable.min_trade_count || 0, 0)}" ${canAdmin ? "" : "disabled"}></div>
-        <div class="span-3"><label class="field-label" for="autoRollbackCooldown">冷却秒数</label><input id="autoRollbackCooldown" type="number" step="1" min="0" value="${formatNumber(editable.cooldown_seconds || 0, 0)}" ${canAdmin ? "" : "disabled"}></div>
-        <div class="span-6"><label class="field-label" for="autoRollbackSymbols">允许标的列表（逗号分隔）</label><input id="autoRollbackSymbols" type="text" value="${escapeHtml((editable.matrix_allowed_symbols || []).join(", "))}" ${canAdmin ? "" : "disabled"}></div>
-        <div class="span-6"><label class="field-label" for="autoRollbackRegimes">允许市场状态列表（逗号分隔）</label><input id="autoRollbackRegimes" type="text" value="${escapeHtml((editable.matrix_allowed_regimes || []).join(", "))}" ${canAdmin ? "" : "disabled"}></div>
-        <div class="span-12"><label class="field-label" for="autoRollbackProfiles">允许档位列表（逗号分隔）</label><input id="autoRollbackProfiles" type="text" value="${escapeHtml((editable.matrix_allowed_profiles || []).join(", "))}" ${canAdmin ? "" : "disabled"}></div>
-        <div class="span-12"><label class="field-label" for="autoRollbackReason">暂存原因</label><input id="autoRollbackReason" type="text" value="${escapeHtml(stagedPolicy?.update_reason || "页面暂存自动回滚策略")}" ${canAdmin ? "" : "disabled"}></div>
-      </div>
-      <div class="stack-actions policy-actions">
-        <button class="primary-button" type="submit" ${canAdmin ? "" : "disabled"}>暂存策略</button>
-        ${actionButton("审批暂存版本", "approve-auto-rollback-policy", stagedPolicy?.policy_id || "", "secondary")}
-        ${actionButton(policy.frozen ? "解除冻结" : "冻结当前策略", "toggle-freeze-auto-rollback-policy", policy.frozen ? "false" : "true", policy.frozen ? "secondary" : "warning")}
-      </div>
-    </form>
-  `;
-}
-
-function renderActivationPolicyPanel(policy, stagedPolicy = null, history = [], canAdmin = false) {
-  const editable = stagedPolicy || policy || {};
-  return `
-    <div class="policy-summary-grid">
-      ${kvList([
-        ["激活策略开关", policy.enabled ? "已启用" : "未启用", `${readableState(policy.policy_status || "unknown")} / ${Boolean(policy.effective) ? "当前生效" : "尚未生效"}`],
-        ["激活阈值", `综合分 ${formatNumber(policy.min_composite_score || 0, 3)} / 回放得分 ${formatNumber(policy.min_offline_replay_score || 0, 3)}`, `推荐强度 ${formatNumber(policy.min_recommendation_strength || 0, 3)}`],
-      ])}
-      ${kvList([
-        ["安全保护", `要求正向回放 ${booleanWord(policy.require_positive_replay_consensus)}`, `影子复核阻断 ${booleanWord(policy.disallow_when_shadow_review_required)}`],
-        ["放权矩阵", `允许标的 ${listText(policy.matrix_allowed_symbols, "当前没有限制标的")}`, `市场状态 ${readableCodeList(policy.matrix_allowed_regimes, "当前没有限制市场状态")} / 档位 ${readableCodeList(policy.matrix_allowed_profiles, "当前没有限制档位")}`],
-        ["审批 / 冻结", `${textOrFallback(policy.approved_by, "待审批")} / ${policy.frozen ? "已冻结" : "正常"}`, policy.frozen ? `冻结原因 ${textOrFallback(policy.freeze_reason, "未填写")}` : `历史记录 ${formatNumber(history.length || 0, 0)} 条`],
-      ])}
-    </div>
-    <form id="activationPolicyForm" class="field-grid policy-form-grid">
-      <div class="panel-grid policy-form-panel">
-        <div class="span-3"><label class="field-label" for="activationPolicyEnabled">是否启用</label><select id="activationPolicyEnabled" ${canAdmin ? "" : "disabled"}><option value="true" ${editable.enabled ? "selected" : ""}>已启用</option><option value="false" ${editable.enabled ? "" : "selected"}>已关闭</option></select></div>
-        <div class="span-3"><label class="field-label" for="activationPolicyComposite">最低综合分</label><input id="activationPolicyComposite" type="number" step="0.001" value="${formatNumber(editable.min_composite_score || 0, 3)}" ${canAdmin ? "" : "disabled"}></div>
-        <div class="span-3"><label class="field-label" for="activationPolicyReplay">最低回放得分</label><input id="activationPolicyReplay" type="number" step="0.001" value="${formatNumber(editable.min_offline_replay_score || 0, 3)}" ${canAdmin ? "" : "disabled"}></div>
-        <div class="span-3"><label class="field-label" for="activationPolicyStrength">最低推荐强度</label><input id="activationPolicyStrength" type="number" step="0.001" value="${formatNumber(editable.min_recommendation_strength || 0, 3)}" ${canAdmin ? "" : "disabled"}></div>
-        <div class="span-3"><label class="field-label" for="activationPolicyReplayConsensus">要求正向回放</label><select id="activationPolicyReplayConsensus" ${canAdmin ? "" : "disabled"}><option value="true" ${editable.require_positive_replay_consensus ? "selected" : ""}>是</option><option value="false" ${editable.require_positive_replay_consensus ? "" : "selected"}>否</option></select></div>
-        <div class="span-3"><label class="field-label" for="activationPolicyShadowReview">影子复核阻断</label><select id="activationPolicyShadowReview" ${canAdmin ? "" : "disabled"}><option value="true" ${editable.disallow_when_shadow_review_required ? "selected" : ""}>是</option><option value="false" ${editable.disallow_when_shadow_review_required ? "" : "selected"}>否</option></select></div>
-        <div class="span-6"><label class="field-label" for="activationPolicySymbols">允许标的列表（逗号分隔）</label><input id="activationPolicySymbols" type="text" value="${escapeHtml((editable.matrix_allowed_symbols || []).join(", "))}" ${canAdmin ? "" : "disabled"}></div>
-        <div class="span-6"><label class="field-label" for="activationPolicyRegimes">允许市场状态列表（逗号分隔）</label><input id="activationPolicyRegimes" type="text" value="${escapeHtml((editable.matrix_allowed_regimes || []).join(", "))}" ${canAdmin ? "" : "disabled"}></div>
-        <div class="span-6"><label class="field-label" for="activationPolicyProfiles">允许档位列表（逗号分隔）</label><input id="activationPolicyProfiles" type="text" value="${escapeHtml((editable.matrix_allowed_profiles || []).join(", "))}" ${canAdmin ? "" : "disabled"}></div>
-        <div class="span-6"><label class="field-label" for="activationPolicyReason">暂存原因</label><input id="activationPolicyReason" type="text" value="${escapeHtml(stagedPolicy?.update_reason || "页面暂存激活策略")}" ${canAdmin ? "" : "disabled"}></div>
-      </div>
-      <div class="stack-actions policy-actions">
-        <button class="primary-button" type="submit" ${canAdmin ? "" : "disabled"}>暂存激活策略</button>
-        ${actionButton("审批暂存版本", "approve-activation-policy", stagedPolicy?.policy_id || "", "secondary")}
-        ${actionButton(policy.frozen ? "解除冻结" : "冻结当前策略", "toggle-freeze-activation-policy", policy.frozen ? "false" : "true", policy.frozen ? "secondary" : "warning")}
-      </div>
-    </form>
-  `;
-}
-
-function renderExecutionSuggestionCapability(capability) {
-  return kvList([
-    ["状态", readableCapabilityStatus(capability.status || capability.capability_status), capability.applied_to_live_execution ? "当前允许进入真实执行" : "当前只在诊断或影子翻译层"],
-    ["允许字段", listText(capability.allowed_fields, "当前没有允许字段说明"), listText(capability.blocked_fields, "当前没有阻断字段说明")],
-    ["执行边界", textOrFallback(capability.translation_mode, "待确认"), textOrFallback(capability.live_translation_guard, "当前仍由确定性执行器做最终裁剪")],
-    ["说明", textOrFallback(capability.description, "当前没有额外说明"), textOrFallback(capability.preview_note, "执行建议不会直接改写真实委托")],
-  ]);
-}
-
-function renderManualProfileSwitchPanel({ canAdmin, activeRevision }) {
+function renderManualProfilePanel({ activeRevision, canAdmin }) {
   const activeProfileId = activeRevision?.profile_id || "";
-  const activeProfileLabel = readableProfile(activeRevision?.profile_label || activeProfileId, "待确认");
-  const buttons = MANUAL_PROFILE_OPTIONS.map(({ profileId, label, tone }) => {
-    const isActive = profileId === activeProfileId;
+  const buttons = PROFILE_OPTIONS.map(([profileId, label, tone]) => {
+    const active = profileId === activeProfileId;
+    const className = active ? "secondary-button" : buttonClass(tone);
+    const disabled = !canAdmin || active ? "disabled" : "";
+    const title = !canAdmin
+      ? "当前账号只有查看权限，不能手动切换策略档位。"
+      : active
+        ? "当前策略档位已经生效，无需重复切换。"
+        : `切换到 ${label}`;
     return `
       <button
-        class="${escapeHtml(isActive ? "secondary-button" : buttonToneClass(tone))}"
+        class="${escapeHtml(className)}"
         data-action="manual-activate-strategy-profile"
         data-value="${escapeHtml(profileId)}"
-        ${!canAdmin || isActive ? "disabled" : ""}
-        title="${escapeHtml(
-          !canAdmin
-            ? "只有管理员可以执行手动档位切换"
-            : isActive
-              ? "当前档位已经生效，无需重复切换"
-              : `切换到 ${label}`
-        )}"
-      >${escapeHtml(isActive ? `${label}（当前）` : label)}</button>
+        title="${escapeHtml(title)}"
+        ${disabled}
+      >${escapeHtml(active ? `${label}（当前）` : label)}</button>
     `;
   }).join("");
 
   return `
-    <div class="manual-profile-switch-grid">
-      <div class="kv-list">
-        <div class="kv-row">
-          <span class="kv-row__label">当前手动切换目标</span>
-          <strong class="kv-row__value">${escapeHtml(activeProfileLabel)}</strong>
-          <span class="meta-copy">只允许切换已注册档位；切换前仍会检查活动委托等安全门禁</span>
-        </div>
-        <div class="kv-row">
-          <span class="kv-row__label">操作说明</span>
-          <strong class="kv-row__value">${canAdmin ? "点击下方按钮即可立即切换" : "当前账号只有查看权限"}</strong>
-          <span class="meta-copy">管理员手动切换会留下审计记录，便于回查是谁在什么时间切换了档位</span>
-        </div>
-      </div>
-      <div class="table-actions table-actions--compact manual-profile-switch-actions">
-        ${buttons}
-      </div>
+    ${kvList([
+      ["当前活动档位", readableProfile(activeRevision?.profile_label || activeProfileId, "待确认"), activeRevision?.profile_id || "当前没有已登记的活动策略档位。"],
+      ["操作说明", canAdmin ? "点击下方按钮即可立刻切换" : "当前账号只有查看权限", "切换前仍会检查活动委托等安全门槛，并留下审计记录。"],
+    ])}
+    <div class="table-actions table-actions--compact manual-profile-switch-actions">
+      ${buttons}
     </div>
   `;
 }
 
-function profileSummary(revision) {
-  if (!revision?.payload) return "当前还没有生效档位摘要";
-  const payload = revision.payload;
+function describeOverlay({ activationHistory, activeRevision }) {
+  if (!activeRevision) {
+    return {
+      label: "当前没有活动覆盖",
+      meta: "当前没有已登记的活动策略档位可供说明。",
+      tone: "neutral",
+    };
+  }
+  const latest = activationHistory.find((item) => item?.to_profile_id === activeRevision.profile_id) || null;
+  const triggerType = String(latest?.trigger_type || "").toLowerCase();
+  if (triggerType === "ai_auto") {
+    return {
+      label: "AI 自动切换",
+      meta: "当前档位由主链自动评估后切换，只影响运行时内存参数，不会回写环境文件。",
+      tone: "info",
+    };
+  }
+  if (triggerType === "manual") {
+    return {
+      label: "管理员手动覆盖",
+      meta: "当前档位由管理员手动切换触发，AI 自动切换会按配置冻结一段时间。",
+      tone: "warning",
+    };
+  }
+  return {
+    label: "环境文件默认值",
+    meta: "当前档位仍来自环境文件或启动时默认种子。",
+    tone: "neutral",
+  };
+}
+
+function profileSummary(activeRevision) {
+  const payload = activeRevision?.payload || null;
+  if (!payload) return "当前没有活动档位摘要。";
   return [
     `15m 最小间隔 ${formatNumber(payload.decision_min_interval_seconds_15m, 0)} 秒`,
     `净边际门槛 ${formatNumber(payload.strategy_min_net_edge_bps, 1)} 个基点`,
@@ -359,21 +234,22 @@ function profileSummary(revision) {
   ].join(" / ");
 }
 
-function readableRiskLevel(value) {
-  return RISK_LEVEL_LABELS[String(value || "").toLowerCase()] || readableState(value || "unknown");
+function readableShadowMeta(summary) {
+  if (!summary) return "影子评估数据暂时不可用。";
+  if (!summary.window_count) return "影子评估常开，但当前窗口样本还不够。";
+  return `最近窗口 ${formatNumber(summary.window_count, 0)} 个，优于基础策略占比 ${formatNumber((summary.outperformed_rate || 0) * 100, 1)}%。`;
 }
 
-function readableCapabilityStatus(value) {
-  return CAPABILITY_STATUS_LABELS[String(value || "").toLowerCase()] || readableState(value || "unknown");
+function readableSelectionMeta(decision) {
+  if (!decision) return "当前暂无新的自动切换结论。";
+  if (decision.candidate_profile_id) {
+    return `候选档位 ${readableProfile(decision.candidate_profile_id)} / 来源 ${readableState(decision.candidate_source || "none")}`;
+  }
+  return "当前暂无新的候选档位。";
 }
 
-function textOrFallback(value, fallback = "待确认") {
-  if (value === null || value === undefined || value === "") return fallback;
-  return String(value);
-}
-
-function listText(value, fallback = "当前没有额外说明") {
-  return listOrDash(value, fallback);
+function readableReasons(reasons) {
+  return listText(reasons, "当前没有记录阻断原因。");
 }
 
 function readableProfile(value, fallback = "待确认") {
@@ -381,120 +257,18 @@ function readableProfile(value, fallback = "待确认") {
   return readableState(String(value), fallback);
 }
 
-function readableCodeItem(value, fallback = "当前没有额外说明") {
-  const text = String(value ?? "").trim();
-  if (!text) return fallback;
-  if (text.includes("=")) {
-    const [rawKey, ...rest] = text.split("=");
-    const rawValue = rest.join("=").trim();
-    const key = String(rawKey || "").trim().toLowerCase();
-    if (key === "evaluation_ref") return rawValue ? `评估记录 ${rawValue}` : "评估记录";
-    if (key === "winner_selection_policy") return rawValue ? `激活策略版本 ${rawValue}` : "激活策略版本";
-    if (key === "activation_policy_id") return rawValue ? `激活策略编号 ${rawValue}` : "激活策略编号";
-  }
-  return readableState(text, fallback);
+function textOrFallback(value, fallback = "待确认") {
+  if (value === null || value === undefined || value === "") return fallback;
+  return String(value);
 }
 
-function readableCodeList(value, fallback = "当前没有额外说明") {
-  if (!value) return fallback;
-  if (Array.isArray(value)) {
-    const items = value.map((item) => readableCodeItem(item, "")).filter(Boolean);
-    return items.length ? items.join("、") : fallback;
-  }
-  const text = readableCodeItem(value, "");
-  return text || fallback;
+function listText(value, fallback = "当前没有额外说明。") {
+  return listOrDash(value, fallback);
 }
 
-function readableRecommendationSource(recommendation) {
-  if (!recommendation) return "当前没有最新推荐记录";
-  const selectionSource = readableState(recommendation.selection_source || "winner_engine");
-  const aiProvider = readableState(recommendation.ai_advice?.provider || recommendation.generated_by || "unknown");
-  return `候选来源 ${selectionSource} / AI 来源 ${aiProvider}`;
-}
-
-function readableActivationSource(selectionDecision) {
-  if (!selectionDecision) return "当前没有激活裁决记录";
-  return `${readableState(selectionDecision.candidate_source || "winner_engine")} / ${readableState(selectionDecision.activation_decision_source || "activation_gate")}`;
-}
-
-function readableAIAdviceMeta(aiAdvice, recommendation) {
-  if (!aiAdvice && !recommendation) return "当前没有 AI 辅助意见";
-  const provider = readableState(aiAdvice?.provider || recommendation?.generated_by || "unknown");
-  const agreement = aiAdvice?.agreement_with_candidate ? "与系统候选一致" : "与系统候选不一致";
-  return `${provider} / ${agreement}`;
-}
-
-function readableActivationMeta(selectionDecision) {
-  if (!selectionDecision) return "当前还没有激活裁决";
-  return `${readableProfile(selectionDecision.active_profile_id, "当前档位未记录")} -> ${readableProfile(selectionDecision.candidate_profile_id, "暂无候选档位")}`;
-}
-
-function readableReasonSummary(recommendation, optimizationReport) {
-  const reasonParts = [];
-  if (recommendation?.reason_codes?.length) reasonParts.push(readableCodeList(recommendation.reason_codes, ""));
-  const candidate = (optimizationReport?.candidates || []).find((item) => item.profile_id === optimizationReport?.recommended_profile_id);
-  if (candidate?.reasons?.length) reasonParts.push(readableCodeList(candidate.reasons, ""));
-  return reasonParts.filter(Boolean).join("；") || "当前没有额外推荐理由";
-}
-
-function readableAIAdviceSummary(aiAdvice) {
-  if (!aiAdvice) return "当前没有 AI 辅助说明";
-  const summaryParts = [
-    aiAdvice.summary || "",
-    readableCodeList(aiAdvice.risk_notes, ""),
-  ].filter(Boolean);
-  return summaryParts.join("；") || "当前没有 AI 辅助说明";
-}
-
-function describeOverlaySource({ activation, activationHistory, activeRevision }) {
-  if (!activeRevision) {
-    return {
-      label: "当前无运行时覆盖",
-      meta: "当前没有可确认的生效档位信息",
-      tone: "neutral",
-    };
-  }
-  const latestActivation = activationHistory.find((item) => item?.to_profile_id === activeRevision.profile_id) || null;
-  const triggerType = String(latestActivation?.trigger_type || "").toLowerCase();
-  if (!latestActivation && String(activation?.last_switch_reason || "").toLowerCase() === "initial_seed") {
-    return {
-      label: "当前无运行时覆盖",
-      meta: "当前仍直接使用环境文件派生出的基础档位参数",
-      tone: "neutral",
-    };
-  }
-  if (triggerType === "ai_auto") {
-    return {
-      label: "AI 自动覆盖",
-      meta: "当前档位覆盖由 AI 推荐并自动执行；只改运行时内存参数，不回写环境文件",
-      tone: "info",
-    };
-  }
-  if (triggerType === "system_guard") {
-    return {
-      label: "系统保护覆盖",
-      meta: "当前档位覆盖由系统保护逻辑触发；只改运行时内存参数，不回写环境文件",
-      tone: "warning",
-    };
-  }
-  if (triggerType === "manual" || triggerType === "rollback" || latestActivation) {
-    return {
-      label: "管理员手动覆盖",
-      meta: "当前档位覆盖由管理员操作触发；只改运行时内存参数，不回写环境文件",
-      tone: "warning",
-    };
-  }
-  return {
-    label: "当前无运行时覆盖",
-    meta: "当前仍直接使用环境文件派生出的基础档位参数",
-    tone: "neutral",
-  };
-}
-
-function buttonToneClass(tone) {
+function buttonClass(tone) {
   if (tone === "primary") return "primary-button";
   if (tone === "secondary") return "secondary-button";
   if (tone === "warning") return "warning-button";
-  if (tone === "danger") return "danger-button";
   return "table-button";
 }

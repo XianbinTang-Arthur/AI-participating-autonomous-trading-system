@@ -13,7 +13,16 @@ import {
   rawJson,
 } from "./modules/formatters.js";
 import { AUTO_REFRESH_MS, CORE_SPECS, DEFAULT_PAGE_LIMITS, PAGE_LOAD_STEP, createState, viewSpecs } from "./modules/store.js";
-import { localizeError, readableState, toneForOrderStatus, toneForRuntimeState } from "./modules/terms.js";
+import {
+  localizeError,
+  operationalStatusCopy,
+  operationalStatusHeadline,
+  readableState,
+  reviewStatusLabel,
+  toneForOrderStatus,
+  toneForRuntimeState,
+  tradingStatusLabel,
+} from "./modules/terms.js";
 import {
   decisionDrawerRows,
   fillDrawerRows,
@@ -84,9 +93,9 @@ const VIEW_META = {
   },
   ai: {
     docTitle: "AATS 自动交易监控台 | AI 工作台",
-    eyebrow: "AI 主链",
-    heading: "AI 当前有效模式、接管门禁和影子回放",
-    copy: "先看模式与接管结果，再看影子回放是否真的优于基础策略。",
+    eyebrow: "AI 决策链路",
+    heading: "AI 当前有效模式、决策门禁和影子回放",
+    copy: "先看模式和最新决策链结果，再看影子回放是否真的优于基础策略。",
     hidePageHead: false,
   },
   aiConfig: {
@@ -205,16 +214,6 @@ function bindEvents() {
     if (form.id === "operatorCreateForm") {
       event.preventDefault();
       void createOperatorUser();
-      return;
-    }
-    if (form.id === "autoRollbackPolicyForm") {
-      event.preventDefault();
-      void stageAutoRollbackPolicy();
-      return;
-    }
-    if (form.id === "activationPolicyForm") {
-      event.preventDefault();
-      void stageActivationPolicy();
     }
   });
 }
@@ -328,13 +327,13 @@ function renderStatusRibbon() {
       tone: homeRibbonTone({ health, recovery, blockers, reconciliation }),
       pills: [
         pill(`运行状态 ${readableState(health.runtime_state || health.overall_status)}`, toneForRuntimeState(health.runtime_state || health.overall_status)),
-        pill(`自动交易 ${recovery.safe_to_trade ? "已放行" : "已阻断"}`, recovery.safe_to_trade ? "positive" : "danger"),
-        pill(`人工复核 ${booleanWord(recovery.review_required)}`, recovery.review_required ? "warning" : "outline"),
+        pill(`自动交易 ${tradingStatusLabel(recovery)}`, recovery.safe_to_trade ? "positive" : isPausedAwaitingResume(recovery) ? "warning" : "danger"),
+        pill(`人工复核 ${reviewStatusLabel(recovery.review_required)}`, recovery.review_required ? "warning" : "outline"),
       ],
       metrics: [
         { label: "最近决策", value: latestDecision.decision_id ? readableState(latestDecision.position_target?.position_intent || "hold") : "暂无", meta: formatMaybeTimestamp(latestDecision.decision_time || latestDecision.decision_context?.as_of_ts), tone: latestDecision.decision_id ? "info" : "neutral" },
         { label: "最新委托", value: readableState(latestOrder?.status || "unknown"), meta: middleEllipsis(latestOrder?.client_order_id, 10, 6, "暂未生成委托"), tone: toneForOrderStatus(latestOrder?.status) },
-        { label: "恢复限制", value: blockers.length > 0 ? localizeError(blockers[0].blocker) : recovery.safe_to_trade ? "当前无硬阻断" : localizedRecoveryReasons(), meta: middleEllipsis(reconciliation?.reconciliation_id, 10, 6, "恢复与对账共同决定交易资格"), tone: blockers.length > 0 || reconciliation?.halt_required ? "danger" : recovery.safe_to_trade ? "positive" : "warning" },
+        { label: "恢复限制", value: isPausedAwaitingResume(recovery) ? "当前可手动恢复" : blockers.length > 0 ? localizeError(blockers[0].blocker) : recovery.safe_to_trade ? "当前无硬阻断" : localizedRecoveryReasons(), meta: middleEllipsis(reconciliation?.reconciliation_id, 10, 6, "恢复与对账共同决定交易资格"), tone: isPausedAwaitingResume(recovery) ? "warning" : blockers.length > 0 || reconciliation?.halt_required ? "danger" : recovery.safe_to_trade ? "positive" : "warning" },
         { label: "账户权益", value: formatNumber(portfolio.total_equity), meta: `活动委托 ${formatNumber(metrics.current_open_order_count)}`, tone: "info" },
       ],
     })}</div>`,
@@ -361,11 +360,7 @@ function renderHomeRibbonSkeleton() {
 }
 
 function homeRibbonHeadline({ health, recovery, blockers, reconciliation }) {
-  if (health.halted) return "系统已暂停";
-  if (blockers.length > 0) return "当前存在阻断";
-  if (reconciliation?.halt_required) return "需先完成对账";
-  if (!recovery.safe_to_trade) return "暂不允许恢复";
-  return "允许自动交易";
+  return operationalStatusHeadline({ health, recovery, blockers, reconciliation });
 }
 
 function homeRibbonTone({ health, recovery, blockers, reconciliation }) {
@@ -386,7 +381,16 @@ function renderBanners() {
     return;
   }
   if (hasResolvedPanel("systemRecovery") && recovery.safe_to_trade === false) {
-    banners.push(notice(`当前还不能恢复自动交易：${localizedRecoveryReasons()}`, "warning"));
+    if (isPausedAwaitingResume(recovery)) {
+      banners.push(notice(operationalStatusCopy({ recovery }), "info"));
+    } else {
+      banners.push(
+        notice(
+          operationalStatusCopy({ recovery, recoveryReasonText: localizedRecoveryReasons() }),
+          "warning"
+        )
+      );
+    }
   }
   if (blockers.length > 0) {
     banners.push(notice(`当前主要阻断原因：${localizeError(blockers[0].blocker)}`, blockers[0].affects_execution ? "danger" : "warning"));
@@ -399,6 +403,28 @@ function renderBanners() {
     state.flash = null;
   }
   patchHtml(nodes.bannerContainer, banners.join(""));
+}
+
+function isPausedAwaitingResume(recovery = state.data.systemRecovery?.recovery || {}) {
+  return Boolean(recovery.halted && recovery.resume_eligible && !recovery.safe_to_trade);
+}
+
+function resumeActionAvailable() {
+  const recovery = state.data.systemRecovery?.recovery || {};
+  return Boolean(recovery.resume_eligible);
+}
+
+function resumeActionHintText() {
+  if (resumeActionAvailable()) {
+    return isPausedAwaitingResume()
+      ? operationalStatusCopy({ recovery: state.data.systemRecovery?.recovery || {} })
+      : "";
+  }
+  const reasons = localizedRecoveryReasons();
+  return operationalStatusCopy({
+    recovery: state.data.systemRecovery?.recovery || {},
+    recoveryReasonText: reasons,
+  });
 }
 
 function renderActiveView() {
@@ -440,7 +466,14 @@ function renderActiveView() {
     return;
   }
   if (state.activeView === "aiConfig" && nodes.aiConfigContent) {
-    patchHtml(nodes.aiConfigContent, renderAIConfigView(viewData));
+    patchHtml(
+      nodes.aiConfigContent,
+      renderAIConfigView({
+        session: state.data.session || {},
+        summary: state.data.aiConfigModel || {},
+        error: state.errors.aiConfigModel || null,
+      }),
+    );
     return;
   }
   if (state.activeView === "admin" && nodes.adminContent) {
@@ -484,6 +517,11 @@ function updateActionAccess() {
   buttons.forEach((node) => {
     if (!node) return;
     const isWriteAction = node !== nodes.logoutButton && node !== nodes.refreshButton;
+    if (node === nodes.resumeButton) {
+      node.disabled = !canWrite || !resumeActionAvailable();
+      node.title = !canWrite ? disabledReason : resumeActionHintText();
+      return;
+    }
     node.disabled = isWriteAction ? !canWrite : false;
     if (isWriteAction) {
       node.title = !canWrite ? disabledReason : "";
@@ -608,9 +646,9 @@ async function triggerRebaseline(target = null) {
 }
 
 async function triggerResume(target = null) {
-  await runAction("/system/resume", { reason: "ui_manual_resume" }, "已提交恢复自动交易请求。", {
+  await runAction("/system/resume", { reason: "ui_manual_resume" }, "已提交恢复自动运行请求。", {
     target,
-    pendingLabel: "正在恢复自动交易…",
+    pendingLabel: "正在恢复自动运行…",
   });
 }
 
@@ -618,10 +656,10 @@ async function triggerHalt(target = null) {
   await runDangerousAction({
     path: "/system/halt",
     body: { reason: "ui_manual_halt" },
-    successMessage: "系统已暂停自动交易。",
-    confirmMessage: "确认立即暂停自动交易吗？",
+    successMessage: "系统已暂停自动运行。",
+    confirmMessage: "确认立即暂停自动运行吗？",
     target,
-    pendingLabel: "正在暂停自动交易…",
+    pendingLabel: "正在暂停自动运行…",
   });
 }
 
@@ -645,14 +683,7 @@ async function dispatchAction(action, value, target = null) {
   if (action === "trigger-resume") return triggerResume(target);
   if (action === "trigger-halt") return triggerHalt(target);
   if (action === "resolve-stuck-order") return resolveStuckOrder(value);
-  if (action === "evaluate-strategy-profile") return evaluateStrategyProfile(target, false);
-  if (action === "evaluate-strategy-profile-with-auto-switch") return evaluateStrategyProfile(target, true);
-  if (action === "accept-strategy-profile-now") return acceptStrategyProfileRecommendation(value, "manual_now");
-  if (action === "stage-strategy-profile") return acceptStrategyProfileRecommendation(value, "stage_only");
-  if (action === "reject-strategy-profile") return rejectStrategyProfileRecommendation(value);
-  if (action === "activate-pending-strategy-profile") return activatePendingStrategyProfile();
   if (action === "manual-activate-strategy-profile") return activateStrategyProfile(value, target);
-  if (action === "rollback-strategy-profile") return rollbackStrategyProfile();
   if (action === "load-more-orders") return adjustPageLimit("recentOrders", PAGE_LOAD_STEP);
   if (action === "collapse-orders") return resetPageLimit("recentOrders");
   if (action === "load-more-fills") return adjustPageLimit("recentFills", PAGE_LOAD_STEP);
@@ -667,17 +698,10 @@ async function dispatchAction(action, value, target = null) {
   if (action === "collapse-replay-validations") return resetPageLimit("replayValidations");
   if (action === "load-more-ai-assessments") return adjustPageLimit("recentAIAssessments", PAGE_LOAD_STEP);
   if (action === "collapse-ai-assessments") return resetPageLimit("recentAIAssessments");
-  if (action === "load-more-ai-takeovers") return adjustPageLimit("recentAITakeovers", PAGE_LOAD_STEP);
-  if (action === "collapse-ai-takeovers") return resetPageLimit("recentAITakeovers");
   if (action === "load-more-ai-shadow-decisions") return adjustPageLimit("recentAIShadowDecisions", PAGE_LOAD_STEP);
   if (action === "collapse-ai-shadow-decisions") return resetPageLimit("recentAIShadowDecisions");
   if (action === "load-more-ai-shadow-evaluations") return adjustPageLimit("recentAIShadowEvaluations", PAGE_LOAD_STEP);
   if (action === "collapse-ai-shadow-evaluations") return resetPageLimit("recentAIShadowEvaluations");
-  if (action === "evaluate-ai-shadow") return evaluateAIShadow();
-  if (action === "approve-auto-rollback-policy") return approveAutoRollbackPolicy(value);
-  if (action === "toggle-freeze-auto-rollback-policy") return freezeAutoRollbackPolicy(value === "true");
-  if (action === "approve-activation-policy") return approveActivationPolicy(value);
-  if (action === "toggle-freeze-activation-policy") return freezeActivationPolicy(value === "true");
   if (action === "toggle-user") return toggleOperatorUser(value);
   if (action === "change-user-role") return updateOperatorUserRole(value);
   if (action === "reset-user-password") return resetOperatorPassword(value);
@@ -691,13 +715,14 @@ async function inspectDecision(decisionId) {
     const aiEconomic = detail.ai_economic_actionability || null;
     const aiDecisionAudit = detail.ai_decision_audit || null;
     const aiExecutionSuggestion = detail.ai_execution_suggestion || null;
+    const decisionOutcome = detail.decision_outcome || null;
     const aiEconomicRows = aiEconomic
       ? [
           ["AI 经济可执行性", booleanWord(aiEconomic.economically_actionable), `最低净边际 ${formatNumber(aiEconomic.min_required_net_edge_bps ?? 0, 2)} 个基点`],
           ["本轮评估边际", `${formatNumber(aiEconomic.estimated_edge_bps ?? 0, 2)} 个基点`, `成本 ${formatNumber(aiEconomic.estimated_cost_bps ?? 0, 2)} / 净边际 ${formatNumber(aiEconomic.estimated_net_edge_bps ?? 0, 2)} 个基点`],
           ["目标边际估计", `${formatNumber(aiEconomic.target_expected_signal_edge_bps ?? 0, 2)} 个基点`, `成本 ${formatNumber(aiEconomic.target_expected_cost_bps ?? 0, 2)} / 净边际 ${formatNumber(aiEconomic.target_expected_net_edge_bps ?? 0, 2)} 个基点`],
           ["总门槛", `${formatNumber(aiEconomic.required_total_edge_bps ?? 0, 2)} 个基点`, `噪声缓冲 ${formatNumber(aiEconomic.noise_buffer_bps ?? 0, 2)} / 最低净边际 ${formatNumber(aiEconomic.min_required_net_edge_bps ?? 0, 2)} 个基点`],
-          ["接管结果", booleanWord(aiEconomic.takeover_applied), drawerListText(aiEconomic.takeover_blockers, "当前没有额外接管阻断项")],
+          ["决策来源", readableState(decisionOutcome?.decision_source || "baseline"), drawerListText((decisionOutcome?.decision_blocked_reasons || []).map(localizeError), "当前没有额外决策链路阻断项")],
           ["新鲜度与安全", `市场快照 ${booleanWord(aiEconomic.market_snapshot_fresh)} / 账户快照 ${booleanWord(aiEconomic.account_snapshot_fresh)}`, `允许交易 ${booleanWord(aiEconomic.safe_to_trade)} / ${drawerText(aiEconomic.execution_condition, "当前没有额外执行条件")}`],
           ["近期执行健康", `手续费拖累 ${formatNumber(aiEconomic.recent_fee_drag_ratio ?? 0, 3)} / 来回交易 ${formatNumber(aiEconomic.recent_churn_ratio ?? 0, 3)}`, `低边际连续次数 ${formatNumber(aiEconomic.recent_low_edge_trade_streak ?? 0, 0)} / 活动委托 ${formatNumber(aiEconomic.current_open_order_count ?? 0, 0)}`],
           ["校验标记", drawerListText(aiEconomic.validation_flags, "当前没有额外校验标记"), drawerListText(aiEconomic.rejection_flags, "当前没有额外拒绝标记")],
@@ -707,8 +732,8 @@ async function inspectDecision(decisionId) {
       ? [
           ["配置与评估模式", `${readableState(aiDecisionAudit.configured_mode || "unknown")} / ${readableState(aiDecisionAudit.assessment_operating_mode || "unknown")}`, drawerText(aiDecisionAudit.provider_name, "当前没有模型服务说明")],
           ["方向链", `基础策略 ${readableState(aiDecisionAudit.baseline_direction || "unknown")} / AI ${readableState(aiDecisionAudit.ai_direction || "unknown")}`, `最终结论 ${readableState(aiDecisionAudit.final_direction || "unknown")}`],
-          ["接管尝试", aiDecisionAudit.takeover_attempted ? "已尝试" : "未尝试", `允许 ${booleanWord(aiDecisionAudit.takeover_allowed)} / 已应用 ${booleanWord(aiDecisionAudit.takeover_applied)}`],
-          ["阻断项", drawerListText(aiDecisionAudit.takeover_blockers, "当前没有接管阻断项"), drawerListText(aiDecisionAudit.guardrail_flags, "当前没有额外保护规则")],
+          ["决策来源", readableState(aiDecisionAudit.decision_source || "baseline"), readableState(aiDecisionAudit.decision_authority || "reference_only")],
+          ["决策链路阻断与保护", drawerListText((decisionOutcome?.decision_blocked_reasons || []).map(localizeError), "当前没有决策链路阻断项"), drawerListText(aiDecisionAudit.guardrail_flags, "当前没有额外保护规则")],
           ["新鲜度与安全", `市场快照 ${booleanWord(aiDecisionAudit.market_snapshot_fresh)} / 账户快照 ${booleanWord(aiDecisionAudit.account_snapshot_fresh)}`, `允许交易 ${booleanWord(aiDecisionAudit.safe_to_trade)} / ${drawerText(aiDecisionAudit.execution_condition, "当前没有额外执行条件")}`],
           ["近期执行健康", `手续费拖累 ${formatNumber(aiDecisionAudit.recent_fee_drag_ratio ?? 0, 3)} / 来回交易 ${formatNumber(aiDecisionAudit.recent_churn_ratio ?? 0, 3)}`, `低边际连续次数 ${formatNumber(aiDecisionAudit.recent_low_edge_trade_streak ?? 0, 0)} / 活动委托 ${formatNumber(aiDecisionAudit.current_open_order_count ?? 0, 0)}`],
         ]
@@ -724,8 +749,8 @@ async function inspectDecision(decisionId) {
         ]
       : [];
     openDrawer({
-      eyebrow: "决策详情",
-      title: detail.decision_id || "决策详情",
+      eyebrow: "决策链详情",
+      title: detail.decision_id ? `当前记录：${detail.decision_id}` : "当前记录：决策链详情",
       summary: strategySummary(detail),
       body: [
         surfaceCard({
@@ -774,7 +799,7 @@ async function inspectOrder(orderId) {
     const fills = detail.fills || [];
     openDrawer({
       eyebrow: `${orderSceneSummary(order)}详情`,
-      title: order.client_order_id || `${orderSceneSummary(order)}详情`,
+      title: order.client_order_id ? `当前记录：${order.client_order_id}` : `当前记录：${orderSceneSummary(order)}详情`,
       summary: `这笔${orderSceneSummary(order)}当前状态：${readableState(order.status)}。${fills.length ? ` 已关联 ${fills.length} 笔成交。` : " 目前还没有关联成交。"} `,
       body: [
         surfaceCard({
@@ -815,7 +840,7 @@ async function inspectFill(fillId) {
     const fill = detail.fill || {};
     openDrawer({
       eyebrow: `${fillSceneSummary(fill)}详情`,
-      title: fill.fill_id || `${fillSceneSummary(fill)}详情`,
+      title: fill.fill_id ? `当前记录：${fill.fill_id}` : `当前记录：${fillSceneSummary(fill)}详情`,
       summary: `这笔${fillSceneSummary(fill)}是 ${readableState(fill.side)} ${formatNumber(fill.fill_qty)}，成交价 ${formatNumber(fill.fill_price)}。`,
       body: [
         surfaceCard({
@@ -853,8 +878,8 @@ async function inspectReconciliation(reconciliationId) {
     };
     openDrawer({
       eyebrow: "对账详情",
-      title: reconciliation.reconciliation_id || "对账详情",
-      summary: `这次对账结论是 ${readableState(reconciliation.severity)}。${reconciliation.halt_required ? " 系统已要求暂停自动交易。" : ""}`,
+      title: reconciliation.reconciliation_id ? `当前记录：${reconciliation.reconciliation_id}` : "当前记录：对账详情",
+      summary: `这次对账结论是 ${readableState(reconciliation.severity)}。${reconciliation.halt_required ? " 系统已要求暂停自动运行。" : ""}`,
       body: [
         surfaceCard({
           title: "核对摘要",
@@ -869,7 +894,7 @@ async function inspectReconciliation(reconciliationId) {
         surfaceCard({
           title: "账单解释链",
           content: kvList([
-            ["最近账单数量", formatNumber(billsSummary.count || 0), drawerText(billsSummary.latest_bill_id, "当前还没有最新账单编号")],
+            ["最近账单数量", formatNumber(billsSummary.count || 0), drawerText(billsSummary.latest_bill_id, "当前暂无最新账单编号")],
             ["涉及币种", drawerListText(billsSummary.currencies, "当前没有账单币种摘要"), "最近交易所侧账务变动范围"],
             ["高频账务类别", renderReconciliationBillsCategories(billsSummary.top_categories), "已按类型、子类型和币种聚合"],
             ["可能解释当前差异", renderReconciliationBillExplanations(billsExplanations), billsExplanations.length ? "这些账务事件更可能解释余额、仓位或执行偏差" : "当前没有明确的账单解释链"],
@@ -878,7 +903,7 @@ async function inspectReconciliation(reconciliationId) {
           ]),
         }),
         surfaceCard({
-          title: "处理动作",
+          title: "可执行操作",
           content: `
             <p class="meta-copy">${escapeHtml(reconciliationActionCopy({ reconciliation, recovery, isHistorical }))}</p>
             ${renderReconciliationControls({ reconciliation, recovery, uiHints, compact: true })}
@@ -982,124 +1007,10 @@ function setActionPending(target, pendingLabel) {
   };
 }
 
-async function evaluateStrategyProfile(target = null, allowAutoActivation = false) {
-  const clearPending = setActionPending(target, allowAutoActivation ? "正在评估并尝试自动切换…" : "正在评估并生成建议…");
-  try {
-    const result = await requestJson("/strategy-profiles/auto-tuning/evaluate-now", {
-      method: "POST",
-      body: { allow_auto_activation: allowAutoActivation },
-    });
-    const profileId = readableProfileName(result?.recommendation?.recommended_profile_id);
-    const autoApplied = Boolean(result?.auto_activation || result?.profile_activation_policy || result?.auto_rollback);
-    const changedProfileId =
-      result?.auto_activation?.active_revision?.profile_label ||
-      result?.auto_activation?.active_revision?.profile_id ||
-      result?.profile_activation_policy?.candidate_profile_id ||
-      result?.auto_rollback?.target_profile_id ||
-      profileId;
-    state.flash = {
-      tone: autoApplied ? "info" : allowAutoActivation ? "warning" : "info",
-      message: allowAutoActivation
-        ? autoApplied
-          ? `已完成评估并执行自动切换，当前档位为 ${readableProfileName(changedProfileId)}。`
-          : `已完成评估，但这次没有自动切换；最新建议是 ${profileId}。`
-        : `已生成新的调参建议：${profileId}。本次只评估，不会自动切换当前档位。`,
-    };
-    await refreshDashboard({ manual: true });
-  } catch (error) {
-    state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
-    renderBanners();
-  } finally {
-    clearPending();
-  }
-}
-
-async function evaluateAIShadow() {
-  try {
-    const result = await requestJson("/ai/shadow/evaluate-now", { method: "POST" });
-    const evaluation = result?.evaluation || {};
-    state.flash = {
-      tone: "info",
-      message: `已完成影子收益回放。基础策略净收益 ${formatNumber(evaluation.baseline_net_pnl ?? 0)}，影子结果净收益 ${formatNumber(evaluation.shadow_net_pnl ?? 0)}。`,
-    };
-    await refreshDashboard({ manual: true });
-  } catch (error) {
-    state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
-    renderBanners();
-  }
-}
-
-async function acceptStrategyProfileRecommendation(recommendationId, activationMode) {
-  if (!recommendationId) return;
-  const confirmMessage =
-    activationMode === "stage_only"
-      ? "确认先把这条 AI 调参建议保存为待审批档位吗？这样不会立即切换，后续可单独激活。"
-      : "确认立即采纳这条 AI 调参建议并切换当前策略档位吗？";
-  if (!window.confirm(confirmMessage)) return;
-  try {
-    const result = await requestJson(`/strategy-profiles/recommendations/${encodeURIComponent(recommendationId)}/accept`, {
-      method: "POST",
-      body: {
-        reason: activationMode === "stage_only" ? "ui_stage_strategy_profile" : "ui_accept_strategy_profile_now",
-        activation_mode: activationMode,
-      },
-    });
-    state.flash = {
-      tone: "info",
-      message:
-        activationMode === "stage_only"
-          ? `这条建议已保存为待审批档位：${readableProfileName(result?.activation?.pending_profile_id)}。`
-          : `当前策略档位已切换为 ${readableProfileName(result?.active_revision?.profile_label || result?.active_revision?.profile_id)}。`,
-    };
-    await refreshDashboard({ manual: true });
-  } catch (error) {
-    state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
-    renderBanners();
-  }
-}
-
-async function rejectStrategyProfileRecommendation(recommendationId) {
-  if (!recommendationId) return;
-  const reasonDetail = window.prompt("请输入拒绝这条 AI 调参建议的原因：", "当前不希望切换策略档位");
-  if (reasonDetail === null) return;
-  try {
-    await requestJson(`/strategy-profiles/recommendations/${encodeURIComponent(recommendationId)}/reject`, {
-      method: "POST",
-      body: {
-        reason_code: "operator_rejected_strategy_profile_recommendation",
-        reason_detail: reasonDetail,
-      },
-    });
-    state.flash = { tone: "info", message: "这条 AI 调参建议已被拒绝。" };
-    await refreshDashboard({ manual: true });
-  } catch (error) {
-    state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
-    renderBanners();
-  }
-}
-
-async function activatePendingStrategyProfile() {
-  if (!window.confirm("确认立即激活当前待审批的策略档位吗？")) return;
-  try {
-    const result = await requestJson("/strategy-profiles/pending/activate", {
-      method: "POST",
-      body: { reason: "ui_activate_pending_strategy_profile" },
-    });
-    state.flash = {
-      tone: "info",
-      message: `待审批档位已激活：${readableProfileName(result?.active_revision?.profile_label || result?.active_revision?.profile_id)}。`,
-    };
-    await refreshDashboard({ manual: true });
-  } catch (error) {
-    state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
-    renderBanners();
-  }
-}
-
 async function activateStrategyProfile(profileId, target = null) {
   if (!profileId) return;
   const profileLabel = target instanceof HTMLElement ? (target.textContent || "").trim() : profileId;
-  const clearPending = setActionPending(target, "正在切换档位…");
+  const clearPending = setActionPending(target, "正在切换策略档位…");
   try {
     if (!window.confirm(`确认立即切换到“${profileLabel}”这个已注册策略档位吗？`)) return;
     const result = await requestJson(`/strategy-profiles/profiles/${encodeURIComponent(profileId)}/activate`, {
@@ -1119,157 +1030,9 @@ async function activateStrategyProfile(profileId, target = null) {
   }
 }
 
-async function rollbackStrategyProfile() {
-  if (!window.confirm("确认回滚到上一个稳定的策略档位吗？")) return;
-  try {
-    const result = await requestJson("/strategy-profiles/rollback", {
-      method: "POST",
-      body: { reason: "ui_rollback_strategy_profile" },
-    });
-    state.flash = {
-      tone: "warning",
-      message: `策略档位已回滚到 ${readableProfileName(result?.active_revision?.profile_label || result?.active_revision?.profile_id)}。`,
-    };
-    await refreshDashboard({ manual: true });
-  } catch (error) {
-    state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
-    renderBanners();
-  }
-}
-
-function csvValues(elementId) {
-  const raw = document.getElementById(elementId)?.value || "";
-  return raw
-    .split(",")
-    .map((item) => item.trim())
-    .filter(Boolean);
-}
-
 function readableProfileName(value, fallback = "未知档位") {
   if (value === null || value === undefined || value === "") return fallback;
   return readableState(String(value), fallback);
-}
-
-async function stageAutoRollbackPolicy() {
-  try {
-    await requestJson("/strategy-profiles/auto-rollback-policy", {
-      method: "POST",
-      body: {
-        enabled: document.getElementById("autoRollbackEnabled")?.value === "true",
-        review_required_only: document.getElementById("autoRollbackReviewOnly")?.value !== "false",
-        min_trade_count: Number(document.getElementById("autoRollbackMinTrades")?.value || 0),
-        cooldown_seconds: Number(document.getElementById("autoRollbackCooldown")?.value || 0),
-        matrix_allowed_symbols: csvValues("autoRollbackSymbols"),
-        matrix_allowed_regimes: csvValues("autoRollbackRegimes"),
-        matrix_allowed_profiles: csvValues("autoRollbackProfiles"),
-        reason: document.getElementById("autoRollbackReason")?.value || "ui_stage_auto_rollback_policy",
-      },
-    });
-    state.flash = { tone: "info", message: "自动回滚策略已进入待审批状态。" };
-    await refreshDashboard({ manual: true });
-  } catch (error) {
-    state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
-    renderBanners();
-  }
-}
-
-async function approveAutoRollbackPolicy(policyId) {
-  if (!window.confirm("确认批准当前待审批的自动回滚策略并立即生效吗？")) return;
-  try {
-    await requestJson("/strategy-profiles/auto-rollback-policy/approve", {
-      method: "POST",
-      body: {
-        policy_id: policyId || null,
-        reason: "ui_approve_auto_rollback_policy",
-      },
-    });
-    state.flash = { tone: "info", message: "自动回滚策略已批准，并更新为当前生效版本。" };
-    await refreshDashboard({ manual: true });
-  } catch (error) {
-    state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
-    renderBanners();
-  }
-}
-
-async function freezeAutoRollbackPolicy(frozen) {
-  const confirmMessage = frozen ? "确认冻结当前自动回滚策略吗？" : "确认解除当前自动回滚策略的冻结吗？";
-  if (!window.confirm(confirmMessage)) return;
-  try {
-    await requestJson("/strategy-profiles/auto-rollback-policy/freeze", {
-      method: "POST",
-      body: {
-        frozen,
-        reason: frozen ? "ui_freeze_auto_rollback_policy" : "ui_unfreeze_auto_rollback_policy",
-      },
-    });
-    state.flash = { tone: "info", message: frozen ? "自动回滚策略已冻结。" : "自动回滚策略已解除冻结。" };
-    await refreshDashboard({ manual: true });
-  } catch (error) {
-    state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
-    renderBanners();
-  }
-}
-
-async function stageActivationPolicy() {
-  try {
-    await requestJson("/strategy-profiles/activation-policy", {
-      method: "POST",
-      body: {
-        enabled: document.getElementById("activationPolicyEnabled")?.value === "true",
-        min_composite_score: Number(document.getElementById("activationPolicyComposite")?.value || 0),
-        min_offline_replay_score: Number(document.getElementById("activationPolicyReplay")?.value || 0),
-        min_recommendation_strength: Number(document.getElementById("activationPolicyStrength")?.value || 0),
-        require_positive_replay_consensus: document.getElementById("activationPolicyReplayConsensus")?.value === "true",
-        disallow_when_shadow_review_required: document.getElementById("activationPolicyShadowReview")?.value === "true",
-        matrix_allowed_symbols: csvValues("activationPolicySymbols"),
-        matrix_allowed_regimes: csvValues("activationPolicyRegimes"),
-        matrix_allowed_profiles: csvValues("activationPolicyProfiles"),
-        reason: document.getElementById("activationPolicyReason")?.value || "ui_stage_activation_policy",
-      },
-    });
-    state.flash = { tone: "info", message: "激活策略已进入待审批状态。" };
-    await refreshDashboard({ manual: true });
-  } catch (error) {
-    state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
-    renderBanners();
-  }
-}
-
-async function approveActivationPolicy(policyId) {
-  if (!window.confirm("确认批准当前待审批的激活策略，并允许优胜档位进入独立激活链吗？")) return;
-  try {
-    await requestJson("/strategy-profiles/activation-policy/approve", {
-      method: "POST",
-      body: {
-        policy_id: policyId || null,
-        reason: "ui_approve_activation_policy",
-      },
-    });
-    state.flash = { tone: "info", message: "激活策略已批准，可用于独立的档位激活流程。" };
-    await refreshDashboard({ manual: true });
-  } catch (error) {
-    state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
-    renderBanners();
-  }
-}
-
-async function freezeActivationPolicy(frozen) {
-  const confirmMessage = frozen ? "确认冻结当前激活策略吗？" : "确认解除当前激活策略的冻结吗？";
-  if (!window.confirm(confirmMessage)) return;
-  try {
-    await requestJson("/strategy-profiles/activation-policy/freeze", {
-      method: "POST",
-      body: {
-        frozen,
-        reason: frozen ? "ui_freeze_activation_policy" : "ui_unfreeze_activation_policy",
-      },
-    });
-    state.flash = { tone: "info", message: frozen ? "激活策略已冻结。" : "激活策略已解除冻结。" };
-    await refreshDashboard({ manual: true });
-  } catch (error) {
-    state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
-    renderBanners();
-  }
 }
 
 async function createOperatorUser() {
@@ -1596,6 +1359,9 @@ function effectiveRecoveryReasons() {
   if (explicitReasons.length > 0) {
     return explicitReasons;
   }
+  if (recovery.resume_eligible) {
+    return [];
+  }
   const blockers = Array.isArray(state.data.blockers?.blockers)
     ? state.data.blockers.blockers
         .filter((item) => item && item.blocker && item.affects_execution !== false)
@@ -1691,7 +1457,7 @@ function patchClassName(node, className) {
 function strategySummary(detail) {
   const policy = detail.policy_decision || {};
   const risk = detail.risk_decision || {};
-  if (!detail.decision_id) return "最近没有新的策略详情。";
+  if (!detail.decision_id) return "当前暂无新的策略详情。";
   return `系统当前对 ${detail.decision_context?.symbol || "当前标的"} 的交易结论是 ${describeDecisionIntent(detail)}。` +
     `${policy.execution_allowed ? "策略门禁已通过，" : "策略门禁未通过，"}` +
     `${risk.approved ? "风控也允许继续执行。" : `风控仍在拦截：${listOrDash(risk.rejection_reasons)}。`}`;

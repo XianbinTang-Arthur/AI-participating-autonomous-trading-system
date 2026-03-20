@@ -20,14 +20,14 @@ export function renderStrategySections(data) {
 
   return {
     strategyHero: surfaceCard({
-      title: "最新策略判断",
-      kicker: "主结论",
+      title: "策略结论",
+      kicker: "决策结果",
       copy: "先看结论，再看是否真的准备进入执行。",
       classes: "hero-card",
       actions: latestDecision.decision_id ? actionButton("查看完整决策链", "inspect-decision", latestDecision.decision_id) : "",
       content: `
         ${callout({
-          title: latestDecision.decision_id ? `当前策略结论：${intentLabel}` : "最近还没有新的策略输出",
+          title: latestDecision.decision_id ? `当前策略结论：${intentLabel}` : "当前暂无新的策略输出",
           copy: strategyNarrative(latestDecision),
           pills: [
             pill(`市场状态：${regimeLabel}`, "info"),
@@ -60,8 +60,8 @@ export function renderStrategySections(data) {
       `,
     }),
     strategySignal: surfaceCard({
-      title: "信号拆解",
-      kicker: "为什么会得出这个结论",
+      title: "信号说明",
+      kicker: "结论依据",
       copy: "先看四个核心摘要，再看门禁和拦截原因。",
       classes: "strategy-signal-card",
       content: `
@@ -94,20 +94,20 @@ export function renderStrategySections(data) {
         ${kvList([
           ["基础信号说明", listText(baseline.reasons, "本轮没有额外信号说明"), numberMeta("微观结构强度", baseline.microstructure_alpha, "当前没有微观结构强度")],
           ["策略门禁", policy.execution_allowed ? "本轮允许进入执行" : "策略层未放行", policy.execution_allowed ? listText(policy.allow_reasons, "当前没有额外门禁说明") : listText(policy.blocker_reasons, "当前没有给出具体拦截原因")],
-          ["风控结论", risk.approved ? "风控已放行" : "风控仍在拦截", risk.approved ? listText(risk.approval_reasons, "当前没有额外放行说明") : listText(risk.rejection_reasons, "当前没有额外拦截说明")],
+          ["风控结论", risk.approved ? "风控允许执行" : "风控仍在拦截", risk.approved ? listText(risk.approval_reasons, "当前没有额外放行说明") : listText(risk.rejection_reasons, "当前没有额外拦截说明")],
         ])}
       `,
     }),
     strategyHealth: surfaceCard({
-      title: "执行约束与交易质量",
-      kicker: "来回交易 / 手续费拖累 / 胜率",
+      title: "执行约束",
+      kicker: "质量约束",
       copy: "把最近成交质量、冷却状态和保护规则直接摆出来，便于一眼判断当前是不是在无效来回交易。",
       content: `
         ${statGrid([
           {
             label: "最近平仓样本",
             value: formatNumber(strategyHealth.recent_closed_trade_count, 0),
-            meta: strategyHealth.latest_fill_timestamp ? `最近成交 ${formatRelativeAge(strategyHealth.latest_fill_timestamp)}` : "最近还没有平仓样本",
+            meta: strategyHealth.latest_fill_timestamp ? `最近成交 ${formatRelativeAge(strategyHealth.latest_fill_timestamp)}` : "当前暂无平仓样本",
           },
           {
             label: "胜率",
@@ -135,8 +135,8 @@ export function renderStrategySections(data) {
       `,
     }),
     strategyHistory: surfaceCard({
-      title: "最近决策记录",
-      kicker: "时间序列",
+      title: "决策记录",
+      kicker: "历史记录",
       copy: "桌面端保留表格，窄屏自动切成卡片，方便值班时在手机上快速扫读。",
       content: `${responsiveTable(
         decisionTableHeaders(decisionScene),
@@ -144,28 +144,28 @@ export function renderStrategySections(data) {
           `<div><strong>${formatRelativeAge(item.decision_time)}</strong><div class="table-meta">${formatMaybeTimestamp(item.decision_time)}</div></div>`,
           `<div><strong>${item.symbol || "标的待确认"}</strong><div class="table-meta">${item.timeframe || "周期待确认"}</div></div>`,
           `<div><strong>${readableRecentIntent(item)}</strong><div class="table-meta">${recentDecisionNarrative(item, decisionScene)}</div></div>`,
-          `<div class="inline-pills">${pill(item.policy_result ? "策略放行" : "策略拦截", item.policy_result ? "positive" : "danger")}${pill(item.risk_result ? "风控通过" : "风控拦截", item.risk_result ? "positive" : "danger")}</div>`,
-          item.decision_id ? actionButton("查看", "inspect-decision", item.decision_id) : "",
+          `<div class="inline-pills">${pill(item.policy_result ? "策略允许" : "策略拦截", item.policy_result ? "positive" : "danger")}${pill(item.risk_result ? "风控允许" : "风控拦截", item.risk_result ? "positive" : "danger")}</div>`,
+          item.decision_id ? actionButton("查看详情", "inspect-decision", item.decision_id) : "",
         ]),
-        "最近还没有决策记录。",
+        "当前暂无决策记录。",
         recentDecisions.map((item) => ({
           kicker: "策略记录",
           title: `${readableRecentIntent(item)} | ${item.symbol || "标的待确认"}`,
           meta: `${formatRelativeAge(item.decision_time)} | ${item.timeframe || "周期待确认"}`,
           tone: item.policy_result && item.risk_result ? "positive" : item.risk_result || item.policy_result ? "warning" : "danger",
-          badge: `<div class="inline-pills">${pill(item.policy_result ? "策略放行" : "策略拦截", item.policy_result ? "positive" : "danger")}${pill(item.risk_result ? "风控通过" : "风控拦截", item.risk_result ? "positive" : "danger")}</div>`,
+          badge: `<div class="inline-pills">${pill(item.policy_result ? "策略允许" : "策略拦截", item.policy_result ? "positive" : "danger")}${pill(item.risk_result ? "风控允许" : "风控拦截", item.risk_result ? "positive" : "danger")}</div>`,
           fields: [
             { label: "决策时间", value: formatMaybeTimestamp(item.decision_time), meta: formatRelativeAge(item.decision_time) },
             { label: "决策摘要", value: readableRecentIntent(item), meta: recentDecisionNarrative(item, decisionScene) },
           ],
           details: [
             { label: "标的", value: item.symbol || "标的待确认", meta: item.timeframe || "周期待确认" },
-            { label: "策略结果", value: item.policy_result ? "已放行" : "被拦截" },
-            { label: "风控结果", value: item.risk_result ? "已通过" : "被拦截" },
+            { label: "策略结果", value: item.policy_result ? "允许执行" : "已阻断" },
+            { label: "风控结果", value: item.risk_result ? "允许执行" : "已阻断" },
             { label: "决策编号", value: item.decision_id || "当前没有编号" },
           ],
           detailLabel: "展开本次决策详情",
-          action: item.decision_id ? actionButton("查看", "inspect-decision", item.decision_id) : "",
+          action: item.decision_id ? actionButton("查看详情", "inspect-decision", item.decision_id) : "",
         }))
       )}${renderPaginationFooter(recentPayload, {
         singular: "策略记录",
@@ -226,7 +226,7 @@ function renderPaginationFooter(payload, { singular, loadAction, collapseAction 
 
 function strategyNarrative(detail) {
   if (!detail.decision_id) {
-    return "当前没有新的策略输出，通常是在等待新的市场条件或下一轮决策窗口。";
+    return "当前暂无新的策略输出，通常是在等待新的市场条件或下一轮决策窗口。";
   }
   const target = detail.position_target || {};
   const policy = detail.policy_decision || {};
@@ -245,7 +245,7 @@ function strategyNarrative(detail) {
           ? "当前已经有在途委托，这轮主要是在维持既有执行状态。"
           : `这轮决策给出了 ${intentLabel} 的交易结论。`;
   return `当前市场状态为 ${regimeLabel}。${actionSentence}`
-    + `${policy.execution_allowed ? "策略层已放行，" : "策略层仍未放行，"}`
+    + `${policy.execution_allowed ? "策略层允许执行，" : "策略层仍未允许执行，"}`
     + `${risk.approved ? "风控层当前没有继续阻断。" : `风控仍在拦截：${listOrDash(risk.rejection_reasons, "当前没有额外风控说明")}。`}`;
 }
 

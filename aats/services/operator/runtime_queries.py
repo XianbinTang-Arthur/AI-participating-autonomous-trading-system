@@ -3,8 +3,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from aats.events import topics
-from aats.events.envelopes import publish_model
-from aats.schemas.operator import AuthSource, OperatorActionRecord, OperatorRole
 from aats.schemas.common import utc_now
 from aats.services.runtime_scope import latest_topic_event_for_scope
 
@@ -17,7 +15,21 @@ class RuntimeQueryFacade:
         self.owner = owner
 
     def ai_runtime(self) -> dict[str, Any]:
-        return self.owner.runtime.ai_service.status()
+        status = dict(self.owner.runtime.ai_service.status())
+        legacy_modes = {
+            "configured_operating_mode": status.get("configured_operating_mode"),
+            "effective_operating_mode": status.get("effective_operating_mode"),
+        }
+        status["configured_operating_mode"] = status.get(
+            "canonical_configured_operating_mode",
+            status.get("configured_operating_mode"),
+        )
+        status["effective_operating_mode"] = status.get(
+            "canonical_effective_operating_mode",
+            status.get("effective_operating_mode"),
+        )
+        status["legacy_modes"] = legacy_modes
+        return status
 
     def ai_performance_overview(self) -> dict[str, Any]:
         return self.owner._ai_performance_overview_impl()
@@ -38,10 +50,12 @@ class RuntimeQueryFacade:
             "runtime": self.ai_runtime(),
             "latest_brief": latest.get("brief"),
             "latest_assessment": latest.get("assessment"),
-            "latest_takeover": latest.get("takeover"),
+            "latest_baseline_reference": None if latest_decision_detail is None else latest_decision_detail.get("baseline_reference"),
+            "latest_ai_decision_intent": None if latest_decision_detail is None else latest_decision_detail.get("ai_decision_intent"),
+            "latest_profile_control_decision": None if latest_decision_detail is None else latest_decision_detail.get("profile_control_decision"),
+            "latest_decision_outcome": None if latest_decision_detail is None else latest_decision_detail.get("decision_outcome"),
             "latest_shadow_decision": shadow_latest.get("shadow_decision"),
             "latest_degradation": self.owner.payload(latest_degradation),
-            "takeover_summary": self.owner._ai_takeover_summary(),
             "shadow_summary": self.owner._ai_shadow_summary(),
             "performance_windows": self.owner._ai_shadow_performance_windows(),
             "latest_performance_report": self.owner._latest_ai_performance_report_payload(),
@@ -52,19 +66,31 @@ class RuntimeQueryFacade:
 
     def ai_latest(self) -> dict[str, Any]:
         if not self.owner._ai_history_visible():
-            return {"brief": None, "assessment": None, "takeover": None, "execution_suggestion": None}
+            return {
+                "brief": None,
+                "assessment": None,
+                "execution_suggestion": None,
+                "baseline_reference": None,
+                "ai_decision_intent": None,
+                "profile_control_decision": None,
+                "decision_outcome": None,
+            }
         brief = latest_topic_event_for_scope(self.owner.runtime.event_store, topics.AI_DECISION_BRIEFS, self.owner.state_scope)
         assessment = latest_topic_event_for_scope(self.owner.runtime.event_store, topics.AI_ASSESSMENTS, self.owner.state_scope)
-        takeover = latest_topic_event_for_scope(self.owner.runtime.event_store, topics.AI_TAKEOVER_DECISIONS, self.owner.state_scope)
         execution_plan = latest_topic_event_for_scope(self.owner.runtime.event_store, topics.EXECUTION_PLANS, self.owner.state_scope)
         order_intent = latest_topic_event_for_scope(self.owner.runtime.event_store, topics.ORDER_INTENTS, self.owner.state_scope)
+        latest_decision_id = self.owner.latest_decision_id()
+        latest_decision_detail = self.owner.decision_view(latest_decision_id) if latest_decision_id is not None else None
         assessment_payload = self.owner.payload(assessment)
         execution_plan_payload = self.owner.payload(execution_plan)
         order_intent_payload = self.owner.payload(order_intent)
         return {
             "brief": self.owner.payload(brief),
             "assessment": assessment_payload,
-            "takeover": self.owner.payload(takeover),
+            "baseline_reference": None if latest_decision_detail is None else latest_decision_detail.get("baseline_reference"),
+            "ai_decision_intent": None if latest_decision_detail is None else latest_decision_detail.get("ai_decision_intent"),
+            "profile_control_decision": None if latest_decision_detail is None else latest_decision_detail.get("profile_control_decision"),
+            "decision_outcome": None if latest_decision_detail is None else latest_decision_detail.get("decision_outcome"),
             "execution_suggestion": self.owner._ai_execution_suggestion_summary(
                 ai_assessment=assessment_payload,
                 execution_plan=execution_plan_payload,
@@ -129,69 +155,6 @@ class RuntimeQueryFacade:
             serializer=self.owner.payload,
         )
 
-    def ai_takeovers_recent(self, *, limit: int, offset: int) -> dict[str, Any]:
-        if not self.owner._ai_history_visible():
-            return {"takeovers": [], "limit": limit, "offset": offset, "total_available": 0, "has_more": False}
-        rows = self.owner._recent_ai_takeover_events()
-        return self.owner._paginate_rows(
-            rows,
-            limit=limit,
-            offset=offset,
-            key="takeovers",
-            serializer=lambda envelope: {
-                **(self.owner.payload(envelope) or {}),
-                "direction_disagreement": (
-                    envelope.payload.get("baseline_direction") != envelope.payload.get("ai_direction")
-                    if isinstance(envelope.payload, dict)
-                    else False
-                ),
-            },
-        )
-
-    async def evaluate_ai_shadow(
-        self,
-        *,
-        actor_role: OperatorRole,
-        actor_identity: str | None,
-        auth_source: AuthSource,
-    ) -> dict[str, Any]:
-        if not self.owner._ai_history_visible():
-            return {"evaluation": None, "status": "baseline_only_ai_history_hidden"}
-        evaluation, created = self.owner.runtime.ai_service.evaluate_shadow_window(
-            limit=self.owner.runtime.settings.ai_shadow_evaluation_window
-        )
-        if evaluation is None:
-            return {"evaluation": None, "status": "no_shadow_decisions"}
-        if created:
-            await publish_model(
-                bus=self.owner.runtime.bus,
-                topic=topics.AI_SHADOW_EVALUATIONS,
-                key=evaluation.symbol,
-                payload_model=evaluation,
-                source_component="operator_api",
-            )
-            status = "evaluation_created"
-        else:
-            status = "evaluation_reused"
-        self.owner._append_event(
-            topic=topics.OPERATOR_ACTIONS,
-            key="ai_shadow",
-            payload_model=OperatorActionRecord(
-                action="ai_shadow_evaluate",
-                actor_role=actor_role,
-                actor_identity=actor_identity,
-                auth_source=auth_source,
-                reason="operator_ai_shadow_evaluate",
-                status=status,
-                details={
-                    "evaluation_id": evaluation.evaluation_id,
-                    "window_size": evaluation.summary.get("window_size"),
-                    "override_rate": evaluation.summary.get("override_rate"),
-                },
-            ),
-        )
-        return {"evaluation": evaluation.model_dump(mode="json"), "status": status}
-
     def recovery_view(self) -> dict[str, Any]:
         return self.owner._cached("recovery_view", self.owner._build_recovery_view)
 
@@ -205,7 +168,7 @@ class RuntimeQueryFacade:
         }
 
     def system_mode(self) -> dict[str, Any]:
-        return self.owner._build_system_mode()
+        return self.owner._cached("system_mode", self.owner._build_system_mode)
 
     def blockers(self) -> list[dict[str, Any]]:
         return self.owner._build_blockers()

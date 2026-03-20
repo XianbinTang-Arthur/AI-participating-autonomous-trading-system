@@ -89,6 +89,35 @@ class TestRecoveryPostureEvaluator(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(final.latest_reconciliation_severity, "WARN")
         self.assertIn("operator_rebaseline_required", final.resume_blocked_reasons)
 
+    async def test_manual_halt_stays_resume_eligible_when_no_other_blockers(self) -> None:
+        runtime = await build_runtime(
+            AATSSettings.model_validate(
+                {
+                    "mode": "paper_live",
+                    "market_data_backend": "demo",
+                    "execution_backend": "paper",
+                    "account_backend": "disabled",
+                    "account_read_enabled": False,
+                    "storage_mode": "memory",
+                    "event_persistence_mode": "strict",
+                }
+            )
+        )
+        await runtime.market_gateway.run_local_publisher(
+            symbol=runtime.settings.default_symbol,
+            iterations=2,
+            interval_seconds=0.0,
+        )
+        runtime.kill_switch.halt(reason="operator_test_halt")
+        evaluator = RecoveryPostureEvaluator(runtime)
+
+        final = evaluator.finalize_status()
+
+        self.assertEqual(final.recovery_state, "manually_halted")
+        self.assertTrue(final.resume_eligible)
+        self.assertFalse(final.safe_to_trade)
+        self.assertEqual(final.resume_blocked_reasons, [])
+
 
 if __name__ == "__main__":
     unittest.main()

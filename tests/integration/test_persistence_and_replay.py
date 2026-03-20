@@ -129,10 +129,14 @@ class TestPersistenceAndReplay(unittest.IsolatedAsyncioTestCase):
                         self.assertIsNotNone(event_store.get(record.ai_decision_brief_ref))
                     if record.ai_market_assessment_ref is not None:
                         self.assertIsNotNone(event_store.get(record.ai_market_assessment_ref))
-                    if record.ai_takeover_decision_ref is not None:
-                        self.assertIsNotNone(event_store.get(record.ai_takeover_decision_ref))
                     if record.position_target_ref is not None:
                         self.assertIsNotNone(event_store.get(record.position_target_ref))
+                    if record.decision_outcome_ref is not None:
+                        outcome_event = event_store.get(record.decision_outcome_ref)
+                        self.assertIsNotNone(outcome_event)
+                        if outcome_event is not None:
+                            self.assertEqual(outcome_event.topic, topics.DECISION_OUTCOMES)
+                            self.assertTrue(outcome_event.payload.get("finalized"))
                     if record.policy_decision_ref is not None:
                         self.assertIsNotNone(event_store.get(record.policy_decision_ref))
                     if record.risk_decision_ref is not None:

@@ -57,7 +57,7 @@ export function summaryStrip(items) {
   `;
 }
 
-export function alertQueue(items, emptyText = "当前没有需要处理的提醒。") {
+export function alertQueue(items, emptyText = "当前暂无需要处理的提醒。") {
   if (!items.length) return emptyState(emptyText);
   return `
     <div class="alert-queue">
@@ -80,7 +80,7 @@ export function alertQueue(items, emptyText = "当前没有需要处理的提醒
 }
 
 export function kvList(rows) {
-  if (!rows.length) return emptyState("当前还没有可展示的数据。");
+  if (!rows.length) return emptyState("当前暂无可展示数据。");
   return `
     <div class="kv-list">
       ${rows
@@ -99,7 +99,7 @@ export function kvList(rows) {
 }
 
 export function statGrid(items) {
-  if (!items.length) return emptyState("当前还没有统计数据。");
+  if (!items.length) return emptyState("当前暂无统计数据。");
   return `
     <div class="stat-grid">
       ${items

@@ -7,7 +7,6 @@ export const DEFAULT_PAGE_LIMITS = {
   blockerHistory: 8,
   replayValidations: 8,
   recentAIAssessments: 8,
-  recentAITakeovers: 8,
   recentAIShadowDecisions: 8,
   recentAIShadowEvaluations: 8,
 };
@@ -89,16 +88,12 @@ export function viewSpecs(view, state = null) {
       ["aiRuntime", "/ai/runtime"],
       ["aiLatest", "/ai/latest"],
       ["aiRecent", `/ai/recent?limit=${limits.recentAIAssessments}&offset=0`],
-      ["aiTakeoversRecent", `/ai/takeovers/recent?limit=${limits.recentAITakeovers}&offset=0`],
       ["aiShadowLatest", "/ai/shadow/latest"],
       ["aiShadowRecent", `/ai/shadow/recent?limit=${limits.recentAIShadowDecisions}&offset=0`],
       ["aiShadowEvaluations", `/ai/shadow/evaluations?limit=${limits.recentAIShadowEvaluations}&offset=0`],
     ],
     aiConfig: [
-      ["aiOverview", "/ai/overview"],
-      ["aiRuntime", "/ai/runtime"],
-      ["runtimeProfiles", "/runtime-profiles"],
-      ["strategyProfiles", "/strategy-profiles"],
+      ["aiConfigModel", "/ai-config/summary"],
     ],
     admin: [
       ["operatorUsers", "/auth/users"],

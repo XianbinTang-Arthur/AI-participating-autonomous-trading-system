@@ -41,12 +41,6 @@ class DecisionAuditService:
             ref_field="ai_decision_brief_ref",
         )
 
-    async def handle_ai_takeover_decision(self, message: dict) -> None:
-        await self._update_decision_record(
-            message=message,
-            ref_field="ai_takeover_decision_ref",
-        )
-
     async def handle_ai_shadow_decision(self, message: dict) -> None:
         envelope = parse_envelope(message)
         decision_id = str(envelope.payload["decision_id"])
@@ -78,6 +72,12 @@ class DecisionAuditService:
         await self._update_decision_record(
             message=message,
             ref_field="position_target_ref",
+        )
+
+    async def handle_decision_outcome(self, message: dict) -> None:
+        await self._update_decision_record(
+            message=message,
+            ref_field="decision_outcome_ref",
         )
 
     async def handle_policy_decision(self, message: dict) -> None:

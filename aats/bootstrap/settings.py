@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import Field
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from aats.schemas.decision import AIOperatingMode
+from aats.schemas.decision import AIOperatingMode, CanonicalAIOperatingMode, normalize_ai_operating_mode
 
 
 RuntimeMode = Literal["backtest", "paper_live", "guarded_live", "autonomous_live"]
@@ -82,10 +82,19 @@ class AATSSettings(BaseSettings):
     ai_recover_after_successes: int = 2
     ai_auto_downgrade_enabled: bool = True
     ai_recovery_probe_interval_seconds: float = 300.0
-    ai_primary_min_confidence: float = 0.6
-    ai_primary_max_uncertainty: float = 0.35
-    ai_primary_min_directional_edge: float = 0.2
-    ai_shadow_mode_enabled: bool = False
+    ai_decision_min_confidence: float = Field(
+        default=0.6,
+        validation_alias=AliasChoices("ai_decision_min_confidence", "ai_primary_min_confidence"),
+    )
+    ai_decision_max_uncertainty: float = Field(
+        default=0.35,
+        validation_alias=AliasChoices("ai_decision_max_uncertainty", "ai_primary_max_uncertainty"),
+    )
+    ai_decision_min_directional_edge: float = Field(
+        default=0.2,
+        validation_alias=AliasChoices("ai_decision_min_directional_edge", "ai_primary_min_directional_edge"),
+    )
+    ai_shadow_mode_enabled: bool = True
     ai_shadow_evaluation_window: int = 50
     ai_outcome_review_bad_window_threshold: int = 2
     ai_outcome_max_fee_ratio_delta: float = 0.05
@@ -98,6 +107,7 @@ class AATSSettings(BaseSettings):
     ai_execution_max_participation_rate: float = 0.35
     ai_execution_max_cancel_replace_patience_ms: int = 4_000
     ai_execution_live_limit_offset_fraction_of_slippage: float = 0.5
+    ai_profile_control_freeze_after_admin_override_seconds: float = 3_600.0
     openai_api_key: str | None = None
     openai_base_url: str = "https://api.openai.com"
     market_data_stale_after_seconds: float = 30.0
@@ -233,6 +243,10 @@ class AATSSettings(BaseSettings):
         if self.ai_provider == "openai":
             return bool(self.openai_api_key)
         return False
+
+    @property
+    def canonical_ai_operating_mode(self) -> CanonicalAIOperatingMode:
+        return normalize_ai_operating_mode(self.ai_operating_mode)
 
     @property
     def operator_session_configured(self) -> bool:

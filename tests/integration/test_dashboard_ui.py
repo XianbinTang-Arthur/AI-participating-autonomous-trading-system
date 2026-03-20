@@ -73,7 +73,7 @@ class TestDashboardUI(unittest.TestCase):
         self.assertIn("const VIEW_META", js_text)
         self.assertIn("renderAISections", js_text)
         self.assertIn("renderAIConfigView", js_text)
-        self.assertIn("正在评估并生成建议", js_text)
+        self.assertIn("AI 配置", js_text)
         self.assertIn("账户与权限工作区", js_text)
         self.assertIn('hidePageHead: true', js_text)
 
@@ -81,24 +81,32 @@ class TestDashboardUI(unittest.TestCase):
         self.assertIn("AUTO_REFRESH_MS", store_text)
         self.assertIn("readyViews", store_text)
         self.assertIn("aiOverview", store_text)
-        self.assertIn("aiConfig", store_text)
+        self.assertIn("aiConfigModel", store_text)
 
         ai_text = responses["ai_view_js"].text
-        self.assertIn("AI 主导方向", ai_text)
+        self.assertIn("AI 决策链路", ai_text)
         self.assertIn("executionSuggestionRows", ai_text)
 
         ai_config_text = responses["ai_config_js"].text
-        self.assertIn("当前运行参数", ai_config_text)
-        self.assertIn("受限执行建议", ai_config_text)
-        self.assertIn("档位激活策略", ai_config_text)
-        self.assertIn("受限执行建议", ai_config_text)
-        self.assertIn("autoRollbackPolicyForm", ai_config_text)
-        self.assertIn("activationPolicyForm", ai_config_text)
-        self.assertIn("evaluate-strategy-profile", ai_config_text)
+        self.assertIn("运行参数概览", ai_config_text)
+        self.assertIn("策略档位切换", ai_config_text)
+        self.assertIn("档位概览", ai_config_text)
+        self.assertIn("管理员手动切换", ai_config_text)
+        self.assertIn("最近一次自动切换结论", ai_config_text)
+        self.assertIn("影子评估状态", ai_config_text)
+        self.assertNotIn("立即评估并生成建议", ai_config_text)
+        self.assertNotIn("评估并允许自动切换", ai_config_text)
+        self.assertNotIn("回滚到上一稳定策略档位", ai_config_text)
+        self.assertNotIn("执行建议能力", ai_config_text)
+        self.assertNotIn("autoRollbackPolicyForm", ai_config_text)
+        self.assertNotIn("activationPolicyForm", ai_config_text)
+        self.assertNotIn("evaluate-strategy-profile", ai_config_text)
 
         admin_text = responses["admin_js"].text
         self.assertIn("账户与权限工作区", admin_text)
         self.assertIn("控制台账号", admin_text)
+        self.assertIn("AI 配置页现在只保留策略档位状态、自动切换结论和管理员手动切换入口", admin_text)
+        self.assertNotIn("回滚和激活策略已经单独迁移到 AI 配置页", admin_text)
         self.assertIn("operatorCreateForm", admin_text)
         self.assertNotIn("autoRollbackPolicyForm", admin_text)
         self.assertNotIn("activationPolicyForm", admin_text)
@@ -106,7 +114,7 @@ class TestDashboardUI(unittest.TestCase):
         self.assertIn("operator_rejected_strategy_profile_recommendation", responses["terms_js"].text)
         self.assertIn("/auth/login", responses["login_js"].text)
         self.assertIn("baseline.regime", responses["strategy_js"].text)
-        self.assertIn("当前最需要处理的问题", responses["home_view_js"].text)
+        self.assertIn("首要问题", responses["home_view_js"].text)
 
     def test_dashboard_redirects_to_login_when_auth_is_enabled(self) -> None:
         settings = AATSSettings.model_validate(

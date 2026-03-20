@@ -26,20 +26,20 @@ export function splitByTradeScene(records = []) {
 
 export function orderTableHeaders(scene) {
   return scene === "derivatives"
-    ? ["合约标的", "仓位动作 / 数量", "委托状态", "最后更新时间", "操作"]
-    : ["现货标的", "买卖方向 / 数量", "委托状态", "最后更新时间", "操作"];
+    ? ["标的 / 场景", "动作摘要", "委托状态", "记录时间", "操作"]
+    : ["标的 / 场景", "动作摘要", "委托状态", "记录时间", "操作"];
 }
 
 export function fillTableHeaders(scene) {
   return scene === "derivatives"
-    ? ["合约成交", "仓位变化 / 价格", "盈亏与手续费", "落库时间", "查看"]
-    : ["现货成交", "买卖数量 / 价格", "成交金额与手续费", "落库时间", "查看"];
+    ? ["标的 / 场景", "成交摘要", "影响摘要", "记录时间", "操作"]
+    : ["标的 / 场景", "成交摘要", "影响摘要", "记录时间", "操作"];
 }
 
 export function decisionTableHeaders(scene) {
   return scene === "derivatives"
-    ? ["时间", "合约标的 / 周期", "仓位结论", "策略与风控", "查看"]
-    : ["时间", "现货标的 / 周期", "买卖结论", "策略与风控", "查看"];
+    ? ["记录时间", "标的 / 周期", "结论摘要", "门禁状态", "操作"]
+    : ["记录时间", "标的 / 周期", "结论摘要", "门禁状态", "操作"];
 }
 
 export function orderSceneSummary(order = {}) {
@@ -63,7 +63,7 @@ export function orderRowMeta(order = {}) {
 
 export function fillRowTitle(fill = {}) {
   return inferTradeScene(fill) === "derivatives"
-    ? readableState(fill.position_intent, "成交方向待确认")
+    ? readableState(fill.execution_action || fill.position_intent, "成交方向待确认")
     : readableState(fill.side, "成交方向待确认");
 }
 
@@ -96,7 +96,7 @@ export function orderDrawerRows(order = {}) {
         ["委托状态", readableState(order.status), order.exchange_order_id || "等待交易所订单号"],
         ["计划买卖数量", formatAssetAmount(order.symbol, order.requested_qty, true), `剩余未成 ${formatAssetAmount(order.symbol, order.remaining_qty)}`],
         ["已成交数量", formatAssetAmount(order.symbol, order.filled_qty), `成交均价 ${formatQuotePrice(order.symbol, order.average_fill_price)}`],
-        ["交易模式", readableState(order.submission_mode, "模式待确认"), readableState(order.position_intent, "意图待确认")],
+        ["交易模式", readableState(order.submission_mode, "模式待确认"), readableState(order.execution_action || order.position_intent, "意图待确认")],
       ];
 }
 
@@ -104,14 +104,14 @@ export function fillDrawerRows(fill = {}) {
   if (inferTradeScene(fill) === "derivatives") {
     return [
       ["合约标的", fill.symbol || "标的待确认", `${readableState(fill.margin_mode, "保证金模式待确认")} | ${readableState(fill.exposure_side, "方向待确认")}`],
-      ["仓位动作", readableState(fill.position_intent, "仓位动作待确认"), `${readableState(fill.side, "买卖方向待确认")} | ${readableState(fill.liquidity_role, "流动性角色待确认")}`],
+      ["仓位动作", readableState(fill.execution_action || fill.position_intent, "仓位动作待确认"), `${readableState(fill.side, "买卖方向待确认")} | ${readableState(fill.liquidity_role, "流动性角色待确认")}`],
       ["成交仓位", formatNumber(fill.fill_qty), `成交均价 ${formatQuotePrice(fill.symbol, fill.fill_price)}`],
       ["已实现盈亏", formatSigned(fill.realized_pnl), `手续费 ${formatNumber(fill.fee_amount, 4, "待同步")} ${fill.fee_currency || ""}`.trim()],
     ];
   }
 
   return [
-    ["现货标的", fill.symbol || "标的待确认", `${readableState(fill.side, "买卖方向待确认")} | ${readableState(fill.position_intent, "成交意图待确认")}`],
+    ["现货标的", fill.symbol || "标的待确认", `${readableState(fill.side, "买卖方向待确认")} | ${readableState(fill.execution_action || fill.position_intent, "成交意图待确认")}`],
     ["成交数量", formatAssetAmount(fill.symbol, fill.fill_qty), `成交单价 ${formatQuotePrice(fill.symbol, fill.fill_price)}`],
     ["成交金额", formatQuoteNotional(fill.symbol, fill.fill_qty, fill.fill_price), `手续费 ${formatNumber(fill.fee_amount, 4, "待同步")} ${fill.fee_currency || ""}`.trim()],
     ["盈亏影响", formatSigned(fill.realized_pnl), readableState(fill.liquidity_role, "流动性角色待确认")],
@@ -144,6 +144,9 @@ export function decisionDrawerRows(detail = {}, describeDecisionIntent) {
 }
 
 function spotOrderAction(order = {}) {
+  const highLevelAction = String(order.execution_action || "").toLowerCase();
+  if (highLevelAction === "exit" || highLevelAction === "reduce") return "卖出现货";
+  if (highLevelAction === "enter" || highLevelAction === "scale_in") return "买入现货";
   const submissionSide = String(order.submission_payload?.side || "").toLowerCase();
   if (submissionSide === "buy") return "买入现货";
   if (submissionSide === "sell") return "卖出现货";
@@ -154,7 +157,7 @@ function spotOrderAction(order = {}) {
 }
 
 function derivativesOrderAction(order = {}) {
-  return readableState(order.position_intent || order.exposure_side, "仓位动作待确认");
+  return readableState(order.execution_action || order.position_intent || order.exposure_side, "仓位动作待确认");
 }
 
 function formatAssetAmount(symbol, value, signed = false) {

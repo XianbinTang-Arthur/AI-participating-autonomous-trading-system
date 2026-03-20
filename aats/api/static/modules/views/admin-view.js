@@ -1,6 +1,6 @@
 ﻿import { callout, kvList, pill, primaryStatusPanel, responsiveTable, surfaceCard } from "../components.js";
 import { booleanWord, formatMaybeTimestamp, formatNumber, middleEllipsis } from "../formatters.js";
-import { readableState } from "../terms.js";
+import { permissionStatusLabel, readableState } from "../terms.js";
 
 export function renderAdminView(data) {
   const session = data.session || {};
@@ -18,13 +18,13 @@ export function renderAdminView(data) {
           title: "账户与权限工作区",
           headline: canAdmin ? "这里专门处理控制台账号、角色和访问权限" : "当前账号可以查看权限状态，但不能改动账号治理",
           summary: providers.auth_enabled
-            ? "AI 档位、回滚和激活策略已经单独迁移到 AI 配置页，这里只保留和人员权限直接相关的操作。"
+            ? "AI 配置页现在只保留策略档位状态、自动切换结论和管理员手动切换入口，这里只保留和人员权限直接相关的操作。"
             : "当前控制台认证未启用，但仍建议把账号治理和 AI 配置分开处理。",
           tone: canAdmin ? "positive" : "info",
           pills: [
             pill(`当前身份 ${session.identity || "未登录"}`, session.authenticated ? "positive" : "outline"),
             pill(`当前角色 ${readableState(session.role || "anonymous")}`, canAdmin ? "danger" : "outline"),
-            pill(`管理能力 ${canAdmin ? "可写" : "只读 / 受限"}`, canAdmin ? "positive" : "warning"),
+            pill(`管理能力 ${permissionStatusLabel(canAdmin)}`, canAdmin ? "positive" : "warning"),
           ],
           metrics: [
             {
@@ -48,7 +48,7 @@ export function renderAdminView(data) {
             {
               label: "AI 配置入口",
               value: "已独立成页",
-              meta: "请在 AI 配置页继续处理档位和回滚策略。",
+              meta: "请在 AI 配置页继续处理策略档位、自动切换状态和管理员手动切换。",
               tone: "info",
             },
           ],
@@ -57,8 +57,8 @@ export function renderAdminView(data) {
 
       <div class="span-4">
         ${surfaceCard({
-          title: "当前登录与权限",
-          kicker: "控制台访问",
+          title: "登录概览",
+          kicker: "访问状态",
           copy: "先确认是谁在操作控制台，再决定是否继续执行账号管理。",
           content: `
             ${callout({
@@ -83,8 +83,8 @@ export function renderAdminView(data) {
 
       <div class="span-8">
         ${surfaceCard({
-          title: "控制台账号",
-          kicker: "账号管理",
+          title: "账号记录",
+          kicker: "账号列表",
           copy: canAdmin
             ? "管理员可以在这里创建、停用、改角色、重置密码或删除控制台账号。"
             : "当前账号没有管理员权限，因此这里只能查看账户概览，不能改动。",
@@ -92,7 +92,7 @@ export function renderAdminView(data) {
             ${operatorUsersError ? `<div class="notice-card tone-warning">${operatorUsersError}</div>` : ""}
             ${renderCreateForm(canAdmin)}
             ${responsiveTable(
-              ["用户名", "角色", "状态", "最近登录", "最近更新", "操作"],
+              ["用户名", "角色", "账号状态", "最近登录", "最近更新", "操作"],
               users.map((user) => [
                 `<div><strong>${user.username || "待确认"}</strong><div class="table-meta mono">${middleEllipsis(user.user_id)}</div></div>`,
                 `${pill(readableState(user.role || "unknown"), user.role === "admin" ? "danger" : user.role === "operator" ? "info" : "outline")}`,
@@ -101,7 +101,7 @@ export function renderAdminView(data) {
                 formatMaybeTimestamp(user.updated_at || user.created_at),
                 renderUserActions(user, canAdmin),
               ]),
-              "当前还没有控制台账号。",
+              "当前暂无控制台账号。",
               users.map((user) => ({
                 kicker: "控制台账号",
                 title: `${user.username || "待确认"} | ${readableState(user.role || "unknown")}`,

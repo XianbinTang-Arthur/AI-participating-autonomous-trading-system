@@ -30,7 +30,7 @@ export function renderExecutionSections(data) {
     executionHero: primaryStatusPanel({
       eyebrow: "委托与成交",
       headline: executionHeadline({ latestOrder, latestFill, errors }),
-      summary: latestOrder || latestFill ? "先看最近委托和成交有没有真正落地，再看是否仍有异常在收敛。" : "当前还没有新的委托和成交记录。",
+      summary: latestOrder || latestFill ? "先看最近委托和成交有没有真正落地，再看是否仍有异常在收敛。" : "当前暂无新的委托和成交记录。",
       tone: executionTone({ latestOrder, errors }),
       actions: latestOrder?.client_order_id ? actionButton("查看最新委托", "inspect-order", latestOrder.client_order_id) : "",
       pills: [
@@ -40,14 +40,14 @@ export function renderExecutionSections(data) {
       ],
       metrics: [
         { label: "最新委托", value: readableState(latestOrder?.status || "unknown"), meta: middleEllipsis(latestOrder?.client_order_id, 10, 6, "暂未生成委托"), tone: toneForOrderStatus(latestOrder?.status) },
-        { label: "最近委托量", value: latestOrder?.requested_qty !== undefined ? formatSigned(latestOrder.requested_qty) : "待确认", meta: latestOrder ? `${readableState(latestOrder.order_type, "委托类型待确认")} | ${latestOrder.symbol || "标的待确认"}` : "当前还没有最新委托" , tone: latestOrder ? "info" : "neutral" },
-        { label: "最新成交", value: latestFill ? formatNumber(latestFill.fill_qty) : "暂未成交", meta: latestFill ? `价格 ${formatNumber(latestFill.fill_price)} | ${middleEllipsis(latestFill.fill_id)}` : "当前还没有成交编号", tone: latestFill ? "positive" : "neutral" },
+        { label: "最近委托量", value: latestOrder?.requested_qty !== undefined ? formatSigned(latestOrder.requested_qty) : "待确认", meta: latestOrder ? `${readableState(latestOrder.order_type, "委托类型待确认")} | ${latestOrder.symbol || "标的待确认"}` : "当前暂无最新委托" , tone: latestOrder ? "info" : "neutral" },
+        { label: "最新成交", value: latestFill ? formatNumber(latestFill.fill_qty) : "暂未成交", meta: latestFill ? `价格 ${formatNumber(latestFill.fill_price)} | ${middleEllipsis(latestFill.fill_id)}` : "当前暂无成交编号", tone: latestFill ? "positive" : "neutral" },
         { label: "最新对账", value: readableState(latestReconciliation?.severity || "unknown"), meta: middleEllipsis(latestReconciliation?.reconciliation_id, 10, 6, "暂时没有最新对账"), tone: latestReconciliation?.halt_required ? "danger" : latestReconciliation?.severity ? "warning" : "neutral" },
       ],
     }),
     executionExceptions: surfaceCard({
-      title: "需要优先处理的执行异常",
-      kicker: "异常优先",
+      title: "执行异常",
+      kicker: "异常处理",
       copy: "先判断执行链路有没有卡住，再去看历史委托和成交明细。",
       classes: errors.length ? "" : "is-muted",
       content: errors.length
@@ -59,17 +59,17 @@ export function renderExecutionSections(data) {
               tone: item.severity === "error" ? "danger" : "warning",
               pill: pill(item.severity === "error" ? "错误" : "告警", item.severity === "error" ? "danger" : "warning"),
             })),
-            "最近没有新的执行异常。"
+            "当前暂无新的执行异常。"
           )
         : summaryStrip([
-            { label: "异常数", value: "0", meta: "最近没有新的执行异常", tone: "positive" },
+            { label: "异常数", value: "0", meta: "当前暂无新的执行异常", tone: "positive" },
             { label: "最新委托状态", value: readableState(latestOrder?.status || "unknown"), meta: middleEllipsis(latestOrder?.client_order_id, 10, 6, "当前没有委托编号") , tone: toneForOrderStatus(latestOrder?.status) },
             { label: "最新成交状态", value: latestFill ? "已落库" : "暂无", meta: middleEllipsis(latestFill?.fill_id, 10, 6, "当前没有成交编号"), tone: latestFill ? "positive" : "neutral" },
           ]),
     }),
     executionOrders: surfaceCard({
-      title: "最近委托",
-      kicker: "委托状态变化",
+      title: "委托记录",
+      kicker: "委托状态",
       copy: "按现货和合约分别查看，判断哪类委托在排队、卡住或反复失败。",
       content: `${renderOrderGroups(recentOrders)}${renderPaginationFooter({
         payload: ordersPayload,
@@ -80,8 +80,8 @@ export function renderExecutionSections(data) {
       })}`,
     }),
     executionFills: surfaceCard({
-      title: "最近成交",
-      kicker: "成交落库确认",
+      title: "成交记录",
+      kicker: "成交状态",
       copy: "确认最近成交是否已经稳定落库，并补充对盈亏和手续费的上下文判断。",
       content: `${renderFillGroups(recentFills)}${renderPaginationFooter({
         payload: fillsPayload,
@@ -109,7 +109,7 @@ export function renderExecutionView(data) {
 function renderOrderGroups(recentOrders) {
   const groups = splitByTradeScene(recentOrders);
   if (!groups.length) {
-    return '<div class="empty-state">最近还没有委托记录。</div>';
+    return '<div class="empty-state">当前暂无委托记录。</div>';
   }
   return groups
     .map((group) => {
@@ -129,9 +129,9 @@ function renderOrderGroups(recentOrders) {
               `<div><strong>${orderRowTitle(order)}</strong><div class="table-meta">${orderRowMeta(order)}</div></div>`,
               `<div><strong>${readableState(order.status)}</strong><div class="table-meta">${order.exchange_order_id || "等待交易所回执"}</div></div>`,
               `<div><strong>${formatRelativeAge(order.last_update_ts || order.created_at)}</strong><div class="table-meta">${formatMaybeTimestamp(order.last_update_ts || order.created_at)}</div></div>`,
-              `<div class="stack-actions">${actionButton("详情", "inspect-order", order.client_order_id)}${stuckButton(order)}</div>`,
+              `<div class="stack-actions">${actionButton("查看详情", "inspect-order", order.client_order_id)}${stuckButton(order)}</div>`,
             ]),
-            "最近还没有委托。",
+            "当前暂无委托记录。",
             group.records.map((order) => ({
               kicker: group.scene === "derivatives" ? "合约委托" : "现货委托",
               title: `${order.symbol || "标的待确认"} | ${orderRowTitle(order)}`,
@@ -149,7 +149,7 @@ function renderOrderGroups(recentOrders) {
                 { label: "最后更新时间", value: formatMaybeTimestamp(order.last_update_ts || order.created_at), meta: formatRelativeAge(order.last_update_ts || order.created_at) },
               ],
               detailLabel: "展开委托详情",
-              action: `<div class="stack-actions">${actionButton("详情", "inspect-order", order.client_order_id)}${stuckButton(order)}</div>`,
+              action: `<div class="stack-actions">${actionButton("查看详情", "inspect-order", order.client_order_id)}${stuckButton(order)}</div>`,
             }))
           )}
         </section>
@@ -161,7 +161,7 @@ function renderOrderGroups(recentOrders) {
 function renderFillGroups(recentFills) {
   const groups = splitByTradeScene(recentFills);
   if (!groups.length) {
-    return '<div class="empty-state">最近还没有成交记录。</div>';
+    return '<div class="empty-state">当前暂无成交记录。</div>';
   }
   return groups
     .map((group) => {
@@ -183,10 +183,10 @@ function renderFillGroups(recentFills) {
                 `<div><strong>${fillRowTitle(fill)}</strong><div class="table-meta">${fillRowMeta(fill)}</div></div>`,
                 `<div><strong>${impact.value}</strong><div class="table-meta">${impact.meta}</div></div>`,
                 `<div><strong>${formatRelativeAge(fill.ingestion_timestamp)}</strong><div class="table-meta">${formatMaybeTimestamp(fill.ingestion_timestamp)}</div></div>`,
-                actionButton("详情", "inspect-fill", fill.fill_id),
+                actionButton("查看详情", "inspect-fill", fill.fill_id),
               ];
             }),
-            "最近还没有成交记录。",
+            "当前暂无成交记录。",
             group.records.map((fill) => {
               const impact = fillImpactDisplay(fill, group.scene);
               return {
@@ -206,7 +206,7 @@ function renderFillGroups(recentFills) {
                   { label: "补充说明", value: impact.meta },
                 ],
                 detailLabel: "展开成交详情",
-                action: actionButton("详情", "inspect-fill", fill.fill_id),
+                action: actionButton("查看详情", "inspect-fill", fill.fill_id),
               };
             })
           )}
@@ -235,7 +235,7 @@ function renderPaginationFooter({ payload, key, singular, loadAction, collapseAc
 
 function executionHeadline({ latestOrder, latestFill, errors }) {
   if (errors.length > 0) return "执行链路存在异常";
-  if (!latestOrder) return "当前没有新的委托";
+  if (!latestOrder) return "当前暂无新的委托";
   if (latestFill) return `最新${fillSceneSummary(latestFill)}已落库`;
   return `最近一笔${orderSceneSummary(latestOrder)}处于 ${readableState(latestOrder.status)} 阶段`;
 }
@@ -258,7 +258,7 @@ function fillImpactDisplay(fill, scene) {
     const [value] = String(meta || "").split(" | ");
     return {
       value: value && value !== "当前没有额外说明" ? value : "影响待确认",
-      meta: meta && meta !== "当前没有额外说明" ? meta : "当前还没有足够的成交影响上下文",
+      meta: meta && meta !== "当前没有额外说明" ? meta : "当前暂无足够的成交影响上下文",
     };
   }
 

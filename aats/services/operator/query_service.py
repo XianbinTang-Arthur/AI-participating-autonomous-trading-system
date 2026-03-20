@@ -4,23 +4,21 @@ from datetime import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
-from aats.bootstrap.logging import get_logger, log_event
+from aats.bootstrap.logging import get_logger
 from aats.events import topics
-from aats.events.envelopes import build_envelope, publish_model
+from aats.events.envelopes import build_envelope
 from aats.schemas.common import EventEnvelope, utc_now
-from aats.schemas.execution import OrderState
+from aats.schemas.decision import AIDecisionIntent, BaselineReference, DecisionOutcome, normalize_ai_operating_mode
+from aats.schemas.execution import OrderState, execution_action_from_position_intent
 from aats.schemas.operator import (
     AuthSource,
     BlockerSnapshotRecord,
-    ExecutionErrorSummary,
     OperatorActionRecord,
     OperatorRole,
     OperatorUserRecord,
-    ReconciliationValidationSummary,
-    ReplayValidationSummary,
 )
-from aats.services.execution_engine.baseline_import import AccountBaselineImportService
 from aats.services.governance_engine.recovery_posture import RecoveryPostureEvaluator
+from aats.services.operator.audit_replay_queries import AuditReplayQueryFacade
 from aats.services.operator.accounts import (
     create_operator_user as create_managed_operator_user,
     delete_operator_user as delete_managed_operator_user,
@@ -32,16 +30,14 @@ from aats.services.operator.runtime_profiles import (
     runtime_profile_action_payload,
 )
 from aats.services.operator.runtime_queries import RuntimeQueryFacade
+from aats.services.operator.reconciliation_system_queries import ReconciliationSystemQueryFacade
 from aats.services.operator.strategy_profile_queries import StrategyProfileQueryFacade
 from aats.services.operator.strategy_profiles import StrategyProfileControlService
-from aats.services.portfolio_service.reconstruction import PortfolioReconstructionService
-from aats.services.reconciliation_service.replay import ReplayEngine, ReplayResult
 from aats.services.runtime_scope import (
     fills_for_scope,
     latest_reconciliation_for_scope,
     latest_snapshot_for_scope,
     order_states_for_scope,
-    reconciliation_reports_for_scope,
     snapshots_for_scope,
     runtime_state_scope,
     latest_topic_event_for_scope,
@@ -63,7 +59,9 @@ class OperatorQueryService:
         self._cache: dict[str, Any] = {}
         self.strategy_profiles = StrategyProfileControlService(runtime)
         self.runtime_queries = RuntimeQueryFacade(self)
+        self.reconciliation_system_queries = ReconciliationSystemQueryFacade(self)
         self.strategy_profile_queries = StrategyProfileQueryFacade(self)
+        self.audit_replay_queries = AuditReplayQueryFacade(self)
 
     def _cached(self, key: str, loader):
         if key not in self._cache:
@@ -221,21 +219,6 @@ class OperatorQueryService:
     def ai_runtime(self) -> dict[str, Any]:
         return self.runtime_queries.ai_runtime()
 
-    def _recent_ai_takeover_events(self, *, limit: int | None = None):
-        if not self._ai_history_visible():
-            return []
-        rows = list(
-            reversed(
-                self.runtime.event_store.by_topic_scoped(
-                    topics.AI_TAKEOVER_DECISIONS,
-                    scope=self.state_scope,
-                )
-            )
-        )
-        if limit is None:
-            return rows
-        return rows[:limit]
-
     def _recent_ai_shadow_evaluation_events(self, *, limit: int | None = None):
         if not self._ai_history_visible():
             return []
@@ -297,46 +280,6 @@ class OperatorQueryService:
         if denominator <= 0:
             return 0.0
         return round(numerator / denominator, 6)
-
-    def _ai_takeover_summary(self, *, limit: int = 50) -> dict[str, Any]:
-        payloads = [self.payload(item) for item in self._recent_ai_takeover_events(limit=limit)]
-        payloads = [item for item in payloads if item is not None]
-        attempted = len(payloads)
-        allowed = sum(1 for item in payloads if item.get("ai_takeover_allowed"))
-        applied = sum(1 for item in payloads if item.get("ai_takeover_applied"))
-        disagreement = sum(
-            1
-            for item in payloads
-            if item.get("baseline_direction") not in {None, ""}
-            and item.get("ai_direction") not in {None, ""}
-            and item.get("baseline_direction") != item.get("ai_direction")
-        )
-        blocker_counts: dict[str, int] = {}
-        for item in payloads:
-            for blocker in item.get("ai_takeover_blockers", []):
-                blocker_counts[str(blocker)] = blocker_counts.get(str(blocker), 0) + 1
-        top_blockers = sorted(
-            (
-                {"blocker": blocker, "count": count}
-                for blocker, count in blocker_counts.items()
-            ),
-            key=lambda row: (-row["count"], row["blocker"]),
-        )[:5]
-        latest = payloads[0] if payloads else None
-        return {
-            "window_size": attempted,
-            "attempted_count": attempted,
-            "allowed_count": allowed,
-            "applied_count": applied,
-            "blocked_count": max(attempted - applied, 0),
-            "disagreement_count": disagreement,
-            "allowed_rate": self._ratio(allowed, attempted),
-            "applied_rate": self._ratio(applied, attempted),
-            "blocked_rate": self._ratio(max(attempted - applied, 0), attempted),
-            "disagreement_rate": self._ratio(disagreement, attempted),
-            "top_blockers": top_blockers,
-            "latest_takeover_at": latest.get("created_at") if latest is not None else None,
-        }
 
     def _ai_shadow_summary(self, *, limit: int = 10) -> dict[str, Any]:
         payloads = [self.payload(item) for item in self._recent_ai_shadow_evaluation_events(limit=limit)]
@@ -537,6 +480,7 @@ class OperatorQueryService:
         return {
             "configured_mode": runtime.get("configured_operating_mode"),
             "effective_mode": runtime.get("effective_operating_mode"),
+            "legacy_modes": runtime.get("legacy_modes"),
             "provider_state": runtime.get("provider_state"),
             "outcome_state": runtime.get("outcome_state"),
             "degraded": runtime.get("degraded"),
@@ -558,8 +502,26 @@ class OperatorQueryService:
     def ai_overview(self) -> dict[str, Any]:
         return self.runtime_queries.ai_overview()
 
+    def ai_config_summary(self) -> dict[str, Any]:
+        runtime = self.ai_runtime()
+        latest_decision_id = self.latest_decision_id()
+        latest_decision_detail = self.decision_view(latest_decision_id) if latest_decision_id is not None else None
+        return {
+            "runtime_profile": self.runtime_profile_ai_config_snapshot(),
+            "strategy_profile": self.strategy_profile_ai_config_snapshot(),
+            "ai": {
+                "configured_operating_mode": runtime.get("configured_operating_mode"),
+                "effective_operating_mode": runtime.get("effective_operating_mode"),
+                "shadow_mode_enabled": runtime.get("shadow_mode_enabled", False),
+                "shadow_summary": self._ai_shadow_summary(),
+                "latest_profile_control_decision": None
+                if latest_decision_detail is None
+                else latest_decision_detail.get("profile_control_decision"),
+            },
+        }
+
     def _ai_history_visible(self) -> bool:
-        return self.runtime.settings.ai_operating_mode != "baseline_only"
+        return self.runtime.settings.canonical_ai_operating_mode != "baseline_only"
 
     def ai_latest(self) -> dict[str, Any]:
         return self.runtime_queries.ai_latest()
@@ -578,22 +540,6 @@ class OperatorQueryService:
 
     def ai_performance_reports(self, *, limit: int, offset: int) -> dict[str, Any]:
         return self.runtime_queries.ai_performance_reports(limit=limit, offset=offset)
-
-    def ai_takeovers_recent(self, *, limit: int, offset: int) -> dict[str, Any]:
-        return self.runtime_queries.ai_takeovers_recent(limit=limit, offset=offset)
-
-    async def evaluate_ai_shadow(
-        self,
-        *,
-        actor_role: OperatorRole,
-        actor_identity: str | None,
-        auth_source: AuthSource,
-    ) -> dict[str, Any]:
-        return await self.runtime_queries.evaluate_ai_shadow(
-            actor_role=actor_role,
-            actor_identity=actor_identity,
-            auth_source=auth_source,
-        )
 
     def latest_operator_action(self, action: str) -> dict[str, Any] | None:
         actions = self._cached(
@@ -659,6 +605,14 @@ class OperatorQueryService:
             "restart_required": activation.get("restart_required", False),
         }
 
+    def runtime_profile_ai_config_snapshot(self) -> dict[str, Any]:
+        snapshot = self.runtime_profile_snapshot()
+        return {
+            "profile_source": snapshot.get("profile_source"),
+            "control_plane_status": snapshot.get("control_plane_status"),
+            "current_runtime_payload": snapshot.get("current_runtime_payload"),
+        }
+
     def record_runtime_profile_action(
         self,
         *,
@@ -689,118 +643,17 @@ class OperatorQueryService:
     def strategy_profile_snapshot(self) -> dict[str, Any]:
         return self.strategy_profile_queries.snapshot()
 
+    def strategy_profile_ai_config_snapshot(self) -> dict[str, Any]:
+        return self.strategy_profile_queries.ai_config_snapshot()
+
     def strategy_profile_optimization_reports(self, *, limit: int, offset: int) -> dict[str, Any]:
         return self.strategy_profile_queries.optimization_reports(limit=limit, offset=offset)
 
     def strategy_profile_selection_decisions(self, *, limit: int, offset: int) -> dict[str, Any]:
         return self.strategy_profile_queries.selection_decisions(limit=limit, offset=offset)
 
-    def strategy_profile_auto_rollback_policy(self) -> dict[str, Any]:
-        return self.strategy_profile_queries.auto_rollback_policy()
-
-    def strategy_profile_auto_rollback_policy_history(self, *, limit: int, offset: int) -> dict[str, Any]:
-        return self.strategy_profile_queries.auto_rollback_policy_history(limit=limit, offset=offset)
-
-    def strategy_profile_activation_policy(self) -> dict[str, Any]:
-        return self.strategy_profile_queries.activation_policy()
-
-    def strategy_profile_activation_policy_history(self, *, limit: int, offset: int) -> dict[str, Any]:
-        return self.strategy_profile_queries.activation_policy_history(limit=limit, offset=offset)
-
-    def strategy_profile_recommendations(self, *, limit: int, offset: int) -> dict[str, Any]:
-        return self.strategy_profile_queries.recommendations(limit=limit, offset=offset)
-
     def strategy_profile_activation_history(self, *, limit: int, offset: int) -> dict[str, Any]:
         return self.strategy_profile_queries.activation_history(limit=limit, offset=offset)
-
-    def strategy_profile_rejections(self, *, limit: int, offset: int) -> dict[str, Any]:
-        return self.strategy_profile_queries.rejections(limit=limit, offset=offset)
-
-    def strategy_profile_evaluations(self, *, limit: int, offset: int) -> dict[str, Any]:
-        return self.strategy_profile_queries.evaluations(limit=limit, offset=offset)
-
-    async def evaluate_strategy_profile(
-        self,
-        *,
-        allow_auto_activation: bool = True,
-        actor_role: OperatorRole,
-        actor_identity: str | None,
-        auth_source: AuthSource,
-    ) -> dict[str, Any]:
-        return await self.strategy_profile_queries.evaluate_now(
-            allow_auto_activation=allow_auto_activation,
-            actor_role=actor_role,
-            actor_identity=actor_identity,
-            auth_source=auth_source,
-        )
-
-    def accept_strategy_profile_recommendation(
-        self,
-        *,
-        recommendation_id: str,
-        activation_mode: str,
-        reason: str,
-        actor_role: OperatorRole,
-        actor_identity: str | None,
-        auth_source: AuthSource,
-    ) -> dict[str, Any]:
-        return self.strategy_profile_queries.accept_recommendation(
-            recommendation_id=recommendation_id,
-            activation_mode=activation_mode,
-            reason=reason,
-            actor_role=actor_role,
-            actor_identity=actor_identity,
-            auth_source=auth_source,
-        )
-
-    def reject_strategy_profile_recommendation(
-        self,
-        *,
-        recommendation_id: str,
-        reason_code: str,
-        reason_detail: str | None,
-        actor_role: OperatorRole,
-        actor_identity: str | None,
-        auth_source: AuthSource,
-    ) -> dict[str, Any]:
-        return self.strategy_profile_queries.reject_recommendation(
-            recommendation_id=recommendation_id,
-            reason_code=reason_code,
-            reason_detail=reason_detail,
-            actor_role=actor_role,
-            actor_identity=actor_identity,
-            auth_source=auth_source,
-        )
-
-    def activate_pending_strategy_profile(
-        self,
-        *,
-        reason: str,
-        actor_role: OperatorRole,
-        actor_identity: str | None,
-        auth_source: AuthSource,
-    ) -> dict[str, Any]:
-        return self.strategy_profile_queries.activate_pending(
-            reason=reason,
-            actor_role=actor_role,
-            actor_identity=actor_identity,
-            auth_source=auth_source,
-        )
-
-    def rollback_strategy_profile(
-        self,
-        *,
-        reason: str,
-        actor_role: OperatorRole,
-        actor_identity: str | None,
-        auth_source: AuthSource,
-    ) -> dict[str, Any]:
-        return self.strategy_profile_queries.rollback(
-            reason=reason,
-            actor_role=actor_role,
-            actor_identity=actor_identity,
-            auth_source=auth_source,
-        )
 
     def activate_strategy_profile(
         self,
@@ -813,136 +666,6 @@ class OperatorQueryService:
     ) -> dict[str, Any]:
         return self.strategy_profile_queries.activate_profile(
             profile_id=profile_id,
-            reason=reason,
-            actor_role=actor_role,
-            actor_identity=actor_identity,
-            auth_source=auth_source,
-        )
-
-    def update_strategy_profile_auto_rollback_policy(
-        self,
-        *,
-        enabled: bool,
-        review_required_only: bool,
-        min_trade_count: int,
-        cooldown_seconds: float,
-        matrix_allowed_symbols: tuple[str, ...],
-        matrix_allowed_regimes: tuple[str, ...],
-        matrix_allowed_profiles: tuple[str, ...],
-        reason: str,
-        actor_role: OperatorRole,
-        actor_identity: str | None,
-        auth_source: AuthSource,
-    ) -> dict[str, Any]:
-        return self.strategy_profile_queries.update_auto_rollback_policy(
-            enabled=enabled,
-            review_required_only=review_required_only,
-            min_trade_count=min_trade_count,
-            cooldown_seconds=cooldown_seconds,
-            matrix_allowed_symbols=matrix_allowed_symbols,
-            matrix_allowed_regimes=matrix_allowed_regimes,
-            matrix_allowed_profiles=matrix_allowed_profiles,
-            reason=reason,
-            actor_role=actor_role,
-            actor_identity=actor_identity,
-            auth_source=auth_source,
-        )
-
-    def approve_strategy_profile_auto_rollback_policy(
-        self,
-        *,
-        policy_id: str | None,
-        reason: str,
-        actor_role: OperatorRole,
-        actor_identity: str | None,
-        auth_source: AuthSource,
-    ) -> dict[str, Any]:
-        return self.strategy_profile_queries.approve_auto_rollback_policy(
-            policy_id=policy_id,
-            reason=reason,
-            actor_role=actor_role,
-            actor_identity=actor_identity,
-            auth_source=auth_source,
-        )
-
-    def freeze_strategy_profile_auto_rollback_policy(
-        self,
-        *,
-        frozen: bool,
-        reason: str,
-        actor_role: OperatorRole,
-        actor_identity: str | None,
-        auth_source: AuthSource,
-    ) -> dict[str, Any]:
-        return self.strategy_profile_queries.freeze_auto_rollback_policy(
-            frozen=frozen,
-            reason=reason,
-            actor_role=actor_role,
-            actor_identity=actor_identity,
-            auth_source=auth_source,
-        )
-
-    def update_strategy_profile_activation_policy(
-        self,
-        *,
-        enabled: bool,
-        min_composite_score: float,
-        min_offline_replay_score: float,
-        min_recommendation_strength: float,
-        require_positive_replay_consensus: bool,
-        disallow_when_shadow_review_required: bool,
-        matrix_allowed_symbols: tuple[str, ...],
-        matrix_allowed_regimes: tuple[str, ...],
-        matrix_allowed_profiles: tuple[str, ...],
-        reason: str,
-        actor_role: OperatorRole,
-        actor_identity: str | None,
-        auth_source: AuthSource,
-    ) -> dict[str, Any]:
-        return self.strategy_profile_queries.update_activation_policy(
-            enabled=enabled,
-            min_composite_score=min_composite_score,
-            min_offline_replay_score=min_offline_replay_score,
-            min_recommendation_strength=min_recommendation_strength,
-            require_positive_replay_consensus=require_positive_replay_consensus,
-            disallow_when_shadow_review_required=disallow_when_shadow_review_required,
-            matrix_allowed_symbols=matrix_allowed_symbols,
-            matrix_allowed_regimes=matrix_allowed_regimes,
-            matrix_allowed_profiles=matrix_allowed_profiles,
-            reason=reason,
-            actor_role=actor_role,
-            actor_identity=actor_identity,
-            auth_source=auth_source,
-        )
-
-    def approve_strategy_profile_activation_policy(
-        self,
-        *,
-        policy_id: str | None,
-        reason: str,
-        actor_role: OperatorRole,
-        actor_identity: str | None,
-        auth_source: AuthSource,
-    ) -> dict[str, Any]:
-        return self.strategy_profile_queries.approve_activation_policy(
-            policy_id=policy_id,
-            reason=reason,
-            actor_role=actor_role,
-            actor_identity=actor_identity,
-            auth_source=auth_source,
-        )
-
-    def freeze_strategy_profile_activation_policy(
-        self,
-        *,
-        frozen: bool,
-        reason: str,
-        actor_role: OperatorRole,
-        actor_identity: str | None,
-        auth_source: AuthSource,
-    ) -> dict[str, Any]:
-        return self.strategy_profile_queries.freeze_activation_policy(
-            frozen=frozen,
             reason=reason,
             actor_role=actor_role,
             actor_identity=actor_identity,
@@ -1199,7 +922,6 @@ class OperatorQueryService:
         self,
         *,
         ai_assessment: dict[str, Any] | None,
-        ai_takeover_decision: dict[str, Any] | None,
         position_target: dict[str, Any] | None,
         ai_decision_brief: dict[str, Any] | None,
         strategy_execution_health: dict[str, Any] | None,
@@ -1252,9 +974,6 @@ class OperatorQueryService:
             "target_expected_net_edge_bps": position_target.get("expected_net_edge_bps") if position_target else None,
             "validation_flags": list(ai_assessment.get("validation_flags") or []),
             "rejection_flags": list(ai_assessment.get("rejection_flags") or []),
-            "takeover_allowed": None if ai_takeover_decision is None else ai_takeover_decision.get("ai_takeover_allowed"),
-            "takeover_applied": None if ai_takeover_decision is None else ai_takeover_decision.get("ai_takeover_applied"),
-            "takeover_blockers": [] if ai_takeover_decision is None else list(ai_takeover_decision.get("ai_takeover_blockers") or []),
             "market_snapshot_fresh": None if ai_decision_brief is None else ai_decision_brief.get("market_snapshot_fresh"),
             "account_snapshot_fresh": None if ai_decision_brief is None else ai_decision_brief.get("account_snapshot_fresh"),
             "safe_to_trade": None if ai_decision_brief is None else ai_decision_brief.get("safe_to_trade"),
@@ -1278,6 +997,259 @@ class OperatorQueryService:
             return "short"
         return "flat"
 
+    @staticmethod
+    def _action_from_position_intent(position_intent: Any) -> str | None:
+        if position_intent is None:
+            return None
+        return execution_action_from_position_intent(str(position_intent)) or "hold"
+
+    def _action_from_execution_fields(self, *, execution_action: Any, position_intent: Any) -> str | None:
+        if execution_action is not None:
+            normalized = str(execution_action).strip().lower()
+            if normalized:
+                return normalized
+        return self._action_from_position_intent(position_intent)
+
+    def _execution_record_payload(self, record: Any) -> dict[str, Any]:
+        payload = record.model_dump(mode="json")
+        payload["execution_action"] = self._action_from_execution_fields(
+            execution_action=payload.get("execution_action"),
+            position_intent=payload.get("position_intent"),
+        )
+        return payload
+
+    def _execution_plan_payload(self, execution_plan: dict[str, Any] | None) -> dict[str, Any] | None:
+        if execution_plan is None:
+            return None
+        payload = dict(execution_plan)
+        payload["execution_action"] = self._action_from_execution_fields(
+            execution_action=payload.get("execution_action"),
+            position_intent=payload.get("position_intent"),
+        )
+        return payload
+
+    def _baseline_reference_payload(
+        self,
+        *,
+        baseline_assessment: dict[str, Any] | None,
+        decision_context: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if baseline_assessment is None:
+            return None
+        reference = BaselineReference(
+            decision_id=str(baseline_assessment.get("decision_id") or ""),
+            symbol=str(baseline_assessment.get("symbol") or ""),
+            timeframe=(
+                None
+                if decision_context is None
+                else decision_context.get("timeframe")
+            ) or baseline_assessment.get("holding_horizon"),
+            regime=baseline_assessment.get("regime"),
+            volatility_state=baseline_assessment.get("volatility_state"),
+            direction_bias=baseline_assessment.get("direction_bias") or "flat",
+            confidence=baseline_assessment.get("confidence"),
+            composite_alpha_score=baseline_assessment.get("composite_alpha_score"),
+            suggested_position_scale=baseline_assessment.get("suggested_position_scale"),
+            reason_codes=list(baseline_assessment.get("reason_codes") or []),
+            raw_payload=baseline_assessment,
+        )
+        return reference.model_dump(mode="json")
+
+    def _ai_decision_intent_payload(
+        self,
+        *,
+        ai_assessment: dict[str, Any] | None,
+        decision_context: dict[str, Any] | None,
+        position_target: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        native_intent = None if position_target is None else position_target.get("ai_decision_intent")
+        if isinstance(native_intent, dict):
+            return native_intent
+        if ai_assessment is None:
+            return None
+        direction = self._direction_from_edge(ai_assessment.get("directional_edge"))
+        current_side = None if decision_context is None else decision_context.get("current_exposure_side")
+        current_qty = 0.0 if decision_context is None else float(decision_context.get("current_position_qty") or 0.0)
+        economically_actionable = bool(ai_assessment.get("economically_actionable"))
+        if direction == "flat" or not economically_actionable:
+            action = "hold"
+        elif current_side not in {None, "flat"} and current_side != direction:
+            action = "reverse"
+        elif abs(current_qty) > 1e-12 and current_side == direction:
+            action = "scale_in"
+        else:
+            action = "enter"
+        intent = AIDecisionIntent(
+            decision_id=str(ai_assessment.get("decision_id") or ""),
+            symbol=str(ai_assessment.get("symbol") or ""),
+            timeframe=(
+                None
+                if decision_context is None
+                else decision_context.get("timeframe")
+            ) or ai_assessment.get("expected_holding_horizon"),
+            direction=direction,
+            action=action,
+            target_qty=Decimal(str((position_target or {}).get("target_position_qty") or "0")),
+            confidence=float(ai_assessment.get("calibrated_confidence") or ai_assessment.get("confidence") or 0.0),
+            economically_actionable=economically_actionable,
+            reason_codes=list(ai_assessment.get("override_reason_codes") or ai_assessment.get("validation_flags") or []),
+            fallback_used=bool(ai_assessment.get("fallback_used")),
+            degraded=bool(ai_assessment.get("degraded")),
+            provider_name=ai_assessment.get("provider_name"),
+            provider_request_id=ai_assessment.get("provider_request_id"),
+            requested_profile_id=ai_assessment.get("requested_profile_id"),
+            requested_profile_reason_codes=list(ai_assessment.get("requested_profile_reason_codes") or []),
+            raw_assessment_ref=ai_assessment,
+        )
+        return intent.model_dump(mode="json")
+
+    def _decision_outcome_payload(
+        self,
+        *,
+        finalized_decision_outcome: dict[str, Any] | None,
+        decision_context: dict[str, Any] | None,
+        baseline_assessment: dict[str, Any] | None,
+        ai_assessment: dict[str, Any] | None,
+        position_target: dict[str, Any] | None,
+        policy_decision: dict[str, Any] | None,
+        risk_decision: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if all(item is None for item in (baseline_assessment, ai_assessment, position_target, policy_decision, risk_decision, finalized_decision_outcome)):
+            return None
+        if isinstance(finalized_decision_outcome, dict):
+            return finalized_decision_outcome
+        native_outcome = None if position_target is None else position_target.get("decision_outcome")
+        native_profile_control = None if position_target is None else position_target.get("profile_control_decision")
+        if isinstance(native_outcome, dict):
+            payload = dict(native_outcome)
+            blocked_reasons = list(payload.get("decision_blocked_reasons") or [])
+            blocked_reasons.extend(list((policy_decision or {}).get("rejection_reasons") or []))
+            blocked_reasons.extend(list((risk_decision or {}).get("rejection_reasons") or []))
+            payload["decision_blocked_reasons"] = list(dict.fromkeys(item for item in blocked_reasons if item))
+            payload["policy_blocked"] = bool(policy_decision is not None and not policy_decision.get("execution_allowed", False))
+            payload["policy_blocked_reasons"] = list((policy_decision or {}).get("rejection_reasons") or [])
+            payload["risk_capped"] = bool(risk_decision is not None and (
+                risk_decision.get("modified")
+                or risk_decision.get("rejection_reasons")
+                or risk_decision.get("constraints_applied")
+            ))
+            payload["risk_capped_reasons"] = list((risk_decision or {}).get("rejection_reasons") or []) + list(
+                (risk_decision or {}).get("constraints_applied") or []
+            )
+            payload["risk_capped_target_qty"] = (
+                None
+                if risk_decision is None or risk_decision.get("capped_target_position_qty") is None
+                else risk_decision.get("capped_target_position_qty")
+            )
+            profile_snapshot = self.strategy_profile_snapshot()
+            activation = profile_snapshot.get("activation", {})
+            payload["active_profile_id"] = (
+                payload.get("active_profile_id")
+                or activation.get("active_profile_id")
+            )
+            payload["finalized"] = bool(payload.get("finalized", False))
+            if payload.get("profile_control_source") is None:
+                if isinstance(native_profile_control, dict):
+                    payload["profile_control_source"] = (
+                        "ai"
+                        if native_profile_control.get("applied")
+                        else "admin" if native_profile_control.get("frozen_by_admin_override") else "system"
+                    )
+                else:
+                    payload["profile_control_source"] = "system" if activation.get("active_profile_id") else "env_default"
+            return payload
+        mode_value = (
+            None if ai_assessment is None else ai_assessment.get("operating_mode")
+        ) or self.runtime.settings.ai_operating_mode
+        canonical_mode = normalize_ai_operating_mode(mode_value)
+        decision_authority_map = {
+            "baseline_only": "reference_only",
+            "ai_assisted": "advisory",
+            "ai_decision_maker": "final_decision",
+            "ai_decision_maker_with_profile_control": "final_decision_with_profile_control",
+        }
+        ai_direction = self._direction_from_edge(None if ai_assessment is None else ai_assessment.get("directional_edge"))
+        if ai_assessment is not None and ai_assessment.get("fallback_used") and canonical_mode in {
+            "ai_decision_maker",
+            "ai_decision_maker_with_profile_control",
+        }:
+            decision_source = "baseline_fallback"
+        elif canonical_mode in {"ai_decision_maker", "ai_decision_maker_with_profile_control"} and ai_assessment is not None and (
+            bool(ai_assessment.get("economically_actionable")) or ai_direction != "flat"
+        ):
+            decision_source = "ai"
+        else:
+            decision_source = "baseline"
+        final_target_qty = None
+        if risk_decision is not None and risk_decision.get("capped_target_position_qty") is not None:
+            final_target_qty = risk_decision.get("capped_target_position_qty")
+        elif position_target is not None:
+            final_target_qty = position_target.get("target_position_qty")
+        policy_blocked = bool(policy_decision is not None and not policy_decision.get("execution_allowed", False))
+        risk_capped = bool(risk_decision is not None and (
+            risk_decision.get("modified")
+            or risk_decision.get("rejection_reasons")
+            or risk_decision.get("constraints_applied")
+        ))
+        blocked_reasons: list[str] = []
+        blocked_reasons.extend(list((position_target or {}).get("guardrail_flags") or []))
+        blocked_reasons.extend(list((policy_decision or {}).get("rejection_reasons") or []))
+        blocked_reasons.extend(list((risk_decision or {}).get("rejection_reasons") or []))
+        profile_snapshot = self.strategy_profile_snapshot()
+        activation = profile_snapshot.get("activation", {})
+        outcome = DecisionOutcome(
+            decision_id=str(
+                (position_target or {}).get("decision_id")
+                or (ai_assessment or {}).get("decision_id")
+                or (baseline_assessment or {}).get("decision_id")
+                or ""
+            ),
+            symbol=str(
+                (position_target or {}).get("symbol")
+                or (ai_assessment or {}).get("symbol")
+                or (baseline_assessment or {}).get("symbol")
+                or ""
+            ),
+            ai_operating_mode=canonical_mode,
+            finalized=False,
+            decision_source=decision_source,
+            decision_authority=decision_authority_map[canonical_mode],
+            final_direction=(
+                None if position_target is None else position_target.get("target_exposure_side")
+            ) or ai_direction or (
+                None if baseline_assessment is None else baseline_assessment.get("direction_bias")
+            ),
+            final_action=self._action_from_position_intent(None if position_target is None else position_target.get("position_intent")),
+            final_target_qty=None if final_target_qty is None else Decimal(str(final_target_qty)),
+            baseline_reference=self._baseline_reference_payload(
+                baseline_assessment=baseline_assessment,
+                decision_context=decision_context,
+            ),
+            baseline_disagreement=None if ai_assessment is None or baseline_assessment is None else {
+                "disagreed": ai_direction != baseline_assessment.get("direction_bias"),
+                "baseline_direction": baseline_assessment.get("direction_bias"),
+                "ai_direction": ai_direction,
+            },
+            decision_blocked_reasons=list(dict.fromkeys(item for item in blocked_reasons if item)),
+            guardrail_flags=list((position_target or {}).get("guardrail_flags") or []),
+            policy_blocked=policy_blocked,
+            policy_blocked_reasons=list((policy_decision or {}).get("rejection_reasons") or []),
+            risk_capped=risk_capped,
+            risk_capped_reasons=list((risk_decision or {}).get("rejection_reasons") or [])
+            + list((risk_decision or {}).get("constraints_applied") or []),
+            risk_capped_target_qty=None if risk_decision is None or risk_decision.get("capped_target_position_qty") is None else Decimal(str(risk_decision.get("capped_target_position_qty"))),
+            active_profile_id=activation.get("active_profile_id"),
+            profile_control_source="system" if activation.get("active_profile_id") else "env_default",
+            ai_fallback_used=bool((ai_assessment or {}).get("fallback_used")),
+            ai_degraded=bool((ai_assessment or {}).get("degraded")),
+        )
+        return outcome.model_dump(mode="json")
+
+    @staticmethod
+    def _profile_control_decision_payload(*, position_target: dict[str, Any] | None) -> dict[str, Any] | None:
+        payload = None if position_target is None else position_target.get("profile_control_decision")
+        return payload if isinstance(payload, dict) else None
+
     def _ai_decision_audit(
         self,
         *,
@@ -1286,12 +1258,15 @@ class OperatorQueryService:
         ai_decision_brief: dict[str, Any] | None,
         baseline_assessment: dict[str, Any] | None,
         ai_assessment: dict[str, Any] | None,
-        ai_takeover_decision: dict[str, Any] | None,
         position_target: dict[str, Any] | None,
+        finalized_decision_outcome: dict[str, Any] | None,
         strategy_execution_health: dict[str, Any] | None,
     ) -> dict[str, Any] | None:
-        if ai_assessment is None and ai_takeover_decision is None:
+        if ai_assessment is None and position_target is None:
             return None
+        native_outcome = finalized_decision_outcome
+        if not isinstance(native_outcome, dict):
+            native_outcome = None if position_target is None else position_target.get("decision_outcome")
         return {
             "configured_mode": self.runtime.settings.ai_operating_mode,
             "assessment_operating_mode": None if ai_assessment is None else ai_assessment.get("operating_mode"),
@@ -1302,10 +1277,9 @@ class OperatorQueryService:
             "baseline_direction": None if baseline_assessment is None else baseline_assessment.get("direction_bias"),
             "ai_direction": self._direction_from_edge(None if ai_assessment is None else ai_assessment.get("directional_edge")),
             "final_direction": None if position_target is None else position_target.get("target_exposure_side"),
-            "takeover_attempted": ai_takeover_decision is not None,
-            "takeover_allowed": None if ai_takeover_decision is None else ai_takeover_decision.get("ai_takeover_allowed"),
-            "takeover_applied": None if ai_takeover_decision is None else ai_takeover_decision.get("ai_takeover_applied"),
-            "takeover_blockers": [] if ai_takeover_decision is None else list(ai_takeover_decision.get("ai_takeover_blockers") or []),
+            "decision_source": None if not isinstance(native_outcome, dict) else native_outcome.get("decision_source"),
+            "decision_authority": None if not isinstance(native_outcome, dict) else native_outcome.get("decision_authority"),
+            "profile_control_source": None if not isinstance(native_outcome, dict) else native_outcome.get("profile_control_source"),
             "market_snapshot_fresh": None if ai_decision_brief is None else ai_decision_brief.get("market_snapshot_fresh"),
             "account_snapshot_fresh": None if ai_decision_brief is None else ai_decision_brief.get("account_snapshot_fresh"),
             "safe_to_trade": None if ai_decision_brief is None else ai_decision_brief.get("safe_to_trade"),
@@ -1546,10 +1520,12 @@ class OperatorQueryService:
         ai_visible = self._ai_history_visible()
         ai_decision_brief = self.payload_by_ref(audit.ai_decision_brief_ref) if ai_visible else None
         ai_assessment = self.payload_by_ref(audit.ai_market_assessment_ref) if ai_visible else None
-        ai_takeover_decision = self.payload_by_ref(audit.ai_takeover_decision_ref) if ai_visible else None
         baseline_assessment = self.payload_by_ref(audit.baseline_assessment_ref)
         position_target = self.payload_by_ref(audit.position_target_ref)
-        execution_plan = self.payload_by_ref(audit.execution_plan_ref)
+        policy_decision = self.payload_by_ref(audit.policy_decision_ref)
+        risk_decision = self.payload_by_ref(audit.risk_decision_ref)
+        finalized_decision_outcome = self.payload_by_ref(audit.decision_outcome_ref)
+        execution_plan = self._execution_plan_payload(self.payload_by_ref(audit.execution_plan_ref))
         strategy_execution_health = self.strategy_execution_health(
             decision_context.get("symbol") if decision_context is not None else None
         )
@@ -1558,14 +1534,32 @@ class OperatorQueryService:
             "health_snapshot": health_snapshot,
             "decision_context": decision_context,
             "baseline_assessment": baseline_assessment,
+            "baseline_reference": self._baseline_reference_payload(
+                baseline_assessment=baseline_assessment,
+                decision_context=decision_context,
+            ),
             "ai_decision_brief": ai_decision_brief,
             "ai_assessment": ai_assessment,
-            "ai_takeover_decision": ai_takeover_decision,
+            "ai_decision_intent": self._ai_decision_intent_payload(
+                ai_assessment=ai_assessment,
+                decision_context=decision_context,
+                position_target=position_target,
+            ),
+            "profile_control_decision": self._profile_control_decision_payload(position_target=position_target),
             "ai_shadow_decisions": self.payloads_by_refs(audit.ai_shadow_decision_refs) if ai_visible else [],
             "ai_shadow_evaluations": self.payloads_by_refs(audit.ai_shadow_evaluation_refs) if ai_visible else [],
             "position_target": position_target,
-            "policy_decision": self.payload_by_ref(audit.policy_decision_ref),
-            "risk_decision": self.payload_by_ref(audit.risk_decision_ref),
+            "policy_decision": policy_decision,
+            "risk_decision": risk_decision,
+            "decision_outcome": self._decision_outcome_payload(
+                finalized_decision_outcome=finalized_decision_outcome,
+                decision_context=decision_context,
+                baseline_assessment=baseline_assessment,
+                ai_assessment=ai_assessment,
+                position_target=position_target,
+                policy_decision=policy_decision,
+                risk_decision=risk_decision,
+            ),
             "execution_plan": execution_plan,
             "audit": audit.model_dump(mode="json"),
             "latest_order_intent": order_intents[-1] if order_intents else None,
@@ -1584,13 +1578,12 @@ class OperatorQueryService:
                 ai_decision_brief=ai_decision_brief,
                 baseline_assessment=baseline_assessment,
                 ai_assessment=ai_assessment,
-                ai_takeover_decision=ai_takeover_decision,
                 position_target=position_target,
+                finalized_decision_outcome=finalized_decision_outcome,
                 strategy_execution_health=strategy_execution_health,
             ),
             "ai_economic_actionability": self._ai_economic_actionability(
                 ai_assessment=ai_assessment,
-                ai_takeover_decision=ai_takeover_decision,
                 position_target=position_target,
                 ai_decision_brief=ai_decision_brief,
                 strategy_execution_health=strategy_execution_health,
@@ -1896,7 +1889,7 @@ class OperatorQueryService:
         )
         orders = all_orders[offset : offset + limit]
         return {
-            "orders": [order.model_dump(mode="json") for order in orders],
+            "orders": [self._execution_record_payload(order) for order in orders],
             "limit": limit,
             "offset": offset,
             "total_available": len(all_orders),
@@ -1912,8 +1905,8 @@ class OperatorQueryService:
             raise KeyError(f"order_not_found:{client_order_id}")
         fills = self._scoped_fills_for_order(client_order_id)
         return {
-            "order": order.model_dump(mode="json"),
-            "fills": [fill.model_dump(mode="json") for fill in fills],
+            "order": self._execution_record_payload(order),
+            "fills": [self._execution_record_payload(fill) for fill in fills],
             "stuck_submission_resolution": self._stuck_submission_resolution(
                 order=order,
                 fills=fills,
@@ -1926,7 +1919,7 @@ class OperatorQueryService:
         fills = all_fills[offset : offset + limit]
         total_available = len(self._scoped_fills())
         return {
-            "fills": [fill.model_dump(mode="json") for fill in fills],
+            "fills": [self._execution_record_payload(fill) for fill in fills],
             "limit": limit,
             "offset": offset,
             "total_available": total_available,
@@ -1937,7 +1930,7 @@ class OperatorQueryService:
         fill = next((item for item in self._scoped_fills() if item.fill_id == fill_id), None)
         if fill is None:
             raise KeyError(f"fill_not_found:{fill_id}")
-        return {"fill": fill.model_dump(mode="json")}
+        return {"fill": self._execution_record_payload(fill)}
 
     def execution_latest(self) -> dict[str, Any]:
         latest_order = self.latest_order()
@@ -1947,8 +1940,8 @@ class OperatorQueryService:
         return {
             "mode": self.system_mode(),
             "execution": self.runtime.execution_adapter.readiness(),
-            "latest_order": latest_order.model_dump(mode="json") if latest_order is not None else None,
-            "latest_fill": latest_fill.model_dump(mode="json") if latest_fill is not None else None,
+            "latest_order": self._execution_record_payload(latest_order) if latest_order is not None else None,
+            "latest_fill": self._execution_record_payload(latest_fill) if latest_fill is not None else None,
             "latest_reconciliation": latest_reconciliation.model_dump(mode="json") if latest_reconciliation is not None else None,
             "recent_failures": self.execution_errors()["errors"],
             "recovery": recovery,
@@ -1985,141 +1978,31 @@ class OperatorQueryService:
         return {"errors": errors}
 
     def reconciliation_latest(self) -> dict[str, Any]:
-        report = self._latest_scoped_reconciliation()
-        latest_validation = self.runtime.event_store.latest(topics.RECONCILIATION_VALIDATIONS)
-        return {
-            "reconciliation": report.model_dump(mode="json") if report is not None else None,
-            "mismatch_summary": self._reconciliation_mismatch_summary(report),
-            "exchange_bills_summary": self._exchange_bills_summary(),
-            "latest_validation": latest_validation.payload if latest_validation is not None else None,
-            "recovery": self.recovery_view(),
-        }
+        return self.reconciliation_system_queries.reconciliation_latest()
 
     def reconciliation_recent(self, *, limit: int = 20, offset: int = 0) -> dict[str, Any]:
-        history = list(reversed(reconciliation_reports_for_scope(self.runtime.reconciliation_repo, self.state_scope)))
-        return self._paginate_rows(
-            history,
-            limit=limit,
-            offset=offset,
-            key="reconciliations",
-            serializer=lambda report: report.model_dump(mode="json"),
-        ) | {"exchange_bills_summary": self._exchange_bills_summary()}
+        return self.reconciliation_system_queries.reconciliation_recent(limit=limit, offset=offset)
 
     def reconciliation_mismatches(self, *, limit: int = 20) -> dict[str, Any]:
-        reports = [
-            report
-            for report in reconciliation_reports_for_scope(self.runtime.reconciliation_repo, self.state_scope, limit=limit * 4)
-            if report.severity != "CLEAN"
-        ][-limit:]
-        return {
-            "mismatches": [self._reconciliation_mismatch_summary(report) for report in reports],
-            "exchange_bills_summary": self._exchange_bills_summary(),
-        }
+        return self.reconciliation_system_queries.reconciliation_mismatches(limit=limit)
 
     def reconciliation_detail(self, reconciliation_id: str) -> dict[str, Any]:
-        report = next(
-            (
-                item
-                for item in reconciliation_reports_for_scope(self.runtime.reconciliation_repo, self.state_scope)
-                if item.reconciliation_id == reconciliation_id
-            ),
-            None,
-        )
-        if report is None:
-            raise KeyError(f"reconciliation_not_found:{reconciliation_id}")
-        return {
-            "reconciliation": report.model_dump(mode="json"),
-            "mismatch_summary": self._reconciliation_mismatch_summary(report),
-            "exchange_bills_summary": self._exchange_bills_summary(),
-            "exchange_bills_explanations": report.exchange_bills_explanations,
-        }
+        return self.reconciliation_system_queries.reconciliation_detail(reconciliation_id)
 
     def audit_latest(self) -> dict[str, Any]:
-        latest = max(self.runtime.audit_repo.all(), key=lambda item: item.created_at, default=None)
-        return {"audit": latest.model_dump(mode="json") if latest is not None else None}
+        return self.audit_replay_queries.audit_latest()
 
     def audit_detail(self, decision_id: str) -> dict[str, Any]:
-        detail = self.decision_view(decision_id)
-        context = detail["decision_context"] or {}
-        return {
-            "audit": detail["audit"],
-            "history_length": len(self.runtime.audit_repo.history(decision_id)),
-            "baseline_switches": self._baseline_switch_history(
-                as_of_ts=context.get("as_of_ts"),
-                limit=10,
-            ),
-            "linked_events": {
-                "decision_context": detail["decision_context"],
-                "baseline_assessment": detail["baseline_assessment"],
-                "ai_decision_brief": detail["ai_decision_brief"],
-                "ai_assessment": detail["ai_assessment"],
-                "ai_takeover_decision": detail["ai_takeover_decision"],
-                "ai_shadow_decisions": detail["ai_shadow_decisions"],
-                "ai_shadow_evaluations": detail["ai_shadow_evaluations"],
-                "position_target": detail["position_target"],
-                "policy_decision": detail["policy_decision"],
-                "risk_decision": detail["risk_decision"],
-                "execution_plan": detail["execution_plan"],
-                "order_intents": detail["order_intents"],
-                "order_updates": detail["order_updates"],
-                "fills": detail["fills"],
-                "portfolio_snapshot": detail["portfolio_snapshot"],
-                "reconciliations": detail["reconciliations"],
-            },
-        }
+        return self.audit_replay_queries.audit_detail(decision_id)
 
     def replay_status(self) -> dict[str, Any]:
-        persisted = self.runtime.event_store.recent_by_topic(topics.REPLAY_VALIDATIONS, limit=10)
-        latest = persisted[-1].payload if persisted else (
-            self.runtime.replay_validation_history[-1] if self.runtime.replay_validation_history else None
-        )
-        recent = [item.payload for item in persisted] if persisted else list(self.runtime.replay_validation_history[-10:])
-        return {
-            "supported": True,
-            "healthy": latest is None or latest["divergence_count"] == 0,
-            "last_validation": latest,
-            "recent_validations": recent,
-            "baseline_switches": self._baseline_switch_history(limit=10),
-        }
+        return self.audit_replay_queries.replay_status()
 
     def replay_validate(self, *, decision_id: str) -> dict[str, Any]:
-        engine = ReplayEngine(
-            event_store=self.runtime.event_store,
-            reconstruction_service=PortfolioReconstructionService(
-                initial_usdt_balance=self.runtime.settings.initial_usdt_balance,
-                snapshot_builder=self.runtime.portfolio_service.snapshot_builder,
-            ),
-            audit_repo=self.runtime.audit_repo,
-            portfolio_repo=self.runtime.portfolio_repo,
-            scope=self.state_scope,
-        )
-        result = engine.replay(decision_id=decision_id)
-        detail = self.decision_view(decision_id)
-        baseline = detail.get("baseline_assessment") or {}
-        context = detail.get("decision_context") or {}
-        profile_state = self.strategy_profiles.snapshot().get("activation", {})
-        summary = self._replay_summary(
-            result,
-            symbol=context.get("symbol"),
-            regime=baseline.get("regime"),
-            active_profile_id=profile_state.get("active_profile_id"),
-        )
-        self._append_event(
-            topic=topics.REPLAY_VALIDATIONS,
-            key=decision_id or "all",
-            payload_model=ReplayValidationSummary(**summary),
-        )
-        self.runtime.replay_validation_history.append(summary)
-        self.runtime.replay_validation_history[:] = self.runtime.replay_validation_history[-20:]
-        return summary
+        return self.audit_replay_queries.replay_validate(decision_id=decision_id)
 
     def replay_recent_validations(self, *, limit: int = 20, offset: int = 0) -> dict[str, Any]:
-        persisted = self.runtime.event_store.by_topic(topics.REPLAY_VALIDATIONS)
-        if persisted:
-            rows = [item.payload for item in reversed(persisted)]
-        else:
-            rows = list(reversed(self.runtime.replay_validation_history))
-        return self._paginate_rows(rows, limit=limit, offset=offset, key="validations")
+        return self.audit_replay_queries.replay_recent_validations(limit=limit, offset=offset)
 
     async def validate_reconciliation(
         self,
@@ -2129,56 +2012,12 @@ class OperatorQueryService:
         actor_identity: str | None = None,
         auth_source: AuthSource = "anonymous",
     ) -> dict[str, Any]:
-        report = await self.runtime.reconciliation_service.validate_now(reason=reason)
-        summary = ReconciliationValidationSummary(
-            trigger=reason,
-            reconciliation_id=report.reconciliation_id,
-            decision_id=report.decision_id,
-            severity=report.severity,
-            halt_required=report.halt_required,
-            exchange_comparison_enabled=report.exchange_comparison_enabled,
-            mismatch_reasons=list(report.mismatch_reasons),
-            safety_impacts=list(report.safety_impacts),
-            validated_at=utc_now(),
+        return await self.reconciliation_system_queries.validate_reconciliation(
+            reason=reason,
+            actor_role=actor_role,
+            actor_identity=actor_identity,
+            auth_source=auth_source,
         )
-        self._append_event(
-            topic=topics.RECONCILIATION_VALIDATIONS,
-            key=report.decision_id or "portfolio",
-            payload_model=summary,
-        )
-        self._append_event(
-            topic=topics.OPERATOR_ACTIONS,
-            key="system",
-            payload_model=OperatorActionRecord(
-                action="reconciliation_validate",
-                actor_role=actor_role,
-                actor_identity=actor_identity,
-                auth_source=auth_source,
-                reason=reason,
-                status="completed",
-                decision_id=report.decision_id,
-                recovery_state_before=self.recovery_view()["recovery_state"],
-                recovery_state_after=(
-                    "resume_blocked"
-                    if report.halt_required
-                    else "review_required"
-                    if report.review_required
-                    else self.recovery_view()["recovery_state"]
-                ),
-                reconciliation_id=report.reconciliation_id,
-            ),
-        )
-        self._update_recovery_status_for_report(report)
-        self._persist_blocker_snapshot(
-            source="reconciliation_validate",
-            runtime_state=self.system_health()["runtime_state"],
-            mode_snapshot=self.system_mode(),
-            blockers=self.blockers(),
-        )
-        return {
-            "reconciliation": report.model_dump(mode="json"),
-            "validation": summary.model_dump(mode="json"),
-        }
 
     async def cancel_order(
         self,
@@ -2220,113 +2059,13 @@ class OperatorQueryService:
         actor_identity: str | None = None,
         auth_source: AuthSource = "anonymous",
     ) -> dict[str, Any]:
-        order = next(
-            (item for item in self._scoped_order_states() if item.client_order_id == client_order_id),
-            None,
-        )
-        if order is None:
-            raise KeyError(f"order_not_found:{client_order_id}")
-
-        fills = self._scoped_fills_for_order(client_order_id)
-        recovery_before = self.recovery_view()["recovery_state"]
-        exchange_snapshot = await self._refresh_exchange_snapshot_for_resolution()
-        resolution = self._stuck_submission_resolution(
-            order=order,
-            fills=fills,
-            exchange_snapshot=exchange_snapshot,
-        )
-        if not resolution["eligible"]:
-            raise ValueError(f"stuck_submission_resolution_blocked:{resolution['reason_code']}")
-
-        now = utc_now()
-        resolved_state = order.model_copy(
-            update={
-                "status": "FAILED",
-                "last_update_ts": now,
-                "execution_error": "operator_resolved_stuck_submission_after_restart",
-                "cancel_reason": reason,
-            }
-        )
-        persisted = self.runtime.execution_repo.save_order_state(resolved_state)
-        if self.runtime.audit_repo.get(persisted.decision_id) is not None:
-            await publish_model(
-                bus=self.runtime.bus,
-                topic=topics.ORDER_UPDATES,
-                key=persisted.symbol,
-                payload_model=persisted,
-                source_component="operator_api",
-            )
-        else:
-            self._append_event(
-                topic=topics.ORDER_UPDATES,
-                key=persisted.symbol,
-                payload_model=persisted,
-            )
-        await publish_model(
-            bus=self.runtime.bus,
-            topic=topics.EXECUTION_ERROR_SUMMARIES,
-            key=persisted.symbol,
-            payload_model=ExecutionErrorSummary(
-                subsystem="operator_recovery",
-                severity="warning",
-                message="Operator resolved a stuck pre-restart submission as FAILED.",
-                decision_id=persisted.decision_id,
-                intent_id=persisted.intent_id,
-                order_id=persisted.client_order_id,
-                status=persisted.status,
-                observed_at=now,
-            ),
-            source_component="operator_api",
-        )
-        report = await self.runtime.reconciliation_service.validate_now(
-            reason=f"resolve_stuck_submission:{client_order_id}"
-        )
-        self._update_recovery_status_for_report(report)
-        self._invalidate_cache()
-        recovery_after = self.recovery_view()["recovery_state"]
-        self._append_event(
-            topic=topics.OPERATOR_ACTIONS,
-            key="system",
-            payload_model=OperatorActionRecord(
-                action="resolve_stuck_submission",
-                actor_role=actor_role,
-                actor_identity=actor_identity,
-                auth_source=auth_source,
-                reason=reason,
-                status="resolved_as_failed",
-                decision_id=persisted.decision_id,
-                order_id=persisted.client_order_id,
-                recovery_state_before=recovery_before,
-                recovery_state_after=recovery_after,
-                reconciliation_id=report.reconciliation_id,
-                details={
-                    "previous_order_status": order.status,
-                    "final_order_status": persisted.status,
-                    "resolution": resolution,
-                },
-            ),
-        )
-        self._persist_blocker_snapshot(
-            source="resolve_stuck_submission",
-            runtime_state=self.system_health()["runtime_state"],
-            mode_snapshot=self.system_mode(),
-            blockers=self.blockers(),
-        )
-        log_event(
-            self.logger,
-            "resolve_stuck_submission",
-            level="warning",
-            order_id=persisted.client_order_id,
-            previous_status=order.status,
-            final_status=persisted.status,
+        return await self.reconciliation_system_queries.resolve_stuck_submission(
+            client_order_id=client_order_id,
             reason=reason,
+            actor_role=actor_role,
+            actor_identity=actor_identity,
+            auth_source=auth_source,
         )
-        return {
-            "order": persisted.model_dump(mode="json"),
-            "resolution": resolution,
-            "reconciliation": report.model_dump(mode="json"),
-            "recovery": self.recovery_view(),
-        }
 
     async def rebaseline(
         self,
@@ -2336,135 +2075,12 @@ class OperatorQueryService:
         actor_identity: str | None = None,
         auth_source: AuthSource = "anonymous",
     ) -> dict[str, Any]:
-        if not self.runtime.settings.account_read_enabled or self.runtime.settings.account_backend != "okx":
-            raise ValueError("rebaseline_requires_okx_account_read")
-        if not self.runtime.recovery_policy.operator_rebaseline_supported:
-            raise ValueError("rebaseline_not_supported_for_runtime_profile")
-
-        recovery_before = self.recovery_view()["recovery_state"]
-        previous_baseline_event = latest_topic_event_for_scope(
-            self.runtime.event_store,
-            topics.ACCOUNT_BASELINES,
-            self.state_scope,
-        )
-        previous_baseline_ref = previous_baseline_event.event_id if previous_baseline_event is not None else None
-
-        self.runtime.kill_switch.halt(reason="operator_rebaseline_pending")
-        pending_status = self.runtime.recovery_status.model_copy(
-            update={"recovery_state": "rebaseline_pending", "recovery_action": "operator_rebaseline_pending"}
-        )
-        self.runtime.recovery_status = self.recovery_posture.finalize_status(base_status=pending_status)
-
-        exchange_snapshot = await self.runtime.account_service.refresh(force=True)
-        if exchange_snapshot is None:
-            raise ValueError("rebaseline_requires_account_snapshot")
-
-        action_record = OperatorActionRecord(
-            action="rebaseline",
+        return await self.reconciliation_system_queries.rebaseline(
+            reason=reason,
             actor_role=actor_role,
             actor_identity=actor_identity,
             auth_source=auth_source,
-            reason=reason,
-            status="completed",
-            recovery_state_before=recovery_before,
-            recovery_state_after="rebaseline_pending",
         )
-        action_envelope = self._append_event(
-            topic=topics.OPERATOR_ACTIONS,
-            key="system",
-            payload_model=action_record,
-        )
-        baseline_importer = AccountBaselineImportService(event_store=self.runtime.event_store)
-        imported = baseline_importer.rebaseline_snapshot(
-            exchange_snapshot=exchange_snapshot,
-            portfolio_state=self.runtime.portfolio_service.state,
-            product_type=self.state_scope.product_type,
-            margin_mode=self.state_scope.margin_mode,
-            allowed_symbols=self.state_scope.allowed_symbols,
-            previous_baseline_ref=previous_baseline_ref,
-            operator_action_ref=action_envelope.event_id,
-            trigger_reason=reason,
-        )
-        await self.runtime.portfolio_service.bootstrap_snapshot(snapshot_origin="operator_rebaseline")
-        report = await self.runtime.reconciliation_service.validate_now(reason="operator_rebaseline")
-
-        recovery_state = (
-            "resume_blocked"
-            if imported.snapshot.requires_operator_review or report.halt_required
-            else "review_required"
-            if report.review_required
-            else "rebaseline_completed"
-        )
-        updated_status = self.runtime.recovery_status.model_copy(
-            update={
-                "status": imported.snapshot.baseline_status,
-                "recovery_state": recovery_state,
-                "safe_startup": False,
-                "recovery_action": (
-                    "operator_rebaseline_completed"
-                    if recovery_state == "rebaseline_completed"
-                    else "operator_rebaseline_requires_review"
-                    if recovery_state == "review_required"
-                    else "operator_rebaseline_resume_blocked"
-                ),
-                "baseline_imported": True,
-                "baseline_status": imported.snapshot.baseline_status,
-                "baseline_imported_at": imported.snapshot.imported_at,
-                "baseline_event_ref": imported.event_id,
-                "baseline_source": imported.snapshot.account_source,
-                "baseline_safe_for_automatic_continuation": imported.snapshot.safe_for_automatic_continuation,
-                "baseline_requires_operator_review": imported.snapshot.requires_operator_review,
-                "baseline_balance_count": imported.snapshot.balance_count,
-                "baseline_position_count": imported.snapshot.position_count,
-                "baseline_open_order_count": imported.snapshot.open_order_count,
-                "baseline_fill_count": imported.snapshot.fill_count,
-                "last_rebaseline_at": imported.snapshot.imported_at,
-                "last_rebaseline_event_ref": imported.event_id,
-                "last_rebaseline_action_ref": action_envelope.event_id,
-                "notes": self.runtime.recovery_status.notes
-                + [
-                    "operator_rebaseline_confirmed",
-                    f"baseline_switch:{previous_baseline_ref or 'none'}->{imported.event_id}",
-                ],
-            }
-        )
-        self.runtime.recovery_status = self.recovery_posture.finalize_status(
-            base_status=updated_status,
-            latest_reconciliation=report,
-        )
-        self._invalidate_cache()
-        resume_eligible = self.runtime.recovery_status.resume_eligible
-        self._append_event(
-            topic=topics.OPERATOR_ACTIONS,
-            key="system",
-            payload_model=action_record.model_copy(
-                update={
-                    "status": recovery_state,
-                    "recovery_state_after": recovery_state,
-                    "baseline_event_ref": imported.event_id,
-                    "reconciliation_id": report.reconciliation_id,
-                    "details": {
-                        "previous_baseline_ref": previous_baseline_ref,
-                        "resume_eligible": resume_eligible,
-                    },
-                }
-            ),
-        )
-        self._persist_blocker_snapshot(
-            source="operator_rebaseline",
-            runtime_state="halted",
-            mode_snapshot=self.system_mode(),
-            blockers=self.blockers(),
-        )
-        return {
-            "status": recovery_state,
-            "halted": True,
-            "reason": reason,
-            "baseline": imported.snapshot.model_dump(mode="json"),
-            "baseline_event_ref": imported.event_id,
-            "reconciliation": report.model_dump(mode="json"),
-            "recovery": self.recovery_view(),
-        }
 
     def halt(
         self,
@@ -2474,45 +2090,12 @@ class OperatorQueryService:
         actor_identity: str | None = None,
         auth_source: AuthSource = "anonymous",
     ) -> dict[str, Any]:
-        was_halted = self.runtime.kill_switch.halted
-        recovery_before = self.recovery_view()["recovery_state"]
-        self.runtime.kill_switch.halt(reason=reason)
-        log_event(self.logger, "operator_halt", level="warning", reason=reason, already_halted=was_halted)
-        status = "already_halted" if was_halted else "halted"
-        updated_status = self.runtime.recovery_status.model_copy(
-            update={
-                "recovery_state": (
-                    "resume_blocked"
-                    if self.runtime.recovery_status.recovery_state == "normal_operation"
-                    else self.runtime.recovery_status.recovery_state
-                ),
-                "last_resume_status": None,
-                "last_resume_reason": None,
-            }
+        return self.reconciliation_system_queries.halt(
+            reason=reason,
+            actor_role=actor_role,
+            actor_identity=actor_identity,
+            auth_source=auth_source,
         )
-        self.runtime.recovery_status = self.recovery_posture.finalize_status(base_status=updated_status)
-        self._invalidate_cache()
-        self._append_event(
-            topic=topics.OPERATOR_ACTIONS,
-            key="system",
-            payload_model=OperatorActionRecord(
-                action="halt",
-                actor_role=actor_role,
-                actor_identity=actor_identity,
-                auth_source=auth_source,
-                reason=reason,
-                status=status,
-                recovery_state_before=recovery_before,
-                recovery_state_after=self.recovery_view()["recovery_state"],
-            ),
-        )
-        self._persist_blocker_snapshot(
-            source="operator_halt",
-            runtime_state="halted",
-            mode_snapshot=self.system_mode(),
-            blockers=self.blockers(),
-        )
-        return {"status": status, "halted": True, "reason": reason}
 
     async def resume(
         self,
@@ -2522,98 +2105,12 @@ class OperatorQueryService:
         actor_identity: str | None = None,
         auth_source: AuthSource = "anonymous",
     ) -> dict[str, Any]:
-        was_halted = self.runtime.kill_switch.halted
-        recovery_before = self.recovery_view()["recovery_state"]
-        if self.runtime.settings.account_backend == "okx" and self.runtime.settings.account_read_enabled:
-            await self.runtime.account_service.refresh(force=True)
-        report = await self.runtime.reconciliation_service.validate_now(reason=f"resume_check:{reason}")
-        self._update_recovery_status_for_report(report)
-        resume_check = self.recovery_posture.resume_check(include_kill_switch=False, latest_reconciliation=report)
-        runnable = resume_check.runnable
-        if runnable:
-            self.runtime.kill_switch.resume()
-            status = "already_resumed" if not was_halted else "resumed"
-            recovery_after = "normal_operation"
-            updated_status = self.runtime.recovery_status.model_copy(
-                update={
-                    "recovery_state": recovery_after,
-                    "recovery_action": "operator_resume_completed",
-                    "last_resume_status": status,
-                    "last_resume_reason": reason,
-                    "resume_blocked_reasons": [],
-                }
-            )
-            self.runtime.recovery_status = self.recovery_posture.finalize_status(
-                base_status=updated_status,
-                latest_reconciliation=report,
-            )
-        else:
-            self.runtime.kill_switch.halt(reason="resume_blocked")
-            status = "resume_blocked"
-            recovery_after = (
-                "review_required"
-                if "operator_rebaseline_required" in resume_check.blockers
-                else "resume_blocked"
-            )
-            updated_status = self.runtime.recovery_status.model_copy(
-                update={
-                    "recovery_state": recovery_after,
-                    "recovery_action": "operator_resume_blocked",
-                    "last_resume_status": status,
-                    "last_resume_reason": reason,
-                    "resume_blocked_reasons": list(resume_check.blockers),
-                }
-            )
-            self.runtime.recovery_status = self.recovery_posture.finalize_status(
-                base_status=updated_status,
-                latest_reconciliation=report,
-            )
-        self._invalidate_cache()
-        mode_state = self.system_mode()
-        blockers = self.blockers()
-        log_event(
-            self.logger,
-            "operator_resume",
-            level="info",
+        return await self.reconciliation_system_queries.resume(
             reason=reason,
-            was_halted=was_halted,
-            blockers=[item["blocker"] for item in blockers],
-            status=status,
+            actor_role=actor_role,
+            actor_identity=actor_identity,
+            auth_source=auth_source,
         )
-        action_envelope = self._append_event(
-            topic=topics.OPERATOR_ACTIONS,
-            key="system",
-            payload_model=OperatorActionRecord(
-                action="resume",
-                actor_role=actor_role,
-                actor_identity=actor_identity,
-                auth_source=auth_source,
-                reason=reason,
-                status=status,
-                recovery_state_before=recovery_before,
-                recovery_state_after=recovery_after,
-                reconciliation_id=report.reconciliation_id,
-                details={"runnable": runnable, "blockers": list(resume_check.blockers)},
-            ),
-        )
-        self.runtime.recovery_status = self.runtime.recovery_status.model_copy(
-            update={"last_resume_action_ref": action_envelope.event_id}
-        )
-        self._persist_blocker_snapshot(
-            source="operator_resume",
-            runtime_state="blocked" if mode_state["execution_blocked"] else "healthy",
-            mode_snapshot=mode_state,
-            blockers=blockers,
-        )
-        return {
-            "status": status,
-            "halted": self.runtime.kill_switch.halted,
-            "reason": reason,
-            "runnable": runnable,
-            "blockers": blockers,
-            "recovery": self.recovery_view(),
-            "reconciliation": report.model_dump(mode="json"),
-        }
 
     def _latest_topic_summary(self, topic: str) -> dict[str, Any]:
         envelope = self.runtime.event_store.latest(topic)
@@ -2653,55 +2150,6 @@ class OperatorQueryService:
             return None
         summary = summary_getter()
         return summary if isinstance(summary, dict) else None
-
-    def _replay_summary(
-        self,
-        result: ReplayResult,
-        *,
-        symbol: str | None = None,
-        regime: str | None = None,
-        active_profile_id: str | None = None,
-    ) -> dict[str, Any]:
-        replayed_event_count = max(result.replayed_event_count, 1)
-        portfolio_issue_count = len(result.portfolio_issues)
-        decision_chain_issue_count = len(result.decision_chain_issues)
-        execution_chain_issue_count = len(result.execution_chain_issues)
-        audit_issue_count = len(result.audit_issues)
-        baseline_switch_issue_count = len(result.baseline_switch_issues)
-        total_issues = (
-            portfolio_issue_count
-            + decision_chain_issue_count
-            + execution_chain_issue_count
-            + audit_issue_count
-            + baseline_switch_issue_count
-        )
-        return {
-            "validated_at": utc_now(),
-            "decision_id": result.selected_decision_id,
-            "symbol": symbol,
-            "regime": regime,
-            "active_profile_id": active_profile_id,
-            "product_type": self.runtime.settings.trading_product_type,
-            "margin_mode": self.runtime.settings.margin_mode,
-            "allowed_symbols": tuple(self.runtime.settings.allowed_symbols),
-            "replayed_event_count": result.replayed_event_count,
-            "stored_snapshot_count": result.stored_snapshot_count,
-            "divergence_count": result.divergence_count,
-            "portfolio_issues": result.portfolio_issues,
-            "portfolio_issue_count": portfolio_issue_count,
-            "decision_chain_issues": result.decision_chain_issues,
-            "decision_chain_issue_count": decision_chain_issue_count,
-            "execution_chain_issues": result.execution_chain_issues,
-            "execution_chain_issue_count": execution_chain_issue_count,
-            "audit_issues": result.audit_issues,
-            "audit_issue_count": audit_issue_count,
-            "baseline_switch_count": result.baseline_switch_count,
-            "baseline_switch_issues": result.baseline_switch_issues,
-            "baseline_switch_issue_count": baseline_switch_issue_count,
-            "divergence_density": round(result.divergence_count / replayed_event_count, 6),
-            "chain_health_score": round(max(0.0, 1.0 - (total_issues / replayed_event_count)), 6),
-            "healthy": result.divergence_count == 0,
-        }
 
     def _append_event(self, *, topic: str, key: str, payload_model: Any) -> EventEnvelope:
         envelope = build_envelope(
@@ -2859,25 +2307,6 @@ class OperatorQueryService:
             base_status=updated_status,
             latest_reconciliation=report,
         )
-
-    def _baseline_switch_history(
-        self,
-        *,
-        as_of_ts: str | None = None,
-        limit: int = 20,
-    ) -> list[dict[str, Any]]:
-        if as_of_ts is None:
-            events = self.runtime.event_store.recent_by_topic(topics.ACCOUNT_BASELINES, limit=limit)
-        else:
-            events = self.runtime.event_store.by_topic(topics.ACCOUNT_BASELINES)
-        if as_of_ts is not None:
-            events = [event for event in events if event.payload.get("imported_at") <= as_of_ts]
-        rows = []
-        for event in events[-limit:]:
-            payload = dict(event.payload)
-            payload["_event_id"] = event.event_id
-            rows.append(payload)
-        return rows
 
     def _persist_blocker_snapshot(
         self,

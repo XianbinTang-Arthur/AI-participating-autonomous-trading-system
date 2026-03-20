@@ -34,6 +34,24 @@ ObligationStatus = Literal[
 
 ExecutionParameterSuggestionStatus = Literal["reserved_not_enabled", "diagnostic_only", "shadow_translation", "enabled"]
 ExecutionSuggestionMode = Literal["disabled", "diagnostic_only", "shadow_translation", "enabled_live"]
+ExecutionAction = Literal["hold", "enter", "scale_in", "reduce", "exit", "reverse"]
+
+
+def execution_action_from_position_intent(position_intent: str | None) -> ExecutionAction | None:
+    mapping: dict[str, ExecutionAction] = {
+        "hold": "hold",
+        "open_long": "enter",
+        "open_short": "enter",
+        "reduce_long": "reduce",
+        "reduce_short": "reduce",
+        "close_long": "exit",
+        "close_short": "exit",
+        "reverse_to_long": "reverse",
+        "reverse_to_short": "reverse",
+    }
+    if position_intent is None:
+        return None
+    return mapping.get(str(position_intent).strip().lower())
 
 
 class ExecutionParameterSuggestion(SchemaBase):
@@ -93,6 +111,7 @@ class OrderIntent(SchemaBase):
     target_leverage: float = 1.0
     margin_mode: MarginModelType = "cash"
     exposure_side: Literal["long", "short", "flat"] = "flat"
+    execution_action: ExecutionAction | None = None
     position_intent: Literal[
         "open_long",
         "reduce_long",
@@ -126,6 +145,7 @@ class ExecutionPlan(SchemaBase):
     target_leverage: float = 1.0
     margin_mode: MarginModelType = "cash"
     exposure_side: Literal["long", "short", "flat"] = "flat"
+    execution_action: ExecutionAction | None = None
     position_intent: Literal[
         "open_long",
         "reduce_long",
@@ -164,6 +184,7 @@ class OrderState(SchemaBase):
     target_leverage: float = 1.0
     margin_mode: MarginModelType = "cash"
     exposure_side: Literal["long", "short", "flat"] = "flat"
+    execution_action: ExecutionAction | None = None
     position_intent: Literal[
         "open_long",
         "reduce_long",
@@ -196,6 +217,7 @@ class FillEvent(SchemaBase):
     target_leverage: float = 1.0
     margin_mode: MarginModelType = "cash"
     exposure_side: Literal["long", "short", "flat"] = "flat"
+    execution_action: ExecutionAction | None = None
     position_intent: Literal[
         "open_long",
         "reduce_long",

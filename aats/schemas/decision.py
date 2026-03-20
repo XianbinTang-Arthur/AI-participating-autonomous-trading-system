@@ -12,7 +12,43 @@ from aats.schemas.execution import AIExecutionParameterSuggestionEnvelope
 from aats.schemas.system import MarginModelType, ProductType
 
 
-AIOperatingMode = Literal["baseline_only", "ai_advisory", "ai_blended", "ai_primary"]
+CanonicalAIOperatingMode = Literal[
+    "baseline_only",
+    "ai_assisted",
+    "ai_decision_maker",
+    "ai_decision_maker_with_profile_control",
+]
+
+LegacyAIOperatingMode = Literal["ai_advisory", "ai_blended", "ai_primary"]
+
+AIOperatingMode = Literal[
+    "baseline_only",
+    "ai_assisted",
+    "ai_decision_maker",
+    "ai_decision_maker_with_profile_control",
+    "ai_advisory",
+    "ai_blended",
+    "ai_primary",
+]
+
+AI_OPERATING_MODE_CANONICAL_MAP: dict[str, CanonicalAIOperatingMode] = {
+    "baseline_only": "baseline_only",
+    "ai_assisted": "ai_assisted",
+    "ai_decision_maker": "ai_decision_maker",
+    "ai_decision_maker_with_profile_control": "ai_decision_maker_with_profile_control",
+    "ai_advisory": "ai_assisted",
+    "ai_blended": "ai_assisted",
+    "ai_primary": "ai_decision_maker",
+}
+
+
+def normalize_ai_operating_mode(mode: str | None) -> CanonicalAIOperatingMode:
+    if mode is None:
+        return "baseline_only"
+    normalized = AI_OPERATING_MODE_CANONICAL_MAP.get(str(mode).strip())
+    if normalized is not None:
+        return normalized
+    return "baseline_only"
 
 
 class DecisionContext(SchemaBase):
@@ -60,6 +96,20 @@ class BaselineAssessment(SchemaBase):
     invalidation_conditions: list[str] = Field(default_factory=list)
     reason_codes: list[str] = Field(default_factory=list)
     engine_version: str
+
+
+class BaselineReference(SchemaBase):
+    decision_id: str
+    symbol: str
+    timeframe: Literal["15m", "1h"] | None = None
+    regime: str | None = None
+    volatility_state: str | None = None
+    direction_bias: Literal["long", "short", "flat"]
+    confidence: float | None = None
+    composite_alpha_score: float | None = None
+    suggested_position_scale: float | None = None
+    reason_codes: list[str] = Field(default_factory=list)
+    raw_payload: dict[str, object] | None = None
 
 
 class AIMarketAssessment(SchemaBase):
@@ -153,6 +203,68 @@ class AIActionProposal(SchemaBase):
     ttl_seconds: int
 
 
+class AIDecisionIntent(SchemaBase):
+    decision_id: str
+    symbol: str
+    timeframe: Literal["15m", "1h"] | None = None
+    direction: Literal["long", "short", "flat"]
+    action: Literal["hold", "enter", "scale_in", "reduce", "exit", "reverse"]
+    target_qty: Decimal
+    confidence: float
+    economically_actionable: bool = False
+    reason_codes: list[str] = Field(default_factory=list)
+    fallback_used: bool = False
+    degraded: bool = False
+    provider_name: str | None = None
+    provider_request_id: str | None = None
+    requested_profile_id: str | None = None
+    requested_profile_reason_codes: list[str] = Field(default_factory=list)
+    raw_assessment_ref: dict[str, object] | None = None
+
+
+DecisionSource = Literal["baseline", "ai", "baseline_fallback", "admin_override"]
+DecisionAuthority = Literal["reference_only", "advisory", "final_decision", "final_decision_with_profile_control"]
+ProfileControlSource = Literal["env_default", "ai", "admin", "system"]
+
+
+class ProfileControlDecision(SchemaBase):
+    decision_id: str | None = None
+    requested_by: Literal["ai", "admin", "system"]
+    requested_profile_id: str
+    current_profile_id: str | None = None
+    applied: bool = False
+    blocked_reasons: list[str] = Field(default_factory=list)
+    frozen_by_admin_override: bool = False
+    freeze_until: datetime | None = None
+    decision_reason_codes: list[str] = Field(default_factory=list)
+    activation_record_ref: str | None = None
+
+
+class DecisionOutcome(SchemaBase):
+    decision_id: str
+    symbol: str
+    ai_operating_mode: CanonicalAIOperatingMode = "baseline_only"
+    finalized: bool = False
+    decision_source: DecisionSource
+    decision_authority: DecisionAuthority
+    final_direction: Literal["long", "short", "flat"] | None = None
+    final_action: Literal["hold", "enter", "scale_in", "reduce", "exit", "reverse"] | None = None
+    final_target_qty: Decimal | None = None
+    baseline_reference: dict[str, object] | None = None
+    baseline_disagreement: dict[str, object] | None = None
+    decision_blocked_reasons: list[str] = Field(default_factory=list)
+    guardrail_flags: list[str] = Field(default_factory=list)
+    policy_blocked: bool = False
+    policy_blocked_reasons: list[str] = Field(default_factory=list)
+    risk_capped: bool = False
+    risk_capped_reasons: list[str] = Field(default_factory=list)
+    risk_capped_target_qty: Decimal | None = None
+    active_profile_id: str | None = None
+    profile_control_source: ProfileControlSource | None = None
+    ai_fallback_used: bool = False
+    ai_degraded: bool = False
+
+
 class PositionTarget(SchemaBase):
     decision_id: str
     symbol: str
@@ -183,11 +295,11 @@ class PositionTarget(SchemaBase):
     target_leverage: float = 1.0
     margin_mode: MarginModelType = "cash"
     leverage_bias: float = 1.0
-    ai_takeover_allowed: bool = False
-    ai_takeover_applied: bool = False
-    ai_takeover_blockers: list[str] = Field(default_factory=list)
     expected_signal_edge_bps: float = 0.0
     expected_cost_bps: float = 0.0
     expected_net_edge_bps: float = 0.0
     guardrail_flags: list[str] = Field(default_factory=list)
     ai_execution_parameter_suggestion: AIExecutionParameterSuggestionEnvelope | None = None
+    ai_decision_intent: AIDecisionIntent | None = None
+    profile_control_decision: ProfileControlDecision | None = None
+    decision_outcome: DecisionOutcome | None = None

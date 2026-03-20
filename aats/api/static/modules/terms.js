@@ -6,9 +6,9 @@
   ok: "正常",
   healthy: "运行正常",
   degraded: "已降级",
-  blocked: "已阻断",
+  blocked: "阻断中",
   halted: "已暂停",
-  ready: "已放行",
+  ready: "允许执行",
   enabled: "已启用",
   disabled: "未启用",
   active: "当前生效",
@@ -21,8 +21,13 @@
   staged_for_activation: "已转为待激活",
   available: "可选",
   settings_fallback: "环境文件默认策略",
-  review_required: "等待人工确认",
-  resume_blocked: "暂不允许恢复",
+  review_required: "待人工确认",
+  clean: "账实一致",
+  soft_mismatch: "轻度差异",
+  hard_mismatch: "严重差异",
+  info: "信息提示",
+  manually_halted: "已暂停，待恢复",
+  resume_blocked: "恢复受限",
   normal_operation: "正常运行",
   rebaseline_completed: "基线确认完成",
   created: "已创建",
@@ -55,6 +60,11 @@
   short: "偏空",
   flat: "空仓",
   hold: "保持当前仓位",
+  enter: "建仓",
+  scale_in: "加仓",
+  reduce: "减仓",
+  exit: "退出仓位",
+  reverse: "反手",
   executed: "已执行",
   open_long: "开多",
   reduce_long: "减多",
@@ -88,7 +98,7 @@
   operator: "操作员",
   admin: "管理员",
   viewer: "只读用户",
-  observing: "观察中",
+  observing: "持续观察",
   no_data: "暂无数据",
   conservative: "保守",
   normal: "常规",
@@ -99,7 +109,7 @@
   ai_auto: "AI 自动切换",
   rollback: "回滚",
   system_guard: "系统保护",
-  registered_profile_only: "只允许已登记档位",
+  registered_profile_only: "只允许已登记策略档位",
   reserved_not_enabled: "保留未启用",
   historical_eval_plus_shadow_guard: "历史对比加影子保护",
   absent: "暂未提供",
@@ -107,29 +117,28 @@
   yes: "是",
   no: "否",
   baseline_only: "仅按基础策略运行",
-  ai_advisory: "AI 参与评估",
-  ai_blended: "AI 一致性过滤",
-  ai_primary: "AI 主导判断",
-  ai_primary_shadow: "AI 影子主导",
+  ai_assisted: "AI 辅助决策",
+  ai_decision_maker: "AI 决策者",
+  ai_decision_maker_with_profile_control: "AI 决策者并控制策略档位",
   winner_engine: "系统候选引擎",
   activation_gate: "激活裁决层",
   auto_activation_executed: "自动激活已执行",
   manual_activation_executed: "手动激活已执行",
   manual_profile_activation_executed: "管理员手动切换已执行",
-  winner_policy_auto_activation_executed: "优胜档位自动激活已执行",
+  winner_policy_auto_activation_executed: "优胜策略档位自动激活已执行",
   execution_outcome_recorded: "已记录执行结果",
-  pending_activation_executed: "待审批档位已激活",
+  pending_activation_executed: "待审批策略档位已激活",
   rollback_executed: "回滚已执行",
-  stable_keep_active: "继续保持当前档位",
+  stable_keep_active: "继续保持当前策略档位",
   recommended_not_executed: "已推荐但未执行",
-  winner_policy_recommended_not_executed: "优胜档位已推荐但未执行",
+  winner_policy_recommended_not_executed: "优胜策略档位已推荐但未执行",
   auto_rollback_recommended: "建议自动回滚",
   auto_rollback_executed: "自动回滚已执行",
   observe_outcome: "观察结果",
   activate_or_reject: "激活或拒绝",
-  keep_current_profile: "保持当前档位",
+  keep_current_profile: "保持当前策略档位",
   observe_after_rollback: "观察回滚后表现",
-  current_profile_active_and_conservative: "当前档位已生效，且策略偏保守",
+  current_profile_active_and_conservative: "当前策略档位已生效，且策略偏保守",
   financial_safety_priority: "优先考虑资金安全",
   prioritize_financial_safety: "优先考虑资金安全",
   fee_churn_reduction: "优先减少手续费磨损",
@@ -146,24 +155,18 @@
   trend_recovery_detected: "检测到趋势恢复",
   fallback_rule_based_recommendation: "当前建议来自规则回退，而非 AI 直接推荐",
   runtime_safety_degraded: "运行安全状态不足，优先保守处理",
-  winner_engine_selected_candidate: "系统候选引擎已选出当前最优档位",
+  winner_engine_selected_candidate: "系统候选引擎已选出当前最优策略档位",
   ai_assist_confirms_winner: "AI 辅助意见与系统候选一致",
   ai_assist_disagrees_with_winner: "AI 辅助意见与系统候选不一致",
-  ai_assist_only: "AI 当前只参与辅助解释，不直接决定切档",
-  should_fallback: "建议回退到已登记档位",
-  "profile is conservative risk level, suitable for financial safety.": "当前档位属于保守风险级别，更适合以资金安全为优先。",
-  "profile reduces trading frequency to lower fee churn.": "这套档位会降低交易频率，减少手续费来回损耗。",
-  "profile avoids low-edge trading to improve execution reliability.": "这套档位会尽量避开低净优势交易，提升执行可靠性。",
-  ui_manual_activate_strategy_profile: "管理员在页面上手动切换了档位",
-  ui_accept_strategy_profile_now: "管理员在页面上立即采纳了建议",
-  ui_stage_strategy_profile: "管理员在页面上把建议保存为待审批档位",
-  ui_activate_pending_strategy_profile: "管理员在页面上激活了待审批档位",
-  ui_rollback_strategy_profile: "管理员在页面上执行了档位回滚",
-  operator_activate_pending_profile: "管理员激活了待审批档位",
-  operator_manual_profile_activation: "管理员手动切换了已注册档位",
-  winner_selection_policy_auto_activation: "优胜档位激活策略已自动执行",
-  auto_rollback_policy_applied: "自动回滚策略已应用",
-  diagnostic_only: "仅用于诊断",
+  ai_assist_only: "AI 当前只参与辅助解释，不直接决定策略档位切换",
+  should_fallback: "建议回退到已登记策略档位",
+  "profile is conservative risk level, suitable for financial safety.": "当前策略档位属于保守风险级别，更适合以资金安全为优先。",
+  "profile reduces trading frequency to lower fee churn.": "这套策略档位会降低交易频率，减少手续费来回损耗。",
+  "profile avoids low-edge trading to improve execution reliability.": "这套策略档位会尽量避开低净优势交易，提升执行可靠性。",
+  ui_manual_activate_strategy_profile: "管理员在页面上手动切换了策略档位",
+  operator_manual_profile_activation: "管理员手动切换了已注册策略档位",
+  winner_selection_policy_auto_activation: "系统已自动采用当前优胜策略档位",
+  diagnostic_only: "仅诊断",
   shadow_translation: "影子翻译",
   enabled_live: "允许进入实盘执行",
   provider_ready: "模型已就绪",
@@ -216,7 +219,7 @@ const ERROR_MAP = {
   observe_only: "先观察，不建议立即处理",
   live_submit_disabled: "当前没有开放向交易所正式报单。",
   guarded_execution_dry_run: "当前是只演练不报单模式，系统不会真正下单。",
-  guarded_live_blocked_by_default: "当前运行档位默认禁止真实报单。",
+  guarded_live_blocked_by_default: "当前运行策略档位默认禁止真实报单。",
   local_demo_no_exchange_submission: "当前是本地演示模式，不会把委托发到交易所。",
   real_market_paper_uses_local_paper_execution: "当前模式只读取真实行情，但成交仍由本地模拟完成。",
   real_money_live_not_supported: "当前版本不支持真实资金自动交易。",
@@ -226,41 +229,39 @@ const ERROR_MAP = {
   strategy_profile_recommendation_not_found: "找不到这条策略档位建议。",
   strategy_profile_profile_not_found: "找不到这个可切换的策略档位。",
   strategy_profile_recommendation_expired: "这条策略档位建议已经过期，不能再直接采纳。",
-  strategy_profile_already_active: "推荐档位已经是当前生效档位，不需要重复切换。",
-  strategy_profile_switch_cooldown_active: "刚完成过一次档位切换，当前仍处于切换冷却期。",
+  strategy_profile_already_active: "推荐策略档位已经是当前生效的策略档位，不需要重复切换。",
+  strategy_profile_switch_cooldown_active: "刚完成过一次策略档位切换，当前仍处于切换冷却期。",
   strategy_profile_auto_switch_disabled: "当前未开启策略档位自动切换。",
   strategy_profile_auto_switch_confidence_too_low: "这条建议的置信度还不够高，不能自动切换。",
-  strategy_profile_auto_switch_same_risk_confidence_too_low: "同风险级别档位切换的置信度还不够高，暂不自动切换。",
-  strategy_profile_auto_switch_aggressive_confidence_too_low: "切向更激进档位需要更高置信度，当前暂不自动切换。",
-  strategy_profile_auto_switch_not_allowed: "这套档位不允许自动生效，只能人工审批。",
-  strategy_profile_manual_approval_required: "这套档位要求人工审批后才能生效。",
+  strategy_profile_auto_switch_same_risk_confidence_too_low: "同风险级别策略档位切换的置信度还不够高，暂不自动切换。",
+  strategy_profile_auto_switch_aggressive_confidence_too_low: "切向更激进策略档位需要更高置信度，当前暂不自动切换。",
+  strategy_profile_auto_switch_not_allowed: "这套策略档位不允许自动生效，只能人工审批。",
+  strategy_profile_manual_approval_required: "这套策略档位要求人工审批后才能生效。",
   strategy_profile_auto_switch_requires_more_conservative_target: "自动切换只允许切向更保守的策略档位。",
   strategy_profile_auto_switch_frozen: "当前策略档位自动切换已被冻结。",
-  strategy_profile_activation_policy_disabled: "当前没有开启自动激活策略，因此本轮只生成建议，不会自动切档。",
-  strategy_profile_activation_policy_not_effective: "当前自动激活策略未生效或已被冻结，因此本轮不会自动切档。",
-  strategy_profile_ai_assist_disagrees: "AI 辅助意见与系统候选不一致，当前先保守处理，不自动切档。",
-  strategy_profile_candidate_requires_more_confirmations: "同一候选档位出现次数还不够，当前需要更多连续评估确认。",
-  strategy_profile_min_active_duration_not_reached: "当前档位生效时间还不够长，先避免过早再次切换。",
-  strategy_profile_score_delta_below_threshold: "候选档位相对当前档位的分数优势还不够明显，暂不自动切换。",
+  strategy_profile_ai_assist_disagrees: "AI 辅助意见与系统候选不一致，当前先保守处理，不自动切换策略档位。",
+  strategy_profile_candidate_requires_more_confirmations: "同一候选策略档位出现次数还不够，当前需要更多连续评估确认。",
+  strategy_profile_min_active_duration_not_reached: "当前策略档位生效时间还不够长，先避免过早再次切换。",
+  strategy_profile_score_delta_below_threshold: "候选策略档位相对当前策略档位的分数优势还不够明显，暂不自动切换。",
   strategy_profile_runtime_not_safe_to_trade: "当前运行态并不适合自动调整策略档位。",
   strategy_profile_review_required: "当前仍需人工复核，不能自动切换策略档位。",
   strategy_profile_market_data_stale: "行情快照不新鲜，不能自动切换策略档位。",
-  strategy_profile_reconciliation_not_clean: "当前对账不干净，不能自动切换策略档位。",
+  strategy_profile_reconciliation_not_clean: "当前对账未达一致，不能自动切换策略档位。",
   operator_rejected_strategy_profile_recommendation: "管理员已拒绝这条策略档位建议。",
   ai_recommended_more_conservative_profile: "AI 建议切到更保守的策略档位，系统已自动采纳。",
   ai_recommended_same_risk_profile: "AI 建议切换到同风险级别但更匹配当前市场的策略档位，系统已自动采纳。",
   ai_recommended_more_aggressive_profile: "AI 建议切换到更积极的策略档位，系统已自动采纳。",
-  ai_degraded_requires_manual_review: "AI 已降级且未开启自动回退，需要人工确认后再恢复 AI 主链。",
-  ai_auto_downgraded: "AI 已自动降级，当前只保留基础策略主链。",
+  ai_degraded_requires_manual_review: "AI 已降级且未开启自动回退，需要人工确认后再恢复 AI 决策链路。",
+  ai_auto_downgraded: "AI 已自动降级，当前只保留基础策略决策链路。",
   output_rejected: "AI 输出结构有效，但没有通过交易语义校验。",
-  ai_fallback_used: "本轮使用了回退结果，不能让 AI 接管。",
+  ai_fallback_used: "本轮使用了回退结果，不能让 AI 直接改写基础策略。",
   ai_output_invalid: "AI 输出没有通过校验。",
   ai_confidence_below_threshold: "校准置信度低于 AI 主导模式最低门槛。",
   ai_uncertainty_above_threshold: "不确定性高于 AI 主导模式允许阈值。",
-  ai_directional_edge_too_small: "方向优势不够，暂不允许 AI 接管。",
+  ai_directional_edge_too_small: "方向优势不够，暂不允许 AI 直接改写基础策略。",
   ai_override_not_recommended: "AI 自己也不建议覆盖基础策略。",
   ai_not_economically_actionable: "预期净优势覆盖不了成本和噪声。",
-  ai_regime_not_allowed: "当前市场状态不允许 AI 直接接管。",
+  ai_regime_not_allowed: "当前市场状态不允许 AI 直接改写基础策略。",
   ai_open_orders_present: "当前还有活动委托，不允许 AI 改写方向。",
   ai_flat_context_requires_stronger_edge: "空仓场景下需要更强的方向优势才能开仓。",
   execution_parameter_suggestions_disabled: "执行建议功能当前关闭。",
@@ -270,8 +271,8 @@ const ERROR_MAP = {
   planner_recorded_suggestion_only: "执行器只保留建议供诊断使用。",
   planner_translated_execution_preview: "执行器已生成影子翻译预览。",
   bounded_live_translation_applied: "执行器已经把建议限制性地转成真实下单字段。",
-  live_translation_not_enabled: "当前没有启用真实执行放权。",
-  live_translation_requires_limit_cap: "只有能转成价格保护型限价保护的建议才允许实盘放权。",
+  live_translation_not_enabled: "当前没有启用实盘授权。",
+  live_translation_requires_limit_cap: "只有能转成价格保护型限价保护的建议才允许进入实盘授权。",
   live_translation_requires_reference_price: "缺少参考价格，不能安全生成实盘价格保护。",
   live_translation_requires_limit_offset: "缺少有效价格偏移，不能生成实盘限价保护。",
   live_translation_requires_slippage_guard: "缺少滑点保护，不能启用受限实盘翻译。",
@@ -304,6 +305,106 @@ export function toneForRuntimeState(runtimeState) {
     default:
       return "neutral";
   }
+}
+
+export function toneForReconciliationSeverity(severity) {
+  switch (String(severity || "").toLowerCase()) {
+    case "clean":
+      return "positive";
+    case "info":
+      return "info";
+    case "review_required":
+    case "soft_mismatch":
+      return "warning";
+    case "hard_mismatch":
+      return "danger";
+    default:
+      return "neutral";
+  }
+}
+
+export function tradingStatusLabel(recovery = {}) {
+  if (recovery.safe_to_trade) return "可交易";
+  if (recovery.halted && recovery.resume_eligible) return "待恢复";
+  if (recovery.halted) return "已暂停";
+  return "已阻断";
+}
+
+export function recoveryStatusLabel(recovery = {}) {
+  if (recovery.safe_to_trade) return "可交易";
+  if (recovery.halted && recovery.resume_eligible) return "待恢复";
+  if (recovery.review_required) return "待人工确认";
+  return "恢复受限";
+}
+
+export function reviewStatusLabel(reviewRequired) {
+  return reviewRequired ? "待人工确认" : "无需确认";
+}
+
+export function reconciliationStatusLabel(reconciliation = {}) {
+  if (reconciliation?.halt_required) return "要求停机";
+  if (String(reconciliation?.severity || "").toLowerCase() === "clean") return "账实一致";
+  return "持续观察";
+}
+
+export function permissionStatusLabel(canWrite) {
+  return canWrite ? "可写" : "只读受限";
+}
+
+export function statusHeadline(label, fallback = "待确认") {
+  const value = String(label || "").trim() || fallback;
+  return `当前状态：${value}`;
+}
+
+export function operationalStatusLabel({
+  health = {},
+  recovery = {},
+  blockers = [],
+  reconciliation = null,
+  readyLabel = "可交易",
+} = {}) {
+  if (recovery.halted && recovery.resume_eligible && !recovery.safe_to_trade) return "待恢复";
+  if (health.halted || (recovery.halted && !recovery.resume_eligible)) return "已暂停";
+  if ((blockers || []).length > 0) return "已阻断";
+  if (reconciliation?.halt_required) return "需先完成对账";
+  if (recovery.review_required) return "待人工确认";
+  if (recovery.safe_to_trade === false) return "恢复受限";
+  return readyLabel;
+}
+
+export function operationalStatusHeadline(options = {}) {
+  return statusHeadline(operationalStatusLabel(options));
+}
+
+export function operationalStatusCopy({
+  health = {},
+  recovery = {},
+  blockers = [],
+  reconciliation = null,
+  recoveryReasonText = "",
+  readyCopy = "当前运行正常，可继续关注账户、对账和下一轮策略判断。",
+} = {}) {
+  if (recovery.halted && recovery.resume_eligible && !recovery.safe_to_trade) {
+    return "当前处于手动暂停状态。确认最新对账和账户快照无误后，可直接恢复自动运行。";
+  }
+  if (health.halted || (recovery.halted && !recovery.resume_eligible)) {
+    return "当前处于暂停状态。请先确认暂停原因和系统状态，再决定后续操作。";
+  }
+  if ((blockers || []).length > 0) {
+    return `当前处于阻断状态。请先处理：${localizeError(blockers[0]?.blocker)}。`;
+  }
+  if (reconciliation?.halt_required) {
+    return "当前需先完成对账。确认没有高风险差异后，再决定是否恢复自动运行。";
+  }
+  if (recovery.review_required) {
+    return "当前仍需人工确认。请先核对交易所状态与本地记录，再决定是否接受为新基线。";
+  }
+  if (recovery.safe_to_trade === false) {
+    return recoveryReasonText
+      ? `当前处于恢复受限状态。${recoveryReasonText}`
+      : "当前处于恢复受限状态。请先满足恢复条件后再恢复自动运行。";
+  }
+  return readyCopy;
 }
 
 export function toneForOrderStatus(status) {
