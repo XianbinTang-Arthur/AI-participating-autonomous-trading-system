@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import subprocess
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 
 from fastapi import FastAPI
@@ -82,11 +84,15 @@ class TestDashboardUI(unittest.TestCase):
         self.assertIn("readyViews", store_text)
         self.assertIn("blockerControl", store_text)
         self.assertIn("aiConfigModel", store_text)
+        self.assertIn('risk: [', store_text)
+        self.assertIn('["replayStatus", "/replay/status"]', store_text)
+        self.assertNotIn('risk: [\n      ["blockers", "/system/blockers"]', store_text)
 
         ai_text = responses["ai_view_js"].text
         self.assertIn("AI 决策链路", ai_text)
         self.assertIn("AI 复核处置", ai_text)
         self.assertIn("executionSuggestionRows", ai_text)
+        self.assertIn("function readableShadowMeta", ai_text)
 
         risk_text = responses["risk"].text
         self.assertIn("风险与恢复", risk_text)
@@ -147,6 +153,75 @@ class TestDashboardUI(unittest.TestCase):
         self.assertEqual(ai_config.headers["location"], "/login")
         self.assertEqual(login.status_code, 200)
         self.assertIn("login", login.text.lower())
+
+    def test_ai_and_risk_views_render_in_node_smoke_test(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { renderAIView } from './aats/api/static/modules/views/ai-view.js';
+import { renderRiskView } from './aats/api/static/modules/views/risk-view.js';
+
+const aiHtml = renderAIView({
+  aiOverview: {
+    runtime: {
+      configured_operating_mode: 'baseline_only',
+      effective_operating_mode: 'baseline_only',
+      provider_ready: true,
+      shadow_mode_enabled: true,
+    },
+    shadow_summary: {},
+  },
+  aiRuntime: {
+    configured_operating_mode: 'baseline_only',
+    effective_operating_mode: 'baseline_only',
+    provider_ready: true,
+    shadow_mode_enabled: true,
+  },
+  aiLatest: {},
+  blockerControl: {},
+  errors: {},
+});
+
+const riskHtml = renderRiskView({
+  health: { runtime_state: 'halted' },
+  systemRecovery: {
+    recovery: {
+      halted: true,
+      resume_eligible: false,
+      safe_to_trade: false,
+      review_required: true,
+      resume_blocked_reasons: ['ai_degraded_requires_manual_review'],
+    },
+  },
+  blockerControl: {
+    blockers: [],
+    secondary_blockers: [],
+    next_step_summary: '请先完成 AI 复核。',
+  },
+  metrics: {},
+  portfolio: { portfolio: {} },
+  accountState: {},
+  reconciliationLatest: {},
+  replayStatus: {},
+  uiHints: {},
+});
+
+console.log(JSON.stringify({
+  aiHasHero: aiHtml.includes('AI 状态概览'),
+  riskHasHero: riskHtml.includes('风险与恢复'),
+  riskHasBlockerPanel: riskHtml.includes('第一优先级阻断处置'),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertIn('"aiHasHero":true', result.stdout)
+        self.assertIn('"riskHasHero":true', result.stdout)
+        self.assertIn('"riskHasBlockerPanel":true', result.stdout)
 
 
 if __name__ == "__main__":

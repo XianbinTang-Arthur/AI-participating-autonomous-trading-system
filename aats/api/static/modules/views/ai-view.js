@@ -129,6 +129,13 @@ function toneForShadowSummary(shadowSummary) {
   return "info";
 }
 
+function readableShadowMeta(shadowSummary = {}) {
+  if (!shadowSummary?.window_count) {
+    return "当前样本不足，暂时还没有形成稳定的影子评估结论。";
+  }
+  return `窗口 ${formatNumber(shadowSummary.window_count ?? 0, 0)} / 状态 ${humanState(shadowSummary.status || "insufficient_data")} / 跑赢率 ${formatNumber(shadowSummary.outperformed_rate ?? 0, 3)}`;
+}
+
 function aiRuntimeNarrative(runtime, latestDegradation) {
   if (!runtime || Object.keys(runtime).length === 0) {
     return "当前暂无 AI 决策链路运行状态，可能是页面刚加载完，或当前配置没有启用 AI。";

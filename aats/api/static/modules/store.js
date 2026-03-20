@@ -71,7 +71,6 @@ export function viewSpecs(view, state = null) {
       ["executionErrors", "/execution/errors"],
     ],
     risk: [
-      ["blockers", "/system/blockers"],
       ["metrics", "/system/metrics"],
       ["portfolio", "/portfolio/latest"],
       ["accountState", "/account/state"],
