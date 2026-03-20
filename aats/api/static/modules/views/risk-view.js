@@ -1,4 +1,4 @@
-﻿import { actionButton, pill, primaryStatusPanel, responsiveTable, summaryStrip, surfaceCard, timeline } from "../components.js";
+﻿import { actionButton, pill, primaryStatusPanel, responsiveTable, summaryStrip, surfaceCard } from "../components.js";
 import { booleanWord, escapeHtml, formatMaybeTimestamp, formatNumber, formatRelativeAge, middleEllipsis } from "../formatters.js";
 import {
   localizeError,
@@ -19,14 +19,11 @@ export function renderRiskSections(data) {
   const blockers = blockerControl.blockers || data.blockers?.blockers || [];
   const primaryBlocker = blockerControl.primary_blocker || blockers[0] || null;
   const secondaryBlockers = blockerControl.secondary_blockers || [];
-  const blockerHistoryPayload = data.blockerHistory || {};
   const reconciliation = data.reconciliationLatest?.reconciliation || null;
-  const reconciliationRecentPayload = data.reconciliationRecent || {};
   const mismatchSummary = data.reconciliationLatest?.mismatch_summary || {};
   const billsSummary = data.reconciliationLatest?.exchange_bills_summary || {};
   const recovery = data.systemRecovery?.recovery || {};
   const replay = data.replayStatus || {};
-  const replayRecentPayload = data.replayRecentValidations || {};
   const metrics = data.metrics || {};
   const health = data.health || {};
   const uiHints = data.uiHints || {};
@@ -150,24 +147,6 @@ export function renderRiskSections(data) {
         { label: "账户快照", value: booleanWord(account.ready), meta: listText(account.blockers, "当前没有额外账户阻断说明"), tone: account.ready ? "positive" : "warning" },
       ]),
     }),
-    riskReconciliationHistory: surfaceCard({
-      title: "对账记录",
-      kicker: "历史记录",
-      copy: "用来判断异常是一次性事件，还是在持续反复出现。",
-      content: `${renderReconciliationHistory(reconciliationRecentPayload)}${renderPaginationFooter({ payload: reconciliationRecentPayload, key: "reconciliations", singular: "对账报告", loadAction: "load-more-reconciliations", collapseAction: "collapse-reconciliations" })}`,
-    }),
-    riskBlockerHistory: surfaceCard({
-      title: "阻断记录",
-      kicker: "历史记录",
-      copy: "观察阻断是偶发事件还是持续性的运行问题。",
-      content: `${renderBlockerHistory(blockerHistoryPayload)}${renderPaginationFooter({ payload: blockerHistoryPayload, key: "history", singular: "阻断快照", loadAction: "load-more-blocker-history", collapseAction: "collapse-blocker-history" })}`,
-    }),
-    riskReplayHistory: surfaceCard({
-      title: "回放记录",
-      kicker: "历史记录",
-      copy: "如果重建差异持续增加，说明恢复可信度在下降。",
-      content: `${renderReplayValidationHistory(replayRecentPayload)}${renderPaginationFooter({ payload: replayRecentPayload, key: "validations", singular: "回放验证", loadAction: "load-more-replay-validations", collapseAction: "collapse-replay-validations" })}`,
-    }),
     riskReconciliation: surfaceCard({
       title: "对账概览",
       kicker: "对账上下文",
@@ -208,9 +187,6 @@ export function renderRiskView(data) {
       <div class="span-12">${sections.riskBills}</div>
       <div class="span-6">${sections.riskBlockers}</div>
       <div class="span-6">${sections.riskMetrics}</div>
-      <div class="span-12">${sections.riskReconciliationHistory}</div>
-      <div class="span-12">${sections.riskBlockerHistory}</div>
-      <div class="span-12">${sections.riskReplayHistory}</div>
     </div>
   `;
 }
@@ -279,32 +255,6 @@ export function reconciliationActionCopy({ reconciliation = null, recovery = {},
     return operationalStatusCopy({ recovery });
   }
   return "当前状态稳定。如果想再次确认状态，可以手动重新对账。";
-}
-
-function renderReconciliationHistory(payload) {
-  const reconciliations = payload?.reconciliations || [];
-  return responsiveTable(
-    ["记录时间", "对账级别", "差异摘要", "停机要求", "操作"],
-    reconciliations.map((item) => {
-      const severity = String(item.severity || "").toLowerCase();
-      const needsHandling = Boolean(severity && severity !== "clean");
-      return [
-        `<div><strong>${formatRelativeAge(item.as_of_ts)}</strong><div class="table-meta">${formatMaybeTimestamp(item.as_of_ts)}</div></div>`,
-        `<div><strong>${readableState(item.severity || "unknown")}</strong><div class="table-meta mono">${middleEllipsis(item.reconciliation_id, 10, 6, "当前没有对账编号")}</div></div>`,
-        `<div><strong>${listText(item.mismatch_reasons, "当前没有额外差异原因")}</strong><div class="table-meta">${listText(item.mismatch_categories, "当前没有额外差异分类")}</div></div>`,
-        `<div><strong>${booleanWord(item.halt_required)}</strong><div class="table-meta">${item.exchange_comparison_enabled ? "已比对交易所" : "仅校验本地记录"}</div></div>`,
-        item.reconciliation_id
-          ? actionButton(
-              needsHandling ? "查看并处理" : "查看详情",
-              "inspect-reconciliation",
-              item.reconciliation_id,
-              needsHandling ? "warning" : "ghost"
-            )
-          : "",
-      ];
-    }),
-    "当前暂无对账记录。"
-  );
 }
 
 function renderPrimaryBlockerActionPanel({ primaryBlocker = null, secondaryBlockers = [], recovery = {}, uiHints = {} } = {}) {
@@ -410,68 +360,12 @@ function renderBlockerActions(actions = [], blocker = "", uiHints = {}) {
   return `<div class="stack-actions">${rendered.join("")}</div>`;
 }
 
-function renderBlockerHistory(payload) {
-  const history = payload?.history || [];
-  return responsiveTable(
-    ["记录时间", "运行状态", "阻断摘要", "执行状态"],
-    history.map((item) => [
-      `<div><strong>${formatRelativeAge(item.created_at)}</strong><div class="table-meta">${formatMaybeTimestamp(item.created_at)}</div></div>`,
-      `<div><strong>${readableState(item.runtime_state || "unknown")}</strong><div class="table-meta">${readableState(item.operating_state || "unknown")}</div></div>`,
-      `<div><strong>${formatNumber((item.blockers || []).length, 0)}</strong><div class="table-meta">${(item.blockers || []).length ? localizeError(item.blockers[0].blocker) : "当前没有阻断项"}</div></div>`,
-      `<div><strong>${booleanWord(item.execution_blocked)}</strong><div class="table-meta">${item.halted ? "已暂停" : item.submit_blocked ? "仅阻断发单" : "允许执行"}</div></div>`,
-    ]),
-    "当前暂无阻断记录。"
-  );
-}
-
-function renderReplayValidationHistory(payload) {
-  const validations = payload?.validations || [];
-  return responsiveTable(
-    ["记录时间", "健康状态", "关联决策", "差异数量", "问题摘要"],
-    validations.map((item) => [
-      `<div><strong>${formatRelativeAge(item.validated_at)}</strong><div class="table-meta">${formatMaybeTimestamp(item.validated_at)}</div></div>`,
-      `<div><strong>${booleanWord(item.healthy)}</strong><div class="table-meta">${textOrFallback(item.validation_id, "当前没有验证编号")}</div></div>`,
-      `<div><strong>${textOrFallback(item.decision_id, "当前没有决策编号")}</strong><div class="table-meta">${formatNumber(item.replayed_event_count, 0)} 个事件</div></div>`,
-      `<div><strong>${formatNumber(item.divergence_count, 0)}</strong><div class="table-meta">基线切换 ${formatNumber(item.baseline_switch_count, 0)}</div></div>`,
-      `<div><strong>${issuesSummary(item)}</strong><div class="table-meta">${listText(item.execution_chain_issues, "当前没有执行链异常")}</div></div>`,
-    ]),
-    "当前暂无回放记录。"
-  );
-}
-
-function renderPaginationFooter({ payload, key, singular, loadAction, collapseAction }) {
-  const shown = Number(payload?.[key]?.length || 0);
-  const total = Number(payload?.total_available || shown);
-  const hasMore = Boolean(payload?.has_more);
-  const limit = Number(payload?.limit || shown);
-  if (!shown) return "";
-  return `
-    <div class="history-footer">
-      <p class="meta-copy">当前显示 ${shown} / ${total} 条${singular}。</p>
-      <div class="stack-actions">
-        ${hasMore ? actionButton(`加载更多${singular}`, loadAction, "", "secondary") : ""}
-        ${limit > 8 ? actionButton("收起到最新 8 条", collapseAction, "", "ghost") : ""}
-      </div>
-    </div>
-  `;
-}
-
 function renderBillCategories(rows) {
   if (!Array.isArray(rows) || rows.length === 0) return "当前没有账单分类";
   return rows
     .slice(0, 3)
     .map((item) => `${item.type}/${item.sub_type}/${item.currency} x${formatNumber(item.count, 0)}`)
     .join(" | ");
-}
-
-function issuesSummary(item) {
-  const issueCount =
-    (item.portfolio_issues || []).length +
-    (item.decision_chain_issues || []).length +
-    (item.execution_chain_issues || []).length +
-    (item.audit_issues || []).length +
-    (item.baseline_switch_issues || []).length;
-  return issueCount > 0 ? `${issueCount} 项需要关注的问题` : "暂未发现异常问题";
 }
 
 function riskHeadline({ primaryBlocker, blockers, reconciliation, recovery }) {

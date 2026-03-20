@@ -699,12 +699,6 @@ async function dispatchAction(action, value, target = null) {
   if (action === "collapse-fills") return resetPageLimit("recentFills");
   if (action === "load-more-decisions") return adjustPageLimit("recentDecisions", PAGE_LOAD_STEP);
   if (action === "collapse-decisions") return resetPageLimit("recentDecisions");
-  if (action === "load-more-reconciliations") return adjustPageLimit("recentReconciliations", PAGE_LOAD_STEP);
-  if (action === "collapse-reconciliations") return resetPageLimit("recentReconciliations");
-  if (action === "load-more-blocker-history") return adjustPageLimit("blockerHistory", PAGE_LOAD_STEP);
-  if (action === "collapse-blocker-history") return resetPageLimit("blockerHistory");
-  if (action === "load-more-replay-validations") return adjustPageLimit("replayValidations", PAGE_LOAD_STEP);
-  if (action === "collapse-replay-validations") return resetPageLimit("replayValidations");
   if (action === "load-more-ai-assessments") return adjustPageLimit("recentAIAssessments", PAGE_LOAD_STEP);
   if (action === "collapse-ai-assessments") return resetPageLimit("recentAIAssessments");
   if (action === "load-more-ai-shadow-decisions") return adjustPageLimit("recentAIShadowDecisions", PAGE_LOAD_STEP);
