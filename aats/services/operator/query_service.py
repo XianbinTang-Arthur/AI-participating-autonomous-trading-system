@@ -290,6 +290,7 @@ class OperatorQueryService:
         payloads = [self.payload(item) for item in self._recent_ai_shadow_evaluation_events(limit=limit)]
         payloads = [item for item in payloads if item is not None]
         latest = payloads[0] if payloads else None
+        ai_runtime = self.runtime.ai_service.status()
         outperformed_count = sum(1 for item in payloads if item.get("shadow_outperformed") is True)
         underperformed_count = sum(1 for item in payloads if item.get("shadow_outperformed") is False)
         if latest is None:
@@ -317,17 +318,12 @@ class OperatorQueryService:
             float(latest.get("shadow_churn_ratio") or 0.0) - float(latest.get("baseline_churn_ratio") or 0.0),
             6,
         )
-        review_required = (
-            len(payloads) >= 2
-            and (
-                underperformed_count >= min(2, len(payloads))
-                or latest_fee_ratio_delta > 0.05
-                or latest_churn_ratio_delta > 0.08
-            )
-        )
+        review_required = bool(ai_runtime.get("outcome_review_required"))
         status = "healthy"
         if review_required:
             status = "review_required"
+        elif latest.get("shadow_outperformed") is None:
+            status = "insufficient_data"
         elif latest.get("shadow_outperformed") is False:
             status = "underperforming"
         elif outperformed_count and underperformed_count:

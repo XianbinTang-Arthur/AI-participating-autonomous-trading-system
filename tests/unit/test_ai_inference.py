@@ -343,6 +343,8 @@ class TestAIInferenceService(unittest.IsolatedAsyncioTestCase):
             provider=FakeProvider(),
             ai_auto_downgrade_enabled=True,
             ai_outcome_review_bad_window_threshold=2,
+            ai_outcome_review_warmup_evaluations=0,
+            ai_outcome_review_min_trade_count=0,
         )
 
         bad_window = AIShadowEvaluation(
@@ -385,6 +387,102 @@ class TestAIInferenceService(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status["outcome_degradation_reason"], "ai_shadow_underperformed_baseline")
         self.assertEqual(status["outcome_state"], "auto_downgraded")
         self.assertIsNotNone(status["last_outcome_degraded_at"])
+
+    async def test_shadow_outcome_review_requires_warmup_and_min_trade_count(self) -> None:
+        service, _context, _baseline, _provider = self._service(
+            ai_operating_mode="ai_primary",
+            provider=FakeProvider(),
+            ai_auto_downgrade_enabled=True,
+            ai_outcome_review_bad_window_threshold=2,
+            ai_outcome_review_warmup_evaluations=5,
+            ai_outcome_review_min_trade_count=3,
+        )
+
+        bad_window = AIShadowEvaluation(
+            decision_ids=["decision_shadow_bad_1", "decision_shadow_bad_2"],
+            window_start=utc_now(),
+            window_end=utc_now(),
+            symbol="BTC-USDT",
+            timeframe="15m",
+            baseline_trade_count=2,
+            shadow_trade_count=2,
+            override_count=2,
+            agreement_count=0,
+            disagreement_count=2,
+            fallback_count=0,
+            baseline_gross_pnl=Decimal("10"),
+            baseline_net_pnl=Decimal("9"),
+            baseline_fee_total=Decimal("1"),
+            baseline_fee_ratio=0.1,
+            baseline_churn_ratio=0.2,
+            shadow_gross_pnl=Decimal("7"),
+            shadow_net_pnl=Decimal("5"),
+            shadow_fee_total=Decimal("2"),
+            shadow_fee_ratio=0.18,
+            shadow_churn_ratio=0.32,
+            shadow_outperformed=False,
+        )
+
+        for index in range(4):
+            evaluation = bad_window.model_copy(update={"decision_ids": [f"prewarm_{index}_a", f"prewarm_{index}_b"]})
+            service.evaluator.record_shadow_evaluation(evaluation)
+            service._record_shadow_outcome(evaluation)
+
+        self.assertFalse(service.status()["outcome_review_required"])
+        self.assertEqual(service.status()["outcome_bad_window_streak"], 0)
+
+        evaluation = bad_window.model_copy(update={"decision_ids": ["warmup_met_a", "warmup_met_b"], "shadow_trade_count": 3})
+        service.evaluator.record_shadow_evaluation(evaluation)
+        service._record_shadow_outcome(evaluation)
+        self.assertFalse(service.status()["outcome_review_required"])
+        self.assertEqual(service.status()["outcome_bad_window_streak"], 1)
+
+        evaluation = bad_window.model_copy(update={"decision_ids": ["warmup_trigger_a", "warmup_trigger_b"], "shadow_trade_count": 3})
+        service.evaluator.record_shadow_evaluation(evaluation)
+        service._record_shadow_outcome(evaluation)
+        self.assertTrue(service.status()["outcome_review_required"])
+
+    async def test_shadow_outcome_tie_with_no_trades_does_not_trigger_review(self) -> None:
+        service, _context, _baseline, _provider = self._service(
+            ai_operating_mode="ai_primary",
+            provider=FakeProvider(),
+            ai_auto_downgrade_enabled=True,
+            ai_outcome_review_bad_window_threshold=1,
+            ai_outcome_review_warmup_evaluations=0,
+            ai_outcome_review_min_trade_count=3,
+        )
+
+        neutral_window = AIShadowEvaluation(
+            decision_ids=["decision_shadow_tie_1", "decision_shadow_tie_2"],
+            window_start=utc_now(),
+            window_end=utc_now(),
+            symbol="BTC-USDT",
+            timeframe="15m",
+            baseline_trade_count=0,
+            shadow_trade_count=0,
+            override_count=0,
+            agreement_count=2,
+            disagreement_count=0,
+            fallback_count=0,
+            baseline_gross_pnl=Decimal("0"),
+            baseline_net_pnl=Decimal("0"),
+            baseline_fee_total=Decimal("0"),
+            baseline_fee_ratio=0.0,
+            baseline_churn_ratio=0.0,
+            shadow_gross_pnl=Decimal("0"),
+            shadow_net_pnl=Decimal("0"),
+            shadow_fee_total=Decimal("0"),
+            shadow_fee_ratio=0.0,
+            shadow_churn_ratio=0.0,
+            shadow_outperformed=None,
+        )
+
+        service.evaluator.record_shadow_evaluation(neutral_window)
+        service._record_shadow_outcome(neutral_window)
+
+        status = service.status()
+        self.assertFalse(status["outcome_review_required"])
+        self.assertEqual(status["outcome_bad_window_streak"], 0)
 
     async def test_shadow_evaluation_prefers_real_fills_for_price_and_fee_replay(self) -> None:
         settings = AATSSettings.model_validate(

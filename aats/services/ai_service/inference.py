@@ -282,6 +282,9 @@ class AIInferenceService:
                 fallback_count += 1
         baseline_replay = self._replay_baseline_path(shadow_rows=shadow_rows, fills_by_decision=fills_by_decision)
         shadow_replay = self._replay_shadow_path(shadow_rows=shadow_rows, fills_by_decision=fills_by_decision)
+        shadow_outperformed = None
+        if shadow_replay["net_pnl"] != baseline_replay["net_pnl"]:
+            shadow_outperformed = shadow_replay["net_pnl"] > baseline_replay["net_pnl"]
         evaluation = AIShadowEvaluation(
             window_start=shadow_rows[0].created_at,
             window_end=shadow_rows[-1].created_at,
@@ -304,7 +307,7 @@ class AIInferenceService:
             shadow_fee_total=shadow_replay["fee_total"],
             shadow_fee_ratio=shadow_replay["fee_ratio"],
             shadow_churn_ratio=shadow_replay["churn_ratio"],
-            shadow_outperformed=shadow_replay["net_pnl"] > baseline_replay["net_pnl"],
+            shadow_outperformed=shadow_outperformed,
             summary={
                 "window_size": len(shadow_rows),
                 "override_rate": round(override_count / len(shadow_rows), 6),
@@ -424,6 +427,8 @@ class AIInferenceService:
             },
             "outcome_policy": {
                 "bad_window_threshold": max(self.settings.ai_outcome_review_bad_window_threshold, 1),
+                "warmup_evaluations": max(self.settings.ai_outcome_review_warmup_evaluations, 0),
+                "min_trade_count": max(self.settings.ai_outcome_review_min_trade_count, 0),
                 "remaining_bad_windows_until_review": outcome_budget_remaining,
                 "max_fee_ratio_delta": self.settings.ai_outcome_max_fee_ratio_delta,
                 "max_churn_ratio_delta": self.settings.ai_outcome_max_churn_ratio_delta,
@@ -435,6 +440,19 @@ class AIInferenceService:
             "recent_timeout_count": recent_timeout_count,
             "recent_invalid_output_count": recent_invalid_output_count,
         }
+
+    def _outcome_review_eligible(self, evaluation: AIShadowEvaluation) -> bool:
+        recent_evaluations = [
+            item
+            for item in self.evaluator.shadow_evaluations_recent(limit=200)
+            if item.symbol == evaluation.symbol and item.timeframe == evaluation.timeframe
+        ]
+        if len(recent_evaluations) < max(self.settings.ai_outcome_review_warmup_evaluations, 0):
+            return False
+        trade_count = max(int(evaluation.baseline_trade_count or 0), int(evaluation.shadow_trade_count or 0))
+        if trade_count < max(self.settings.ai_outcome_review_min_trade_count, 0):
+            return False
+        return True
 
     async def _fallback(
         self,
@@ -686,9 +704,7 @@ class AIInferenceService:
         if churn_ratio_delta > self.settings.ai_outcome_max_churn_ratio_delta:
             reason_codes.append("ai_shadow_churn_worse")
 
-        if reason_codes:
-            self._outcome_bad_window_streak += 1
-        else:
+        if not reason_codes:
             was_review_required = self._outcome_review_required or self._outcome_auto_downgraded
             self._outcome_bad_window_streak = 0
             self._outcome_review_required = False
@@ -704,6 +720,11 @@ class AIInferenceService:
                     review_resolution="auto_recovered",
                 )
             return
+
+        if not self._outcome_review_eligible(evaluation):
+            return
+
+        self._outcome_bad_window_streak += 1
 
         if self._outcome_bad_window_streak < max(self.settings.ai_outcome_review_bad_window_threshold, 1):
             return
@@ -773,7 +794,15 @@ class AIInferenceService:
             window_count=len(rows),
             latest_evaluation_ref=latest_evaluation_ref,
             latest_evaluation_id=evaluation.evaluation_id,
-            latest_status="review_required" if self._outcome_review_required else ("healthy" if evaluation.shadow_outperformed else "underperforming"),
+            latest_status=(
+                "review_required"
+                if self._outcome_review_required
+                else (
+                    "insufficient_data"
+                    if evaluation.shadow_outperformed is None
+                    else ("healthy" if evaluation.shadow_outperformed else "underperforming")
+                )
+            ),
             review_required=self._outcome_review_required,
             windows=self._performance_windows(
                 rows,

@@ -96,6 +96,8 @@ class AATSSettings(BaseSettings):
     ai_shadow_mode_enabled: bool = True
     ai_shadow_evaluation_window: int = 50
     ai_outcome_review_bad_window_threshold: int = 2
+    ai_outcome_review_warmup_evaluations: int = 10
+    ai_outcome_review_min_trade_count: int = 3
     ai_outcome_max_fee_ratio_delta: float = 0.05
     ai_outcome_max_churn_ratio_delta: float = 0.08
     ai_execution_suggestion_mode: AIExecutionSuggestionMode = "disabled"
