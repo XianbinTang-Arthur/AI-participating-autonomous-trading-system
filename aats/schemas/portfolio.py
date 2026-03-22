@@ -7,6 +7,7 @@ from typing import Literal
 from pydantic import Field
 
 from aats.schemas.common import SchemaBase, utc_now
+from aats.schemas.execution import FillEvent
 from aats.schemas.system import MarginModelType, ProductType
 
 PortfolioSnapshotOrigin = Literal[
@@ -96,3 +97,78 @@ class PortfolioBalanceDelta(SchemaBase):
     product_type: ProductType = "spot"
     margin_mode: MarginModelType = "cash"
     created_at: datetime = Field(default_factory=utc_now)
+
+
+class FillOutcomeRecord(SchemaBase):
+    fill_id: str
+    decision_id: str | None = None
+    intent_id: str | None = None
+    order_id: str | None = None
+    symbol: str
+    venue: str | None = None
+    side: str | None = None
+    fill_qty: Decimal | None = None
+    fill_price: Decimal | None = None
+    fill_notional: Decimal | None = None
+    fee_amount: Decimal | None = None
+    fee_currency: str | None = None
+    liquidity_role: str | None = None
+    exchange_timestamp: datetime | None = None
+    ingestion_timestamp: datetime | None = None
+    order_status_after_fill: str | None = None
+    target_leverage: float | None = None
+    exposure_side: str | None = None
+    execution_action: str | None = None
+    position_intent: str | None = None
+    starting_position_qty: Decimal | None = None
+    starting_avg_entry_price: Decimal | None = None
+    ending_position_qty: Decimal | None = None
+    ending_avg_entry_price: Decimal | None = None
+    balances_before: dict[str, Decimal] = Field(default_factory=dict)
+    balances_after: dict[str, Decimal] = Field(default_factory=dict)
+    balance_deltas: dict[str, Decimal] = Field(default_factory=dict)
+    realized_pnl_delta: Decimal = Decimal("0")
+    fee_delta: Decimal = Decimal("0")
+    product_type: ProductType = "spot"
+    margin_mode: MarginModelType = "cash"
+    created_at: datetime = Field(default_factory=utc_now)
+
+    @classmethod
+    def from_balance_delta(cls, balance_delta: PortfolioBalanceDelta) -> "FillOutcomeRecord":
+        return cls.model_validate(balance_delta.model_dump(mode="python"))
+
+    @classmethod
+    def from_fill_and_balance_delta(
+        cls,
+        *,
+        fill: FillEvent,
+        balance_delta: PortfolioBalanceDelta,
+        starting_position_qty: Decimal | None = None,
+        starting_avg_entry_price: Decimal | None = None,
+        ending_position_qty: Decimal | None = None,
+        ending_avg_entry_price: Decimal | None = None,
+    ) -> "FillOutcomeRecord":
+        return cls.model_validate(
+            {
+                **balance_delta.model_dump(mode="python"),
+                "venue": fill.venue,
+                "side": fill.side,
+                "fill_qty": fill.fill_qty,
+                "fill_price": fill.fill_price,
+                "fill_notional": fill.fill_qty * fill.fill_price,
+                "fee_amount": fill.fee_amount,
+                "fee_currency": fill.fee_currency,
+                "liquidity_role": fill.liquidity_role,
+                "exchange_timestamp": fill.exchange_timestamp,
+                "ingestion_timestamp": fill.ingestion_timestamp,
+                "order_status_after_fill": fill.order_status_after_fill,
+                "target_leverage": fill.target_leverage,
+                "exposure_side": fill.exposure_side,
+                "execution_action": fill.execution_action,
+                "position_intent": fill.position_intent,
+                "starting_position_qty": starting_position_qty,
+                "starting_avg_entry_price": starting_avg_entry_price,
+                "ending_position_qty": ending_position_qty,
+                "ending_avg_entry_price": ending_avg_entry_price,
+            }
+        )

@@ -5,7 +5,7 @@ from typing import Any, Mapping, TypeVar
 from pydantic import BaseModel
 
 from aats.bus.base import EventBus
-from aats.schemas.common import EventEnvelope
+from aats.schemas.common import EventEnvelope, dump_payload_exact
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
 
@@ -22,7 +22,7 @@ def build_envelope(
         source_component=source_component,
         topic=topic,
         key=key,
-        payload=payload_model.model_dump(mode="json"),
+        payload=dump_payload_exact(payload_model),
     )
 
 
@@ -51,4 +51,3 @@ def parse_envelope(message: Mapping[str, Any]) -> EventEnvelope:
 def parse_payload(message: Mapping[str, Any], model_type: type[ModelT]) -> ModelT:
     envelope = parse_envelope(message)
     return model_type.model_validate(envelope.payload)
-

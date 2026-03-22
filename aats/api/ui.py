@@ -32,7 +32,7 @@ def _dashboard_allowed(request: Request) -> bool:
 def _serve_dashboard_page(request: Request, page_name: str) -> FileResponse | RedirectResponse:
     if not _dashboard_allowed(request):
         return RedirectResponse(url="/login", status_code=303)
-    if page_name not in {"home", "overview", "strategy", "execution", "risk", "ai", "ai-config", "settings"}:
+    if page_name not in {"home", "overview", "strategy", "execution", "risk", "ai-analysis", "ai-config", "settings"}:
         raise HTTPException(status_code=404, detail="ui_page_not_found")
     return FileResponse(DASHBOARD_SHELL, media_type="text/html; charset=utf-8", headers=PAGE_NO_STORE_HEADERS)
 
@@ -70,7 +70,14 @@ async def risk_index(request: Request):
 
 @ui_router.get("/ui/ai")
 async def ai_index(request: Request):
-    return _serve_dashboard_page(request, "ai")
+    if not _dashboard_allowed(request):
+        return RedirectResponse(url="/login", status_code=303)
+    return RedirectResponse(url="/ui/ai-analysis", status_code=303)
+
+
+@ui_router.get("/ui/ai-analysis")
+async def ai_analysis_index(request: Request):
+    return _serve_dashboard_page(request, "ai-analysis")
 
 
 @ui_router.get("/ui/ai-config")

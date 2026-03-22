@@ -28,6 +28,11 @@ class ExecutionReadinessProvider(Protocol):
         ...
 
 
+class ShadowStatusProvider(Protocol):
+    def snapshot(self) -> dict[str, Any]:
+        ...
+
+
 class SystemHealthService:
     def __init__(
         self,
@@ -39,6 +44,7 @@ class SystemHealthService:
         account_provider: AccountStatusProvider,
         execution_provider: ExecutionReadinessProvider,
         reconciliation_repo: ReconciliationRepository,
+        phase1_shadow_provider: ShadowStatusProvider | None = None,
         recovery_policy: RecoveryPolicy | None = None,
     ) -> None:
         self.settings = settings
@@ -48,6 +54,7 @@ class SystemHealthService:
         self.account_provider = account_provider
         self.execution_provider = execution_provider
         self.reconciliation_repo = reconciliation_repo
+        self.phase1_shadow_provider = phase1_shadow_provider
         self.recovery_policy = recovery_policy or mode_controller.recovery_policy
         self.state_scope = runtime_state_scope(settings)
 
@@ -92,11 +99,16 @@ class SystemHealthService:
         reconciliation_status = self._reconciliation_status(
             latest_reconciliation
         )
-        return [
+        components = [
             self._component_from_status("market_data", market_status),
             self._component_from_status("account_state", account_status),
             self._component_from_status("reconciliation", reconciliation_status),
         ]
+        if self.phase1_shadow_provider is not None:
+            components.append(
+                self._component_from_status("phase1_shadow", self.phase1_shadow_provider.snapshot())
+            )
+        return components
 
     def _base_blockers(self) -> list[str]:
         blockers = [blocker for component in self._base_components() for blocker in component.blockers]

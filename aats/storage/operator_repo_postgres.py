@@ -94,3 +94,25 @@ class PostgresOperatorUserRepository:
             session.delete(row)
             session.commit()
             return True
+
+    def bump_session_version(self, username: str, updated_at: datetime) -> OperatorUserRecord | None:
+        with self.session_factory() as session:
+            row = session.scalar(
+                select(OperatorUserModel).where(OperatorUserModel.username == username)
+            )
+            if row is None:
+                return None
+            user = OperatorUserRecord.model_validate(row.payload).model_copy(
+                update={
+                    "session_version": int(row.payload.get("session_version", 1) or 1) + 1,
+                    "updated_at": updated_at,
+                }
+            )
+            row.password_hash = user.password_hash
+            row.role = user.role
+            row.enabled = user.enabled
+            row.updated_at = user.updated_at
+            row.last_login_at = user.last_login_at
+            row.payload = user.model_dump(mode="json")
+            session.commit()
+            return user

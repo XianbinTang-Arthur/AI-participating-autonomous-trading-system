@@ -186,5 +186,47 @@ class TestDecisionCycleTrigger(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(orchestrator.calls, [("BTC-USDT", "15m")])
+
+    async def test_halted_gate_skips_decision_cycle(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "enabled_decision_timeframes": ["15m"],
+                "decision_min_interval_seconds_15m": 0.0,
+            }
+        )
+        policy = DecisionTriggerPolicy(settings=settings)
+        base_ts = utc_now()
+        market = _market(snapshot_ts=base_ts, last_price=67_000.0)
+        feature = _feature(snapshot_ts=base_ts, momentum=0.1, regime="trend")
+
+        class _FakeOrchestrator:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, str]] = []
+
+            async def run_cycle(self, *, symbol: str, timeframe: str):
+                self.calls.append((symbol, timeframe))
+
+        class _FakeMarketGateway:
+            def latest_snapshot(self, symbol: str):
+                return market if symbol == "BTC-USDT" else None
+
+        orchestrator = _FakeOrchestrator()
+        trigger = DecisionCycleTrigger(
+            orchestrator=orchestrator,
+            market_gateway=_FakeMarketGateway(),
+            policy=policy,
+            can_trigger=lambda *, symbol: (False, "kill_switch_active"),
+        )
+        envelope = build_envelope(
+            topic=topics.FEATURE_SNAPSHOTS,
+            key=feature.symbol,
+            payload_model=feature,
+            source_component="test",
+        )
+        message = {"topic": topics.FEATURE_SNAPSHOTS, "key": feature.symbol, "payload": envelope.model_dump(mode="json")}
+
+        await trigger.handle_feature_snapshot(message)
+
+        self.assertEqual(orchestrator.calls, [])
 if __name__ == "__main__":
     unittest.main()

@@ -1,5 +1,6 @@
 ﻿import { actionButton, callout, kvList, pill, responsiveTable, statGrid, summaryStrip, surfaceCard } from "../components.js";
-import { escapeHtml, formatDuration, formatMaybeTimestamp, formatNumber, formatRelativeAge, formatSigned, listOrDash, middleEllipsis } from "../formatters.js";
+import { localizeList, summarizeLocalizedList } from "../copy.js";
+import { escapeHtml, formatDuration, formatMaybeTimestamp, formatNumber, formatRelativeAge, formatSigned, middleEllipsis } from "../formatters.js";
 import { readableState } from "../terms.js";
 import { decisionTableHeaders, inferTradeScene } from "../trade-display.js";
 
@@ -17,6 +18,28 @@ export function renderStrategySections(data) {
   const regimeLabel = readableRegime(latestDecision);
   const decisionScene = inferDecisionScene(latestDecision, recentDecisions);
   const strategyHealth = latestDecision.strategy_execution_health || data.metrics?.strategy_execution_health || {};
+  const forwardValidation = data.forwardValidation || {};
+  const forwardSummary = forwardValidation.summary || {};
+  const forwardPeriods = forwardValidation.periods || [];
+  const scalingReadiness = data.scalingReadiness || {};
+  const scalingRequirements = scalingReadiness.requirements || {};
+  const trialReviewPacket = data.trialReviewPacket || {};
+  const trialReviewSummary = trialReviewPacket.summary || {};
+  const trialReviewRecommendation = trialReviewPacket.recommendation || {};
+  const trialReviewSections = trialReviewPacket.sections || {};
+  const latestForwardPeriod = forwardPeriods[0] || {};
+  const trialVerdict = chooseTrialVerdict(scalingReadiness.readiness, forwardSummary.verdict, trialReviewSummary.readiness);
+  const trialHeadline =
+    scalingReadiness.summary
+    || forwardSummary.summary
+    || trialReviewSummary.headline
+    || "当前还没有形成稳定的系统试盘结论。";
+  const trialReasons = mergeReasonLists(
+    scalingReadiness.reasons,
+    scalingReadiness.forward_validation_summary?.reasons,
+    forwardSummary.reasons,
+    trialReviewRecommendation.reasons,
+  );
 
   return {
     strategyHero: surfaceCard({
@@ -92,7 +115,7 @@ export function renderStrategySections(data) {
           },
         ])}
         ${kvList([
-          ["基础信号说明", listText(baseline.reasons, "本轮没有额外信号说明"), numberMeta("微观结构强度", baseline.microstructure_alpha, "当前没有微观结构强度")],
+          ["基础信号说明", summarizeLocalizedList(baseline.reasons, { fallback: "本轮没有额外信号说明", limit: 4 }), numberMeta("微观结构强度", baseline.microstructure_alpha, "当前没有微观结构强度")],
           ["策略门禁", policy.execution_allowed ? "本轮允许进入执行" : "策略层未放行", policy.execution_allowed ? listText(policy.allow_reasons, "当前没有额外门禁说明") : listText(policy.blocker_reasons, "当前没有给出具体拦截原因")],
           ["风控结论", risk.approved ? "风控允许执行" : "风控仍在拦截", risk.approved ? listText(risk.approval_reasons, "当前没有额外放行说明") : listText(risk.rejection_reasons, "当前没有额外拦截说明")],
         ])}
@@ -126,12 +149,74 @@ export function renderStrategySections(data) {
           },
         ])}
         ${kvList([
-          ["当前保护规则", listOrDash(strategyHealth.guardrail_flags, "当前没有额外保护规则"), cooldownSummary(strategyHealth.cooldowns)],
+          ["当前保护规则", listText(strategyHealth.guardrail_flags, "当前没有额外保护规则"), cooldownSummary(strategyHealth.cooldowns)],
           ["最早持仓开始", formatMaybeTimestamp(latestDecision.decision_context?.current_position_opened_at || strategyHealth.current_position_opened_at), holdAge(latestDecision.decision_context?.current_position_opened_at || strategyHealth.current_position_opened_at)],
           ["最近平仓时间", formatMaybeTimestamp(latestDecision.decision_context?.last_position_closed_at || strategyHealth.last_position_closed_at), formatRelativeAge(latestDecision.decision_context?.last_position_closed_at || strategyHealth.last_position_closed_at)],
           ["预期净优势", formatBps(target.expected_net_edge_bps), `信号优势 ${formatBps(target.expected_signal_edge_bps)} / 成本 ${formatBps(target.expected_cost_bps)}`],
-          ["本轮执行限制", listOrDash(target.guardrail_flags, "当前没有额外执行限制"), `目标动作 ${readableState(target.position_intent || "hold")}`],
+          ["本轮执行限制", listText(target.guardrail_flags, "当前没有额外执行限制"), `目标动作 ${readableState(target.position_intent || "hold")}`],
         ])}
+      `,
+    }),
+    strategyTrialVerdict: surfaceCard({
+      title: "系统自动试盘结论",
+      kicker: "试盘审查",
+      copy: "这里汇总系统自动给出的试盘建议、最近观察周期表现，以及当前是否满足继续试盘或进入下一步评估的前置条件。",
+      content: `
+        ${summaryStrip([
+          {
+            label: "当前系统建议",
+            value: scalingVerdictLabel(trialVerdict),
+            meta: trialHeadline,
+            tone: scalingVerdictTone(trialVerdict),
+          },
+          {
+            label: "最近净收益",
+            value: formatSigned(latestForwardPeriod.net_realized_pnl ?? trialReviewSummary.net_realized_pnl),
+            meta: `${formatNumber(latestForwardPeriod.closed_fill_count ?? trialReviewSummary.closed_fill_count, 0, "0")} 笔已完成成交`,
+            tone: Number((latestForwardPeriod.net_realized_pnl ?? trialReviewSummary.net_realized_pnl) ?? 0) >= 0 ? "positive" : "warning",
+          },
+          {
+            label: "费用拖累",
+            value: formatRatio(latestForwardPeriod.fee_to_notional_ratio ?? trialReviewSummary.fee_to_notional_ratio),
+            meta: `平均滑点 ${formatBps(latestForwardPeriod.avg_adverse_slippage_bps)}`,
+            tone: "info",
+          },
+          {
+            label: "运行前置条件",
+            value: scalingRequirements.safe_to_trade ? "当前可继续观察" : "当前先不要推进",
+            meta: `${scalingRequirements.review_required ? "仍需人工复核" : "当前无需人工复核"} | 阻断 ${formatNumber(scalingRequirements.active_blocker_count, 0, "0")} 项`,
+            tone: scalingRequirements.safe_to_trade && !scalingRequirements.review_required && Number(scalingRequirements.active_blocker_count || 0) === 0 ? "positive" : "danger",
+          },
+        ])}
+        ${kvList([
+          [
+            "为什么系统给出这个结论",
+            trialHeadline,
+            reasonListText(trialReasons, "当前没有额外原因说明"),
+          ],
+          [
+            "最近观察周期",
+            forwardVerdictLabel(forwardSummary.verdict),
+            reasonListText(forwardSummary.reasons, "当前还没有形成额外的周期说明"),
+          ],
+          [
+            "当前运行前置条件",
+            scalingRequirements.trial_guard_profile_active ? "试盘守护已启用" : "试盘守护未启用",
+            [
+              scalingRequirements.trial_guard_status === "monitoring" ? "试盘守护正在监控" : "当前不在试盘档位",
+              scalingRequirements.safe_to_trade ? "恢复状态允许继续运行" : "恢复状态暂不允许继续自动运行",
+              Number(scalingRequirements.active_blocker_count || 0) > 0 ? `仍有 ${formatNumber(scalingRequirements.active_blocker_count, 0, "0")} 项阻断未清除` : "当前没有新的执行阻断",
+            ].join("；"),
+          ],
+          [
+            "最近一周复盘参考",
+            plainListText(trialReviewRecommendation.action_items, "当前没有新的周度动作建议"),
+            trialReviewSummary.headline || reasonListText(trialReviewRecommendation.reasons, "当前没有额外复盘说明"),
+          ],
+          ["最强分层切片", formatSegmentLabel(trialReviewSections.strategy_segments?.strongest_segment?.segment), formatSigned(trialReviewSections.strategy_segments?.strongest_segment?.net_realized_pnl)],
+          ["最弱分层切片", formatSegmentLabel(trialReviewSections.strategy_segments?.weakest_segment?.segment), formatSigned(trialReviewSections.strategy_segments?.weakest_segment?.net_realized_pnl)],
+        ])}
+        ${renderForwardValidationPeriods(forwardPeriods)}
       `,
     }),
     strategyHistory: surfaceCard({
@@ -182,8 +267,9 @@ export function renderStrategyView(data) {
     <div class="panel-grid">
       <div class="span-6">${sections.strategyHero}</div>
       <div class="span-6">${sections.strategySignal}</div>
-      <div class="span-12">${sections.strategyHealth}</div>
       <div class="span-12">${sections.strategyHistory}</div>
+      <div class="span-12">${sections.strategyHealth}</div>
+      <div class="span-12">${sections.strategyTrialVerdict}</div>
     </div>
   `;
 }
@@ -246,7 +332,7 @@ function strategyNarrative(detail) {
           : `这轮决策给出了 ${intentLabel} 的交易结论。`;
   return `当前市场状态为 ${regimeLabel}。${actionSentence}`
     + `${policy.execution_allowed ? "策略层允许执行，" : "策略层仍未允许执行，"}`
-    + `${risk.approved ? "风控层当前没有继续阻断。" : `风控仍在拦截：${listOrDash(risk.rejection_reasons, "当前没有额外风控说明")}。`}`;
+    + `${risk.approved ? "风控层当前没有继续阻断。" : `风控仍在拦截：${listText(risk.rejection_reasons, "当前没有额外风控说明")}。`}`;
 }
 
 function recentDecisionNarrative(item, scene) {
@@ -305,6 +391,131 @@ function formatBps(value) {
   return `${formatNumber(number, 1)} 个基点`;
 }
 
+function forwardVerdictLabel(value) {
+  const labels = {
+    continue: "继续试盘",
+    observe: "继续观察",
+    shrink: "建议缩容",
+    pause: "建议暂停",
+    insufficient_data: "样本仍少，先继续观察",
+  };
+  return labels[String(value || "")] || readableState(value || "unknown");
+}
+
+function forwardVerdictTone(value) {
+  if (value === "continue") return "positive";
+  if (value === "observe" || value === "insufficient_data") return "warning";
+  if (value === "shrink") return "warning";
+  if (value === "pause") return "danger";
+  return "neutral";
+}
+
+function renderForwardValidationPeriods(periods) {
+  if (!periods.length) {
+    return `<p class="meta-copy">当前还没有可展示的前向验证周期。</p>`;
+  }
+  return responsiveTable(
+    ["周期", "状态", "净收益", "费用拖累", "异常比例"],
+    periods.map((item) => [
+      `<div><strong>${formatMaybeTimestamp(item.period_start)}</strong><div class="table-meta">至 ${formatMaybeTimestamp(item.period_end)}</div></div>`,
+      forwardPeriodStatusLabel(item.status),
+      formatSigned(item.net_realized_pnl),
+      formatRatio(item.fee_to_notional_ratio),
+      `${formatRatio(item.high_slippage_ratio)} / ${formatRatio(item.slow_submit_to_fill_ratio)}`,
+    ]),
+    "当前没有前向验证周期。"
+  );
+}
+
+function scalingVerdictLabel(value) {
+  const labels = {
+    approve_scale_up: "允许进入下一档资金评审",
+    continue_small_capital: "继续小资金试盘",
+    shrink_trial: "建议缩容试盘",
+    pause_trial: "建议暂停试盘",
+  };
+  return labels[String(value || "")] || readableState(value || "unknown");
+}
+
+function scalingVerdictTone(value) {
+  if (value === "approve_scale_up") return "positive";
+  if (value === "continue_small_capital") return "info";
+  if (value === "shrink_trial") return "warning";
+  if (value === "pause_trial") return "danger";
+  return "neutral";
+}
+
+function formatSegmentLabel(segment) {
+  if (!segment || typeof segment !== "object") return "当前没有可用分层切片";
+  const parts = [
+    segment.symbol,
+    segment.market_regime,
+    segment.side,
+    segment.execution_action,
+  ].filter(Boolean);
+  return parts.length ? parts.map((item) => readableState(item)).join(" | ") : "当前没有可用分层切片";
+}
+
+function forwardPeriodStatusLabel(value) {
+  const labels = {
+    healthy: "稳定通过",
+    caution: "收益转弱，建议谨慎",
+    failing: "已触发警戒",
+    insufficient_data: "样本仍少，先继续观察",
+  };
+  return labels[String(value || "")] || readableState(value || "unknown");
+}
+
+function reasonListText(value, fallback) {
+  const rows = splitStrategyReasons(value).map((item) => strategyReasonText(item)).filter(Boolean);
+  return rows.length ? rows.join("；") : fallback;
+}
+
+function splitStrategyReasons(value) {
+  const items = Array.isArray(value) ? value : [value];
+  return items.map((item) => String(item ?? "").trim()).filter(Boolean);
+}
+
+function plainListText(value, fallback) {
+  const rows = splitStrategyReasons(value);
+  return rows.length ? rows.join("；") : fallback;
+}
+
+function mergeReasonLists(...values) {
+  return values.flatMap((value) => splitStrategyReasons(value));
+}
+
+function chooseTrialVerdict(...values) {
+  for (const value of values) {
+    if (value) return value;
+  }
+  return "unknown";
+}
+
+function strategyReasonText(value) {
+  const map = {
+    no_forward_validation_rows: "当前还没有足够的已完成成交，暂时无法做前向验证。",
+    insufficient_forward_validation_sample: "最近一个观察周期的样本还不够，先继续观察，不适合下强结论。",
+    negative_net_realized_pnl: "最近一个观察周期净收益转负，说明试盘边际开始变弱。",
+    execution_quality_or_fee_threshold_breached: "最近一个观察周期的执行质量或手续费拖累已经超过允许范围。",
+    forward_validation_loss_limit_breached: "最近一个观察周期已经触碰试盘亏损上限。",
+    trial_guard_not_enabled: "试盘守护还没启用，所以当前不适合直接加资金。",
+    trial_profile_not_active: "当前不在试盘档位，先不要做放量判断。",
+    runtime_halted: "系统当前处于暂停状态，先处理暂停原因。",
+    recovery_not_safe_to_trade: "当前恢复状态还不允许继续自动交易。",
+    manual_review_required: "当前仍有人工复核要求，先处理复核再谈放量。",
+    active_execution_blockers_present: "当前仍有执行阻断项没有清掉。",
+    trial_guard_breached: "试盘守护已经触发警戒，当前不适合继续放量。",
+    forward_validation_pause: "最近周期已经达到建议暂停的条件。",
+    forward_validation_shrink: "最近周期更适合先缩容观察。",
+    forward_validation_still_observing: "最近周期还在观察期，样本还不够稳。",
+    forward_validation_stable: "最近周期暂时稳定，可以继续积累样本。",
+    healthy_period_requirement_not_met: "连续健康周期还没达标，现在谈放量还太早。",
+    scale_up_requirements_met: "样本、恢复状态和执行质量都达到进入下一档资金评审的条件。",
+  };
+  return map[String(value || "").trim()] || readableState(value || "unknown");
+}
+
 function cooldownSummary(cooldowns) {
   if (!cooldowns || typeof cooldowns !== "object") return "当前没有冷却限制";
   const parts = Object.entries(cooldowns)
@@ -332,7 +543,7 @@ function humanCooldownLabel(key) {
 }
 
 function listText(value, fallback) {
-  return listOrDash(value, fallback);
+  return localizeList(value, fallback);
 }
 
 function optionalState(value, fallback) {

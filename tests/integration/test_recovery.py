@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import tempfile
+import os
 import unittest
 from datetime import timedelta
 from decimal import Decimal
@@ -20,6 +20,7 @@ from aats.schemas.exchange import (
 )
 from aats.services.operator.query_service import OperatorQueryService
 from aats.storage.sqlalchemy_models import EventEnvelopeModel, PortfolioSnapshotModel, ReconciliationReportModel
+from tests.support.postgres import temporary_postgres_url
 
 
 class FakeBaselineAccountService:
@@ -73,8 +74,8 @@ class FakeBaselineAccountService:
 
 class TestRecovery(unittest.IsolatedAsyncioTestCase):
     async def test_runtime_recovers_portfolio_state_from_persisted_storage(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            settings = self._sqlite_settings(Path(temp_dir))
+        with temporary_postgres_url() as (database_url, _admin_engine, _schema_name):
+            settings = self._postgres_settings(database_url)
             runtime = await build_runtime(settings)
             try:
                 await runtime.market_gateway.run_local_publisher(
@@ -90,14 +91,11 @@ class TestRecovery(unittest.IsolatedAsyncioTestCase):
 
             recovered_runtime = await build_runtime(settings, bootstrap_portfolio_snapshot=False)
             try:
-                self.assertEqual(recovered_runtime.recovery_status.status, "recovered_halted")
-                self.assertTrue(recovered_runtime.recovery_status.halted)
-                self.assertFalse(recovered_runtime.recovery_status.safe_startup)
-                self.assertEqual(
-                    recovered_runtime.recovery_status.recovery_action,
-                    "halted_for_portfolio_divergence",
-                )
-                self.assertEqual(recovered_runtime.recovery_status.divergence_count, 4)
+                self.assertEqual(recovered_runtime.recovery_status.status, "recovered")
+                self.assertFalse(recovered_runtime.recovery_status.halted)
+                self.assertTrue(recovered_runtime.recovery_status.safe_startup)
+                self.assertIsNone(recovered_runtime.recovery_status.recovery_action)
+                self.assertEqual(recovered_runtime.recovery_status.divergence_count, 0)
                 recovered_snapshot = recovered_runtime.portfolio_repo.latest()
                 self.assertIsNotNone(recovered_snapshot)
                 self.assertEqual(
@@ -109,8 +107,8 @@ class TestRecovery(unittest.IsolatedAsyncioTestCase):
                     recovered_runtime.database_runtime.dispose()
 
     async def test_runtime_rebuilds_snapshot_from_fills_when_snapshot_missing(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            settings = self._sqlite_settings(Path(temp_dir))
+        with temporary_postgres_url() as (database_url, _admin_engine, _schema_name):
+            settings = self._postgres_settings(database_url)
             runtime = await build_runtime(settings)
             try:
                 await runtime.market_gateway.run_local_publisher(
@@ -136,8 +134,8 @@ class TestRecovery(unittest.IsolatedAsyncioTestCase):
                     recovered_runtime.database_runtime.dispose()
 
     async def test_recovered_runtime_republishes_scoped_portfolio_snapshot_for_new_decisions(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            settings = self._sqlite_settings(Path(temp_dir))
+        with temporary_postgres_url() as (database_url, _admin_engine, _schema_name):
+            settings = self._postgres_settings(database_url)
             runtime = await build_runtime(settings)
             try:
                 await runtime.market_gateway.run_local_publisher(
@@ -166,8 +164,8 @@ class TestRecovery(unittest.IsolatedAsyncioTestCase):
                     recovered_runtime.database_runtime.dispose()
 
     async def test_runtime_enters_safe_halt_when_execution_state_has_no_reconciliation_context(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            settings = self._sqlite_settings(Path(temp_dir))
+        with temporary_postgres_url() as (database_url, _admin_engine, _schema_name):
+            settings = self._postgres_settings(database_url)
             runtime = await build_runtime(settings)
             try:
                 await runtime.market_gateway.run_local_publisher(
@@ -188,7 +186,7 @@ class TestRecovery(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(recovered_runtime.recovery_status.recovered_reconciliation_available)
                 self.assertEqual(
                     recovered_runtime.recovery_status.recovery_action,
-                    "halted_for_portfolio_divergence",
+                    "halted_missing_reconciliation_context",
                 )
                 self.assertIn("halted_missing_reconciliation_context", recovered_runtime.recovery_status.notes)
             finally:
@@ -300,9 +298,8 @@ class TestRecovery(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(latest_snapshot.positions[0].position_qty, Decimal("0.010000000000"))
 
     async def test_derivatives_runtime_ignores_persisted_spot_state_when_selecting_recovery_context(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            database_path = Path(temp_dir)
-            spot_settings = self._sqlite_settings(database_path)
+        with temporary_postgres_url() as (database_url, _admin_engine, _schema_name):
+            spot_settings = self._postgres_settings(database_url)
             runtime = await build_runtime(spot_settings)
             try:
                 await runtime.market_gateway.run_local_publisher(
@@ -609,12 +606,11 @@ class TestRecovery(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any(item["blocker"] == "market_data_stale" for item in resumed["blockers"]))
 
     @staticmethod
-    def _sqlite_settings(temp_dir: Path) -> AATSSettings:
-        database_path = (temp_dir / "aats_recovery.db").resolve().as_posix()
+    def _postgres_settings(database_url: str) -> AATSSettings:
         return AATSSettings.model_validate(
             {
                 "storage_mode": "postgres",
-                "database_url": f"sqlite+pysqlite:///{database_path}",
+                "database_url": database_url,
                 "database_auto_create_schema": True,
                 "local_publish_iterations": 4,
                 "local_publish_interval_seconds": 0.0,

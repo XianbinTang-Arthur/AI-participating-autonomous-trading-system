@@ -463,7 +463,12 @@ class ExecutionRecoveryService:
     def _recovery_price_provider(self, snapshot: PortfolioSnapshot) -> Callable[[str], Decimal]:
         snapshot_marks: dict[str, Decimal] = {}
         for position in snapshot.positions:
-            if abs(position.position_qty) > self._RECOVERY_COMPARISON_EPSILON:
+            if (
+                abs(position.unrealized_pnl) <= self._RECOVERY_COMPARISON_EPSILON
+                and position.avg_entry_price > Decimal("0")
+            ):
+                snapshot_marks[position.symbol] = position.avg_entry_price
+            elif abs(position.position_qty) > self._RECOVERY_COMPARISON_EPSILON:
                 snapshot_marks[position.symbol] = position.position_notional / position.position_qty
             elif position.avg_entry_price > Decimal("0"):
                 snapshot_marks[position.symbol] = position.avg_entry_price

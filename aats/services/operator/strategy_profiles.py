@@ -323,6 +323,21 @@ class StrategyProfileControlService:
             reason=reason,
         )
 
+    def restore_auto(
+        self,
+        *,
+        actor_role: OperatorRole,
+        actor_identity: str | None,
+        auth_source: AuthSource,
+        reason: str,
+    ) -> dict[str, Any]:
+        return self.activation.restore_auto(
+            actor_role=actor_role,
+            actor_identity=actor_identity,
+            auth_source=auth_source,
+            reason=reason,
+        )
+
     def rollback(
         self,
         *,
@@ -382,6 +397,68 @@ class StrategyProfileControlService:
 
     def _resolved_context_signals(self, context: dict[str, Any]) -> dict[str, Any]:
         return self.context.resolved_context_signals(context)
+
+    def _safety_profile_ids(self) -> set[str]:
+        return {str(item).strip() for item in self.settings.strategy_profile_safety_profiles if str(item).strip()}
+
+    def _is_safety_profile_id(self, profile_id: str | None) -> bool:
+        return bool(profile_id and profile_id in self._safety_profile_ids())
+
+    def _safety_profile_required(self, *, context: dict[str, Any]) -> bool:
+        safety_state = context.get("safety_state") or {}
+        execution_health = context.get("execution_health") or {}
+        execution_errors = int(execution_health.get("recent_execution_error_count", 0) or 0)
+        return bool(
+            execution_errors >= int(self.settings.strategy_profile_safety_trigger_execution_error_count)
+            or not bool(safety_state.get("safe_to_trade", True))
+            or bool(safety_state.get("review_required", False))
+            or bool(safety_state.get("reconciliation_halt_required", False))
+            or bool(safety_state.get("reconciliation_review_required", False))
+            or not bool(safety_state.get("market_snapshot_fresh", True))
+            or not bool(safety_state.get("account_snapshot_fresh", True))
+        )
+
+    def _profile_control_evidence_state(
+        self,
+        *,
+        context: dict[str, Any],
+        replay_summary: dict[str, Any],
+    ) -> dict[str, Any]:
+        performance = context.get("performance") or {}
+        closed_trades = int(performance.get("trade_count", 0) or 0)
+        replay_validations = int(replay_summary.get("validation_count", 0) or 0)
+        min_closed_trades = int(self.settings.strategy_profile_auto_switch_min_closed_trades)
+        min_replay_validations = int(self.settings.strategy_profile_auto_switch_min_replay_validations)
+        trade_requirement_met = closed_trades >= min_closed_trades
+        replay_requirement_met = replay_validations >= min_replay_validations
+        cold_start_active = bool(
+            self.settings.strategy_profile_cold_start_lock_enabled
+            and (not trade_requirement_met or not replay_requirement_met)
+        )
+        return {
+            "closed_trades": closed_trades,
+            "replay_validations": replay_validations,
+            "min_closed_trades": min_closed_trades,
+            "min_replay_validations": min_replay_validations,
+            "trade_requirement_met": trade_requirement_met,
+            "replay_requirement_met": replay_requirement_met,
+            "cold_start_active": cold_start_active,
+        }
+
+    def _profile_control_summary(
+        self,
+        *,
+        context: dict[str, Any],
+        replay_summary: dict[str, Any],
+        active_profile_id: str | None,
+    ) -> dict[str, Any]:
+        evidence = self._profile_control_evidence_state(context=context, replay_summary=replay_summary)
+        return {
+            "active_profile_id": active_profile_id,
+            "safety_profile_ids": sorted(self._safety_profile_ids()),
+            "safety_profile_required": self._safety_profile_required(context=context),
+            "evidence": evidence,
+        }
 
     def _candidate_for_profile(
         self,
@@ -1077,9 +1154,11 @@ class StrategyProfileControlService:
         ai_performance_summary: dict[str, Any],
     ) -> dict[str, Any]:
         activation_policy = self._resolved_activation_policy()
-        winner = candidates[0] if candidates else None
+        eligible_candidates = [item for item in candidates if item.selection_eligible]
+        winner = eligible_candidates[0] if eligible_candidates else (candidates[0] if candidates else None)
         blocked_reasons: list[str] = []
         if winner is not None:
+            blocked_reasons.extend(list(winner.selection_blocked_reasons))
             if float(winner.composite_score or 0.0) < float(activation_policy.min_composite_score):
                 blocked_reasons.append("winner_composite_score_below_threshold")
             if float(winner.offline_replay_score or 0.0) < float(activation_policy.min_offline_replay_score):
@@ -1127,6 +1206,7 @@ class StrategyProfileControlService:
                 "on_shadow_review_required": bool(self.settings.strategy_profile_failure_rollback_on_shadow_review_required),
                 "on_alternative_winner": bool(self.settings.strategy_profile_failure_rollback_on_alternative_winner),
             },
+            "eligible_candidate_profile_ids": [item.profile_id for item in eligible_candidates],
             "winner_profile_id": winner.profile_id if winner else None,
             "auto_activation": {
                 "eligible": not blocked_reasons and winner is not None,
@@ -1204,7 +1284,18 @@ class StrategyProfileControlService:
                 "profile_bucket": int(profile_bucket.get("count") or 0),
                 "cross_bucket": int(cross_bucket.get("count") or 0),
             },
+            "evidence_state": "sufficient",
         }
+        if int(scorecard["evidence_counts"]["global_validations"]) <= 0:
+            scorecard["final_adjustment"] = 0.0
+            scorecard["confidence_weight"] = 0.0
+            scorecard["evidence_state"] = "insufficient"
+            scorecard["target"] = {
+                "symbol": target_symbol,
+                "regime": target_regime,
+                "profile_id": row.profile_id,
+            }
+            return scorecard
         healthy_rate = float(replay_summary.get("healthy_rate") or 0.0)
         avg_divergence = float(replay_summary.get("avg_divergence_count") or 0.0)
         avg_execution_issues = float(replay_summary.get("avg_execution_chain_issue_count") or 0.0)
@@ -1407,6 +1498,7 @@ class StrategyProfileControlService:
             reasons.append("ai_performance_review_required")
         if replay_summary.get("validation_count", 0) == 0:
             reasons.append("replay_history_insufficient")
+            reasons.append("replay_history_neutralized")
         return reasons
 
     def _latest_optimization_report_payload(self) -> dict[str, Any] | None:

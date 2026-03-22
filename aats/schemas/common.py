@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Literal
 from uuid import uuid4
 
@@ -17,9 +17,25 @@ def new_id(prefix: str) -> str:
 
 
 class SchemaBase(BaseModel):
-    model_config = ConfigDict(json_encoders={Decimal: lambda value: float(value)})
+    model_config = ConfigDict()
     schema_version: str = "1.0.0"
     created_at: datetime = Field(default_factory=utc_now)
+
+
+def dump_payload_exact(value: Any) -> Any:
+    if isinstance(value, BaseModel):
+        return dump_payload_exact(value.model_dump(mode="python"))
+    if isinstance(value, Decimal):
+        return format(value, "f")
+    if isinstance(value, datetime):
+        return value.isoformat().replace("+00:00", "Z")
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {str(key): dump_payload_exact(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [dump_payload_exact(item) for item in value]
+    return value
 
 
 class EventEnvelope(SchemaBase):

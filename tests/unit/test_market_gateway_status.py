@@ -36,6 +36,40 @@ class _FakeOKXNormalizer:
         return [self.snapshot]
 
 
+class _FakeOKXRESTClient:
+    def __init__(self) -> None:
+        self.ticker_calls = 0
+        self.candle_calls = 0
+
+    async def get_market_ticker(self, *, symbol: str):
+        self.ticker_calls += 1
+        return {
+            "code": "0",
+            "data": [
+                {
+                    "instId": symbol,
+                    "ts": str(int(utc_now().timestamp() * 1000)),
+                    "bidPx": "100000",
+                    "askPx": "100010",
+                    "last": "100005",
+                    "bidSz": "1.2",
+                    "askSz": "1.1",
+                    "vol24h": "1000",
+                }
+            ],
+        }
+
+    async def get_market_candles(self, *, symbol: str, bar: str, limit: int = 1):
+        self.candle_calls += 1
+        snapshot_ms = str(int(utc_now().timestamp() * 1000))
+        return {
+            "code": "0",
+            "data": [
+                [snapshot_ms, "99900", "100100", "99800", "100005", "10", "10", "100000", "1"],
+            ],
+        }
+
+
 class TestMarketGatewayStatus(unittest.IsolatedAsyncioTestCase):
     async def test_stale_market_data_is_detected(self) -> None:
         settings = AATSSettings.model_validate(
@@ -53,9 +87,37 @@ class TestMarketGatewayStatus(unittest.IsolatedAsyncioTestCase):
         gateway._latest_snapshots["BTC-USDT"] = snapshot.model_copy(
             update={"snapshot_ts": utc_now().replace(year=utc_now().year - 1)}
         )
+        gateway._latest_received_at["BTC-USDT"] = utc_now().replace(year=utc_now().year - 1)
 
         status = gateway.status()
         self.assertFalse(gateway.is_fresh("BTC-USDT"))
+        self.assertIn("market_data_stale", status["blockers"])
+
+    async def test_recently_received_snapshot_is_not_fresh_when_snapshot_timestamp_lags(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "market_data_backend": "okx",
+                "default_symbol": "BTC-USDT",
+                "market_data_stale_after_seconds": 30.0,
+            }
+        )
+        gateway = MarketDataGateway(
+            settings=settings,
+            normalizer=MarketSnapshotNormalizer(exchange_name="OKX"),
+            publisher=MarketSnapshotPublisher(bus=InMemoryEventBus()),
+            okx_ws_client=_FakeWSClient(connected_public=True, connected_business=True),  # type: ignore[arg-type]
+        )
+        snapshot = await gateway.publish_local_snapshot(symbol="BTC-USDT")
+        gateway._latest_snapshots["BTC-USDT"] = snapshot.model_copy(
+            update={"snapshot_ts": utc_now().replace(year=utc_now().year - 1)}
+        )
+        gateway._latest_received_at["BTC-USDT"] = utc_now()
+
+        status = gateway.status()
+
+        self.assertFalse(gateway.is_fresh("BTC-USDT"))
+        self.assertTrue(status["receipt_fresh"])
+        self.assertFalse(status["snapshot_fresh"])
         self.assertIn("market_data_stale", status["blockers"])
 
     async def test_okx_transport_degradation_does_not_block_when_snapshot_is_fresh(self) -> None:
@@ -150,6 +212,65 @@ class TestMarketGatewayStatus(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(gateway.latest_snapshot("BTC-USDT"), snapshot)
         self.assertEqual(gateway._last_error, "downstream failed")
+
+    async def test_okx_rest_fallback_restores_freshness_when_ws_snapshot_is_stale(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "market_data_backend": "okx",
+                "default_symbol": "BTC-USDT",
+                "market_data_stale_after_seconds": 30.0,
+                "okx_market_rest_fallback_enabled": True,
+            }
+        )
+        rest_client = _FakeOKXRESTClient()
+        gateway = MarketDataGateway(
+            settings=settings,
+            normalizer=MarketSnapshotNormalizer(exchange_name="OKX"),
+            publisher=MarketSnapshotPublisher(bus=InMemoryEventBus()),
+            okx_ws_client=_FakeWSClient(connected_public=False, connected_business=False, last_error="disconnected"),  # type: ignore[arg-type]
+            okx_rest_client=rest_client,  # type: ignore[arg-type]
+        )
+        snapshot = await gateway.publish_local_snapshot(symbol="BTC-USDT")
+        gateway._latest_snapshots["BTC-USDT"] = snapshot.model_copy(
+            update={"snapshot_ts": utc_now().replace(year=utc_now().year - 1)}
+        )
+        gateway._latest_received_at["BTC-USDT"] = utc_now().replace(year=utc_now().year - 1)
+
+        used = await gateway._run_okx_rest_fallback_once()
+        status = gateway.status()
+
+        self.assertTrue(used)
+        self.assertTrue(gateway.is_fresh("BTC-USDT"))
+        self.assertTrue(status["fresh"])
+        self.assertTrue(status["rest_fallback_active"])
+        self.assertIn("rest_fallback", status["detail"])
+        self.assertEqual(rest_client.ticker_calls, 1)
+        self.assertEqual(rest_client.candle_calls, 2)
+
+    async def test_okx_rest_fallback_does_not_run_when_market_is_already_fresh(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "market_data_backend": "okx",
+                "default_symbol": "BTC-USDT",
+                "market_data_stale_after_seconds": 30.0,
+                "okx_market_rest_fallback_enabled": True,
+            }
+        )
+        rest_client = _FakeOKXRESTClient()
+        gateway = MarketDataGateway(
+            settings=settings,
+            normalizer=MarketSnapshotNormalizer(exchange_name="OKX"),
+            publisher=MarketSnapshotPublisher(bus=InMemoryEventBus()),
+            okx_ws_client=_FakeWSClient(connected_public=True, connected_business=True),  # type: ignore[arg-type]
+            okx_rest_client=rest_client,  # type: ignore[arg-type]
+        )
+        await gateway.publish_local_snapshot(symbol="BTC-USDT")
+
+        used = await gateway._run_okx_rest_fallback_once()
+
+        self.assertFalse(used)
+        self.assertEqual(rest_client.ticker_calls, 0)
+        self.assertEqual(rest_client.candle_calls, 0)
 
 
 if __name__ == "__main__":

@@ -16,18 +16,28 @@ class DecisionCycleTrigger:
         orchestrator: DecisionOrchestrator,
         market_gateway: MarketDataGateway,
         policy: DecisionTriggerPolicy,
+        can_trigger=None,
     ) -> None:
         self.orchestrator = orchestrator
         self.market_gateway = market_gateway
         self.policy = policy
+        self.can_trigger = can_trigger
         self._timeframe_locks: dict[tuple[str, str], asyncio.Lock] = {}
 
     async def handle_feature_snapshot(self, message: dict) -> None:
         snapshot = parse_payload(message, FeatureSnapshot)
         market_snapshot = self.market_gateway.latest_snapshot(snapshot.symbol)
+        if self.can_trigger is not None:
+            allowed, _reason = self.can_trigger(symbol=snapshot.symbol)
+            if not allowed:
+                return
         for timeframe in self.policy.enabled_timeframes():
             lock = self._timeframe_locks.setdefault((snapshot.symbol, timeframe), asyncio.Lock())
             async with lock:
+                if self.can_trigger is not None:
+                    allowed, _reason = self.can_trigger(symbol=snapshot.symbol)
+                    if not allowed:
+                        continue
                 current_market_snapshot = self.market_gateway.latest_snapshot(snapshot.symbol)
                 should_trigger, _reason = self.policy.should_trigger(
                     feature_snapshot=snapshot,

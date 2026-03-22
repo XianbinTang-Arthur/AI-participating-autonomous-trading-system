@@ -13,7 +13,7 @@ from aats.schemas.common import EventEnvelope
 from aats.schemas.execution import FillEvent, OrderObligation, OrderState
 from aats.schemas.operator import ExecutionErrorSummary
 from aats.storage.event_store_postgres import PostgresEventStore
-from aats.storage.execution_repo_postgres import PostgresExecutionRepository
+from aats.storage.base import ExecutionRepository
 from aats.storage.obligation_repo_postgres import PostgresExecutionObligationRepository
 from aats.storage.outbox_repo_postgres import PostgresOutboxRepository
 
@@ -23,7 +23,7 @@ class PostgresExecutionOutboxPublisher:
     _MAX_PUBLISH_ATTEMPTS = 3
     session_factory: sessionmaker[Session]
     event_store: PostgresEventStore
-    execution_repo: PostgresExecutionRepository
+    execution_repo: ExecutionRepository
     obligation_repo: PostgresExecutionObligationRepository
     outbox_repo: PostgresOutboxRepository
     bus: InMemoryEventBus
@@ -40,7 +40,7 @@ class PostgresExecutionOutboxPublisher:
         obligation: OrderObligation | None = None,
     ) -> OrderState:
         with self.session_factory() as session:
-            persisted, previous = self.execution_repo.save_order_state_in_session(session, order_state)
+            persisted, previous = self.execution_repo.save_order_state_in_session(session, order_state)  # type: ignore[attr-defined]
             if obligation is not None:
                 self.obligation_repo.save_obligation_in_session(session, obligation)
             envelopes = [self._order_update_envelope(key=key, persisted=persisted)]
@@ -61,7 +61,7 @@ class PostgresExecutionOutboxPublisher:
         obligation: OrderObligation | None = None,
     ) -> bool:
         with self.session_factory() as session:
-            saved = self.execution_repo.save_fill_in_session(session, fill)
+            saved = self.execution_repo.save_fill_in_session(session, fill)  # type: ignore[attr-defined]
             if not saved:
                 session.rollback()
                 return False

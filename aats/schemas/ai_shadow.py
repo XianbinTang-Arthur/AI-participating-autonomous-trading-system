@@ -84,6 +84,7 @@ class AIDegradationEvent(SchemaBase):
     outcome_review_required: bool = False
     auto_downgrade_active: bool = False
     manual_override_mode: str | None = None
+    manual_override_freeze_until: datetime | None = None
     review_resolution: str | None = None
 
     reason_code: str

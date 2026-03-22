@@ -1,197 +1,155 @@
-# 指定当前运行环境名称。
+# AATS 基线配置
+# 说明：
+# 1. 这是“本地演示 / 开发基线”，不是当前实盘推荐配置。
+# 2. 真实 spot / derivatives 运行请优先使用 `.env.spot` 或 `.env.derivatives`。
+# 3. 本文件保留常见默认键，未写出的高级参数会回落到 settings.py 默认值。
+
+# [运行必改] environment：环境标识。可选值：dev / staging / prod；推荐值：dev。
 environment: dev
-
-# 指定当前配置档案名称。
+# [运行必改] config_profile：配置档名称。可选值：自定义字符串；推荐值：local_demo。
 config_profile: local_demo
-
-# 指定系统运行模式。
+# [运行必改] mode：运行模式。可选值：backtest / paper_live / guarded_live / autonomous_live；本地基线推荐：paper_live。
 mode: paper_live
 
-# 指定默认交易标的。
+# [运行必改] default_symbol：默认交易标的。可选值：交易所支持的符号；基线推荐：BTC-USDT。
 default_symbol: BTC-USDT
-
-# 指定主决策周期。
+# [常用可调] primary_timeframe：主决策周期。可选值：15m / 1h；推荐值：15m。
 primary_timeframe: 15m
-
-# 指定辅助决策周期。
+# [常用可调] secondary_timeframe：辅助决策周期。可选值：15m / 1h；推荐值：1h。
 secondary_timeframe: 1h
-
-# 指定允许触发决策的周期列表。
+# [常用可调] enabled_decision_timeframes：启用的决策周期列表。可选值：仅 15m 或同时启用 15m/1h；推荐值：["15m"]。
 enabled_decision_timeframes:
   - 15m
 
-# 指定本地初始资金。
+# [常用可调] initial_usdt_balance：本地初始 USDT 余额。可选值：正数；推荐值：10000.0。
 initial_usdt_balance: 10000.0
-
-# 指定存储模式。
+# [运行必改] storage_mode：存储模式。可选值：memory / postgres；本地基线推荐：memory。
 storage_mode: memory
-
-# 指定事件持久化策略。
+# [运行必改] event_persistence_mode：事件持久化模式。可选值：strict / permissive；推荐值：strict。
 event_persistence_mode: strict
 
-# 指定市场数据后端。
+# [运行必改] market_data_backend：行情后端。可选值：demo / okx；本地基线推荐：demo。
 market_data_backend: demo
-
-# 指定执行后端。
+# [运行必改] execution_backend：执行后端。可选值：paper / okx；本地基线推荐：paper。
 execution_backend: paper
-
-# 指定账户读取后端。
+# [运行必改] account_backend：账户后端。可选值：disabled / okx；本地基线推荐：disabled。
 account_backend: disabled
-
-# 指定是否启用账户读取。
+# [常用可调] account_read_enabled：是否启用账户读取。可选值：true / false；本地基线推荐：false。
 account_read_enabled: false
-
-# 指定是否允许真实提交。
+# [运行必改] live_submit_enabled：是否允许真实提交通道。可选值：true / false；本地基线推荐：false。
 live_submit_enabled: false
-
-# 指定 guarded 执行是否只做演练。
+# [运行必改] guarded_execution_dry_run：guarded 模式下是否只演练不提交。可选值：true / false；本地基线推荐：true。
 guarded_execution_dry_run: true
-
-# 指定启动时是否从交易所账户初始化组合快照。
+# [常用可调] bootstrap_portfolio_from_exchange：启动时是否从交易所回填组合快照。可选值：true / false；本地基线推荐：false。
 bootstrap_portfolio_from_exchange: false
 
-# 指定数据库连接串。
+# [运行必改] database_url：PostgreSQL 连接串。可选值：合法的 postgresql+psycopg 连接串；仅在 storage_mode=postgres 时生效。
 database_url: postgresql+psycopg://aats:aats@localhost:5432/aats
-
-# 指定是否自动创建数据库表结构。
+# [运行必改] database_auto_create_schema：是否自动建表建索引。可选值：true / false；推荐值：true。
 database_auto_create_schema: true
 
-# 指定单品种最大绝对仓位数量。
+# [常用可调] max_abs_position_qty：单标的最大绝对仓位数量。可选值：正数；推荐值：0.01。
 max_abs_position_qty: 0.01
-
-# 指定单品种最大名义价值上限。
+# [常用可调] max_notional_per_symbol：单标的最大名义金额。可选值：正数；推荐值：1000.0。
 max_notional_per_symbol: 1000.0
-
-# 指定最大未完成挂单数量。
+# [常用可调] max_open_orders：最多同时挂单数。可选值：1~10；推荐值：5。
 max_open_orders: 5
-
-# 指定每分钟最多允许多少次决策触发。
+# [常用可调] max_decisions_per_minute：每分钟最多触发多少次决策。可选值：1~20；推荐值：6。
 max_decisions_per_minute: 6
-
-# 指定默认下单数量。
+# [常用可调] default_order_qty：默认下单数量。可选值：正数；推荐值：0.001。
 default_order_qty: 0.001
 
-# 指定本地市场数据循环发布次数。
+# [常用可调] local_publish_iterations：本地行情发布轮数。可选值：正整数；推荐值：6。
 local_publish_iterations: 6
-
-# 指定本地市场数据循环发布间隔秒数。
+# [常用可调] local_publish_interval_seconds：本地行情发布间隔秒数。可选值：0.0~60.0；推荐值：0.0。
 local_publish_interval_seconds: 0.0
 
-# 指定 15m 周期两次决策之间的最小间隔秒数。
+# [常用可调] decision_min_interval_seconds_15m：15m 周期最小决策间隔秒数。可选值：0.0~300.0；基线推荐：0.0。
 decision_min_interval_seconds_15m: 0.0
-
-# 指定 1h 周期两次决策之间的最小间隔秒数。
+# [常用可调] decision_min_interval_seconds_1h：1h 周期最小决策间隔秒数。可选值：0.0~900.0；基线推荐：0.0。
 decision_min_interval_seconds_1h: 0.0
-
-# 指定触发决策所需的最小价格变化基点。
+# [常用可调] decision_min_price_move_bps：触发新决策前要求的最小价格变动。可选值：0.0~20.0；基线推荐：0.0。
 decision_min_price_move_bps: 0.0
-
-# 指定触发决策所需的最小动量变化阈值。
+# [常用可调] decision_min_momentum_delta：触发新决策前要求的最小动量变化。可选值：0.0~0.01；基线推荐：0.0。
 decision_min_momentum_delta: 0.0
 
-# 指定 paper 执行的默认 taker 手续费基点。
+# [常用可调] paper_taker_fee_bps：paper 执行 taker 手续费估计。可选值：0.0~100.0；推荐值：5.0。
 paper_taker_fee_bps: 5.0
-
-# 指定最大允许滑点容忍度基点。
+# [常用可调] max_slippage_tolerance_bps：最大允许滑点。可选值：0~100；推荐值：20。
 max_slippage_tolerance_bps: 20
 
-# 指定 AI 工作模式。
+# [常用可调] ai_operating_mode：AI 运行模式。可选值：baseline_only / ai_assisted / ai_decision_maker / ai_decision_maker_with_profile_control；基线推荐：baseline_only。
 ai_operating_mode: baseline_only
-
-# 指定 AI 提供方。
+# [运行必改] ai_provider：AI 提供方。可选值：disabled / openai；基线推荐：disabled。
 ai_provider: disabled
-
-# 指定 AI 模型名称。
+# [常用可调] ai_model_name：AI 模型名。可选值：可用模型名；推荐值：gpt-4o-mini。
 ai_model_name: gpt-4o-mini
-
-# 指定 AI 提示词版本号。
+# [常用可调] ai_prompt_version：提示词版本。可选值：自定义版本号；推荐值：0.2.0。
 ai_prompt_version: 0.2.0
-
-# 指定 AI 模型版本号。
+# [常用可调] ai_model_version：模型配置版本。可选值：自定义版本号；推荐值：1.0.0。
 ai_model_version: 1.0.0
-
-# 指定 AI 超时时间。
+# [常用可调] ai_timeout_seconds：AI 请求超时秒数。可选值：1.0~60.0；推荐值：5.0。
 ai_timeout_seconds: 5.0
-
-# 指定 AI 最大重试次数。
+# [常用可调] ai_max_retries：AI 请求重试次数。可选值：0~5；推荐值：0。
 ai_max_retries: 0
-
-# 指定 AI 连续失败多少次后降级。
+# [常用可调] ai_degrade_after_failures：连续失败多少次后自动降级。可选值：1~10；推荐值：3。
 ai_degrade_after_failures: 3
-
-# 指定 AI 连续成功多少次后恢复。
+# [常用可调] ai_recover_after_successes：连续成功多少次后恢复。可选值：1~10；推荐值：2。
 ai_recover_after_successes: 2
-
-# 指定 AI 主决策最小置信度。
+# [常用可调] ai_decision_min_confidence：AI 决策最小置信度。可选值：0.0~1.0；推荐值：0.6。
 ai_decision_min_confidence: 0.6
+# [常用可调] ai_decision_max_uncertainty：AI 决策最大不确定度。可选值：0.0~1.0；推荐值：0.35。
 ai_decision_max_uncertainty: 0.35
+# [常用可调] ai_decision_min_directional_edge：AI 决策最小方向边际。可选值：0.0~1.0；推荐值：0.2。
 ai_decision_min_directional_edge: 0.2
-
-# 指定 OpenAI 接口基地址。
+# [运行必改] openai_base_url：OpenAI API 基础地址。可选值：https://api.openai.com 或兼容代理地址；推荐值：https://api.openai.com。
 openai_base_url: https://api.openai.com
 
-# 指定市场数据多久算过期。
+# [常用可调] market_data_stale_after_seconds：行情快照过期阈值秒数。可选值：1.0~300.0；推荐值：30.0。
 market_data_stale_after_seconds: 30.0
-
-# 指定账户状态多久算过期。
+# [常用可调] account_state_stale_after_seconds：账户状态过期阈值秒数。可选值：1.0~600.0；推荐值：60.0。
 account_state_stale_after_seconds: 60.0
-
-# 指定对账结果多久算过期。
+# [常用可调] reconciliation_stale_after_seconds：对账状态过期阈值秒数。可选值：10.0~3600.0；推荐值：300.0。
 reconciliation_stale_after_seconds: 300.0
 
-# 指定 OKX REST 地址。
+# [运行必改] okx_rest_url：OKX REST 地址。可选值：交易所官方地址；推荐值：https://www.okx.com。
 okx_rest_url: https://www.okx.com
-
-# 指定 OKX 公共频道 WebSocket 地址。
+# [运行必改] okx_public_ws_url：OKX 公共 WS 地址。可选值：交易所官方地址；推荐值：wss://ws.okx.com:8443/ws/v5/public。
 okx_public_ws_url: wss://ws.okx.com:8443/ws/v5/public
-
-# 指定 OKX 业务频道 WebSocket 地址。
+# [运行必改] okx_business_ws_url：OKX 业务 WS 地址。可选值：交易所官方地址；推荐值：wss://ws.okx.com:8443/ws/v5/business。
 okx_business_ws_url: wss://ws.okx.com:8443/ws/v5/business
-
-# 指定是否启用 OKX 模拟交易。
+# [运行必改] okx_simulated_trading：是否使用 OKX 模拟盘。可选值：true / false；基线推荐：false。
 okx_simulated_trading: false
-
-# 指定 OKX 调用超时时间。
+# [常用可调] okx_timeout_seconds：OKX 请求超时秒数。可选值：1.0~60.0；推荐值：10.0。
 okx_timeout_seconds: 10.0
-
-# 指定 OKX 市场数据重连等待秒数。
+# [常用可调] okx_market_reconnect_delay_seconds：行情重连延迟秒数。可选值：1.0~30.0；推荐值：2.0。
 okx_market_reconnect_delay_seconds: 2.0
-
-# 指定 OKX 账户刷新间隔秒数。
+# [常用可调] okx_account_refresh_interval_seconds：账户刷新间隔秒数。可选值：1.0~300.0；推荐值：15.0。
 okx_account_refresh_interval_seconds: 15.0
-
-# 指定 OKX 执行同步间隔秒数。
+# [常用可调] okx_execution_sync_interval_seconds：执行同步间隔秒数。可选值：1.0~300.0；推荐值：5.0。
 okx_execution_sync_interval_seconds: 5.0
-
-# 指定单次拉取 fills 的数量上限。
+# [常用可调] okx_fill_fetch_limit：单次抓取成交数上限。可选值：1~1000；推荐值：100。
 okx_fill_fetch_limit: 100
 
-# 指定是否启用浏览器登录鉴权。
+# [运行必改] operator_auth_enabled：是否启用操作员鉴权。可选值：true / false；基线推荐：false。
 operator_auth_enabled: false
-
-# 指定无鉴权状态下是否允许危险写操作。
+# [运行必改] operator_unsafe_write_without_auth：是否允许未鉴权写操作。可选值：true / false；推荐值：false。
 operator_unsafe_write_without_auth: false
-
-# 指定浏览器登录 cookie 名称。
+# [常用可调] operator_session_cookie_name：会话 cookie 名。可选值：自定义字符串；推荐值：aats_operator_session。
 operator_session_cookie_name: aats_operator_session
-
-# 指定浏览器登录 cookie 有效期。
+# [常用可调] operator_session_max_age_seconds：会话最大有效秒数。可选值：300~604800；推荐值：43200。
 operator_session_max_age_seconds: 43200
-
-# 指定浏览器登录 cookie 是否要求 HTTPS。
+# [运行必改] operator_session_cookie_secure：是否仅通过 HTTPS 传输 cookie。可选值：true / false；推荐值：false（本地 HTTP 基线）。
 operator_session_cookie_secure: false
 
-# 指定日志级别。
+# [常用可调] log_level：日志级别。可选值：DEBUG / INFO / WARNING / ERROR；推荐值：INFO。
 log_level: INFO
-
-# 指定日志目录。
+# [常用可调] log_dir：日志目录。可选值：相对或绝对路径；推荐值：logs。
 log_dir: logs
-
-# 指定日志轮转最大字节数。
+# [常用可调] log_rotate_max_bytes：单个日志文件最大字节数。可选值：正整数；推荐值：5242880。
 log_rotate_max_bytes: 5242880
-
-# 指定日志备份文件数量。
+# [常用可调] log_backup_count：日志备份份数。可选值：1~100；推荐值：7。
 log_backup_count: 7
 
-# 指定交易所名称标识。
+# [常用可调] exchange_name：展示用交易所名称。可选值：任意字符串；基线推荐：PAPER。
 exchange_name: PAPER

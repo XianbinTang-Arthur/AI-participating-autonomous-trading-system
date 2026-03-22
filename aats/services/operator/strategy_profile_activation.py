@@ -109,6 +109,7 @@ class StrategyProfileActivationFacade:
             reason_code="operator_accept_recommendation",
             reason_detail=reason,
             freeze_until=self.manual_override_freeze_until(),
+            pause_auto_switch=True,
         )
         updated = recommendation.model_copy(
             update={
@@ -207,6 +208,7 @@ class StrategyProfileActivationFacade:
             reason_code="operator_activate_pending_profile",
             reason_detail=reason,
             freeze_until=self.manual_override_freeze_until(),
+            pause_auto_switch=True,
         )
         self.owner._append_selection_decision_transition(
             status="pending_activation_executed",
@@ -253,6 +255,7 @@ class StrategyProfileActivationFacade:
             reason_code="operator_manual_profile_activation",
             reason_detail=reason,
             freeze_until=self.manual_override_freeze_until(),
+            pause_auto_switch=True,
         )
         self.owner._append_selection_decision_transition(
             status="manual_profile_activation_executed",
@@ -268,6 +271,48 @@ class StrategyProfileActivationFacade:
             "status": "manually_activated",
             "activation_record": record.model_dump(mode="json"),
             "active_revision": self.owner._revision_view(revision),
+        }
+
+    def restore_auto(
+        self,
+        *,
+        actor_role: "OperatorRole",
+        actor_identity: str | None,
+        auth_source: "AuthSource",
+        reason: str,
+    ) -> dict[str, Any]:
+        state = self.owner._activation_state()
+        if state.auto_switch_enabled and (state.frozen_until is None or state.frozen_until <= utc_now()):
+            cleared_state = state.model_copy(update={"frozen_until": None})
+            self.owner.repo.save_activation_state(cleared_state)
+            return {
+                "status": "already_auto",
+                "activation": cleared_state.model_dump(mode="json"),
+                "active_revision": self.owner._revision_view(self.owner._revision(cleared_state.active_revision_id)),
+            }
+
+        next_state = state.model_copy(
+            update={
+                "auto_switch_enabled": True,
+                "frozen_until": None,
+                "last_switch_reason": "operator_restore_auto_strategy_profile_control",
+                "last_switch_actor": actor_identity,
+            }
+        )
+        self.owner.repo.save_activation_state(next_state)
+        self.owner._append_selection_decision_transition(
+            status="manual_profile_auto_switch_restored",
+            candidate_profile_id=next_state.active_profile_id,
+            rollback_profile_id=state.previous_active_revision_id,
+            execution_state="not_executed",
+            recommended_action="keep_current_profile",
+            rationale=["operator_restore_auto_strategy_profile_control"],
+            notes=[reason],
+        )
+        return {
+            "status": "auto_restored",
+            "activation": next_state.model_dump(mode="json"),
+            "active_revision": self.owner._revision_view(self.owner._revision(next_state.active_revision_id)),
         }
 
     def rollback(
@@ -298,6 +343,7 @@ class StrategyProfileActivationFacade:
             reason_code="operator_manual_rollback",
             reason_detail=reason,
             freeze_until=self.manual_override_freeze_until(),
+            pause_auto_switch=True,
         )
         self.owner._append_selection_decision_transition(
             status="rollback_executed",
@@ -438,6 +484,16 @@ class StrategyProfileActivationFacade:
         safety_state = self.owner._safety_state()
         blocked_reasons: list[str] = []
         transition = "unknown"
+        control_summary = optimization_report.control_summary if optimization_report is not None else {}
+        evidence = control_summary.get("evidence") or {}
+        candidate = (
+            self.owner._candidate_for_profile(
+                optimization_report=optimization_report,
+                profile_id=recommendation.recommended_profile_id,
+            )
+            if optimization_report is not None
+            else None
+        )
         if revision is None:
             blocked_reasons.append("strategy_profile_revision_missing")
         else:
@@ -477,6 +533,14 @@ class StrategyProfileActivationFacade:
             blocked_reasons.append("strategy_profile_auto_switch_not_allowed")
         if revision is not None and revision.manual_approval_required:
             blocked_reasons.append("strategy_profile_manual_approval_required")
+        if evidence.get("closed_trades", 0) < evidence.get("min_closed_trades", 0):
+            blocked_reasons.append("strategy_profile_requires_more_realized_trades")
+        if evidence.get("replay_validations", 0) < evidence.get("min_replay_validations", 0):
+            blocked_reasons.append("strategy_profile_requires_more_replay_validations")
+        if bool(evidence.get("cold_start_active")):
+            blocked_reasons.append("strategy_profile_cold_start_lock_active")
+        if candidate is not None:
+            blocked_reasons.extend(candidate.selection_blocked_reasons)
         blocked_reasons.extend(self.activation_blockers())
 
         consecutive_candidate_wins = self.owner._consecutive_candidate_win_count(
@@ -573,6 +637,7 @@ class StrategyProfileActivationFacade:
         reason_code: str,
         reason_detail: str,
         freeze_until: datetime | None = None,
+        pause_auto_switch: bool = False,
     ) -> StrategyProfileActivationRecord:
         previous = self.owner._revision(state.active_revision_id)
         previous_payload = previous.payload if previous is not None else strategy_profile_payload_from_settings(self.owner.settings)
@@ -606,6 +671,7 @@ class StrategyProfileActivationFacade:
                 "last_switch_actor": actor_identity,
                 "cooldown_until": utc_now() + timedelta(minutes=120),
                 "frozen_until": retained_freeze_until,
+                "auto_switch_enabled": False if pause_auto_switch else state.auto_switch_enabled,
             }
         )
         self.owner.repo.save_activation_state(next_state)

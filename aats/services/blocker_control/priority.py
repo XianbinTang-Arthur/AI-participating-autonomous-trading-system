@@ -14,6 +14,8 @@ _CATEGORY_PRIORITY: dict[BlockerCategory, int] = {
 _BLOCKER_PRIORITY: dict[str, int] = {
     "reconciliation_halt_required": 10,
     "operator_rebaseline_required": 20,
+    "phase1_shadow_degraded": 25,
+    "phase1_shadow_lagging": 26,
     "ai_degraded_requires_manual_review": 30,
     "account_snapshot_missing": 40,
     "account_state_stale": 45,

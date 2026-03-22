@@ -6,6 +6,7 @@ from sqlalchemy import desc, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from aats.bootstrap.logging import get_logger, log_event
+from aats.schemas.common import dump_payload_exact
 from aats.schemas.execution import FillEvent, OrderState
 from aats.services.execution_engine.state_machine import OrderStateMachine
 from aats.services.runtime_scope import RuntimeStateScope
@@ -48,8 +49,12 @@ class PostgresExecutionRepository:
                 incoming_status=state.status,
                 reason=validation.reason,
             )
+            if validation.reason == "invalid_transition":
+                raise ValueError(
+                    f"invalid_order_state_transition current={None if current is None else current.status} next={state.status}"
+                )
         merged = self.state_machine.merge(current=current, incoming=state)
-        payload = merged.model_dump(mode="json")
+        payload = dump_payload_exact(merged)
         scope = order_scope_metadata(merged)
         if row is None:
             row = OrderStateModel(
@@ -138,7 +143,7 @@ class PostgresExecutionRepository:
                 exchange_timestamp=fill.exchange_timestamp,
                 ingestion_timestamp=fill.ingestion_timestamp,
                 created_at=fill.created_at,
-                payload=fill.model_dump(mode="json"),
+                payload=dump_payload_exact(fill),
             )
         )
         return True
@@ -185,7 +190,7 @@ class PostgresExecutionRepository:
             rows = session.scalars(
                 select(FillEventModel).order_by(FillEventModel.ingestion_timestamp, FillEventModel.fill_id)
             ).all()
-        return [FillEvent.model_validate(row.payload) for row in rows]
+        return [self._to_fill_event(row) for row in rows]
 
     def fills_for_order(self, client_order_id: str) -> list[FillEvent]:
         with self.session_factory() as session:
@@ -194,7 +199,7 @@ class PostgresExecutionRepository:
                 .where(FillEventModel.client_order_id == client_order_id)
                 .order_by(FillEventModel.ingestion_timestamp, FillEventModel.fill_id)
             ).all()
-        return [FillEvent.model_validate(row.payload) for row in rows]
+        return [self._to_fill_event(row) for row in rows]
 
     def fills_since(
         self,
@@ -210,7 +215,7 @@ class PostgresExecutionRepository:
             query = query.limit(limit)
         with self.session_factory() as session:
             rows = session.scalars(query).all()
-        return [FillEvent.model_validate(row.payload) for row in rows]
+        return [self._to_fill_event(row) for row in rows]
 
     def order_states_for_scope(
         self,
@@ -260,10 +265,46 @@ class PostgresExecutionRepository:
             query = query.limit(limit)
         with self.session_factory() as session:
             rows = session.scalars(query).all()
-        return [FillEvent.model_validate(row.payload) for row in rows]
+        return [self._to_fill_event(row) for row in rows]
 
     @staticmethod
     def _to_order_state(row: OrderStateModel) -> OrderState:
         payload = dict(row.payload)
         payload.setdefault("decision_id", row.decision_id)
+        payload.setdefault("intent_id", row.intent_id)
+        payload.setdefault("symbol", row.symbol)
+        payload.setdefault("client_order_id", row.client_order_id)
+        payload.setdefault("exchange_order_id", row.exchange_order_id)
+        payload.setdefault("status", row.status)
+        payload.setdefault("submitted_ts", row.submitted_ts)
+        payload.setdefault("last_update_ts", row.last_update_ts)
+        payload.setdefault("requested_qty", row.requested_qty)
+        payload.setdefault("filled_qty", row.filled_qty)
+        payload.setdefault("remaining_qty", row.remaining_qty)
+        payload.setdefault("average_fill_price", row.average_fill_price)
+        payload.setdefault("fees", row.fees)
+        payload.setdefault("product_type", row.product_type)
+        payload.setdefault("margin_mode", row.margin_mode)
+        payload.setdefault("position_intent", row.position_intent)
         return OrderState.model_validate(payload)
+
+    @staticmethod
+    def _to_fill_event(row: FillEventModel) -> FillEvent:
+        payload = dict(row.payload)
+        payload.setdefault("fill_id", row.fill_id)
+        payload.setdefault("decision_id", row.decision_id)
+        payload.setdefault("intent_id", row.intent_id)
+        payload.setdefault("client_order_id", row.client_order_id)
+        payload.setdefault("exchange_order_id", row.exchange_order_id)
+        payload.setdefault("symbol", row.symbol)
+        payload.setdefault("side", row.side)
+        payload.setdefault("fill_qty", row.fill_qty)
+        payload.setdefault("fill_price", row.fill_price)
+        payload.setdefault("fee_amount", row.fee_amount)
+        payload.setdefault("product_type", row.product_type)
+        payload.setdefault("margin_mode", row.margin_mode)
+        payload.setdefault("position_intent", row.position_intent)
+        payload.setdefault("exchange_timestamp", row.exchange_timestamp)
+        payload.setdefault("ingestion_timestamp", row.ingestion_timestamp)
+        payload.setdefault("liquidity_role", payload.get("liquidity_role") or "taker")
+        return FillEvent.model_validate(payload)

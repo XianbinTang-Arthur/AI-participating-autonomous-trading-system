@@ -20,7 +20,7 @@ from aats.schemas.ai_brief import AIDecisionBrief
 from aats.schemas.ai_shadow import AIDegradationEvent
 from aats.schemas.common import utc_now
 from aats.schemas.decision import AIMarketAssessment, ProfileControlDecision
-from aats.schemas.execution import FillEvent, OrderState
+from aats.schemas.execution import FillEvent, OrderIntent, OrderState
 from aats.schemas.exchange import AccountBaselineSnapshot, ExchangeAccountSnapshot, ExchangeBalance, ExchangeOpenOrder
 from aats.schemas.governance import PolicyDecision, RiskDecision
 from aats.events import topics
@@ -32,6 +32,7 @@ from aats.services.operator.strategy_profiles import StrategyProfileControlServi
 from aats.services.operator.strategy_profiles import _seed_revisions, seed_strategy_profiles
 from aats.services.operator.passwords import hash_password
 from aats.schemas.strategy_profiles import strategy_profile_payload_from_settings
+from tests.support.postgres import temporary_postgres_url
 
 
 class FakeOperatorAccountService:
@@ -148,6 +149,33 @@ class FakeShadowProvider:
         )
 
 
+class FakeLaggingPhase1ShadowMonitor:
+    def snapshot(self) -> dict[str, object]:
+        return {
+            "configured": True,
+            "status": "lagging",
+            "connected": True,
+            "ready": False,
+            "fresh": False,
+            "detail": "Phase 1 shadow compatibility layer is behind the legacy runtime.",
+            "blockers": ["phase1_shadow_lagging"],
+            "summary": "Phase 1 shadow compatibility layer is behind the legacy runtime.",
+            "lag": {
+                "order_backlog": 2,
+                "fill_backlog": 1,
+                "obligation_backlog": 0,
+            },
+            "execution_shadow": {
+                "configured": True,
+                "status": "healthy",
+            },
+            "ledger_shadow": {
+                "configured": True,
+                "status": "healthy",
+            },
+        }
+
+
 class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
     async def test_system_status_and_mode_endpoints_are_operator_readable(self) -> None:
         runtime = await self._runtime()
@@ -159,12 +187,15 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             blockers = client.get("/system/blockers")
             blocker_history = client.get("/system/blocker-history?limit=5")
             metrics = client.get("/system/metrics")
+            shadow = client.get("/system/shadow")
+            trial_guard = client.get("/system/trial-guard")
 
         self.assertEqual(health.status_code, 200)
         self.assertEqual(mode.status_code, 200)
         self.assertEqual(runtime_response.status_code, 200)
         self.assertEqual(blockers.status_code, 200)
         self.assertEqual(metrics.status_code, 200)
+        self.assertEqual(shadow.status_code, 200)
 
         health_payload = health.json()
         mode_payload = mode.json()
@@ -172,13 +203,17 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         blockers_payload = blockers.json()
         blocker_history_payload = blocker_history.json()
         metrics_payload = metrics.json()
+        shadow_payload = shadow.json()
+        trial_guard_payload = trial_guard.json()
 
         self.assertIn("overall_status", health_payload)
         self.assertIn("subsystems", health_payload)
         self.assertIn("execution_summary", health_payload)
         self.assertIn("storage", health_payload["subsystems"])
+        self.assertIn("phase1_shadow", health_payload["subsystems"])
         self.assertIn("audit_replay", health_payload["subsystems"])
         self.assertIn("portfolio_snapshot_repairs", health_payload["execution_summary"])
+        self.assertIn("phase1_shadow_status", health_payload["execution_summary"])
         self.assertEqual(mode_payload["config_profile"], "local_demo")
         self.assertEqual(mode_payload["market_data_backend"], "demo")
         self.assertEqual(mode_payload["execution_backend"], "paper")
@@ -197,13 +232,26 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(runtime_payload["uptime_seconds"], 0.0)
         self.assertEqual(runtime_payload["runtime_profile"]["name"], "paper_local")
         self.assertEqual(runtime_payload["environment_capabilities"]["execution_route"], "paper_local")
+        self.assertIn("trial_guard", runtime_payload)
         self.assertIn("baseline_takeover", runtime_payload)
         self.assertIn("decision_cycle_count", metrics_payload)
         self.assertIn("recent_execution_errors", metrics_payload)
         self.assertIn("exposure_summary", metrics_payload)
         self.assertIn("portfolio_snapshot_repair_count", metrics_payload)
+        self.assertIn("phase1_shadow", metrics_payload)
+        self.assertIn("phase1_shadow_alert_count", metrics_payload)
+        self.assertIn("phase1_shadow_recovery_count", metrics_payload)
         self.assertIn("strategy_execution_health", metrics_payload)
         self.assertIn("recent_churn_ratio", metrics_payload["strategy_execution_health"])
+        self.assertIn("status", shadow_payload)
+        self.assertIn("execution_shadow", shadow_payload)
+        self.assertIn("ledger_shadow", shadow_payload)
+        self.assertIn("lag", shadow_payload)
+        self.assertIn("status", trial_guard_payload)
+        self.assertIn("summary", trial_guard_payload)
+        self.assertIn("thresholds", trial_guard_payload)
+        self.assertIn("phase1_shadow_alert_count", health_payload["execution_summary"])
+        self.assertIn("phase1_shadow_recovery_count", health_payload["execution_summary"])
         self.assertIsInstance(blockers_payload["blockers"], list)
         self.assertTrue(any(item["submit_only"] for item in blockers_payload["blockers"]))
         self.assertIn("history", blocker_history_payload)
@@ -234,6 +282,16 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             latest_fill_id = fills_recent["fills"][0]["fill_id"]
             fill_detail = client.get(f"/fills/{latest_fill_id}").json()
             execution_latest = client.get("/execution/latest").json()
+            execution_quality = client.get("/reports/execution-quality?limit=5").json()
+            profitability_overview = client.get("/reports/profitability-overview?limit=5").json()
+            strategy_segments = client.get("/reports/strategy-segments?limit=10").json()
+            execution_anomalies = client.get("/reports/execution-anomalies?limit=10").json()
+            forward_validation = client.get("/reports/forward-validation?window_days=7&period_count=4").json()
+            scaling_readiness = client.get("/reports/scaling-readiness?window_days=7&period_count=4").json()
+            trial_review_packet = client.get(
+                "/reports/trial-review-packet?profitability_limit=100&anomaly_limit=100&segment_limit=100&window_days=7&period_count=4"
+            ).json()
+            trial_review_history = client.get("/reports/trial-review-history?limit=5").json()
             reconciliation_latest = client.get("/reconciliation/latest").json()
             reconciliation_recent = client.get("/reconciliation/recent").json()
             reconciliation_mismatches = client.get("/reconciliation/mismatches").json()
@@ -273,8 +331,56 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertIn("has_more", fills_recent)
         self.assertEqual(fill_detail["fill"]["fill_id"], latest_fill_id)
         self.assertIn("execution_action", fill_detail["fill"])
+        self.assertTrue(fill_detail["fill"].get("has_fill_outcome"))
+        self.assertIn("realized_pnl", fill_detail["fill"])
+        self.assertIsNotNone(fill_detail.get("fill_outcome"))
+        self.assertIn("fill_qty", fill_detail["fill_outcome"])
+        self.assertIn("fill_price", fill_detail["fill_outcome"])
+        self.assertIn("starting_position_qty", fill_detail["fill_outcome"])
+        self.assertIn("ending_position_qty", fill_detail["fill_outcome"])
         self.assertIsNotNone(execution_latest["latest_order"])
         self.assertIn("execution_action", execution_latest["latest_order"])
+        self.assertIn("rows", execution_quality)
+        self.assertIn("summary", execution_quality)
+        self.assertTrue(execution_quality["rows"])
+        self.assertIn("signal_timestamp", execution_quality["rows"][0])
+        self.assertIn("decision_to_submit_latency_ms", execution_quality["rows"][0])
+        self.assertIn("adverse_slippage_bps", execution_quality["rows"][0])
+        self.assertIn("fee_ratio", execution_quality["rows"][0])
+        self.assertIn("closed_fill_count", profitability_overview["summary"])
+        self.assertIn("gross_realized_pnl", profitability_overview["summary"])
+        self.assertIn("net_realized_pnl", profitability_overview["summary"])
+        self.assertIn("execution_quality", profitability_overview)
+        self.assertTrue(profitability_overview["recent_closed_fills"])
+        self.assertIn("group_by", strategy_segments)
+        self.assertIn("segments", strategy_segments)
+        self.assertTrue(strategy_segments["segments"])
+        self.assertIn("segment", strategy_segments["segments"][0])
+        self.assertIn("fill_count", strategy_segments["segments"][0])
+        self.assertIn("net_realized_pnl", strategy_segments["segments"][0])
+        self.assertIn("avg_adverse_slippage_bps", strategy_segments["segments"][0])
+        self.assertIn("summary", execution_anomalies)
+        self.assertIn("rows", execution_anomalies)
+        self.assertIn("evaluated_fill_count", execution_anomalies)
+        self.assertIn("high_slippage_count", execution_anomalies["summary"])
+        self.assertIn("slow_submit_to_fill_count", execution_anomalies["summary"])
+        self.assertIn("summary", forward_validation)
+        self.assertIn("periods", forward_validation)
+        self.assertEqual(forward_validation["window_days"], 7)
+        self.assertEqual(forward_validation["period_count"], 4)
+        self.assertIn("verdict", forward_validation["summary"])
+        self.assertIn("readiness", scaling_readiness)
+        self.assertIn("summary", scaling_readiness)
+        self.assertIn("requirements", scaling_readiness)
+        self.assertIn("latest_review", scaling_readiness)
+        self.assertEqual(scaling_readiness["window_days"], 7)
+        self.assertEqual(scaling_readiness["period_count"], 4)
+        self.assertIn("summary", trial_review_packet)
+        self.assertIn("recommendation", trial_review_packet)
+        self.assertIn("sections", trial_review_packet)
+        self.assertIn("action_items", trial_review_packet["recommendation"])
+        self.assertIn("scaling_readiness", trial_review_packet["sections"])
+        self.assertIn("actions", trial_review_history)
         self.assertIsNotNone(reconciliation_latest["reconciliation"])
         self.assertIn("mismatch_categories", reconciliation_latest["mismatch_summary"])
         self.assertIn("exchange_bills_summary", reconciliation_latest)
@@ -303,6 +409,92 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(replay_recent["validations"])
         self.assertIn("total_available", replay_recent)
         self.assertIn("has_more", replay_recent)
+
+    async def test_operator_can_record_capital_scaling_review(self) -> None:
+        runtime = await self._runtime()
+        app = self._app(runtime)
+        with TestClient(app) as client:
+            response = client.post(
+                "/system/scaling-review",
+                json={
+                    "verdict": "continue_small_capital",
+                    "reason": "test_scaling_review",
+                },
+            )
+            report = client.get("/reports/scaling-readiness?window_days=7&period_count=4")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        report_payload = report.json()
+        self.assertEqual(payload["action"], "capital_scale_review")
+        self.assertEqual(payload["status"], "review_recorded")
+        self.assertEqual(payload["details"]["selected_verdict"], "continue_small_capital")
+        self.assertIsNotNone(report_payload["latest_review"])
+        self.assertEqual(report_payload["latest_review"]["action"], "capital_scale_review")
+
+    async def test_operator_can_record_trial_review_snapshot(self) -> None:
+        runtime = await self._runtime()
+        app = self._app(runtime)
+        with TestClient(app) as client:
+            response = client.post(
+                "/system/trial-review/record",
+                json={"reason": "test_trial_review_snapshot"},
+            )
+            packet = client.get(
+                "/reports/trial-review-packet?profitability_limit=100&anomaly_limit=100&segment_limit=100&window_days=7&period_count=4"
+            ).json()
+            history = client.get("/reports/trial-review-history?limit=5").json()
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["action"], "trial_review_snapshot")
+        self.assertEqual(payload["status"], "snapshot_recorded")
+        self.assertIsNotNone(packet["latest_review"])
+        self.assertEqual(packet["latest_review"]["action"], "trial_review_snapshot")
+        self.assertTrue(history["actions"])
+
+    async def test_metrics_order_intent_count_uses_persisted_events_not_runtime_counter(self) -> None:
+        runtime = await self._runtime(
+            trading_product_type="derivatives",
+            margin_mode="cross",
+            default_symbol="BTC-USDT-SWAP",
+            allowed_symbols=("BTC-USDT-SWAP",),
+        )
+        runtime.event_store.append(
+            build_envelope(
+                topic=topics.ORDER_INTENTS,
+                key="BTC-USDT-SWAP",
+                payload_model=OrderIntent(
+                    intent_id="intent_test_metrics",
+                    decision_id="decision_test_metrics",
+                    symbol="BTC-USDT-SWAP",
+                    side="buy",
+                    quantity=Decimal("0.01"),
+                    execution_style="taker",
+                    order_type="market",
+                    urgency="medium",
+                    time_in_force="IOC",
+                    reduce_only=False,
+                    close_only=False,
+                    idempotency_key="idem_test_metrics",
+                    product_type="derivatives",
+                    target_leverage=3.0,
+                    margin_mode="cross",
+                    exposure_side="long",
+                    execution_action="enter",
+                    position_intent="open_long",
+                ),
+                source_component="test",
+            )
+        )
+        runtime.metrics = type(runtime.metrics)()
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            metrics = client.get("/system/metrics")
+
+        self.assertEqual(metrics.status_code, 200)
+        self.assertGreaterEqual(metrics.json()["order_intent_count"], 1)
 
     async def test_ai_endpoints_expose_latest_assessment_and_shadow_decisions(self) -> None:
         runtime = await self._runtime(
@@ -434,6 +626,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
     async def test_ai_profile_control_decision_is_exposed_in_mainline_and_operator_views(self) -> None:
         runtime = await self._runtime(
             ai_operating_mode="ai_decision_maker_with_profile_control",
+            strategy_profile_auto_control_enabled=True,
             ai_provider="openai",
             openai_api_key="test-key",
             trading_product_type="derivatives",
@@ -613,6 +806,36 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         await runtime.decision_engine.run_cycle(runtime.settings.default_symbol, runtime.settings.primary_timeframe)
 
         runtime.decision_engine.strategy_profile_service.evaluate_mainline_profile_control.assert_not_awaited()
+
+    async def test_profile_control_can_run_independently_of_ai_mode_when_explicitly_enabled(self) -> None:
+        runtime = await self._runtime(
+            ai_operating_mode="baseline_only",
+            strategy_profile_auto_control_enabled=True,
+            trading_product_type="derivatives",
+            margin_mode="cross",
+            strategy_short_bias_enabled=True,
+            default_symbol="BTC-USDT-SWAP",
+            allowed_symbols=("BTC-USDT-SWAP",),
+        )
+        self.assertIsNotNone(runtime.decision_engine.strategy_profile_service)
+        runtime.ai_service.should_attempt_assessment = Mock(return_value=False)
+        runtime.ai_service.effective_operating_mode = Mock(return_value="baseline_only")
+        runtime.ai_service.canonical_effective_operating_mode = Mock(return_value="baseline_only")
+        runtime.ai_service.latest_brief = Mock(return_value=None)
+        runtime.ai_service.latest_shadow_assessment = Mock(return_value=None)
+        runtime.decision_engine.strategy_profile_service.evaluate_mainline_profile_control = AsyncMock(
+            return_value=ProfileControlDecision(
+                decision_id="decision_profile_independent",
+                requested_by="ai",
+                requested_profile_id="trend_strict",
+                current_profile_id="trend_normal",
+                applied=False,
+            )
+        )
+
+        await runtime.decision_engine.run_cycle(runtime.settings.default_symbol, runtime.settings.primary_timeframe)
+
+        runtime.decision_engine.strategy_profile_service.evaluate_mainline_profile_control.assert_awaited_once()
 
     async def test_finalized_decision_outcome_collapses_to_hold_when_policy_blocks(self) -> None:
         runtime = await self._runtime()
@@ -959,6 +1182,80 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertIn("改为仅基础策略继续运行", [item["label"] for item in payload["primary_blocker"]["actions"]])
         self.assertTrue(any(item["blocker"] == "kill_switch_active" for item in payload["secondary_blockers"]))
 
+    async def test_blocker_control_and_history_surface_phase1_shadow_blocker(self) -> None:
+        runtime = await self._runtime()
+        runtime.phase1_shadow_monitor = FakeLaggingPhase1ShadowMonitor()
+        runtime.health_service.phase1_shadow_provider = runtime.phase1_shadow_monitor
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            health = client.get("/system/health")
+            blocker_control = client.get("/system/blocker-control")
+            blocker_history = client.get("/system/blocker-history?limit=5")
+
+        self.assertEqual(health.status_code, 200)
+        self.assertEqual(blocker_control.status_code, 200)
+        self.assertEqual(blocker_history.status_code, 200)
+
+        health_payload = health.json()
+        blocker_payload = blocker_control.json()
+        history_payload = blocker_history.json()
+
+        health_blockers = [item["blocker"] for item in health_payload["blockers"]]
+        self.assertIn("phase1_shadow_lagging", health_blockers)
+        self.assertEqual(blocker_payload["primary_blocker"]["blocker"], "phase1_shadow_lagging")
+        self.assertEqual(blocker_payload["primary_blocker"]["subsystem"], "phase1_shadow")
+        self.assertIn("查看影子详情", [item["label"] for item in blocker_payload["primary_blocker"]["actions"]])
+        self.assertIn("刷新当前状态", [item["label"] for item in blocker_payload["primary_blocker"]["actions"]])
+        self.assertIn("已核查，继续阻断", [item["label"] for item in blocker_payload["primary_blocker"]["actions"]])
+        self.assertTrue(
+            any(
+                any(entry.get("blocker") == "phase1_shadow_lagging" for entry in row.get("blockers", []))
+                for row in history_payload["history"]
+            )
+        )
+
+    async def test_phase1_shadow_detail_and_review_action_are_visible_to_operator(self) -> None:
+        runtime = await self._runtime()
+        runtime.phase1_shadow_monitor = FakeLaggingPhase1ShadowMonitor()
+        runtime.health_service.phase1_shadow_provider = runtime.phase1_shadow_monitor
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            blocker_control = client.get("/system/blocker-control").json()
+            before = client.get("/system/shadow")
+            action = client.post(
+                "/system/blocker-actions/acknowledge-phase1-shadow",
+                json={
+                    "panel_version": blocker_control["panel_version"],
+                    "blocker": "phase1_shadow_lagging",
+                    "reason": "operator_reviewed_phase1_shadow_and_keeps_blocked",
+                },
+            )
+            after = client.get("/system/shadow")
+            history = client.get("/system/shadow/history?limit=10")
+
+        self.assertEqual(before.status_code, 200)
+        self.assertEqual(action.status_code, 200)
+        self.assertEqual(after.status_code, 200)
+        self.assertEqual(history.status_code, 200)
+        self.assertEqual(action.json()["action_id"], "acknowledge-phase1-shadow")
+        self.assertEqual(action.json()["status"], "completed")
+
+        before_payload = before.json()
+        after_payload = after.json()
+        history_payload = history.json()
+        self.assertEqual(before_payload["status"], "lagging")
+        self.assertTrue(before_payload["review_recommended"])
+        self.assertIsNone(before_payload["latest_review_action"])
+        self.assertEqual(after_payload["latest_review_action"]["action"], "phase1_shadow_review")
+        self.assertEqual(after_payload["latest_review_action"]["details"]["snapshot_status"], "lagging")
+        self.assertEqual(after_payload["latest_review_action"]["details"]["lag"]["order_backlog"], 2)
+        self.assertIn("phase1_shadow_lagging", after_payload["blockers"])
+        self.assertTrue(history_payload["history"])
+        self.assertEqual(history_payload["history"][0]["entry_type"], "review")
+        self.assertEqual(history_payload["history"][0]["details"]["lag"]["order_backlog"], 2)
+
     async def test_blocker_action_degrade_to_baseline_clears_review_requirement_and_keeps_system_resumable(self) -> None:
         runtime = await self._runtime(
             ai_operating_mode="ai_primary",
@@ -1094,6 +1391,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         runtime.market_gateway._latest_snapshots[runtime.settings.default_symbol] = latest_snapshot.model_copy(
             update={"snapshot_ts": utc_now() - timedelta(seconds=120)}
         )
+        runtime.market_gateway._latest_received_at[runtime.settings.default_symbol] = utc_now() - timedelta(seconds=120)
         with TestClient(app) as client:
             stale_health = client.get("/system/health").json()
         stale_blockers = [item["blocker"] for item in stale_health["blockers"]]
@@ -1235,6 +1533,29 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.json()["role"], "operator")
         self.assertEqual(login_admin.status_code, 200)
         self.assertEqual(halt_allowed_admin.status_code, 200)
+
+    async def test_logout_revokes_existing_session_token(self) -> None:
+        runtime = await self._runtime(
+            operator_auth_enabled=True,
+            operator_session_secret="session-secret",
+            operator_users=[("admin", "admin-pass")],
+        )
+        app = self._app(runtime)
+        cookie_name = runtime.settings.operator_session_cookie_name
+        with TestClient(app) as client:
+            login = client.post("/auth/login", json={"username": "admin", "password": "admin-pass"})
+            self.assertEqual(login.status_code, 200)
+            token = client.cookies.get(cookie_name)
+            self.assertIsNotNone(token)
+            logout = client.post("/auth/logout")
+            self.assertEqual(logout.status_code, 200)
+
+        with TestClient(app) as replay_client:
+            replay_client.cookies.set(cookie_name, token)
+            whoami = replay_client.get("/auth/whoami")
+
+        self.assertEqual(whoami.status_code, 401)
+        self.assertEqual(whoami.json()["detail"], "operator_auth_required")
 
     async def test_session_login_rejects_invalid_credentials(self) -> None:
         runtime = await self._runtime(
@@ -1432,6 +1753,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             operator_session_secret="session-secret",
             operator_users=[("admin", "admin-pass")],
             ai_operating_mode="ai_decision_maker_with_profile_control",
+            strategy_profile_auto_control_enabled=True,
             ai_shadow_mode_enabled=True,
         )
         app = self._app(runtime)
@@ -1461,11 +1783,59 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
                 "configured_operating_mode",
                 "effective_operating_mode",
                 "shadow_mode_enabled",
+                "strategy_profile_auto_control_configured",
+                "strategy_profile_auto_control_effective",
+                "strategy_profile_auto_control_reason",
                 "shadow_summary",
                 "latest_profile_control_decision",
             },
         )
         return
+
+    async def test_admin_can_manually_override_ai_operating_mode_with_freeze_and_restore_auto(self) -> None:
+        runtime = await self._runtime(
+            operator_auth_enabled=True,
+            operator_session_secret="session-secret",
+            operator_users=[("admin", "admin-pass")],
+            ai_operating_mode="ai_decision_maker_with_profile_control",
+        )
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            login = client.post("/auth/login", json={"username": "admin", "password": "admin-pass"})
+            override = client.post(
+                "/ai/operating-mode/override",
+                json={"mode": "baseline_only", "reason": "test_manual_override_ai_operating_mode"},
+            )
+            runtime_after_override = client.get("/ai/runtime")
+            restore = client.post(
+                "/ai/operating-mode/restore-auto",
+                json={"reason": "test_restore_auto_ai_operating_mode"},
+            )
+            runtime_after_restore = client.get("/ai/runtime")
+
+        self.assertEqual(login.status_code, 200)
+        self.assertEqual(override.status_code, 200)
+        self.assertEqual(runtime_after_override.status_code, 200)
+        override_payload = override.json()
+        runtime_payload = runtime_after_override.json()
+        self.assertEqual(override_payload["status"], "completed")
+        self.assertEqual(runtime_payload["manual_override_mode"], "baseline_only")
+        self.assertTrue(runtime_payload["manual_override_active"])
+        self.assertIsNotNone(runtime_payload["manual_override_freeze_until"])
+        self.assertEqual(runtime_payload["effective_operating_mode"], "baseline_only")
+
+        self.assertEqual(restore.status_code, 200)
+        self.assertEqual(runtime_after_restore.status_code, 200)
+        restored_payload = runtime_after_restore.json()
+        self.assertFalse(restored_payload["manual_override_active"])
+        self.assertIsNone(restored_payload["manual_override_mode"])
+        self.assertIsNone(restored_payload["manual_override_freeze_until"])
+        self.assertEqual(restored_payload["configured_operating_mode"], "ai_decision_maker_with_profile_control")
+        self.assertIn(
+            restored_payload["effective_operating_mode"],
+            {"ai_decision_maker_with_profile_control", "baseline_only"},
+        )
 
         runtime = await self._runtime(
             operator_auth_enabled=True,
@@ -1486,12 +1856,12 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(login.status_code, 200)
         self.assertEqual(snapshot.status_code, 200)
-        self.assertEqual(evaluated.status_code, 200)
+        self.assertEqual(evaluated.status_code, 404)
         self.assertEqual(optimization_reports.status_code, 200)
         self.assertEqual(selection_decisions.status_code, 200)
-        self.assertEqual(auto_rollback_policy.status_code, 200)
-        self.assertEqual(activation_policy.status_code, 200)
-        self.assertEqual(recommendations.status_code, 200)
+        self.assertEqual(auto_rollback_policy.status_code, 404)
+        self.assertEqual(activation_policy.status_code, 404)
+        self.assertEqual(recommendations.status_code, 404)
         snapshot_payload = snapshot.json()
         self.assertIn(
             snapshot_payload["activation"]["active_profile_id"],
@@ -1499,82 +1869,20 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(snapshot_payload["revisions"])
         self.assertIn("safety_state", snapshot_payload)
-        self.assertIn("evaluations", snapshot_payload)
         self.assertIn("profile_space", snapshot_payload)
         self.assertIn("comparison_report", snapshot_payload)
+        self.assertIn("control_summary", snapshot_payload)
         self.assertIn("latest_optimization_report", snapshot_payload)
         self.assertIn("latest_selection_decision", snapshot_payload)
-        self.assertIn("auto_rollback_policy", snapshot_payload)
-        self.assertIn("activation_policy", snapshot_payload)
         self.assertIn("execution_parameter_suggestion_capability", snapshot_payload)
+        self.assertNotIn("auto_rollback_policy", snapshot_payload)
+        self.assertNotIn("activation_policy", snapshot_payload)
         self.assertEqual(snapshot_payload["profile_space"]["selection_mode"], "registered_profile_only")
         self.assertFalse(snapshot_payload["profile_space"]["free_form_parameter_generation_enabled"])
         self.assertFalse(snapshot_payload["execution_parameter_suggestion_capability"]["enabled"])
         self.assertTrue(snapshot_payload["comparison_report"]["rows"])
-        evaluated_payload = evaluated.json()
-        recommendation_payload = evaluated_payload["recommendation"]
-        self.assertIn("safety_state", evaluated_payload)
-        self.assertIn("current_evaluation", evaluated_payload)
-        self.assertIn("evaluation_pipeline", evaluated_payload)
-        self.assertIn("comparison_report", evaluated_payload)
-        self.assertIn("optimization_report", evaluated_payload)
-        self.assertIn("selection_decision", evaluated_payload)
-        self.assertIn("bucket_scores", evaluated_payload["optimization_report"]["replay_summary"])
-        self.assertIn("cross_bucket_scores", evaluated_payload["optimization_report"]["replay_summary"])
-        self.assertIn("current_cross_bucket", evaluated_payload["optimization_report"]["replay_summary"])
-        self.assertIn("offline_replay_pipeline", evaluated_payload["optimization_report"])
-        self.assertIn("winner_selection_policy", evaluated_payload["optimization_report"])
-        self.assertIn("version_experiments", evaluated_payload["optimization_report"])
-        self.assertIn("window_reports", evaluated_payload["optimization_report"]["offline_replay_pipeline"])
-        self.assertEqual(recommendation_payload["selection_source"], "winner_engine")
-        self.assertEqual(recommendation_payload["generated_by"], "winner_engine")
-        self.assertIn("ai_advice", recommendation_payload)
-        self.assertEqual(
-            recommendation_payload["context_snapshot_id"],
-            evaluated_payload["optimization_report"]["context_snapshot_id"],
-        )
-        self.assertEqual(
-            evaluated_payload["selection_decision"]["context_snapshot_id"],
-            evaluated_payload["optimization_report"]["context_snapshot_id"],
-        )
-        self.assertGreaterEqual(
-            len(evaluated_payload["evaluation_pipeline"]),
-            len(snapshot_payload["revisions"]),
-        )
-        self.assertTrue(
-            any(item["summary"]["evaluation_mode"] == "heuristic_projection_v1" for item in evaluated_payload["evaluation_pipeline"])
-        )
-        self.assertIn(
-            recommendation_payload["recommended_profile_id"],
-            {"trend_aggressive", "trend_normal", "trend_strict", "range_defensive", "high_volatility_defensive", "execution_degraded_safe"},
-        )
-        self.assertEqual(evaluated_payload["validation"]["candidate_source"], "winner_engine")
-        self.assertEqual(recommendations.json()["total_available"], 1)
-        self.assertFalse(recommendations.json()["has_more"])
-        self.assertTrue(optimization_reports.json()["reports"])
-        self.assertTrue(selection_decisions.json()["decisions"])
-        self.assertEqual(
-            optimization_reports.json()["reports"][0]["recommended_profile_id"],
-            evaluated_payload["optimization_report"]["recommended_profile_id"],
-        )
-        self.assertEqual(
-            optimization_reports.json()["reports"][0]["winner_selection_policy"]["winner_profile_id"],
-            evaluated_payload["optimization_report"]["winner_selection_policy"]["winner_profile_id"],
-        )
-        self.assertEqual(
-            selection_decisions.json()["decisions"][0]["candidate_profile_id"],
-            evaluated_payload["selection_decision"]["candidate_profile_id"],
-        )
-        stored = runtime.event_store.by_topic(topics.STRATEGY_PROFILE_RECOMMENDATIONS)
-        self.assertEqual(len(stored), 1)
-        comparison_reports = runtime.event_store.by_topic(topics.STRATEGY_PROFILE_COMPARISON_REPORTS)
-        self.assertEqual(len(comparison_reports), 1)
-        optimization_report_events = runtime.event_store.by_topic(topics.STRATEGY_PROFILE_OPTIMIZATION_REPORTS)
-        self.assertEqual(len(optimization_report_events), 1)
-        selection_decision_events = runtime.event_store.by_topic(topics.STRATEGY_PROFILE_SELECTION_DECISIONS)
-        self.assertGreaterEqual(len(selection_decision_events), 1)
-        activations = runtime.event_store.by_topic(topics.STRATEGY_PROFILE_ACTIVATIONS)
-        self.assertIn(len(activations), {0, 1})
+        self.assertEqual(optimization_reports.json()["reports"], [])
+        self.assertEqual(selection_decisions.json()["decisions"], [])
 
     async def test_strategy_profile_provider_output_is_limited_to_registered_profiles(self) -> None:
         runtime = await self._runtime(
@@ -2824,6 +3132,66 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(activate_action["details"]["requested_profile_id"], "trend_strict")
         self.assertEqual(activate_action["details"]["active_profile_id"], "trend_strict")
 
+    async def test_admin_can_restore_strategy_profile_auto_switch_after_manual_activate(self) -> None:
+        runtime = await self._runtime(
+            operator_auth_enabled=True,
+            operator_session_secret="session-secret",
+            operator_users=[("admin", "admin-pass")],
+            strategy_profile_auto_control_enabled=True,
+        )
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            client.post("/auth/login", json={"username": "admin", "password": "admin-pass"})
+            activated = client.post(
+                "/strategy-profiles/profiles/trend_strict/activate",
+                json={"reason": "manual_switch_then_restore_auto"},
+            )
+            snapshot_after_activate = client.get("/strategy-profiles")
+            restored = client.post(
+                "/strategy-profiles/restore-auto",
+                json={"reason": "manual_restore_auto_strategy_profile_control"},
+            )
+            snapshot_after_restore = client.get("/strategy-profiles")
+
+        self.assertEqual(activated.status_code, 200)
+        self.assertEqual(snapshot_after_activate.status_code, 200)
+        self.assertIsNotNone(snapshot_after_activate.json()["activation"]["frozen_until"])
+
+        self.assertEqual(restored.status_code, 200)
+        self.assertEqual(restored.json()["status"], "auto_restored")
+        self.assertEqual(snapshot_after_restore.status_code, 200)
+        self.assertIsNone(snapshot_after_restore.json()["activation"]["frozen_until"])
+        self.assertEqual(snapshot_after_restore.json()["activation"]["active_profile_id"], "trend_strict")
+
+        selection_decisions = [item.payload for item in runtime.event_store.by_topic(topics.STRATEGY_PROFILE_SELECTION_DECISIONS)]
+        self.assertTrue(any(item["decision_status"] == "manual_profile_auto_switch_restored" for item in selection_decisions))
+        actions = [item.payload for item in runtime.event_store.by_topic(topics.OPERATOR_ACTIONS)]
+        restore_action = next(item for item in reversed(actions) if item["action"] == "strategy_profile_restore_auto")
+        self.assertEqual(restore_action["status"], "profile_auto_switch_restored")
+        self.assertEqual(restore_action["details"]["active_profile_id"], "trend_strict")
+        self.assertFalse(restore_action["details"]["frozen_by_admin_override"])
+
+    async def test_restore_strategy_profile_auto_is_rejected_when_auto_control_is_disabled(self) -> None:
+        runtime = await self._runtime(
+            operator_auth_enabled=True,
+            operator_session_secret="session-secret",
+            operator_users=[("admin", "admin-pass")],
+            ai_operating_mode="baseline_only",
+            strategy_profile_auto_control_enabled=False,
+        )
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            client.post("/auth/login", json={"username": "admin", "password": "admin-pass"})
+            restored = client.post(
+                "/strategy-profiles/restore-auto",
+                json={"reason": "manual_restore_auto_strategy_profile_control"},
+            )
+
+        self.assertEqual(restored.status_code, 409)
+        self.assertEqual(restored.json()["detail"], "strategy_profile_auto_control_not_enabled")
+
     async def test_strategy_profile_activation_is_blocked_when_open_orders_exist(self) -> None:
         runtime = await self._runtime(
             operator_auth_enabled=True,
@@ -3024,9 +3392,8 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["role"], "anonymous")
         self.assertEqual(payload["auth_source"], "anonymous")
 
-    async def test_sqlite_backed_operator_account_persists_and_allows_login(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            database_path = (Path(temp_dir) / "aats_auth.db").resolve().as_posix()
+    async def test_postgres_backed_operator_account_persists_and_allows_login(self) -> None:
+        with temporary_postgres_url() as (database_url, _admin_engine, _schema_name):
             seed_settings = AATSSettings.model_validate(
                 {
                     "config_profile": "local_demo",
@@ -3036,7 +3403,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
                     "account_backend": "disabled",
                     "account_read_enabled": False,
                     "storage_mode": "postgres",
-                    "database_url": f"sqlite+pysqlite:///{database_path}",
+                    "database_url": database_url,
                     "database_auto_create_schema": True,
                     "event_persistence_mode": "strict",
                     "enabled_decision_timeframes": ("15m",),
@@ -3081,8 +3448,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
                 recovered_runtime.database_runtime.dispose()
 
     async def test_database_backed_session_auth_requires_preexisting_admin_user(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            database_path = (Path(temp_dir) / "aats_auth.db").resolve().as_posix()
+        with temporary_postgres_url() as (database_url, _admin_engine, _schema_name):
             settings = AATSSettings.model_validate(
                 {
                     "config_profile": "local_demo",
@@ -3092,7 +3458,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
                     "account_backend": "disabled",
                     "account_read_enabled": False,
                     "storage_mode": "postgres",
-                    "database_url": f"sqlite+pysqlite:///{database_path}",
+                    "database_url": database_url,
                     "database_auto_create_schema": True,
                     "event_persistence_mode": "strict",
                     "enabled_decision_timeframes": ("15m",),
@@ -3505,6 +3871,22 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(next_page.status_code, 200)
         self.assertEqual(next_page.json()["orders"][0]["client_order_id"], "order_old_recent")
         self.assertEqual(next_page.json()["offset"], old_index)
+
+    async def test_profile_control_summary_report_exposes_cold_start_and_safety_state(self) -> None:
+        runtime = await self._runtime()
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            response = client.get("/reports/profile-control-summary")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertIn("control_summary", payload)
+        self.assertIn("evidence", payload["control_summary"])
+        self.assertIn("cold_start_active", payload["control_summary"]["evidence"])
+        self.assertIn("safety_profile_required", payload["control_summary"])
+        self.assertIn("active_profile_id", payload["activation"])
+        self.assertIn("latest_selection_decision", payload)
 
     async def test_execution_latest_uses_normalized_recovery_view(self) -> None:
         runtime = await self._runtime()

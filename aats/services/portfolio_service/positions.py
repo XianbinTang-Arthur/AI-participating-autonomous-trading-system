@@ -13,10 +13,10 @@ from aats.schemas.common import utc_now
 from aats.schemas.execution import FillEvent
 from aats.schemas.exchange import ExchangeAccountSnapshot
 from aats.schemas.operator import ProcessingFailureRecord
-from aats.schemas.portfolio import PortfolioBalanceDelta, PortfolioSnapshot, PortfolioSnapshotOrigin
+from aats.schemas.portfolio import FillOutcomeRecord, PortfolioBalanceDelta, PortfolioSnapshot, PortfolioSnapshotOrigin
 from aats.services.accounting import fill_fee_cost_in_quote, resolve_symbol_currencies, resolved_fee_currency
 from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, is_effectively_zero, to_decimal
-from aats.storage.base import PortfolioRepository
+from aats.storage.base import FillOutcomeRepository, PortfolioRepository
 from aats.services.portfolio_service.snapshots import PortfolioSnapshotBuilder
 
 
@@ -34,6 +34,8 @@ class FillApplicationResult:
     applied: bool
     starting_quantity: Decimal
     ending_quantity: Decimal
+    starting_avg_entry_price: Decimal
+    ending_avg_entry_price: Decimal
     realized_pnl_delta: Decimal
     fee_delta: Decimal
 
@@ -157,6 +159,8 @@ class PortfolioState:
                 applied=False,
                 starting_quantity=self.positions.get(fill.symbol, PositionRecord()).quantity,
                 ending_quantity=self.positions.get(fill.symbol, PositionRecord()).quantity,
+                starting_avg_entry_price=self.positions.get(fill.symbol, PositionRecord()).avg_entry_price,
+                ending_avg_entry_price=self.positions.get(fill.symbol, PositionRecord()).avg_entry_price,
                 realized_pnl_delta=Decimal("0"),
                 fee_delta=Decimal("0"),
             )
@@ -182,6 +186,7 @@ class PortfolioState:
         fee_quote_amount = to_decimal(fee_quote_amount)
         fee_delta = fee_quote_amount
         trading_pnl_delta = Decimal("0")
+        starting_avg_entry_price = to_decimal(record.avg_entry_price)
 
         if product_type != "derivatives":
             if quote_currency is not None:
@@ -232,10 +237,13 @@ class PortfolioState:
         self.total_fees_paid = self.total_fees_paid + fee_delta
         self._applied_fill_ids.add(fill.fill_id)
         self._cleanup_if_flat(fill.symbol)
+        ending_record = self.positions.get(fill.symbol, PositionRecord())
         return FillApplicationResult(
             applied=True,
             starting_quantity=starting_qty,
-            ending_quantity=self.positions.get(fill.symbol, PositionRecord()).quantity,
+            ending_quantity=ending_record.quantity,
+            starting_avg_entry_price=starting_avg_entry_price,
+            ending_avg_entry_price=ending_record.avg_entry_price,
             realized_pnl_delta=realized_pnl_delta,
             fee_delta=fee_delta,
         )
@@ -281,6 +289,7 @@ class PortfolioService:
         state: PortfolioState,
         snapshot_builder: PortfolioSnapshotBuilder,
         portfolio_repo: PortfolioRepository,
+        fill_outcome_repo: FillOutcomeRepository,
         price_provider: Callable[[str], Decimal],
         metrics: MetricsRegistry | None = None,
     ) -> None:
@@ -288,6 +297,7 @@ class PortfolioService:
         self.state = state
         self.snapshot_builder = snapshot_builder
         self.portfolio_repo = portfolio_repo
+        self.fill_outcome_repo = fill_outcome_repo
         self.price_provider = price_provider
         self.metrics = metrics
         self.logger = get_logger("aats.portfolio_service")
@@ -340,6 +350,37 @@ class PortfolioService:
             realized_pnl_delta=result.realized_pnl_delta,
             fee_delta=result.fee_delta,
         )
+        try:
+            self.fill_outcome_repo.save_outcome(
+                FillOutcomeRecord.from_fill_and_balance_delta(
+                    fill=fill,
+                    balance_delta=balance_delta,
+                    starting_position_qty=result.starting_quantity,
+                    starting_avg_entry_price=result.starting_avg_entry_price,
+                    ending_position_qty=result.ending_quantity,
+                    ending_avg_entry_price=result.ending_avg_entry_price,
+                )
+            )
+        except Exception as exc:
+            log_event(
+                self.logger,
+                "fill_outcome_persist_failed",
+                level="warning",
+                **correlation_fields(
+                    decision_id=fill.decision_id,
+                    intent_id=fill.intent_id,
+                    order_id=fill.client_order_id,
+                    fill_id=fill.fill_id,
+                    symbol=fill.symbol,
+                    error=str(exc),
+                ),
+            )
+            await self._emit_processing_failure(
+                stage="fill_outcome_persist",
+                message=str(exc),
+                fill=fill,
+                retriable=True,
+            )
         if self.metrics is not None:
             self.metrics.increment("fills_processed")
         log_event(

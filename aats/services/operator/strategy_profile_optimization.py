@@ -137,6 +137,14 @@ def build_optimization_report(
         active_profile_id=state.active_profile_id,
     )
     replay_summary = replay_pipeline.get("primary_summary") or replay_summary
+    control_summary = service._profile_control_summary(
+        context=context,
+        replay_summary=replay_summary,
+        active_profile_id=state.active_profile_id,
+    )
+    safety_profile_required = bool(control_summary.get("safety_profile_required"))
+    evidence = control_summary.get("evidence") or {}
+    cold_start_active = bool(evidence.get("cold_start_active"))
     previous_report = service._latest_optimization_report()
     evaluation_refs_by_profile: dict[str, list[str]] = {}
     for evaluation in evaluations:
@@ -151,6 +159,13 @@ def build_optimization_report(
         replay_adjustment = float(replay_scorecard.get("aggregate_adjustment") or 0.0)
         stability_adjustment = service._stability_adjustment_for_profile(row=row, replay_summary=replay_summary)
         composite_score = round(row.score + shadow_adjustment + replay_adjustment + stability_adjustment, 6)
+        selection_blocked_reasons: list[str] = []
+        if service._is_safety_profile_id(row.profile_id) and not safety_profile_required:
+            selection_blocked_reasons.append("strategy_profile_safety_profile_requires_explicit_trigger")
+        if cold_start_active and row.profile_id != state.active_profile_id and not (
+            service._is_safety_profile_id(row.profile_id) and safety_profile_required
+        ):
+            selection_blocked_reasons.append("strategy_profile_cold_start_lock_active")
         reasons = service._optimization_reasons(
             row=row,
             shadow_adjustment=shadow_adjustment,
@@ -173,6 +188,8 @@ def build_optimization_report(
                 recommendation_strength=round(max(composite_score, 0.0), 6),
                 offline_replay_score=replay_adjustment,
                 offline_replay_breakdown=replay_scorecard,
+                selection_eligible=not selection_blocked_reasons,
+                selection_blocked_reasons=selection_blocked_reasons,
                 reasons=reasons,
                 evaluation_refs=evaluation_refs_by_profile.get(row.profile_id, []),
                 metrics={
@@ -183,13 +200,20 @@ def build_optimization_report(
                     "avg_win_rate": row.avg_win_rate,
                     "latest_status": row.latest_status,
                     "shadow_summary": ai_performance_summary,
+                    "selection_eligible": not selection_blocked_reasons,
+                    "selection_blocked_reasons": selection_blocked_reasons,
                 },
             )
         )
     candidates.sort(key=lambda item: (-item.composite_score, item.profile_id))
-    recommended = candidates[0].profile_id if candidates else None
+    eligible_candidates = [item for item in candidates if item.selection_eligible]
+    recommended_candidate = eligible_candidates[0] if eligible_candidates else next(
+        (item for item in candidates if item.profile_id == state.active_profile_id),
+        None,
+    )
+    recommended = recommended_candidate.profile_id if recommended_candidate is not None else (candidates[0].profile_id if candidates else None)
     active_candidate = next((item for item in candidates if item.profile_id == state.active_profile_id), None)
-    winner_candidate = candidates[0] if candidates else None
+    winner_candidate = recommended_candidate if recommended_candidate is not None else (candidates[0] if candidates else None)
     score_delta_vs_active = round(
         float(winner_candidate.composite_score if winner_candidate is not None else 0.0)
         - float(active_candidate.composite_score if active_candidate is not None else 0.0),
@@ -227,6 +251,7 @@ def build_optimization_report(
         replay_summary=replay_summary,
         offline_replay_pipeline=replay_pipeline,
         ai_performance_summary=ai_performance_summary,
+        control_summary=control_summary,
         winner_selection_policy=winner_selection_policy,
         version_experiments=version_experiments,
         candidates=candidates,

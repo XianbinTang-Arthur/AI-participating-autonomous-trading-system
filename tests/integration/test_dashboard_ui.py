@@ -23,109 +23,74 @@ class TestDashboardUI(unittest.TestCase):
         with TestClient(app) as client:
             responses = {
                 "root": client.get("/"),
-                "home": client.get("/ui/home"),
                 "overview": client.get("/ui"),
-                "overview_alias": client.get("/ui/overview"),
                 "strategy": client.get("/ui/strategy"),
-                "execution": client.get("/ui/execution"),
-                "risk": client.get("/ui/risk"),
-                "ai": client.get("/ui/ai"),
+                "ai_redirect": client.get("/ui/ai", follow_redirects=False),
+                "ai_analysis": client.get("/ui/ai-analysis"),
                 "ai_config": client.get("/ui/ai-config"),
-                "settings": client.get("/ui/settings"),
                 "css": client.get("/ui/app.css"),
                 "js": client.get("/ui/app.js"),
                 "store_js": client.get("/ui/modules/store.js"),
-                "home_view_js": client.get("/ui/modules/views/home-view.js"),
-                "strategy_js": client.get("/ui/modules/views/strategy-view.js"),
                 "ai_view_js": client.get("/ui/modules/views/ai-view.js"),
+                "ai_analysis_js": client.get("/ui/modules/views/ai-analysis-view.js"),
                 "ai_config_js": client.get("/ui/modules/views/ai-config-view.js"),
-                "admin_js": client.get("/ui/modules/views/admin-view.js"),
-                "terms_js": client.get("/ui/modules/terms.js"),
-                "login_js": client.get("/ui/login.js"),
+                "strategy_js": client.get("/ui/modules/views/strategy-view.js"),
             }
             login = client.get("/login", follow_redirects=False)
 
-        for response in responses.values():
+        for key, response in responses.items():
+            if key == "ai_redirect":
+                self.assertEqual(response.status_code, 303)
+                self.assertEqual(response.headers["location"], "/ui/ai-analysis")
+                continue
             self.assertEqual(response.status_code, 200)
 
         self.assertEqual(login.status_code, 303)
         self.assertEqual(login.headers["location"], "/ui")
 
-        self.assertEqual(responses["root"].headers["cache-control"], "no-store")
-        self.assertEqual(responses["home"].headers["cache-control"], "no-store")
-        self.assertEqual(responses["overview_alias"].headers["cache-control"], "no-store")
-        self.assertEqual(responses["css"].headers["cache-control"], "public, max-age=120")
-        self.assertIn(".primary-button.is-pending", responses["css"].text)
-        self.assertEqual(responses["js"].headers["cache-control"], "public, max-age=120")
-        self.assertEqual(responses["store_js"].headers["cache-control"], "public, max-age=120")
-        self.assertEqual(responses["login_js"].headers["cache-control"], "public, max-age=120")
-
-        self.assertIn("text/html; charset=utf-8", responses["root"].headers["content-type"])
-        self.assertIn("application/javascript; charset=utf-8", responses["js"].headers["content-type"])
-
         root_text = responses["root"].text
-        self.assertIn("/ui/ai", root_text)
+        self.assertNotIn("AI 工作台", root_text)
+        self.assertIn("/ui/ai-analysis", root_text)
         self.assertIn("/ui/ai-config", root_text)
-        self.assertIn("/ui/settings", root_text)
-        self.assertIn('data-view="aiConfig"', root_text)
-        self.assertIn('data-view="admin"', root_text)
+        self.assertIn('data-view="aiAnalysis"', root_text)
 
         js_text = responses["js"].text
-        self.assertIn("const VIEW_ROUTES", js_text)
-        self.assertIn("const VIEW_META", js_text)
-        self.assertIn("renderAISections", js_text)
-        self.assertIn("renderAIConfigView", js_text)
-        self.assertIn("AI 配置", js_text)
-        self.assertIn("账户与权限工作区", js_text)
-        self.assertIn('hidePageHead: true', js_text)
+        self.assertIn("renderAIAnalysisView", js_text)
+        self.assertIn('aiAnalysis: "/ui/ai-analysis"', js_text)
+        self.assertNotIn('ai: "/ui/ai"', js_text)
 
         store_text = responses["store_js"].text
-        self.assertIn("AUTO_REFRESH_MS", store_text)
-        self.assertIn("readyViews", store_text)
-        self.assertIn("blockerControl", store_text)
-        self.assertIn("aiConfigModel", store_text)
-        self.assertIn('risk: [', store_text)
-        self.assertIn('["replayStatus", "/replay/status"]', store_text)
-        self.assertNotIn('risk: [\n      ["blockers", "/system/blockers"]', store_text)
+        self.assertIn('["profileControlSummary", "/reports/profile-control-summary"]', store_text)
+        self.assertIn("aiAnalysis", store_text)
+        self.assertNotIn('  ai: [', store_text)
 
-        ai_text = responses["ai_view_js"].text
-        self.assertIn("AI 决策链路", ai_text)
-        self.assertIn("AI 复核处置", ai_text)
-        self.assertIn("executionSuggestionRows", ai_text)
-        self.assertIn("function readableShadowMeta", ai_text)
-
-        risk_text = responses["risk"].text
-        self.assertIn("风险与恢复", risk_text)
-        self.assertIn("trigger-blocker-action", responses["js"].text)
+        ai_analysis_text = responses["ai_analysis_js"].text
+        self.assertIn("renderAISections", ai_analysis_text)
+        self.assertIn("renderAIAnalysisSectionCards", ai_analysis_text)
+        self.assertIn("档位控制证据", ai_analysis_text)
+        self.assertNotIn("前往 AI 工作台", ai_analysis_text)
+        self.assertNotIn("前往 AI 配置", ai_analysis_text)
 
         ai_config_text = responses["ai_config_js"].text
-        self.assertIn("运行参数概览", ai_config_text)
+        self.assertIn("运行模式切换", ai_config_text)
+        self.assertIn("自动换档控制", ai_config_text)
         self.assertIn("策略档位切换", ai_config_text)
-        self.assertIn("档位概览", ai_config_text)
-        self.assertIn("管理员手动切换", ai_config_text)
-        self.assertIn("最近一次自动切换结论", ai_config_text)
-        self.assertIn("影子评估状态", ai_config_text)
-        self.assertNotIn("立即评估并生成建议", ai_config_text)
-        self.assertNotIn("评估并允许自动切换", ai_config_text)
-        self.assertNotIn("回滚到上一稳定策略档位", ai_config_text)
-        self.assertNotIn("执行建议能力", ai_config_text)
-        self.assertNotIn("autoRollbackPolicyForm", ai_config_text)
-        self.assertNotIn("activationPolicyForm", ai_config_text)
-        self.assertNotIn("evaluate-strategy-profile", ai_config_text)
+        self.assertIn("运行参数概览", ai_config_text)
+        self.assertIn("策略层 shadow", ai_config_text)
+        self.assertIn("执行层 shadow", ai_config_text)
+        self.assertIn("恢复自动切档", ai_config_text)
+        self.assertNotIn("前往 AI 工作台", ai_config_text)
+        self.assertNotIn("查看 AI 分析", ai_config_text)
 
-        admin_text = responses["admin_js"].text
-        self.assertIn("账户与权限工作区", admin_text)
-        self.assertIn("控制台账号", admin_text)
-        self.assertIn("AI 配置页现在只保留策略档位状态、自动切换结论和管理员手动切换入口", admin_text)
-        self.assertNotIn("回滚和激活策略已经单独迁移到 AI 配置页", admin_text)
-        self.assertIn("operatorCreateForm", admin_text)
-        self.assertNotIn("autoRollbackPolicyForm", admin_text)
-        self.assertNotIn("activationPolicyForm", admin_text)
-
-        self.assertIn("operator_rejected_strategy_profile_recommendation", responses["terms_js"].text)
-        self.assertIn("/auth/login", responses["login_js"].text)
-        self.assertIn("baseline.regime", responses["strategy_js"].text)
-        self.assertIn("首要问题", responses["home_view_js"].text)
+        strategy_text = responses["strategy_js"].text
+        self.assertNotIn("自动跳档状态", strategy_text)
+        self.assertIn("系统自动试盘结论", strategy_text)
+        self.assertIn("样本仍少，先继续观察", strategy_text)
+        self.assertNotIn("记为继续小资金观察", strategy_text)
+        self.assertNotIn("记为缩小试盘规模", strategy_text)
+        self.assertNotIn("记为暂停试盘并复盘", strategy_text)
+        self.assertNotIn("记为允许进入放量评审", strategy_text)
+        self.assertNotIn("记录本次周复盘", strategy_text)
 
     def test_dashboard_redirects_to_login_when_auth_is_enabled(self) -> None:
         settings = AATSSettings.model_validate(
@@ -142,6 +107,7 @@ class TestDashboardUI(unittest.TestCase):
         with TestClient(app) as client:
             root = client.get("/", follow_redirects=False)
             ai = client.get("/ui/ai", follow_redirects=False)
+            ai_analysis = client.get("/ui/ai-analysis", follow_redirects=False)
             ai_config = client.get("/ui/ai-config", follow_redirects=False)
             login = client.get("/login")
 
@@ -149,66 +115,157 @@ class TestDashboardUI(unittest.TestCase):
         self.assertEqual(root.headers["location"], "/login")
         self.assertEqual(ai.status_code, 303)
         self.assertEqual(ai.headers["location"], "/login")
+        self.assertEqual(ai_analysis.status_code, 303)
+        self.assertEqual(ai_analysis.headers["location"], "/login")
         self.assertEqual(ai_config.status_code, 303)
         self.assertEqual(ai_config.headers["location"], "/login")
         self.assertEqual(login.status_code, 200)
         self.assertIn("login", login.text.lower())
 
-    def test_ai_and_risk_views_render_in_node_smoke_test(self) -> None:
+    def test_ai_views_render_in_node_smoke_test(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
         script = """
-import { renderAIView } from './aats/api/static/modules/views/ai-view.js';
-import { renderRiskView } from './aats/api/static/modules/views/risk-view.js';
+import { renderAIAnalysisView } from './aats/api/static/modules/views/ai-analysis-view.js';
+import { renderAIConfigView } from './aats/api/static/modules/views/ai-config-view.js';
+import { buildDecisionDrawer } from './aats/api/static/modules/detail-drawers.js';
 
-const aiHtml = renderAIView({
+const analysisHtml = renderAIAnalysisView({
+  session: { role: 'admin' },
+  blockerControl: {},
   aiOverview: {
     runtime: {
-      configured_operating_mode: 'baseline_only',
-      effective_operating_mode: 'baseline_only',
+      configured_operating_mode: 'ai_decision_maker_with_profile_control',
+      effective_operating_mode: 'ai_decision_maker_with_profile_control',
       provider_ready: true,
       shadow_mode_enabled: true,
+      manual_override_active: false,
+      manual_override_default_freeze_seconds: 3600,
+      execution_suggestion_mode: 'shadow_translation',
     },
-    shadow_summary: {},
-  },
-  aiRuntime: {
-    configured_operating_mode: 'baseline_only',
-    effective_operating_mode: 'baseline_only',
-    provider_ready: true,
-    shadow_mode_enabled: true,
+    latest_decision_outcome: {
+      decision_source: 'baseline_fallback',
+      final_action: 'hold',
+      final_target_qty: 0,
+      decision_authority: 'final_decision_with_profile_control',
+    },
+    shadow_summary: { window_count: 3, outperformed_rate: 0.66, status: 'healthy' },
+    downgrade_state: { provider_state: 'healthy', outcome_state: 'healthy' },
+    latest_execution_suggestion: {
+      configured_mode: 'shadow_translation',
+      status: 'healthy',
+      translation_present: true,
+      latest_translation: {
+        translation_preview: { execution_style: 'maker_bias', order_type: 'limit', time_in_force: 'IOC', limit_offset_bps: 3 },
+        rejection_reasons: [],
+        clipped_fields: [],
+        notes: [],
+      },
+    },
+    performance_view: {
+      report_count: 1,
+      status_counts: { healthy: 1 },
+      replay_context: { healthy_rate: 1, validation_count: 2, latest_validation: { validated_at: '2026-03-21T12:00:00Z', divergence_count: 0 } },
+      recent_reports: [],
+    },
   },
   aiLatest: {},
-  blockerControl: {},
-  errors: {},
+  aiRecent: { assessments: [] },
+  aiShadowRecent: { shadow_decisions: [] },
+  aiShadowEvaluations: { evaluations: [] },
+  profileControlSummary: {
+    control_summary: { safety_profile_required: false, evidence: { cold_start_active: true, closed_trades: 1, min_closed_trades: 6, replay_validations: 0, min_replay_validations: 5 } },
+    activation: { active_profile_id: 'trend_normal' },
+    active_revision: { profile_id: 'trend_normal', profile_label: '趋势标准' },
+    latest_selection_decision: {
+      blocked_reasons: ['strategy_profile_cold_start_lock_active'],
+      candidate_profile_id: 'trend_strict',
+      selection_reason_summary: 'raw backend summary should not appear',
+    },
+    latest_optimization_report: { recommended_profile_id: 'trend_strict', score_delta_vs_active: 1.2, notes: ['replay_history_neutralized'] },
+  },
 });
 
-const riskHtml = renderRiskView({
-  health: { runtime_state: 'halted' },
-  systemRecovery: {
-    recovery: {
-      halted: true,
-      resume_eligible: false,
-      safe_to_trade: false,
-      review_required: true,
-      resume_blocked_reasons: ['ai_degraded_requires_manual_review'],
+const configHtml = renderAIConfigView({
+  session: { role: 'admin' },
+  aiRuntime: {
+    configured_operating_mode: 'ai_decision_maker_with_profile_control',
+    effective_operating_mode: 'ai_decision_maker_with_profile_control',
+    manual_override_active: false,
+    manual_override_default_freeze_seconds: 3600,
+    shadow_mode_enabled: true,
+    execution_suggestion_mode: 'shadow_translation',
+    strategy_profile_auto_control_effective: false,
+  },
+  summary: {
+    ai: {
+      effective_operating_mode: 'ai_decision_maker_with_profile_control',
+      configured_operating_mode: 'ai_decision_maker_with_profile_control',
+      shadow_mode_enabled: true,
+      execution_suggestion_mode: 'shadow_translation',
+      shadow_summary: { window_count: 3, outperformed_rate: 0.66 },
+      latest_profile_control_decision: {
+        applied: false,
+        blocked_reasons: ['strategy_profile_auto_switch_frozen'],
+        frozen_by_admin_override: true,
+        freeze_until: '2026-03-21T12:30:00Z',
+      },
+    },
+    runtime_profile: {
+      profile_source: 'env_fallback',
+      current_runtime_payload: {
+        default_symbol: 'BTC-USDT-SWAP',
+        allowed_symbols: ['BTC-USDT-SWAP'],
+        trading_product_type: 'derivatives',
+        margin_mode: 'cross',
+        default_order_qty: 0.01,
+        max_notional_per_symbol: 8000,
+      },
+    },
+    strategy_profile: {
+      activation: { active_profile_id: 'trend_normal' },
+      active_revision: { profile_id: 'trend_normal', profile_label: '趋势标准' },
+      latest_selection_decision: { blocked_reasons: ['strategy_profile_auto_switch_frozen'] },
+      latest_optimization_report: { recommended_profile_id: 'trend_strict', score_delta_vs_active: 0.6, notes: ['replay_history_neutralized'] },
+      activation_history: [],
     },
   },
-  blockerControl: {
-    blockers: [],
-    secondary_blockers: [],
-    next_step_summary: '请先完成 AI 复核。',
+});
+
+const drawer = buildDecisionDrawer({
+  decision_id: 'dec-1',
+  decision_context: { symbol: 'BTC-USDT-SWAP', current_position_qty: 0 },
+  position_target: { position_intent: 'hold', current_position_qty: 0, target_position_qty: 0 },
+  policy_decision: { execution_allowed: true },
+  risk_decision: { approved: true },
+  decision_outcome: {
+    decision_source: 'baseline_fallback',
+    decision_authority: 'final_decision_with_profile_control',
+    decision_blocked_reasons: ['ai_confidence_below_threshold'],
   },
-  metrics: {},
-  portfolio: { portfolio: {} },
-  accountState: {},
-  reconciliationLatest: {},
-  replayStatus: {},
-  uiHints: {},
+  ai_decision_audit: {
+    configured_mode: 'ai_decision_maker_with_profile_control',
+    assessment_operating_mode: 'ai_decision_maker_with_profile_control',
+    decision_source: 'baseline_fallback',
+    decision_authority: 'final_decision_with_profile_control',
+  },
 });
 
 console.log(JSON.stringify({
-  aiHasHero: aiHtml.includes('AI 状态概览'),
-  riskHasHero: riskHtml.includes('风险与恢复'),
-  riskHasBlockerPanel: riskHtml.includes('第一优先级阻断处置'),
+  analysisHasRuntimeSummary: analysisHtml.includes('AI 状态概览'),
+  analysisHasDecisionChain: analysisHtml.includes('决策链概览'),
+  analysisUsesStrategyShadowName: analysisHtml.includes('策略层 shadow'),
+  analysisUsesExecutionShadowName: analysisHtml.includes('执行层 shadow'),
+  analysisNoTopNavButtons: !analysisHtml.includes('前往 AI 工作台') && !analysisHtml.includes('前往 AI 配置'),
+  configHasRuntimeModeCard: configHtml.includes('运行模式切换'),
+  configHasAutoProfileControlCard: configHtml.includes('自动换档控制'),
+  configHasManualProfileCard: configHtml.includes('策略档位切换'),
+  configHasRuntimeParams: configHtml.includes('运行参数概览'),
+  configHasStrategyShadow: configHtml.includes('策略层 shadow'),
+  configHasExecutionShadow: configHtml.includes('执行层 shadow'),
+  configHasRestoreAutoSwitch: configHtml.includes('恢复自动切档'),
+  configNoJumpButtons: !configHtml.includes('前往 AI 工作台') && !configHtml.includes('查看 AI 分析'),
+  drawerExplainsFallback: drawer.body.includes('当前运行模式允许 AI 参与'),
+  drawerUsesHumanDecisionSource: drawer.body.includes('本轮最终回退到基础策略'),
 }));
 """
         result = subprocess.run(
@@ -219,9 +276,21 @@ console.log(JSON.stringify({
             check=False,
         )
         self.assertEqual(result.returncode, 0, msg=result.stderr)
-        self.assertIn('"aiHasHero":true', result.stdout)
-        self.assertIn('"riskHasHero":true', result.stdout)
-        self.assertIn('"riskHasBlockerPanel":true', result.stdout)
+        self.assertIn('"analysisHasRuntimeSummary":true', result.stdout)
+        self.assertIn('"analysisHasDecisionChain":true', result.stdout)
+        self.assertIn('"analysisUsesStrategyShadowName":true', result.stdout)
+        self.assertIn('"analysisUsesExecutionShadowName":true', result.stdout)
+        self.assertIn('"analysisNoTopNavButtons":true', result.stdout)
+        self.assertIn('"configHasRuntimeModeCard":true', result.stdout)
+        self.assertIn('"configHasAutoProfileControlCard":true', result.stdout)
+        self.assertIn('"configHasManualProfileCard":true', result.stdout)
+        self.assertIn('"configHasRuntimeParams":true', result.stdout)
+        self.assertIn('"configHasStrategyShadow":true', result.stdout)
+        self.assertIn('"configHasExecutionShadow":true', result.stdout)
+        self.assertIn('"configHasRestoreAutoSwitch":true', result.stdout)
+        self.assertIn('"configNoJumpButtons":true', result.stdout)
+        self.assertIn('"drawerExplainsFallback":true', result.stdout)
+        self.assertIn('"drawerUsesHumanDecisionSource":true', result.stdout)
 
 
 if __name__ == "__main__":

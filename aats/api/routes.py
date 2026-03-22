@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
@@ -47,6 +47,20 @@ class BlockerActionRequest(BaseModel):
     reason: str | None = None
 
 
+class ScalingReviewRequest(BaseModel):
+    verdict: Literal[
+        "approve_scale_up",
+        "continue_small_capital",
+        "shrink_trial",
+        "pause_trial",
+    ]
+    reason: str = "ui_capital_scale_review"
+
+
+class TrialReviewRecordRequest(BaseModel):
+    reason: str = "ui_trial_review_snapshot"
+
+
 def _runtime(request: Request) -> ApplicationRuntime:
     return cast(ApplicationRuntime, request.app.state.runtime)
 
@@ -70,6 +84,13 @@ async def system_health(request: Request) -> dict[str, Any]:
         "portfolio_snapshot_repairs": operator_metrics.get("portfolio_snapshot_repair_count", 0),
         "fills_without_snapshot": operator_metrics.get("fill_without_snapshot_count", 0),
         "snapshots_without_reconciliation": operator_metrics.get("snapshot_without_reconciliation_count", 0),
+        "phase1_shadow_status": operator_metrics.get("phase1_shadow", {}).get("status"),
+        "phase1_shadow_failure_count": operator_metrics.get("phase1_shadow_failure_count", 0),
+        "phase1_shadow_alert_count": operator_metrics.get("phase1_shadow_alert_count", 0),
+        "phase1_shadow_recovery_count": operator_metrics.get("phase1_shadow_recovery_count", 0),
+        "phase1_shadow_order_backlog": operator_metrics.get("phase1_shadow_order_backlog"),
+        "phase1_shadow_fill_backlog": operator_metrics.get("phase1_shadow_fill_backlog"),
+        "phase1_shadow_obligation_backlog": operator_metrics.get("phase1_shadow_obligation_backlog"),
     }
     return health
 
@@ -112,6 +133,20 @@ async def system_blocker_history(
 @router.get("/system/metrics")
 async def system_metrics(request: Request) -> dict[str, Any]:
     return _query(request).metrics()
+
+
+@router.get("/system/shadow")
+async def system_shadow(request: Request) -> dict[str, Any]:
+    return _query(request).phase1_shadow()
+
+
+@router.get("/system/shadow/history")
+async def system_shadow_history(
+    request: Request,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0, le=5000),
+) -> dict[str, Any]:
+    return _query(request).phase1_shadow_history(limit=limit, offset=offset)
 
 
 @router.post("/system/mode")
@@ -237,6 +272,7 @@ async def system_blocker_action(
         "accept-rebaseline": "blocker_accept_rebaseline",
         "resume-system": "blocker_resume_system",
         "halt-system": "blocker_keep_halted",
+        "acknowledge-phase1-shadow": "blocker_phase1_shadow_review",
         "ai-review-restore": "blocker_ai_review_restore",
         "ai-review-degrade-to-baseline": "blocker_ai_review_degrade_to_baseline",
     }
@@ -400,6 +436,11 @@ async def account_state(request: Request) -> dict[str, Any]:
     return _query(request).account_state()
 
 
+@router.get("/system/trial-guard")
+async def system_trial_guard(request: Request) -> dict[str, Any]:
+    return _query(request).trial_guard()
+
+
 @router.get("/account/open-orders")
 async def account_open_orders(request: Request) -> dict[str, Any]:
     return _query(request).account_open_orders()
@@ -426,6 +467,8 @@ async def open_orders(request: Request) -> dict[str, Any]:
 @router.get("/orders/latest")
 async def latest_order(request: Request) -> dict[str, Any]:
     order = _query(request).latest_order()
+    if isinstance(order, dict):
+        return {"order": order}
     return {"order": order.model_dump(mode="json") if order is not None else None}
 
 
@@ -515,7 +558,7 @@ async def latest_fill(request: Request) -> dict[str, Any]:
     exchange = _runtime(request).account_service.latest_snapshot()
     exchange_fill = exchange.fills[0] if exchange is not None and exchange.fills else None
     return {
-        "local_fill": local_fill.model_dump(mode="json") if local_fill is not None else None,
+        "local_fill": local_fill if isinstance(local_fill, dict) else local_fill.model_dump(mode="json") if local_fill is not None else None,
         "exchange_fill": exchange_fill.model_dump(mode="json") if exchange_fill is not None else None,
     }
 
@@ -546,6 +589,123 @@ async def latest_execution(request: Request) -> dict[str, Any]:
 @router.get("/execution/errors")
 async def execution_errors(request: Request) -> dict[str, Any]:
     return _query(request).execution_errors()
+
+
+@router.get("/reports/execution-quality")
+async def execution_quality_report(
+    request: Request,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0, le=5000),
+) -> dict[str, Any]:
+    return _query(request).execution_quality_report(limit=limit, offset=offset)
+
+
+@router.get("/reports/profitability-overview")
+async def profitability_overview(
+    request: Request,
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, Any]:
+    return _query(request).profitability_overview(limit=limit)
+
+
+@router.get("/reports/strategy-segments")
+async def strategy_segment_report(
+    request: Request,
+    limit: int = Query(default=200, ge=1, le=1000),
+    group_by: str = Query(default="symbol,market_regime,side,execution_action"),
+) -> dict[str, Any]:
+    dimensions = tuple(item.strip() for item in group_by.split(",") if item.strip())
+    return _query(request).strategy_segment_report(limit=limit, group_by=dimensions)
+
+
+@router.get("/reports/execution-anomalies")
+async def execution_anomaly_report(
+    request: Request,
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, Any]:
+    return _query(request).execution_anomaly_report(limit=limit)
+
+
+@router.get("/reports/forward-validation")
+async def forward_validation_report(
+    request: Request,
+    window_days: int = Query(default=7, ge=1, le=90),
+    period_count: int = Query(default=4, ge=1, le=12),
+) -> dict[str, Any]:
+    return _query(request).forward_validation_report(window_days=window_days, period_count=period_count)
+
+
+@router.get("/reports/scaling-readiness")
+async def scaling_readiness_report(
+    request: Request,
+    window_days: int = Query(default=7, ge=1, le=90),
+    period_count: int = Query(default=4, ge=1, le=12),
+) -> dict[str, Any]:
+    return _query(request).scaling_readiness_report(window_days=window_days, period_count=period_count)
+
+
+@router.get("/reports/trial-review-packet")
+async def trial_review_packet(
+    request: Request,
+    profitability_limit: int = Query(default=100, ge=1, le=500),
+    anomaly_limit: int = Query(default=100, ge=1, le=500),
+    segment_limit: int = Query(default=100, ge=1, le=500),
+    window_days: int = Query(default=7, ge=1, le=90),
+    period_count: int = Query(default=4, ge=1, le=12),
+) -> dict[str, Any]:
+    return _query(request).trial_review_packet(
+        profitability_limit=profitability_limit,
+        anomaly_limit=anomaly_limit,
+        segment_limit=segment_limit,
+        window_days=window_days,
+        period_count=period_count,
+    )
+
+
+@router.get("/reports/trial-review-history")
+async def trial_review_history(
+    request: Request,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0, le=5000),
+) -> dict[str, Any]:
+    return _query(request).trial_review_history(limit=limit, offset=offset)
+
+
+@router.get("/reports/profile-control-summary")
+async def profile_control_summary_report(request: Request) -> dict[str, Any]:
+    return _query(request).profile_control_summary_report()
+
+
+@router.post("/system/scaling-review")
+async def system_scaling_review(
+    request: Request,
+    payload: ScalingReviewRequest,
+    principal: OperatorPrincipal = Depends(require_admin_access),
+) -> dict[str, Any]:
+    try:
+        return _query(request).record_capital_scale_review(
+            verdict=payload.verdict,
+            reason=payload.reason,
+            actor_role=principal.role,
+            actor_identity=principal.identity,
+            auth_source=principal.auth_source,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/system/trial-review/record")
+async def system_trial_review_record(
+    request: Request,
+    payload: TrialReviewRecordRequest | None = None,
+    principal: OperatorPrincipal = Depends(require_admin_access),
+) -> dict[str, Any]:
+    return _query(request).record_trial_review_snapshot(
+        reason=payload.reason if payload is not None else "ui_trial_review_snapshot",
+        actor_role=principal.role,
+        actor_identity=principal.identity,
+        auth_source=principal.auth_source,
+    )
 
 
 @router.get("/reconciliation/latest")

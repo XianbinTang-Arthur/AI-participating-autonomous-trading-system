@@ -66,6 +66,7 @@ class AIInferenceService:
         self._outcome_degradation_reason = ""
         self._outcome_bad_window_streak = 0
         self._manual_operating_mode_override: CanonicalAIOperatingMode | None = None
+        self._manual_operating_mode_freeze_until: datetime | None = None
         self._review_resolution: str | None = None
         self._last_provider_degraded_at: datetime | None = None
         self._last_provider_recovered_at: datetime | None = None
@@ -341,6 +342,7 @@ class AIInferenceService:
         await self.evaluator.handle_reconciliation_report(message)
 
     def status(self) -> dict[str, object]:
+        self._expire_manual_operating_mode_override_if_needed()
         recent_assessments = self.evaluator.assessments_recent(limit=25)
         fallback_ratio = 0.0
         if recent_assessments:
@@ -395,6 +397,8 @@ class AIInferenceService:
             "canonical_effective_operating_mode": self.canonical_effective_operating_mode(),
             "manual_override_mode": self._manual_operating_mode_override,
             "manual_override_active": self._manual_operating_mode_override is not None,
+            "manual_override_freeze_until": self._manual_operating_mode_freeze_until,
+            "manual_override_default_freeze_seconds": self.settings.ai_manual_operating_mode_override_freeze_seconds,
             "review_resolution": self._review_resolution,
             "provider": self.settings.ai_provider,
             "configured": self.settings.ai_provider_configured,
@@ -586,7 +590,82 @@ class AIInferenceService:
             return OpenAIProvider(settings=self.settings)
         return None
 
+    def _clear_manual_operating_mode_override(
+        self,
+        *,
+        reason_code: str,
+        review_resolution: str,
+        persist_event: bool,
+    ) -> None:
+        if self._manual_operating_mode_override is None and self._manual_operating_mode_freeze_until is None:
+            return
+        self._manual_operating_mode_override = None
+        self._manual_operating_mode_freeze_until = None
+        self._review_resolution = review_resolution
+        if persist_event:
+            self._append_degradation_event(
+                reason_code=reason_code,
+                review_resolution=review_resolution,
+            )
+
+    def _expire_manual_operating_mode_override_if_needed(self) -> None:
+        if self._manual_operating_mode_override is None:
+            self._manual_operating_mode_freeze_until = None
+            return
+        if self._manual_operating_mode_freeze_until is None:
+            return
+        if self._manual_operating_mode_freeze_until > utc_now():
+            return
+        self._clear_manual_operating_mode_override(
+            reason_code="operator_manual_ai_mode_override_expired",
+            review_resolution="operator_manual_ai_mode_override_expired",
+            persist_event=True,
+        )
+
+    def set_manual_operating_mode_override(
+        self,
+        *,
+        mode: str,
+        freeze_seconds: float | None = None,
+    ) -> dict[str, object]:
+        allowed_modes = {
+            "baseline_only",
+            "ai_assisted",
+            "ai_decision_maker",
+            "ai_decision_maker_with_profile_control",
+        }
+        normalized_input = str(mode).strip()
+        if normalized_input not in allowed_modes:
+            raise ValueError("invalid_ai_operating_mode")
+        normalized_mode = normalize_ai_operating_mode(normalized_input)
+        applied_freeze_seconds = (
+            freeze_seconds
+            if freeze_seconds is not None
+            else self.settings.ai_manual_operating_mode_override_freeze_seconds
+        )
+        self._manual_operating_mode_override = normalized_mode
+        self._manual_operating_mode_freeze_until = (
+            None
+            if applied_freeze_seconds <= 0
+            else utc_now() + timedelta(seconds=applied_freeze_seconds)
+        )
+        self._review_resolution = "operator_manual_ai_mode_override"
+        self._append_degradation_event(
+            reason_code="operator_manual_ai_mode_override",
+            review_resolution="operator_manual_ai_mode_override",
+        )
+        return self.status()
+
+    def clear_manual_operating_mode_override(self) -> dict[str, object]:
+        self._clear_manual_operating_mode_override(
+            reason_code="operator_manual_ai_mode_override_cleared",
+            review_resolution="operator_manual_ai_mode_override_cleared",
+            persist_event=True,
+        )
+        return self.status()
+
     def effective_operating_mode(self) -> str:
+        self._expire_manual_operating_mode_override_if_needed()
         if self._manual_operating_mode_override is not None:
             return self._manual_operating_mode_override
         if self._outcome_auto_downgraded:
@@ -640,6 +719,7 @@ class AIInferenceService:
                 or self._outcome_auto_downgraded
             ),
             manual_override_mode=self._manual_operating_mode_override,
+            manual_override_freeze_until=self._manual_operating_mode_freeze_until,
             review_resolution=review_resolution or self._review_resolution,
             reason_code=reason_code,
             consecutive_failures=self._consecutive_failures,
@@ -664,6 +744,7 @@ class AIInferenceService:
         self._outcome_review_required = bool(payload.get("outcome_review_required", False))
         self._outcome_auto_downgraded = bool(payload.get("auto_downgrade_active", False)) and self._outcome_review_required
         self._manual_operating_mode_override = normalize_ai_operating_mode(payload.get("manual_override_mode")) if payload.get("manual_override_mode") else None
+        self._manual_operating_mode_freeze_until = self._parse_event_datetime(payload.get("manual_override_freeze_until"))
         self._review_resolution = str(payload.get("review_resolution") or "") or None
         self._degradation_reason = str(payload.get("reason_code") or "") if self._degraded else ""
         self._outcome_degradation_reason = (
@@ -749,6 +830,7 @@ class AIInferenceService:
         self._outcome_degradation_reason = ""
         self._outcome_bad_window_streak = 0
         self._manual_operating_mode_override = None
+        self._manual_operating_mode_freeze_until = None
         self._review_resolution = "operator_restore_ai"
         self._last_outcome_recovered_at = utc_now()
         if had_review:
@@ -764,6 +846,7 @@ class AIInferenceService:
         self._outcome_degradation_reason = ""
         self._outcome_bad_window_streak = 0
         self._manual_operating_mode_override = "baseline_only"
+        self._manual_operating_mode_freeze_until = None
         self._review_resolution = "operator_degrade_to_baseline"
         self._last_outcome_recovered_at = utc_now()
         self._append_degradation_event(

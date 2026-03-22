@@ -14,7 +14,7 @@
       <a class="workspace-link" data-view="strategy" href="/ui/strategy">策略判断</a>
       <a class="workspace-link" data-view="execution" href="/ui/execution">委托与成交</a>
       <a class="workspace-link" data-view="risk" href="/ui/risk">风险与恢复</a>
-      <a class="workspace-link" data-view="ai" href="/ui/ai">AI 工作台</a>
+      <a class="workspace-link" data-view="aiAnalysis" href="/ui/ai-analysis">AI 分析</a>
       <a class="workspace-link" data-view="aiConfig" href="/ui/ai-config">AI 配置</a>
       <a class="workspace-link" data-view="admin" href="/ui/settings">账户与权限</a>
     </nav>
@@ -63,9 +63,9 @@
                 </div>
               </div>
 
-              <div class="command-grid">
-                <button id="refreshButton" class="primary-button">刷新数据</button>
-                <button id="resumeButton" class="warning-button">恢复自动交易</button>
+              <div class="command-grid command-grid--home-actions">
+                <button id="refreshButton" class="primary-button">立即刷新</button>
+                <button id="resumeButton" class="warning-button">恢复运行</button>
                 <label class="toggle-pill toggle-pill--grid" for="autoRefreshToggle">
                   <input id="autoRefreshToggle" type="checkbox" checked>
                   <span class="toggle-pill__check" aria-hidden="true">✓</span>
@@ -74,7 +74,7 @@
                     <span>每 10 秒刷新一次</span>
                   </span>
                 </label>
-                <button id="haltButton" class="danger-button">暂停自动交易</button>
+                <button id="haltButton" class="danger-button">暂停运行</button>
               </div>
 
               <p id="actionPermissionHint" class="meta-copy">正在确认当前账号权限…</p>
@@ -101,8 +101,8 @@
         <div id="riskContent" class="view-layout"></div>
       </section>
 
-      <section class="workspace-view" data-view="ai">
-        <div id="aiContent" class="view-layout"></div>
+      <section class="workspace-view" data-view="aiAnalysis">
+        <div id="aiAnalysisContent" class="view-layout"></div>
       </section>
 
       <section class="workspace-view" data-view="aiConfig">

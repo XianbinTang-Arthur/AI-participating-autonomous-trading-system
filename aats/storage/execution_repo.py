@@ -36,6 +36,10 @@ class InMemoryExecutionRepository:
                 incoming_status=state.status,
                 reason=validation.reason,
             )
+            if validation.reason == "invalid_transition":
+                raise ValueError(
+                    f"invalid_order_state_transition current={None if current is None else current.status} next={state.status}"
+                )
         merged = self._state_machine.merge(current=current, incoming=state)
         if current is not None and current.client_order_id != merged.client_order_id:
             self._order_states_by_client_order_id.pop(current.client_order_id, None)

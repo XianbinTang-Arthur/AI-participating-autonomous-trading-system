@@ -29,6 +29,9 @@ class ReconciliationReport(SchemaBase):
     mismatch_reasons: list[str] = Field(default_factory=list)
     safety_impacts: list[str] = Field(default_factory=list)
     severity: str
+    recovery_classification: str | None = None
+    auto_repairable: bool = False
+    resume_blocking: bool = False
     review_required: bool = False
     recommended_operator_action: str | None = None
     remediation_action: str | None = None

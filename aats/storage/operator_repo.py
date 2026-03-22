@@ -45,3 +45,16 @@ class InMemoryOperatorUserRepository:
 
     def delete_user(self, username: str) -> bool:
         return self._users_by_username.pop(username, None) is not None
+
+    def bump_session_version(self, username: str, updated_at: datetime) -> OperatorUserRecord | None:
+        user = self._users_by_username.get(username)
+        if user is None:
+            return None
+        updated = user.model_copy(
+            update={
+                "session_version": user.session_version + 1,
+                "updated_at": updated_at,
+            }
+        )
+        self._users_by_username[username] = updated
+        return updated

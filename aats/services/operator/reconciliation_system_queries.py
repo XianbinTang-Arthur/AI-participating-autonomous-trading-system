@@ -146,14 +146,11 @@ class ReconciliationSystemQueryFacade:
         actor_identity: str | None = None,
         auth_source: AuthSource = "anonymous",
     ) -> dict[str, Any]:
-        order = next(
-            (item for item in self.owner._scoped_order_states() if item.client_order_id == client_order_id),
-            None,
-        )
+        order = self.owner._control_plane_order_state(client_order_id)
         if order is None:
             raise KeyError(f"order_not_found:{client_order_id}")
 
-        fills = self.owner._scoped_fills_for_order(client_order_id)
+        fills = self.owner._control_plane_fills_for_order(client_order_id)
         recovery_before = self.owner.recovery_view()["recovery_state"]
         exchange_snapshot = await self.owner._refresh_exchange_snapshot_for_resolution()
         resolution = self.owner._stuck_submission_resolution(
@@ -174,6 +171,7 @@ class ReconciliationSystemQueryFacade:
             }
         )
         persisted = self.owner.runtime.execution_repo.save_order_state(resolved_state)
+        self.owner._sync_execution_order_truth(persisted)
         if self.owner.runtime.audit_repo.get(persisted.decision_id) is not None:
             await publish_model(
                 bus=self.owner.runtime.bus,

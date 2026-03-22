@@ -73,6 +73,15 @@ def update_operator_user(
                 "role": next_role,
                 "enabled": next_enabled,
                 "password_hash": hash_password(password) if password is not None else existing.password_hash,
+                "session_version": existing.session_version + (
+                    1
+                    if (
+                        password is not None
+                        or next_role != existing.role
+                        or next_enabled != existing.enabled
+                    )
+                    else 0
+                ),
                 "updated_at": utc_now(),
             }
         )

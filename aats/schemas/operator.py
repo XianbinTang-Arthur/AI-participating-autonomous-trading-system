@@ -105,6 +105,7 @@ class OperatorUserRecord(SchemaBase):
     password_hash: str
     role: Literal["viewer", "operator", "admin"]
     enabled: bool = True
+    session_version: int = 1
     updated_at: datetime = Field(default_factory=utc_now)
     last_login_at: datetime | None = None
 
@@ -137,11 +138,17 @@ class OperatorActionRecord(SchemaBase):
         "strategy_profile_reject",
         "strategy_profile_activate_pending",
         "strategy_profile_manual_activate",
+        "strategy_profile_restore_auto",
         "strategy_profile_rollback",
         "strategy_profile_activation_policy",
         "ai_shadow_evaluate",
+        "ai_manual_mode_override",
+        "ai_manual_mode_restore_auto",
         "ai_review_restore",
         "ai_review_degrade_to_baseline",
+        "phase1_shadow_review",
+        "capital_scale_review",
+        "trial_review_snapshot",
     ]
     actor_role: OperatorRole
     actor_identity: str | None = None

@@ -147,7 +147,7 @@ Operator/UI impact
 - Later UI and diagnostics can become more precise because scope is now first-class in storage.
 
 Rollout Steps
-1. Apply migration `migrations/0005_storage_scope_columns.sql`
+1. Apply the current PostgreSQL baseline migration under `migrations/0001_postgres_latest_schema.sql`
 2. Restart service
 3. Verify:
   - startup succeeds

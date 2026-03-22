@@ -18,6 +18,7 @@ from aats.api.auth import (
 )
 from aats.api.session_auth import issue_session_token
 from aats.bootstrap.config import ApplicationRuntime
+from aats.schemas.common import utc_now
 from aats.services.operator.query_service import OperatorQueryService
 
 
@@ -58,6 +59,19 @@ class StageRuntimeProfileRequest(BaseModel):
 
 class StrategyProfileManualActivateRequest(BaseModel):
     reason: str = "manual_activate_strategy_profile"
+
+
+class StrategyProfileManualRestoreRequest(BaseModel):
+    reason: str = "manual_restore_auto_strategy_profile_control"
+
+
+class AIManualOperatingModeOverrideRequest(BaseModel):
+    mode: str
+    reason: str = "manual_override_ai_operating_mode"
+
+
+class AIManualOperatingModeRestoreRequest(BaseModel):
+    reason: str = "manual_restore_auto_ai_operating_mode"
 
 
 def _runtime(request: Request) -> ApplicationRuntime:
@@ -124,12 +138,20 @@ async def auth_login(request: Request, payload: LoginRequest, response: Response
     principal = authenticate_operator_user(runtime, username=payload.username, password=payload.password)
     if principal is None:
         raise HTTPException(status_code=401, detail="operator_login_failed")
+    user = runtime.operator_repo.get_by_username(payload.username)
+    if user is None:
+        raise HTTPException(status_code=401, detail="operator_login_failed")
     _query(request).record_operator_login(
         actor_identity=principal.identity or payload.username,
         actor_role=principal.role,
         auth_source="session",
     )
-    token = issue_session_token(settings=settings, identity=principal.identity or payload.username, role=principal.role)
+    token = issue_session_token(
+        settings=settings,
+        identity=principal.identity or payload.username,
+        role=principal.role,
+        session_version=user.session_version,
+    )
     response.set_cookie(
         key=settings.operator_session_cookie_name,
         value=token,
@@ -149,7 +171,13 @@ async def auth_login(request: Request, payload: LoginRequest, response: Response
 
 @auth_router.post("/auth/logout")
 async def auth_logout(request: Request, response: Response) -> dict[str, Any]:
+    runtime = _runtime(request)
     settings = _runtime(request).settings
+    principal = session_principal(request)
+    if principal is not None and hasattr(runtime, "operator_repo"):
+        bump = getattr(runtime.operator_repo, "bump_session_version", None)
+        if callable(bump):
+            bump(principal.identity or "", utc_now())
     response.delete_cookie(settings.operator_session_cookie_name, path="/")
     return {"authenticated": False, "status": "logged_out"}
 
@@ -355,6 +383,55 @@ async def activate_strategy_profile(
         if detail == "strategy_profile_profile_not_found":
             raise HTTPException(status_code=404, detail=detail) from exc
         raise HTTPException(status_code=409, detail=detail) from exc
+
+
+@auth_router.post("/strategy-profiles/restore-auto")
+async def restore_strategy_profile_auto(
+    request: Request,
+    payload: StrategyProfileManualRestoreRequest | None = None,
+    principal: OperatorPrincipal = Depends(require_admin_access),
+) -> dict[str, Any]:
+    try:
+        return _query(request).restore_strategy_profile_auto(
+            reason=payload.reason if payload is not None else "manual_restore_auto_strategy_profile_control",
+            actor_role=principal.role,
+            actor_identity=principal.identity,
+            auth_source=principal.auth_source,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@auth_router.post("/ai/operating-mode/override")
+async def override_ai_operating_mode(
+    request: Request,
+    payload: AIManualOperatingModeOverrideRequest,
+    principal: OperatorPrincipal = Depends(require_admin_access),
+) -> dict[str, Any]:
+    try:
+        return _query(request).set_ai_operating_mode_override(
+            mode=payload.mode,
+            reason=payload.reason,
+            actor_role=principal.role,
+            actor_identity=principal.identity,
+            auth_source=principal.auth_source,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@auth_router.post("/ai/operating-mode/restore-auto")
+async def restore_ai_operating_mode_auto(
+    request: Request,
+    payload: AIManualOperatingModeRestoreRequest | None = None,
+    principal: OperatorPrincipal = Depends(require_admin_access),
+) -> dict[str, Any]:
+    return _query(request).clear_ai_operating_mode_override(
+        reason=payload.reason if payload is not None else "manual_restore_auto_ai_operating_mode",
+        actor_role=principal.role,
+        actor_identity=principal.identity,
+        auth_source=principal.auth_source,
+    )
 
 
 @auth_router.post("/auth/users")

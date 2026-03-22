@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import unittest
 from datetime import timedelta
+from decimal import Decimal
 
 from aats.bootstrap.settings import AATSSettings
 from aats.bus.memory_bus import InMemoryEventBus
 from aats.events import topics
 from aats.events.envelopes import build_envelope
 from aats.schemas.ai_shadow import AIDegradationEvent
-from aats.schemas.common import utc_now
+from aats.schemas.common import dump_payload_exact, utc_now
 from aats.schemas.execution import OrderIntent, OrderState
 from aats.schemas.operator import ProcessingFailureRecord
 from aats.services.ai_service.inference import AIInferenceService
@@ -26,6 +27,7 @@ from aats.services.reconciliation_service.fetcher import ExchangeStateFetcher
 from aats.services.reconciliation_service.repair import ReconciliationRepairService, ReconciliationService
 from aats.storage.event_store import InMemoryEventStore
 from aats.storage.execution_repo import InMemoryExecutionRepository
+from aats.storage.fill_outcome_repo import InMemoryFillOutcomeRepository
 from aats.storage.portfolio_repo import InMemoryPortfolioRepository
 from aats.storage.reconciliation_repo import InMemoryReconciliationRepository
 from aats.schemas.execution import FillEvent
@@ -105,6 +107,44 @@ class TestRound2SafetyRegressions(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(merged.status, "FILLED")
         self.assertTrue(any("order_state_transition_rejected" in entry for entry in logs.output))
+
+    def test_invalid_order_state_transition_is_rejected(self) -> None:
+        repo = InMemoryExecutionRepository()
+        submitted = OrderState(
+            decision_id="decision_transition_invalid_round2",
+            intent_id="intent_transition_invalid_round2",
+            symbol="BTC-USDT",
+            client_order_id="clord_transition_invalid_round2",
+            venue="OKX",
+            exchange_order_id="ord_transition_invalid_round2",
+            status="SUBMITTED",
+            submission_mode="guarded_simulated_submit",
+            submitted_ts=utc_now(),
+            last_update_ts=utc_now(),
+            requested_qty=1.0,
+            filled_qty=0.0,
+            remaining_qty=1.0,
+            average_fill_price=None,
+            fees=0.0,
+        )
+        blocked = submitted.model_copy(update={"status": "BLOCKED"})
+
+        repo.save_order_state(submitted)
+        with self.assertRaises(ValueError):
+            repo.save_order_state(blocked)
+
+    def test_dump_payload_exact_preserves_decimal_precision(self) -> None:
+        payload = dump_payload_exact(
+            {
+                "qty": Decimal("0.123456789123456789"),
+                "price": Decimal("1.000000000000000001"),
+                "nested": [Decimal("0.000000000000000019")],
+            }
+        )
+
+        self.assertEqual(payload["qty"], "0.123456789123456789")
+        self.assertEqual(payload["price"], "1.000000000000000001")
+        self.assertEqual(payload["nested"][0], "0.000000000000000019")
 
     def test_ai_service_restores_degraded_state_from_durable_event(self) -> None:
         event_store = InMemoryEventStore()
@@ -217,6 +257,7 @@ class TestRound2SafetyRegressions(unittest.IsolatedAsyncioTestCase):
             state=PortfolioState(initial_usdt_balance=1_000.0),
             snapshot_builder=PortfolioSnapshotBuilder(pnl_calculator=PortfolioPnLCalculator()),
             portfolio_repo=InMemoryPortfolioRepository(),
+            fill_outcome_repo=InMemoryFillOutcomeRepository(),
             price_provider=lambda _symbol: 100.0,
         )
         fill = FillEvent(
@@ -254,7 +295,7 @@ class TestRound2SafetyRegressions(unittest.IsolatedAsyncioTestCase):
         delta_event = event_store.latest(topics.PORTFOLIO_BALANCE_DELTAS, key="BTC-USDT")
         self.assertIsNotNone(delta_event)
         self.assertEqual(delta_event.payload["fill_id"], "fill_balance_delta_round2")
-        self.assertEqual(str(delta_event.payload["balance_deltas"]["USDT"]), "-100.5")
+        self.assertEqual(str(delta_event.payload["balance_deltas"]["USDT"]), "-100.50")
         self.assertEqual(str(delta_event.payload["balance_deltas"]["BTC"]), "1.0")
 
 

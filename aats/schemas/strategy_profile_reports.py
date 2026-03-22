@@ -21,6 +21,8 @@ class StrategyProfileOptimizationCandidate(SchemaBase):
     recommendation_strength: float = 0.0
     offline_replay_score: float = 0.0
     offline_replay_breakdown: dict[str, Any] = Field(default_factory=dict)
+    selection_eligible: bool = True
+    selection_blocked_reasons: list[str] = Field(default_factory=list)
     reasons: list[str] = Field(default_factory=list)
     evaluation_refs: list[str] = Field(default_factory=list)
     metrics: dict[str, Any] = Field(default_factory=dict)
@@ -44,6 +46,7 @@ class StrategyProfileOptimizationReport(SchemaBase):
     replay_summary: dict[str, Any] = Field(default_factory=dict)
     offline_replay_pipeline: dict[str, Any] = Field(default_factory=dict)
     ai_performance_summary: dict[str, Any] = Field(default_factory=dict)
+    control_summary: dict[str, Any] = Field(default_factory=dict)
     winner_selection_policy: dict[str, Any] = Field(default_factory=dict)
     version_experiments: list[dict[str, Any]] = Field(default_factory=list)
     candidates: list[StrategyProfileOptimizationCandidate] = Field(default_factory=list)

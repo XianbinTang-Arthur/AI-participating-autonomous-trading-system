@@ -98,6 +98,38 @@ class TestRuntimeControls(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(len(runtime.execution_repo.order_states()), 1)
         self.assertGreaterEqual(len(runtime.execution_repo.fills()), 1)
 
+    async def test_halt_blocks_background_decision_cycles(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "config_profile": "local_demo",
+                "mode": "paper_live",
+                "market_data_backend": "demo",
+                "execution_backend": "paper",
+                "account_backend": "disabled",
+                "account_read_enabled": False,
+                "storage_mode": "memory",
+                "event_persistence_mode": "strict",
+                "enabled_decision_timeframes": ("15m",),
+                "decision_min_interval_seconds_15m": 0.0,
+                "decision_min_price_move_bps": 0.0,
+                "decision_min_momentum_delta": 0.0,
+            }
+        )
+        runtime = await build_runtime(settings)
+
+        runtime.kill_switch.halt("test_halt_background_cycles")
+        targets_before = len(runtime.event_store.by_topic(topics.POSITION_TARGETS))
+        outcomes_before = len(runtime.event_store.by_topic(topics.DECISION_OUTCOMES))
+
+        await runtime.market_gateway.run_local_publisher(
+            symbol=settings.default_symbol,
+            iterations=3,
+            interval_seconds=0.0,
+        )
+
+        self.assertEqual(len(runtime.event_store.by_topic(topics.POSITION_TARGETS)), targets_before)
+        self.assertEqual(len(runtime.event_store.by_topic(topics.DECISION_OUTCOMES)), outcomes_before)
+
     async def test_background_reconciliation_refresh_keeps_reports_current(self) -> None:
         settings = AATSSettings.model_validate(
             {

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from aats.schemas.blocker_control import BlockerActionExecutionResult
 
@@ -62,6 +62,14 @@ class BlockerActionService:
                 auth_source=auth_source,
             )
             message = "系统会继续保持暂停状态。"
+        elif action_id == "acknowledge-phase1-shadow":
+            self.owner.record_phase1_shadow_review(
+                reason=reason,
+                actor_role=actor_role,
+                actor_identity=actor_identity,
+                auth_source=auth_source,
+            )
+            message = "已记录影子兼容层人工核查结果，当前阻断会继续保留，直到兼容层恢复正常。"
         elif action_id == "ai-review-restore":
             self.owner.ai_review_restore(
                 reason=reason,

@@ -33,6 +33,11 @@ from aats.services.execution_engine.baseline_import import AccountBaselineImport
 from aats.services.execution_engine.obligations import ExecutionObligationService
 from aats.services.execution_engine.recovery import ExecutionRecoveryService
 from aats.services.execution_engine.okx_rest import OKXRESTClient
+from aats.services.execution_control.command_service import ExecutionCommandProcessor
+from aats.services.execution_control.monitor import Phase1ShadowMonitor
+from aats.services.execution_control.order_service import ExecutionOrderService
+from aats.services.execution_control.shadow import Phase1ExecutionShadowService
+from aats.services.execution_control.subsystem import Phase1ShadowSubsystem
 from aats.services.execution_engine.order_manager import OrderManager
 from aats.services.execution_engine.outbox import PostgresExecutionOutboxPublisher
 from aats.services.execution_engine.paper_adapter import PaperExecutionAdapter
@@ -52,14 +57,22 @@ from aats.services.governance_engine.runtime_layers import (
     RuntimeProfile,
     resolve_runtime_layering,
 )
+from aats.services.governance_engine.trial_guard import ForwardTrialGuardService
 from aats.services.market_gateway.gateway import MarketDataGateway
 from aats.services.market_gateway.normalizer import MarketSnapshotNormalizer
 from aats.services.market_gateway.okx_websocket import OKXPublicWebSocketClient
 from aats.services.market_gateway.publisher import MarketSnapshotPublisher
 from aats.services.operator.accounts import enabled_admin_count
+from aats.services.ledger.posting import Phase1LedgerMirrorService
+from aats.services.ledger.lot_projection import LotBasedProjectionBuilder
+from aats.services.ledger.persistent_lot_book import PersistentLotBookService
+from aats.services.ledger.settlement_posting import LedgerSettlementPostingService
 from aats.services.operator.runtime_profiles import runtime_profile_resolution
 from aats.services.operator.strategy_profiles import StrategyProfileControlService, seed_strategy_profiles
+from aats.services.projections.ledger_portfolio import LedgerBackedPortfolioService
+from aats.services.recovery_control import ExecutionLedgerRecoveryService, RecoveryReconciliationClassifier
 from aats.services.runtime_scope import latest_matching_snapshot, runtime_state_scope, scoped_portfolio_event
+from aats.schemas.portfolio import FillOutcomeRecord, PortfolioBalanceDelta
 from aats.services.portfolio_service.pnl import PortfolioPnLCalculator
 from aats.services.portfolio_service.positions import PortfolioService, PortfolioState
 from aats.services.portfolio_service.reconstruction import PortfolioReconstructionService
@@ -72,6 +85,7 @@ from aats.storage.audit_repo_postgres import PostgresAuditRepository
 from aats.storage.base import (
     AuditRepository,
     EventStore,
+    FillOutcomeRepository,
     ExecutionRepository,
     ExecutionObligationRepository,
     OperatorUserRepository,
@@ -82,7 +96,25 @@ from aats.storage.base import (
 from aats.storage.event_store import InMemoryEventStore
 from aats.storage.event_store_postgres import PostgresEventStore
 from aats.storage.execution_repo import InMemoryExecutionRepository
+from aats.storage.execution_repo_converged_postgres import ConvergedPostgresExecutionRepository
 from aats.storage.execution_repo_postgres import PostgresExecutionRepository
+from aats.storage.fill_outcome_repo import InMemoryFillOutcomeRepository
+from aats.storage.fill_outcome_repo_postgres import PostgresFillOutcomeRepository
+from aats.storage.command_outbox_repo_postgres import PostgresCommandOutboxRepositoryV2
+from aats.storage.execution_command_repo_postgres import PostgresExecutionCommandRepository
+from aats.storage.execution_fill_repo_v2_postgres import PostgresExecutionFillRepositoryV2
+from aats.storage.execution_order_repo_postgres import (
+    PostgresExecutionOrderHistoryRepository,
+    PostgresExecutionOrderRepository,
+)
+from aats.storage.inbox_repo_postgres import PostgresExternalInboxRepository
+from aats.storage.ledger_repo_postgres import (
+    PostgresLedgerAccountRepository,
+    PostgresLedgerEntryRepository,
+    PostgresLedgerJournalRepository,
+    PostgresSettlementRepository,
+)
+from aats.storage.lot_repo_postgres import PostgresLotEventRepository, PostgresPositionLotRepository
 from aats.storage.obligation_repo import InMemoryExecutionObligationRepository
 from aats.storage.obligation_repo_postgres import PostgresExecutionObligationRepository
 from aats.storage.outbox_repo_postgres import PostgresOutboxRepository
@@ -92,6 +124,7 @@ from aats.storage.portfolio_repo import InMemoryPortfolioRepository
 from aats.storage.portfolio_repo_postgres import PostgresPortfolioRepository
 from aats.storage.reconciliation_repo import InMemoryReconciliationRepository
 from aats.storage.reconciliation_repo_postgres import PostgresReconciliationRepository
+from aats.storage.reservation_repo_postgres import PostgresReservationRepository
 from aats.storage.runtime_profile_repo import InMemoryRuntimeProfileRepository
 from aats.storage.runtime_profile_repo_postgres import PostgresRuntimeProfileRepository
 from aats.storage.strategy_profile_repo import InMemoryStrategyProfileRepository
@@ -123,7 +156,14 @@ def load_yaml_config(environment: str, profile: str, config_dir: str | Path = "c
     return merged
 
 
-def resilient_subscription_handler(*, topic: str, name: str, handler, subscription_class: str = "observer"):
+def resilient_subscription_handler(
+    *,
+    topic: str,
+    name: str,
+    handler,
+    subscription_class: str = "observer",
+    raise_on_error: bool = False,
+):
     logger = get_logger("aats.event_bus")
 
     async def wrapped(message: dict) -> None:
@@ -144,6 +184,8 @@ def resilient_subscription_handler(*, topic: str, name: str, handler, subscripti
                 error_type=type(exc).__name__,
                 error=str(exc),
             )
+            if raise_on_error:
+                raise
 
     return wrapped
 
@@ -163,12 +205,29 @@ class StorageBackends:
     event_store: EventStore
     audit_repo: AuditRepository
     portfolio_repo: PortfolioRepository
+    fill_outcome_repo: FillOutcomeRepository
     execution_repo: ExecutionRepository
     obligation_repo: ExecutionObligationRepository
     reconciliation_repo: ReconciliationRepository
     operator_repo: OperatorUserRepository
     runtime_profile_repo: RuntimeProfileRepository
     strategy_profile_repo: StrategyProfileRepository
+    execution_order_repo: PostgresExecutionOrderRepository | None = None
+    execution_order_history_repo: PostgresExecutionOrderHistoryRepository | None = None
+    execution_command_repo: PostgresExecutionCommandRepository | None = None
+    execution_fill_repo_v2: PostgresExecutionFillRepositoryV2 | None = None
+    reservation_repo_v2: PostgresReservationRepository | None = None
+    ledger_account_repo: PostgresLedgerAccountRepository | None = None
+    ledger_journal_repo: PostgresLedgerJournalRepository | None = None
+    ledger_entry_repo: PostgresLedgerEntryRepository | None = None
+    settlement_repo: PostgresSettlementRepository | None = None
+    position_lot_repo: PostgresPositionLotRepository | None = None
+    lot_event_repo: PostgresLotEventRepository | None = None
+    external_inbox_repo: PostgresExternalInboxRepository | None = None
+    command_outbox_repo_v2: PostgresCommandOutboxRepositoryV2 | None = None
+    phase1_execution_shadow_service: Phase1ExecutionShadowService | None = None
+    phase1_ledger_mirror_service: Phase1LedgerMirrorService | None = None
+    phase1_shadow: Phase1ShadowSubsystem | None = None
     outbox_repo: PostgresOutboxRepository | None = None
     database_runtime: DatabaseRuntime | None = None
 
@@ -213,6 +272,7 @@ class ApplicationRuntime:
     metrics: MetricsRegistry
     audit_repo: AuditRepository
     portfolio_repo: PortfolioRepository
+    fill_outcome_repo: FillOutcomeRepository
     execution_repo: ExecutionRepository
     obligation_repo: ExecutionObligationRepository
     reconciliation_repo: ReconciliationRepository
@@ -220,6 +280,27 @@ class ApplicationRuntime:
     runtime_profile_repo: RuntimeProfileRepository
     strategy_profile_repo: StrategyProfileRepository
     recovery_status: RecoveryStatus
+    execution_order_repo: PostgresExecutionOrderRepository | None = None
+    execution_order_history_repo: PostgresExecutionOrderHistoryRepository | None = None
+    execution_command_repo: PostgresExecutionCommandRepository | None = None
+    execution_fill_repo_v2: PostgresExecutionFillRepositoryV2 | None = None
+    reservation_repo_v2: PostgresReservationRepository | None = None
+    ledger_account_repo: PostgresLedgerAccountRepository | None = None
+    ledger_journal_repo: PostgresLedgerJournalRepository | None = None
+    ledger_entry_repo: PostgresLedgerEntryRepository | None = None
+    settlement_repo: PostgresSettlementRepository | None = None
+    position_lot_repo: PostgresPositionLotRepository | None = None
+    lot_event_repo: PostgresLotEventRepository | None = None
+    external_inbox_repo: PostgresExternalInboxRepository | None = None
+    command_outbox_repo_v2: PostgresCommandOutboxRepositoryV2 | None = None
+    phase1_execution_shadow_service: Phase1ExecutionShadowService | None = None
+    phase1_ledger_mirror_service: Phase1LedgerMirrorService | None = None
+    phase1_shadow_monitor: Phase1ShadowMonitor | None = None
+    phase1_shadow: Phase1ShadowSubsystem | None = None
+    execution_order_service: ExecutionOrderService | None = None
+    execution_command_processor: ExecutionCommandProcessor | None = None
+    phase1_shadow_alert_state: str | None = None
+    trial_guard_service: ForwardTrialGuardService | None = None
     replay_validation_history: list[dict[str, Any]] = field(default_factory=list)
     database_runtime: DatabaseRuntime | None = None
     background_tasks: list[asyncio.Task[Any]] = field(default_factory=list)
@@ -247,6 +328,18 @@ class ApplicationRuntime:
         if self.execution_outbox_publisher is not None:
             self.background_tasks.append(
                 asyncio.create_task(self._flush_execution_outbox_loop(), name="aats_execution_outbox_flush")
+            )
+        if self.execution_command_processor is not None:
+            self.background_tasks.append(
+                asyncio.create_task(self._process_execution_commands_loop(), name="aats_execution_command_flow")
+            )
+        if self.phase1_shadow_monitor is not None:
+            self.background_tasks.append(
+                asyncio.create_task(self._monitor_phase1_shadow_loop(), name="aats_phase1_shadow_monitor")
+            )
+        if self.trial_guard_service is not None:
+            self.background_tasks.append(
+                asyncio.create_task(self._monitor_trial_guard_loop(), name="aats_trial_guard_monitor")
             )
 
     async def stop_background_tasks(self) -> None:
@@ -301,6 +394,38 @@ class ApplicationRuntime:
                 self._record_background_failure(subsystem="execution_outbox_flush", exc=exc)
             await asyncio.sleep(1.0)
 
+    async def _process_execution_commands_loop(self) -> None:
+        interval_seconds = max(0.1, float(self.settings.execution_command_poll_interval_seconds))
+        while True:
+            try:
+                if self.execution_command_processor is not None:
+                    await self.execution_command_processor.process_pending()
+            except Exception as exc:
+                self._record_background_failure(subsystem="execution_command_flow", exc=exc)
+            await asyncio.sleep(interval_seconds)
+
+    async def _monitor_phase1_shadow_loop(self) -> None:
+        interval_seconds = max(
+            1.0,
+            min(self.settings.reconciliation_stale_after_seconds / 4.0, 5.0),
+        )
+        while True:
+            try:
+                self._record_phase1_shadow_state()
+            except Exception as exc:
+                self._record_background_failure(subsystem="phase1_shadow_monitor", exc=exc)
+            await asyncio.sleep(interval_seconds)
+
+    async def _monitor_trial_guard_loop(self) -> None:
+        interval_seconds = max(1.0, float(self.settings.trial_guard_poll_interval_seconds))
+        while True:
+            try:
+                if self.trial_guard_service is not None:
+                    self.trial_guard_service.evaluate_now()
+            except Exception as exc:
+                self._record_background_failure(subsystem="trial_guard_monitor", exc=exc)
+            await asyncio.sleep(interval_seconds)
+
     def _record_background_failure(self, *, subsystem: str, exc: Exception) -> None:
         message = f"{subsystem}_failed: {exc}"
         log_event(
@@ -351,6 +476,73 @@ class ApplicationRuntime:
             )
         )
 
+    def _record_phase1_shadow_state(self) -> None:
+        if self.phase1_shadow_monitor is not None:
+            snapshot = self.phase1_shadow_monitor.snapshot()
+        elif self.phase1_shadow is not None:
+            snapshot = self.phase1_shadow.snapshot()
+        else:
+            return
+        status = str(snapshot.get("status") or "idle")
+        previous = self.phase1_shadow_alert_state
+        if status == previous:
+            return
+        self.phase1_shadow_alert_state = status
+        if status not in {"degraded", "lagging"}:
+            if previous in {"degraded", "lagging"}:
+                self.metrics.increment("phase1_shadow_recoveries")
+                self.event_store.append(
+                    build_envelope(
+                        topic=topics.EXECUTION_ERROR_SUMMARIES,
+                        key="phase1_shadow",
+                        payload_model=ExecutionErrorSummary(
+                            subsystem="phase1_shadow",
+                            severity="warning",
+                            message=f"phase1_shadow_recovered:{snapshot.get('summary')}",
+                            observed_at=utc_now(),
+                        ),
+                        source_component="runtime",
+                    )
+                )
+            return
+
+        severity = "error" if status == "degraded" else "warning"
+        self.metrics.increment("phase1_shadow_alerts")
+        self.event_store.append(
+            build_envelope(
+                topic=topics.EXECUTION_ERROR_SUMMARIES,
+                key="phase1_shadow",
+                payload_model=ExecutionErrorSummary(
+                    subsystem="phase1_shadow",
+                    severity=severity,
+                    message=str(snapshot.get("summary") or f"phase1_shadow_{status}"),
+                    observed_at=utc_now(),
+                ),
+                source_component="runtime",
+            )
+        )
+        self.event_store.append(
+            build_envelope(
+                topic=topics.PROCESSING_FAILURES,
+                key="phase1_shadow",
+                payload_model=ProcessingFailureRecord(
+                    subsystem="phase1_shadow",
+                    stage=f"shadow_{status}",
+                    severity=severity,
+                    message=str(snapshot.get("summary") or f"phase1_shadow_{status}"),
+                    retriable=True,
+                    observed_at=utc_now(),
+                    details={
+                        "status": status,
+                        "lag": snapshot.get("lag"),
+                        "execution_shadow": snapshot.get("execution_shadow"),
+                        "ledger_shadow": snapshot.get("ledger_shadow"),
+                    },
+                ),
+                source_component="runtime",
+            )
+        )
+
 
 def _validate_runtime_settings(settings: AATSSettings, runtime_layering: RuntimeLayering) -> None:
     if (
@@ -359,6 +551,43 @@ def _validate_runtime_settings(settings: AATSSettings, runtime_layering: Runtime
         and settings.storage_mode == "memory"
     ):
         raise ValueError("guarded_simulated_submit_requires_persistent_storage")
+    if settings.portfolio_ledger_truth_enabled and settings.storage_mode == "memory":
+        raise ValueError("portfolio_ledger_truth_requires_persistent_storage")
+    if settings.recovery_reconciliation_execution_ledger_enabled and settings.storage_mode == "memory":
+        raise ValueError("recovery_reconciliation_execution_ledger_requires_persistent_storage")
+    if settings.recovery_reconciliation_execution_ledger_enabled and not settings.portfolio_ledger_truth_enabled:
+        raise ValueError("recovery_reconciliation_execution_ledger_requires_portfolio_ledger_truth")
+    if settings.operator_control_plane_execution_ledger_enabled and settings.storage_mode == "memory":
+        raise ValueError("operator_control_plane_execution_ledger_requires_persistent_storage")
+    if (
+        settings.operator_control_plane_execution_ledger_enabled
+        and not settings.recovery_reconciliation_execution_ledger_enabled
+    ):
+        raise ValueError("operator_control_plane_execution_ledger_requires_phase4_recovery")
+    if settings.operator_control_plane_execution_ledger_enabled and not settings.execution_command_flow_enabled:
+        raise ValueError("operator_control_plane_execution_ledger_requires_execution_command_flow")
+    if settings.operator_control_plane_execution_ledger_enabled and settings.operator_unsafe_write_without_auth:
+        raise ValueError("operator_control_plane_execution_ledger_disallows_unsafe_write_without_auth")
+    if (
+        settings.operator_control_plane_execution_ledger_enabled
+        and runtime_layering.environment_capabilities.exchange_coupled
+        and not settings.operator_auth_enabled
+    ):
+        raise ValueError("operator_control_plane_execution_ledger_requires_operator_auth")
+    if settings.financial_convergence_mode_enabled and settings.storage_mode == "memory":
+        raise ValueError("financial_convergence_mode_requires_persistent_storage")
+    if settings.financial_convergence_mode_enabled and not settings.execution_command_flow_enabled:
+        raise ValueError("financial_convergence_mode_requires_execution_command_flow")
+    if settings.financial_convergence_mode_enabled and not settings.portfolio_ledger_truth_enabled:
+        raise ValueError("financial_convergence_mode_requires_portfolio_ledger_truth")
+    if settings.financial_convergence_mode_enabled and not settings.recovery_reconciliation_execution_ledger_enabled:
+        raise ValueError("financial_convergence_mode_requires_phase4_recovery")
+    if settings.financial_convergence_mode_enabled and not settings.operator_control_plane_execution_ledger_enabled:
+        raise ValueError("financial_convergence_mode_requires_phase5_control_plane")
+    if settings.financial_convergence_mode_enabled and settings.event_persistence_mode != "strict":
+        raise ValueError("financial_convergence_mode_requires_strict_event_persistence")
+    if settings.financial_convergence_mode_enabled and not settings.database_single_runtime_guard_enabled:
+        raise ValueError("financial_convergence_mode_requires_single_runtime_guard")
 
 
 def _validate_operator_auth_settings(settings: AATSSettings, storage: StorageBackends) -> None:
@@ -375,12 +604,38 @@ def _validate_operator_auth_settings(settings: AATSSettings, storage: StorageBac
     raise ValueError("operator_session_auth_requires_enabled_admin_user")
 
 
+def _backfill_fill_outcomes_from_event_store(
+    *,
+    event_store: EventStore,
+    fill_outcome_repo: FillOutcomeRepository,
+    execution_repo: ExecutionRepository,
+) -> None:
+    fill_by_id = {fill.fill_id: fill for fill in execution_repo.fills()}
+    for event in event_store.by_topic(topics.PORTFOLIO_BALANCE_DELTAS):
+        try:
+            balance_delta = PortfolioBalanceDelta.model_validate(event.payload)
+        except Exception:
+            continue
+        base_outcome = FillOutcomeRecord.from_balance_delta(balance_delta)
+        fill = fill_by_id.get(base_outcome.fill_id)
+        outcome = (
+            base_outcome
+            if fill is None
+            else FillOutcomeRecord.from_fill_and_balance_delta(
+                fill=fill,
+                balance_delta=balance_delta,
+            )
+        )
+        fill_outcome_repo.save_outcome(outcome)
+
+
 def build_storage_backends(settings: AATSSettings) -> StorageBackends:
     if settings.storage_mode == "memory":
         return StorageBackends(
             event_store=InMemoryEventStore(),
             audit_repo=InMemoryAuditRepository(),
             portfolio_repo=InMemoryPortfolioRepository(),
+            fill_outcome_repo=InMemoryFillOutcomeRepository(),
             execution_repo=InMemoryExecutionRepository(),
             obligation_repo=InMemoryExecutionObligationRepository(),
             outbox_repo=None,
@@ -388,6 +643,7 @@ def build_storage_backends(settings: AATSSettings) -> StorageBackends:
             operator_repo=InMemoryOperatorUserRepository(),
             runtime_profile_repo=InMemoryRuntimeProfileRepository(),
             strategy_profile_repo=InMemoryStrategyProfileRepository(),
+            phase1_shadow=Phase1ShadowSubsystem(),
         )
 
     if not settings.database_url:
@@ -400,11 +656,91 @@ def build_storage_backends(settings: AATSSettings) -> StorageBackends:
     if settings.database_single_runtime_guard_enabled:
         database_runtime.acquire_single_runtime_lock(settings.database_runtime_lock_key)
 
+    execution_order_repo = PostgresExecutionOrderRepository(database_runtime.session_factory)
+    execution_order_history_repo = PostgresExecutionOrderHistoryRepository(database_runtime.session_factory)
+    execution_command_repo = PostgresExecutionCommandRepository(database_runtime.session_factory)
+    execution_fill_repo_v2 = PostgresExecutionFillRepositoryV2(database_runtime.session_factory)
+    reservation_repo_v2 = PostgresReservationRepository(database_runtime.session_factory)
+    ledger_account_repo = PostgresLedgerAccountRepository(database_runtime.session_factory)
+    ledger_journal_repo = PostgresLedgerJournalRepository(database_runtime.session_factory)
+    ledger_entry_repo = PostgresLedgerEntryRepository(database_runtime.session_factory)
+    settlement_repo = PostgresSettlementRepository(database_runtime.session_factory)
+    position_lot_repo = PostgresPositionLotRepository(database_runtime.session_factory)
+    lot_event_repo = PostgresLotEventRepository(database_runtime.session_factory)
+    external_inbox_repo = PostgresExternalInboxRepository(database_runtime.session_factory)
+    command_outbox_repo_v2 = PostgresCommandOutboxRepositoryV2(database_runtime.session_factory)
+
+    if settings.financial_convergence_mode_enabled:
+        phase1_execution_shadow_service = None
+        phase1_ledger_mirror_service = Phase1LedgerMirrorService(
+            reservation_repo=reservation_repo_v2,
+            ledger_account_repo=ledger_account_repo,
+            ledger_journal_repo=ledger_journal_repo,
+            ledger_entry_repo=ledger_entry_repo,
+            settlement_repo=settlement_repo,
+        )
+    else:
+        phase1_execution_shadow_service = Phase1ExecutionShadowService(
+            execution_order_repo=execution_order_repo,
+            execution_order_history_repo=execution_order_history_repo,
+            execution_fill_repo=execution_fill_repo_v2,
+        )
+        phase1_ledger_mirror_service = Phase1LedgerMirrorService(
+            reservation_repo=reservation_repo_v2,
+            ledger_account_repo=ledger_account_repo,
+            ledger_journal_repo=ledger_journal_repo,
+            ledger_entry_repo=ledger_entry_repo,
+            settlement_repo=settlement_repo,
+        )
+
+    legacy_execution_repo = PostgresExecutionRepository(database_runtime.session_factory)
+    execution_repo = (
+        ConvergedPostgresExecutionRepository(
+            database_runtime.session_factory,
+            execution_order_repo=execution_order_repo,
+            execution_order_history_repo=execution_order_history_repo,
+            execution_fill_repo=execution_fill_repo_v2,
+        )
+        if settings.financial_convergence_mode_enabled
+        else legacy_execution_repo
+    )
+
     return StorageBackends(
+        execution_order_repo=execution_order_repo,
+        execution_order_history_repo=execution_order_history_repo,
+        execution_command_repo=execution_command_repo,
+        execution_fill_repo_v2=execution_fill_repo_v2,
+        reservation_repo_v2=reservation_repo_v2,
+        ledger_account_repo=ledger_account_repo,
+        ledger_journal_repo=ledger_journal_repo,
+        ledger_entry_repo=ledger_entry_repo,
+        settlement_repo=settlement_repo,
+        position_lot_repo=position_lot_repo,
+        lot_event_repo=lot_event_repo,
+        external_inbox_repo=external_inbox_repo,
+        command_outbox_repo_v2=command_outbox_repo_v2,
+        phase1_execution_shadow_service=phase1_execution_shadow_service,
+        phase1_ledger_mirror_service=phase1_ledger_mirror_service,
+        phase1_shadow=Phase1ShadowSubsystem(
+            execution_order_repo=execution_order_repo,
+            execution_order_history_repo=execution_order_history_repo,
+            execution_command_repo=execution_command_repo,
+            execution_fill_repo=execution_fill_repo_v2,
+            reservation_repo=reservation_repo_v2,
+            ledger_account_repo=ledger_account_repo,
+            ledger_journal_repo=ledger_journal_repo,
+            ledger_entry_repo=ledger_entry_repo,
+            settlement_repo=settlement_repo,
+            execution_shadow_service=phase1_execution_shadow_service,
+            ledger_mirror_service=phase1_ledger_mirror_service,
+            external_inbox_repo=external_inbox_repo,
+            command_outbox_repo=command_outbox_repo_v2,
+        ),
         event_store=PostgresEventStore(database_runtime.session_factory),
         audit_repo=PostgresAuditRepository(database_runtime.session_factory),
         portfolio_repo=PostgresPortfolioRepository(database_runtime.session_factory),
-        execution_repo=PostgresExecutionRepository(database_runtime.session_factory),
+        fill_outcome_repo=PostgresFillOutcomeRepository(database_runtime.session_factory),
+        execution_repo=execution_repo,
         obligation_repo=PostgresExecutionObligationRepository(database_runtime.session_factory),
         outbox_repo=PostgresOutboxRepository(database_runtime.session_factory),
         reconciliation_repo=PostgresReconciliationRepository(database_runtime.session_factory),
@@ -672,12 +1008,23 @@ async def _subscribe_critical_handlers(
     order_manager: OrderManager,
     portfolio_service: PortfolioService,
     reconciliation_service: ReconciliationService,
+    audit_service: DecisionAuditService,
     position_target_handler,
 ) -> None:
     await bus.subscribe(topics.MARKET_SNAPSHOTS, feature_engine.handle_market_snapshot)
     await bus.subscribe(topics.FEATURE_SNAPSHOTS, decision_trigger.handle_feature_snapshot)
     await bus.subscribe(topics.ORDER_INTENTS, order_manager.handle_order_intent)
     await bus.subscribe(topics.FILL_EVENTS, portfolio_service.handle_fill_event)
+    await bus.subscribe(
+        topics.PORTFOLIO_SNAPSHOTS,
+        resilient_subscription_handler(
+            topic=topics.PORTFOLIO_SNAPSHOTS,
+            name="audit.handle_portfolio_snapshot",
+            handler=audit_service.handle_portfolio_snapshot,
+            subscription_class="pre_reconciliation_observer",
+            raise_on_error=True,
+        ),
+    )
     await bus.subscribe(topics.PORTFOLIO_SNAPSHOTS, reconciliation_service.handle_portfolio_snapshot)
     await bus.subscribe(topics.POSITION_TARGETS, position_target_handler)
 
@@ -704,7 +1051,6 @@ def _observer_subscription_specs(
         ObserverSubscriptionSpec(topics.ORDER_UPDATES, "audit.handle_order_update", audit_service.handle_order_update),
         ObserverSubscriptionSpec(topics.FILL_EVENTS, "audit.handle_fill_event", audit_service.handle_fill_event),
         ObserverSubscriptionSpec(topics.PORTFOLIO_SNAPSHOTS, "ai.handle_portfolio_snapshot", ai_service.handle_portfolio_snapshot),
-        ObserverSubscriptionSpec(topics.PORTFOLIO_SNAPSHOTS, "audit.handle_portfolio_snapshot", audit_service.handle_portfolio_snapshot),
         ObserverSubscriptionSpec(topics.RECONCILIATION_REPORTS, "ai.handle_reconciliation_report", ai_service.handle_reconciliation_report),
         ObserverSubscriptionSpec(topics.RECONCILIATION_REPORTS, "audit.handle_reconciliation_report", audit_service.handle_reconciliation_report),
         ObserverSubscriptionSpec(topics.PROCESSING_FAILURES, "reconciliation.handle_processing_failure", reconciliation_service.handle_processing_failure),
@@ -724,6 +1070,7 @@ async def _subscribe_observer_handlers(
                 name=spec.name,
                 handler=spec.handler,
                 subscription_class="observer",
+                raise_on_error=spec.name == "audit.handle_reconciliation_report",
             ),
         )
 
@@ -734,6 +1081,8 @@ async def build_runtime(
     bootstrap_portfolio_snapshot: bool = True,
 ) -> ApplicationRuntime:
     base_settings = settings or load_settings()
+    base_runtime_layering = resolve_runtime_layering(base_settings)
+    _validate_runtime_settings(base_settings, base_runtime_layering)
     storage = build_storage_backends(base_settings)
     try:
         profile_resolution = runtime_profile_resolution(settings=base_settings, repo=storage.runtime_profile_repo)
@@ -752,6 +1101,11 @@ async def build_runtime(
         event_store=storage.event_store,
         persistence_mode=runtime_settings.event_persistence_mode,
     )
+    _backfill_fill_outcomes_from_event_store(
+        event_store=storage.event_store,
+        fill_outcome_repo=storage.fill_outcome_repo,
+        execution_repo=storage.execution_repo,
+    )
 
     kill_switch = KillSwitch()
     mode_controller = RuntimeModeController(
@@ -762,6 +1116,7 @@ async def build_runtime(
 
     normalizer = MarketSnapshotNormalizer(exchange_name=runtime_settings.exchange_name)
     market_publisher = MarketSnapshotPublisher(bus=bus)
+    okx_client = OKXRESTClient(settings=runtime_settings)
     okx_ws_client = (
         OKXPublicWebSocketClient(settings=runtime_settings)
         if runtime_settings.market_data_backend == "okx"
@@ -772,9 +1127,8 @@ async def build_runtime(
         normalizer=normalizer,
         publisher=market_publisher,
         okx_ws_client=okx_ws_client,
+        okx_rest_client=okx_client if runtime_settings.market_data_backend == "okx" else None,
     )
-
-    okx_client = OKXRESTClient(settings=runtime_settings)
     private_account_ws_client = (
         OKXPrivateWebSocketClient(settings=runtime_settings)
         if runtime_settings.account_backend == "okx" and runtime_settings.account_read_enabled
@@ -815,6 +1169,40 @@ async def build_runtime(
 
     snapshot_builder = PortfolioSnapshotBuilder(pnl_calculator=PortfolioPnLCalculator())
     feature_engine = FeatureEngine(bus=bus, calculator=FeatureCalculator())
+    phase1_shadow_monitor = Phase1ShadowMonitor(
+        execution_repo=storage.execution_repo,
+        obligation_repo=storage.obligation_repo,
+        state_scope=state_scope,
+        execution_shadow_service=storage.phase1_execution_shadow_service,
+        ledger_mirror_service=storage.phase1_ledger_mirror_service,
+        execution_order_repo=storage.execution_order_repo,
+        execution_fill_repo=storage.execution_fill_repo_v2,
+        reservation_repo=storage.reservation_repo_v2,
+    )
+    phase1_shadow = storage.phase1_shadow or Phase1ShadowSubsystem(
+        execution_order_repo=storage.execution_order_repo,
+        execution_order_history_repo=storage.execution_order_history_repo,
+        execution_command_repo=storage.execution_command_repo,
+        execution_fill_repo=storage.execution_fill_repo_v2,
+        reservation_repo=storage.reservation_repo_v2,
+        ledger_account_repo=storage.ledger_account_repo,
+        ledger_journal_repo=storage.ledger_journal_repo,
+        ledger_entry_repo=storage.ledger_entry_repo,
+        settlement_repo=storage.settlement_repo,
+        position_lot_repo=storage.position_lot_repo,
+        lot_event_repo=storage.lot_event_repo,
+        external_inbox_repo=storage.external_inbox_repo,
+        command_outbox_repo=storage.command_outbox_repo_v2,
+        execution_shadow_service=storage.phase1_execution_shadow_service,
+        ledger_mirror_service=storage.phase1_ledger_mirror_service,
+    )
+    phase1_shadow.monitor = phase1_shadow_monitor
+    health_service.phase1_shadow_provider = phase1_shadow_monitor
+    reconciliation_classifier = (
+        RecoveryReconciliationClassifier()
+        if runtime_settings.recovery_reconciliation_execution_ledger_enabled
+        else None
+    )
     ai_service = AIInferenceService(
         settings=runtime_settings,
         event_store=storage.event_store,
@@ -844,6 +1232,7 @@ async def build_runtime(
         orchestrator=decision_engine,
         market_gateway=market_gateway,
         policy=decision_trigger_policy,
+        can_trigger=lambda *, symbol: (not kill_switch.halted, "kill_switch_active" if kill_switch.halted else "ready"),
     )
     audit_service = DecisionAuditService(bus=bus, audit_repo=storage.audit_repo)
 
@@ -878,10 +1267,11 @@ async def build_runtime(
     execution_outbox_publisher = None
     if (
         storage.database_runtime is not None
-        and isinstance(storage.execution_repo, PostgresExecutionRepository)
         and isinstance(storage.obligation_repo, PostgresExecutionObligationRepository)
         and isinstance(storage.event_store, PostgresEventStore)
         and storage.outbox_repo is not None
+        and hasattr(storage.execution_repo, "save_order_state_in_session")
+        and hasattr(storage.execution_repo, "save_fill_in_session")
     ):
         execution_outbox_publisher = PostgresExecutionOutboxPublisher(
             session_factory=storage.database_runtime.session_factory,
@@ -891,6 +1281,14 @@ async def build_runtime(
             outbox_repo=storage.outbox_repo,
             bus=bus,
         )
+    execution_order_service = None
+    execution_command_processor = None
+    if runtime_settings.execution_command_flow_enabled and storage.execution_command_repo is not None:
+        execution_order_service = ExecutionOrderService(
+            execution_command_repo=storage.execution_command_repo,
+            execution_order_repo=storage.execution_order_repo,
+            execution_order_history_repo=storage.execution_order_history_repo,
+        )
     order_manager = OrderManager(
         settings=runtime_settings,
         bus=bus,
@@ -898,21 +1296,73 @@ async def build_runtime(
         execution_repo=storage.execution_repo,
         obligation_service=obligation_service,
         execution_outbox_publisher=execution_outbox_publisher,
+        persistent_order_service=execution_order_service,
+        shadow_execution_service=storage.phase1_execution_shadow_service,
+        shadow_execution_order_repo=storage.execution_order_repo,
+        shadow_execution_order_history_repo=storage.execution_order_history_repo,
+        shadow_execution_fill_repo=storage.execution_fill_repo_v2,
+        shadow_ledger_mirror_service=storage.phase1_ledger_mirror_service,
         kill_switch=kill_switch,
     )
+    if execution_order_service is not None and storage.execution_command_repo is not None:
+        execution_command_processor = ExecutionCommandProcessor(
+            execution_command_repo=storage.execution_command_repo,
+            submit_executor=lambda intent, client_order_id=None: order_manager.process_submit_command(
+                intent=intent,
+                client_order_id=client_order_id,
+            ),
+            cancel_executor=lambda client_order_id: order_manager.process_cancel_command(
+                client_order_id=client_order_id,
+            ),
+        )
 
-    portfolio_service = PortfolioService(
-        bus=bus,
-        state=PortfolioState(
-            initial_usdt_balance=runtime_settings.initial_usdt_balance,
-            default_product_type=runtime_settings.trading_product_type,
-            default_margin_mode=runtime_settings.margin_mode,
-        ),
-        snapshot_builder=snapshot_builder,
-        portfolio_repo=storage.portfolio_repo,
-        price_provider=market_gateway.latest_price,
-        metrics=metrics,
+    portfolio_state = PortfolioState(
+        initial_usdt_balance=runtime_settings.initial_usdt_balance,
+        default_product_type=runtime_settings.trading_product_type,
+        default_margin_mode=runtime_settings.margin_mode,
     )
+    if (
+        runtime_settings.portfolio_ledger_truth_enabled
+        and storage.ledger_account_repo is not None
+        and storage.ledger_journal_repo is not None
+        and storage.ledger_entry_repo is not None
+    ):
+        portfolio_service = LedgerBackedPortfolioService(
+            bus=bus,
+            state=portfolio_state,
+            snapshot_builder=snapshot_builder,
+            portfolio_repo=storage.portfolio_repo,
+            fill_outcome_repo=storage.fill_outcome_repo,
+            price_provider=market_gateway.latest_price,
+            execution_repo=storage.execution_repo,
+            settlement_posting_service=LedgerSettlementPostingService(
+                ledger_account_repo=storage.ledger_account_repo,
+                ledger_journal_repo=storage.ledger_journal_repo,
+                ledger_entry_repo=storage.ledger_entry_repo,
+                reservation_repo=storage.reservation_repo_v2,
+            ),
+            persistent_lot_book_service=(
+                PersistentLotBookService(
+                    position_lot_repo=storage.position_lot_repo,
+                    lot_event_repo=storage.lot_event_repo,
+                    projection_builder=LotBasedProjectionBuilder(),
+                )
+                if storage.position_lot_repo is not None and storage.lot_event_repo is not None
+                else None
+            ),
+            initial_usdt_balance=runtime_settings.initial_usdt_balance,
+            metrics=metrics,
+        )
+    else:
+        portfolio_service = PortfolioService(
+            bus=bus,
+            state=portfolio_state,
+            snapshot_builder=snapshot_builder,
+            portfolio_repo=storage.portfolio_repo,
+            fill_outcome_repo=storage.fill_outcome_repo,
+            price_provider=market_gateway.latest_price,
+            metrics=metrics,
+        )
 
     reconciliation_service = ReconciliationService(
         settings=runtime_settings,
@@ -932,8 +1382,9 @@ async def build_runtime(
         bootstrap_portfolio_from_exchange=bootstrap_from_exchange,
         recovery_policy=runtime_layering.recovery_policy,
         metrics=metrics,
+        reconciliation_classifier=reconciliation_classifier,
     )
-    recovery_service = ExecutionRecoveryService(
+    base_recovery_service = ExecutionRecoveryService(
         settings=runtime_settings,
         execution_repo=storage.execution_repo,
         obligation_repo=storage.obligation_repo,
@@ -948,6 +1399,20 @@ async def build_runtime(
         bootstrap_portfolio_from_exchange=bootstrap_from_exchange,
         reconciliation_stale_after_seconds=runtime_settings.reconciliation_stale_after_seconds,
         recovery_policy=runtime_layering.recovery_policy,
+    )
+    recovery_service = (
+        ExecutionLedgerRecoveryService(
+            settings=runtime_settings,
+            base_recovery_service=base_recovery_service,
+            reconciliation_repo=storage.reconciliation_repo,
+            portfolio_repo=storage.portfolio_repo,
+            kill_switch=kill_switch,
+            reconciliation_classifier=reconciliation_classifier or RecoveryReconciliationClassifier(),
+            execution_order_repo=storage.execution_order_repo,
+            execution_command_repo=storage.execution_command_repo,
+        )
+        if runtime_settings.recovery_reconciliation_execution_ledger_enabled
+        else base_recovery_service
     )
     position_target_handler = _build_position_target_handler(
         runtime_layering=runtime_layering,
@@ -967,6 +1432,7 @@ async def build_runtime(
         order_manager=order_manager,
         portfolio_service=portfolio_service,
         reconciliation_service=reconciliation_service,
+        audit_service=audit_service,
         position_target_handler=position_target_handler,
     )
     await _subscribe_observer_handlers(
@@ -1072,15 +1538,44 @@ async def build_runtime(
         metrics=metrics,
         audit_repo=storage.audit_repo,
         portfolio_repo=storage.portfolio_repo,
+        fill_outcome_repo=storage.fill_outcome_repo,
         execution_repo=storage.execution_repo,
         obligation_repo=storage.obligation_repo,
         reconciliation_repo=storage.reconciliation_repo,
         operator_repo=storage.operator_repo,
         runtime_profile_repo=storage.runtime_profile_repo,
         strategy_profile_repo=storage.strategy_profile_repo,
+        execution_order_repo=storage.execution_order_repo,
+        execution_order_history_repo=storage.execution_order_history_repo,
+        execution_command_repo=storage.execution_command_repo,
+        execution_fill_repo_v2=storage.execution_fill_repo_v2,
+        reservation_repo_v2=storage.reservation_repo_v2,
+        ledger_account_repo=storage.ledger_account_repo,
+        ledger_journal_repo=storage.ledger_journal_repo,
+        ledger_entry_repo=storage.ledger_entry_repo,
+        settlement_repo=storage.settlement_repo,
+        external_inbox_repo=storage.external_inbox_repo,
+        command_outbox_repo_v2=storage.command_outbox_repo_v2,
+        phase1_execution_shadow_service=storage.phase1_execution_shadow_service,
+        phase1_ledger_mirror_service=storage.phase1_ledger_mirror_service,
+        phase1_shadow_monitor=phase1_shadow_monitor,
+        phase1_shadow=phase1_shadow,
+        execution_order_service=execution_order_service,
+        execution_command_processor=execution_command_processor,
         recovery_status=recovery_status,
         database_runtime=storage.database_runtime,
         execution_outbox_publisher=execution_outbox_publisher,
     )
+    from aats.services.operator.query_service import OperatorQueryService
+
+    runtime.trial_guard_service = ForwardTrialGuardService(
+        settings=runtime.settings,
+        kill_switch=runtime.kill_switch,
+        event_store=runtime.event_store,
+        metrics=runtime.metrics,
+        profitability_provider=lambda limit: OperatorQueryService(runtime).profitability_overview(limit=limit),
+        anomaly_provider=lambda limit: OperatorQueryService(runtime).execution_anomaly_report(limit=limit),
+    )
+    runtime.trial_guard_service.evaluate_now()
     runtime.decision_engine.strategy_profile_service = StrategyProfileControlService(runtime)
     return runtime

@@ -4,6 +4,24 @@ export function pill(label, tone = "neutral") {
   return `<span class="signal-pill tone-${escapeHtml(tone)}">${escapeHtml(label)}</span>`;
 }
 
+export function actorTag(actor) {
+  const key = String(actor || "").trim().toLowerCase();
+  const labelMap = {
+    system: "系统自动决定",
+    ai: "AI 给建议/决策",
+    admin: "管理员手动覆盖",
+  };
+  const label = labelMap[key] || "主体待确认";
+  return `<span class="actor-tag actor-tag--${escapeHtml(key || "unknown")}">${escapeHtml(label)}</span>`;
+}
+
+export function actorTags(...actors) {
+  return actors
+    .filter(Boolean)
+    .map((actor) => actorTag(actor))
+    .join("");
+}
+
 export function surfaceCard({ title, kicker = "", copy = "", actions = "", content = "", classes = "" }) {
   return `
     <section class="surface-card ${escapeHtml(classes)}">
@@ -46,6 +64,7 @@ export function summaryStrip(items) {
         .map(
           (item) => `
             <article class="summary-tile tone-${escapeHtml(item.tone || "neutral")}">
+              ${item.badge ? `<div class="summary-tile__badge">${item.badge}</div>` : ""}
               <span class="summary-tile__label">${escapeHtml(item.label)}</span>
               <strong class="summary-tile__value">${escapeHtml(item.value)}</strong>
               ${item.meta ? `<span class="summary-tile__meta">${escapeHtml(item.meta)}</span>` : ""}

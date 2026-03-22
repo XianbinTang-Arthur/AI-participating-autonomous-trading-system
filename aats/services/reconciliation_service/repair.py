@@ -19,6 +19,7 @@ from aats.services.portfolio_service.reconstruction import PortfolioReconstructi
 from aats.services.reconciliation_service.comparator import StateComparator
 from aats.services.reconciliation_service.fetcher import ExchangeStateFetcher
 from aats.services.governance_engine.runtime_layers import RecoveryPolicy
+from aats.services.recovery_control.reconciliation_classifier import RecoveryReconciliationClassifier
 from aats.storage.base import EventStore
 from aats.storage.base import ExecutionRepository, ReconciliationRepository
 from aats.schemas.common import utc_now
@@ -109,6 +110,7 @@ class ReconciliationService:
         bootstrap_portfolio_from_exchange: bool = False,
         recovery_policy: RecoveryPolicy | None = None,
         metrics: MetricsRegistry | None = None,
+        reconciliation_classifier: RecoveryReconciliationClassifier | None = None,
     ) -> None:
         self.settings = settings
         self.bus = bus
@@ -124,6 +126,7 @@ class ReconciliationService:
         self.bootstrap_portfolio_from_exchange = bootstrap_portfolio_from_exchange
         self.recovery_policy = recovery_policy
         self.metrics = metrics
+        self.reconciliation_classifier = reconciliation_classifier
         self.runtime_scope = runtime_state_scope(settings)
         configure = getattr(self.repair_service, "configure", None)
         if callable(configure):
@@ -300,6 +303,8 @@ class ReconciliationService:
             trusted_exchange_portfolio_baseline=trusted_exchange_portfolio_baseline,
             exchange_bills_summary=self._exchange_bills_summary(),
         )
+        if self.reconciliation_classifier is not None:
+            report = self.reconciliation_classifier.annotate(report)
         return report
 
     def _exchange_bills_summary(self) -> dict[str, object]:
@@ -315,6 +320,8 @@ class ReconciliationService:
         stored_snapshot: PortfolioSnapshot | None,
         fills: list[FillEvent],
     ) -> PortfolioSnapshot:
+        if self.settings.portfolio_ledger_truth_enabled and stored_snapshot is not None:
+            return stored_snapshot
         if not self.bootstrap_portfolio_from_exchange:
             return self.reconstruction_service.rebuild_snapshot(
                 fills=fills,

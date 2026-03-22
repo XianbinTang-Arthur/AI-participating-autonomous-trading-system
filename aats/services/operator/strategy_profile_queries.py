@@ -90,6 +90,34 @@ class StrategyProfileQueryFacade:
         self.owner._invalidate_cache()
         return result
 
+    def restore_auto(
+        self,
+        *,
+        reason: str,
+        actor_role: OperatorRole,
+        actor_identity: str | None,
+        auth_source: AuthSource,
+    ) -> dict[str, Any]:
+        result = self.strategy_profiles.restore_auto(
+            reason=reason,
+            actor_role=actor_role,
+            actor_identity=actor_identity,
+            auth_source=auth_source,
+        )
+        self._append_action(
+            action="strategy_profile_restore_auto",
+            actor_role=actor_role,
+            actor_identity=actor_identity,
+            auth_source=auth_source,
+            status="profile_auto_switch_restored",
+            details={
+                "frozen_by_admin_override": result["activation"].get("frozen_until") is not None,
+                "active_profile_id": result["activation"].get("active_profile_id"),
+            },
+        )
+        self.owner._invalidate_cache()
+        return result
+
     def _append_action(
         self,
         *,

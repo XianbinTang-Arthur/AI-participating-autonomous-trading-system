@@ -272,7 +272,7 @@ function fillImpactDisplay(fill, scene) {
     };
   }
   return {
-    value: "待结转",
-    meta: `${feeText} | 已实现盈亏还在同步`,
+    value: "逐笔盈亏未单独落库",
+    meta: `${feeText} | 当前成交已落库，但这条成交记录没有单独保存已实现盈亏`,
   };
 }

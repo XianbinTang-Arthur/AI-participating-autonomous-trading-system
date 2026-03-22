@@ -28,6 +28,19 @@ class RuntimeQueryFacade:
             "canonical_effective_operating_mode",
             status.get("effective_operating_mode"),
         )
+        settings = self.owner.runtime.settings
+        strategy_profile_state = self.owner.strategy_profiles.snapshot().get("activation", {})
+        auto_control_configured = settings.strategy_profile_auto_control_configured
+        auto_control_enabled = bool(strategy_profile_state.get("auto_switch_enabled", auto_control_configured))
+        status["strategy_profile_auto_control_configured"] = settings.strategy_profile_auto_control_configured
+        status["strategy_profile_auto_control_effective"] = auto_control_configured and auto_control_enabled
+        status["strategy_profile_auto_control_reason"] = (
+            "explicit_setting_disabled"
+            if not auto_control_configured
+            else "manually_paused_by_admin"
+            if not auto_control_enabled
+            else "explicit_setting_enabled"
+        )
         status["legacy_modes"] = legacy_modes
         return status
 
@@ -188,3 +201,6 @@ class RuntimeQueryFacade:
 
     def metrics(self) -> dict[str, Any]:
         return self.owner._build_metrics()
+
+    def phase1_shadow_history(self, *, limit: int = 20, offset: int = 0) -> dict[str, Any]:
+        return self.owner._build_phase1_shadow_history(limit=limit, offset=offset)

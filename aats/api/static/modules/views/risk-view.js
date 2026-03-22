@@ -1,5 +1,6 @@
 ﻿import { actionButton, pill, primaryStatusPanel, responsiveTable, summaryStrip, surfaceCard } from "../components.js";
 import { kvList } from "../components.js";
+import { localizeList, textOrFallback } from "../copy.js";
 import { booleanWord, escapeHtml, formatMaybeTimestamp, formatNumber, formatRelativeAge, middleEllipsis } from "../formatters.js";
 import {
   localizeError,
@@ -28,6 +29,8 @@ export function renderRiskSections(data) {
   const metrics = data.metrics || {};
   const health = data.health || {};
   const uiHints = data.uiHints || {};
+  const phase1Shadow = data.phase1Shadow || metrics.phase1_shadow || {};
+  const trialGuard = data.trialGuard || data.runtime?.trial_guard || {};
 
   return {
     riskHero: primaryStatusPanel({
@@ -130,6 +133,72 @@ export function renderRiskSections(data) {
         { label: "最近回放时间", value: formatMaybeTimestamp(replay.last_validation?.validated_at), meta: formatRelativeAge(replay.last_validation?.validated_at), tone: replay.last_validation?.validated_at ? "info" : "neutral" },
       ]),
     }),
+    riskShadow: surfaceCard({
+      title: "影子兼容层",
+      kicker: "Phase 1 兼容状态",
+      copy: "这里单独看新旧执行链的兼容层是否追平，避免把恢复判断建立在半同步的数据上。",
+      actions: actionButton("查看影子详情", "inspect-shadow", "", "ghost"),
+      content: summaryStrip([
+        {
+          label: "当前状态",
+          value: phase1ShadowLabel(phase1Shadow.status),
+          meta: phase1Shadow.summary || "当前没有额外兼容层说明",
+          tone: phase1ShadowTone(phase1Shadow.status),
+        },
+        {
+          label: "订单 / 成交积压",
+          value: `${backlogText(phase1Shadow.lag?.order_backlog)} / ${backlogText(phase1Shadow.lag?.fill_backlog)}`,
+          meta: `保留金积压 ${backlogText(phase1Shadow.lag?.obligation_backlog)}`,
+          tone: phase1ShadowHasBacklog(phase1Shadow) ? "warning" : "positive",
+        },
+        {
+          label: "最近人工核查",
+          value: phase1Shadow.latest_review_action ? "已记录" : "尚未记录",
+          meta: phase1ShadowReviewMeta(phase1Shadow.latest_review_action),
+          tone: phase1Shadow.latest_review_action ? "info" : "neutral",
+        },
+        {
+          label: "最近兼容层错误",
+          value: phase1ShadowLastError(phase1Shadow),
+          meta: formatMaybeTimestamp(
+            phase1Shadow.execution_shadow?.last_failure_ts
+            || phase1Shadow.ledger_shadow?.last_failure_ts
+          ),
+          tone: phase1Shadow.status === "degraded" ? "danger" : "neutral",
+        },
+      ]),
+    }),
+    riskTrialGuard: surfaceCard({
+      title: "试盘守护",
+      kicker: "小资金前向验证",
+      copy: "这里专门看小资金试盘的自动停机阈值，避免在还没证明策略有效前先放大亏损。",
+      content: summaryStrip([
+        {
+          label: "当前状态",
+          value: trialGuardStatusLabel(trialGuard.status),
+          meta: trialGuard.summary || "当前没有额外试盘守护说明",
+          tone: trialGuardTone(trialGuard.status),
+        },
+        {
+          label: "样本量",
+          value: formatNumber(trialGuard.fill_count, 0),
+          meta: `最少需要 ${formatNumber(trialGuard.min_closed_fills, 0)} 笔已完成成交后才会触发自动停机判断`,
+          tone: Number(trialGuard.fill_count || 0) >= Number(trialGuard.min_closed_fills || 0) ? "positive" : "warning",
+        },
+        {
+          label: "最近 24 小时净收益",
+          value: formatNumber(trialGuard.daily_net_realized),
+          meta: `连续亏损 ${formatNumber(trialGuard.consecutive_losses, 0)} 笔`,
+          tone: Number(trialGuard.daily_net_realized || 0) >= 0 ? "positive" : "warning",
+        },
+        {
+          label: "费用 / 成交额",
+          value: trialRatioText(trialGuard.fee_to_notional_ratio),
+          meta: `高滑点比例 ${trialRatioText(trialGuard.high_slippage_ratio)}，慢成交比例 ${trialRatioText(trialGuard.slow_submit_to_fill_ratio)}`,
+          tone: (trialGuard.breaches || []).length ? "danger" : "info",
+        },
+      ]),
+    }),
     riskBlockers: surfaceCard({
       title: "当前阻断明细",
       kicker: "阻断状态",
@@ -185,11 +254,35 @@ export function renderRiskView(data) {
       <div class="span-4">${sections.riskAccount}</div>
       <div class="span-4">${sections.riskReconciliation}</div>
       <div class="span-4">${sections.riskRecovery}</div>
+      <div class="span-12">${sections.riskShadow}</div>
+      <div class="span-12">${sections.riskTrialGuard}</div>
       <div class="span-12">${sections.riskBills}</div>
       <div class="span-6">${sections.riskBlockers}</div>
       <div class="span-6">${sections.riskMetrics}</div>
     </div>
   `;
+}
+
+function trialGuardStatusLabel(status) {
+  if (status === "disabled" || status === "not_configured") return "未启用";
+  if (status === "warming_up") return "预热中";
+  if (status === "breached") return "已触发暂停";
+  if (status === "monitoring") return "监控中";
+  return textOrFallback(status, "未知状态");
+}
+
+function trialGuardTone(status) {
+  if (status === "breached") return "danger";
+  if (status === "warming_up") return "warning";
+  if (status === "monitoring") return "positive";
+  return "neutral";
+}
+
+function trialRatioText(value) {
+  if (value === null || value === undefined || value === "") return "暂无";
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return "暂无";
+  return `${formatNumber(numeric * 100, 2)}%`;
 }
 
 export function renderReconciliationControls({
@@ -428,16 +521,49 @@ function isPausedAwaitingResume({ blockers = [], recovery = {} } = {}) {
   );
 }
 
-function textOrFallback(value, fallback = "待确认") {
-  if (value === null || value === undefined) return fallback;
-  const text = String(value).trim();
-  return text ? text : fallback;
+function listText(value, fallback = "当前没有额外说明") {
+  return Array.isArray(value) ? localizeList(value, fallback) : textOrFallback(value, fallback);
 }
 
-function listText(value, fallback = "当前没有额外说明") {
-  if (Array.isArray(value)) {
-    const filtered = value.map((item) => String(item ?? "").trim()).filter(Boolean);
-    return filtered.length ? filtered.join(" / ") : fallback;
-  }
-  return textOrFallback(value, fallback);
+function phase1ShadowLabel(status) {
+  const map = {
+    not_configured: "未配置",
+    idle: "空闲",
+    healthy: "已追平",
+    lagging: "仍有积压",
+    degraded: "最近失败",
+  };
+  return map[String(status || "")] || readableState(status || "unknown");
+}
+
+function phase1ShadowTone(status) {
+  if (status === "healthy") return "positive";
+  if (status === "lagging") return "warning";
+  if (status === "degraded") return "danger";
+  return "neutral";
+}
+
+function backlogText(value) {
+  if (value === null || value === undefined) return "待确认";
+  return formatNumber(value, 0);
+}
+
+function phase1ShadowHasBacklog(phase1Shadow) {
+  const lag = phase1Shadow.lag || {};
+  return Number(lag.order_backlog || 0) > 0 || Number(lag.fill_backlog || 0) > 0 || Number(lag.obligation_backlog || 0) > 0;
+}
+
+function phase1ShadowReviewMeta(action) {
+  if (!action) return "当前还没有人工核查记录";
+  const actor = action.actor_identity || action.actor_role || "未知操作人";
+  const reviewedAt = action.details?.reviewed_at || action.details?.snapshot_generated_at;
+  return `${actor} 于 ${formatMaybeTimestamp(reviewedAt)}`;
+}
+
+function phase1ShadowLastError(phase1Shadow) {
+  return (
+    phase1Shadow.execution_shadow?.last_error
+    || phase1Shadow.ledger_shadow?.last_error
+    || "当前没有兼容层错误"
+  );
 }

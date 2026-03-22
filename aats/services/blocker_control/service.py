@@ -135,6 +135,8 @@ class BlockerControlService:
 
     @staticmethod
     def _subsystem_for(code: str) -> str:
+        if code.startswith("phase1_shadow"):
+            return "phase1_shadow"
         if code.startswith("market_"):
             return "market_data"
         if code.startswith("account_"):
@@ -198,6 +200,79 @@ class BlockerControlService:
         actions: list[BlockerActionDefinition] = []
         ai_review_required = bool(ai_runtime.get("outcome_review_required"))
         reconciliation_id = None if latest_reconciliation is None else latest_reconciliation.reconciliation_id
+        if code in {"phase1_shadow_lagging", "phase1_shadow_degraded"}:
+            return [
+                BlockerActionDefinition(
+                    action_id="inspect-shadow",
+                    label="查看影子详情",
+                    kind="client",
+                    method="CLIENT",
+                    client_action="inspect-shadow",
+                    tone="ghost",
+                    expected_effect="打开影子兼容层详情，先确认当前积压、最近失败和人工核查记录。",
+                ),
+                BlockerActionDefinition(
+                    action_id="refresh-dashboard",
+                    label="刷新当前状态",
+                    kind="client",
+                    method="CLIENT",
+                    client_action="refresh-dashboard",
+                    tone="secondary",
+                    expected_effect="重新拉取健康状态、阻断面板和影子兼容层快照，确认异常是否仍然存在。",
+                ),
+                BlockerActionDefinition(
+                    action_id="acknowledge-phase1-shadow",
+                    label="已核查，继续阻断",
+                    endpoint="/system/blocker-actions/acknowledge-phase1-shadow",
+                    tone="warning",
+                    requires_confirmation=True,
+                    confirmation_title="确认已完成人工核查",
+                    confirmation_copy="这会留下当前影子兼容层状态记录，但不会解除阻断，也不会恢复自动运行。",
+                    expected_effect="记录当前人工核查结果，说明系统因为影子兼容层异常而继续保持阻断。",
+                ),
+                BlockerActionDefinition(
+                    action_id="halt-system",
+                    label="继续保持暂停",
+                    endpoint="/system/halt",
+                    tone="danger",
+                    expected_effect="保留当前暂停状态，避免在问题未处理完之前恢复自动交易。",
+                ),
+            ]
+        if code in {"phase1_shadow_lagging", "phase1_shadow_degraded"}:
+            actions.extend(
+                [
+                    BlockerActionDefinition(
+                        action_id="inspect-shadow",
+                        label="查看影子同步状态",
+                        kind="client",
+                        method="CLIENT",
+                        client_action="inspect-shadow",
+                        tone="ghost",
+                        expected_effect="切到风险视图，先确认影子兼容层的阻断状态、积压数量和恢复资格。",
+                    ),
+                    BlockerActionDefinition(
+                        action_id="refresh-dashboard",
+                        label="刷新当前状态",
+                        kind="client",
+                        method="CLIENT",
+                        client_action="refresh-dashboard",
+                        tone="secondary",
+                        expected_effect="重新拉取健康状态、阻断面板和影子兼容层快照，确认异常是否仍然存在。",
+                    ),
+                ]
+            )
+            actions.append(
+                BlockerActionDefinition(
+                    action_id="acknowledge-phase1-shadow",
+                    label="已核查，继续阻断",
+                    endpoint="/system/blocker-actions/acknowledge-phase1-shadow",
+                    tone="warning",
+                    requires_confirmation=True,
+                    confirmation_title="确认已完成人工核查",
+                    confirmation_copy="这会留下当前影子兼容层状态记录，但不会解除阻断，也不会恢复自动运行。",
+                    expected_effect="记录当前人工核查结果，说明系统因为影子兼容层异常而继续保持阻断。",
+                )
+            )
         if reconciliation_id:
             actions.append(
                 BlockerActionDefinition(
@@ -330,6 +405,20 @@ class BlockerControlService:
         is_surface_halt: bool,
         ai_runtime: dict[str, Any],
     ) -> tuple[str, str, str, str]:
+        if code == "phase1_shadow_degraded":
+            return (
+                "影子兼容层写入失败",
+                "Phase 1 影子兼容层最近出现了写入失败。继续运行会削弱新旧执行链和账本链的一致性验证，当前不应恢复自动交易。",
+                "如果兼容层持续写入失败，系统会失去对新执行表和影子账本的连续校验能力，恢复后的状态可信度会下降。",
+                "先查看影子同步状态和最近错误，确认写入失败原因已消除后，再重新评估是否恢复自动运行。",
+            )
+        if code == "phase1_shadow_lagging":
+            return (
+                "影子兼容层尚未追平",
+                "Phase 1 影子兼容层仍然落后于当前主执行链路。新旧链路还没有重新收敛前，不应把系统视为可安全恢复。",
+                "如果在影子表仍然积压时继续恢复，后续对新执行模型和影子账本的验证会建立在不完整数据上，容易掩盖状态漂移。",
+                "先查看影子同步状态，确认订单、成交和保留金积压已经清零，再重新评估恢复资格。",
+            )
         if code == "ai_degraded_requires_manual_review":
             if ai_runtime.get("outcome_review_required"):
                 return (

@@ -16,6 +16,7 @@ from aats.services.market_gateway.okx_normalizer import (
 )
 from aats.services.market_gateway.okx_websocket import OKXPublicWebSocketClient
 from aats.services.market_gateway.publisher import MarketSnapshotPublisher
+from aats.services.execution_engine.okx_rest import OKXRESTClient
 
 
 class MarketDataGateway:
@@ -36,26 +37,43 @@ class MarketDataGateway:
         publisher: MarketSnapshotPublisher,
         okx_normalizer: OKXMarketSnapshotNormalizer | None = None,
         okx_ws_client: OKXPublicWebSocketClient | None = None,
+        okx_rest_client: OKXRESTClient | None = None,
     ) -> None:
         self.settings = settings
         self.normalizer = normalizer
         self.publisher = publisher
         self.okx_normalizer = okx_normalizer or OKXMarketSnapshotNormalizer(exchange_name="OKX")
         self.okx_ws_client = okx_ws_client
+        self.okx_rest_client = okx_rest_client
         self.logger = get_logger("aats.market_gateway")
         self._latest_snapshots: dict[str, MarketSnapshot] = {}
+        self._latest_received_at: dict[str, Any] = {}
         self._tick_by_symbol: dict[str, int] = {}
         self._okx_states: dict[str, OKXInstrumentMarketState] = {}
         self._background_task: asyncio.Task[None] | None = None
+        self._fallback_task: asyncio.Task[None] | None = None
         self._last_publish_ts = None
         self._last_error: str | None = None
+        self._rest_fallback_last_success_ts = None
+        self._rest_fallback_last_attempt_ts = None
+        self._rest_fallback_last_error: str | None = None
+        self._rest_fallback_active = False
 
     async def start(self) -> None:
-        if self.settings.market_data_backend != "okx" or self.okx_ws_client is None:
+        if self.settings.market_data_backend != "okx":
             return
-        if self._background_task is not None and not self._background_task.done():
-            return
-        self._background_task = asyncio.create_task(self._run_okx_stream(), name="aats_okx_market_stream")
+        if self.okx_ws_client is not None:
+            if self._background_task is None or self._background_task.done():
+                self._background_task = asyncio.create_task(self._run_okx_stream(), name="aats_okx_market_stream")
+        if (
+            self.settings.okx_market_rest_fallback_enabled
+            and self.okx_rest_client is not None
+            and (self._fallback_task is None or self._fallback_task.done())
+        ):
+            self._fallback_task = asyncio.create_task(
+                self._run_okx_rest_fallback_loop(),
+                name="aats_okx_market_rest_fallback",
+            )
 
     async def stop(self) -> None:
         if self.okx_ws_client is not None:
@@ -67,6 +85,13 @@ class MarketDataGateway:
             except asyncio.CancelledError:
                 pass
             self._background_task = None
+        if self._fallback_task is not None:
+            self._fallback_task.cancel()
+            try:
+                await self._fallback_task
+            except asyncio.CancelledError:
+                pass
+            self._fallback_task = None
 
     async def publish_local_snapshot(self, symbol: str | None = None) -> MarketSnapshot:
         trading_symbol = symbol or self.settings.default_symbol
@@ -99,6 +124,16 @@ class MarketDataGateway:
         return snapshot.last_price if snapshot is not None else Decimal("0")
 
     def is_fresh(self, symbol: str) -> bool:
+        return self.receipt_is_fresh(symbol) and self.snapshot_is_fresh(symbol)
+
+    def receipt_is_fresh(self, symbol: str) -> bool:
+        received_at = self._latest_received_at.get(symbol)
+        if received_at is None:
+            return False
+        age_seconds = (utc_now() - received_at).total_seconds()
+        return age_seconds <= self.settings.market_data_stale_after_seconds
+
+    def snapshot_is_fresh(self, symbol: str) -> bool:
         snapshot = self._latest_snapshots.get(symbol)
         if snapshot is None:
             return False
@@ -107,8 +142,9 @@ class MarketDataGateway:
 
     def status(self) -> dict[str, Any]:
         default_snapshot = self._latest_snapshots.get(self.settings.default_symbol)
+        last_received_ts = self._latest_received_at.get(self.settings.default_symbol)
         connected = True
-        last_update_ts = default_snapshot.snapshot_ts if default_snapshot is not None else None
+        last_update_ts = last_received_ts or (default_snapshot.snapshot_ts if default_snapshot is not None else None)
         detail = "demo_market_data"
         transport_connected = True
         transport_connected_public: bool | None = None
@@ -121,16 +157,20 @@ class MarketDataGateway:
             last_update_ts = okx_status.get("last_message_ts") or last_update_ts
             detail = "okx_public_ws"
             self._last_error = okx_status.get("last_error")
-        fresh = self.is_fresh(self.settings.default_symbol)
+        receipt_fresh = self.receipt_is_fresh(self.settings.default_symbol)
+        snapshot_fresh = self.snapshot_is_fresh(self.settings.default_symbol)
+        fresh = receipt_fresh and snapshot_fresh
         if self.settings.market_data_backend == "okx":
-            connected = transport_connected or fresh
+            connected = transport_connected or receipt_fresh
         blockers: list[str] = []
-        if not transport_connected and not fresh:
+        if not transport_connected and not receipt_fresh:
             blockers.append("market_connection_down")
         if not fresh:
             blockers.append("market_data_stale")
-        if not transport_connected and fresh:
+        if not transport_connected and receipt_fresh:
             detail = f"{detail}_transport_degraded"
+        if self._rest_fallback_active:
+            detail = f"{detail}_rest_fallback"
         return {
             "backend": self.settings.market_data_backend,
             "connected": connected,
@@ -138,8 +178,16 @@ class MarketDataGateway:
             "transport_connected_public": transport_connected_public,
             "transport_connected_business": transport_connected_business,
             "fresh": fresh,
+            "receipt_fresh": receipt_fresh,
+            "snapshot_fresh": snapshot_fresh,
             "last_update_ts": last_update_ts,
+            "market_snapshot_ts": default_snapshot.snapshot_ts if default_snapshot is not None else None,
             "last_error": self._last_error,
+            "rest_fallback_enabled": bool(self.settings.okx_market_rest_fallback_enabled and self.okx_rest_client is not None),
+            "rest_fallback_active": self._rest_fallback_active,
+            "rest_fallback_last_attempt_ts": self._rest_fallback_last_attempt_ts,
+            "rest_fallback_last_success_ts": self._rest_fallback_last_success_ts,
+            "rest_fallback_last_error": self._rest_fallback_last_error,
             "detail": detail,
             "blockers": blockers,
             "ready": fresh,
@@ -150,6 +198,73 @@ class MarketDataGateway:
             return
         log_event(self.logger, "market_stream_started", backend="okx")
         await self.okx_ws_client.run_forever(on_message=self._handle_okx_message)
+
+    async def _run_okx_rest_fallback_loop(self) -> None:
+        while True:
+            try:
+                await self._run_okx_rest_fallback_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self._rest_fallback_last_error = str(exc)
+                log_event(
+                    self.logger,
+                    "okx_market_rest_fallback_error",
+                    level="error",
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
+            await asyncio.sleep(self.settings.okx_market_rest_fallback_poll_interval_seconds)
+
+    async def _run_okx_rest_fallback_once(self) -> bool:
+        if (
+            self.settings.market_data_backend != "okx"
+            or not self.settings.okx_market_rest_fallback_enabled
+            or self.okx_rest_client is None
+        ):
+            self._rest_fallback_active = False
+            return False
+        symbol = self.settings.default_symbol
+        if self.is_fresh(symbol):
+            self._rest_fallback_active = False
+            return False
+        self._rest_fallback_last_attempt_ts = utc_now()
+        snapshot = await self._fetch_okx_rest_snapshot(symbol=symbol)
+        await self._publish_snapshot(snapshot)
+        self._rest_fallback_last_success_ts = utc_now()
+        self._rest_fallback_last_error = None
+        self._rest_fallback_active = True
+        log_event(
+            self.logger,
+            "okx_market_rest_fallback_published",
+            symbol=symbol,
+            snapshot_ts=snapshot.snapshot_ts.isoformat(),
+        )
+        return True
+
+    async def _fetch_okx_rest_snapshot(self, *, symbol: str) -> MarketSnapshot:
+        if self.okx_rest_client is None:
+            raise RuntimeError("okx_rest_client_unavailable")
+        ticker_payload, candle_15m_payload, candle_1h_payload = await asyncio.gather(
+            self.okx_rest_client.get_market_ticker(symbol=symbol),
+            self.okx_rest_client.get_market_candles(symbol=symbol, bar="15m", limit=1),
+            self.okx_rest_client.get_market_candles(symbol=symbol, bar="1H", limit=1),
+        )
+        ticker_rows = ticker_payload.get("data", [])
+        candle_15m_rows = candle_15m_payload.get("data", [])
+        candle_1h_rows = candle_1h_payload.get("data", [])
+        if not isinstance(ticker_rows, list) or not ticker_rows or not isinstance(ticker_rows[0], dict):
+            raise RuntimeError("okx_market_rest_ticker_missing")
+        if not isinstance(candle_15m_rows, list) or not candle_15m_rows or not isinstance(candle_15m_rows[0], list):
+            raise RuntimeError("okx_market_rest_candle_15m_missing")
+        if not isinstance(candle_1h_rows, list) or not candle_1h_rows or not isinstance(candle_1h_rows[0], list):
+            raise RuntimeError("okx_market_rest_candle_1h_missing")
+        return self.okx_normalizer.build_snapshot_from_rest_payloads(
+            symbol=symbol,
+            ticker_payload=ticker_rows[0],
+            candle_15m_payload=candle_15m_rows[0],
+            candle_1h_payload=candle_1h_rows[0],
+        )
 
     async def _handle_okx_message(self, message: dict[str, Any]) -> None:
         try:
@@ -169,8 +284,10 @@ class MarketDataGateway:
             return
 
     async def _publish_snapshot(self, snapshot: MarketSnapshot) -> None:
+        received_at = utc_now()
         self._latest_snapshots[snapshot.symbol] = snapshot
-        self._last_publish_ts = snapshot.snapshot_ts
+        self._latest_received_at[snapshot.symbol] = received_at
+        self._last_publish_ts = received_at
         await self.publisher.publish(snapshot)
 
     def _build_local_payload(self, symbol: str) -> dict[str, Any]:

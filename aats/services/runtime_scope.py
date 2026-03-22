@@ -5,7 +5,7 @@ from typing import Any
 
 from aats.bootstrap.settings import AATSSettings
 from aats.schemas.execution import FillEvent, OrderState
-from aats.schemas.portfolio import PortfolioSnapshot
+from aats.schemas.portfolio import FillOutcomeRecord, PortfolioSnapshot
 from aats.schemas.reconciliation import ReconciliationReport
 from aats.schemas.system import MarginModelType, ProductType
 
@@ -40,6 +40,10 @@ def filter_order_states(order_states: list[OrderState], scope: RuntimeStateScope
 
 def filter_fills(fills: list[FillEvent], scope: RuntimeStateScope) -> list[FillEvent]:
     return [fill for fill in fills if fill_event_matches_scope(fill, scope)]
+
+
+def filter_fill_outcomes(outcomes: list[FillOutcomeRecord], scope: RuntimeStateScope) -> list[FillOutcomeRecord]:
+    return [outcome for outcome in outcomes if fill_outcome_matches_scope(outcome, scope)]
 
 
 def latest_matching_snapshot(
@@ -196,6 +200,35 @@ def fills_for_scope(
         return repo.fills_for_scope(scope=scope, since=since, limit=limit)
     rows = repo.fills_since(since=since) if since is not None else repo.fills()
     rows = filter_fills(rows, scope)
+    if limit is not None:
+        rows = rows[-limit:]
+    return rows
+
+
+def fill_outcome_matches_scope(
+    outcome: FillOutcomeRecord,
+    scope: RuntimeStateScope,
+) -> bool:
+    if not scope.symbol_allowed(outcome.symbol):
+        return False
+    if outcome.product_type != scope.product_type:
+        return False
+    return outcome.margin_mode == scope.margin_mode
+
+
+def fill_outcomes_for_scope(
+    repo,
+    scope: RuntimeStateScope,
+    *,
+    since=None,
+    limit: int | None = None,
+) -> list[FillOutcomeRecord]:
+    if hasattr(repo, "outcomes_for_scope"):
+        return repo.outcomes_for_scope(scope=scope, since=since, limit=limit)
+    rows = repo.outcomes()
+    if since is not None:
+        rows = [outcome for outcome in rows if outcome.created_at >= since]
+    rows = filter_fill_outcomes(rows, scope)
     if limit is not None:
         rows = rows[-limit:]
     return rows

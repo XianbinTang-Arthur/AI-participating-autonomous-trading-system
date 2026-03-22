@@ -160,11 +160,11 @@ class TestExecutionOutboxPostgres(unittest.IsolatedAsyncioTestCase):
                 symbol="BTC-USDT",
                 side="buy",
                 reserve_currency="USDT",
-                reserved_amount=60.0,
+                reserved_amount=Decimal("60.0"),
                 status="ACTIVE",
                 product_type="spot",
                 margin_mode="cash",
-                reference_price=60_000.0,
+                reference_price=Decimal("60000.0"),
                 last_update_ts=utc_now(),
             )
             obligation_repo.save_obligation(base_obligation)
@@ -177,9 +177,9 @@ class TestExecutionOutboxPostgres(unittest.IsolatedAsyncioTestCase):
                 symbol="BTC-USDT",
                 venue="OKX",
                 side="buy",
-                fill_qty=0.001,
-                fill_price=60_000.0,
-                fee_amount=0.0,
+                fill_qty=Decimal("0.001"),
+                fill_price=Decimal("60000.0"),
+                fee_amount=Decimal("0.0"),
                 fee_currency="USDT",
                 product_type="spot",
                 margin_mode="cash",
@@ -190,7 +190,7 @@ class TestExecutionOutboxPostgres(unittest.IsolatedAsyncioTestCase):
             )
             updated_obligation = base_obligation.model_copy(
                 update={
-                    "consumed_amount": 60.0,
+                    "consumed_amount": Decimal("60.0"),
                     "status": "RELEASED",
                     "last_update_ts": utc_now(),
                 }
@@ -266,11 +266,11 @@ class TestExecutionOutboxPostgres(unittest.IsolatedAsyncioTestCase):
             submission_mode="guarded_simulated_submit",
             submitted_ts=now,
             last_update_ts=now,
-            requested_qty=0.001,
-            filled_qty=0.0,
-            remaining_qty=0.001,
+            requested_qty=Decimal("0.001"),
+            filled_qty=Decimal("0.0"),
+            remaining_qty=Decimal("0.001"),
             average_fill_price=None,
-            fees=0.0,
+            fees=Decimal("0.0"),
             product_type="spot",
             margin_mode="cash",
             submission_payload={"instId": "BTC-USDT"},

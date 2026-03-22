@@ -222,6 +222,32 @@ class OKXRESTClient:
             require_auth=False,
         )
 
+    async def get_market_ticker(self, *, symbol: str) -> dict[str, Any]:
+        return await self.request(
+            method="GET",
+            path="/api/v5/market/ticker",
+            params={"instId": symbol},
+            require_auth=False,
+        )
+
+    async def get_market_candles(
+        self,
+        *,
+        symbol: str,
+        bar: str,
+        limit: int = 1,
+    ) -> dict[str, Any]:
+        return await self.request(
+            method="GET",
+            path="/api/v5/market/candles",
+            params={
+                "instId": symbol,
+                "bar": bar,
+                "limit": limit,
+            },
+            require_auth=False,
+        )
+
     async def get_bills_details(
         self,
         *,

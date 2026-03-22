@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
@@ -10,7 +10,7 @@ from aats.events.envelopes import build_envelope
 from aats.schemas.common import EventEnvelope, utc_now
 from aats.schemas.blocker_control import BlockerControlSnapshot
 from aats.schemas.decision import AIDecisionIntent, BaselineReference, DecisionOutcome, normalize_ai_operating_mode
-from aats.schemas.execution import OrderState, execution_action_from_position_intent
+from aats.schemas.execution import FillEvent, OrderState, execution_action_from_position_intent
 from aats.schemas.operator import (
     AuthSource,
     BlockerSnapshotRecord,
@@ -37,6 +37,7 @@ from aats.services.operator.reconciliation_system_queries import ReconciliationS
 from aats.services.operator.strategy_profile_queries import StrategyProfileQueryFacade
 from aats.services.operator.strategy_profiles import StrategyProfileControlService
 from aats.services.runtime_scope import (
+    fill_outcomes_for_scope,
     fills_for_scope,
     latest_reconciliation_for_scope,
     latest_snapshot_for_scope,
@@ -53,6 +54,7 @@ if TYPE_CHECKING:
 
 class OperatorQueryService:
     _STUCK_SUBMISSION_STATUSES = {"CREATED", "SUBMITTING"}
+    _DECIMAL_EPSILON = Decimal("1e-12")
 
     def __init__(self, runtime: ApplicationRuntime) -> None:
         self.runtime = runtime
@@ -94,11 +96,161 @@ class OperatorQueryService:
             lambda: fills_for_scope(self.runtime.execution_repo, self.state_scope),
         )
 
+    def _scoped_fill_outcomes(self):
+        return self._cached(
+            "scoped_fill_outcomes",
+            lambda: fill_outcomes_for_scope(self.runtime.fill_outcome_repo, self.state_scope),
+        )
+
+    def _fill_outcome_map(self) -> dict[str, Any]:
+        return self._cached(
+            "fill_outcome_map",
+            lambda: {item.fill_id: item for item in self._scoped_fill_outcomes()},
+        )
+
     def _latest_scoped_snapshot(self):
         return self._cached(
             "latest_scoped_snapshot",
             lambda: latest_snapshot_for_scope(self.runtime.portfolio_repo, self.state_scope),
         )
+
+    def _phase5_control_plane_enabled(self) -> bool:
+        return bool(
+            self.runtime.settings.operator_control_plane_execution_ledger_enabled
+            and self.runtime.execution_order_repo is not None
+            and self.runtime.execution_fill_repo_v2 is not None
+            and self.runtime.ledger_account_repo is not None
+            and self.runtime.ledger_entry_repo is not None
+        )
+
+    def _phase5_order_rows(self, *, limit: int | None = None, offset: int = 0) -> list[dict[str, Any]]:
+        if not self._phase5_control_plane_enabled():
+            return []
+        rows = self.runtime.execution_order_repo.list_orders(limit=limit, offset=offset)
+        allowed_symbols = set(self.state_scope.allowed_symbols)
+        return [
+            row
+            for row in rows
+            if row.get("product_type") == self.state_scope.product_type
+            and row.get("margin_mode") == self.state_scope.margin_mode
+            and (not allowed_symbols or row.get("symbol") in allowed_symbols)
+        ]
+
+    def _phase5_fill_rows(self, *, limit: int | None = None, offset: int = 0) -> list[dict[str, Any]]:
+        if not self._phase5_control_plane_enabled():
+            return []
+        rows = list(reversed(self.runtime.execution_fill_repo_v2.fills_since(limit=None)))
+        allowed_symbols = set(self.state_scope.allowed_symbols)
+        scoped = [
+            row
+            for row in rows
+            if row.get("raw_payload", {}).get("product_type", self.state_scope.product_type) == self.state_scope.product_type
+            and row.get("raw_payload", {}).get("margin_mode", self.state_scope.margin_mode) == self.state_scope.margin_mode
+            and (not allowed_symbols or row.get("symbol") in allowed_symbols)
+        ]
+        if offset:
+            scoped = scoped[offset:]
+        if limit is not None:
+            scoped = scoped[:limit]
+        return scoped
+
+    def _phase5_balance_view(self) -> dict[str, Decimal]:
+        if not self._phase5_control_plane_enabled():
+            snapshot = self._latest_scoped_snapshot()
+            return {} if snapshot is None else dict(snapshot.balances)
+        balances: dict[str, Decimal] = {}
+        for account in self.runtime.ledger_account_repo.list_accounts(
+            account_type="cash_available",
+            product_type=self.state_scope.product_type,
+            margin_mode=self.state_scope.margin_mode,
+        ):
+            currency = str(account["currency"])
+            amount = self.runtime.ledger_entry_repo.balance_by_account(str(account["account_id"]))
+            balances[currency] = amount
+        return balances
+
+    def _control_plane_order_state(self, client_order_id: str) -> OrderState | None:
+        resolver = getattr(self.runtime.order_manager, "resolve_order_state_for_control", None)
+        if callable(resolver):
+            return resolver(client_order_id)
+        return next(
+            (item for item in self._scoped_order_states() if item.client_order_id == client_order_id),
+            None,
+        )
+
+    def _control_plane_fills_for_order(self, client_order_id: str) -> list[Any]:
+        if not self._phase5_control_plane_enabled():
+            return self._scoped_fills_for_order(client_order_id)
+        rows = self.runtime.execution_fill_repo_v2.fills_for_order(client_order_id)
+        hydrated: list[Any] = []
+        for row in rows:
+            raw_payload = dict(row.get("raw_payload") or {})
+            fill_payload = raw_payload.get("fill_event")
+            if isinstance(fill_payload, dict):
+                hydrated.append(FillEvent.model_validate(fill_payload))
+                continue
+            hydrated.append(
+                FillEvent(
+                    fill_id=str(row.get("fill_id") or ""),
+                    decision_id=str(row.get("decision_id") or ""),
+                    intent_id=str(row.get("intent_id") or ""),
+                    client_order_id=str(row.get("client_order_id") or client_order_id),
+                    exchange_order_id=str(row.get("venue_order_id") or ""),
+                    symbol=str(row.get("symbol") or self.runtime.settings.default_symbol),
+                    venue=str(raw_payload.get("venue") or "PAPER"),
+                    side=str(row.get("side") or "buy"),
+                    fill_qty=row.get("fill_qty"),
+                    fill_price=row.get("fill_price"),
+                    fee_amount=row.get("fee_amount") or Decimal("0"),
+                    fee_currency=row.get("fee_currency"),
+                    product_type=raw_payload.get("product_type", self.state_scope.product_type),
+                    target_leverage=float(raw_payload.get("target_leverage") or 1.0),
+                    margin_mode=raw_payload.get("margin_mode", self.state_scope.margin_mode),
+                    exposure_side=str(raw_payload.get("exposure_side") or "flat"),
+                    execution_action=raw_payload.get("execution_action"),
+                    position_intent=str(raw_payload.get("position_intent") or "open_long"),
+                    liquidity_role=str(row.get("liquidity_role") or "taker"),
+                    exchange_timestamp=row.get("exchange_ts"),
+                    ingestion_timestamp=row.get("ingestion_ts"),
+                    order_status_after_fill=raw_payload.get("order_status_after_fill"),
+                )
+            )
+        return hydrated
+
+    def _sync_execution_order_truth(self, order_state: OrderState) -> None:
+        shadow_service = self.runtime.phase1_execution_shadow_service
+        if shadow_service is not None:
+            shadow_service.shadow_order_state(order_state=order_state)
+            return
+        if self.runtime.execution_order_repo is None:
+            return
+        existing = self.runtime.execution_order_repo.get_order_by_client_order_id(order_state.client_order_id)
+        if existing is None:
+            return
+        previous_state = str(existing["state"])
+        self.runtime.execution_order_repo.update_order_state(
+            order_id=str(existing["order_id"]),
+            expected_state_version=int(existing["state_version"]),
+            next_state=order_state.status,
+            venue_order_id=order_state.exchange_order_id,
+            last_exchange_ts=order_state.last_exchange_update_ts,
+            updated_at=order_state.last_update_ts or order_state.created_at,
+            raw_payload=order_state.model_dump(mode="python"),
+        )
+        if (
+            self.runtime.execution_order_history_repo is not None
+            and previous_state != order_state.status
+        ):
+            self.runtime.execution_order_history_repo.append_transition(
+                order_id=str(existing["order_id"]),
+                from_state=previous_state,
+                to_state=order_state.status,
+                reason_code="operator_state_sync",
+                source="operator_control_plane",
+                source_message_id=order_state.intent_id,
+                payload=order_state.model_dump(mode="python"),
+                created_at=order_state.last_update_ts or order_state.created_at,
+            )
 
     def _current_symbol_position_qty(self, symbol: str) -> Any:
         snapshot = self._latest_scoped_snapshot()
@@ -172,6 +324,140 @@ class OperatorQueryService:
         return rows
 
     @staticmethod
+    def _to_decimal(value: Any) -> Decimal | None:
+        if value is None:
+            return None
+        try:
+            return Decimal(str(value))
+        except Exception:
+            return None
+
+    @staticmethod
+    def _latency_ms(start: Any, end: Any) -> float | None:
+        if not isinstance(start, datetime) or not isinstance(end, datetime):
+            return None
+        return round((end - start).total_seconds() * 1000.0, 3)
+
+    def _adverse_slippage_bps(self, *, side: Any, fill_price: Any, reference_price: Any) -> Decimal | None:
+        fill_price_decimal = self._to_decimal(fill_price)
+        reference_price_decimal = self._to_decimal(reference_price)
+        if (
+            fill_price_decimal is None
+            or reference_price_decimal is None
+            or abs(reference_price_decimal) <= self._DECIMAL_EPSILON
+        ):
+            return None
+        raw_bps = ((fill_price_decimal - reference_price_decimal) / reference_price_decimal) * Decimal("10000")
+        if str(side).lower() == "sell":
+            raw_bps = -raw_bps
+        return raw_bps
+
+    def _decision_support_payload(self, decision_id: str | None) -> dict[str, Any]:
+        if not decision_id:
+            return {
+                "audit": None,
+                "decision_context": None,
+                "position_target": None,
+                "execution_plan": None,
+                "decision_outcome": None,
+            }
+        audit = self.runtime.audit_repo.get(decision_id)
+        if audit is None:
+            return {
+                "audit": None,
+                "decision_context": None,
+                "position_target": None,
+                "execution_plan": None,
+                "decision_outcome": None,
+            }
+        return {
+            "audit": audit,
+            "decision_context": self.payload_by_ref(audit.decision_context_ref),
+            "position_target": self.payload_by_ref(audit.position_target_ref),
+            "execution_plan": self._execution_plan_payload(self.payload_by_ref(audit.execution_plan_ref)),
+            "decision_outcome": self.payload_by_ref(audit.decision_outcome_ref),
+        }
+
+    def _execution_quality_row(self, fill_record: Any) -> dict[str, Any]:
+        fill_payload = self._execution_record_payload(fill_record)
+        decision_support = self._decision_support_payload(fill_payload.get("decision_id"))
+        decision_context = decision_support["decision_context"]
+        execution_plan = decision_support["execution_plan"]
+        decision_outcome = decision_support["decision_outcome"]
+        order_state = self._control_plane_order_state(str(fill_payload.get("client_order_id") or ""))
+        order_payload = None if order_state is None else self._execution_record_payload(order_state)
+
+        signal_ts = None if decision_context is None else decision_context.get("as_of_ts")
+        reference_price = None
+        if execution_plan is not None:
+            reference_price = execution_plan.get("reference_price")
+        if reference_price is None:
+            reference_price = fill_payload.get("reference_price")
+        if reference_price is None and order_payload is not None:
+            submission_payload = order_payload.get("submission_payload") or {}
+            reference_price = submission_payload.get("referencePrice") or submission_payload.get("reference_price")
+
+        fill_notional = self._to_decimal(fill_payload.get("fill_notional"))
+        if fill_notional is None:
+            qty = self._to_decimal(fill_payload.get("fill_qty"))
+            price = self._to_decimal(fill_payload.get("fill_price"))
+            if qty is not None and price is not None:
+                fill_notional = qty * price
+
+        fee_amount = self._to_decimal(fill_payload.get("fee_amount"))
+        fee_delta = self._to_decimal(fill_payload.get("fee_delta"))
+        adverse_slippage_bps = self._adverse_slippage_bps(
+            side=fill_payload.get("side"),
+            fill_price=fill_payload.get("fill_price"),
+            reference_price=reference_price,
+        )
+
+        return {
+            "fill_id": fill_payload.get("fill_id"),
+            "decision_id": fill_payload.get("decision_id"),
+            "intent_id": fill_payload.get("intent_id"),
+            "order_id": fill_payload.get("client_order_id"),
+            "symbol": fill_payload.get("symbol"),
+            "side": fill_payload.get("side"),
+            "execution_action": fill_payload.get("execution_action"),
+            "position_intent": fill_payload.get("position_intent"),
+            "truth_source": fill_payload.get("truth_source"),
+            "signal_timestamp": signal_ts,
+            "order_created_timestamp": None if order_payload is None else order_payload.get("created_at"),
+            "submitted_timestamp": None if order_payload is None else order_payload.get("submitted_ts"),
+            "exchange_fill_timestamp": fill_payload.get("exchange_timestamp"),
+            "ingestion_timestamp": fill_payload.get("ingestion_timestamp"),
+            "decision_to_submit_latency_ms": self._latency_ms(signal_ts, None if order_payload is None else order_payload.get("submitted_ts")),
+            "submit_to_exchange_fill_latency_ms": self._latency_ms(
+                None if order_payload is None else order_payload.get("submitted_ts"),
+                fill_payload.get("exchange_timestamp"),
+            ),
+            "exchange_fill_to_ingestion_latency_ms": self._latency_ms(
+                fill_payload.get("exchange_timestamp"),
+                fill_payload.get("ingestion_timestamp"),
+            ),
+            "reference_price": reference_price,
+            "fill_price": fill_payload.get("fill_price"),
+            "adverse_slippage_bps": None if adverse_slippage_bps is None else adverse_slippage_bps,
+            "fill_qty": fill_payload.get("fill_qty"),
+            "fill_notional": fill_notional,
+            "fee_amount": fee_amount,
+            "fee_delta": fee_delta,
+            "fee_ratio": (
+                None
+                if fee_amount is None or fill_notional is None or abs(fill_notional) <= self._DECIMAL_EPSILON
+                else fee_amount / fill_notional
+            ),
+            "realized_pnl_delta": self._to_decimal(fill_payload.get("realized_pnl_delta")),
+            "gross_realized_pnl": self._to_decimal(fill_payload.get("gross_realized_pnl")),
+            "expected_net_edge_bps": None if decision_outcome is None else decision_outcome.get("expected_net_edge_bps"),
+            "decision_context": {
+                "timeframe": None if decision_context is None else decision_context.get("timeframe"),
+                "market_regime": None if decision_context is None else decision_context.get("market_regime"),
+            },
+        }
+
+    @staticmethod
     def _paginate_rows(
         rows: list[Any],
         *,
@@ -192,10 +478,16 @@ class OperatorQueryService:
         }
 
     def latest_order(self):
+        if self._phase5_control_plane_enabled():
+            rows = self._phase5_order_rows(limit=1)
+            return rows[0] if rows else None
         rows = self._scoped_order_states()
         return max(rows, key=lambda item: item.last_update_ts or item.created_at, default=None)
 
     def latest_fill(self):
+        if self._phase5_control_plane_enabled():
+            rows = self._phase5_fill_rows(limit=1)
+            return rows[0] if rows else None
         rows = self._scoped_fills()
         return max(rows, key=lambda item: item.ingestion_timestamp, default=None)
 
@@ -514,6 +806,9 @@ class OperatorQueryService:
                 "configured_operating_mode": runtime.get("configured_operating_mode"),
                 "effective_operating_mode": runtime.get("effective_operating_mode"),
                 "shadow_mode_enabled": runtime.get("shadow_mode_enabled", False),
+                "strategy_profile_auto_control_configured": runtime.get("strategy_profile_auto_control_configured", False),
+                "strategy_profile_auto_control_effective": runtime.get("strategy_profile_auto_control_effective", False),
+                "strategy_profile_auto_control_reason": runtime.get("strategy_profile_auto_control_reason"),
                 "shadow_summary": self._ai_shadow_summary(),
                 "latest_profile_control_decision": None
                 if latest_decision_detail is None
@@ -551,6 +846,29 @@ class OperatorQueryService:
             if item.payload.get("action") == action:
                 return item.payload
         return None
+
+    def recent_operator_actions(
+        self,
+        *,
+        action: str | None = None,
+        key: str | None = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        actions = self._cached(
+            "operator_action_events",
+            lambda: self.runtime.event_store.by_topic(topics.OPERATOR_ACTIONS),
+        )
+        rows: list[dict[str, Any]] = []
+        for item in reversed(actions):
+            if action is not None and item.payload.get("action") != action:
+                continue
+            if key is not None and item.key != key:
+                continue
+            payload = self.payload(item)
+            if payload is not None:
+                rows.append(payload)
+        return self._paginate_rows(rows, limit=limit, offset=offset, key="actions")
 
     def record_operator_login(
         self,
@@ -597,6 +915,51 @@ class OperatorQueryService:
                 resolution=self.runtime.runtime_profile_resolution,
             ),
         )
+        return snapshot
+
+    def record_phase1_shadow_review(
+        self,
+        *,
+        reason: str,
+        actor_role: OperatorRole,
+        actor_identity: str | None = None,
+        auth_source: AuthSource = "anonymous",
+    ) -> dict[str, Any]:
+        snapshot = self._build_phase1_shadow()
+        recovery_before = self.recovery_view()["recovery_state"]
+        action = OperatorActionRecord(
+            action="phase1_shadow_review",
+            actor_role=actor_role,
+            actor_identity=actor_identity,
+            auth_source=auth_source,
+            reason=reason,
+            status="review_recorded",
+            recovery_state_before=recovery_before,
+            recovery_state_after=recovery_before,
+            details={
+                "snapshot_status": snapshot.get("status"),
+                "summary": snapshot.get("summary"),
+                "lag": snapshot.get("lag"),
+                "blockers": snapshot.get("blockers", []),
+                "reviewed_at": utc_now(),
+                "snapshot_generated_at": utc_now(),
+            },
+        )
+        envelope = self._append_event(
+            topic=topics.OPERATOR_ACTIONS,
+            key="phase1_shadow",
+            payload_model=action,
+        )
+        self._persist_blocker_snapshot(
+            source="phase1_shadow_review",
+            runtime_state=self.system_health()["runtime_state"],
+            mode_snapshot=self.system_mode(),
+            blockers=self.blockers(),
+        )
+        payload = action.model_dump(mode="json")
+        payload["_event_id"] = envelope.event_id
+        payload["_topic"] = envelope.topic
+        return payload
         activation = snapshot["activation"]
         return {
             **snapshot,
@@ -656,6 +1019,24 @@ class OperatorQueryService:
     def strategy_profile_activation_history(self, *, limit: int, offset: int) -> dict[str, Any]:
         return self.strategy_profile_queries.activation_history(limit=limit, offset=offset)
 
+    def profile_control_summary_report(self) -> dict[str, Any]:
+        snapshot = self.strategy_profile_queries.snapshot()
+        latest_optimization = snapshot.get("latest_optimization_report") or {}
+        latest_selection = snapshot.get("latest_selection_decision") or {}
+        return {
+            "control_summary": snapshot.get("control_summary") or {},
+            "activation": snapshot.get("activation") or {},
+            "active_revision": snapshot.get("active_revision"),
+            "latest_selection_decision": latest_selection,
+            "latest_optimization_report": {
+                "recommended_profile_id": latest_optimization.get("recommended_profile_id"),
+                "score_delta_vs_active": latest_optimization.get("score_delta_vs_active"),
+                "control_summary": latest_optimization.get("control_summary") or {},
+                "winner_selection_policy": latest_optimization.get("winner_selection_policy") or {},
+                "notes": latest_optimization.get("notes") or [],
+            },
+        }
+
     def activate_strategy_profile(
         self,
         *,
@@ -667,6 +1048,23 @@ class OperatorQueryService:
     ) -> dict[str, Any]:
         return self.strategy_profile_queries.activate_profile(
             profile_id=profile_id,
+            reason=reason,
+            actor_role=actor_role,
+            actor_identity=actor_identity,
+            auth_source=auth_source,
+        )
+
+    def restore_strategy_profile_auto(
+        self,
+        *,
+        reason: str,
+        actor_role: OperatorRole,
+        actor_identity: str | None,
+        auth_source: AuthSource,
+    ) -> dict[str, Any]:
+        if not self.ai_runtime().get("strategy_profile_auto_control_configured", False):
+            raise ValueError("strategy_profile_auto_control_not_enabled")
+        return self.strategy_profile_queries.restore_auto(
             reason=reason,
             actor_role=actor_role,
             actor_identity=actor_identity,
@@ -861,6 +1259,22 @@ class OperatorQueryService:
     def metrics(self) -> dict[str, Any]:
         return self.runtime_queries.metrics()
 
+    def phase1_shadow(self) -> dict[str, Any]:
+        return self._build_phase1_shadow()
+
+    def phase1_shadow_history(self, *, limit: int = 20, offset: int = 0) -> dict[str, Any]:
+        return self.runtime_queries.phase1_shadow_history(limit=limit, offset=offset)
+
+    def trial_guard(self) -> dict[str, Any]:
+        service = getattr(self.runtime, "trial_guard_service", None)
+        if service is None:
+            return {
+                "enabled": False,
+                "status": "not_configured",
+                "summary": "试盘守护未配置。",
+            }
+        return service.snapshot()
+
     def _build_system_mode(self) -> dict[str, Any]:
         snapshot = dict(self.runtime.mode_controller.snapshot())
         readiness = self.runtime.execution_adapter.readiness()
@@ -894,6 +1308,7 @@ class OperatorQueryService:
         snapshot["active_profile_revision_id"] = self.runtime.runtime_profile_resolution.activation_state.active_revision_id
         snapshot["pending_profile_revision_id"] = self.runtime.runtime_profile_resolution.activation_state.pending_revision_id
         snapshot["restart_required"] = self.runtime.runtime_profile_resolution.activation_state.restart_required
+        snapshot["trial_guard"] = self.trial_guard()
         return snapshot
 
     def _effective_taker_fee_bps(self, *, symbol: str | None = None) -> float:
@@ -1038,11 +1453,72 @@ class OperatorQueryService:
         return self._action_from_position_intent(position_intent)
 
     def _execution_record_payload(self, record: Any) -> dict[str, Any]:
+        if isinstance(record, dict):
+            payload = dict(record)
+            raw_payload = dict(payload.get("raw_payload") or {})
+            if "state" in payload and "status" not in payload:
+                payload["status"] = payload.get("state")
+            if "requested_qty" in payload and "quantity" not in payload:
+                payload["quantity"] = payload.get("requested_qty")
+            if "exchange_ts" in payload and "exchange_timestamp" not in payload:
+                payload["exchange_timestamp"] = payload.get("exchange_ts")
+            if "ingestion_ts" in payload and "ingestion_timestamp" not in payload:
+                payload["ingestion_timestamp"] = payload.get("ingestion_ts")
+            payload["truth_source"] = payload.get("truth_source") or (
+                "execution_fill_repo_v2" if payload.get("fill_id") else "execution_order_repo"
+            )
+            payload["product_type"] = raw_payload.get("product_type", payload.get("product_type"))
+            payload["margin_mode"] = raw_payload.get("margin_mode", payload.get("margin_mode"))
+            payload["execution_action"] = self._action_from_execution_fields(
+                execution_action=raw_payload.get("execution_action", payload.get("execution_action")),
+                position_intent=raw_payload.get("position_intent", payload.get("position_intent")),
+            )
+            fill_id = payload.get("fill_id")
+            if fill_id:
+                outcome = self._fill_outcome_map().get(fill_id)
+                payload["has_fill_outcome"] = outcome is not None
+                if outcome is not None:
+                    outcome_payload = outcome.model_dump(mode="json")
+                    payload["fill_notional"] = outcome_payload.get("fill_notional")
+                    payload["realized_pnl"] = outcome_payload.get("realized_pnl_delta")
+                    payload["realized_pnl_delta"] = outcome_payload.get("realized_pnl_delta")
+                    payload["gross_realized_pnl"] = outcome.realized_pnl_delta + outcome.fee_delta
+                    payload["fee_delta"] = outcome_payload.get("fee_delta")
+                    payload["starting_position_qty"] = outcome_payload.get("starting_position_qty")
+                    payload["starting_avg_entry_price"] = outcome_payload.get("starting_avg_entry_price")
+                    payload["ending_position_qty"] = outcome_payload.get("ending_position_qty")
+                    payload["ending_avg_entry_price"] = outcome_payload.get("ending_avg_entry_price")
+                    payload["balances_before"] = outcome_payload.get("balances_before") or {}
+                    payload["balances_after"] = outcome_payload.get("balances_after") or {}
+                    payload["balance_deltas"] = outcome_payload.get("balance_deltas") or {}
+                    payload["fill_outcome_recorded_at"] = outcome_payload.get("created_at")
+            return payload
         payload = record.model_dump(mode="json")
         payload["execution_action"] = self._action_from_execution_fields(
             execution_action=payload.get("execution_action"),
             position_intent=payload.get("position_intent"),
         )
+        fill_id = payload.get("fill_id")
+        if fill_id:
+            outcome = self._fill_outcome_map().get(fill_id)
+            payload["has_fill_outcome"] = outcome is not None
+            if outcome is not None:
+                outcome_payload = outcome.model_dump(mode="json")
+                payload["fill_notional"] = outcome_payload.get("fill_notional")
+                payload["realized_pnl"] = outcome_payload.get("realized_pnl_delta")
+                payload["realized_pnl_delta"] = outcome_payload.get("realized_pnl_delta")
+                payload["gross_realized_pnl"] = (
+                    outcome.realized_pnl_delta + outcome.fee_delta
+                )
+                payload["fee_delta"] = outcome_payload.get("fee_delta")
+                payload["starting_position_qty"] = outcome_payload.get("starting_position_qty")
+                payload["starting_avg_entry_price"] = outcome_payload.get("starting_avg_entry_price")
+                payload["ending_position_qty"] = outcome_payload.get("ending_position_qty")
+                payload["ending_avg_entry_price"] = outcome_payload.get("ending_avg_entry_price")
+                payload["balances_before"] = outcome_payload.get("balances_before") or {}
+                payload["balances_after"] = outcome_payload.get("balances_after") or {}
+                payload["balance_deltas"] = outcome_payload.get("balance_deltas") or {}
+                payload["fill_outcome_recorded_at"] = outcome_payload.get("created_at")
         return payload
 
     def _execution_plan_payload(self, execution_plan: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -1362,6 +1838,7 @@ class OperatorQueryService:
         market = self.runtime.market_gateway.status()
         account = self.runtime.account_service.status()
         execution = self.runtime.execution_adapter.readiness()
+        phase1_shadow = self.phase1_shadow()
         latest_reconciliation = self._latest_scoped_reconciliation()
         latest_portfolio = self._latest_scoped_snapshot()
         blockers = self.blockers()
@@ -1379,6 +1856,14 @@ class OperatorQueryService:
             for component in snapshot.components
             if component.status == "warn"
         ]
+        if phase1_shadow["status"] in {"degraded", "lagging"}:
+            warnings.append(
+                {
+                    "component": "phase1_shadow",
+                    "detail": phase1_shadow["summary"],
+                    "blockers": [],
+                }
+            )
         if self.runtime.kill_switch.halted:
             runtime_state = "halted"
         elif any(item["affects_execution"] for item in blockers):
@@ -1434,6 +1919,7 @@ class OperatorQueryService:
                     "fresh": True,
                     "detail": self.runtime.settings.storage_mode,
                 },
+                "phase1_shadow": phase1_shadow,
                 "audit_replay": {
                     "ready": True,
                     "fresh": bool(self.runtime.replay_validation_history),
@@ -1500,11 +1986,14 @@ class OperatorQueryService:
                     self.runtime.settings.operator_read_api_key or self.runtime.settings.operator_write_api_key
                 ),
                 "unsafe_write_without_auth": self.runtime.settings.operator_unsafe_write_without_auth,
+                "phase5_hardened": self.runtime.settings.operator_control_plane_execution_ledger_enabled,
             },
             "startup_timestamp": self.runtime.started_at,
             "uptime_seconds": max((now - self.runtime.started_at).total_seconds(), 0.0),
             "last_decision_timestamp": latest_decision.event_timestamp if latest_decision else None,
-            "last_fill_timestamp": latest_fill.ingestion_timestamp if latest_fill else None,
+            "last_fill_timestamp": (
+                latest_fill.get("ingestion_timestamp") if isinstance(latest_fill, dict) else latest_fill.ingestion_timestamp
+            ) if latest_fill else None,
             "last_reconciliation_timestamp": latest_reconciliation.as_of_ts if latest_reconciliation else None,
             "recovery": {
                 "recovery_state": recovery["recovery_state"],
@@ -1530,6 +2019,16 @@ class OperatorQueryService:
                 "last_rebaseline_at": self.runtime.recovery_status.last_rebaseline_at,
                 "snapshot": account_baseline,
             },
+            "control_plane": {
+                "phase5_enabled": self._phase5_control_plane_enabled(),
+                "order_truth_source": "execution_order_repo" if self._phase5_control_plane_enabled() else "execution_repo",
+                "fill_truth_source": "execution_fill_repo_v2" if self._phase5_control_plane_enabled() else "execution_repo",
+                "balance_truth_source": "ledger_accounts" if self._phase5_control_plane_enabled() else "portfolio_snapshot",
+                "legacy_layer_authoritative": not self._phase5_control_plane_enabled(),
+                "auth_hardened": self.runtime.settings.operator_control_plane_execution_ledger_enabled,
+                "financial_convergence_mode_enabled": self.runtime.settings.financial_convergence_mode_enabled,
+            },
+            "trial_guard": self.trial_guard(),
         }
 
     def decision_view(self, decision_id: str) -> dict[str, Any]:
@@ -1743,6 +2242,19 @@ class OperatorQueryService:
         snapshot = self._latest_scoped_snapshot()
         metrics = self.runtime.metrics.snapshot()
         fills = self._scoped_fills()
+        phase1_shadow = self.phase1_shadow()
+        order_intent_events = list(
+            self.runtime.event_store.by_topic_scoped(
+                topics.ORDER_INTENTS,
+                scope=self.state_scope,
+            )
+        )
+        decision_context_events = list(
+            self.runtime.event_store.by_topic_scoped(
+                topics.DECISION_CONTEXTS,
+                scope=self.state_scope,
+            )
+        )
         snapshot_events = [
             event
             for event in self.runtime.event_store.by_topic_scoped(
@@ -1760,8 +2272,8 @@ class OperatorQueryService:
             for report in self.runtime.reconciliation_repo.history_for_scope(scope=self.state_scope)
         }
         return {
-            "decision_cycle_count": metrics.get("decision_cycles", 0),
-            "order_intent_count": metrics.get("order_intents_generated", 0),
+            "decision_cycle_count": len(decision_context_events),
+            "order_intent_count": len(order_intent_events),
             "fill_count": len(fills),
             "rejection_count": len(
                 order_states_for_scope(
@@ -1780,6 +2292,17 @@ class OperatorQueryService:
             "snapshot_without_reconciliation_count": sum(
                 1 for event in snapshot_events if event.event_id not in reconciliation_refs
             ),
+            "phase1_shadow": phase1_shadow,
+            "phase1_shadow_order_backlog": phase1_shadow["lag"]["order_backlog"],
+            "phase1_shadow_fill_backlog": phase1_shadow["lag"]["fill_backlog"],
+            "phase1_shadow_obligation_backlog": phase1_shadow["lag"]["obligation_backlog"],
+            "phase1_shadow_failure_count": (
+                int(phase1_shadow["execution_shadow"].get("order_failure_count", 0) or 0)
+                + int(phase1_shadow["execution_shadow"].get("fill_failure_count", 0) or 0)
+                + int(phase1_shadow["ledger_shadow"].get("sync_failure_count", 0) or 0)
+            ),
+            "phase1_shadow_alert_count": metrics.get("phase1_shadow_alerts", 0),
+            "phase1_shadow_recovery_count": metrics.get("phase1_shadow_recoveries", 0),
             "recent_execution_errors": self.execution_errors()["errors"][:10],
             "exposure_summary": None if snapshot is None else {
                 "gross_exposure": snapshot.gross_exposure,
@@ -1789,11 +2312,195 @@ class OperatorQueryService:
             "strategy_execution_health": self.strategy_execution_health(),
         }
 
+    def _build_phase1_shadow(self) -> dict[str, Any]:
+        if getattr(self.runtime, "phase1_shadow_monitor", None) is not None:
+            payload = dict(self.runtime.phase1_shadow_monitor.snapshot())
+        elif getattr(self.runtime, "phase1_shadow", None) is not None:
+            payload = dict(self.runtime.phase1_shadow.snapshot())
+        else:
+            execution_shadow = (
+                self.runtime.phase1_execution_shadow_service.snapshot()
+                if self.runtime.phase1_execution_shadow_service is not None
+                else {
+                    "configured": False,
+                    "status": "not_configured",
+                    "last_outcome": "idle",
+                    "order_attempt_count": 0,
+                    "order_success_count": 0,
+                    "order_failure_count": 0,
+                    "fill_attempt_count": 0,
+                    "fill_success_count": 0,
+                    "fill_failure_count": 0,
+                    "last_order_sync_ts": None,
+                    "last_fill_sync_ts": None,
+                    "last_failure_ts": None,
+                    "last_error": None,
+                    "last_synced_order_id": None,
+                    "last_synced_order_state": None,
+                    "last_synced_fill_id": None,
+                }
+            )
+            ledger_shadow = (
+                self.runtime.phase1_ledger_mirror_service.snapshot()
+                if self.runtime.phase1_ledger_mirror_service is not None
+                else {
+                    "configured": False,
+                    "status": "not_configured",
+                    "last_outcome": "idle",
+                    "sync_attempt_count": 0,
+                    "sync_success_count": 0,
+                    "sync_failure_count": 0,
+                    "last_sync_ts": None,
+                    "last_failure_ts": None,
+                    "last_reason": None,
+                    "last_synced_order_id": None,
+                    "last_synced_fill_id": None,
+                    "last_obligation_status": None,
+                    "last_error": None,
+                }
+            )
+            order_backlog = (
+                None
+                if self.runtime.execution_order_repo is None
+                else max(len(self._scoped_order_states()) - self.runtime.execution_order_repo.count_orders(), 0)
+            )
+            fill_backlog = (
+                None
+                if self.runtime.execution_fill_repo_v2 is None
+                else max(len(self._scoped_fills()) - self.runtime.execution_fill_repo_v2.count_fills(), 0)
+            )
+            obligation_backlog = (
+                None
+                if self.runtime.reservation_repo_v2 is None
+                else max(len(self.runtime.obligation_repo.all_obligations()) - self.runtime.reservation_repo_v2.count_reservations(), 0)
+            )
+            lag = {
+                "order_backlog": order_backlog,
+                "fill_backlog": fill_backlog,
+                "obligation_backlog": obligation_backlog,
+            }
+            backlog_present = any((value or 0) > 0 for value in lag.values() if value is not None)
+            if not execution_shadow["configured"] and not ledger_shadow["configured"]:
+                status = "not_configured"
+            elif execution_shadow["status"] == "degraded" or ledger_shadow["status"] == "degraded":
+                status = "degraded"
+            elif backlog_present:
+                status = "lagging"
+            elif execution_shadow["status"] == "healthy" or ledger_shadow["status"] == "healthy":
+                status = "healthy"
+            else:
+                status = "idle"
+            payload = {
+                "configured": bool(execution_shadow["configured"] or ledger_shadow["configured"]),
+                "status": status,
+                "connected": bool(execution_shadow["configured"] or ledger_shadow["configured"]),
+                "ready": status in {"healthy", "idle", "not_configured"},
+                "fresh": status != "degraded",
+                "detail": self._phase1_shadow_summary(status=status, lag=lag),
+                "summary": self._phase1_shadow_summary(status=status, lag=lag),
+                "blockers": ["phase1_shadow_degraded"] if status == "degraded" else ["phase1_shadow_lagging"] if status == "lagging" else [],
+                "lag": lag,
+                "execution_shadow": execution_shadow,
+                "ledger_shadow": ledger_shadow,
+            }
+        latest_review_action = self.latest_operator_action("phase1_shadow_review")
+        latest_alert = self.runtime.event_store.latest(topics.EXECUTION_ERROR_SUMMARIES, key="phase1_shadow")
+        latest_failure = self.runtime.event_store.latest(topics.PROCESSING_FAILURES, key="phase1_shadow")
+        payload["latest_review_action"] = latest_review_action
+        payload["latest_alert"] = self.payload(latest_alert)
+        payload["latest_failure"] = self.payload(latest_failure)
+        payload["review_recommended"] = payload.get("status") in {"lagging", "degraded"}
+        if "detail" not in payload:
+            payload["detail"] = payload.get("summary")
+        if "blockers" not in payload:
+            payload["blockers"] = []
+        return payload
+
+    def _build_phase1_shadow_history(self, *, limit: int = 20, offset: int = 0) -> dict[str, Any]:
+        rows: list[dict[str, Any]] = []
+
+        for item in reversed(self.runtime.event_store.by_topic(topics.OPERATOR_ACTIONS)):
+            if item.payload.get("action") != "phase1_shadow_review":
+                continue
+            rows.append(
+                {
+                    "entry_type": "review",
+                    "event_id": item.event_id,
+                    "observed_at": item.payload.get("details", {}).get("reviewed_at") or item.created_at,
+                    "status": item.payload.get("details", {}).get("snapshot_status"),
+                    "summary": item.payload.get("details", {}).get("summary") or item.payload.get("reason"),
+                    "actor_identity": item.payload.get("actor_identity"),
+                    "actor_role": item.payload.get("actor_role"),
+                    "reason": item.payload.get("reason"),
+                    "details": item.payload.get("details", {}),
+                }
+            )
+
+        for item in reversed(self.runtime.event_store.by_topic(topics.EXECUTION_ERROR_SUMMARIES)):
+            if item.key != "phase1_shadow" and item.payload.get("subsystem") != "phase1_shadow":
+                continue
+            rows.append(
+                {
+                    "entry_type": "alert",
+                    "event_id": item.event_id,
+                    "observed_at": item.payload.get("observed_at") or item.created_at,
+                    "status": item.payload.get("severity"),
+                    "summary": item.payload.get("message"),
+                    "actor_identity": None,
+                    "actor_role": None,
+                    "reason": None,
+                    "details": item.payload,
+                }
+            )
+
+        for item in reversed(self.runtime.event_store.by_topic(topics.PROCESSING_FAILURES)):
+            if item.key != "phase1_shadow" and item.payload.get("subsystem") != "phase1_shadow":
+                continue
+            rows.append(
+                {
+                    "entry_type": "failure",
+                    "event_id": item.event_id,
+                    "observed_at": item.payload.get("observed_at") or item.created_at,
+                    "status": item.payload.get("severity"),
+                    "summary": item.payload.get("message"),
+                    "actor_identity": None,
+                    "actor_role": None,
+                    "reason": item.payload.get("stage"),
+                    "details": item.payload,
+                }
+            )
+
+        rows.sort(key=self._history_sort_key, reverse=True)
+        return self._paginate_rows(rows, limit=limit, offset=offset, key="history")
+
+    @staticmethod
+    def _history_sort_key(item: dict[str, Any]) -> str:
+        value = item.get("observed_at")
+        if isinstance(value, datetime):
+            return value.isoformat()
+        return str(value or "")
+
+    @staticmethod
+    def _phase1_shadow_summary(*, status: str, lag: dict[str, Any]) -> str:
+        if status == "not_configured":
+            return "Phase 1 shadow compatibility layer is not configured in this runtime."
+        if status == "degraded":
+            return "Phase 1 shadow compatibility layer has recent write failures and should block automated continuation."
+        if status == "lagging":
+            return (
+                "Phase 1 shadow compatibility layer is behind the legacy runtime. "
+                f"order_backlog={lag.get('order_backlog')}, fill_backlog={lag.get('fill_backlog')}, obligation_backlog={lag.get('obligation_backlog')}"
+            )
+        if status == "healthy":
+            return "Phase 1 shadow compatibility layer is tracking legacy execution and obligation flows."
+        return "Phase 1 shadow compatibility layer is configured but has not processed shadow traffic yet."
+
     def portfolio_latest(self) -> dict[str, Any]:
         snapshot = self._latest_scoped_snapshot()
         return {
             "portfolio": snapshot.model_dump(mode="json") if snapshot is not None else None,
             "latest_update_timestamp": snapshot.snapshot_ts if snapshot is not None else None,
+            "truth_source": "ledger_backed_snapshot" if self._phase5_control_plane_enabled() else "legacy_portfolio_snapshot",
         }
 
     def portfolio_history(self, *, limit: int = 20) -> dict[str, Any]:
@@ -1807,8 +2514,10 @@ class OperatorQueryService:
         snapshot = self._latest_scoped_snapshot()
         exchange = self.runtime.account_service.latest_snapshot()
         return {
-            "local_balances": snapshot.balances if snapshot is not None else {},
+            "local_balances": self._phase5_balance_view(),
             "exchange_balances": [item.model_dump(mode="json") for item in exchange.balances] if exchange is not None else [],
+            "truth_source": "ledger_accounts" if self._phase5_control_plane_enabled() else "legacy_portfolio_snapshot",
+            "snapshot_balances": snapshot.balances if snapshot is not None else {},
         }
 
     def positions(self) -> dict[str, Any]:
@@ -1817,6 +2526,7 @@ class OperatorQueryService:
         return {
             "local_positions": [item.model_dump(mode="json") for item in snapshot.positions] if snapshot is not None else [],
             "exchange_positions": [item.model_dump(mode="json") for item in exchange.positions] if exchange is not None else [],
+            "truth_source": "ledger_backed_snapshot" if self._phase5_control_plane_enabled() else "legacy_portfolio_snapshot",
         }
 
     def account_state(self) -> dict[str, Any]:
@@ -1862,6 +2572,13 @@ class OperatorQueryService:
                 "fill_count": self.runtime.recovery_status.baseline_fill_count,
                 "event_ref": self.runtime.recovery_status.baseline_event_ref,
             },
+            "control_plane": {
+                "phase5_enabled": self._phase5_control_plane_enabled(),
+                "order_truth_source": "execution_order_repo" if self._phase5_control_plane_enabled() else "execution_repo",
+                "fill_truth_source": "execution_fill_repo_v2" if self._phase5_control_plane_enabled() else "execution_repo",
+                "balance_truth_source": "ledger_accounts" if self._phase5_control_plane_enabled() else "portfolio_snapshot",
+                "legacy_execution_views_authoritative": not self._phase5_control_plane_enabled(),
+            },
         }
 
     async def account_recent_bills(self, *, limit: int = 50) -> dict[str, Any]:
@@ -1878,15 +2595,25 @@ class OperatorQueryService:
 
     def account_open_orders(self) -> dict[str, Any]:
         exchange = self.runtime.account_service.latest_snapshot()
+        local_open_orders = (
+            [self._execution_record_payload(order) for order in self.runtime.execution_order_repo.open_orders()]
+            if self._phase5_control_plane_enabled()
+            else [order.model_dump(mode="json") for order in self._scoped_open_order_states()]
+        )
         return {
-            "local_open_orders": [order.model_dump(mode="json") for order in self._scoped_open_order_states()],
+            "local_open_orders": local_open_orders,
             "exchange_open_orders": [order.model_dump(mode="json") for order in exchange.open_orders] if exchange is not None else [],
         }
 
     def account_recent_fills(self) -> dict[str, Any]:
         exchange = self.runtime.account_service.latest_snapshot()
+        local_fills = (
+            [self._execution_record_payload(fill) for fill in self._phase5_fill_rows(limit=50)]
+            if self._phase5_control_plane_enabled()
+            else [fill.model_dump(mode="json") for fill in self.recent_fills(limit=50)]
+        )
         return {
-            "local_fills": [fill.model_dump(mode="json") for fill in self.recent_fills(limit=50)],
+            "local_fills": local_fills,
             "exchange_fills": [fill.model_dump(mode="json") for fill in exchange.fills[:50]] if exchange is not None else [],
         }
 
@@ -1894,6 +2621,17 @@ class OperatorQueryService:
         return self.account_open_orders()
 
     def orders_recent(self, *, limit: int = 50, offset: int = 0) -> dict[str, Any]:
+        if self._phase5_control_plane_enabled():
+            all_orders = self._phase5_order_rows()
+            orders = all_orders[offset : offset + limit]
+            return {
+                "orders": [self._execution_record_payload(order) for order in orders],
+                "limit": limit,
+                "offset": offset,
+                "total_available": len(all_orders),
+                "has_more": offset + len(orders) < len(all_orders),
+                "truth_source": "execution_order_repo",
+            }
         all_orders = sorted(
             order_states_for_scope(self.runtime.execution_repo, self.state_scope),
             key=lambda item: (item.last_update_ts or item.created_at, item.client_order_id),
@@ -1906,9 +2644,34 @@ class OperatorQueryService:
             "offset": offset,
             "total_available": len(all_orders),
             "has_more": offset + len(orders) < len(all_orders),
+            "truth_source": "execution_repo",
         }
 
     def order_detail(self, client_order_id: str) -> dict[str, Any]:
+        if self._phase5_control_plane_enabled():
+            order = self.runtime.execution_order_repo.get_order_by_client_order_id(client_order_id)
+            if order is None:
+                raise KeyError(f"order_not_found:{client_order_id}")
+            fills = self.runtime.execution_fill_repo_v2.fills_for_order(client_order_id)
+            control_order = self._control_plane_order_state(client_order_id)
+            return {
+                "order": self._execution_record_payload(order),
+                "fills": [self._execution_record_payload(fill) for fill in fills],
+                "stuck_submission_resolution": (
+                    self._stuck_submission_resolution(
+                        order=control_order,
+                        fills=self._control_plane_fills_for_order(client_order_id),
+                        exchange_snapshot=self.runtime.account_service.latest_snapshot(),
+                    )
+                    if control_order is not None
+                    else {
+                        "eligible": False,
+                        "summary": "当前订单缺少可操作的本地执行状态，暂时不能执行卡单恢复。",
+                        "reason_code": "phase5_order_state_unavailable",
+                    }
+                ),
+                "truth_source": "execution_order_repo",
+            }
         order = next(
             (item for item in self._scoped_order_states() if item.client_order_id == client_order_id),
             None,
@@ -1924,9 +2687,21 @@ class OperatorQueryService:
                 fills=fills,
                 exchange_snapshot=self.runtime.account_service.latest_snapshot(),
             ),
+            "truth_source": "execution_repo",
         }
 
     def fills_recent(self, *, limit: int = 50, offset: int = 0) -> dict[str, Any]:
+        if self._phase5_control_plane_enabled():
+            all_fills = self._phase5_fill_rows()
+            fills = all_fills[offset : offset + limit]
+            return {
+                "fills": [self._execution_record_payload(fill) for fill in fills],
+                "limit": limit,
+                "offset": offset,
+                "total_available": len(all_fills),
+                "has_more": offset + len(fills) < len(all_fills),
+                "truth_source": "execution_fill_repo_v2",
+            }
         all_fills = self.recent_fills(limit=limit + offset)
         fills = all_fills[offset : offset + limit]
         total_available = len(self._scoped_fills())
@@ -1936,13 +2711,29 @@ class OperatorQueryService:
             "offset": offset,
             "total_available": total_available,
             "has_more": offset + len(fills) < total_available,
+            "truth_source": "execution_repo",
         }
 
     def fill_detail(self, fill_id: str) -> dict[str, Any]:
+        if self._phase5_control_plane_enabled():
+            fill = self.runtime.execution_fill_repo_v2.get_fill(fill_id)
+            if fill is None:
+                raise KeyError(f"fill_not_found:{fill_id}")
+            outcome = self._fill_outcome_map().get(fill_id)
+            return {
+                "fill": self._execution_record_payload(fill),
+                "fill_outcome": None if outcome is None else outcome.model_dump(mode="json"),
+                "truth_source": "execution_fill_repo_v2",
+            }
         fill = next((item for item in self._scoped_fills() if item.fill_id == fill_id), None)
         if fill is None:
             raise KeyError(f"fill_not_found:{fill_id}")
-        return {"fill": self._execution_record_payload(fill)}
+        outcome = self._fill_outcome_map().get(fill_id)
+        return {
+            "fill": self._execution_record_payload(fill),
+            "fill_outcome": None if outcome is None else outcome.model_dump(mode="json"),
+            "truth_source": "execution_repo",
+        }
 
     def execution_latest(self) -> dict[str, Any]:
         latest_order = self.latest_order()
@@ -1957,6 +2748,713 @@ class OperatorQueryService:
             "latest_reconciliation": latest_reconciliation.model_dump(mode="json") if latest_reconciliation is not None else None,
             "recent_failures": self.execution_errors()["errors"],
             "recovery": recovery,
+            "truth_source": {
+                "orders": "execution_order_repo" if self._phase5_control_plane_enabled() else "execution_repo",
+                "fills": "execution_fill_repo_v2" if self._phase5_control_plane_enabled() else "execution_repo",
+                "balances": "ledger_accounts" if self._phase5_control_plane_enabled() else "portfolio_snapshot",
+            },
+        }
+
+    def execution_quality_report(self, *, limit: int = 50, offset: int = 0) -> dict[str, Any]:
+        source_rows = self._phase5_fill_rows(limit=None) if self._phase5_control_plane_enabled() else list(reversed(self._scoped_fills()))
+        rows = [self._execution_quality_row(fill) for fill in source_rows]
+        paged = rows[offset : offset + limit]
+        return {
+            "rows": paged,
+            "limit": limit,
+            "offset": offset,
+            "total_available": len(rows),
+            "has_more": offset + len(paged) < len(rows),
+            "truth_source": "execution_fill_repo_v2" if self._phase5_control_plane_enabled() else "execution_repo",
+            "summary": self._execution_quality_summary(rows),
+        }
+
+    def _execution_quality_summary(self, rows: list[dict[str, Any]]) -> dict[str, Any]:
+        if not rows:
+            return {
+                "fill_count": 0,
+                "avg_decision_to_submit_latency_ms": None,
+                "avg_submit_to_exchange_fill_latency_ms": None,
+                "avg_exchange_fill_to_ingestion_latency_ms": None,
+                "avg_adverse_slippage_bps": None,
+                "avg_fee_ratio": None,
+            }
+
+        def _avg_float(key: str) -> float | None:
+            values = [float(item[key]) for item in rows if item.get(key) is not None]
+            if not values:
+                return None
+            return round(sum(values) / len(values), 3)
+
+        def _avg_decimal(key: str) -> Decimal | None:
+            values = [self._to_decimal(item.get(key)) for item in rows]
+            clean = [value for value in values if value is not None]
+            if not clean:
+                return None
+            return sum(clean, start=Decimal("0")) / Decimal(len(clean))
+
+        return {
+            "fill_count": len(rows),
+            "avg_decision_to_submit_latency_ms": _avg_float("decision_to_submit_latency_ms"),
+            "avg_submit_to_exchange_fill_latency_ms": _avg_float("submit_to_exchange_fill_latency_ms"),
+            "avg_exchange_fill_to_ingestion_latency_ms": _avg_float("exchange_fill_to_ingestion_latency_ms"),
+            "avg_adverse_slippage_bps": _avg_decimal("adverse_slippage_bps"),
+            "avg_fee_ratio": _avg_decimal("fee_ratio"),
+        }
+
+    def profitability_overview(self, *, limit: int = 100) -> dict[str, Any]:
+        outcomes = list(self._scoped_fill_outcomes())
+        outcomes.sort(key=lambda item: item.ingestion_timestamp or item.created_at, reverse=True)
+        rows = [self._execution_quality_row(item) for item in outcomes[:limit]]
+        net_realized = sum(
+            (self._to_decimal(item.get("realized_pnl_delta")) or Decimal("0"))
+            for item in rows
+        )
+        gross_realized = sum(
+            (self._to_decimal(item.get("gross_realized_pnl")) or Decimal("0"))
+            for item in rows
+        )
+        total_fees = sum(
+            (self._to_decimal(item.get("fee_amount")) or Decimal("0"))
+            for item in rows
+        )
+        total_notional = sum(
+            (self._to_decimal(item.get("fill_notional")) or Decimal("0"))
+            for item in rows
+        )
+        winning = 0
+        losing = 0
+        for item in rows:
+            pnl = self._to_decimal(item.get("realized_pnl_delta")) or Decimal("0")
+            if pnl > self._DECIMAL_EPSILON:
+                winning += 1
+            elif pnl < -self._DECIMAL_EPSILON:
+                losing += 1
+        return {
+            "summary": {
+                "closed_fill_count": len(rows),
+                "winning_fill_count": winning,
+                "losing_fill_count": losing,
+                "win_rate": None if not rows else round(winning / len(rows), 6),
+                "gross_realized_pnl": gross_realized,
+                "net_realized_pnl": net_realized,
+                "total_fees": total_fees,
+                "total_notional": total_notional,
+                "fee_to_notional_ratio": (
+                    None if abs(total_notional) <= self._DECIMAL_EPSILON else total_fees / total_notional
+                ),
+                "avg_realized_pnl_per_fill": (
+                    None if not rows else net_realized / Decimal(len(rows))
+                ),
+            },
+            "execution_quality": self._execution_quality_summary(rows),
+            "recent_closed_fills": rows,
+            "truth_source": "fill_outcomes",
+        }
+
+    def forward_validation_report(self, *, window_days: int = 7, period_count: int = 4) -> dict[str, Any]:
+        normalized_window_days = max(int(window_days), 1)
+        normalized_period_count = max(int(period_count), 1)
+        all_rows = [self._execution_quality_row(item) for item in self._scoped_fill_outcomes()]
+        all_rows.sort(
+            key=lambda item: item.get("ingestion_timestamp") or item.get("exchange_fill_timestamp") or datetime.min,
+            reverse=True,
+        )
+        now = utc_now()
+        periods: list[dict[str, Any]] = []
+        for index in range(normalized_period_count):
+            period_end = now - timedelta(days=index * normalized_window_days)
+            period_start = period_end - timedelta(days=normalized_window_days)
+            period_rows = [
+                row
+                for row in all_rows
+                if isinstance(row.get("ingestion_timestamp") or row.get("exchange_fill_timestamp"), datetime)
+                and period_start <= (row.get("ingestion_timestamp") or row.get("exchange_fill_timestamp")) < period_end
+            ]
+            periods.append(
+                self._forward_validation_period(
+                    rows=period_rows,
+                    period_start=period_start,
+                    period_end=period_end,
+                )
+            )
+
+        latest_period = periods[0] if periods else None
+        recommendation = self._forward_validation_recommendation(latest_period)
+        return {
+            "window_days": normalized_window_days,
+            "period_count": normalized_period_count,
+            "generated_at": now,
+            "summary": recommendation,
+            "periods": periods,
+            "truth_source": "fill_outcomes",
+        }
+
+    def _forward_validation_period(
+        self,
+        *,
+        rows: list[dict[str, Any]],
+        period_start: datetime,
+        period_end: datetime,
+    ) -> dict[str, Any]:
+        closed_fill_count = len(rows)
+        net_realized = sum((self._to_decimal(item.get("realized_pnl_delta")) or Decimal("0")) for item in rows)
+        gross_realized = sum((self._to_decimal(item.get("gross_realized_pnl")) or Decimal("0")) for item in rows)
+        total_fees = sum((self._to_decimal(item.get("fee_amount")) or Decimal("0")) for item in rows)
+        total_notional = sum((self._to_decimal(item.get("fill_notional")) or Decimal("0")) for item in rows)
+        winning_fill_count = 0
+        losing_fill_count = 0
+        total_adverse_slippage = Decimal("0")
+        slippage_observation_count = 0
+        high_slippage_count = 0
+        slow_submit_to_fill_count = 0
+        for row in rows:
+            pnl = self._to_decimal(row.get("realized_pnl_delta")) or Decimal("0")
+            slippage = self._to_decimal(row.get("adverse_slippage_bps"))
+            latency = row.get("submit_to_exchange_fill_latency_ms")
+            if pnl > self._DECIMAL_EPSILON:
+                winning_fill_count += 1
+            elif pnl < -self._DECIMAL_EPSILON:
+                losing_fill_count += 1
+            if slippage is not None:
+                total_adverse_slippage += slippage
+                slippage_observation_count += 1
+                if slippage > Decimal(str(max(self.runtime.settings.max_slippage_tolerance_bps * 0.5, 2))):
+                    high_slippage_count += 1
+            if isinstance(latency, (int, float)) and latency > 10_000:
+                slow_submit_to_fill_count += 1
+
+        fee_to_notional_ratio = (
+            None if abs(total_notional) <= self._DECIMAL_EPSILON else total_fees / total_notional
+        )
+        avg_adverse_slippage_bps = (
+            None if slippage_observation_count == 0 else total_adverse_slippage / Decimal(slippage_observation_count)
+        )
+        high_slippage_ratio = None if closed_fill_count == 0 else round(high_slippage_count / closed_fill_count, 6)
+        slow_submit_to_fill_ratio = (
+            None if closed_fill_count == 0 else round(slow_submit_to_fill_count / closed_fill_count, 6)
+        )
+        status = "healthy"
+        if closed_fill_count < int(self.runtime.settings.trial_guard_min_closed_fills):
+            status = "insufficient_data"
+        elif net_realized < Decimal("0"):
+            status = "caution"
+        if (
+            fee_to_notional_ratio is not None
+            and fee_to_notional_ratio >= Decimal(str(self.runtime.settings.trial_guard_max_fee_to_notional_ratio))
+        ) or (
+            high_slippage_ratio is not None
+            and high_slippage_ratio >= float(self.runtime.settings.trial_guard_max_high_slippage_ratio)
+        ) or (
+            slow_submit_to_fill_ratio is not None
+            and slow_submit_to_fill_ratio >= float(self.runtime.settings.trial_guard_max_slow_submit_to_fill_ratio)
+        ):
+            status = "failing"
+        return {
+            "period_start": period_start,
+            "period_end": period_end,
+            "closed_fill_count": closed_fill_count,
+            "winning_fill_count": winning_fill_count,
+            "losing_fill_count": losing_fill_count,
+            "win_rate": None if closed_fill_count == 0 else round(winning_fill_count / closed_fill_count, 6),
+            "gross_realized_pnl": gross_realized,
+            "net_realized_pnl": net_realized,
+            "total_fees": total_fees,
+            "total_notional": total_notional,
+            "fee_to_notional_ratio": fee_to_notional_ratio,
+            "avg_adverse_slippage_bps": avg_adverse_slippage_bps,
+            "high_slippage_count": high_slippage_count,
+            "high_slippage_ratio": high_slippage_ratio,
+            "slow_submit_to_fill_count": slow_submit_to_fill_count,
+            "slow_submit_to_fill_ratio": slow_submit_to_fill_ratio,
+            "status": status,
+        }
+
+    def _forward_validation_recommendation(self, latest_period: dict[str, Any] | None) -> dict[str, Any]:
+        if latest_period is None:
+            return {
+                "verdict": "insufficient_data",
+                "summary": "当前还没有可用于前向验证的已完成成交样本。",
+                "reasons": ["no_forward_validation_rows"],
+            }
+        reasons: list[str] = []
+        verdict = "continue"
+        if latest_period["status"] == "insufficient_data":
+            verdict = "observe"
+            reasons.append("insufficient_forward_validation_sample")
+        if latest_period["status"] == "caution":
+            verdict = "shrink"
+            reasons.append("negative_net_realized_pnl")
+        if latest_period["status"] == "failing":
+            verdict = "pause"
+            reasons.append("execution_quality_or_fee_threshold_breached")
+        if (
+            self._to_decimal(latest_period.get("net_realized_pnl")) is not None
+            and self._to_decimal(latest_period.get("net_realized_pnl")) <= -Decimal(str(self.runtime.settings.trial_guard_max_daily_loss_usdt))
+        ):
+            verdict = "pause"
+            reasons.append("forward_validation_loss_limit_breached")
+        summary_map = {
+            "continue": "最近一个验证周期表现稳定，可以继续保持当前小资金试盘。",
+            "observe": "当前样本量仍不足，继续观察，不要扩大风险。",
+            "shrink": "最近一个验证周期边际转弱，建议缩小仓位并继续观察。",
+            "pause": "最近一个验证周期已不满足试盘要求，建议暂停并复盘策略与执行质量。",
+        }
+        return {
+            "verdict": verdict,
+            "summary": summary_map[verdict],
+            "reasons": reasons,
+        }
+
+    def scaling_readiness_report(self, *, window_days: int = 7, period_count: int = 4) -> dict[str, Any]:
+        forward_validation = self.forward_validation_report(
+            window_days=window_days,
+            period_count=period_count,
+        )
+        periods = list(forward_validation.get("periods") or [])
+        latest_period = periods[0] if periods else None
+        forward_summary = dict(forward_validation.get("summary") or {})
+        recovery = self.recovery_view()
+        trial_guard = self.trial_guard()
+        active_blockers = [item for item in self.blockers() if not item.get("submit_only")]
+        latest_review = self.latest_operator_action("capital_scale_review")
+
+        consecutive_healthy_periods = 0
+        for period in periods:
+            if (
+                period.get("status") == "healthy"
+                and (self._to_decimal(period.get("net_realized_pnl")) or Decimal("0")) > self._DECIMAL_EPSILON
+                and int(period.get("closed_fill_count") or 0) >= int(self.runtime.settings.trial_guard_min_closed_fills)
+            ):
+                consecutive_healthy_periods += 1
+                continue
+            break
+
+        verdict = "continue_small_capital"
+        reasons: list[str] = []
+        if not trial_guard.get("enabled"):
+            reasons.append("trial_guard_not_enabled")
+        if not trial_guard.get("profile_active"):
+            reasons.append("trial_profile_not_active")
+        if recovery.get("halted"):
+            verdict = "pause_trial"
+            reasons.append("runtime_halted")
+        if not recovery.get("safe_to_trade", False):
+            verdict = "pause_trial"
+            reasons.append("recovery_not_safe_to_trade")
+        if recovery.get("review_required"):
+            verdict = "pause_trial"
+            reasons.append("manual_review_required")
+        if active_blockers:
+            verdict = "pause_trial"
+            reasons.append("active_execution_blockers_present")
+        if trial_guard.get("status") == "breached":
+            verdict = "pause_trial"
+            reasons.append("trial_guard_breached")
+
+        forward_verdict = str(forward_summary.get("verdict") or "")
+        if verdict != "pause_trial":
+            if forward_verdict == "pause":
+                verdict = "pause_trial"
+                reasons.append("forward_validation_pause")
+            elif forward_verdict == "shrink":
+                verdict = "shrink_trial"
+                reasons.append("forward_validation_shrink")
+            elif forward_verdict in {"observe", "insufficient_data"}:
+                reasons.append("forward_validation_still_observing")
+            elif forward_verdict == "continue":
+                reasons.append("forward_validation_stable")
+
+        healthy_period_requirement_met = consecutive_healthy_periods >= 2
+        latest_period_has_sample = (
+            latest_period is not None
+            and int(latest_period.get("closed_fill_count") or 0) >= int(self.runtime.settings.trial_guard_min_closed_fills)
+        )
+        if verdict == "continue_small_capital" and (
+            not healthy_period_requirement_met or not latest_period_has_sample
+        ):
+            reasons.append("healthy_period_requirement_not_met")
+
+        if (
+            verdict == "continue_small_capital"
+            and trial_guard.get("status") == "monitoring"
+            and healthy_period_requirement_met
+            and latest_period_has_sample
+            and forward_verdict == "continue"
+            and recovery.get("safe_to_trade", False)
+            and not recovery.get("review_required")
+            and not active_blockers
+        ):
+            verdict = "approve_scale_up"
+            reasons.append("scale_up_requirements_met")
+
+        summary_map = {
+            "approve_scale_up": "最近多个试盘周期表现稳定，且当前恢复与风控状态正常，可以进入人工放量评审。",
+            "continue_small_capital": "当前仍应保持小资金试盘，继续积累样本，不建议直接放量。",
+            "shrink_trial": "当前边际转弱，建议先缩小试盘规模，再继续观察收益与执行质量。",
+            "pause_trial": "当前不满足继续试盘或放量条件，建议暂停并复盘策略、执行和恢复状态。",
+        }
+        return {
+            "window_days": int(forward_validation.get("window_days") or window_days),
+            "period_count": int(forward_validation.get("period_count") or period_count),
+            "generated_at": utc_now(),
+            "readiness": verdict,
+            "summary": summary_map[verdict],
+            "reasons": list(dict.fromkeys(reasons)),
+            "requirements": {
+                "required_healthy_periods": 2,
+                "required_min_closed_fills_per_period": int(self.runtime.settings.trial_guard_min_closed_fills),
+                "consecutive_healthy_periods": consecutive_healthy_periods,
+                "healthy_period_requirement_met": healthy_period_requirement_met,
+                "latest_period_has_sample": latest_period_has_sample,
+                "trial_guard_status": trial_guard.get("status"),
+                "trial_guard_profile_active": bool(trial_guard.get("profile_active")),
+                "safe_to_trade": bool(recovery.get("safe_to_trade")),
+                "review_required": bool(recovery.get("review_required")),
+                "active_blocker_count": len(active_blockers),
+            },
+            "latest_forward_validation": latest_period,
+            "forward_validation_summary": forward_summary,
+            "trial_guard": trial_guard,
+            "recovery": recovery,
+            "active_blockers": active_blockers,
+            "latest_review": latest_review,
+            "periods": periods,
+            "truth_source": "fill_outcomes_plus_runtime_controls",
+        }
+
+    def trial_review_packet(
+        self,
+        *,
+        profitability_limit: int = 100,
+        anomaly_limit: int = 100,
+        segment_limit: int = 100,
+        window_days: int = 7,
+        period_count: int = 4,
+    ) -> dict[str, Any]:
+        profitability = self.profitability_overview(limit=profitability_limit)
+        anomalies = self.execution_anomaly_report(limit=anomaly_limit)
+        segments = self.strategy_segment_report(limit=segment_limit)
+        forward_validation = self.forward_validation_report(
+            window_days=window_days,
+            period_count=period_count,
+        )
+        scaling = self.scaling_readiness_report(
+            window_days=window_days,
+            period_count=period_count,
+        )
+        trial_guard = self.trial_guard()
+        recovery = self.recovery_view()
+        blocker_rows = [item for item in self.blockers() if not item.get("submit_only")]
+        latest_review = self.latest_operator_action("trial_review_snapshot")
+
+        segment_rows = list(segments.get("segments") or [])
+        strongest_segment = max(
+            segment_rows,
+            key=lambda item: self._to_decimal(item.get("net_realized_pnl")) or Decimal("-999999999"),
+            default=None,
+        )
+        weakest_segment = min(
+            segment_rows,
+            key=lambda item: self._to_decimal(item.get("net_realized_pnl")) or Decimal("999999999"),
+            default=None,
+        )
+        summary = dict(profitability.get("summary") or {})
+        anomaly_summary = dict(anomalies.get("summary") or {})
+        scaling_readiness = str(scaling.get("readiness") or "continue_small_capital")
+
+        action_items: list[str] = []
+        if scaling_readiness == "approve_scale_up":
+            action_items.append("可以进入下一档资金评审，但仍需要人工确认放量边界和回退条件。")
+        elif scaling_readiness == "continue_small_capital":
+            action_items.append("继续保持小资金试盘，优先积累更多稳定样本。")
+        elif scaling_readiness == "shrink_trial":
+            action_items.append("缩小试盘规模，先观察收益边际是否恢复。")
+        else:
+            action_items.append("暂停试盘，优先处理恢复状态、执行质量或收益退化问题。")
+
+        if int(anomaly_summary.get("high_slippage_count") or 0) > 0:
+            action_items.append("复盘高滑点成交，确认是流动性问题还是执行策略问题。")
+        if int(anomaly_summary.get("slow_submit_to_fill_count") or 0) > 0:
+            action_items.append("检查慢成交路径，确认是否存在 submit 到 fill 的延迟异常。")
+        if recovery.get("review_required"):
+            action_items.append("当前仍有人工复核要求，处理完成前不应放量。")
+        if blocker_rows:
+            action_items.append("存在活动阻断项，必须先清除阻断再继续试盘。")
+
+        return {
+            "generated_at": utc_now(),
+            "summary": {
+                "readiness": scaling_readiness,
+                "headline": scaling.get("summary"),
+                "closed_fill_count": summary.get("closed_fill_count"),
+                "net_realized_pnl": summary.get("net_realized_pnl"),
+                "win_rate": summary.get("win_rate"),
+                "fee_to_notional_ratio": summary.get("fee_to_notional_ratio"),
+                "high_slippage_count": anomaly_summary.get("high_slippage_count"),
+                "slow_submit_to_fill_count": anomaly_summary.get("slow_submit_to_fill_count"),
+            },
+            "recommendation": {
+                "readiness": scaling_readiness,
+                "reasons": scaling.get("reasons", []),
+                "action_items": list(dict.fromkeys(action_items)),
+            },
+            "sections": {
+                "profitability": profitability,
+                "execution_anomalies": anomalies,
+                "strategy_segments": {
+                    "group_by": segments.get("group_by"),
+                    "strongest_segment": strongest_segment,
+                    "weakest_segment": weakest_segment,
+                },
+                "forward_validation": forward_validation,
+                "scaling_readiness": scaling,
+                "trial_guard": trial_guard,
+                "recovery": recovery,
+                "active_blockers": blocker_rows,
+            },
+            "latest_review": latest_review,
+            "truth_source": "aggregated_operator_reports",
+        }
+
+    def trial_review_history(self, *, limit: int = 20, offset: int = 0) -> dict[str, Any]:
+        return self.recent_operator_actions(
+            action="trial_review_snapshot",
+            key="trial_review",
+            limit=limit,
+            offset=offset,
+        )
+
+    def record_capital_scale_review(
+        self,
+        *,
+        verdict: str,
+        reason: str,
+        actor_role: OperatorRole,
+        actor_identity: str | None = None,
+        auth_source: AuthSource = "anonymous",
+        window_days: int = 7,
+        period_count: int = 4,
+    ) -> dict[str, Any]:
+        allowed_verdicts = {
+            "approve_scale_up",
+            "continue_small_capital",
+            "shrink_trial",
+            "pause_trial",
+        }
+        if verdict not in allowed_verdicts:
+            raise ValueError(f"unsupported_scaling_review_verdict:{verdict}")
+        report = self.scaling_readiness_report(window_days=window_days, period_count=period_count)
+        action = OperatorActionRecord(
+            action="capital_scale_review",
+            actor_role=actor_role,
+            actor_identity=actor_identity,
+            auth_source=auth_source,
+            reason=reason,
+            status="review_recorded",
+            recovery_state_before=report.get("recovery", {}).get("recovery_state"),
+            recovery_state_after=report.get("recovery", {}).get("recovery_state"),
+            details={
+                "selected_verdict": verdict,
+                "recommended_readiness": report.get("readiness"),
+                "summary": report.get("summary"),
+                "reasons": report.get("reasons", []),
+                "requirements": report.get("requirements", {}),
+                "latest_forward_validation": report.get("latest_forward_validation"),
+                "trial_guard_status": report.get("trial_guard", {}).get("status"),
+                "recorded_at": utc_now(),
+            },
+        )
+        envelope = self._append_event(
+            topic=topics.OPERATOR_ACTIONS,
+            key="capital_scale",
+            payload_model=action,
+        )
+        payload = action.model_dump(mode="json")
+        payload["_event_id"] = envelope.event_id
+        payload["_topic"] = envelope.topic
+        return payload
+
+    def record_trial_review_snapshot(
+        self,
+        *,
+        reason: str,
+        actor_role: OperatorRole,
+        actor_identity: str | None = None,
+        auth_source: AuthSource = "anonymous",
+        profitability_limit: int = 100,
+        anomaly_limit: int = 100,
+        segment_limit: int = 100,
+        window_days: int = 7,
+        period_count: int = 4,
+    ) -> dict[str, Any]:
+        packet = self.trial_review_packet(
+            profitability_limit=profitability_limit,
+            anomaly_limit=anomaly_limit,
+            segment_limit=segment_limit,
+            window_days=window_days,
+            period_count=period_count,
+        )
+        action = OperatorActionRecord(
+            action="trial_review_snapshot",
+            actor_role=actor_role,
+            actor_identity=actor_identity,
+            auth_source=auth_source,
+            reason=reason,
+            status="snapshot_recorded",
+            recovery_state_before=packet.get("sections", {}).get("recovery", {}).get("recovery_state"),
+            recovery_state_after=packet.get("sections", {}).get("recovery", {}).get("recovery_state"),
+            details={
+                "summary": packet.get("summary"),
+                "recommendation": packet.get("recommendation"),
+                "latest_forward_validation": packet.get("sections", {}).get("forward_validation", {}).get("summary"),
+                "scaling_readiness": packet.get("sections", {}).get("scaling_readiness", {}).get("readiness"),
+                "recorded_at": utc_now(),
+            },
+        )
+        envelope = self._append_event(
+            topic=topics.OPERATOR_ACTIONS,
+            key="trial_review",
+            payload_model=action,
+        )
+        payload = action.model_dump(mode="json")
+        payload["_event_id"] = envelope.event_id
+        payload["_topic"] = envelope.topic
+        return payload
+
+    def strategy_segment_report(
+        self,
+        *,
+        limit: int = 200,
+        group_by: tuple[str, ...] = ("symbol", "market_regime", "side", "execution_action"),
+    ) -> dict[str, Any]:
+        allowed_dimensions = {"symbol", "market_regime", "timeframe", "side", "execution_action", "position_intent"}
+        normalized_group_by = tuple(item for item in group_by if item in allowed_dimensions) or ("symbol",)
+        outcomes = list(self._scoped_fill_outcomes())
+        outcomes.sort(key=lambda item: item.ingestion_timestamp or item.created_at, reverse=True)
+        rows = [self._execution_quality_row(item) for item in outcomes[:limit]]
+        grouped: dict[tuple[Any, ...], dict[str, Any]] = {}
+        for row in rows:
+            segment_payload = {
+                "symbol": row.get("symbol"),
+                "market_regime": (row.get("decision_context") or {}).get("market_regime"),
+                "timeframe": (row.get("decision_context") or {}).get("timeframe"),
+                "side": row.get("side"),
+                "execution_action": row.get("execution_action"),
+                "position_intent": row.get("position_intent"),
+            }
+            group_key = tuple(segment_payload.get(key) for key in normalized_group_by)
+            bucket = grouped.setdefault(
+                group_key,
+                {
+                    "segment": {key: segment_payload.get(key) for key in normalized_group_by},
+                    "fill_count": 0,
+                    "winning_fill_count": 0,
+                    "losing_fill_count": 0,
+                    "gross_realized_pnl": Decimal("0"),
+                    "net_realized_pnl": Decimal("0"),
+                    "total_fees": Decimal("0"),
+                    "total_notional": Decimal("0"),
+                    "total_adverse_slippage_bps": Decimal("0"),
+                    "slippage_observation_count": 0,
+                },
+            )
+            bucket["fill_count"] += 1
+            realized = self._to_decimal(row.get("realized_pnl_delta")) or Decimal("0")
+            gross = self._to_decimal(row.get("gross_realized_pnl")) or Decimal("0")
+            fees = self._to_decimal(row.get("fee_amount")) or Decimal("0")
+            notional = self._to_decimal(row.get("fill_notional")) or Decimal("0")
+            slippage = self._to_decimal(row.get("adverse_slippage_bps"))
+            bucket["gross_realized_pnl"] += gross
+            bucket["net_realized_pnl"] += realized
+            bucket["total_fees"] += fees
+            bucket["total_notional"] += notional
+            if realized > self._DECIMAL_EPSILON:
+                bucket["winning_fill_count"] += 1
+            elif realized < -self._DECIMAL_EPSILON:
+                bucket["losing_fill_count"] += 1
+            if slippage is not None:
+                bucket["total_adverse_slippage_bps"] += slippage
+                bucket["slippage_observation_count"] += 1
+
+        segments: list[dict[str, Any]] = []
+        for bucket in grouped.values():
+            fill_count = int(bucket["fill_count"])
+            total_notional = bucket["total_notional"]
+            slippage_observation_count = int(bucket["slippage_observation_count"])
+            segments.append(
+                {
+                    "segment": bucket["segment"],
+                    "fill_count": fill_count,
+                    "winning_fill_count": int(bucket["winning_fill_count"]),
+                    "losing_fill_count": int(bucket["losing_fill_count"]),
+                    "win_rate": None if fill_count == 0 else round(int(bucket["winning_fill_count"]) / fill_count, 6),
+                    "gross_realized_pnl": bucket["gross_realized_pnl"],
+                    "net_realized_pnl": bucket["net_realized_pnl"],
+                    "total_fees": bucket["total_fees"],
+                    "total_notional": total_notional,
+                    "fee_to_notional_ratio": (
+                        None if abs(total_notional) <= self._DECIMAL_EPSILON else bucket["total_fees"] / total_notional
+                    ),
+                    "avg_adverse_slippage_bps": (
+                        None
+                        if slippage_observation_count == 0
+                        else bucket["total_adverse_slippage_bps"] / Decimal(slippage_observation_count)
+                    ),
+                }
+            )
+
+        segments.sort(
+            key=lambda item: (
+                self._to_decimal(item.get("net_realized_pnl")) or Decimal("0"),
+                item.get("fill_count") or 0,
+            ),
+            reverse=True,
+        )
+        return {
+            "group_by": list(normalized_group_by),
+            "segments": segments,
+            "total_available": len(segments),
+            "source_fill_count": len(rows),
+            "truth_source": "fill_outcomes",
+        }
+
+    def execution_anomaly_report(self, *, limit: int = 100) -> dict[str, Any]:
+        rows = self.execution_quality_report(limit=limit, offset=0)["rows"]
+        flagged_rows: list[dict[str, Any]] = []
+        summary = {
+            "high_slippage_count": 0,
+            "high_fee_ratio_count": 0,
+            "slow_decision_to_submit_count": 0,
+            "slow_submit_to_fill_count": 0,
+        }
+        for row in rows:
+            flags: list[str] = []
+            slippage = self._to_decimal(row.get("adverse_slippage_bps"))
+            fee_ratio = self._to_decimal(row.get("fee_ratio"))
+            decision_to_submit_latency_ms = row.get("decision_to_submit_latency_ms")
+            submit_to_exchange_fill_latency_ms = row.get("submit_to_exchange_fill_latency_ms")
+
+            if slippage is not None and slippage > Decimal(str(max(self.runtime.settings.max_slippage_tolerance_bps * 0.5, 2))):
+                flags.append("high_adverse_slippage")
+                summary["high_slippage_count"] += 1
+            if fee_ratio is not None and fee_ratio > Decimal("0.001"):
+                flags.append("high_fee_ratio")
+                summary["high_fee_ratio_count"] += 1
+            if isinstance(decision_to_submit_latency_ms, (int, float)) and decision_to_submit_latency_ms > 10_000:
+                flags.append("slow_decision_to_submit")
+                summary["slow_decision_to_submit_count"] += 1
+            if isinstance(submit_to_exchange_fill_latency_ms, (int, float)) and submit_to_exchange_fill_latency_ms > 10_000:
+                flags.append("slow_submit_to_fill")
+                summary["slow_submit_to_fill_count"] += 1
+            if flags:
+                flagged_rows.append({**row, "anomaly_flags": flags})
+
+        return {
+            "summary": summary,
+            "rows": flagged_rows,
+            "evaluated_fill_count": len(rows),
+            "truth_source": "fill_outcomes",
         }
 
     def execution_errors(self) -> dict[str, Any]:
@@ -2159,6 +3657,99 @@ class OperatorQueryService:
         )
         self._persist_blocker_snapshot(
             source="ai_review_restore",
+            runtime_state=self.system_health()["runtime_state"],
+            mode_snapshot=self.system_mode(),
+            blockers=self.blockers(),
+        )
+        return {
+            "status": "completed",
+            "recovery": self.recovery_view(),
+            "ai_runtime": self.ai_runtime(),
+        }
+
+    def set_ai_operating_mode_override(
+        self,
+        *,
+        mode: str,
+        reason: str,
+        actor_role: OperatorRole,
+        actor_identity: str | None = None,
+        auth_source: AuthSource = "anonymous",
+    ) -> dict[str, Any]:
+        recovery_before = self.recovery_view()["recovery_state"]
+        ai_before = dict(self.runtime.ai_service.status())
+        ai_after = self.runtime.ai_service.set_manual_operating_mode_override(mode=mode)
+        self._invalidate_cache()
+        self.runtime.recovery_status = self.recovery_posture.finalize_status()
+        self._invalidate_cache()
+        recovery_after = self.recovery_view()["recovery_state"]
+        self._append_event(
+            topic=topics.OPERATOR_ACTIONS,
+            key="system",
+            payload_model=OperatorActionRecord(
+                action="ai_manual_mode_override",
+                actor_role=actor_role,
+                actor_identity=actor_identity,
+                auth_source=auth_source,
+                reason=reason,
+                status="completed",
+                recovery_state_before=recovery_before,
+                recovery_state_after=recovery_after,
+                details={
+                    "ai_before": ai_before,
+                    "ai_after": ai_after,
+                    "target_mode": ai_after.get("manual_override_mode"),
+                    "freeze_until": ai_after.get("manual_override_freeze_until"),
+                },
+            ),
+        )
+        self._persist_blocker_snapshot(
+            source="ai_manual_mode_override",
+            runtime_state=self.system_health()["runtime_state"],
+            mode_snapshot=self.system_mode(),
+            blockers=self.blockers(),
+        )
+        return {
+            "status": "completed",
+            "recovery": self.recovery_view(),
+            "ai_runtime": self.ai_runtime(),
+        }
+
+    def clear_ai_operating_mode_override(
+        self,
+        *,
+        reason: str,
+        actor_role: OperatorRole,
+        actor_identity: str | None = None,
+        auth_source: AuthSource = "anonymous",
+    ) -> dict[str, Any]:
+        recovery_before = self.recovery_view()["recovery_state"]
+        ai_before = dict(self.runtime.ai_service.status())
+        ai_after = self.runtime.ai_service.clear_manual_operating_mode_override()
+        self._invalidate_cache()
+        self.runtime.recovery_status = self.recovery_posture.finalize_status()
+        self._invalidate_cache()
+        recovery_after = self.recovery_view()["recovery_state"]
+        self._append_event(
+            topic=topics.OPERATOR_ACTIONS,
+            key="system",
+            payload_model=OperatorActionRecord(
+                action="ai_manual_mode_restore_auto",
+                actor_role=actor_role,
+                actor_identity=actor_identity,
+                auth_source=auth_source,
+                reason=reason,
+                status="completed",
+                recovery_state_before=recovery_before,
+                recovery_state_after=recovery_after,
+                details={
+                    "ai_before": ai_before,
+                    "ai_after": ai_after,
+                },
+            ),
+        )
+        self._persist_blocker_snapshot(
+            source="ai_manual_mode_restore_auto",
             runtime_state=self.system_health()["runtime_state"],
             mode_snapshot=self.system_mode(),
             blockers=self.blockers(),

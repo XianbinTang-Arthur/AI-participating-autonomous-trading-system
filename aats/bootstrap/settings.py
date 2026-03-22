@@ -17,6 +17,7 @@ MarginMode = Literal["cash", "cross", "isolated"]
 ConfigProfile = Literal[
     "local_demo",
     "real_market_paper",
+    "forward_test_small_capital",
     "guarded_simulated_submit_dry_run",
     "guarded_simulated_submit_enabled",
     "guarded_simulated_dry_run",
@@ -109,6 +110,8 @@ class AATSSettings(BaseSettings):
     ai_execution_max_cancel_replace_patience_ms: int = 4_000
     ai_execution_live_limit_offset_fraction_of_slippage: float = 0.5
     ai_profile_control_freeze_after_admin_override_seconds: float = 3_600.0
+    ai_manual_operating_mode_override_freeze_seconds: float = 3_600.0
+    strategy_profile_auto_control_enabled: bool = False
     openai_api_key: str | None = None
     openai_base_url: str = "https://api.openai.com"
     market_data_stale_after_seconds: float = 30.0
@@ -124,8 +127,16 @@ class AATSSettings(BaseSettings):
     okx_simulated_trading: bool = False
     okx_timeout_seconds: float = 10.0
     okx_market_reconnect_delay_seconds: float = 2.0
+    okx_market_rest_fallback_enabled: bool = True
+    okx_market_rest_fallback_poll_interval_seconds: float = 5.0
     okx_account_refresh_interval_seconds: float = 15.0
     okx_execution_sync_interval_seconds: float = 5.0
+    execution_command_flow_enabled: bool = False
+    execution_command_poll_interval_seconds: float = 1.0
+    portfolio_ledger_truth_enabled: bool = False
+    recovery_reconciliation_execution_ledger_enabled: bool = False
+    operator_control_plane_execution_ledger_enabled: bool = False
+    financial_convergence_mode_enabled: bool = False
     okx_fill_fetch_limit: int = 100
     okx_bills_fetch_limit: int = 100
     okx_trade_fee_refresh_interval_seconds: float = 300.0
@@ -155,9 +166,14 @@ class AATSSettings(BaseSettings):
     strategy_profile_failure_rollback_on_degraded_evaluation: bool = True
     strategy_profile_failure_rollback_on_shadow_review_required: bool = True
     strategy_profile_failure_rollback_on_alternative_winner: bool = True
-    strategy_profile_activation_min_active_minutes: int = 0
-    strategy_profile_activation_min_score_delta: float = 0.0
-    strategy_profile_activation_required_consecutive_wins: int = 1
+    strategy_profile_activation_min_active_minutes: int = 240
+    strategy_profile_activation_min_score_delta: float = 0.5
+    strategy_profile_activation_required_consecutive_wins: int = 3
+    strategy_profile_auto_switch_min_closed_trades: int = 6
+    strategy_profile_auto_switch_min_replay_validations: int = 5
+    strategy_profile_cold_start_lock_enabled: bool = True
+    strategy_profile_safety_profiles: tuple[str, ...] = Field(default=("execution_degraded_safe",))
+    strategy_profile_safety_trigger_execution_error_count: int = 3
     strategy_profile_score_fee_penalty_weight: float = -25.0
     strategy_profile_score_churn_penalty_weight: float = -20.0
     strategy_profile_score_degraded_status_penalty: float = -15.0
@@ -200,6 +216,15 @@ class AATSSettings(BaseSettings):
     strategy_low_edge_streak_limit: int = 3
     strategy_low_edge_cooldown_seconds: float = 1_800.0
     strategy_transient_close_retry_cooldown_seconds: float = 90.0
+    trial_guard_enabled: bool = False
+    trial_guard_poll_interval_seconds: float = 15.0
+    trial_guard_lookback_fills: int = 30
+    trial_guard_min_closed_fills: int = 5
+    trial_guard_max_daily_loss_usdt: float = 25.0
+    trial_guard_max_consecutive_losses: int = 4
+    trial_guard_max_fee_to_notional_ratio: float = 0.0012
+    trial_guard_max_high_slippage_ratio: float = 0.35
+    trial_guard_max_slow_submit_to_fill_ratio: float = 0.35
     max_margin_usage_fraction: float = 0.85
     liquidation_buffer_fraction: float = 0.15
     api_host: str = "127.0.0.1"
@@ -248,6 +273,14 @@ class AATSSettings(BaseSettings):
     @property
     def canonical_ai_operating_mode(self) -> CanonicalAIOperatingMode:
         return normalize_ai_operating_mode(self.ai_operating_mode)
+
+    @property
+    def strategy_profile_auto_control_configured(self) -> bool:
+        return bool(self.strategy_profile_auto_control_enabled)
+
+    def strategy_profile_auto_control_is_enabled_for_mode(self, operating_mode: str | None) -> bool:
+        _ = operating_mode
+        return bool(self.strategy_profile_auto_control_enabled)
 
     @property
     def operator_session_configured(self) -> bool:

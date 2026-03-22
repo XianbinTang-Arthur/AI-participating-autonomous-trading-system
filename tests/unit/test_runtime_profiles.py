@@ -8,9 +8,25 @@ from aats.schemas.runtime_profiles import RuntimeProfileActivationState, Runtime
 from aats.services.operator.runtime_profiles import RuntimeProfileControlService, RuntimeProfileError, runtime_profile_resolution
 from aats.storage.execution_repo import InMemoryExecutionRepository
 from aats.storage.runtime_profile_repo import InMemoryRuntimeProfileRepository
+from tests.support.postgres import postgres_example_url
 
 
 class TestRuntimeProfiles(unittest.TestCase):
+    def test_strategy_profile_auto_control_is_disabled_by_default(self) -> None:
+        settings = AATSSettings.model_validate({"ai_operating_mode": "ai_decision_maker_with_profile_control"})
+        self.assertFalse(settings.strategy_profile_auto_control_configured)
+        self.assertFalse(settings.strategy_profile_auto_control_is_enabled_for_mode("ai_decision_maker_with_profile_control"))
+
+    def test_strategy_profile_auto_control_can_be_enabled_independently(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "ai_operating_mode": "baseline_only",
+                "strategy_profile_auto_control_enabled": True,
+            }
+        )
+        self.assertTrue(settings.strategy_profile_auto_control_configured)
+        self.assertTrue(settings.strategy_profile_auto_control_is_enabled_for_mode("baseline_only"))
+
     def test_resolution_falls_back_to_env_when_no_active_revision_exists(self) -> None:
         settings = AATSSettings.model_validate({"default_symbol": "BTC-USDT"})
         repo = InMemoryRuntimeProfileRepository()
@@ -25,7 +41,7 @@ class TestRuntimeProfiles(unittest.TestCase):
         settings = AATSSettings.model_validate(
             {
                 "default_symbol": "BTC-USDT",
-                "database_url": "sqlite:///env.db",
+                "database_url": postgres_example_url(database_name="env"),
                 "operator_session_secret": "session-secret",
             }
         )
@@ -49,7 +65,7 @@ class TestRuntimeProfiles(unittest.TestCase):
                 "decision_min_interval_seconds_1h": 0.0,
                 "decision_min_price_move_bps": 0.0,
                 "decision_min_momentum_delta": 0.0,
-                "database_url": "sqlite:///malicious.db",
+                "database_url": postgres_example_url(database_name="malicious"),
             },
             summary={"default_symbol": "BTC-USDT-SWAP"},
             status="active",
@@ -67,7 +83,7 @@ class TestRuntimeProfiles(unittest.TestCase):
 
         self.assertEqual(resolution.profile_source, "env_fallback")
         self.assertEqual(resolution.resolved_settings["default_symbol"], "BTC-USDT")
-        self.assertEqual(resolution.resolved_settings["database_url"], "sqlite:///env.db")
+        self.assertEqual(resolution.resolved_settings["database_url"], postgres_example_url(database_name="env"))
         self.assertEqual(resolution.resolved_settings["operator_session_secret"], "session-secret")
 
     def test_resolution_ignores_pending_revision_when_env_switch_mode_is_active(self) -> None:

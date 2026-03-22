@@ -14,16 +14,28 @@ def build_strategy_profile_snapshot(service: "StrategyProfileControlService") ->
         product_type=service.settings.trading_product_type,
         margin_mode=service.settings.margin_mode,
     )
+    context_snapshot = service._tuning_context()
     comparison_report = service._comparison_report(revisions=revisions, state=state)
+    latest_optimization_report = service._latest_optimization_report_payload()
+    control_summary = (
+        latest_optimization_report.get("control_summary")
+        if isinstance(latest_optimization_report, dict)
+        else service._profile_control_summary(
+            context=service._context_payload(context_snapshot),
+            replay_summary={},
+            active_profile_id=state.active_profile_id,
+        )
+    )
     return {
         "scope": service._scope(),
         "safety_state": service._safety_state(),
+        "control_summary": control_summary,
         "activation": state.model_dump(mode="json"),
         "active_revision": service._revision_view(active),
         "revisions": [service._revision_view(item) for item in revisions],
         "profile_space": service._profile_space(revisions=revisions),
         "comparison_report": comparison_report.model_dump(mode="json"),
-        "latest_optimization_report": service._latest_optimization_report_payload(),
+        "latest_optimization_report": latest_optimization_report,
         "latest_selection_decision": service._latest_selection_decision_payload(),
         "execution_parameter_suggestion_capability": service._execution_parameter_suggestion_capability(),
         "activation_history": [
@@ -44,6 +56,8 @@ def build_strategy_profile_ai_config_snapshot(service: "StrategyProfileControlSe
         "activation": {
             "active_profile_id": state.active_profile_id,
             "active_revision_id": state.active_revision_id,
+            "auto_switch_enabled": state.auto_switch_enabled,
+            "frozen_until": state.frozen_until,
             "last_activation_at": state.last_activation_at,
             "last_activation_result": state.last_activation_result,
         },

@@ -3,7 +3,7 @@ from __future__ import annotations
 from decimal import Decimal
 from datetime import datetime
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, Index, Integer, Numeric, String
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Index, Integer, Numeric, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -108,6 +108,45 @@ class FillEventModel(Base):
     payload: Mapped[dict] = mapped_column(JSON, nullable=False)
 
 
+class FillOutcomeModel(Base):
+    __tablename__ = "fill_outcomes"
+    __table_args__ = (
+        Index("ix_fill_outcomes_scope_symbol_ts", "product_type", "margin_mode", "symbol", "created_at"),
+        Index("ix_fill_outcomes_order_id", "order_id", "created_at"),
+    )
+
+    fill_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    decision_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    intent_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    order_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    venue: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    side: Mapped[str | None] = mapped_column(String(8), nullable=True, index=True)
+    fill_qty: Mapped[Decimal | None] = mapped_column(DECIMAL_36_18, nullable=True)
+    fill_price: Mapped[Decimal | None] = mapped_column(DECIMAL_36_18, nullable=True)
+    fill_notional: Mapped[Decimal | None] = mapped_column(DECIMAL_36_18, nullable=True)
+    fee_amount: Mapped[Decimal | None] = mapped_column(DECIMAL_36_18, nullable=True)
+    fee_currency: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    liquidity_role: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    exchange_timestamp: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ingestion_timestamp: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    order_status_after_fill: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    target_leverage: Mapped[float | None] = mapped_column(Float, nullable=True)
+    exposure_side: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    execution_action: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    position_intent: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    starting_position_qty: Mapped[Decimal | None] = mapped_column(DECIMAL_36_18, nullable=True)
+    starting_avg_entry_price: Mapped[Decimal | None] = mapped_column(DECIMAL_36_18, nullable=True)
+    ending_position_qty: Mapped[Decimal | None] = mapped_column(DECIMAL_36_18, nullable=True)
+    ending_avg_entry_price: Mapped[Decimal | None] = mapped_column(DECIMAL_36_18, nullable=True)
+    realized_pnl_delta: Mapped[Decimal] = mapped_column(DECIMAL_36_18, nullable=False)
+    fee_delta: Mapped[Decimal] = mapped_column(DECIMAL_36_18, nullable=False)
+    product_type: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
+    margin_mode: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+
+
 class OrderObligationModel(Base):
     __tablename__ = "order_obligations"
     __table_args__ = (
@@ -148,6 +187,274 @@ class OutboxEventModel(Base):
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_error: Mapped[str | None] = mapped_column(String(512), nullable=True)
     payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+
+
+class ExecutionOrderModel(Base):
+    __tablename__ = "execution_orders"
+    __table_args__ = (
+        Index("ix_execution_orders_symbol_state", "symbol", "state"),
+        Index("ix_execution_orders_decision_created", "decision_id", "created_at"),
+    )
+
+    order_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    intent_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    decision_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    client_order_id: Mapped[str | None] = mapped_column(String(64), nullable=True, unique=True, index=True)
+    venue_order_id: Mapped[str | None] = mapped_column(String(64), nullable=True, unique=True, index=True)
+    symbol: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    side: Mapped[str] = mapped_column(String(8), nullable=False)
+    order_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    time_in_force: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    requested_qty: Mapped[Decimal] = mapped_column(DECIMAL_36_18, nullable=False)
+    limit_price: Mapped[Decimal | None] = mapped_column(DECIMAL_36_18, nullable=True)
+    product_type: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    margin_mode: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    execution_action: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    position_intent: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    state: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    state_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    source_system: Mapped[str] = mapped_column(String(32), nullable=False, default="aats")
+    last_exchange_ts: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    raw_payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+
+
+class ExecutionOrderStateHistoryModel(Base):
+    __tablename__ = "execution_order_state_history"
+    __table_args__ = (
+        Index("ix_execution_order_state_history_order", "order_id", "id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    order_id: Mapped[str] = mapped_column(String(64), ForeignKey("execution_orders.order_id"), nullable=False, index=True)
+    from_state: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    to_state: Mapped[str] = mapped_column(String(32), nullable=False)
+    reason_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    source: Mapped[str] = mapped_column(String(32), nullable=False)
+    source_message_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class ExecutionCommandModel(Base):
+    __tablename__ = "execution_commands"
+    __table_args__ = (
+        Index("ix_execution_commands_order_state", "order_id", "state"),
+    )
+
+    command_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    order_id: Mapped[str] = mapped_column(String(64), ForeignKey("execution_orders.order_id"), nullable=False, index=True)
+    command_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False, unique=True, index=True)
+    state: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    command_payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class ExecutionFillModelV2(Base):
+    __tablename__ = "execution_fills"
+    __table_args__ = (
+        Index("ix_execution_fills_order_ts", "order_id", "ingestion_ts"),
+        Index("ix_execution_fills_symbol_ts", "symbol", "ingestion_ts"),
+        Index("ix_execution_fills_source_venue_fill", "source_system", "venue_fill_id", unique=True),
+    )
+
+    fill_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    venue_fill_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    order_id: Mapped[str] = mapped_column(String(64), ForeignKey("execution_orders.order_id"), nullable=False, index=True)
+    venue_order_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    client_order_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    decision_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    intent_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    symbol: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    side: Mapped[str] = mapped_column(String(8), nullable=False)
+    fill_qty: Mapped[Decimal] = mapped_column(DECIMAL_36_18, nullable=False)
+    fill_price: Mapped[Decimal] = mapped_column(DECIMAL_36_18, nullable=False)
+    fee_amount: Mapped[Decimal] = mapped_column(DECIMAL_36_18, nullable=False, default=Decimal("0"))
+    fee_currency: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    liquidity_role: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    exchange_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    ingestion_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    source_system: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    raw_payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class LedgerAccountModel(Base):
+    __tablename__ = "ledger_accounts"
+    __table_args__ = (
+        Index(
+            "ux_ledger_accounts_identity",
+            "account_type",
+            "currency",
+            "product_type",
+            "margin_mode",
+            "symbol",
+            unique=True,
+        ),
+    )
+
+    account_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    account_type: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    currency: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    product_type: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    margin_mode: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    symbol: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class LedgerJournalModel(Base):
+    __tablename__ = "ledger_journals"
+    __table_args__ = (
+        Index("ix_ledger_journals_status_created", "status", "created_at"),
+        Index("ux_ledger_journals_source", "source_type", "source_id", unique=True),
+    )
+
+    journal_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    journal_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    source_type: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    source_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    posted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    metadata_json: Mapped[dict] = mapped_column("metadata", JSON, nullable=False)
+
+
+class LedgerEntryModel(Base):
+    __tablename__ = "ledger_entries"
+    __table_args__ = (
+        Index("ix_ledger_entries_journal", "journal_id"),
+        Index("ix_ledger_entries_account_effective", "account_id", "effective_at", "created_at"),
+    )
+
+    entry_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    journal_id: Mapped[str] = mapped_column(String(64), ForeignKey("ledger_journals.journal_id"), nullable=False, index=True)
+    account_id: Mapped[str] = mapped_column(String(64), ForeignKey("ledger_accounts.account_id"), nullable=False, index=True)
+    direction: Mapped[str] = mapped_column(String(8), nullable=False)
+    amount: Mapped[Decimal] = mapped_column(DECIMAL_36_18, nullable=False)
+    currency: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    effective_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    source_type: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    source_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class ReservationModel(Base):
+    __tablename__ = "reservations"
+
+    reservation_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    order_id: Mapped[str] = mapped_column(String(64), ForeignKey("execution_orders.order_id"), nullable=False, unique=True, index=True)
+    reserve_account_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("ledger_accounts.account_id"), nullable=False, index=True
+    )
+    reserved_amount: Mapped[Decimal] = mapped_column(DECIMAL_36_18, nullable=False)
+    consumed_amount: Mapped[Decimal] = mapped_column(DECIMAL_36_18, nullable=False, default=Decimal("0"))
+    released_amount: Mapped[Decimal] = mapped_column(DECIMAL_36_18, nullable=False, default=Decimal("0"))
+    state: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class SettlementModel(Base):
+    __tablename__ = "settlements"
+
+    settlement_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    fill_id: Mapped[str] = mapped_column(String(64), ForeignKey("execution_fills.fill_id"), nullable=False, unique=True, index=True)
+    order_id: Mapped[str] = mapped_column(String(64), ForeignKey("execution_orders.order_id"), nullable=False, index=True)
+    journal_id: Mapped[str | None] = mapped_column(
+        String(64), ForeignKey("ledger_journals.journal_id"), nullable=True, unique=True, index=True
+    )
+    state: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    posted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class PositionLotModel(Base):
+    __tablename__ = "position_lots"
+    __table_args__ = (
+        Index("ix_position_lots_scope_symbol_status", "product_type", "margin_mode", "symbol", "status"),
+        Index("ix_position_lots_source_fill", "source_fill_id"),
+    )
+
+    lot_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    product_type: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    margin_mode: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    signed_quantity_open: Mapped[Decimal] = mapped_column(DECIMAL_36_18, nullable=False)
+    entry_price: Mapped[Decimal] = mapped_column(DECIMAL_36_18, nullable=False)
+    source_fill_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    target_leverage: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
+    exposure_side: Mapped[str] = mapped_column(String(16), nullable=False, default="flat")
+    status: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    metadata_json: Mapped[dict] = mapped_column("metadata", JSON, nullable=False)
+
+
+class LotEventModel(Base):
+    __tablename__ = "lot_events"
+    __table_args__ = (
+        Index("ix_lot_events_scope_symbol", "product_type", "margin_mode", "symbol"),
+        Index("ix_lot_events_fill_id", "fill_id"),
+        Index("ix_lot_events_lot_id", "lot_id"),
+    )
+
+    event_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    fill_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    lot_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("position_lots.lot_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    symbol: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    product_type: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    margin_mode: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    event_type: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    quantity: Mapped[Decimal] = mapped_column(DECIMAL_36_18, nullable=False)
+    entry_price: Mapped[Decimal] = mapped_column(DECIMAL_36_18, nullable=False)
+    exit_price: Mapped[Decimal | None] = mapped_column(DECIMAL_36_18, nullable=True)
+    realized_pnl_delta: Mapped[Decimal] = mapped_column(DECIMAL_36_18, nullable=False, default=Decimal("0"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+
+
+class ExternalEventInboxModel(Base):
+    __tablename__ = "external_event_inbox"
+    __table_args__ = (
+        Index("ix_external_event_inbox_source_received", "source_system", "received_at"),
+    )
+
+    inbox_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    source_system: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    dedupe_key: Mapped[str] = mapped_column(String(256), nullable=False, unique=True, index=True)
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    processing_result: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class CommandOutboxModel(Base):
+    __tablename__ = "command_outbox"
+    __table_args__ = (
+        Index("ix_command_outbox_status_created", "status", "created_at"),
+    )
+
+    event_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    aggregate_type: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    aggregate_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    topic: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class ReconciliationReportModel(Base):

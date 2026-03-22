@@ -71,7 +71,7 @@ class TestDatabaseRuntimeGuard(unittest.TestCase):
         self.assertFalse(engine.disposed)
 
     def test_non_postgres_runtime_skips_locking(self) -> None:
-        engine = _FakeEngine(dialect_name="sqlite", acquire_result=True)
+        engine = _FakeEngine(dialect_name="mysql", acquire_result=True)
         runtime = DatabaseRuntime(engine=engine, session_factory=None)  # type: ignore[arg-type]
 
         runtime.acquire_single_runtime_lock(12345)

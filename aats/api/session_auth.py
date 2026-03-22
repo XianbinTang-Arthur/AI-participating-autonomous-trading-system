@@ -21,9 +21,16 @@ class SessionIdentity:
     role: OperatorRole
     issued_at: int
     expires_at: int
+    session_version: int
 
 
-def issue_session_token(*, settings: AATSSettings, identity: str, role: OperatorRole) -> str:
+def issue_session_token(
+    *,
+    settings: AATSSettings,
+    identity: str,
+    role: OperatorRole,
+    session_version: int,
+) -> str:
     if not settings.operator_session_secret:
         raise SessionAuthError("operator_session_secret_missing")
     issued_at = int(time.time())
@@ -33,6 +40,7 @@ def issue_session_token(*, settings: AATSSettings, identity: str, role: Operator
         "role": role,
         "iat": issued_at,
         "exp": expires_at,
+        "ver": session_version,
     }
     encoded_payload = _urlsafe_encode(json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8"))
     signature = _sign(settings.operator_session_secret, encoded_payload)
@@ -65,6 +73,7 @@ def verify_session_token(*, settings: AATSSettings, token: str | None) -> Sessio
         role=role,  # type: ignore[arg-type]
         issued_at=int(payload.get("iat", 0) or 0),
         expires_at=expires_at,
+        session_version=int(payload.get("ver", 1) or 1),
     )
 
 

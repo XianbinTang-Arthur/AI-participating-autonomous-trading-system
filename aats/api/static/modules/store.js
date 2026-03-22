@@ -61,6 +61,9 @@ export function viewSpecs(view, state = null) {
       ["latestDecision", "/decision/latest"],
       ["recentDecisions", `/decision/recent?limit=${limits.recentDecisions}&offset=0`],
       ["executionLatest", "/execution/latest"],
+      ["forwardValidation", "/reports/forward-validation?window_days=7&period_count=4"],
+      ["scalingReadiness", "/reports/scaling-readiness?window_days=7&period_count=4"],
+      ["trialReviewPacket", "/reports/trial-review-packet?profitability_limit=100&anomaly_limit=100&segment_limit=100&window_days=7&period_count=4"],
     ],
     execution: [
       ["latestDecision", "/decision/latest"],
@@ -72,12 +75,14 @@ export function viewSpecs(view, state = null) {
     ],
     risk: [
       ["metrics", "/system/metrics"],
+      ["phase1Shadow", "/system/shadow"],
+      ["trialGuard", "/system/trial-guard"],
       ["portfolio", "/portfolio/latest"],
       ["accountState", "/account/state"],
       ["reconciliationLatest", "/reconciliation/latest"],
       ["replayStatus", "/replay/status"],
     ],
-    ai: [
+    aiAnalysis: [
       ["aiOverview", "/ai/overview"],
       ["aiRuntime", "/ai/runtime"],
       ["aiLatest", "/ai/latest"],
@@ -85,9 +90,11 @@ export function viewSpecs(view, state = null) {
       ["aiShadowLatest", "/ai/shadow/latest"],
       ["aiShadowRecent", `/ai/shadow/recent?limit=${limits.recentAIShadowDecisions}&offset=0`],
       ["aiShadowEvaluations", `/ai/shadow/evaluations?limit=${limits.recentAIShadowEvaluations}&offset=0`],
+      ["profileControlSummary", "/reports/profile-control-summary"],
     ],
     aiConfig: [
       ["aiConfigModel", "/ai-config/summary"],
+      ["aiRuntime", "/ai/runtime"],
     ],
     admin: [
       ["operatorUsers", "/auth/users"],

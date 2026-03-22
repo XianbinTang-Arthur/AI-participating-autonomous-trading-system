@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from sqlalchemy import create_engine, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.engine import Connection
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
@@ -22,9 +23,34 @@ _EXPECTED_NUMERIC_COLUMNS: tuple[tuple[str, str], ...] = (
     ("fill_events", "fill_qty"),
     ("fill_events", "fill_price"),
     ("fill_events", "fee_amount"),
+    ("fill_outcomes", "fill_qty"),
+    ("fill_outcomes", "fill_price"),
+    ("fill_outcomes", "fill_notional"),
+    ("fill_outcomes", "fee_amount"),
+    ("fill_outcomes", "starting_position_qty"),
+    ("fill_outcomes", "starting_avg_entry_price"),
+    ("fill_outcomes", "ending_position_qty"),
+    ("fill_outcomes", "ending_avg_entry_price"),
+    ("fill_outcomes", "realized_pnl_delta"),
+    ("fill_outcomes", "fee_delta"),
     ("order_obligations", "reserved_amount"),
     ("order_obligations", "consumed_amount"),
     ("order_obligations", "released_amount"),
+    ("execution_orders", "requested_qty"),
+    ("execution_orders", "limit_price"),
+    ("execution_fills", "fill_qty"),
+    ("execution_fills", "fill_price"),
+    ("execution_fills", "fee_amount"),
+    ("ledger_entries", "amount"),
+    ("reservations", "reserved_amount"),
+    ("reservations", "consumed_amount"),
+    ("reservations", "released_amount"),
+    ("position_lots", "signed_quantity_open"),
+    ("position_lots", "entry_price"),
+    ("lot_events", "quantity"),
+    ("lot_events", "entry_price"),
+    ("lot_events", "exit_price"),
+    ("lot_events", "realized_pnl_delta"),
 )
 
 
@@ -66,15 +92,14 @@ class DatabaseRuntime:
 
 
 def create_database_runtime(database_url: str) -> DatabaseRuntime:
-    connect_args: dict[str, object] = {}
-    if database_url.startswith("sqlite"):
-        connect_args["check_same_thread"] = False
+    parsed_url = make_url(database_url)
+    if parsed_url.get_backend_name() != "postgresql":
+        raise ValueError("database_url_must_use_postgresql")
 
     engine = create_engine(
         database_url,
         future=True,
         pool_pre_ping=True,
-        connect_args=connect_args,
     )
     return DatabaseRuntime(
         engine=engine,
@@ -90,29 +115,13 @@ def validate_runtime_schema(runtime: DatabaseRuntime) -> None:
     if runtime.engine.dialect.name != "postgresql":
         return
     expected = {(table, column): ("numeric", 36, 18) for table, column in _EXPECTED_NUMERIC_COLUMNS}
+    expected_pairs_sql = ", ".join(f"('{table}', '{column}')" for table, column in _EXPECTED_NUMERIC_COLUMNS)
     query = text(
-        """
+        f"""
         SELECT table_name, column_name, data_type, numeric_precision, numeric_scale
         FROM information_schema.columns
         WHERE table_schema = current_schema()
-          AND (
-            (table_name, column_name) IN (
-              ('portfolio_snapshots', 'total_equity'),
-              ('portfolio_snapshots', 'realized_pnl'),
-              ('portfolio_snapshots', 'unrealized_pnl'),
-              ('order_states', 'requested_qty'),
-              ('order_states', 'filled_qty'),
-              ('order_states', 'remaining_qty'),
-              ('order_states', 'average_fill_price'),
-              ('order_states', 'fees'),
-              ('fill_events', 'fill_qty'),
-              ('fill_events', 'fill_price'),
-              ('fill_events', 'fee_amount'),
-              ('order_obligations', 'reserved_amount'),
-              ('order_obligations', 'consumed_amount'),
-              ('order_obligations', 'released_amount')
-            )
-          )
+          AND (table_name, column_name) IN ({expected_pairs_sql})
         """
     )
     with runtime.engine.connect() as connection:

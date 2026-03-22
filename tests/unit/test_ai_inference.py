@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import unittest
+from datetime import timedelta
 from decimal import Decimal
 
 from aats.bootstrap.settings import AATSSettings
@@ -690,6 +691,29 @@ class TestAIInferenceService(unittest.IsolatedAsyncioTestCase):
 
 
 class TestAIOperatingModes(unittest.TestCase):
+    def test_manual_operating_mode_override_expires_and_restores_automatic_logic(self) -> None:
+        service, _context, _baseline, _provider = TestAIInferenceService._service(
+            ai_operating_mode="ai_decision_maker_with_profile_control",
+            provider=FakeProvider(),
+        )
+
+        status = service.set_manual_operating_mode_override(mode="baseline_only", freeze_seconds=60.0)
+
+        self.assertTrue(status["manual_override_active"])
+        self.assertEqual(status["effective_operating_mode"], "baseline_only")
+        self.assertIsNotNone(status["manual_override_freeze_until"])
+
+        service._manual_operating_mode_freeze_until = utc_now() - timedelta(seconds=1)
+        restored = service.status()
+
+        self.assertFalse(restored["manual_override_active"])
+        self.assertIsNone(restored["manual_override_mode"])
+        self.assertIsNone(restored["manual_override_freeze_until"])
+        self.assertEqual(restored["effective_operating_mode"], "ai_decision_maker_with_profile_control")
+        latest_event = service.event_store.latest(topics.AI_DEGRADATION_EVENTS, key=service.settings.default_symbol)
+        self.assertIsNotNone(latest_event)
+        self.assertEqual(latest_event.payload["reason_code"], "operator_manual_ai_mode_override_expired")
+
     def test_target_engine_respects_canonical_modes(self) -> None:
         baseline = BaselineAssessment(
             decision_id="decision_ai_mode",

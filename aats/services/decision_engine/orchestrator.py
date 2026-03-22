@@ -81,7 +81,10 @@ class DecisionOrchestrator:
             ai_assessment = await self.ai_service.assess(context=context, baseline=baseline)
             operating_mode = self.ai_service.effective_operating_mode()
         canonical_mode = self.ai_service.canonical_effective_operating_mode()
-        if canonical_mode == "ai_decision_maker_with_profile_control" and self.strategy_profile_service is not None:
+        if (
+            self.ai_service.settings.strategy_profile_auto_control_is_enabled_for_mode(canonical_mode)
+            and self.strategy_profile_service is not None
+        ):
             profile_control_decision = await self.strategy_profile_service.evaluate_mainline_profile_control(
                 decision_id=context.decision_id,
             )

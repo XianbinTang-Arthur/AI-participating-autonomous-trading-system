@@ -1,5 +1,6 @@
-﻿import { actionButton, pill, primaryStatusPanel, summaryStrip, surfaceCard, timeline } from "../components.js";
-import { booleanWord, formatMaybeTimestamp, formatNumber, formatRelativeAge, formatSigned, listOrDash, middleEllipsis } from "../formatters.js";
+import { actionButton, pill, primaryStatusPanel, responsiveTable, summaryStrip, surfaceCard, timeline } from "../components.js";
+import { localizeList } from "../copy.js";
+import { booleanWord, formatMaybeTimestamp, formatNumber, formatRelativeAge, formatSigned, middleEllipsis } from "../formatters.js";
 import {
   localizeError,
   operationalStatusCopy,
@@ -45,8 +46,8 @@ export function renderOverviewView(data) {
           metrics: [
             { label: "最新决策时间", value: formatMaybeTimestamp(latestDecision.decision_time || latestDecision.decision_context?.as_of_ts), meta: formatRelativeAge(latestDecision.decision_time || latestDecision.decision_context?.as_of_ts), tone: latestDecision.decision_id ? "info" : "neutral" },
             { label: "目标仓位变化", value: formatSigned(latestDecision.position_target?.delta_position_qty), meta: readableState(latestDecision.position_target?.target_exposure_side || latestDecision.position_target?.position_intent, "方向待确认"), tone: latestDecision.decision_id ? "info" : "neutral" },
-            { label: "策略门禁", value: booleanWord(latestDecision.policy_decision?.execution_allowed), meta: listOrDash(latestDecision.policy_decision?.blocker_reasons, "当前没有额外门禁说明"), tone: latestDecision.policy_decision?.execution_allowed ? "positive" : "warning" },
-            { label: "风控结论", value: booleanWord(latestDecision.risk_decision?.approved), meta: listOrDash(latestDecision.risk_decision?.rejection_reasons, "当前没有额外风控说明"), tone: latestDecision.risk_decision?.approved ? "positive" : "danger" },
+            { label: "策略门禁", value: booleanWord(latestDecision.policy_decision?.execution_allowed), meta: localizeList(latestDecision.policy_decision?.blocker_reasons, "当前没有额外门禁说明"), tone: latestDecision.policy_decision?.execution_allowed ? "positive" : "warning" },
+            { label: "风控结论", value: booleanWord(latestDecision.risk_decision?.approved), meta: localizeList(latestDecision.risk_decision?.rejection_reasons, "当前没有额外风控说明"), tone: latestDecision.risk_decision?.approved ? "positive" : "danger" },
           ],
         })}
       </div>
@@ -55,12 +56,12 @@ export function renderOverviewView(data) {
         ${surfaceCard({
           title: "资产概览",
           kicker: "资产状态",
-          copy: "值班视角下只保留最关键的仓位和收益信息。",
+          copy: "值班视角下只保留账户总览信息，持仓细节单独放到实时持仓表格。",
           content: summaryStrip([
             { label: "总权益", value: formatNumber(portfolio.total_equity), meta: `已实现 ${formatSigned(portfolio.realized_pnl)}`, tone: "info" },
             { label: "未实现收益", value: formatSigned(portfolio.unrealized_pnl), meta: `总敞口 ${formatNumber(portfolio.gross_exposure)}`, tone: Number(portfolio.unrealized_pnl || 0) >= 0 ? "positive" : "warning" },
-            { label: "跟踪标的", value: trackedSymbol(runtime, mode), meta: currentPosition ? "来自最新组合快照" : "当前没有持仓", tone: "info" },
-            { label: "当前仓位", value: readableState(currentPosition?.exposure_side || "flat"), meta: currentPosition ? formatSigned(currentPosition?.position_qty) : "当前没有持仓", tone: currentPosition ? "info" : "neutral" },
+            { label: "持仓数量", value: formatNumber((portfolio.positions || []).length, 0), meta: currentPosition ? "详情请看下方当前持仓表" : "当前没有持仓", tone: "info" },
+            { label: "净敞口", value: formatSigned(portfolio.net_exposure), meta: portfolio.snapshot_ts ? `快照 ${formatMaybeTimestamp(portfolio.snapshot_ts)}` : "快照时间待同步", tone: Number(portfolio.net_exposure || 0) === 0 ? "neutral" : "info" },
           ]),
         })}
       </div>
@@ -74,7 +75,7 @@ export function renderOverviewView(data) {
             { label: "最新委托", value: readableState(latestOrder?.status || "unknown"), meta: middleEllipsis(latestOrder?.client_order_id, 10, 6, "暂未生成委托"), tone: toneForOrderStatus(latestOrder?.status) },
             { label: "最新成交", value: latestFill ? `${formatNumber(latestFill.fill_qty)} @ ${formatNumber(latestFill.fill_price)}` : "暂未成交", meta: middleEllipsis(latestFill?.fill_id, 10, 6, "当前暂无成交编号"), tone: latestFill ? "positive" : "neutral" },
             { label: "对账结果", value: readableState(reconciliation?.severity || "unknown"), meta: middleEllipsis(reconciliation?.reconciliation_id, 10, 6, "暂时没有最新对账"), tone: reconciliation?.halt_required ? "danger" : toneForReconciliationSeverity(reconciliation?.severity) },
-            { label: "活动委托", value: formatNumber(metrics.current_open_order_count, 0), meta: metrics.current_open_order_count > 0 ? "执行还在收敛中" : "当前没有活动委托", tone: metrics.current_open_order_count > 0 ? "warning" : "positive" },
+            { label: "活动委托", value: formatNumber(metrics.current_open_order_count, 0), meta: activityOrderMeta({ currentOpenOrderCount: metrics.current_open_order_count, positionCount: (portfolio.positions || []).length }), tone: metrics.current_open_order_count > 0 ? "warning" : "positive" },
           ]),
         })}
       </div>
@@ -86,6 +87,18 @@ export function renderOverviewView(data) {
           copy: blockers.length ? "这里专门提醒当前最需要关注的风险和限制。" : "当前暂无新的硬阻断，但仍保留恢复和对账上下文。",
           classes: blockers.length || !recovery.safe_to_trade ? "" : "is-muted",
           content: timeline(overviewFocusItems({ blockers, recovery, reconciliation, uiHints }), "当前暂无新的高优先级关注项。"),
+        })}
+      </div>
+
+      <div class="span-12">
+        ${surfaceCard({
+          title: "当前持仓",
+          kicker: "实时持仓",
+          copy: "这里按表格展示最新组合快照中的全部持仓，多条持仓时也能直接横向比较。",
+          content: renderCurrentPositionsTable({
+            portfolio,
+            fallbackSymbol: trackedSymbol(runtime, mode),
+          }),
         })}
       </div>
 
@@ -135,7 +148,7 @@ function overviewSummary({ latestDecision, latestOrder, latestFill, blockers, re
       ? operationalStatusCopy({ recovery, readyCopy: "当前暂无新的决策输出，系统当前保持观察状态，暂未进入新的开平仓动作。" })
       : operationalStatusCopy({
           recovery,
-          recoveryReasonText: listOrDash(recovery.resume_blocked_reasons, "当前没有给出额外恢复说明"),
+          recoveryReasonText: localizeList(recovery.resume_blocked_reasons, "当前没有给出额外恢复说明"),
         });
   }
   return `${formatRelativeAge(latestDecision.decision_time || latestDecision.decision_context?.as_of_ts)}，系统形成了 ${overviewIntentLabel(latestDecision)} 的策略判断。`
@@ -164,10 +177,10 @@ function overviewFocusItems({ blockers, recovery, reconciliation, uiHints }) {
     items.push({
       title: statusHeadline(recovery.halted && recovery.resume_eligible ? "待恢复" : "恢复受限"),
       subtitle: readableState(recovery.recovery_state),
-      detail: operationalStatusCopy({
-        recovery,
-        recoveryReasonText: uiHints.recoveryReasonsText || listOrDash(recovery.resume_blocked_reasons, "当前没有额外恢复说明"),
-      }),
+        detail: operationalStatusCopy({
+          recovery,
+          recoveryReasonText: uiHints.recoveryReasonsText || localizeList(recovery.resume_blocked_reasons, "当前没有额外恢复说明"),
+        }),
       pill: pill(recovery.halted && recovery.resume_eligible ? "待恢复" : "恢复受限", "warning"),
     });
   }
@@ -189,6 +202,51 @@ function trackedPosition(portfolio, symbol) {
 
 function trackedSymbol(runtime, mode) {
   return runtime.symbols?.[0] || mode.default_symbol || "标的待确认";
+}
+
+function activityOrderMeta({ currentOpenOrderCount, positionCount }) {
+  if (Number(currentOpenOrderCount || 0) > 0) {
+    return "执行还在收敛中";
+  }
+  if (Number(positionCount || 0) > 0) {
+    return "当前无挂单，但仍有未平仓仓位";
+  }
+  return "当前没有活动委托";
+}
+
+function renderCurrentPositionsTable({ portfolio, fallbackSymbol }) {
+  const positions = [...(portfolio.positions || [])].sort(
+    (left, right) => Math.abs(Number(right?.position_notional || 0)) - Math.abs(Number(left?.position_notional || 0))
+  );
+  return responsiveTable(
+    ["标的", "方向与数量", "名义敞口", "开仓均价 / 保证金", "浮盈亏 / 快照"],
+    positions.map((position) => [
+      `<div><strong>${position.symbol || fallbackSymbol}</strong><div class="table-meta">${readableState(position.product_type, "产品类型待确认")} | ${readableState(position.margin_mode, "保证金模式待确认")}</div></div>`,
+      `<div><strong>${readableState(position.exposure_side || "flat")}</strong><div class="table-meta">数量 ${formatSigned(position.position_qty)}</div></div>`,
+      `<div><strong>${formatSigned(position.position_notional)}</strong><div class="table-meta">杠杆 ${formatNumber(position.target_leverage, 2)}</div></div>`,
+      `<div><strong>${formatNumber(position.avg_entry_price)}</strong><div class="table-meta">保证金 ${formatNumber(position.margin_allocated)}</div></div>`,
+      `<div><strong>${formatSigned(position.unrealized_pnl)}</strong><div class="table-meta">${portfolio.snapshot_ts ? formatMaybeTimestamp(portfolio.snapshot_ts) : "快照时间待同步"}</div></div>`,
+    ]),
+    "当前没有持仓。",
+    positions.map((position) => ({
+      kicker: "实时持仓",
+      title: position.symbol || fallbackSymbol,
+      meta: portfolio.snapshot_ts ? `快照 ${formatMaybeTimestamp(portfolio.snapshot_ts)}` : "快照时间待同步",
+      tone: Number(position.unrealized_pnl || 0) >= 0 ? "positive" : "warning",
+      badge: pill(readableState(position.exposure_side || "flat"), "info"),
+      fields: [
+        { label: "产品与模式", value: readableState(position.product_type, "产品类型待确认"), meta: readableState(position.margin_mode, "保证金模式待确认") },
+        { label: "持仓数量", value: formatSigned(position.position_qty), meta: `名义 ${formatSigned(position.position_notional)}` },
+        { label: "浮盈亏", value: formatSigned(position.unrealized_pnl), meta: `杠杆 ${formatNumber(position.target_leverage, 2)}` },
+      ],
+      details: [
+        { label: "开仓均价", value: formatNumber(position.avg_entry_price) },
+        { label: "保证金占用", value: formatNumber(position.margin_allocated) },
+        { label: "强平价格", value: position.liquidation_price === null ? "当前没有强平价格" : formatNumber(position.liquidation_price) },
+      ],
+      detailLabel: "展开持仓详情",
+    }))
+  );
 }
 
 function buildTimeline({ latestDecision, latestOrder, latestFill, reconciliation }) {

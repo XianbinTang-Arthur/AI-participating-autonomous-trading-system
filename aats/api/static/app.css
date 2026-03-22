@@ -393,6 +393,44 @@ h3 {
   font-size: 11px;
 }
 
+.actor-tag {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 24px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+}
+
+.actor-tag--system {
+  color: #93c5fd;
+  border-color: rgba(96, 165, 250, 0.26);
+  background: rgba(16, 36, 60, 0.92);
+}
+
+.actor-tag--ai {
+  color: #6ee7b7;
+  border-color: rgba(52, 211, 153, 0.26);
+  background: rgba(11, 38, 30, 0.92);
+}
+
+.actor-tag--admin {
+  color: #fbbf24;
+  border-color: rgba(251, 191, 36, 0.3);
+  background: rgba(52, 34, 10, 0.92);
+}
+
+.actor-tag--unknown {
+  color: var(--text-soft);
+  border-color: var(--line-strong);
+  background: rgba(17, 27, 38, 0.78);
+}
+
 .tone-positive {
   color: var(--positive);
   background: var(--positive-soft);
@@ -700,6 +738,13 @@ h3 {
   gap: 10px;
 }
 
+.command-grid--home-actions .primary-button,
+.command-grid--home-actions .warning-button,
+.command-grid--home-actions .danger-button {
+  font-size: 15px;
+  letter-spacing: 0.01em;
+}
+
 .command-panel--compact .command-head h2 {
   font-size: 24px;
 }
@@ -992,6 +1037,12 @@ h3 {
   line-height: 1.2;
   overflow-wrap: anywhere;
   word-break: break-word;
+}
+
+.summary-tile__badge {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 
 .summary-tile__meta {
@@ -1404,8 +1455,8 @@ h3 {
 
 .manual-profile-switch-actions {
   display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
-  gap: 8px;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 10px;
 }
 
 .manual-profile-switch-actions .table-button,
@@ -1413,12 +1464,37 @@ h3 {
 .manual-profile-switch-actions .warning-button,
 .manual-profile-switch-actions .danger-button,
 .manual-profile-switch-actions .primary-button {
+  width: 100%;
   min-width: 0;
-  min-height: 38px;
-  padding: 0 10px;
-  font-size: 12px;
-  white-space: nowrap;
+  min-height: 52px;
+  padding: 12px 14px;
+  font-size: 14px;
+  line-height: 1.4;
+  white-space: normal;
+  text-align: left;
+  justify-content: flex-start;
+}
+
+.manual-profile-switch-actions--centered .table-button,
+.manual-profile-switch-actions--centered .secondary-button,
+.manual-profile-switch-actions--centered .warning-button,
+.manual-profile-switch-actions--centered .danger-button,
+.manual-profile-switch-actions--centered .primary-button {
+  text-align: center;
   justify-content: center;
+}
+
+.scaling-review-actions {
+  gap: 6px;
+}
+
+.scaling-review-actions .primary-button,
+.scaling-review-actions .secondary-button,
+.scaling-review-actions .warning-button,
+.scaling-review-actions .danger-button {
+  min-height: 38px;
+  padding: 0 12px;
+  font-size: 13px;
 }
 
 .detail-drawer {

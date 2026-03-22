@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import tempfile
+import os
 import unittest
 from datetime import timedelta
 from decimal import Decimal
@@ -27,12 +27,13 @@ from aats.services.portfolio_service.snapshots import PortfolioSnapshotBuilder
 from aats.services.reconciliation_service.replay import ReplayEngine
 from aats.storage.audit_repo import InMemoryAuditRepository
 from aats.storage.event_store import InMemoryEventStore
+from tests.support.postgres import temporary_postgres_url
 
 
 class TestPersistenceAndReplay(unittest.IsolatedAsyncioTestCase):
     async def test_sqlalchemy_event_store_persists_and_queries_events(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            settings = self._sqlite_settings(Path(temp_dir))
+        with temporary_postgres_url() as (database_url, _admin_engine, _schema_name):
+            settings = self._postgres_settings(database_url)
             runtime = await build_runtime(settings)
             fresh_storage = None
             try:
@@ -59,8 +60,8 @@ class TestPersistenceAndReplay(unittest.IsolatedAsyncioTestCase):
                     fresh_storage.database_runtime.dispose()
 
     async def test_replay_reconstructs_same_portfolio_state(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            settings = self._sqlite_settings(Path(temp_dir))
+        with temporary_postgres_url() as (database_url, _admin_engine, _schema_name):
+            settings = self._postgres_settings(database_url)
             runtime = await build_runtime(settings)
             storage = None
             try:
@@ -99,8 +100,8 @@ class TestPersistenceAndReplay(unittest.IsolatedAsyncioTestCase):
                     storage.database_runtime.dispose()
 
     async def test_audit_records_reference_persisted_events(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            settings = self._sqlite_settings(Path(temp_dir))
+        with temporary_postgres_url() as (database_url, _admin_engine, _schema_name):
+            settings = self._postgres_settings(database_url)
             runtime = await build_runtime(settings)
             storage = None
             try:
@@ -1134,12 +1135,11 @@ class TestPersistenceAndReplay(unittest.IsolatedAsyncioTestCase):
         )
 
     @staticmethod
-    def _sqlite_settings(temp_dir: Path) -> AATSSettings:
-        database_path = (temp_dir / "aats.db").resolve().as_posix()
+    def _postgres_settings(database_url: str) -> AATSSettings:
         return AATSSettings.model_validate(
             {
                 "storage_mode": "postgres",
-                "database_url": f"sqlite+pysqlite:///{database_path}",
+                "database_url": database_url,
                 "database_auto_create_schema": True,
                 "local_publish_iterations": 4,
                 "local_publish_interval_seconds": 0.0,

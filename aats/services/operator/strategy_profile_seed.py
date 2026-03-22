@@ -217,7 +217,7 @@ def seed_strategy_profiles(*, settings: AATSSettings, repo: StrategyProfileRepos
                 update={
                     "active_revision_id": active.revision_id,
                     "active_profile_id": active.profile_id,
-                    "auto_switch_enabled": True,
+                    "auto_switch_enabled": settings.strategy_profile_auto_control_enabled,
                     "last_activation_result": "activation_succeeded",
                     "last_activation_at": utc_now(),
                     "last_switch_reason": "initial_seed",
@@ -226,11 +226,3 @@ def seed_strategy_profiles(*, settings: AATSSettings, repo: StrategyProfileRepos
             )
         )
         return
-    if not state.auto_switch_enabled:
-        repo.save_activation_state(
-            state.model_copy(
-                update={
-                    "auto_switch_enabled": True,
-                }
-            )
-        )

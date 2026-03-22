@@ -36,6 +36,9 @@ class RecoveryPostureEvaluator:
         "real_money_live_not_supported",
         "guarded_live_blocked_by_default",
     }
+    _PERSISTENT_STATUS_BLOCKERS = {
+        "pending_execution_commands",
+    }
 
     def __init__(self, runtime: ApplicationRuntime) -> None:
         self.runtime = runtime
@@ -61,12 +64,18 @@ class RecoveryPostureEvaluator:
             self.runtime.reconciliation_repo.history(),
             self.state_scope,
         )
-        blockers = list(self.runtime.health_service.snapshot().blockers)
+        blockers = [
+            blocker
+            for blocker in status.resume_blocked_reasons
+            if blocker in self._PERSISTENT_STATUS_BLOCKERS
+        ] + list(self.runtime.health_service.snapshot().blockers)
         if not include_kill_switch:
             blockers = [blocker for blocker in blockers if blocker != "kill_switch_active"]
         if report is not None:
             if report.halt_required and "reconciliation_halt_required" not in blockers:
                 blockers.append("reconciliation_halt_required")
+            if getattr(report, "resume_blocking", False) and "operator_rebaseline_required" not in blockers:
+                blockers.append("operator_rebaseline_required")
             if (
                 report.review_required
                 and self.runtime.recovery_policy.review_required_blocks_resume

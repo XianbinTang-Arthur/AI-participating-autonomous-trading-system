@@ -1,17 +1,20 @@
 ﻿import { fetchPanels, requestJson } from "./modules/api-client.js";
-import { actionButton, kvList, notice, pill, primaryStatusPanel, surfaceCard } from "./modules/components.js";
+import { notice, pill, primaryStatusPanel } from "./modules/components.js";
 import {
-  booleanWord,
   emptyState,
-  escapeHtml,
   formatMaybeTimestamp,
   formatNumber,
   formatRelativeAge,
-  formatSigned,
   listOrDash,
   middleEllipsis,
-  rawJson,
 } from "./modules/formatters.js";
+import {
+  buildDecisionDrawer,
+  buildFillDrawer,
+  buildOrderDrawer,
+  buildReconciliationDrawer,
+} from "./modules/detail-drawers.js";
+import { buildPhase1ShadowDrawer } from "./modules/shadow-drawer.js";
 import { AUTO_REFRESH_MS, CORE_SPECS, DEFAULT_PAGE_LIMITS, PAGE_LOAD_STEP, createState, viewSpecs } from "./modules/store.js";
 import {
   localizeError,
@@ -23,25 +26,13 @@ import {
   toneForRuntimeState,
   tradingStatusLabel,
 } from "./modules/terms.js";
-import {
-  decisionDrawerRows,
-  fillDrawerRows,
-  fillSceneSummary,
-  orderDrawerRows,
-  orderSceneSummary,
-} from "./modules/trade-display.js";
-import { renderAISections, renderAIView } from "./modules/views/ai-view.js";
+import { renderAIAnalysisView } from "./modules/views/ai-analysis-view.js";
 import { renderAIConfigView } from "./modules/views/ai-config-view.js";
 import { renderAdminView } from "./modules/views/admin-view.js";
 import { renderExecutionSections, renderExecutionView } from "./modules/views/execution-view.js";
 import { renderHomeView } from "./modules/views/home-view.js";
 import { renderOverviewView } from "./modules/views/overview-view.js";
-import {
-  reconciliationActionCopy,
-  renderReconciliationControls,
-  renderRiskSections,
-  renderRiskView,
-} from "./modules/views/risk-view.js";
+import { renderRiskSections, renderRiskView } from "./modules/views/risk-view.js";
 import { renderStrategySections, renderStrategyView } from "./modules/views/strategy-view.js";
 
 const VIEW_ROUTES = {
@@ -50,7 +41,7 @@ const VIEW_ROUTES = {
   strategy: "/ui/strategy",
   execution: "/ui/execution",
   risk: "/ui/risk",
-  ai: "/ui/ai",
+  aiAnalysis: "/ui/ai-analysis",
   aiConfig: "/ui/ai-config",
   admin: "/ui/settings",
 };
@@ -91,19 +82,19 @@ const VIEW_META = {
     copy: "关注阻断原因、对账结论、恢复状态、账户快照和是否需要人工确认。",
     hidePageHead: false,
   },
-  ai: {
-    docTitle: "AATS 自动交易监控台 | AI 工作台",
-    eyebrow: "AI 决策链路",
-    heading: "AI 当前有效模式、决策门禁和影子回放",
-    copy: "先看模式和最新决策链结果，再看影子回放是否真的优于基础策略。",
+  aiAnalysis: {
+    docTitle: "AATS 自动交易监控台 | AI 分析",
+    eyebrow: "AI 分析",
+    heading: "先看 AI 怎么运行，再看它有没有价值",
+    copy: "这里集中展示 AI 当前状态、决策解释、策略层 shadow、执行层 shadow 和长期表现。",
     hidePageHead: false,
   },
   aiConfig: {
     docTitle: "AATS 自动交易监控台 | AI 配置",
     eyebrow: "AI 配置",
-    heading: "",
-    copy: "",
-    hidePageHead: true,
+    heading: "这里管理 AI 模式、策略档位和自动切换规则",
+    copy: "这里是控制面，只放配置、切换入口和生效规则，不再混入长周期分析卡片。",
+    hidePageHead: false,
   },
   admin: {
     docTitle: "AATS 自动交易控制台 | 账户与权限",
@@ -146,7 +137,7 @@ const nodes = {
   strategyContent: document.getElementById("strategyContent"),
   executionContent: document.getElementById("executionContent"),
   riskContent: document.getElementById("riskContent"),
-  aiContent: document.getElementById("aiContent"),
+  aiAnalysisContent: document.getElementById("aiAnalysisContent"),
   aiConfigContent: document.getElementById("aiConfigContent"),
   adminContent: document.getElementById("adminContent"),
   detailDrawer: document.getElementById("detailDrawer"),
@@ -467,8 +458,8 @@ function renderActiveView() {
     patchRenderedSections(renderRiskSections(viewData), () => nodes.riskContent, () => renderRiskView(viewData));
     return;
   }
-  if (state.activeView === "ai") {
-    patchRenderedSections(renderAISections(viewData), () => nodes.aiContent, () => renderAIView(viewData));
+  if (state.activeView === "aiAnalysis" && nodes.aiAnalysisContent) {
+    patchHtml(nodes.aiAnalysisContent, renderAIAnalysisView(viewData));
     return;
   }
   if (state.activeView === "aiConfig" && nodes.aiConfigContent) {
@@ -476,6 +467,7 @@ function renderActiveView() {
       nodes.aiConfigContent,
       renderAIConfigView({
         session: state.data.session || {},
+        aiRuntime: state.data.aiRuntime || {},
         summary: state.data.aiConfigModel || {},
         error: state.errors.aiConfigModel || null,
       }),
@@ -669,6 +661,65 @@ async function triggerHalt(target = null) {
   });
 }
 
+async function recordScalingReview(verdict, target = null) {
+  if (!verdict) return;
+  const payloadMap = {
+    approve_scale_up: {
+      reason: "ui_scaling_review_approve_scale_up",
+      successMessage: "已记录允许放量的人工评审结论。",
+      pendingLabel: "正在记录放量评审…",
+      confirmMessage: "确认记录“允许放量”评审结论吗？这表示系统已满足进入下一档资金评审的条件。",
+    },
+    continue_small_capital: {
+      reason: "ui_scaling_review_continue_small_capital",
+      successMessage: "已记录继续小资金试盘的人工评审结论。",
+      pendingLabel: "正在记录评审结论…",
+      confirmMessage: "",
+    },
+    shrink_trial: {
+      reason: "ui_scaling_review_shrink_trial",
+      successMessage: "已记录建议缩容试盘的人工评审结论。",
+      pendingLabel: "正在记录缩容评审…",
+      confirmMessage: "确认记录“建议缩容试盘”评审结论吗？",
+    },
+    pause_trial: {
+      reason: "ui_scaling_review_pause_trial",
+      successMessage: "已记录建议暂停试盘的人工评审结论。",
+      pendingLabel: "正在记录暂停评审…",
+      confirmMessage: "确认记录“建议暂停试盘”评审结论吗？",
+    },
+  };
+  const payload = payloadMap[verdict];
+  if (!payload) return;
+  if (payload.confirmMessage && !window.confirm(payload.confirmMessage)) return;
+  await runAction(
+    "/system/scaling-review",
+    {
+      verdict,
+      reason: payload.reason,
+    },
+    payload.successMessage,
+    {
+      target,
+      pendingLabel: payload.pendingLabel,
+    }
+  );
+}
+
+async function recordTrialReview(target = null) {
+  await runAction(
+    "/system/trial-review/record",
+    {
+      reason: "ui_trial_review_snapshot",
+    },
+    "已记录本次试盘复盘摘要。",
+    {
+      target,
+      pendingLabel: "正在记录复盘摘要…",
+    }
+  );
+}
+
 async function logoutOperator() {
   try {
     await requestJson("/auth/logout", { method: "POST" });
@@ -686,13 +737,19 @@ async function dispatchAction(action, value, target = null) {
   if (action === "inspect-order") return inspectOrder(value);
   if (action === "inspect-fill") return inspectFill(value);
   if (action === "inspect-reconciliation") return inspectReconciliation(value);
+  if (action === "inspect-shadow") return inspectPhase1Shadow();
   if (action === "trigger-reconciliation-validate") return triggerReconciliationValidate(target);
   if (action === "trigger-rebaseline") return triggerRebaseline(target);
   if (action === "trigger-resume") return triggerResume(target);
   if (action === "trigger-halt") return triggerHalt(target);
+  if (action === "record-scaling-review") return recordScalingReview(value, target);
+  if (action === "record-trial-review") return recordTrialReview(target);
   if (action === "trigger-blocker-action") return triggerBlockerAction(value, target);
   if (action === "resolve-stuck-order") return resolveStuckOrder(value);
+  if (action === "manual-set-ai-operating-mode") return setAIManualOperatingMode(value, target);
+  if (action === "restore-ai-operating-mode-auto") return restoreAIAutomaticOperatingMode(target);
   if (action === "manual-activate-strategy-profile") return activateStrategyProfile(value, target);
+  if (action === "restore-strategy-profile-auto") return restoreStrategyProfileAutomaticControl(target);
   if (action === "load-more-orders") return adjustPageLimit("recentOrders", PAGE_LOAD_STEP);
   if (action === "collapse-orders") return resetPageLimit("recentOrders");
   if (action === "load-more-fills") return adjustPageLimit("recentFills", PAGE_LOAD_STEP);
@@ -715,79 +772,7 @@ async function inspectDecision(decisionId) {
   if (!decisionId) return;
   try {
     const detail = await requestJson(`/decision/${encodeURIComponent(decisionId)}`);
-    const aiEconomic = detail.ai_economic_actionability || null;
-    const aiDecisionAudit = detail.ai_decision_audit || null;
-    const aiExecutionSuggestion = detail.ai_execution_suggestion || null;
-    const decisionOutcome = detail.decision_outcome || null;
-    const aiEconomicRows = aiEconomic
-      ? [
-          ["AI 经济可执行性", booleanWord(aiEconomic.economically_actionable), `最低净边际 ${formatNumber(aiEconomic.min_required_net_edge_bps ?? 0, 2)} 个基点`],
-          ["本轮评估边际", `${formatNumber(aiEconomic.estimated_edge_bps ?? 0, 2)} 个基点`, `成本 ${formatNumber(aiEconomic.estimated_cost_bps ?? 0, 2)} / 净边际 ${formatNumber(aiEconomic.estimated_net_edge_bps ?? 0, 2)} 个基点`],
-          ["目标边际估计", `${formatNumber(aiEconomic.target_expected_signal_edge_bps ?? 0, 2)} 个基点`, `成本 ${formatNumber(aiEconomic.target_expected_cost_bps ?? 0, 2)} / 净边际 ${formatNumber(aiEconomic.target_expected_net_edge_bps ?? 0, 2)} 个基点`],
-          ["总门槛", `${formatNumber(aiEconomic.required_total_edge_bps ?? 0, 2)} 个基点`, `噪声缓冲 ${formatNumber(aiEconomic.noise_buffer_bps ?? 0, 2)} / 最低净边际 ${formatNumber(aiEconomic.min_required_net_edge_bps ?? 0, 2)} 个基点`],
-          ["决策来源", readableState(decisionOutcome?.decision_source || "baseline"), drawerListText((decisionOutcome?.decision_blocked_reasons || []).map(localizeError), "当前没有额外决策链路阻断项")],
-          ["新鲜度与安全", `市场快照 ${booleanWord(aiEconomic.market_snapshot_fresh)} / 账户快照 ${booleanWord(aiEconomic.account_snapshot_fresh)}`, `允许交易 ${booleanWord(aiEconomic.safe_to_trade)} / ${drawerText(aiEconomic.execution_condition, "当前没有额外执行条件")}`],
-          ["近期执行健康", `手续费拖累 ${formatNumber(aiEconomic.recent_fee_drag_ratio ?? 0, 3)} / 来回交易 ${formatNumber(aiEconomic.recent_churn_ratio ?? 0, 3)}`, `低边际连续次数 ${formatNumber(aiEconomic.recent_low_edge_trade_streak ?? 0, 0)} / 活动委托 ${formatNumber(aiEconomic.current_open_order_count ?? 0, 0)}`],
-          ["校验标记", drawerListText(aiEconomic.validation_flags, "当前没有额外校验标记"), drawerListText(aiEconomic.rejection_flags, "当前没有额外拒绝标记")],
-        ]
-      : [];
-    const aiAuditRows = aiDecisionAudit
-      ? [
-          ["配置与评估模式", `${readableState(aiDecisionAudit.configured_mode || "unknown")} / ${readableState(aiDecisionAudit.assessment_operating_mode || "unknown")}`, drawerText(aiDecisionAudit.provider_name, "当前没有模型服务说明")],
-          ["方向链", `基础策略 ${readableState(aiDecisionAudit.baseline_direction || "unknown")} / AI ${readableState(aiDecisionAudit.ai_direction || "unknown")}`, `最终结论 ${readableState(aiDecisionAudit.final_direction || "unknown")}`],
-          ["决策来源", readableState(aiDecisionAudit.decision_source || "baseline"), readableState(aiDecisionAudit.decision_authority || "reference_only")],
-          ["决策链路阻断与保护", drawerListText((decisionOutcome?.decision_blocked_reasons || []).map(localizeError), "当前没有决策链路阻断项"), drawerListText(aiDecisionAudit.guardrail_flags, "当前没有额外保护规则")],
-          ["新鲜度与安全", `市场快照 ${booleanWord(aiDecisionAudit.market_snapshot_fresh)} / 账户快照 ${booleanWord(aiDecisionAudit.account_snapshot_fresh)}`, `允许交易 ${booleanWord(aiDecisionAudit.safe_to_trade)} / ${drawerText(aiDecisionAudit.execution_condition, "当前没有额外执行条件")}`],
-          ["近期执行健康", `手续费拖累 ${formatNumber(aiDecisionAudit.recent_fee_drag_ratio ?? 0, 3)} / 来回交易 ${formatNumber(aiDecisionAudit.recent_churn_ratio ?? 0, 3)}`, `低边际连续次数 ${formatNumber(aiDecisionAudit.recent_low_edge_trade_streak ?? 0, 0)} / 活动委托 ${formatNumber(aiDecisionAudit.current_open_order_count ?? 0, 0)}`],
-        ]
-      : [];
-    const aiExecutionRows = aiExecutionSuggestion
-      ? [
-          ["建议模式", readableState(aiExecutionSuggestion.configured_mode || "disabled"), aiExecutionSuggestion.translation_present ? "已有翻译结果" : aiExecutionSuggestion.suggestion_present ? "已有建议结果" : "最近没有生成建议"],
-          ["翻译器状态", readableState(aiExecutionSuggestion.status || "absent"), aiExecutionSuggestion.latest_translation?.applied_to_live_execution ? "已进入真实执行" : "当前不会改写真实执行"],
-          ["实盘应用", booleanWord(aiExecutionSuggestion.latest_translation?.applied_to_live_execution), aiExecutionSuggestion.latest_translation?.applied_to_live_execution ? drawerListText(aiExecutionSuggestion.latest_translation?.applied_live_fields, "当前没有额外实盘字段") : drawerListText([aiExecutionSuggestion.latest_translation?.live_translation_fallback_reason], "当前没有进入实盘应用")],
-          ["建议姿态", drawerListText(Object.entries(aiExecutionSuggestion.assessment_suggestion?.suggestion || {}).filter(([, value]) => value !== null && value !== undefined).map(([key, value]) => `${key}=${value}`), "当前没有额外建议姿态"), drawerListText(aiExecutionSuggestion.latest_translation?.clipped_fields, "当前没有裁剪字段")],
-          ["翻译预览", drawerListText(Object.entries(aiExecutionSuggestion.latest_translation?.translation_preview || {}).filter(([, value]) => value !== null && value !== undefined).map(([key, value]) => `${key}=${value}`), "当前没有翻译预览"), drawerListText(aiExecutionSuggestion.latest_translation?.rejection_reasons, "当前没有拒绝原因")],
-          ["实盘字段", `订单类型=${drawerText(aiExecutionSuggestion.live_order_type, "待确认")} / 时效=${drawerText(aiExecutionSuggestion.live_time_in_force, "待确认")} / 限价=${formatNumber(aiExecutionSuggestion.live_limit_price ?? 0, 2)}`, drawerText(aiExecutionSuggestion.live_execution_style, "当前没有执行风格说明")],
-        ]
-      : [];
-    openDrawer({
-      eyebrow: "决策链详情",
-      title: detail.decision_id ? `当前记录：${detail.decision_id}` : "当前记录：决策链详情",
-      summary: strategySummary(detail),
-      body: [
-        surfaceCard({
-          title: "决策摘要",
-          content: kvList(decisionDrawerRows(detail, describeDecisionIntent)),
-        }),
-        surfaceCard({
-          title: "交易解释",
-          content: `<div class="callout"><p>${escapeHtml(strategySummary(detail))}</p></div>`,
-        }),
-        aiEconomic
-          ? surfaceCard({
-              title: "AI 经济可行动性",
-              content: kvList(aiEconomicRows),
-            })
-          : "",
-        aiDecisionAudit
-          ? surfaceCard({
-              title: "AI 决策审计链",
-              content: kvList(aiAuditRows),
-            })
-          : "",
-        aiExecutionSuggestion
-          ? surfaceCard({
-              title: "AI 受限执行建议",
-              content: kvList(aiExecutionRows),
-            })
-          : "",
-        surfaceCard({
-          title: "原始记录",
-          content: rawJson(detail),
-        }),
-      ].join(""),
-    });
+    openDrawer(buildDecisionDrawer(detail));
   } catch (error) {
     state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
     renderBanners();
@@ -798,38 +783,7 @@ async function inspectOrder(orderId) {
   if (!orderId) return;
   try {
     const detail = await requestJson(`/orders/${encodeURIComponent(orderId)}`);
-    const order = detail.order || {};
-    const fills = detail.fills || [];
-    openDrawer({
-      eyebrow: `${orderSceneSummary(order)}详情`,
-      title: order.client_order_id ? `当前记录：${order.client_order_id}` : `当前记录：${orderSceneSummary(order)}详情`,
-      summary: `这笔${orderSceneSummary(order)}当前状态：${readableState(order.status)}。${fills.length ? ` 已关联 ${fills.length} 笔成交。` : " 目前还没有关联成交。"} `,
-      body: [
-        surfaceCard({
-          title: `${orderSceneSummary(order)}摘要`,
-          content: kvList([
-            ...orderDrawerRows(order),
-            ["最后更新时间", formatMaybeTimestamp(order.last_update_ts || order.created_at), formatRelativeAge(order.last_update_ts || order.created_at)],
-          ]),
-        }),
-        surfaceCard({
-          title: "关联成交",
-          content: fills.length
-            ? kvList(
-                fills.map((fill) => [
-                  fill.fill_id || "成交编号待同步",
-                  `${formatNumber(fill.fill_qty)} @ ${formatNumber(fill.fill_price)}`,
-                  `${readableState(fill.side)} | 手续费 ${formatNumber(fill.fee_amount)} ${fill.fee_currency || ""}`,
-                ])
-              )
-            : emptyState("这笔委托暂时还没有对应成交。"),
-        }),
-        surfaceCard({
-          title: "原始记录",
-          content: rawJson(detail),
-        }),
-      ].join(""),
-    });
+    openDrawer(buildOrderDrawer(detail));
   } catch (error) {
     state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
     renderBanners();
@@ -840,25 +794,7 @@ async function inspectFill(fillId) {
   if (!fillId) return;
   try {
     const detail = await requestJson(`/fills/${encodeURIComponent(fillId)}`);
-    const fill = detail.fill || {};
-    openDrawer({
-      eyebrow: `${fillSceneSummary(fill)}详情`,
-      title: fill.fill_id ? `当前记录：${fill.fill_id}` : `当前记录：${fillSceneSummary(fill)}详情`,
-      summary: `这笔${fillSceneSummary(fill)}是 ${readableState(fill.side)} ${formatNumber(fill.fill_qty)}，成交价 ${formatNumber(fill.fill_price)}。`,
-      body: [
-        surfaceCard({
-          title: `${fillSceneSummary(fill)}摘要`,
-          content: kvList([
-            ...fillDrawerRows(fill),
-            ["落库时间", formatMaybeTimestamp(fill.ingestion_timestamp), formatRelativeAge(fill.ingestion_timestamp)],
-          ]),
-        }),
-        surfaceCard({
-          title: "原始记录",
-          content: rawJson(detail),
-        }),
-      ].join(""),
-    });
+    openDrawer(buildFillDrawer(detail));
   } catch (error) {
     state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
     renderBanners();
@@ -869,75 +805,41 @@ async function inspectReconciliation(reconciliationId) {
   if (!reconciliationId) return;
   try {
     const detail = await requestJson(`/reconciliation/${encodeURIComponent(reconciliationId)}`);
-    const reconciliation = detail.reconciliation || {};
-    const billsSummary = detail.exchange_bills_summary || {};
-    const billsExplanations = Array.isArray(detail.exchange_bills_explanations) ? detail.exchange_bills_explanations : [];
-    const recovery = state.data.systemRecovery?.recovery || {};
-    const latestReconciliationId = state.data.reconciliationLatest?.reconciliation?.reconciliation_id || "";
-    const isHistorical = Boolean(latestReconciliationId) && latestReconciliationId !== reconciliation.reconciliation_id;
-    const uiHints = {
-      recoveryReasonsText: localizedRecoveryReasons(),
-      controlPermissionMessage: controlPermissionMessage(),
-    };
-    openDrawer({
-      eyebrow: "对账详情",
-      title: reconciliation.reconciliation_id ? `当前记录：${reconciliation.reconciliation_id}` : "当前记录：对账详情",
-      summary: `这次对账结论是 ${readableState(reconciliation.severity)}。${reconciliation.halt_required ? " 系统已要求暂停自动运行。" : ""}`,
-      body: [
-        surfaceCard({
-          title: "核对摘要",
-          content: kvList([
-            ["核对级别", readableState(reconciliation.severity), reconciliation.exchange_comparison_enabled ? "已比对交易所" : "仅校验本地记录"],
-            ["是否要求停机", booleanWord(reconciliation.halt_required), booleanWord(reconciliation.review_required)],
-            ["差异原因", drawerListText(detail.mismatch_summary?.mismatch_reasons, "当前没有额外差异原因"), drawerListText(detail.mismatch_summary?.mismatch_categories, "当前没有额外差异分类")],
-            ["建议动作", detail.mismatch_summary?.recommended_operator_action ? localizeError(detail.mismatch_summary.recommended_operator_action) : "当前没有额外建议动作", drawerListText(detail.mismatch_summary?.safety_impacts, "当前没有额外安全影响说明")],
-            ["核对时间", formatMaybeTimestamp(reconciliation.as_of_ts), formatRelativeAge(reconciliation.as_of_ts)],
-          ]),
-        }),
-        surfaceCard({
-          title: "账单解释链",
-          content: kvList([
-            ["最近账单数量", formatNumber(billsSummary.count || 0), drawerText(billsSummary.latest_bill_id, "当前暂无最新账单编号")],
-            ["涉及币种", drawerListText(billsSummary.currencies, "当前没有账单币种摘要"), "最近交易所侧账务变动范围"],
-            ["高频账务类别", renderReconciliationBillsCategories(billsSummary.top_categories), "已按类型、子类型和币种聚合"],
-            ["可能解释当前差异", renderReconciliationBillExplanations(billsExplanations), billsExplanations.length ? "这些账务事件更可能解释余额、仓位或执行偏差" : "当前没有明确的账单解释链"],
-            ["识别类型", renderReconciliationBillCases(billsExplanations), billsExplanations.length ? "系统按账单语义和对账差异归纳出的处理场景" : "当前没有可归类的账单处理场景"],
-            ["建议处理", renderReconciliationBillActions(billsExplanations), billsExplanations.length ? "这是给操作员的下一步动作建议，不会直接改动交易所账单" : "当前没有额外账单处理建议"],
-          ]),
-        }),
-        surfaceCard({
-          title: "可执行操作",
-          content: `
-            <p class="meta-copy">${escapeHtml(reconciliationActionCopy({ reconciliation, recovery, isHistorical }))}</p>
-            ${renderReconciliationControls({ reconciliation, recovery, uiHints, compact: true })}
-          `,
-        }),
-        surfaceCard({
-          title: "原始记录",
-          content: rawJson(detail),
-        }),
-      ].join(""),
-    });
+    openDrawer(
+      buildReconciliationDrawer(detail, {
+        recovery: state.data.systemRecovery?.recovery || {},
+        latestReconciliationId: state.data.reconciliationLatest?.reconciliation?.reconciliation_id || "",
+        uiHints: {
+          recoveryReasonsText: localizedRecoveryReasons(),
+          controlPermissionMessage: controlPermissionMessage(),
+        },
+      })
+    );
   } catch (error) {
     state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
     renderBanners();
   }
 }
 
-function renderReconciliationBillsCategories(rows) {
-  if (!Array.isArray(rows) || rows.length === 0) return "当前没有账单分类";
-  return rows
-    .slice(0, 4)
-    .map((item) => `${item.human_label || `${item.type}/${item.sub_type}`}${item.count ? ` x${formatNumber(item.count)}` : ""}`)
-    .join(" | ");
-}
-
-function renderReconciliationBillExplanations(rows) {
-  if (!Array.isArray(rows) || rows.length === 0) return "当前没有账单解释";
-  return rows
-    .slice(0, 3)
-    .map((item) => `${item.title}: ${drawerListText(item.likely_explains, "当前没有额外解释")}`)
-    .join(" | ");
+async function inspectPhase1Shadow() {
+  try {
+    const [detail, history] = await Promise.all([
+      requestJson("/system/shadow"),
+      requestJson("/system/shadow/history?limit=12"),
+    ]);
+    openDrawer(
+      buildPhase1ShadowDrawer(detail, {
+        shadowBlocker: activePhase1ShadowBlocker(),
+        uiHints: {
+          controlPermissionMessage: controlPermissionMessage(),
+        },
+        history: history?.history || [],
+      })
+    );
+  } catch (error) {
+    state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
+    renderBanners();
+  }
 }
 
 async function triggerBlockerAction(value, target = null) {
@@ -963,35 +865,6 @@ async function triggerBlockerAction(value, target = null) {
   );
 }
 
-function renderReconciliationBillCases(rows) {
-  if (!Array.isArray(rows) || rows.length === 0) return "当前没有账单处理分类";
-  return rows
-    .slice(0, 3)
-    .map((item) => `${item.title}: ${localizeError(item.operator_case || "manual_activity")}`)
-    .join(" | ");
-}
-
-function renderReconciliationBillActions(rows) {
-  if (!Array.isArray(rows) || rows.length === 0) return "当前没有账单处理建议";
-  return rows
-    .slice(0, 3)
-    .map((item) => `${item.title}: ${localizeError(item.operator_action || "observe_only")}`)
-    .join(" | ");
-}
-
-function drawerText(value, fallback = "待确认") {
-  if (value === null || value === undefined) return fallback;
-  const text = String(value).trim();
-  return text ? text : fallback;
-}
-
-function drawerListText(value, fallback = "当前没有额外说明") {
-  if (Array.isArray(value)) {
-    const filtered = value.map((item) => String(item ?? "").trim()).filter(Boolean);
-    return filtered.length ? filtered.join(" / ") : fallback;
-  }
-  return drawerText(value, fallback);
-}
 
 async function resolveStuckOrder(orderId) {
   if (!orderId) return;
@@ -1046,6 +919,75 @@ async function activateStrategyProfile(profileId, target = null) {
     state.flash = {
       tone: "info",
       message: `当前策略档位已手动切换为 ${readableProfileName(result?.active_revision?.profile_label || result?.active_revision?.profile_id)}。`,
+    };
+    await refreshDashboard({ manual: true });
+  } catch (error) {
+    state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
+    renderBanners();
+  } finally {
+    clearPending();
+  }
+}
+
+async function restoreStrategyProfileAutomaticControl(target = null) {
+  const clearPending = setActionPending(target, "正在恢复自动切档…");
+  try {
+    if (!window.confirm("确认提前结束当前策略档位的人工冻结，并恢复自动切档逻辑吗？")) return;
+    const result = await requestJson("/strategy-profiles/restore-auto", {
+      method: "POST",
+      body: { reason: "ui_restore_auto_strategy_profile_control" },
+    });
+    const activation = result?.activation || {};
+    state.flash = {
+      tone: "info",
+      message: activation?.active_profile_id
+        ? `策略档位已恢复自动切档逻辑，当前仍保持 ${readableProfileName(result?.active_revision?.profile_label || activation.active_profile_id)}。`
+        : "策略档位已恢复自动切档逻辑。",
+    };
+    await refreshDashboard({ manual: true });
+  } catch (error) {
+    state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
+    renderBanners();
+  } finally {
+    clearPending();
+  }
+}
+
+async function setAIManualOperatingMode(mode, target = null) {
+  if (!mode) return;
+  const modeLabel = target instanceof HTMLElement ? (target.textContent || "").trim() : mode;
+  const clearPending = setActionPending(target, "正在切换运行模式…");
+  try {
+    if (!window.confirm(`确认立即把 AI 当前运行模式切换为“${modeLabel}”吗？系统会在冻结时间结束后恢复自动模式逻辑。`)) return;
+    const result = await requestJson("/ai/operating-mode/override", {
+      method: "POST",
+      body: { mode, reason: "ui_manual_override_ai_operating_mode" },
+    });
+    const runtime = result?.ai_runtime || {};
+    state.flash = {
+      tone: "info",
+      message: `AI 当前运行模式已手动切换为 ${readableState(runtime.manual_override_mode || mode, "目标模式")}，冻结到 ${runtime.manual_override_freeze_until || "待确认"}。`,
+    };
+    await refreshDashboard({ manual: true });
+  } catch (error) {
+    state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
+    renderBanners();
+  } finally {
+    clearPending();
+  }
+}
+
+async function restoreAIAutomaticOperatingMode(target = null) {
+  const clearPending = setActionPending(target, "正在恢复自动模式…");
+  try {
+    if (!window.confirm("确认提前结束人工覆盖，并恢复 AI 自动运行模式逻辑吗？")) return;
+    await requestJson("/ai/operating-mode/restore-auto", {
+      method: "POST",
+      body: { reason: "ui_restore_auto_ai_operating_mode" },
+    });
+    state.flash = {
+      tone: "info",
+      message: "AI 当前运行模式已恢复为自动逻辑控制。",
     };
     await refreshDashboard({ manual: true });
   } catch (error) {
@@ -1203,8 +1145,8 @@ function renderLoadingView() {
     patchHtml(nodes.riskContent, html);
     return;
   }
-  if (state.activeView === "ai" && nodes.aiContent) {
-    patchHtml(nodes.aiContent, html);
+  if (state.activeView === "aiAnalysis" && nodes.aiAnalysisContent) {
+    patchHtml(nodes.aiAnalysisContent, html);
     return;
   }
   if (state.activeView === "aiConfig" && nodes.aiConfigContent) {
@@ -1223,7 +1165,7 @@ function renderRefreshIndicators() {
     ["strategy", nodes.strategyContent],
     ["execution", nodes.executionContent],
     ["risk", nodes.riskContent],
-    ["ai", nodes.aiContent],
+    ["aiAnalysis", nodes.aiAnalysisContent],
     ["aiConfig", nodes.aiConfigContent],
     ["admin", nodes.adminContent],
   ];
@@ -1280,7 +1222,7 @@ function loadingMarkupForView(view) {
     `;
   }
 
-  if (view === "strategy" || view === "execution" || view === "risk" || view === "ai" || view === "aiConfig" || view === "admin") {
+  if (view === "strategy" || view === "execution" || view === "risk" || view === "aiAnalysis" || view === "aiConfig" || view === "admin") {
     return `
       <div class="panel-grid skeleton-grid" aria-hidden="true">
         <section class="surface-card hero-card skeleton-surface skeleton-card span-7">
@@ -1348,6 +1290,7 @@ function loadingList(count) {
 function resolveViewFromLocation() {
   const pathname = window.location.pathname.replace(/\/+$/, "") || "/ui";
   if (pathname === "/" || pathname === "/ui" || pathname === "/ui/home") return "home";
+  if (pathname === "/ui/ai") return "aiAnalysis";
   const match = Object.entries(VIEW_ROUTES).find(([, route]) => route === pathname);
   return match?.[0] || "home";
 }
@@ -1410,6 +1353,15 @@ function localizedRecoveryReasons() {
   return listOrDash(effectiveRecoveryReasons().map((item) => localizeError(item)));
 }
 
+function activePhase1ShadowBlocker() {
+  const blockerControl = state.data.blockerControl || {};
+  const candidates = [];
+  if (blockerControl.primary_blocker) candidates.push(blockerControl.primary_blocker);
+  if (Array.isArray(blockerControl.secondary_blockers)) candidates.push(...blockerControl.secondary_blockers);
+  if (Array.isArray(blockerControl.blockers)) candidates.push(...blockerControl.blockers);
+  return candidates.find((item) => String(item?.blocker || "").startsWith("phase1_shadow")) || null;
+}
+
 function scheduleRefresh() {
   cancelScheduledRefresh();
   if (state.actionInFlight) return;
@@ -1423,6 +1375,7 @@ function defaultBlockerActionReason(actionId) {
     "accept-rebaseline": "operator_rebaseline_from_blocker_panel",
     "resume-system": "operator_resume_from_blocker_panel",
     "halt-system": "operator_keep_halted_from_blocker_panel",
+    "acknowledge-phase1-shadow": "operator_review_phase1_shadow_from_blocker_panel",
     "ai-review-restore": "operator_restore_ai_from_blocker_panel",
     "ai-review-degrade-to-baseline": "operator_degrade_to_baseline_from_blocker_panel",
   };
@@ -1435,6 +1388,7 @@ function blockerActionPendingLabel(actionId) {
     "accept-rebaseline": "正在确认新基线…",
     "resume-system": "正在恢复自动运行…",
     "halt-system": "正在保持暂停状态…",
+    "acknowledge-phase1-shadow": "正在记录影子核查结果…",
     "ai-review-restore": "正在恢复 AI 决策…",
     "ai-review-degrade-to-baseline": "正在切到仅基础策略运行…",
   };
@@ -1447,6 +1401,7 @@ function blockerActionSuccessMessage(actionId) {
     "accept-rebaseline": "新基线已确认。",
     "resume-system": "恢复自动运行请求已提交。",
     "halt-system": "系统会继续保持暂停状态。",
+    "acknowledge-phase1-shadow": "已记录影子兼容层人工核查结果。",
     "ai-review-restore": "AI 复核已处理，已恢复 AI 决策资格。",
     "ai-review-degrade-to-baseline": "AI 复核已处理，系统将以仅基础策略继续运行。",
   };
@@ -1457,6 +1412,7 @@ function blockerActionConfirmMessage(actionId) {
   const map = {
     "accept-rebaseline": "确认把当前状态接受为新基线吗？这会覆盖旧的恢复参照。",
     "halt-system": "确认继续保持暂停状态吗？这会阻止系统继续自动交易。",
+    "acknowledge-phase1-shadow": "确认已完成人工核查吗？这会留下当前影子兼容层状态记录，但不会解除阻断。",
     "ai-review-restore": "确认恢复 AI 决策链路吗？这会清除当前 AI 结果复核阻断。",
     "ai-review-degrade-to-baseline": "确认改为仅基础策略继续运行吗？这会解除当前 AI 复核阻断，并把 AI 决策权降为仅基础策略。",
   };
@@ -1528,27 +1484,6 @@ function patchClassName(node, className) {
   if (!node) return;
   if (node.className === className) return;
   node.className = className;
-}
-
-function strategySummary(detail) {
-  const policy = detail.policy_decision || {};
-  const risk = detail.risk_decision || {};
-  if (!detail.decision_id) return "当前暂无新的策略详情。";
-  return `系统当前对 ${detail.decision_context?.symbol || "当前标的"} 的交易结论是 ${describeDecisionIntent(detail)}。` +
-    `${policy.execution_allowed ? "策略门禁已通过，" : "策略门禁未通过，"}` +
-    `${risk.approved ? "风控也允许继续执行。" : `风控仍在拦截：${listOrDash(risk.rejection_reasons)}。`}`;
-}
-
-function describeDecisionIntent(detail) {
-  const target = detail.position_target || {};
-  const rawIntent = String(target.position_intent || "hold").toLowerCase();
-  const currentQty = Number(target.current_position_qty ?? detail.decision_context?.current_position_qty ?? 0);
-  const targetQty = Number(target.target_position_qty ?? 0);
-  const openOrders = Array.isArray(detail.decision_context?.current_open_orders) ? detail.decision_context.current_open_orders : [];
-  if (rawIntent === "hold" && currentQty === 0 && targetQty === 0 && openOrders.length === 0) {
-    return "继续观望";
-  }
-  return readableState(rawIntent);
 }
 
 window.refreshDashboard = refreshDashboard;

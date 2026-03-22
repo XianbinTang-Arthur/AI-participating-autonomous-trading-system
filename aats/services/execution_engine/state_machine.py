@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 
 from aats.schemas.execution import OrderLifecycleStatus, OrderState
@@ -27,8 +27,8 @@ OPEN_ORDER_STATES: set[OrderLifecycleStatus] = {
 }
 
 ALLOWED_TRANSITIONS: dict[OrderLifecycleStatus, set[OrderLifecycleStatus]] = {
-    "CREATED": {"CREATED", "SUBMITTING", "BLOCKED", "FAILED", "REJECTED", "DRY_RUN"},
-    "SUBMITTING": {"SUBMITTING", "SUBMITTED", "PARTIALLY_FILLED", "FILLED", "REJECTED", "FAILED", "BLOCKED", "DRY_RUN"},
+    "CREATED": {"CREATED", "SUBMITTING", "CANCEL_PENDING", "CANCELED", "BLOCKED", "FAILED", "REJECTED", "DRY_RUN"},
+    "SUBMITTING": {"SUBMITTING", "SUBMITTED", "PARTIALLY_FILLED", "FILLED", "CANCEL_PENDING", "CANCELED", "REJECTED", "FAILED", "BLOCKED", "DRY_RUN"},
     "SUBMITTED": {"SUBMITTED", "PARTIALLY_FILLED", "FILLED", "CANCEL_PENDING", "CANCELED", "FAILED", "EXPIRED"},
     "PARTIALLY_FILLED": {"PARTIALLY_FILLED", "FILLED", "CANCEL_PENDING", "CANCELED", "FAILED", "EXPIRED"},
     "CANCEL_PENDING": {"CANCEL_PENDING", "CANCELED", "FILLED", "FAILED", "EXPIRED"},
@@ -228,7 +228,7 @@ class OrderStateMachine:
             return right
         if right is None:
             return left
-        return max(left, right)
+        return max(OrderStateMachine._coerce_utc(left), OrderStateMachine._coerce_utc(right))
 
     @staticmethod
     def _earliest(left: datetime | None, right: datetime | None) -> datetime | None:
@@ -236,4 +236,10 @@ class OrderStateMachine:
             return right
         if right is None:
             return left
-        return min(left, right)
+        return min(OrderStateMachine._coerce_utc(left), OrderStateMachine._coerce_utc(right))
+
+    @staticmethod
+    def _coerce_utc(value: datetime) -> datetime:
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)

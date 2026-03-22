@@ -148,6 +148,7 @@ class RuntimeModeState(SchemaBase):
 
 class RecoveryStatus(SchemaBase):
     status: str
+    recovery_source: str | None = None
     recovery_state: str = "normal_operation"
     recovered_order_count: int = 0
     recovered_fill_count: int = 0
@@ -156,7 +157,9 @@ class RecoveryStatus(SchemaBase):
     recovered_reconciliation_available: bool = False
     latest_reconciliation_id: str | None = None
     latest_reconciliation_severity: str | None = None
+    reconciliation_classification: str | None = None
     open_order_count: int = 0
+    pending_command_count: int = 0
     divergence_count: int = 0
     safe_startup: bool = True
     safe_to_trade: bool = False

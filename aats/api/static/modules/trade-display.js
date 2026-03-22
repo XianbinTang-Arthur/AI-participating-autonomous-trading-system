@@ -106,6 +106,8 @@ export function fillDrawerRows(fill = {}) {
       ["合约标的", fill.symbol || "标的待确认", `${readableState(fill.margin_mode, "保证金模式待确认")} | ${readableState(fill.exposure_side, "方向待确认")}`],
       ["仓位动作", readableState(fill.execution_action || fill.position_intent, "仓位动作待确认"), `${readableState(fill.side, "买卖方向待确认")} | ${readableState(fill.liquidity_role, "流动性角色待确认")}`],
       ["成交仓位", formatNumber(fill.fill_qty), `成交均价 ${formatQuotePrice(fill.symbol, fill.fill_price)}`],
+      ["成交名义价值", formatQuoteNotional(fill.symbol, fill.fill_qty, fill.fill_price), `交易所时间 ${fill.exchange_timestamp || "待同步"}`],
+      ["仓位前后", `${formatSigned(fill.starting_position_qty)} -> ${formatSigned(fill.ending_position_qty)}`, `均价 ${formatNumber(fill.starting_avg_entry_price, 4, "待同步")} -> ${formatNumber(fill.ending_avg_entry_price, 4, "待同步")}`],
       ["已实现盈亏", formatSigned(fill.realized_pnl), `手续费 ${formatNumber(fill.fee_amount, 4, "待同步")} ${fill.fee_currency || ""}`.trim()],
     ];
   }

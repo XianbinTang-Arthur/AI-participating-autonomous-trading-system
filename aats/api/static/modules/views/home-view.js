@@ -1,5 +1,6 @@
 ﻿import { alertQueue, pill, summaryStrip, surfaceCard } from "../components.js";
-import { booleanWord, formatMaybeTimestamp, formatNumber, formatRelativeAge, formatSigned, listOrDash } from "../formatters.js";
+import { localizeList } from "../copy.js";
+import { booleanWord, formatMaybeTimestamp, formatNumber, formatRelativeAge, formatSigned } from "../formatters.js";
 import {
   localizeError,
   operationalStatusCopy,
@@ -162,7 +163,7 @@ function primaryIssues({ blockers, reconciliation, recovery, account }) {
       title: statusHeadline("恢复受限"),
       copy: operationalStatusCopy({
         recovery,
-        recoveryReasonText: listOrDash(recovery.resume_blocked_reasons, "当前没有给出额外恢复限制说明"),
+        recoveryReasonText: localizeList(recovery.resume_blocked_reasons, "当前没有给出额外恢复限制说明"),
       }),
       meta: readableState(recovery.recovery_state),
       tone: "warning",
@@ -172,7 +173,7 @@ function primaryIssues({ blockers, reconciliation, recovery, account }) {
   if (!account.ready) {
     return [{
       title: "先恢复账户同步",
-      copy: listOrDash(account.blockers, "当前账户状态还没同步完整。"),
+      copy: localizeList(account.blockers, "当前账户状态还没同步完整。"),
       meta: formatMaybeTimestamp(account.last_refresh_timestamp),
       tone: "warning",
       pill: pill("账户未就绪", "warning"),
@@ -188,7 +189,7 @@ function secondaryAlerts({ recovery, blockers, reconciliation, account, uiHints 
       title: statusHeadline("待人工确认"),
       copy: operationalStatusCopy({
         recovery,
-        recoveryReasonText: uiHints.recoveryReasonsText || listOrDash(recovery.resume_blocked_reasons, "当前没有额外复核说明"),
+        recoveryReasonText: uiHints.recoveryReasonsText || localizeList(recovery.resume_blocked_reasons, "当前没有额外复核说明"),
       }),
       meta: readableState(recovery.recovery_state),
       tone: "warning",

@@ -103,6 +103,25 @@ class OKXMarketSnapshotNormalizer:
         snapshot = self._build_snapshot(state)
         return [snapshot] if snapshot is not None else []
 
+    def build_snapshot_from_rest_payloads(
+        self,
+        *,
+        symbol: str,
+        ticker_payload: dict[str, Any],
+        candle_15m_payload: list[str],
+        candle_1h_payload: list[str],
+    ) -> MarketSnapshot:
+        state = OKXInstrumentMarketState(
+            symbol=symbol,
+            ticker=self._parse_ticker(symbol=symbol, payload=ticker_payload),
+            candle_15m=self._parse_candle(channel="candle15m", payload=candle_15m_payload),
+            candle_1h=self._parse_candle(channel="candle1H", payload=candle_1h_payload),
+        )
+        snapshot = self._build_snapshot(state)
+        if snapshot is None:
+            raise ValueError("unable_to_build_market_snapshot_from_rest_payloads")
+        return snapshot
+
     def _parse_ticker(self, *, symbol: str, payload: dict[str, Any]) -> OKXTickerState:
         return OKXTickerState(
             symbol=symbol,
