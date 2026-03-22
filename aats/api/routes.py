@@ -662,6 +662,38 @@ async def trial_review_packet(
     )
 
 
+@router.get("/reports/trial-review-summary")
+async def trial_review_summary(
+    request: Request,
+    segment_limit: int = Query(default=100, ge=1, le=500),
+    window_days: int = Query(default=7, ge=1, le=90),
+    period_count: int = Query(default=4, ge=1, le=12),
+) -> dict[str, Any]:
+    return _query(request).trial_review_summary(
+        segment_limit=segment_limit,
+        window_days=window_days,
+        period_count=period_count,
+    )
+
+
+@router.get("/reports/trial-review-details")
+async def trial_review_details(
+    request: Request,
+    profitability_limit: int = Query(default=100, ge=1, le=500),
+    anomaly_limit: int = Query(default=100, ge=1, le=500),
+    segment_limit: int = Query(default=100, ge=1, le=500),
+    window_days: int = Query(default=7, ge=1, le=90),
+    period_count: int = Query(default=4, ge=1, le=12),
+) -> dict[str, Any]:
+    return _query(request).trial_review_details(
+        profitability_limit=profitability_limit,
+        anomaly_limit=anomaly_limit,
+        segment_limit=segment_limit,
+        window_days=window_days,
+        period_count=period_count,
+    )
+
+
 @router.get("/reports/trial-review-history")
 async def trial_review_history(
     request: Request,

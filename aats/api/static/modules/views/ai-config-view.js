@@ -1,5 +1,4 @@
 import { actorTags, actionButton, callout, kvList, summaryStrip, surfaceCard } from "../components.js";
-import { localizeList, summarizeLocalizedList, textOrFallback } from "../copy.js";
 import { formatMaybeTimestamp, formatNumber } from "../formatters.js";
 import { readableState } from "../terms.js";
 
@@ -30,6 +29,7 @@ export function renderAIConfigView(data) {
   const latestSelectionDecision = strategyProfiles.latest_selection_decision || {};
   const latestOptimizationReport = strategyProfiles.latest_optimization_report || {};
   const latestProfileControl = aiState.latest_profile_control_decision || {};
+  const uiState = data.uiState || {};
   const canAdmin = session.role === "admin" || session.identity === "api_key_write";
   const summaryError = data.error || null;
 
@@ -37,9 +37,9 @@ export function renderAIConfigView(data) {
     return surfaceCard({
       title: "AI 配置暂时不可用",
       kicker: "读取失败",
-      copy: "当前无法读取 AI 配置摘要，先确认登录状态、后端接口和管理员权限是否正常。",
+      copy: "现在还拿不到配置摘要。",
       content: callout({
-        title: "配置摘要读取失败",
+        title: "请先检查登录状态和后端接口",
         copy: summaryError,
         pills: [actorTags("system")],
       }),
@@ -49,34 +49,31 @@ export function renderAIConfigView(data) {
   return `
     <div class="panel-grid ai-config-layout">
       <div class="span-6 workspace-stack">
-        ${renderManualOperatingModePanel({ runtime, canAdmin })}
-        ${renderAutoProfileControlPanel({
+        ${renderManualOperatingModePanel({ runtime, canAdmin, uiState })}
+      </div>
+      <div class="span-6 workspace-stack">
+        ${renderProfileControlPanel({
           runtime,
+          activeRevision,
+          activation,
           latestProfileControl,
           latestSelectionDecision,
           latestOptimizationReport,
           canAdmin,
+          uiState,
         })}
-        ${renderManualProfilePanel({ activeRevision, activation, canAdmin })}
       </div>
-      <div class="span-6 workspace-stack">
-        ${renderRuntimeParameterCard({
-          runtimeProfiles,
-          runtime,
-          aiState,
-          activeRevision,
-          activation,
-          latestSelectionDecision,
-          latestOptimizationReport,
-        })}
+      <div class="span-12 workspace-stack">
+        ${renderCurrentConfigurationCard({ runtimeProfiles, runtime, aiState, activeRevision, activation })}
       </div>
     </div>
   `;
 }
 
-function renderManualOperatingModePanel({ runtime = {}, canAdmin = false }) {
+function renderManualOperatingModePanel({ runtime = {}, canAdmin = false, uiState = {} }) {
   const mode = currentOperatingMode(runtime);
   const summary = runtimeModeSummary(runtime);
+  const manualEditing = Boolean(uiState.modeManualEditing || runtime.manual_override_active);
   const buttons = MANUAL_MODE_OPTIONS.map(([value, label, tone]) =>
     actionButton(
       value === mode ? `${label}（当前）` : label,
@@ -84,230 +81,164 @@ function renderManualOperatingModePanel({ runtime = {}, canAdmin = false }) {
       value,
       value === mode ? "primary" : tone,
       {
-        disabled: !canAdmin || value === mode,
+        disabled: !canAdmin || !manualEditing || (value === mode && runtime.manual_override_active),
         title: !canAdmin
-          ? "当前账号只有查看权限，不能手动切换运行模式。"
-          : value === mode
-            ? "当前运行模式已经生效，无需重复切换。"
-            : `切换到 ${label}`,
+          ? "当前账号只有查看权限"
+          : !manualEditing
+            ? "先切到手动模式，下面的按钮才能点击"
+            : value === mode
+              ? "保持当前模式，但切入手动接管"
+              : `切换到${label}`,
       },
     ),
   ).join("");
 
-  const restoreButton = actionButton(
-    "恢复自动模式",
-    "restore-ai-operating-mode-auto",
-    "",
-    "secondary",
-    {
-      disabled: !canAdmin || !runtime.manual_override_active,
-      title: !canAdmin
-        ? "当前账号只有查看权限，不能恢复自动模式。"
-        : runtime.manual_override_active
-          ? "提前结束管理员手动覆盖，恢复系统自动运行模式逻辑。"
-          : "当前没有管理员手动覆盖中的运行模式。",
-    },
-  );
-
   return surfaceCard({
     title: "运行模式切换",
     kicker: "人工入口",
-    copy: "这里控制 AI 是否参与最终决策，以及参与到什么程度。",
+    copy: "这里只决定 AI 是否参与最终交易决策。",
+    actions: renderControlModeActions({
+      canAdmin,
+      manualEditing,
+      manualAction: "set-ai-mode-editing",
+      autoAction: "set-ai-mode-editing",
+      autoTitle: "恢复自动模式",
+    }),
     content: `
       ${callout({
-        title: summary.value,
+        title: summary.title,
         copy: summary.copy,
         pills: [actorTags(...summary.actors)],
       })}
       ${summaryStrip([
         {
-          label: "当前运行模式",
+          label: "当前模式",
           value: readableMode(mode),
-          meta: `默认运行模式 ${readableMode(runtime.configured_operating_mode || "baseline_only")}`,
+          meta: `默认模式：${readableMode(runtime.configured_operating_mode || "baseline_only")}`,
           tone: runtime.manual_override_active ? "warning" : "info",
           badge: actorTags(runtime.manual_override_active ? "admin" : "system"),
         },
         {
-          label: "人工覆盖状态",
-          value: runtime.manual_override_active ? "管理员正在接管" : "当前未手动覆盖",
+          label: "当前状态",
+          value: runtime.manual_override_active ? "管理员已接管" : "系统自动运行",
           meta: runtime.manual_override_active
             ? runtime.manual_override_freeze_until
-              ? `恢复系统自动逻辑时间：${formatMaybeTimestamp(runtime.manual_override_freeze_until)}`
-              : "当前会一直保持手动模式，直到管理员恢复自动模式。"
-            : "手动切换后会一直保持当前模式，直到管理员恢复自动模式。",
+              ? `恢复时间：${formatMaybeTimestamp(runtime.manual_override_freeze_until)}`
+              : "会一直保持当前模式，直到手动恢复"
+            : "现在没有管理员手动覆盖",
           tone: runtime.manual_override_active ? "warning" : "outline",
           badge: actorTags(runtime.manual_override_active ? "admin" : "system"),
         },
       ])}
-      ${kvList([
-        [
-          "这个卡片负责什么",
-          "只控制 AI 最终决策模式",
-          "你可以在基础策略、AI 辅助决策和 AI 决策者之间切换，这里不负责换策略档位。",
-        ],
-        [
-          "如何理解当前状态",
-          summary.value,
-          summary.meta,
-        ],
-      ])}
       <div class="table-actions table-actions--compact manual-profile-switch-actions manual-profile-switch-actions--centered">
         ${buttons}
-        ${restoreButton}
       </div>
     `,
   });
 }
 
-function renderAutoProfileControlPanel({
+function renderProfileControlPanel({
   runtime = {},
+  activeRevision = {},
+  activation = {},
   latestProfileControl = {},
   latestSelectionDecision = {},
   latestOptimizationReport = {},
   canAdmin = false,
+  uiState = {},
 }) {
+  const activeProfileId = currentStrategyProfile(activeRevision, activation);
   const summary = autoControlSummary(runtime, latestProfileControl, latestSelectionDecision, latestOptimizationReport);
   const configured = Boolean(runtime.strategy_profile_auto_control_configured);
-  const enabled = Boolean(runtime.strategy_profile_auto_control_effective);
   const manuallyPaused = runtime.strategy_profile_auto_control_reason === "manually_paused_by_admin";
-  const restoreButton = actionButton(
-    "恢复自动切档",
-    "restore-strategy-profile-auto",
-    "",
-    "secondary",
-    {
-      disabled: !canAdmin || !configured || !manuallyPaused,
-      title: !canAdmin
-        ? "当前账号只有查看权限，不能恢复自动切档。"
-        : !configured
-          ? "当前没有启用自动换档，无法恢复自动切档。"
-          : manuallyPaused
-            ? "恢复系统自动换档逻辑。"
-            : "当前没有被管理员暂停的自动换档逻辑。",
-    },
-  );
-
-  return surfaceCard({
-    title: "自动换档控制",
-    kicker: "独立功能",
-    copy: "这里控制系统是否允许自动评估和切换策略档位。",
-    actions: `<div class="table-actions table-actions--compact">${restoreButton}</div>`,
-    content: `
-      ${callout({
-        title: summary.value,
-        copy: summary.copy,
-        pills: [actorTags(...summary.actors)],
-      })}
-      ${summaryStrip([
-        {
-          label: "自动换档开关",
-          value: enabled ? "已启用" : configured ? "已暂停" : "未启用",
-          meta: enabled ? "系统会自动评估是否切换策略档位。" : configured ? "当前由管理员暂停自动换档。" : "当前不会自动切换策略档位。",
-          tone: enabled ? "positive" : configured ? "warning" : "outline",
-          badge: actorTags("system"),
-        },
-        {
-          label: "当前状态",
-          value: summary.value,
-          meta: summary.meta,
-          tone: summary.tone,
-          badge: actorTags(...summary.actors),
-        },
-        {
-          label: "候选策略档位",
-          value: readableProfile(latestOptimizationReport.recommended_profile_id || latestSelectionDecision.candidate_profile_id),
-          meta: latestOptimizationReport.recommended_profile_id
-            ? `相对当前档领先 ${formatNumber(latestOptimizationReport.score_delta_vs_active, 2, "0.00")}`
-            : "当前没有新的候选策略档位。",
-          tone: latestOptimizationReport.recommended_profile_id ? "info" : "outline",
-          badge: actorTags("system", "ai"),
-        },
-        {
-          label: "管理员状态",
-          value: manuallyPaused ? "已手动暂停自动换档" : "当前未手动暂停",
-          meta: manuallyPaused ? "会一直保持当前策略档位，直到管理员恢复自动切档。" : "当前没有管理员手动暂停自动换档。",
-          tone: manuallyPaused ? "warning" : "outline",
-          badge: actorTags("admin"),
-        },
-      ])}
-      ${kvList([
-        [
-          "这个卡片负责什么",
-          "只控制策略档位自动切换",
-          "开启后，系统会自己评估是否需要换到另一套策略参数；关闭后，只能手动切换。",
-        ],
-        [
-          "当前为什么没有自动切档",
-          summarizeLocalizedList(latestSelectionDecision.blocked_reasons || latestProfileControl.blocked_reasons, {
-            fallback: "当前没有新的自动换档阻断说明。",
-            limit: 3,
-          }),
-          "这里解释系统为什么继续保持原档位，或为什么还在观察候选档位。",
-        ],
-      ])}
-    `,
-  });
-}
-
-function renderManualProfilePanel({ activeRevision = {}, activation = {}, canAdmin = false }) {
-  const activeProfileId = currentStrategyProfile(activeRevision, activation);
-  const buttons = PROFILE_OPTIONS.map(([profileId, label, tone]) =>
+  const manualEditing = Boolean(uiState.profileManualEditing || manuallyPaused);
+  const profileButtons = PROFILE_OPTIONS.map(([profileId, label, tone]) =>
     actionButton(
       profileId === activeProfileId ? `${label}（当前）` : label,
       "manual-activate-strategy-profile",
       profileId,
       profileId === activeProfileId ? "primary" : tone,
       {
-        disabled: !canAdmin || profileId === activeProfileId,
+        disabled: !canAdmin || !manualEditing || (profileId === activeProfileId && manuallyPaused),
         title: !canAdmin
-          ? "当前账号只有查看权限，不能手动切换策略档位。"
-          : profileId === activeProfileId
-            ? "当前策略档位已经生效，无需重复切换。"
-            : `切换到 ${label}`,
+          ? "当前账号只有查看权限"
+          : !manualEditing
+            ? "先切到手动模式，下面的按钮才能点击"
+            : profileId === activeProfileId
+              ? "保持当前档位，但切入手动接管"
+              : `切换到${label}`,
       },
     ),
   ).join("");
 
   return surfaceCard({
-    title: "策略档位切换",
-    kicker: "人工入口",
-    copy: "这里负责管理员手动切换当前策略档位。手动切档会留下审计记录，并在冻结窗口内压住自动换档。",
+    title: "自动换档控制",
+    kicker: "独立功能",
+    copy: "这里决定系统会不会自己换档。",
+    actions: renderControlModeActions({
+      canAdmin,
+      manualEditing,
+      manualAction: "set-profile-editing",
+      autoAction: "set-profile-editing",
+      autoDisabled: !configured,
+      autoTitle: !configured ? "恢复自动切档（当前没有启用自动换档）" : "恢复自动切档",
+    }),
     content: `
       ${callout({
-        title: `当前策略档位：${readableProfile(activeRevision.profile_id || activeRevision.profile_label || activation.active_profile_id, "当前没有生效中的策略档位")}`,
-        copy: canAdmin
-          ? "这里是管理员手动切换策略档位的地方。手动切换会留下审计记录，并在冻结窗口内压住自动换档。"
-          : "这里只展示当前生效的策略档位。当前账号只有查看权限，不能手动切换。",
-        pills: [actorTags("admin")],
+        title: summary.title,
+        copy: summary.copy,
+        pills: [actorTags(...summary.actors)],
       })}
-      ${kvList([
-        [
-          "当前活动档位",
-          readableProfile(activeProfileId, "当前没有生效中的策略档位"),
-          "这是当前真正控制阈值和保护规则的策略档位。",
-        ],
-        [
-          "这个卡片负责什么",
-          canAdmin ? "管理员可以直接手动切换档位" : "当前账号只有查看权限",
-          "手动切档会先检查安全门槛，并留下审计记录。",
-        ],
+      ${summaryStrip([
+        {
+          label: "自动换档",
+          value: configured ? (runtime.strategy_profile_auto_control_effective ? "已启用" : "已暂停") : "未启用",
+          meta: configured
+            ? runtime.strategy_profile_auto_control_effective
+              ? "系统会自己评估是否切换档位"
+              : "现在不会自动改档"
+            : "当前只允许手动切换档位",
+          tone: runtime.strategy_profile_auto_control_effective ? "positive" : configured ? "warning" : "outline",
+          badge: actorTags("system"),
+        },
+        {
+          label: "当前档位",
+          value: readableProfile(activeProfileId, "待确认"),
+          meta: "策略档位切换",
+          tone: "info",
+          badge: actorTags(manuallyPaused ? "admin" : "system"),
+        },
       ])}
       <div class="table-actions table-actions--compact manual-profile-switch-actions manual-profile-switch-actions--centered">
-        ${buttons}
+        ${profileButtons}
       </div>
     `,
   });
 }
 
-function renderRuntimeParameterCard({
-  runtimeProfiles = {},
-  runtime = {},
-  aiState = {},
-  activeRevision = {},
-  activation = {},
-  latestSelectionDecision = {},
-  latestOptimizationReport = {},
+function renderControlModeActions({
+  canAdmin = false,
+  manualEditing = false,
+  manualAction,
+  autoAction,
+  autoDisabled = false,
+  autoTitle = "",
 }) {
+  return `
+    <div class="table-actions table-actions--compact">
+      ${actionButton("手动模式", manualAction, "manual", manualEditing ? "primary" : "secondary", {
+        disabled: !canAdmin,
+        title: !canAdmin ? "当前账号只有查看权限" : "解锁下面的按钮，允许手动调整",
+      })}
+      ${actionButton("自动模式", autoAction, "auto", !manualEditing ? "primary" : "secondary", {
+        disabled: !canAdmin || autoDisabled,
+        title: !canAdmin ? "当前账号只有查看权限" : autoTitle || "锁定下面的按钮，并恢复系统自动逻辑",
+      })}
+    </div>
+  `;
+}
+
+function renderCurrentConfigurationCard({ runtimeProfiles = {}, runtime = {}, aiState = {}, activeRevision = {}, activation = {} }) {
   const runtimePayload = runtimeProfiles.current_runtime_payload || {};
   const strategyShadowEnabled = Boolean(aiState.shadow_mode_enabled ?? runtime.shadow_mode_enabled);
   const executionShadow = executionShadowState(
@@ -319,28 +250,28 @@ function renderRuntimeParameterCard({
 
   return surfaceCard({
     title: "运行参数概览",
-    kicker: "当前真正生效的配置",
-    copy: "这里集中解释当前生效的运行模式、策略档位、策略层 shadow 和执行层 shadow。",
+    kicker: "当前生效",
+    copy: "这里只看真正会影响运行的状态。",
     content: `
       ${summaryStrip([
         {
-          label: "当前运行模式",
+          label: "运行模式",
           value: readableMode(runtime.effective_operating_mode || aiState.effective_operating_mode || "baseline_only"),
-          meta: `默认运行模式 ${readableMode(runtime.configured_operating_mode || aiState.configured_operating_mode || "baseline_only")}`,
+          meta: `默认模式：${readableMode(runtime.configured_operating_mode || aiState.configured_operating_mode || "baseline_only")}`,
           tone: runtime.manual_override_active ? "warning" : "info",
           badge: actorTags(runtime.manual_override_active ? "admin" : "system"),
         },
         {
-          label: "当前策略档位",
-          value: readableProfile(activeRevision.profile_id || activation.active_profile_id),
-          meta: activation.active_profile_id ? "当前阈值由这套策略档位控制。" : "当前还没有登记的生效策略档位。",
+          label: "策略档位",
+          value: readableProfile(activeRevision.profile_id || activation.active_profile_id, "待确认"),
+          meta: activation.active_profile_id ? "当前阈值由这套档位控制" : "当前没有活动档位",
           tone: activation.active_profile_id ? "positive" : "outline",
           badge: actorTags("system"),
         },
         {
           label: "策略层 shadow",
           value: strategyShadowEnabled ? "已开启" : "未开启",
-          meta: strategyShadowEnabled ? "比较 AI 决策路线和基础策略路线。" : "当前不积累策略层 shadow 对照样本。",
+          meta: strategyShadowEnabled ? "比较 AI 决策和基础策略" : "当前不记录策略层对照样本",
           tone: strategyShadowEnabled ? "info" : "outline",
           badge: actorTags("ai", "system"),
         },
@@ -352,23 +283,11 @@ function renderRuntimeParameterCard({
           badge: actorTags("ai", "system"),
         },
       ])}
-      ${callout({
-        title: "策略层 shadow 和执行层 shadow 是两条独立辅助线",
-        copy: "策略层 shadow 用来比较 AI 决策路线与基础策略；执行层 shadow 用来预演 AI 执行建议会怎样翻译成下单计划。它们都不等于自动换档。",
-        pills: [actorTags("ai", "system")],
-      })}
       ${kvList([
-        [
-          "参数来源",
-          readableState(runtimeProfiles.profile_source || "env_fallback"),
-          runtimeProfiles.control_plane_status === "deprecated_readonly"
-            ? "当前仍由环境文件控制运行参数，页面主要负责解释和人工切换。"
-            : "页面展示的是当前真正生效的运行参数。",
-        ],
         [
           "主交易标的",
           textOrFallback(runtimePayload.default_symbol, "待配置"),
-          localizeList(runtimePayload.allowed_symbols, "当前没有额外允许交易的标的。"),
+          listText(runtimePayload.allowed_symbols, "当前没有额外允许交易的标的"),
         ],
         [
           "产品与保证金",
@@ -380,13 +299,6 @@ function renderRuntimeParameterCard({
           formatNumber(runtimePayload.default_order_qty, 6, "待配置"),
           `单标的名义上限 ${formatNumber(runtimePayload.max_notional_per_symbol, 2, "待配置")}`,
         ],
-        [
-          "最近自动换档候选",
-          readableProfile(latestOptimizationReport.recommended_profile_id || latestSelectionDecision.candidate_profile_id),
-          latestOptimizationReport.recommended_profile_id
-            ? summarizeLocalizedList(latestOptimizationReport.notes, { fallback: "当前没有额外候选说明。", limit: 2 })
-            : "当前没有新的自动换档候选。",
-        ],
       ])}
     `,
   });
@@ -395,20 +307,17 @@ function renderRuntimeParameterCard({
 function runtimeModeSummary(runtime = {}) {
   if (!runtime.manual_override_active) {
     return {
-      value: "当前未启用管理员手动覆盖",
-      meta: `系统仍按默认运行模式 ${readableMode(runtime.configured_operating_mode || "baseline_only")} 自动运行。`,
-      copy: "当前没有管理员手动接管。这里控制的是 AI 运行模式，不会直接决定策略档位是否自动切换。",
+      title: `当前按${readableMode(runtime.configured_operating_mode || "baseline_only")}运行`,
+      copy: "现在没有管理员手动接管。",
       actors: ["system"],
     };
   }
+  const activeMode = readableMode(runtime.manual_override_mode || runtime.effective_operating_mode || "baseline_only");
   return {
-    value: `管理员已手动覆盖为 ${readableMode(runtime.manual_override_mode || runtime.effective_operating_mode || "baseline_only")}`,
-    meta: runtime.manual_override_freeze_until
-      ? `恢复系统自动逻辑时间：${formatMaybeTimestamp(runtime.manual_override_freeze_until)}`
-      : "当前会一直保持手动模式，直到管理员恢复自动模式。",
+    title: `管理员已切到${activeMode}`,
     copy: runtime.manual_override_freeze_until
-      ? "当前运行模式由管理员临时接管。冻结时间结束后，系统才会恢复自动运行模式逻辑。"
-      : "当前运行模式由管理员手动接管，会一直保持到你主动恢复自动模式为止。",
+      ? `系统会在 ${formatMaybeTimestamp(runtime.manual_override_freeze_until)} 后恢复自动逻辑。`
+      : "会一直保持当前模式，直到你点击自动模式。",
     actors: ["admin"],
   };
 }
@@ -418,51 +327,52 @@ function autoControlSummary(runtime = {}, latestProfileControl = {}, latestSelec
   const enabled = Boolean(runtime.strategy_profile_auto_control_effective);
   const manuallyPaused = runtime.strategy_profile_auto_control_reason === "manually_paused_by_admin";
   const candidate = latestOptimizationReport.recommended_profile_id || latestSelectionDecision.candidate_profile_id || "";
+
   if (!configured) {
     return {
-      value: "当前未启用自动换档",
-      meta: "当前配置没有开启自动换档。",
-      copy: "当前自动换档是关闭状态。你仍然可以手动切换策略档位，但系统不会自己改档。",
+      title: "自动换档未启用",
+      copy: "系统现在不会自己改档。",
       tone: "outline",
       actors: ["system"],
     };
   }
   if (manuallyPaused) {
     return {
-      value: "管理员已暂停自动换档",
-      meta: "当前会一直保持手动控制，直到管理员恢复自动切档。",
-      copy: "管理员手动切档后，系统不会再自己改档，除非你主动恢复自动切档。",
+      title: "自动换档已暂停",
+      copy: "恢复自动切档前，系统会保持当前手动档位。",
       tone: "warning",
       actors: ["admin", "system"],
     };
   }
   if (latestProfileControl.applied) {
     return {
-      value: `本轮已自动切到 ${readableProfile(latestProfileControl.requested_profile_id)}`,
-      meta: "系统已按独立的自动换档逻辑完成这轮切换。",
-      copy: "自动换档当前已启用，且本轮已经实际完成档位切换。",
+      title: `本轮已切到${readableProfile(latestProfileControl.requested_profile_id)}`,
+      copy: "系统已经完成这一轮自动换档。",
       tone: "positive",
       actors: ["system", "ai"],
     };
   }
   if (candidate) {
     return {
-      value: `当前正在评估候选策略档位 ${readableProfile(candidate)}`,
-      meta: summarizeLocalizedList(latestSelectionDecision.blocked_reasons, {
-        fallback: "当前还在比较证据，尚未满足自动切换条件。",
-        limit: 2,
-      }),
-      copy: "自动换档当前已启用，但系统还在比较证据，尚未决定真正切换。",
+      title: `正在观察${readableProfile(candidate)}`,
+      copy: summarizeList(latestSelectionDecision.blocked_reasons, "系统还在比较证据"),
       tone: "info",
       actors: ["system", "ai"],
     };
   }
+  if (enabled) {
+    return {
+      title: "自动换档已启用",
+      copy: "本轮没有新的切档动作。",
+      tone: "info",
+      actors: ["system"],
+    };
+  }
   return {
-    value: "自动换档已启用，当前保持原档位",
-    meta: "系统会独立评估是否需要切换策略档位，但本轮没有新的自动切换动作。",
-    copy: "当前自动换档当前已启用，但这轮没有新的切档动作。",
-    tone: "info",
-    actors: ["system", "ai"],
+    title: "自动换档已暂停",
+    copy: "系统继续保持当前档位。",
+    tone: "warning",
+    actors: ["system"],
   };
 }
 
@@ -471,27 +381,27 @@ function executionShadowState(mode) {
   if (normalized === "enabled_live") {
     return {
       value: "已进入受限实盘",
-      meta: "AI 执行建议会在保护边界内参与真实执行。",
+      meta: "AI 执行建议会在保护边界内参与真实执行",
       tone: "warning",
     };
   }
   if (normalized === "shadow_translation") {
     return {
       value: "已开启预演",
-      meta: "系统会把 AI 执行建议翻译成影子下单计划，但不会直接改写真委托。",
+      meta: "会预演 AI 的执行建议，但不会直接改真实委托",
       tone: "info",
     };
   }
   if (normalized === "diagnostic_only") {
     return {
-      value: "仅记录诊断",
-      meta: "系统只记录 AI 执行建议，不生成可落地的影子执行计划。",
+      value: "只做记录",
+      meta: "只记录 AI 执行建议，不影响下单",
       tone: "outline",
     };
   }
   return {
     value: "已关闭",
-    meta: "当前不启用执行层 shadow，也不会采纳 AI 执行建议。",
+    meta: "当前不启用执行层 shadow",
     tone: "outline",
   };
 }
@@ -523,4 +433,19 @@ function readableMode(value, fallback = "待确认") {
     return "AI 决策者";
   }
   return readableState(normalized, fallback);
+}
+
+function textOrFallback(value, fallback = "待确认") {
+  if (value === null || value === undefined || value === "") return fallback;
+  return String(value);
+}
+
+function listText(value, fallback = "暂无") {
+  if (!Array.isArray(value) || !value.length) return fallback;
+  return value.join("、");
+}
+
+function summarizeList(items, fallback = "当前没有额外说明") {
+  if (!Array.isArray(items) || !items.length) return fallback;
+  return items.slice(0, 2).map((item) => readableState(String(item), String(item))).join("；");
 }

@@ -236,12 +236,13 @@ class StrategyProfileActivationFacade:
         reason: str,
     ) -> dict[str, Any]:
         state = self.owner._activation_state()
-        if profile_id == state.active_profile_id:
-            raise ValueError("strategy_profile_already_active")
         blockers = self.activation_blockers()
         if blockers:
             raise ValueError(blockers[0])
-        revision = self.owner._revision_for_profile(profile_id)
+        if profile_id == state.active_profile_id:
+            revision = self.owner._revision(state.active_revision_id)
+        else:
+            revision = self.owner._revision_for_profile(profile_id)
         if revision is None:
             raise ValueError("strategy_profile_profile_not_found")
         record = self.activate_revision(

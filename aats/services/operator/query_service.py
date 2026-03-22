@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -62,6 +62,7 @@ class OperatorQueryService:
         self.recovery_posture = RecoveryPostureEvaluator(runtime)
         self.state_scope = runtime_state_scope(runtime.settings)
         self._cache: dict[str, Any] = {}
+        self._ttl_cache: dict[str, tuple[datetime, Any]] = {}
         self.strategy_profiles = StrategyProfileControlService(runtime)
         self.blocker_control_service = BlockerControlService(self)
         self.blocker_action_service = BlockerActionService(self)
@@ -75,8 +76,27 @@ class OperatorQueryService:
             self._cache[key] = loader()
         return self._cache[key]
 
+    def _cached_ttl(self, key: str, ttl_seconds: int, loader):
+        now = utc_now()
+        cached = self._ttl_cache.get(key)
+        if cached is not None:
+            expires_at, value = cached
+            if expires_at > now:
+                return value
+        value = loader()
+        self._ttl_cache[key] = (now + timedelta(seconds=max(int(ttl_seconds), 1)), value)
+        return value
+
     def _invalidate_cache(self) -> None:
         self._cache.clear()
+        self._ttl_cache.clear()
+
+    def _scope_cache_fragment(self) -> str:
+        return (
+            f"{self.state_scope.product_type}:"
+            f"{self.state_scope.margin_mode}:"
+            f"{','.join(sorted(self.state_scope.allowed_symbols))}"
+        )
 
     def _scoped_order_states(self):
         return self._cached(
@@ -823,16 +843,46 @@ class OperatorQueryService:
         return self.runtime_queries.ai_latest()
 
     def ai_recent(self, *, limit: int, offset: int) -> dict[str, Any]:
-        return self.runtime_queries.ai_recent(limit=limit, offset=offset)
+        normalized_limit = max(int(limit), 1)
+        normalized_offset = max(int(offset), 0)
+        cache_key = (
+            f"ai_recent:{self._scope_cache_fragment()}:"
+            f"{normalized_limit}:{normalized_offset}"
+        )
+        return self._cached_ttl(
+            cache_key,
+            20,
+            lambda: self.runtime_queries.ai_recent(limit=normalized_limit, offset=normalized_offset),
+        )
 
     def ai_shadow_latest(self) -> dict[str, Any]:
         return self.runtime_queries.ai_shadow_latest()
 
     def ai_shadow_recent(self, *, limit: int, offset: int) -> dict[str, Any]:
-        return self.runtime_queries.ai_shadow_recent(limit=limit, offset=offset)
+        normalized_limit = max(int(limit), 1)
+        normalized_offset = max(int(offset), 0)
+        cache_key = (
+            f"ai_shadow_recent:{self._scope_cache_fragment()}:"
+            f"{normalized_limit}:{normalized_offset}"
+        )
+        return self._cached_ttl(
+            cache_key,
+            20,
+            lambda: self.runtime_queries.ai_shadow_recent(limit=normalized_limit, offset=normalized_offset),
+        )
 
     def ai_shadow_evaluations(self, *, limit: int, offset: int) -> dict[str, Any]:
-        return self.runtime_queries.ai_shadow_evaluations(limit=limit, offset=offset)
+        normalized_limit = max(int(limit), 1)
+        normalized_offset = max(int(offset), 0)
+        cache_key = (
+            f"ai_shadow_evaluations:{self._scope_cache_fragment()}:"
+            f"{normalized_limit}:{normalized_offset}"
+        )
+        return self._cached_ttl(
+            cache_key,
+            30,
+            lambda: self.runtime_queries.ai_shadow_evaluations(limit=normalized_limit, offset=normalized_offset),
+        )
 
     def ai_performance_reports(self, *, limit: int, offset: int) -> dict[str, Any]:
         return self.runtime_queries.ai_performance_reports(limit=limit, offset=offset)
@@ -1020,6 +1070,10 @@ class OperatorQueryService:
         return self.strategy_profile_queries.activation_history(limit=limit, offset=offset)
 
     def profile_control_summary_report(self) -> dict[str, Any]:
+        cache_key = f"profile_control_summary:{self._scope_cache_fragment()}"
+        return self._cached_ttl(cache_key, 20, self._build_profile_control_summary_report)
+
+    def _build_profile_control_summary_report(self) -> dict[str, Any]:
         snapshot = self.strategy_profile_queries.snapshot()
         latest_optimization = snapshot.get("latest_optimization_report") or {}
         latest_selection = snapshot.get("latest_selection_decision") or {}
@@ -1257,10 +1311,12 @@ class OperatorQueryService:
         return self.runtime_queries.blocker_history(limit=limit, offset=offset)
 
     def metrics(self) -> dict[str, Any]:
-        return self.runtime_queries.metrics()
+        cache_key = f"metrics:{self._scope_cache_fragment()}"
+        return self._cached_ttl(cache_key, 15, self.runtime_queries.metrics)
 
     def phase1_shadow(self) -> dict[str, Any]:
-        return self._build_phase1_shadow()
+        cache_key = f"phase1_shadow:{self._scope_cache_fragment()}"
+        return self._cached_ttl(cache_key, 10, self._build_phase1_shadow)
 
     def phase1_shadow_history(self, *, limit: int = 20, offset: int = 0) -> dict[str, Any]:
         return self.runtime_queries.phase1_shadow_history(limit=limit, offset=offset)
@@ -1273,7 +1329,8 @@ class OperatorQueryService:
                 "status": "not_configured",
                 "summary": "试盘守护未配置。",
             }
-        return service.snapshot()
+        cache_key = f"trial_guard:{self._scope_cache_fragment()}"
+        return self._cached_ttl(cache_key, 15, service.snapshot)
 
     def _build_system_mode(self) -> dict[str, Any]:
         snapshot = dict(self.runtime.mode_controller.snapshot())
@@ -2122,6 +2179,19 @@ class OperatorQueryService:
         }
 
     def recent_decisions(self, *, limit: int = 20, offset: int = 0) -> dict[str, Any]:
+        normalized_limit = max(int(limit), 1)
+        normalized_offset = max(int(offset), 0)
+        cache_key = (
+            f"recent_decisions:{self._scope_cache_fragment()}:"
+            f"{normalized_limit}:{normalized_offset}"
+        )
+        return self._cached_ttl(
+            cache_key,
+            10,
+            lambda: self._build_recent_decisions(limit=normalized_limit, offset=normalized_offset),
+        )
+
+    def _build_recent_decisions(self, *, limit: int, offset: int) -> dict[str, Any]:
         rows = self.runtime.audit_repo.recent(limit=limit + offset)
         paged_rows = rows[offset : offset + limit]
         payloads: list[dict[str, Any]] = []
@@ -2496,6 +2566,10 @@ class OperatorQueryService:
         return "Phase 1 shadow compatibility layer is configured but has not processed shadow traffic yet."
 
     def portfolio_latest(self) -> dict[str, Any]:
+        cache_key = f"portfolio_latest:{self._scope_cache_fragment()}"
+        return self._cached_ttl(cache_key, 10, self._build_portfolio_latest)
+
+    def _build_portfolio_latest(self) -> dict[str, Any]:
         snapshot = self._latest_scoped_snapshot()
         return {
             "portfolio": snapshot.model_dump(mode="json") if snapshot is not None else None,
@@ -2530,6 +2604,10 @@ class OperatorQueryService:
         }
 
     def account_state(self) -> dict[str, Any]:
+        cache_key = f"account_state:{self._scope_cache_fragment()}"
+        return self._cached_ttl(cache_key, 10, self._build_account_state)
+
+    def _build_account_state(self) -> dict[str, Any]:
         status = self.runtime.account_service.status()
         recovery = self.recovery_view()
         return {
@@ -2621,6 +2699,19 @@ class OperatorQueryService:
         return self.account_open_orders()
 
     def orders_recent(self, *, limit: int = 50, offset: int = 0) -> dict[str, Any]:
+        normalized_limit = max(int(limit), 1)
+        normalized_offset = max(int(offset), 0)
+        cache_key = (
+            f"orders_recent:{self._scope_cache_fragment()}:"
+            f"{normalized_limit}:{normalized_offset}"
+        )
+        return self._cached_ttl(
+            cache_key,
+            10,
+            lambda: self._build_orders_recent(limit=normalized_limit, offset=normalized_offset),
+        )
+
+    def _build_orders_recent(self, *, limit: int, offset: int) -> dict[str, Any]:
         if self._phase5_control_plane_enabled():
             all_orders = self._phase5_order_rows()
             orders = all_orders[offset : offset + limit]
@@ -2691,6 +2782,19 @@ class OperatorQueryService:
         }
 
     def fills_recent(self, *, limit: int = 50, offset: int = 0) -> dict[str, Any]:
+        normalized_limit = max(int(limit), 1)
+        normalized_offset = max(int(offset), 0)
+        cache_key = (
+            f"fills_recent:{self._scope_cache_fragment()}:"
+            f"{normalized_limit}:{normalized_offset}"
+        )
+        return self._cached_ttl(
+            cache_key,
+            10,
+            lambda: self._build_fills_recent(limit=normalized_limit, offset=normalized_offset),
+        )
+
+    def _build_fills_recent(self, *, limit: int, offset: int) -> dict[str, Any]:
         if self._phase5_control_plane_enabled():
             all_fills = self._phase5_fill_rows()
             fills = all_fills[offset : offset + limit]
@@ -2736,6 +2840,10 @@ class OperatorQueryService:
         }
 
     def execution_latest(self) -> dict[str, Any]:
+        cache_key = f"execution_latest:{self._scope_cache_fragment()}"
+        return self._cached_ttl(cache_key, 10, self._build_execution_latest)
+
+    def _build_execution_latest(self) -> dict[str, Any]:
         latest_order = self.latest_order()
         latest_fill = self.latest_fill()
         latest_reconciliation = self._latest_scoped_reconciliation()
@@ -2853,6 +2961,22 @@ class OperatorQueryService:
         }
 
     def forward_validation_report(self, *, window_days: int = 7, period_count: int = 4) -> dict[str, Any]:
+        normalized_window_days = max(int(window_days), 1)
+        normalized_period_count = max(int(period_count), 1)
+        cache_key = (
+            f"forward_validation:{self._scope_cache_fragment()}:"
+            f"{normalized_window_days}:{normalized_period_count}"
+        )
+        return self._cached_ttl(
+            cache_key,
+            30,
+            lambda: self._build_forward_validation_report(
+                window_days=normalized_window_days,
+                period_count=normalized_period_count,
+            ),
+        )
+
+    def _build_forward_validation_report(self, *, window_days: int, period_count: int) -> dict[str, Any]:
         normalized_window_days = max(int(window_days), 1)
         normalized_period_count = max(int(period_count), 1)
         all_rows = [self._execution_quality_row(item) for item in self._scoped_fill_outcomes()]
@@ -2996,9 +3120,9 @@ class OperatorQueryService:
             reasons.append("forward_validation_loss_limit_breached")
         summary_map = {
             "continue": "最近一个验证周期表现稳定，可以继续保持当前小资金试盘。",
-            "observe": "当前样本量仍不足，继续观察，不要扩大风险。",
+            "observe": "当前样本量仍然不足，继续观察，不要扩大风险。",
             "shrink": "最近一个验证周期边际转弱，建议缩小仓位并继续观察。",
-            "pause": "最近一个验证周期已不满足试盘要求，建议暂停并复盘策略与执行质量。",
+            "pause": "最近一个验证周期已经不满足试盘要求，建议暂停并复盘策略与执行质量。",
         }
         return {
             "verdict": verdict,
@@ -3006,8 +3130,43 @@ class OperatorQueryService:
             "reasons": reasons,
         }
 
-    def scaling_readiness_report(self, *, window_days: int = 7, period_count: int = 4) -> dict[str, Any]:
-        forward_validation = self.forward_validation_report(
+    def scaling_readiness_report(
+        self,
+        *,
+        window_days: int = 7,
+        period_count: int = 4,
+        forward_validation: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        normalized_window_days = max(int(window_days), 1)
+        normalized_period_count = max(int(period_count), 1)
+        if forward_validation is not None:
+            return self._build_scaling_readiness_report(
+                window_days=normalized_window_days,
+                period_count=normalized_period_count,
+                forward_validation=forward_validation,
+            )
+        cache_key = (
+            f"scaling_readiness:{self._scope_cache_fragment()}:"
+            f"{normalized_window_days}:{normalized_period_count}"
+        )
+        return self._cached_ttl(
+            cache_key,
+            30,
+            lambda: self._build_scaling_readiness_report(
+                window_days=normalized_window_days,
+                period_count=normalized_period_count,
+                forward_validation=None,
+            ),
+        )
+
+    def _build_scaling_readiness_report(
+        self,
+        *,
+        window_days: int,
+        period_count: int,
+        forward_validation: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        forward_validation = forward_validation or self.forward_validation_report(
             window_days=window_days,
             period_count=period_count,
         )
@@ -3132,9 +3291,118 @@ class OperatorQueryService:
         window_days: int = 7,
         period_count: int = 4,
     ) -> dict[str, Any]:
-        profitability = self.profitability_overview(limit=profitability_limit)
-        anomalies = self.execution_anomaly_report(limit=anomaly_limit)
-        segments = self.strategy_segment_report(limit=segment_limit)
+        normalized_profitability_limit = max(int(profitability_limit), 1)
+        normalized_anomaly_limit = max(int(anomaly_limit), 1)
+        normalized_segment_limit = max(int(segment_limit), 1)
+        normalized_window_days = max(int(window_days), 1)
+        normalized_period_count = max(int(period_count), 1)
+        cache_key = (
+            f"trial_review_packet:{self._scope_cache_fragment()}:"
+            f"{normalized_profitability_limit}:{normalized_anomaly_limit}:"
+            f"{normalized_segment_limit}:{normalized_window_days}:{normalized_period_count}"
+        )
+        return self._cached_ttl(
+            cache_key,
+            45,
+            lambda: self._build_trial_review_packet(
+                profitability_limit=normalized_profitability_limit,
+                anomaly_limit=normalized_anomaly_limit,
+                segment_limit=normalized_segment_limit,
+                window_days=normalized_window_days,
+                period_count=normalized_period_count,
+            ),
+        )
+
+    def trial_review_summary(
+        self,
+        *,
+        segment_limit: int = 100,
+        window_days: int = 7,
+        period_count: int = 4,
+    ) -> dict[str, Any]:
+        normalized_segment_limit = max(int(segment_limit), 1)
+        normalized_window_days = max(int(window_days), 1)
+        normalized_period_count = max(int(period_count), 1)
+        cache_key = (
+            f"trial_review_summary:{self._scope_cache_fragment()}:"
+            f"{normalized_segment_limit}:{normalized_window_days}:{normalized_period_count}"
+        )
+        return self._cached_ttl(
+            cache_key,
+            30,
+            lambda: self._build_trial_review_summary(
+                segment_limit=normalized_segment_limit,
+                window_days=normalized_window_days,
+                period_count=normalized_period_count,
+            ),
+        )
+
+    def trial_review_details(
+        self,
+        *,
+        profitability_limit: int = 100,
+        anomaly_limit: int = 100,
+        segment_limit: int = 100,
+        window_days: int = 7,
+        period_count: int = 4,
+    ) -> dict[str, Any]:
+        normalized_profitability_limit = max(int(profitability_limit), 1)
+        normalized_anomaly_limit = max(int(anomaly_limit), 1)
+        normalized_segment_limit = max(int(segment_limit), 1)
+        normalized_window_days = max(int(window_days), 1)
+        normalized_period_count = max(int(period_count), 1)
+        cache_key = (
+            f"trial_review_details:{self._scope_cache_fragment()}:"
+            f"{normalized_profitability_limit}:{normalized_anomaly_limit}:"
+            f"{normalized_segment_limit}:{normalized_window_days}:{normalized_period_count}"
+        )
+        return self._cached_ttl(
+            cache_key,
+            45,
+            lambda: self._build_trial_review_details(
+                profitability_limit=normalized_profitability_limit,
+                anomaly_limit=normalized_anomaly_limit,
+                segment_limit=normalized_segment_limit,
+                window_days=normalized_window_days,
+                period_count=normalized_period_count,
+            ),
+        )
+
+    def _trial_review_action_items(
+        self,
+        *,
+        scaling_readiness: str,
+        high_slippage_count: int,
+        slow_submit_to_fill_count: int,
+        recovery: dict[str, Any],
+        blocker_rows: list[dict[str, Any]],
+    ) -> list[str]:
+        action_items: list[str] = []
+        if scaling_readiness == "approve_scale_up":
+            action_items.append("閸欘垯浜掓潻娑樺弳娑撳绔村锝堢カ闁叉垼鐦庣€光槄绱濇担鍡曠矝闂団偓鐟曚椒姹夊銉р€樼拋銈嗘杹闁插繗绔熼悾灞芥嫲閸ョ偤鈧偓閺夆€叉閵?")
+        elif scaling_readiness == "continue_small_capital":
+            action_items.append("缂佈呯敾娣囨繃瀵旂亸蹇氱カ闁叉垼鐦惄姗堢礉娴兼ê鍘涚粔顖滅柈閺囨潙顦跨粙鍐茬暰閺嶉攱婀伴妴?")
+        elif scaling_readiness == "shrink_trial":
+            action_items.append("缂傗晛鐨拠鏇犳磸鐟欏嫭膩閿涘苯鍘涚憴鍌氱檪閺€鍓佹抄鏉堝綊妾弰顖氭儊閹垹顦查妴?")
+        else:
+            action_items.append("閺嗗倸浠犵拠鏇犳磸閿涘奔绱崗鍫濐槱閻炲棙浠径宥囧Ц閹降鈧焦澧界悰宀冨窛闁插繑鍨ㄩ弨鍓佹抄闁偓閸栨牠妫舵０妯糕偓?")
+        if high_slippage_count > 0:
+            action_items.append("婢跺秶娲忔妯荤拨閻愯鍨氭禍銈忕礉绾喛顓婚弰顖涚ウ閸斻劍鈧囨６妫版绻曢弰顖涘⒔鐞涘瞼鐡ラ悾銉╂６妫版ǜ鈧?")
+        if slow_submit_to_fill_count > 0:
+            action_items.append("濡偓閺屻儲鍙冮幋鎰唉鐠侯垰绶為敍宀€鈥樼拋銈嗘Ц閸氾箑鐡ㄩ崷?submit 閸?fill 閻ㄥ嫬娆㈡潻鐔风磽鐢悶鈧?")
+        if recovery.get("review_required"):
+            action_items.append("瑜版挸澧犳禒宥嗘箒娴滃搫浼愭径宥嗙壋鐟曚焦鐪伴敍灞筋槱閻炲棗鐣幋鎰娑撳秴绨查弨楣冨櫤閵?")
+        if blocker_rows:
+            action_items.append("鐎涙ê婀ú璇插З闂冪粯鏌囨い鐧哥礉韫囧懘銆忛崗鍫熺闂勩倝妯嗛弬顓炲晙缂佈呯敾鐠囨洜娲忛妴?")
+        return list(dict.fromkeys(action_items))
+
+    def _build_trial_review_summary(
+        self,
+        *,
+        segment_limit: int,
+        window_days: int,
+        period_count: int,
+    ) -> dict[str, Any]:
         forward_validation = self.forward_validation_report(
             window_days=window_days,
             period_count=period_count,
@@ -3142,12 +3410,13 @@ class OperatorQueryService:
         scaling = self.scaling_readiness_report(
             window_days=window_days,
             period_count=period_count,
+            forward_validation=forward_validation,
         )
-        trial_guard = self.trial_guard()
+        segments = self.strategy_segment_report(limit=segment_limit)
         recovery = self.recovery_view()
         blocker_rows = [item for item in self.blockers() if not item.get("submit_only")]
         latest_review = self.latest_operator_action("trial_review_snapshot")
-
+        latest_period = (forward_validation.get("periods") or [None])[0] or {}
         segment_rows = list(segments.get("segments") or [])
         strongest_segment = max(
             segment_rows,
@@ -3159,54 +3428,79 @@ class OperatorQueryService:
             key=lambda item: self._to_decimal(item.get("net_realized_pnl")) or Decimal("999999999"),
             default=None,
         )
-        summary = dict(profitability.get("summary") or {})
-        anomaly_summary = dict(anomalies.get("summary") or {})
         scaling_readiness = str(scaling.get("readiness") or "continue_small_capital")
-
-        action_items: list[str] = []
-        if scaling_readiness == "approve_scale_up":
-            action_items.append("可以进入下一档资金评审，但仍需要人工确认放量边界和回退条件。")
-        elif scaling_readiness == "continue_small_capital":
-            action_items.append("继续保持小资金试盘，优先积累更多稳定样本。")
-        elif scaling_readiness == "shrink_trial":
-            action_items.append("缩小试盘规模，先观察收益边际是否恢复。")
-        else:
-            action_items.append("暂停试盘，优先处理恢复状态、执行质量或收益退化问题。")
-
-        if int(anomaly_summary.get("high_slippage_count") or 0) > 0:
-            action_items.append("复盘高滑点成交，确认是流动性问题还是执行策略问题。")
-        if int(anomaly_summary.get("slow_submit_to_fill_count") or 0) > 0:
-            action_items.append("检查慢成交路径，确认是否存在 submit 到 fill 的延迟异常。")
-        if recovery.get("review_required"):
-            action_items.append("当前仍有人工复核要求，处理完成前不应放量。")
-        if blocker_rows:
-            action_items.append("存在活动阻断项，必须先清除阻断再继续试盘。")
-
+        high_slippage_count = int(latest_period.get("high_slippage_count") or 0)
+        slow_submit_to_fill_count = int(latest_period.get("slow_submit_to_fill_count") or 0)
         return {
             "generated_at": utc_now(),
             "summary": {
                 "readiness": scaling_readiness,
-                "headline": scaling.get("summary"),
-                "closed_fill_count": summary.get("closed_fill_count"),
-                "net_realized_pnl": summary.get("net_realized_pnl"),
-                "win_rate": summary.get("win_rate"),
-                "fee_to_notional_ratio": summary.get("fee_to_notional_ratio"),
-                "high_slippage_count": anomaly_summary.get("high_slippage_count"),
-                "slow_submit_to_fill_count": anomaly_summary.get("slow_submit_to_fill_count"),
+                "headline": scaling.get("summary") or forward_validation.get("summary", {}).get("summary"),
+                "closed_fill_count": latest_period.get("closed_fill_count"),
+                "net_realized_pnl": latest_period.get("net_realized_pnl"),
+                "win_rate": latest_period.get("win_rate"),
+                "fee_to_notional_ratio": latest_period.get("fee_to_notional_ratio"),
+                "high_slippage_count": high_slippage_count,
+                "slow_submit_to_fill_count": slow_submit_to_fill_count,
             },
             "recommendation": {
                 "readiness": scaling_readiness,
                 "reasons": scaling.get("reasons", []),
-                "action_items": list(dict.fromkeys(action_items)),
+                "action_items": self._trial_review_action_items(
+                    scaling_readiness=scaling_readiness,
+                    high_slippage_count=high_slippage_count,
+                    slow_submit_to_fill_count=slow_submit_to_fill_count,
+                    recovery=recovery,
+                    blocker_rows=blocker_rows,
+                ),
             },
             "sections": {
-                "profitability": profitability,
-                "execution_anomalies": anomalies,
+                "forward_validation": {
+                    "summary": forward_validation.get("summary"),
+                    "periods": forward_validation.get("periods"),
+                },
+                "scaling_readiness": scaling,
                 "strategy_segments": {
                     "group_by": segments.get("group_by"),
                     "strongest_segment": strongest_segment,
                     "weakest_segment": weakest_segment,
                 },
+            },
+            "latest_review": latest_review,
+            "truth_source": "aggregated_operator_reports_summary",
+        }
+
+    def _build_trial_review_details(
+        self,
+        *,
+        profitability_limit: int,
+        anomaly_limit: int,
+        segment_limit: int,
+        window_days: int,
+        period_count: int,
+    ) -> dict[str, Any]:
+        profitability = self.profitability_overview(limit=profitability_limit)
+        anomalies = self.execution_anomaly_report(limit=anomaly_limit)
+        segments = self.strategy_segment_report(limit=segment_limit)
+        forward_validation = self.forward_validation_report(
+            window_days=window_days,
+            period_count=period_count,
+        )
+        scaling = self.scaling_readiness_report(
+            window_days=window_days,
+            period_count=period_count,
+            forward_validation=forward_validation,
+        )
+        trial_guard = self.trial_guard()
+        recovery = self.recovery_view()
+        blocker_rows = [item for item in self.blockers() if not item.get("submit_only")]
+        latest_review = self.latest_operator_action("trial_review_snapshot")
+        return {
+            "generated_at": utc_now(),
+            "sections": {
+                "profitability": profitability,
+                "execution_anomalies": anomalies,
+                "strategy_segments": segments,
                 "forward_validation": forward_validation,
                 "scaling_readiness": scaling,
                 "trial_guard": trial_guard,
@@ -3214,6 +3508,43 @@ class OperatorQueryService:
                 "active_blockers": blocker_rows,
             },
             "latest_review": latest_review,
+            "truth_source": "aggregated_operator_reports_details",
+        }
+
+    def _build_trial_review_packet(
+        self,
+        *,
+        profitability_limit: int,
+        anomaly_limit: int,
+        segment_limit: int,
+        window_days: int,
+        period_count: int,
+    ) -> dict[str, Any]:
+        summary = self._build_trial_review_summary(
+            segment_limit=segment_limit,
+            window_days=window_days,
+            period_count=period_count,
+        )
+        details = self._build_trial_review_details(
+            profitability_limit=profitability_limit,
+            anomaly_limit=anomaly_limit,
+            segment_limit=segment_limit,
+            window_days=window_days,
+            period_count=period_count,
+        )
+        summary_sections = summary.get("sections") or {}
+        detail_sections = details.get("sections") or {}
+        return {
+            "generated_at": summary.get("generated_at") or details.get("generated_at") or utc_now(),
+            "summary": summary.get("summary") or {},
+            "recommendation": summary.get("recommendation") or {},
+            "sections": {
+                **detail_sections,
+                "strategy_segments": summary_sections.get("strategy_segments") or detail_sections.get("strategy_segments"),
+                "forward_validation": summary_sections.get("forward_validation") or detail_sections.get("forward_validation"),
+                "scaling_readiness": summary_sections.get("scaling_readiness") or detail_sections.get("scaling_readiness"),
+            },
+            "latest_review": summary.get("latest_review") or details.get("latest_review"),
             "truth_source": "aggregated_operator_reports",
         }
 
@@ -3488,7 +3819,8 @@ class OperatorQueryService:
         return {"errors": errors}
 
     def reconciliation_latest(self) -> dict[str, Any]:
-        return self.reconciliation_system_queries.reconciliation_latest()
+        cache_key = f"reconciliation_latest:{self._scope_cache_fragment()}"
+        return self._cached_ttl(cache_key, 15, self.reconciliation_system_queries.reconciliation_latest)
 
     def reconciliation_recent(self, *, limit: int = 20, offset: int = 0) -> dict[str, Any]:
         return self.reconciliation_system_queries.reconciliation_recent(limit=limit, offset=offset)
@@ -3506,7 +3838,8 @@ class OperatorQueryService:
         return self.audit_replay_queries.audit_detail(decision_id)
 
     def replay_status(self) -> dict[str, Any]:
-        return self.audit_replay_queries.replay_status()
+        cache_key = f"replay_status:{self._scope_cache_fragment()}"
+        return self._cached_ttl(cache_key, 30, self.audit_replay_queries.replay_status)
 
     def replay_validate(self, *, decision_id: str) -> dict[str, Any]:
         return self.audit_replay_queries.replay_validate(decision_id=decision_id)

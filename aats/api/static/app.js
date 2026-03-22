@@ -15,7 +15,7 @@ import {
   buildReconciliationDrawer,
 } from "./modules/detail-drawers.js";
 import { buildPhase1ShadowDrawer } from "./modules/shadow-drawer.js";
-import { AUTO_REFRESH_MS, CORE_SPECS, DEFAULT_PAGE_LIMITS, PAGE_LOAD_STEP, createState, viewSpecs } from "./modules/store.js";
+import { AUTO_REFRESH_MS, CORE_SPECS, DEFAULT_PAGE_LIMITS, PAGE_LOAD_STEP, createState, viewBackgroundSpecs, viewSpecs } from "./modules/store.js";
 import {
   localizeError,
   operationalStatusCopy,
@@ -219,6 +219,8 @@ async function refreshDashboard({ manual = false } = {}) {
     return;
   }
   const refreshingView = state.activeView;
+  const backgroundGeneration = (state.backgroundGenerations[refreshingView] || 0) + 1;
+  state.backgroundGenerations[refreshingView] = backgroundGeneration;
   cancelScheduledRefresh();
   state.refreshing = true;
   renderShell();
@@ -238,6 +240,7 @@ async function refreshDashboard({ manual = false } = {}) {
     if (manual) {
       state.flash = { tone: "info", message: "页面数据已刷新。" };
     }
+    void refreshBackgroundPanels(refreshingView, backgroundGeneration);
   } finally {
     state.refreshing = false;
     if (state.loadingView === refreshingView) {
@@ -251,6 +254,19 @@ async function refreshDashboard({ manual = false } = {}) {
     }
     scheduleRefresh();
   }
+}
+
+async function refreshBackgroundPanels(view, generation) {
+  const specs = dedupeSpecs(viewBackgroundSpecs(view, state));
+  if (!specs.length) return;
+  const results = await fetchPanels(specs);
+  if (state.activeView !== view) return;
+  if ((state.backgroundGenerations[view] || 0) !== generation) return;
+  for (const [key, result] of Object.entries(results)) {
+    state.data[key] = result.data;
+    state.errors[key] = result.error;
+  }
+  renderShell();
 }
 
 function renderShell() {
@@ -470,6 +486,7 @@ function renderActiveView() {
         aiRuntime: state.data.aiRuntime || {},
         summary: state.data.aiConfigModel || {},
         error: state.errors.aiConfigModel || null,
+        uiState: state.ui.aiConfig,
       }),
     );
     return;
@@ -750,6 +767,8 @@ async function dispatchAction(action, value, target = null) {
   if (action === "restore-ai-operating-mode-auto") return restoreAIAutomaticOperatingMode(target);
   if (action === "manual-activate-strategy-profile") return activateStrategyProfile(value, target);
   if (action === "restore-strategy-profile-auto") return restoreStrategyProfileAutomaticControl(target);
+  if (action === "set-ai-mode-editing") return setAIConfigModeEditing(value);
+  if (action === "set-profile-editing") return setAIConfigProfileEditing(value);
   if (action === "load-more-orders") return adjustPageLimit("recentOrders", PAGE_LOAD_STEP);
   if (action === "collapse-orders") return resetPageLimit("recentOrders");
   if (action === "load-more-fills") return adjustPageLimit("recentFills", PAGE_LOAD_STEP);
@@ -920,6 +939,7 @@ async function activateStrategyProfile(profileId, target = null) {
       tone: "info",
       message: `当前策略档位已手动切换为 ${readableProfileName(result?.active_revision?.profile_label || result?.active_revision?.profile_id)}。`,
     };
+    state.ui.aiConfig.profileManualEditing = true;
     await refreshDashboard({ manual: true });
   } catch (error) {
     state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
@@ -944,6 +964,7 @@ async function restoreStrategyProfileAutomaticControl(target = null) {
         ? `策略档位已恢复自动切档逻辑，当前仍保持 ${readableProfileName(result?.active_revision?.profile_label || activation.active_profile_id)}。`
         : "策略档位已恢复自动切档逻辑。",
     };
+    state.ui.aiConfig.profileManualEditing = false;
     await refreshDashboard({ manual: true });
   } catch (error) {
     state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
@@ -968,6 +989,7 @@ async function setAIManualOperatingMode(mode, target = null) {
       tone: "info",
       message: `AI 当前运行模式已手动切换为 ${readableState(runtime.manual_override_mode || mode, "目标模式")}，冻结到 ${runtime.manual_override_freeze_until || "待确认"}。`,
     };
+    state.ui.aiConfig.modeManualEditing = true;
     await refreshDashboard({ manual: true });
   } catch (error) {
     state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
@@ -989,6 +1011,7 @@ async function restoreAIAutomaticOperatingMode(target = null) {
       tone: "info",
       message: "AI 当前运行模式已恢复为自动逻辑控制。",
     };
+    state.ui.aiConfig.modeManualEditing = false;
     await refreshDashboard({ manual: true });
   } catch (error) {
     state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
@@ -1001,6 +1024,28 @@ async function restoreAIAutomaticOperatingMode(target = null) {
 function readableProfileName(value, fallback = "未知档位") {
   if (value === null || value === undefined || value === "") return fallback;
   return readableState(String(value), fallback);
+}
+
+function setAIConfigModeEditing(value) {
+  const nextManual = value === "manual";
+  const runtime = state.data.aiRuntime || {};
+  if (!nextManual && runtime.manual_override_active) {
+    void restoreAIAutomaticOperatingMode();
+    return;
+  }
+  state.ui.aiConfig.modeManualEditing = nextManual;
+  renderShell();
+}
+
+function setAIConfigProfileEditing(value) {
+  const nextManual = value === "manual";
+  const runtime = state.data.aiRuntime || {};
+  if (!nextManual && runtime.strategy_profile_auto_control_reason === "manually_paused_by_admin") {
+    void restoreStrategyProfileAutomaticControl();
+    return;
+  }
+  state.ui.aiConfig.profileManualEditing = nextManual;
+  renderShell();
 }
 
 async function createOperatorUser() {
