@@ -78,7 +78,7 @@ paper_taker_fee_bps: 5.0
 # [常用可调] max_slippage_tolerance_bps：最大允许滑点。可选值：0~100；推荐值：20。
 max_slippage_tolerance_bps: 20
 
-# [常用可调] ai_operating_mode：AI 运行模式。可选值：baseline_only / ai_assisted / ai_decision_maker / ai_decision_maker_with_profile_control；基线推荐：baseline_only。
+# [常用可调] ai_operating_mode：AI 运行模式。可选值：baseline_only / ai_assisted / ai_decision_maker；基线推荐：baseline_only。自动换档已独立，单独由 strategy_profile_auto_control_enabled 控制。
 ai_operating_mode: baseline_only
 # [运行必改] ai_provider：AI 提供方。可选值：disabled / openai；基线推荐：disabled。
 ai_provider: disabled
