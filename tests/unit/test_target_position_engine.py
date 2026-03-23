@@ -250,15 +250,97 @@ class TestTargetPositionEngine(unittest.TestCase):
             factor_scores={
                 "momentum_alpha": -0.21,
                 "trend_alpha": -0.19,
-                "microstructure_alpha": -0.16,
+                "microstructure_alpha": -0.04,
                 "liquidity_scale": 0.9,
             },
-        )
+        ).model_copy(update={"composite_alpha_score": 0.04})
 
-        target = engine.build(context, baseline, self._ai_assessment(direction=-0.26, confidence=0.72))
+        target = engine.build(context, baseline, self._ai_assessment(direction=-0.10, confidence=0.72))
 
         self.assertEqual(target.target_position_qty, 0.0)
         self.assertEqual(target.position_intent, "close_long")
+        self.assertEqual(target.decision_outcome.exit_attribution, "alpha_decay_exit")
+
+    def test_derivatives_alpha_decay_reduce_scales_down_existing_position_when_signal_fades(self) -> None:
+        engine = TargetPositionEngine(
+            settings=AATSSettings.model_validate(
+                {
+                    "default_order_qty": 0.1,
+                    "trading_product_type": "derivatives",
+                    "strategy_short_bias_enabled": True,
+                }
+            )
+        )
+        context = self._context(current_position_qty=0.05, product_type="derivatives", current_exposure_side="long")
+        baseline = self._baseline(
+            direction_bias="long",
+            confidence=0.42,
+            suggested_position_scale=1.0,
+            volatility_target_scale=1.0,
+            factor_scores={"momentum_alpha": 0.05, "trend_alpha": 0.04, "microstructure_alpha": 0.03, "liquidity_scale": 0.9},
+        ).model_copy(update={"composite_alpha_score": 0.08})
+
+        target = engine.build(context, baseline, self._ai_assessment(direction=0.06, confidence=0.45))
+
+        self.assertGreater(target.target_position_qty, Decimal("0"))
+        self.assertLess(target.target_position_qty, context.current_position_qty)
+        self.assertEqual(target.position_intent, "reduce_long")
+        self.assertIn("alpha_decay_reduce", target.guardrail_flags)
+        self.assertEqual(target.decision_outcome.exit_attribution, "alpha_decay_reduce")
+
+    def test_derivatives_risk_contraction_reduces_existing_position_in_high_volatility(self) -> None:
+        engine = TargetPositionEngine(
+            settings=AATSSettings.model_validate(
+                {
+                    "default_order_qty": 0.1,
+                    "trading_product_type": "derivatives",
+                    "strategy_short_bias_enabled": True,
+                }
+            )
+        )
+        context = self._context(current_position_qty=0.05, product_type="derivatives", current_exposure_side="long")
+        baseline = self._baseline(
+            direction_bias="long",
+            confidence=0.82,
+            suggested_position_scale=1.0,
+            volatility_target_scale=0.62,
+            volatility_state="high",
+            factor_scores={"momentum_alpha": 0.32, "trend_alpha": 0.28, "microstructure_alpha": 0.14, "liquidity_scale": 0.8},
+        ).model_copy(update={"composite_alpha_score": 0.36})
+
+        target = engine.build(context, baseline, self._ai_assessment(direction=0.3, confidence=0.84))
+
+        self.assertGreater(target.target_position_qty, Decimal("0"))
+        self.assertLess(target.target_position_qty, context.current_position_qty)
+        self.assertIn("risk_contraction_exit", target.guardrail_flags)
+        self.assertEqual(target.decision_outcome.exit_attribution, "risk_contraction_exit")
+
+    def test_derivatives_emergency_protective_exit_flattens_on_severe_adverse_pressure(self) -> None:
+        engine = TargetPositionEngine(
+            settings=AATSSettings.model_validate(
+                {
+                    "default_order_qty": 0.01,
+                    "trading_product_type": "derivatives",
+                    "strategy_short_bias_enabled": True,
+                }
+            )
+        )
+        context = self._context(current_position_qty=0.05, product_type="derivatives", current_exposure_side="long")
+        baseline = self._baseline(
+            direction_bias="short",
+            confidence=0.9,
+            suggested_position_scale=1.0,
+            volatility_target_scale=1.0,
+            volatility_state="high",
+            factor_scores={"momentum_alpha": -0.34, "trend_alpha": -0.31, "microstructure_alpha": -0.24, "liquidity_scale": 0.75},
+        ).model_copy(update={"composite_alpha_score": -0.42, "regime": "breakout"})
+
+        target = engine.build(context, baseline, self._ai_assessment(direction=-0.4, confidence=0.92))
+
+        self.assertEqual(target.target_position_qty, Decimal("0"))
+        self.assertEqual(target.position_intent, "close_long")
+        self.assertIn("emergency_protective_exit", target.guardrail_flags)
+        self.assertEqual(target.decision_outcome.exit_attribution, "emergency_protective_exit")
 
     def test_cost_guard_blocks_weak_derivatives_entry(self) -> None:
         engine = TargetPositionEngine(

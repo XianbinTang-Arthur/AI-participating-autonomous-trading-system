@@ -227,6 +227,12 @@ class AATSSettings(BaseSettings):
     strategy_flat_exit_microstructure_threshold: float = 0.12
     strategy_flat_exit_factor_threshold: float = 0.18
     strategy_flat_exit_ai_edge_threshold: float = 0.22
+    strategy_position_alpha_decay_reduce_alpha: float = 0.12
+    strategy_position_alpha_decay_reduce_confidence: float = 0.5
+    strategy_position_alpha_decay_exit_alpha: float = 0.06
+    strategy_position_high_volatility_reduce_fraction: float = 0.72
+    strategy_position_range_reduce_fraction: float = 0.8
+    strategy_position_uncertain_reduce_fraction: float = 0.65
     strategy_cost_guard_enabled: bool = True
     strategy_alpha_edge_bps_scale: float = 100.0
     strategy_expected_slippage_bps_fraction: float = 0.25
@@ -252,8 +258,12 @@ class AATSSettings(BaseSettings):
     strategy_low_edge_streak_limit: int = 3
     strategy_low_edge_cooldown_seconds: float = 1_800.0
     strategy_transient_close_retry_cooldown_seconds: float = 90.0
+    strategy_volatility_target_scale_floor: float = 0.35
+    strategy_volatility_target_scale_ceiling: float = 1.10
     strategy_risk_budget_multiplier_floor: float = 0.35
     strategy_execution_aggressiveness_multiplier_floor: float = 0.30
+    strategy_risk_snapshot_missing_budget_multiplier: float = 0.7
+    strategy_risk_snapshot_missing_execution_aggressiveness_multiplier: float = 0.55
     trial_guard_enabled: bool = False
     trial_guard_poll_interval_seconds: float = 15.0
     trial_guard_lookback_fills: int = 30
@@ -269,6 +279,8 @@ class AATSSettings(BaseSettings):
     max_daily_realized_loss_usdt: float = 100.0
     derivatives_only_reduce_trigger_margin_fraction: float = 0.7
     derivatives_runtime_guard_enabled: bool = True
+    derivatives_risk_snapshot_grace_seconds: float = 45.0
+    derivatives_risk_snapshot_auto_halt_after_seconds: float = 240.0
     derivatives_auto_halt_margin_usage_fraction: float = 0.85
     derivatives_auto_halt_liquidation_gap_fraction: float = 0.08
     max_margin_usage_fraction: float = 0.85

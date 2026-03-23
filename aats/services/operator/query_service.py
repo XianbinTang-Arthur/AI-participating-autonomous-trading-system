@@ -1324,7 +1324,9 @@ class OperatorQueryService:
             return {
                 "audit": None,
                 "decision_context": None,
+                "baseline_assessment": None,
                 "position_target": None,
+                "risk_decision": None,
                 "execution_plan": None,
                 "decision_outcome": None,
             }
@@ -1333,22 +1335,34 @@ class OperatorQueryService:
             return {
                 "audit": None,
                 "decision_context": None,
+                "baseline_assessment": None,
                 "position_target": None,
+                "risk_decision": None,
                 "execution_plan": None,
                 "decision_outcome": None,
             }
+        position_target = self.payload_by_ref(audit.position_target_ref)
+        decision_outcome = self.payload_by_ref(audit.decision_outcome_ref)
+        if decision_outcome is None and isinstance(position_target, dict):
+            native_outcome = position_target.get("decision_outcome")
+            decision_outcome = native_outcome if isinstance(native_outcome, dict) else None
         return {
             "audit": audit,
             "decision_context": self.payload_by_ref(audit.decision_context_ref),
-            "position_target": self.payload_by_ref(audit.position_target_ref),
+            "baseline_assessment": self.payload_by_ref(audit.baseline_assessment_ref),
+            "position_target": position_target,
+            "risk_decision": self._risk_decision_payload(self.payload_by_ref(audit.risk_decision_ref)),
             "execution_plan": self._execution_plan_payload(self.payload_by_ref(audit.execution_plan_ref)),
-            "decision_outcome": self.payload_by_ref(audit.decision_outcome_ref),
+            "decision_outcome": decision_outcome,
         }
 
     def _execution_quality_row(self, fill_record: Any) -> dict[str, Any]:
         fill_payload = self._execution_record_payload(fill_record)
         decision_support = self._decision_support_payload(fill_payload.get("decision_id"))
         decision_context = decision_support["decision_context"]
+        baseline_assessment = decision_support["baseline_assessment"]
+        position_target = decision_support["position_target"]
+        risk_decision = decision_support["risk_decision"]
         execution_plan = decision_support["execution_plan"]
         decision_outcome = decision_support["decision_outcome"]
         order_state = self._control_plane_order_state(str(fill_payload.get("client_order_id") or ""))
@@ -1381,6 +1395,34 @@ class OperatorQueryService:
             side=fill_payload.get("side"),
             fill_price=fill_payload.get("fill_price"),
             reference_price=reference_price,
+        )
+        market_regime = None if baseline_assessment is None else baseline_assessment.get("regime")
+        volatility_state = None if baseline_assessment is None else baseline_assessment.get("volatility_state")
+        baseline_reason_codes = [] if baseline_assessment is None else list(baseline_assessment.get("reason_codes") or [])
+        position_management_reason_codes = (
+            []
+            if decision_outcome is None
+            else list(decision_outcome.get("position_management_reason_codes") or [])
+        )
+        exit_attribution = None if decision_outcome is None else decision_outcome.get("exit_attribution")
+        risk_constraints_applied = [] if risk_decision is None else list(risk_decision.get("constraints_applied") or [])
+        risk_rejection_reasons = [] if risk_decision is None else list(risk_decision.get("rejection_reasons") or [])
+        risk_budget_multiplier = None if risk_decision is None else self._to_decimal(risk_decision.get("risk_budget_multiplier"))
+        execution_aggressiveness_multiplier = (
+            None if risk_decision is None else self._to_decimal(risk_decision.get("execution_aggressiveness_multiplier"))
+        )
+        risk_protection_active = bool(
+            risk_decision is not None
+            and (
+                bool(risk_decision.get("only_reduce_required"))
+                or "risk_budget_multiplier_applied" in risk_constraints_applied
+                or "execution_aggressiveness_contracted" in risk_constraints_applied
+                or (risk_budget_multiplier is not None and risk_budget_multiplier < Decimal("0.999999"))
+                or (
+                    execution_aggressiveness_multiplier is not None
+                    and execution_aggressiveness_multiplier < Decimal("0.999999")
+                )
+            )
         )
 
         return {
@@ -1422,9 +1464,24 @@ class OperatorQueryService:
             "realized_pnl_delta": self._to_decimal(fill_payload.get("realized_pnl_delta")),
             "gross_realized_pnl": self._to_decimal(fill_payload.get("gross_realized_pnl")),
             "expected_net_edge_bps": None if decision_outcome is None else decision_outcome.get("expected_net_edge_bps"),
+            "market_regime": market_regime,
+            "volatility_state": volatility_state,
+            "baseline_reason_codes": baseline_reason_codes,
+            "active_profile_id": None if decision_outcome is None else decision_outcome.get("active_profile_id"),
+            "profile_control_source": None if decision_outcome is None else decision_outcome.get("profile_control_source"),
+            "position_management_reason_codes": position_management_reason_codes,
+            "exit_attribution": exit_attribution,
+            "guardrail_flags": [] if position_target is None else list(position_target.get("guardrail_flags") or []),
+            "risk_constraints_applied": risk_constraints_applied,
+            "risk_rejection_reasons": risk_rejection_reasons,
+            "risk_budget_multiplier": risk_budget_multiplier,
+            "execution_aggressiveness_multiplier": execution_aggressiveness_multiplier,
+            "risk_protection_active": risk_protection_active,
+            "risk_protection": "active" if risk_protection_active else "inactive",
             "decision_context": {
                 "timeframe": None if decision_context is None else decision_context.get("timeframe"),
-                "market_regime": None if decision_context is None else decision_context.get("market_regime"),
+                "market_regime": market_regime,
+                "volatility_state": volatility_state,
             },
         }
 
@@ -2759,6 +2816,17 @@ class OperatorQueryService:
                     )
                 else:
                     payload["profile_control_source"] = "system" if activation.get("active_profile_id") else "env_default"
+            if payload.get("position_management_reason_codes") is None:
+                payload["position_management_reason_codes"] = [
+                    code
+                    for code in ("alpha_decay_exit", "alpha_decay_reduce", "risk_contraction_exit", "emergency_protective_exit")
+                    if code in list(payload.get("guardrail_flags") or [])
+                ]
+            if payload.get("exit_attribution") is None:
+                for code in ("emergency_protective_exit", "alpha_decay_exit", "alpha_decay_reduce", "risk_contraction_exit"):
+                    if code in list(payload.get("position_management_reason_codes") or []):
+                        payload["exit_attribution"] = code
+                        break
             return payload
         mode_value = (
             None if ai_assessment is None else ai_assessment.get("operating_mode")
@@ -2797,6 +2865,16 @@ class OperatorQueryService:
         blocked_reasons.extend(list((position_target or {}).get("guardrail_flags") or []))
         blocked_reasons.extend(list((policy_decision or {}).get("rejection_reasons") or []))
         blocked_reasons.extend(list((risk_decision or {}).get("rejection_reasons") or []))
+        position_management_reason_codes = [
+            code
+            for code in ("alpha_decay_exit", "alpha_decay_reduce", "risk_contraction_exit", "emergency_protective_exit")
+            if code in list((position_target or {}).get("guardrail_flags") or [])
+        ]
+        exit_attribution = None
+        for code in ("emergency_protective_exit", "alpha_decay_exit", "alpha_decay_reduce", "risk_contraction_exit"):
+            if code in position_management_reason_codes:
+                exit_attribution = code
+                break
         profile_snapshot = self.strategy_profile_snapshot()
         activation = profile_snapshot.get("activation", {})
         outcome = DecisionOutcome(
@@ -2840,6 +2918,8 @@ class OperatorQueryService:
             risk_capped_reasons=list((risk_decision or {}).get("rejection_reasons") or [])
             + list((risk_decision or {}).get("constraints_applied") or []),
             risk_capped_target_qty=None if risk_decision is None or risk_decision.get("capped_target_position_qty") is None else Decimal(str(risk_decision.get("capped_target_position_qty"))),
+            position_management_reason_codes=position_management_reason_codes,
+            exit_attribution=exit_attribution,
             active_profile_id=activation.get("active_profile_id"),
             profile_control_source="system" if activation.get("active_profile_id") else "env_default",
             ai_fallback_used=bool((ai_assessment or {}).get("fallback_used")),
@@ -3381,6 +3461,8 @@ class OperatorQueryService:
             "derivatives_margin_usage_requires_only_reduce": "预估保证金占用已经进入高风险区域，系统只允许减仓或平仓。",
             "derivatives_liquidation_gap_requires_only_reduce": "当前最近仓位已经进入强平缓冲区，系统只允许继续减仓或平仓。",
             "derivatives_risk_snapshot_missing_requires_only_reduce": "当前拿不到合约风险快照，系统只允许继续减仓或平仓。",
+            "derivatives_risk_snapshot_missing_grace_active": "当前合约风险快照短时缺失，系统先降档、缩预算并降低执行侵略性。",
+            "derivatives_risk_snapshot_missing_auto_halt": "合约风险快照持续缺失过久，系统已升级到自动停机。",
             "derivatives_margin_buffer_auto_halt": "当前保证金占用已经进入自动停机阈值，系统必须保持暂停。",
             "derivatives_liquidation_proximity_auto_halt": "当前最近仓位距离强平过近，系统已经触发自动停机。",
             "max_gross_notional_per_symbol_exceeded": "单标的总名义敞口超过上限，系统禁止继续扩大该标的仓位。",
@@ -3389,6 +3471,10 @@ class OperatorQueryService:
             "max_daily_realized_loss_usdt_exceeded": "当日已实现亏损超过上限，系统只允许继续减仓或平仓。",
             "risk_budget_multiplier_applied": "当前风险预算已经自动收缩，目标仓位和名义金额上限会同步变小。",
             "execution_aggressiveness_contracted": "当前执行侵略性已经自动收缩，实际滑点和执行参数上限会同步变严。",
+            "alpha_decay_exit": "原有持仓的优势已经明显衰减，系统将直接退出该仓位。",
+            "alpha_decay_reduce": "原有持仓的优势开始衰减，系统先自动减仓。",
+            "risk_contraction_exit": "当前波动率或市场状态不利于继续满仓持有，系统自动收缩现有仓位。",
+            "emergency_protective_exit": "当前 adverse 信号过强，系统触发紧急保护退出。",
         }
         return messages.get(code, f"风控命中了限制：{code}")
 
@@ -5339,7 +5425,18 @@ class OperatorQueryService:
         limit: int = 200,
         group_by: tuple[str, ...] = ("symbol", "market_regime", "side", "execution_action"),
     ) -> dict[str, Any]:
-        allowed_dimensions = {"symbol", "market_regime", "timeframe", "side", "execution_action", "position_intent"}
+        allowed_dimensions = {
+            "symbol",
+            "market_regime",
+            "volatility_state",
+            "timeframe",
+            "side",
+            "execution_action",
+            "position_intent",
+            "active_profile_id",
+            "exit_attribution",
+            "risk_protection",
+        }
         normalized_group_by = tuple(item for item in group_by if item in allowed_dimensions) or ("symbol",)
         outcomes = list(self._scoped_fill_outcomes())
         outcomes.sort(key=lambda item: item.ingestion_timestamp or item.created_at, reverse=True)
@@ -5348,11 +5445,15 @@ class OperatorQueryService:
         for row in rows:
             segment_payload = {
                 "symbol": row.get("symbol"),
-                "market_regime": (row.get("decision_context") or {}).get("market_regime"),
+                "market_regime": row.get("market_regime"),
+                "volatility_state": row.get("volatility_state"),
                 "timeframe": (row.get("decision_context") or {}).get("timeframe"),
                 "side": row.get("side"),
                 "execution_action": row.get("execution_action"),
                 "position_intent": row.get("position_intent"),
+                "active_profile_id": row.get("active_profile_id"),
+                "exit_attribution": row.get("exit_attribution"),
+                "risk_protection": row.get("risk_protection"),
             }
             group_key = tuple(segment_payload.get(key) for key in normalized_group_by)
             bucket = grouped.setdefault(
@@ -5428,6 +5529,90 @@ class OperatorQueryService:
             "total_available": len(segments),
             "source_fill_count": len(rows),
             "truth_source": "fill_outcomes",
+        }
+
+    def strategy_attribution_report(self, *, limit: int = 200) -> dict[str, Any]:
+        normalized_limit = max(int(limit), 1)
+        outcomes = list(self._scoped_fill_outcomes())
+        outcomes.sort(key=lambda item: item.ingestion_timestamp or item.created_at, reverse=True)
+        rows = [self._execution_quality_row(item) for item in outcomes[:normalized_limit]]
+
+        def _bucket_by(key: str, fallback: str) -> list[dict[str, Any]]:
+            buckets: dict[str, dict[str, Any]] = {}
+            for row in rows:
+                bucket_key = str(row.get(key) or fallback)
+                bucket = buckets.setdefault(
+                    bucket_key,
+                    {
+                        key: bucket_key,
+                        "fill_count": 0,
+                        "net_realized_pnl": Decimal("0"),
+                        "gross_realized_pnl": Decimal("0"),
+                        "total_notional": Decimal("0"),
+                        "winning_fill_count": 0,
+                        "losing_fill_count": 0,
+                    },
+                )
+                realized = self._to_decimal(row.get("realized_pnl_delta")) or Decimal("0")
+                gross = self._to_decimal(row.get("gross_realized_pnl")) or Decimal("0")
+                notional = self._to_decimal(row.get("fill_notional")) or Decimal("0")
+                bucket["fill_count"] += 1
+                bucket["net_realized_pnl"] += realized
+                bucket["gross_realized_pnl"] += gross
+                bucket["total_notional"] += notional
+                if realized > self._DECIMAL_EPSILON:
+                    bucket["winning_fill_count"] += 1
+                elif realized < -self._DECIMAL_EPSILON:
+                    bucket["losing_fill_count"] += 1
+            payload = list(buckets.values())
+            payload.sort(
+                key=lambda item: (
+                    self._to_decimal(item.get("net_realized_pnl")) or Decimal("0"),
+                    item.get("fill_count") or 0,
+                ),
+                reverse=True,
+            )
+            return payload
+
+        protected_rows = [row for row in rows if bool(row.get("risk_protection_active"))]
+        unprotected_rows = [row for row in rows if not bool(row.get("risk_protection_active"))]
+        constraint_counts: dict[str, int] = {}
+        rejection_counts: dict[str, int] = {}
+        for row in protected_rows:
+            for code in row.get("risk_constraints_applied") or []:
+                constraint_counts[str(code)] = constraint_counts.get(str(code), 0) + 1
+            for code in row.get("risk_rejection_reasons") or []:
+                rejection_counts[str(code)] = rejection_counts.get(str(code), 0) + 1
+
+        return {
+            "summary": {
+                "fill_count": len(rows),
+                "protected_fill_count": len(protected_rows),
+                "unprotected_fill_count": len(unprotected_rows),
+                "protected_net_realized_pnl": sum(
+                    (self._to_decimal(item.get("realized_pnl_delta")) or Decimal("0")) for item in protected_rows
+                ),
+                "unprotected_net_realized_pnl": sum(
+                    (self._to_decimal(item.get("realized_pnl_delta")) or Decimal("0")) for item in unprotected_rows
+                ),
+            },
+            "profitability_by_regime": _bucket_by("market_regime", "unknown"),
+            "profitability_by_profile": _bucket_by("active_profile_id", "unassigned"),
+            "profitability_by_exit_attribution": _bucket_by("exit_attribution", "none"),
+            "risk_protection_summary": {
+                "protected_fill_count": len(protected_rows),
+                "unprotected_fill_count": len(unprotected_rows),
+                "top_constraint_codes": [
+                    {"code": key, "count": value}
+                    for key, value in sorted(constraint_counts.items(), key=lambda item: (-item[1], item[0]))[:10]
+                ],
+                "top_rejection_codes": [
+                    {"code": key, "count": value}
+                    for key, value in sorted(rejection_counts.items(), key=lambda item: (-item[1], item[0]))[:10]
+                ],
+            },
+            "source_fill_count": len(rows),
+            "truth_source": "fill_outcomes_plus_decision_audit",
         }
 
     def execution_anomaly_report(self, *, limit: int = 100) -> dict[str, Any]:

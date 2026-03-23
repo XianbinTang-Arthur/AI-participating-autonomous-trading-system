@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from datetime import timedelta
 import unittest
 from decimal import Decimal
+from unittest.mock import patch
 
 from aats.bootstrap.metrics import MetricsRegistry
 from aats.bootstrap.settings import AATSSettings
@@ -169,6 +171,97 @@ class TestTask72DerivativesLiveGuard(unittest.TestCase):
         self.assertFalse(payload["auto_halt_required"])
         self.assertFalse(kill_switch.halted)
 
+    def test_live_guard_enters_grace_mode_before_only_reduce_when_risk_snapshot_temporarily_missing(self) -> None:
+        settings = self._settings()
+        snapshot = _snapshot(
+            initial_margin="720",
+            adjusted_equity="1000",
+            mark_price="70000",
+            liquidation_price="42000",
+        ).model_copy(update={"risk_snapshot": None})
+        kill_switch = KillSwitch()
+        service = DerivativesLiveGuardService(
+            settings=settings,
+            kill_switch=kill_switch,
+            account_service=_StubAccountService(snapshot),
+            event_store=InMemoryEventStore(),
+            metrics=MetricsRegistry(),
+        )
+
+        frozen_now = utc_now()
+        with patch("aats.services.governance_engine.derivatives_live_guard.utc_now", return_value=frozen_now):
+            payload = service.evaluate_now()
+
+        self.assertEqual(payload["status"], "degraded")
+        self.assertEqual(payload["risk_snapshot_stage"], "grace")
+        self.assertFalse(payload["only_reduce_required"])
+        self.assertFalse(payload["auto_halt_required"])
+        self.assertIn("derivatives_risk_snapshot_missing_grace_active", payload["warnings"])
+
+    def test_live_guard_escalates_missing_risk_snapshot_to_only_reduce_after_grace(self) -> None:
+        settings = self._settings()
+        snapshot = _snapshot(
+            initial_margin="720",
+            adjusted_equity="1000",
+            mark_price="70000",
+            liquidation_price="42000",
+        ).model_copy(update={"risk_snapshot": None})
+        kill_switch = KillSwitch()
+        service = DerivativesLiveGuardService(
+            settings=settings,
+            kill_switch=kill_switch,
+            account_service=_StubAccountService(snapshot),
+            event_store=InMemoryEventStore(),
+            metrics=MetricsRegistry(),
+        )
+
+        start = utc_now()
+        with patch("aats.services.governance_engine.derivatives_live_guard.utc_now", return_value=start):
+            service.evaluate_now()
+        with patch(
+            "aats.services.governance_engine.derivatives_live_guard.utc_now",
+            return_value=start + timedelta(seconds=settings.derivatives_risk_snapshot_grace_seconds + 5),
+        ):
+            payload = service.evaluate_now()
+
+        self.assertEqual(payload["status"], "warning")
+        self.assertEqual(payload["risk_snapshot_stage"], "only_reduce")
+        self.assertTrue(payload["only_reduce_required"])
+        self.assertIn("derivatives_risk_snapshot_missing_requires_only_reduce", payload["only_reduce_reasons"])
+        self.assertFalse(payload["auto_halt_required"])
+
+    def test_live_guard_auto_halts_when_risk_snapshot_missing_for_too_long(self) -> None:
+        settings = self._settings()
+        snapshot = _snapshot(
+            initial_margin="720",
+            adjusted_equity="1000",
+            mark_price="70000",
+            liquidation_price="42000",
+        ).model_copy(update={"risk_snapshot": None})
+        kill_switch = KillSwitch()
+        service = DerivativesLiveGuardService(
+            settings=settings,
+            kill_switch=kill_switch,
+            account_service=_StubAccountService(snapshot),
+            event_store=InMemoryEventStore(),
+            metrics=MetricsRegistry(),
+        )
+
+        start = utc_now()
+        with patch("aats.services.governance_engine.derivatives_live_guard.utc_now", return_value=start):
+            service.evaluate_now()
+        with patch(
+            "aats.services.governance_engine.derivatives_live_guard.utc_now",
+            return_value=start + timedelta(seconds=settings.derivatives_risk_snapshot_auto_halt_after_seconds + 5),
+        ):
+            payload = service.evaluate_now()
+
+        self.assertEqual(payload["status"], "critical")
+        self.assertEqual(payload["risk_snapshot_stage"], "auto_halt")
+        self.assertTrue(payload["auto_halt_required"])
+        self.assertIn("derivatives_risk_snapshot_missing_auto_halt", payload["auto_halt_reasons"])
+        self.assertTrue(kill_switch.halted)
+
     def test_live_guard_auto_halts_when_liquidation_gap_is_too_small(self) -> None:
         settings = self._settings()
         kill_switch = KillSwitch()
@@ -255,7 +348,7 @@ class TestTask72DerivativesLiveGuard(unittest.TestCase):
                 target_exposure_side="long",
                 position_intent="open_long",
                 margin_mode="cross",
-                target_leverage=3.0,
+                target_leverage=1.0,
             )
         )
 
@@ -263,6 +356,78 @@ class TestTask72DerivativesLiveGuard(unittest.TestCase):
         self.assertIn("derivatives_margin_usage_requires_only_reduce", decision.constraints_applied)
         self.assertFalse(decision.approved)
         self.assertIn("only_reduce_mode_active", decision.rejection_reasons)
+
+    def test_risk_engine_contracts_budget_during_risk_snapshot_grace_without_only_reduce(self) -> None:
+        settings = self._settings()
+        snapshot = _snapshot(
+            initial_margin="720",
+            adjusted_equity="1000",
+            mark_price="70000",
+            liquidation_price="42000",
+        ).model_copy(update={"risk_snapshot": None})
+        kill_switch = KillSwitch()
+        controller = RuntimeModeController(settings=settings, kill_switch=kill_switch)
+        account_service = _StubAccountService(snapshot)
+        runtime_guard = DerivativesLiveGuardService(
+            settings=settings,
+            kill_switch=kill_switch,
+            account_service=account_service,
+            event_store=InMemoryEventStore(),
+            metrics=MetricsRegistry(),
+        )
+        frozen_now = utc_now()
+        with patch("aats.services.governance_engine.derivatives_live_guard.utc_now", return_value=frozen_now):
+            runtime_guard.evaluate_now()
+        health_service = SystemHealthService(
+            settings=settings,
+            mode_controller=controller,
+            kill_switch=kill_switch,
+            market_provider=_HealthyMarketProvider(),
+            account_provider=account_service,
+            execution_provider=_HealthyExecutionProvider(),
+            reconciliation_repo=_HealthyReconciliationRepo(),
+        )
+        risk = RiskEngine(
+            settings=settings,
+            account_service=account_service,  # type: ignore[arg-type]
+            health_service=health_service,
+            trigger_policy=DecisionTriggerPolicy(settings=settings),
+            price_provider=lambda symbol: Decimal("70000"),
+            mode_controller=controller,
+            obligation_repo=InMemoryExecutionObligationRepository(),
+            reconciliation_repo=_HealthyReconciliationRepo(),
+            live_runtime_guard_provider=runtime_guard,
+        )
+
+        decision = risk.evaluate(
+            PositionTarget(
+                decision_id="decision_guard_grace",
+                symbol="BTC-USDT-SWAP",
+                current_position_qty=Decimal("0.006"),
+                target_position_qty=Decimal("0.008"),
+                delta_position_qty=Decimal("0.002"),
+                current_notional=Decimal("420"),
+                target_notional=Decimal("560"),
+                rebalance_reason="runtime_guard_test",
+                urgency="medium",
+                max_slippage_tolerance_bps=20,
+                source_mix={"baseline": 1.0},
+                decision_expiry_ts=frozen_now,
+                product_type="derivatives",
+                current_exposure_side="long",
+                target_exposure_side="long",
+                position_intent="open_long",
+                margin_mode="cross",
+                target_leverage=1.0,
+            )
+        )
+
+        self.assertTrue(decision.approved)
+        self.assertFalse(decision.only_reduce_required)
+        self.assertLess(decision.risk_budget_multiplier, Decimal("1"))
+        self.assertLess(decision.execution_aggressiveness_multiplier, Decimal("1"))
+        self.assertIn("risk_budget_multiplier_applied", decision.constraints_applied)
+        self.assertIn("execution_aggressiveness_contracted", decision.constraints_applied)
 
 
 if __name__ == "__main__":

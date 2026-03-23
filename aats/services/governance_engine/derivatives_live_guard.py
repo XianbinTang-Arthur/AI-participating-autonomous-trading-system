@@ -30,6 +30,9 @@ class DerivativesLiveGuardService:
     metrics: MetricsRegistry
     last_snapshot: dict[str, Any] = field(default_factory=dict)
     last_auto_halt_at: Any = None
+    last_risk_snapshot_seen_at: Any = None
+    risk_snapshot_missing_started_at: Any = None
+    risk_snapshot_missing_count: int = 0
 
     _EPSILON: Decimal = field(default=Decimal("1e-12"), init=False, repr=False)
 
@@ -70,16 +73,39 @@ class DerivativesLiveGuardService:
         auto_halt_margin_threshold = Decimal(str(self.settings.derivatives_auto_halt_margin_usage_fraction))
         only_reduce_gap_threshold = Decimal(str(self.settings.liquidation_buffer_fraction))
         auto_halt_gap_threshold = Decimal(str(self.settings.derivatives_auto_halt_liquidation_gap_fraction))
+        risk_snapshot_available = current_margin_usage is not None
+        risk_snapshot_stage = "healthy"
+        risk_snapshot_missing_seconds: float | None = None
 
         only_reduce_reasons: list[str] = []
         auto_halt_reasons: list[str] = []
         warnings: list[str] = []
 
-        if current_margin_usage is None:
+        if not risk_snapshot_available:
             if snapshot.positions:
-                only_reduce_reasons.append("derivatives_risk_snapshot_missing_requires_only_reduce")
-                warnings.append("当前拿不到合约风险快照，只允许继续减仓或平仓。")
+                self.risk_snapshot_missing_count += 1
+                if self.risk_snapshot_missing_started_at is None:
+                    self.risk_snapshot_missing_started_at = utc_now()
+                risk_snapshot_missing_seconds = max(
+                    (utc_now() - self.risk_snapshot_missing_started_at).total_seconds(),
+                    0.0,
+                )
+                if risk_snapshot_missing_seconds < float(self.settings.derivatives_risk_snapshot_grace_seconds):
+                    risk_snapshot_stage = "grace"
+                    warnings.append("derivatives_risk_snapshot_missing_grace_active")
+                elif risk_snapshot_missing_seconds < float(self.settings.derivatives_risk_snapshot_auto_halt_after_seconds):
+                    risk_snapshot_stage = "only_reduce"
+                    only_reduce_reasons.append("derivatives_risk_snapshot_missing_requires_only_reduce")
+                else:
+                    risk_snapshot_stage = "auto_halt"
+                    auto_halt_reasons.append("derivatives_risk_snapshot_missing_auto_halt")
+            else:
+                self.risk_snapshot_missing_started_at = None
+                self.risk_snapshot_missing_count = 0
         else:
+            self.last_risk_snapshot_seen_at = getattr(snapshot, "fetched_at", None) or utc_now()
+            self.risk_snapshot_missing_started_at = None
+            self.risk_snapshot_missing_count = 0
             if current_margin_usage >= only_reduce_threshold - self._EPSILON:
                 only_reduce_reasons.append("derivatives_margin_usage_requires_only_reduce")
             if current_margin_usage >= auto_halt_margin_threshold - self._EPSILON:
@@ -97,15 +123,19 @@ class DerivativesLiveGuardService:
 
         if auto_halt_required:
             status = "critical"
-            summary = "当前保证金缓冲或强平距离已经进入自动停机区间，系统必须保持暂停。"
+            summary = "当前保证金缓冲、强平距离或风险快照状态已经进入自动停机区间，系统必须保持暂停。"
             detail = " / ".join(self._reason_copy(code) for code in auto_halt_reasons)
         elif only_reduce_required:
             status = "warning"
-            summary = "当前保证金缓冲偏紧，系统只允许继续减仓或平仓。"
+            summary = "当前保证金缓冲偏紧，或合约风险快照持续缺失，系统只允许继续减仓或平仓。"
             detail = " / ".join(self._reason_copy(code) for code in only_reduce_reasons)
+        elif risk_snapshot_stage == "grace":
+            status = "degraded"
+            summary = "当前合约风险快照短时缺失，系统先自动收缩风险预算并降低执行侵略性。"
+            detail = "如果风险快照持续缺失，系统会升级到只减仓，再升级到自动停机。"
         else:
             status = "healthy"
-            summary = "当前合约保证金缓冲和强平距离都还在自动保护阈值之外。"
+            summary = "当前合约保证金缓冲、风险快照和强平距离都仍在自动保护阈值之外。"
             detail = warnings[0] if warnings else "derivatives_runtime_guard_healthy"
 
         payload = self._base_snapshot(
@@ -124,18 +154,30 @@ class DerivativesLiveGuardService:
             auto_halt_required=auto_halt_required,
             auto_halt_reasons=list(dict.fromkeys(auto_halt_reasons)),
             warnings=warnings,
+            risk_snapshot_available=risk_snapshot_available,
+            risk_snapshot_stage=risk_snapshot_stage,
+            risk_snapshot_missing_seconds=risk_snapshot_missing_seconds,
+            risk_snapshot_missing_count=self.risk_snapshot_missing_count,
+            last_risk_snapshot_seen_at=self.last_risk_snapshot_seen_at,
             thresholds={
                 "only_reduce_margin_usage_fraction": only_reduce_threshold,
                 "auto_halt_margin_usage_fraction": auto_halt_margin_threshold,
                 "only_reduce_liquidation_gap_fraction": only_reduce_gap_threshold,
                 "auto_halt_liquidation_gap_fraction": auto_halt_gap_threshold,
+                "risk_snapshot_grace_seconds": float(self.settings.derivatives_risk_snapshot_grace_seconds),
+                "risk_snapshot_auto_halt_after_seconds": float(
+                    self.settings.derivatives_risk_snapshot_auto_halt_after_seconds
+                ),
             },
         )
         if auto_halt_required:
             payload["halted"] = True
             self._trigger_halt(payload)
         else:
-            payload["halted"] = self.kill_switch.halted and self.kill_switch.status().get("reason") == "derivatives_live_risk_auto_halt"
+            payload["halted"] = (
+                self.kill_switch.halted
+                and self.kill_switch.status().get("reason") == "derivatives_live_risk_auto_halt"
+            )
         self.last_snapshot = payload
         return dict(payload)
 
@@ -166,6 +208,11 @@ class DerivativesLiveGuardService:
         auto_halt_reasons: list[str] | None = None,
         warnings: list[str] | None = None,
         thresholds: dict[str, Any] | None = None,
+        risk_snapshot_available: bool = True,
+        risk_snapshot_stage: str = "healthy",
+        risk_snapshot_missing_seconds: float | None = None,
+        risk_snapshot_missing_count: int = 0,
+        last_risk_snapshot_seen_at: Any = None,
     ) -> dict[str, Any]:
         return {
             "enabled": bool(self.settings.derivatives_runtime_guard_enabled),
@@ -184,6 +231,11 @@ class DerivativesLiveGuardService:
             "auto_halt_required": auto_halt_required,
             "auto_halt_reasons": auto_halt_reasons or [],
             "warnings": warnings or [],
+            "risk_snapshot_available": risk_snapshot_available,
+            "risk_snapshot_stage": risk_snapshot_stage,
+            "risk_snapshot_missing_seconds": risk_snapshot_missing_seconds,
+            "risk_snapshot_missing_count": risk_snapshot_missing_count,
+            "last_risk_snapshot_seen_at": last_risk_snapshot_seen_at,
             "thresholds": thresholds or {},
             "halted": self.kill_switch.halted,
             "kill_switch_reason": self.kill_switch.status().get("reason"),
@@ -293,6 +345,8 @@ class DerivativesLiveGuardService:
                             else str(snapshot["nearest_liquidation_gap_ratio"])
                         ),
                         "closest_position": snapshot.get("closest_position"),
+                        "risk_snapshot_stage": snapshot.get("risk_snapshot_stage"),
+                        "risk_snapshot_missing_seconds": snapshot.get("risk_snapshot_missing_seconds"),
                     },
                 ),
                 source_component="derivatives_live_guard",
@@ -304,9 +358,11 @@ class DerivativesLiveGuardService:
         messages = {
             "derivatives_margin_usage_requires_only_reduce": "当前保证金占用已经进入 only-reduce 区间",
             "derivatives_liquidation_gap_requires_only_reduce": "当前最近仓位已经进入强平缓冲区",
-            "derivatives_risk_snapshot_missing_requires_only_reduce": "当前缺少合约风险快照，只允许继续减仓",
+            "derivatives_risk_snapshot_missing_requires_only_reduce": "当前缺少合约风险快照，系统只允许继续减仓",
+            "derivatives_risk_snapshot_missing_auto_halt": "合约风险快照持续缺失时间过长，系统已经升级为自动停机",
             "derivatives_margin_buffer_auto_halt": "当前保证金占用已经进入自动停机阈值",
-            "derivatives_liquidation_proximity_auto_halt": "当前最近仓位距离强平过近，已进入自动停机阈值",
+            "derivatives_liquidation_proximity_auto_halt": "当前最近仓位距离强平过近，已经进入自动停机阈值",
+            "derivatives_risk_snapshot_missing_grace_active": "合约风险快照短时缺失，系统先进入平滑降级观察期",
         }
         return messages.get(code, code)
 

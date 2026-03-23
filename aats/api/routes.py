@@ -725,6 +725,14 @@ async def guarded_live_run_packet(request: Request) -> dict[str, Any]:
     return _query(request).guarded_live_run_packet()
 
 
+@router.get("/reports/strategy-attribution")
+async def strategy_attribution_report(
+    request: Request,
+    limit: int = Query(default=200, ge=1, le=1000),
+) -> dict[str, Any]:
+    return _query(request).strategy_attribution_report(limit=limit)
+
+
 @router.get("/reports/trial-review-history")
 async def trial_review_history(
     request: Request,

@@ -259,6 +259,8 @@ class DecisionOutcome(SchemaBase):
     risk_capped: bool = False
     risk_capped_reasons: list[str] = Field(default_factory=list)
     risk_capped_target_qty: Decimal | None = None
+    position_management_reason_codes: list[str] = Field(default_factory=list)
+    exit_attribution: str | None = None
     active_profile_id: str | None = None
     profile_control_source: ProfileControlSource | None = None
     ai_fallback_used: bool = False

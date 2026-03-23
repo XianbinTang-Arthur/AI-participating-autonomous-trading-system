@@ -47,6 +47,7 @@ def resolve_risk_budget_state(
     reconciliation_clean: bool = True,
     only_reduce_required: bool = False,
     auto_halt_required: bool = False,
+    risk_snapshot_stage: str | None = None,
     trial_guard_breached: bool = False,
     current_margin_usage_fraction: Any | None = None,
     projected_margin_usage_fraction: Any | None = None,
@@ -67,6 +68,19 @@ def resolve_risk_budget_state(
     elif only_reduce_required:
         multiplier = min(multiplier, max(floor, Decimal("0.45")))
         reasons.append("only_reduce_required")
+    elif str(risk_snapshot_stage or "").lower() == "grace":
+        multiplier = min(
+            multiplier,
+            max(
+                floor,
+                _clamp_decimal(
+                    _to_decimal(settings.strategy_risk_snapshot_missing_budget_multiplier) or Decimal("0.70"),
+                    Decimal("0.10"),
+                    Decimal("1.00"),
+                ),
+            ),
+        )
+        reasons.append("risk_snapshot_missing_grace_active")
 
     if trial_guard_breached:
         multiplier = min(multiplier, max(floor, Decimal("0.50")))
@@ -139,6 +153,7 @@ def resolve_execution_aggressiveness_state(
     reconciliation_clean: bool = True,
     only_reduce_required: bool = False,
     auto_halt_required: bool = False,
+    risk_snapshot_stage: str | None = None,
     trial_guard_breached: bool = False,
     current_margin_usage_fraction: Any | None = None,
     projected_margin_usage_fraction: Any | None = None,
@@ -159,6 +174,20 @@ def resolve_execution_aggressiveness_state(
     elif only_reduce_required:
         multiplier = min(multiplier, max(floor, Decimal("0.35")))
         reasons.append("only_reduce_required")
+    elif str(risk_snapshot_stage or "").lower() == "grace":
+        multiplier = min(
+            multiplier,
+            max(
+                floor,
+                _clamp_decimal(
+                    _to_decimal(settings.strategy_risk_snapshot_missing_execution_aggressiveness_multiplier)
+                    or Decimal("0.55"),
+                    Decimal("0.10"),
+                    Decimal("1.00"),
+                ),
+            ),
+        )
+        reasons.append("risk_snapshot_missing_grace_active")
 
     if trial_guard_breached:
         multiplier = min(multiplier, max(floor, Decimal("0.40")))
@@ -214,7 +243,12 @@ def resolve_execution_aggressiveness_state(
         "status": status,
         "reasons": reasons,
         "floor": float(floor),
-        "prefer_passive_execution": bool(multiplier <= Decimal("0.60") or only_reduce_required or auto_halt_required),
+        "prefer_passive_execution": bool(
+            multiplier <= Decimal("0.60")
+            or only_reduce_required
+            or auto_halt_required
+            or str(risk_snapshot_stage or "").lower() == "grace"
+        ),
     }
 
 

@@ -329,18 +329,24 @@ class TargetPositionEngine:
         if mode == "ai_decision_maker":
             return self._target_quantity_ai_decision_maker(
                 context=context,
+                baseline=baseline,
+                ai_assessment=ai_assessment,
                 ai_decision_intent=ai_decision_intent,
                 product_type=product_type,
                 baseline_fallback_qty=baseline_fallback_qty,
                 ai_decision_authorized=ai_decision_authorized,
+                guardrail_flags=guardrail_flags,
             )
         if mode == "ai_decision_maker_with_profile_control":
             return self._target_quantity_ai_decision_maker(
                 context=context,
+                baseline=baseline,
+                ai_assessment=ai_assessment,
                 ai_decision_intent=ai_decision_intent,
                 product_type=product_type,
                 baseline_fallback_qty=baseline_fallback_qty,
                 ai_decision_authorized=ai_decision_authorized,
+                guardrail_flags=guardrail_flags,
             )
         return self._apply_position_management(
             current_position_qty=context.current_position_qty,
@@ -367,9 +373,17 @@ class TargetPositionEngine:
         ):
             guardrail_flags.append("flat_signal_hold")
             return context.current_position_qty
+        managed_target_qty = self._manage_existing_position(
+            context=context,
+            baseline=baseline,
+            ai_assessment=ai_assessment,
+            desired_target_qty=baseline_qty,
+            product_type=product_type,
+            guardrail_flags=guardrail_flags,
+        )
         return self._apply_position_management(
             current_position_qty=context.current_position_qty,
-            desired_target_qty=baseline_qty,
+            desired_target_qty=managed_target_qty,
             product_type=product_type,
         )
 
@@ -401,9 +415,17 @@ class TargetPositionEngine:
         ):
             guardrail_flags.append("flat_signal_hold")
             return context.current_position_qty
+        managed_target_qty = self._manage_existing_position(
+            context=context,
+            baseline=baseline,
+            ai_assessment=ai_assessment,
+            desired_target_qty=baseline_qty,
+            product_type=product_type,
+            guardrail_flags=guardrail_flags,
+        )
         return self._apply_position_management(
             current_position_qty=context.current_position_qty,
-            desired_target_qty=baseline_qty,
+            desired_target_qty=managed_target_qty,
             product_type=product_type,
         )
 
@@ -434,24 +456,43 @@ class TargetPositionEngine:
         self,
         *,
         context: DecisionContext,
+        baseline: BaselineAssessment,
+        ai_assessment: AIMarketAssessment | None,
         ai_decision_intent: AIDecisionIntent | None,
         product_type: str,
         baseline_fallback_qty: Decimal,
         ai_decision_authorized: bool,
+        guardrail_flags: list[str],
     ) -> Decimal:
         if ai_decision_intent is not None and ai_decision_authorized:
             desired_target_qty = self._desired_target_qty_from_ai_decision_intent(
                 context=context,
                 ai_decision_intent=ai_decision_intent,
             )
-            return self._apply_position_management(
-                current_position_qty=context.current_position_qty,
+            managed_target_qty = self._manage_existing_position(
+                context=context,
+                baseline=baseline,
+                ai_assessment=ai_assessment,
                 desired_target_qty=desired_target_qty,
                 product_type=product_type,
+                guardrail_flags=guardrail_flags,
             )
+            return self._apply_position_management(
+                current_position_qty=context.current_position_qty,
+                desired_target_qty=managed_target_qty,
+                product_type=product_type,
+            )
+        managed_target_qty = self._manage_existing_position(
+            context=context,
+            baseline=baseline,
+            ai_assessment=ai_assessment,
+            desired_target_qty=baseline_fallback_qty,
+            product_type=product_type,
+            guardrail_flags=guardrail_flags,
+        )
         return self._apply_position_management(
             current_position_qty=context.current_position_qty,
-            desired_target_qty=baseline_fallback_qty,
+            desired_target_qty=managed_target_qty,
             product_type=product_type,
         )
 
@@ -470,9 +511,260 @@ class TargetPositionEngine:
     def _baseline_target_qty(self, *, baseline: BaselineAssessment, product_type: str) -> Decimal:
         scale = to_decimal(self._clamp(baseline.suggested_position_scale, 0.0, 1.0))
         target_qty = self._qty_from_bias(baseline.direction_bias, product_type=product_type) * scale
-        if baseline.volatility_target_scale < 0.55:
-            target_qty *= to_decimal(baseline.volatility_target_scale)
+        target_qty *= self._volatility_target_multiplier(baseline)
         return target_qty
+
+    def _volatility_target_multiplier(self, baseline: BaselineAssessment) -> Decimal:
+        floor = to_decimal(self.settings.strategy_volatility_target_scale_floor)
+        ceiling = to_decimal(self.settings.strategy_volatility_target_scale_ceiling)
+        raw_value = to_decimal(baseline.volatility_target_scale)
+        return min(max(raw_value, floor), ceiling)
+
+    def _manage_existing_position(
+        self,
+        *,
+        context: DecisionContext,
+        baseline: BaselineAssessment,
+        ai_assessment: AIMarketAssessment | None,
+        desired_target_qty: Decimal,
+        product_type: str,
+        guardrail_flags: list[str],
+    ) -> Decimal:
+        current_position_qty = context.current_position_qty
+        if abs(current_position_qty) < EPSILON_DECIMAL_12:
+            return desired_target_qty
+
+        explicit_flat_exit_required = self._explicit_flat_exit_required(
+            current_position_qty=current_position_qty,
+            baseline=baseline,
+            ai_assessment=ai_assessment,
+        )
+        if self._emergency_protective_exit_required(
+            current_position_qty=current_position_qty,
+            desired_target_qty=desired_target_qty,
+            baseline=baseline,
+            ai_assessment=ai_assessment,
+        ):
+            guardrail_flags.append("emergency_protective_exit")
+            return Decimal("0")
+
+        if self._alpha_decay_exit_required(
+            current_position_qty=current_position_qty,
+            baseline=baseline,
+            ai_assessment=ai_assessment,
+        ):
+            reduced_target = self._apply_position_management_hold_gate(
+                context=context,
+                baseline=baseline,
+                ai_assessment=ai_assessment,
+                desired_target_qty=Decimal("0"),
+                bypass_min_hold=explicit_flat_exit_required,
+                guardrail_flags=guardrail_flags,
+            )
+            if abs(reduced_target - current_position_qty) > EPSILON_DECIMAL_12:
+                guardrail_flags.append("alpha_decay_exit")
+            return reduced_target
+
+        alpha_decay_target = self._alpha_decay_reduce_target_qty(
+            current_position_qty=current_position_qty,
+            desired_target_qty=desired_target_qty,
+            baseline=baseline,
+        )
+        if alpha_decay_target is not None:
+            managed_target = self._apply_position_management_hold_gate(
+                context=context,
+                baseline=baseline,
+                ai_assessment=ai_assessment,
+                desired_target_qty=alpha_decay_target,
+                bypass_min_hold=False,
+                guardrail_flags=guardrail_flags,
+            )
+            if abs(managed_target) + EPSILON_DECIMAL_12 < abs(current_position_qty):
+                guardrail_flags.append("alpha_decay_reduce")
+                return managed_target
+
+        risk_contracted_target = self._risk_contracted_target_qty(
+            current_position_qty=current_position_qty,
+            desired_target_qty=desired_target_qty,
+            baseline=baseline,
+        )
+        if risk_contracted_target is not None:
+            managed_target = self._apply_position_management_hold_gate(
+                context=context,
+                baseline=baseline,
+                ai_assessment=ai_assessment,
+                desired_target_qty=risk_contracted_target,
+                bypass_min_hold=False,
+                guardrail_flags=guardrail_flags,
+            )
+            if abs(managed_target) + EPSILON_DECIMAL_12 < abs(current_position_qty):
+                guardrail_flags.append("risk_contraction_exit")
+                return managed_target
+
+        return desired_target_qty
+
+    def _apply_position_management_hold_gate(
+        self,
+        *,
+        context: DecisionContext,
+        baseline: BaselineAssessment,
+        ai_assessment: AIMarketAssessment | None,
+        desired_target_qty: Decimal,
+        bypass_min_hold: bool,
+        guardrail_flags: list[str],
+    ) -> Decimal:
+        if bypass_min_hold:
+            return desired_target_qty
+        if not self._min_hold_blocks_adjustment(
+            context=context,
+            current_position_qty=context.current_position_qty,
+            desired_target_qty=desired_target_qty,
+            baseline=baseline,
+            ai_assessment=ai_assessment,
+        ):
+            return desired_target_qty
+        guardrail_flags.append("min_hold_blocks_exit")
+        return context.current_position_qty
+
+    def _position_adverse_factors(
+        self,
+        *,
+        current_position_qty: Decimal,
+        baseline: BaselineAssessment,
+        ai_assessment: AIMarketAssessment | None,
+    ) -> dict[str, object]:
+        side_sign = self._sign(current_position_qty)
+        microstructure = to_decimal(baseline.factor_scores.get("microstructure_alpha", 0.0))
+        momentum_alpha = to_decimal(baseline.factor_scores.get("momentum_alpha", 0.0))
+        trend_alpha = to_decimal(baseline.factor_scores.get("trend_alpha", 0.0))
+        ai_edge = Decimal("0") if ai_assessment is None else to_decimal(ai_assessment.directional_edge)
+        adverse_microstructure = (
+            side_sign * microstructure
+        ) <= -abs(to_decimal(self.settings.strategy_flat_exit_microstructure_threshold))
+        adverse_momentum = (
+            side_sign * momentum_alpha
+        ) <= -abs(to_decimal(self.settings.strategy_flat_exit_factor_threshold))
+        adverse_trend = (
+            side_sign * trend_alpha
+        ) <= -abs(to_decimal(self.settings.strategy_flat_exit_factor_threshold))
+        adverse_ai = (
+            side_sign * ai_edge
+        ) <= -abs(to_decimal(self.settings.strategy_flat_exit_ai_edge_threshold))
+        return {
+            "adverse_microstructure": adverse_microstructure,
+            "adverse_momentum": adverse_momentum,
+            "adverse_trend": adverse_trend,
+            "adverse_ai": adverse_ai,
+            "adverse_count": sum((adverse_microstructure, adverse_momentum, adverse_trend, adverse_ai)),
+        }
+
+    def _emergency_protective_exit_required(
+        self,
+        *,
+        current_position_qty: Decimal,
+        desired_target_qty: Decimal,
+        baseline: BaselineAssessment,
+        ai_assessment: AIMarketAssessment | None,
+    ) -> bool:
+        factors = self._position_adverse_factors(
+            current_position_qty=current_position_qty,
+            baseline=baseline,
+            ai_assessment=ai_assessment,
+        )
+        adverse_count = int(factors["adverse_count"])
+        desired_side = self._exposure_side(desired_target_qty)
+        current_side = self._exposure_side(current_position_qty)
+        if adverse_count >= 3:
+            return True
+        if desired_side not in {"flat", current_side} and adverse_count >= 2:
+            return True
+        if baseline.volatility_state == "high" and baseline.regime in {"breakout", "trend"} and adverse_count >= 2:
+            return True
+        return False
+
+    def _alpha_decay_exit_required(
+        self,
+        *,
+        current_position_qty: Decimal,
+        baseline: BaselineAssessment,
+        ai_assessment: AIMarketAssessment | None,
+    ) -> bool:
+        if self._exposure_side(current_position_qty) == "flat":
+            return False
+        alpha = abs(to_decimal(baseline.composite_alpha_score))
+        if baseline.direction_bias != "flat":
+            return False
+        if alpha <= to_decimal(self.settings.strategy_position_alpha_decay_exit_alpha):
+            return True
+        return self._explicit_flat_exit_required(
+            current_position_qty=current_position_qty,
+            baseline=baseline,
+            ai_assessment=ai_assessment,
+        )
+
+    def _alpha_decay_reduce_target_qty(
+        self,
+        *,
+        current_position_qty: Decimal,
+        desired_target_qty: Decimal,
+        baseline: BaselineAssessment,
+    ) -> Decimal | None:
+        current_side = self._exposure_side(current_position_qty)
+        desired_side = self._exposure_side(desired_target_qty)
+        if current_side == "flat" or desired_side not in {current_side, "flat"}:
+            return None
+        alpha = abs(to_decimal(baseline.composite_alpha_score))
+        confidence = to_decimal(baseline.confidence)
+        alpha_threshold = to_decimal(self.settings.strategy_position_alpha_decay_reduce_alpha)
+        confidence_threshold = to_decimal(self.settings.strategy_position_alpha_decay_reduce_confidence)
+        if (
+            alpha + EPSILON_DECIMAL_12 >= alpha_threshold
+            and confidence + EPSILON_DECIMAL_12 >= confidence_threshold
+        ):
+            return None
+        reduce_fraction = Decimal("0.55") if baseline.direction_bias == "flat" else Decimal("0.72")
+        current_abs = abs(current_position_qty)
+        desired_abs = abs(desired_target_qty) if desired_side == current_side else current_abs
+        reduced_abs = min(current_abs * reduce_fraction, desired_abs)
+        if reduced_abs + EPSILON_DECIMAL_12 >= current_abs:
+            return None
+        return self._sign(current_position_qty) * reduced_abs
+
+    def _risk_contracted_target_qty(
+        self,
+        *,
+        current_position_qty: Decimal,
+        desired_target_qty: Decimal,
+        baseline: BaselineAssessment,
+    ) -> Decimal | None:
+        current_side = self._exposure_side(current_position_qty)
+        desired_side = self._exposure_side(desired_target_qty)
+        if current_side == "flat" or desired_side != current_side:
+            return None
+        contraction_fraction = Decimal("1")
+        if baseline.volatility_state == "high":
+            contraction_fraction = min(
+                contraction_fraction,
+                to_decimal(self.settings.strategy_position_high_volatility_reduce_fraction),
+            )
+        if baseline.regime == "range":
+            contraction_fraction = min(
+                contraction_fraction,
+                to_decimal(self.settings.strategy_position_range_reduce_fraction),
+            )
+        if baseline.regime == "uncertain":
+            contraction_fraction = min(
+                contraction_fraction,
+                to_decimal(self.settings.strategy_position_uncertain_reduce_fraction),
+            )
+        contraction_fraction = min(contraction_fraction, self._volatility_target_multiplier(baseline))
+        if contraction_fraction + EPSILON_DECIMAL_12 >= Decimal("1"):
+            return None
+        contracted_abs = abs(current_position_qty) * contraction_fraction
+        desired_abs = abs(desired_target_qty)
+        if contracted_abs + EPSILON_DECIMAL_12 >= desired_abs:
+            return None
+        return self._sign(current_position_qty) * contracted_abs
 
     def _apply_entry_edge_gate(
         self,
@@ -745,19 +1037,15 @@ class TargetPositionEngine:
         baseline: BaselineAssessment,
         ai_assessment: AIMarketAssessment | None,
     ) -> bool:
-        side_sign = self._sign(current_position_qty)
-        microstructure = to_decimal(baseline.factor_scores.get("microstructure_alpha", 0.0))
-        momentum_alpha = to_decimal(baseline.factor_scores.get("momentum_alpha", 0.0))
-        trend_alpha = to_decimal(baseline.factor_scores.get("trend_alpha", 0.0))
-        ai_edge = Decimal("0") if ai_assessment is None else to_decimal(ai_assessment.directional_edge)
-        adverse_microstructure = (side_sign * microstructure) <= -abs(to_decimal(self.settings.strategy_flat_exit_microstructure_threshold))
-        adverse_momentum = (side_sign * momentum_alpha) <= -abs(to_decimal(self.settings.strategy_flat_exit_factor_threshold))
-        adverse_trend = (side_sign * trend_alpha) <= -abs(to_decimal(self.settings.strategy_flat_exit_factor_threshold))
-        adverse_ai = (side_sign * ai_edge) <= -abs(to_decimal(self.settings.strategy_flat_exit_ai_edge_threshold))
-        adverse_count = sum((adverse_microstructure, adverse_momentum, adverse_trend, adverse_ai))
+        factors = self._position_adverse_factors(
+            current_position_qty=current_position_qty,
+            baseline=baseline,
+            ai_assessment=ai_assessment,
+        )
+        adverse_count = int(factors["adverse_count"])
         if adverse_count >= 2:
             return True
-        if adverse_microstructure and adverse_ai:
+        if bool(factors["adverse_microstructure"]) and bool(factors["adverse_ai"]):
             return True
         return False
 
@@ -1071,6 +1359,20 @@ class TargetPositionEngine:
             "reverse_to_short": "reverse",
         }
         blocked_reasons = list(dict.fromkeys([*guardrail_flags, *ai_decision_blockers]))
+        position_management_reason_codes = [
+            code
+            for code in ("alpha_decay_exit", "alpha_decay_reduce", "risk_contraction_exit", "emergency_protective_exit")
+            if code in guardrail_flags
+        ]
+        exit_attribution = None
+        if "emergency_protective_exit" in guardrail_flags:
+            exit_attribution = "emergency_protective_exit"
+        elif "alpha_decay_exit" in guardrail_flags:
+            exit_attribution = "alpha_decay_exit"
+        elif "alpha_decay_reduce" in guardrail_flags:
+            exit_attribution = "alpha_decay_reduce"
+        elif "risk_contraction_exit" in guardrail_flags:
+            exit_attribution = "risk_contraction_exit"
         return DecisionOutcome(
             decision_id=context.decision_id,
             symbol=context.symbol,
@@ -1106,6 +1408,8 @@ class TargetPositionEngine:
             profile_control_source=profile_control_source,
             ai_fallback_used=False if ai_decision_intent is None else ai_decision_intent.fallback_used,
             ai_degraded=False if ai_decision_intent is None else ai_decision_intent.degraded,
+            position_management_reason_codes=position_management_reason_codes,
+            exit_attribution=exit_attribution,
         )
 
     @staticmethod

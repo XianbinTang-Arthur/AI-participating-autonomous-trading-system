@@ -162,7 +162,14 @@ class RiskEngine:
             capped_target_notional=capped_target_notional,
             projected_margin_usage=projected_margin_usage,
         )
-        halt_required = any(reason.endswith("_halt_required") for reason in rejection_reasons)
+        halt_required = bool(
+            any(
+                reason.endswith("_halt_required") or reason.endswith("_auto_halt")
+                for reason in rejection_reasons
+            )
+            or adaptive_state["risk_budget"].get("auto_halt_required")
+            or adaptive_state["execution_aggressiveness"].get("auto_halt_required")
+        )
         return RiskDecision(
             decision_id=target.decision_id,
             approved=approved,
@@ -626,6 +633,7 @@ class RiskEngine:
             reconciliation_clean=reconciliation_clean_from_safety_state(safety_state),
             only_reduce_required=bool(runtime_guard.get("only_reduce_required")),
             auto_halt_required=bool(runtime_guard.get("auto_halt_required")),
+            risk_snapshot_stage=runtime_guard.get("risk_snapshot_stage"),
             trial_guard_breached=str(trial_guard.get("status") or "").lower() == "breached",
             current_margin_usage_fraction=runtime_guard.get("current_initial_margin_usage_fraction"),
             projected_margin_usage_fraction=runtime_guard.get("current_initial_margin_usage_fraction"),
@@ -641,6 +649,7 @@ class RiskEngine:
             reconciliation_clean=reconciliation_clean_from_safety_state(safety_state),
             only_reduce_required=bool(runtime_guard.get("only_reduce_required")),
             auto_halt_required=bool(runtime_guard.get("auto_halt_required")),
+            risk_snapshot_stage=runtime_guard.get("risk_snapshot_stage"),
             trial_guard_breached=str(trial_guard.get("status") or "").lower() == "breached",
             current_margin_usage_fraction=runtime_guard.get("current_initial_margin_usage_fraction"),
             projected_margin_usage_fraction=runtime_guard.get("current_initial_margin_usage_fraction"),
@@ -652,12 +661,16 @@ class RiskEngine:
                 "source": "risk_engine_snapshot",
                 "runtime_guard_status": runtime_guard.get("status"),
                 "trial_guard_status": trial_guard.get("status"),
+                "risk_snapshot_stage": runtime_guard.get("risk_snapshot_stage"),
+                "auto_halt_required": bool(runtime_guard.get("auto_halt_required")),
             },
             "execution_aggressiveness": {
                 **execution_aggressiveness,
                 "source": "risk_engine_snapshot",
                 "runtime_guard_status": runtime_guard.get("status"),
                 "trial_guard_status": trial_guard.get("status"),
+                "risk_snapshot_stage": runtime_guard.get("risk_snapshot_stage"),
+                "auto_halt_required": bool(runtime_guard.get("auto_halt_required")),
             },
         }
 

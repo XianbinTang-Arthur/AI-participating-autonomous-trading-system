@@ -19,7 +19,14 @@ from aats.schemas.audit import DecisionAuditRecord
 from aats.schemas.ai_brief import AIDecisionBrief
 from aats.schemas.ai_shadow import AIDegradationEvent
 from aats.schemas.common import utc_now
-from aats.schemas.decision import AIMarketAssessment, ProfileControlDecision
+from aats.schemas.decision import (
+    AIMarketAssessment,
+    BaselineAssessment,
+    DecisionContext,
+    DecisionOutcome,
+    PositionTarget,
+    ProfileControlDecision,
+)
 from aats.schemas.execution import FillEvent, OrderIntent, OrderState
 from aats.schemas.exchange import (
     AccountBaselineSnapshot,
@@ -537,27 +544,6 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             FakeOperatorAccountService.PRIVATE_ORDER_FILLS = None
 
     async def test_guarded_live_preflight_and_run_packet_surface_structural_and_margin_failures(self) -> None:
-        settings = AATSSettings.model_validate(
-            {
-                "config_profile": "local_demo",
-                "mode": "guarded_live",
-                "market_data_backend": "okx",
-                "execution_backend": "okx",
-                "account_backend": "okx",
-                "account_read_enabled": True,
-                "trading_product_type": "derivatives",
-                "margin_mode": "cross",
-                "default_symbol": "BTC-USDT-SWAP",
-                "allowed_symbols": ("BTC-USDT-SWAP",),
-                "storage_mode": "memory",
-                "event_persistence_mode": "strict",
-                "live_submit_enabled": True,
-                "guarded_execution_dry_run": False,
-                "okx_simulated_trading": False,
-                "operator_auth_enabled": False,
-                "operator_unsafe_write_without_auth": True,
-            }
-        )
         FakeOperatorAccountService.SNAPSHOT = ExchangeAccountSnapshot(
             account_source="okx",
             fetched_at=utc_now(),
@@ -627,39 +613,65 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             ),
         )
         try:
-            with patch("aats.bootstrap.config.OKXAccountService", FakeOperatorAccountService):
-                runtime = await build_runtime(settings)
-            runtime.portfolio_service.state.load_exchange_snapshot(FakeOperatorAccountService.SNAPSHOT)
-            await runtime.portfolio_service.bootstrap_snapshot(snapshot_origin="operator_rebaseline")
-            app = self._app(runtime)
+            with temporary_postgres_url() as (database_url, _admin_engine, _schema_name):
+                settings = AATSSettings.model_validate(
+                    {
+                        "config_profile": "local_demo",
+                        "mode": "guarded_live",
+                        "market_data_backend": "okx",
+                        "execution_backend": "okx",
+                        "account_backend": "okx",
+                        "account_read_enabled": True,
+                        "trading_product_type": "derivatives",
+                        "margin_mode": "cross",
+                        "default_symbol": "BTC-USDT-SWAP",
+                        "allowed_symbols": ("BTC-USDT-SWAP",),
+                        "storage_mode": "postgres",
+                        "database_url": database_url,
+                        "database_auto_create_schema": True,
+                        "event_persistence_mode": "strict",
+                        "live_submit_enabled": True,
+                        "guarded_execution_dry_run": False,
+                        "okx_simulated_trading": False,
+                        "operator_auth_enabled": False,
+                        "operator_unsafe_write_without_auth": True,
+                    }
+                )
+                with patch("aats.bootstrap.config.OKXAccountService", FakeOperatorAccountService):
+                    runtime = await build_runtime(settings)
+                runtime.portfolio_service.state.load_exchange_snapshot(FakeOperatorAccountService.SNAPSHOT)
+                await runtime.portfolio_service.bootstrap_snapshot(snapshot_origin="operator_rebaseline")
+                app = self._app(runtime)
 
-            with TestClient(app) as client:
-                preflight = client.get("/system/guarded-live-preflight")
-                run_packet = client.get("/reports/guarded-live-run-packet")
-                health = client.get("/system/health")
-                runtime_response = client.get("/system/runtime")
+                with TestClient(app) as client:
+                    preflight = client.get("/system/guarded-live-preflight")
+                    run_packet = client.get("/reports/guarded-live-run-packet")
+                    health = client.get("/system/health")
+                    runtime_response = client.get("/system/runtime")
 
-            self.assertEqual(preflight.status_code, 200)
-            self.assertEqual(run_packet.status_code, 200)
-            self.assertEqual(health.status_code, 200)
-            self.assertEqual(runtime_response.status_code, 200)
+                self.assertEqual(preflight.status_code, 200)
+                self.assertEqual(run_packet.status_code, 200)
+                self.assertEqual(health.status_code, 200)
+                self.assertEqual(runtime_response.status_code, 200)
 
-            preflight_payload = preflight.json()
-            run_packet_payload = run_packet.json()
-            health_payload = health.json()
-            runtime_payload = runtime_response.json()
+                preflight_payload = preflight.json()
+                run_packet_payload = run_packet.json()
+                health_payload = health.json()
+                runtime_payload = runtime_response.json()
 
-            self.assertEqual(preflight_payload["status"], "fail")
-            self.assertFalse(preflight_payload["launch_ready"])
-            self.assertTrue(any(item["check_id"] == "real_money_route_ready" and item["status"] == "fail" for item in preflight_payload["checks"]))
-            self.assertTrue(any(item["check_id"] == "margin_buffer_safe" and item["status"] == "fail" for item in preflight_payload["checks"]))
-            self.assertEqual(run_packet_payload["status"], "critical")
-            self.assertTrue(run_packet_payload["derivatives_live_guard"]["auto_halt_required"])
-            self.assertIn("derivatives_liquidation_proximity_auto_halt", run_packet_payload["derivatives_live_guard"]["auto_halt_reasons"])
-            self.assertIn("derivatives_liquidation_proximity_auto_halt", [item["blocker"] for item in health_payload["blockers"]])
-            self.assertEqual(health_payload["subsystems"]["derivatives_live_guard"]["status"], "critical")
-            self.assertEqual(runtime_payload["guarded_live_preflight"]["status"], "fail")
-            self.assertEqual(runtime_payload["guarded_live_run_packet_summary"]["status"], "critical")
+                self.assertEqual(preflight_payload["status"], "fail")
+                self.assertFalse(preflight_payload["launch_ready"])
+                self.assertTrue(any(item["check_id"] == "real_money_route_ready" and item["status"] == "fail" for item in preflight_payload["checks"]))
+                self.assertTrue(any(item["check_id"] == "margin_buffer_safe" and item["status"] == "fail" for item in preflight_payload["checks"]))
+                self.assertEqual(run_packet_payload["status"], "critical")
+                self.assertTrue(run_packet_payload["derivatives_live_guard"]["auto_halt_required"])
+                self.assertIn("derivatives_liquidation_proximity_auto_halt", run_packet_payload["derivatives_live_guard"]["auto_halt_reasons"])
+                self.assertIn("derivatives_liquidation_proximity_auto_halt", [item["blocker"] for item in health_payload["blockers"]])
+                self.assertEqual(health_payload["subsystems"]["derivatives_live_guard"]["status"], "critical")
+                self.assertEqual(runtime_payload["guarded_live_preflight"]["status"], "fail")
+                self.assertEqual(runtime_payload["guarded_live_run_packet_summary"]["status"], "critical")
+                if runtime.database_runtime is not None:
+                    runtime.database_runtime.dispose()
         finally:
             FakeOperatorAccountService.SNAPSHOT = None
             FakeOperatorAccountService.PRIVATE_ORDER_ROW = None
@@ -796,6 +808,223 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["funding_fee_summary"]["net_total_by_currency"]["USDT"], "-1.25")
         self.assertTrue(any(item["event_kind"] == "funding_fee" for item in payload["recent_realized_events"]))
         self.assertEqual(payload["truth_source"], "fill_outcomes_plus_funding_fee_records")
+
+    async def test_strategy_attribution_report_groups_regime_profile_exit_and_risk_protection(self) -> None:
+        runtime = await self._runtime(
+            trading_product_type="derivatives",
+            margin_mode="cross",
+            default_symbol="BTC-USDT-SWAP",
+            allowed_symbols=("BTC-USDT-SWAP",),
+        )
+        now = utc_now()
+
+        def seed_decision(
+            *,
+            decision_id: str,
+            regime: str,
+            volatility_state: str,
+            profile_id: str,
+            exit_attribution: str,
+            risk_constraints: list[str],
+            realized_pnl: Decimal,
+        ) -> None:
+            decision_context = DecisionContext(
+                decision_id=decision_id,
+                symbol="BTC-USDT-SWAP",
+                timeframe="15m",
+                as_of_ts=now,
+                market_snapshot_ref="evt_market_seed",
+                feature_snapshot_ref="evt_feature_seed",
+                portfolio_snapshot_ref="evt_portfolio_seed",
+                health_snapshot_ref="evt_health_seed",
+                mode="guarded_live",
+                current_position_qty=Decimal("0.02"),
+                product_type="derivatives",
+                current_exposure_side="long",
+                current_target_leverage=3.0,
+            )
+            baseline = BaselineAssessment(
+                decision_id=decision_id,
+                symbol="BTC-USDT-SWAP",
+                regime=regime,
+                direction_bias="long",
+                trend_strength=0.72,
+                volatility_state=volatility_state,
+                confidence=0.81,
+                composite_alpha_score=0.26,
+                suggested_position_scale=0.8,
+                volatility_target_scale=0.84,
+                factor_scores={"momentum_alpha": 0.18, "microstructure_alpha": 0.08},
+                holding_horizon="15m",
+                invalidation_conditions=[],
+                reason_codes=[f"regime_{regime}"],
+                engine_version="test",
+            )
+            decision_outcome = DecisionOutcome(
+                decision_id=decision_id,
+                symbol="BTC-USDT-SWAP",
+                decision_source="baseline",
+                decision_authority="reference_only",
+                final_direction="long",
+                final_action="reduce",
+                final_target_qty=Decimal("0.01"),
+                baseline_reference={"regime": regime, "volatility_state": volatility_state},
+                active_profile_id=profile_id,
+                profile_control_source="system",
+                position_management_reason_codes=[exit_attribution],
+                exit_attribution=exit_attribution,
+            )
+            position_target = PositionTarget(
+                decision_id=decision_id,
+                symbol="BTC-USDT-SWAP",
+                current_position_qty=Decimal("0.02"),
+                target_position_qty=Decimal("0.01"),
+                delta_position_qty=Decimal("-0.01"),
+                current_notional=Decimal("1400"),
+                target_notional=Decimal("700"),
+                rebalance_reason="test",
+                urgency="medium",
+                max_slippage_tolerance_bps=20,
+                source_mix={"baseline": 1.0},
+                decision_expiry_ts=now + timedelta(minutes=15),
+                product_type="derivatives",
+                current_exposure_side="long",
+                target_exposure_side="long",
+                position_intent="reduce_long",
+                target_leverage=3.0,
+                margin_mode="cross",
+                guardrail_flags=[exit_attribution],
+                decision_outcome=decision_outcome,
+            )
+            risk_decision = RiskDecision(
+                decision_id=decision_id,
+                approved=True,
+                modified=bool(risk_constraints),
+                capped_target_position_qty=Decimal("0.01"),
+                capped_target_notional=Decimal("700"),
+                current_open_order_count=0,
+                risk_budget_multiplier=Decimal("0.72") if risk_constraints else Decimal("1"),
+                risk_budget_state={},
+                execution_aggressiveness_multiplier=Decimal("0.65") if risk_constraints else Decimal("1"),
+                execution_aggressiveness_state={},
+                constraints_applied=risk_constraints,
+                risk_score=0.42,
+                rejection_reasons=[],
+            )
+            decision_event = build_envelope(
+                topic=topics.DECISION_CONTEXTS,
+                key="BTC-USDT-SWAP",
+                payload_model=decision_context,
+                source_component="test",
+            )
+            baseline_event = build_envelope(
+                topic=topics.BASELINE_ASSESSMENTS,
+                key="BTC-USDT-SWAP",
+                payload_model=baseline,
+                source_component="test",
+            )
+            target_event = build_envelope(
+                topic=topics.POSITION_TARGETS,
+                key="BTC-USDT-SWAP",
+                payload_model=position_target,
+                source_component="test",
+            )
+            risk_event = build_envelope(
+                topic=topics.RISK_DECISIONS,
+                key="BTC-USDT-SWAP",
+                payload_model=risk_decision,
+                source_component="test",
+            )
+            runtime.event_store.append(decision_event)
+            runtime.event_store.append(baseline_event)
+            runtime.event_store.append(target_event)
+            runtime.event_store.append(risk_event)
+            runtime.audit_repo.upsert(
+                DecisionAuditRecord(
+                    decision_id=decision_id,
+                    decision_context_ref=decision_event.event_id,
+                    baseline_assessment_ref=baseline_event.event_id,
+                    position_target_ref=target_event.event_id,
+                    risk_decision_ref=risk_event.event_id,
+                )
+            )
+            runtime.fill_outcome_repo.save_outcome(
+                FillOutcomeRecord(
+                    fill_id=f"fill_{decision_id}",
+                    decision_id=decision_id,
+                    order_id=f"order_{decision_id}",
+                    symbol="BTC-USDT-SWAP",
+                    position_key="BTC-USDT-SWAP:long",
+                    venue="OKX",
+                    side="sell",
+                    fill_qty=Decimal("0.01"),
+                    fill_price=Decimal("70000"),
+                    fill_notional=Decimal("700"),
+                    fee_amount=Decimal("0.50"),
+                    fee_currency="USDT",
+                    liquidity_role="taker",
+                    exchange_timestamp=now,
+                    ingestion_timestamp=now,
+                    order_status_after_fill="FILLED",
+                    target_leverage=3.0,
+                    exposure_side="long",
+                    execution_action="reduce_long",
+                    position_intent="reduce_long",
+                    position_mode="net_mode",
+                    instrument_family="BTC-USDT",
+                    settle_currency="USDT",
+                    starting_position_qty=Decimal("0.02"),
+                    starting_avg_entry_price=Decimal("69000"),
+                    ending_position_qty=Decimal("0.01"),
+                    ending_avg_entry_price=Decimal("69000"),
+                    realized_pnl_delta=realized_pnl,
+                    fee_delta=Decimal("-0.50"),
+                    product_type="derivatives",
+                    margin_mode="cross",
+                    created_at=now,
+                )
+            )
+
+        seed_decision(
+            decision_id="decision_attr_trend",
+            regime="trend",
+            volatility_state="medium",
+            profile_id="trend_normal",
+            exit_attribution="alpha_decay_reduce",
+            risk_constraints=["risk_budget_multiplier_applied", "execution_aggressiveness_contracted"],
+            realized_pnl=Decimal("12"),
+        )
+        seed_decision(
+            decision_id="decision_attr_range",
+            regime="range",
+            volatility_state="high",
+            profile_id="execution_degraded_safe",
+            exit_attribution="emergency_protective_exit",
+            risk_constraints=[],
+            realized_pnl=Decimal("-3"),
+        )
+
+        app = self._app(runtime)
+        with TestClient(app) as client:
+            response = client.get("/reports/strategy-attribution?limit=10")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertGreaterEqual(payload["summary"]["fill_count"], 2)
+        self.assertGreaterEqual(payload["summary"]["protected_fill_count"], 1)
+        self.assertGreaterEqual(payload["summary"]["unprotected_fill_count"], 1)
+        self.assertEqual(payload["truth_source"], "fill_outcomes_plus_decision_audit")
+        self.assertTrue(any(item["market_regime"] == "trend" for item in payload["profitability_by_regime"]))
+        self.assertTrue(any(item["active_profile_id"] == "trend_normal" for item in payload["profitability_by_profile"]))
+        self.assertTrue(
+            any(item["exit_attribution"] == "emergency_protective_exit" for item in payload["profitability_by_exit_attribution"])
+        )
+        self.assertTrue(
+            any(
+                item["code"] == "execution_aggressiveness_contracted"
+                for item in payload["risk_protection_summary"]["top_constraint_codes"]
+            )
+        )
 
     async def test_position_lifecycle_profitability_tracks_closed_lifecycle_and_unassigned_funding(self) -> None:
         settings = AATSSettings.model_validate(
