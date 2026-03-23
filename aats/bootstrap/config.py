@@ -45,6 +45,7 @@ from aats.services.execution_engine.planner import ExecutionPlanner
 from aats.services.fee_resolver import EffectiveFeeResolver
 from aats.services.feature_engine.calculator import FeatureCalculator, FeatureEngine
 from aats.services.governance_engine.health import SystemHealthService
+from aats.services.governance_engine.derivatives_live_guard import DerivativesLiveGuardService
 from aats.services.governance_engine.kill_switch import KillSwitch
 from aats.services.governance_engine.mode import RuntimeModeController
 from aats.services.governance_engine.policy import PolicyEngine
@@ -64,6 +65,7 @@ from aats.services.market_gateway.okx_websocket import OKXPublicWebSocketClient
 from aats.services.market_gateway.publisher import MarketSnapshotPublisher
 from aats.services.operator.accounts import enabled_admin_count
 from aats.services.ledger.posting import Phase1LedgerMirrorService
+from aats.services.ledger.funding_fee_sync import LedgerFundingFeeSyncService
 from aats.services.ledger.lot_projection import LotBasedProjectionBuilder
 from aats.services.ledger.persistent_lot_book import PersistentLotBookService
 from aats.services.ledger.settlement_posting import LedgerSettlementPostingService
@@ -86,6 +88,7 @@ from aats.storage.base import (
     AuditRepository,
     EventStore,
     FillOutcomeRepository,
+    FundingFeeRepository,
     ExecutionRepository,
     ExecutionObligationRepository,
     OperatorUserRepository,
@@ -100,6 +103,8 @@ from aats.storage.execution_repo_converged_postgres import ConvergedPostgresExec
 from aats.storage.execution_repo_postgres import PostgresExecutionRepository
 from aats.storage.fill_outcome_repo import InMemoryFillOutcomeRepository
 from aats.storage.fill_outcome_repo_postgres import PostgresFillOutcomeRepository
+from aats.storage.funding_fee_repo import InMemoryFundingFeeRepository
+from aats.storage.funding_fee_repo_postgres import PostgresFundingFeeRepository
 from aats.storage.command_outbox_repo_postgres import PostgresCommandOutboxRepositoryV2
 from aats.storage.execution_command_repo_postgres import PostgresExecutionCommandRepository
 from aats.storage.execution_fill_repo_v2_postgres import PostgresExecutionFillRepositoryV2
@@ -135,6 +140,12 @@ from aats.schemas.common import utc_now
 from aats.schemas.operator import ExecutionErrorSummary, ProcessingFailureRecord
 from aats.schemas.runtime_profiles import RuntimeProfileResolution
 from aats.storage.base import StrategyProfileRepository
+
+
+SPOT_GUARDED_CONFIG_PROFILES = frozenset({"guarded_spot_dry_run", "guarded_spot_enabled"})
+DERIVATIVES_GUARDED_CONFIG_PROFILES = frozenset(
+    {"guarded_derivatives_dry_run", "guarded_derivatives_enabled"}
+)
 
 
 def load_yaml_config(environment: str, profile: str, config_dir: str | Path = "configs") -> dict[str, Any]:
@@ -229,6 +240,7 @@ class StorageBackends:
     phase1_ledger_mirror_service: Phase1LedgerMirrorService | None = None
     phase1_shadow: Phase1ShadowSubsystem | None = None
     outbox_repo: PostgresOutboxRepository | None = None
+    funding_fee_repo: FundingFeeRepository | None = None
     database_runtime: DatabaseRuntime | None = None
 
 
@@ -301,10 +313,13 @@ class ApplicationRuntime:
     execution_command_processor: ExecutionCommandProcessor | None = None
     phase1_shadow_alert_state: str | None = None
     trial_guard_service: ForwardTrialGuardService | None = None
+    derivatives_live_guard_service: DerivativesLiveGuardService | None = None
     replay_validation_history: list[dict[str, Any]] = field(default_factory=list)
     database_runtime: DatabaseRuntime | None = None
     background_tasks: list[asyncio.Task[Any]] = field(default_factory=list)
     execution_outbox_publisher: PostgresExecutionOutboxPublisher | None = None
+    funding_fee_repo: FundingFeeRepository | None = None
+    funding_fee_sync_service: LedgerFundingFeeSyncService | None = None
     logger: Any = field(default_factory=lambda: get_logger("aats.runtime"))
 
     async def start_background_tasks(self) -> None:
@@ -353,6 +368,9 @@ class ApplicationRuntime:
                 pass
         self.background_tasks.clear()
         await self.market_gateway.stop()
+        close_rest_client = getattr(self.account_service.client, "aclose", None)
+        if callable(close_rest_client):
+            await close_rest_client()
         if self.database_runtime is not None:
             self.database_runtime.dispose()
 
@@ -360,9 +378,29 @@ class ApplicationRuntime:
         while True:
             try:
                 await self.account_service.refresh()
+                await self._sync_funding_fees_after_refresh()
+                self._evaluate_derivatives_live_guard_after_refresh()
             except Exception as exc:
                 self._record_background_failure(subsystem="account_refresh", exc=exc)
             await asyncio.sleep(self.settings.okx_account_refresh_interval_seconds)
+
+    def _evaluate_derivatives_live_guard_after_refresh(self) -> None:
+        if self.derivatives_live_guard_service is None:
+            return
+        self.derivatives_live_guard_service.evaluate_now()
+
+    async def _sync_funding_fees_after_refresh(self) -> None:
+        if self.funding_fee_sync_service is None:
+            return
+        result = self.funding_fee_sync_service.sync_recent_bills(
+            rows=self.account_service.latest_recent_bills(),
+            product_type=self.settings.trading_product_type,
+            margin_mode=self.settings.margin_mode,
+        )
+        if result.posted_count <= 0:
+            return
+        if hasattr(self.portfolio_service, "bootstrap_snapshot"):
+            await self.portfolio_service.bootstrap_snapshot(snapshot_origin="local_repair")
 
     async def _sync_execution_loop(self) -> None:
         while True:
@@ -545,6 +583,7 @@ class ApplicationRuntime:
 
 
 def _validate_runtime_settings(settings: AATSSettings, runtime_layering: RuntimeLayering) -> None:
+    _validate_startup_profile_settings(settings, runtime_layering)
     if (
         runtime_layering.environment_capabilities.persistent_storage_required
         and runtime_layering.environment_capabilities.exchange_submission_enabled
@@ -588,6 +627,77 @@ def _validate_runtime_settings(settings: AATSSettings, runtime_layering: Runtime
         raise ValueError("financial_convergence_mode_requires_strict_event_persistence")
     if settings.financial_convergence_mode_enabled and not settings.database_single_runtime_guard_enabled:
         raise ValueError("financial_convergence_mode_requires_single_runtime_guard")
+
+
+def _validate_startup_profile_settings(settings: AATSSettings, runtime_layering: RuntimeLayering) -> None:
+    if settings.startup_profile == "derivatives" and settings.trading_product_type != "derivatives":
+        raise ValueError("startup_profile_derivatives_requires_derivatives_product_type")
+    if settings.startup_profile == "spot" and settings.trading_product_type != "spot":
+        raise ValueError("startup_profile_spot_requires_spot_product_type")
+
+    if settings.startup_profile == "derivatives" and settings.mode == "guarded_live" and settings.execution_backend == "okx":
+        if settings.config_profile not in DERIVATIVES_GUARDED_CONFIG_PROFILES:
+            raise ValueError("startup_profile_derivatives_requires_dedicated_derivatives_config_profile")
+    if settings.startup_profile == "spot" and settings.mode == "guarded_live" and settings.execution_backend == "okx":
+        if settings.config_profile not in SPOT_GUARDED_CONFIG_PROFILES:
+            raise ValueError("startup_profile_spot_requires_dedicated_spot_config_profile")
+
+    if settings.config_profile in DERIVATIVES_GUARDED_CONFIG_PROFILES:
+        if settings.trading_product_type != "derivatives":
+            raise ValueError("guarded_derivatives_config_profile_requires_derivatives_product_type")
+        if settings.margin_mode == "cash":
+            raise ValueError("guarded_derivatives_config_profile_disallows_cash_margin_mode")
+    if settings.config_profile in SPOT_GUARDED_CONFIG_PROFILES:
+        if settings.trading_product_type != "spot":
+            raise ValueError("guarded_spot_config_profile_requires_spot_product_type")
+        if settings.margin_mode != "cash":
+            raise ValueError("guarded_spot_config_profile_requires_cash_margin_mode")
+
+    exchange_runtime_kind = _exchange_runtime_hardening_kind(settings, runtime_layering)
+    if exchange_runtime_kind is None:
+        return
+    error_prefix = f"{exchange_runtime_kind}_exchange_runtime"
+    if settings.execution_backend != "okx":
+        raise ValueError(f"{error_prefix}_requires_okx_execution_backend")
+    if settings.account_backend != "okx":
+        raise ValueError(f"{error_prefix}_requires_okx_account_backend")
+    if not settings.account_read_enabled:
+        raise ValueError(f"{error_prefix}_requires_account_read_enabled")
+    if exchange_runtime_kind == "derivatives" and settings.margin_mode == "cash":
+        raise ValueError("derivatives_exchange_runtime_disallows_cash_margin_mode")
+    if exchange_runtime_kind == "spot" and settings.margin_mode != "cash":
+        raise ValueError("spot_exchange_runtime_requires_cash_margin_mode")
+    if settings.storage_mode != "postgres":
+        raise ValueError(f"{error_prefix}_requires_postgres_storage")
+    if not settings.database_url_configured:
+        raise ValueError(f"{error_prefix}_requires_database_url")
+    if not settings.database_single_runtime_guard_enabled:
+        raise ValueError(f"{error_prefix}_requires_single_runtime_guard")
+    if not settings.okx_credentials_configured:
+        raise ValueError(f"{error_prefix}_requires_okx_credentials")
+    if not settings.operator_auth_enabled:
+        raise ValueError(f"{error_prefix}_requires_operator_auth")
+    if settings.operator_unsafe_write_without_auth:
+        raise ValueError(f"{error_prefix}_disallows_unsafe_operator_write_without_auth")
+
+
+def _exchange_runtime_hardening_kind(
+    settings: AATSSettings,
+    runtime_layering: RuntimeLayering,
+) -> str | None:
+    if not runtime_layering.environment_capabilities.exchange_coupled:
+        return None
+    if settings.trading_product_type == "derivatives" and (
+        settings.startup_profile == "derivatives"
+        or settings.config_profile in DERIVATIVES_GUARDED_CONFIG_PROFILES
+    ):
+        return "derivatives"
+    if settings.trading_product_type == "spot" and (
+        settings.startup_profile == "spot"
+        or settings.config_profile in SPOT_GUARDED_CONFIG_PROFILES
+    ):
+        return "spot"
+    return None
 
 
 def _validate_operator_auth_settings(settings: AATSSettings, storage: StorageBackends) -> None:
@@ -644,6 +754,7 @@ def build_storage_backends(settings: AATSSettings) -> StorageBackends:
             runtime_profile_repo=InMemoryRuntimeProfileRepository(),
             strategy_profile_repo=InMemoryStrategyProfileRepository(),
             phase1_shadow=Phase1ShadowSubsystem(),
+            funding_fee_repo=InMemoryFundingFeeRepository(),
         )
 
     if not settings.database_url:
@@ -667,6 +778,7 @@ def build_storage_backends(settings: AATSSettings) -> StorageBackends:
     settlement_repo = PostgresSettlementRepository(database_runtime.session_factory)
     position_lot_repo = PostgresPositionLotRepository(database_runtime.session_factory)
     lot_event_repo = PostgresLotEventRepository(database_runtime.session_factory)
+    funding_fee_repo = PostgresFundingFeeRepository(database_runtime.session_factory)
     external_inbox_repo = PostgresExternalInboxRepository(database_runtime.session_factory)
     command_outbox_repo_v2 = PostgresCommandOutboxRepositoryV2(database_runtime.session_factory)
 
@@ -747,6 +859,7 @@ def build_storage_backends(settings: AATSSettings) -> StorageBackends:
         operator_repo=PostgresOperatorUserRepository(database_runtime.session_factory),
         runtime_profile_repo=PostgresRuntimeProfileRepository(database_runtime.session_factory),
         strategy_profile_repo=PostgresStrategyProfileRepository(database_runtime.session_factory),
+        funding_fee_repo=funding_fee_repo,
         database_runtime=database_runtime,
     )
 
@@ -971,6 +1084,11 @@ def _build_position_target_handler(
             ),
             None,
         )
+        account_snapshot = account_service.latest_snapshot()
+        account_configuration = (
+            None if account_snapshot is None else account_snapshot.account_configuration
+        )
+        instrument_rule = account_service.instrument_metadata(target.symbol)
 
         plan = execution_planner.build_plan(
             decision_id=target.decision_id,
@@ -985,6 +1103,32 @@ def _build_position_target_handler(
             product_type=target.product_type,
             target_leverage=target.target_leverage,
             margin_mode=target.margin_mode,
+            td_mode=target.margin_mode,
+            position_mode=(
+                None
+                if account_configuration is None
+                else account_configuration.position_mode
+            ),
+            instrument_family=(
+                None
+                if instrument_rule is None
+                else instrument_rule.instrument_family
+            ),
+            settle_currency=(
+                None
+                if instrument_rule is None
+                else instrument_rule.settle_currency
+            ),
+            required_initial_margin=risk_decision.required_initial_margin,
+            projected_margin_usage=risk_decision.projected_margin_usage,
+            projected_notional=risk_decision.projected_notional,
+            risk_budget_multiplier=risk_decision.risk_budget_multiplier,
+            risk_budget_state=risk_decision.risk_budget_state,
+            execution_aggressiveness_multiplier=risk_decision.execution_aggressiveness_multiplier,
+            execution_aggressiveness_state=risk_decision.execution_aggressiveness_state,
+            only_reduce_required=risk_decision.only_reduce_required,
+            risk_limit_breached=risk_decision.risk_limit_breached,
+            liquidation_buffer_remaining=risk_decision.liquidation_buffer_remaining,
             ai_execution_parameter_suggestion=target.ai_execution_parameter_suggestion,
         )
         if plan is None:
@@ -1255,6 +1399,7 @@ async def build_runtime(
         environment_capabilities=runtime_layering.environment_capabilities,
         policy_profile=runtime_layering.policy_profile,
         fee_resolver=fee_resolver,
+        reconciliation_repo=storage.reconciliation_repo,
     )
     execution_planner = ExecutionPlanner(settings=runtime_settings)
     obligation_service = ExecutionObligationService(
@@ -1363,6 +1508,21 @@ async def build_runtime(
             price_provider=market_gateway.latest_price,
             metrics=metrics,
         )
+    funding_fee_sync_service = (
+        LedgerFundingFeeSyncService(
+            funding_fee_repo=storage.funding_fee_repo,
+            ledger_account_repo=storage.ledger_account_repo,
+            ledger_journal_repo=storage.ledger_journal_repo,
+            ledger_entry_repo=storage.ledger_entry_repo,
+        )
+        if (
+            storage.funding_fee_repo is not None
+            and storage.ledger_account_repo is not None
+            and storage.ledger_journal_repo is not None
+            and storage.ledger_entry_repo is not None
+        )
+        else None
+    )
 
     reconciliation_service = ReconciliationService(
         settings=runtime_settings,
@@ -1446,6 +1606,14 @@ async def build_runtime(
 
     if runtime_layering.environment_capabilities.account_state_source_kind == "exchange":
         account_snapshot = await account_service.refresh(force=True)
+        funding_fee_sync_posted_count = 0
+        if funding_fee_sync_service is not None:
+            funding_result = funding_fee_sync_service.sync_recent_bills(
+                rows=account_service.latest_recent_bills(),
+                product_type=state_scope.product_type,
+                margin_mode=state_scope.margin_mode,
+            )
+            funding_fee_sync_posted_count = funding_result.posted_count
         imported_baseline = None
         imported_baseline_event_id = None
         latest_scoped_snapshot = latest_matching_snapshot(storage.portfolio_repo.history(), state_scope)
@@ -1466,6 +1634,7 @@ async def build_runtime(
     else:
         imported_baseline = None
         imported_baseline_event_id = None
+        funding_fee_sync_posted_count = 0
     recovery_artifacts = recovery_service.recover(
         portfolio_state=portfolio_service.state,
         account_baseline=imported_baseline,
@@ -1492,6 +1661,13 @@ async def build_runtime(
         )
     else:
         recovery_status = recovery_artifacts.status
+
+    if (
+        funding_fee_sync_posted_count > 0
+        and hasattr(portfolio_service, "bootstrap_snapshot")
+        and latest_matching_snapshot(storage.portfolio_repo.history(), state_scope) is not None
+    ):
+        await portfolio_service.bootstrap_snapshot(snapshot_origin="local_repair")
 
     latest_scoped_portfolio_snapshot = latest_matching_snapshot(storage.portfolio_repo.history(), state_scope)
     if (
@@ -1565,9 +1741,21 @@ async def build_runtime(
         recovery_status=recovery_status,
         database_runtime=storage.database_runtime,
         execution_outbox_publisher=execution_outbox_publisher,
+        funding_fee_repo=storage.funding_fee_repo,
+        funding_fee_sync_service=funding_fee_sync_service,
     )
     from aats.services.operator.query_service import OperatorQueryService
 
+    runtime.derivatives_live_guard_service = DerivativesLiveGuardService(
+        settings=runtime.settings,
+        kill_switch=runtime.kill_switch,
+        account_service=runtime.account_service,
+        event_store=runtime.event_store,
+        metrics=runtime.metrics,
+    )
+    runtime.derivatives_live_guard_service.evaluate_now()
+    runtime.health_service.runtime_guard_provider = runtime.derivatives_live_guard_service
+    runtime.risk_engine.live_runtime_guard_provider = runtime.derivatives_live_guard_service
     runtime.trial_guard_service = ForwardTrialGuardService(
         settings=runtime.settings,
         kill_switch=runtime.kill_switch,
@@ -1577,5 +1765,6 @@ async def build_runtime(
         anomaly_provider=lambda limit: OperatorQueryService(runtime).execution_anomaly_report(limit=limit),
     )
     runtime.trial_guard_service.evaluate_now()
+    runtime.risk_engine.trial_guard_provider = runtime.trial_guard_service
     runtime.decision_engine.strategy_profile_service = StrategyProfileControlService(runtime)
     return runtime

@@ -160,6 +160,18 @@ class StrategyProfileContextFacade:
         account_status = self.owner.runtime.account_service.status()
         latest_reconciliation = latest_reconciliation_for_scope(self.owner.runtime.reconciliation_repo, scope)
         activation = self.owner._activation_state()
+        live_guard_service = getattr(self.owner.runtime, "derivatives_live_guard_service", None)
+        trial_guard_service = getattr(self.owner.runtime, "trial_guard_service", None)
+        live_guard = (
+            live_guard_service.snapshot()
+            if live_guard_service is not None and hasattr(live_guard_service, "snapshot")
+            else {}
+        )
+        trial_guard = (
+            trial_guard_service.snapshot()
+            if trial_guard_service is not None and hasattr(trial_guard_service, "snapshot")
+            else {}
+        )
         now = utc_now()
         return {
             "safe_to_trade": recovery.safe_to_trade,
@@ -177,4 +189,9 @@ class StrategyProfileContextFacade:
             "reconciliation_review_required": bool(latest_reconciliation.review_required) if latest_reconciliation else False,
             "auto_switch_frozen": bool(activation.frozen_until and activation.frozen_until > now),
             "auto_switch_cooldown_active": bool(activation.cooldown_until and activation.cooldown_until > now),
+            "live_guard": _json_safe(live_guard),
+            "trial_guard": _json_safe(trial_guard),
+            "only_reduce_required": bool(live_guard.get("only_reduce_required")),
+            "auto_halt_required": bool(live_guard.get("auto_halt_required")),
+            "trial_guard_breached": str(trial_guard.get("status") or "").lower() == "breached",
         }

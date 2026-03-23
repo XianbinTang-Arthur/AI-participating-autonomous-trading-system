@@ -2,16 +2,23 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
-from aats.bootstrap.env_profiles import load_profiled_dotenv_into_process, resolve_profile_dotenv_path
+from aats.bootstrap.env_profiles import (
+    load_profiled_dotenv_into_process,
+    reset_profiled_dotenv_state,
+    resolve_profile_dotenv_path,
+)
 from aats.bootstrap.settings import AATSSettings
 
 
 def test_resolve_profile_dotenv_path_uses_named_profile(tmp_path: Path) -> None:
     assert resolve_profile_dotenv_path(tmp_path, "spot") == tmp_path / ".env.spot"
     assert resolve_profile_dotenv_path(tmp_path, "derivatives") == tmp_path / ".env.derivatives"
+    assert resolve_profile_dotenv_path(tmp_path, "spot_live") == tmp_path / ".env.spot.live"
+    assert resolve_profile_dotenv_path(tmp_path, "derivatives_live") == tmp_path / ".env.derivatives.live"
 
 
 def test_resolve_profile_dotenv_path_requires_profile(tmp_path: Path) -> None:
@@ -19,29 +26,86 @@ def test_resolve_profile_dotenv_path_requires_profile(tmp_path: Path) -> None:
         resolve_profile_dotenv_path(tmp_path, None)
 
 
-def test_load_profiled_dotenv_into_process_clears_previous_aats_keys(tmp_path: Path) -> None:
-    dotenv_path = tmp_path / ".env.spot"
-    dotenv_path.write_text("AATS_MODE=guarded_live\nAATS_DEFAULT_SYMBOL=BTC-USDT\n", encoding="utf-8")
-    os.environ["AATS_MODE"] = "paper_live"
-    os.environ["AATS_DEFAULT_SYMBOL"] = "OLD"
-    os.environ["AATS_SOMETHING_ELSE"] = "legacy"
-    os.environ["UNRELATED_ENV"] = "keep"
+def test_load_profiled_dotenv_into_process_preserves_external_aats_values(tmp_path: Path) -> None:
+    dotenv_path = tmp_path / ".env.spot.live"
+    dotenv_path.write_text(
+        "AATS_MODE=guarded_live\n"
+        "AATS_OKX_API_KEY=placeholder-key\n"
+        "AATS_DEFAULT_SYMBOL=BTC-USDT\n",
+        encoding="utf-8",
+    )
+    reset_profiled_dotenv_state()
+    with patch.dict(
+        os.environ,
+        {
+            "AATS_MODE": "paper_live",
+            "AATS_OKX_API_KEY": "external-secret",
+            "UNRELATED_ENV": "keep",
+        },
+        clear=True,
+    ):
+        loaded = load_profiled_dotenv_into_process(tmp_path, "spot_live")
 
-    loaded = load_profiled_dotenv_into_process(tmp_path, "spot")
+        assert loaded == dotenv_path
+        assert os.environ["AATS_MODE"] == "paper_live"
+        assert os.environ["AATS_OKX_API_KEY"] == "external-secret"
+        assert os.environ["AATS_DEFAULT_SYMBOL"] == "BTC-USDT"
+        assert os.environ["AATS_STARTUP_PROFILE"] == "spot"
+        assert os.environ["AATS_ENV_TEMPLATE_PROFILE"] == "spot_live"
+        assert os.environ["UNRELATED_ENV"] == "keep"
 
-    assert loaded == dotenv_path
-    assert os.environ["AATS_MODE"] == "guarded_live"
-    assert os.environ["AATS_DEFAULT_SYMBOL"] == "BTC-USDT"
-    assert "AATS_SOMETHING_ELSE" not in os.environ
-    assert os.environ["UNRELATED_ENV"] == "keep"
+
+def test_load_profiled_dotenv_into_process_replaces_prior_profile_managed_values(tmp_path: Path) -> None:
+    (tmp_path / ".env.spot.live").write_text(
+        "AATS_MODE=guarded_live\nAATS_DEFAULT_SYMBOL=BTC-USDT\nAATS_ALLOWED_SYMBOLS=[\"BTC-USDT\"]\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".env.derivatives.live").write_text(
+        "AATS_MODE=guarded_live\nAATS_DEFAULT_SYMBOL=BTC-USDT-SWAP\n",
+        encoding="utf-8",
+    )
+    reset_profiled_dotenv_state()
+    with patch.dict(os.environ, {}, clear=True):
+        load_profiled_dotenv_into_process(tmp_path, "spot_live")
+        assert os.environ["AATS_DEFAULT_SYMBOL"] == "BTC-USDT"
+        assert os.environ["AATS_ALLOWED_SYMBOLS"] == "[\"BTC-USDT\"]"
+
+        load_profiled_dotenv_into_process(tmp_path, "derivatives_live")
+
+        assert os.environ["AATS_DEFAULT_SYMBOL"] == "BTC-USDT-SWAP"
+        assert "AATS_ALLOWED_SYMBOLS" not in os.environ
+        assert os.environ["AATS_STARTUP_PROFILE"] == "derivatives"
+        assert os.environ["AATS_ENV_TEMPLATE_PROFILE"] == "derivatives_live"
 
 
 def test_profile_templates_are_utf8_and_use_live_canonical_keys() -> None:
     repo_root = Path(__file__).resolve().parents[2]
     supported_keys = {f"AATS_{name.upper()}" for name in AATSSettings.model_fields}
     expected_phrases = {
-        ".env.spot": ["AATS_TRADING_PRODUCT_TYPE=spot", "AATS_AI_OPERATING_MODE", "AATS_TRIAL_GUARD_ENABLED"],
-        ".env.derivatives": ["AATS_TRADING_PRODUCT_TYPE=derivatives", "AATS_AI_OPERATING_MODE", "AATS_TRIAL_GUARD_ENABLED"],
+        ".env.spot": [
+            "AATS_CONFIG_PROFILE=guarded_spot_enabled",
+            "AATS_TRADING_PRODUCT_TYPE=spot",
+            "AATS_AI_OPERATING_MODE",
+            "AATS_TRIAL_GUARD_ENABLED",
+        ],
+        ".env.derivatives": [
+            "AATS_CONFIG_PROFILE=guarded_derivatives_enabled",
+            "AATS_TRADING_PRODUCT_TYPE=derivatives",
+            "AATS_AI_OPERATING_MODE",
+            "AATS_TRIAL_GUARD_ENABLED",
+        ],
+        ".env.spot.live": [
+            "AATS_CONFIG_PROFILE=guarded_spot_enabled",
+            "AATS_TRADING_PRODUCT_TYPE=spot",
+            "AATS_OKX_SIMULATED_TRADING=false",
+            "AATS_OPERATOR_SESSION_COOKIE_SECURE=true",
+        ],
+        ".env.derivatives.live": [
+            "AATS_CONFIG_PROFILE=guarded_derivatives_enabled",
+            "AATS_TRADING_PRODUCT_TYPE=derivatives",
+            "AATS_OKX_SIMULATED_TRADING=false",
+            "AATS_OPERATOR_SESSION_COOKIE_SECURE=true",
+        ],
     }
     required_keys = {
         "AATS_EXECUTION_COMMAND_FLOW_ENABLED",
@@ -84,6 +148,34 @@ def test_profile_templates_are_utf8_and_use_live_canonical_keys() -> None:
                 continue
             key = stripped.split("=", 1)[0].strip()
             assert key in supported_keys, key
+
+
+def test_profile_templates_use_distinct_parallel_runtime_defaults() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+
+    def load_env_file(path: Path) -> dict[str, str]:
+        values: dict[str, str] = {}
+        for line in path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in stripped:
+                continue
+            key, value = stripped.split("=", 1)
+            values[key] = value
+        return values
+
+    spot = load_env_file(repo_root / ".env.spot")
+    derivatives = load_env_file(repo_root / ".env.derivatives")
+    spot_live = load_env_file(repo_root / ".env.spot.live")
+    derivatives_live = load_env_file(repo_root / ".env.derivatives.live")
+
+    assert spot["AATS_API_PORT"] != derivatives["AATS_API_PORT"]
+    assert spot["AATS_LOG_DIR"] != derivatives["AATS_LOG_DIR"]
+    assert spot["AATS_OPERATOR_SESSION_COOKIE_NAME"] != derivatives["AATS_OPERATOR_SESSION_COOKIE_NAME"]
+    assert spot_live["AATS_API_PORT"] != derivatives_live["AATS_API_PORT"]
+    assert (
+        spot_live["AATS_OPERATOR_SESSION_COOKIE_NAME"]
+        != derivatives_live["AATS_OPERATOR_SESSION_COOKIE_NAME"]
+    )
 
 
 def test_ai_config_view_is_utf8_and_only_exposes_supported_controls() -> None:

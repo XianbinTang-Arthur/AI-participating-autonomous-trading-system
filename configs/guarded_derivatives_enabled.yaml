@@ -1,0 +1,82 @@
+# 指定当前配置档案名称。
+config_profile: guarded_derivatives_enabled
+
+# 指定该档案运行在 guarded_live 模式。
+mode: guarded_live
+
+# 指定市场数据直接读取 OKX。
+market_data_backend: okx
+
+# 指定执行走 OKX 适配器。
+execution_backend: okx
+
+# 指定账户状态直接读取 OKX。
+account_backend: okx
+
+# 指定启用账户读取。
+account_read_enabled: true
+
+# 指定合约产品线。
+trading_product_type: derivatives
+
+# 指定默认保证金模式为 cross。
+margin_mode: cross
+
+# 指定启用 OKX 模拟交易环境。
+okx_simulated_trading: true
+
+# 指定允许向 OKX 模拟盘提交通路。
+live_submit_enabled: true
+
+# 指定 guarded 执行不再是 dry run。
+guarded_execution_dry_run: false
+
+# 指定启动时从交易所账户初始化组合快照。
+bootstrap_portfolio_from_exchange: true
+
+# 指定合约单标的最大总名义敞口。
+max_gross_notional_per_symbol: 2500.0
+
+# 指定合约单标的最大待成交名义金额。
+max_pending_notional_per_symbol: 1250.0
+
+# 指定合约账户最大总名义敞口。
+max_total_open_notional: 5000.0
+
+# 指定合约当日已实现亏损上限。
+max_daily_realized_loss_usdt: 100.0
+
+# 指定保证金占用达到该比例后只允许减仓或平仓。
+derivatives_only_reduce_trigger_margin_fraction: 0.7
+
+# 指定启用合约实盘自动保护。
+derivatives_runtime_guard_enabled: true
+
+# 指定当前保证金占用达到该比例后自动停机。
+derivatives_auto_halt_margin_usage_fraction: 0.85
+
+# 指定最近仓位距离强平小于该比例后自动停机。
+derivatives_auto_halt_liquidation_gap_fraction: 0.08
+
+# 指定合约保证金占用上限。
+max_margin_usage_fraction: 0.85
+
+# 指定启用 15m 和 1h 两个决策周期。
+enabled_decision_timeframes:
+  - 15m
+  - 1h
+
+# 指定 15m 周期两次决策之间的最小间隔秒数。
+decision_min_interval_seconds_15m: 30.0
+
+# 指定 1h 周期两次决策之间的最小间隔秒数。
+decision_min_interval_seconds_1h: 120.0
+
+# 指定触发决策所需的最小价格变化基点。
+decision_min_price_move_bps: 4.0
+
+# 指定触发决策所需的最小动量变化阈值。
+decision_min_momentum_delta: 0.0005
+
+# 指定交易所标识为 OKX。
+exchange_name: OKX

@@ -19,10 +19,9 @@ class BlockerControlService:
     _SUBMIT_ONLY = {
         "guarded_execution_dry_run",
         "live_submit_disabled",
+        "okx_simulated_trading_required",
         "local_demo_no_exchange_submission",
         "real_market_paper_uses_local_paper_execution",
-        "real_money_live_not_supported",
-        "guarded_live_blocked_by_default",
     }
 
     def __init__(self, owner: "OperatorQueryService") -> None:
@@ -137,10 +136,14 @@ class BlockerControlService:
     def _subsystem_for(code: str) -> str:
         if code.startswith("phase1_shadow"):
             return "phase1_shadow"
+        if code.startswith("derivatives_"):
+            return "risk_control"
         if code.startswith("market_"):
             return "market_data"
         if code.startswith("account_"):
             return "account_state"
+        if code.startswith("okx_"):
+            return "execution_adapter"
         if code.startswith("reconciliation_") or code.startswith("operator_rebaseline"):
             return "reconciliation"
         if code.startswith("ai_"):
@@ -164,7 +167,7 @@ class BlockerControlService:
 
     @staticmethod
     def _resolution_mode_for(code: str, *, submit_only: bool) -> str:
-        if submit_only or code in {"real_money_live_not_supported", "local_demo_no_exchange_submission"}:
+        if submit_only or code == "local_demo_no_exchange_submission":
             return "external_only"
         if code in {"market_data_stale", "account_state_stale", "account_snapshot_missing", "market_connection_down"}:
             return "manual_or_auto"
@@ -236,6 +239,35 @@ class BlockerControlService:
                     endpoint="/system/halt",
                     tone="danger",
                     expected_effect="保留当前暂停状态，避免在问题未处理完之前恢复自动交易。",
+                ),
+            ]
+        if code in {"derivatives_margin_buffer_auto_halt", "derivatives_liquidation_proximity_auto_halt"}:
+            return [
+                BlockerActionDefinition(
+                    action_id="open-risk-view",
+                    label="查看风险视图",
+                    kind="client",
+                    method="CLIENT",
+                    client_action="navigate-view",
+                    value="risk",
+                    tone="ghost",
+                    expected_effect="切到风险页查看保证金缓冲、强平距离和当前恢复状态。",
+                ),
+                BlockerActionDefinition(
+                    action_id="refresh-dashboard",
+                    label="刷新当前状态",
+                    kind="client",
+                    method="CLIENT",
+                    client_action="refresh-dashboard",
+                    tone="secondary",
+                    expected_effect="重新拉取账户快照、风险缓冲和阻断状态，确认自动停机是否仍然成立。",
+                ),
+                BlockerActionDefinition(
+                    action_id="halt-system",
+                    label="继续保持暂停",
+                    endpoint="/system/halt",
+                    tone="danger",
+                    expected_effect="继续保持暂停，避免在保证金风险尚未解除时恢复自动交易。",
                 ),
             ]
         if code in {"phase1_shadow_lagging", "phase1_shadow_degraded"}:
@@ -412,6 +444,20 @@ class BlockerControlService:
                 "如果兼容层持续写入失败，系统会失去对新执行表和影子账本的连续校验能力，恢复后的状态可信度会下降。",
                 "先查看影子同步状态和最近错误，确认写入失败原因已消除后，再重新评估是否恢复自动运行。",
             )
+        if code == "derivatives_margin_buffer_auto_halt":
+            return (
+                "保证金缓冲触发自动停机",
+                "当前保证金占用已经进入自动停机阈值，系统必须先暂停，避免继续扩大合约风险暴露。",
+                "如果在保证金缓冲已经打穿硬阈值后仍继续运行，系统会更接近被动减仓或强平，财务和执行风险都会快速放大。",
+                "先查看风险视图确认当前保证金占用、账户风险快照和仓位来源，再决定如何减仓和恢复。",
+            )
+        if code == "derivatives_liquidation_proximity_auto_halt":
+            return (
+                "最近仓位距离强平过近",
+                "当前至少有一条合约仓位已经逼近自动停机定义的强平距离，系统必须先暂停并优先减仓。",
+                "如果在最近仓位已经贴近强平时继续自动交易，系统可能在报单和回报延迟之间直接滑入被动减仓或强平。",
+                "先查看风险视图确认最危险仓位、强平价格和保证金模式，再决定如何处理仓位。",
+            )
         if code == "phase1_shadow_lagging":
             return (
                 "影子兼容层尚未追平",
@@ -502,6 +548,13 @@ class BlockerControlService:
                 "最近一次账户状态更新已经过期，当前余额、仓位和挂单信息不再可信。",
                 "在账户状态过期时，系统不能安全地继续自动交易。",
                 "先刷新当前状态，确认账户快照恢复新鲜后再继续。",
+            )
+        if code == "okx_simulated_trading_required":
+            return (
+                "OKX 提交通道与当前环境不一致",
+                "当前 OKX 执行通道和运行配置不一致。请确认是否误用了模拟盘开关、错误环境的 API Key，或加载了错误的启动档。",
+                "在提交通道和凭证环境不一致时，系统不会继续真实报单，以避免把订单发往错误环境或在提交前反复失败。",
+                "先核对 simulated/live 开关、API 凭证所属环境和当前启动档；修正后重启服务，再刷新当前状态。",
             )
         if code == "rebaseline_in_progress":
             return (

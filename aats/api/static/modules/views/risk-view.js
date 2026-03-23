@@ -31,6 +31,9 @@ export function renderRiskSections(data) {
   const uiHints = data.uiHints || {};
   const phase1Shadow = data.phase1Shadow || metrics.phase1_shadow || {};
   const trialGuard = data.trialGuard || data.runtime?.trial_guard || {};
+  const marginBuffer = account.margin_buffer_overview || data.runtime?.margin_buffer_overview || {};
+  const guardedLivePreflight = data.guardedLivePreflight || data.runtime?.guarded_live_preflight || {};
+  const guardedLiveRunPacket = data.guardedLiveRunPacket || data.runtime?.guarded_live_run_packet_summary || {};
 
   return {
     riskHero: primaryStatusPanel({
@@ -133,6 +136,101 @@ export function renderRiskSections(data) {
         { label: "最近回放时间", value: formatMaybeTimestamp(replay.last_validation?.validated_at), meta: formatRelativeAge(replay.last_validation?.validated_at), tone: replay.last_validation?.validated_at ? "info" : "neutral" },
       ]),
     }),
+    riskMarginBuffer: surfaceCard({
+      title: "保证金缓冲",
+      kicker: "强平风险",
+      copy: marginBuffer.summary || "这里同时展示当前真实保证金缓冲和下一笔投影风险。",
+      content: summaryStrip([
+        {
+          label: "当前状态",
+          value: readableState(marginBuffer.status || "unknown"),
+          meta: marginBuffer.summary || "当前没有额外保证金风险说明",
+          tone: marginBufferTone(marginBuffer.status),
+        },
+        {
+          label: "当前保证金占用",
+          value: trialRatioText(marginBuffer.current?.initial_margin_usage_fraction),
+          meta: `距离 only-reduce ${trialRatioText(marginBuffer.current?.buffer_to_only_reduce)}，距离硬上限 ${trialRatioText(marginBuffer.current?.buffer_to_hard_limit)}`,
+          tone: marginBufferTone(marginBuffer.status),
+        },
+        {
+          label: "下一笔投影占用",
+          value: trialRatioText(marginBuffer.projected?.projected_margin_usage),
+          meta: `投影后距离 only-reduce ${trialRatioText(marginBuffer.projected?.buffer_to_only_reduce)}，距离硬上限 ${trialRatioText(marginBuffer.projected?.buffer_to_hard_limit)}`,
+          tone: marginBufferTone(marginBuffer.status),
+        },
+        {
+          label: "最近强平距离",
+          value: trialRatioText(marginBuffer.liquidation?.nearest_liquidation_gap_ratio),
+          meta: marginBuffer.liquidation?.closest_position
+            ? `${textOrFallback(marginBuffer.liquidation.closest_position.symbol, "未知合约")} / ${textOrFallback(marginBuffer.liquidation.closest_position.pos_side, "未知方向")}，强平价 ${formatNumber(marginBuffer.liquidation.closest_position.liquidation_price)}`
+            : "当前没有可计算强平距离的仓位",
+          tone: marginBufferTone(marginBuffer.status),
+        },
+      ]),
+    }),
+    riskPreflight: surfaceCard({
+      title: "启盘前自检",
+      kicker: "guarded_live 预检",
+      copy: guardedLivePreflight.summary || "这里收口合约 guarded_live 启盘前必须人工确认的结构化检查项。",
+      content: summaryStrip([
+        {
+          label: "当前结论",
+          value: readableState(guardedLivePreflight.status || "unknown"),
+          meta: guardedLivePreflight.summary || "当前没有额外预检说明",
+          tone: preflightTone(guardedLivePreflight.status),
+        },
+        {
+          label: "通过 / 告警 / 失败",
+          value: `${formatNumber(guardedLivePreflight.counts?.pass || 0, 0)} / ${formatNumber(guardedLivePreflight.counts?.warn || 0, 0)} / ${formatNumber(guardedLivePreflight.counts?.fail || 0, 0)}`,
+          meta: `启盘资格 ${booleanWord(guardedLivePreflight.launch_ready)}`,
+          tone: preflightTone(guardedLivePreflight.status),
+        },
+        {
+          label: "真实资金报单路径",
+          value: textOrFallback(guardedLivePreflight.checks?.find((item) => item.check_id === "real_money_route_ready")?.status, "未知"),
+          meta: textOrFallback(guardedLivePreflight.checks?.find((item) => item.check_id === "real_money_route_ready")?.detail, "当前没有额外线路说明"),
+          tone: preflightTone(guardedLivePreflight.checks?.find((item) => item.check_id === "real_money_route_ready")?.status),
+        },
+        {
+          label: "下一步",
+          value: textOrFallback((guardedLivePreflight.operator_actions || [])[0], "当前没有额外预检动作"),
+          meta: textOrFallback((guardedLivePreflight.operator_actions || [])[1], "请继续保持小资金和人工盯盘。"),
+          tone: guardedLivePreflight.launch_ready ? "positive" : "warning",
+        },
+      ]),
+    }),
+    riskRunPacket: surfaceCard({
+      title: "小资金运行包",
+      kicker: "运行摘要",
+      copy: guardedLiveRunPacket.summary || "这里把试盘守护、保证金风险、恢复状态和当前敞口收成一张运行包。",
+      content: summaryStrip([
+        {
+          label: "当前状态",
+          value: readableState(guardedLiveRunPacket.status || "unknown"),
+          meta: guardedLiveRunPacket.summary || "当前没有额外运行包说明",
+          tone: packetTone(guardedLiveRunPacket.status),
+        },
+        {
+          label: "综合净收益",
+          value: formatNumber(guardedLiveRunPacket.summary_metrics?.combined_net_realized_pnl),
+          meta: `资金费 ${formatNumber(guardedLiveRunPacket.summary_metrics?.funding_fee_net_pnl)}，活动阻断 ${formatNumber(guardedLiveRunPacket.summary_metrics?.execution_blocker_count || 0, 0)} 个`,
+          tone: Number(guardedLiveRunPacket.summary_metrics?.combined_net_realized_pnl || 0) >= 0 ? "positive" : "warning",
+        },
+        {
+          label: "保证金 / 强平距离",
+          value: trialRatioText(guardedLiveRunPacket.summary_metrics?.current_initial_margin_usage_fraction),
+          meta: `最近强平距离 ${trialRatioText(guardedLiveRunPacket.summary_metrics?.nearest_liquidation_gap_ratio)}，持仓 ${formatNumber(guardedLiveRunPacket.summary_metrics?.open_position_count || 0, 0)} 条`,
+          tone: packetTone(guardedLiveRunPacket.status),
+        },
+        {
+          label: "人工动作",
+          value: textOrFallback((guardedLiveRunPacket.operator_actions || [])[0], "当前没有额外运行包动作"),
+          meta: textOrFallback((guardedLiveRunPacket.operator_actions || [])[1], "继续保持受控运行并关注风险页。"),
+          tone: packetTone(guardedLiveRunPacket.status),
+        },
+      ]),
+    }),
     riskShadow: surfaceCard({
       title: "影子兼容层",
       kicker: "Phase 1 兼容状态",
@@ -186,10 +284,10 @@ export function renderRiskSections(data) {
           tone: Number(trialGuard.fill_count || 0) >= Number(trialGuard.min_closed_fills || 0) ? "positive" : "warning",
         },
         {
-          label: "最近 24 小时净收益",
-          value: formatNumber(trialGuard.daily_net_realized),
-          meta: `连续亏损 ${formatNumber(trialGuard.consecutive_losses, 0)} 笔`,
-          tone: Number(trialGuard.daily_net_realized || 0) >= 0 ? "positive" : "warning",
+          label: "最近 24 小时综合净收益",
+          value: formatNumber(trialGuard.daily_combined_net_realized ?? trialGuard.daily_net_realized),
+          meta: `交易净收益 ${formatNumber(trialGuard.daily_trading_net_realized)}，资金费 ${formatNumber(trialGuard.daily_funding_fee_net)}，连续亏损 ${formatNumber(trialGuard.consecutive_losses, 0)} 笔`,
+          tone: Number((trialGuard.daily_combined_net_realized ?? trialGuard.daily_net_realized) || 0) >= 0 ? "positive" : "warning",
         },
         {
           label: "费用 / 成交额",
@@ -251,9 +349,12 @@ export function renderRiskView(data) {
       <div class="span-12">${sections.riskHero}</div>
       <div class="span-12">${sections.riskActions}</div>
       <div class="span-12">${sections.riskEvidence}</div>
-      <div class="span-4">${sections.riskAccount}</div>
-      <div class="span-4">${sections.riskReconciliation}</div>
-      <div class="span-4">${sections.riskRecovery}</div>
+      <div class="span-3">${sections.riskAccount}</div>
+      <div class="span-3">${sections.riskMarginBuffer}</div>
+      <div class="span-3">${sections.riskReconciliation}</div>
+      <div class="span-3">${sections.riskRecovery}</div>
+      <div class="span-6">${sections.riskPreflight}</div>
+      <div class="span-6">${sections.riskRunPacket}</div>
       <div class="span-12">${sections.riskShadow}</div>
       <div class="span-12">${sections.riskTrialGuard}</div>
       <div class="span-12">${sections.riskBills}</div>
@@ -275,6 +376,28 @@ function trialGuardTone(status) {
   if (status === "breached") return "danger";
   if (status === "warming_up") return "warning";
   if (status === "monitoring") return "positive";
+  return "neutral";
+}
+
+function marginBufferTone(status) {
+  if (status === "critical") return "danger";
+  if (status === "warning") return "warning";
+  if (status === "healthy") return "positive";
+  return "neutral";
+}
+
+function preflightTone(status) {
+  if (status === "pass") return "positive";
+  if (status === "fail") return "danger";
+  if (status === "warning") return "warning";
+  if (status === "ready") return "positive";
+  return "neutral";
+}
+
+function packetTone(status) {
+  if (status === "critical") return "danger";
+  if (status === "warning") return "warning";
+  if (status === "ready") return "positive";
   return "neutral";
 }
 

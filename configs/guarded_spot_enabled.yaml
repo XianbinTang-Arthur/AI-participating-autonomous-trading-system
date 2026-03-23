@@ -1,0 +1,55 @@
+# 指定当前配置档案名称。
+config_profile: guarded_spot_enabled
+
+# 指定该档案运行在 guarded_live 模式。
+mode: guarded_live
+
+# 指定市场数据直接读取 OKX。
+market_data_backend: okx
+
+# 指定执行走 OKX 适配器。
+execution_backend: okx
+
+# 指定账户状态直接读取 OKX。
+account_backend: okx
+
+# 指定启用账户读取。
+account_read_enabled: true
+
+# 指定现货产品线。
+trading_product_type: spot
+
+# 指定现货默认保证金模式为 cash。
+margin_mode: cash
+
+# 指定启用 OKX 模拟交易环境。
+okx_simulated_trading: true
+
+# 指定允许向 OKX 模拟盘提交通路。
+live_submit_enabled: true
+
+# 指定 guarded 执行不再是 dry run。
+guarded_execution_dry_run: false
+
+# 指定启动时从交易所账户初始化组合快照。
+bootstrap_portfolio_from_exchange: true
+
+# 指定启用 15m 和 1h 两个决策周期。
+enabled_decision_timeframes:
+  - 15m
+  - 1h
+
+# 指定 15m 周期两次决策之间的最小间隔秒数。
+decision_min_interval_seconds_15m: 30.0
+
+# 指定 1h 周期两次决策之间的最小间隔秒数。
+decision_min_interval_seconds_1h: 120.0
+
+# 指定触发决策所需的最小价格变化基点。
+decision_min_price_move_bps: 4.0
+
+# 指定触发决策所需的最小动量变化阈值。
+decision_min_momentum_delta: 0.0005
+
+# 指定交易所标识为 OKX。
+exchange_name: OKX

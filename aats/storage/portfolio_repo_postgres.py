@@ -110,6 +110,7 @@ class PostgresPortfolioRepository:
         for position in payload.get("positions") or []:
             item = dict(position)
             item.setdefault("symbol", item.get("symbol") or row.primary_symbol or "legacy_unknown")
+            item.setdefault("position_key", item.get("position_key"))
             item.setdefault("position_qty", 0)
             item.setdefault("position_notional", 0)
             item.setdefault("avg_entry_price", 0)
@@ -118,9 +119,15 @@ class PostgresPortfolioRepository:
             item.setdefault("exposure_side", "flat")
             item.setdefault("target_leverage", 1.0)
             item.setdefault("margin_mode", payload["margin_mode"])
+            item.setdefault("position_mode", None)
+            item.setdefault("pos_side", None)
+            item.setdefault("instrument_family", None)
+            item.setdefault("settle_currency", None)
             item.setdefault("margin_allocated", 0)
             item.setdefault("maintenance_margin", 0)
+            item.setdefault("margin_ratio", None)
             item.setdefault("liquidation_price", None)
+            item.setdefault("margin_source", "estimated")
             positions.append(item)
         payload["positions"] = positions
         return PortfolioSnapshot.model_validate(payload)

@@ -72,6 +72,15 @@ class PostgresExecutionRepository:
                 remaining_qty=merged.remaining_qty,
                 average_fill_price=merged.average_fill_price,
                 fees=merged.fees,
+                reduce_only=merged.reduce_only,
+                close_only=merged.close_only,
+                td_mode=merged.td_mode,
+                position_mode=merged.position_mode,
+                pos_side=merged.pos_side,
+                reduce_only_reason=merged.reduce_only_reason,
+                close_only_reason=merged.close_only_reason,
+                instrument_family=merged.instrument_family,
+                settle_currency=merged.settle_currency,
                 product_type=scope["product_type"],
                 margin_mode=scope["margin_mode"],
                 position_intent=scope["position_intent"],
@@ -97,6 +106,15 @@ class PostgresExecutionRepository:
             row.remaining_qty = merged.remaining_qty
             row.average_fill_price = merged.average_fill_price
             row.fees = merged.fees
+            row.reduce_only = merged.reduce_only
+            row.close_only = merged.close_only
+            row.td_mode = merged.td_mode
+            row.position_mode = merged.position_mode
+            row.pos_side = merged.pos_side
+            row.reduce_only_reason = merged.reduce_only_reason
+            row.close_only_reason = merged.close_only_reason
+            row.instrument_family = merged.instrument_family
+            row.settle_currency = merged.settle_currency
             row.product_type = scope["product_type"]
             row.margin_mode = scope["margin_mode"]
             row.position_intent = scope["position_intent"]
@@ -137,6 +155,15 @@ class PostgresExecutionRepository:
                 fill_qty=fill.fill_qty,
                 fill_price=fill.fill_price,
                 fee_amount=fill.fee_amount,
+                reduce_only=fill.reduce_only,
+                close_only=fill.close_only,
+                td_mode=fill.td_mode,
+                position_mode=fill.position_mode,
+                pos_side=fill.pos_side,
+                reduce_only_reason=fill.reduce_only_reason,
+                close_only_reason=fill.close_only_reason,
+                instrument_family=fill.instrument_family,
+                settle_currency=fill.settle_currency,
                 product_type=resolved_scope["product_type"],
                 margin_mode=resolved_scope["margin_mode"],
                 position_intent=resolved_scope["position_intent"],
@@ -283,6 +310,15 @@ class PostgresExecutionRepository:
         payload.setdefault("remaining_qty", row.remaining_qty)
         payload.setdefault("average_fill_price", row.average_fill_price)
         payload.setdefault("fees", row.fees)
+        payload.setdefault("reduce_only", row.reduce_only)
+        payload.setdefault("close_only", row.close_only)
+        payload.setdefault("td_mode", row.td_mode)
+        payload.setdefault("position_mode", row.position_mode)
+        payload.setdefault("pos_side", row.pos_side)
+        payload.setdefault("reduce_only_reason", row.reduce_only_reason)
+        payload.setdefault("close_only_reason", row.close_only_reason)
+        payload.setdefault("instrument_family", row.instrument_family)
+        payload.setdefault("settle_currency", row.settle_currency)
         payload.setdefault("product_type", row.product_type)
         payload.setdefault("margin_mode", row.margin_mode)
         payload.setdefault("position_intent", row.position_intent)
@@ -301,6 +337,15 @@ class PostgresExecutionRepository:
         payload.setdefault("fill_qty", row.fill_qty)
         payload.setdefault("fill_price", row.fill_price)
         payload.setdefault("fee_amount", row.fee_amount)
+        payload.setdefault("reduce_only", row.reduce_only)
+        payload.setdefault("close_only", row.close_only)
+        payload.setdefault("td_mode", row.td_mode)
+        payload.setdefault("position_mode", row.position_mode)
+        payload.setdefault("pos_side", row.pos_side)
+        payload.setdefault("reduce_only_reason", row.reduce_only_reason)
+        payload.setdefault("close_only_reason", row.close_only_reason)
+        payload.setdefault("instrument_family", row.instrument_family)
+        payload.setdefault("settle_currency", row.settle_currency)
         payload.setdefault("product_type", row.product_type)
         payload.setdefault("margin_mode", row.margin_mode)
         payload.setdefault("position_intent", row.position_intent)

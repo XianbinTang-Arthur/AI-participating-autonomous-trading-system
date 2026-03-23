@@ -58,6 +58,7 @@ class RuntimeModeController:
         return {
             "mode": self._mode,
             "config_profile": self.settings.config_profile,
+            "startup_profile": self.settings.startup_profile,
             "operating_state": operating_state,
             "runtime_profile": self.runtime_profile.to_dict(),
             "environment_capabilities": self.environment_capabilities.to_dict(),

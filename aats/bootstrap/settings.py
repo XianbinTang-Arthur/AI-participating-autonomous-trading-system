@@ -13,11 +13,16 @@ SupportedTimeframe = Literal["15m", "1h"]
 StorageMode = Literal["memory", "postgres"]
 PersistenceMode = Literal["strict", "permissive"]
 TradingProductType = Literal["spot", "derivatives"]
+StartupProfile = Literal["spot", "derivatives"]
 MarginMode = Literal["cash", "cross", "isolated"]
 ConfigProfile = Literal[
     "local_demo",
     "real_market_paper",
     "forward_test_small_capital",
+    "guarded_spot_dry_run",
+    "guarded_spot_enabled",
+    "guarded_derivatives_dry_run",
+    "guarded_derivatives_enabled",
     "guarded_simulated_submit_dry_run",
     "guarded_simulated_submit_enabled",
     "guarded_simulated_dry_run",
@@ -30,6 +35,25 @@ ExecutionBackend = Literal["paper", "okx"]
 AccountBackend = Literal["disabled", "okx"]
 AIExecutionSuggestionMode = Literal["disabled", "diagnostic_only", "shadow_translation", "enabled_live"]
 
+_PLACEHOLDER_TOKENS = (
+    "REPLACE_WITH_",
+    "CHANGE_ME",
+    "YOUR_",
+    "SET_ME",
+    "TODO",
+    "<",
+)
+
+
+def is_placeholder_config_value(value: str | None) -> bool:
+    if value is None:
+        return False
+    normalized = value.strip()
+    if not normalized:
+        return False
+    upper = normalized.upper()
+    return any(upper.startswith(token) for token in _PLACEHOLDER_TOKENS)
+
 
 class AATSSettings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -39,6 +63,7 @@ class AATSSettings(BaseSettings):
 
     environment: EnvironmentName = "dev"
     config_profile: ConfigProfile = "local_demo"
+    startup_profile: StartupProfile | None = None
     mode: RuntimeMode = "paper_live"
     default_symbol: str = "BTC-USDT"
     primary_timeframe: SupportedTimeframe = "15m"
@@ -114,8 +139,8 @@ class AATSSettings(BaseSettings):
     strategy_profile_auto_control_enabled: bool = False
     openai_api_key: str | None = None
     openai_base_url: str = "https://api.openai.com"
-    market_data_stale_after_seconds: float = 30.0
-    account_state_stale_after_seconds: float = 60.0
+    market_data_stale_after_seconds: float = 45.0
+    account_state_stale_after_seconds: float = 120.0
     reconciliation_stale_after_seconds: float = 300.0
     okx_rest_url: str = "https://www.okx.com"
     okx_public_ws_url: str = "wss://ws.okx.com:8443/ws/v5/public"
@@ -125,8 +150,13 @@ class AATSSettings(BaseSettings):
     okx_api_secret: str | None = None
     okx_api_passphrase: str | None = None
     okx_simulated_trading: bool = False
-    okx_timeout_seconds: float = 10.0
-    okx_market_reconnect_delay_seconds: float = 2.0
+    okx_timeout_seconds: float = 15.0
+    okx_market_reconnect_delay_seconds: float = 4.0
+    okx_market_reconnect_max_delay_seconds: float = 20.0
+    okx_ws_ping_interval_seconds: float = 30.0
+    okx_ws_ping_timeout_seconds: float = 30.0
+    okx_ws_open_timeout_seconds: float = 20.0
+    okx_private_ws_idle_ping_interval_seconds: float = 20.0
     okx_market_rest_fallback_enabled: bool = True
     okx_market_rest_fallback_poll_interval_seconds: float = 5.0
     okx_account_refresh_interval_seconds: float = 15.0
@@ -139,6 +169,10 @@ class AATSSettings(BaseSettings):
     financial_convergence_mode_enabled: bool = False
     okx_fill_fetch_limit: int = 100
     okx_bills_fetch_limit: int = 100
+    okx_instruments_refresh_interval_seconds: float = 300.0
+    okx_account_config_refresh_interval_seconds: float = 300.0
+    okx_account_position_risk_refresh_interval_seconds: float = 60.0
+    okx_bills_refresh_interval_seconds: float = 60.0
     okx_trade_fee_refresh_interval_seconds: float = 300.0
     okx_system_status_refresh_interval_seconds: float = 60.0
     okx_max_order_quantity_precheck_enabled: bool = True
@@ -174,6 +208,8 @@ class AATSSettings(BaseSettings):
     strategy_profile_cold_start_lock_enabled: bool = True
     strategy_profile_safety_profiles: tuple[str, ...] = Field(default=("execution_degraded_safe",))
     strategy_profile_safety_trigger_execution_error_count: int = 3
+    strategy_profile_emergency_safety_fast_track_enabled: bool = True
+    strategy_profile_emergency_safety_confidence_min: float = 0.68
     strategy_profile_score_fee_penalty_weight: float = -25.0
     strategy_profile_score_churn_penalty_weight: float = -20.0
     strategy_profile_score_degraded_status_penalty: float = -15.0
@@ -216,6 +252,8 @@ class AATSSettings(BaseSettings):
     strategy_low_edge_streak_limit: int = 3
     strategy_low_edge_cooldown_seconds: float = 1_800.0
     strategy_transient_close_retry_cooldown_seconds: float = 90.0
+    strategy_risk_budget_multiplier_floor: float = 0.35
+    strategy_execution_aggressiveness_multiplier_floor: float = 0.30
     trial_guard_enabled: bool = False
     trial_guard_poll_interval_seconds: float = 15.0
     trial_guard_lookback_fills: int = 30
@@ -225,6 +263,14 @@ class AATSSettings(BaseSettings):
     trial_guard_max_fee_to_notional_ratio: float = 0.0012
     trial_guard_max_high_slippage_ratio: float = 0.35
     trial_guard_max_slow_submit_to_fill_ratio: float = 0.35
+    max_gross_notional_per_symbol: float = 2_500.0
+    max_pending_notional_per_symbol: float = 1_250.0
+    max_total_open_notional: float = 5_000.0
+    max_daily_realized_loss_usdt: float = 100.0
+    derivatives_only_reduce_trigger_margin_fraction: float = 0.7
+    derivatives_runtime_guard_enabled: bool = True
+    derivatives_auto_halt_margin_usage_fraction: float = 0.85
+    derivatives_auto_halt_liquidation_gap_fraction: float = 0.08
     max_margin_usage_fraction: float = 0.85
     liquidation_buffer_fraction: float = 0.15
     api_host: str = "127.0.0.1"
@@ -260,14 +306,21 @@ class AATSSettings(BaseSettings):
 
     @property
     def okx_credentials_configured(self) -> bool:
-        return all((self.okx_api_key, self.okx_api_secret, self.okx_api_passphrase))
+        return all(
+            value and not is_placeholder_config_value(value)
+            for value in (self.okx_api_key, self.okx_api_secret, self.okx_api_passphrase)
+        )
+
+    @property
+    def database_url_configured(self) -> bool:
+        return bool(self.database_url and not is_placeholder_config_value(self.database_url))
 
     @property
     def ai_provider_configured(self) -> bool:
         if self.ai_provider == "disabled":
             return False
         if self.ai_provider == "openai":
-            return bool(self.openai_api_key)
+            return bool(self.openai_api_key and not is_placeholder_config_value(self.openai_api_key))
         return False
 
     @property
@@ -284,4 +337,4 @@ class AATSSettings(BaseSettings):
 
     @property
     def operator_session_configured(self) -> bool:
-        return bool(self.operator_session_secret)
+        return bool(self.operator_session_secret and not is_placeholder_config_value(self.operator_session_secret))

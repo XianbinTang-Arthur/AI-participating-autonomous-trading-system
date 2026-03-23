@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from dataclasses import dataclass, field
 from decimal import Decimal
 
 from aats.schemas.common import new_id, utc_now
@@ -11,6 +12,23 @@ from aats.schemas.reconciliation import ReconciliationReport
 from aats.services.execution_engine.okx_bills import explain_okx_bills_for_reconciliation
 from aats.services.execution_engine.state_machine import OrderStateMachine
 from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, EPSILON_DECIMAL_9, to_decimal
+from aats.services.portfolio_service.position_keys import (
+    position_key_for_exchange_position,
+    position_key_for_snapshot_position,
+    signed_quantity_for_position_side,
+    symbol_from_position_key,
+)
+
+
+@dataclass(slots=True)
+class DerivativesUnknownStateAssessment:
+    mismatch_categories: list[str] = field(default_factory=list)
+    mismatch_reasons: list[str] = field(default_factory=list)
+    safety_impacts: list[str] = field(default_factory=list)
+    only_reduce_required: bool = False
+    only_reduce_reasons: list[str] = field(default_factory=list)
+    unknown_state_details: list[dict[str, object]] = field(default_factory=list)
+    preferred_operator_action: str | None = None
 
 
 class StateComparator:
@@ -80,20 +98,38 @@ class StateComparator:
             trusted_exchange_portfolio_baseline=trusted_exchange_portfolio_baseline,
             exchange_bills_summary=exchange_bills_summary or {},
         )
+        derivatives_assessment = self._derivatives_unknown_state_assessment(
+            product_type=product_type,
+            order_states=order_states,
+            fills=fills,
+            order_diff=order_diff,
+            fill_diff=fill_diff,
+            position_diff=position_diff,
+            exchange_snapshot=exchange_snapshot,
+        )
+        mismatch_categories = self._dedupe_codes(
+            [*mismatch_categories, *derivatives_assessment.mismatch_categories]
+        )
         severity = self._severity(
             mismatch_categories=mismatch_categories,
             order_diff=order_diff,
             fill_diff=fill_diff,
             balance_diff=balance_diff,
             position_diff=position_diff,
+            only_reduce_required=derivatives_assessment.only_reduce_required,
         )
-        mismatch_reasons = self._mismatch_reasons(
-            order_diff=order_diff,
-            fill_diff=fill_diff,
-            balance_diff=balance_diff,
-            position_diff=position_diff,
-            mismatch_categories=mismatch_categories,
-            exchange_bills_summary=exchange_bills_summary or {},
+        mismatch_reasons = self._dedupe_codes(
+            [
+                *self._mismatch_reasons(
+                    order_diff=order_diff,
+                    fill_diff=fill_diff,
+                    balance_diff=balance_diff,
+                    position_diff=position_diff,
+                    mismatch_categories=mismatch_categories,
+                    exchange_bills_summary=exchange_bills_summary or {},
+                ),
+                *derivatives_assessment.mismatch_reasons,
+            ]
         )
         review_required = severity == "REVIEW_REQUIRED"
         exchange_bills_explanations = explain_okx_bills_for_reconciliation(
@@ -101,19 +137,29 @@ class StateComparator:
             mismatch_categories=mismatch_categories,
             mismatch_reasons=mismatch_reasons,
         )
-        safety_impacts = self._safety_impacts(
-            severity=severity,
-            mismatch_categories=mismatch_categories,
-            order_diff=order_diff,
-            fill_diff=fill_diff,
-            balance_diff=balance_diff,
-            position_diff=position_diff,
-            exchange_bills_summary=exchange_bills_summary or {},
+        safety_impacts = self._dedupe_codes(
+            [
+                *self._safety_impacts(
+                    severity=severity,
+                    mismatch_categories=mismatch_categories,
+                    order_diff=order_diff,
+                    fill_diff=fill_diff,
+                    balance_diff=balance_diff,
+                    position_diff=position_diff,
+                    exchange_bills_summary=exchange_bills_summary or {},
+                    only_reduce_required=derivatives_assessment.only_reduce_required,
+                ),
+                *derivatives_assessment.safety_impacts,
+            ]
         )
-        recommended_operator_action = self._recommended_operator_action(
-            severity=severity,
-            mismatch_categories=mismatch_categories,
-            exchange_bills_summary=exchange_bills_summary or {},
+        recommended_operator_action = (
+            derivatives_assessment.preferred_operator_action
+            or self._recommended_operator_action(
+                severity=severity,
+                mismatch_categories=mismatch_categories,
+                exchange_bills_summary=exchange_bills_summary or {},
+                only_reduce_required=derivatives_assessment.only_reduce_required,
+            )
         )
         remediation_action = recommended_operator_action
         return ReconciliationReport(
@@ -137,10 +183,327 @@ class StateComparator:
             safety_impacts=safety_impacts,
             severity=severity,
             review_required=review_required,
+            only_reduce_required=derivatives_assessment.only_reduce_required,
+            only_reduce_reasons=derivatives_assessment.only_reduce_reasons,
+            unknown_state_details=derivatives_assessment.unknown_state_details,
             recommended_operator_action=recommended_operator_action,
             remediation_action=remediation_action,
             halt_required=severity == "HARD_MISMATCH",
         )
+
+    @staticmethod
+    def _dedupe_codes(values: list[str]) -> list[str]:
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for value in values:
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            ordered.append(value)
+        return ordered
+
+    @staticmethod
+    def _derivatives_unknown_state_assessment(
+        *,
+        product_type: str | None,
+        order_states: list[OrderState],
+        fills: list[FillEvent],
+        order_diff: dict[str, object],
+        fill_diff: dict[str, object],
+        position_diff: dict[str, object],
+        exchange_snapshot: ExchangeAccountSnapshot | None,
+    ) -> DerivativesUnknownStateAssessment:
+        assessment = DerivativesUnknownStateAssessment()
+        if product_type != "derivatives" or exchange_snapshot is None:
+            return assessment
+
+        open_local_orders = [
+            order
+            for order in order_states
+            if order.product_type == "derivatives"
+            and order.venue == "OKX"
+            and OrderStateMachine.is_open(order.status)
+        ]
+        exchange_order_view = order_diff.get("exchange") if isinstance(order_diff.get("exchange"), dict) else {}
+        missing_on_exchange = list(exchange_order_view.get("missing_on_exchange") or [])
+        status_mismatches = dict(exchange_order_view.get("status_mismatches") or {})
+        if missing_on_exchange or status_mismatches:
+            assessment.mismatch_categories.append("derivatives_order_state_unknown_on_exchange")
+            if missing_on_exchange:
+                assessment.mismatch_reasons.append("derivatives_local_order_missing_from_exchange_open_order_view")
+                assessment.unknown_state_details.extend(
+                    {
+                        "kind": "order_state_unknown_on_exchange",
+                        "symbol": next(
+                            (order.symbol for order in open_local_orders if StateComparator._order_key(order) == order_key),
+                            None,
+                        ),
+                        "order_key": order_key,
+                    }
+                    for order_key in missing_on_exchange
+                )
+            if status_mismatches:
+                assessment.mismatch_reasons.append("derivatives_exchange_order_status_conflicts_with_local_open_state")
+                assessment.unknown_state_details.extend(
+                    {
+                        "kind": "order_status_mismatch",
+                        "symbol": next(
+                            (order.symbol for order in open_local_orders if StateComparator._order_key(order) == order_key),
+                            None,
+                        ),
+                        "order_key": order_key,
+                        "local_status": details.get("local"),
+                        "exchange_status": details.get("exchange"),
+                    }
+                    for order_key, details in status_mismatches.items()
+                )
+            assessment.safety_impacts.append("derivatives_open_order_state_is_not_confirmed")
+            assessment.preferred_operator_action = "halt_execution_and_investigate_state_divergence"
+
+        exchange_fill_view = fill_diff.get("exchange") if isinstance(fill_diff.get("exchange"), dict) else {}
+        unexpected_exchange_fills = list(exchange_fill_view.get("unexpected_on_exchange") or [])
+        if unexpected_exchange_fills:
+            assessment.mismatch_categories.append("derivatives_fill_observed_not_booked")
+            assessment.mismatch_reasons.append("derivatives_exchange_fill_observed_without_local_booking")
+            assessment.safety_impacts.append("derivatives_fill_reconciliation_is_incomplete")
+            assessment.unknown_state_details.append(
+                {
+                    "kind": "exchange_fill_without_local_booking",
+                    "fill_ids": unexpected_exchange_fills,
+                }
+            )
+            assessment.preferred_operator_action = "halt_execution_and_investigate_state_divergence"
+
+        account_position_mode = StateComparator._exchange_position_mode(exchange_snapshot)
+        if account_position_mode:
+            position_mode_conflicts = [
+                order
+                for order in open_local_orders
+                if order.position_mode is not None and order.position_mode != account_position_mode
+            ]
+            if position_mode_conflicts:
+                assessment.mismatch_categories.append("derivatives_position_mode_mismatch")
+                assessment.mismatch_reasons.append(
+                    "derivatives_local_position_mode_differs_from_exchange_account_configuration"
+                )
+                assessment.safety_impacts.append("derivatives_order_semantics_do_not_match_exchange_account_mode")
+                assessment.unknown_state_details.extend(
+                    {
+                        "kind": "position_mode_mismatch",
+                        "symbol": order.symbol,
+                        "client_order_id": order.client_order_id,
+                        "local_position_mode": order.position_mode,
+                        "exchange_position_mode": account_position_mode,
+                    }
+                    for order in position_mode_conflicts
+                )
+                assessment.preferred_operator_action = "halt_execution_and_investigate_state_divergence"
+
+            pos_side_conflicts: list[OrderState] = []
+            if account_position_mode == "net_mode":
+                pos_side_conflicts = [
+                    order for order in open_local_orders if order.pos_side not in {None, "net"}
+                ]
+            elif account_position_mode == "long_short_mode":
+                pos_side_conflicts = [
+                    order for order in open_local_orders if order.pos_side not in {"long", "short"}
+                ]
+            if pos_side_conflicts:
+                assessment.mismatch_categories.append("derivatives_pos_side_mismatch")
+                assessment.mismatch_reasons.append(
+                    "derivatives_local_pos_side_conflicts_with_exchange_position_mode"
+                )
+                assessment.safety_impacts.append("derivatives_order_semantics_do_not_match_exchange_account_mode")
+                assessment.unknown_state_details.extend(
+                    {
+                        "kind": "pos_side_mismatch",
+                        "symbol": order.symbol,
+                        "client_order_id": order.client_order_id,
+                        "local_pos_side": order.pos_side,
+                        "exchange_position_mode": account_position_mode,
+                    }
+                    for order in pos_side_conflicts
+                )
+                assessment.preferred_operator_action = "halt_execution_and_investigate_state_divergence"
+
+        exchange_position_mismatches = (
+            position_diff.get("exchange_mismatches")
+            if isinstance(position_diff.get("exchange_mismatches"), dict)
+            else {}
+        )
+        local_execution_symbols = {
+            order.symbol for order in order_states if order.product_type == "derivatives"
+        } | {
+            fill.symbol for fill in fills if fill.product_type == "derivatives"
+        }
+        exchange_positions = StateComparator._exchange_position_quantity_map(exchange_snapshot)
+        stored_positions = position_diff.get("stored") if isinstance(position_diff.get("stored"), dict) else {}
+        missing_execution_chain_details: list[dict[str, object]] = []
+        for position_key, mismatch in exchange_position_mismatches.items():
+            exchange_qty = to_decimal(exchange_positions.get(position_key, Decimal("0")))
+            symbol = symbol_from_position_key(position_key)
+            if abs(exchange_qty) <= EPSILON_DECIMAL_12 or symbol in local_execution_symbols:
+                continue
+            missing_execution_chain_details.append(
+                {
+                    "kind": "exchange_position_without_local_execution_chain",
+                    "position_key": position_key,
+                    "symbol": symbol,
+                    "stored_qty": to_decimal(stored_positions.get(position_key, Decimal("0"))),
+                    "exchange_qty": exchange_qty,
+                    "exchange_side_breakdown": [
+                        {
+                            "side": str(position.side or "net"),
+                            "quantity": str(to_decimal(position.quantity)),
+                        }
+                        for position in exchange_snapshot.positions
+                        if position.symbol == symbol and abs(to_decimal(position.quantity)) > EPSILON_DECIMAL_12
+                    ],
+                    "mismatch": mismatch,
+                }
+            )
+        if missing_execution_chain_details:
+            assessment.mismatch_categories.append("derivatives_exchange_position_without_local_execution_chain")
+            assessment.mismatch_reasons.append("derivatives_exchange_position_not_replayed_locally")
+            assessment.safety_impacts.append("derivatives_new_open_orders_blocked_until_position_reconciled")
+            assessment.only_reduce_required = True
+            assessment.only_reduce_reasons.append("derivatives_exchange_position_without_local_execution_chain")
+            assessment.unknown_state_details.extend(missing_execution_chain_details)
+            if assessment.preferred_operator_action is None:
+                assessment.preferred_operator_action = "go_close_position_on_exchange"
+
+        assessment.mismatch_categories = StateComparator._dedupe_codes(assessment.mismatch_categories)
+        assessment.mismatch_reasons = StateComparator._dedupe_codes(assessment.mismatch_reasons)
+        assessment.safety_impacts = StateComparator._dedupe_codes(assessment.safety_impacts)
+        assessment.only_reduce_reasons = StateComparator._dedupe_codes(assessment.only_reduce_reasons)
+        return assessment
+
+    @staticmethod
+    def _exchange_position_mode(exchange_snapshot: ExchangeAccountSnapshot) -> str | None:
+        account_configuration = exchange_snapshot.account_configuration
+        configured = None if account_configuration is None else account_configuration.position_mode
+        value = str(configured or exchange_snapshot.position_mode or "").strip()
+        return value or None
+
+    @staticmethod
+    def _exchange_position_net_by_symbol(positions) -> dict[str, Decimal]:
+        net_by_symbol: dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
+        for position in positions:
+            quantity = to_decimal(position.quantity)
+            if abs(quantity) <= EPSILON_DECIMAL_12:
+                continue
+            side = str(getattr(position, "side", "net") or "net").lower()
+            signed_quantity = -quantity if side == "short" and quantity > 0 else quantity
+            net_by_symbol[position.symbol] += signed_quantity
+        return {
+            symbol: quantity
+            for symbol, quantity in net_by_symbol.items()
+            if abs(quantity) > EPSILON_DECIMAL_12
+        }
+
+    @staticmethod
+    def _position_quantity_map(positions) -> dict[str, Decimal]:
+        return {
+            position_key_for_snapshot_position(position): to_decimal(position.position_qty)
+            for position in positions
+            if abs(to_decimal(position.position_qty)) > EPSILON_DECIMAL_12
+        }
+
+    @staticmethod
+    def _snapshot_position_margin_map(positions) -> dict[str, dict[str, object]]:
+        rows: dict[str, dict[str, object]] = {}
+        for position in positions:
+            quantity = to_decimal(position.position_qty)
+            if abs(quantity) <= EPSILON_DECIMAL_12:
+                continue
+            rows[position_key_for_snapshot_position(position)] = {
+                "margin_mode": getattr(position, "margin_mode", None),
+                "margin_allocated": to_decimal(getattr(position, "margin_allocated", 0) or 0),
+                "maintenance_margin": to_decimal(getattr(position, "maintenance_margin", 0) or 0),
+                "margin_ratio": (
+                    None
+                    if getattr(position, "margin_ratio", None) in {None, ""}
+                    else to_decimal(getattr(position, "margin_ratio"))
+                ),
+                "liquidation_price": (
+                    None
+                    if getattr(position, "liquidation_price", None) in {None, ""}
+                    else to_decimal(getattr(position, "liquidation_price"))
+                ),
+                "margin_source": str(getattr(position, "margin_source", "estimated") or "estimated"),
+            }
+        return rows
+
+    @staticmethod
+    def _exchange_position_margin_map(exchange_snapshot: ExchangeAccountSnapshot) -> dict[str, dict[str, object]]:
+        position_mode = StateComparator._exchange_position_mode(exchange_snapshot)
+        rows: dict[str, dict[str, object]] = {}
+        for position in exchange_snapshot.positions:
+            quantity = signed_quantity_for_position_side(
+                position.quantity,
+                pos_side=getattr(position, "side", None),
+                position_mode=position_mode,
+            )
+            if abs(quantity) <= EPSILON_DECIMAL_12:
+                continue
+            rows[position_key_for_exchange_position(position, position_mode=position_mode)] = {
+                "margin_mode": getattr(position, "margin_mode", None),
+                "margin_allocated": (
+                    None
+                    if getattr(position, "margin_allocated", None) in {None, ""}
+                    else to_decimal(getattr(position, "margin_allocated"))
+                ),
+                "maintenance_margin": (
+                    None
+                    if getattr(position, "maintenance_margin", None) in {None, ""}
+                    else to_decimal(getattr(position, "maintenance_margin"))
+                ),
+                "margin_ratio": (
+                    None
+                    if getattr(position, "margin_ratio", None) in {None, ""}
+                    else to_decimal(getattr(position, "margin_ratio"))
+                ),
+                "liquidation_price": (
+                    None
+                    if getattr(position, "liquidation_price", None) in {None, ""}
+                    else to_decimal(getattr(position, "liquidation_price"))
+                ),
+            }
+        return rows
+
+    @staticmethod
+    def _position_margin_metric_mismatches(
+        local: dict[str, object],
+        exchange: dict[str, object],
+    ) -> dict[str, dict[str, Decimal | None]]:
+        mismatches: dict[str, dict[str, Decimal | None]] = {}
+        for field in ("margin_allocated", "maintenance_margin", "margin_ratio", "liquidation_price"):
+            local_value = None if local.get(field) in {None, ""} else to_decimal(local.get(field))
+            exchange_value = None if exchange.get(field) in {None, ""} else to_decimal(exchange.get(field))
+            if local_value is None and exchange_value is None:
+                continue
+            if (
+                local_value is None
+                or exchange_value is None
+                or abs(local_value - exchange_value) > EPSILON_DECIMAL_9
+            ):
+                mismatches[field] = {"stored": local_value, "exchange": exchange_value}
+        return mismatches
+
+    @staticmethod
+    def _exchange_position_quantity_map(exchange_snapshot: ExchangeAccountSnapshot) -> dict[str, Decimal]:
+        position_mode = StateComparator._exchange_position_mode(exchange_snapshot)
+        quantities: dict[str, Decimal] = {}
+        for position in exchange_snapshot.positions:
+            quantity = signed_quantity_for_position_side(
+                position.quantity,
+                pos_side=getattr(position, "side", None),
+                position_mode=position_mode,
+            )
+            if abs(quantity) <= EPSILON_DECIMAL_12:
+                continue
+            quantities[position_key_for_exchange_position(position, position_mode=position_mode)] = quantity
+        return quantities
 
     @staticmethod
     def _mismatch_categories(
@@ -161,6 +524,8 @@ class StateComparator:
         unexpected_exchange_fills = bool(exchange_fill_view.get("unexpected_on_exchange"))
         exchange_balance_diff = bool(balance_diff.get("exchange"))
         exchange_position_diff = bool(position_diff.get("exchange_mismatches"))
+        exchange_margin_diff = bool(position_diff.get("exchange_margin_mismatches"))
+        exchange_margin_profile_diff = bool(position_diff.get("exchange_margin_mode_mismatches"))
         exchange_order_diff = bool(order_diff.get("exchange"))
         local_execution_diff = bool(order_diff.get("reconstructed")) or bool(fill_diff.get("replayed"))
         local_portfolio_diff = bool(balance_diff.get("reconstructed")) or bool(
@@ -169,12 +534,24 @@ class StateComparator:
 
         if (
             not has_local_execution_state
-            and (exchange_fill_diff or exchange_balance_diff or exchange_position_diff)
+            and (
+                exchange_fill_diff
+                or exchange_balance_diff
+                or exchange_position_diff
+                or exchange_margin_diff
+                or exchange_margin_profile_diff
+            )
             and not trusted_exchange_portfolio_baseline
         ):
             return ["historical_state_only"]
         if (
-            (unexpected_exchange_fills or exchange_balance_diff or exchange_position_diff)
+            (
+                unexpected_exchange_fills
+                or exchange_balance_diff
+                or exchange_position_diff
+                or exchange_margin_diff
+                or exchange_margin_profile_diff
+            )
             and not exchange_order_diff
             and not local_execution_diff
             and not local_portfolio_diff
@@ -182,7 +559,14 @@ class StateComparator:
             categories.append("external_manual_activity_detected")
         if (
             exchange_bills_summary.get("available")
-            and (unexpected_exchange_fills or exchange_balance_diff or exchange_position_diff or exchange_order_diff)
+            and (
+                unexpected_exchange_fills
+                or exchange_balance_diff
+                or exchange_position_diff
+                or exchange_margin_diff
+                or exchange_margin_profile_diff
+                or exchange_order_diff
+            )
         ):
             categories.append("exchange_bills_activity_available")
 
@@ -192,6 +576,10 @@ class StateComparator:
             categories.append("local_balance_divergence")
         if position_diff.get("exchange_mismatches"):
             categories.append("local_position_divergence")
+        if position_diff.get("exchange_margin_mismatches"):
+            categories.append("local_position_margin_divergence")
+        if position_diff.get("exchange_margin_mode_mismatches"):
+            categories.append("local_position_margin_profile_divergence")
         if order_diff.get("exchange"):
             categories.append("local_open_order_divergence")
         if local_execution_diff or local_portfolio_diff:
@@ -351,10 +739,9 @@ class StateComparator:
         exchange_snapshot: ExchangeAccountSnapshot | None,
         compare_exchange_portfolio: bool,
     ) -> dict[str, object]:
-        stored_positions = {position.symbol: position.position_qty for position in stored_snapshot.positions}
-        replayed_positions = {
-            position.symbol: position.position_qty for position in reconstructed_snapshot.positions
-        }
+        stored_positions = StateComparator._position_quantity_map(stored_snapshot.positions)
+        replayed_positions = StateComparator._position_quantity_map(reconstructed_snapshot.positions)
+        stored_margin = StateComparator._snapshot_position_margin_map(stored_snapshot.positions)
         reconstructed_mismatches: dict[str, dict[str, Decimal]] = {}
         for symbol in sorted(set(stored_positions) | set(replayed_positions)):
             stored = to_decimal(stored_positions.get(symbol, 0))
@@ -364,17 +751,41 @@ class StateComparator:
 
         exchange_positions: dict[str, Decimal] = {}
         exchange_mismatches: dict[str, dict[str, Decimal]] = {}
+        exchange_margin: dict[str, dict[str, object]] = {}
+        exchange_margin_mismatches: dict[str, dict[str, dict[str, Decimal | None]]] = {}
+        exchange_margin_mode_mismatches: dict[str, dict[str, str | None]] = {}
         if compare_exchange_portfolio and exchange_snapshot is not None and exchange_snapshot.positions:
-            exchange_positions = {
-                position.symbol: to_decimal(position.quantity)
-                for position in exchange_snapshot.positions
-                if abs(to_decimal(position.quantity)) > EPSILON_DECIMAL_12
-            }
+            exchange_positions = StateComparator._exchange_position_quantity_map(exchange_snapshot)
+            exchange_margin = StateComparator._exchange_position_margin_map(exchange_snapshot)
             for symbol in sorted(set(stored_positions) | set(exchange_positions)):
                 stored = to_decimal(stored_positions.get(symbol, 0))
                 exchange = to_decimal(exchange_positions.get(symbol, 0))
                 if abs(stored - exchange) > EPSILON_DECIMAL_12:
                     exchange_mismatches[symbol] = {"stored": stored, "exchange": exchange}
+            for position_key in sorted(set(stored_margin) | set(exchange_margin)):
+                local_margin = stored_margin.get(position_key)
+                exchange_margin_row = exchange_margin.get(position_key)
+                if local_margin is None or exchange_margin_row is None:
+                    continue
+                local_margin_mode = str(local_margin.get("margin_mode") or "").strip().lower() or None
+                exchange_margin_mode = str(exchange_margin_row.get("margin_mode") or "").strip().lower() or None
+                if (
+                    local_margin_mode is not None
+                    and exchange_margin_mode is not None
+                    and local_margin_mode != exchange_margin_mode
+                ):
+                    exchange_margin_mode_mismatches[position_key] = {
+                        "stored": local_margin_mode,
+                        "exchange": exchange_margin_mode,
+                    }
+                if str(local_margin.get("margin_source") or "").lower() != "exchange":
+                    continue
+                metric_mismatches = StateComparator._position_margin_metric_mismatches(
+                    local_margin,
+                    exchange_margin_row,
+                )
+                if metric_mismatches:
+                    exchange_margin_mismatches[position_key] = metric_mismatches
 
         return {
             "stored": stored_positions,
@@ -382,6 +793,10 @@ class StateComparator:
             "reconstructed_mismatches": reconstructed_mismatches,
             "exchange": exchange_positions,
             "exchange_mismatches": exchange_mismatches,
+            "stored_margin": stored_margin,
+            "exchange_margin": exchange_margin,
+            "exchange_margin_mismatches": exchange_margin_mismatches,
+            "exchange_margin_mode_mismatches": exchange_margin_mode_mismatches,
         }
 
     @staticmethod
@@ -423,6 +838,7 @@ class StateComparator:
         fill_diff: dict[str, object],
         balance_diff: dict[str, object],
         position_diff: dict[str, object],
+        only_reduce_required: bool = False,
     ) -> str:
         replay_portfolio_mismatch = bool(balance_diff.get("reconstructed")) or bool(
             position_diff.get("reconstructed_mismatches")
@@ -433,14 +849,27 @@ class StateComparator:
         exchange_order_mismatch = bool(order_diff.get("exchange")) or bool(fill_diff.get("exchange"))
         local_execution_mismatch = bool(order_diff.get("reconstructed")) or bool(fill_diff.get("replayed"))
 
-        if not replay_portfolio_mismatch and not exchange_portfolio_mismatch and not exchange_order_mismatch and not local_execution_mismatch:
-            return "CLEAN"
         if "unsafe_unknown_state" in mismatch_categories or "local_open_order_divergence" in mismatch_categories:
+            return "HARD_MISMATCH"
+        if any(
+            category in mismatch_categories
+            for category in (
+                "derivatives_order_state_unknown_on_exchange",
+                "derivatives_fill_observed_not_booked",
+                "derivatives_position_mode_mismatch",
+                "derivatives_pos_side_mismatch",
+                "local_position_margin_profile_divergence",
+            )
+        ):
             return "HARD_MISMATCH"
         if mismatch_categories == ["historical_state_only"]:
             return "INFO"
+        if only_reduce_required:
+            return "SOFT_MISMATCH"
         if "external_manual_activity_detected" in mismatch_categories:
             return "REVIEW_REQUIRED"
+        if not mismatch_categories and not replay_portfolio_mismatch and not exchange_portfolio_mismatch and not exchange_order_mismatch and not local_execution_mismatch:
+            return "CLEAN"
         if exchange_portfolio_mismatch or bool(fill_diff.get("exchange")):
             return "SOFT_MISMATCH"
         return "SOFT_MISMATCH"
@@ -472,6 +901,10 @@ class StateComparator:
             reasons.append("stored_position_differs_from_replayed_position")
         if position_diff.get("exchange_mismatches"):
             reasons.append("local_position_differs_from_exchange_position")
+        if position_diff.get("exchange_margin_mismatches"):
+            reasons.append("local_position_margin_differs_from_exchange_position_margin")
+        if position_diff.get("exchange_margin_mode_mismatches"):
+            reasons.append("local_position_margin_mode_differs_from_exchange_position_margin_mode")
         if "exchange_bills_activity_available" in mismatch_categories and exchange_bills_summary.get("count"):
             reasons.append("recent_exchange_bills_may_explain_exchange_side_balance_activity")
         return reasons
@@ -486,12 +919,15 @@ class StateComparator:
         balance_diff: dict[str, object],
         position_diff: dict[str, object],
         exchange_bills_summary: dict[str, object],
+        only_reduce_required: bool = False,
     ) -> list[str]:
         impacts: list[str] = []
         if severity == "HARD_MISMATCH":
             impacts.append("portfolio_state_may_be_unsafe_for_trading")
         if severity == "REVIEW_REQUIRED":
             impacts.append("operator_review_required_before_trading")
+        if only_reduce_required:
+            impacts.append("derivatives_only_reduce_until_position_reconciled")
         if "historical_state_only" in mismatch_categories:
             impacts.append("historical_account_state_is_not_locally_replayed")
         if order_diff.get("exchange"):
@@ -500,6 +936,10 @@ class StateComparator:
             impacts.append("fill_history_visibility_is_incomplete")
         if balance_diff.get("exchange") or position_diff.get("exchange_mismatches"):
             impacts.append("exchange_account_state_differs_from_local_state")
+        if position_diff.get("exchange_margin_mismatches"):
+            impacts.append("exchange_margin_state_differs_from_local_snapshot")
+        if position_diff.get("exchange_margin_mode_mismatches"):
+            impacts.append("cross_isolated_margin_mode_is_not_confirmed")
         if "exchange_bills_activity_available" in mismatch_categories and exchange_bills_summary.get("count"):
             impacts.append("review_exchange_bills_before_rebaselining")
         return impacts
@@ -510,11 +950,14 @@ class StateComparator:
         severity: str,
         mismatch_categories: list[str],
         exchange_bills_summary: dict[str, object],
+        only_reduce_required: bool = False,
     ) -> str | None:
         if severity == "CLEAN":
             return None
         if severity == "INFO":
             return "observe_only"
+        if only_reduce_required:
+            return "go_close_position_on_exchange"
         if (
             severity == "REVIEW_REQUIRED"
             and "exchange_bills_activity_available" in mismatch_categories

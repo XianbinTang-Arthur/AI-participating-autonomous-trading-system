@@ -4,6 +4,7 @@ import unittest
 from datetime import datetime, timezone
 from decimal import Decimal
 
+from aats.schemas.exchange import ExchangeAccountSnapshot, ExchangeBalance, ExchangePosition
 from aats.schemas.execution import FillEvent
 from aats.services.portfolio_service.pnl import PortfolioPnLCalculator
 from aats.services.portfolio_service.positions import PortfolioState
@@ -67,6 +68,59 @@ class TestPortfolioPrecision(unittest.TestCase):
         self.assertEqual(snapshot.off_position_asset_equity, Decimal("4000.0"))
         self.assertEqual(snapshot.collateral_value, Decimal("5000.0"))
         self.assertEqual(snapshot.total_equity, Decimal("5000.0"))
+
+    def test_exchange_sourced_margin_fields_are_preserved_in_snapshot(self) -> None:
+        state = PortfolioState(
+            initial_usdt_balance=0.0,
+            default_product_type="derivatives",
+            default_margin_mode="cross",
+        )
+        state.load_exchange_snapshot(
+            ExchangeAccountSnapshot(
+                account_source="okx",
+                fetched_at=datetime.now(timezone.utc),
+                balances=[ExchangeBalance(currency="USDT", total=2500.0, available=2100.0, frozen=400.0)],
+                positions=[
+                    ExchangePosition(
+                        instrument_id="BTC-USDT-SWAP",
+                        symbol="BTC-USDT-SWAP",
+                        quantity=Decimal("0.02"),
+                        average_entry_price=Decimal("80000"),
+                        mark_price=Decimal("80100"),
+                        notional_usd=Decimal("1602"),
+                        side="long",
+                        margin_mode="cross",
+                        margin_currency="USDT",
+                        leverage=Decimal("12"),
+                        margin_allocated=Decimal("320"),
+                        maintenance_margin=Decimal("140"),
+                        margin_ratio=Decimal("5.2"),
+                        liquidation_price=Decimal("62000"),
+                        settle_currency="USDT",
+                        instrument_family="BTC-USDT",
+                    )
+                ],
+                open_orders=[],
+                fills=[],
+                instruments=[],
+                account_mode="2",
+                position_mode="net_mode",
+            )
+        )
+
+        snapshot = PortfolioSnapshotBuilder(pnl_calculator=PortfolioPnLCalculator()).build(
+            state=state,
+            price_provider=lambda _symbol: Decimal("80100"),
+        )
+
+        self.assertEqual(snapshot.margin_mode, "cross")
+        self.assertEqual(snapshot.margin_usage, Decimal("320.0"))
+        self.assertEqual(snapshot.risk_budget_usage["margin_usage"], Decimal("320.0"))
+        self.assertEqual(snapshot.positions[0].margin_source, "exchange")
+        self.assertEqual(snapshot.positions[0].margin_allocated, Decimal("320.0"))
+        self.assertEqual(snapshot.positions[0].maintenance_margin, Decimal("140.0"))
+        self.assertEqual(snapshot.positions[0].margin_ratio, Decimal("5.2"))
+        self.assertEqual(snapshot.positions[0].liquidation_price, Decimal("62000.0"))
 
 
 if __name__ == "__main__":

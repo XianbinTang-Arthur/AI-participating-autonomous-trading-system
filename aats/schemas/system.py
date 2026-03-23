@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import Field
 
@@ -9,7 +9,14 @@ from aats.schemas.common import SchemaBase
 
 
 HealthStatus = Literal["ok", "warn", "blocked"]
-RuntimeProfileName = Literal["paper_local", "exchange_simulated", "exchange_simulated_spot", "exchange_simulated_derivatives", "exchange_live_reserved"]
+RuntimeProfileName = Literal[
+    "paper_local",
+    "exchange_simulated",
+    "exchange_simulated_spot",
+    "exchange_simulated_derivatives",
+    "exchange_live_spot",
+    "exchange_live_derivatives",
+]
 ProductType = Literal["spot", "derivatives"]
 PositionDirectionality = Literal["long_only", "bi_directional"]
 LeverageSupport = Literal["none", "supported"]
@@ -115,6 +122,7 @@ class RecoveryPolicyState(SchemaBase):
 class RuntimeModeState(SchemaBase):
     mode: str
     config_profile: str
+    startup_profile: ProductType | None = None
     operating_state: OperatingState
     runtime_profile: RuntimeProfileState
     environment_capabilities: EnvironmentCapabilitiesState
@@ -165,6 +173,9 @@ class RecoveryStatus(SchemaBase):
     safe_to_trade: bool = False
     resume_eligible: bool = False
     review_required: bool = False
+    only_reduce_required: bool = False
+    only_reduce_reasons: list[str] = Field(default_factory=list)
+    unknown_state_details: list[dict[str, Any]] = Field(default_factory=list)
     rebaseline_available: bool = False
     halted: bool = False
     recovery_action: str | None = None

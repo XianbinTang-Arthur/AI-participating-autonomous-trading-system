@@ -9,7 +9,7 @@ from aats.events import topics
 from aats.events.envelopes import build_envelope
 from aats.schemas.features import FeatureSnapshot
 from aats.schemas.market import MarketSnapshot
-from aats.schemas.portfolio import PortfolioSnapshot
+from aats.schemas.portfolio import PortfolioSnapshot, Position
 from aats.schemas.execution import OrderState
 from aats.services.governance_engine.kill_switch import KillSwitch
 from aats.services.governance_engine.mode import RuntimeModeController
@@ -62,6 +62,51 @@ class TestDecisionContextBuilder(unittest.TestCase):
         quantity = DecisionContextBuilder._position_qty(snapshot, "BTC-USDT-SWAP", "derivatives")
 
         self.assertEqual(quantity, Decimal("0"))
+
+    def test_position_qty_aggregates_derivatives_legs_for_same_symbol(self) -> None:
+        snapshot = PortfolioSnapshot(
+            snapshot_ts=datetime.now(timezone.utc),
+            balances={"USDT": 75_000.0},
+            positions=[
+                Position(
+                    symbol="BTC-USDT-SWAP",
+                    position_key="BTC-USDT-SWAP:long",
+                    position_qty=Decimal("0.02"),
+                    position_notional=Decimal("1400"),
+                    avg_entry_price=Decimal("70000"),
+                    unrealized_pnl=Decimal("0"),
+                    product_type="derivatives",
+                    margin_mode="cross",
+                    position_mode="long_short_mode",
+                    pos_side="long",
+                ),
+                Position(
+                    symbol="BTC-USDT-SWAP",
+                    position_key="BTC-USDT-SWAP:short",
+                    position_qty=Decimal("-0.01"),
+                    position_notional=Decimal("-700"),
+                    avg_entry_price=Decimal("70000"),
+                    unrealized_pnl=Decimal("0"),
+                    product_type="derivatives",
+                    margin_mode="cross",
+                    position_mode="long_short_mode",
+                    pos_side="short",
+                ),
+            ],
+            cost_basis={},
+            realized_pnl=0.0,
+            unrealized_pnl=0.0,
+            total_equity=75_000.0,
+            gross_exposure=0.0,
+            net_exposure=0.0,
+            risk_budget_usage={},
+            product_type="derivatives",
+            margin_mode="cross",
+        )
+
+        quantity = DecisionContextBuilder._position_qty(snapshot, "BTC-USDT-SWAP", "derivatives")
+
+        self.assertEqual(quantity, Decimal("0.01"))
 
     def test_build_uses_repo_snapshot_when_portfolio_event_is_missing(self) -> None:
         settings = AATSSettings.model_validate(

@@ -3,10 +3,18 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from datetime import datetime
+import json
 from typing import Any
 
-import orjson
-from websockets.asyncio.client import ClientConnection, connect
+try:
+    import orjson
+except ModuleNotFoundError:  # pragma: no cover - exercised implicitly in environments without orjson.
+    orjson = None
+try:
+    from websockets.asyncio.client import ClientConnection, connect
+except ModuleNotFoundError:  # pragma: no cover - exercised implicitly in environments without websockets.
+    ClientConnection = Any
+    connect = None
 
 from aats.bootstrap.logging import get_logger, log_event
 from aats.bootstrap.settings import AATSSettings
@@ -14,6 +22,20 @@ from aats.schemas.common import utc_now
 
 
 RawMessageHandler = Callable[[dict[str, Any]], Awaitable[None]]
+
+
+def _json_loads(raw_message: str | bytes) -> Any:
+    if orjson is not None:
+        return orjson.loads(raw_message)
+    if isinstance(raw_message, bytes):
+        raw_message = raw_message.decode("utf-8")
+    return json.loads(raw_message)
+
+
+def _json_dumps(payload: dict[str, Any]) -> str:
+    if orjson is not None:
+        return orjson.dumps(payload).decode("utf-8")
+    return json.dumps(payload, separators=(",", ":"))
 
 
 class OKXPublicWebSocketClient:
@@ -26,6 +48,8 @@ class OKXPublicWebSocketClient:
         self._last_error: str | None = None
 
     async def run_forever(self, *, on_message: RawMessageHandler) -> None:
+        if connect is None:
+            raise RuntimeError("websockets_dependency_missing")
         public_args = [{"channel": "tickers", "instId": self.settings.default_symbol}]
         business_args = [
             {"channel": "candle15m", "instId": self.settings.default_symbol},
@@ -72,16 +96,19 @@ class OKXPublicWebSocketClient:
         subscribe_args: list[dict[str, str]],
         on_message: RawMessageHandler,
     ) -> None:
+        reconnect_delay = self.settings.okx_market_reconnect_delay_seconds
         while not self._stop_event.is_set():
             try:
                 async with connect(
                     url,
-                    ping_interval=20,
-                    ping_timeout=20,
+                    ping_interval=self.settings.okx_ws_ping_interval_seconds,
+                    ping_timeout=self.settings.okx_ws_ping_timeout_seconds,
+                    open_timeout=self.settings.okx_ws_open_timeout_seconds,
                     close_timeout=5,
                 ) as websocket:
                     await self._subscribe(websocket, subscribe_args)
                     self._connected[connection_name] = True
+                    reconnect_delay = self.settings.okx_market_reconnect_delay_seconds
                     log_event(
                         self.logger,
                         "okx_ws_connected",
@@ -91,7 +118,7 @@ class OKXPublicWebSocketClient:
                     async for raw_message in websocket:
                         if self._stop_event.is_set():
                             break
-                        message = orjson.loads(raw_message)
+                        message = _json_loads(raw_message)
                         if not isinstance(message, dict):
                             continue
                         self._last_message_ts[connection_name] = utc_now()
@@ -111,7 +138,11 @@ class OKXPublicWebSocketClient:
                     error_type=type(exc).__name__,
                     error=str(exc),
                 )
-                await asyncio.sleep(self.settings.okx_market_reconnect_delay_seconds)
+                await asyncio.sleep(reconnect_delay)
+                reconnect_delay = min(
+                    max(reconnect_delay * 2.0, self.settings.okx_market_reconnect_delay_seconds),
+                    self.settings.okx_market_reconnect_max_delay_seconds,
+                )
             finally:
                 self._connected[connection_name] = False
 
@@ -120,7 +151,7 @@ class OKXPublicWebSocketClient:
         websocket: ClientConnection,
         subscribe_args: list[dict[str, str]],
     ) -> None:
-        await websocket.send(orjson.dumps({"op": "subscribe", "args": subscribe_args}).decode("utf-8"))
+        await websocket.send(_json_dumps({"op": "subscribe", "args": subscribe_args}))
 
     @staticmethod
     def _is_subscription_ack(message: dict[str, Any]) -> bool:

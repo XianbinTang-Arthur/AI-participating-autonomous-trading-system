@@ -68,9 +68,15 @@ class StrategyProfileSelectionDecision(SchemaBase):
     rollback_profile_id: str | None = None
     candidate_source: str = "winner_engine"
     activation_decision_source: str = "activation_gate"
+    transition_class: str | None = None
+    transition_risk_direction: str | None = None
     decision_status: str = "pending_review"
     execution_state: str = "not_executed"
     recommended_action: str | None = None
+    fast_track_eligible: bool = False
+    fast_track_applied: bool = False
+    operator_summary: str | None = None
+    gating_state: dict[str, Any] = Field(default_factory=dict)
     blocked_reasons: list[str] = Field(default_factory=list)
     rationale: list[str] = Field(default_factory=list)
     replay_guard: dict[str, Any] = Field(default_factory=dict)

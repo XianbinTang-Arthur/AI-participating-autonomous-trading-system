@@ -51,7 +51,7 @@ class TestRuntimeLayering(unittest.TestCase):
         self.assertEqual(layering.environment_capabilities.position_directionality, "long_only")
         self.assertEqual(layering.environment_capabilities.leverage_support, "none")
 
-    def test_exchange_live_reserved_profile_remains_blocked(self) -> None:
+    def test_exchange_live_spot_profile_allows_submission(self) -> None:
         layering = resolve_runtime_layering(
             AATSSettings.model_validate(
                 {
@@ -67,11 +67,14 @@ class TestRuntimeLayering(unittest.TestCase):
             )
         )
 
-        self.assertEqual(layering.runtime_profile.name, "exchange_live_reserved")
+        self.assertEqual(layering.runtime_profile.name, "exchange_live_spot")
         self.assertEqual(layering.operating_state, "guarded_live_enabled")
-        self.assertTrue(layering.runtime_profile.live_trading_blocked)
-        self.assertTrue(layering.policy_profile.real_money_submission_structurally_blocked)
-        self.assertFalse(layering.environment_capabilities.exchange_submission_enabled)
+        self.assertFalse(layering.runtime_profile.live_trading_blocked)
+        self.assertFalse(layering.policy_profile.real_money_submission_structurally_blocked)
+        self.assertTrue(layering.environment_capabilities.exchange_submission_enabled)
+        self.assertEqual(layering.environment_capabilities.exchange_submission_target, "okx_live_spot")
+        self.assertEqual(layering.environment_capabilities.execution_route, "okx_live_guarded")
+        self.assertEqual(layering.mode_submit_blocked_reasons, ())
 
     def test_exchange_simulated_derivatives_profile_resolution(self) -> None:
         layering = resolve_runtime_layering(
@@ -101,6 +104,35 @@ class TestRuntimeLayering(unittest.TestCase):
         self.assertTrue(layering.policy_profile.shorting_allowed)
         self.assertTrue(layering.policy_profile.leverage_allowed)
         self.assertEqual(layering.policy_profile.max_target_leverage, 3.0)
+
+    def test_exchange_live_derivatives_profile_resolution(self) -> None:
+        layering = resolve_runtime_layering(
+            AATSSettings.model_validate(
+                {
+                    "mode": "guarded_live",
+                    "market_data_backend": "okx",
+                    "execution_backend": "okx",
+                    "account_backend": "okx",
+                    "account_read_enabled": True,
+                    "okx_simulated_trading": False,
+                    "live_submit_enabled": True,
+                    "guarded_execution_dry_run": False,
+                    "bootstrap_portfolio_from_exchange": True,
+                    "trading_product_type": "derivatives",
+                    "margin_mode": "cross",
+                    "max_target_leverage": 3.0,
+                }
+            )
+        )
+
+        self.assertEqual(layering.runtime_profile.name, "exchange_live_derivatives")
+        self.assertEqual(layering.operating_state, "guarded_live_enabled")
+        self.assertTrue(layering.environment_capabilities.exchange_submission_enabled)
+        self.assertEqual(layering.environment_capabilities.exchange_submission_target, "okx_live_derivatives")
+        self.assertEqual(layering.environment_capabilities.execution_route, "okx_live_derivatives_guarded")
+        self.assertEqual(layering.environment_capabilities.position_directionality, "bi_directional")
+        self.assertEqual(layering.environment_capabilities.leverage_support, "supported")
+        self.assertFalse(layering.policy_profile.real_money_submission_structurally_blocked)
 
 
 if __name__ == "__main__":

@@ -18,6 +18,7 @@ from aats.schemas.exchange import (
     ExchangeOpenOrder,
     ExchangePosition,
 )
+from aats.schemas.reconciliation import ReconciliationReport
 from aats.services.operator.query_service import OperatorQueryService
 from aats.storage.sqlalchemy_models import EventEnvelopeModel, PortfolioSnapshotModel, ReconciliationReportModel
 from tests.support.postgres import temporary_postgres_url
@@ -574,6 +575,118 @@ class TestRecovery(unittest.IsolatedAsyncioTestCase):
         operator_actions = [item.payload for item in runtime.event_store.by_topic(topics.OPERATOR_ACTIONS)]
         self.assertTrue(any(item["action"] == "rebaseline" for item in operator_actions))
         self.assertTrue(any(item["action"] == "resume" for item in operator_actions))
+
+    async def test_operator_rebaseline_refresh_failure_does_not_force_pending_halt_state(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "storage_mode": "memory",
+                "mode": "guarded_live",
+                "market_data_backend": "demo",
+                "execution_backend": "okx",
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "okx_simulated_trading": True,
+                "live_submit_enabled": False,
+                "guarded_execution_dry_run": True,
+                "bootstrap_portfolio_from_exchange": True,
+            }
+        )
+        FakeBaselineAccountService.SNAPSHOT = ExchangeAccountSnapshot(
+            account_source="okx",
+            fetched_at=utc_now(),
+            balances=[ExchangeBalance(currency="USDT", total=1000.0, available=1000.0, frozen=0.0)],
+            positions=[],
+            open_orders=[],
+            fills=[],
+            instruments=[],
+            account_mode="cash",
+        )
+
+        with patch("aats.bootstrap.config.OKXAccountService", FakeBaselineAccountService):
+            runtime = await build_runtime(settings)
+
+        query = OperatorQueryService(runtime)
+        recovery_before = query.recovery_view()
+        halted_before = runtime.kill_switch.halted
+        runtime.account_service._snapshot = None
+
+        with self.assertRaisesRegex(ValueError, "rebaseline_requires_account_snapshot"):
+            await query.rebaseline(reason="accept_current_exchange_state", actor_role="admin")
+
+        self.assertEqual(query.recovery_view()["recovery_state"], recovery_before["recovery_state"])
+        self.assertEqual(runtime.kill_switch.halted, halted_before)
+
+    async def test_derivatives_recovery_view_surfaces_only_reduce_state_without_forcing_halt(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "storage_mode": "memory",
+                "mode": "paper_live",
+                "market_data_backend": "demo",
+                "execution_backend": "paper",
+                "account_backend": "disabled",
+                "account_read_enabled": False,
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+            }
+        )
+        runtime = await build_runtime(settings)
+        await runtime.market_gateway.run_local_publisher(
+            symbol=settings.default_symbol,
+            iterations=2,
+            interval_seconds=0.0,
+        )
+        runtime.reconciliation_repo.save_report(
+            ReconciliationReport(
+                reconciliation_id="recon_integration_only_reduce",
+                as_of_ts=utc_now(),
+                product_type="derivatives",
+                margin_mode="cross",
+                allowed_symbols=["BTC-USDT-SWAP"],
+                exchange_comparison_enabled=True,
+                order_diff={"reconstructed": {}, "exchange": {}},
+                fill_diff={"replayed": {}, "exchange": {}},
+                balance_diff={"reconstructed": {}, "exchange": {}},
+                position_diff={
+                    "stored": {},
+                    "reconstructed": {},
+                    "reconstructed_mismatches": {},
+                    "exchange": {"BTC-USDT-SWAP": "0.02"},
+                    "exchange_mismatches": {"BTC-USDT-SWAP": {"stored": "0", "exchange": "0.02"}},
+                },
+                mismatch_categories=["derivatives_exchange_position_without_local_execution_chain"],
+                mismatch_reasons=["derivatives_exchange_position_not_replayed_locally"],
+                safety_impacts=["derivatives_only_reduce_until_position_reconciled"],
+                severity="SOFT_MISMATCH",
+                recovery_classification="derivatives_only_reduce",
+                only_reduce_required=True,
+                only_reduce_reasons=["derivatives_exchange_position_without_local_execution_chain"],
+                unknown_state_details=[
+                    {
+                        "kind": "exchange_position_without_local_execution_chain",
+                        "symbol": "BTC-USDT-SWAP",
+                        "stored_qty": "0",
+                        "exchange_qty": "0.02",
+                    }
+                ],
+                recommended_operator_action="go_close_position_on_exchange",
+            )
+        )
+
+        query = OperatorQueryService(runtime)
+        recovery = query.recovery_view()
+
+        self.assertEqual(recovery["recovery_state"], "only_reduce")
+        self.assertTrue(recovery["safe_to_trade"])
+        self.assertTrue(recovery["resume_eligible"])
+        self.assertTrue(recovery["only_reduce_required"])
+        self.assertIn("derivatives_exchange_position_without_local_execution_chain", recovery["only_reduce_reasons"])
+        self.assertEqual(recovery["latest_reconciliation"]["recovery_classification"], "derivatives_only_reduce")
+        self.assertEqual(
+            recovery["latest_reconciliation"]["recommended_operator_action"],
+            "go_close_position_on_exchange",
+        )
 
     async def test_resume_rechecks_blockers_and_stays_halted_when_market_is_stale(self) -> None:
         settings = AATSSettings.model_validate(

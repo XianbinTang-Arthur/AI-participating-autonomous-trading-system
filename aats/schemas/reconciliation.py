@@ -33,6 +33,9 @@ class ReconciliationReport(SchemaBase):
     auto_repairable: bool = False
     resume_blocking: bool = False
     review_required: bool = False
+    only_reduce_required: bool = False
+    only_reduce_reasons: list[str] = Field(default_factory=list)
+    unknown_state_details: list[dict[str, Any]] = Field(default_factory=list)
     recommended_operator_action: str | None = None
     remediation_action: str | None = None
     halt_required: bool = False

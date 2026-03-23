@@ -50,11 +50,6 @@ class PolicyEngine:
                 *self.health_service.submission_blockers(),
             ]
             rejection_reasons.extend(health_blockers)
-        if (
-            self.policy_profile.real_money_submission_structurally_blocked
-            and self.environment_capabilities.exchange_submission_enabled
-        ):
-            rejection_reasons.append("real_money_live_not_supported")
         rejection_reasons = list(dict.fromkeys(rejection_reasons))
 
         allowed = not rejection_reasons
@@ -63,7 +58,6 @@ class PolicyEngine:
             execution_allowed
             and self.policy_profile.exchange_submission_allowed_in_principle
             and self.environment_capabilities.exchange_submission_enabled
-            and not self.policy_profile.real_money_submission_structurally_blocked
         )
         dry_run_only = (
             execution_allowed

@@ -6,7 +6,13 @@ from decimal import Decimal
 from aats.bootstrap.settings import AATSSettings
 from aats.schemas.common import utc_now
 from aats.schemas.execution import FillEvent, OrderIntent, OrderObligation, OrderState
-from aats.schemas.exchange import ExchangeAccountSnapshot, ExchangeFill, InstrumentMetadata
+from aats.schemas.exchange import (
+    ExchangeAccountConfiguration,
+    ExchangeAccountSnapshot,
+    ExchangeFill,
+    ExchangePosition,
+    InstrumentMetadata,
+)
 from aats.schemas.reconciliation import ReconciliationReport
 from aats.services.execution_engine.okx_adapter import OKXExecutionAdapter, OKXOrderPayloadBuilder
 from aats.services.execution_engine.okx_account import datetime_from_ms
@@ -42,6 +48,13 @@ class FakeAccountService:
                 )
             ],
             account_mode="cash",
+            account_configuration=ExchangeAccountConfiguration(
+                account_level_code="1",
+                account_level_label="simple",
+                position_mode="net_mode",
+                position_mode_label="net",
+                raw={"posMode": "net_mode"},
+            ),
             raw={"account_config": {"data": [{"posMode": "net_mode"}]}},
         )
 
@@ -717,6 +730,17 @@ class TestGuardedSimulatedExecution(unittest.IsolatedAsyncioTestCase):
         account_service = FakeAccountService()
         account_service._snapshot = account_service._snapshot.model_copy(
             update={
+                "positions": [
+                    ExchangePosition(
+                        instrument_id="BTC-USDT-SWAP",
+                        symbol="BTC-USDT-SWAP",
+                        quantity=Decimal("0.03"),
+                        average_entry_price=Decimal("67000"),
+                        mark_price=Decimal("68000"),
+                        notional_usd=Decimal("2040"),
+                        side="long",
+                    )
+                ],
                 "instruments": [
                     InstrumentMetadata(
                         instrument_id="BTC-USDT-SWAP",
@@ -731,6 +755,13 @@ class TestGuardedSimulatedExecution(unittest.IsolatedAsyncioTestCase):
                     )
                 ],
                 "account_mode": "2",
+                "account_configuration": ExchangeAccountConfiguration(
+                    account_level_code="2",
+                    account_level_label="single_currency_margin",
+                    position_mode="net_mode",
+                    position_mode_label="net",
+                    raw={"posMode": "net_mode"},
+                ),
                 "raw": {"account_config": {"data": [{"posMode": "net_mode"}]}},
             }
         )
@@ -765,6 +796,521 @@ class TestGuardedSimulatedExecution(unittest.IsolatedAsyncioTestCase):
         await adapter.submit(intent)
 
         self.assertNotIn("posSide", client.place_order_calls[0])
+
+    async def test_submit_uses_explicit_pos_side_for_long_short_close_orders(self) -> None:
+        settings = make_settings(
+            {
+                "live_submit_enabled": True,
+                "guarded_execution_dry_run": False,
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "max_notional_per_symbol": 10_000.0,
+            }
+        )
+        mode_controller = RuntimeModeController(settings=settings, kill_switch=KillSwitch())
+        account_service = FakeAccountService()
+        account_service._snapshot = account_service._snapshot.model_copy(
+            update={
+                "positions": [
+                    ExchangePosition(
+                        instrument_id="BTC-USDT-SWAP",
+                        symbol="BTC-USDT-SWAP",
+                        quantity=Decimal("0.03"),
+                        average_entry_price=Decimal("67000"),
+                        mark_price=Decimal("68000"),
+                        notional_usd=Decimal("2040"),
+                        side="long",
+                    )
+                ],
+                "instruments": [
+                    InstrumentMetadata(
+                        instrument_id="BTC-USDT-SWAP",
+                        symbol="BTC-USDT-SWAP",
+                        base_currency="BTC",
+                        quote_currency="USDT",
+                        lot_size=0.01,
+                        tick_size=0.1,
+                        min_size=0.01,
+                        contract_value=0.01,
+                        state="live",
+                    )
+                ],
+                "account_mode": "2",
+                "account_configuration": ExchangeAccountConfiguration(
+                    account_level_code="2",
+                    account_level_label="single_currency_margin",
+                    position_mode="long_short_mode",
+                    position_mode_label="long_short",
+                    raw={"posMode": "long_short_mode"},
+                ),
+            }
+        )
+        account_service.instrument_metadata = lambda symbol: account_service._snapshot.instruments[0] if symbol == "BTC-USDT-SWAP" else None
+        client = FakeOKXClient()
+        adapter = OKXExecutionAdapter(
+            settings=settings,
+            client=client,  # type: ignore[arg-type]
+            account_service=account_service,  # type: ignore[arg-type]
+            mode_controller=mode_controller,
+            health_service=FakeHealthService(),
+            price_provider=lambda _symbol: 68_000.0,
+        )
+        intent = OrderIntent(
+            intent_id="intent_derivatives_close_long",
+            decision_id="decision_derivatives_close_long",
+            symbol="BTC-USDT-SWAP",
+            side="sell",
+            quantity=0.03,
+            execution_style="taker",
+            order_type="market",
+            urgency="medium",
+            time_in_force="IOC",
+            idempotency_key="intent_derivatives_close_long",
+            product_type="derivatives",
+            target_leverage=2.5,
+            margin_mode="cross",
+            td_mode="cross",
+            position_mode="long_short_mode",
+            pos_side="long",
+            reduce_only=True,
+            close_only=True,
+            reduce_only_reason="position_intent_close_path",
+            close_only_reason="position_intent_close_path",
+            instrument_family="BTC-USDT",
+            settle_currency="USDT",
+            exposure_side="flat",
+            position_intent="close_long",
+        )
+
+        await adapter.submit(intent)
+
+        self.assertEqual(client.place_order_calls[0]["posSide"], "long")
+        self.assertEqual(client.place_order_calls[0]["tdMode"], "cross")
+        self.assertEqual(client.place_order_calls[0]["reduceOnly"], "true")
+
+    async def test_submit_blocks_when_derivatives_td_mode_mismatches_margin_mode(self) -> None:
+        settings = make_settings(
+            {
+                "live_submit_enabled": True,
+                "guarded_execution_dry_run": False,
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "max_notional_per_symbol": 10_000.0,
+            }
+        )
+        mode_controller = RuntimeModeController(settings=settings, kill_switch=KillSwitch())
+        account_service = FakeAccountService()
+        account_service._snapshot = account_service._snapshot.model_copy(
+            update={
+                "instruments": [
+                    InstrumentMetadata(
+                        instrument_id="BTC-USDT-SWAP",
+                        symbol="BTC-USDT-SWAP",
+                        base_currency="BTC",
+                        quote_currency="USDT",
+                        lot_size=0.01,
+                        tick_size=0.1,
+                        min_size=0.01,
+                        contract_value=0.01,
+                        max_leverage=Decimal("5"),
+                        state="live",
+                    )
+                ],
+                "account_mode": "2",
+                "account_configuration": ExchangeAccountConfiguration(
+                    account_level_code="2",
+                    account_level_label="single_currency_margin",
+                    position_mode="net_mode",
+                    position_mode_label="net",
+                    raw={"posMode": "net_mode"},
+                ),
+            }
+        )
+        account_service.instrument_metadata = (
+            lambda symbol: account_service._snapshot.instruments[0] if symbol == "BTC-USDT-SWAP" else None
+        )
+        client = FakeOKXClient()
+        adapter = OKXExecutionAdapter(
+            settings=settings,
+            client=client,  # type: ignore[arg-type]
+            account_service=account_service,  # type: ignore[arg-type]
+            mode_controller=mode_controller,
+            health_service=FakeHealthService(),
+            price_provider=lambda _symbol: Decimal("68000"),
+        )
+        intent = OrderIntent(
+            intent_id="intent_td_mode_mismatch",
+            decision_id="decision_td_mode_mismatch",
+            symbol="BTC-USDT-SWAP",
+            side="buy",
+            quantity=Decimal("0.02"),
+            execution_style="taker",
+            order_type="market",
+            urgency="medium",
+            time_in_force="IOC",
+            idempotency_key="intent_td_mode_mismatch",
+            product_type="derivatives",
+            target_leverage=2.0,
+            margin_mode="cross",
+            td_mode="isolated",
+            exposure_side="long",
+            position_intent="open_long",
+        )
+
+        state, fills = await adapter.submit(intent)
+
+        self.assertEqual(state.status, "BLOCKED")
+        self.assertEqual(state.execution_error, "okx_td_mode_margin_mode_mismatch")
+        self.assertEqual(fills, [])
+        self.assertEqual(client.place_order_calls, [])
+
+    async def test_submit_blocks_when_net_mode_account_receives_explicit_pos_side(self) -> None:
+        settings = make_settings(
+            {
+                "live_submit_enabled": True,
+                "guarded_execution_dry_run": False,
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "max_notional_per_symbol": 10_000.0,
+            }
+        )
+        mode_controller = RuntimeModeController(settings=settings, kill_switch=KillSwitch())
+        account_service = FakeAccountService()
+        account_service._snapshot = account_service._snapshot.model_copy(
+            update={
+                "instruments": [
+                    InstrumentMetadata(
+                        instrument_id="BTC-USDT-SWAP",
+                        symbol="BTC-USDT-SWAP",
+                        base_currency="BTC",
+                        quote_currency="USDT",
+                        lot_size=0.01,
+                        tick_size=0.1,
+                        min_size=0.01,
+                        contract_value=0.01,
+                        max_leverage=Decimal("5"),
+                        state="live",
+                    )
+                ],
+                "account_mode": "2",
+                "account_configuration": ExchangeAccountConfiguration(
+                    account_level_code="2",
+                    account_level_label="single_currency_margin",
+                    position_mode="net_mode",
+                    position_mode_label="net",
+                    raw={"posMode": "net_mode"},
+                ),
+            }
+        )
+        account_service.instrument_metadata = (
+            lambda symbol: account_service._snapshot.instruments[0] if symbol == "BTC-USDT-SWAP" else None
+        )
+        client = FakeOKXClient()
+        adapter = OKXExecutionAdapter(
+            settings=settings,
+            client=client,  # type: ignore[arg-type]
+            account_service=account_service,  # type: ignore[arg-type]
+            mode_controller=mode_controller,
+            health_service=FakeHealthService(),
+            price_provider=lambda _symbol: Decimal("68000"),
+        )
+        intent = OrderIntent(
+            intent_id="intent_net_mode_pos_side",
+            decision_id="decision_net_mode_pos_side",
+            symbol="BTC-USDT-SWAP",
+            side="buy",
+            quantity=Decimal("0.02"),
+            execution_style="taker",
+            order_type="market",
+            urgency="medium",
+            time_in_force="IOC",
+            idempotency_key="intent_net_mode_pos_side",
+            product_type="derivatives",
+            target_leverage=2.0,
+            margin_mode="cross",
+            td_mode="cross",
+            position_mode="net_mode",
+            pos_side="long",
+            exposure_side="long",
+            position_intent="open_long",
+        )
+
+        state, fills = await adapter.submit(intent)
+
+        self.assertEqual(state.status, "BLOCKED")
+        self.assertEqual(state.execution_error, "okx_pos_side_disallowed_for_net_mode")
+        self.assertEqual(fills, [])
+        self.assertEqual(client.place_order_calls, [])
+
+    async def test_submit_blocks_when_only_reduce_required_order_would_reverse_position(self) -> None:
+        settings = make_settings(
+            {
+                "live_submit_enabled": True,
+                "guarded_execution_dry_run": False,
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "max_notional_per_symbol": 10_000.0,
+            }
+        )
+        mode_controller = RuntimeModeController(settings=settings, kill_switch=KillSwitch())
+        account_service = FakeAccountService()
+        account_service._snapshot = account_service._snapshot.model_copy(
+            update={
+                "positions": [
+                    ExchangePosition(
+                        instrument_id="BTC-USDT-SWAP",
+                        symbol="BTC-USDT-SWAP",
+                        quantity=Decimal("0.02"),
+                        average_entry_price=Decimal("67000"),
+                        mark_price=Decimal("68000"),
+                        notional_usd=Decimal("1360"),
+                        side="net",
+                    )
+                ],
+                "instruments": [
+                    InstrumentMetadata(
+                        instrument_id="BTC-USDT-SWAP",
+                        symbol="BTC-USDT-SWAP",
+                        base_currency="BTC",
+                        quote_currency="USDT",
+                        lot_size=0.01,
+                        tick_size=0.1,
+                        min_size=0.01,
+                        contract_value=0.01,
+                        max_leverage=Decimal("5"),
+                        state="live",
+                    )
+                ],
+                "account_mode": "2",
+                "account_configuration": ExchangeAccountConfiguration(
+                    account_level_code="2",
+                    account_level_label="single_currency_margin",
+                    position_mode="net_mode",
+                    position_mode_label="net",
+                    raw={"posMode": "net_mode"},
+                ),
+            }
+        )
+        account_service.instrument_metadata = (
+            lambda symbol: account_service._snapshot.instruments[0] if symbol == "BTC-USDT-SWAP" else None
+        )
+        client = FakeOKXClient()
+        adapter = OKXExecutionAdapter(
+            settings=settings,
+            client=client,  # type: ignore[arg-type]
+            account_service=account_service,  # type: ignore[arg-type]
+            mode_controller=mode_controller,
+            health_service=FakeHealthService(),
+            price_provider=lambda _symbol: Decimal("68000"),
+        )
+        intent = OrderIntent(
+            intent_id="intent_only_reduce_reverse",
+            decision_id="decision_only_reduce_reverse",
+            symbol="BTC-USDT-SWAP",
+            side="sell",
+            quantity=Decimal("0.03"),
+            execution_style="taker",
+            order_type="market",
+            urgency="medium",
+            time_in_force="IOC",
+            idempotency_key="intent_only_reduce_reverse",
+            product_type="derivatives",
+            target_leverage=2.0,
+            margin_mode="cross",
+            td_mode="cross",
+            position_mode="net_mode",
+            exposure_side="short",
+            position_intent="reverse_to_short",
+            only_reduce_required=True,
+            projected_margin_usage=Decimal("0.82"),
+        )
+
+        state, fills = await adapter.submit(intent)
+
+        self.assertEqual(state.status, "BLOCKED")
+        self.assertEqual(state.execution_error, "okx_reduce_only_required_by_risk")
+        self.assertEqual(fills, [])
+        self.assertEqual(client.place_order_calls, [])
+
+    async def test_submit_allows_only_reduce_close_when_risk_requires_only_reduce(self) -> None:
+        settings = make_settings(
+            {
+                "live_submit_enabled": True,
+                "guarded_execution_dry_run": False,
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "max_notional_per_symbol": 10_000.0,
+            }
+        )
+        mode_controller = RuntimeModeController(settings=settings, kill_switch=KillSwitch())
+        account_service = FakeAccountService()
+        account_service._snapshot = account_service._snapshot.model_copy(
+            update={
+                "positions": [
+                    ExchangePosition(
+                        instrument_id="BTC-USDT-SWAP",
+                        symbol="BTC-USDT-SWAP",
+                        quantity=Decimal("0.02"),
+                        average_entry_price=Decimal("67000"),
+                        mark_price=Decimal("68000"),
+                        notional_usd=Decimal("1360"),
+                        side="net",
+                    )
+                ],
+                "instruments": [
+                    InstrumentMetadata(
+                        instrument_id="BTC-USDT-SWAP",
+                        symbol="BTC-USDT-SWAP",
+                        base_currency="BTC",
+                        quote_currency="USDT",
+                        lot_size=0.01,
+                        tick_size=0.1,
+                        min_size=0.01,
+                        contract_value=0.01,
+                        max_leverage=Decimal("5"),
+                        state="live",
+                    )
+                ],
+                "account_mode": "2",
+                "account_configuration": ExchangeAccountConfiguration(
+                    account_level_code="2",
+                    account_level_label="single_currency_margin",
+                    position_mode="net_mode",
+                    position_mode_label="net",
+                    raw={"posMode": "net_mode"},
+                ),
+            }
+        )
+        account_service.instrument_metadata = (
+            lambda symbol: account_service._snapshot.instruments[0] if symbol == "BTC-USDT-SWAP" else None
+        )
+        client = FakeOKXClient()
+        adapter = OKXExecutionAdapter(
+            settings=settings,
+            client=client,  # type: ignore[arg-type]
+            account_service=account_service,  # type: ignore[arg-type]
+            mode_controller=mode_controller,
+            health_service=FakeHealthService(),
+            price_provider=lambda _symbol: Decimal("68000"),
+        )
+        intent = OrderIntent(
+            intent_id="intent_only_reduce_close",
+            decision_id="decision_only_reduce_close",
+            symbol="BTC-USDT-SWAP",
+            side="sell",
+            quantity=Decimal("0.02"),
+            execution_style="taker",
+            order_type="market",
+            urgency="medium",
+            time_in_force="IOC",
+            idempotency_key="intent_only_reduce_close",
+            product_type="derivatives",
+            target_leverage=2.0,
+            margin_mode="cross",
+            td_mode="cross",
+            position_mode="net_mode",
+            exposure_side="flat",
+            position_intent="close_long",
+            only_reduce_required=True,
+            projected_margin_usage=Decimal("0.82"),
+        )
+
+        state, fills = await adapter.submit(intent)
+
+        self.assertEqual(state.status, "FILLED")
+        self.assertEqual(len(fills), 1)
+        self.assertEqual(client.place_order_calls[0]["reduceOnly"], "true")
+        self.assertEqual(state.submission_payload["onlyReduceRequired"], "true")
+        self.assertEqual(state.submission_payload["projectedMarginUsage"], "0.82")
+
+    async def test_submit_blocks_when_instrument_max_leverage_is_exceeded(self) -> None:
+        settings = make_settings(
+            {
+                "live_submit_enabled": True,
+                "guarded_execution_dry_run": False,
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "max_notional_per_symbol": 10_000.0,
+            }
+        )
+        mode_controller = RuntimeModeController(settings=settings, kill_switch=KillSwitch())
+        account_service = FakeAccountService()
+        account_service._snapshot = account_service._snapshot.model_copy(
+            update={
+                "instruments": [
+                    InstrumentMetadata(
+                        instrument_id="BTC-USDT-SWAP",
+                        symbol="BTC-USDT-SWAP",
+                        base_currency="BTC",
+                        quote_currency="USDT",
+                        lot_size=0.01,
+                        tick_size=0.1,
+                        min_size=0.01,
+                        contract_value=0.01,
+                        max_leverage=Decimal("3"),
+                        state="live",
+                    )
+                ],
+                "account_mode": "2",
+                "account_configuration": ExchangeAccountConfiguration(
+                    account_level_code="2",
+                    account_level_label="single_currency_margin",
+                    position_mode="net_mode",
+                    position_mode_label="net",
+                    raw={"posMode": "net_mode"},
+                ),
+            }
+        )
+        account_service.instrument_metadata = (
+            lambda symbol: account_service._snapshot.instruments[0] if symbol == "BTC-USDT-SWAP" else None
+        )
+        client = FakeOKXClient()
+        adapter = OKXExecutionAdapter(
+            settings=settings,
+            client=client,  # type: ignore[arg-type]
+            account_service=account_service,  # type: ignore[arg-type]
+            mode_controller=mode_controller,
+            health_service=FakeHealthService(),
+            price_provider=lambda _symbol: Decimal("68000"),
+        )
+        intent = OrderIntent(
+            intent_id="intent_leverage_limit",
+            decision_id="decision_leverage_limit",
+            symbol="BTC-USDT-SWAP",
+            side="buy",
+            quantity=Decimal("0.02"),
+            execution_style="taker",
+            order_type="market",
+            urgency="medium",
+            time_in_force="IOC",
+            idempotency_key="intent_leverage_limit",
+            product_type="derivatives",
+            target_leverage=5.0,
+            margin_mode="cross",
+            td_mode="cross",
+            position_mode="net_mode",
+            exposure_side="long",
+            position_intent="open_long",
+        )
+
+        state, fills = await adapter.submit(intent)
+
+        self.assertEqual(state.status, "BLOCKED")
+        self.assertEqual(state.execution_error, "okx_leverage_exceeds_instrument_limit")
+        self.assertEqual(fills, [])
+        self.assertEqual(client.place_order_calls, [])
 
     async def test_submit_blocks_when_okx_max_order_quantity_is_exceeded(self) -> None:
         settings = make_settings(

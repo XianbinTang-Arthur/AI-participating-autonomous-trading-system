@@ -6,7 +6,7 @@ from typing import Protocol
 from aats.schemas.common import EventEnvelope
 from aats.schemas.audit import DecisionAuditRecord
 from aats.schemas.execution import FillEvent, OrderObligation, OrderState
-from aats.schemas.portfolio import FillOutcomeRecord, PortfolioSnapshot
+from aats.schemas.portfolio import FillOutcomeRecord, FundingFeeRecord, PortfolioSnapshot
 from aats.schemas.reconciliation import ReconciliationReport
 from aats.schemas.operator import OperatorUserRecord
 from aats.schemas.runtime_profiles import RuntimeProfileActivationState, RuntimeProfileRevision
@@ -192,6 +192,26 @@ class FillOutcomeRepository(Protocol):
         since: datetime | None = None,
         limit: int | None = None,
     ) -> list[FillOutcomeRecord]:
+        ...
+
+
+class FundingFeeRepository(Protocol):
+    def save_record(self, record: FundingFeeRecord) -> FundingFeeRecord:
+        ...
+
+    def get_record(self, bill_id: str) -> FundingFeeRecord | None:
+        ...
+
+    def records(self) -> list[FundingFeeRecord]:
+        ...
+
+    def records_for_scope(
+        self,
+        *,
+        scope: RuntimeStateScope,
+        since: datetime | None = None,
+        limit: int | None = None,
+    ) -> list[FundingFeeRecord]:
         ...
 
 

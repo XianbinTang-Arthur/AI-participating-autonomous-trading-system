@@ -12,6 +12,7 @@ from aats.schemas.execution import FillEvent, OrderState
 from aats.schemas.exchange import (
     AccountBaselineSnapshot,
     ExchangeAccountSnapshot,
+    ExchangeAccountConfiguration,
     ExchangeBalance,
     ExchangeFill,
     ExchangeOpenOrder,
@@ -109,10 +110,339 @@ class TestReconciliationComparator(unittest.TestCase):
             ),
             exchange_comparison_enabled=True,
             compare_exchange_portfolio=True,
+            trusted_exchange_portfolio_baseline=True,
         )
 
         self.assertEqual(report.severity, "CLEAN")
         self.assertFalse(report.balance_diff["exchange"])
+
+    def test_compare_derivatives_long_short_positions_by_position_key(self) -> None:
+        comparator = StateComparator()
+        now = utc_now()
+        report = comparator.compare(
+            decision_id="decision_derivatives_long_short_clean",
+            portfolio_snapshot_ref="evt_portfolio_derivatives_long_short_clean",
+            product_type="derivatives",
+            margin_mode="cross",
+            order_states=[],
+            fills=[],
+            stored_snapshot=PortfolioSnapshot(
+                snapshot_ts=now,
+                balances={"USDT": 10_000.0},
+                positions=[
+                    Position(
+                        symbol="BTC-USDT-SWAP",
+                        position_key="BTC-USDT-SWAP:long",
+                        position_qty=0.02,
+                        position_notional=1420.0,
+                        avg_entry_price=70_000.0,
+                        unrealized_pnl=20.0,
+                        product_type="derivatives",
+                        margin_mode="cross",
+                        position_mode="long_short_mode",
+                        pos_side="long",
+                    ),
+                    Position(
+                        symbol="BTC-USDT-SWAP",
+                        position_key="BTC-USDT-SWAP:short",
+                        position_qty=-0.01,
+                        position_notional=-710.0,
+                        avg_entry_price=71_000.0,
+                        unrealized_pnl=5.0,
+                        product_type="derivatives",
+                        margin_mode="cross",
+                        position_mode="long_short_mode",
+                        pos_side="short",
+                    ),
+                ],
+                cost_basis={"BTC-USDT-SWAP:long": 70_000.0, "BTC-USDT-SWAP:short": 71_000.0},
+                realized_pnl=0.0,
+                unrealized_pnl=25.0,
+                total_equity=10_025.0,
+                gross_exposure=2130.0,
+                net_exposure=710.0,
+                risk_budget_usage={},
+                product_type="derivatives",
+                margin_mode="cross",
+            ),
+            reconstructed_snapshot=PortfolioSnapshot(
+                snapshot_ts=now,
+                balances={"USDT": 10_000.0},
+                positions=[
+                    Position(
+                        symbol="BTC-USDT-SWAP",
+                        position_key="BTC-USDT-SWAP:long",
+                        position_qty=0.02,
+                        position_notional=1420.0,
+                        avg_entry_price=70_000.0,
+                        unrealized_pnl=20.0,
+                        product_type="derivatives",
+                        margin_mode="cross",
+                        position_mode="long_short_mode",
+                        pos_side="long",
+                    ),
+                    Position(
+                        symbol="BTC-USDT-SWAP",
+                        position_key="BTC-USDT-SWAP:short",
+                        position_qty=-0.01,
+                        position_notional=-710.0,
+                        avg_entry_price=71_000.0,
+                        unrealized_pnl=5.0,
+                        product_type="derivatives",
+                        margin_mode="cross",
+                        position_mode="long_short_mode",
+                        pos_side="short",
+                    ),
+                ],
+                cost_basis={"BTC-USDT-SWAP:long": 70_000.0, "BTC-USDT-SWAP:short": 71_000.0},
+                realized_pnl=0.0,
+                unrealized_pnl=25.0,
+                total_equity=10_025.0,
+                gross_exposure=2130.0,
+                net_exposure=710.0,
+                risk_budget_usage={},
+                product_type="derivatives",
+                margin_mode="cross",
+            ),
+            exchange_snapshot=ExchangeAccountSnapshot(
+                account_source="okx",
+                fetched_at=now,
+                balances=[ExchangeBalance(currency="USDT", total=10_000.0, available=10_000.0, frozen=0.0)],
+                positions=[
+                    ExchangePosition(
+                        instrument_id="BTC-USDT-SWAP",
+                        symbol="BTC-USDT-SWAP",
+                        quantity=0.02,
+                        average_entry_price=70_000.0,
+                        mark_price=71_000.0,
+                        side="long",
+                    ),
+                    ExchangePosition(
+                        instrument_id="BTC-USDT-SWAP",
+                        symbol="BTC-USDT-SWAP",
+                        quantity=0.01,
+                        average_entry_price=71_000.0,
+                        mark_price=70_500.0,
+                        side="short",
+                    ),
+                ],
+                open_orders=[],
+                fills=[],
+                instruments=[],
+                account_mode="futures",
+                position_mode="long_short_mode",
+                account_configuration=ExchangeAccountConfiguration(position_mode="long_short_mode"),
+            ),
+            exchange_comparison_enabled=True,
+            compare_exchange_portfolio=True,
+            trusted_exchange_portfolio_baseline=True,
+        )
+
+        self.assertEqual(report.severity, "CLEAN")
+        self.assertFalse(report.position_diff["exchange_mismatches"])
+
+    def test_compare_detects_exchange_position_margin_metric_mismatch_for_exchange_sourced_snapshot(self) -> None:
+        comparator = StateComparator()
+        now = utc_now()
+        report = comparator.compare(
+            decision_id="decision_derivatives_margin_mismatch",
+            portfolio_snapshot_ref="evt_portfolio_derivatives_margin_mismatch",
+            product_type="derivatives",
+            margin_mode="cross",
+            order_states=[],
+            fills=[],
+            stored_snapshot=PortfolioSnapshot(
+                snapshot_ts=now,
+                balances={"USDT": 10_000.0},
+                positions=[
+                    Position(
+                        symbol="BTC-USDT-SWAP",
+                        position_qty=0.02,
+                        position_notional=1420.0,
+                        avg_entry_price=70_000.0,
+                        unrealized_pnl=20.0,
+                        product_type="derivatives",
+                        margin_mode="cross",
+                        margin_allocated=320.0,
+                        maintenance_margin=140.0,
+                        margin_ratio=5.2,
+                        liquidation_price=62_000.0,
+                        margin_source="exchange",
+                    )
+                ],
+                cost_basis={"BTC-USDT-SWAP": 70_000.0},
+                realized_pnl=0.0,
+                unrealized_pnl=20.0,
+                total_equity=10_020.0,
+                gross_exposure=1420.0,
+                net_exposure=1420.0,
+                risk_budget_usage={"margin_usage": 320.0},
+                product_type="derivatives",
+                margin_mode="cross",
+                margin_usage=320.0,
+            ),
+            reconstructed_snapshot=PortfolioSnapshot(
+                snapshot_ts=now,
+                balances={"USDT": 10_000.0},
+                positions=[
+                    Position(
+                        symbol="BTC-USDT-SWAP",
+                        position_qty=0.02,
+                        position_notional=1420.0,
+                        avg_entry_price=70_000.0,
+                        unrealized_pnl=20.0,
+                        product_type="derivatives",
+                        margin_mode="cross",
+                    )
+                ],
+                cost_basis={"BTC-USDT-SWAP": 70_000.0},
+                realized_pnl=0.0,
+                unrealized_pnl=20.0,
+                total_equity=10_020.0,
+                gross_exposure=1420.0,
+                net_exposure=1420.0,
+                risk_budget_usage={},
+                product_type="derivatives",
+                margin_mode="cross",
+            ),
+            exchange_snapshot=ExchangeAccountSnapshot(
+                account_source="okx",
+                fetched_at=now,
+                balances=[ExchangeBalance(currency="USDT", total=10_000.0, available=10_000.0, frozen=0.0)],
+                positions=[
+                    ExchangePosition(
+                        instrument_id="BTC-USDT-SWAP",
+                        symbol="BTC-USDT-SWAP",
+                        quantity=0.02,
+                        average_entry_price=70_000.0,
+                        mark_price=71_000.0,
+                        side="net",
+                        margin_mode="cross",
+                        margin_allocated=340.0,
+                        maintenance_margin=150.0,
+                        margin_ratio=5.6,
+                        liquidation_price=61_500.0,
+                    )
+                ],
+                open_orders=[],
+                fills=[],
+                instruments=[],
+                account_mode="futures",
+                position_mode="net_mode",
+                account_configuration=ExchangeAccountConfiguration(position_mode="net_mode"),
+            ),
+            exchange_comparison_enabled=True,
+            compare_exchange_portfolio=True,
+            trusted_exchange_portfolio_baseline=True,
+        )
+
+        self.assertEqual(report.severity, "REVIEW_REQUIRED")
+        self.assertIn("local_position_margin_divergence", report.mismatch_categories)
+        self.assertIn(
+            "local_position_margin_differs_from_exchange_position_margin",
+            report.mismatch_reasons,
+        )
+        self.assertIn("exchange_margin_state_differs_from_local_snapshot", report.safety_impacts)
+        self.assertIn("BTC-USDT-SWAP", report.position_diff["exchange_margin_mismatches"])
+
+    def test_compare_halts_when_exchange_position_margin_mode_conflicts_with_local_snapshot(self) -> None:
+        comparator = StateComparator()
+        now = utc_now()
+        report = comparator.compare(
+            decision_id="decision_derivatives_margin_mode_conflict",
+            portfolio_snapshot_ref="evt_portfolio_derivatives_margin_mode_conflict",
+            product_type="derivatives",
+            margin_mode="cross",
+            order_states=[],
+            fills=[],
+            stored_snapshot=PortfolioSnapshot(
+                snapshot_ts=now,
+                balances={"USDT": 10_000.0},
+                positions=[
+                    Position(
+                        symbol="BTC-USDT-SWAP",
+                        position_qty=0.02,
+                        position_notional=1420.0,
+                        avg_entry_price=70_000.0,
+                        unrealized_pnl=20.0,
+                        product_type="derivatives",
+                        margin_mode="cross",
+                        margin_allocated=320.0,
+                        margin_source="exchange",
+                    )
+                ],
+                cost_basis={"BTC-USDT-SWAP": 70_000.0},
+                realized_pnl=0.0,
+                unrealized_pnl=20.0,
+                total_equity=10_020.0,
+                gross_exposure=1420.0,
+                net_exposure=1420.0,
+                risk_budget_usage={"margin_usage": 320.0},
+                product_type="derivatives",
+                margin_mode="cross",
+                margin_usage=320.0,
+            ),
+            reconstructed_snapshot=PortfolioSnapshot(
+                snapshot_ts=now,
+                balances={"USDT": 10_000.0},
+                positions=[
+                    Position(
+                        symbol="BTC-USDT-SWAP",
+                        position_qty=0.02,
+                        position_notional=1420.0,
+                        avg_entry_price=70_000.0,
+                        unrealized_pnl=20.0,
+                        product_type="derivatives",
+                        margin_mode="cross",
+                    )
+                ],
+                cost_basis={"BTC-USDT-SWAP": 70_000.0},
+                realized_pnl=0.0,
+                unrealized_pnl=20.0,
+                total_equity=10_020.0,
+                gross_exposure=1420.0,
+                net_exposure=1420.0,
+                risk_budget_usage={},
+                product_type="derivatives",
+                margin_mode="cross",
+            ),
+            exchange_snapshot=ExchangeAccountSnapshot(
+                account_source="okx",
+                fetched_at=now,
+                balances=[ExchangeBalance(currency="USDT", total=10_000.0, available=10_000.0, frozen=0.0)],
+                positions=[
+                    ExchangePosition(
+                        instrument_id="BTC-USDT-SWAP",
+                        symbol="BTC-USDT-SWAP",
+                        quantity=0.02,
+                        average_entry_price=70_000.0,
+                        mark_price=71_000.0,
+                        side="net",
+                        margin_mode="isolated",
+                        margin_allocated=320.0,
+                    )
+                ],
+                open_orders=[],
+                fills=[],
+                instruments=[],
+                account_mode="futures",
+                position_mode="net_mode",
+                account_configuration=ExchangeAccountConfiguration(position_mode="net_mode"),
+            ),
+            exchange_comparison_enabled=True,
+            compare_exchange_portfolio=True,
+            trusted_exchange_portfolio_baseline=True,
+        )
+
+        self.assertEqual(report.severity, "HARD_MISMATCH")
+        self.assertTrue(report.halt_required)
+        self.assertIn("local_position_margin_profile_divergence", report.mismatch_categories)
+        self.assertIn(
+            "local_position_margin_mode_differs_from_exchange_position_margin_mode",
+            report.mismatch_reasons,
+        )
+        self.assertIn("cross_isolated_margin_mode_is_not_confirmed", report.safety_impacts)
+        self.assertIn("BTC-USDT-SWAP", report.position_diff["exchange_margin_mode_mismatches"])
 
     def test_compare_detects_hard_snapshot_mismatch(self) -> None:
         comparator = StateComparator()
@@ -1672,6 +2002,180 @@ class TestReconciliationComparator(unittest.TestCase):
 
         self.assertEqual(report.severity, "CLEAN")
         self.assertEqual(report.fill_diff["exchange"], {})
+
+    def test_compare_marks_derivatives_exchange_position_without_local_execution_chain_as_only_reduce(self) -> None:
+        comparator = StateComparator()
+        now = utc_now()
+        report = comparator.compare(
+            decision_id="decision_derivatives_only_reduce",
+            portfolio_snapshot_ref="evt_portfolio_derivatives_only_reduce",
+            product_type="derivatives",
+            margin_mode="cross",
+            allowed_symbols=["BTC-USDT-SWAP"],
+            order_states=[],
+            fills=[],
+            stored_snapshot=PortfolioSnapshot(
+                snapshot_ts=now,
+                balances={"USDT": 1000.0},
+                positions=[],
+                cost_basis={},
+                realized_pnl=0.0,
+                unrealized_pnl=0.0,
+                total_equity=1000.0,
+                gross_exposure=0.0,
+                net_exposure=0.0,
+                risk_budget_usage={},
+                product_type="derivatives",
+                margin_mode="cross",
+            ),
+            reconstructed_snapshot=PortfolioSnapshot(
+                snapshot_ts=now,
+                balances={"USDT": 1000.0},
+                positions=[],
+                cost_basis={},
+                realized_pnl=0.0,
+                unrealized_pnl=0.0,
+                total_equity=1000.0,
+                gross_exposure=0.0,
+                net_exposure=0.0,
+                risk_budget_usage={},
+                product_type="derivatives",
+                margin_mode="cross",
+            ),
+            exchange_snapshot=ExchangeAccountSnapshot(
+                account_source="okx",
+                fetched_at=now,
+                balances=[ExchangeBalance(currency="USDT", total=980.0, available=980.0, frozen=0.0)],
+                positions=[
+                    ExchangePosition(
+                        instrument_id="BTC-USDT-SWAP",
+                        symbol="BTC-USDT-SWAP",
+                        quantity=0.02,
+                        average_entry_price=65000.0,
+                        mark_price=65500.0,
+                        side="long",
+                    )
+                ],
+                open_orders=[],
+                fills=[],
+                instruments=[],
+                account_mode="futures",
+                position_mode="net_mode",
+                account_configuration=ExchangeAccountConfiguration(position_mode="net_mode"),
+            ),
+            exchange_comparison_enabled=True,
+            compare_exchange_portfolio=True,
+        )
+
+        self.assertEqual(report.severity, "SOFT_MISMATCH")
+        self.assertFalse(report.review_required)
+        self.assertFalse(report.halt_required)
+        self.assertTrue(report.only_reduce_required)
+        self.assertIn("derivatives_exchange_position_without_local_execution_chain", report.mismatch_categories)
+        self.assertIn("derivatives_exchange_position_not_replayed_locally", report.mismatch_reasons)
+        self.assertEqual(report.recommended_operator_action, "go_close_position_on_exchange")
+        self.assertEqual(report.unknown_state_details[0]["kind"], "exchange_position_without_local_execution_chain")
+
+    def test_compare_halts_derivatives_when_local_position_mode_conflicts_with_exchange_account_configuration(self) -> None:
+        comparator = StateComparator()
+        now = utc_now()
+        report = comparator.compare(
+            decision_id="decision_derivatives_mode_conflict",
+            portfolio_snapshot_ref="evt_portfolio_derivatives_mode_conflict",
+            product_type="derivatives",
+            margin_mode="cross",
+            allowed_symbols=["BTC-USDT-SWAP"],
+            order_states=[
+                OrderState(
+                    decision_id="decision_derivatives_mode_conflict",
+                    intent_id="intent_derivatives_mode_conflict",
+                    symbol="BTC-USDT-SWAP",
+                    client_order_id="clord_derivatives_mode_conflict",
+                    venue="OKX",
+                    exchange_order_id="ord_derivatives_mode_conflict",
+                    status="SUBMITTED",
+                    exchange_status="live",
+                    submitted_ts=now,
+                    last_update_ts=now,
+                    last_exchange_update_ts=now,
+                    requested_qty=0.01,
+                    filled_qty=0.0,
+                    remaining_qty=0.01,
+                    average_fill_price=None,
+                    fees=0.0,
+                    product_type="derivatives",
+                    margin_mode="cross",
+                    position_mode="long_short_mode",
+                    pos_side="long",
+                    submission_payload={},
+                )
+            ],
+            fills=[],
+            stored_snapshot=PortfolioSnapshot(
+                snapshot_ts=now,
+                balances={"USDT": 1000.0},
+                positions=[],
+                cost_basis={},
+                realized_pnl=0.0,
+                unrealized_pnl=0.0,
+                total_equity=1000.0,
+                gross_exposure=0.0,
+                net_exposure=0.0,
+                risk_budget_usage={},
+                product_type="derivatives",
+                margin_mode="cross",
+            ),
+            reconstructed_snapshot=PortfolioSnapshot(
+                snapshot_ts=now,
+                balances={"USDT": 1000.0},
+                positions=[],
+                cost_basis={},
+                realized_pnl=0.0,
+                unrealized_pnl=0.0,
+                total_equity=1000.0,
+                gross_exposure=0.0,
+                net_exposure=0.0,
+                risk_budget_usage={},
+                product_type="derivatives",
+                margin_mode="cross",
+            ),
+            exchange_snapshot=ExchangeAccountSnapshot(
+                account_source="okx",
+                fetched_at=now,
+                balances=[ExchangeBalance(currency="USDT", total=1000.0, available=1000.0, frozen=0.0)],
+                positions=[],
+                open_orders=[
+                    ExchangeOpenOrder(
+                        instrument_id="BTC-USDT-SWAP",
+                        client_order_id="clord_derivatives_mode_conflict",
+                        exchange_order_id="ord_derivatives_mode_conflict",
+                        side="buy",
+                        order_type="market",
+                        status="LIVE",
+                        quantity=0.01,
+                        filled_quantity=0.0,
+                        created_ts=now,
+                        updated_ts=now,
+                    )
+                ],
+                fills=[],
+                instruments=[],
+                account_mode="futures",
+                position_mode="net_mode",
+                account_configuration=ExchangeAccountConfiguration(position_mode="net_mode"),
+            ),
+            exchange_comparison_enabled=True,
+            compare_exchange_portfolio=True,
+        )
+
+        self.assertEqual(report.severity, "HARD_MISMATCH")
+        self.assertTrue(report.halt_required)
+        self.assertIn("derivatives_position_mode_mismatch", report.mismatch_categories)
+        self.assertIn(
+            "derivatives_local_position_mode_differs_from_exchange_account_configuration",
+            report.mismatch_reasons,
+        )
+        self.assertEqual(report.recommended_operator_action, "halt_execution_and_investigate_state_divergence")
 
 
 class TestReconciliationServiceIdempotency(unittest.IsolatedAsyncioTestCase):

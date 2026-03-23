@@ -232,9 +232,15 @@ class StrategyProfileRecommendationFacade:
             activation_decision_source=str(
                 activation_decision.get("activation_decision_source") or "activation_gate"
             ),
+            transition_class=activation_decision.get("transition_class"),
+            transition_risk_direction=activation_decision.get("transition_risk_direction"),
             decision_status=status,
             execution_state=execution_state,
             recommended_action=recommended_action,
+            fast_track_eligible=bool(activation_decision.get("fast_track_eligible")),
+            fast_track_applied=bool(activation_decision.get("fast_track_applied")),
+            operator_summary=activation_decision.get("operator_summary"),
+            gating_state=dict(activation_decision.get("gating_state") or {}),
             blocked_reasons=list(activation_decision.get("blocked_reasons") or []),
             rationale=[
                 "selection_based_on_winner_engine",
@@ -264,6 +270,12 @@ class StrategyProfileRecommendationFacade:
         execution_outcome: dict[str, Any] | None = None,
         auto_rollback_recommendation: dict[str, Any] | None = None,
         notes: list[str],
+        transition_class: str | None = None,
+        transition_risk_direction: str | None = None,
+        fast_track_eligible: bool | None = None,
+        fast_track_applied: bool | None = None,
+        operator_summary: str | None = None,
+        gating_state: dict[str, Any] | None = None,
     ) -> StrategyProfileSelectionDecision:
         previous = self.latest_selection_decision()
         latest_report = self.latest_optimization_report()
@@ -290,12 +302,38 @@ class StrategyProfileRecommendationFacade:
             activation_decision_source=(
                 previous.activation_decision_source if previous is not None else "activation_gate"
             ),
+            transition_class=transition_class if transition_class is not None else (
+                previous.transition_class if previous is not None else None
+            ),
+            transition_risk_direction=transition_risk_direction if transition_risk_direction is not None else (
+                previous.transition_risk_direction if previous is not None else None
+            ),
             decision_status=status,
             execution_state=execution_state or (previous.execution_state if previous is not None else "not_executed"),
             recommended_action=(
                 recommended_action
                 if recommended_action is not None
                 else (previous.recommended_action if previous is not None else None)
+            ),
+            fast_track_eligible=(
+                bool(fast_track_eligible)
+                if fast_track_eligible is not None
+                else (previous.fast_track_eligible if previous is not None else False)
+            ),
+            fast_track_applied=(
+                bool(fast_track_applied)
+                if fast_track_applied is not None
+                else (previous.fast_track_applied if previous is not None else False)
+            ),
+            operator_summary=(
+                operator_summary
+                if operator_summary is not None
+                else (previous.operator_summary if previous is not None else None)
+            ),
+            gating_state=(
+                dict(gating_state)
+                if gating_state is not None
+                else (previous.gating_state if previous is not None else {})
             ),
             blocked_reasons=(
                 list(blocked_reasons)

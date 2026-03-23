@@ -53,6 +53,10 @@ class TestExecutionOutboxPostgres(unittest.IsolatedAsyncioTestCase):
             stored = execution_repo.get_order_state(state.client_order_id)
             self.assertIsNotNone(stored)
             self.assertEqual(stored.status, "SUBMITTED")
+            self.assertEqual(stored.td_mode, "cross")
+            self.assertEqual(stored.position_mode, "long_short_mode")
+            self.assertEqual(stored.pos_side, "long")
+            self.assertTrue(stored.reduce_only)
             self.assertEqual(event_store.count(topic=topics.ORDER_UPDATES), 1)
             self.assertEqual(outbox_repo.counts(), {"pending": 0, "published": 1, "failed": 0})
             self.assertEqual(len(received), 1)
@@ -157,13 +161,13 @@ class TestExecutionOutboxPostgres(unittest.IsolatedAsyncioTestCase):
                 client_order_id="clord_fill_atomic",
                 decision_id="decision_fill_atomic",
                 intent_id="intent_fill_atomic",
-                symbol="BTC-USDT",
-                side="buy",
+                symbol="BTC-USDT-SWAP",
+                side="sell",
                 reserve_currency="USDT",
                 reserved_amount=Decimal("60.0"),
                 status="ACTIVE",
-                product_type="spot",
-                margin_mode="cash",
+                product_type="derivatives",
+                margin_mode="cross",
                 reference_price=Decimal("60000.0"),
                 last_update_ts=utc_now(),
             )
@@ -174,15 +178,25 @@ class TestExecutionOutboxPostgres(unittest.IsolatedAsyncioTestCase):
                 intent_id="intent_fill_atomic",
                 client_order_id="clord_fill_atomic",
                 exchange_order_id="ord_fill_atomic",
-                symbol="BTC-USDT",
+                symbol="BTC-USDT-SWAP",
                 venue="OKX",
-                side="buy",
+                side="sell",
                 fill_qty=Decimal("0.001"),
                 fill_price=Decimal("60000.0"),
                 fee_amount=Decimal("0.0"),
                 fee_currency="USDT",
-                product_type="spot",
-                margin_mode="cash",
+                reduce_only=True,
+                close_only=True,
+                td_mode="cross",
+                position_mode="long_short_mode",
+                pos_side="long",
+                reduce_only_reason="position_intent_close_path",
+                close_only_reason="position_intent_close_path",
+                instrument_family="BTC-USDT",
+                settle_currency="USDT",
+                product_type="derivatives",
+                margin_mode="cross",
+                position_intent="close_long",
                 liquidity_role="taker",
                 exchange_timestamp=utc_now(),
                 ingestion_timestamp=utc_now(),
@@ -199,7 +213,11 @@ class TestExecutionOutboxPostgres(unittest.IsolatedAsyncioTestCase):
             saved = await publisher.persist_fill(fill=fill, obligation=updated_obligation)
 
             self.assertTrue(saved)
-            self.assertEqual(len(execution_repo.fills_for_order("clord_fill_atomic")), 1)
+            stored_fills = execution_repo.fills_for_order("clord_fill_atomic")
+            self.assertEqual(len(stored_fills), 1)
+            self.assertEqual(stored_fills[0].td_mode, "cross")
+            self.assertEqual(stored_fills[0].instrument_family, "BTC-USDT")
+            self.assertTrue(stored_fills[0].close_only)
             stored_obligation = obligation_repo.get_obligation("clord_fill_atomic")
             self.assertIsNotNone(stored_obligation)
             self.assertEqual(stored_obligation.consumed_amount, Decimal("60.0"))
@@ -258,7 +276,7 @@ class TestExecutionOutboxPostgres(unittest.IsolatedAsyncioTestCase):
         return OrderState(
             decision_id=f"decision_{client_order_id}",
             intent_id=f"intent_{client_order_id}",
-            symbol="BTC-USDT",
+            symbol="BTC-USDT-SWAP",
             client_order_id=client_order_id,
             venue="OKX",
             exchange_order_id=f"ord_{client_order_id}",
@@ -271,9 +289,19 @@ class TestExecutionOutboxPostgres(unittest.IsolatedAsyncioTestCase):
             remaining_qty=Decimal("0.001"),
             average_fill_price=None,
             fees=Decimal("0.0"),
-            product_type="spot",
-            margin_mode="cash",
-            submission_payload={"instId": "BTC-USDT"},
+            reduce_only=True,
+            close_only=True,
+            td_mode="cross",
+            position_mode="long_short_mode",
+            pos_side="long",
+            reduce_only_reason="position_intent_close_path",
+            close_only_reason="position_intent_close_path",
+            instrument_family="BTC-USDT",
+            settle_currency="USDT",
+            product_type="derivatives",
+            margin_mode="cross",
+            position_intent="close_long",
+            submission_payload={"instId": "BTC-USDT-SWAP", "tdMode": "cross", "posSide": "long"},
         )
 
     @staticmethod

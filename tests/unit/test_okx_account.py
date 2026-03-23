@@ -53,7 +53,7 @@ class _FakeOKXClient:
         }
 
     async def get_account_config(self):
-        return {"code": "0", "data": [{"acctLv": "1", "posMode": "net_mode"}]}
+        return {"code": "0", "data": [{"acctLv": "1", "posMode": "net_mode", "autoLoan": False}]}
 
     async def get_trade_fee(
         self,
@@ -72,7 +72,7 @@ class _FakeOKXClient:
         return {"code": "0", "data": [{"maker": "-0.0008", "taker": "0.001"}]}
 
     async def get_account_position_risk(self):
-        return {"code": "0", "data": [{"adjEq": "1000", "imr": "10"}]}
+        return {"code": "0", "data": [{"adjEq": "1000", "imr": "10", "mmr": "5", "mgnRatio": "100"}]}
 
     async def get_system_status(self):
         return {"code": "0", "data": []}
@@ -101,6 +101,8 @@ class _FakeDerivativesOKXClient(_FakeOKXClient):
             "data": [
                 {
                     "instId": "BTC-USDT-SWAP",
+                    "instType": "SWAP",
+                    "instFamily": "BTC-USDT",
                     "baseCcy": "",
                     "quoteCcy": "",
                     "uly": "BTC-USDT",
@@ -110,6 +112,10 @@ class _FakeDerivativesOKXClient(_FakeOKXClient):
                     "lotSz": "0.01",
                     "tickSz": "0.1",
                     "minSz": "0.01",
+                    "lever": "25",
+                    "maxMktSz": "2000",
+                    "maxLmtSz": "2500",
+                    "listTime": "1700000000000",
                     "state": "live",
                 }
             ],
@@ -127,12 +133,23 @@ class _FakeDerivativesOKXClient(_FakeOKXClient):
                     "markPx": "80100",
                     "notionalUsd": "1602",
                     "posSide": "long",
+                    "mgnMode": "cross",
+                    "ccy": "USDT",
+                    "lever": "12",
+                    "margin": "320",
+                    "mmr": "140",
+                    "mgnRatio": "5.2",
+                    "liqPx": "62000",
+                    "upl": "12.5",
                 }
             ],
         }
 
     async def get_account_config(self):
-        return {"code": "0", "data": [{"acctLv": "2", "posMode": "net_mode"}]}
+        return {
+            "code": "0",
+            "data": [{"acctLv": "2", "posMode": "net_mode", "autoLoan": True, "greeksType": "PA", "ctIsoMode": "automatic"}],
+        }
 
 
 class _FakeIncompatibleDerivativesClient(_FakeDerivativesOKXClient):
@@ -314,6 +331,70 @@ class _FakeMultiSymbolOKXClient(_FakeOKXClient):
         }
 
 
+class _CountingAuxClient(_FakeOKXClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.balance_calls = 0
+        self.open_order_calls = 0
+        self.fill_calls = 0
+        self.instrument_calls = 0
+        self.account_config_calls = 0
+        self.trade_fee_call_count = 0
+        self.account_risk_calls = 0
+        self.system_status_calls = 0
+        self.bills_calls = 0
+
+    async def get_balance(self):
+        self.balance_calls += 1
+        return await super().get_balance()
+
+    async def get_open_orders(self, *, symbol: str | None = None):
+        self.open_order_calls += 1
+        return await super().get_open_orders(symbol=symbol)
+
+    async def get_fills(self, *, symbol: str | None = None, limit: int | None = None):
+        self.fill_calls += 1
+        return await super().get_fills(symbol=symbol, limit=limit)
+
+    async def get_instruments(self):
+        self.instrument_calls += 1
+        return await super().get_instruments()
+
+    async def get_account_config(self):
+        self.account_config_calls += 1
+        return await super().get_account_config()
+
+    async def get_trade_fee(
+        self,
+        *,
+        symbol: str | None = None,
+        underlying: str | None = None,
+        instrument_family: str | None = None,
+    ):
+        self.trade_fee_call_count += 1
+        return await super().get_trade_fee(
+            symbol=symbol,
+            underlying=underlying,
+            instrument_family=instrument_family,
+        )
+
+    async def get_account_position_risk(self):
+        self.account_risk_calls += 1
+        return await super().get_account_position_risk()
+
+    async def get_system_status(self):
+        self.system_status_calls += 1
+        return await super().get_system_status()
+
+    async def get_bills_details(self, *, symbol: str | None = None, limit: int | None = None, begin=None, end=None):
+        _ = symbol
+        _ = limit
+        _ = begin
+        _ = end
+        self.bills_calls += 1
+        return {"code": "0", "data": []}
+
+
 class TestOKXAccountService(unittest.IsolatedAsyncioTestCase):
     async def test_spot_refresh_uses_balances_without_calling_positions_endpoint(self) -> None:
         settings = AATSSettings.model_validate(
@@ -398,9 +479,44 @@ class TestOKXAccountService(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(instrument.base_currency, "BTC")
         self.assertEqual(instrument.quote_currency, "USDT")
         self.assertEqual(instrument.contract_value, Decimal("0.01"))
+        self.assertEqual(instrument.instrument_type, "SWAP")
+        self.assertEqual(instrument.instrument_family, "BTC-USDT")
+        self.assertEqual(instrument.underlying, "BTC-USDT")
+        self.assertEqual(instrument.settle_currency, "USDT")
+        self.assertEqual(instrument.contract_value_currency, "BTC")
+        self.assertEqual(instrument.max_leverage, Decimal("25"))
+        self.assertEqual(instrument.max_market_size, Decimal("2000"))
+        self.assertEqual(instrument.max_limit_size, Decimal("2500"))
+        self.assertIsNotNone(instrument.list_ts)
         self.assertEqual(snapshot.positions[0].quantity, Decimal("0.0002"))
+        self.assertEqual(snapshot.positions[0].margin_mode, "cross")
+        self.assertEqual(snapshot.positions[0].margin_currency, "USDT")
+        self.assertEqual(snapshot.positions[0].leverage, Decimal("12"))
+        self.assertEqual(snapshot.positions[0].margin_allocated, Decimal("320"))
+        self.assertEqual(snapshot.positions[0].maintenance_margin, Decimal("140"))
+        self.assertEqual(snapshot.positions[0].margin_ratio, Decimal("5.2"))
+        self.assertEqual(snapshot.positions[0].liquidation_price, Decimal("62000"))
+        self.assertEqual(snapshot.positions[0].unrealized_pnl, Decimal("12.5"))
+        self.assertEqual(snapshot.positions[0].instrument_family, "BTC-USDT")
+        self.assertEqual(snapshot.positions[0].settle_currency, "USDT")
         self.assertEqual(snapshot.position_mode, "net_mode")
         self.assertEqual(snapshot.fee_rates["taker"], "0.001")
+        self.assertIsNotNone(snapshot.account_configuration)
+        self.assertEqual(snapshot.account_configuration.account_level_code, "2")
+        self.assertEqual(snapshot.account_configuration.account_level_label, "single_currency_margin")
+        self.assertEqual(snapshot.account_configuration.position_mode_label, "net")
+        self.assertTrue(snapshot.account_configuration.auto_loan_enabled)
+        self.assertEqual(snapshot.account_configuration.greeks_type, "PA")
+        self.assertEqual(snapshot.account_configuration.isolated_margin_mode, "automatic")
+        self.assertIsNotNone(snapshot.fee_schedule)
+        self.assertEqual(snapshot.fee_schedule.taker, Decimal("0.001"))
+        self.assertEqual(snapshot.fee_schedule.maker, Decimal("-0.0008"))
+        self.assertIsNotNone(snapshot.risk_snapshot)
+        self.assertEqual(snapshot.risk_snapshot.adjusted_equity, Decimal("1000"))
+        self.assertEqual(snapshot.risk_snapshot.initial_margin_requirement, Decimal("10"))
+        self.assertEqual(snapshot.risk_snapshot.maintenance_margin_requirement, Decimal("5"))
+        self.assertEqual(snapshot.risk_snapshot.margin_ratio, Decimal("100"))
+        self.assertEqual(len(snapshot.system_status_items), 0)
         self.assertEqual(client.trade_fee_calls[0]["underlying"], "BTC-USDT")
 
     async def test_refresh_collects_open_orders_and_fills_for_all_allowed_symbols(self) -> None:
@@ -425,6 +541,38 @@ class TestOKXAccountService(unittest.IsolatedAsyncioTestCase):
         self.assertEqual({fill.symbol for fill in snapshot.fills}, {"BTC-USDT", "ETH-USDT"})
         self.assertEqual(service.open_order_count("ETH-USDT"), 1)
 
+    async def test_refresh_caches_low_frequency_auxiliary_payloads(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "okx_api_key": "demo_key",
+                "okx_api_secret": "demo_secret",
+                "okx_api_passphrase": "demo_passphrase",
+                "okx_instruments_refresh_interval_seconds": 300,
+                "okx_account_config_refresh_interval_seconds": 300,
+                "okx_trade_fee_refresh_interval_seconds": 300,
+                "okx_account_position_risk_refresh_interval_seconds": 60,
+                "okx_system_status_refresh_interval_seconds": 60,
+                "okx_bills_refresh_interval_seconds": 60,
+            }
+        )
+        client = _CountingAuxClient()
+        service = OKXAccountService(settings=settings, client=client)
+
+        await service.refresh(force=True)
+        await service.refresh(force=True)
+
+        self.assertEqual(client.balance_calls, 2)
+        self.assertEqual(client.open_order_calls, 2)
+        self.assertEqual(client.fill_calls, 2)
+        self.assertEqual(client.instrument_calls, 1)
+        self.assertEqual(client.account_config_calls, 1)
+        self.assertEqual(client.trade_fee_call_count, 1)
+        self.assertEqual(client.account_risk_calls, 1)
+        self.assertEqual(client.system_status_calls, 1)
+        self.assertEqual(client.bills_calls, 1)
+
     async def test_status_blocks_incompatible_derivatives_account_configuration(self) -> None:
         settings = AATSSettings.model_validate(
             {
@@ -445,6 +593,9 @@ class TestOKXAccountService(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(status["ready"])
         self.assertIn("okx_account_mode_incompatible_with_derivatives", status["blockers"])
         self.assertIn("okx_position_mode_missing", status["blockers"])
+        self.assertIsNotNone(status["account_configuration"])
+        self.assertEqual(status["account_configuration"]["account_level_code"], "1")
+        self.assertEqual(status["account_configuration"]["account_level_label"], "simple")
 
     async def test_status_blocks_when_okx_system_status_reports_incident(self) -> None:
         settings = AATSSettings.model_validate(
@@ -463,6 +614,28 @@ class TestOKXAccountService(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(status["ready"])
         self.assertIn("okx_system_status_incident", status["blockers"])
+        self.assertEqual(status["system_status_items"][0]["state"], "ongoing")
+
+    async def test_status_blocks_when_position_margin_mode_conflicts_with_runtime_margin_mode(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "okx_api_key": "demo_key",
+                "okx_api_secret": "demo_secret",
+                "okx_api_passphrase": "demo_passphrase",
+                "trading_product_type": "derivatives",
+                "margin_mode": "isolated",
+                "default_symbol": "BTC-USDT-SWAP",
+            }
+        )
+        service = OKXAccountService(settings=settings, client=_FakeDerivativesOKXClient())
+
+        await service.refresh(force=True)
+        status = service.status()
+
+        self.assertFalse(status["ready"])
+        self.assertIn("okx_position_margin_mode_conflicts_with_runtime_margin_mode", status["blockers"])
 
     async def test_private_balance_and_position_ws_updates_latest_snapshot(self) -> None:
         settings = AATSSettings.model_validate(
