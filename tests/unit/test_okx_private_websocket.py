@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 
 from aats.bootstrap.settings import AATSSettings
@@ -49,6 +50,63 @@ class TestOKXPrivateWebSocketClient(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaisesRegex(RuntimeError, "okx_private_ws_login_error"):
             await client._login(websocket)
+
+    def test_spot_subscription_args_subscribe_only_spot_orders(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "trading_product_type": "spot",
+            }
+        )
+        client = OKXPrivateWebSocketClient(settings=settings)
+
+        self.assertEqual(
+            client._subscription_args(),
+            [
+                {"channel": "balance_and_position"},
+                {"channel": "orders", "instType": "SPOT"},
+            ],
+        )
+
+    def test_derivatives_subscription_args_subscribe_swap_and_futures_orders(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "trading_product_type": "derivatives",
+            }
+        )
+        client = OKXPrivateWebSocketClient(settings=settings)
+
+        self.assertEqual(
+            client._subscription_args(),
+            [
+                {"channel": "balance_and_position"},
+                {"channel": "orders", "instType": "SWAP"},
+                {"channel": "orders", "instType": "FUTURES"},
+            ],
+        )
+
+    async def test_subscribe_serializes_swap_and_futures_order_channels(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "trading_product_type": "derivatives",
+            }
+        )
+        client = OKXPrivateWebSocketClient(settings=settings)
+        websocket = _FakeWebSocket('{"event":"login","code":"0","msg":"","connId":"abc"}')
+
+        await client._subscribe(websocket, client._subscription_args())
+
+        self.assertEqual(len(websocket.sent_messages), 1)
+        self.assertEqual(
+            json.loads(websocket.sent_messages[0]),
+            {
+                "op": "subscribe",
+                "args": [
+                    {"channel": "balance_and_position"},
+                    {"channel": "orders", "instType": "SWAP"},
+                    {"channel": "orders", "instType": "FUTURES"},
+                ],
+            },
+        )
 
 
 if __name__ == "__main__":

@@ -55,8 +55,7 @@ class OKXPrivateWebSocketClient:
     async def run_forever(self, *, on_message: RawMessageHandler) -> None:
         if connect is None:
             raise RuntimeError("websockets_dependency_missing")
-        inst_type = "SWAP" if self.settings.trading_product_type == "derivatives" else "SPOT"
-        subscribe_args = [{"channel": "balance_and_position"}, {"channel": "orders", "instType": inst_type}]
+        subscribe_args = self._subscription_args()
         reconnect_delay = self.settings.okx_market_reconnect_delay_seconds
         while not self._stop_event.is_set():
             try:
@@ -151,6 +150,17 @@ class OKXPrivateWebSocketClient:
 
     async def _subscribe(self, websocket: ClientConnection, subscribe_args: list[dict[str, str]]) -> None:
         await websocket.send(_json_dumps({"op": "subscribe", "args": subscribe_args}))
+
+    def _subscription_args(self) -> list[dict[str, str]]:
+        return [{"channel": "balance_and_position"}, *self._orders_subscription_args()]
+
+    def _orders_subscription_args(self) -> list[dict[str, str]]:
+        if self.settings.trading_product_type != "derivatives":
+            return [{"channel": "orders", "instType": "SPOT"}]
+        return [
+            {"channel": "orders", "instType": "SWAP"},
+            {"channel": "orders", "instType": "FUTURES"},
+        ]
 
     def _resolved_private_ws_url(self) -> str:
         url = self.settings.okx_private_ws_url
