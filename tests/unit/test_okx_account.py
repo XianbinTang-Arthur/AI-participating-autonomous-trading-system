@@ -157,6 +157,49 @@ class _FakeIncompatibleDerivativesClient(_FakeDerivativesOKXClient):
         return {"code": "0", "data": [{"acctLv": "1", "posMode": ""}]}
 
 
+class _FakeFuturesDerivativesClient(_FakeDerivativesOKXClient):
+    async def get_instruments(self):
+        return {
+            "code": "0",
+            "data": [
+                {
+                    "instId": "BTC-USDT-240329",
+                    "instType": "FUTURES",
+                    "instFamily": "BTC-USDT",
+                    "baseCcy": "",
+                    "quoteCcy": "",
+                    "uly": "BTC-USDT",
+                    "settleCcy": "USDT",
+                    "ctValCcy": "BTC",
+                    "ctVal": "0.01",
+                    "lotSz": "1",
+                    "tickSz": "0.1",
+                    "minSz": "1",
+                    "lever": "20",
+                    "state": "live",
+                }
+            ],
+        }
+
+    async def get_positions(self):
+        self.get_positions_called = True
+        return {
+            "code": "0",
+            "data": [
+                {
+                    "instId": "BTC-USDT-240329",
+                    "pos": "2",
+                    "avgPx": "80500",
+                    "markPx": "80600",
+                    "notionalUsd": "1612",
+                    "posSide": "long",
+                    "mgnMode": "cross",
+                    "ccy": "USDT",
+                }
+            ],
+        }
+
+
 class _FakeMultiPositionDerivativesClient(_FakeDerivativesOKXClient):
     async def get_instruments(self):
         return {
@@ -502,6 +545,32 @@ class TestOKXAccountService(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot.position_mode, "net_mode")
         self.assertEqual(snapshot.fee_rates["taker"], "0.001")
         self.assertIsNotNone(snapshot.account_configuration)
+
+    async def test_derivatives_refresh_converts_futures_contract_quantity_to_internal_units(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "okx_api_key": "demo_key",
+                "okx_api_secret": "demo_secret",
+                "okx_api_passphrase": "demo_passphrase",
+                "trading_product_type": "derivatives",
+                "default_symbol": "BTC-USDT-240329",
+            }
+        )
+        client = _FakeFuturesDerivativesClient()
+        service = OKXAccountService(settings=settings, client=client)
+
+        snapshot = await service.refresh(force=True)
+
+        self.assertIsNotNone(snapshot)
+        self.assertTrue(client.get_positions_called)
+        self.assertEqual(snapshot.positions[0].symbol, "BTC-USDT-240329")
+        self.assertEqual(snapshot.positions[0].quantity, Decimal("0.02"))
+        instrument = service.instrument_metadata("BTC-USDT-240329")
+        self.assertIsNotNone(instrument)
+        self.assertEqual(instrument.instrument_type, "FUTURES")
+        self.assertEqual(instrument.contract_value, Decimal("0.01"))
         self.assertEqual(snapshot.account_configuration.account_level_code, "2")
         self.assertEqual(snapshot.account_configuration.account_level_label, "single_currency_margin")
         self.assertEqual(snapshot.account_configuration.position_mode_label, "net")

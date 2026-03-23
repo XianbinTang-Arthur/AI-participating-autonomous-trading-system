@@ -22,7 +22,7 @@ from aats.schemas.exchange import (
 )
 from aats.services.execution_engine.okx_private_websocket import OKXPrivateWebSocketClient
 from aats.services.execution_engine.okx_bills import enrich_okx_bill_category
-from aats.services.execution_engine.okx_rest import OKXRESTClient
+from aats.services.execution_engine.okx_rest import OKXRESTClient, infer_okx_derivatives_inst_type
 from aats.services.portfolio_service.decimals import to_decimal
 
 
@@ -1142,7 +1142,9 @@ class OKXAccountService:
         instrument_map: dict[str, InstrumentMetadata],
     ) -> Decimal:
         instrument = instrument_map.get(symbol)
-        if instrument is None or "-SWAP" not in symbol:
+        instrument_type = str(getattr(instrument, "instrument_type", "") or "").upper()
+        inferred_inst_type = infer_okx_derivatives_inst_type(symbol)
+        if instrument is None or (instrument_type not in {"SWAP", "FUTURES"} and inferred_inst_type not in {"SWAP", "FUTURES"}):
             return quantity
         contract_value = max(instrument.contract_value, Decimal("0"))
         if contract_value <= 0:

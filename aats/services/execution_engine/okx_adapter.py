@@ -22,13 +22,14 @@ from aats.schemas.execution import (
 from aats.schemas.exchange import ExchangeAccountSnapshot, ExchangeFill, ExchangePosition, InstrumentMetadata
 from aats.services.execution_engine.exchange_adapter import ExchangeAdapter
 from aats.services.execution_engine.okx_account import OKXAccountService, datetime_from_ms
-from aats.services.execution_engine.okx_rest import OKXRESTClient, OKXRequestError
+from aats.services.execution_engine.okx_rest import OKXRESTClient, OKXRequestError, infer_okx_derivatives_inst_type
 from aats.services.governance_engine.health import SystemHealthService
 from aats.services.governance_engine.mode import RuntimeModeController
 from aats.services.governance_engine.runtime_layers import EnvironmentCapabilities, PolicyProfile
 from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, to_decimal
 from aats.bootstrap.logging import correlation_fields, get_logger, log_event
 from aats.storage.base import ExecutionObligationRepository
+from aats.services.runtime_scope import infer_product_type_from_symbol
 
 
 OKX_DEMO_SUBMISSION_TARGETS = {"okx_demo_spot", "okx_demo_derivatives"}
@@ -110,6 +111,10 @@ class OKXOrderPayloadBuilder:
     @staticmethod
     def _exchange_quantity(*, intent: OrderIntent, instrument: InstrumentMetadata) -> Decimal:
         if intent.product_type != "derivatives":
+            return intent.quantity
+        instrument_type = str(getattr(instrument, "instrument_type", "") or "").upper()
+        inferred_inst_type = infer_okx_derivatives_inst_type(intent.symbol)
+        if instrument_type not in {"SWAP", "FUTURES"} and inferred_inst_type not in {"SWAP", "FUTURES"}:
             return intent.quantity
         contract_value = max(instrument.contract_value, Decimal("0"))
         if contract_value <= 0:
@@ -1338,7 +1343,7 @@ class OKXExecutionAdapter(ExchangeAdapter):
                         symbol=symbol,
                         quantity=to_decimal(row.get("fillSz", row.get("sz", "0"))),
                         instrument=instrument,
-                        product_type="derivatives" if "-SWAP" in symbol else "spot",
+                        product_type=infer_product_type_from_symbol(symbol),
                     ),
                     fill_price=to_decimal(row.get("fillPx", row.get("px", "0"))),
                     fee_amount=abs(to_decimal(row.get("fee", "0"))),
@@ -1373,7 +1378,13 @@ class OKXExecutionAdapter(ExchangeAdapter):
         instrument: InstrumentMetadata | None,
         product_type: str,
     ) -> Decimal:
-        if product_type != "derivatives" or instrument is None or "-SWAP" not in symbol:
+        instrument_type = str(getattr(instrument, "instrument_type", "") or "").upper()
+        inferred_inst_type = infer_okx_derivatives_inst_type(symbol)
+        if (
+            product_type != "derivatives"
+            or instrument is None
+            or (instrument_type not in {"SWAP", "FUTURES"} and inferred_inst_type not in {"SWAP", "FUTURES"})
+        ):
             return quantity
         contract_value = max(instrument.contract_value, Decimal("0"))
         if contract_value <= 0:
