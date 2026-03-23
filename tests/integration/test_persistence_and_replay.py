@@ -342,6 +342,100 @@ class TestPersistenceAndReplay(unittest.IsolatedAsyncioTestCase):
             any("missing_health_snapshot" in issue for issue in replay.decision_chain_issues)
         )
 
+    async def test_replay_detects_execution_semantic_mismatch(self) -> None:
+        event_store = InMemoryEventStore()
+        audit_repo = InMemoryAuditRepository()
+        intent = OrderIntent(
+            intent_id="intent_semantic_mismatch",
+            decision_id="decision_semantic_mismatch",
+            symbol="BTC-USDT-SWAP",
+            side="sell",
+            quantity=Decimal("0.01"),
+            execution_style="exchange",
+            order_type="market",
+            urgency="medium",
+            time_in_force="IOC",
+            reduce_only=True,
+            close_only=True,
+            td_mode="cross",
+            position_mode="long_short_mode",
+            pos_side="long",
+            reduce_only_reason="position_intent_close_path",
+            close_only_reason="position_intent_close_path",
+            instrument_family="BTC-USDT",
+            settle_currency="USDT",
+            idempotency_key="intent_semantic_mismatch",
+            product_type="derivatives",
+            margin_mode="cross",
+            exposure_side="flat",
+            execution_action="exit",
+            position_intent="close_long",
+        )
+        order_state = OrderState(
+            decision_id="decision_semantic_mismatch",
+            intent_id="intent_semantic_mismatch",
+            symbol="BTC-USDT-SWAP",
+            client_order_id="clord_semantic_mismatch",
+            venue="OKX",
+            exchange_order_id="ord_semantic_mismatch",
+            status="SUBMITTED",
+            submission_mode="guarded_simulated_submit",
+            submitted_ts=utc_now(),
+            last_update_ts=utc_now(),
+            requested_qty=Decimal("0.01"),
+            filled_qty=Decimal("0"),
+            remaining_qty=Decimal("0.01"),
+            average_fill_price=None,
+            fees=Decimal("0"),
+            reduce_only=True,
+            close_only=True,
+            td_mode="isolated",
+            position_mode="long_short_mode",
+            pos_side="long",
+            reduce_only_reason="position_intent_close_path",
+            close_only_reason="position_intent_close_path",
+            instrument_family="BTC-USDT",
+            settle_currency="USDT",
+            product_type="derivatives",
+            margin_mode="cross",
+            exposure_side="flat",
+            execution_action="exit",
+            position_intent="close_long",
+            submission_payload={"tdMode": "isolated", "posSide": "long"},
+        )
+        event_store.append(
+            build_envelope(
+                topic=topics.ORDER_INTENTS,
+                key=intent.symbol,
+                payload_model=intent,
+                source_component="test",
+            )
+        )
+        event_store.append(
+            build_envelope(
+                topic=topics.ORDER_UPDATES,
+                key=order_state.symbol,
+                payload_model=order_state,
+                source_component="test",
+            )
+        )
+
+        replay = ReplayEngine(
+            event_store=event_store,
+            reconstruction_service=PortfolioReconstructionService(
+                initial_usdt_balance=10_000.0,
+                snapshot_builder=PortfolioSnapshotBuilder(pnl_calculator=PortfolioPnLCalculator()),
+            ),
+            audit_repo=audit_repo,
+        ).replay()
+
+        self.assertTrue(
+            any(
+                "execution_chain_order_state_semantic_mismatch" in issue and "field=td_mode" in issue
+                for issue in replay.execution_chain_issues
+            )
+        )
+
     async def test_duplicate_fill_does_not_mutate_portfolio_twice_and_replay_stays_reconstructable(self) -> None:
         settings = self._paper_runtime_settings()
         runtime = await build_runtime(settings)
@@ -712,9 +806,9 @@ class TestPersistenceAndReplay(unittest.IsolatedAsyncioTestCase):
                 "exchange_status": "partially_filled",
                 "last_update_ts": now + timedelta(seconds=2),
                 "last_exchange_update_ts": now + timedelta(seconds=2),
-                "filled_qty": 0.0004,
-                "remaining_qty": 0.0006,
-                "average_fill_price": 68_000.0,
+                "filled_qty": Decimal("0.0004"),
+                "remaining_qty": Decimal("0.0006"),
+                "average_fill_price": Decimal("68000"),
             }
         )
         cancel_pending_state = partial_state.model_copy(
@@ -743,9 +837,9 @@ class TestPersistenceAndReplay(unittest.IsolatedAsyncioTestCase):
             symbol="BTC-USDT",
             venue="OKX",
             side="buy",
-            fill_qty=0.0004,
-            fill_price=68_000.0,
-            fee_amount=0.0272,
+            fill_qty=Decimal("0.0004"),
+            fill_price=Decimal("68000"),
+            fee_amount=Decimal("0.0272"),
             liquidity_role="taker",
             exchange_timestamp=now,
             ingestion_timestamp=now,
@@ -1141,6 +1235,7 @@ class TestPersistenceAndReplay(unittest.IsolatedAsyncioTestCase):
                 "storage_mode": "postgres",
                 "database_url": database_url,
                 "database_auto_create_schema": True,
+                "database_single_runtime_guard_enabled": False,
                 "local_publish_iterations": 4,
                 "local_publish_interval_seconds": 0.0,
             }

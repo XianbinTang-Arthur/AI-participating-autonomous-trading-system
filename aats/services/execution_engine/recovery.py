@@ -15,6 +15,7 @@ from aats.schemas.system import RecoveryStatus
 from aats.services.accounting import remaining_obligation_amount
 from aats.services.governance_engine.kill_switch import KillSwitch
 from aats.services.governance_engine.runtime_layers import RecoveryPolicy
+from aats.services.portfolio_service.position_keys import position_key_for_snapshot_position
 from aats.services.portfolio_service.positions import PortfolioState
 from aats.services.portfolio_service.reconstruction import PortfolioReconstructionService
 from aats.services.runtime_scope import (
@@ -172,6 +173,9 @@ class ExecutionRecoveryService:
             recovery_action=recovery_action,
             notes=notes,
         )
+        if latest_reconciliation is not None and latest_reconciliation.only_reduce_required:
+            notes.append("reconciliation_only_reduce_required")
+            notes.extend(latest_reconciliation.only_reduce_reasons)
 
         if open_orders:
             self._halt_for_recovery(
@@ -206,6 +210,9 @@ class ExecutionRecoveryService:
             recovered_reconciliation_available=latest_reconciliation is not None,
             latest_reconciliation_id=latest_reconciliation.reconciliation_id if latest_reconciliation else None,
             latest_reconciliation_severity=latest_reconciliation.severity if latest_reconciliation else None,
+            reconciliation_classification=(
+                latest_reconciliation.recovery_classification if latest_reconciliation is not None else None
+            ),
             open_order_count=len(open_orders),
             divergence_count=divergence_count,
             safe_startup=safe_startup and not self.kill_switch.halted,
@@ -214,6 +221,17 @@ class ExecutionRecoveryService:
             review_required=bool(
                 (account_baseline is not None and account_baseline.requires_operator_review)
                 or (latest_reconciliation is not None and latest_reconciliation.review_required)
+            ),
+            only_reduce_required=bool(latest_reconciliation is not None and latest_reconciliation.only_reduce_required),
+            only_reduce_reasons=(
+                list(latest_reconciliation.only_reduce_reasons)
+                if latest_reconciliation is not None
+                else []
+            ),
+            unknown_state_details=(
+                list(latest_reconciliation.unknown_state_details)
+                if latest_reconciliation is not None
+                else []
             ),
             rebaseline_available=bool(
                 (account_baseline is not None and account_baseline.requires_operator_review)
@@ -391,6 +409,8 @@ class ExecutionRecoveryService:
                 return "resume_blocked"
             if latest_reconciliation.review_required:
                 return "review_required"
+            if latest_reconciliation.only_reduce_required:
+                return "only_reduce"
         if halted:
             return "resume_blocked"
         return "normal_operation"
@@ -486,8 +506,14 @@ class ExecutionRecoveryService:
         count = 0
         if ExecutionRecoveryService._dict_diverges(left.balances, right.balances):
             count += 1
-        left_positions = {position.symbol: (position.position_qty, position.avg_entry_price) for position in left.positions}
-        right_positions = {position.symbol: (position.position_qty, position.avg_entry_price) for position in right.positions}
+        left_positions = {
+            position_key_for_snapshot_position(position): (position.position_qty, position.avg_entry_price)
+            for position in left.positions
+        }
+        right_positions = {
+            position_key_for_snapshot_position(position): (position.position_qty, position.avg_entry_price)
+            for position in right.positions
+        }
         if ExecutionRecoveryService._position_diverges(left_positions, right_positions):
             count += 1
         for field_name in (

@@ -13,6 +13,8 @@ _CATEGORY_PRIORITY: dict[BlockerCategory, int] = {
 
 _BLOCKER_PRIORITY: dict[str, int] = {
     "reconciliation_halt_required": 10,
+    "derivatives_margin_buffer_auto_halt": 12,
+    "derivatives_liquidation_proximity_auto_halt": 13,
     "operator_rebaseline_required": 20,
     "phase1_shadow_degraded": 25,
     "phase1_shadow_lagging": 26,
@@ -26,6 +28,7 @@ _BLOCKER_PRIORITY: dict[str, int] = {
     "kill_switch_active": 90,
     "guarded_execution_dry_run": 110,
     "live_submit_disabled": 112,
+    "okx_simulated_trading_required": 113,
     "local_demo_no_exchange_submission": 114,
     "real_market_paper_uses_local_paper_execution": 116,
     "real_money_live_not_supported": 118,

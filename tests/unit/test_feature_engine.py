@@ -121,6 +121,21 @@ class TestFeatureEngine(unittest.TestCase):
         self.assertLess(poor.analysis_context.liquidity.execution_quality_scale, 0.2)  # type: ignore[union-attr]
         self.assertLess(poor.suggested_position_scale, 0.1)
 
+    def test_list_based_depth_levels_from_local_market_publisher_contribute_to_liquidity(self) -> None:
+        snapshot = self._snapshot().model_copy(
+            update={
+                "orderbook_depth": {
+                    "bids": [[67_000.0, 1.25], [66_995.0, 1.5]],
+                    "asks": [[67_005.0, 1.1], [67_010.0, 1.35]],
+                }
+            }
+        )
+
+        features = FeatureCalculator().calculate(snapshot, market_snapshot_ref="evt_market_list_depth")
+
+        self.assertAlmostEqual(features.analysis_context.liquidity.quoted_depth, 5.2)  # type: ignore[union-attr]
+        self.assertGreater(features.liquidity_score, 0.0)
+
     @staticmethod
     def _snapshot() -> MarketSnapshot:
         now = utc_now()

@@ -1,13 +1,22 @@
 from __future__ import annotations
 
 import unittest
+from decimal import Decimal
 
 from aats.bootstrap.settings import AATSSettings
 from aats.schemas.common import utc_now
 from aats.schemas.decision import PositionTarget
 from aats.schemas.execution import OrderIntent, OrderObligation
-from aats.schemas.exchange import ExchangeAccountSnapshot, ExchangeBalance, InstrumentMetadata
+from aats.schemas.exchange import (
+    ExchangeAccountRiskSnapshot,
+    ExchangeAccountSnapshot,
+    ExchangeBalance,
+    ExchangeOpenOrder,
+    ExchangePosition,
+    InstrumentMetadata,
+)
 from aats.schemas.governance import PolicyDecision
+from aats.schemas.reconciliation import ReconciliationReport
 from aats.services.decision_engine.trigger_policy import DecisionTriggerPolicy
 from aats.services.execution_engine.okx_adapter import OKXExecutionAdapter
 from aats.services.governance_engine.health import SystemHealthService
@@ -22,11 +31,18 @@ class FakeAccountService:
     def __init__(
         self,
         *,
-        open_order_count: int = 0,
+        open_order_count: int | None = None,
         btc_available: float = 1.0,
         usdt_available: float = 100_000.0,
+        symbol: str = "BTC-USDT",
+        positions: list[ExchangePosition] | None = None,
+        open_orders: list[ExchangeOpenOrder] | None = None,
+        instruments: list[InstrumentMetadata] | None = None,
+        risk_snapshot: ExchangeAccountRiskSnapshot | None = None,
+        recent_bills: list[dict] | None = None,
     ) -> None:
         self._open_order_count = open_order_count
+        instrument_rows = instruments or [self._default_instrument(symbol=symbol)]
         self._snapshot = ExchangeAccountSnapshot(
             account_source="okx",
             fetched_at=utc_now(),
@@ -34,34 +50,36 @@ class FakeAccountService:
                 ExchangeBalance(currency="BTC", total=btc_available, available=btc_available, frozen=0.0),
                 ExchangeBalance(currency="USDT", total=usdt_available, available=usdt_available, frozen=0.0),
             ],
-            positions=[],
-            open_orders=[],
-            instruments=[
-                InstrumentMetadata(
-                    instrument_id="BTC-USDT",
-                    symbol="BTC-USDT",
-                    base_currency="BTC",
-                    quote_currency="USDT",
-                    lot_size=0.0001,
-                    tick_size=0.1,
-                    min_size=0.0001,
-                    state="live",
-                )
-            ],
+            positions=list(positions or []),
+            open_orders=list(open_orders or []),
+            instruments=instrument_rows,
             account_mode="cash",
+            risk_snapshot=risk_snapshot,
         )
+        self._recent_bills = list(recent_bills or [])
 
     async def refresh(self, *, force: bool = False):
         return self._snapshot
 
     def instrument_metadata(self, symbol: str):
-        return self._snapshot.instruments[0] if symbol == "BTC-USDT" else None
+        return next((item for item in self._snapshot.instruments if item.symbol == symbol), None)
 
     def open_order_count(self, symbol: str | None = None) -> int:
-        return self._open_order_count
+        if self._open_order_count is not None:
+            return self._open_order_count
+        if symbol is None:
+            return len(self._snapshot.open_orders)
+        return sum(
+            1
+            for order in self._snapshot.open_orders
+            if str(getattr(order, "instrument_id", "") or "") == symbol
+        )
 
     def latest_snapshot(self):
         return self._snapshot
+
+    def latest_recent_bills(self):
+        return list(self._recent_bills)
 
     def status(self):
         return {
@@ -76,6 +94,24 @@ class FakeAccountService:
             "detail": "test_account",
             "blockers": [],
         }
+
+    @staticmethod
+    def _default_instrument(*, symbol: str) -> InstrumentMetadata:
+        parts = [part for part in symbol.split("-") if part]
+        base_currency = parts[0] if len(parts) >= 1 else "BTC"
+        quote_currency = parts[1] if len(parts) >= 2 else "USDT"
+        return InstrumentMetadata(
+            instrument_id=symbol,
+            symbol=symbol,
+            base_currency=base_currency if not symbol.endswith("-SWAP") else "",
+            quote_currency=quote_currency if not symbol.endswith("-SWAP") else "",
+            lot_size=Decimal("0.0001") if not symbol.endswith("-SWAP") else Decimal("0.01"),
+            tick_size=Decimal("0.1"),
+            min_size=Decimal("0.0001") if not symbol.endswith("-SWAP") else Decimal("0.01"),
+            instrument_family=f"{base_currency}-{quote_currency}" if len(parts) >= 2 else None,
+            settle_currency=quote_currency if symbol.endswith("-SWAP") else quote_currency,
+            state="live",
+        )
 
 
 class FakeExecutionProvider:
@@ -123,6 +159,52 @@ class FakeHealthyReconciliationRepo:
                 "as_of_ts": utc_now(),
             },
         )()
+
+
+class FakeAdaptiveRuntimeGuardProvider:
+    def snapshot(self):
+        return {
+            "status": "warning",
+            "only_reduce_required": False,
+            "auto_halt_required": False,
+            "current_initial_margin_usage_fraction": Decimal("0.72"),
+            "nearest_liquidation_gap_ratio": Decimal("0.12"),
+        }
+
+
+class FakeBreachedTrialGuardProvider:
+    def snapshot(self):
+        return {"status": "breached"}
+
+
+class FakeOnlyReduceReconciliationRepo:
+    def latest(self):
+        return ReconciliationReport(
+            reconciliation_id="recon_only_reduce_live",
+            as_of_ts=utc_now(),
+            product_type="derivatives",
+            margin_mode="cross",
+            allowed_symbols=["BTC-USDT-SWAP"],
+            exchange_comparison_enabled=True,
+            order_diff={"reconstructed": {}, "exchange": {}},
+            fill_diff={"replayed": {}, "exchange": {}},
+            balance_diff={"reconstructed": {}, "exchange": {}},
+            position_diff={
+                "stored": {},
+                "reconstructed": {},
+                "reconstructed_mismatches": {},
+                "exchange": {"BTC-USDT-SWAP": "0.03"},
+                "exchange_mismatches": {"BTC-USDT-SWAP": {"stored": "0", "exchange": "0.03"}},
+            },
+            mismatch_categories=["derivatives_exchange_position_without_local_execution_chain"],
+            mismatch_reasons=["derivatives_exchange_position_not_replayed_locally"],
+            safety_impacts=["derivatives_only_reduce_until_position_reconciled"],
+            severity="SOFT_MISMATCH",
+            recovery_classification="derivatives_only_reduce",
+            only_reduce_required=True,
+            only_reduce_reasons=["derivatives_exchange_position_without_local_execution_chain"],
+            recommended_operator_action="go_close_position_on_exchange",
+        )
 
 
 class FakeOKXClient:
@@ -205,6 +287,7 @@ class TestGuardedLive(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(order_state.status, "DRY_RUN")
+        self.assertEqual(order_state.submission_mode, "guarded_live_dry_run")
         self.assertEqual(order_state.venue, "OKX")
         self.assertEqual(fills, [])
         readiness = adapter.readiness()
@@ -212,6 +295,147 @@ class TestGuardedLive(unittest.IsolatedAsyncioTestCase):
         self.assertIn("guarded_execution_dry_run", readiness["submit_blocked_reasons"])
         self.assertTrue(readiness["safety_gates"]["mode_is_guarded_live"])
         self.assertFalse(readiness["safety_gates"]["dry_run_disabled"])
+
+    def test_mode_snapshot_exposes_guarded_live_spot_submit_route(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "mode": "guarded_live",
+                "market_data_backend": "okx",
+                "execution_backend": "okx",
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "okx_simulated_trading": False,
+                "live_submit_enabled": True,
+                "guarded_execution_dry_run": False,
+            }
+        )
+        controller = RuntimeModeController(settings=settings, kill_switch=KillSwitch())
+
+        snapshot = controller.snapshot()
+
+        self.assertEqual(snapshot["operating_state"], "guarded_live_enabled")
+        self.assertEqual(snapshot["execution_route"], "okx_live_guarded")
+        self.assertEqual(snapshot["exchange_submit_target"], "okx_live_spot")
+        self.assertTrue(snapshot["exchange_submit_allowed"])
+        self.assertEqual(snapshot["submit_blocked_reasons"], [])
+
+    async def test_okx_adapter_allows_live_submission_when_guards_satisfied(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "mode": "guarded_live",
+                "execution_backend": "okx",
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "live_submit_enabled": True,
+                "guarded_execution_dry_run": False,
+                "okx_simulated_trading": False,
+                "max_notional_per_symbol": 1_000.0,
+            }
+        )
+        kill_switch = KillSwitch()
+        mode_controller = RuntimeModeController(settings=settings, kill_switch=kill_switch)
+        client = FakeOKXClient()
+        adapter = OKXExecutionAdapter(
+            settings=settings,
+            client=client,  # type: ignore[arg-type]
+            account_service=FakeAccountService(),  # type: ignore[arg-type]
+            mode_controller=mode_controller,
+            price_provider=lambda _symbol: 68_000.0,
+        )
+
+        order_state, fills = await adapter.submit(
+            OrderIntent(
+                intent_id="intent_live_1",
+                decision_id="decision_live_1",
+                symbol="BTC-USDT",
+                side="buy",
+                quantity=0.001,
+                execution_style="taker",
+                order_type="market",
+                urgency="medium",
+                time_in_force="IOC",
+                idempotency_key="intent_live_1",
+            )
+        )
+
+        self.assertEqual(len(client.place_order_calls), 1)
+        self.assertEqual(order_state.status, "SUBMITTED")
+        self.assertEqual(order_state.submission_mode, "guarded_live_submit")
+        self.assertEqual(fills, [])
+        readiness = adapter.readiness()
+        self.assertTrue(readiness["exchange_submit_allowed"])
+        self.assertEqual(readiness["execution_mode"], "guarded_live_submit")
+        self.assertTrue(readiness["safety_gates"]["submission_target_is_live"])
+        self.assertTrue(readiness["safety_gates"]["okx_environment_matches_target"])
+        self.assertNotIn("okx_simulated_trading_required", readiness["submit_blocked_reasons"])
+
+    def test_risk_engine_exposes_adaptive_budget_and_execution_contraction(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "mode": "guarded_live",
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "execution_backend": "okx",
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "live_submit_enabled": True,
+                "max_abs_position_qty": 0.2,
+                "max_notional_per_symbol": 5_000,
+                "max_gross_notional_per_symbol": 5_000,
+                "max_pending_notional_per_symbol": 5_000,
+                "max_total_open_notional": 10_000,
+                "max_target_leverage": 5,
+            }
+        )
+        kill_switch = KillSwitch()
+        mode_controller = RuntimeModeController(settings=settings, kill_switch=kill_switch)
+        account_service = FakeAccountService(symbol="BTC-USDT-SWAP")
+        health_service = SystemHealthService(
+            settings=settings,
+            mode_controller=mode_controller,
+            kill_switch=kill_switch,
+            market_provider=FakeHealthyMarketProvider(),  # type: ignore[arg-type]
+            account_provider=account_service,  # type: ignore[arg-type]
+            execution_provider=FakeExecutionProvider(),  # type: ignore[arg-type]
+            reconciliation_repo=FakeHealthyReconciliationRepo(),  # type: ignore[arg-type]
+        )
+        risk = RiskEngine(
+            settings=settings,
+            account_service=account_service,  # type: ignore[arg-type]
+            health_service=health_service,
+            trigger_policy=DecisionTriggerPolicy(settings=settings),
+            price_provider=lambda _symbol: Decimal("30000"),
+            mode_controller=mode_controller,
+            obligation_repo=InMemoryExecutionObligationRepository(),
+            live_runtime_guard_provider=FakeAdaptiveRuntimeGuardProvider(),
+            trial_guard_provider=FakeBreachedTrialGuardProvider(),
+        )
+
+        decision = risk.evaluate(
+            PositionTarget(
+                decision_id="adaptive_risk_budget",
+                symbol="BTC-USDT-SWAP",
+                target_position_qty=Decimal("0.05"),
+                current_position_qty=Decimal("0"),
+                delta_position_qty=Decimal("0.05"),
+                current_notional=Decimal("0"),
+                target_notional=Decimal("1500"),
+                rebalance_reason="test_adaptive_controls",
+                urgency="medium",
+                max_slippage_tolerance_bps=20,
+                source_mix={"baseline": 1.0},
+                decision_expiry_ts=utc_now(),
+                product_type="derivatives",
+                target_leverage=3.0,
+                margin_mode="cross",
+            )
+        )
+
+        self.assertTrue(decision.approved)
+        self.assertLess(decision.risk_budget_multiplier, Decimal("1"))
+        self.assertLess(decision.execution_aggressiveness_multiplier, Decimal("1"))
+        self.assertIn("risk_budget_multiplier_applied", decision.constraints_applied)
+        self.assertIn("execution_aggressiveness_contracted", decision.constraints_applied)
 
     def test_policy_and_risk_block_unsafe_live_path(self) -> None:
         settings = AATSSettings.model_validate(
@@ -762,6 +986,444 @@ class TestGuardedLive(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(rejected.approved)
         self.assertIn("max_target_leverage_exceeded", rejected.rejection_reasons)
+
+    def test_derivatives_risk_caps_reverse_to_close_only_when_margin_usage_requires_only_reduce(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "mode": "guarded_live",
+                "execution_backend": "okx",
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "okx_simulated_trading": True,
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "max_target_leverage": 3.0,
+                "max_margin_usage_fraction": 0.85,
+                "derivatives_only_reduce_trigger_margin_fraction": 0.70,
+            }
+        )
+        kill_switch = KillSwitch()
+        mode_controller = RuntimeModeController(settings=settings, kill_switch=kill_switch)
+        account_service = FakeAccountService(
+            symbol="BTC-USDT-SWAP",
+            btc_available=0.0,
+            usdt_available=100.0,
+            positions=[
+                ExchangePosition(
+                    instrument_id="BTC-USDT-SWAP",
+                    symbol="BTC-USDT-SWAP",
+                    quantity=Decimal("0.002"),
+                    average_entry_price=Decimal("66000"),
+                    mark_price=Decimal("67000"),
+                    notional_usd=Decimal("134"),
+                    side="long",
+                )
+            ],
+            risk_snapshot=ExchangeAccountRiskSnapshot(
+                adjusted_equity=Decimal("100"),
+                total_equity=Decimal("100"),
+                available_equity=Decimal("100"),
+                initial_margin_requirement=Decimal("50"),
+                maintenance_margin_requirement=Decimal("30"),
+                margin_ratio=Decimal("0.5"),
+                notional_usd=Decimal("134"),
+            ),
+        )
+        health_service = SystemHealthService(
+            settings=settings,
+            mode_controller=mode_controller,
+            kill_switch=kill_switch,
+            market_provider=FakeHealthyMarketProvider(),  # type: ignore[arg-type]
+            account_provider=account_service,  # type: ignore[arg-type]
+            execution_provider=FakeExecutionProvider(),  # type: ignore[arg-type]
+            reconciliation_repo=FakeHealthyReconciliationRepo(),  # type: ignore[arg-type]
+        )
+        risk = RiskEngine(
+            settings=settings,
+            account_service=account_service,  # type: ignore[arg-type]
+            health_service=health_service,
+            trigger_policy=DecisionTriggerPolicy(settings=settings),
+            price_provider=lambda _symbol: 67_000.0,
+            mode_controller=mode_controller,
+        )
+
+        decision = risk.evaluate(
+            PositionTarget(
+                decision_id="decision_derivatives_only_reduce",
+                symbol="BTC-USDT-SWAP",
+                current_position_qty=Decimal("0.002"),
+                target_position_qty=Decimal("-0.001"),
+                delta_position_qty=Decimal("-0.003"),
+                current_notional=Decimal("134"),
+                target_notional=Decimal("-67"),
+                rebalance_reason="test_only_reduce",
+                urgency="medium",
+                max_slippage_tolerance_bps=20,
+                source_mix={"baseline": 1.0},
+                decision_expiry_ts=utc_now(),
+                product_type="derivatives",
+                current_exposure_side="long",
+                target_exposure_side="short",
+                position_intent="reverse_to_short",
+                target_leverage=3.0,
+                margin_mode="cross",
+            )
+        )
+
+        self.assertTrue(decision.approved)
+        self.assertTrue(decision.only_reduce_required)
+        self.assertTrue(decision.flatten_required)
+        self.assertEqual(decision.capped_target_position_qty, Decimal("0"))
+        self.assertIn("only_reduce_required", decision.constraints_applied)
+        self.assertIn("derivatives_margin_usage_requires_only_reduce", decision.constraints_applied)
+        self.assertIsNotNone(decision.projected_margin_usage)
+        self.assertGreater(decision.projected_margin_usage or Decimal("0"), Decimal("0.7"))
+
+    def test_derivatives_risk_inherits_only_reduce_constraint_from_reconciliation_state(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "mode": "guarded_live",
+                "execution_backend": "okx",
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "okx_simulated_trading": True,
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+            }
+        )
+        kill_switch = KillSwitch()
+        mode_controller = RuntimeModeController(settings=settings, kill_switch=kill_switch)
+        account_service = FakeAccountService(
+            symbol="BTC-USDT-SWAP",
+            btc_available=0.0,
+            usdt_available=500.0,
+            risk_snapshot=ExchangeAccountRiskSnapshot(
+                adjusted_equity=Decimal("500"),
+                total_equity=Decimal("500"),
+                available_equity=Decimal("500"),
+                initial_margin_requirement=Decimal("0"),
+                maintenance_margin_requirement=Decimal("0"),
+                margin_ratio=Decimal("0"),
+                notional_usd=Decimal("0"),
+            ),
+        )
+        reconciliation_repo = FakeOnlyReduceReconciliationRepo()
+        health_service = SystemHealthService(
+            settings=settings,
+            mode_controller=mode_controller,
+            kill_switch=kill_switch,
+            market_provider=FakeHealthyMarketProvider(),  # type: ignore[arg-type]
+            account_provider=account_service,  # type: ignore[arg-type]
+            execution_provider=FakeExecutionProvider(),  # type: ignore[arg-type]
+            reconciliation_repo=reconciliation_repo,  # type: ignore[arg-type]
+        )
+        risk = RiskEngine(
+            settings=settings,
+            account_service=account_service,  # type: ignore[arg-type]
+            health_service=health_service,
+            trigger_policy=DecisionTriggerPolicy(settings=settings),
+            price_provider=lambda _symbol: 67_000.0,
+            mode_controller=mode_controller,
+            reconciliation_repo=reconciliation_repo,  # type: ignore[arg-type]
+        )
+
+        decision = risk.evaluate(
+            PositionTarget(
+                decision_id="decision_derivatives_recovery_only_reduce",
+                symbol="BTC-USDT-SWAP",
+                current_position_qty=Decimal("0"),
+                target_position_qty=Decimal("0.002"),
+                delta_position_qty=Decimal("0.002"),
+                current_notional=Decimal("0"),
+                target_notional=Decimal("134"),
+                rebalance_reason="test_recovery_only_reduce",
+                urgency="medium",
+                max_slippage_tolerance_bps=20,
+                source_mix={"baseline": 1.0},
+                decision_expiry_ts=utc_now(),
+                product_type="derivatives",
+                current_exposure_side="flat",
+                target_exposure_side="long",
+                position_intent="open_long",
+                target_leverage=2.0,
+                margin_mode="cross",
+            )
+        )
+
+        self.assertFalse(decision.approved)
+        self.assertTrue(decision.only_reduce_required)
+        self.assertTrue(decision.risk_limit_breached)
+        self.assertEqual(decision.capped_target_position_qty, Decimal("0"))
+        self.assertIn("derivatives_exchange_position_without_local_execution_chain", decision.constraints_applied)
+        self.assertIn("derivatives_exchange_position_without_local_execution_chain", decision.rejection_reasons)
+        self.assertIn("only_reduce_mode_active", decision.rejection_reasons)
+
+    def test_derivatives_risk_blocks_new_exposure_after_daily_realized_loss_limit(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "mode": "guarded_live",
+                "execution_backend": "okx",
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "okx_simulated_trading": True,
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "max_target_leverage": 3.0,
+                "max_daily_realized_loss_usdt": 100.0,
+            }
+        )
+        kill_switch = KillSwitch()
+        mode_controller = RuntimeModeController(settings=settings, kill_switch=kill_switch)
+        now_ms = int(utc_now().timestamp() * 1000)
+        account_service = FakeAccountService(
+            symbol="BTC-USDT-SWAP",
+            btc_available=0.0,
+            usdt_available=500.0,
+            recent_bills=[
+                {"ts": str(now_ms), "pnl": "-125", "ccy": "USDT", "instId": "BTC-USDT-SWAP"},
+            ],
+            risk_snapshot=ExchangeAccountRiskSnapshot(
+                adjusted_equity=Decimal("500"),
+                total_equity=Decimal("500"),
+                available_equity=Decimal("500"),
+                initial_margin_requirement=Decimal("0"),
+                maintenance_margin_requirement=Decimal("0"),
+                margin_ratio=Decimal("0"),
+                notional_usd=Decimal("0"),
+            ),
+        )
+        health_service = SystemHealthService(
+            settings=settings,
+            mode_controller=mode_controller,
+            kill_switch=kill_switch,
+            market_provider=FakeHealthyMarketProvider(),  # type: ignore[arg-type]
+            account_provider=account_service,  # type: ignore[arg-type]
+            execution_provider=FakeExecutionProvider(),  # type: ignore[arg-type]
+            reconciliation_repo=FakeHealthyReconciliationRepo(),  # type: ignore[arg-type]
+        )
+        risk = RiskEngine(
+            settings=settings,
+            account_service=account_service,  # type: ignore[arg-type]
+            health_service=health_service,
+            trigger_policy=DecisionTriggerPolicy(settings=settings),
+            price_provider=lambda _symbol: 67_000.0,
+            mode_controller=mode_controller,
+        )
+
+        decision = risk.evaluate(
+            PositionTarget(
+                decision_id="decision_derivatives_daily_loss",
+                symbol="BTC-USDT-SWAP",
+                current_position_qty=Decimal("0"),
+                target_position_qty=Decimal("0.001"),
+                delta_position_qty=Decimal("0.001"),
+                current_notional=Decimal("0"),
+                target_notional=Decimal("67"),
+                rebalance_reason="test_daily_loss_limit",
+                urgency="medium",
+                max_slippage_tolerance_bps=20,
+                source_mix={"baseline": 1.0},
+                decision_expiry_ts=utc_now(),
+                product_type="derivatives",
+                current_exposure_side="flat",
+                target_exposure_side="long",
+                position_intent="open_long",
+                target_leverage=2.0,
+                margin_mode="cross",
+            )
+        )
+
+        self.assertFalse(decision.approved)
+        self.assertTrue(decision.only_reduce_required)
+        self.assertTrue(decision.risk_limit_breached)
+        self.assertIn("max_daily_realized_loss_usdt_exceeded", decision.rejection_reasons)
+        self.assertIn("only_reduce_mode_active", decision.rejection_reasons)
+
+    def test_derivatives_risk_blocks_when_pending_symbol_notional_exceeds_limit(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "mode": "guarded_live",
+                "execution_backend": "okx",
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "okx_simulated_trading": True,
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "max_pending_notional_per_symbol": 1200.0,
+            }
+        )
+        kill_switch = KillSwitch()
+        mode_controller = RuntimeModeController(settings=settings, kill_switch=kill_switch)
+        account_service = FakeAccountService(
+            symbol="BTC-USDT-SWAP",
+            btc_available=0.0,
+            usdt_available=800.0,
+            open_orders=[
+                ExchangeOpenOrder(
+                    instrument_id="BTC-USDT-SWAP",
+                    symbol="BTC-USDT-SWAP",
+                    exchange_order_id="ord_pending_1",
+                    side="buy",
+                    order_type="limit",
+                    status="live",
+                    quantity=Decimal("0.015"),
+                    filled_quantity=Decimal("0"),
+                    price=Decimal("65000"),
+                )
+            ],
+            risk_snapshot=ExchangeAccountRiskSnapshot(
+                adjusted_equity=Decimal("800"),
+                total_equity=Decimal("800"),
+                available_equity=Decimal("800"),
+                initial_margin_requirement=Decimal("50"),
+                maintenance_margin_requirement=Decimal("20"),
+                margin_ratio=Decimal("0.1"),
+                notional_usd=Decimal("975"),
+            ),
+        )
+        health_service = SystemHealthService(
+            settings=settings,
+            mode_controller=mode_controller,
+            kill_switch=kill_switch,
+            market_provider=FakeHealthyMarketProvider(),  # type: ignore[arg-type]
+            account_provider=account_service,  # type: ignore[arg-type]
+            execution_provider=FakeExecutionProvider(),  # type: ignore[arg-type]
+            reconciliation_repo=FakeHealthyReconciliationRepo(),  # type: ignore[arg-type]
+        )
+        risk = RiskEngine(
+            settings=settings,
+            account_service=account_service,  # type: ignore[arg-type]
+            health_service=health_service,
+            trigger_policy=DecisionTriggerPolicy(settings=settings),
+            price_provider=lambda _symbol: 67_000.0,
+            mode_controller=mode_controller,
+        )
+
+        decision = risk.evaluate(
+            PositionTarget(
+                decision_id="decision_derivatives_pending_notional",
+                symbol="BTC-USDT-SWAP",
+                current_position_qty=Decimal("0"),
+                target_position_qty=Decimal("0.005"),
+                delta_position_qty=Decimal("0.005"),
+                current_notional=Decimal("0"),
+                target_notional=Decimal("335"),
+                rebalance_reason="test_pending_notional_limit",
+                urgency="medium",
+                max_slippage_tolerance_bps=20,
+                source_mix={"baseline": 1.0},
+                decision_expiry_ts=utc_now(),
+                product_type="derivatives",
+                current_exposure_side="flat",
+                target_exposure_side="long",
+                position_intent="open_long",
+                target_leverage=2.0,
+                margin_mode="cross",
+            )
+        )
+
+        self.assertFalse(decision.approved)
+        self.assertTrue(decision.risk_limit_breached)
+        self.assertIn("max_pending_notional_per_symbol_exceeded", decision.rejection_reasons)
+
+    def test_derivatives_risk_still_allows_reducing_position_after_daily_loss_limit(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "mode": "guarded_live",
+                "execution_backend": "okx",
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "okx_simulated_trading": True,
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "max_daily_realized_loss_usdt": 100.0,
+            }
+        )
+        kill_switch = KillSwitch()
+        mode_controller = RuntimeModeController(settings=settings, kill_switch=kill_switch)
+        now_ms = int(utc_now().timestamp() * 1000)
+        account_service = FakeAccountService(
+            symbol="BTC-USDT-SWAP",
+            btc_available=0.0,
+            usdt_available=400.0,
+            positions=[
+                ExchangePosition(
+                    instrument_id="BTC-USDT-SWAP",
+                    symbol="BTC-USDT-SWAP",
+                    quantity=Decimal("0.002"),
+                    average_entry_price=Decimal("66000"),
+                    mark_price=Decimal("67000"),
+                    notional_usd=Decimal("134"),
+                    side="long",
+                )
+            ],
+            recent_bills=[
+                {"ts": str(now_ms), "pnl": "-125", "ccy": "USDT", "instId": "BTC-USDT-SWAP"},
+            ],
+            risk_snapshot=ExchangeAccountRiskSnapshot(
+                adjusted_equity=Decimal("400"),
+                total_equity=Decimal("400"),
+                available_equity=Decimal("400"),
+                initial_margin_requirement=Decimal("20"),
+                maintenance_margin_requirement=Decimal("8"),
+                margin_ratio=Decimal("0.05"),
+                notional_usd=Decimal("134"),
+            ),
+        )
+        health_service = SystemHealthService(
+            settings=settings,
+            mode_controller=mode_controller,
+            kill_switch=kill_switch,
+            market_provider=FakeHealthyMarketProvider(),  # type: ignore[arg-type]
+            account_provider=account_service,  # type: ignore[arg-type]
+            execution_provider=FakeExecutionProvider(),  # type: ignore[arg-type]
+            reconciliation_repo=FakeHealthyReconciliationRepo(),  # type: ignore[arg-type]
+        )
+        risk = RiskEngine(
+            settings=settings,
+            account_service=account_service,  # type: ignore[arg-type]
+            health_service=health_service,
+            trigger_policy=DecisionTriggerPolicy(settings=settings),
+            price_provider=lambda _symbol: 67_000.0,
+            mode_controller=mode_controller,
+        )
+
+        decision = risk.evaluate(
+            PositionTarget(
+                decision_id="decision_derivatives_reduce_after_loss",
+                symbol="BTC-USDT-SWAP",
+                current_position_qty=Decimal("0.002"),
+                target_position_qty=Decimal("0.001"),
+                delta_position_qty=Decimal("-0.001"),
+                current_notional=Decimal("134"),
+                target_notional=Decimal("67"),
+                rebalance_reason="test_reduce_after_loss",
+                urgency="medium",
+                max_slippage_tolerance_bps=20,
+                source_mix={"baseline": 1.0},
+                decision_expiry_ts=utc_now(),
+                product_type="derivatives",
+                current_exposure_side="long",
+                target_exposure_side="long",
+                position_intent="reduce_long",
+                target_leverage=2.0,
+                margin_mode="cross",
+            )
+        )
+
+        self.assertTrue(decision.approved)
+        self.assertFalse(decision.only_reduce_required)
+        self.assertEqual(decision.rejection_reasons, [])
 
 
 if __name__ == "__main__":

@@ -49,6 +49,11 @@ def _seed_revisions(*, settings: AATSSettings, payload: StrategyProfilePayload) 
                 strategy_scale_in_confidence_min=min(payload.strategy_scale_in_confidence_min, 0.68),
                 strategy_reversal_alpha_min=min(payload.strategy_reversal_alpha_min, 0.30),
                 strategy_reversal_confidence_min=min(payload.strategy_reversal_confidence_min, 0.78),
+                strategy_min_hold_seconds=min(payload.strategy_min_hold_seconds, 600.0),
+                strategy_post_close_cooldown_seconds=min(payload.strategy_post_close_cooldown_seconds, 300.0),
+                strategy_low_edge_threshold_bps=min(payload.strategy_low_edge_threshold_bps, 2.5),
+                strategy_low_edge_streak_limit=max(payload.strategy_low_edge_streak_limit, 4),
+                strategy_low_edge_cooldown_seconds=min(payload.strategy_low_edge_cooldown_seconds, 900.0),
                 strategy_transient_close_retry_cooldown_seconds=min(
                     payload.strategy_transient_close_retry_cooldown_seconds, 90.0
                 ),
@@ -90,6 +95,11 @@ def _seed_revisions(*, settings: AATSSettings, payload: StrategyProfilePayload) 
                 strategy_scale_in_confidence_min=max(payload.strategy_scale_in_confidence_min, 0.76),
                 strategy_reversal_alpha_min=max(payload.strategy_reversal_alpha_min, 0.36),
                 strategy_reversal_confidence_min=max(payload.strategy_reversal_confidence_min, 0.84),
+                strategy_min_hold_seconds=max(payload.strategy_min_hold_seconds, 1_200.0),
+                strategy_post_close_cooldown_seconds=max(payload.strategy_post_close_cooldown_seconds, 900.0),
+                strategy_low_edge_threshold_bps=max(payload.strategy_low_edge_threshold_bps, 3.5),
+                strategy_low_edge_streak_limit=min(payload.strategy_low_edge_streak_limit, 3),
+                strategy_low_edge_cooldown_seconds=max(payload.strategy_low_edge_cooldown_seconds, 2_400.0),
                 strategy_transient_close_retry_cooldown_seconds=max(
                     payload.strategy_transient_close_retry_cooldown_seconds, 120.0
                 ),
@@ -119,6 +129,11 @@ def _seed_revisions(*, settings: AATSSettings, payload: StrategyProfilePayload) 
                 strategy_scale_in_confidence_min=max(payload.strategy_scale_in_confidence_min, 0.80),
                 strategy_reversal_alpha_min=max(payload.strategy_reversal_alpha_min, 0.40),
                 strategy_reversal_confidence_min=max(payload.strategy_reversal_confidence_min, 0.86),
+                strategy_min_hold_seconds=max(payload.strategy_min_hold_seconds, 1_500.0),
+                strategy_post_close_cooldown_seconds=max(payload.strategy_post_close_cooldown_seconds, 1_200.0),
+                strategy_low_edge_threshold_bps=max(payload.strategy_low_edge_threshold_bps, 4.0),
+                strategy_low_edge_streak_limit=min(payload.strategy_low_edge_streak_limit, 2),
+                strategy_low_edge_cooldown_seconds=max(payload.strategy_low_edge_cooldown_seconds, 3_600.0),
                 strategy_transient_close_retry_cooldown_seconds=max(
                     payload.strategy_transient_close_retry_cooldown_seconds, 180.0
                 ),
@@ -148,6 +163,11 @@ def _seed_revisions(*, settings: AATSSettings, payload: StrategyProfilePayload) 
                 strategy_scale_in_confidence_min=max(payload.strategy_scale_in_confidence_min, 0.84),
                 strategy_reversal_alpha_min=max(payload.strategy_reversal_alpha_min, 0.44),
                 strategy_reversal_confidence_min=max(payload.strategy_reversal_confidence_min, 0.90),
+                strategy_min_hold_seconds=max(payload.strategy_min_hold_seconds, 1_800.0),
+                strategy_post_close_cooldown_seconds=max(payload.strategy_post_close_cooldown_seconds, 1_500.0),
+                strategy_low_edge_threshold_bps=max(payload.strategy_low_edge_threshold_bps, 4.5),
+                strategy_low_edge_streak_limit=min(payload.strategy_low_edge_streak_limit, 2),
+                strategy_low_edge_cooldown_seconds=max(payload.strategy_low_edge_cooldown_seconds, 4_200.0),
                 strategy_transient_close_retry_cooldown_seconds=max(
                     payload.strategy_transient_close_retry_cooldown_seconds, 240.0
                 ),
@@ -177,6 +197,11 @@ def _seed_revisions(*, settings: AATSSettings, payload: StrategyProfilePayload) 
                 strategy_scale_in_confidence_min=max(payload.strategy_scale_in_confidence_min, 0.88),
                 strategy_reversal_alpha_min=max(payload.strategy_reversal_alpha_min, 0.48),
                 strategy_reversal_confidence_min=max(payload.strategy_reversal_confidence_min, 0.92),
+                strategy_min_hold_seconds=max(payload.strategy_min_hold_seconds, 2_400.0),
+                strategy_post_close_cooldown_seconds=max(payload.strategy_post_close_cooldown_seconds, 1_800.0),
+                strategy_low_edge_threshold_bps=max(payload.strategy_low_edge_threshold_bps, 5.0),
+                strategy_low_edge_streak_limit=min(payload.strategy_low_edge_streak_limit, 1),
+                strategy_low_edge_cooldown_seconds=max(payload.strategy_low_edge_cooldown_seconds, 5_400.0),
                 strategy_transient_close_retry_cooldown_seconds=max(
                     payload.strategy_transient_close_retry_cooldown_seconds, 300.0
                 ),

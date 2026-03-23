@@ -1369,6 +1369,10 @@ function controlPermissionMessage() {
 
 function effectiveRecoveryReasons() {
   const recovery = state.data.systemRecovery?.recovery || {};
+  const onlyReduceReasons = Array.isArray(recovery.only_reduce_reasons) ? recovery.only_reduce_reasons.filter(Boolean) : [];
+  if (onlyReduceReasons.length > 0) {
+    return onlyReduceReasons;
+  }
   const explicitReasons = Array.isArray(recovery.resume_blocked_reasons) ? recovery.resume_blocked_reasons.filter(Boolean) : [];
   if (explicitReasons.length > 0) {
     return explicitReasons;

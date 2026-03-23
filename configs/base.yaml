@@ -52,6 +52,14 @@ database_auto_create_schema: true
 max_abs_position_qty: 0.01
 # [常用可调] max_notional_per_symbol：单标的最大名义金额。可选值：正数；推荐值：1000.0。
 max_notional_per_symbol: 1000.0
+# [常用可调] max_gross_notional_per_symbol：合约单标的最大总名义敞口。可选值：正数；推荐值：2500.0。
+max_gross_notional_per_symbol: 2500.0
+# [常用可调] max_pending_notional_per_symbol：合约单标的最大待成交名义金额。可选值：正数；推荐值：1250.0。
+max_pending_notional_per_symbol: 1250.0
+# [常用可调] max_total_open_notional：合约全账户最大总名义敞口。可选值：正数；推荐值：5000.0。
+max_total_open_notional: 5000.0
+# [常用可调] max_daily_realized_loss_usdt：合约当日已实现亏损上限。可选值：正数；推荐值：100.0。
+max_daily_realized_loss_usdt: 100.0
 # [常用可调] max_open_orders：最多同时挂单数。可选值：1~10；推荐值：5。
 max_open_orders: 5
 # [常用可调] max_decisions_per_minute：每分钟最多触发多少次决策。可选值：1~20；推荐值：6。
@@ -77,9 +85,29 @@ decision_min_momentum_delta: 0.0
 paper_taker_fee_bps: 5.0
 # [常用可调] max_slippage_tolerance_bps：最大允许滑点。可选值：0~100；推荐值：20。
 max_slippage_tolerance_bps: 20
+# [常用可调] derivatives_only_reduce_trigger_margin_fraction：合约保证金占用达到该比例后只允许减仓。可选值：0.0~1.0；推荐值：0.70。
+derivatives_only_reduce_trigger_margin_fraction: 0.7
+# [常用可调] derivatives_runtime_guard_enabled：是否启用合约实盘自动保护。可选值：true / false；推荐值：true。
+derivatives_runtime_guard_enabled: true
+# [常用可调] derivatives_auto_halt_margin_usage_fraction：当前保证金占用达到该比例后自动停机。可选值：0.0~1.0；推荐值：0.85。
+derivatives_auto_halt_margin_usage_fraction: 0.85
+# [常用可调] derivatives_auto_halt_liquidation_gap_fraction：最近仓位距离强平小于该比例后自动停机。可选值：0.0~1.0；推荐值：0.08。
+derivatives_auto_halt_liquidation_gap_fraction: 0.08
+# [常用可调] max_margin_usage_fraction：合约预估保证金占用上限。可选值：0.0~1.0；推荐值：0.85。
+max_margin_usage_fraction: 0.85
+# [常用可调] liquidation_buffer_fraction：合约预留的强平缓冲比例。可选值：0.0~1.0；推荐值：0.15。
+liquidation_buffer_fraction: 0.15
 
 # [常用可调] ai_operating_mode：AI 运行模式。可选值：baseline_only / ai_assisted / ai_decision_maker；基线推荐：baseline_only。自动换档已独立，单独由 strategy_profile_auto_control_enabled 控制。
 ai_operating_mode: baseline_only
+# [常用可调] strategy_profile_emergency_safety_fast_track_enabled：是否允许安全事件走快速切档通道。可选值：true / false；推荐值：true。
+strategy_profile_emergency_safety_fast_track_enabled: true
+# [常用可调] strategy_profile_emergency_safety_confidence_min：快速切入安全档的最低置信度。可选值：0.0~1.0；推荐值：0.68。
+strategy_profile_emergency_safety_confidence_min: 0.68
+# [常用可调] strategy_risk_budget_multiplier_floor：风险预算自动收缩的最小乘数。可选值：0.1~1.0；推荐值：0.35。
+strategy_risk_budget_multiplier_floor: 0.35
+# [常用可调] strategy_execution_aggressiveness_multiplier_floor：执行侵略性自动收缩的最小乘数。可选值：0.1~1.0；推荐值：0.30。
+strategy_execution_aggressiveness_multiplier_floor: 0.30
 # [运行必改] ai_provider：AI 提供方。可选值：disabled / openai；基线推荐：disabled。
 ai_provider: disabled
 # [常用可调] ai_model_name：AI 模型名。可选值：可用模型名；推荐值：gpt-4o-mini。
@@ -105,10 +133,10 @@ ai_decision_min_directional_edge: 0.2
 # [运行必改] openai_base_url：OpenAI API 基础地址。可选值：https://api.openai.com 或兼容代理地址；推荐值：https://api.openai.com。
 openai_base_url: https://api.openai.com
 
-# [常用可调] market_data_stale_after_seconds：行情快照过期阈值秒数。可选值：1.0~300.0；推荐值：30.0。
-market_data_stale_after_seconds: 30.0
-# [常用可调] account_state_stale_after_seconds：账户状态过期阈值秒数。可选值：1.0~600.0；推荐值：60.0。
-account_state_stale_after_seconds: 60.0
+# [常用可调] market_data_stale_after_seconds：行情快照过期阈值秒数。可选值：1.0~300.0；推荐值：45.0。
+market_data_stale_after_seconds: 45.0
+# [常用可调] account_state_stale_after_seconds：账户状态过期阈值秒数。可选值：1.0~600.0；推荐值：120.0。
+account_state_stale_after_seconds: 120.0
 # [常用可调] reconciliation_stale_after_seconds：对账状态过期阈值秒数。可选值：10.0~3600.0；推荐值：300.0。
 reconciliation_stale_after_seconds: 300.0
 
@@ -120,16 +148,34 @@ okx_public_ws_url: wss://ws.okx.com:8443/ws/v5/public
 okx_business_ws_url: wss://ws.okx.com:8443/ws/v5/business
 # [运行必改] okx_simulated_trading：是否使用 OKX 模拟盘。可选值：true / false；基线推荐：false。
 okx_simulated_trading: false
-# [常用可调] okx_timeout_seconds：OKX 请求超时秒数。可选值：1.0~60.0；推荐值：10.0。
-okx_timeout_seconds: 10.0
-# [常用可调] okx_market_reconnect_delay_seconds：行情重连延迟秒数。可选值：1.0~30.0；推荐值：2.0。
-okx_market_reconnect_delay_seconds: 2.0
+# [常用可调] okx_timeout_seconds：OKX 请求超时秒数。可选值：1.0~60.0；推荐值：15.0。
+okx_timeout_seconds: 15.0
+# [常用可调] okx_market_reconnect_delay_seconds：行情重连基础延迟秒数。可选值：1.0~30.0；推荐值：4.0。
+okx_market_reconnect_delay_seconds: 4.0
+# [常用可调] okx_market_reconnect_max_delay_seconds：行情重连最大延迟秒数。可选值：1.0~120.0；推荐值：20.0。
+okx_market_reconnect_max_delay_seconds: 20.0
+# [常用可调] okx_ws_ping_interval_seconds：WebSocket 协议级心跳间隔秒数。可选值：5.0~120.0；推荐值：30.0。
+okx_ws_ping_interval_seconds: 30.0
+# [常用可调] okx_ws_ping_timeout_seconds：WebSocket 协议级心跳超时秒数。可选值：5.0~120.0；推荐值：30.0。
+okx_ws_ping_timeout_seconds: 30.0
+# [常用可调] okx_ws_open_timeout_seconds：WebSocket 建连握手超时秒数。可选值：5.0~120.0；推荐值：20.0。
+okx_ws_open_timeout_seconds: 20.0
+# [常用可调] okx_private_ws_idle_ping_interval_seconds：私有 WS 应用层 ping 间隔秒数。可选值：5.0~120.0；推荐值：20.0。
+okx_private_ws_idle_ping_interval_seconds: 20.0
 # [常用可调] okx_account_refresh_interval_seconds：账户刷新间隔秒数。可选值：1.0~300.0；推荐值：15.0。
 okx_account_refresh_interval_seconds: 15.0
 # [常用可调] okx_execution_sync_interval_seconds：执行同步间隔秒数。可选值：1.0~300.0；推荐值：5.0。
 okx_execution_sync_interval_seconds: 5.0
 # [常用可调] okx_fill_fetch_limit：单次抓取成交数上限。可选值：1~1000；推荐值：100。
 okx_fill_fetch_limit: 100
+# [常用可调] okx_instruments_refresh_interval_seconds：合约与现货元数据刷新间隔秒数。可选值：30.0~3600.0；推荐值：300.0。
+okx_instruments_refresh_interval_seconds: 300.0
+# [常用可调] okx_account_config_refresh_interval_seconds：账户配置刷新间隔秒数。可选值：30.0~3600.0；推荐值：300.0。
+okx_account_config_refresh_interval_seconds: 300.0
+# [常用可调] okx_account_position_risk_refresh_interval_seconds：账户风险视图刷新间隔秒数。可选值：10.0~3600.0；推荐值：60.0。
+okx_account_position_risk_refresh_interval_seconds: 60.0
+# [常用可调] okx_bills_refresh_interval_seconds：最近账单刷新间隔秒数。可选值：10.0~3600.0；推荐值：60.0。
+okx_bills_refresh_interval_seconds: 60.0
 
 # [运行必改] operator_auth_enabled：是否启用操作员鉴权。可选值：true / false；基线推荐：false。
 operator_auth_enabled: false

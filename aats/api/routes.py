@@ -395,6 +395,16 @@ async def recent_risk(
     return _query(request).recent_risks(limit=limit, offset=offset)
 
 
+@router.get("/risk/margin-buffer")
+async def margin_buffer_risk(request: Request) -> dict[str, Any]:
+    return _query(request).margin_buffer_risk()
+
+
+@router.get("/system/guarded-live-preflight")
+async def guarded_live_preflight(request: Request) -> dict[str, Any]:
+    return _query(request).guarded_live_preflight()
+
+
 @router.get("/policy/latest")
 async def latest_policy(request: Request) -> dict[str, Any]:
     payload = _query(request).latest_policy()
@@ -457,6 +467,14 @@ async def account_recent_bills(
     limit: int = Query(default=50, ge=1, le=200),
 ) -> dict[str, Any]:
     return await _query(request).account_recent_bills(limit=limit)
+
+
+@router.get("/account/recent-funding-fees")
+async def account_recent_funding_fees(
+    request: Request,
+    limit: int = Query(default=50, ge=1, le=200),
+) -> dict[str, Any]:
+    return _query(request).account_recent_funding_fees(limit=limit)
 
 
 @router.get("/orders/open")
@@ -608,6 +626,14 @@ async def profitability_overview(
     return _query(request).profitability_overview(limit=limit)
 
 
+@router.get("/reports/position-lifecycle-profitability")
+async def position_lifecycle_profitability(
+    request: Request,
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, Any]:
+    return _query(request).position_lifecycle_profitability(limit=limit)
+
+
 @router.get("/reports/strategy-segments")
 async def strategy_segment_report(
     request: Request,
@@ -692,6 +718,11 @@ async def trial_review_details(
         window_days=window_days,
         period_count=period_count,
     )
+
+
+@router.get("/reports/guarded-live-run-packet")
+async def guarded_live_run_packet(request: Request) -> dict[str, Any]:
+    return _query(request).guarded_live_run_packet()
 
 
 @router.get("/reports/trial-review-history")

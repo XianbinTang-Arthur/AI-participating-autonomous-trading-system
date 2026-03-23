@@ -33,6 +33,8 @@ _EXPECTED_NUMERIC_COLUMNS: tuple[tuple[str, str], ...] = (
     ("fill_outcomes", "ending_avg_entry_price"),
     ("fill_outcomes", "realized_pnl_delta"),
     ("fill_outcomes", "fee_delta"),
+    ("funding_fee_records", "amount"),
+    ("funding_fee_records", "balance_after"),
     ("order_obligations", "reserved_amount"),
     ("order_obligations", "consumed_amount"),
     ("order_obligations", "released_amount"),

@@ -1,6 +1,6 @@
 ﻿from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
@@ -36,9 +36,11 @@ from aats.services.operator.runtime_queries import RuntimeQueryFacade
 from aats.services.operator.reconciliation_system_queries import ReconciliationSystemQueryFacade
 from aats.services.operator.strategy_profile_queries import StrategyProfileQueryFacade
 from aats.services.operator.strategy_profiles import StrategyProfileControlService
+from aats.services.portfolio_service.position_keys import build_position_key, position_key_for_snapshot_position
 from aats.services.runtime_scope import (
     fill_outcomes_for_scope,
     fills_for_scope,
+    funding_fee_records_for_scope,
     latest_reconciliation_for_scope,
     latest_snapshot_for_scope,
     order_states_for_scope,
@@ -120,6 +122,16 @@ class OperatorQueryService:
         return self._cached(
             "scoped_fill_outcomes",
             lambda: fill_outcomes_for_scope(self.runtime.fill_outcome_repo, self.state_scope),
+        )
+
+    def _scoped_funding_fee_records(self):
+        return self._cached(
+            "scoped_funding_fee_records",
+            lambda: (
+                funding_fee_records_for_scope(getattr(self.runtime, "funding_fee_repo", None), self.state_scope)
+                if getattr(self.runtime, "funding_fee_repo", None) is not None
+                else []
+            ),
         )
 
     def _fill_outcome_map(self) -> dict[str, Any]:
@@ -276,13 +288,926 @@ class OperatorQueryService:
         snapshot = self._latest_scoped_snapshot()
         if snapshot is None:
             return Decimal("0")
-        for position in snapshot.positions:
-            if position.symbol == symbol:
-                return position.position_qty
+        quantity = sum(
+            (
+                Decimal(str(position.position_qty))
+                for position in snapshot.positions
+                if position.symbol == symbol
+            ),
+            start=Decimal("0"),
+        )
+        if abs(quantity) > self._DECIMAL_EPSILON:
+            return quantity
         if snapshot.product_type == "spot" and "-" in symbol:
             base_currency, _quote_currency = symbol.split("-", 1)
             return snapshot.balances.get(base_currency, Decimal("0"))
         return Decimal("0")
+
+    @staticmethod
+    def _aggregate_local_positions(snapshot) -> list[dict[str, Any]]:
+        if snapshot is None:
+            return []
+        aggregated: dict[str, dict[str, Any]] = {}
+        for position in snapshot.positions:
+            entry = aggregated.setdefault(
+                position.symbol,
+                {
+                    "symbol": position.symbol,
+                    "position_qty": Decimal("0"),
+                    "position_notional": Decimal("0"),
+                    "avg_entry_price": Decimal("0"),
+                    "unrealized_pnl": Decimal("0"),
+                    "product_type": position.product_type,
+                    "margin_mode": position.margin_mode,
+                    "position_mode": position.position_mode,
+                    "target_leverage": position.target_leverage,
+                    "legs": [],
+                },
+            )
+            entry["position_qty"] = Decimal(str(entry["position_qty"])) + Decimal(str(position.position_qty))
+            entry["position_notional"] = Decimal(str(entry["position_notional"])) + Decimal(str(position.position_notional))
+            entry["unrealized_pnl"] = Decimal(str(entry["unrealized_pnl"])) + Decimal(str(position.unrealized_pnl))
+            entry["target_leverage"] = max(float(entry["target_leverage"]), float(position.target_leverage))
+            entry["legs"].append(
+                {
+                    "position_key": position_key_for_snapshot_position(position),
+                    "pos_side": position.pos_side,
+                    "position_qty": position.position_qty,
+                    "avg_entry_price": position.avg_entry_price,
+                    "unrealized_pnl": position.unrealized_pnl,
+                    "settle_currency": position.settle_currency,
+                    "margin_mode": position.margin_mode,
+                    "margin_allocated": position.margin_allocated,
+                    "maintenance_margin": position.maintenance_margin,
+                    "margin_ratio": position.margin_ratio,
+                    "liquidation_price": position.liquidation_price,
+                    "margin_source": position.margin_source,
+                }
+            )
+        rows: list[dict[str, Any]] = []
+        for item in aggregated.values():
+            total_qty = Decimal(str(item["position_qty"]))
+            total_notional = Decimal(str(item["position_notional"]))
+            item["avg_entry_price"] = (
+                total_notional / total_qty
+                if abs(total_qty) > Decimal("1e-12")
+                else Decimal("0")
+            )
+            rows.append(item)
+        rows.sort(key=lambda item: str(item["symbol"]))
+        return rows
+
+    @staticmethod
+    def _aggregate_exchange_positions(exchange) -> list[dict[str, Any]]:
+        if exchange is None:
+            return []
+        aggregated: dict[str, dict[str, Any]] = {}
+        for position in exchange.positions:
+            quantity = Decimal(str(position.quantity))
+            if str(getattr(position, "side", "net") or "net").lower() == "short" and quantity > 0:
+                quantity = -quantity
+            entry = aggregated.setdefault(
+                position.symbol,
+                {
+                    "symbol": position.symbol,
+                    "position_qty": Decimal("0"),
+                    "legs": [],
+                },
+            )
+            entry["position_qty"] = Decimal(str(entry["position_qty"])) + quantity
+            entry["legs"].append(
+                {
+                    "side": getattr(position, "side", "net"),
+                    "position_qty": quantity,
+                    "avg_entry_price": position.average_entry_price,
+                    "notional_usd": position.notional_usd,
+                    "margin_mode": getattr(position, "margin_mode", None),
+                    "margin_allocated": getattr(position, "margin_allocated", None),
+                    "maintenance_margin": getattr(position, "maintenance_margin", None),
+                    "margin_ratio": getattr(position, "margin_ratio", None),
+                    "liquidation_price": getattr(position, "liquidation_price", None),
+                    "settle_currency": getattr(position, "settle_currency", None),
+                }
+            )
+        rows = list(aggregated.values())
+        rows.sort(key=lambda item: str(item["symbol"]))
+        return rows
+
+    @staticmethod
+    def _empty_position_margin_summary() -> dict[str, Any]:
+        return {
+            "available": False,
+            "position_count": 0,
+            "position_count_by_margin_mode": {},
+            "margin_allocated_total": Decimal("0"),
+            "maintenance_margin_total": Decimal("0"),
+            "positions_with_liquidation_price": 0,
+            "settle_currencies": [],
+            "margin_source_counts": {},
+        }
+
+    def _local_position_margin_summary(self, snapshot) -> dict[str, Any]:
+        if snapshot is None:
+            return self._empty_position_margin_summary()
+        summary = self._empty_position_margin_summary()
+        margin_mode_counts: dict[str, int] = {}
+        margin_source_counts: dict[str, int] = {}
+        settle_currencies: set[str] = set()
+        margin_allocated_total = Decimal("0")
+        maintenance_margin_total = Decimal("0")
+        positions_with_liquidation_price = 0
+        for position in snapshot.positions:
+            margin_mode = str(position.margin_mode or "unknown")
+            margin_mode_counts[margin_mode] = margin_mode_counts.get(margin_mode, 0) + 1
+            margin_source = str(getattr(position, "margin_source", "estimated") or "estimated")
+            margin_source_counts[margin_source] = margin_source_counts.get(margin_source, 0) + 1
+            margin_allocated_total += self._to_decimal(getattr(position, "margin_allocated", None)) or Decimal("0")
+            maintenance_margin_total += self._to_decimal(getattr(position, "maintenance_margin", None)) or Decimal("0")
+            if getattr(position, "liquidation_price", None) not in {None, ""}:
+                positions_with_liquidation_price += 1
+            if getattr(position, "settle_currency", None):
+                settle_currencies.add(str(position.settle_currency))
+        return {
+            "available": bool(snapshot.positions),
+            "position_count": len(snapshot.positions),
+            "position_count_by_margin_mode": margin_mode_counts,
+            "margin_allocated_total": margin_allocated_total,
+            "maintenance_margin_total": maintenance_margin_total,
+            "positions_with_liquidation_price": positions_with_liquidation_price,
+            "settle_currencies": sorted(settle_currencies),
+            "margin_source_counts": margin_source_counts,
+        }
+
+    def _exchange_position_margin_summary(self, exchange) -> dict[str, Any]:
+        if exchange is None:
+            return self._empty_position_margin_summary()
+        summary = self._empty_position_margin_summary()
+        margin_mode_counts: dict[str, int] = {}
+        settle_currencies: set[str] = set()
+        margin_allocated_total = Decimal("0")
+        maintenance_margin_total = Decimal("0")
+        positions_with_liquidation_price = 0
+        for position in exchange.positions:
+            margin_mode = str(getattr(position, "margin_mode", None) or "unknown")
+            margin_mode_counts[margin_mode] = margin_mode_counts.get(margin_mode, 0) + 1
+            margin_allocated_total += self._to_decimal(getattr(position, "margin_allocated", None)) or Decimal("0")
+            maintenance_margin_total += self._to_decimal(getattr(position, "maintenance_margin", None)) or Decimal("0")
+            if getattr(position, "liquidation_price", None) not in {None, ""}:
+                positions_with_liquidation_price += 1
+            if getattr(position, "settle_currency", None):
+                settle_currencies.add(str(position.settle_currency))
+        return {
+            "available": bool(exchange.positions),
+            "position_count": len(exchange.positions),
+            "position_count_by_margin_mode": margin_mode_counts,
+            "margin_allocated_total": margin_allocated_total,
+            "maintenance_margin_total": maintenance_margin_total,
+            "positions_with_liquidation_price": positions_with_liquidation_price,
+            "settle_currencies": sorted(settle_currencies),
+            "margin_source_counts": {"exchange": len(exchange.positions)} if exchange.positions else {},
+        }
+
+    def _margin_reconciliation_summary(self, report) -> dict[str, Any] | None:
+        if report is None:
+            return None
+        position_diff = report.position_diff if isinstance(report.position_diff, dict) else {}
+        margin_mode_mismatches = (
+            position_diff.get("exchange_margin_mode_mismatches")
+            if isinstance(position_diff.get("exchange_margin_mode_mismatches"), dict)
+            else {}
+        )
+        margin_metric_mismatches = (
+            position_diff.get("exchange_margin_mismatches")
+            if isinstance(position_diff.get("exchange_margin_mismatches"), dict)
+            else {}
+        )
+        return {
+            "position_margin_mode_mismatch_count": len(margin_mode_mismatches),
+            "position_margin_metric_mismatch_count": len(margin_metric_mismatches),
+            "position_margin_mode_mismatch_keys": sorted(margin_mode_mismatches.keys()),
+            "position_margin_metric_mismatch_keys": sorted(margin_metric_mismatches.keys()),
+            "has_margin_reconciliation_findings": bool(margin_mode_mismatches or margin_metric_mismatches),
+        }
+
+    def _position_liquidation_gap_ratio(self, position: Any) -> Decimal | None:
+        mark_price = self._to_decimal(getattr(position, "mark_price", None))
+        liquidation_price = self._to_decimal(getattr(position, "liquidation_price", None))
+        if (
+            mark_price is None
+            or liquidation_price is None
+            or abs(mark_price) <= self._DECIMAL_EPSILON
+        ):
+            return None
+        side = str(getattr(position, "side", None) or getattr(position, "pos_side", None) or "net").lower()
+        if side == "short":
+            return (liquidation_price - mark_price) / mark_price
+        return (mark_price - liquidation_price) / mark_price
+
+    def _exchange_liquidation_risk_summary(self, exchange) -> dict[str, Any]:
+        if exchange is None:
+            return {
+                "available": False,
+                "position_count": 0,
+                "positions_with_liquidation_price": 0,
+                "nearest_liquidation_gap_ratio": None,
+                "buffer_threshold_ratio": Decimal(str(self.runtime.settings.liquidation_buffer_fraction)),
+                "positions_inside_buffer": 0,
+                "closest_position": None,
+            }
+        buffer_threshold = Decimal(str(self.runtime.settings.liquidation_buffer_fraction))
+        positions_with_liquidation_price = 0
+        positions_inside_buffer = 0
+        closest_position: dict[str, Any] | None = None
+        closest_gap: Decimal | None = None
+        for position in exchange.positions:
+            gap_ratio = self._position_liquidation_gap_ratio(position)
+            if gap_ratio is None:
+                continue
+            positions_with_liquidation_price += 1
+            if gap_ratio <= buffer_threshold + self._DECIMAL_EPSILON:
+                positions_inside_buffer += 1
+            if closest_gap is None or gap_ratio < closest_gap:
+                closest_gap = gap_ratio
+                closest_position = {
+                    "symbol": getattr(position, "symbol", None),
+                    "pos_side": getattr(position, "side", None),
+                    "mark_price": getattr(position, "mark_price", None),
+                    "liquidation_price": getattr(position, "liquidation_price", None),
+                    "margin_mode": getattr(position, "margin_mode", None),
+                    "margin_ratio": getattr(position, "margin_ratio", None),
+                    "margin_allocated": getattr(position, "margin_allocated", None),
+                    "maintenance_margin": getattr(position, "maintenance_margin", None),
+                    "gap_ratio": gap_ratio,
+                    "buffer_gap_ratio": gap_ratio - buffer_threshold,
+                }
+        return {
+            "available": bool(exchange.positions),
+            "position_count": len(exchange.positions),
+            "positions_with_liquidation_price": positions_with_liquidation_price,
+            "nearest_liquidation_gap_ratio": closest_gap,
+            "buffer_threshold_ratio": buffer_threshold,
+            "positions_inside_buffer": positions_inside_buffer,
+            "closest_position": closest_position,
+        }
+
+    def _risk_margin_buffer_context(self, risk_payload: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not isinstance(risk_payload, dict):
+            return None
+        projected_margin_usage = self._to_decimal(risk_payload.get("projected_margin_usage"))
+        liquidation_buffer_remaining = self._to_decimal(risk_payload.get("liquidation_buffer_remaining"))
+        only_reduce_trigger = Decimal(str(self.runtime.settings.derivatives_only_reduce_trigger_margin_fraction))
+        hard_limit = Decimal(str(self.runtime.settings.max_margin_usage_fraction))
+        if projected_margin_usage is None and liquidation_buffer_remaining is None:
+            return None
+        return {
+            "projected_margin_usage": projected_margin_usage,
+            "projected_margin_usage_percent": (
+                None if projected_margin_usage is None else self._format_fraction_percent(projected_margin_usage)
+            ),
+            "only_reduce_trigger_fraction": only_reduce_trigger,
+            "only_reduce_trigger_percent": self._format_fraction_percent(only_reduce_trigger),
+            "hard_limit_fraction": hard_limit,
+            "hard_limit_percent": self._format_fraction_percent(hard_limit),
+            "buffer_to_only_reduce": (
+                None if projected_margin_usage is None else only_reduce_trigger - projected_margin_usage
+            ),
+            "buffer_to_only_reduce_percent": (
+                None
+                if projected_margin_usage is None
+                else self._format_fraction_percent(only_reduce_trigger - projected_margin_usage)
+            ),
+            "buffer_to_hard_limit": (
+                liquidation_buffer_remaining
+                if liquidation_buffer_remaining is not None
+                else (None if projected_margin_usage is None else hard_limit - projected_margin_usage)
+            ),
+            "buffer_to_hard_limit_percent": (
+                None
+                if (
+                    liquidation_buffer_remaining is None
+                    and projected_margin_usage is None
+                )
+                else self._format_fraction_percent(
+                    liquidation_buffer_remaining
+                    if liquidation_buffer_remaining is not None
+                    else hard_limit - projected_margin_usage
+                )
+            ),
+        }
+
+    def margin_buffer_risk(self) -> dict[str, Any]:
+        cache_key = f"margin_buffer_risk:{self._scope_cache_fragment()}"
+        return self._cached_ttl(cache_key, 10, self._build_margin_buffer_risk)
+
+    def _build_margin_buffer_risk(self) -> dict[str, Any]:
+        snapshot = self.runtime.account_service.latest_snapshot()
+        risk_snapshot = snapshot.risk_snapshot if snapshot is not None else None
+        latest_risk_payload = self.latest_risk().get("payload")
+        projected_context = self._risk_margin_buffer_context(latest_risk_payload)
+        current_initial_margin_requirement = (
+            None
+            if risk_snapshot is None or risk_snapshot.initial_margin_requirement is None
+            else self._to_decimal(risk_snapshot.initial_margin_requirement)
+        )
+        current_maintenance_margin_requirement = (
+            None
+            if risk_snapshot is None or risk_snapshot.maintenance_margin_requirement is None
+            else self._to_decimal(risk_snapshot.maintenance_margin_requirement)
+        )
+        equity_base = None
+        if risk_snapshot is not None:
+            for value in (
+                risk_snapshot.adjusted_equity,
+                risk_snapshot.total_equity,
+                risk_snapshot.available_equity,
+            ):
+                resolved = self._to_decimal(value)
+                if resolved is not None and resolved > self._DECIMAL_EPSILON:
+                    equity_base = resolved
+                    break
+        current_initial_margin_usage = (
+            None
+            if current_initial_margin_requirement is None or equity_base is None
+            else current_initial_margin_requirement / equity_base
+        )
+        current_maintenance_margin_usage = (
+            None
+            if current_maintenance_margin_requirement is None or equity_base is None
+            else current_maintenance_margin_requirement / equity_base
+        )
+        only_reduce_trigger = Decimal(str(self.runtime.settings.derivatives_only_reduce_trigger_margin_fraction))
+        hard_limit = Decimal(str(self.runtime.settings.max_margin_usage_fraction))
+        current_buffer_to_only_reduce = (
+            None if current_initial_margin_usage is None else only_reduce_trigger - current_initial_margin_usage
+        )
+        current_buffer_to_hard_limit = (
+            None if current_initial_margin_usage is None else hard_limit - current_initial_margin_usage
+        )
+        liquidation_summary = self._exchange_liquidation_risk_summary(snapshot)
+        nearest_gap = self._to_decimal(liquidation_summary.get("nearest_liquidation_gap_ratio"))
+        projected_margin_usage = None if projected_context is None else self._to_decimal(projected_context.get("projected_margin_usage"))
+        status = "healthy"
+        if (
+            (nearest_gap is not None and nearest_gap <= Decimal("0"))
+            or (current_buffer_to_hard_limit is not None and current_buffer_to_hard_limit <= Decimal("0"))
+            or (
+                projected_context is not None
+                and self._to_decimal(projected_context.get("buffer_to_hard_limit")) is not None
+                and self._to_decimal(projected_context.get("buffer_to_hard_limit")) <= Decimal("0")
+            )
+        ):
+            status = "critical"
+        elif (
+            (nearest_gap is not None and nearest_gap <= Decimal(str(self.runtime.settings.liquidation_buffer_fraction)) + self._DECIMAL_EPSILON)
+            or (current_buffer_to_only_reduce is not None and current_buffer_to_only_reduce <= Decimal("0"))
+            or (
+                projected_context is not None
+                and self._to_decimal(projected_context.get("buffer_to_only_reduce")) is not None
+                and self._to_decimal(projected_context.get("buffer_to_only_reduce")) <= Decimal("0")
+            )
+        ):
+            status = "warning"
+        summary_map = {
+            "healthy": "当前保证金缓冲和强平距离都还在可接受区间内。",
+            "warning": "当前保证金缓冲或强平距离已经偏紧，新的开仓和加仓需要特别谨慎。",
+            "critical": "当前保证金缓冲或强平距离已经进入高风险区域，应优先减仓或暂停新增暴露。",
+        }
+        return {
+            "available": snapshot is not None and self.runtime.settings.trading_product_type == "derivatives",
+            "status": status,
+            "summary": summary_map[status],
+            "current": {
+                "equity_base": equity_base,
+                "initial_margin_requirement": current_initial_margin_requirement,
+                "maintenance_margin_requirement": current_maintenance_margin_requirement,
+                "initial_margin_usage_fraction": current_initial_margin_usage,
+                "initial_margin_usage_percent": (
+                    None if current_initial_margin_usage is None else self._format_fraction_percent(current_initial_margin_usage)
+                ),
+                "maintenance_margin_usage_fraction": current_maintenance_margin_usage,
+                "maintenance_margin_usage_percent": (
+                    None
+                    if current_maintenance_margin_usage is None
+                    else self._format_fraction_percent(current_maintenance_margin_usage)
+                ),
+                "buffer_to_only_reduce": current_buffer_to_only_reduce,
+                "buffer_to_only_reduce_percent": (
+                    None
+                    if current_buffer_to_only_reduce is None
+                    else self._format_fraction_percent(current_buffer_to_only_reduce)
+                ),
+                "buffer_to_hard_limit": current_buffer_to_hard_limit,
+                "buffer_to_hard_limit_percent": (
+                    None
+                    if current_buffer_to_hard_limit is None
+                    else self._format_fraction_percent(current_buffer_to_hard_limit)
+                ),
+            },
+            "projected": projected_context,
+            "liquidation": liquidation_summary,
+            "thresholds": {
+                "only_reduce_trigger_fraction": only_reduce_trigger,
+                "only_reduce_trigger_percent": self._format_fraction_percent(only_reduce_trigger),
+                "hard_limit_fraction": hard_limit,
+                "hard_limit_percent": self._format_fraction_percent(hard_limit),
+                "liquidation_buffer_fraction": Decimal(str(self.runtime.settings.liquidation_buffer_fraction)),
+                "liquidation_buffer_percent": self._format_fraction_percent(self.runtime.settings.liquidation_buffer_fraction),
+            },
+            "truth_source": "exchange_risk_snapshot_plus_latest_risk_decision",
+        }
+
+    def derivatives_live_guard(self) -> dict[str, Any]:
+        service = getattr(self.runtime, "derivatives_live_guard_service", None)
+        if service is None:
+            return {
+                "enabled": False,
+                "status": "not_configured",
+                "summary": "当前没有启用合约实盘自动保护。",
+            }
+        cache_key = f"derivatives_live_guard:{self._scope_cache_fragment()}"
+        return self._cached_ttl(cache_key, 5, service.snapshot)
+
+    @staticmethod
+    def _guarded_live_preflight_check(
+        *,
+        check_id: str,
+        category: str,
+        label: str,
+        status: str,
+        detail: str,
+        required: bool = True,
+        observed: Any = None,
+    ) -> dict[str, Any]:
+        return {
+            "check_id": check_id,
+            "category": category,
+            "label": label,
+            "status": status,
+            "detail": detail,
+            "required": required,
+            "observed": observed,
+        }
+
+    def guarded_live_preflight(self) -> dict[str, Any]:
+        cache_key = f"guarded_live_preflight:{self._scope_cache_fragment()}"
+        return self._cached_ttl(cache_key, 10, self._build_guarded_live_preflight)
+
+    def _build_guarded_live_preflight(self) -> dict[str, Any]:
+        if not (
+            self.runtime.settings.mode == "guarded_live"
+            and self.runtime.settings.trading_product_type == "derivatives"
+        ):
+            return {
+                "generated_at": utc_now(),
+                "status": "not_applicable",
+                "launch_ready": False,
+                "summary": "当前不是合约 guarded_live 运行线，不需要执行这份启盘前自检。",
+                "checks": [],
+                "counts": {"pass": 0, "warn": 0, "fail": 0},
+                "operator_actions": ["先切到合约 guarded_live 运行线，再执行启盘前自检。"],
+                "truth_source": "runtime_contract_plus_operator_safety_checks",
+            }
+
+        mode_snapshot = self.system_mode()
+        recovery = self.recovery_view()
+        blockers = self.blockers()
+        account = self.account_state()
+        margin_buffer = self.margin_buffer_risk()
+        live_guard = self.derivatives_live_guard()
+        trial_guard = self.trial_guard()
+        account_snapshot = self.runtime.account_service.latest_snapshot()
+        account_configuration = (
+            None if account_snapshot is None else account_snapshot.account_configuration
+        )
+        primary_instrument_rule = (
+            None
+            if account_snapshot is None
+            else next(
+                (
+                    item
+                    for item in account_snapshot.instruments
+                    if item.symbol == self.runtime.settings.default_symbol
+                ),
+                None,
+            )
+        )
+        active_blockers = [item for item in blockers if not item.get("submit_only")]
+        submit_blocked_reasons = list(mode_snapshot.get("submit_blocked_reasons") or [])
+
+        checks = [
+            self._guarded_live_preflight_check(
+                check_id="startup_profile_derivatives",
+                category="runtime_contract",
+                label="启动档位必须是合约",
+                status="pass" if self.runtime.settings.startup_profile == "derivatives" else "fail",
+                detail=(
+                    "当前启动档位已经明确为 derivatives。"
+                    if self.runtime.settings.startup_profile == "derivatives"
+                    else "当前启动档位不是 derivatives，不能把现货配置误带进合约实盘。"
+                ),
+                observed=self.runtime.settings.startup_profile,
+            ),
+            self._guarded_live_preflight_check(
+                check_id="guarded_live_mode",
+                category="runtime_contract",
+                label="运行模式必须是 guarded_live",
+                status="pass" if self.runtime.settings.mode == "guarded_live" else "fail",
+                detail=(
+                    "当前运行模式已经进入 guarded_live。"
+                    if self.runtime.settings.mode == "guarded_live"
+                    else "当前不是 guarded_live，不能拿这份预检结果当作实盘启盘依据。"
+                ),
+                observed=self.runtime.settings.mode,
+            ),
+            self._guarded_live_preflight_check(
+                check_id="exchange_backends_okx",
+                category="runtime_contract",
+                label="行情、账户和执行后端必须接到 OKX",
+                status=(
+                    "pass"
+                    if (
+                        self.runtime.settings.market_data_backend == "okx"
+                        and self.runtime.settings.execution_backend == "okx"
+                        and self.runtime.settings.account_backend == "okx"
+                        and self.runtime.settings.account_read_enabled
+                    )
+                    else "fail"
+                ),
+                detail=(
+                    "当前行情、账户和执行链都已接到 OKX，并且账户读取已启用。"
+                    if (
+                        self.runtime.settings.market_data_backend == "okx"
+                        and self.runtime.settings.execution_backend == "okx"
+                        and self.runtime.settings.account_backend == "okx"
+                        and self.runtime.settings.account_read_enabled
+                    )
+                    else "当前行情、账户或执行后端还没有全部接到 OKX，或者账户读取没有启用。"
+                ),
+                observed={
+                    "market_data_backend": self.runtime.settings.market_data_backend,
+                    "execution_backend": self.runtime.settings.execution_backend,
+                    "account_backend": self.runtime.settings.account_backend,
+                    "account_read_enabled": self.runtime.settings.account_read_enabled,
+                },
+            ),
+            self._guarded_live_preflight_check(
+                check_id="postgres_and_runtime_lock",
+                category="runtime_contract",
+                label="必须启用 Postgres 和单实例运行锁",
+                status=(
+                    "pass"
+                    if (
+                        self.runtime.settings.storage_mode == "postgres"
+                        and bool(self.runtime.settings.database_url)
+                        and self.runtime.settings.database_single_runtime_guard_enabled
+                    )
+                    else "fail"
+                ),
+                detail=(
+                    "当前已经启用 Postgres 和单实例运行锁。"
+                    if (
+                        self.runtime.settings.storage_mode == "postgres"
+                        and bool(self.runtime.settings.database_url)
+                        and self.runtime.settings.database_single_runtime_guard_enabled
+                    )
+                    else "当前没有完整启用 Postgres 持久化和单实例运行锁，不能把这条线当成合约实盘运行线。"
+                ),
+                observed={
+                    "storage_mode": self.runtime.settings.storage_mode,
+                    "database_single_runtime_guard_enabled": self.runtime.settings.database_single_runtime_guard_enabled,
+                },
+            ),
+            self._guarded_live_preflight_check(
+                check_id="operator_auth_hardened",
+                category="operator_safety",
+                label="控制面必须启用认证并禁止未认证写入",
+                status=(
+                    "pass"
+                    if self.runtime.settings.operator_auth_enabled and not self.runtime.settings.operator_unsafe_write_without_auth
+                    else "fail"
+                ),
+                detail=(
+                    "当前控制面已经启用认证，并关闭了未认证写入。"
+                    if self.runtime.settings.operator_auth_enabled and not self.runtime.settings.operator_unsafe_write_without_auth
+                    else "当前控制面认证仍不够硬，必须先启用认证并关闭未认证写入。"
+                ),
+                observed={
+                    "operator_auth_enabled": self.runtime.settings.operator_auth_enabled,
+                    "operator_unsafe_write_without_auth": self.runtime.settings.operator_unsafe_write_without_auth,
+                },
+            ),
+            self._guarded_live_preflight_check(
+                check_id="real_money_route_ready",
+                category="execution_route",
+                label="真实资金报单路径必须不再处于结构性阻断",
+                status=(
+                    "pass"
+                    if not self.runtime.policy_profile.real_money_submission_structurally_blocked
+                    else "fail"
+                ),
+                detail=(
+                    "当前执行线路已经不再被 real_money_live_not_supported 结构性阻断。"
+                    if not self.runtime.policy_profile.real_money_submission_structurally_blocked
+                    else "当前执行线路仍然被结构性阻断，系统还不会把订单真正发到真实资金线路。"
+                ),
+                observed={
+                    "execution_route": mode_snapshot.get("execution_route"),
+                    "exchange_submit_target": mode_snapshot.get("exchange_submit_target"),
+                    "submit_blocked_reasons": submit_blocked_reasons,
+                },
+            ),
+            self._guarded_live_preflight_check(
+                check_id="account_snapshot_ready",
+                category="account_readiness",
+                label="账户快照必须可用且新鲜",
+                status=(
+                    "pass"
+                    if account.get("connected") and account.get("fresh") and account.get("ready")
+                    else "fail"
+                ),
+                detail=(
+                    "当前账户快照已经连接、刷新并可用于交易判断。"
+                    if account.get("connected") and account.get("fresh") and account.get("ready")
+                    else "当前账户快照还不够可信，必须先恢复连接和新鲜度。"
+                ),
+                observed={
+                    "connected": account.get("connected"),
+                    "fresh": account.get("fresh"),
+                    "ready": account.get("ready"),
+                    "blockers": account.get("blockers"),
+                },
+            ),
+            self._guarded_live_preflight_check(
+                check_id="account_configuration_present",
+                category="account_readiness",
+                label="必须拿到结构化账户模式快照",
+                status="pass" if account_configuration is not None else "fail",
+                detail=(
+                    "当前已经拿到结构化账户模式快照。"
+                    if account_configuration is not None
+                    else "当前拿不到结构化账户模式快照，不能确认持仓模式和账户模式是否正确。"
+                ),
+                observed=None if account_configuration is None else account_configuration.model_dump(mode="json"),
+            ),
+            self._guarded_live_preflight_check(
+                check_id="risk_snapshot_present",
+                category="account_readiness",
+                label="必须拿到结构化风险快照",
+                status="pass" if account.get("risk_snapshot") is not None else "fail",
+                detail=(
+                    "当前已经拿到结构化风险快照。"
+                    if account.get("risk_snapshot") is not None
+                    else "当前拿不到结构化风险快照，无法确认保证金占用和风险率。"
+                ),
+                observed=account.get("risk_snapshot"),
+            ),
+            self._guarded_live_preflight_check(
+                check_id="primary_instrument_rule_present",
+                category="account_readiness",
+                label="默认交易标的必须有结构化产品规则",
+                status="pass" if primary_instrument_rule is not None else "fail",
+                detail=(
+                    "当前默认交易标的已经拿到结构化产品规则。"
+                    if primary_instrument_rule is not None
+                    else "当前默认交易标的缺少结构化产品规则，不能安全做下单前一致性校验。"
+                ),
+                observed=None if primary_instrument_rule is None else primary_instrument_rule.model_dump(mode="json"),
+            ),
+            self._guarded_live_preflight_check(
+                check_id="no_active_execution_blockers",
+                category="recovery_and_blockers",
+                label="当前不能存在活动中的执行阻断",
+                status="pass" if not active_blockers else "fail",
+                detail=(
+                    "当前没有活动中的执行阻断。"
+                    if not active_blockers
+                    else "当前仍然有执行阻断，启盘前必须先把这些阻断处理干净。"
+                ),
+                observed=[item.get("blocker") for item in active_blockers],
+            ),
+            self._guarded_live_preflight_check(
+                check_id="recovery_state_safe",
+                category="recovery_and_blockers",
+                label="恢复状态必须允许安全继续交易",
+                status=(
+                    "pass"
+                    if recovery.get("safe_to_trade") and not recovery.get("review_required")
+                    else "fail"
+                ),
+                detail=(
+                    "当前恢复状态允许继续自动交易。"
+                    if recovery.get("safe_to_trade") and not recovery.get("review_required")
+                    else "当前恢复状态仍不允许安全继续交易，必须先处理恢复阻断或人工复核。"
+                ),
+                observed={
+                    "recovery_state": recovery.get("recovery_state"),
+                    "review_required": recovery.get("review_required"),
+                    "resume_blocked_reasons": recovery.get("resume_blocked_reasons"),
+                },
+            ),
+            self._guarded_live_preflight_check(
+                check_id="margin_buffer_safe",
+                category="risk_buffer",
+                label="当前保证金缓冲不能处于 critical 或 only-reduce",
+                status=(
+                    "pass"
+                    if margin_buffer.get("status") == "healthy" and not live_guard.get("only_reduce_required")
+                    else "fail"
+                ),
+                detail=(
+                    "当前保证金缓冲和强平距离都还在健康区间。"
+                    if margin_buffer.get("status") == "healthy" and not live_guard.get("only_reduce_required")
+                    else "当前保证金缓冲已经过紧，系统至少会进入 only-reduce，严重时会自动停机。"
+                ),
+                observed={
+                    "margin_buffer_status": margin_buffer.get("status"),
+                    "only_reduce_required": live_guard.get("only_reduce_required"),
+                    "auto_halt_required": live_guard.get("auto_halt_required"),
+                },
+            ),
+            self._guarded_live_preflight_check(
+                check_id="trial_guard_status",
+                category="trial_guard",
+                label="试盘守护不能处于 breached",
+                status=(
+                    "fail"
+                    if trial_guard.get("status") == "breached"
+                    else "warn"
+                    if trial_guard.get("status") in {"disabled", "not_configured", "warming_up"}
+                    else "pass"
+                ),
+                detail=(
+                    "当前试盘守护已经进入监控中，没有触发自动停机。"
+                    if trial_guard.get("status") == "monitoring"
+                    else "当前试盘守护已经触发自动停机。"
+                    if trial_guard.get("status") == "breached"
+                    else "当前试盘守护还没有形成稳定样本，启盘后要保持小资金和人工盯盘。 "
+                ).strip(),
+                observed={
+                    "status": trial_guard.get("status"),
+                    "fill_count": trial_guard.get("fill_count"),
+                    "daily_combined_net_realized": trial_guard.get("daily_combined_net_realized"),
+                },
+                required=False,
+            ),
+            self._guarded_live_preflight_check(
+                check_id="small_capital_limits_present",
+                category="capital_envelope",
+                label="必须配置小资金运行包的名义与试盘阈值",
+                status=(
+                    "pass"
+                    if (
+                        self.runtime.settings.max_gross_notional_per_symbol > 0
+                        and self.runtime.settings.max_total_open_notional > 0
+                        and self.runtime.settings.trial_guard_max_daily_loss_usdt > 0
+                    )
+                    else "fail"
+                ),
+                detail=(
+                    "当前已经配置小资金运行包的名义上限和试盘止损阈值。"
+                    if (
+                        self.runtime.settings.max_gross_notional_per_symbol > 0
+                        and self.runtime.settings.max_total_open_notional > 0
+                        and self.runtime.settings.trial_guard_max_daily_loss_usdt > 0
+                    )
+                    else "当前没有完整配置小资金运行包的名义上限或试盘止损阈值。"
+                ),
+                observed={
+                    "max_gross_notional_per_symbol": self.runtime.settings.max_gross_notional_per_symbol,
+                    "max_total_open_notional": self.runtime.settings.max_total_open_notional,
+                    "trial_guard_max_daily_loss_usdt": self.runtime.settings.trial_guard_max_daily_loss_usdt,
+                },
+            ),
+        ]
+
+        fail_count = sum(1 for item in checks if item["status"] == "fail")
+        warn_count = sum(1 for item in checks if item["status"] == "warn")
+        pass_count = sum(1 for item in checks if item["status"] == "pass")
+        required_failures = [item for item in checks if item["required"] and item["status"] == "fail"]
+        launch_ready = not required_failures
+        status = "fail" if required_failures else "warning" if warn_count else "ready"
+        summary = {
+            "ready": "当前合约 guarded_live 启盘前自检已通过，可以进入小资金人工盯盘阶段。",
+            "warning": "当前启盘前自检没有硬失败，但仍有需要人工确认的告警项，只适合小资金受控运行。",
+            "fail": "当前启盘前自检仍有硬失败项，不能把这条线视为可启盘的合约实盘运行线。",
+        }[status]
+        operator_actions = [
+            item["detail"]
+            for item in checks
+            if item["status"] in {"fail", "warn"}
+        ]
+        return {
+            "generated_at": utc_now(),
+            "status": status,
+            "launch_ready": launch_ready,
+            "summary": summary,
+            "counts": {"pass": pass_count, "warn": warn_count, "fail": fail_count},
+            "checks": checks,
+            "operator_actions": list(dict.fromkeys(operator_actions)),
+            "truth_source": "runtime_contract_plus_operator_safety_checks",
+        }
+
+    def guarded_live_run_packet(self) -> dict[str, Any]:
+        cache_key = f"guarded_live_run_packet:{self._scope_cache_fragment()}"
+        return self._cached_ttl(cache_key, 15, self._build_guarded_live_run_packet)
+
+    def _build_guarded_live_run_packet(self) -> dict[str, Any]:
+        preflight = self.guarded_live_preflight()
+        live_guard = self.derivatives_live_guard()
+        trial_guard = self.trial_guard()
+        margin_buffer = self.margin_buffer_risk()
+        recovery = self.recovery_view()
+        blockers = self.blockers()
+        positions = self.positions()
+        account = self.account_state()
+        forward_validation = self.forward_validation_report(window_days=7, period_count=4)
+        latest_period = (forward_validation.get("periods") or [None])[0] or {}
+        execution_blockers = [item for item in blockers if item.get("affects_execution")]
+
+        status = "ready"
+        if live_guard.get("auto_halt_required") or trial_guard.get("status") == "breached" or execution_blockers:
+            status = "critical"
+        elif (
+            preflight.get("status") in {"warning", "fail"}
+            or live_guard.get("only_reduce_required")
+            or margin_buffer.get("status") in {"warning", "critical"}
+            or not recovery.get("safe_to_trade")
+        ):
+            status = "warning"
+
+        summary_map = {
+            "ready": "当前运行包状态健康，可以继续保持小资金受控运行。",
+            "warning": "当前运行包存在明显风险或约束，必须保持 only-reduce / 小资金 / 人工盯盘。",
+            "critical": "当前运行包已经触发自动停机或存在硬阻断，不应继续自动运行。",
+        }
+        operator_actions: list[str] = []
+        if preflight.get("status") == "fail":
+            operator_actions.append("先处理启盘前自检里的硬失败项，再讨论继续实盘。")
+        if live_guard.get("auto_halt_required"):
+            operator_actions.append("当前已经进入自动停机区间，先减仓并核对交易所保证金状态。")
+        elif live_guard.get("only_reduce_required"):
+            operator_actions.append("当前只允许继续减仓或平仓，先把保证金缓冲拉回健康区间。")
+        if trial_guard.get("status") == "breached":
+            operator_actions.append("试盘守护已经触发暂停，先复盘最近收益、滑点和资金费拖累。")
+        if execution_blockers:
+            operator_actions.append("当前仍有执行阻断，先把阻断项处理干净。")
+        if (self._to_decimal(latest_period.get("combined_net_realized_pnl")) or Decimal("0")) < Decimal("0"):
+            operator_actions.append("最近一个验证周期综合净收益为负，先缩小试盘规模并继续观察。")
+
+        return {
+            "generated_at": utc_now(),
+            "status": status,
+            "summary": summary_map[status],
+            "runtime_contract": {
+                "config_profile": self.runtime.settings.config_profile,
+                "startup_profile": self.runtime.settings.startup_profile,
+                "execution_route": self.runtime.environment_capabilities.exchange_submission_target,
+                "storage_mode": self.runtime.settings.storage_mode,
+            },
+            "capital_envelope": {
+                "default_order_qty": self.runtime.settings.default_order_qty,
+                "max_gross_notional_per_symbol": self.runtime.settings.max_gross_notional_per_symbol,
+                "max_pending_notional_per_symbol": self.runtime.settings.max_pending_notional_per_symbol,
+                "max_total_open_notional": self.runtime.settings.max_total_open_notional,
+                "max_daily_realized_loss_usdt": self.runtime.settings.max_daily_realized_loss_usdt,
+                "trial_guard_max_daily_loss_usdt": self.runtime.settings.trial_guard_max_daily_loss_usdt,
+            },
+            "summary_metrics": {
+                "launch_ready": preflight.get("launch_ready"),
+                "safe_to_trade": recovery.get("safe_to_trade"),
+                "execution_blocker_count": len(execution_blockers),
+                "current_initial_margin_usage_fraction": margin_buffer.get("current", {}).get("initial_margin_usage_fraction"),
+                "nearest_liquidation_gap_ratio": margin_buffer.get("liquidation", {}).get("nearest_liquidation_gap_ratio"),
+                "combined_net_realized_pnl": latest_period.get("combined_net_realized_pnl"),
+                "funding_fee_net_pnl": latest_period.get("funding_fee_net_pnl"),
+                "open_position_count": len(positions.get("exchange_positions") or []),
+                "current_open_order_count": len(self._scoped_open_order_states()),
+            },
+            "preflight": preflight,
+            "derivatives_live_guard": live_guard,
+            "trial_guard": trial_guard,
+            "margin_buffer_overview": margin_buffer,
+            "forward_validation_summary": {
+                "summary": forward_validation.get("summary"),
+                "latest_period": latest_period,
+            },
+            "recovery": recovery,
+            "account": {
+                "maker_fee_rate": account.get("maker_fee_rate"),
+                "taker_fee_rate": account.get("taker_fee_rate"),
+                "account_configuration": account.get("account_configuration"),
+                "risk_snapshot": account.get("risk_snapshot"),
+            },
+            "exposure": {
+                "local_margin_summary": positions.get("local_margin_summary"),
+                "exchange_margin_summary": positions.get("exchange_margin_summary"),
+                "margin_reconciliation": positions.get("margin_reconciliation"),
+                "exchange_positions": (positions.get("exchange_positions") or [])[:5],
+            },
+            "active_blockers": execution_blockers,
+            "operator_actions": list(dict.fromkeys(operator_actions)),
+            "truth_source": "guarded_live_operator_packet",
+        }
 
     def strategy_execution_health(self, symbol: str | None = None) -> dict[str, Any]:
         target_symbol = symbol or self.runtime.settings.default_symbol
@@ -353,6 +1278,28 @@ class OperatorQueryService:
             return None
 
     @staticmethod
+    def _format_fraction_percent(value: Any, *, places: int = 2) -> str:
+        try:
+            resolved = Decimal(str(value))
+        except Exception:
+            return "待确认"
+        quantizer = Decimal("1") if places <= 0 else Decimal("1").scaleb(-places)
+        normalized = resolved * Decimal("100")
+        return f"{normalized.quantize(quantizer)}%"
+
+    @staticmethod
+    def _as_datetime(value: Any) -> datetime | None:
+        if isinstance(value, datetime):
+            return value
+        if isinstance(value, str):
+            normalized = value.replace("Z", "+00:00")
+            try:
+                return datetime.fromisoformat(normalized)
+            except ValueError:
+                return None
+        return None
+
+    @staticmethod
     def _latency_ms(start: Any, end: Any) -> float | None:
         if not isinstance(start, datetime) or not isinstance(end, datetime):
             return None
@@ -407,7 +1354,11 @@ class OperatorQueryService:
         order_state = self._control_plane_order_state(str(fill_payload.get("client_order_id") or ""))
         order_payload = None if order_state is None else self._execution_record_payload(order_state)
 
-        signal_ts = None if decision_context is None else decision_context.get("as_of_ts")
+        signal_ts = None if decision_context is None else self._as_datetime(decision_context.get("as_of_ts"))
+        order_created_ts = None if order_payload is None else self._as_datetime(order_payload.get("created_at"))
+        submitted_ts = None if order_payload is None else self._as_datetime(order_payload.get("submitted_ts"))
+        exchange_fill_ts = self._as_datetime(fill_payload.get("exchange_timestamp"))
+        ingestion_ts = self._as_datetime(fill_payload.get("ingestion_timestamp"))
         reference_price = None
         if execution_plan is not None:
             reference_price = execution_plan.get("reference_price")
@@ -443,18 +1394,18 @@ class OperatorQueryService:
             "position_intent": fill_payload.get("position_intent"),
             "truth_source": fill_payload.get("truth_source"),
             "signal_timestamp": signal_ts,
-            "order_created_timestamp": None if order_payload is None else order_payload.get("created_at"),
-            "submitted_timestamp": None if order_payload is None else order_payload.get("submitted_ts"),
-            "exchange_fill_timestamp": fill_payload.get("exchange_timestamp"),
-            "ingestion_timestamp": fill_payload.get("ingestion_timestamp"),
-            "decision_to_submit_latency_ms": self._latency_ms(signal_ts, None if order_payload is None else order_payload.get("submitted_ts")),
+            "order_created_timestamp": order_created_ts,
+            "submitted_timestamp": submitted_ts,
+            "exchange_fill_timestamp": exchange_fill_ts,
+            "ingestion_timestamp": ingestion_ts,
+            "decision_to_submit_latency_ms": self._latency_ms(signal_ts, submitted_ts),
             "submit_to_exchange_fill_latency_ms": self._latency_ms(
-                None if order_payload is None else order_payload.get("submitted_ts"),
-                fill_payload.get("exchange_timestamp"),
+                submitted_ts,
+                exchange_fill_ts,
             ),
             "exchange_fill_to_ingestion_latency_ms": self._latency_ms(
-                fill_payload.get("exchange_timestamp"),
-                fill_payload.get("ingestion_timestamp"),
+                exchange_fill_ts,
+                ingestion_ts,
             ),
             "reference_price": reference_price,
             "fill_price": fill_payload.get("fill_price"),
@@ -476,6 +1427,105 @@ class OperatorQueryService:
                 "market_regime": None if decision_context is None else decision_context.get("market_regime"),
             },
         }
+
+    def _profitability_fill_row(self, fill_record: Any) -> dict[str, Any]:
+        row = self._execution_quality_row(fill_record)
+        realized = self._to_decimal(row.get("realized_pnl_delta")) or Decimal("0")
+        gross = self._to_decimal(row.get("gross_realized_pnl")) or Decimal("0")
+        fee_delta = self._to_decimal(row.get("fee_delta")) or Decimal("0")
+        row["event_kind"] = "fill_realization"
+        row["event_id"] = row.get("fill_id")
+        row["event_timestamp"] = row.get("ingestion_timestamp") or row.get("exchange_fill_timestamp")
+        row["trading_net_realized_delta"] = realized
+        row["trading_gross_realized_delta"] = gross
+        row["funding_fee_delta"] = Decimal("0")
+        row["combined_net_realized_delta"] = realized
+        row["fee_delta"] = fee_delta
+        return row
+
+    @staticmethod
+    def _funding_fee_event_timestamp(record: Any):
+        return record.bill_ts or record.created_at
+
+    def _funding_fee_profitability_row(self, record: Any) -> dict[str, Any]:
+        amount = self._to_decimal(getattr(record, "amount", None)) or Decimal("0")
+        return {
+            "event_kind": "funding_fee",
+            "event_id": record.bill_id,
+            "bill_id": record.bill_id,
+            "symbol": record.symbol,
+            "currency": record.currency,
+            "funding_direction": record.funding_direction,
+            "type_label": record.type_label,
+            "sub_type_label": record.sub_type_label,
+            "event_timestamp": self._funding_fee_event_timestamp(record),
+            "created_at": record.created_at,
+            "trading_net_realized_delta": Decimal("0"),
+            "trading_gross_realized_delta": Decimal("0"),
+            "fee_delta": Decimal("0"),
+            "funding_fee_delta": amount,
+            "combined_net_realized_delta": amount,
+            "ledger_posting_state": record.ledger_posting_state,
+            "ledger_journal_id": record.ledger_journal_id,
+            "truth_source": "funding_fee_records",
+        }
+
+    def _profitability_funding_fee_summary(self, records: list[Any]) -> dict[str, Any]:
+        if not records:
+            return {
+                "count": 0,
+                "income_count": 0,
+                "expense_count": 0,
+                "latest_bill_id": None,
+                "latest_bill_ts": None,
+                "net_total": Decimal("0"),
+                "absolute_total": Decimal("0"),
+                "net_total_by_currency": {},
+                "absolute_total_by_currency": {},
+                "net_total_by_symbol": {},
+            }
+        latest = max(records, key=lambda item: self._funding_fee_event_timestamp(item) or datetime.min)
+        income_count = 0
+        expense_count = 0
+        net_total = Decimal("0")
+        absolute_total = Decimal("0")
+        net_total_by_currency: dict[str, Decimal] = {}
+        absolute_total_by_currency: dict[str, Decimal] = {}
+        net_total_by_symbol: dict[str, Decimal] = {}
+        for record in records:
+            amount = self._to_decimal(getattr(record, "amount", None)) or Decimal("0")
+            currency = str(getattr(record, "currency", "") or "UNKNOWN")
+            symbol = str(getattr(record, "symbol", "") or "account_level")
+            net_total += amount
+            absolute_total += abs(amount)
+            net_total_by_currency[currency] = net_total_by_currency.get(currency, Decimal("0")) + amount
+            absolute_total_by_currency[currency] = absolute_total_by_currency.get(currency, Decimal("0")) + abs(amount)
+            net_total_by_symbol[symbol] = net_total_by_symbol.get(symbol, Decimal("0")) + amount
+            if getattr(record, "funding_direction", None) == "income":
+                income_count += 1
+            elif getattr(record, "funding_direction", None) == "expense":
+                expense_count += 1
+        return {
+            "count": len(records),
+            "income_count": income_count,
+            "expense_count": expense_count,
+            "latest_bill_id": latest.bill_id,
+            "latest_bill_ts": latest.bill_ts,
+            "net_total": net_total,
+            "absolute_total": absolute_total,
+            "net_total_by_currency": {key: format(value, "f") for key, value in net_total_by_currency.items()},
+            "absolute_total_by_currency": {key: format(value, "f") for key, value in absolute_total_by_currency.items()},
+            "net_total_by_symbol": {key: format(value, "f") for key, value in net_total_by_symbol.items()},
+        }
+
+    @staticmethod
+    def _profitability_event_sort_key(row: dict[str, Any]) -> tuple[datetime, str]:
+        event_timestamp = row.get("event_timestamp")
+        if not isinstance(event_timestamp, datetime):
+            event_timestamp = datetime.min.replace(tzinfo=timezone.utc)
+        elif event_timestamp.tzinfo is None:
+            event_timestamp = event_timestamp.replace(tzinfo=timezone.utc)
+        return (event_timestamp, str(row.get("event_id") or ""))
 
     @staticmethod
     def _paginate_rows(
@@ -1010,14 +2060,6 @@ class OperatorQueryService:
         payload["_event_id"] = envelope.event_id
         payload["_topic"] = envelope.topic
         return payload
-        activation = snapshot["activation"]
-        return {
-            **snapshot,
-            "profile_source": self.runtime.runtime_profile_resolution.profile_source,
-            "active_revision_id": activation.get("active_revision_id"),
-            "pending_revision_id": activation.get("pending_revision_id"),
-            "restart_required": activation.get("restart_required", False),
-        }
 
     def runtime_profile_ai_config_snapshot(self) -> dict[str, Any]:
         snapshot = self.runtime_profile_snapshot()
@@ -1896,6 +2938,7 @@ class OperatorQueryService:
         account = self.runtime.account_service.status()
         execution = self.runtime.execution_adapter.readiness()
         phase1_shadow = self.phase1_shadow()
+        derivatives_live_guard = self.derivatives_live_guard()
         latest_reconciliation = self._latest_scoped_reconciliation()
         latest_portfolio = self._latest_scoped_snapshot()
         blockers = self.blockers()
@@ -1977,6 +3020,7 @@ class OperatorQueryService:
                     "detail": self.runtime.settings.storage_mode,
                 },
                 "phase1_shadow": phase1_shadow,
+                "derivatives_live_guard": derivatives_live_guard,
                 "audit_replay": {
                     "ready": True,
                     "fresh": bool(self.runtime.replay_validation_history),
@@ -2014,7 +3058,10 @@ class OperatorQueryService:
         latest_fill = self.latest_fill()
         latest_reconciliation = self._latest_scoped_reconciliation()
         account_baseline = self.latest_account_baseline()
+        account_snapshot = self.runtime.account_service.latest_snapshot()
         recovery = self.recovery_view()
+        guarded_live_preflight = self.guarded_live_preflight()
+        guarded_live_run_packet = self.guarded_live_run_packet()
         now = utc_now()
         return {
             "runtime_profile": self.runtime.runtime_profile.to_dict(),
@@ -2022,6 +3069,30 @@ class OperatorQueryService:
             "policy_profile": self.runtime.policy_profile.to_dict(),
             "recovery_policy": self.runtime.recovery_policy.to_dict(),
             "profile_source": self.runtime.runtime_profile_resolution.profile_source,
+            "startup_profile": self.runtime.settings.startup_profile,
+            "config_profile": self.runtime.settings.config_profile,
+            "account_configuration": (
+                account_snapshot.account_configuration.model_dump(mode="json")
+                if account_snapshot is not None and account_snapshot.account_configuration is not None
+                else None
+            ),
+            "risk_snapshot": (
+                account_snapshot.risk_snapshot.model_dump(mode="json")
+                if account_snapshot is not None and account_snapshot.risk_snapshot is not None
+                else None
+            ),
+            "primary_instrument_rule": (
+                next(
+                    (
+                        item.model_dump(mode="json")
+                        for item in account_snapshot.instruments
+                        if item.symbol == self.runtime.settings.default_symbol
+                    ),
+                    None,
+                )
+                if account_snapshot is not None
+                else None
+            ),
             "runtime_profile_control": self.runtime_profile_snapshot(),
             "symbols": [self.runtime.settings.default_symbol],
             "enabled_timeframes": list(self.runtime.settings.enabled_decision_timeframes),
@@ -2086,6 +3157,15 @@ class OperatorQueryService:
                 "financial_convergence_mode_enabled": self.runtime.settings.financial_convergence_mode_enabled,
             },
             "trial_guard": self.trial_guard(),
+            "margin_buffer_overview": self.margin_buffer_risk(),
+            "derivatives_live_guard": self.derivatives_live_guard(),
+            "guarded_live_preflight": guarded_live_preflight,
+            "guarded_live_run_packet_summary": {
+                "status": guarded_live_run_packet.get("status"),
+                "summary": guarded_live_run_packet.get("summary"),
+                "summary_metrics": guarded_live_run_packet.get("summary_metrics"),
+                "operator_actions": guarded_live_run_packet.get("operator_actions"),
+            },
         }
 
     def decision_view(self, decision_id: str) -> dict[str, Any]:
@@ -2106,7 +3186,7 @@ class OperatorQueryService:
         baseline_assessment = self.payload_by_ref(audit.baseline_assessment_ref)
         position_target = self.payload_by_ref(audit.position_target_ref)
         policy_decision = self.payload_by_ref(audit.policy_decision_ref)
-        risk_decision = self.payload_by_ref(audit.risk_decision_ref)
+        risk_decision = self._risk_decision_payload(self.payload_by_ref(audit.risk_decision_ref))
         finalized_decision_outcome = self.payload_by_ref(audit.decision_outcome_ref)
         execution_plan = self._execution_plan_payload(self.payload_by_ref(audit.execution_plan_ref))
         strategy_execution_health = self.strategy_execution_health(
@@ -2270,11 +3350,113 @@ class OperatorQueryService:
         return detail
 
     def latest_risk(self) -> dict[str, Any]:
-        return self._latest_topic_summary(topics.RISK_DECISIONS)
+        payload = self._latest_topic_summary(topics.RISK_DECISIONS)
+        return {
+            **payload,
+            "payload": self._risk_decision_payload(payload.get("payload")),
+        }
 
     def recent_risks(self, *, limit: int = 20, offset: int = 0) -> dict[str, Any]:
         rows = list(reversed(self.runtime.event_store.by_topic(topics.RISK_DECISIONS)))
-        return self._paginate_rows(rows, limit=limit, offset=offset, key="risks", serializer=lambda item: item.payload)
+        return self._paginate_rows(
+            rows,
+            limit=limit,
+            offset=offset,
+            key="risks",
+            serializer=lambda item: self._risk_decision_payload(item.payload),
+        )
+
+    @staticmethod
+    def _risk_reason_message(code: str) -> str:
+        messages = {
+            "max_abs_qty": "目标仓位超过单标的最大绝对仓位上限，系统已先按仓位上限裁剪。",
+            "max_notional_per_symbol": "目标名义金额超过通用单标的上限，系统已先按名义金额上限裁剪。",
+            "only_reduce_required": "当前风控只允许继续减仓或平仓，不再允许新增暴露。",
+            "only_reduce_mode_active": "当前没有可执行的减仓空间，因此本轮不会继续发出新增暴露订单。",
+            "max_target_leverage": "目标杠杆超过当前运行配置允许的上限，系统已先按最大杠杆约束处理。",
+            "max_open_orders_reached": "当前活动委托数已经达到上限，不能继续新增暴露。",
+            "max_target_leverage_exceeded": "请求杠杆超过当前合约运行配置允许的最大杠杆。",
+            "insufficient_initial_margin": "可用保证金不足，当前不能继续新增合约暴露。",
+            "liquidation_buffer_breached": "预估保证金占用已经侵蚀到强平缓冲区，系统禁止继续新增暴露。",
+            "derivatives_margin_usage_requires_only_reduce": "预估保证金占用已经进入高风险区域，系统只允许减仓或平仓。",
+            "derivatives_liquidation_gap_requires_only_reduce": "当前最近仓位已经进入强平缓冲区，系统只允许继续减仓或平仓。",
+            "derivatives_risk_snapshot_missing_requires_only_reduce": "当前拿不到合约风险快照，系统只允许继续减仓或平仓。",
+            "derivatives_margin_buffer_auto_halt": "当前保证金占用已经进入自动停机阈值，系统必须保持暂停。",
+            "derivatives_liquidation_proximity_auto_halt": "当前最近仓位距离强平过近，系统已经触发自动停机。",
+            "max_gross_notional_per_symbol_exceeded": "单标的总名义敞口超过上限，系统禁止继续扩大该标的仓位。",
+            "max_pending_notional_per_symbol_exceeded": "单标的待成交名义金额超过上限，系统禁止继续追加该标的挂单。",
+            "max_total_open_notional_exceeded": "账户总名义敞口超过上限，系统禁止继续新增整体暴露。",
+            "max_daily_realized_loss_usdt_exceeded": "当日已实现亏损超过上限，系统只允许继续减仓或平仓。",
+            "risk_budget_multiplier_applied": "当前风险预算已经自动收缩，目标仓位和名义金额上限会同步变小。",
+            "execution_aggressiveness_contracted": "当前执行侵略性已经自动收缩，实际滑点和执行参数上限会同步变严。",
+        }
+        return messages.get(code, f"风控命中了限制：{code}")
+
+    @classmethod
+    def _risk_reason_details(
+        cls,
+        *,
+        codes: list[str],
+        category: str,
+    ) -> list[dict[str, str]]:
+        return [
+            {
+                "code": code,
+                "category": category,
+                "message": cls._risk_reason_message(str(code)),
+            }
+            for code in list(dict.fromkeys(str(code) for code in codes if code))
+        ]
+
+    def _risk_decision_payload(self, payload: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not isinstance(payload, dict):
+            return payload
+        enriched = dict(payload)
+        rejection_reasons = [str(item) for item in (payload.get("rejection_reasons") or []) if item]
+        constraints_applied = [str(item) for item in (payload.get("constraints_applied") or []) if item]
+        only_reduce_required = bool(payload.get("only_reduce_required"))
+        approved = bool(payload.get("approved"))
+        risk_budget_multiplier = self._to_decimal(payload.get("risk_budget_multiplier"))
+        execution_aggressiveness_multiplier = self._to_decimal(payload.get("execution_aggressiveness_multiplier"))
+        enriched["rejection_reason_details"] = self._risk_reason_details(
+            codes=rejection_reasons,
+            category="rejection",
+        )
+        enriched["constraint_details"] = self._risk_reason_details(
+            codes=constraints_applied,
+            category="constraint",
+        )
+        if approved and only_reduce_required:
+            enriched["operator_summary"] = "风控当前只允许减仓或平仓，不允许继续新增暴露。"
+        elif approved:
+            enriched["operator_summary"] = "风控当前允许继续执行。"
+        else:
+            enriched["operator_summary"] = "风控当前已阻断本轮目标，请先处理列出的限制。"
+        margin_context = self._risk_margin_buffer_context(enriched)
+        if margin_context is not None:
+            enriched["margin_buffer_context"] = margin_context
+            projected_margin_usage_percent = margin_context.get("projected_margin_usage_percent")
+            buffer_to_only_reduce_percent = margin_context.get("buffer_to_only_reduce_percent")
+            buffer_to_hard_limit_percent = margin_context.get("buffer_to_hard_limit_percent")
+            enriched["operator_summary"] = (
+                f"{enriched['operator_summary']} 当前投影保证金占用 {projected_margin_usage_percent}，"
+                f"距离 only-reduce 还有 {buffer_to_only_reduce_percent}，"
+                f"距离硬上限还有 {buffer_to_hard_limit_percent}。"
+            )
+        if risk_budget_multiplier is not None and risk_budget_multiplier < Decimal("0.999999"):
+            enriched["operator_summary"] = (
+                f"{enriched['operator_summary']} 当前风险预算乘数 {risk_budget_multiplier.normalize()}，"
+                "系统会自动压低仓位和名义金额上限。"
+            )
+        if (
+            execution_aggressiveness_multiplier is not None
+            and execution_aggressiveness_multiplier < Decimal("0.999999")
+        ):
+            enriched["operator_summary"] = (
+                f"{enriched['operator_summary']} 当前执行侵略性乘数 {execution_aggressiveness_multiplier.normalize()}，"
+                "系统会自动收紧滑点和执行参数边界。"
+            )
+        return enriched
 
     def latest_policy(self) -> dict[str, Any]:
         return self._latest_topic_summary(topics.POLICY_DECISIONS)
@@ -2597,9 +3779,16 @@ class OperatorQueryService:
     def positions(self) -> dict[str, Any]:
         snapshot = self._latest_scoped_snapshot()
         exchange = self.runtime.account_service.latest_snapshot()
+        reconciliation = self._latest_scoped_reconciliation()
         return {
             "local_positions": [item.model_dump(mode="json") for item in snapshot.positions] if snapshot is not None else [],
+            "local_net_positions": self._aggregate_local_positions(snapshot),
+            "local_margin_summary": self._local_position_margin_summary(snapshot),
             "exchange_positions": [item.model_dump(mode="json") for item in exchange.positions] if exchange is not None else [],
+            "exchange_net_positions": self._aggregate_exchange_positions(exchange),
+            "exchange_margin_summary": self._exchange_position_margin_summary(exchange),
+            "margin_reconciliation": self._margin_reconciliation_summary(reconciliation),
+            "margin_buffer_overview": self.margin_buffer_risk(),
             "truth_source": "ledger_backed_snapshot" if self._phase5_control_plane_enabled() else "legacy_portfolio_snapshot",
         }
 
@@ -2609,7 +3798,17 @@ class OperatorQueryService:
 
     def _build_account_state(self) -> dict[str, Any]:
         status = self.runtime.account_service.status()
+        snapshot = self.runtime.account_service.latest_snapshot()
+        local_snapshot = self._latest_scoped_snapshot()
         recovery = self.recovery_view()
+        reconciliation = self._latest_scoped_reconciliation()
+        tracked_symbols = set(self.runtime.settings.allowed_symbols) | {self.runtime.settings.default_symbol}
+        exchange_funding_fee_summary = (
+            self.runtime.account_service.recent_funding_fee_summary(symbol=self.runtime.settings.default_symbol)
+            if hasattr(self.runtime.account_service, "recent_funding_fee_summary")
+            else None
+        )
+        derivatives_live_guard = self.derivatives_live_guard()
         return {
             "backend": self.runtime.settings.account_backend,
             "read_enabled": self.runtime.settings.account_read_enabled,
@@ -2625,8 +3824,44 @@ class OperatorQueryService:
             "maker_fee_rate": status.get("maker_fee_rate"),
             "taker_fee_rate": status.get("taker_fee_rate"),
             "fee_rates_source": status.get("fee_rates_source"),
+            "account_configuration": (
+                snapshot.account_configuration.model_dump(mode="json")
+                if snapshot is not None and snapshot.account_configuration is not None
+                else status.get("account_configuration")
+            ),
+            "fee_schedule": (
+                snapshot.fee_schedule.model_dump(mode="json")
+                if snapshot is not None and snapshot.fee_schedule is not None
+                else status.get("fee_schedule")
+            ),
+            "risk_snapshot": (
+                snapshot.risk_snapshot.model_dump(mode="json")
+                if snapshot is not None and snapshot.risk_snapshot is not None
+                else status.get("risk_snapshot")
+            ),
+            "system_status_items": (
+                [item.model_dump(mode="json") for item in snapshot.system_status_items]
+                if snapshot is not None
+                else status.get("system_status_items", [])
+            ),
+            "tracked_instrument_rules": (
+                [
+                    item.model_dump(mode="json")
+                    for item in snapshot.instruments
+                    if item.symbol in tracked_symbols
+                ]
+                if snapshot is not None
+                else []
+            ),
             "recent_bills_count": status.get("recent_bills_count", 0),
             "last_bills_error": status.get("last_bills_error"),
+            "exchange_funding_fee_summary": exchange_funding_fee_summary,
+            "persisted_funding_fee_summary": self._recent_persisted_funding_fee_summary(limit=200),
+            "local_position_margin_summary": self._local_position_margin_summary(local_snapshot),
+            "exchange_position_margin_summary": self._exchange_position_margin_summary(snapshot),
+            "margin_reconciliation": self._margin_reconciliation_summary(reconciliation),
+            "margin_buffer_overview": self.margin_buffer_risk(),
+            "derivatives_live_guard": derivatives_live_guard,
             "blockers": status.get("blockers", []),
             "current_blocking_reason": next(iter(status.get("blockers", [])), None),
             "detail": status.get("detail"),
@@ -2669,6 +3904,85 @@ class OperatorQueryService:
             "total_available": len(rows),
             "limit": limit,
             "latest_bill": rows[0] if rows else None,
+        }
+
+    def account_recent_funding_fees(self, *, limit: int = 50) -> dict[str, Any]:
+        normalized_limit = max(int(limit), 1)
+        cache_key = f"account_recent_funding_fees:{self._scope_cache_fragment()}:{normalized_limit}"
+        return self._cached_ttl(
+            cache_key,
+            10,
+            lambda: self._build_account_recent_funding_fees(limit=normalized_limit),
+        )
+
+    def _build_account_recent_funding_fees(self, *, limit: int) -> dict[str, Any]:
+        rows = funding_fee_records_for_scope(
+            getattr(self.runtime, "funding_fee_repo", None),
+            self.state_scope,
+            limit=limit,
+        ) if getattr(self.runtime, "funding_fee_repo", None) is not None else []
+        return {
+            "funding_fees": [row.model_dump(mode="json") for row in rows],
+            "total_available": len(
+                funding_fee_records_for_scope(
+                    getattr(self.runtime, "funding_fee_repo", None),
+                    self.state_scope,
+                )
+            ) if getattr(self.runtime, "funding_fee_repo", None) is not None else 0,
+            "limit": limit,
+            "latest_funding_fee": rows[-1].model_dump(mode="json") if rows else None,
+            "summary": self._recent_persisted_funding_fee_summary(limit=max(limit, 200)),
+        }
+
+    def _recent_persisted_funding_fee_summary(self, *, limit: int = 200) -> dict[str, Any]:
+        repo = getattr(self.runtime, "funding_fee_repo", None)
+        if repo is None:
+            return {
+                "available": False,
+                "count": 0,
+                "latest_bill_id": None,
+                "latest_bill_ts": None,
+                "currencies": [],
+                "net_total_by_currency": {},
+                "absolute_total_by_currency": {},
+                "income_count": 0,
+                "expense_count": 0,
+            }
+        rows = funding_fee_records_for_scope(repo, self.state_scope, limit=limit)
+        if not rows:
+            return {
+                "available": False,
+                "count": 0,
+                "latest_bill_id": None,
+                "latest_bill_ts": None,
+                "currencies": [],
+                "net_total_by_currency": {},
+                "absolute_total_by_currency": {},
+                "income_count": 0,
+                "expense_count": 0,
+            }
+        latest = rows[-1]
+        net_total_by_currency: dict[str, Decimal] = {}
+        absolute_total_by_currency: dict[str, Decimal] = {}
+        income_count = 0
+        expense_count = 0
+        for row in rows:
+            net_total_by_currency[row.currency] = net_total_by_currency.get(row.currency, Decimal("0")) + row.amount
+            absolute_total_by_currency[row.currency] = absolute_total_by_currency.get(row.currency, Decimal("0")) + abs(row.amount)
+            if row.funding_direction == "income":
+                income_count += 1
+            elif row.funding_direction == "expense":
+                expense_count += 1
+        return {
+            "available": True,
+            "count": len(rows),
+            "latest_bill_id": latest.bill_id,
+            "latest_bill_ts": latest.bill_ts,
+            "currencies": sorted(net_total_by_currency.keys()),
+            "net_total_by_currency": {key: format(value, "f") for key, value in net_total_by_currency.items()},
+            "absolute_total_by_currency": {key: format(value, "f") for key, value in absolute_total_by_currency.items()},
+            "income_count": income_count,
+            "expense_count": expense_count,
         }
 
     def account_open_orders(self) -> dict[str, Any]:
@@ -2910,10 +4224,318 @@ class OperatorQueryService:
             "avg_fee_ratio": _avg_decimal("fee_ratio"),
         }
 
+    @staticmethod
+    def _fill_outcome_event_timestamp(record: Any) -> datetime | None:
+        return getattr(record, "ingestion_timestamp", None) or getattr(record, "exchange_timestamp", None) or getattr(record, "created_at", None)
+
+    def _fill_outcome_position_key(self, outcome: Any) -> str:
+        if getattr(outcome, "position_key", None):
+            return str(outcome.position_key)
+        return build_position_key(
+            symbol=str(getattr(outcome, "symbol", "") or ""),
+            product_type=str(getattr(outcome, "product_type", "spot") or "spot"),
+            position_mode=getattr(outcome, "position_mode", None),
+            pos_side=getattr(outcome, "pos_side", None),
+        )
+
+    def _new_position_lifecycle(
+        self,
+        *,
+        outcome: Any,
+        position_key: str,
+        event_timestamp: datetime | None,
+        starting_position_qty: Decimal,
+    ) -> dict[str, Any]:
+        opening_avg_entry_price = self._to_decimal(getattr(outcome, "starting_avg_entry_price", None))
+        return {
+            "lifecycle_id": f"lifecycle:{position_key}:{getattr(outcome, 'fill_id', 'unknown')}",
+            "symbol": getattr(outcome, "symbol", None),
+            "position_key": position_key,
+            "position_mode": getattr(outcome, "position_mode", None),
+            "pos_side": getattr(outcome, "pos_side", None),
+            "product_type": getattr(outcome, "product_type", None),
+            "margin_mode": getattr(outcome, "margin_mode", None),
+            "instrument_family": getattr(outcome, "instrument_family", None),
+            "settle_currency": getattr(outcome, "settle_currency", None),
+            "status": "open",
+            "opened_at": event_timestamp,
+            "closed_at": None,
+            "opened_by_fill_id": getattr(outcome, "fill_id", None),
+            "opened_by_transition_fill_id": None,
+            "closed_by_fill_id": None,
+            "carry_in_position": abs(starting_position_qty) > self._DECIMAL_EPSILON,
+            "contains_reversal_transition": False,
+            "fill_count": 0,
+            "fill_ids": [],
+            "latest_fill_id": None,
+            "execution_actions": [],
+            "starting_position_qty": starting_position_qty,
+            "current_position_qty": starting_position_qty,
+            "ending_position_qty": starting_position_qty,
+            "opening_avg_entry_price": opening_avg_entry_price,
+            "ending_avg_entry_price": opening_avg_entry_price,
+            "peak_abs_position_qty": abs(starting_position_qty),
+            "entry_notional_total": Decimal("0"),
+            "exit_notional_total": Decimal("0"),
+            "trading_gross_realized_pnl": Decimal("0"),
+            "trading_net_realized_pnl": Decimal("0"),
+            "fee_total": Decimal("0"),
+            "funding_fee_total": Decimal("0"),
+            "combined_net_realized_pnl": Decimal("0"),
+            "funding_fee_event_count": 0,
+            "funding_fee_bill_ids": [],
+            "funding_fee_attribution_scope": "none",
+        }
+
+    def _append_fill_to_lifecycle(
+        self,
+        *,
+        lifecycle: dict[str, Any],
+        outcome: Any,
+        event_timestamp: datetime | None,
+        reversal_transition: bool,
+    ) -> None:
+        starting_qty = self._to_decimal(getattr(outcome, "starting_position_qty", None))
+        if starting_qty is None:
+            starting_qty = self._to_decimal(lifecycle.get("current_position_qty")) or Decimal("0")
+        ending_qty = self._to_decimal(getattr(outcome, "ending_position_qty", None)) or Decimal("0")
+        fill_notional = self._to_decimal(getattr(outcome, "fill_notional", None))
+        if fill_notional is None:
+            fill_qty = self._to_decimal(getattr(outcome, "fill_qty", None)) or Decimal("0")
+            fill_price = self._to_decimal(getattr(outcome, "fill_price", None)) or Decimal("0")
+            fill_notional = fill_qty * fill_price
+        fill_notional = abs(fill_notional)
+        fee_amount = self._to_decimal(getattr(outcome, "fee_amount", None))
+        if fee_amount is None:
+            fee_amount = abs(self._to_decimal(getattr(outcome, "fee_delta", None)) or Decimal("0"))
+        else:
+            fee_amount = abs(fee_amount)
+
+        start_flat = abs(starting_qty) <= self._DECIMAL_EPSILON
+        end_flat = abs(ending_qty) <= self._DECIMAL_EPSILON
+        if reversal_transition:
+            lifecycle["exit_notional_total"] += fill_notional
+        elif start_flat and not end_flat:
+            lifecycle["entry_notional_total"] += fill_notional
+        elif not start_flat and end_flat:
+            lifecycle["exit_notional_total"] += fill_notional
+        elif abs(ending_qty) > abs(starting_qty) + self._DECIMAL_EPSILON:
+            lifecycle["entry_notional_total"] += fill_notional
+        elif abs(ending_qty) + self._DECIMAL_EPSILON < abs(starting_qty):
+            lifecycle["exit_notional_total"] += fill_notional
+
+        lifecycle["fill_count"] += 1
+        lifecycle["fill_ids"].append(getattr(outcome, "fill_id", None))
+        lifecycle["latest_fill_id"] = getattr(outcome, "fill_id", None)
+        lifecycle["current_position_qty"] = ending_qty
+        lifecycle["ending_position_qty"] = ending_qty
+        lifecycle["ending_avg_entry_price"] = self._to_decimal(getattr(outcome, "ending_avg_entry_price", None))
+        lifecycle["peak_abs_position_qty"] = max(
+            self._to_decimal(lifecycle.get("peak_abs_position_qty")) or Decimal("0"),
+            abs(starting_qty),
+            abs(ending_qty),
+        )
+        lifecycle["trading_gross_realized_pnl"] += self._to_decimal(getattr(outcome, "gross_realized_pnl", None)) or Decimal("0")
+        lifecycle["trading_net_realized_pnl"] += self._to_decimal(getattr(outcome, "realized_pnl_delta", None)) or Decimal("0")
+        lifecycle["fee_total"] += fee_amount
+        lifecycle["combined_net_realized_pnl"] = lifecycle["trading_net_realized_pnl"] + lifecycle["funding_fee_total"]
+        execution_action = getattr(outcome, "execution_action", None)
+        if execution_action and execution_action not in lifecycle["execution_actions"]:
+            lifecycle["execution_actions"].append(execution_action)
+        if event_timestamp is not None and lifecycle.get("opened_at") is None:
+            lifecycle["opened_at"] = event_timestamp
+
+    def _build_position_lifecycle_rows(
+        self,
+        *,
+        outcomes: list[Any],
+        funding_records: list[Any],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        ordered_outcomes = sorted(
+            outcomes,
+            key=lambda item: (
+                self._fill_outcome_event_timestamp(item) or datetime.min.replace(tzinfo=timezone.utc),
+                str(getattr(item, "fill_id", "") or ""),
+            ),
+        )
+        lifecycles: list[dict[str, Any]] = []
+        active_by_position_key: dict[str, dict[str, Any]] = {}
+
+        for outcome in ordered_outcomes:
+            position_key = self._fill_outcome_position_key(outcome)
+            event_timestamp = self._fill_outcome_event_timestamp(outcome)
+            starting_qty = self._to_decimal(getattr(outcome, "starting_position_qty", None)) or Decimal("0")
+            ending_qty = self._to_decimal(getattr(outcome, "ending_position_qty", None)) or Decimal("0")
+            start_sign = 1 if starting_qty > self._DECIMAL_EPSILON else -1 if starting_qty < -self._DECIMAL_EPSILON else 0
+            end_sign = 1 if ending_qty > self._DECIMAL_EPSILON else -1 if ending_qty < -self._DECIMAL_EPSILON else 0
+            reversal_transition = start_sign != 0 and end_sign != 0 and start_sign != end_sign
+
+            lifecycle = active_by_position_key.get(position_key)
+            if lifecycle is None:
+                lifecycle = self._new_position_lifecycle(
+                    outcome=outcome,
+                    position_key=position_key,
+                    event_timestamp=event_timestamp,
+                    starting_position_qty=starting_qty,
+                )
+                active_by_position_key[position_key] = lifecycle
+            elif abs(starting_qty) <= self._DECIMAL_EPSILON and abs(self._to_decimal(lifecycle.get("current_position_qty")) or Decimal("0")) > self._DECIMAL_EPSILON:
+                lifecycle["status"] = "closed"
+                lifecycle["closed_at"] = event_timestamp
+                lifecycle["closed_by_fill_id"] = getattr(outcome, "fill_id", None)
+                lifecycle["contains_reversal_transition"] = True
+                lifecycles.append(lifecycle)
+                lifecycle = self._new_position_lifecycle(
+                    outcome=outcome,
+                    position_key=position_key,
+                    event_timestamp=event_timestamp,
+                    starting_position_qty=starting_qty,
+                )
+                active_by_position_key[position_key] = lifecycle
+
+            self._append_fill_to_lifecycle(
+                lifecycle=lifecycle,
+                outcome=outcome,
+                event_timestamp=event_timestamp,
+                reversal_transition=reversal_transition,
+            )
+            if reversal_transition:
+                lifecycle["status"] = "closed"
+                lifecycle["closed_at"] = event_timestamp
+                lifecycle["closed_by_fill_id"] = getattr(outcome, "fill_id", None)
+                lifecycle["contains_reversal_transition"] = True
+                lifecycle["current_position_qty"] = Decimal("0")
+                lifecycle["ending_position_qty"] = Decimal("0")
+                lifecycles.append(lifecycle)
+                reopened = self._new_position_lifecycle(
+                    outcome=outcome,
+                    position_key=position_key,
+                    event_timestamp=event_timestamp,
+                    starting_position_qty=Decimal("0"),
+                )
+                reopened["opened_by_fill_id"] = None
+                reopened["opened_by_transition_fill_id"] = getattr(outcome, "fill_id", None)
+                reopened["contains_reversal_transition"] = True
+                reopened["opening_avg_entry_price"] = self._to_decimal(getattr(outcome, "ending_avg_entry_price", None))
+                reopened["ending_avg_entry_price"] = self._to_decimal(getattr(outcome, "ending_avg_entry_price", None))
+                reopened["current_position_qty"] = ending_qty
+                reopened["ending_position_qty"] = ending_qty
+                reopened["peak_abs_position_qty"] = max(
+                    self._to_decimal(reopened.get("peak_abs_position_qty")) or Decimal("0"),
+                    abs(ending_qty),
+                )
+                active_by_position_key[position_key] = reopened
+                continue
+
+            if abs(ending_qty) <= self._DECIMAL_EPSILON:
+                lifecycle["status"] = "closed"
+                lifecycle["closed_at"] = event_timestamp
+                lifecycle["closed_by_fill_id"] = getattr(outcome, "fill_id", None)
+                lifecycles.append(lifecycle)
+                active_by_position_key.pop(position_key, None)
+
+        lifecycles.extend(active_by_position_key.values())
+        for lifecycle in lifecycles:
+            lifecycle["combined_net_realized_pnl"] = (
+                self._to_decimal(lifecycle.get("trading_net_realized_pnl")) or Decimal("0")
+            ) + (self._to_decimal(lifecycle.get("funding_fee_total")) or Decimal("0"))
+
+        unassigned_funding_fees: list[dict[str, Any]] = []
+        for record in sorted(
+            funding_records,
+            key=lambda item: (
+                self._funding_fee_event_timestamp(item) or datetime.min.replace(tzinfo=timezone.utc),
+                str(getattr(item, "bill_id", "") or ""),
+            ),
+        ):
+            bill_timestamp = self._funding_fee_event_timestamp(record)
+            symbol = str(getattr(record, "symbol", "") or "")
+            candidates = [
+                lifecycle
+                for lifecycle in lifecycles
+                if symbol
+                and lifecycle.get("symbol") == symbol
+                and lifecycle.get("opened_at") is not None
+                and bill_timestamp is not None
+                and lifecycle["opened_at"] <= bill_timestamp
+                and (lifecycle.get("closed_at") is None or bill_timestamp <= lifecycle["closed_at"])
+            ]
+            if len(candidates) == 1:
+                lifecycle = candidates[0]
+                amount = self._to_decimal(getattr(record, "amount", None)) or Decimal("0")
+                lifecycle["funding_fee_total"] += amount
+                lifecycle["funding_fee_event_count"] += 1
+                lifecycle["funding_fee_bill_ids"].append(getattr(record, "bill_id", None))
+                lifecycle["funding_fee_attribution_scope"] = "symbol_window"
+                lifecycle["combined_net_realized_pnl"] = (
+                    self._to_decimal(lifecycle.get("trading_net_realized_pnl")) or Decimal("0")
+                ) + lifecycle["funding_fee_total"]
+                continue
+            reason = "no_matching_position_window" if not candidates else "ambiguous_symbol_overlap"
+            unassigned_funding_fees.append(
+                {
+                    **self._funding_fee_profitability_row(record),
+                    "attribution_reason": reason,
+                }
+            )
+        return lifecycles, unassigned_funding_fees
+
+    def position_lifecycle_profitability(self, *, limit: int = 100) -> dict[str, Any]:
+        normalized_limit = max(int(limit), 1)
+        outcomes = list(self._scoped_fill_outcomes())
+        funding_records = list(self._scoped_funding_fee_records())
+        lifecycles, unassigned_funding_fees = self._build_position_lifecycle_rows(
+            outcomes=outcomes,
+            funding_records=funding_records,
+        )
+        lifecycles.sort(
+            key=lambda item: (
+                item.get("closed_at") or item.get("opened_at") or datetime.min.replace(tzinfo=timezone.utc),
+                str(item.get("lifecycle_id") or ""),
+            ),
+            reverse=True,
+        )
+        visible_rows = lifecycles[:normalized_limit]
+        closed_count = sum(1 for item in lifecycles if item.get("status") == "closed")
+        open_count = sum(1 for item in lifecycles if item.get("status") != "closed")
+        trading_net = sum(
+            (self._to_decimal(item.get("trading_net_realized_pnl")) or Decimal("0"))
+            for item in lifecycles
+        )
+        funding_net = sum(
+            (self._to_decimal(item.get("funding_fee_total")) or Decimal("0"))
+            for item in lifecycles
+        )
+        unassigned_funding_net = sum(
+            (self._to_decimal(item.get("funding_fee_delta")) or Decimal("0"))
+            for item in unassigned_funding_fees
+        )
+        return {
+            "summary": {
+                "lifecycle_count": len(lifecycles),
+                "closed_lifecycle_count": closed_count,
+                "open_lifecycle_count": open_count,
+                "assigned_funding_fee_count": sum(int(item.get("funding_fee_event_count") or 0) for item in lifecycles),
+                "unassigned_funding_fee_count": len(unassigned_funding_fees),
+                "trading_net_realized_pnl": trading_net,
+                "assigned_funding_fee_net_pnl": funding_net,
+                "unassigned_funding_fee_net_pnl": unassigned_funding_net,
+                "combined_net_realized_pnl": trading_net + funding_net + unassigned_funding_net,
+            },
+            "lifecycles": visible_rows,
+            "unassigned_funding_fees": unassigned_funding_fees[:normalized_limit],
+            "has_more": len(lifecycles) > normalized_limit,
+            "truth_source": "fill_outcomes_plus_funding_fee_records",
+        }
+
     def profitability_overview(self, *, limit: int = 100) -> dict[str, Any]:
+        normalized_limit = max(int(limit), 1)
         outcomes = list(self._scoped_fill_outcomes())
         outcomes.sort(key=lambda item: item.ingestion_timestamp or item.created_at, reverse=True)
-        rows = [self._execution_quality_row(item) for item in outcomes[:limit]]
+        rows = [self._profitability_fill_row(item) for item in outcomes[:normalized_limit]]
+        funding_records = list(self._scoped_funding_fee_records())
+        funding_records.sort(key=lambda item: self._funding_fee_event_timestamp(item) or datetime.min, reverse=True)
+        funding_rows = [self._funding_fee_profitability_row(item) for item in funding_records[:normalized_limit]]
         net_realized = sum(
             (self._to_decimal(item.get("realized_pnl_delta")) or Decimal("0"))
             for item in rows
@@ -2930,6 +4552,11 @@ class OperatorQueryService:
             (self._to_decimal(item.get("fill_notional")) or Decimal("0"))
             for item in rows
         )
+        funding_fee_net = sum(
+            (self._to_decimal(item.get("funding_fee_delta")) or Decimal("0"))
+            for item in funding_rows
+        )
+        combined_net_realized = net_realized + funding_fee_net
         winning = 0
         losing = 0
         for item in rows:
@@ -2938,15 +4565,25 @@ class OperatorQueryService:
                 winning += 1
             elif pnl < -self._DECIMAL_EPSILON:
                 losing += 1
+        recent_realized_events = sorted(
+            rows + funding_rows,
+            key=self._profitability_event_sort_key,
+            reverse=True,
+        )[:normalized_limit]
+        funding_summary = self._profitability_funding_fee_summary(funding_records[:normalized_limit])
         return {
             "summary": {
                 "closed_fill_count": len(rows),
+                "trading_fill_count": len(rows),
                 "winning_fill_count": winning,
                 "losing_fill_count": losing,
                 "win_rate": None if not rows else round(winning / len(rows), 6),
                 "gross_realized_pnl": gross_realized,
                 "net_realized_pnl": net_realized,
+                "trading_gross_realized_pnl": gross_realized,
+                "trading_net_realized_pnl": net_realized,
                 "total_fees": total_fees,
+                "trading_total_fees": total_fees,
                 "total_notional": total_notional,
                 "fee_to_notional_ratio": (
                     None if abs(total_notional) <= self._DECIMAL_EPSILON else total_fees / total_notional
@@ -2954,10 +4591,19 @@ class OperatorQueryService:
                 "avg_realized_pnl_per_fill": (
                     None if not rows else net_realized / Decimal(len(rows))
                 ),
+                "funding_fee_count": funding_summary["count"],
+                "funding_fee_income_count": funding_summary["income_count"],
+                "funding_fee_expense_count": funding_summary["expense_count"],
+                "funding_fee_net_pnl": funding_summary["net_total"],
+                "funding_fee_absolute_total": funding_summary["absolute_total"],
+                "combined_net_realized_pnl": combined_net_realized,
+                "realized_event_count": len(recent_realized_events),
             },
             "execution_quality": self._execution_quality_summary(rows),
+            "funding_fee_summary": funding_summary,
             "recent_closed_fills": rows,
-            "truth_source": "fill_outcomes",
+            "recent_realized_events": recent_realized_events,
+            "truth_source": "fill_outcomes_plus_funding_fee_records",
         }
 
     def forward_validation_report(self, *, window_days: int = 7, period_count: int = 4) -> dict[str, Any]:
@@ -2984,6 +4630,14 @@ class OperatorQueryService:
             key=lambda item: item.get("ingestion_timestamp") or item.get("exchange_fill_timestamp") or datetime.min,
             reverse=True,
         )
+        funding_rows = [
+            self._funding_fee_profitability_row(item)
+            for item in self._scoped_funding_fee_records()
+        ]
+        funding_rows.sort(
+            key=lambda item: item.get("event_timestamp") or datetime.min,
+            reverse=True,
+        )
         now = utc_now()
         periods: list[dict[str, Any]] = []
         for index in range(normalized_period_count):
@@ -2995,9 +4649,16 @@ class OperatorQueryService:
                 if isinstance(row.get("ingestion_timestamp") or row.get("exchange_fill_timestamp"), datetime)
                 and period_start <= (row.get("ingestion_timestamp") or row.get("exchange_fill_timestamp")) < period_end
             ]
+            period_funding_rows = [
+                row
+                for row in funding_rows
+                if isinstance(row.get("event_timestamp"), datetime)
+                and period_start <= row.get("event_timestamp") < period_end
+            ]
             periods.append(
                 self._forward_validation_period(
                     rows=period_rows,
+                    funding_rows=period_funding_rows,
                     period_start=period_start,
                     period_end=period_end,
                 )
@@ -3011,13 +4672,14 @@ class OperatorQueryService:
             "generated_at": now,
             "summary": recommendation,
             "periods": periods,
-            "truth_source": "fill_outcomes",
+            "truth_source": "fill_outcomes_plus_funding_fee_records",
         }
 
     def _forward_validation_period(
         self,
         *,
         rows: list[dict[str, Any]],
+        funding_rows: list[dict[str, Any]],
         period_start: datetime,
         period_end: datetime,
     ) -> dict[str, Any]:
@@ -3026,6 +4688,8 @@ class OperatorQueryService:
         gross_realized = sum((self._to_decimal(item.get("gross_realized_pnl")) or Decimal("0")) for item in rows)
         total_fees = sum((self._to_decimal(item.get("fee_amount")) or Decimal("0")) for item in rows)
         total_notional = sum((self._to_decimal(item.get("fill_notional")) or Decimal("0")) for item in rows)
+        funding_fee_net_pnl = sum((self._to_decimal(item.get("funding_fee_delta")) or Decimal("0")) for item in funding_rows)
+        combined_net_realized_pnl = net_realized + funding_fee_net_pnl
         winning_fill_count = 0
         losing_fill_count = 0
         total_adverse_slippage = Decimal("0")
@@ -3061,7 +4725,7 @@ class OperatorQueryService:
         status = "healthy"
         if closed_fill_count < int(self.runtime.settings.trial_guard_min_closed_fills):
             status = "insufficient_data"
-        elif net_realized < Decimal("0"):
+        elif combined_net_realized_pnl < Decimal("0"):
             status = "caution"
         if (
             fee_to_notional_ratio is not None
@@ -3083,6 +4747,9 @@ class OperatorQueryService:
             "win_rate": None if closed_fill_count == 0 else round(winning_fill_count / closed_fill_count, 6),
             "gross_realized_pnl": gross_realized,
             "net_realized_pnl": net_realized,
+            "trading_net_realized_pnl": net_realized,
+            "funding_fee_net_pnl": funding_fee_net_pnl,
+            "combined_net_realized_pnl": combined_net_realized_pnl,
             "total_fees": total_fees,
             "total_notional": total_notional,
             "fee_to_notional_ratio": fee_to_notional_ratio,
@@ -3091,6 +4758,7 @@ class OperatorQueryService:
             "high_slippage_ratio": high_slippage_ratio,
             "slow_submit_to_fill_count": slow_submit_to_fill_count,
             "slow_submit_to_fill_ratio": slow_submit_to_fill_ratio,
+            "funding_fee_event_count": len(funding_rows),
             "status": status,
         }
 
@@ -3113,8 +4781,8 @@ class OperatorQueryService:
             verdict = "pause"
             reasons.append("execution_quality_or_fee_threshold_breached")
         if (
-            self._to_decimal(latest_period.get("net_realized_pnl")) is not None
-            and self._to_decimal(latest_period.get("net_realized_pnl")) <= -Decimal(str(self.runtime.settings.trial_guard_max_daily_loss_usdt))
+            self._to_decimal(latest_period.get("combined_net_realized_pnl")) is not None
+            and self._to_decimal(latest_period.get("combined_net_realized_pnl")) <= -Decimal(str(self.runtime.settings.trial_guard_max_daily_loss_usdt))
         ):
             verdict = "pause"
             reasons.append("forward_validation_loss_limit_breached")
@@ -3182,7 +4850,7 @@ class OperatorQueryService:
         for period in periods:
             if (
                 period.get("status") == "healthy"
-                and (self._to_decimal(period.get("net_realized_pnl")) or Decimal("0")) > self._DECIMAL_EPSILON
+                and (self._to_decimal(period.get("combined_net_realized_pnl")) or Decimal("0")) > self._DECIMAL_EPSILON
                 and int(period.get("closed_fill_count") or 0) >= int(self.runtime.settings.trial_guard_min_closed_fills)
             ):
                 consecutive_healthy_periods += 1
@@ -3379,21 +5047,21 @@ class OperatorQueryService:
     ) -> list[str]:
         action_items: list[str] = []
         if scaling_readiness == "approve_scale_up":
-            action_items.append("閸欘垯浜掓潻娑樺弳娑撳绔村锝堢カ闁叉垼鐦庣€光槄绱濇担鍡曠矝闂団偓鐟曚椒姹夊銉р€樼拋銈嗘杹闁插繗绔熼悾灞芥嫲閸ョ偤鈧偓閺夆€叉閵?")
+            action_items.append("最近多个验证周期表现稳定，可以发起下一档资金量的人工评审，但仍要保持 guarded_live 约束。")
         elif scaling_readiness == "continue_small_capital":
-            action_items.append("缂佈呯敾娣囨繃瀵旂亸蹇氱カ闁叉垼鐦惄姗堢礉娴兼ê鍘涚粔顖滅柈閺囨潙顦跨粙鍐茬暰閺嶉攱婀伴妴?")
+            action_items.append("继续保持当前小资金试盘，先积累更多稳定样本，再考虑放量。")
         elif scaling_readiness == "shrink_trial":
-            action_items.append("缂傗晛鐨拠鏇犳磸鐟欏嫭膩閿涘苯鍘涚憴鍌氱檪閺€鍓佹抄鏉堝綊妾弰顖氭儊閹垹顦查妴?")
+            action_items.append("先缩小试盘仓位和总暴露，观察收益、滑点和资金费拖累是否收敛。")
         else:
-            action_items.append("閺嗗倸浠犵拠鏇犳磸閿涘奔绱崗鍫濐槱閻炲棙浠径宥囧Ц閹降鈧焦澧界悰宀冨窛闁插繑鍨ㄩ弨鍓佹抄闁偓閸栨牠妫舵０妯糕偓?")
+            action_items.append("先暂停试盘并复盘最近周期的收益、执行质量、恢复状态和资金费拖累。")
         if high_slippage_count > 0:
-            action_items.append("婢跺秶娲忔妯荤拨閻愯鍨氭禍銈忕礉绾喛顓婚弰顖涚ウ閸斻劍鈧囨６妫版绻曢弰顖涘⒔鐞涘瞼鐡ラ悾銉╂６妫版ǜ鈧?")
+            action_items.append("高滑点样本仍然偏多，优先复核下单保护、挂单策略和市场冲击。")
         if slow_submit_to_fill_count > 0:
-            action_items.append("濡偓閺屻儲鍙冮幋鎰唉鐠侯垰绶為敍宀€鈥樼拋銈嗘Ц閸氾箑鐡ㄩ崷?submit 閸?fill 閻ㄥ嫬娆㈡潻鐔风磽鐢悶鈧?")
+            action_items.append("submit 到 fill 的耗时偏长，优先排查报单链路、价格保护和交易所回报延迟。")
         if recovery.get("review_required"):
-            action_items.append("瑜版挸澧犳禒宥嗘箒娴滃搫浼愭径宥嗙壋鐟曚焦鐪伴敍灞筋槱閻炲棗鐣幋鎰娑撳秴绨查弨楣冨櫤閵?")
+            action_items.append("恢复状态仍要求人工复核，先完成对账、rebaseline 或恢复审批。")
         if blocker_rows:
-            action_items.append("鐎涙ê婀ú璇插З闂冪粯鏌囨い鐧哥礉韫囧懘銆忛崗鍫熺闂勩倝妯嗛弬顓炲晙缂佈呯敾鐠囨洜娲忛妴?")
+            action_items.append("当前仍有执行阻断项，先处理阻断项再讨论继续试盘或放量。")
         return list(dict.fromkeys(action_items))
 
     def _build_trial_review_summary(
@@ -3438,6 +5106,8 @@ class OperatorQueryService:
                 "headline": scaling.get("summary") or forward_validation.get("summary", {}).get("summary"),
                 "closed_fill_count": latest_period.get("closed_fill_count"),
                 "net_realized_pnl": latest_period.get("net_realized_pnl"),
+                "funding_fee_net_pnl": latest_period.get("funding_fee_net_pnl"),
+                "combined_net_realized_pnl": latest_period.get("combined_net_realized_pnl"),
                 "win_rate": latest_period.get("win_rate"),
                 "fee_to_notional_ratio": latest_period.get("fee_to_notional_ratio"),
                 "high_slippage_count": high_slippage_count,
@@ -3460,6 +5130,11 @@ class OperatorQueryService:
                     "periods": forward_validation.get("periods"),
                 },
                 "scaling_readiness": scaling,
+                "guarded_live_run_packet": {
+                    "status": self.guarded_live_run_packet().get("status"),
+                    "summary": self.guarded_live_run_packet().get("summary"),
+                    "summary_metrics": self.guarded_live_run_packet().get("summary_metrics"),
+                },
                 "strategy_segments": {
                     "group_by": segments.get("group_by"),
                     "strongest_segment": strongest_segment,
@@ -3480,6 +5155,7 @@ class OperatorQueryService:
         period_count: int,
     ) -> dict[str, Any]:
         profitability = self.profitability_overview(limit=profitability_limit)
+        lifecycle_profitability = self.position_lifecycle_profitability(limit=profitability_limit)
         anomalies = self.execution_anomaly_report(limit=anomaly_limit)
         segments = self.strategy_segment_report(limit=segment_limit)
         forward_validation = self.forward_validation_report(
@@ -3499,11 +5175,15 @@ class OperatorQueryService:
             "generated_at": utc_now(),
             "sections": {
                 "profitability": profitability,
+                "position_lifecycle_profitability": lifecycle_profitability,
                 "execution_anomalies": anomalies,
                 "strategy_segments": segments,
                 "forward_validation": forward_validation,
                 "scaling_readiness": scaling,
                 "trial_guard": trial_guard,
+                "margin_buffer_overview": self.margin_buffer_risk(),
+                "guarded_live_preflight": self.guarded_live_preflight(),
+                "guarded_live_run_packet": self.guarded_live_run_packet(),
                 "recovery": recovery,
                 "active_blockers": blocker_rows,
             },
@@ -4159,8 +5839,12 @@ class OperatorQueryService:
         return {
             "reconciliation_id": report.reconciliation_id,
             "severity": report.severity,
+            "recovery_classification": report.recovery_classification,
             "review_required": report.review_required,
             "halt_required": report.halt_required,
+            "only_reduce_required": report.only_reduce_required,
+            "only_reduce_reasons": report.only_reduce_reasons,
+            "unknown_state_details": report.unknown_state_details,
             "mismatch_categories": report.mismatch_categories,
             "mismatch_reasons": report.mismatch_reasons,
             "safety_impacts": report.safety_impacts,
@@ -4372,10 +6056,9 @@ class OperatorQueryService:
         submit_only_value = submit_only if submit_only is not None else blocker in {
             "guarded_execution_dry_run",
             "live_submit_disabled",
+            "okx_simulated_trading_required",
             "local_demo_no_exchange_submission",
             "real_market_paper_uses_local_paper_execution",
-            "real_money_live_not_supported",
-            "guarded_live_blocked_by_default",
         }
         affects_execution = not submit_only_value
         recommended_action = "Inspect subsystem status and operator logs before resuming execution."
@@ -4384,9 +6067,9 @@ class OperatorQueryService:
         elif blocker == "real_market_paper_uses_local_paper_execution":
             recommended_action = "No action required. Real-market paper mode intentionally uses local paper fills."
         elif blocker in {"guarded_execution_dry_run", "live_submit_disabled"}:
-            recommended_action = "Enable the guarded simulated submit flags only if you intend to test demo exchange submission."
-        elif blocker == "real_money_live_not_supported":
-            recommended_action = "Do not attempt real-money live trading in this repository."
+            recommended_action = "Open real submission only if the current runtime profile, account state, and credentials are all aligned with your intended environment."
+        elif blocker == "okx_simulated_trading_required":
+            recommended_action = "Verify the simulated/live switch, the API key environment, and the selected startup profile before restarting the service."
         elif blocker == "operator_rebaseline_required":
             recommended_action = "Review the exchange/local divergence and accept the current exchange state as a new baseline only if it is expected."
         elif blocker == "rebaseline_in_progress":

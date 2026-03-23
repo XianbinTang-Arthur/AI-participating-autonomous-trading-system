@@ -273,15 +273,15 @@ class ReconciliationSystemQueryFacade:
         )
         previous_baseline_ref = previous_baseline_event.event_id if previous_baseline_event is not None else None
 
+        exchange_snapshot = await self.owner.runtime.account_service.refresh(force=True)
+        if exchange_snapshot is None:
+            raise ValueError("rebaseline_requires_account_snapshot")
+
         self.owner.runtime.kill_switch.halt(reason="operator_rebaseline_pending")
         pending_status = self.owner.runtime.recovery_status.model_copy(
             update={"recovery_state": "rebaseline_pending", "recovery_action": "operator_rebaseline_pending"}
         )
         self.owner.runtime.recovery_status = self.owner.recovery_posture.finalize_status(base_status=pending_status)
-
-        exchange_snapshot = await self.owner.runtime.account_service.refresh(force=True)
-        if exchange_snapshot is None:
-            raise ValueError("rebaseline_requires_account_snapshot")
 
         action_record = OperatorActionRecord(
             action="rebaseline",

@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from decimal import Decimal
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import Field
 
 from aats.schemas.common import SchemaBase, utc_now
-from aats.schemas.execution import FillEvent
+from aats.schemas.execution import FillEvent, PositionMode, PositionSide
 from aats.schemas.system import MarginModelType, ProductType
 
 PortfolioSnapshotOrigin = Literal[
@@ -44,6 +44,7 @@ def is_trusted_baseline_snapshot(snapshot: "PortfolioSnapshot") -> bool:
 
 class Position(SchemaBase):
     symbol: str
+    position_key: str | None = None
     position_qty: Decimal
     position_notional: Decimal
     avg_entry_price: Decimal
@@ -52,9 +53,15 @@ class Position(SchemaBase):
     exposure_side: str = "flat"
     target_leverage: float = 1.0
     margin_mode: MarginModelType = "cash"
+    position_mode: PositionMode | None = None
+    pos_side: PositionSide | None = None
+    instrument_family: str | None = None
+    settle_currency: str | None = None
     margin_allocated: Decimal = Decimal("0")
     maintenance_margin: Decimal = Decimal("0")
+    margin_ratio: Decimal | None = None
     liquidation_price: Decimal | None = None
+    margin_source: Literal["estimated", "exchange"] = "estimated"
 
 
 class PortfolioSnapshot(SchemaBase):
@@ -105,6 +112,7 @@ class FillOutcomeRecord(SchemaBase):
     intent_id: str | None = None
     order_id: str | None = None
     symbol: str
+    position_key: str | None = None
     venue: str | None = None
     side: str | None = None
     fill_qty: Decimal | None = None
@@ -120,6 +128,10 @@ class FillOutcomeRecord(SchemaBase):
     exposure_side: str | None = None
     execution_action: str | None = None
     position_intent: str | None = None
+    position_mode: PositionMode | None = None
+    pos_side: PositionSide | None = None
+    instrument_family: str | None = None
+    settle_currency: str | None = None
     starting_position_qty: Decimal | None = None
     starting_avg_entry_price: Decimal | None = None
     ending_position_qty: Decimal | None = None
@@ -148,11 +160,19 @@ class FillOutcomeRecord(SchemaBase):
         ending_position_qty: Decimal | None = None,
         ending_avg_entry_price: Decimal | None = None,
     ) -> "FillOutcomeRecord":
+        position_key = fill.symbol
+        if (
+            fill.product_type == "derivatives"
+            and fill.position_mode == "long_short_mode"
+            and fill.pos_side in {"long", "short"}
+        ):
+            position_key = f"{fill.symbol}:{fill.pos_side}"
         return cls.model_validate(
             {
                 **balance_delta.model_dump(mode="python"),
                 "venue": fill.venue,
                 "side": fill.side,
+                "position_key": position_key,
                 "fill_qty": fill.fill_qty,
                 "fill_price": fill.fill_price,
                 "fill_notional": fill.fill_qty * fill.fill_price,
@@ -166,9 +186,34 @@ class FillOutcomeRecord(SchemaBase):
                 "exposure_side": fill.exposure_side,
                 "execution_action": fill.execution_action,
                 "position_intent": fill.position_intent,
+                "position_mode": fill.position_mode,
+                "pos_side": fill.pos_side,
+                "instrument_family": fill.instrument_family,
+                "settle_currency": fill.settle_currency,
                 "starting_position_qty": starting_position_qty,
                 "starting_avg_entry_price": starting_avg_entry_price,
                 "ending_position_qty": ending_position_qty,
                 "ending_avg_entry_price": ending_avg_entry_price,
             }
         )
+
+
+class FundingFeeRecord(SchemaBase):
+    bill_id: str
+    symbol: str | None = None
+    currency: str
+    amount: Decimal
+    balance_after: Decimal | None = None
+    bill_type: str
+    sub_type: str
+    type_label: str
+    sub_type_label: str
+    semantic_group: str = "funding_fee"
+    funding_direction: Literal["income", "expense", "neutral"] = "neutral"
+    bill_ts: datetime | None = None
+    ledger_posting_state: Literal["PENDING", "POSTED"] = "PENDING"
+    ledger_journal_id: str | None = None
+    ledger_posted_at: datetime | None = None
+    product_type: ProductType = "spot"
+    margin_mode: MarginModelType = "cash"
+    raw_payload: dict[str, Any] = Field(default_factory=dict)

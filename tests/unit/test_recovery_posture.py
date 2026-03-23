@@ -60,6 +60,11 @@ class TestRecoveryPostureEvaluator(unittest.IsolatedAsyncioTestCase):
             )
         )
         evaluator = RecoveryPostureEvaluator(runtime)
+        await runtime.market_gateway.run_local_publisher(
+            symbol=runtime.settings.default_symbol,
+            iterations=2,
+            interval_seconds=0.0,
+        )
         report = ReconciliationReport(
             reconciliation_id="recon_test",
             as_of_ts=utc_now(),
@@ -117,6 +122,66 @@ class TestRecoveryPostureEvaluator(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(final.resume_eligible)
         self.assertFalse(final.safe_to_trade)
         self.assertEqual(final.resume_blocked_reasons, [])
+
+    async def test_derivatives_only_reduce_recovery_keeps_runtime_runnable(self) -> None:
+        runtime = await build_runtime(
+            AATSSettings.model_validate(
+                {
+                    "mode": "paper_live",
+                    "market_data_backend": "demo",
+                    "execution_backend": "paper",
+                    "account_backend": "disabled",
+                    "account_read_enabled": False,
+                    "trading_product_type": "derivatives",
+                    "margin_mode": "cross",
+                    "default_symbol": "BTC-USDT-SWAP",
+                    "allowed_symbols": ("BTC-USDT-SWAP",),
+                    "storage_mode": "memory",
+                    "event_persistence_mode": "strict",
+                }
+            )
+        )
+        evaluator = RecoveryPostureEvaluator(runtime)
+        await runtime.market_gateway.run_local_publisher(
+            symbol=runtime.settings.default_symbol,
+            iterations=2,
+            interval_seconds=0.0,
+        )
+        report = ReconciliationReport(
+            reconciliation_id="recon_only_reduce",
+            as_of_ts=utc_now(),
+            product_type="derivatives",
+            margin_mode="cross",
+            exchange_comparison_enabled=True,
+            order_diff={"reconstructed": {}, "exchange": {}},
+            fill_diff={"replayed": {}, "exchange": {}},
+            balance_diff={"reconstructed": {}, "exchange": {}},
+            position_diff={
+                "stored": {},
+                "reconstructed": {},
+                "reconstructed_mismatches": {},
+                "exchange": {"BTC-USDT-SWAP": "0.02"},
+                "exchange_mismatches": {"BTC-USDT-SWAP": {"stored": "0", "exchange": "0.02"}},
+            },
+            mismatch_categories=["derivatives_exchange_position_without_local_execution_chain"],
+            mismatch_reasons=["derivatives_exchange_position_not_replayed_locally"],
+            safety_impacts=["derivatives_only_reduce_until_position_reconciled"],
+            severity="SOFT_MISMATCH",
+            only_reduce_required=True,
+            only_reduce_reasons=["derivatives_exchange_position_without_local_execution_chain"],
+            recovery_classification="derivatives_only_reduce",
+            recommended_operator_action="go_close_position_on_exchange",
+        )
+        base_status = RecoveryStatus(status="recovered", recovery_state="normal_operation")
+
+        final = evaluator.finalize_status(base_status=base_status, latest_reconciliation=report)
+
+        self.assertEqual(final.recovery_state, "only_reduce")
+        self.assertTrue(final.resume_eligible)
+        self.assertTrue(final.safe_to_trade)
+        self.assertFalse(final.review_required)
+        self.assertTrue(final.only_reduce_required)
+        self.assertIn("derivatives_exchange_position_without_local_execution_chain", final.only_reduce_reasons)
 
 
 if __name__ == "__main__":

@@ -75,6 +75,11 @@ from aats.services.operator.strategy_profile_snapshot import (
 from aats.services.operator.strategy_profile_context import StrategyProfileContextFacade
 from aats.services.operator.strategy_profile_activation import StrategyProfileActivationFacade
 from aats.services.operator.strategy_profile_recommendations import StrategyProfileRecommendationFacade
+from aats.services.governance_engine.adaptive_controls import (
+    reconciliation_clean_from_safety_state,
+    resolve_execution_aggressiveness_state,
+    resolve_risk_budget_state,
+)
 from aats.services.runtime_scope import (
     runtime_state_scope,
 )
@@ -453,11 +458,58 @@ class StrategyProfileControlService:
         active_profile_id: str | None,
     ) -> dict[str, Any]:
         evidence = self._profile_control_evidence_state(context=context, replay_summary=replay_summary)
+        adaptive_controls = self._adaptive_control_summary(context=context)
         return {
             "active_profile_id": active_profile_id,
             "safety_profile_ids": sorted(self._safety_profile_ids()),
             "safety_profile_required": self._safety_profile_required(context=context),
+            "emergency_safety_fast_track_enabled": bool(
+                self.settings.strategy_profile_emergency_safety_fast_track_enabled
+            ),
             "evidence": evidence,
+            "adaptive_controls": adaptive_controls,
+        }
+
+    def _adaptive_control_summary(self, *, context: dict[str, Any]) -> dict[str, Any]:
+        safety_state = context.get("safety_state") or {}
+        execution_health = context.get("execution_health") or {}
+        live_guard = safety_state.get("live_guard") or {}
+        trial_guard = safety_state.get("trial_guard") or {}
+        risk_budget = resolve_risk_budget_state(
+            self.settings,
+            execution_error_count=int(execution_health.get("recent_execution_error_count") or 0),
+            safe_to_trade=bool(safety_state.get("safe_to_trade", True)),
+            review_required=bool(safety_state.get("review_required", False)),
+            market_snapshot_fresh=bool(safety_state.get("market_snapshot_fresh", True)),
+            account_snapshot_fresh=bool(safety_state.get("account_snapshot_fresh", True)),
+            reconciliation_clean=reconciliation_clean_from_safety_state(safety_state),
+            only_reduce_required=bool(safety_state.get("only_reduce_required")),
+            auto_halt_required=bool(safety_state.get("auto_halt_required")),
+            trial_guard_breached=bool(safety_state.get("trial_guard_breached")),
+            current_margin_usage_fraction=live_guard.get("current_initial_margin_usage_fraction"),
+            projected_margin_usage_fraction=live_guard.get("current_initial_margin_usage_fraction"),
+            nearest_liquidation_gap_ratio=live_guard.get("nearest_liquidation_gap_ratio"),
+        )
+        execution_aggressiveness = resolve_execution_aggressiveness_state(
+            self.settings,
+            execution_error_count=int(execution_health.get("recent_execution_error_count") or 0),
+            safe_to_trade=bool(safety_state.get("safe_to_trade", True)),
+            review_required=bool(safety_state.get("review_required", False)),
+            market_snapshot_fresh=bool(safety_state.get("market_snapshot_fresh", True)),
+            account_snapshot_fresh=bool(safety_state.get("account_snapshot_fresh", True)),
+            reconciliation_clean=reconciliation_clean_from_safety_state(safety_state),
+            only_reduce_required=bool(safety_state.get("only_reduce_required")),
+            auto_halt_required=bool(safety_state.get("auto_halt_required")),
+            trial_guard_breached=bool(safety_state.get("trial_guard_breached")),
+            current_margin_usage_fraction=live_guard.get("current_initial_margin_usage_fraction"),
+            projected_margin_usage_fraction=live_guard.get("current_initial_margin_usage_fraction"),
+            nearest_liquidation_gap_ratio=live_guard.get("nearest_liquidation_gap_ratio"),
+        )
+        return {
+            "risk_budget": risk_budget,
+            "execution_aggressiveness": execution_aggressiveness,
+            "live_guard_status": live_guard.get("status"),
+            "trial_guard_status": trial_guard.get("status"),
         }
 
     def _candidate_for_profile(
@@ -1551,6 +1603,12 @@ class StrategyProfileControlService:
         execution_outcome: dict[str, Any] | None = None,
         auto_rollback_recommendation: dict[str, Any] | None = None,
         notes: list[str],
+        transition_class: str | None = None,
+        transition_risk_direction: str | None = None,
+        fast_track_eligible: bool | None = None,
+        fast_track_applied: bool | None = None,
+        operator_summary: str | None = None,
+        gating_state: dict[str, Any] | None = None,
     ) -> StrategyProfileSelectionDecision:
         return self.recommendations.append_selection_decision_transition(
             status=status,
@@ -1563,6 +1621,12 @@ class StrategyProfileControlService:
             execution_outcome=execution_outcome,
             auto_rollback_recommendation=auto_rollback_recommendation,
             notes=notes,
+            transition_class=transition_class,
+            transition_risk_direction=transition_risk_direction,
+            fast_track_eligible=fast_track_eligible,
+            fast_track_applied=fast_track_applied,
+            operator_summary=operator_summary,
+            gating_state=gating_state,
         )
 
     @staticmethod
@@ -1714,6 +1778,57 @@ class StrategyProfileControlService:
         if transition == "more_aggressive":
             return _AUTO_SWITCH_CONFIDENCE_MIN_AGGRESSIVE
         return _AUTO_SWITCH_CONFIDENCE_MIN_SAME_RISK
+
+    def _transition_class(
+        self,
+        *,
+        target: StrategyProfileRevision | None,
+        transition_risk_direction: str,
+        fast_track: dict[str, Any] | None = None,
+    ) -> str:
+        if target is None:
+            return "unknown"
+        if fast_track is not None and fast_track.get("eligible"):
+            return "emergency_safety"
+        if transition_risk_direction == "more_aggressive":
+            return "aggressive_optimization"
+        if transition_risk_direction == "more_conservative":
+            return "conservative_rebalance"
+        return "same_risk_optimization"
+
+    def _selection_operator_summary(
+        self,
+        *,
+        candidate_profile_id: str | None,
+        transition_class: str,
+        blocked_reasons: list[str],
+        fast_track: dict[str, Any] | None = None,
+        evidence: dict[str, Any] | None = None,
+    ) -> str:
+        candidate = candidate_profile_id or "none"
+        if fast_track is not None and fast_track.get("eligible") and not blocked_reasons:
+            return f"当前候选档位 {candidate} 走紧急安全快速通道，系统允许直接切向更保守档位。"
+        if blocked_reasons:
+            remaining_trades = max(
+                int((evidence or {}).get("min_closed_trades", 0)) - int((evidence or {}).get("closed_trades", 0)),
+                0,
+            )
+            remaining_replays = max(
+                int((evidence or {}).get("min_replay_validations", 0))
+                - int((evidence or {}).get("replay_validations", 0)),
+                0,
+            )
+            if remaining_trades or remaining_replays:
+                return (
+                    f"当前候选档位 {candidate} 仍被自动切档门槛阻断，"
+                    f"还差 {remaining_trades} 笔已平仓交易、{remaining_replays} 次 replay 验证。"
+                )
+            return f"当前候选档位 {candidate} 已产生，但仍有阻断条件未解除。"
+        if transition_class == "aggressive_optimization":
+            return f"当前候选档位 {candidate} 属于更激进切换，系统会要求更高置信度后才允许自动生效。"
+        if transition_class == "conservative_rebalance":
+            return f"当前候选档位 {candidate} 属于更保守切换，系统准备在门槛满足后自动收缩。"
+        return f"当前候选档位 {candidate} 与现档位同风险级，系统会继续观察是否值得切换。"
 
     def _activation_blockers(self) -> list[str]:
         return self.activation.activation_blockers()

@@ -143,6 +143,15 @@ class OrderManager:
                 remaining_qty=intent.quantity,
                 average_fill_price=None,
                 fees=Decimal("0"),
+                reduce_only=intent.reduce_only,
+                close_only=intent.close_only,
+                td_mode=intent.td_mode,
+                position_mode=intent.position_mode,
+                pos_side=intent.pos_side,
+                reduce_only_reason=intent.reduce_only_reason,
+                close_only_reason=intent.close_only_reason,
+                instrument_family=intent.instrument_family,
+                settle_currency=intent.settle_currency,
                 product_type=intent.product_type,
                 target_leverage=intent.target_leverage,
                 margin_mode=intent.margin_mode,
@@ -170,6 +179,15 @@ class OrderManager:
             remaining_qty=intent.quantity,
             average_fill_price=None,
             fees=Decimal("0"),
+            reduce_only=intent.reduce_only,
+            close_only=intent.close_only,
+            td_mode=intent.td_mode,
+            position_mode=intent.position_mode,
+            pos_side=intent.pos_side,
+            reduce_only_reason=intent.reduce_only_reason,
+            close_only_reason=intent.close_only_reason,
+            instrument_family=intent.instrument_family,
+            settle_currency=intent.settle_currency,
             product_type=intent.product_type,
             target_leverage=intent.target_leverage,
             margin_mode=intent.margin_mode,
@@ -238,6 +256,15 @@ class OrderManager:
                 remaining_qty=intent.quantity,
                 average_fill_price=None,
                 fees=Decimal("0"),
+                reduce_only=intent.reduce_only,
+                close_only=intent.close_only,
+                td_mode=intent.td_mode,
+                position_mode=intent.position_mode,
+                pos_side=intent.pos_side,
+                reduce_only_reason=intent.reduce_only_reason,
+                close_only_reason=intent.close_only_reason,
+                instrument_family=intent.instrument_family,
+                settle_currency=intent.settle_currency,
                 product_type=intent.product_type,
                 target_leverage=intent.target_leverage,
                 margin_mode=intent.margin_mode,
@@ -273,6 +300,15 @@ class OrderManager:
                 remaining_qty=intent.quantity,
                 average_fill_price=None,
                 fees=Decimal("0"),
+                reduce_only=intent.reduce_only,
+                close_only=intent.close_only,
+                td_mode=intent.td_mode,
+                position_mode=intent.position_mode,
+                pos_side=intent.pos_side,
+                reduce_only_reason=intent.reduce_only_reason,
+                close_only_reason=intent.close_only_reason,
+                instrument_family=intent.instrument_family,
+                settle_currency=intent.settle_currency,
                 product_type=intent.product_type,
                 target_leverage=intent.target_leverage,
                 margin_mode=intent.margin_mode,
@@ -580,6 +616,15 @@ class OrderManager:
                 remaining_qty=intent.quantity,
                 average_fill_price=None,
                 fees=Decimal("0"),
+                reduce_only=intent.reduce_only,
+                close_only=intent.close_only,
+                td_mode=intent.td_mode,
+                position_mode=intent.position_mode,
+                pos_side=intent.pos_side,
+                reduce_only_reason=intent.reduce_only_reason,
+                close_only_reason=intent.close_only_reason,
+                instrument_family=intent.instrument_family,
+                settle_currency=intent.settle_currency,
                 product_type=intent.product_type,
                 target_leverage=intent.target_leverage,
                 margin_mode=intent.margin_mode,
@@ -651,6 +696,9 @@ class OrderManager:
         order_payload = raw_payload.get("order_state")
         if isinstance(order_payload, dict):
             payload = dict(order_payload)
+            submission_payload = payload.get("submission_payload")
+            if not isinstance(submission_payload, dict):
+                submission_payload = {}
             payload.setdefault("decision_id", row.get("decision_id"))
             payload.setdefault("intent_id", row.get("intent_id"))
             payload.setdefault("symbol", row.get("symbol"))
@@ -662,9 +710,23 @@ class OrderManager:
             payload.setdefault("product_type", row.get("product_type"))
             payload.setdefault("margin_mode", row.get("margin_mode"))
             payload.setdefault("target_leverage", row.get("raw_payload", {}).get("target_leverage", 1.0))
+            payload.setdefault("reduce_only", row.get("reduce_only", False))
+            payload.setdefault("close_only", row.get("close_only", False))
+            payload.setdefault(
+                "td_mode",
+                row.get("td_mode") or submission_payload.get("tdMode") or row.get("margin_mode"),
+            )
+            payload.setdefault("position_mode", row.get("position_mode"))
+            payload.setdefault("pos_side", row.get("pos_side") or submission_payload.get("posSide"))
+            payload.setdefault("reduce_only_reason", row.get("reduce_only_reason"))
+            payload.setdefault("close_only_reason", row.get("close_only_reason"))
+            payload.setdefault("instrument_family", row.get("instrument_family"))
+            payload.setdefault("settle_currency", row.get("settle_currency"))
             payload.setdefault("position_intent", row.get("position_intent") or "open_long")
             payload.setdefault("execution_action", row.get("execution_action"))
-            payload.setdefault("submission_payload", {})
+            payload.setdefault("submission_payload", submission_payload)
+            if payload.get("pos_side") in {"", None}:
+                payload["pos_side"] = row.get("pos_side") or submission_payload.get("posSide") or None
             return OrderState.model_validate(payload)
         submission_mode = str(raw_payload.get("source_system") or "phase2_execution_order_repo")
         venue = str(raw_payload.get("venue") or ("OKX" if self.adapter.readiness().get("backend") == "okx" else "PAPER"))
@@ -688,6 +750,20 @@ class OrderManager:
             remaining_qty=requested_qty,
             average_fill_price=None,
             fees=Decimal("0"),
+            reduce_only=bool(raw_payload.get("reduce_only", False)),
+            close_only=bool(raw_payload.get("close_only", False)),
+            td_mode=str(
+                raw_payload.get("td_mode")
+                or raw_payload.get("submission_payload", {}).get("tdMode")
+                or row.get("margin_mode")
+                or "cash"
+            ),
+            position_mode=raw_payload.get("position_mode"),
+            pos_side=raw_payload.get("pos_side") or raw_payload.get("submission_payload", {}).get("posSide") or None,
+            reduce_only_reason=raw_payload.get("reduce_only_reason"),
+            close_only_reason=raw_payload.get("close_only_reason"),
+            instrument_family=raw_payload.get("instrument_family"),
+            settle_currency=raw_payload.get("settle_currency"),
             product_type=row.get("product_type") or "spot",
             target_leverage=float(raw_payload.get("target_leverage") or 1.0),
             margin_mode=row.get("margin_mode") or "cash",

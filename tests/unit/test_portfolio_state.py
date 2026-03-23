@@ -21,6 +21,10 @@ def build_fill(
     symbol: str = "BTC-USDT",
     product_type: str = "spot",
     margin_mode: str = "cash",
+    position_mode: str | None = None,
+    pos_side: str | None = None,
+    instrument_family: str | None = None,
+    settle_currency: str | None = None,
 ) -> FillEvent:
     now = datetime.now(timezone.utc)
     return FillEvent(
@@ -38,6 +42,10 @@ def build_fill(
         fee_currency=fee_currency,
         product_type=product_type,
         margin_mode=margin_mode,
+        position_mode=position_mode,
+        pos_side=pos_side,
+        instrument_family=instrument_family,
+        settle_currency=settle_currency,
         liquidity_role="taker",
         exchange_timestamp=now,
         ingestion_timestamp=now,
@@ -220,6 +228,56 @@ class TestPortfolioState(unittest.TestCase):
         self.assertEqual(state.positions, {})
         self.assertEqual(state.balances["USDT"], Decimal("10009.6"))
         self.assertEqual(state.realized_pnl, Decimal("9.6"))
+
+    def test_derivatives_long_short_mode_tracks_each_leg_by_position_key(self) -> None:
+        state = PortfolioState(
+            initial_usdt_balance=10_000.0,
+            default_product_type="derivatives",
+            default_margin_mode="cross",
+        )
+
+        state.apply_fill(
+            build_fill(
+                fill_id="fill_open_long",
+                side="buy",
+                qty=0.02,
+                price=70_000.0,
+                fee=0.1,
+                fee_currency="USDT",
+                venue="OKX",
+                symbol="BTC-USDT-SWAP",
+                product_type="derivatives",
+                margin_mode="cross",
+                position_mode="long_short_mode",
+                pos_side="long",
+                instrument_family="BTC-USDT",
+                settle_currency="USDT",
+            )
+        )
+        state.apply_fill(
+            build_fill(
+                fill_id="fill_open_short",
+                side="sell",
+                qty=0.01,
+                price=71_000.0,
+                fee=0.1,
+                fee_currency="USDT",
+                venue="OKX",
+                symbol="BTC-USDT-SWAP",
+                product_type="derivatives",
+                margin_mode="cross",
+                position_mode="long_short_mode",
+                pos_side="short",
+                instrument_family="BTC-USDT",
+                settle_currency="USDT",
+            )
+        )
+
+        self.assertEqual(state.positions["BTC-USDT-SWAP:long"].quantity, Decimal("0.02"))
+        self.assertEqual(state.positions["BTC-USDT-SWAP:short"].quantity, Decimal("-0.01"))
+        self.assertEqual(state.positions["BTC-USDT-SWAP:long"].pos_side, "long")
+        self.assertEqual(state.positions["BTC-USDT-SWAP:short"].pos_side, "short")
+        self.assertEqual(state.position_quantity_for_symbol("BTC-USDT-SWAP"), Decimal("0.01"))
 
 
 if __name__ == "__main__":

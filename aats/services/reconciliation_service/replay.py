@@ -18,6 +18,7 @@ from aats.schemas.reconciliation import ReconciliationReport
 from aats.schemas.system import HealthSnapshot
 from aats.services.execution_engine.state_machine import OrderStateMachine
 from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, EPSILON_DECIMAL_9, is_effectively_zero, quantize_decimal, to_decimal
+from aats.services.portfolio_service.position_keys import position_key_for_snapshot_position
 from aats.services.portfolio_service.positions import PortfolioState
 from aats.storage.base import AuditRepository, EventStore, PortfolioRepository
 from aats.services.portfolio_service.reconstruction import PortfolioReconstructionService
@@ -466,6 +467,14 @@ class ReplayEngine:
                     f"intent_decision_id={intent.decision_id}"
                 )
                 continue
+            issues.extend(
+                self._execution_semantic_mismatches(
+                    left=intent,
+                    right=order_state,
+                    context=f"intent_id={intent_id}",
+                    label="order_state",
+                )
+            )
             fill_events = sorted(
                 fills_by_intent_id.get(intent_id, []),
                 key=lambda item: (item.ingestion_timestamp, item.fill_id),
@@ -511,6 +520,15 @@ class ReplayEngine:
                     "execution_chain_fill_decision_mismatch "
                     f"fill_id={fill_id} fill_decision_id={fill.decision_id} intent_decision_id={intent.decision_id}"
                 )
+            else:
+                issues.extend(
+                    self._execution_semantic_mismatches(
+                        left=intent,
+                        right=fill,
+                        context=f"fill_id={fill_id}",
+                        label="fill_event",
+                    )
+                )
 
             order_state = order_states_by_intent_id.get(fill.intent_id)
             if order_state is None:
@@ -529,6 +547,14 @@ class ReplayEngine:
                     "execution_chain_fill_order_state_decision_mismatch "
                     f"fill_id={fill_id} fill_decision_id={fill.decision_id} order_state_decision_id={order_state.decision_id}"
                 )
+            issues.extend(
+                self._execution_semantic_mismatches(
+                    left=order_state,
+                    right=fill,
+                    context=f"fill_id={fill_id}",
+                    label="fill_order_state",
+                )
+            )
 
         for fill_id, event_refs in sorted(fill_event_refs_by_fill_id.items()):
             if len(event_refs) > 1:
@@ -543,6 +569,46 @@ class ReplayEngine:
             for issue in state_machine.validate_path(ordered_states):
                 issues.append(f"execution_chain_invalid_state_transition client_order_id={client_order_id} {issue}")
         return issues
+
+    @staticmethod
+    def _execution_semantic_mismatches(
+        *,
+        left,
+        right,
+        context: str,
+        label: str,
+    ) -> list[str]:
+        issues: list[str] = []
+        fields = (
+            "reduce_only",
+            "close_only",
+            "td_mode",
+            "position_mode",
+            "pos_side",
+            "reduce_only_reason",
+            "close_only_reason",
+            "instrument_family",
+            "settle_currency",
+            "execution_action",
+            "position_intent",
+            "margin_mode",
+            "product_type",
+        )
+        for field_name in fields:
+            left_value = ReplayEngine._normalized_semantic_value(getattr(left, field_name, None))
+            right_value = ReplayEngine._normalized_semantic_value(getattr(right, field_name, None))
+            if left_value != right_value:
+                issues.append(
+                    f"execution_chain_{label}_semantic_mismatch {context} field={field_name} left={left_value} right={right_value}"
+                )
+        return issues
+
+    @staticmethod
+    def _normalized_semantic_value(value):
+        if isinstance(value, str):
+            normalized = value.strip()
+            return normalized or None
+        return value
 
     def _validate_decision_chains(
         self,
@@ -1036,7 +1102,7 @@ class ReplayEngine:
                 for currency, value in snapshot.balances.items()
             },
             "positions": {
-                position.symbol: ReplayEngine._normalize_decimal(position.position_qty)
+                position_key_for_snapshot_position(position): ReplayEngine._normalize_decimal(position.position_qty)
                 for position in snapshot.positions
             },
             "cost_basis": {

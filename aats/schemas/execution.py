@@ -35,6 +35,8 @@ ObligationStatus = Literal[
 ExecutionParameterSuggestionStatus = Literal["reserved_not_enabled", "diagnostic_only", "shadow_translation", "enabled"]
 ExecutionSuggestionMode = Literal["disabled", "diagnostic_only", "shadow_translation", "enabled_live"]
 ExecutionAction = Literal["hold", "enter", "scale_in", "reduce", "exit", "reverse"]
+PositionMode = Literal["net_mode", "long_short_mode"]
+PositionSide = Literal["net", "long", "short"]
 
 
 def execution_action_from_position_intent(position_intent: str | None) -> ExecutionAction | None:
@@ -52,6 +54,66 @@ def execution_action_from_position_intent(position_intent: str | None) -> Execut
     if position_intent is None:
         return None
     return mapping.get(str(position_intent).strip().lower())
+
+
+def reduce_only_from_position_intent(position_intent: str | None) -> bool:
+    if position_intent is None:
+        return False
+    return str(position_intent).strip().lower() in {
+        "reduce_long",
+        "reduce_short",
+        "close_long",
+        "close_short",
+    }
+
+
+def close_only_from_position_intent(position_intent: str | None) -> bool:
+    if position_intent is None:
+        return False
+    return str(position_intent).strip().lower() in {"close_long", "close_short"}
+
+
+def default_reduce_only_reason(
+    *,
+    position_intent: str | None,
+    reduce_only: bool,
+) -> str | None:
+    if not reduce_only:
+        return None
+    if close_only_from_position_intent(position_intent):
+        return "position_intent_close_path"
+    return "position_intent_reduce_path"
+
+
+def default_close_only_reason(
+    *,
+    position_intent: str | None,
+    close_only: bool,
+) -> str | None:
+    if not close_only:
+        return None
+    return "position_intent_close_path"
+
+
+def pos_side_from_position_intent(
+    *,
+    position_intent: str | None,
+    position_mode: PositionMode | None,
+) -> PositionSide | None:
+    if position_mode == "net_mode":
+        return "net"
+    normalized = None if position_intent is None else str(position_intent).strip().lower()
+    mapping: dict[str, PositionSide] = {
+        "open_long": "long",
+        "reduce_long": "long",
+        "close_long": "long",
+        "reverse_to_long": "long",
+        "open_short": "short",
+        "reduce_short": "short",
+        "close_short": "short",
+        "reverse_to_short": "short",
+    }
+    return mapping.get(normalized) if normalized is not None else None
 
 
 class ExecutionParameterSuggestion(SchemaBase):
@@ -106,6 +168,23 @@ class OrderIntent(SchemaBase):
     max_slippage_tolerance_bps: int | None = None
     reduce_only: bool = False
     close_only: bool = False
+    td_mode: MarginModelType | None = None
+    position_mode: PositionMode | None = None
+    pos_side: PositionSide | None = None
+    reduce_only_reason: str | None = None
+    close_only_reason: str | None = None
+    instrument_family: str | None = None
+    settle_currency: str | None = None
+    required_initial_margin: Decimal | None = None
+    projected_margin_usage: Decimal | None = None
+    projected_notional: Decimal | None = None
+    risk_budget_multiplier: Decimal | None = None
+    risk_budget_state: dict[str, object] = Field(default_factory=dict)
+    execution_aggressiveness_multiplier: Decimal | None = None
+    execution_aggressiveness_state: dict[str, object] = Field(default_factory=dict)
+    only_reduce_required: bool = False
+    risk_limit_breached: bool = False
+    liquidation_buffer_remaining: Decimal | None = None
     idempotency_key: str
     product_type: ProductType = "spot"
     target_leverage: float = 1.0
@@ -141,6 +220,25 @@ class ExecutionPlan(SchemaBase):
     urgency: Literal["low", "medium", "high"]
     max_slippage_tolerance_bps: int
     reference_price: Decimal | None = None
+    reduce_only: bool = False
+    close_only: bool = False
+    td_mode: MarginModelType | None = None
+    position_mode: PositionMode | None = None
+    pos_side: PositionSide | None = None
+    reduce_only_reason: str | None = None
+    close_only_reason: str | None = None
+    instrument_family: str | None = None
+    settle_currency: str | None = None
+    required_initial_margin: Decimal | None = None
+    projected_margin_usage: Decimal | None = None
+    projected_notional: Decimal | None = None
+    risk_budget_multiplier: Decimal | None = None
+    risk_budget_state: dict[str, object] = Field(default_factory=dict)
+    execution_aggressiveness_multiplier: Decimal | None = None
+    execution_aggressiveness_state: dict[str, object] = Field(default_factory=dict)
+    only_reduce_required: bool = False
+    risk_limit_breached: bool = False
+    liquidation_buffer_remaining: Decimal | None = None
     product_type: ProductType = "spot"
     target_leverage: float = 1.0
     margin_mode: MarginModelType = "cash"
@@ -180,6 +278,15 @@ class OrderState(SchemaBase):
     remaining_qty: Decimal
     average_fill_price: Decimal | None = None
     fees: Decimal = Decimal("0")
+    reduce_only: bool = False
+    close_only: bool = False
+    td_mode: MarginModelType | None = None
+    position_mode: PositionMode | None = None
+    pos_side: PositionSide | None = None
+    reduce_only_reason: str | None = None
+    close_only_reason: str | None = None
+    instrument_family: str | None = None
+    settle_currency: str | None = None
     product_type: ProductType = "spot"
     target_leverage: float = 1.0
     margin_mode: MarginModelType = "cash"
@@ -213,6 +320,15 @@ class FillEvent(SchemaBase):
     fill_price: Decimal
     fee_amount: Decimal
     fee_currency: str | None = None
+    reduce_only: bool = False
+    close_only: bool = False
+    td_mode: MarginModelType | None = None
+    position_mode: PositionMode | None = None
+    pos_side: PositionSide | None = None
+    reduce_only_reason: str | None = None
+    close_only_reason: str | None = None
+    instrument_family: str | None = None
+    settle_currency: str | None = None
     product_type: ProductType = "spot"
     target_leverage: float = 1.0
     margin_mode: MarginModelType = "cash"

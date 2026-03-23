@@ -31,10 +31,9 @@ class RecoveryPostureEvaluator:
     _SUBMIT_ONLY_BLOCKERS = {
         "guarded_execution_dry_run",
         "live_submit_disabled",
+        "okx_simulated_trading_required",
         "local_demo_no_exchange_submission",
         "real_market_paper_uses_local_paper_execution",
-        "real_money_live_not_supported",
-        "guarded_live_blocked_by_default",
     }
     _PERSISTENT_STATUS_BLOCKERS = {
         "pending_execution_commands",
@@ -112,6 +111,8 @@ class RecoveryPostureEvaluator:
         if report is not None:
             if report.halt_required:
                 recovery_state = "resume_blocked"
+            elif report.only_reduce_required and recovery_state not in {"rebaseline_pending", "rebaseline_completed"}:
+                recovery_state = "only_reduce"
             elif (
                 report.review_required
                 and self.runtime.recovery_policy.review_required_blocks_resume
@@ -124,7 +125,7 @@ class RecoveryPostureEvaluator:
             recovery_state = "review_required"
         if recovery_state == "rebaseline_completed" and not self.runtime.kill_switch.halted:
             recovery_state = "normal_operation"
-        elif self.runtime.kill_switch.halted and recovery_state == "normal_operation":
+        elif self.runtime.kill_switch.halted and recovery_state in {"normal_operation", "only_reduce"}:
             recovery_state = "resume_blocked"
 
         normalized = status.model_copy(update={"recovery_state": recovery_state})
@@ -141,8 +142,15 @@ class RecoveryPostureEvaluator:
             self.runtime.recovery_policy.operator_rebaseline_supported
             and recovery_state in {"review_required", "resume_blocked"}
         )
-        resume_eligible = recovery_state in {"normal_operation", "rebaseline_completed", "manually_halted"} and resume_check.runnable
-        safe_to_trade = resume_eligible and not self.runtime.kill_switch.halted
+        resume_eligible = (
+            recovery_state in {"normal_operation", "only_reduce", "rebaseline_completed", "manually_halted"}
+            and resume_check.runnable
+        )
+        safe_to_trade = (
+            recovery_state in {"normal_operation", "only_reduce"}
+            and resume_check.runnable
+            and not self.runtime.kill_switch.halted
+        )
         return RecoveryAssessment(
             recovery_state=recovery_state,
             review_required=review_required,
@@ -172,7 +180,11 @@ class RecoveryPostureEvaluator:
         if latest_reconciliation is not None:
             updates["latest_reconciliation_id"] = latest_reconciliation.reconciliation_id
             updates["latest_reconciliation_severity"] = latest_reconciliation.severity
+            updates["reconciliation_classification"] = latest_reconciliation.recovery_classification
             updates["recovered_reconciliation_available"] = True
+            updates["only_reduce_required"] = bool(latest_reconciliation.only_reduce_required)
+            updates["only_reduce_reasons"] = list(latest_reconciliation.only_reduce_reasons)
+            updates["unknown_state_details"] = list(latest_reconciliation.unknown_state_details)
         return status.model_copy(update=updates)
 
     def execution_blockers(

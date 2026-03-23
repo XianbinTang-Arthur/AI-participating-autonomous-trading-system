@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import hashlib
 import hmac
 import json
@@ -56,28 +57,40 @@ class OKXPrivateWebSocketClient:
             raise RuntimeError("websockets_dependency_missing")
         inst_type = "SWAP" if self.settings.trading_product_type == "derivatives" else "SPOT"
         subscribe_args = [{"channel": "balance_and_position"}, {"channel": "orders", "instType": inst_type}]
+        reconnect_delay = self.settings.okx_market_reconnect_delay_seconds
         while not self._stop_event.is_set():
             try:
                 async with connect(
                     self._resolved_private_ws_url(),
-                    ping_interval=20,
-                    ping_timeout=20,
+                    ping_interval=self.settings.okx_ws_ping_interval_seconds,
+                    ping_timeout=self.settings.okx_ws_ping_timeout_seconds,
+                    open_timeout=self.settings.okx_ws_open_timeout_seconds,
                     close_timeout=5,
                 ) as websocket:
-                    await self._login(websocket)
-                    await self._subscribe(websocket, subscribe_args)
-                    self._connected = True
-                    log_event(self.logger, "okx_private_ws_connected", url=self._resolved_private_ws_url())
-                    async for raw_message in websocket:
-                        if self._stop_event.is_set():
-                            break
-                        message = _json_loads(raw_message)
-                        if not isinstance(message, dict):
-                            continue
-                        self._last_message_ts = utc_now()
-                        if self._is_control_message(message):
-                            continue
-                        await on_message(message)
+                    keepalive_task = asyncio.create_task(self._keepalive_loop(websocket))
+                    try:
+                        await self._login(websocket)
+                        await self._subscribe(websocket, subscribe_args)
+                        self._connected = True
+                        reconnect_delay = self.settings.okx_market_reconnect_delay_seconds
+                        log_event(self.logger, "okx_private_ws_connected", url=self._resolved_private_ws_url())
+                        async for raw_message in websocket:
+                            if self._stop_event.is_set():
+                                break
+                            if self._is_pong_message(raw_message):
+                                self._last_message_ts = utc_now()
+                                continue
+                            message = _json_loads(raw_message)
+                            if not isinstance(message, dict):
+                                continue
+                            self._last_message_ts = utc_now()
+                            if self._is_control_message(message):
+                                continue
+                            await on_message(message)
+                    finally:
+                        keepalive_task.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await keepalive_task
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -90,7 +103,11 @@ class OKXPrivateWebSocketClient:
                     error_type=type(exc).__name__,
                     error=str(exc),
                 )
-                await asyncio.sleep(self.settings.okx_market_reconnect_delay_seconds)
+                await asyncio.sleep(reconnect_delay)
+                reconnect_delay = min(
+                    max(reconnect_delay * 2.0, self.settings.okx_market_reconnect_delay_seconds),
+                    self.settings.okx_market_reconnect_max_delay_seconds,
+                )
             finally:
                 self._connected = False
 
@@ -167,3 +184,20 @@ class OKXPrivateWebSocketClient:
     def _is_control_message(message: dict[str, Any]) -> bool:
         event = message.get("event")
         return isinstance(event, str) and event in {"subscribe", "notice", "login"}
+
+    @staticmethod
+    def _is_pong_message(raw_message: str | bytes) -> bool:
+        if isinstance(raw_message, bytes):
+            try:
+                raw_message = raw_message.decode("utf-8")
+            except UnicodeDecodeError:
+                return False
+        return str(raw_message).strip().lower() == "pong"
+
+    async def _keepalive_loop(self, websocket: ClientConnection) -> None:
+        interval = max(5.0, float(self.settings.okx_private_ws_idle_ping_interval_seconds))
+        while not self._stop_event.is_set():
+            await asyncio.sleep(interval)
+            if self._stop_event.is_set():
+                return
+            await websocket.send("ping")

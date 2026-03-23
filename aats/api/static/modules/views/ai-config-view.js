@@ -1,4 +1,5 @@
 import { actorTags, actionButton, callout, kvList, summaryStrip, surfaceCard } from "../components.js";
+import { summarizeLocalizedList } from "../copy.js";
 import { formatMaybeTimestamp, formatNumber } from "../formatters.js";
 import { readableState } from "../terms.js";
 
@@ -149,9 +150,14 @@ function renderProfileControlPanel({
 }) {
   const activeProfileId = currentStrategyProfile(activeRevision, activation);
   const summary = autoControlSummary(runtime, latestProfileControl, latestSelectionDecision, latestOptimizationReport);
+  const controlSummary = latestOptimizationReport.control_summary || {};
+  const adaptiveControls = controlSummary.adaptive_controls || {};
+  const riskBudget = adaptiveControls.risk_budget || {};
+  const executionAggressiveness = adaptiveControls.execution_aggressiveness || {};
   const configured = Boolean(runtime.strategy_profile_auto_control_configured);
   const manuallyPaused = runtime.strategy_profile_auto_control_reason === "manually_paused_by_admin";
   const manualEditing = Boolean(uiState.profileManualEditing || manuallyPaused);
+  const candidateProfileId = latestOptimizationReport.recommended_profile_id || latestSelectionDecision.candidate_profile_id || "";
   const profileButtons = PROFILE_OPTIONS.map(([profileId, label, tone]) =>
     actionButton(
       profileId === activeProfileId ? `${label}（当前）` : label,
@@ -208,10 +214,47 @@ function renderProfileControlPanel({
           tone: "info",
           badge: actorTags(manuallyPaused ? "admin" : "system"),
         },
+        {
+          label: "紧急安全切档",
+          value: latestSelectionDecision.fast_track_applied ? "已启用" : latestSelectionDecision.fast_track_eligible ? "条件已满足" : "未触发",
+          meta: summarizeLocalizedList(latestSelectionDecision.gating_state?.fast_track_reasons, {
+            fallback: "当前没有触发紧急安全快速通道。",
+            limit: 3,
+          }),
+          tone: latestSelectionDecision.fast_track_applied ? "danger" : latestSelectionDecision.fast_track_eligible ? "warning" : "outline",
+          badge: actorTags("risk_control"),
+        },
       ])}
       <div class="table-actions table-actions--compact manual-profile-switch-actions manual-profile-switch-actions--centered">
         ${profileButtons}
       </div>
+      ${kvList([
+        [
+          "候选策略档位",
+          readableProfile(candidateProfileId, "当前没有新的候选策略档位"),
+          summarizeList(latestSelectionDecision.blocked_reasons, "当前没有新的自动切档阻断原因。"),
+        ],
+        [
+          "切换分类",
+          readableState(latestSelectionDecision.transition_class || "unknown"),
+          textOrFallback(latestSelectionDecision.operator_summary, "当前没有额外切换摘要。"),
+        ],
+        [
+          "自动切档闸门",
+          profileGateSummary(latestSelectionDecision),
+          latestSelectionDecision.gating_state?.reconciliation_clean ? "当前对账状态干净，可以继续评估。" : "当前对账未完全干净，系统会更谨慎。",
+        ],
+        [
+          "风险预算乘数",
+          multiplierLabel(riskBudget.multiplier, riskBudget.status),
+          summarizeAdaptiveReasons(riskBudget, "当前风险预算没有自动收缩。"),
+        ],
+        [
+          "执行侵略性乘数",
+          multiplierLabel(executionAggressiveness.multiplier, executionAggressiveness.status),
+          summarizeAdaptiveReasons(executionAggressiveness, "当前执行侵略性没有自动收缩。"),
+        ],
+      ])}
     `,
   });
 }
@@ -298,6 +341,16 @@ function renderCurrentConfigurationCard({ runtimeProfiles = {}, runtime = {}, ai
           "默认下单量",
           formatNumber(runtimePayload.default_order_qty, 6, "待配置"),
           `单标的名义上限 ${formatNumber(runtimePayload.max_notional_per_symbol, 2, "待配置")}`,
+        ],
+        [
+          "持有与冷却",
+          `最小持仓 ${formatNumber(runtimePayload.strategy_min_hold_seconds, 0, "待配置")} 秒`,
+          `平仓后冷却 ${formatNumber(runtimePayload.strategy_post_close_cooldown_seconds, 0, "待配置")} 秒`,
+        ],
+        [
+          "低边际保护",
+          `低边际阈值 ${formatNumber(runtimePayload.strategy_low_edge_threshold_bps, 1, "待配置")} bps / 连续 ${formatNumber(runtimePayload.strategy_low_edge_streak_limit, 0, "待配置")} 次`,
+          `低边际冷却 ${formatNumber(runtimePayload.strategy_low_edge_cooldown_seconds, 0, "待配置")} 秒`,
         ],
       ])}
     `,
@@ -448,4 +501,39 @@ function listText(value, fallback = "暂无") {
 function summarizeList(items, fallback = "当前没有额外说明") {
   if (!Array.isArray(items) || !items.length) return fallback;
   return items.slice(0, 2).map((item) => readableState(String(item), String(item))).join("；");
+}
+
+function profileGateSummary(selection = {}) {
+  const gating = selection.gating_state || {};
+  const parts = [];
+  if (gating.confidence_floor !== null && gating.confidence_floor !== undefined) {
+    parts.push(`最低置信度 ${formatNumber(gating.confidence_floor, 2, "待确认")}`);
+  }
+  if (gating.next_eligible_switch_at) {
+    parts.push(`最早可切换时间 ${formatMaybeTimestamp(gating.next_eligible_switch_at)}`);
+  }
+  if ((gating.remaining_closed_trades || 0) > 0 || (gating.remaining_replay_validations || 0) > 0) {
+    parts.push(
+      `还差 ${formatNumber(gating.remaining_closed_trades, 0, "0")} 笔已平仓交易、${formatNumber(gating.remaining_replay_validations, 0, "0")} 次 replay`,
+    );
+  }
+  if ((gating.remaining_consecutive_wins || 0) > 0) {
+    parts.push(`还差 ${formatNumber(gating.remaining_consecutive_wins, 0, "0")} 次连续胜出`);
+  }
+  return parts.join("；") || "当前没有额外闸门说明。";
+}
+
+function multiplierLabel(multiplier, status) {
+  return `${formatNumber(multiplier, 2, "待确认")}（${readableState(status || "unknown")}）`;
+}
+
+function summarizeAdaptiveReasons(state = {}, fallback = "当前没有额外说明。") {
+  const localizedReasons = summarizeLocalizedList(state.reasons, {
+    fallback,
+    limit: 2,
+  });
+  if (state.multiplier === null || state.multiplier === undefined) {
+    return localizedReasons;
+  }
+  return `当前乘数 ${formatNumber(state.multiplier, 2, "待确认")}，${localizedReasons}`;
 }

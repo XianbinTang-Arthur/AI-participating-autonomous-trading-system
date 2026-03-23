@@ -13,7 +13,13 @@ from aats.schemas.system import (
 )
 
 
-RuntimeProfileName = Literal["paper_local", "exchange_simulated_spot", "exchange_simulated_derivatives", "exchange_live_reserved"]
+RuntimeProfileName = Literal[
+    "paper_local",
+    "exchange_simulated_spot",
+    "exchange_simulated_derivatives",
+    "exchange_live_spot",
+    "exchange_live_derivatives",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,18 +169,32 @@ def _resolve_runtime_profile(settings: AATSSettings) -> RuntimeProfile:
                 shorting_supported=False,
                 leverage_supported=False,
             )
+        if settings.trading_product_type == "derivatives":
+            return RuntimeProfile(
+                name="exchange_live_derivatives",
+                description="Exchange-backed live submit path for derivatives trading with guarded controls.",
+                product_type="derivatives",
+                exchange_coupled=True,
+                exchange_submission_capable=True,
+                persistent_storage_required=True,
+                account_synchronization_meaningful=True,
+                rebaseline_meaningful=True,
+                live_trading_blocked=False,
+                shorting_supported=True,
+                leverage_supported=True,
+            )
         return RuntimeProfile(
-            name="exchange_live_reserved",
-            description="Reserved exchange-live profile. Real-money submission remains structurally blocked.",
-            product_type=settings.trading_product_type,
+            name="exchange_live_spot",
+            description="Exchange-backed live submit path for spot trading with guarded operator controls.",
+            product_type="spot",
             exchange_coupled=True,
             exchange_submission_capable=True,
             persistent_storage_required=True,
             account_synchronization_meaningful=True,
             rebaseline_meaningful=True,
-            live_trading_blocked=True,
-            shorting_supported=settings.trading_product_type == "derivatives",
-            leverage_supported=settings.trading_product_type == "derivatives",
+            live_trading_blocked=False,
+            shorting_supported=False,
+            leverage_supported=False,
         )
     return RuntimeProfile(
         name="paper_local",
@@ -220,12 +240,20 @@ def _resolve_environment_capabilities(
         elif profile.name == "exchange_simulated_spot":
             execution_route = "okx_demo_guarded"
             exchange_submission_target = "okx_demo_spot"
+        elif profile.name == "exchange_live_derivatives":
+            execution_route = "okx_live_derivatives_guarded"
+            exchange_submission_target = "okx_live_derivatives"
         else:
-            execution_route = "reserved_future_live"
-            exchange_submission_target = "future_real_money_live"
+            execution_route = "okx_live_guarded"
+            exchange_submission_target = "okx_live_spot"
         exchange_submission_possible = True
         exchange_submission_enabled = (
-            profile.name in {"exchange_simulated_spot", "exchange_simulated_derivatives"}
+            profile.name in {
+                "exchange_simulated_spot",
+                "exchange_simulated_derivatives",
+                "exchange_live_spot",
+                "exchange_live_derivatives",
+            }
             and settings.live_submit_enabled
             and not settings.guarded_execution_dry_run
         )
@@ -274,11 +302,16 @@ def _resolve_policy_profile(
             max_target_leverage=settings.max_target_leverage,
         )
     dry_run_only = not environment.exchange_submission_enabled
-    live_blocked = profile.name == "exchange_live_reserved"
     return PolicyProfile(
         name=f"{profile.name}_policy",
         product_type=profile.product_type,
-        exchange_submission_allowed_in_principle=profile.name in {"exchange_simulated_spot", "exchange_simulated_derivatives"},
+        exchange_submission_allowed_in_principle=profile.name
+        in {
+            "exchange_simulated_spot",
+            "exchange_simulated_derivatives",
+            "exchange_live_spot",
+            "exchange_live_derivatives",
+        },
         dry_run_only=dry_run_only,
         requires_human_approval=True,
         enforce_health_blockers=True,
@@ -286,7 +319,7 @@ def _resolve_policy_profile(
         blocks_on_reconciliation_freshness=True,
         blocks_on_review_required=True,
         balance_checks_required=True,
-        real_money_submission_structurally_blocked=live_blocked,
+        real_money_submission_structurally_blocked=False,
         shorting_allowed=profile.shorting_supported,
         leverage_allowed=profile.leverage_supported,
         max_target_leverage=settings.max_target_leverage,
@@ -335,6 +368,10 @@ def _resolve_operating_state(
         if environment.exchange_submission_enabled:
             return "guarded_simulated_submit_spot_enabled"
         return "guarded_simulated_submit_spot_dry_run"
+    if profile.name in {"exchange_live_spot", "exchange_live_derivatives"}:
+        if settings.live_submit_enabled and not settings.guarded_execution_dry_run:
+            return "guarded_live_enabled"
+        return "guarded_live_blocked"
     if settings.live_submit_enabled and not settings.guarded_execution_dry_run:
         return "guarded_live_enabled"
     return "guarded_live_blocked"
@@ -356,6 +393,12 @@ def _resolve_mode_submit_blocked_reasons(
         if not settings.live_submit_enabled:
             return ("live_submit_disabled",)
         return ()
+    if profile.name in {"exchange_live_spot", "exchange_live_derivatives"}:
+        if settings.guarded_execution_dry_run:
+            return ("guarded_execution_dry_run",)
+        if not settings.live_submit_enabled:
+            return ("live_submit_disabled",)
+        return ()
     if operating_state == "guarded_live_enabled":
-        return ("real_money_live_not_supported",)
-    return ("guarded_live_blocked_by_default",)
+        return ()
+    return ("live_submit_disabled",)

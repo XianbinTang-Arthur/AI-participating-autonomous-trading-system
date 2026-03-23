@@ -17,6 +17,7 @@ from aats.storage.execution_repo import InMemoryExecutionRepository
 from aats.storage.obligation_repo import InMemoryExecutionObligationRepository
 from aats.storage.portfolio_repo import InMemoryPortfolioRepository
 from aats.storage.reconciliation_repo import InMemoryReconciliationRepository
+from aats.schemas.reconciliation import ReconciliationReport
 
 
 class TestExecutionRecovery(unittest.TestCase):
@@ -136,6 +137,59 @@ class TestExecutionRecovery(unittest.TestCase):
         self.assertFalse(artifacts.status.safe_to_trade)
         self.assertIn("stored_snapshot_differs_from_fill_reconstruction", artifacts.status.notes)
 
+    def test_recovery_marks_derivatives_only_reduce_when_latest_reconciliation_requires_it(self) -> None:
+        reconciliation_repo = InMemoryReconciliationRepository()
+        reconciliation_repo.save_report(
+            ReconciliationReport(
+                reconciliation_id="recon_only_reduce_recovery",
+                as_of_ts=utc_now(),
+                product_type="derivatives",
+                margin_mode="cross",
+                allowed_symbols=["BTC-USDT-SWAP"],
+                exchange_comparison_enabled=True,
+                order_diff={"reconstructed": {}, "exchange": {}},
+                fill_diff={"replayed": {}, "exchange": {}},
+                balance_diff={"reconstructed": {}, "exchange": {}},
+                position_diff={
+                    "stored": {},
+                    "reconstructed": {},
+                    "reconstructed_mismatches": {},
+                    "exchange": {"BTC-USDT-SWAP": "0.02"},
+                    "exchange_mismatches": {"BTC-USDT-SWAP": {"stored": "0", "exchange": "0.02"}},
+                },
+                mismatch_categories=["derivatives_exchange_position_without_local_execution_chain"],
+                mismatch_reasons=["derivatives_exchange_position_not_replayed_locally"],
+                safety_impacts=["derivatives_only_reduce_until_position_reconciled"],
+                severity="SOFT_MISMATCH",
+                only_reduce_required=True,
+                only_reduce_reasons=["derivatives_exchange_position_without_local_execution_chain"],
+                recovery_classification="derivatives_only_reduce",
+                recommended_operator_action="go_close_position_on_exchange",
+            )
+        )
+        recovery = self._service(
+            reconciliation_repo=reconciliation_repo,
+            settings_override={
+                "config_profile": "guarded_derivatives_dry_run",
+                "mode": "guarded_live",
+                "execution_backend": "okx",
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "margin_mode": "cross",
+                "trading_product_type": "derivatives",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ["BTC-USDT-SWAP"],
+            },
+        )
+
+        artifacts = recovery.recover(portfolio_state=PortfolioState(initial_usdt_balance=10_000.0))
+
+        self.assertEqual(artifacts.status.recovery_state, "only_reduce")
+        self.assertTrue(artifacts.status.safe_to_trade)
+        self.assertTrue(artifacts.status.resume_eligible)
+        self.assertTrue(artifacts.status.only_reduce_required)
+        self.assertIn("derivatives_exchange_position_without_local_execution_chain", artifacts.status.only_reduce_reasons)
+
     @staticmethod
     def _service(
         *,
@@ -144,22 +198,24 @@ class TestExecutionRecovery(unittest.TestCase):
         portfolio_repo: InMemoryPortfolioRepository | None = None,
         kill_switch: KillSwitch | None = None,
         bootstrap_portfolio_from_exchange: bool = False,
+        reconciliation_repo: InMemoryReconciliationRepository | None = None,
+        settings_override: dict | None = None,
     ) -> ExecutionRecoveryService:
-        settings = AATSSettings.model_validate(
-            {
-                "storage_mode": "memory",
-                "market_data_backend": "demo",
-                "execution_backend": "paper",
-                "account_backend": "disabled",
-                "account_read_enabled": False,
-            }
-        )
+        payload = {
+            "storage_mode": "memory",
+            "market_data_backend": "demo",
+            "execution_backend": "paper",
+            "account_backend": "disabled",
+            "account_read_enabled": False,
+        }
+        payload.update(settings_override or {})
+        settings = AATSSettings.model_validate(payload)
         return ExecutionRecoveryService(
             settings=settings,
             execution_repo=execution_repo or InMemoryExecutionRepository(),
             obligation_repo=obligation_repo or InMemoryExecutionObligationRepository(),
             portfolio_repo=portfolio_repo or InMemoryPortfolioRepository(),
-            reconciliation_repo=InMemoryReconciliationRepository(),
+            reconciliation_repo=reconciliation_repo or InMemoryReconciliationRepository(),
             reconstruction_service=PortfolioReconstructionService(
                 initial_usdt_balance=settings.initial_usdt_balance,
                 snapshot_builder=PortfolioSnapshotBuilder(pnl_calculator=PortfolioPnLCalculator()),

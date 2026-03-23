@@ -14,6 +14,11 @@ from aats.schemas.execution import (
     ExecutionAction,
     ExecutionPlan,
     OrderIntent,
+    close_only_from_position_intent,
+    default_close_only_reason,
+    default_reduce_only_reason,
+    pos_side_from_position_intent,
+    reduce_only_from_position_intent,
 )
 from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, to_decimal
 
@@ -37,6 +42,20 @@ class ExecutionPlanner:
         product_type: str = "spot",
         target_leverage: float = 1.0,
         margin_mode: str = "cash",
+        position_mode: str | None = None,
+        instrument_family: str | None = None,
+        settle_currency: str | None = None,
+        td_mode: str | None = None,
+        required_initial_margin: Decimal | float | None = None,
+        projected_margin_usage: Decimal | float | None = None,
+        projected_notional: Decimal | float | None = None,
+        risk_budget_multiplier: Decimal | float | None = None,
+        risk_budget_state: dict[str, object] | None = None,
+        execution_aggressiveness_multiplier: Decimal | float | None = None,
+        execution_aggressiveness_state: dict[str, object] | None = None,
+        only_reduce_required: bool = False,
+        risk_limit_breached: bool = False,
+        liquidation_buffer_remaining: Decimal | float | None = None,
         ai_execution_parameter_suggestion: AIExecutionParameterSuggestionEnvelope | None = None,
     ) -> ExecutionPlan | None:
         if abs(to_decimal(delta_qty)) < EPSILON_DECIMAL_12:
@@ -52,12 +71,26 @@ class ExecutionPlanner:
             current_position_qty=current_position_qty,
             target_position_qty=approved_target_position_qty,
         )
+        reduce_only = reduce_only_from_position_intent(position_intent)
+        close_only = close_only_from_position_intent(position_intent)
+        resolved_position_mode = position_mode if position_mode in {"net_mode", "long_short_mode"} else None
+        resolved_td_mode = td_mode or margin_mode
         exposure_side = self._exposure_side(approved_target_position_qty)
+        normalized_execution_multiplier = self._normalized_multiplier(execution_aggressiveness_multiplier)
+        effective_slippage_tolerance_bps = self._effective_slippage_tolerance_bps(
+            max_slippage_tolerance_bps=max_slippage_tolerance_bps,
+            execution_aggressiveness_multiplier=normalized_execution_multiplier,
+        )
+        pos_side = pos_side_from_position_intent(
+            position_intent=position_intent,
+            position_mode=resolved_position_mode,
+        )
         translated_suggestion = self._translate_ai_execution_parameter_suggestion(
             ai_execution_parameter_suggestion,
             side=side,
             reference_price=reference_price,
-            max_slippage_tolerance_bps=max_slippage_tolerance_bps,
+            max_slippage_tolerance_bps=effective_slippage_tolerance_bps,
+            execution_aggressiveness_multiplier=normalized_execution_multiplier,
         )
         execution_style = "taker"
         order_type = "market"
@@ -75,7 +108,7 @@ class ExecutionPlanner:
                 side=side,
                 reference_price=reference_price,
                 preview=translated_suggestion.translation_preview,
-                max_slippage_tolerance_bps=max_slippage_tolerance_bps,
+                max_slippage_tolerance_bps=effective_slippage_tolerance_bps,
             )
         return ExecutionPlan(
             plan_id=new_id("plan"),
@@ -91,8 +124,43 @@ class ExecutionPlanner:
             limit_price=limit_price,
             time_in_force=time_in_force,
             urgency=normalized_urgency,
-            max_slippage_tolerance_bps=max_slippage_tolerance_bps,
+            max_slippage_tolerance_bps=effective_slippage_tolerance_bps,
             reference_price=reference_price,
+            reduce_only=reduce_only,
+            close_only=close_only,
+            td_mode=resolved_td_mode,  # type: ignore[arg-type]
+            position_mode=resolved_position_mode,  # type: ignore[arg-type]
+            pos_side=pos_side,  # type: ignore[arg-type]
+            reduce_only_reason=default_reduce_only_reason(
+                position_intent=position_intent,
+                reduce_only=reduce_only,
+            ),
+            close_only_reason=default_close_only_reason(
+                position_intent=position_intent,
+                close_only=close_only,
+            ),
+            instrument_family=instrument_family,
+            settle_currency=settle_currency,
+            required_initial_margin=(
+                None if required_initial_margin is None else to_decimal(required_initial_margin)
+            ),
+            projected_margin_usage=(
+                None if projected_margin_usage is None else to_decimal(projected_margin_usage)
+            ),
+            projected_notional=(
+                None if projected_notional is None else to_decimal(projected_notional)
+            ),
+            risk_budget_multiplier=(
+                None if risk_budget_multiplier is None else to_decimal(risk_budget_multiplier)
+            ),
+            risk_budget_state=dict(risk_budget_state or {}),
+            execution_aggressiveness_multiplier=normalized_execution_multiplier,
+            execution_aggressiveness_state=dict(execution_aggressiveness_state or {}),
+            only_reduce_required=bool(only_reduce_required),
+            risk_limit_breached=bool(risk_limit_breached),
+            liquidation_buffer_remaining=(
+                None if liquidation_buffer_remaining is None else to_decimal(liquidation_buffer_remaining)
+            ),
             product_type=product_type,  # type: ignore[arg-type]
             target_leverage=target_leverage,
             margin_mode=margin_mode,  # type: ignore[arg-type]
@@ -121,8 +189,25 @@ class ExecutionPlanner:
             urgency=plan.urgency,
             time_in_force=plan.time_in_force,
             max_slippage_tolerance_bps=plan.max_slippage_tolerance_bps,
-            reduce_only=plan.position_intent in {"reduce_long", "reduce_short"},
-            close_only=plan.position_intent in {"close_long", "close_short"},
+            reduce_only=plan.reduce_only,
+            close_only=plan.close_only,
+            td_mode=plan.td_mode,
+            position_mode=plan.position_mode,
+            pos_side=plan.pos_side,
+            reduce_only_reason=plan.reduce_only_reason,
+            close_only_reason=plan.close_only_reason,
+            instrument_family=plan.instrument_family,
+            settle_currency=plan.settle_currency,
+            required_initial_margin=plan.required_initial_margin,
+            projected_margin_usage=plan.projected_margin_usage,
+            projected_notional=plan.projected_notional,
+            risk_budget_multiplier=plan.risk_budget_multiplier,
+            risk_budget_state=plan.risk_budget_state,
+            execution_aggressiveness_multiplier=plan.execution_aggressiveness_multiplier,
+            execution_aggressiveness_state=plan.execution_aggressiveness_state,
+            only_reduce_required=plan.only_reduce_required,
+            risk_limit_breached=plan.risk_limit_breached,
+            liquidation_buffer_remaining=plan.liquidation_buffer_remaining,
             idempotency_key=intent_id,
             product_type=plan.product_type,
             target_leverage=plan.target_leverage,
@@ -211,6 +296,7 @@ class ExecutionPlanner:
         side: str,
         reference_price: Decimal | float | None,
         max_slippage_tolerance_bps: int,
+        execution_aggressiveness_multiplier: Decimal,
     ) -> AIExecutionParameterSuggestionEnvelope | None:
         if suggestion is None:
             return None
@@ -218,6 +304,7 @@ class ExecutionPlanner:
         clipped_fields: list[str] = list(suggestion.clipped_fields)
         notes: list[str] = list(suggestion.notes)
         sanitized = ExecutionParameterSuggestion.model_validate(suggestion.suggestion.model_dump(mode="python"))
+        scaled_aggressiveness = self._normalized_multiplier(execution_aggressiveness_multiplier)
 
         def clip_decimal(value: Decimal | None, lower: Decimal, upper: Decimal, field_name: str) -> Decimal | None:
             if value is None:
@@ -245,34 +332,40 @@ class ExecutionPlanner:
         )
         sanitized.maker_taker_bias = clip_decimal(
             sanitized.maker_taker_bias,
-            -to_decimal(self.settings.ai_execution_max_maker_taker_bias),
-            to_decimal(self.settings.ai_execution_max_maker_taker_bias),
+            -(to_decimal(self.settings.ai_execution_max_maker_taker_bias) * scaled_aggressiveness),
+            to_decimal(self.settings.ai_execution_max_maker_taker_bias) * scaled_aggressiveness,
             "maker_taker_bias",
         )
         sanitized.max_cross_spread_bps = clip_decimal(
             sanitized.max_cross_spread_bps,
             Decimal("0"),
-            to_decimal(self.settings.ai_execution_max_cross_spread_bps),
+            to_decimal(self.settings.ai_execution_max_cross_spread_bps) * scaled_aggressiveness,
             "max_cross_spread_bps",
         )
         sanitized.slice_count = clip_int(
             sanitized.slice_count,
             1,
-            max(self.settings.ai_execution_max_slice_count, 1),
+            max(int(round(self.settings.ai_execution_max_slice_count * float(scaled_aggressiveness))), 1),
             "slice_count",
         )
         sanitized.max_participation_rate = clip_decimal(
             sanitized.max_participation_rate,
             Decimal("0"),
-            to_decimal(self.settings.ai_execution_max_participation_rate),
+            to_decimal(self.settings.ai_execution_max_participation_rate) * scaled_aggressiveness,
             "max_participation_rate",
         )
         sanitized.cancel_replace_patience_ms = clip_int(
             sanitized.cancel_replace_patience_ms,
             0,
-            max(self.settings.ai_execution_max_cancel_replace_patience_ms, 0),
+            max(int(round(self.settings.ai_execution_max_cancel_replace_patience_ms * float(scaled_aggressiveness))), 0),
             "cancel_replace_patience_ms",
         )
+        if scaled_aggressiveness <= Decimal("0.60") and sanitized.passive_bias is not None:
+            preferred_passive_floor = Decimal("0.60")
+            if sanitized.passive_bias < preferred_passive_floor:
+                sanitized.passive_bias = preferred_passive_floor
+                clipped_fields.append("passive_bias")
+                notes.append("passive_bias_planner_raised_for_safe_execution")
 
         if requested_mode == "disabled":
             return AIExecutionParameterSuggestionEnvelope(
@@ -350,6 +443,28 @@ class ExecutionPlanner:
             rejection_reasons=["shadow_translation_preview_only"],
             notes=list(dict.fromkeys(notes + ["planner_translated_execution_preview", "live_translation_not_enabled"])),
         )
+
+    @staticmethod
+    def _normalized_multiplier(value: Decimal | float | None) -> Decimal:
+        if value is None:
+            return Decimal("1")
+        return max(min(to_decimal(value), Decimal("1")), Decimal("0.1"))
+
+    @staticmethod
+    def _effective_slippage_tolerance_bps(
+        *,
+        max_slippage_tolerance_bps: int,
+        execution_aggressiveness_multiplier: Decimal,
+    ) -> int:
+        if max_slippage_tolerance_bps <= 0:
+            return max_slippage_tolerance_bps
+        scaled = int(
+            max(
+                Decimal("1"),
+                (Decimal(str(max_slippage_tolerance_bps)) * execution_aggressiveness_multiplier).quantize(Decimal("1")),
+            )
+        )
+        return min(max_slippage_tolerance_bps, scaled)
 
     @staticmethod
     def _build_translation_preview(

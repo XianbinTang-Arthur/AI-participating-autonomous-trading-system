@@ -21,6 +21,10 @@ from aats.schemas.strategy_profiles import (
     diff_strategy_profile_payload,
     strategy_profile_payload_from_settings,
 )
+from aats.services.governance_engine.adaptive_controls import (
+    reconciliation_clean_from_safety_state,
+    resolve_emergency_safety_fast_track,
+)
 
 if TYPE_CHECKING:
     from aats.schemas.operator import AuthSource, OperatorRole
@@ -499,18 +503,41 @@ class StrategyProfileActivationFacade:
             blocked_reasons.append("strategy_profile_revision_missing")
         else:
             transition = self.owner._transition_risk_direction(current=current, target=revision)
+        fast_track = resolve_emergency_safety_fast_track(
+            self.owner.settings,
+            candidate_profile_id=recommendation.recommended_profile_id,
+            safety_profile_ids=self.owner._safety_profile_ids(),
+            transition_risk_direction=transition,
+            safety_profile_required=bool(control_summary.get("safety_profile_required")),
+            safe_to_trade=bool(safety_state.get("safe_to_trade", True)),
+            review_required=bool(safety_state.get("review_required", False)),
+            execution_error_count=int(
+                ((recommendation.input_snapshot or {}).get("execution_health") or {}).get(
+                    "recent_execution_error_count",
+                    0,
+                )
+                or 0
+            ),
+            only_reduce_required=bool(safety_state.get("only_reduce_required")),
+            auto_halt_required=bool(safety_state.get("auto_halt_required")),
+            trial_guard_breached=bool(safety_state.get("trial_guard_breached")),
+        )
+        fast_track_applied = bool(fast_track.get("eligible"))
+        confidence_floor = 0.0
         if recommendation.expires_at <= utc_now():
             blocked_reasons.append("strategy_profile_recommendation_expired")
         if recommendation.recommended_profile_id == active.active_profile_id:
             blocked_reasons.append("strategy_profile_already_active")
-        if active.frozen_until is not None and active.frozen_until > utc_now():
+        if not fast_track_applied and active.frozen_until is not None and active.frozen_until > utc_now():
             blocked_reasons.append("strategy_profile_auto_switch_frozen")
-        if active.cooldown_until is not None and active.cooldown_until > utc_now():
+        if not fast_track_applied and active.cooldown_until is not None and active.cooldown_until > utc_now():
             blocked_reasons.append("strategy_profile_switch_cooldown_active")
         if not active.auto_switch_enabled:
             blocked_reasons.append("strategy_profile_auto_switch_disabled")
         if revision is not None:
             confidence_floor = self.owner._auto_switch_confidence_min(current=current, target=revision)
+            if fast_track_applied:
+                confidence_floor = min(confidence_floor, float(fast_track.get("confidence_floor") or confidence_floor))
             if recommendation.confidence < confidence_floor:
                 if transition == "more_aggressive":
                     blocked_reasons.append("strategy_profile_auto_switch_aggressive_confidence_too_low")
@@ -518,50 +545,100 @@ class StrategyProfileActivationFacade:
                     blocked_reasons.append("strategy_profile_auto_switch_same_risk_confidence_too_low")
                 else:
                     blocked_reasons.append("strategy_profile_auto_switch_confidence_too_low")
-        if not safety_state["safe_to_trade"]:
+        if not safety_state["safe_to_trade"] and not fast_track_applied:
             blocked_reasons.append("strategy_profile_runtime_not_safe_to_trade")
-        if safety_state["review_required"]:
+        if safety_state["review_required"] and not fast_track_applied:
             blocked_reasons.append("strategy_profile_review_required")
         if not safety_state["market_snapshot_fresh"]:
             blocked_reasons.append("strategy_profile_market_data_stale")
         if not safety_state["account_snapshot_fresh"]:
             blocked_reasons.append("strategy_profile_account_state_stale")
-        if safety_state["reconciliation_halt_required"] or safety_state["reconciliation_review_required"]:
+        if (
+            (safety_state["reconciliation_halt_required"] or safety_state["reconciliation_review_required"])
+            and not fast_track_applied
+        ):
             blocked_reasons.append("strategy_profile_reconciliation_not_clean")
-        elif str(safety_state["reconciliation_severity"]).upper() not in {"CLEAN", "UNKNOWN"}:
+        elif (
+            str(safety_state["reconciliation_severity"]).upper() not in {"CLEAN", "UNKNOWN"}
+            and not fast_track_applied
+        ):
             blocked_reasons.append("strategy_profile_reconciliation_not_clean")
         if revision is not None and not revision.auto_switch_allowed:
             blocked_reasons.append("strategy_profile_auto_switch_not_allowed")
         if revision is not None and revision.manual_approval_required:
             blocked_reasons.append("strategy_profile_manual_approval_required")
-        if evidence.get("closed_trades", 0) < evidence.get("min_closed_trades", 0):
+        if not fast_track_applied and evidence.get("closed_trades", 0) < evidence.get("min_closed_trades", 0):
             blocked_reasons.append("strategy_profile_requires_more_realized_trades")
-        if evidence.get("replay_validations", 0) < evidence.get("min_replay_validations", 0):
+        if not fast_track_applied and evidence.get("replay_validations", 0) < evidence.get("min_replay_validations", 0):
             blocked_reasons.append("strategy_profile_requires_more_replay_validations")
-        if bool(evidence.get("cold_start_active")):
+        if not fast_track_applied and bool(evidence.get("cold_start_active")):
             blocked_reasons.append("strategy_profile_cold_start_lock_active")
         if candidate is not None:
-            blocked_reasons.extend(candidate.selection_blocked_reasons)
+            bypassed = set(fast_track.get("bypass_gates") or [])
+            blocked_reasons.extend(
+                reason
+                for reason in candidate.selection_blocked_reasons
+                if not fast_track_applied or reason not in bypassed
+            )
         blocked_reasons.extend(self.activation_blockers())
 
         consecutive_candidate_wins = self.owner._consecutive_candidate_win_count(
             candidate_profile_id=recommendation.recommended_profile_id
         )
-        if consecutive_candidate_wins < int(self.owner.settings.strategy_profile_activation_required_consecutive_wins):
-            blocked_reasons.append("strategy_profile_candidate_requires_more_confirmations")
         if (
+            not fast_track_applied
+            and consecutive_candidate_wins < int(self.owner.settings.strategy_profile_activation_required_consecutive_wins)
+        ):
+            blocked_reasons.append("strategy_profile_candidate_requires_more_confirmations")
+        next_eligible_switch_at = None
+        if (
+            not fast_track_applied
+            and
             active.last_activation_at is not None
             and recommendation.recommended_profile_id != active.active_profile_id
             and (utc_now() - active.last_activation_at).total_seconds()
             < float(self.owner.settings.strategy_profile_activation_min_active_minutes) * 60.0
         ):
             blocked_reasons.append("strategy_profile_min_active_duration_not_reached")
+            next_eligible_switch_at = (
+                active.last_activation_at
+                + timedelta(minutes=int(self.owner.settings.strategy_profile_activation_min_active_minutes))
+            ).isoformat()
 
-        if optimization_report is not None and float(optimization_report.score_delta_vs_active or 0.0) < float(
+        if (
+            not fast_track_applied
+            and optimization_report is not None
+            and float(optimization_report.score_delta_vs_active or 0.0) < float(
             self.owner.settings.strategy_profile_activation_min_score_delta
+            )
         ):
             blocked_reasons.append("strategy_profile_score_delta_below_threshold")
         blocked_reasons = self.owner._dedupe_items(blocked_reasons)
+        transition_class = self.owner._transition_class(
+            target=revision,
+            transition_risk_direction=transition,
+            fast_track=fast_track,
+        )
+        gating_state = {
+            "confidence_floor": confidence_floor,
+            "next_eligible_switch_at": next_eligible_switch_at,
+            "remaining_closed_trades": max(
+                int(evidence.get("min_closed_trades", 0)) - int(evidence.get("closed_trades", 0)),
+                0,
+            ),
+            "remaining_replay_validations": max(
+                int(evidence.get("min_replay_validations", 0)) - int(evidence.get("replay_validations", 0)),
+                0,
+            ),
+            "remaining_consecutive_wins": max(
+                int(self.owner.settings.strategy_profile_activation_required_consecutive_wins)
+                - consecutive_candidate_wins,
+                0,
+            ),
+            "reconciliation_clean": reconciliation_clean_from_safety_state(safety_state),
+            "fast_track_reasons": list(fast_track.get("reasons") or []),
+            "fast_track_bypass_gates": list(fast_track.get("bypass_gates") or []),
+        }
         return {
             "auto_apply_allowed": not blocked_reasons,
             "blocked_reasons": blocked_reasons,
@@ -570,10 +647,22 @@ class StrategyProfileActivationFacade:
                 for item in blocked_reasons
             ),
             "transition_risk_direction": transition,
+            "transition_class": transition_class,
             "candidate_profile_id": recommendation.recommended_profile_id,
             "candidate_source": recommendation.selection_source or "winner_engine",
             "activation_decision_source": "activation_gate",
             "consecutive_candidate_wins": consecutive_candidate_wins,
+            "fast_track_eligible": bool(fast_track.get("eligible")),
+            "fast_track_applied": fast_track_applied and not blocked_reasons,
+            "fast_track_state": fast_track,
+            "gating_state": gating_state,
+            "operator_summary": self.owner._selection_operator_summary(
+                candidate_profile_id=recommendation.recommended_profile_id,
+                transition_class=transition_class,
+                blocked_reasons=blocked_reasons,
+                fast_track=fast_track,
+                evidence=evidence,
+            ),
             "ai_preferred_profile_id": recommendation.ai_advice.preferred_profile_id if recommendation.ai_advice else None,
             "ai_agreement_with_candidate": (
                 recommendation.ai_advice.agreement_with_candidate if recommendation.ai_advice else True

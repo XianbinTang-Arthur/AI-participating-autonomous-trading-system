@@ -10,10 +10,14 @@ from aats.bootstrap.settings import AATSSettings
 from aats.schemas.common import utc_now
 from aats.schemas.exchange import (
     ExchangeAccountSnapshot,
+    ExchangeAccountConfiguration,
+    ExchangeAccountRiskSnapshot,
     ExchangeBalance,
+    ExchangeFeeSchedule,
     ExchangeFill,
     ExchangeOpenOrder,
     ExchangePosition,
+    ExchangeSystemStatusItem,
     InstrumentMetadata,
 )
 from aats.services.execution_engine.okx_private_websocket import OKXPrivateWebSocketClient
@@ -50,6 +54,7 @@ class OKXAccountService:
         self._latest_ws_update_ts: datetime | None = None
         self._latest_recent_bills: list[dict[str, Any]] = []
         self._last_bills_error: str | None = None
+        self._aux_payload_cache: dict[str, tuple[datetime, dict[str, Any]]] = {}
 
     async def refresh(self, *, force: bool = False) -> ExchangeAccountSnapshot | None:
         if not self.settings.account_read_enabled or self.settings.account_backend != "okx":
@@ -65,57 +70,86 @@ class OKXAccountService:
                     return self._latest_snapshot
 
             try:
-                balance_payload = await self.client.get_balance()
-                instruments_payload = await self.client.get_instruments()
-                instruments = self._parse_instruments(instruments_payload)
-                instrument_map = {instrument.symbol: instrument for instrument in instruments}
                 tracked_symbols = self._tracked_symbols()
-                open_orders_payloads = [
-                    await self.client.get_open_orders(symbol=symbol)
-                    for symbol in tracked_symbols
-                ]
-                fills_payloads = [
-                    await self.client.get_fills(
-                        symbol=symbol,
-                        limit=self.settings.okx_fill_fetch_limit,
-                    )
-                    for symbol in tracked_symbols
-                ]
-                account_config_payload = await self.client.get_account_config()
-                trade_fee_payload = await self._optional_client_call(
-                    "get_trade_fee",
-                    symbol=self.settings.default_symbol,
-                    underlying=(
-                        self._fee_underlying(self.settings.default_symbol, instrument_map=instrument_map)
-                        if self.settings.trading_product_type == "derivatives"
-                        else None
-                    ),
-                    instrument_family=(
-                        self._fee_instrument_family(
-                            self.settings.default_symbol,
-                            instrument_map=instrument_map,
-                        )
-                        if self.settings.trading_product_type == "derivatives"
-                        else None
+                balance_payload, instruments_payload = await asyncio.gather(
+                    self.client.get_balance(),
+                    self._cached_aux_payload(
+                        "instruments",
+                        refresh_interval_seconds=self.settings.okx_instruments_refresh_interval_seconds,
+                        fetcher=self.client.get_instruments,
                     ),
                 )
-                account_risk_payload = await self._optional_client_call("get_account_position_risk")
-                system_status_payload = await self._optional_client_call("get_system_status")
-                bills_payload = await self._optional_client_call(
-                    "get_bills_details",
-                    limit=self.settings.okx_bills_fetch_limit,
+                instruments = self._parse_instruments(instruments_payload)
+                instrument_map = {instrument.symbol: instrument for instrument in instruments}
+                open_orders_payloads, fills_payloads, positions_payload = await asyncio.gather(
+                    asyncio.gather(*[
+                        self.client.get_open_orders(symbol=symbol)
+                        for symbol in tracked_symbols
+                    ]),
+                    asyncio.gather(*[
+                        self.client.get_fills(
+                            symbol=symbol,
+                            limit=self.settings.okx_fill_fetch_limit,
+                        )
+                        for symbol in tracked_symbols
+                    ]),
+                    self._positions_payload(),
+                )
+                account_config_payload, trade_fee_payload, account_risk_payload, system_status_payload, bills_payload = await asyncio.gather(
+                    self._cached_aux_payload_optional(
+                        "account_config",
+                        refresh_interval_seconds=self.settings.okx_account_config_refresh_interval_seconds,
+                        fetcher=self.client.get_account_config,
+                        fallback=self._raw_snapshot_value("account_config"),
+                    ),
+                    self._cached_aux_payload_optional(
+                        "trade_fee",
+                        refresh_interval_seconds=self.settings.okx_trade_fee_refresh_interval_seconds,
+                        fetcher=lambda: self._optional_client_call(
+                            "get_trade_fee",
+                            symbol=self.settings.default_symbol,
+                            underlying=(
+                                self._fee_underlying(self.settings.default_symbol, instrument_map=instrument_map)
+                                if self.settings.trading_product_type == "derivatives"
+                                else None
+                            ),
+                            instrument_family=(
+                                self._fee_instrument_family(
+                                    self.settings.default_symbol,
+                                    instrument_map=instrument_map,
+                                )
+                                if self.settings.trading_product_type == "derivatives"
+                                else None
+                            ),
+                        ),
+                        fallback=self._raw_snapshot_value("trade_fee", default={"code": "0", "data": []}),
+                    ),
+                    self._cached_aux_payload_optional(
+                        "account_position_risk",
+                        refresh_interval_seconds=self.settings.okx_account_position_risk_refresh_interval_seconds,
+                        fetcher=lambda: self._optional_client_call("get_account_position_risk"),
+                        fallback=self._raw_snapshot_value("account_position_risk", default={"code": "0", "data": []}),
+                    ),
+                    self._cached_aux_payload_optional(
+                        "system_status",
+                        refresh_interval_seconds=self.settings.okx_system_status_refresh_interval_seconds,
+                        fetcher=lambda: self._optional_client_call("get_system_status"),
+                        fallback=self._raw_snapshot_value("system_status", default={"code": "0", "data": []}),
+                    ),
+                    self._cached_aux_payload_optional(
+                        "recent_bills",
+                        refresh_interval_seconds=self.settings.okx_bills_refresh_interval_seconds,
+                        fetcher=lambda: self._optional_client_call(
+                            "get_bills_details",
+                            limit=self.settings.okx_bills_fetch_limit,
+                        ),
+                        fallback=self._raw_snapshot_value("recent_bills", default={"code": "0", "data": []}),
+                    ),
                 )
                 self._latest_recent_bills = [
                     dict(row) for row in bills_payload.get("data", []) if isinstance(row, dict)
                 ]
                 self._last_bills_error = None
-                if self.settings.trading_product_type == "derivatives":
-                    positions_payload = await self.client.get_positions()
-                else:
-                    # OKX spot accounts expose holdings through balances. The positions
-                    # endpoint is not consistently available for spot and can return 400s,
-                    # which would otherwise spam the refresh loop logs.
-                    positions_payload = {"data": []}
 
                 snapshot = ExchangeAccountSnapshot(
                     account_source="okx",
@@ -137,9 +171,13 @@ class OKXAccountService:
                     instruments=instruments,
                     account_mode=self._parse_account_mode(account_config_payload),
                     position_mode=self._parse_position_mode(account_config_payload),
+                    account_configuration=self._parse_account_configuration(account_config_payload),
                     fee_rates=self._parse_fee_rates(trade_fee_payload),
+                    fee_schedule=self._parse_fee_schedule(trade_fee_payload),
                     account_risk=self._first_data_row(account_risk_payload),
+                    risk_snapshot=self._parse_account_risk_snapshot(account_risk_payload),
                     system_status=self._parse_system_status(system_status_payload),
+                    system_status_items=self._parse_system_status_items(system_status_payload),
                     raw={
                         "balance": balance_payload,
                         "positions": positions_payload,
@@ -198,6 +236,60 @@ class OKXAccountService:
                 if self._latest_snapshot is None:
                     raise
                 return self._latest_snapshot
+
+    async def _positions_payload(self) -> dict[str, Any]:
+        if self.settings.trading_product_type != "derivatives":
+            # OKX spot accounts expose holdings through balances. The positions
+            # endpoint is not consistently available for spot and can return 400s,
+            # which would otherwise spam the refresh loop logs.
+            return {"data": []}
+        return await self.client.get_positions()
+
+    async def _cached_aux_payload(
+        self,
+        cache_key: str,
+        *,
+        refresh_interval_seconds: float,
+        fetcher,
+    ) -> dict[str, Any]:
+        cached = self._aux_payload_cache.get(cache_key)
+        if cached is not None:
+            fetched_at, payload = cached
+            if (utc_now() - fetched_at).total_seconds() < refresh_interval_seconds:
+                return payload
+        payload = await fetcher()
+        self._aux_payload_cache[cache_key] = (utc_now(), payload)
+        return payload
+
+    async def _cached_aux_payload_optional(
+        self,
+        cache_key: str,
+        *,
+        refresh_interval_seconds: float,
+        fetcher,
+        fallback: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        try:
+            return await self._cached_aux_payload(
+                cache_key,
+                refresh_interval_seconds=refresh_interval_seconds,
+                fetcher=fetcher,
+            )
+        except Exception:
+            cached = self._aux_payload_cache.get(cache_key)
+            if cached is not None:
+                return cached[1]
+            if fallback is not None:
+                return fallback
+            raise
+
+    def _raw_snapshot_value(self, key: str, *, default: dict[str, Any] | None = None) -> dict[str, Any]:
+        if self._latest_snapshot is None:
+            return default or {"code": "0", "data": []}
+        raw = self._latest_snapshot.raw.get(key)
+        if isinstance(raw, dict):
+            return raw
+        return default or {"code": "0", "data": []}
 
     def latest_snapshot(self) -> ExchangeAccountSnapshot | None:
         return self._latest_snapshot
@@ -465,6 +557,18 @@ class OKXAccountService:
                 return instrument
         return None
 
+    def account_configuration(self) -> ExchangeAccountConfiguration | None:
+        snapshot = self._latest_snapshot
+        return None if snapshot is None else snapshot.account_configuration
+
+    def fee_schedule(self) -> ExchangeFeeSchedule | None:
+        snapshot = self._latest_snapshot
+        return None if snapshot is None else snapshot.fee_schedule
+
+    def risk_snapshot(self) -> ExchangeAccountRiskSnapshot | None:
+        snapshot = self._latest_snapshot
+        return None if snapshot is None else snapshot.risk_snapshot
+
     def _fee_underlying(self, symbol: str, *, instrument_map: dict[str, InstrumentMetadata]) -> str | None:
         instrument = instrument_map.get(symbol)
         if instrument is not None:
@@ -522,7 +626,9 @@ class OKXAccountService:
         if snapshot is not None and self.settings.okx_system_status_gate_enabled:
             blockers.extend(self._system_status_blockers(snapshot))
         blockers = list(dict.fromkeys(blockers))
-        fee_rates = snapshot.fee_rates if snapshot is not None else {}
+        fee_schedule = snapshot.fee_schedule if snapshot is not None else None
+        account_configuration = snapshot.account_configuration if snapshot is not None else None
+        risk_snapshot = snapshot.risk_snapshot if snapshot is not None else None
         private_ws_status = self.private_ws_client.status() if self.private_ws_client is not None else {}
         return {
             "backend": "okx" if self.settings.account_backend == "okx" else "disabled",
@@ -537,10 +643,20 @@ class OKXAccountService:
             "blockers": blockers,
             "account_mode": None if snapshot is None else snapshot.account_mode,
             "position_mode": None if snapshot is None else snapshot.position_mode,
-            "maker_fee_rate": fee_rates.get("maker"),
-            "taker_fee_rate": fee_rates.get("taker"),
-            "fee_rates_source": fee_rates.get("source"),
+            "account_configuration": (
+                account_configuration.model_dump(mode="json") if account_configuration is not None else None
+            ),
+            "risk_snapshot": risk_snapshot.model_dump(mode="json") if risk_snapshot is not None else None,
+            "maker_fee_rate": fee_schedule.maker if fee_schedule is not None else None,
+            "taker_fee_rate": fee_schedule.taker if fee_schedule is not None else None,
+            "fee_rates_source": fee_schedule.source if fee_schedule is not None else None,
+            "fee_schedule": fee_schedule.model_dump(mode="json") if fee_schedule is not None else None,
             "system_status_ok": not self._system_status_blockers(snapshot) if snapshot is not None else False,
+            "system_status_items": (
+                [item.model_dump(mode="json") for item in snapshot.system_status_items]
+                if snapshot is not None
+                else []
+            ),
             "private_ws_connected": bool(private_ws_status.get("connected", False)),
             "private_ws_last_message_ts": private_ws_status.get("last_message_ts"),
             "private_ws_last_error": private_ws_status.get("last_error"),
@@ -566,7 +682,7 @@ class OKXAccountService:
         snapshot = self._latest_snapshot
         if snapshot is None:
             return None
-        taker = snapshot.fee_rates.get("taker")
+        taker = snapshot.fee_schedule.taker if snapshot.fee_schedule is not None else snapshot.fee_rates.get("taker")
         if taker in {None, ""}:
             return None
         return abs(to_decimal(taker)) * Decimal("10000")
@@ -576,7 +692,7 @@ class OKXAccountService:
         snapshot = self._latest_snapshot
         if snapshot is None:
             return None
-        maker = snapshot.fee_rates.get("maker")
+        maker = snapshot.fee_schedule.maker if snapshot.fee_schedule is not None else snapshot.fee_rates.get("maker")
         if maker in {None, ""}:
             return None
         return abs(to_decimal(maker)) * Decimal("10000")
@@ -681,6 +797,42 @@ class OKXAccountService:
                     ),
                     "mark_price": item.mark_price if item.mark_price is not None else existing.mark_price,
                     "notional_usd": item.notional_usd if item.notional_usd is not None else existing.notional_usd,
+                    "margin_mode": item.margin_mode if item.margin_mode is not None else existing.margin_mode,
+                    "margin_currency": (
+                        item.margin_currency if item.margin_currency is not None else existing.margin_currency
+                    ),
+                    "leverage": item.leverage if item.leverage is not None else existing.leverage,
+                    "margin_allocated": (
+                        item.margin_allocated
+                        if item.margin_allocated is not None
+                        else existing.margin_allocated
+                    ),
+                    "maintenance_margin": (
+                        item.maintenance_margin
+                        if item.maintenance_margin is not None
+                        else existing.maintenance_margin
+                    ),
+                    "margin_ratio": item.margin_ratio if item.margin_ratio is not None else existing.margin_ratio,
+                    "liquidation_price": (
+                        item.liquidation_price
+                        if item.liquidation_price is not None
+                        else existing.liquidation_price
+                    ),
+                    "unrealized_pnl": (
+                        item.unrealized_pnl
+                        if item.unrealized_pnl is not None
+                        else existing.unrealized_pnl
+                    ),
+                    "instrument_family": (
+                        item.instrument_family
+                        if item.instrument_family is not None
+                        else existing.instrument_family
+                    ),
+                    "settle_currency": (
+                        item.settle_currency
+                        if item.settle_currency is not None
+                        else existing.settle_currency
+                    ),
                 }
             )
         return list(merged.values())
@@ -842,6 +994,7 @@ class OKXAccountService:
         positions: list[ExchangePosition] = []
         for row in payload.get("data", []):
             symbol = str(row.get("instId"))
+            instrument = instrument_map.get(symbol)
             positions.append(
                 ExchangePosition(
                     instrument_id=symbol,
@@ -857,6 +1010,18 @@ class OKXAccountService:
                     mark_price=(to_decimal(row.get("markPx")) if row.get("markPx") not in {None, ""} else None),
                     notional_usd=(to_decimal(row.get("notionalUsd")) if row.get("notionalUsd") not in {None, ""} else None),
                     side=str(row.get("posSide", "net")),
+                    margin_mode=OKXAccountService._text_value(row, "mgnMode"),
+                    margin_currency=OKXAccountService._text_value(row, "ccy") or (
+                        None if instrument is None else instrument.settle_currency
+                    ),
+                    leverage=OKXAccountService._decimal_value(row, "lever"),
+                    margin_allocated=OKXAccountService._decimal_value(row, "margin", "imr"),
+                    maintenance_margin=OKXAccountService._decimal_value(row, "mmr"),
+                    margin_ratio=OKXAccountService._decimal_value(row, "mgnRatio"),
+                    liquidation_price=OKXAccountService._decimal_value(row, "liqPx"),
+                    unrealized_pnl=OKXAccountService._decimal_value(row, "upl"),
+                    instrument_family=None if instrument is None else instrument.instrument_family,
+                    settle_currency=None if instrument is None else instrument.settle_currency,
                 )
             )
         return positions
@@ -953,6 +1118,16 @@ class OKXAccountService:
                     tick_size=to_decimal(row.get("tickSz", "0.00000001")),
                     min_size=to_decimal(row.get("minSz", row.get("lotSz", "0"))),
                     contract_value=to_decimal(contract_value_raw if contract_value_raw not in {None, ""} else "1"),
+                    instrument_type=OKXAccountService._text_value(row, "instType"),
+                    instrument_family=OKXAccountService._text_value(row, "instFamily"),
+                    underlying=OKXAccountService._text_value(row, "uly"),
+                    settle_currency=OKXAccountService._text_value(row, "settleCcy"),
+                    contract_value_currency=OKXAccountService._text_value(row, "ctValCcy"),
+                    max_leverage=OKXAccountService._decimal_value(row, "lever"),
+                    max_market_size=OKXAccountService._decimal_value(row, "maxMktSz"),
+                    max_limit_size=OKXAccountService._decimal_value(row, "maxLmtSz"),
+                    list_ts=OKXAccountService._timestamp_from_ms_optional(row.get("listTime")),
+                    expiry_ts=OKXAccountService._timestamp_from_ms_optional(row.get("expTime")),
                     state=str(row.get("state", "")),
                     raw=dict(row),
                 )
@@ -1008,18 +1183,35 @@ class OKXAccountService:
 
     @staticmethod
     def _parse_account_mode(payload: dict[str, Any]) -> str | None:
-        data = payload.get("data", [])
-        if not data:
+        configuration = OKXAccountService._parse_account_configuration(payload)
+        if configuration is None:
             return None
-        return str(data[0].get("acctLv")) if data[0].get("acctLv") is not None else None
+        return configuration.account_level_code
 
     @staticmethod
     def _parse_position_mode(payload: dict[str, Any]) -> str | None:
-        data = payload.get("data", [])
-        if not data:
+        configuration = OKXAccountService._parse_account_configuration(payload)
+        if configuration is None:
             return None
-        value = data[0].get("posMode")
-        return str(value) if value not in {None, ""} else None
+        return configuration.position_mode
+
+    @staticmethod
+    def _parse_account_configuration(payload: dict[str, Any]) -> ExchangeAccountConfiguration | None:
+        row = OKXAccountService._first_data_row(payload)
+        if not row:
+            return None
+        account_level_code = OKXAccountService._text_value(row, "acctLv")
+        position_mode = OKXAccountService._text_value(row, "posMode")
+        return ExchangeAccountConfiguration(
+            account_level_code=account_level_code,
+            account_level_label=OKXAccountService._account_level_label(account_level_code),
+            position_mode=position_mode,
+            position_mode_label=OKXAccountService._position_mode_label(position_mode),
+            auto_loan_enabled=OKXAccountService._boolish(row.get("autoLoan")),
+            greeks_type=OKXAccountService._text_value(row, "greeksType"),
+            isolated_margin_mode=OKXAccountService._text_value(row, "ctIsoMode", "mgnIsoMode"),
+            raw=row,
+        )
 
     @staticmethod
     def _first_data_row(payload: dict[str, Any]) -> dict[str, Any]:
@@ -1040,11 +1232,68 @@ class OKXAccountService:
         }
 
     @staticmethod
+    def _parse_fee_schedule(payload: dict[str, Any]) -> ExchangeFeeSchedule | None:
+        row = OKXAccountService._first_data_row(payload)
+        if not row:
+            return None
+        return ExchangeFeeSchedule(
+            maker=OKXAccountService._decimal_value(row, "maker"),
+            taker=OKXAccountService._decimal_value(row, "taker"),
+            delivery=OKXAccountService._decimal_value(row, "delivery"),
+            exercise=OKXAccountService._decimal_value(row, "exercise"),
+            source="okx_trade_fee",
+            raw=row,
+        )
+
+    @staticmethod
+    def _parse_account_risk_snapshot(payload: dict[str, Any]) -> ExchangeAccountRiskSnapshot | None:
+        row = OKXAccountService._first_data_row(payload)
+        if not row:
+            return None
+        return ExchangeAccountRiskSnapshot(
+            adjusted_equity=OKXAccountService._decimal_value(row, "adjEq"),
+            total_equity=OKXAccountService._decimal_value(row, "eq", "totalEq"),
+            available_equity=OKXAccountService._decimal_value(row, "availEq", "availBal"),
+            initial_margin_requirement=OKXAccountService._decimal_value(row, "imr"),
+            maintenance_margin_requirement=OKXAccountService._decimal_value(row, "mmr"),
+            margin_ratio=OKXAccountService._decimal_value(row, "mgnRatio"),
+            notional_usd=OKXAccountService._decimal_value(
+                row,
+                "notionalUsd",
+                "notionalUsdForSwap",
+                "notionalUsdForFutures",
+            ),
+            raw=row,
+        )
+
+    @staticmethod
     def _parse_system_status(payload: dict[str, Any]) -> list[dict[str, Any]]:
         rows = payload.get("data", [])
         if not isinstance(rows, list):
             return []
         return [dict(row) for row in rows if isinstance(row, dict)]
+
+    @staticmethod
+    def _parse_system_status_items(payload: dict[str, Any]) -> list[ExchangeSystemStatusItem]:
+        rows = payload.get("data", [])
+        if not isinstance(rows, list):
+            return []
+        items: list[ExchangeSystemStatusItem] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            items.append(
+                ExchangeSystemStatusItem(
+                    state=OKXAccountService._text_value(row, "state") or "",
+                    service_type=OKXAccountService._text_value(row, "serviceType"),
+                    title=OKXAccountService._text_value(row, "title", "serviceName"),
+                    description=OKXAccountService._text_value(row, "description", "msg"),
+                    begin_ts=OKXAccountService._timestamp_from_ms_optional(row.get("begin")),
+                    end_ts=OKXAccountService._timestamp_from_ms_optional(row.get("end")),
+                    raw=dict(row),
+                )
+            )
+        return items
 
     @staticmethod
     def _row_contains_fill(row: dict[str, Any]) -> bool:
@@ -1081,21 +1330,106 @@ class OKXAccountService:
 
     def _account_config_blockers(self, snapshot: ExchangeAccountSnapshot) -> list[str]:
         blockers: list[str] = []
-        if self.settings.trading_product_type == "derivatives" and snapshot.account_mode == "1":
+        account_level_code = (
+            snapshot.account_configuration.account_level_code
+            if snapshot.account_configuration is not None
+            else snapshot.account_mode
+        )
+        position_mode = (
+            snapshot.account_configuration.position_mode
+            if snapshot.account_configuration is not None
+            else snapshot.position_mode
+        )
+        if self.settings.trading_product_type == "derivatives" and account_level_code == "1":
             blockers.append("okx_account_mode_incompatible_with_derivatives")
-        if self.settings.trading_product_type == "derivatives" and snapshot.position_mode in {None, ""}:
+        if self.settings.trading_product_type == "derivatives" and position_mode in {None, ""}:
             blockers.append("okx_position_mode_missing")
+        if self.settings.trading_product_type == "derivatives":
+            blockers.extend(self._position_margin_blockers(snapshot))
         return blockers
+
+    def _position_margin_blockers(self, snapshot: ExchangeAccountSnapshot) -> list[str]:
+        expected_margin_mode = str(self.settings.margin_mode or "").strip().lower()
+        if expected_margin_mode not in {"cross", "isolated"}:
+            return []
+        for position in snapshot.positions:
+            margin_mode = str(getattr(position, "margin_mode", "") or "").strip().lower()
+            if not margin_mode:
+                continue
+            if margin_mode != expected_margin_mode:
+                return ["okx_position_margin_mode_conflicts_with_runtime_margin_mode"]
+        return []
 
     @staticmethod
     def _system_status_blockers(snapshot: ExchangeAccountSnapshot) -> list[str]:
         blockers: list[str] = []
-        for row in snapshot.system_status:
-            state = str(row.get("state") or "").strip().lower()
+        rows = snapshot.system_status_items or [
+            ExchangeSystemStatusItem(state=str(row.get("state") or ""), raw=dict(row))
+            for row in snapshot.system_status
+        ]
+        for row in rows:
+            state = str(row.state or "").strip().lower()
             if state in {"scheduled", "ongoing"}:
                 blockers.append("okx_system_status_incident")
                 break
         return blockers
+
+    @staticmethod
+    def _decimal_value(row: dict[str, Any], *keys: str) -> Decimal | None:
+        for key in keys:
+            value = row.get(key)
+            if value in {None, ""}:
+                continue
+            return to_decimal(value)
+        return None
+
+    @staticmethod
+    def _text_value(row: dict[str, Any], *keys: str) -> str | None:
+        for key in keys:
+            value = row.get(key)
+            if value in {None, ""}:
+                continue
+            return str(value)
+        return None
+
+    @staticmethod
+    def _boolish(value: Any) -> bool | None:
+        if value in {None, ""}:
+            return None
+        text = str(value).strip().lower()
+        if text in {"true", "1", "yes"}:
+            return True
+        if text in {"false", "0", "no"}:
+            return False
+        return None
+
+    @staticmethod
+    def _timestamp_from_ms_optional(value: Any) -> datetime | None:
+        if value in {None, ""}:
+            return None
+        return datetime_from_ms(str(value))
+
+    @staticmethod
+    def _account_level_label(value: str | None) -> str | None:
+        mapping = {
+            "1": "simple",
+            "2": "single_currency_margin",
+            "3": "multi_currency_margin",
+            "4": "portfolio_margin",
+        }
+        if value is None:
+            return None
+        return mapping.get(value, value)
+
+    @staticmethod
+    def _position_mode_label(value: str | None) -> str | None:
+        mapping = {
+            "net_mode": "net",
+            "long_short_mode": "long_short",
+        }
+        if value is None:
+            return None
+        return mapping.get(value, value)
 
 
 def datetime_from_ms(value: str) -> datetime:

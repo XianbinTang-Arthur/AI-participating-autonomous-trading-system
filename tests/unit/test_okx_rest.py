@@ -25,6 +25,20 @@ class _CapturingOKXRESTClient(OKXRESTClient):
 
 
 class TestOKXRESTClient(unittest.IsolatedAsyncioTestCase):
+    async def test_client_handle_reuses_async_client_until_closed(self) -> None:
+        client = OKXRESTClient(settings=AATSSettings.model_validate({}))
+
+        first = await client._client_handle()
+        second = await client._client_handle()
+
+        self.assertIs(first, second)
+
+        await client.aclose()
+
+        third = await client._client_handle()
+        self.assertIsNot(first, third)
+        await client.aclose()
+
     async def test_spot_runtime_uses_spot_inst_type(self) -> None:
         client = _CapturingOKXRESTClient(
             settings=AATSSettings.model_validate({"trading_product_type": "spot"})

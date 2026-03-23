@@ -74,8 +74,11 @@ class ReconciliationRepairService:
             return None
         if not report.balance_diff.get("reconstructed") and not report.position_diff.get("reconstructed_mismatches"):
             return None
+        scoped_fills = fills_for_scope(self.execution_repo, self.runtime_scope)
+        if not scoped_fills:
+            return None
         rebuilt_snapshot = self.reconstruction_service.rebuild_snapshot(
-            fills=fills_for_scope(self.execution_repo, self.runtime_scope),
+            fills=scoped_fills,
             price_provider=self.price_provider,
         ).model_copy(
             update={

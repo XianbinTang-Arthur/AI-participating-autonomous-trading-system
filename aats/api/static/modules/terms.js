@@ -5,6 +5,11 @@
   none: "暂无",
   ok: "正常",
   healthy: "运行正常",
+  warning: "风险偏高",
+  critical: "高风险",
+  pass: "通过",
+  fail: "未通过",
+  not_applicable: "不适用",
   degraded: "已降级",
   blocked: "阻断中",
   halted: "已暂停",
@@ -29,6 +34,11 @@
   manually_halted: "已暂停，待恢复",
   resume_blocked: "恢复受限",
   normal_operation: "正常运行",
+  only_reduce: "仅允许减仓",
+  derivatives_only_reduce: "仅允许减仓",
+  symbol_window: "按持仓时间窗归因",
+  no_matching_position_window: "没有匹配的持仓时间窗",
+  ambiguous_symbol_overlap: "同一时间存在多条持仓，资金费无法唯一归因",
   rebaseline_completed: "基线确认完成",
   created: "已创建",
   submitting: "正在报单",
@@ -45,6 +55,8 @@
   paper_local: "本地模拟",
   exchange_simulated_spot: "OKX 模拟盘现货",
   exchange_simulated_derivatives: "OKX 模拟盘合约",
+  exchange_live_spot: "OKX 实盘现货",
+  exchange_live_derivatives: "OKX 实盘合约",
   exchange_live_reserved: "预留真实资金线路",
   guarded_live: "守护模式",
   derivatives: "合约",
@@ -82,6 +94,10 @@
   "trend normal": "趋势标准",
   trend_strict: "趋势严格",
   "trend strict": "趋势严格",
+  aggressive_optimization: "激进优化切档",
+  same_risk_optimization: "同风险优化切档",
+  conservative_rebalance: "保守收缩切档",
+  emergency_safety: "紧急安全切档",
   breakout: "突破",
   range: "震荡",
   low_volatility: "波动较低",
@@ -128,6 +144,9 @@
   no_data: "暂无数据",
   conservative: "保守",
   normal: "常规",
+  contracted: "已收缩",
+  floor_contracted: "已收缩到下限",
+  safe_mode: "安全模式",
   aggressive: "激进",
   session: "浏览器会话",
   api_key: "API 密钥",
@@ -141,6 +160,7 @@
   absent: "暂未提供",
   system: "系统",
   phase1_shadow: "影子兼容层",
+  risk_control: "风险控制",
   yes: "是",
   no: "否",
   baseline_only: "仅按基础策略运行",
@@ -203,6 +223,14 @@
   diagnostic_only: "仅诊断",
   shadow_translation: "执行层 shadow",
   enabled_live: "允许进入实盘执行",
+  guarded_simulated_submit: "守护模拟盘报单",
+  guarded_simulated_submit_derivatives: "守护模拟盘合约报单",
+  guarded_simulated_dry_run: "守护模拟盘演练",
+  guarded_live_submit: "守护实盘报单",
+  guarded_live_submit_derivatives: "守护实盘合约报单",
+  guarded_live_dry_run: "守护实盘演练",
+  guarded_dry_run: "守护演练",
+  guarded_blocked: "已被执行器阻断",
   insufficient_data: "样本仍少，先继续观察",
   caution: "收益转弱，建议谨慎",
   failing: "已触发警戒",
@@ -246,7 +274,72 @@ const ERROR_MAP = {
   insufficient_quote_balance: "可用资金不足，当前不满足开仓或加仓条件。",
   insufficient_base_balance: "可卖数量不足，当前不满足卖出条件。",
   insufficient_initial_margin: "可用保证金不足，当前不满足开仓条件。",
+  only_reduce_required: "当前风控只允许减仓或平仓，不再允许新增暴露。",
+  only_reduce_mode_active: "当前没有可执行的减仓空间，本轮不会继续新增暴露。",
+  derivatives_margin_usage_requires_only_reduce: "预估保证金占用已经偏高，当前只允许继续减仓或平仓。",
+  derivatives_liquidation_gap_requires_only_reduce: "当前最近仓位已经进入强平缓冲区，系统只允许继续减仓或平仓。",
+  derivatives_risk_snapshot_missing_requires_only_reduce: "当前拿不到合约风险快照，系统只允许继续减仓或平仓。",
+  derivatives_margin_buffer_auto_halt: "当前保证金占用已经进入自动停机阈值，系统必须保持暂停。",
+  derivatives_liquidation_proximity_auto_halt: "当前最近仓位距离强平过近，系统已经触发自动停机。",
   max_open_orders_reached: "活动委托数达到上限，暂不继续发单。",
+  max_target_leverage_exceeded: "请求杠杆超过当前运行配置允许的最大杠杆。",
+  liquidation_buffer_breached: "预估保证金占用已经侵蚀到强平缓冲区，系统禁止继续新增暴露。",
+  max_gross_notional_per_symbol_exceeded: "单标的总名义敞口超过上限，不能继续扩大该标的仓位。",
+  max_pending_notional_per_symbol_exceeded: "单标的待成交名义金额超过上限，不能继续追加该标的挂单。",
+  max_total_open_notional_exceeded: "账户总名义敞口超过上限，不能继续新增整体暴露。",
+  max_daily_realized_loss_usdt_exceeded: "当日已实现亏损超过上限，当前只允许减仓或平仓。",
+  risk_budget_multiplier_applied: "风险预算已经自动收缩。",
+  execution_aggressiveness_contracted: "执行侵略性已经自动收缩。",
+  safety_profile_required: "当前安全事件已经明确触发。",
+  runtime_not_safe_to_trade: "当前运行态不适合继续自动扩张。",
+  auto_halt_required: "自动停机条件已经触发。",
+  state_freshness_or_reconciliation_degraded: "行情、账户或对账状态不够新鲜，系统先自动收缩。",
+  projected_margin_usage_near_hard_cap: "预估保证金占用已经接近硬上限。",
+  projected_margin_usage_elevated: "预估保证金占用偏高，系统开始收缩风险预算。",
+  current_margin_usage_near_hard_cap: "当前保证金占用已经接近硬上限。",
+  current_margin_usage_elevated: "当前保证金占用偏高，系统开始收缩风险预算。",
+  liquidation_gap_tight: "最近仓位距离强平过近，系统显著收缩。",
+  liquidation_gap_narrowing: "最近仓位距离强平缓冲正在收窄，系统开始收缩。",
+  derivatives_order_state_unknown_on_exchange: "本地合约委托在交易所侧无法确认当前状态，系统已进入恢复阻断。",
+  derivatives_fill_observed_not_booked: "交易所侧发现了本地未入账的合约成交，系统已进入恢复阻断。",
+  derivatives_position_mode_mismatch: "本地合约订单记录的持仓模式与交易所账户真实配置不一致。",
+  derivatives_pos_side_mismatch: "本地合约订单记录的持仓方向字段与交易所账户模式不一致。",
+  derivatives_exchange_position_without_local_execution_chain: "交易所存在本地执行链无法解释的合约仓位，当前只允许减仓或平仓。",
+  derivatives_local_order_missing_from_exchange_open_order_view: "本地仍记录为活动中的合约委托，在交易所当前挂单视图中却找不到。",
+  derivatives_exchange_order_status_conflicts_with_local_open_state: "本地记录的合约委托状态与交易所返回的真实状态冲突。",
+  derivatives_local_position_mode_differs_from_exchange_account_configuration: "本地订单记录的持仓模式与交易所账户配置不一致。",
+  derivatives_local_pos_side_conflicts_with_exchange_position_mode: "本地订单记录的持仓方向字段与交易所账户模式不一致。",
+  derivatives_exchange_fill_observed_without_local_booking: "交易所发现了本地没有入账的合约成交。",
+  derivatives_exchange_position_not_replayed_locally: "交易所仓位没有被本地执行链正确重放出来。",
+  derivatives_only_reduce_until_position_reconciled: "在仓位来源未厘清前，系统只允许继续减仓或平仓。",
+  derivatives_open_order_state_is_not_confirmed: "当前无法确认部分合约挂单的真实状态。",
+  derivatives_fill_reconciliation_is_incomplete: "当前合约成交链还没有完整收敛。",
+  derivatives_order_semantics_do_not_match_exchange_account_mode: "本地合约订单语义与交易所账户模式不一致。",
+  derivatives_new_open_orders_blocked_until_position_reconciled: "在异常仓位收敛前，系统不会继续新增合约暴露。",
+  local_position_margin_divergence: "本地持仓快照记录的保证金占用与交易所真实仓位保证金不一致。",
+  local_position_margin_profile_divergence: "本地持仓快照记录的全仓/逐仓模式与交易所真实仓位模式不一致。",
+  local_position_margin_differs_from_exchange_position_margin: "本地持仓快照记录的保证金占用、维持保证金或强平价与交易所不一致。",
+  local_position_margin_mode_differs_from_exchange_position_margin_mode: "本地持仓快照记录的全仓/逐仓模式与交易所仓位模式不一致。",
+  exchange_margin_state_differs_from_local_snapshot: "交易所仓位保证金状态和本地快照不一致，需要先核对保证金占用与释放。",
+  cross_isolated_margin_mode_is_not_confirmed: "当前无法确认本地和交易所的全仓/逐仓模式一致，系统不应继续盲目交易。",
+  okx_account_mode_incompatible_with_derivatives: "当前 OKX 账户模式不支持合约自动交易。",
+  okx_position_mode_missing: "当前拿不到 OKX 持仓模式，系统不会盲目继续报单。",
+  okx_position_margin_mode_conflicts_with_runtime_margin_mode: "交易所现有合约仓位的全仓/逐仓模式与当前运行配置不一致。",
+  okx_td_mode_incompatible_with_derivatives: "合约报单必须使用全仓或逐仓模式，不能使用现金模式。",
+  okx_td_mode_margin_mode_mismatch: "本地合约报单的交易模式和保证金模式不一致，系统已阻断本次报单。",
+  okx_position_mode_mismatch: "本地订单记录的持仓模式和 OKX 账户真实持仓模式不一致。",
+  okx_pos_side_missing_for_long_short_mode: "双向持仓模式下必须显式给出多头或空头方向。",
+  okx_pos_side_disallowed_for_net_mode: "净持仓模式下不允许携带显式多空方向字段。",
+  okx_pos_side_mismatch_with_position_intent: "订单方向字段和本地仓位意图不一致，系统已阻断本次报单。",
+  okx_reduce_only_required_by_risk: "当前风控只允许减仓或平仓，这笔单如果发出会新增暴露。",
+  okx_reduce_only_without_reducible_position: "当前没有可减的对应仓位，不能发送 reduce-only 报单。",
+  okx_reduce_only_would_increase_exposure: "这笔 reduce-only 报单会超过可减仓位，继续执行会变成反手开仓。",
+  okx_close_only_requires_reduce_only: "close-only 报单必须同时满足 reduce-only 语义。",
+  okx_close_only_without_reducible_position: "当前没有可平的对应仓位，不能发送 close-only 报单。",
+  okx_close_only_exceeds_reducible_position: "这笔 close-only 报单数量超过可平仓位，继续执行会变成新增暴露。",
+  okx_leverage_exceeds_instrument_limit: "请求杠杆超过交易所该合约的产品限制。",
+  okx_order_size_exceeds_instrument_limit: "请求下单数量超过交易所该合约允许的单笔上限。",
+  okx_order_quantity_below_min_size: "请求下单数量在交易所最小下单量以下，系统已阻断本次报单。",
   operator_rebaseline_required: "当前账实状态需要人工确认并重建基线后，才能继续交易。",
   rebaseline_in_progress: "基线重建进行中，完成前不要恢复交易。",
   phase1_shadow_lagging: "影子兼容层仍有积压，恢复前需要先确认影子同步已经追平。",
@@ -265,6 +358,7 @@ const ERROR_MAP = {
   confirm_and_rebaseline: "确认属实后纳入新基线",
   observe_only: "先观察，不建议立即处理",
   live_submit_disabled: "当前没有开放向交易所正式报单。",
+  okx_simulated_trading_required: "当前 OKX 模拟盘/实盘环境与运行配置不一致。",
   guarded_execution_dry_run: "当前是只演练不报单模式，系统不会真正下单。",
   guarded_live_blocked_by_default: "当前运行策略档位默认禁止真实报单。",
   local_demo_no_exchange_submission: "当前是本地演示模式，不会把委托发到交易所。",
@@ -380,6 +474,8 @@ export function toneForRuntimeState(runtimeState) {
       return "positive";
     case "degraded":
     case "review_required":
+    case "only_reduce":
+    case "derivatives_only_reduce":
       return "warning";
     case "blocked":
     case "halted":
@@ -407,6 +503,7 @@ export function toneForReconciliationSeverity(severity) {
 }
 
 export function tradingStatusLabel(recovery = {}) {
+  if (recovery.recovery_state === "only_reduce" || recovery.only_reduce_required) return "仅允许减仓";
   if (recovery.safe_to_trade) return "可交易";
   if (recovery.halted && recovery.resume_eligible) return "待恢复";
   if (recovery.halted) return "已暂停";
@@ -414,6 +511,7 @@ export function tradingStatusLabel(recovery = {}) {
 }
 
 export function recoveryStatusLabel(recovery = {}) {
+  if (recovery.recovery_state === "only_reduce" || recovery.only_reduce_required) return "仅允许减仓";
   if (recovery.safe_to_trade) return "可交易";
   if (recovery.halted && recovery.resume_eligible) return "待恢复";
   if (recovery.review_required) return "待人工确认";
@@ -451,6 +549,7 @@ export function operationalStatusLabel({
   if ((blockers || []).length > 0) return "已阻断";
   if (reconciliation?.halt_required) return "需先完成对账";
   if (recovery.review_required) return "待人工确认";
+  if (recovery.recovery_state === "only_reduce" || recovery.only_reduce_required) return "仅允许减仓";
   if (recovery.safe_to_trade === false) return "恢复受限";
   return readyLabel;
 }
@@ -481,6 +580,11 @@ export function operationalStatusCopy({
   }
   if (recovery.review_required) {
     return "当前仍需人工确认。请先核对交易所状态与本地记录，再决定是否接受为新基线。";
+  }
+  if (recovery.recovery_state === "only_reduce" || recovery.only_reduce_required) {
+    return recoveryReasonText
+      ? `当前只允许减仓或平仓。${recoveryReasonText}`
+      : "当前只允许减仓或平仓，系统不会继续新增暴露。";
   }
   if (recovery.safe_to_trade === false) {
     return recoveryReasonText

@@ -27,7 +27,7 @@ def parse_args() -> argparse.Namespace:
         "--profile",
         choices=("spot", "derivatives"),
         required=True,
-        help="必填。选择启动时加载的环境模板。",
+        help="必填。选择本地演练时加载的环境模板；实盘请使用 start_api.py。",
     )
     return parser.parse_args()
 

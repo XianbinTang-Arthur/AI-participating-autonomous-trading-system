@@ -48,6 +48,11 @@ STRATEGY_PROFILE_MANAGED_FIELDS: tuple[str, ...] = (
     "strategy_scale_in_confidence_min",
     "strategy_reversal_alpha_min",
     "strategy_reversal_confidence_min",
+    "strategy_min_hold_seconds",
+    "strategy_post_close_cooldown_seconds",
+    "strategy_low_edge_threshold_bps",
+    "strategy_low_edge_streak_limit",
+    "strategy_low_edge_cooldown_seconds",
     "strategy_transient_close_retry_cooldown_seconds",
 )
 
@@ -73,6 +78,11 @@ class StrategyProfilePayload(SchemaBase):
     strategy_scale_in_confidence_min: float
     strategy_reversal_alpha_min: float
     strategy_reversal_confidence_min: float
+    strategy_min_hold_seconds: float
+    strategy_post_close_cooldown_seconds: float
+    strategy_low_edge_threshold_bps: float
+    strategy_low_edge_streak_limit: int
+    strategy_low_edge_cooldown_seconds: float
     strategy_transient_close_retry_cooldown_seconds: float
 
 
@@ -338,6 +348,11 @@ def summarize_strategy_profile_payload(payload: StrategyProfilePayload | dict[st
         "strategy_entry_alpha_min": raw.get("strategy_entry_alpha_min"),
         "strategy_scale_in_alpha_min": raw.get("strategy_scale_in_alpha_min"),
         "strategy_reversal_alpha_min": raw.get("strategy_reversal_alpha_min"),
+        "strategy_min_hold_seconds": raw.get("strategy_min_hold_seconds"),
+        "strategy_post_close_cooldown_seconds": raw.get("strategy_post_close_cooldown_seconds"),
+        "strategy_low_edge_threshold_bps": raw.get("strategy_low_edge_threshold_bps"),
+        "strategy_low_edge_streak_limit": raw.get("strategy_low_edge_streak_limit"),
+        "strategy_low_edge_cooldown_seconds": raw.get("strategy_low_edge_cooldown_seconds"),
     }
 
 
@@ -372,7 +387,12 @@ def strategy_profile_axes_from_payload(payload: StrategyProfilePayload | dict[st
         float(raw.get("strategy_min_net_edge_bps", 0.0) or 0.0),
         float(raw.get("decision_min_price_move_bps", 0.0) or 0.0),
     )
-    cooldown_signal = float(raw.get("strategy_transient_close_retry_cooldown_seconds", 0.0) or 0.0)
+    cooldown_signal = max(
+        float(raw.get("strategy_transient_close_retry_cooldown_seconds", 0.0) or 0.0),
+        float(raw.get("strategy_post_close_cooldown_seconds", 0.0) or 0.0),
+        (float(raw.get("strategy_min_hold_seconds", 0.0) or 0.0) / 8.0),
+        float(raw.get("strategy_low_edge_cooldown_seconds", 0.0) or 0.0) / 12.0,
+    )
     return StrategyProfileAxes(
         frequency=level(frequency_signal, low=1.5, medium=2.5, high=4.0),
         entry_threshold=level(float(raw.get("strategy_entry_alpha_min", 0.0) or 0.0), low=0.16, medium=0.22, high=0.28),

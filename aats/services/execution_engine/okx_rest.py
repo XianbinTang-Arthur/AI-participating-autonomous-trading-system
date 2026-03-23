@@ -54,6 +54,7 @@ class OKXRequestError(RuntimeError):
 class OKXRESTClient:
     def __init__(self, *, settings: AATSSettings) -> None:
         self.settings = settings
+        self._client: httpx.AsyncClient | None = None
 
     def _inst_type(self) -> str:
         return "SWAP" if self.settings.trading_product_type == "derivatives" else "SPOT"
@@ -75,16 +76,13 @@ class OKXRESTClient:
         if self.settings.okx_simulated_trading:
             headers["x-simulated-trading"] = "1"
 
-        async with httpx.AsyncClient(
-            base_url=self.settings.okx_rest_url,
-            timeout=self.settings.okx_timeout_seconds,
-        ) as client:
-            response = await client.request(
-                method=method.upper(),
-                url=request_path,
-                headers=headers,
-                content=body_text if body_text else None,
-            )
+        client = await self._client_handle()
+        response = await client.request(
+            method=method.upper(),
+            url=request_path,
+            headers=headers,
+            content=body_text if body_text else None,
+        )
         payload = self._parse_json_payload(response)
         if response.status_code >= 400:
             row_code, row_message = self._extract_row_error(payload)
@@ -109,6 +107,20 @@ class OKXRESTClient:
                 payload=payload,
             )
         return payload
+
+    async def _client_handle(self) -> httpx.AsyncClient:
+        if self._client is None:
+            self._client = httpx.AsyncClient(
+                base_url=self.settings.okx_rest_url,
+                timeout=self.settings.okx_timeout_seconds,
+                limits=httpx.Limits(max_keepalive_connections=20, max_connections=100),
+            )
+        return self._client
+
+    async def aclose(self) -> None:
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
 
     @staticmethod
     def _serialize_json_body(json_body: Mapping[str, Any]) -> str:

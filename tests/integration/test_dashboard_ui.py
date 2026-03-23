@@ -35,6 +35,7 @@ class TestDashboardUI(unittest.TestCase):
                 "ai_analysis_js": client.get("/ui/modules/views/ai-analysis-view.js"),
                 "ai_config_js": client.get("/ui/modules/views/ai-config-view.js"),
                 "strategy_js": client.get("/ui/modules/views/strategy-view.js"),
+                "risk_js": client.get("/ui/modules/views/risk-view.js"),
             }
             login = client.get("/login", follow_redirects=False)
 
@@ -57,17 +58,30 @@ class TestDashboardUI(unittest.TestCase):
         js_text = responses["js"].text
         self.assertIn("renderAIAnalysisView", js_text)
         self.assertIn('aiAnalysis: "/ui/ai-analysis"', js_text)
+        self.assertIn("refreshBackgroundPanels", js_text)
+        self.assertIn("backgroundGenerations", js_text)
+        self.assertIn("void refreshBackgroundPanels(refreshingView, backgroundGeneration)", js_text)
+        self.assertIn('if ((state.backgroundGenerations[view] || 0) !== generation) return;', js_text)
         self.assertNotIn('ai: "/ui/ai"', js_text)
 
         store_text = responses["store_js"].text
         self.assertIn('["profileControlSummary", "/reports/profile-control-summary"]', store_text)
+        self.assertIn('["trialReviewSummary", "/reports/trial-review-summary?segment_limit=100&window_days=7&period_count=4"]', store_text)
         self.assertIn("aiAnalysis", store_text)
+        self.assertIn("viewBackgroundSpecs", store_text)
+        self.assertIn('["aiRecent", `/ai/recent?limit=${limits.recentAIAssessments}&offset=0`]', store_text)
+        self.assertIn('["aiShadowRecent", `/ai/shadow/recent?limit=${limits.recentAIShadowDecisions}&offset=0`]', store_text)
+        self.assertIn('["aiShadowEvaluations", `/ai/shadow/evaluations?limit=${limits.recentAIShadowEvaluations}&offset=0`]', store_text)
+        self.assertIn('["guardedLivePreflight", "/system/guarded-live-preflight"]', store_text)
+        self.assertIn('["guardedLiveRunPacket", "/reports/guarded-live-run-packet"]', store_text)
         self.assertNotIn('  ai: [', store_text)
 
         ai_analysis_text = responses["ai_analysis_js"].text
         self.assertIn("renderAISections", ai_analysis_text)
         self.assertIn("renderAIAnalysisSectionCards", ai_analysis_text)
         self.assertIn("档位控制证据", ai_analysis_text)
+        self.assertIn("风险预算乘数", ai_analysis_text)
+        self.assertIn("自动切档闸门", ai_analysis_text)
         self.assertNotIn("前往 AI 工作台", ai_analysis_text)
         self.assertNotIn("前往 AI 配置", ai_analysis_text)
 
@@ -76,6 +90,8 @@ class TestDashboardUI(unittest.TestCase):
         self.assertIn("自动换档控制", ai_config_text)
         self.assertIn("策略档位切换", ai_config_text)
         self.assertIn("运行参数概览", ai_config_text)
+        self.assertIn("紧急安全切档", ai_config_text)
+        self.assertIn("持有与冷却", ai_config_text)
         self.assertIn("策略层 shadow", ai_config_text)
         self.assertIn("执行层 shadow", ai_config_text)
         self.assertIn("恢复自动切档", ai_config_text)
@@ -91,6 +107,12 @@ class TestDashboardUI(unittest.TestCase):
         self.assertNotIn("记为暂停试盘并复盘", strategy_text)
         self.assertNotIn("记为允许进入放量评审", strategy_text)
         self.assertNotIn("记录本次周复盘", strategy_text)
+
+        risk_text = responses["risk_js"].text
+        self.assertIn("启盘前自检", risk_text)
+        self.assertIn("小资金运行包", risk_text)
+        self.assertIn("guardedLivePreflight", risk_text)
+        self.assertIn("guardedLiveRunPacket", risk_text)
 
     def test_dashboard_redirects_to_login_when_auth_is_enabled(self) -> None:
         settings = AATSSettings.model_validate(
@@ -173,12 +195,32 @@ const analysisHtml = renderAIAnalysisView({
   aiShadowRecent: { shadow_decisions: [] },
   aiShadowEvaluations: { evaluations: [] },
   profileControlSummary: {
-    control_summary: { safety_profile_required: false, evidence: { cold_start_active: true, closed_trades: 1, min_closed_trades: 6, replay_validations: 0, min_replay_validations: 5 } },
+    control_summary: {
+      safety_profile_required: false,
+      evidence: { cold_start_active: true, closed_trades: 1, min_closed_trades: 6, replay_validations: 0, min_replay_validations: 5 },
+      adaptive_controls: {
+        risk_budget: { multiplier: 0.7, status: 'contracted', reasons: ['execution_errors_elevated'] },
+        execution_aggressiveness: { multiplier: 0.55, status: 'safe_mode', reasons: ['execution_errors_elevated', 'trial_guard_breached'] },
+      },
+    },
     activation: { active_profile_id: 'trend_normal' },
     active_revision: { profile_id: 'trend_normal', profile_label: '趋势标准' },
     latest_selection_decision: {
       blocked_reasons: ['strategy_profile_cold_start_lock_active'],
       candidate_profile_id: 'trend_strict',
+      transition_class: 'conservative_rebalance',
+      operator_summary: '当前候选档位 trend_strict 属于更保守切换，系统准备在门槛满足后自动收缩。',
+      fast_track_eligible: true,
+      fast_track_applied: false,
+      gating_state: {
+        confidence_floor: 0.75,
+        remaining_closed_trades: 5,
+        remaining_replay_validations: 5,
+        remaining_consecutive_wins: 2,
+        fast_track_reasons: ['execution_errors_elevated'],
+        fast_track_bypass_gates: ['strategy_profile_cold_start_lock_active'],
+        reconciliation_clean: true,
+      },
       selection_reason_summary: 'raw backend summary should not appear',
     },
     latest_optimization_report: { recommended_profile_id: 'trend_strict', score_delta_vs_active: 1.2, notes: ['replay_history_neutralized'] },
@@ -224,8 +266,31 @@ const configHtml = renderAIConfigView({
     strategy_profile: {
       activation: { active_profile_id: 'trend_normal' },
       active_revision: { profile_id: 'trend_normal', profile_label: '趋势标准' },
-      latest_selection_decision: { blocked_reasons: ['strategy_profile_auto_switch_frozen'] },
-      latest_optimization_report: { recommended_profile_id: 'trend_strict', score_delta_vs_active: 0.6, notes: ['replay_history_neutralized'] },
+      latest_selection_decision: {
+        blocked_reasons: ['strategy_profile_auto_switch_frozen'],
+        transition_class: 'same_risk_optimization',
+        operator_summary: '当前候选档位 trend_strict 已产生，但仍有阻断条件未解除。',
+        fast_track_eligible: false,
+        fast_track_applied: false,
+        gating_state: {
+          confidence_floor: 0.8,
+          remaining_closed_trades: 2,
+          remaining_replay_validations: 1,
+          remaining_consecutive_wins: 1,
+          reconciliation_clean: true,
+        },
+      },
+      latest_optimization_report: {
+        recommended_profile_id: 'trend_strict',
+        score_delta_vs_active: 0.6,
+        notes: ['replay_history_neutralized'],
+        control_summary: {
+          adaptive_controls: {
+            risk_budget: { multiplier: 0.85, status: 'contracted', reasons: ['current_margin_usage_elevated'] },
+            execution_aggressiveness: { multiplier: 0.7, status: 'contracted', reasons: ['execution_errors_elevated'] },
+          },
+        },
+      },
       activation_history: [],
     },
   },
@@ -260,10 +325,13 @@ console.log(JSON.stringify({
   configHasAutoProfileControlCard: configHtml.includes('自动换档控制'),
   configHasManualProfileCard: configHtml.includes('策略档位切换'),
   configHasRuntimeParams: configHtml.includes('运行参数概览'),
+  configHasAdaptiveControls: configHtml.includes('风险预算乘数') && configHtml.includes('执行侵略性乘数'),
+  configHasTimingControls: configHtml.includes('持有与冷却') && configHtml.includes('低边际保护'),
   configHasStrategyShadow: configHtml.includes('策略层 shadow'),
   configHasExecutionShadow: configHtml.includes('执行层 shadow'),
   configHasRestoreAutoSwitch: configHtml.includes('恢复自动切档'),
   configNoJumpButtons: !configHtml.includes('前往 AI 工作台') && !configHtml.includes('查看 AI 分析'),
+  analysisHasAdaptiveControls: analysisHtml.includes('风险预算乘数') && analysisHtml.includes('自动切档闸门'),
   drawerExplainsFallback: drawer.body.includes('当前运行模式允许 AI 参与'),
   drawerUsesHumanDecisionSource: drawer.body.includes('本轮最终回退到基础策略'),
 }));
@@ -285,10 +353,13 @@ console.log(JSON.stringify({
         self.assertIn('"configHasAutoProfileControlCard":true', result.stdout)
         self.assertIn('"configHasManualProfileCard":true', result.stdout)
         self.assertIn('"configHasRuntimeParams":true', result.stdout)
+        self.assertIn('"configHasAdaptiveControls":true', result.stdout)
+        self.assertIn('"configHasTimingControls":true', result.stdout)
         self.assertIn('"configHasStrategyShadow":true', result.stdout)
         self.assertIn('"configHasExecutionShadow":true', result.stdout)
         self.assertIn('"configHasRestoreAutoSwitch":true', result.stdout)
         self.assertIn('"configNoJumpButtons":true', result.stdout)
+        self.assertIn('"analysisHasAdaptiveControls":true', result.stdout)
         self.assertIn('"drawerExplainsFallback":true', result.stdout)
         self.assertIn('"drawerUsesHumanDecisionSource":true', result.stdout)
 

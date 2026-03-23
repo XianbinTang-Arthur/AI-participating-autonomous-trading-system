@@ -16,17 +16,38 @@ from aats.schemas.operator import ProcessingFailureRecord
 from aats.schemas.portfolio import FillOutcomeRecord, PortfolioBalanceDelta, PortfolioSnapshot, PortfolioSnapshotOrigin
 from aats.services.accounting import fill_fee_cost_in_quote, resolve_symbol_currencies, resolved_fee_currency
 from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, is_effectively_zero, to_decimal
+from aats.services.portfolio_service.position_keys import (
+    build_position_key,
+    exposure_side_from_quantity,
+    normalize_position_mode,
+    normalize_position_side,
+    position_key_for_fill,
+    position_key_for_snapshot_position,
+    signed_quantity_for_position_side,
+)
 from aats.storage.base import FillOutcomeRepository, PortfolioRepository
 from aats.services.portfolio_service.snapshots import PortfolioSnapshotBuilder
 
 
 @dataclass
 class PositionRecord:
+    symbol: str = ""
+    position_key: str | None = None
     quantity: Decimal = Decimal("0")
     avg_entry_price: Decimal = Decimal("0")
     product_type: str = "spot"
     target_leverage: float = 1.0
     margin_mode: str = "cash"
+    position_mode: str | None = None
+    pos_side: str | None = None
+    instrument_family: str | None = None
+    settle_currency: str | None = None
+    margin_allocated: Decimal = Decimal("0")
+    maintenance_margin: Decimal = Decimal("0")
+    margin_ratio: Decimal | None = None
+    liquidation_price: Decimal | None = None
+    margin_source: str = "estimated"
+    exposure_side: str = "flat"
 
 
 @dataclass
@@ -47,6 +68,7 @@ class PortfolioStateCheckpoint:
     realized_pnl: Decimal = Decimal("0")
     total_fees_paid: Decimal = Decimal("0")
     applied_fill_ids: set[str] = field(default_factory=set)
+    loaded_from_exchange_snapshot: bool = False
 
 
 class PortfolioState:
@@ -62,6 +84,7 @@ class PortfolioState:
         self.realized_pnl: Decimal = Decimal("0")
         self.total_fees_paid: Decimal = Decimal("0")
         self._applied_fill_ids: set[str] = set()
+        self._loaded_from_exchange_snapshot = False
         self.default_product_type = default_product_type
         self.default_margin_mode = default_margin_mode
 
@@ -72,11 +95,23 @@ class PortfolioState:
         return PortfolioStateCheckpoint(
             positions={
                 symbol: PositionRecord(
+                    symbol=record.symbol,
+                    position_key=record.position_key,
                     quantity=record.quantity,
                     avg_entry_price=record.avg_entry_price,
                     product_type=record.product_type,
                     target_leverage=record.target_leverage,
                     margin_mode=record.margin_mode,
+                    position_mode=record.position_mode,
+                    pos_side=record.pos_side,
+                    instrument_family=record.instrument_family,
+                    settle_currency=record.settle_currency,
+                    margin_allocated=record.margin_allocated,
+                    maintenance_margin=record.maintenance_margin,
+                    margin_ratio=record.margin_ratio,
+                    liquidation_price=record.liquidation_price,
+                    margin_source=record.margin_source,
+                    exposure_side=record.exposure_side,
                 )
                 for symbol, record in self.positions.items()
             },
@@ -84,16 +119,29 @@ class PortfolioState:
             realized_pnl=self.realized_pnl,
             total_fees_paid=self.total_fees_paid,
             applied_fill_ids=set(self._applied_fill_ids),
+            loaded_from_exchange_snapshot=self._loaded_from_exchange_snapshot,
         )
 
     def restore(self, checkpoint: PortfolioStateCheckpoint) -> None:
         self.positions = {
             symbol: PositionRecord(
+                symbol=record.symbol,
+                position_key=record.position_key,
                 quantity=record.quantity,
                 avg_entry_price=record.avg_entry_price,
                 product_type=record.product_type,
                 target_leverage=record.target_leverage,
                 margin_mode=record.margin_mode,
+                position_mode=record.position_mode,
+                pos_side=record.pos_side,
+                instrument_family=record.instrument_family,
+                settle_currency=record.settle_currency,
+                margin_allocated=record.margin_allocated,
+                maintenance_margin=record.maintenance_margin,
+                margin_ratio=record.margin_ratio,
+                liquidation_price=record.liquidation_price,
+                margin_source=record.margin_source,
+                exposure_side=record.exposure_side,
             )
             for symbol, record in checkpoint.positions.items()
         }
@@ -101,6 +149,7 @@ class PortfolioState:
         self.realized_pnl = checkpoint.realized_pnl
         self.total_fees_paid = checkpoint.total_fees_paid
         self._applied_fill_ids = set(checkpoint.applied_fill_ids)
+        self._loaded_from_exchange_snapshot = checkpoint.loaded_from_exchange_snapshot
 
     def load_exchange_snapshot(self, snapshot: ExchangeAccountSnapshot) -> None:
         self.positions = {}
@@ -111,22 +160,65 @@ class PortfolioState:
         }
         if "USDT" not in self.balances:
             self.balances["USDT"] = Decimal("0")
+        snapshot_position_mode = (
+            snapshot.account_configuration.position_mode
+            if snapshot.account_configuration is not None
+            else snapshot.position_mode
+        )
         for position in snapshot.positions:
-            if is_effectively_zero(position.quantity):
+            signed_quantity = signed_quantity_for_position_side(
+                position.quantity,
+                pos_side=getattr(position, "side", None),
+                position_mode=snapshot_position_mode,
+            )
+            if is_effectively_zero(signed_quantity):
                 continue
-            self.positions[position.symbol] = PositionRecord(
-                quantity=to_decimal(position.quantity),
+            position_key = build_position_key(
+                symbol=position.symbol,
+                product_type=self.default_product_type,
+                position_mode=snapshot_position_mode,
+                pos_side=getattr(position, "side", None),
+            )
+            self.positions[position_key] = PositionRecord(
+                symbol=position.symbol,
+                position_key=position_key,
+                quantity=signed_quantity,
                 avg_entry_price=to_decimal(position.average_entry_price),
                 product_type=getattr(position, "product_type", self.default_product_type),
-                target_leverage=getattr(position, "target_leverage", 1.0),
-                margin_mode=getattr(position, "margin_mode", self.default_margin_mode),
+                target_leverage=float(getattr(position, "leverage", None) or 1.0),
+                margin_mode=getattr(position, "margin_mode", None) or self.default_margin_mode,
+                position_mode=normalize_position_mode(snapshot_position_mode),
+                pos_side=normalize_position_side(getattr(position, "side", None), position_mode=snapshot_position_mode),
+                instrument_family=getattr(position, "instrument_family", None),
+                settle_currency=getattr(position, "settle_currency", None),
+                margin_allocated=to_decimal(getattr(position, "margin_allocated", 0) or 0),
+                maintenance_margin=to_decimal(getattr(position, "maintenance_margin", 0) or 0),
+                margin_ratio=(
+                    None
+                    if getattr(position, "margin_ratio", None) in {None, ""}
+                    else to_decimal(getattr(position, "margin_ratio"))
+                ),
+                liquidation_price=(
+                    None
+                    if getattr(position, "liquidation_price", None) in {None, ""}
+                    else to_decimal(getattr(position, "liquidation_price"))
+                ),
+                margin_source="exchange",
+                exposure_side=exposure_side_from_quantity(signed_quantity),
             )
         if self.default_product_type == "spot" and not snapshot.positions:
             for symbol, quantity in self._synthetic_spot_positions(snapshot).items():
-                self.positions[symbol] = PositionRecord(quantity=quantity, avg_entry_price=Decimal("0"))
+                self.positions[symbol] = PositionRecord(
+                    symbol=symbol,
+                    position_key=symbol,
+                    quantity=quantity,
+                    avg_entry_price=Decimal("0"),
+                    exposure_side=exposure_side_from_quantity(quantity),
+                )
         self.realized_pnl = Decimal("0")
         self.total_fees_paid = Decimal("0")
         self._applied_fill_ids.clear()
+        self._loaded_from_exchange_snapshot = True
 
     def load_portfolio_snapshot(
         self,
@@ -136,12 +228,26 @@ class PortfolioState:
         total_fees_paid: Decimal | float | None = None,
     ) -> None:
         self.positions = {
-            position.symbol: PositionRecord(
+            position_key_for_snapshot_position(position): PositionRecord(
+                symbol=position.symbol,
+                position_key=position_key_for_snapshot_position(position),
                 quantity=to_decimal(position.position_qty),
                 avg_entry_price=to_decimal(position.avg_entry_price),
                 product_type=position.product_type,
                 target_leverage=position.target_leverage,
                 margin_mode=position.margin_mode,
+                position_mode=position.position_mode,
+                pos_side=position.pos_side,
+                instrument_family=position.instrument_family,
+                settle_currency=position.settle_currency,
+                margin_allocated=to_decimal(position.margin_allocated),
+                maintenance_margin=to_decimal(position.maintenance_margin),
+                margin_ratio=None if position.margin_ratio in {None, ""} else to_decimal(position.margin_ratio),
+                liquidation_price=(
+                    None if position.liquidation_price in {None, ""} else to_decimal(position.liquidation_price)
+                ),
+                margin_source=position.margin_source,
+                exposure_side=position.exposure_side or exposure_side_from_quantity(position.position_qty),
             )
             for position in snapshot.positions
             if not is_effectively_zero(position.position_qty)
@@ -152,23 +258,44 @@ class PortfolioState:
         self.realized_pnl = to_decimal(snapshot.realized_pnl)
         self.total_fees_paid = to_decimal(total_fees_paid if total_fees_paid is not None else 0)
         self._applied_fill_ids = set(applied_fill_ids or set())
+        self._loaded_from_exchange_snapshot = False
 
     def apply_fill(self, fill: FillEvent) -> FillApplicationResult:
+        position_key = position_key_for_fill(fill)
         if fill.fill_id in self._applied_fill_ids:
+            existing = self.positions.get(position_key, PositionRecord(symbol=fill.symbol, position_key=position_key))
             return FillApplicationResult(
                 applied=False,
-                starting_quantity=self.positions.get(fill.symbol, PositionRecord()).quantity,
-                ending_quantity=self.positions.get(fill.symbol, PositionRecord()).quantity,
-                starting_avg_entry_price=self.positions.get(fill.symbol, PositionRecord()).avg_entry_price,
-                ending_avg_entry_price=self.positions.get(fill.symbol, PositionRecord()).avg_entry_price,
+                starting_quantity=existing.quantity,
+                ending_quantity=existing.quantity,
+                starting_avg_entry_price=existing.avg_entry_price,
+                ending_avg_entry_price=existing.avg_entry_price,
                 realized_pnl_delta=Decimal("0"),
                 fee_delta=Decimal("0"),
             )
 
-        record = self.positions.setdefault(fill.symbol, PositionRecord())
+        record = self.positions.setdefault(
+            position_key,
+            PositionRecord(
+                symbol=fill.symbol,
+                position_key=position_key,
+            ),
+        )
+        record.symbol = fill.symbol
+        record.position_key = position_key
         record.product_type = getattr(fill, "product_type", "spot")
         record.target_leverage = getattr(fill, "target_leverage", 1.0)
         record.margin_mode = getattr(fill, "margin_mode", "cash")
+        record.position_mode = normalize_position_mode(getattr(fill, "position_mode", None))
+        record.pos_side = normalize_position_side(getattr(fill, "pos_side", None), position_mode=record.position_mode)
+        record.instrument_family = getattr(fill, "instrument_family", None)
+        record.settle_currency = getattr(fill, "settle_currency", None)
+        record.margin_allocated = Decimal("0")
+        record.maintenance_margin = Decimal("0")
+        record.margin_ratio = None
+        record.liquidation_price = None
+        record.margin_source = "estimated"
+        record.exposure_side = exposure_side_from_quantity(record.quantity)
         product_type = record.product_type or self.default_product_type
         fill_qty = to_decimal(fill.fill_qty)
         fill_price = to_decimal(fill.fill_price)
@@ -236,8 +363,10 @@ class PortfolioState:
         self.realized_pnl = self.realized_pnl + realized_pnl_delta
         self.total_fees_paid = self.total_fees_paid + fee_delta
         self._applied_fill_ids.add(fill.fill_id)
-        self._cleanup_if_flat(fill.symbol)
-        ending_record = self.positions.get(fill.symbol, PositionRecord())
+        self._loaded_from_exchange_snapshot = False
+        record.exposure_side = exposure_side_from_quantity(record.quantity)
+        self._cleanup_if_flat(position_key)
+        ending_record = self.positions.get(position_key, PositionRecord(symbol=fill.symbol, position_key=position_key))
         return FillApplicationResult(
             applied=True,
             starting_quantity=starting_qty,
@@ -248,10 +377,26 @@ class PortfolioState:
             fee_delta=fee_delta,
         )
 
-    def _cleanup_if_flat(self, symbol: str) -> None:
-        record = self.positions.get(symbol)
+    def _cleanup_if_flat(self, position_key: str) -> None:
+        record = self.positions.get(position_key)
         if record is not None and is_effectively_zero(record.quantity):
-            self.positions.pop(symbol, None)
+            self.positions.pop(position_key, None)
+
+    def position_for_fill(self, fill: FillEvent) -> PositionRecord | None:
+        return self.positions.get(position_key_for_fill(fill))
+
+    def position_quantity_for_symbol(self, symbol: str) -> Decimal:
+        return sum(
+            (
+                to_decimal(record.quantity)
+                for record in self.positions.values()
+                if record.symbol == symbol
+            ),
+            start=Decimal("0"),
+        )
+
+    def loaded_from_exchange_snapshot(self) -> bool:
+        return self._loaded_from_exchange_snapshot
 
     def _synthetic_spot_positions(self, snapshot: ExchangeAccountSnapshot) -> dict[str, Decimal]:
         synthetic_positions: dict[str, Decimal] = {}

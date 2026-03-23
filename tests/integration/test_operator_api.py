@@ -21,11 +21,23 @@ from aats.schemas.ai_shadow import AIDegradationEvent
 from aats.schemas.common import utc_now
 from aats.schemas.decision import AIMarketAssessment, ProfileControlDecision
 from aats.schemas.execution import FillEvent, OrderIntent, OrderState
-from aats.schemas.exchange import AccountBaselineSnapshot, ExchangeAccountSnapshot, ExchangeBalance, ExchangeOpenOrder
+from aats.schemas.exchange import (
+    AccountBaselineSnapshot,
+    ExchangeAccountConfiguration,
+    ExchangeAccountRiskSnapshot,
+    ExchangeAccountSnapshot,
+    ExchangeBalance,
+    ExchangeFeeSchedule,
+    ExchangeOpenOrder,
+    ExchangePosition,
+    ExchangeSystemStatusItem,
+    InstrumentMetadata,
+)
 from aats.schemas.governance import PolicyDecision, RiskDecision
 from aats.events import topics
 from aats.schemas.operator import ExecutionErrorSummary, ReplayValidationSummary
 from aats.schemas.operator import OperatorUserRecord
+from aats.schemas.portfolio import FillOutcomeRecord, FundingFeeRecord
 from aats.schemas.strategy_profiles import StrategyProfileMarketRegimeAssessment, StrategyProfileRecommendation
 from aats.services.ai_service.provider import AIProviderResponse
 from aats.services.operator.strategy_profiles import StrategyProfileControlService
@@ -53,6 +65,11 @@ class FakeOperatorAccountService:
         return self._snapshot
 
     def instrument_metadata(self, symbol: str):
+        if self._snapshot is None:
+            return None
+        for instrument in self._snapshot.instruments:
+            if instrument.symbol == symbol:
+                return instrument
         return None
 
     def open_order_count(self, symbol: str | None = None) -> int:
@@ -64,6 +81,12 @@ class FakeOperatorAccountService:
     async def recent_bills(self, *, symbol: str | None = None, limit: int | None = None):
         _ = symbol
         _ = limit
+        return [
+            {"billId": "bill_1", "type": "1", "subType": "173", "ccy": "USDT", "bal": "1000"},
+            {"billId": "bill_2", "type": "2", "subType": "174", "ccy": "USDT", "bal": "998"},
+        ]
+
+    def latest_recent_bills(self):
         return [
             {"billId": "bill_1", "type": "1", "subType": "173", "ccy": "USDT", "bal": "1000"},
             {"billId": "bill_2", "type": "2", "subType": "174", "ccy": "USDT", "bal": "998"},
@@ -91,6 +114,19 @@ class FakeOperatorAccountService:
             "last_error": None,
         }
 
+    def recent_funding_fee_summary(self, *, symbol: str | None = None):
+        _ = symbol
+        return {
+            "available": True,
+            "count": 2,
+            "latest_bill_ts": utc_now(),
+            "currencies": ["USDT"],
+            "net_total_by_currency": {"USDT": "-2"},
+            "absolute_total_by_currency": {"USDT": "2"},
+            "current_position_notional_usd": Decimal("1000"),
+            "funding_fee_bps_proxy": Decimal("20"),
+        }
+
     def latest_private_order_row(self, *, symbol: str, order_id: str | None = None, client_order_id: str | None = None):
         _ = symbol
         _ = order_id
@@ -104,6 +140,21 @@ class FakeOperatorAccountService:
         return list(self.PRIVATE_ORDER_FILLS or [])
 
     def status(self):
+        account_configuration = (
+            self._snapshot.account_configuration.model_dump(mode="json")
+            if self._snapshot is not None and self._snapshot.account_configuration is not None
+            else None
+        )
+        fee_schedule = (
+            self._snapshot.fee_schedule.model_dump(mode="json")
+            if self._snapshot is not None and self._snapshot.fee_schedule is not None
+            else None
+        )
+        risk_snapshot = (
+            self._snapshot.risk_snapshot.model_dump(mode="json")
+            if self._snapshot is not None and self._snapshot.risk_snapshot is not None
+            else None
+        )
         return {
             "backend": "okx",
             "enabled": True,
@@ -115,6 +166,17 @@ class FakeOperatorAccountService:
             "ready": self._snapshot is not None,
             "detail": "fake_operator_account",
             "blockers": [] if self._snapshot is not None else ["account_snapshot_missing"],
+            "account_configuration": account_configuration,
+            "fee_schedule": fee_schedule,
+            "risk_snapshot": risk_snapshot,
+            "system_status_items": (
+                [item.model_dump(mode="json") for item in self._snapshot.system_status_items]
+                if self._snapshot is not None
+                else []
+            ),
+            "maker_fee_rate": None if fee_schedule is None else fee_schedule.get("maker"),
+            "taker_fee_rate": None if fee_schedule is None else fee_schedule.get("taker"),
+            "fee_rates_source": None if fee_schedule is None else fee_schedule.get("source"),
         }
 
 
@@ -259,6 +321,748 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertIn("has_more", blocker_history_payload)
         self.assertIn(health_payload["runtime_state"], {"healthy", "degraded", "blocked", "halted"})
 
+    async def test_derivatives_account_state_and_runtime_expose_structured_exchange_snapshots(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "config_profile": "local_demo",
+                "startup_profile": "derivatives",
+                "mode": "paper_live",
+                "market_data_backend": "demo",
+                "execution_backend": "paper",
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP", "ETH-USDT-SWAP"),
+                "storage_mode": "memory",
+                "event_persistence_mode": "strict",
+                "operator_unsafe_write_without_auth": True,
+                "okx_api_key": "demo_key",
+                "okx_api_secret": "demo_secret",
+                "okx_api_passphrase": "demo_passphrase",
+            }
+        )
+        FakeOperatorAccountService.SNAPSHOT = ExchangeAccountSnapshot(
+            account_source="okx",
+            fetched_at=utc_now(),
+            balances=[ExchangeBalance(currency="USDT", total=Decimal("2500"), available=Decimal("2100"), frozen=Decimal("400"))],
+            positions=[
+                ExchangePosition(
+                    instrument_id="BTC-USDT-SWAP",
+                    symbol="BTC-USDT-SWAP",
+                    quantity=Decimal("0.02"),
+                    average_entry_price=Decimal("80000"),
+                    mark_price=Decimal("80100"),
+                    notional_usd=Decimal("1602"),
+                    side="net",
+                    margin_mode="cross",
+                    margin_currency="USDT",
+                    leverage=Decimal("12"),
+                    margin_allocated=Decimal("320"),
+                    maintenance_margin=Decimal("140"),
+                    margin_ratio=Decimal("5.2"),
+                    liquidation_price=Decimal("62000"),
+                    instrument_family="BTC-USDT",
+                    settle_currency="USDT",
+                )
+            ],
+            open_orders=[
+                ExchangeOpenOrder(
+                    instrument_id="BTC-USDT-SWAP",
+                    exchange_order_id="ord_deriv_1",
+                    client_order_id="cl_deriv_1",
+                    side="buy",
+                    order_type="limit",
+                    status="LIVE",
+                    quantity=Decimal("0.01"),
+                    filled_quantity=Decimal("0"),
+                    price=Decimal("80000"),
+                )
+            ],
+            fills=[],
+            instruments=[
+                InstrumentMetadata(
+                    instrument_id="BTC-USDT-SWAP",
+                    symbol="BTC-USDT-SWAP",
+                    base_currency="BTC",
+                    quote_currency="USDT",
+                    lot_size=Decimal("0.01"),
+                    tick_size=Decimal("0.1"),
+                    min_size=Decimal("0.01"),
+                    contract_value=Decimal("0.01"),
+                    instrument_type="SWAP",
+                    instrument_family="BTC-USDT",
+                    underlying="BTC-USDT",
+                    settle_currency="USDT",
+                    contract_value_currency="BTC",
+                    max_leverage=Decimal("50"),
+                    max_market_size=Decimal("2000"),
+                    max_limit_size=Decimal("2500"),
+                    state="live",
+                ),
+                InstrumentMetadata(
+                    instrument_id="ETH-USDT-SWAP",
+                    symbol="ETH-USDT-SWAP",
+                    base_currency="ETH",
+                    quote_currency="USDT",
+                    lot_size=Decimal("0.1"),
+                    tick_size=Decimal("0.01"),
+                    min_size=Decimal("0.1"),
+                    contract_value=Decimal("0.1"),
+                    instrument_type="SWAP",
+                    instrument_family="ETH-USDT",
+                    underlying="ETH-USDT",
+                    settle_currency="USDT",
+                    contract_value_currency="ETH",
+                    max_leverage=Decimal("25"),
+                    max_market_size=Decimal("5000"),
+                    max_limit_size=Decimal("6000"),
+                    state="live",
+                ),
+            ],
+            account_mode="4",
+            position_mode="long_short_mode",
+            account_configuration=ExchangeAccountConfiguration(
+                account_level_code="4",
+                account_level_label="portfolio_margin",
+                position_mode="long_short_mode",
+                position_mode_label="long_short",
+                auto_loan_enabled=True,
+                greeks_type="PA",
+                isolated_margin_mode="automatic",
+                raw={"acctLv": "4", "posMode": "long_short_mode"},
+            ),
+            fee_rates={"maker": "-0.0002", "taker": "0.0005", "source": "okx_trade_fee"},
+            fee_schedule=ExchangeFeeSchedule(
+                maker=Decimal("-0.0002"),
+                taker=Decimal("0.0005"),
+                delivery=Decimal("0.0001"),
+                exercise=Decimal("0.00015"),
+                source="okx_trade_fee",
+                raw={"maker": "-0.0002", "taker": "0.0005"},
+            ),
+            account_risk={"adjEq": "2500", "imr": "320", "mmr": "140", "mgnRatio": "5.2"},
+            risk_snapshot=ExchangeAccountRiskSnapshot(
+                adjusted_equity=Decimal("2500"),
+                total_equity=Decimal("2550"),
+                available_equity=Decimal("2100"),
+                initial_margin_requirement=Decimal("320"),
+                maintenance_margin_requirement=Decimal("140"),
+                margin_ratio=Decimal("5.2"),
+                notional_usd=Decimal("12500"),
+                raw={"adjEq": "2500", "mgnRatio": "5.2"},
+            ),
+            system_status=[{"state": "completed", "serviceType": "0"}],
+            system_status_items=[
+                ExchangeSystemStatusItem(
+                    state="completed",
+                    service_type="0",
+                    title="All Systems Operational",
+                    description="No active incident",
+                    raw={"state": "completed", "serviceType": "0"},
+                )
+            ],
+        )
+        try:
+            with patch("aats.bootstrap.config.OKXAccountService", FakeOperatorAccountService):
+                runtime = await build_runtime(settings)
+            runtime.portfolio_service.state.load_exchange_snapshot(FakeOperatorAccountService.SNAPSHOT)
+            await runtime.portfolio_service.bootstrap_snapshot(snapshot_origin="operator_rebaseline")
+            app = self._app(runtime)
+
+            with TestClient(app) as client:
+                account_state = client.get("/account/state")
+                positions = client.get("/positions")
+                runtime_response = client.get("/system/runtime")
+                margin_buffer = client.get("/risk/margin-buffer")
+
+            self.assertEqual(account_state.status_code, 200)
+            self.assertEqual(positions.status_code, 200)
+            self.assertEqual(runtime_response.status_code, 200)
+            self.assertEqual(margin_buffer.status_code, 200)
+
+            account_state_payload = account_state.json()
+            positions_payload = positions.json()
+            runtime_payload = runtime_response.json()
+            margin_buffer_payload = margin_buffer.json()
+
+            self.assertEqual(account_state_payload["backend"], "okx")
+            self.assertEqual(account_state_payload["account_configuration"]["account_level_code"], "4")
+            self.assertEqual(account_state_payload["account_configuration"]["position_mode_label"], "long_short")
+            self.assertEqual(account_state_payload["fee_schedule"]["taker"], "0.0005")
+            self.assertEqual(account_state_payload["risk_snapshot"]["margin_ratio"], "5.2")
+            self.assertEqual(account_state_payload["system_status_items"][0]["title"], "All Systems Operational")
+            self.assertEqual(account_state_payload["exchange_position_margin_summary"]["margin_allocated_total"], "320")
+            self.assertEqual(account_state_payload["exchange_position_margin_summary"]["position_count_by_margin_mode"]["cross"], 1)
+            self.assertEqual(
+                Decimal(account_state_payload["local_position_margin_summary"]["margin_allocated_total"]),
+                Decimal("320"),
+            )
+            self.assertEqual(account_state_payload["margin_reconciliation"]["position_margin_metric_mismatch_count"], 0)
+            self.assertEqual(
+                {item["symbol"] for item in account_state_payload["tracked_instrument_rules"]},
+                {"BTC-USDT-SWAP", "ETH-USDT-SWAP"},
+            )
+            self.assertEqual(
+                next(
+                    item["settle_currency"]
+                    for item in account_state_payload["tracked_instrument_rules"]
+                    if item["symbol"] == "BTC-USDT-SWAP"
+                ),
+                "USDT",
+            )
+            self.assertEqual(Decimal(positions_payload["local_margin_summary"]["margin_allocated_total"]), Decimal("320"))
+            self.assertEqual(Decimal(positions_payload["exchange_margin_summary"]["maintenance_margin_total"]), Decimal("140"))
+            self.assertEqual(positions_payload["local_positions"][0]["margin_source"], "exchange")
+            self.assertEqual(Decimal(positions_payload["exchange_positions"][0]["liquidation_price"]), Decimal("62000"))
+            self.assertEqual(margin_buffer_payload["status"], "healthy")
+            self.assertEqual(Decimal(margin_buffer_payload["current"]["initial_margin_usage_fraction"]), Decimal("0.128"))
+            self.assertEqual(
+                Decimal(margin_buffer_payload["liquidation"]["nearest_liquidation_gap_ratio"]).quantize(Decimal("0.000001")),
+                Decimal("0.225968"),
+            )
+            self.assertEqual(margin_buffer_payload["liquidation"]["closest_position"]["symbol"], "BTC-USDT-SWAP")
+            self.assertEqual(account_state_payload["margin_buffer_overview"]["status"], "healthy")
+            self.assertEqual(runtime_payload["startup_profile"], "derivatives")
+            self.assertEqual(runtime_payload["account_configuration"]["account_level_label"], "portfolio_margin")
+            self.assertEqual(runtime_payload["risk_snapshot"]["initial_margin_requirement"], "320")
+            self.assertEqual(runtime_payload["primary_instrument_rule"]["symbol"], "BTC-USDT-SWAP")
+            self.assertEqual(runtime_payload["primary_instrument_rule"]["instrument_type"], "SWAP")
+            self.assertEqual(runtime_payload["primary_instrument_rule"]["max_leverage"], "50")
+            self.assertEqual(runtime_payload["margin_buffer_overview"]["status"], "healthy")
+        finally:
+            FakeOperatorAccountService.SNAPSHOT = None
+            FakeOperatorAccountService.PRIVATE_ORDER_ROW = None
+            FakeOperatorAccountService.PRIVATE_ORDER_FILLS = None
+
+    async def test_guarded_live_preflight_and_run_packet_surface_structural_and_margin_failures(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "config_profile": "local_demo",
+                "mode": "guarded_live",
+                "market_data_backend": "okx",
+                "execution_backend": "okx",
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "storage_mode": "memory",
+                "event_persistence_mode": "strict",
+                "live_submit_enabled": True,
+                "guarded_execution_dry_run": False,
+                "okx_simulated_trading": False,
+                "operator_auth_enabled": False,
+                "operator_unsafe_write_without_auth": True,
+            }
+        )
+        FakeOperatorAccountService.SNAPSHOT = ExchangeAccountSnapshot(
+            account_source="okx",
+            fetched_at=utc_now(),
+            balances=[ExchangeBalance(currency="USDT", total=Decimal("1000"), available=Decimal("620"), frozen=Decimal("380"))],
+            positions=[
+                ExchangePosition(
+                    instrument_id="BTC-USDT-SWAP",
+                    symbol="BTC-USDT-SWAP",
+                    quantity=Decimal("0.02"),
+                    average_entry_price=Decimal("70000"),
+                    mark_price=Decimal("70000"),
+                    notional_usd=Decimal("1400"),
+                    side="long",
+                    margin_mode="cross",
+                    margin_currency="USDT",
+                    leverage=Decimal("8"),
+                    margin_allocated=Decimal("860"),
+                    maintenance_margin=Decimal("380"),
+                    margin_ratio=Decimal("1.8"),
+                    liquidation_price=Decimal("65000"),
+                    instrument_family="BTC-USDT",
+                    settle_currency="USDT",
+                )
+            ],
+            open_orders=[],
+            fills=[],
+            instruments=[
+                InstrumentMetadata(
+                    instrument_id="BTC-USDT-SWAP",
+                    symbol="BTC-USDT-SWAP",
+                    base_currency="BTC",
+                    quote_currency="USDT",
+                    lot_size=Decimal("0.01"),
+                    tick_size=Decimal("0.1"),
+                    min_size=Decimal("0.01"),
+                    contract_value=Decimal("0.01"),
+                    instrument_type="SWAP",
+                    instrument_family="BTC-USDT",
+                    underlying="BTC-USDT",
+                    settle_currency="USDT",
+                    contract_value_currency="BTC",
+                    max_leverage=Decimal("50"),
+                    max_market_size=Decimal("2000"),
+                    max_limit_size=Decimal("2500"),
+                    state="live",
+                )
+            ],
+            account_mode="4",
+            position_mode="net_mode",
+            account_configuration=ExchangeAccountConfiguration(
+                account_level_code="4",
+                account_level_label="portfolio_margin",
+                position_mode="net_mode",
+                position_mode_label="net",
+                auto_loan_enabled=True,
+                raw={"acctLv": "4", "posMode": "net_mode"},
+            ),
+            risk_snapshot=ExchangeAccountRiskSnapshot(
+                adjusted_equity=Decimal("1000"),
+                total_equity=Decimal("1000"),
+                available_equity=Decimal("620"),
+                initial_margin_requirement=Decimal("860"),
+                maintenance_margin_requirement=Decimal("380"),
+                margin_ratio=Decimal("1.8"),
+                notional_usd=Decimal("1400"),
+                raw={"adjEq": "1000", "imr": "860"},
+            ),
+        )
+        try:
+            with patch("aats.bootstrap.config.OKXAccountService", FakeOperatorAccountService):
+                runtime = await build_runtime(settings)
+            runtime.portfolio_service.state.load_exchange_snapshot(FakeOperatorAccountService.SNAPSHOT)
+            await runtime.portfolio_service.bootstrap_snapshot(snapshot_origin="operator_rebaseline")
+            app = self._app(runtime)
+
+            with TestClient(app) as client:
+                preflight = client.get("/system/guarded-live-preflight")
+                run_packet = client.get("/reports/guarded-live-run-packet")
+                health = client.get("/system/health")
+                runtime_response = client.get("/system/runtime")
+
+            self.assertEqual(preflight.status_code, 200)
+            self.assertEqual(run_packet.status_code, 200)
+            self.assertEqual(health.status_code, 200)
+            self.assertEqual(runtime_response.status_code, 200)
+
+            preflight_payload = preflight.json()
+            run_packet_payload = run_packet.json()
+            health_payload = health.json()
+            runtime_payload = runtime_response.json()
+
+            self.assertEqual(preflight_payload["status"], "fail")
+            self.assertFalse(preflight_payload["launch_ready"])
+            self.assertTrue(any(item["check_id"] == "real_money_route_ready" and item["status"] == "fail" for item in preflight_payload["checks"]))
+            self.assertTrue(any(item["check_id"] == "margin_buffer_safe" and item["status"] == "fail" for item in preflight_payload["checks"]))
+            self.assertEqual(run_packet_payload["status"], "critical")
+            self.assertTrue(run_packet_payload["derivatives_live_guard"]["auto_halt_required"])
+            self.assertIn("derivatives_liquidation_proximity_auto_halt", run_packet_payload["derivatives_live_guard"]["auto_halt_reasons"])
+            self.assertIn("derivatives_liquidation_proximity_auto_halt", [item["blocker"] for item in health_payload["blockers"]])
+            self.assertEqual(health_payload["subsystems"]["derivatives_live_guard"]["status"], "critical")
+            self.assertEqual(runtime_payload["guarded_live_preflight"]["status"], "fail")
+            self.assertEqual(runtime_payload["guarded_live_run_packet_summary"]["status"], "critical")
+        finally:
+            FakeOperatorAccountService.SNAPSHOT = None
+            FakeOperatorAccountService.PRIVATE_ORDER_ROW = None
+            FakeOperatorAccountService.PRIVATE_ORDER_FILLS = None
+
+    async def test_persisted_funding_fees_are_operator_readable(self) -> None:
+        runtime = await self._runtime(
+            trading_product_type="derivatives",
+            margin_mode="cross",
+            default_symbol="BTC-USDT-SWAP",
+            allowed_symbols=("BTC-USDT-SWAP",),
+        )
+        runtime.funding_fee_repo.save_record(
+            FundingFeeRecord(
+                bill_id="bill_fee_1",
+                symbol="BTC-USDT-SWAP",
+                currency="USDT",
+                amount=Decimal("-2.5"),
+                bill_type="8",
+                sub_type="173",
+                type_label="funding_fee",
+                sub_type_label="funding_fee_expense",
+                funding_direction="expense",
+                bill_ts=utc_now(),
+                ledger_posting_state="POSTED",
+                ledger_journal_id="jrnl_fee_1",
+                ledger_posted_at=utc_now(),
+                product_type="derivatives",
+                margin_mode="cross",
+            )
+        )
+        runtime.funding_fee_repo.save_record(
+            FundingFeeRecord(
+                bill_id="bill_fee_2",
+                symbol="BTC-USDT-SWAP",
+                currency="USDT",
+                amount=Decimal("1.25"),
+                bill_type="8",
+                sub_type="174",
+                type_label="funding_fee",
+                sub_type_label="funding_fee_income",
+                funding_direction="income",
+                bill_ts=utc_now(),
+                ledger_posting_state="POSTED",
+                ledger_journal_id="jrnl_fee_2",
+                ledger_posted_at=utc_now(),
+                product_type="derivatives",
+                margin_mode="cross",
+            )
+        )
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            recent = client.get("/account/recent-funding-fees?limit=10")
+            account_state = client.get("/account/state")
+
+        self.assertEqual(recent.status_code, 200)
+        recent_payload = recent.json()
+        self.assertEqual(recent_payload["total_available"], 2)
+        self.assertEqual(len(recent_payload["funding_fees"]), 2)
+        self.assertEqual(recent_payload["summary"]["count"], 2)
+        self.assertEqual(recent_payload["summary"]["expense_count"], 1)
+        self.assertEqual(recent_payload["summary"]["income_count"], 1)
+        self.assertEqual(recent_payload["summary"]["net_total_by_currency"]["USDT"], "-1.25")
+        self.assertEqual(recent_payload["latest_funding_fee"]["bill_id"], "bill_fee_2")
+
+        account_state_payload = account_state.json()
+        self.assertEqual(account_state_payload["persisted_funding_fee_summary"]["count"], 2)
+        self.assertIn("exchange_funding_fee_summary", account_state_payload)
+
+    async def test_profitability_overview_merges_funding_fee_into_realized_view(self) -> None:
+        runtime = await self._runtime(
+            trading_product_type="derivatives",
+            margin_mode="cross",
+            default_symbol="BTC-USDT-SWAP",
+            allowed_symbols=("BTC-USDT-SWAP",),
+        )
+        runtime.funding_fee_repo.save_record(
+            FundingFeeRecord(
+                bill_id="bill_profit_fee_1",
+                symbol="BTC-USDT-SWAP",
+                currency="USDT",
+                amount=Decimal("-2.5"),
+                bill_type="8",
+                sub_type="173",
+                type_label="funding_fee",
+                sub_type_label="funding_fee_expense",
+                funding_direction="expense",
+                bill_ts=utc_now() - timedelta(minutes=5),
+                ledger_posting_state="POSTED",
+                ledger_journal_id="jrnl_profit_fee_1",
+                ledger_posted_at=utc_now() - timedelta(minutes=5),
+                product_type="derivatives",
+                margin_mode="cross",
+            )
+        )
+        runtime.funding_fee_repo.save_record(
+            FundingFeeRecord(
+                bill_id="bill_profit_fee_2",
+                symbol="BTC-USDT-SWAP",
+                currency="USDT",
+                amount=Decimal("1.25"),
+                bill_type="8",
+                sub_type="174",
+                type_label="funding_fee",
+                sub_type_label="funding_fee_income",
+                funding_direction="income",
+                bill_ts=utc_now(),
+                ledger_posting_state="POSTED",
+                ledger_journal_id="jrnl_profit_fee_2",
+                ledger_posted_at=utc_now(),
+                product_type="derivatives",
+                margin_mode="cross",
+            )
+        )
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            response = client.get("/reports/profitability-overview?limit=20")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        summary = payload["summary"]
+        self.assertEqual(summary["funding_fee_count"], 2)
+        self.assertEqual(summary["funding_fee_income_count"], 1)
+        self.assertEqual(summary["funding_fee_expense_count"], 1)
+        self.assertEqual(Decimal(str(summary["funding_fee_net_pnl"])), Decimal("-1.25"))
+        self.assertEqual(
+            Decimal(str(summary["combined_net_realized_pnl"])),
+            Decimal(str(summary["net_realized_pnl"])) + Decimal(str(summary["funding_fee_net_pnl"])),
+        )
+        self.assertIn("funding_fee_summary", payload)
+        self.assertIn("recent_realized_events", payload)
+        self.assertEqual(payload["funding_fee_summary"]["net_total_by_currency"]["USDT"], "-1.25")
+        self.assertTrue(any(item["event_kind"] == "funding_fee" for item in payload["recent_realized_events"]))
+        self.assertEqual(payload["truth_source"], "fill_outcomes_plus_funding_fee_records")
+
+    async def test_position_lifecycle_profitability_tracks_closed_lifecycle_and_unassigned_funding(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "config_profile": "local_demo",
+                "mode": "paper_live",
+                "market_data_backend": "demo",
+                "execution_backend": "paper",
+                "account_backend": "disabled",
+                "account_read_enabled": False,
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP", "LTC-USDT-SWAP"),
+                "storage_mode": "memory",
+                "event_persistence_mode": "strict",
+                "operator_unsafe_write_without_auth": True,
+            }
+        )
+        runtime = await build_runtime(settings)
+        now = utc_now()
+        runtime.fill_outcome_repo.save_outcome(
+            FillOutcomeRecord(
+                fill_id="ltc_lifecycle_open",
+                order_id="ltc_order_open",
+                symbol="LTC-USDT-SWAP",
+                position_key="LTC-USDT-SWAP:long",
+                venue="PAPER",
+                side="buy",
+                fill_qty=Decimal("2"),
+                fill_price=Decimal("80"),
+                fill_notional=Decimal("160"),
+                fee_amount=Decimal("0.20"),
+                fee_currency="USDT",
+                liquidity_role="maker",
+                exchange_timestamp=now - timedelta(minutes=20),
+                ingestion_timestamp=now - timedelta(minutes=20),
+                order_status_after_fill="FILLED",
+                target_leverage=3.0,
+                exposure_side="long",
+                execution_action="open_long",
+                position_intent="open_long",
+                position_mode="long_short_mode",
+                pos_side="long",
+                instrument_family="LTC-USDT",
+                settle_currency="USDT",
+                starting_position_qty=Decimal("0"),
+                starting_avg_entry_price=Decimal("0"),
+                ending_position_qty=Decimal("2"),
+                ending_avg_entry_price=Decimal("80"),
+                realized_pnl_delta=Decimal("0"),
+                fee_delta=Decimal("-0.20"),
+                product_type="derivatives",
+                margin_mode="cross",
+                created_at=now - timedelta(minutes=20),
+            )
+        )
+        runtime.fill_outcome_repo.save_outcome(
+            FillOutcomeRecord(
+                fill_id="ltc_lifecycle_close",
+                order_id="ltc_order_close",
+                symbol="LTC-USDT-SWAP",
+                position_key="LTC-USDT-SWAP:long",
+                venue="PAPER",
+                side="sell",
+                fill_qty=Decimal("2"),
+                fill_price=Decimal("82.5"),
+                fill_notional=Decimal("165"),
+                fee_amount=Decimal("0.25"),
+                fee_currency="USDT",
+                liquidity_role="taker",
+                exchange_timestamp=now - timedelta(minutes=10),
+                ingestion_timestamp=now - timedelta(minutes=10),
+                order_status_after_fill="FILLED",
+                target_leverage=3.0,
+                exposure_side="flat",
+                execution_action="close_long",
+                position_intent="close_long",
+                position_mode="long_short_mode",
+                pos_side="long",
+                instrument_family="LTC-USDT",
+                settle_currency="USDT",
+                starting_position_qty=Decimal("2"),
+                starting_avg_entry_price=Decimal("80"),
+                ending_position_qty=Decimal("0"),
+                ending_avg_entry_price=Decimal("0"),
+                realized_pnl_delta=Decimal("5"),
+                fee_delta=Decimal("-0.25"),
+                product_type="derivatives",
+                margin_mode="cross",
+                created_at=now - timedelta(minutes=10),
+            )
+        )
+        runtime.funding_fee_repo.save_record(
+            FundingFeeRecord(
+                bill_id="ltc_funding_assigned",
+                symbol="LTC-USDT-SWAP",
+                currency="USDT",
+                amount=Decimal("-0.30"),
+                bill_type="8",
+                sub_type="173",
+                type_label="funding_fee",
+                sub_type_label="funding_fee_expense",
+                funding_direction="expense",
+                bill_ts=now - timedelta(minutes=15),
+                ledger_posting_state="POSTED",
+                ledger_journal_id="jrnl_ltc_funding_1",
+                ledger_posted_at=now - timedelta(minutes=15),
+                product_type="derivatives",
+                margin_mode="cross",
+            )
+        )
+        runtime.funding_fee_repo.save_record(
+            FundingFeeRecord(
+                bill_id="ltc_funding_unassigned",
+                symbol="LTC-USDT-SWAP",
+                currency="USDT",
+                amount=Decimal("-0.20"),
+                bill_type="8",
+                sub_type="173",
+                type_label="funding_fee",
+                sub_type_label="funding_fee_expense",
+                funding_direction="expense",
+                bill_ts=now - timedelta(minutes=2),
+                ledger_posting_state="POSTED",
+                ledger_journal_id="jrnl_ltc_funding_2",
+                ledger_posted_at=now - timedelta(minutes=2),
+                product_type="derivatives",
+                margin_mode="cross",
+            )
+        )
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            lifecycle_response = client.get("/reports/position-lifecycle-profitability?limit=20")
+            trial_review_details = client.get(
+                "/reports/trial-review-details?profitability_limit=20&anomaly_limit=20&segment_limit=20&window_days=7&period_count=2"
+            )
+
+        self.assertEqual(lifecycle_response.status_code, 200)
+        lifecycle_payload = lifecycle_response.json()
+        target = next(
+            item
+            for item in lifecycle_payload["lifecycles"]
+            if item["symbol"] == "LTC-USDT-SWAP" and item["position_key"] == "LTC-USDT-SWAP:long"
+        )
+        self.assertEqual(target["status"], "closed")
+        self.assertEqual(Decimal(str(target["trading_net_realized_pnl"])), Decimal("5"))
+        self.assertEqual(Decimal(str(target["fee_total"])), Decimal("0.45"))
+        self.assertEqual(Decimal(str(target["funding_fee_total"])), Decimal("-0.30"))
+        self.assertEqual(Decimal(str(target["combined_net_realized_pnl"])), Decimal("4.70"))
+        self.assertEqual(target["funding_fee_attribution_scope"], "symbol_window")
+        self.assertEqual(lifecycle_payload["summary"]["unassigned_funding_fee_count"], 1)
+        self.assertEqual(lifecycle_payload["unassigned_funding_fees"][0]["bill_id"], "ltc_funding_unassigned")
+        self.assertEqual(lifecycle_payload["unassigned_funding_fees"][0]["attribution_reason"], "no_matching_position_window")
+        self.assertEqual(trial_review_details.status_code, 200)
+        self.assertIn("position_lifecycle_profitability", trial_review_details.json()["sections"])
+
+    async def test_trial_guard_and_forward_validation_include_funding_fee_drag(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "config_profile": "forward_test_small_capital",
+                "mode": "paper_live",
+                "market_data_backend": "demo",
+                "execution_backend": "paper",
+                "account_backend": "disabled",
+                "account_read_enabled": False,
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "storage_mode": "memory",
+                "event_persistence_mode": "strict",
+                "operator_unsafe_write_without_auth": True,
+                "trial_guard_enabled": True,
+                "trial_guard_min_closed_fills": 1,
+                "trial_guard_lookback_fills": 20,
+                "trial_guard_max_daily_loss_usdt": 20.0,
+            }
+        )
+        runtime = await build_runtime(settings)
+        now = utc_now()
+        runtime.fill_outcome_repo.save_outcome(
+            FillOutcomeRecord(
+                fill_id="btc_trial_guard_fill",
+                order_id="btc_trial_guard_order",
+                symbol="BTC-USDT-SWAP",
+                position_key="BTC-USDT-SWAP",
+                venue="PAPER",
+                side="sell",
+                fill_qty=Decimal("1"),
+                fill_price=Decimal("101"),
+                fill_notional=Decimal("101"),
+                fee_amount=Decimal("0.10"),
+                fee_currency="USDT",
+                liquidity_role="taker",
+                exchange_timestamp=now - timedelta(minutes=30),
+                ingestion_timestamp=now - timedelta(minutes=30),
+                order_status_after_fill="FILLED",
+                target_leverage=2.0,
+                exposure_side="flat",
+                execution_action="close_long",
+                position_intent="close_long",
+                position_mode="net_mode",
+                pos_side="net",
+                instrument_family="BTC-USDT",
+                settle_currency="USDT",
+                starting_position_qty=Decimal("1"),
+                starting_avg_entry_price=Decimal("95"),
+                ending_position_qty=Decimal("0"),
+                ending_avg_entry_price=Decimal("0"),
+                realized_pnl_delta=Decimal("8"),
+                fee_delta=Decimal("-0.10"),
+                product_type="derivatives",
+                margin_mode="cross",
+                created_at=now - timedelta(minutes=30),
+            )
+        )
+        runtime.funding_fee_repo.save_record(
+            FundingFeeRecord(
+                bill_id="btc_trial_guard_funding",
+                symbol="BTC-USDT-SWAP",
+                currency="USDT",
+                amount=Decimal("-40"),
+                bill_type="8",
+                sub_type="173",
+                type_label="funding_fee",
+                sub_type_label="funding_fee_expense",
+                funding_direction="expense",
+                bill_ts=now - timedelta(minutes=5),
+                ledger_posting_state="POSTED",
+                ledger_journal_id="jrnl_btc_trial_guard_funding",
+                ledger_posted_at=now - timedelta(minutes=5),
+                product_type="derivatives",
+                margin_mode="cross",
+            )
+        )
+        runtime.trial_guard_service.evaluate_now()
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            trial_guard = client.get("/system/trial-guard")
+            forward_validation = client.get("/reports/forward-validation?window_days=1&period_count=2")
+            trial_review_summary = client.get(
+                "/reports/trial-review-summary?segment_limit=20&window_days=1&period_count=2"
+            )
+
+        self.assertEqual(trial_guard.status_code, 200)
+        trial_guard_payload = trial_guard.json()
+        self.assertEqual(trial_guard_payload["status"], "breached")
+        self.assertEqual(Decimal(str(trial_guard_payload["daily_trading_net_realized"])), Decimal("8"))
+        self.assertEqual(Decimal(str(trial_guard_payload["daily_funding_fee_net"])), Decimal("-40"))
+        self.assertEqual(Decimal(str(trial_guard_payload["daily_combined_net_realized"])), Decimal("-32"))
+        self.assertTrue(any(item["code"] == "trial_guard_daily_loss_limit" for item in trial_guard_payload["breaches"]))
+
+        self.assertEqual(forward_validation.status_code, 200)
+        latest_period = forward_validation.json()["periods"][0]
+        self.assertEqual(Decimal(str(latest_period["net_realized_pnl"])), Decimal("8"))
+        self.assertEqual(Decimal(str(latest_period["funding_fee_net_pnl"])), Decimal("-40"))
+        self.assertEqual(Decimal(str(latest_period["combined_net_realized_pnl"])), Decimal("-32"))
+        self.assertEqual(forward_validation.json()["summary"]["verdict"], "pause")
+
+        self.assertEqual(trial_review_summary.status_code, 200)
+        summary_payload = trial_review_summary.json()["summary"]
+        self.assertEqual(Decimal(str(summary_payload["funding_fee_net_pnl"])), Decimal("-40"))
+        self.assertEqual(Decimal(str(summary_payload["combined_net_realized_pnl"])), Decimal("-32"))
+
     async def test_operator_visibility_endpoints_cover_decision_execution_reconciliation_and_audit(self) -> None:
         runtime = await self._runtime()
         app = self._app(runtime)
@@ -269,6 +1073,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             decision_detail = client.get(f"/decision/{decision_id}").json()
             risk_latest = client.get("/risk/latest").json()
             risk_recent = client.get("/risk/recent?limit=2").json()
+            margin_buffer = client.get("/risk/margin-buffer").json()
             policy_latest = client.get("/policy/latest").json()
             policy_recent = client.get("/policy/recent?limit=2").json()
             portfolio_latest = client.get("/portfolio/latest").json()
@@ -284,10 +1089,17 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             execution_latest = client.get("/execution/latest").json()
             execution_quality = client.get("/reports/execution-quality?limit=5").json()
             profitability_overview = client.get("/reports/profitability-overview?limit=5").json()
+            lifecycle_profitability = client.get("/reports/position-lifecycle-profitability?limit=5").json()
             strategy_segments = client.get("/reports/strategy-segments?limit=10").json()
             execution_anomalies = client.get("/reports/execution-anomalies?limit=10").json()
             forward_validation = client.get("/reports/forward-validation?window_days=7&period_count=4").json()
             scaling_readiness = client.get("/reports/scaling-readiness?window_days=7&period_count=4").json()
+            trial_review_summary = client.get(
+                "/reports/trial-review-summary?segment_limit=100&window_days=7&period_count=4"
+            ).json()
+            trial_review_details = client.get(
+                "/reports/trial-review-details?profitability_limit=100&anomaly_limit=100&segment_limit=100&window_days=7&period_count=4"
+            ).json()
             trial_review_packet = client.get(
                 "/reports/trial-review-packet?profitability_limit=100&anomaly_limit=100&segment_limit=100&window_days=7&period_count=4"
             ).json()
@@ -314,6 +1126,9 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(risk_latest["decision_id"], decision_id)
         self.assertIn("total_available", risk_recent)
         self.assertIn("has_more", risk_recent)
+        self.assertIn("status", margin_buffer)
+        self.assertIn("current", margin_buffer)
+        self.assertIn("liquidation", margin_buffer)
         self.assertEqual(policy_latest["decision_id"], decision_id)
         self.assertIn("total_available", policy_recent)
         self.assertIn("has_more", policy_recent)
@@ -321,6 +1136,11 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(portfolio_history["snapshots"])
         self.assertIn("local_balances", balances)
         self.assertIn("local_positions", positions)
+        self.assertIn("local_net_positions", positions)
+        self.assertIn("local_margin_summary", positions)
+        self.assertIn("exchange_net_positions", positions)
+        self.assertIn("exchange_margin_summary", positions)
+        self.assertIn("margin_reconciliation", positions)
         self.assertTrue(orders_recent["orders"])
         self.assertIn("total_available", orders_recent)
         self.assertIn("has_more", orders_recent)
@@ -350,8 +1170,14 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertIn("closed_fill_count", profitability_overview["summary"])
         self.assertIn("gross_realized_pnl", profitability_overview["summary"])
         self.assertIn("net_realized_pnl", profitability_overview["summary"])
+        self.assertIn("funding_fee_count", profitability_overview["summary"])
+        self.assertIn("combined_net_realized_pnl", profitability_overview["summary"])
         self.assertIn("execution_quality", profitability_overview)
+        self.assertIn("funding_fee_summary", profitability_overview)
         self.assertTrue(profitability_overview["recent_closed_fills"])
+        self.assertIn("recent_realized_events", profitability_overview)
+        self.assertIn("lifecycles", lifecycle_profitability)
+        self.assertIn("summary", lifecycle_profitability)
         self.assertIn("group_by", strategy_segments)
         self.assertIn("segments", strategy_segments)
         self.assertTrue(strategy_segments["segments"])
@@ -375,11 +1201,42 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertIn("latest_review", scaling_readiness)
         self.assertEqual(scaling_readiness["window_days"], 7)
         self.assertEqual(scaling_readiness["period_count"], 4)
+        self.assertIn("summary", trial_review_summary)
+        self.assertIn("recommendation", trial_review_summary)
+        self.assertIn("sections", trial_review_summary)
+        self.assertIn("forward_validation", trial_review_summary["sections"])
+        self.assertIn("scaling_readiness", trial_review_summary["sections"])
+        self.assertIn("strategy_segments", trial_review_summary["sections"])
+        self.assertEqual(trial_review_summary["truth_source"], "aggregated_operator_reports_summary")
+        self.assertIn("sections", trial_review_details)
+        self.assertIn("profitability", trial_review_details["sections"])
+        self.assertIn("position_lifecycle_profitability", trial_review_details["sections"])
+        self.assertIn("execution_anomalies", trial_review_details["sections"])
+        self.assertIn("trial_guard", trial_review_details["sections"])
+        self.assertIn("margin_buffer_overview", trial_review_details["sections"])
+        self.assertIn("recovery", trial_review_details["sections"])
+        self.assertEqual(trial_review_details["truth_source"], "aggregated_operator_reports_details")
         self.assertIn("summary", trial_review_packet)
         self.assertIn("recommendation", trial_review_packet)
         self.assertIn("sections", trial_review_packet)
         self.assertIn("action_items", trial_review_packet["recommendation"])
         self.assertIn("scaling_readiness", trial_review_packet["sections"])
+        self.assertEqual(
+            trial_review_packet["summary"]["readiness"],
+            trial_review_summary["summary"]["readiness"],
+        )
+        self.assertEqual(
+            trial_review_packet["recommendation"]["readiness"],
+            trial_review_summary["recommendation"]["readiness"],
+        )
+        self.assertEqual(
+            trial_review_packet["sections"]["profitability"],
+            trial_review_details["sections"]["profitability"],
+        )
+        self.assertEqual(
+            trial_review_packet["sections"]["execution_anomalies"],
+            trial_review_details["sections"]["execution_anomalies"],
+        )
         self.assertIn("actions", trial_review_history)
         self.assertIsNotNone(reconciliation_latest["reconciliation"])
         self.assertIn("mismatch_categories", reconciliation_latest["mismatch_summary"])
@@ -912,6 +1769,51 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(outcome["final_action"], "hold")
         self.assertEqual(outcome["final_target_qty"], target["current_position_qty"])
         self.assertIsNone(payload["execution_plan"])
+
+    async def test_risk_decision_payload_includes_operator_friendly_explanations(self) -> None:
+        runtime = await self._runtime()
+
+        def explained_risk(*, target):
+            return RiskDecision(
+                decision_id=target.decision_id,
+                approved=False,
+                modified=True,
+                capped_target_position_qty=Decimal("0"),
+                capped_target_notional=Decimal("0"),
+                required_initial_margin=Decimal("20"),
+                projected_margin_usage=Decimal("0.82"),
+                projected_notional=Decimal("67"),
+                current_open_order_count=0,
+                constraints_applied=["only_reduce_required"],
+                risk_score=0.82,
+                flatten_required=False,
+                halt_required=False,
+                only_reduce_required=True,
+                risk_limit_breached=True,
+                liquidation_buffer_remaining=Decimal("0.03"),
+                rejection_reasons=["max_daily_realized_loss_usdt_exceeded"],
+            )
+
+        runtime.risk_engine.evaluate = explained_risk
+        await runtime.decision_engine.run_cycle(runtime.settings.default_symbol, runtime.settings.primary_timeframe)
+        decision_id = runtime.audit_repo.recent(limit=1)[0].decision_id
+
+        app = self._app(runtime)
+        with TestClient(app) as client:
+            decision_detail = client.get(f"/decision/{decision_id}")
+            latest_risk = client.get("/risk/latest")
+
+        detail_payload = decision_detail.json()
+        risk_payload = detail_payload["risk_decision"]
+        latest_payload = latest_risk.json()["risk_decision"]
+
+        self.assertEqual(risk_payload["rejection_reason_details"][0]["code"], "max_daily_realized_loss_usdt_exceeded")
+        self.assertIn("当日已实现亏损超过上限", risk_payload["rejection_reason_details"][0]["message"])
+        self.assertEqual(risk_payload["constraint_details"][0]["code"], "only_reduce_required")
+        self.assertIn("减仓或平仓", risk_payload["constraint_details"][0]["message"])
+        self.assertIn("风控当前已阻断", risk_payload["operator_summary"])
+        self.assertEqual(latest_payload["rejection_reason_details"][0]["code"], "max_daily_realized_loss_usdt_exceeded")
+        self.assertEqual(latest_payload["constraint_details"][0]["code"], "only_reduce_required")
 
     async def test_finalized_decision_outcome_collapses_to_hold_when_kill_switch_halts_after_risk(self) -> None:
         runtime = await self._runtime()
@@ -3874,6 +4776,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
 
     async def test_profile_control_summary_report_exposes_cold_start_and_safety_state(self) -> None:
         runtime = await self._runtime()
+        await runtime.decision_engine.strategy_profile_service.evaluate_now(allow_auto_activation=False)
         app = self._app(runtime)
 
         with TestClient(app) as client:
@@ -3885,8 +4788,14 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertIn("evidence", payload["control_summary"])
         self.assertIn("cold_start_active", payload["control_summary"]["evidence"])
         self.assertIn("safety_profile_required", payload["control_summary"])
+        self.assertIn("adaptive_controls", payload["control_summary"])
+        self.assertIn("risk_budget", payload["control_summary"]["adaptive_controls"])
+        self.assertIn("execution_aggressiveness", payload["control_summary"]["adaptive_controls"])
         self.assertIn("active_profile_id", payload["activation"])
         self.assertIn("latest_selection_decision", payload)
+        self.assertIn("transition_class", payload["latest_selection_decision"])
+        self.assertIn("gating_state", payload["latest_selection_decision"])
+        self.assertIn("operator_summary", payload["latest_selection_decision"])
 
     async def test_execution_latest_uses_normalized_recovery_view(self) -> None:
         runtime = await self._runtime()

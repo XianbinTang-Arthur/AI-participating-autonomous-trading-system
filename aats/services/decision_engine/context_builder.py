@@ -11,6 +11,7 @@ from aats.schemas.system import HealthSnapshot
 from aats.services.governance_engine.health import SystemHealthService
 from aats.services.governance_engine.mode import RuntimeModeController
 from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, to_decimal
+from aats.services.portfolio_service.position_keys import symbol_from_position_key
 from aats.services.runtime_scope import latest_matching_snapshot, runtime_state_scope, scoped_portfolio_event
 from aats.services.strategy_execution_health import compute_strategy_execution_health
 from aats.storage.base import EventStore, ExecutionRepository, PortfolioRepository
@@ -118,11 +119,7 @@ class DecisionContextBuilder:
             current_open_orders=open_orders,
             product_type=self.settings.trading_product_type,
             current_exposure_side=current_exposure_side,
-            current_target_leverage=(
-                portfolio_snapshot.leverage_profile.get(symbol, 1.0)
-                if portfolio_snapshot is not None
-                else 1.0
-            ),
+            current_target_leverage=self._current_target_leverage(portfolio_snapshot, symbol),
             current_position_opened_at=strategy_health.current_position_opened_at,
             last_position_closed_at=strategy_health.last_position_closed_at,
             latest_fill_timestamp=strategy_health.latest_fill_timestamp,
@@ -144,13 +141,39 @@ class DecisionContextBuilder:
     ) -> Decimal:
         if snapshot is None:
             return Decimal("0")
-        for position in snapshot.positions:
-            if position.symbol == symbol:
-                return position.position_qty
+        quantity = sum(
+            (
+                position.position_qty
+                for position in snapshot.positions
+                if position.symbol == symbol
+            ),
+            start=Decimal("0"),
+        )
+        if abs(quantity) > EPSILON_DECIMAL_12:
+            return quantity
         if product_type == "spot" and "-" in symbol:
             base_currency, _quote_currency = symbol.split("-", 1)
             return snapshot.balances.get(base_currency, Decimal("0"))
         return Decimal("0")
+
+    @staticmethod
+    def _current_target_leverage(snapshot: PortfolioSnapshot | None, symbol: str) -> float:
+        if snapshot is None:
+            return 1.0
+        direct = snapshot.leverage_profile.get(symbol)
+        if direct is not None:
+            return float(direct)
+        leverages = [
+            float(snapshot.leverage_profile.get(position.position_key or position.symbol, position.target_leverage))
+            for position in snapshot.positions
+            if position.symbol == symbol
+        ]
+        if leverages:
+            return max(leverages)
+        for key, value in snapshot.leverage_profile.items():
+            if symbol_from_position_key(key) == symbol:
+                leverages.append(float(value))
+        return max(leverages) if leverages else 1.0
 
     @staticmethod
     def _exposure_side(quantity: Decimal) -> str:

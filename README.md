@@ -140,7 +140,7 @@ psql postgresql://aats:aats@localhost:5432/aats -f migrations/0007_execution_out
 ### 4. 启动 API 与 UI
 
 ```powershell
-.\.venv\Scripts\python.exe -m uvicorn apps.api_gateway.main:app --host 127.0.0.1 --port 8000
+.\.venv\Scripts\python.exe scripts/start_api.py --profile spot
 ```
 
 启动后可访问：
@@ -149,6 +149,13 @@ psql postgresql://aats:aats@localhost:5432/aats -f migrations/0007_execution_out
 - `http://127.0.0.1:8000/system/health`
 - `http://127.0.0.1:8000/system/runtime`
 - `http://127.0.0.1:8000/reconciliation/latest`
+
+Run spot and derivatives side by side with separate API ports:
+
+```powershell
+.\.venv\Scripts\python.exe scripts/start_api.py --profile spot --port 8000
+.\.venv\Scripts\python.exe scripts/start_api.py --profile derivatives --port 8001
+```
 
 ## 配置建议
 

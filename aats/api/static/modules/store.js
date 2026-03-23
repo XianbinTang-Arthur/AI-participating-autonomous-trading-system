@@ -97,6 +97,8 @@ export function viewSpecs(view, state = null) {
       ["metrics", "/system/metrics"],
       ["phase1Shadow", "/system/shadow"],
       ["trialGuard", "/system/trial-guard"],
+      ["guardedLivePreflight", "/system/guarded-live-preflight"],
+      ["guardedLiveRunPacket", "/reports/guarded-live-run-packet"],
       ["portfolio", "/portfolio/latest"],
       ["accountState", "/account/state"],
       ["reconciliationLatest", "/reconciliation/latest"],

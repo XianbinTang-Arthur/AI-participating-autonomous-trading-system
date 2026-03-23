@@ -61,9 +61,12 @@ class LiquidityAnalyzer:
             return 0.0
         total = 0.0
         for level in levels:
-            if not isinstance(level, dict):
+            if isinstance(level, dict):
+                size = level.get("size") or level.get("qty") or level.get("quantity")
+            elif isinstance(level, (list, tuple)) and len(level) >= 2:
+                size = level[1]
+            else:
                 continue
-            size = level.get("size") or level.get("qty") or level.get("quantity")
             try:
                 total += float(size)
             except (TypeError, ValueError):

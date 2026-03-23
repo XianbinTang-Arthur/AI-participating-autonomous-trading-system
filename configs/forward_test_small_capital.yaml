@@ -1,0 +1,36 @@
+config_profile: forward_test_small_capital
+mode: paper_live
+market_data_backend: okx
+execution_backend: paper
+account_backend: okx
+account_read_enabled: true
+live_submit_enabled: false
+guarded_execution_dry_run: true
+storage_mode: postgres
+event_persistence_mode: strict
+allowed_symbols:
+  - BTC-USDT
+default_symbol: BTC-USDT
+enabled_decision_timeframes:
+  - 15m
+  - 1h
+max_abs_position_qty: 0.0015
+max_notional_per_symbol: 150.0
+max_open_orders: 1
+default_order_qty: 0.0003
+decision_min_interval_seconds_15m: 90.0
+decision_min_interval_seconds_1h: 240.0
+decision_min_price_move_bps: 6.0
+decision_min_momentum_delta: 0.0007
+max_target_leverage: 1.0
+default_target_leverage: 1.0
+trial_guard_enabled: true
+trial_guard_poll_interval_seconds: 10.0
+trial_guard_lookback_fills: 30
+trial_guard_min_closed_fills: 5
+trial_guard_max_daily_loss_usdt: 20.0
+trial_guard_max_consecutive_losses: 4
+trial_guard_max_fee_to_notional_ratio: 0.0012
+trial_guard_max_high_slippage_ratio: 0.35
+trial_guard_max_slow_submit_to_fill_ratio: 0.35
+exchange_name: OKX
