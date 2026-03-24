@@ -555,9 +555,12 @@ class TestRecovery(unittest.IsolatedAsyncioTestCase):
 
         previous_baseline_ref = runtime.recovery_status.baseline_event_ref
         rebaseline = await query.rebaseline(reason="accept_current_exchange_state", actor_role="admin")
-        self.assertEqual(rebaseline["status"], "rebaseline_completed")
+        self.assertEqual(rebaseline["status"], "review_required")
+        self.assertEqual(rebaseline["rebaseline_status"], "review_required")
         self.assertTrue(rebaseline["halted"])
-        self.assertTrue(runtime.recovery_status.resume_eligible)
+        self.assertIsNotNone(rebaseline["auto_resume"])
+        self.assertEqual(rebaseline["auto_resume"]["status"], "resume_blocked")
+        self.assertFalse(runtime.recovery_status.resume_eligible)
         self.assertEqual(runtime.recovery_status.last_rebaseline_event_ref, rebaseline["baseline_event_ref"])
         latest_baseline = runtime.event_store.latest(topics.ACCOUNT_BASELINES)
         self.assertIsNotNone(latest_baseline)
@@ -566,12 +569,11 @@ class TestRecovery(unittest.IsolatedAsyncioTestCase):
         latest_snapshot = runtime.portfolio_repo.latest()
         self.assertIsNotNone(latest_snapshot)
         self.assertEqual(latest_snapshot.balances["BTC"], Decimal("0.001000000000"))
-
         resumed = await query.resume(reason="resume_after_rebaseline", actor_role="admin")
-        self.assertEqual(resumed["status"], "resumed")
-        self.assertFalse(resumed["halted"])
-        self.assertTrue(resumed["runnable"])
-        self.assertEqual(query.recovery_view()["recovery_state"], "normal_operation")
+        self.assertEqual(resumed["status"], "resume_blocked")
+        self.assertTrue(resumed["halted"])
+        self.assertFalse(resumed["runnable"])
+        self.assertEqual(query.recovery_view()["recovery_state"], "review_required")
 
         operator_actions = [item.payload for item in runtime.event_store.by_topic(topics.OPERATOR_ACTIONS)]
         self.assertTrue(any(item["action"] == "rebaseline" for item in operator_actions))

@@ -380,14 +380,25 @@ class ReconciliationSystemQueryFacade:
             mode_snapshot=self.owner.system_mode(),
             blockers=self.owner.blockers(),
         )
+        auto_resume: dict[str, Any] | None = None
+        if recovery_state != "resume_blocked":
+            auto_resume = await self.resume(
+                reason="auto_resume_after_rebaseline",
+                actor_role=actor_role,
+                actor_identity=actor_identity,
+                auth_source=auth_source,
+            )
+        effective_recovery = self.owner.recovery_view()
         return {
-            "status": recovery_state,
-            "halted": True,
+            "status": effective_recovery["recovery_state"],
+            "rebaseline_status": recovery_state,
+            "halted": self.owner.runtime.kill_switch.halted,
             "reason": reason,
             "baseline": imported.snapshot.model_dump(mode="json"),
             "baseline_event_ref": imported.event_id,
             "reconciliation": report.model_dump(mode="json"),
-            "recovery": self.owner.recovery_view(),
+            "recovery": effective_recovery,
+            "auto_resume": auto_resume,
         }
 
     def halt(

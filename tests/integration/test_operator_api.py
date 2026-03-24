@@ -5150,9 +5150,13 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             recovery_after = client.get("/system/recovery").json()
 
         self.assertIn("recovery_state", recovery_before["recovery"])
-        self.assertEqual(rebaseline["status"], "rebaseline_completed")
-        self.assertEqual(recovery_after["recovery"]["recovery_state"], "rebaseline_completed")
+        self.assertEqual(rebaseline["status"], "normal_operation")
+        self.assertEqual(rebaseline["rebaseline_status"], "rebaseline_completed")
+        self.assertIn("auto_resume", rebaseline)
+        self.assertIsNotNone(rebaseline["auto_resume"])
+        self.assertEqual(recovery_after["recovery"]["recovery_state"], "normal_operation")
         self.assertTrue(recovery_after["recovery"]["resume_eligible"])
+        self.assertTrue(recovery_after["recovery"]["safe_to_trade"])
         self.assertIsNotNone(recovery_after["recovery"]["last_rebaseline_action"])
 
     async def test_recovery_view_uses_latest_account_baseline_for_current_scope(self) -> None:
