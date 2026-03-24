@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
@@ -117,6 +118,15 @@ def create_database_runtime(database_url: str) -> DatabaseRuntime:
 
 def create_schema(runtime: DatabaseRuntime) -> None:
     Base.metadata.create_all(runtime.engine)
+
+
+def apply_current_migrations(runtime: DatabaseRuntime) -> None:
+    migrations_dir = Path(__file__).resolve().parents[2] / "migrations"
+    with runtime.engine.begin() as connection:
+        raw_connection = connection.connection
+        with raw_connection.cursor() as cursor:
+            for migration_path in sorted(migrations_dir.glob("*.sql")):
+                cursor.execute(migration_path.read_text(encoding="utf-8"))
 
 
 def validate_runtime_schema(runtime: DatabaseRuntime) -> None:

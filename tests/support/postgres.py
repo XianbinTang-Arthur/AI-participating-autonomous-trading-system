@@ -10,7 +10,7 @@ from typing import Iterator
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine, make_url
 
-from aats.storage.session import DatabaseRuntime, create_database_runtime, create_schema
+from aats.storage.session import DatabaseRuntime, apply_current_migrations, create_database_runtime, create_schema
 
 
 def postgres_test_url() -> str:
@@ -59,9 +59,4 @@ def temporary_postgres_runtime(*, use_migrations: bool = False) -> Iterator[tupl
 
 
 def _apply_migrations(runtime: DatabaseRuntime) -> None:
-    migrations_dir = Path(__file__).resolve().parents[2] / "migrations"
-    with runtime.engine.begin() as connection:
-        raw_connection = connection.connection
-        with raw_connection.cursor() as cursor:
-            for migration_path in sorted(migrations_dir.glob("*.sql")):
-                cursor.execute(migration_path.read_text(encoding="utf-8"))
+    apply_current_migrations(runtime)

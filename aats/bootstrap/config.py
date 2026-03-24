@@ -146,7 +146,13 @@ from aats.storage.strategy_sleeve_repo import InMemoryStrategySleeveRepository
 from aats.storage.strategy_sleeve_repo_postgres import PostgresStrategySleeveRepository
 from aats.storage.strategy_runtime_repo import InMemoryStrategyRuntimeRepository
 from aats.storage.strategy_runtime_repo_postgres import PostgresStrategyRuntimeRepository
-from aats.storage.session import DatabaseRuntime, create_database_runtime, create_schema, validate_runtime_schema
+from aats.storage.session import (
+    DatabaseRuntime,
+    apply_current_migrations,
+    create_database_runtime,
+    create_schema,
+    validate_runtime_schema,
+)
 from aats.schemas.system import RecoveryStatus
 from aats.schemas.common import new_id, utc_now
 from aats.schemas.operator import ExecutionErrorSummary, ProcessingFailureRecord
@@ -789,6 +795,7 @@ def build_storage_backends(settings: AATSSettings) -> StorageBackends:
     database_runtime = create_database_runtime(settings.database_url)
     if settings.database_auto_create_schema:
         create_schema(database_runtime)
+    apply_current_migrations(database_runtime)
     validate_runtime_schema(database_runtime)
     if settings.database_single_runtime_guard_enabled:
         database_runtime.acquire_single_runtime_lock(settings.database_runtime_lock_key)
