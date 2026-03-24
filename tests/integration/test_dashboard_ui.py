@@ -74,6 +74,7 @@ class TestDashboardUI(unittest.TestCase):
         self.assertIn('["aiShadowEvaluations", `/ai/shadow/evaluations?limit=${limits.recentAIShadowEvaluations}&offset=0`]', store_text)
         self.assertIn('["guardedLivePreflight", "/system/guarded-live-preflight"]', store_text)
         self.assertIn('["guardedLiveRunPacket", "/reports/guarded-live-run-packet"]', store_text)
+        self.assertIn('["strategyRuntime", "/strategy/runtime"]', store_text)
         self.assertNotIn('  ai: [', store_text)
 
         ai_analysis_text = responses["ai_analysis_js"].text
@@ -102,6 +103,9 @@ class TestDashboardUI(unittest.TestCase):
         self.assertNotIn("自动跳档状态", strategy_text)
         self.assertIn("系统自动试盘结论", strategy_text)
         self.assertIn("样本仍少，先继续观察", strategy_text)
+        self.assertIn("strategyRuntimeSummary", strategy_text)
+        self.assertIn("renderStrategyCandidateTable", strategy_text)
+        self.assertIn("strategyFamilyEnablement", strategy_text)
         self.assertNotIn("记为继续小资金观察", strategy_text)
         self.assertNotIn("记为缩小试盘规模", strategy_text)
         self.assertNotIn("记为暂停试盘并复盘", strategy_text)

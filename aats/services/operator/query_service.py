@@ -11,6 +11,7 @@ from aats.schemas.common import EventEnvelope, utc_now
 from aats.schemas.blocker_control import BlockerControlSnapshot
 from aats.schemas.decision import AIDecisionIntent, BaselineReference, DecisionOutcome, normalize_ai_operating_mode
 from aats.schemas.execution import FillEvent, OrderState, execution_action_from_position_intent
+from aats.schemas.strategy_runtime import StrategyCoordinatorSnapshot
 from aats.schemas.operator import (
     AuthSource,
     BlockerSnapshotRecord,
@@ -1411,6 +1412,30 @@ class OperatorQueryService:
         execution_aggressiveness_multiplier = (
             None if risk_decision is None else self._to_decimal(risk_decision.get("execution_aggressiveness_multiplier"))
         )
+        strategy_family = (
+            None
+            if decision_outcome is None
+            else decision_outcome.get("selected_strategy_family")
+        )
+        if strategy_family is None and position_target is not None:
+            strategy_family = position_target.get("strategy_family")
+        strategy_route_action = (
+            None
+            if decision_outcome is None
+            else decision_outcome.get("selected_strategy_route_action")
+        )
+        if strategy_route_action is None and position_target is not None:
+            strategy_route_action = position_target.get("strategy_route_action")
+        strategy_selection_reason_codes = (
+            []
+            if decision_outcome is None
+            else list(decision_outcome.get("strategy_selection_reason_codes") or [])
+        )
+        if not strategy_selection_reason_codes and position_target is not None:
+            strategy_selection_reason_codes = list(position_target.get("strategy_reason_codes") or [])
+        strategy_headline = None if decision_outcome is None else decision_outcome.get("strategy_selection_headline")
+        if strategy_headline is None and position_target is not None:
+            strategy_headline = position_target.get("strategy_headline")
         risk_protection_active = bool(
             risk_decision is not None
             and (
@@ -1469,6 +1494,10 @@ class OperatorQueryService:
             "baseline_reason_codes": baseline_reason_codes,
             "active_profile_id": None if decision_outcome is None else decision_outcome.get("active_profile_id"),
             "profile_control_source": None if decision_outcome is None else decision_outcome.get("profile_control_source"),
+            "strategy_family": strategy_family or "directional",
+            "strategy_route_action": strategy_route_action or "override_target",
+            "strategy_selection_reason_codes": strategy_selection_reason_codes,
+            "strategy_headline": strategy_headline,
             "position_management_reason_codes": position_management_reason_codes,
             "exit_attribution": exit_attribution,
             "guardrail_flags": [] if position_target is None else list(position_target.get("guardrail_flags") or []),
@@ -1628,6 +1657,167 @@ class OperatorQueryService:
             ),
         )
         return latest.payload if latest is not None else None
+
+    def _latest_strategy_snapshot_event(self):
+        return self._cached(
+            "latest_strategy_snapshot_event",
+            lambda: latest_topic_event_for_scope(
+                self.runtime.event_store,
+                topics.STRATEGY_COORDINATOR_SNAPSHOTS,
+                self.state_scope,
+            ),
+        )
+
+    @staticmethod
+    def _strategy_snapshot_payload(event: Any | None) -> dict[str, Any] | None:
+        if event is None:
+            return None
+        snapshot = StrategyCoordinatorSnapshot.model_validate(event.payload)
+        payload = snapshot.model_dump(mode="json")
+        payload["_event_id"] = event.event_id
+        payload["_event_timestamp"] = event.event_timestamp
+        return payload
+
+    def strategy_runtime(self, *, limit: int = 10) -> dict[str, Any]:
+        normalized_limit = max(int(limit), 1)
+        cache_key = f"strategy_runtime:{self._scope_cache_fragment()}:{normalized_limit}"
+        return self._cached_ttl(
+            cache_key,
+            10,
+            lambda: self._build_strategy_runtime(limit=normalized_limit),
+        )
+
+    def _build_strategy_runtime(self, *, limit: int) -> dict[str, Any]:
+        latest_event = self._latest_strategy_snapshot_event()
+        latest_snapshot = self._strategy_snapshot_payload(latest_event)
+        selected_candidate = None
+        if latest_snapshot is not None:
+            selected_family = latest_snapshot.get("selected_family")
+            selected_candidate = next(
+                (
+                    candidate
+                    for candidate in latest_snapshot.get("candidates", [])
+                    if candidate.get("family") == selected_family
+                ),
+                None,
+            )
+        recent_events = list(
+            reversed(
+                self.runtime.event_store.by_topic_scoped(
+                    topics.STRATEGY_COORDINATOR_SNAPSHOTS,
+                    scope=self.state_scope,
+                    limit=limit,
+                )
+            )
+        )
+        recent_snapshots = [self._strategy_snapshot_payload(event) for event in recent_events]
+        latest_target_event = latest_topic_event_for_scope(
+            self.runtime.event_store,
+            topics.POSITION_TARGETS,
+            self.state_scope,
+        )
+        latest_target_payload = None
+        if latest_target_event is not None:
+            target_payload = dict(latest_target_event.payload)
+            latest_target_payload = {
+                "decision_id": target_payload.get("decision_id"),
+                "symbol": target_payload.get("symbol"),
+                "target_position_qty": target_payload.get("target_position_qty"),
+                "delta_position_qty": target_payload.get("delta_position_qty"),
+                "position_intent": target_payload.get("position_intent"),
+                "strategy_family": target_payload.get("strategy_family", "directional"),
+                "strategy_route_action": target_payload.get("strategy_route_action", "override_target"),
+                "strategy_reason_codes": list(target_payload.get("strategy_reason_codes") or []),
+                "strategy_headline": target_payload.get("strategy_headline"),
+                "event_timestamp": latest_target_event.event_timestamp,
+            }
+        configured_family = self.runtime.settings.strategy_family_active
+        family_enablement = {
+            "directional": {
+                "enabled": True,
+                "runtime_supported": True,
+                "execution_compatible": True,
+            },
+            "smart_arbitrage": {
+                "enabled": bool(self.runtime.settings.smart_arbitrage_enabled),
+                "runtime_supported": True,
+                "execution_compatible": False,
+            },
+            "spot_grid": {
+                "enabled": bool(self.runtime.settings.spot_grid_enabled),
+                "runtime_supported": self.runtime.settings.trading_product_type == "spot",
+                "execution_compatible": self.runtime.settings.trading_product_type == "spot",
+            },
+            "dca": {
+                "enabled": bool(self.runtime.settings.dca_enabled),
+                "runtime_supported": self.runtime.settings.trading_product_type == "spot",
+                "execution_compatible": self.runtime.settings.trading_product_type == "spot",
+            },
+        }
+        summary = {
+            "configured_active_family": configured_family,
+            "latest_selected_family": None if latest_snapshot is None else latest_snapshot.get("selected_family"),
+            "latest_selected_state": None if latest_snapshot is None else latest_snapshot.get("selected_state"),
+            "latest_selected_route_action": None if latest_snapshot is None else latest_snapshot.get("selected_route_action"),
+            "latest_selection_reason_codes": []
+            if latest_snapshot is None
+            else list(latest_snapshot.get("selection_reason_codes") or []),
+            "protective_fallback_active": bool(
+                latest_snapshot is not None and latest_snapshot.get("selected_route_action") == "protective_fallback"
+            ),
+            "operator_summary": (
+                "当前还没有产生多策略协调快照。"
+                if latest_snapshot is None
+                else "当前多策略协调结果已经生成。"
+            ),
+        }
+        route_action = summary["latest_selected_route_action"]
+        if latest_snapshot is not None:
+            if route_action == "override_target":
+                summary["operator_summary"] = "当前选中的策略家族正在直接接管本轮目标仓位。"
+            elif route_action == "protective_fallback":
+                summary["operator_summary"] = "当前选中的策略家族没有直接接管仓位，系统保留了方向策略的保护性减仓或退出。"
+            elif route_action == "advisory_only":
+                summary["operator_summary"] = "当前选中的策略家族只提供参考，不会直接接管实盘执行。"
+            else:
+                summary["operator_summary"] = "当前选中的策略家族没有生成可执行目标，系统继续保持当前仓位。"
+        return {
+            "generated_at": utc_now(),
+            "summary": summary,
+            "family_enablement": family_enablement,
+            "configured_parameters": {
+                "strategy_family_active": configured_family,
+                "smart_arbitrage": {
+                    "enabled": self.runtime.settings.smart_arbitrage_enabled,
+                    "companion_spot_symbol": self.runtime.settings.smart_arbitrage_companion_spot_symbol,
+                    "companion_derivatives_symbol": self.runtime.settings.smart_arbitrage_companion_derivatives_symbol,
+                    "basis_entry_bps": self.runtime.settings.smart_arbitrage_basis_entry_bps,
+                    "basis_exit_bps": self.runtime.settings.smart_arbitrage_basis_exit_bps,
+                    "estimated_cost_bps": self.runtime.settings.smart_arbitrage_estimated_cost_bps,
+                },
+                "spot_grid": {
+                    "enabled": self.runtime.settings.spot_grid_enabled,
+                    "anchor_lookback_snapshots": self.runtime.settings.spot_grid_anchor_lookback_snapshots,
+                    "band_bps": self.runtime.settings.spot_grid_band_bps,
+                    "inventory_floor_fraction": self.runtime.settings.spot_grid_inventory_floor_fraction,
+                    "inventory_ceiling_fraction": self.runtime.settings.spot_grid_inventory_ceiling_fraction,
+                    "rebalance_min_fraction_of_max_qty": self.runtime.settings.spot_grid_rebalance_min_fraction_of_max_qty,
+                    "breakout_guard_enabled": self.runtime.settings.spot_grid_breakout_guard_enabled,
+                },
+                "dca": {
+                    "enabled": self.runtime.settings.dca_enabled,
+                    "interval_seconds": self.runtime.settings.dca_interval_seconds,
+                    "quote_budget_per_cycle": self.runtime.settings.dca_quote_budget_per_cycle,
+                    "max_position_fraction_of_limit": self.runtime.settings.dca_max_position_fraction_of_limit,
+                    "pullback_only_enabled": self.runtime.settings.dca_pullback_only_enabled,
+                    "pullback_entry_bps": self.runtime.settings.dca_pullback_entry_bps,
+                },
+            },
+            "latest_snapshot": latest_snapshot,
+            "latest_applied_target": latest_target_payload,
+            "recent_snapshots": recent_snapshots,
+            "truth_source": "strategy_coordinator_snapshots",
+        }
 
     def recent_fills(self, *, limit: int = 50):
         return sorted(
@@ -2920,6 +3110,10 @@ class OperatorQueryService:
             risk_capped_target_qty=None if risk_decision is None or risk_decision.get("capped_target_position_qty") is None else Decimal(str(risk_decision.get("capped_target_position_qty"))),
             position_management_reason_codes=position_management_reason_codes,
             exit_attribution=exit_attribution,
+            selected_strategy_family=str((position_target or {}).get("strategy_family") or "directional"),
+            selected_strategy_route_action=str((position_target or {}).get("strategy_route_action") or "override_target"),
+            strategy_selection_reason_codes=list((position_target or {}).get("strategy_reason_codes") or []),
+            strategy_selection_headline=(position_target or {}).get("strategy_headline"),
             active_profile_id=activation.get("active_profile_id"),
             profile_control_source="system" if activation.get("active_profile_id") else "env_default",
             ai_fallback_used=bool((ai_assessment or {}).get("fallback_used")),
@@ -3174,6 +3368,7 @@ class OperatorQueryService:
                 else None
             ),
             "runtime_profile_control": self.runtime_profile_snapshot(),
+            "strategy_runtime_summary": self.strategy_runtime(limit=5).get("summary"),
             "symbols": [self.runtime.settings.default_symbol],
             "enabled_timeframes": list(self.runtime.settings.enabled_decision_timeframes),
             "decision_cadence": {
@@ -3183,6 +3378,7 @@ class OperatorQueryService:
                 "decision_min_momentum_delta": self.runtime.settings.decision_min_momentum_delta,
                 "max_decisions_per_minute": self.runtime.settings.max_decisions_per_minute,
             },
+            "strategy_family_active": self.runtime.settings.strategy_family_active,
             "storage_mode": self.runtime.settings.storage_mode,
             "operator_auth_enabled": self.runtime.settings.operator_auth_enabled,
             "operator_auth": {
@@ -3381,6 +3577,17 @@ class OperatorQueryService:
                     "target_position_qty": target.get("target_position_qty") if target else None,
                     "delta_position_qty": target.get("delta_position_qty") if target else None,
                     "target_delta_qty": target.get("delta_position_qty") if target else None,
+                    "strategy_family": (
+                        target.get("strategy_family")
+                        if target
+                        else None
+                    ),
+                    "strategy_route_action": (
+                        target.get("strategy_route_action")
+                        if target
+                        else None
+                    ),
+                    "strategy_reason_codes": [] if target is None else list(target.get("strategy_reason_codes") or []),
                     "guardrail_flags": target.get("guardrail_flags") if target else [],
                     "expected_net_edge_bps": target.get("expected_net_edge_bps") if target else None,
                     "policy_result": policy.get("execution_allowed") if policy else None,
@@ -5597,6 +5804,8 @@ class OperatorQueryService:
                 ),
             },
             "profitability_by_regime": _bucket_by("market_regime", "unknown"),
+            "profitability_by_strategy_family": _bucket_by("strategy_family", "directional"),
+            "profitability_by_strategy_route_action": _bucket_by("strategy_route_action", "override_target"),
             "profitability_by_profile": _bucket_by("active_profile_id", "unassigned"),
             "profitability_by_exit_attribution": _bucket_by("exit_attribution", "none"),
             "risk_protection_summary": {

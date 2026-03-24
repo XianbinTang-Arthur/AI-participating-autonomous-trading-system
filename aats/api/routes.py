@@ -297,6 +297,11 @@ async def latest_decision(request: Request) -> dict[str, Any]:
     return _query(request).latest_decision()
 
 
+@router.get("/strategy/runtime")
+async def strategy_runtime(request: Request) -> dict[str, Any]:
+    return _query(request).strategy_runtime()
+
+
 @router.get("/decision/recent")
 async def recent_decisions(
     request: Request,

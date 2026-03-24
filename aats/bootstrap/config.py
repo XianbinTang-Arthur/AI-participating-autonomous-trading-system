@@ -74,6 +74,7 @@ from aats.services.operator.strategy_profiles import StrategyProfileControlServi
 from aats.services.projections.ledger_portfolio import LedgerBackedPortfolioService
 from aats.services.recovery_control import ExecutionLedgerRecoveryService, RecoveryReconciliationClassifier
 from aats.services.runtime_scope import latest_matching_snapshot, runtime_state_scope, scoped_portfolio_event
+from aats.services.strategy_engines import StrategyCoordinatorService
 from aats.schemas.portfolio import FillOutcomeRecord, PortfolioBalanceDelta
 from aats.services.portfolio_service.pnl import PortfolioPnLCalculator
 from aats.services.portfolio_service.positions import PortfolioService, PortfolioState
@@ -267,6 +268,7 @@ class ApplicationRuntime:
     feature_engine: FeatureEngine
     ai_service: AIInferenceService
     decision_engine: DecisionOrchestrator
+    strategy_coordinator: Any | None
     decision_trigger: DecisionCycleTrigger
     decision_trigger_policy: DecisionTriggerPolicy
     execution_planner: ExecutionPlanner
@@ -1356,6 +1358,12 @@ async def build_runtime(
         validator=AssessmentValidator(),
         fee_resolver=fee_resolver,
     )
+    strategy_coordinator = StrategyCoordinatorService(
+        settings=runtime_settings,
+        event_store=storage.event_store,
+        market_gateway=market_gateway,
+        portfolio_repo=storage.portfolio_repo,
+    )
     decision_trigger_policy = DecisionTriggerPolicy(settings=runtime_settings)
     decision_engine = DecisionOrchestrator(
         bus=bus,
@@ -1370,6 +1378,7 @@ async def build_runtime(
         baseline_strategy=BaselineStrategy(event_store=storage.event_store),
         ai_service=ai_service,
         target_engine=TargetPositionEngine(settings=runtime_settings, fee_resolver=fee_resolver),
+        strategy_coordinator=strategy_coordinator,
         metrics=metrics,
     )
     decision_trigger = DecisionCycleTrigger(
@@ -1697,6 +1706,7 @@ async def build_runtime(
         feature_engine=feature_engine,
         ai_service=ai_service,
         decision_engine=decision_engine,
+        strategy_coordinator=strategy_coordinator,
         decision_trigger=decision_trigger,
         decision_trigger_policy=decision_trigger_policy,
         execution_planner=execution_planner,

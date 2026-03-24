@@ -80,6 +80,7 @@ export function viewSpecs(view, state = null) {
       ["accountState", "/account/state"],
     ],
     strategy: [
+      ["strategyRuntime", "/strategy/runtime"],
       ["latestDecision", "/decision/latest"],
       ["recentDecisions", `/decision/recent?limit=${limits.recentDecisions}&offset=0`],
       ["executionLatest", "/execution/latest"],

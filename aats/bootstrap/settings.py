@@ -34,6 +34,7 @@ MarketDataBackend = Literal["demo", "okx"]
 ExecutionBackend = Literal["paper", "okx"]
 AccountBackend = Literal["disabled", "okx"]
 AIExecutionSuggestionMode = Literal["disabled", "diagnostic_only", "shadow_translation", "enabled_live"]
+StrategyFamily = Literal["directional", "smart_arbitrage", "spot_grid", "dca"]
 
 _PLACEHOLDER_TOKENS = (
     "REPLACE_WITH_",
@@ -217,6 +218,26 @@ class AATSSettings(BaseSettings):
     strategy_profile_score_low_health_non_conservative_penalty: float = -2.0
     strategy_profile_score_divergence_execution_bonus: float = 1.5
     strategy_profile_score_divergence_other_penalty: float = -1.0
+    strategy_family_active: StrategyFamily = "directional"
+    smart_arbitrage_enabled: bool = False
+    smart_arbitrage_companion_spot_symbol: str | None = None
+    smart_arbitrage_companion_derivatives_symbol: str | None = None
+    smart_arbitrage_basis_entry_bps: float = 18.0
+    smart_arbitrage_basis_exit_bps: float = 6.0
+    smart_arbitrage_estimated_cost_bps: float = 10.0
+    spot_grid_enabled: bool = False
+    spot_grid_anchor_lookback_snapshots: int = 24
+    spot_grid_band_bps: float = 150.0
+    spot_grid_inventory_floor_fraction: float = 0.15
+    spot_grid_inventory_ceiling_fraction: float = 1.0
+    spot_grid_rebalance_min_fraction_of_max_qty: float = 0.08
+    spot_grid_breakout_guard_enabled: bool = True
+    dca_enabled: bool = False
+    dca_interval_seconds: float = 86_400.0
+    dca_quote_budget_per_cycle: float = 25.0
+    dca_max_position_fraction_of_limit: float = 1.0
+    dca_pullback_only_enabled: bool = False
+    dca_pullback_entry_bps: float = 40.0
     trading_product_type: TradingProductType = "spot"
     margin_mode: MarginMode = "cash"
     max_target_leverage: float = 1.0

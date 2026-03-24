@@ -824,6 +824,8 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             regime: str,
             volatility_state: str,
             profile_id: str,
+            strategy_family: str,
+            strategy_route_action: str,
             exit_attribution: str,
             risk_constraints: list[str],
             realized_pnl: Decimal,
@@ -873,6 +875,9 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
                 profile_control_source="system",
                 position_management_reason_codes=[exit_attribution],
                 exit_attribution=exit_attribution,
+                selected_strategy_family=strategy_family,
+                selected_strategy_route_action=strategy_route_action,
+                strategy_selection_reason_codes=[f"active_strategy_family_{strategy_family}"],
             )
             position_target = PositionTarget(
                 decision_id=decision_id,
@@ -893,6 +898,9 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
                 position_intent="reduce_long",
                 target_leverage=3.0,
                 margin_mode="cross",
+                strategy_family=strategy_family,
+                strategy_route_action=strategy_route_action,
+                strategy_reason_codes=[f"active_strategy_family_{strategy_family}"],
                 guardrail_flags=[exit_attribution],
                 decision_outcome=decision_outcome,
             )
@@ -990,6 +998,8 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             regime="trend",
             volatility_state="medium",
             profile_id="trend_normal",
+            strategy_family="directional",
+            strategy_route_action="override_target",
             exit_attribution="alpha_decay_reduce",
             risk_constraints=["risk_budget_multiplier_applied", "execution_aggressiveness_contracted"],
             realized_pnl=Decimal("12"),
@@ -999,6 +1009,8 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             regime="range",
             volatility_state="high",
             profile_id="execution_degraded_safe",
+            strategy_family="smart_arbitrage",
+            strategy_route_action="protective_fallback",
             exit_attribution="emergency_protective_exit",
             risk_constraints=[],
             realized_pnl=Decimal("-3"),
@@ -1016,6 +1028,16 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["truth_source"], "fill_outcomes_plus_decision_audit")
         self.assertTrue(any(item["market_regime"] == "trend" for item in payload["profitability_by_regime"]))
         self.assertTrue(any(item["active_profile_id"] == "trend_normal" for item in payload["profitability_by_profile"]))
+        self.assertTrue(any(item["strategy_family"] == "directional" for item in payload["profitability_by_strategy_family"]))
+        self.assertTrue(
+            any(item["strategy_family"] == "smart_arbitrage" for item in payload["profitability_by_strategy_family"])
+        )
+        self.assertTrue(
+            any(
+                item["strategy_route_action"] == "protective_fallback"
+                for item in payload["profitability_by_strategy_route_action"]
+            )
+        )
         self.assertTrue(
             any(item["exit_attribution"] == "emergency_protective_exit" for item in payload["profitability_by_exit_attribution"])
         )

@@ -23,6 +23,7 @@ class DecisionOrchestrator:
         ai_service: AIInferenceService,
         target_engine: TargetPositionEngine,
         strategy_profile_service=None,
+        strategy_coordinator=None,
         metrics: MetricsRegistry | None = None,
     ) -> None:
         self.bus = bus
@@ -31,6 +32,7 @@ class DecisionOrchestrator:
         self.ai_service = ai_service
         self.target_engine = target_engine
         self.strategy_profile_service = strategy_profile_service
+        self.strategy_coordinator = strategy_coordinator
         self.metrics = metrics
         self.logger = get_logger("aats.decision_engine")
 
@@ -109,6 +111,24 @@ class DecisionOrchestrator:
             profile_control_decision=profile_control_decision,
             operating_mode=operating_mode,
         )
+        if self.strategy_coordinator is not None:
+            strategy_snapshot = self.strategy_coordinator.evaluate(
+                context=context,
+                baseline=baseline,
+                directional_target=target,
+            )
+            strategy_envelope = await publish_model(
+                bus=self.bus,
+                topic=topics.STRATEGY_COORDINATOR_SNAPSHOTS,
+                key=symbol,
+                payload_model=strategy_snapshot,
+                source_component="decision_engine",
+            )
+            target = self.strategy_coordinator.apply_selected_target(
+                base_target=target,
+                snapshot=strategy_snapshot,
+                snapshot_ref=strategy_envelope.event_id,
+            )
         brief = None if ai_assessment is None else self.ai_service.latest_brief(context.decision_id)
         shadow_assessment = None if ai_assessment is None else self.ai_service.latest_shadow_assessment(context.decision_id)
         if brief is not None:

@@ -1,0 +1,174 @@
+from __future__ import annotations
+
+import unittest
+
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from aats.api.routes import router
+from aats.bootstrap.config import build_runtime
+from aats.bootstrap.settings import AATSSettings
+from aats.events import topics
+
+
+class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
+    async def test_spot_grid_runtime_endpoint_exposes_latest_snapshot_and_system_summary(self) -> None:
+        settings = self._settings(
+            trading_product_type="spot",
+            margin_mode="cash",
+            default_symbol="BTC-USDT",
+            allowed_symbols=("BTC-USDT",),
+            strategy_family_active="spot_grid",
+            spot_grid_enabled=True,
+            spot_grid_breakout_guard_enabled=False,
+            spot_grid_anchor_lookback_snapshots=4,
+            spot_grid_band_bps=500.0,
+            spot_grid_inventory_floor_fraction=0.5,
+            spot_grid_inventory_ceiling_fraction=1.0,
+            spot_grid_rebalance_min_fraction_of_max_qty=0.05,
+            max_abs_position_qty=1.0,
+        )
+        runtime = await build_runtime(settings)
+        await runtime.market_gateway.run_local_publisher(
+            symbol=settings.default_symbol,
+            iterations=4,
+            interval_seconds=0.0,
+        )
+
+        target = await runtime.decision_engine.run_cycle(settings.default_symbol, settings.primary_timeframe)
+
+        self.assertEqual(target.strategy_family, "spot_grid")
+        self.assertEqual(target.strategy_route_action, "override_target")
+        self.assertGreater(runtime.event_store.count(topic=topics.STRATEGY_COORDINATOR_SNAPSHOTS), 0)
+
+        app = self._app(runtime)
+        with TestClient(app) as client:
+            strategy_runtime = client.get("/strategy/runtime")
+            system_runtime = client.get("/system/runtime")
+
+        self.assertEqual(strategy_runtime.status_code, 200)
+        self.assertEqual(system_runtime.status_code, 200)
+        strategy_payload = strategy_runtime.json()
+        system_payload = system_runtime.json()
+        self.assertEqual(strategy_payload["summary"]["configured_active_family"], "spot_grid")
+        self.assertEqual(strategy_payload["summary"]["latest_selected_family"], "spot_grid")
+        self.assertEqual(strategy_payload["summary"]["latest_selected_route_action"], "override_target")
+        self.assertEqual(strategy_payload["latest_applied_target"]["strategy_family"], "spot_grid")
+        self.assertEqual(strategy_payload["latest_applied_target"]["strategy_route_action"], "override_target")
+        self.assertTrue(any(item["family"] == "spot_grid" for item in strategy_payload["latest_snapshot"]["candidates"]))
+        self.assertEqual(system_payload["strategy_family_active"], "spot_grid")
+        self.assertEqual(
+            system_payload["strategy_runtime_summary"]["configured_active_family"],
+            "spot_grid",
+        )
+
+    async def test_dca_runtime_endpoint_exposes_interval_ready_target(self) -> None:
+        settings = self._settings(
+            trading_product_type="spot",
+            margin_mode="cash",
+            default_symbol="BTC-USDT",
+            allowed_symbols=("BTC-USDT",),
+            strategy_family_active="dca",
+            dca_enabled=True,
+            dca_interval_seconds=0.0,
+            dca_quote_budget_per_cycle=100.0,
+            max_abs_position_qty=1.0,
+        )
+        runtime = await build_runtime(settings)
+        await runtime.market_gateway.run_local_publisher(
+            symbol=settings.default_symbol,
+            iterations=2,
+            interval_seconds=0.0,
+        )
+
+        target = await runtime.decision_engine.run_cycle(settings.default_symbol, settings.primary_timeframe)
+
+        self.assertEqual(target.strategy_family, "dca")
+        self.assertEqual(target.strategy_route_action, "override_target")
+        self.assertGreater(target.delta_position_qty, 0)
+
+        app = self._app(runtime)
+        with TestClient(app) as client:
+            strategy_runtime = client.get("/strategy/runtime")
+
+        self.assertEqual(strategy_runtime.status_code, 200)
+        payload = strategy_runtime.json()
+        self.assertEqual(payload["summary"]["configured_active_family"], "dca")
+        self.assertEqual(payload["summary"]["latest_selected_family"], "dca")
+        self.assertEqual(payload["latest_applied_target"]["strategy_family"], "dca")
+        self.assertEqual(
+            payload["configured_parameters"]["dca"]["quote_budget_per_cycle"],
+            100.0,
+        )
+
+    async def test_smart_arbitrage_runtime_endpoint_exposes_advisory_snapshot(self) -> None:
+        settings = self._settings(
+            trading_product_type="derivatives",
+            margin_mode="cross",
+            default_symbol="BTC-USDT-SWAP",
+            allowed_symbols=("BTC-USDT-SWAP",),
+            strategy_family_active="smart_arbitrage",
+            smart_arbitrage_enabled=True,
+            smart_arbitrage_basis_entry_bps=0.0,
+            smart_arbitrage_estimated_cost_bps=0.0,
+        )
+        runtime = await build_runtime(settings)
+        await runtime.market_gateway.run_local_publisher(
+            symbol="BTC-USDT",
+            iterations=2,
+            interval_seconds=0.0,
+        )
+        await runtime.market_gateway.run_local_publisher(
+            symbol=settings.default_symbol,
+            iterations=2,
+            interval_seconds=0.0,
+        )
+
+        target = await runtime.decision_engine.run_cycle(settings.default_symbol, settings.primary_timeframe)
+
+        self.assertEqual(target.strategy_family, "smart_arbitrage")
+        self.assertEqual(target.strategy_route_action, "advisory_only")
+        self.assertEqual(target.target_position_qty, target.current_position_qty)
+
+        app = self._app(runtime)
+        with TestClient(app) as client:
+            strategy_runtime = client.get("/strategy/runtime")
+
+        self.assertEqual(strategy_runtime.status_code, 200)
+        payload = strategy_runtime.json()
+        self.assertEqual(payload["summary"]["configured_active_family"], "smart_arbitrage")
+        self.assertEqual(payload["summary"]["latest_selected_family"], "smart_arbitrage")
+        self.assertEqual(payload["summary"]["latest_selected_route_action"], "advisory_only")
+        smart_arbitrage_candidate = next(
+            item for item in payload["latest_snapshot"]["candidates"] if item["family"] == "smart_arbitrage"
+        )
+        self.assertEqual(smart_arbitrage_candidate["route_action"], "advisory_only")
+        self.assertEqual(len(smart_arbitrage_candidate["legs"]), 2)
+
+    @staticmethod
+    def _settings(**overrides) -> AATSSettings:
+        return AATSSettings.model_validate(
+            {
+                "config_profile": "local_demo",
+                "mode": "paper_live",
+                "market_data_backend": "demo",
+                "execution_backend": "paper",
+                "account_backend": "disabled",
+                "account_read_enabled": False,
+                "storage_mode": "memory",
+                "event_persistence_mode": "strict",
+                "enabled_decision_timeframes": ("15m",),
+                **overrides,
+            }
+        )
+
+    @staticmethod
+    def _app(runtime) -> FastAPI:
+        app = FastAPI()
+        app.include_router(router)
+        app.state.runtime = runtime
+        return app
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -9,6 +9,12 @@ export function renderStrategySections(data) {
   const recentPayload = data.recentDecisions || {};
   const recentDecisions = recentPayload.decisions || [];
   const executionLatest = data.executionLatest || {};
+  const strategyRuntime = data.strategyRuntime || {};
+  const strategyRuntimeSummary = strategyRuntime.summary || {};
+  const strategyRuntimeSnapshot = strategyRuntime.latest_snapshot || {};
+  const strategyCandidates = strategyRuntimeSnapshot.candidates || [];
+  const strategyAppliedTarget = strategyRuntime.latest_applied_target || {};
+  const strategyFamilyEnablement = strategyRuntime.family_enablement || {};
   const baseline = latestDecision.baseline_assessment || {};
   const ai = latestDecision.ai_assessment || {};
   const target = latestDecision.position_target || {};
@@ -80,6 +86,44 @@ export function renderStrategySections(data) {
             meta: middleEllipsis(executionLatest.latest_order?.client_order_id, 10, 6, "暂未生成委托"),
           },
         ])}
+      `,
+    }),
+    strategyCoordinator: surfaceCard({
+      title: "多策略调度",
+      kicker: "并行策略",
+      copy: "这里展示当前配置的主策略家族、最近一次调度结果，以及其他候选策略为什么没有接管执行。",
+      content: `
+        ${summaryStrip([
+          {
+            label: "当前配置家族",
+            value: readableState(strategyRuntimeSummary.configured_active_family || "directional"),
+            meta: familyEnablementSummary(strategyFamilyEnablement),
+            tone: "info",
+          },
+          {
+            label: "最近一次选中",
+            value: readableState(strategyRuntimeSummary.latest_selected_family || "directional"),
+            meta: readableState(strategyRuntimeSummary.latest_selected_state || "unknown"),
+            tone: "info",
+          },
+          {
+            label: "当前路由动作",
+            value: readableState(strategyRuntimeSummary.latest_selected_route_action || "override_target"),
+            meta: strategyRuntimeSummary.protective_fallback_active ? "当前保留了方向策略的保护性减仓/退出" : "当前没有触发保护性回退",
+            tone: strategyRuntimeSummary.protective_fallback_active ? "warning" : "positive",
+          },
+          {
+            label: "最近已应用目标",
+            value: formatSigned(strategyAppliedTarget.target_position_qty),
+            meta: `${readableState(strategyAppliedTarget.strategy_family || "directional")} | ${readableState(strategyAppliedTarget.strategy_route_action || "override_target")}`,
+            tone: "info",
+          },
+        ])}
+        ${kvList([
+          ["调度结论", strategyRuntimeSummary.operator_summary || "当前还没有多策略调度快照。", reasonListText(strategyRuntimeSummary.latest_selection_reason_codes, "当前没有额外调度原因说明")],
+          ["最近已应用动作", readableState(strategyAppliedTarget.position_intent || "hold"), reasonListText(strategyAppliedTarget.strategy_reason_codes, "当前没有额外已应用目标说明")],
+        ])}
+        ${renderStrategyCandidateTable(strategyCandidates)}
       `,
     }),
     strategySignal: surfaceCard({
@@ -266,7 +310,8 @@ export function renderStrategyView(data) {
   return `
     <div class="panel-grid">
       <div class="span-6">${sections.strategyHero}</div>
-      <div class="span-6">${sections.strategySignal}</div>
+      <div class="span-6">${sections.strategyCoordinator}</div>
+      <div class="span-12">${sections.strategySignal}</div>
       <div class="span-12">${sections.strategyHistory}</div>
       <div class="span-12">${sections.strategyHealth}</div>
       <div class="span-12">${sections.strategyTrialVerdict}</div>
@@ -315,10 +360,12 @@ function strategyNarrative(detail) {
     return "当前暂无新的策略输出，通常是在等待新的市场条件或下一轮决策窗口。";
   }
   const target = detail.position_target || {};
+  const outcome = detail.decision_outcome || {};
   const policy = detail.policy_decision || {};
   const risk = detail.risk_decision || {};
   const intentLabel = readableIntent(detail);
   const regimeLabel = readableRegime(detail);
+  const strategyFamily = readableState(outcome.selected_strategy_family || target.strategy_family || "directional");
   const currentQty = Number(target.current_position_qty ?? detail.decision_context?.current_position_qty ?? 0);
   const targetQty = Number(target.target_position_qty ?? 0);
   const openOrders = Array.isArray(detail.decision_context?.current_open_orders) ? detail.decision_context.current_open_orders : [];
@@ -330,7 +377,7 @@ function strategyNarrative(detail) {
         : openOrders.length > 0
           ? "当前已经有在途委托，这轮主要是在维持既有执行状态。"
           : `这轮决策给出了 ${intentLabel} 的交易结论。`;
-  return `当前市场状态为 ${regimeLabel}。${actionSentence}`
+  return `当前市场状态为 ${regimeLabel}，本轮由 ${strategyFamily} 接管。${actionSentence}`
     + `${policy.execution_allowed ? "策略层允许执行，" : "策略层仍未允许执行，"}`
     + `${risk.approved ? "风控层当前没有继续阻断。" : `风控仍在拦截：${listText(risk.rejection_reasons, "当前没有额外风控说明")}。`}`;
 }
@@ -425,6 +472,47 @@ function renderForwardValidationPeriods(periods) {
     ]),
     "当前没有前向验证周期。"
   );
+}
+
+function renderStrategyCandidateTable(candidates) {
+  if (!Array.isArray(candidates) || !candidates.length) {
+    return `<p class="meta-copy">当前还没有候选策略快照。</p>`;
+  }
+  return responsiveTable(
+    ["策略家族", "状态", "路由", "目标", "说明"],
+    candidates.map((candidate) => [
+      `<div><strong>${escapeHtml(readableState(candidate.family || "unknown"))}</strong><div class="table-meta">${escapeHtml(candidate.recommended_symbol || "当前没有推荐标的")}</div></div>`,
+      `<div><strong>${escapeHtml(readableState(candidate.state || "unknown"))}</strong><div class="table-meta">${escapeHtml(formatNumber(candidate.confidence, 2, "待确认"))}</div></div>`,
+      `<div><strong>${escapeHtml(readableState(candidate.route_action || "hold_current"))}</strong><div class="table-meta">${escapeHtml(readableState(candidate.urgency || "low"))}</div></div>`,
+      `<div><strong>${escapeHtml(formatSigned(candidate.target_position_qty))}</strong><div class="table-meta">${escapeHtml(formatSigned(candidate.delta_position_qty))}</div></div>`,
+      `<div><strong>${escapeHtml(strategyCandidateReason(candidate))}</strong><div class="table-meta">${escapeHtml(strategyLegSummary(candidate.legs))}</div></div>`,
+    ]),
+    "当前没有候选策略快照。"
+  );
+}
+
+function familyEnablementSummary(payload) {
+  if (!payload || typeof payload !== "object") return "当前没有多策略运行能力摘要";
+  return Object.entries(payload)
+    .map(([family, detail]) => {
+      const status = detail?.enabled ? "已启用" : "未启用";
+      return `${readableState(family)} ${status}`;
+    })
+    .join(" | ");
+}
+
+function strategyCandidateReason(candidate) {
+  const summary = reasonListText(candidate?.reason_codes, "");
+  if (summary) return summary;
+  if (candidate?.headline) return candidate.headline;
+  return "当前没有额外说明";
+}
+
+function strategyLegSummary(legs) {
+  if (!Array.isArray(legs) || !legs.length) return "当前没有附带腿说明";
+  return legs
+    .map((item) => `${readableState(item.product_type)} ${readableState(item.side)} ${item.symbol || "标的待确认"}`)
+    .join(" | ");
 }
 
 function scalingVerdictLabel(value) {

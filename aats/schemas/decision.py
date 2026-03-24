@@ -9,6 +9,7 @@ from pydantic import BaseModel
 
 from aats.schemas.common import SchemaBase
 from aats.schemas.execution import AIExecutionParameterSuggestionEnvelope
+from aats.schemas.strategy_runtime import StrategyFamily, StrategyRouteAction
 from aats.schemas.system import MarginModelType, ProductType
 
 
@@ -261,6 +262,10 @@ class DecisionOutcome(SchemaBase):
     risk_capped_target_qty: Decimal | None = None
     position_management_reason_codes: list[str] = Field(default_factory=list)
     exit_attribution: str | None = None
+    selected_strategy_family: StrategyFamily = "directional"
+    selected_strategy_route_action: StrategyRouteAction = "override_target"
+    strategy_selection_reason_codes: list[str] = Field(default_factory=list)
+    strategy_selection_headline: str | None = None
     active_profile_id: str | None = None
     profile_control_source: ProfileControlSource | None = None
     ai_fallback_used: bool = False
@@ -300,6 +305,10 @@ class PositionTarget(SchemaBase):
     expected_signal_edge_bps: float = 0.0
     expected_cost_bps: float = 0.0
     expected_net_edge_bps: float = 0.0
+    strategy_family: StrategyFamily = "directional"
+    strategy_route_action: StrategyRouteAction = "override_target"
+    strategy_reason_codes: list[str] = Field(default_factory=list)
+    strategy_headline: str | None = None
     guardrail_flags: list[str] = Field(default_factory=list)
     ai_execution_parameter_suggestion: AIExecutionParameterSuggestionEnvelope | None = None
     ai_decision_intent: AIDecisionIntent | None = None
