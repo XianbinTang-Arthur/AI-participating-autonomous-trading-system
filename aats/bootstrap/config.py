@@ -76,6 +76,7 @@ from aats.services.projections.ledger_portfolio import LedgerBackedPortfolioServ
 from aats.services.recovery_control import ExecutionLedgerRecoveryService, RecoveryReconciliationClassifier
 from aats.services.runtime_scope import latest_matching_snapshot, runtime_state_scope, scoped_portfolio_event
 from aats.services.strategy_engines import StrategyCoordinatorService
+from aats.services.strategy_engines.sleeve_pnl_projection import SleevePnLProjectionService
 from aats.schemas.portfolio import FillOutcomeRecord, PortfolioBalanceDelta
 from aats.services.portfolio_service.decimals import to_decimal
 from aats.services.portfolio_service.pnl import PortfolioPnLCalculator
@@ -92,12 +93,14 @@ from aats.storage.base import (
     EventStore,
     FillOutcomeRepository,
     FundingFeeRepository,
+    SleevePnLRepository,
     ExecutionRepository,
     ExecutionObligationRepository,
     OperatorUserRepository,
     PortfolioRepository,
     ReconciliationRepository,
     RuntimeProfileRepository,
+    StrategyRuntimeRepository,
 )
 from aats.storage.event_store import InMemoryEventStore
 from aats.storage.event_store_postgres import PostgresEventStore
@@ -108,6 +111,8 @@ from aats.storage.fill_outcome_repo import InMemoryFillOutcomeRepository
 from aats.storage.fill_outcome_repo_postgres import PostgresFillOutcomeRepository
 from aats.storage.funding_fee_repo import InMemoryFundingFeeRepository
 from aats.storage.funding_fee_repo_postgres import PostgresFundingFeeRepository
+from aats.storage.sleeve_pnl_repo import InMemorySleevePnLRepository
+from aats.storage.sleeve_pnl_repo_postgres import PostgresSleevePnLRepository
 from aats.storage.command_outbox_repo_postgres import PostgresCommandOutboxRepositoryV2
 from aats.storage.execution_command_repo_postgres import PostgresExecutionCommandRepository
 from aats.storage.execution_fill_repo_v2_postgres import PostgresExecutionFillRepositoryV2
@@ -137,13 +142,17 @@ from aats.storage.runtime_profile_repo import InMemoryRuntimeProfileRepository
 from aats.storage.runtime_profile_repo_postgres import PostgresRuntimeProfileRepository
 from aats.storage.strategy_profile_repo import InMemoryStrategyProfileRepository
 from aats.storage.strategy_profile_repo_postgres import PostgresStrategyProfileRepository
+from aats.storage.strategy_sleeve_repo import InMemoryStrategySleeveRepository
+from aats.storage.strategy_sleeve_repo_postgres import PostgresStrategySleeveRepository
+from aats.storage.strategy_runtime_repo import InMemoryStrategyRuntimeRepository
+from aats.storage.strategy_runtime_repo_postgres import PostgresStrategyRuntimeRepository
 from aats.storage.session import DatabaseRuntime, create_database_runtime, create_schema, validate_runtime_schema
 from aats.schemas.system import RecoveryStatus
 from aats.schemas.common import new_id, utc_now
 from aats.schemas.operator import ExecutionErrorSummary, ProcessingFailureRecord
 from aats.schemas.runtime_profiles import RuntimeProfileResolution
 from aats.schemas.strategy_runtime import StrategyExecutionBundle
-from aats.storage.base import StrategyProfileRepository
+from aats.storage.base import StrategyProfileRepository, StrategySleeveRepository
 
 
 SPOT_GUARDED_CONFIG_PROFILES = frozenset({"guarded_spot_dry_run", "guarded_spot_enabled"})
@@ -221,12 +230,15 @@ class StorageBackends:
     audit_repo: AuditRepository
     portfolio_repo: PortfolioRepository
     fill_outcome_repo: FillOutcomeRepository
+    sleeve_pnl_repo: SleevePnLRepository
     execution_repo: ExecutionRepository
     obligation_repo: ExecutionObligationRepository
     reconciliation_repo: ReconciliationRepository
     operator_repo: OperatorUserRepository
     runtime_profile_repo: RuntimeProfileRepository
     strategy_profile_repo: StrategyProfileRepository
+    strategy_sleeve_repo: StrategySleeveRepository
+    strategy_runtime_repo: StrategyRuntimeRepository
     execution_order_repo: PostgresExecutionOrderRepository | None = None
     execution_order_history_repo: PostgresExecutionOrderHistoryRepository | None = None
     execution_command_repo: PostgresExecutionCommandRepository | None = None
@@ -290,12 +302,15 @@ class ApplicationRuntime:
     audit_repo: AuditRepository
     portfolio_repo: PortfolioRepository
     fill_outcome_repo: FillOutcomeRepository
+    sleeve_pnl_repo: SleevePnLRepository
     execution_repo: ExecutionRepository
     obligation_repo: ExecutionObligationRepository
     reconciliation_repo: ReconciliationRepository
     operator_repo: OperatorUserRepository
     runtime_profile_repo: RuntimeProfileRepository
     strategy_profile_repo: StrategyProfileRepository
+    strategy_sleeve_repo: StrategySleeveRepository
+    strategy_runtime_repo: StrategyRuntimeRepository
     recovery_status: RecoveryStatus
     execution_order_repo: PostgresExecutionOrderRepository | None = None
     execution_order_history_repo: PostgresExecutionOrderHistoryRepository | None = None
@@ -324,6 +339,7 @@ class ApplicationRuntime:
     background_tasks: list[asyncio.Task[Any]] = field(default_factory=list)
     execution_outbox_publisher: PostgresExecutionOutboxPublisher | None = None
     funding_fee_repo: FundingFeeRepository | None = None
+    sleeve_pnl_projection_service: SleevePnLProjectionService | None = None
     funding_fee_sync_service: LedgerFundingFeeSyncService | None = None
     logger: Any = field(default_factory=lambda: get_logger("aats.runtime"))
 
@@ -404,6 +420,8 @@ class ApplicationRuntime:
         )
         if result.posted_count <= 0:
             return
+        if self.sleeve_pnl_projection_service is not None:
+            self.sleeve_pnl_projection_service.rebuild_scope(scope=runtime_state_scope(self.settings))
         if hasattr(self.portfolio_service, "bootstrap_snapshot"):
             await self.portfolio_service.bootstrap_snapshot(snapshot_origin="local_repair")
 
@@ -751,6 +769,7 @@ def build_storage_backends(settings: AATSSettings) -> StorageBackends:
             audit_repo=InMemoryAuditRepository(),
             portfolio_repo=InMemoryPortfolioRepository(),
             fill_outcome_repo=InMemoryFillOutcomeRepository(),
+            sleeve_pnl_repo=InMemorySleevePnLRepository(),
             execution_repo=InMemoryExecutionRepository(),
             obligation_repo=InMemoryExecutionObligationRepository(),
             outbox_repo=None,
@@ -758,6 +777,8 @@ def build_storage_backends(settings: AATSSettings) -> StorageBackends:
             operator_repo=InMemoryOperatorUserRepository(),
             runtime_profile_repo=InMemoryRuntimeProfileRepository(),
             strategy_profile_repo=InMemoryStrategyProfileRepository(),
+            strategy_sleeve_repo=InMemoryStrategySleeveRepository(),
+            strategy_runtime_repo=InMemoryStrategyRuntimeRepository(),
             phase1_shadow=Phase1ShadowSubsystem(),
             funding_fee_repo=InMemoryFundingFeeRepository(),
         )
@@ -784,6 +805,7 @@ def build_storage_backends(settings: AATSSettings) -> StorageBackends:
     position_lot_repo = PostgresPositionLotRepository(database_runtime.session_factory)
     lot_event_repo = PostgresLotEventRepository(database_runtime.session_factory)
     funding_fee_repo = PostgresFundingFeeRepository(database_runtime.session_factory)
+    sleeve_pnl_repo = PostgresSleevePnLRepository(database_runtime.session_factory)
     external_inbox_repo = PostgresExternalInboxRepository(database_runtime.session_factory)
     command_outbox_repo_v2 = PostgresCommandOutboxRepositoryV2(database_runtime.session_factory)
 
@@ -857,6 +879,7 @@ def build_storage_backends(settings: AATSSettings) -> StorageBackends:
         audit_repo=PostgresAuditRepository(database_runtime.session_factory),
         portfolio_repo=PostgresPortfolioRepository(database_runtime.session_factory),
         fill_outcome_repo=PostgresFillOutcomeRepository(database_runtime.session_factory),
+        sleeve_pnl_repo=sleeve_pnl_repo,
         execution_repo=execution_repo,
         obligation_repo=PostgresExecutionObligationRepository(database_runtime.session_factory),
         outbox_repo=PostgresOutboxRepository(database_runtime.session_factory),
@@ -864,6 +887,8 @@ def build_storage_backends(settings: AATSSettings) -> StorageBackends:
         operator_repo=PostgresOperatorUserRepository(database_runtime.session_factory),
         runtime_profile_repo=PostgresRuntimeProfileRepository(database_runtime.session_factory),
         strategy_profile_repo=PostgresStrategyProfileRepository(database_runtime.session_factory),
+        strategy_sleeve_repo=PostgresStrategySleeveRepository(database_runtime.session_factory),
+        strategy_runtime_repo=PostgresStrategyRuntimeRepository(database_runtime.session_factory),
         funding_fee_repo=funding_fee_repo,
         database_runtime=database_runtime,
     )
@@ -914,6 +939,7 @@ def _build_position_target_handler(
     kill_switch: KillSwitch,
     metrics: MetricsRegistry,
     bus: InMemoryEventBus,
+    strategy_runtime_repo: StrategyRuntimeRepository | None = None,
 ):
     def _exposure_side(quantity: Decimal) -> str:
         if quantity > Decimal("1e-12"):
@@ -1092,6 +1118,8 @@ def _build_position_target_handler(
             risk_limit_breached=risk_decision.risk_limit_breached,
             liquidation_buffer_remaining=risk_decision.liquidation_buffer_remaining,
             strategy_family=target.strategy_family,
+            strategy_sleeve_id=target.strategy_sleeve_id,
+            allocation_id=target.allocation_id,
             strategy_bundle_id=target.strategy_bundle_id,
             ai_execution_parameter_suggestion=target.ai_execution_parameter_suggestion,
         )
@@ -1136,7 +1164,7 @@ def _build_position_target_handler(
             rebalance_reason=f"{base_target.strategy_family}_{leg.role}",
             urgency=base_target.urgency,
             max_slippage_tolerance_bps=base_target.max_slippage_tolerance_bps,
-            source_mix={base_target.strategy_family: 1.0},
+            source_mix={str(getattr(leg, "family", None) or base_target.strategy_family): 1.0},
             decision_expiry_ts=base_target.decision_expiry_ts,
             product_type=leg.product_type,
             current_exposure_side=_exposure_side(current_qty),
@@ -1148,10 +1176,12 @@ def _build_position_target_handler(
             expected_signal_edge_bps=base_target.expected_signal_edge_bps,
             expected_cost_bps=base_target.expected_cost_bps,
             expected_net_edge_bps=base_target.expected_net_edge_bps,
-            strategy_family=base_target.strategy_family,
+            strategy_family=str(getattr(leg, "family", None) or base_target.strategy_family),
+            strategy_sleeve_id=leg.strategy_sleeve_id or base_target.strategy_sleeve_id,
             strategy_route_action=base_target.strategy_route_action,
             strategy_reason_codes=list(base_target.strategy_reason_codes),
             strategy_headline=base_target.strategy_headline,
+            allocation_id=leg.allocation_id or base_target.allocation_id,
             strategy_bundle_id=base_target.strategy_bundle_id,
             guardrail_flags=list(base_target.guardrail_flags),
             ai_execution_parameter_suggestion=base_target.ai_execution_parameter_suggestion,
@@ -1280,9 +1310,34 @@ def _build_position_target_handler(
         if runtime_layering.environment_capabilities.account_state_source_kind == "exchange":
             await account_service.refresh()
 
-        if target.strategy_family == "smart_arbitrage" and target.strategy_execution_legs:
+        if target.strategy_execution_legs:
             leg_results: list[dict[str, Any]] = []
-            for leg in target.strategy_execution_legs:
+            synthetic_current_by_leg_key: dict[tuple[str, str, str], Decimal] = {}
+            for raw_leg in target.strategy_execution_legs:
+                leg_key = (
+                    raw_leg.symbol,
+                    str(raw_leg.product_type),
+                    str(raw_leg.margin_mode),
+                )
+                current_qty = to_decimal(
+                    synthetic_current_by_leg_key.get(
+                        leg_key,
+                        to_decimal(raw_leg.current_position_qty or Decimal("0")),
+                    )
+                )
+                if raw_leg.delta_position_qty is not None:
+                    delta_qty = to_decimal(raw_leg.delta_position_qty)
+                else:
+                    delta_qty = to_decimal(raw_leg.target_position_qty or current_qty) - current_qty
+                target_qty = current_qty + delta_qty
+                leg = raw_leg.model_copy(
+                    update={
+                        "current_position_qty": current_qty,
+                        "target_position_qty": target_qty,
+                        "delta_position_qty": delta_qty,
+                    }
+                )
+                synthetic_current_by_leg_key[leg_key] = target_qty
                 leg_target = _strategy_leg_target(base_target=target, leg=leg)
                 policy_decision = policy_engine.evaluate(target=leg_target)
                 risk_decision = risk_engine.evaluate(target=leg_target) if policy_decision.execution_allowed else None
@@ -1343,6 +1398,8 @@ def _build_position_target_handler(
                     plan = plan.model_copy(
                         update={
                             "strategy_leg_role": item["leg"].role,
+                            "strategy_sleeve_id": item["leg"].strategy_sleeve_id or target.strategy_sleeve_id,
+                            "allocation_id": item["leg"].allocation_id or target.allocation_id,
                         }
                     )
                     plan_envelope = await publish_model(
@@ -1357,7 +1414,13 @@ def _build_position_target_handler(
                     if intent is None:
                         item["leg"] = item["leg"].model_copy(update={"execution_plan_ref": plan_envelope.event_id})
                         continue
-                    intent = intent.model_copy(update={"strategy_leg_role": item["leg"].role})
+                    intent = intent.model_copy(
+                        update={
+                            "strategy_leg_role": item["leg"].role,
+                            "strategy_sleeve_id": item["leg"].strategy_sleeve_id or target.strategy_sleeve_id,
+                            "allocation_id": item["leg"].allocation_id or target.allocation_id,
+                        }
+                    )
                     intent_envelope = await publish_model(
                         bus=bus,
                         topic=topics.ORDER_INTENTS,
@@ -1383,6 +1446,31 @@ def _build_position_target_handler(
                 bundle_id=target.strategy_bundle_id or new_id("bundle"),
                 decision_id=target.decision_id,
                 family=target.strategy_family,
+                participating_families=list(
+                    dict.fromkeys(
+                        [
+                            target.strategy_family,
+                            *(
+                                str(getattr(leg, "family", "") or "")
+                                for leg in published_legs
+                                if str(getattr(leg, "family", "") or "")
+                            ),
+                        ]
+                    )
+                ),
+                strategy_sleeve_id=target.strategy_sleeve_id,
+                strategy_sleeve_refs=list(
+                    dict.fromkeys(
+                        [
+                            target.strategy_sleeve_id,
+                            *(
+                                str(getattr(leg, "strategy_sleeve_id", "") or "")
+                                for leg in published_legs
+                            ),
+                        ]
+                    )
+                ),
+                allocation_id=target.allocation_id,
                 product_type=target.product_type,
                 margin_mode=target.margin_mode,
                 allowed_symbols=settings.expanded_allowed_symbols(),
@@ -1411,6 +1499,8 @@ def _build_position_target_handler(
                 payload_model=bundle,
                 source_component="decision_engine",
             )
+            if strategy_runtime_repo is not None:
+                strategy_runtime_repo.save_execution_bundle(bundle)
             await _publish_finalized_decision_outcome(
                 target=target,
                 policy_decision=aggregate_policy,
@@ -1514,6 +1604,21 @@ def _observer_subscription_specs(
         ObserverSubscriptionSpec(topics.AI_ASSESSMENTS, "audit.handle_ai_assessment", audit_service.handle_ai_assessment),
         ObserverSubscriptionSpec(topics.AI_SHADOW_DECISIONS, "audit.handle_ai_shadow_decision", audit_service.handle_ai_shadow_decision),
         ObserverSubscriptionSpec(topics.AI_SHADOW_EVALUATIONS, "audit.handle_ai_shadow_evaluation", audit_service.handle_ai_shadow_evaluation),
+        ObserverSubscriptionSpec(
+            topics.STRATEGY_COORDINATOR_SNAPSHOTS,
+            "audit.handle_strategy_coordinator_snapshot",
+            audit_service.handle_strategy_coordinator_snapshot,
+        ),
+        ObserverSubscriptionSpec(
+            topics.STRATEGY_SLEEVE_INTENTS,
+            "audit.handle_strategy_sleeve_intent",
+            audit_service.handle_strategy_sleeve_intent,
+        ),
+        ObserverSubscriptionSpec(
+            topics.PORTFOLIO_ALLOCATION_DECISIONS,
+            "audit.handle_portfolio_allocation_decision",
+            audit_service.handle_portfolio_allocation_decision,
+        ),
         ObserverSubscriptionSpec(topics.POSITION_TARGETS, "audit.handle_position_target", audit_service.handle_position_target),
         ObserverSubscriptionSpec(topics.DECISION_OUTCOMES, "audit.handle_decision_outcome", audit_service.handle_decision_outcome),
         ObserverSubscriptionSpec(topics.POLICY_DECISIONS, "audit.handle_policy_decision", audit_service.handle_policy_decision),
@@ -1694,7 +1799,13 @@ async def build_runtime(
         event_store=storage.event_store,
         market_gateway=market_gateway,
         portfolio_repo=storage.portfolio_repo,
+        execution_repo=storage.execution_repo,
+        position_lot_repo=storage.position_lot_repo,
         account_service=account_service,
+        strategy_sleeve_repo=storage.strategy_sleeve_repo,
+        strategy_runtime_repo=storage.strategy_runtime_repo,
+        reconciliation_repo=storage.reconciliation_repo,
+        sleeve_pnl_repo=storage.sleeve_pnl_repo,
     )
     decision_trigger_policy = DecisionTriggerPolicy(settings=runtime_settings)
     decision_engine = DecisionOrchestrator(
@@ -1807,6 +1918,13 @@ async def build_runtime(
         default_product_type=runtime_settings.trading_product_type,
         default_margin_mode=runtime_settings.margin_mode,
     )
+    sleeve_pnl_projection_service = SleevePnLProjectionService(
+        fill_outcome_repo=storage.fill_outcome_repo,
+        funding_fee_repo=storage.funding_fee_repo,
+        sleeve_pnl_repo=storage.sleeve_pnl_repo,
+        execution_repo=storage.execution_repo,
+        strategy_sleeve_repo=storage.strategy_sleeve_repo,
+    )
     if (
         runtime_settings.portfolio_ledger_truth_enabled
         and storage.ledger_account_repo is not None
@@ -1836,6 +1954,8 @@ async def build_runtime(
                 if storage.position_lot_repo is not None and storage.lot_event_repo is not None
                 else None
             ),
+            sleeve_pnl_projection_service=sleeve_pnl_projection_service,
+            state_scope=state_scope,
             initial_usdt_balance=runtime_settings.initial_usdt_balance,
             metrics=metrics,
         )
@@ -1847,6 +1967,18 @@ async def build_runtime(
             portfolio_repo=storage.portfolio_repo,
             fill_outcome_repo=storage.fill_outcome_repo,
             price_provider=market_gateway.latest_price,
+            execution_repo=storage.execution_repo,
+            persistent_lot_book_service=(
+                PersistentLotBookService(
+                    position_lot_repo=storage.position_lot_repo,
+                    lot_event_repo=storage.lot_event_repo,
+                    projection_builder=LotBasedProjectionBuilder(),
+                )
+                if storage.position_lot_repo is not None and storage.lot_event_repo is not None
+                else None
+            ),
+            sleeve_pnl_projection_service=sleeve_pnl_projection_service,
+            state_scope=state_scope,
             metrics=metrics,
         )
     funding_fee_sync_service = (
@@ -1927,6 +2059,7 @@ async def build_runtime(
         kill_switch=kill_switch,
         metrics=metrics,
         bus=bus,
+        strategy_runtime_repo=storage.strategy_runtime_repo,
     )
     await _subscribe_critical_handlers(
         bus=bus,
@@ -2059,12 +2192,15 @@ async def build_runtime(
         audit_repo=storage.audit_repo,
         portfolio_repo=storage.portfolio_repo,
         fill_outcome_repo=storage.fill_outcome_repo,
+        sleeve_pnl_repo=storage.sleeve_pnl_repo,
         execution_repo=storage.execution_repo,
         obligation_repo=storage.obligation_repo,
         reconciliation_repo=storage.reconciliation_repo,
         operator_repo=storage.operator_repo,
         runtime_profile_repo=storage.runtime_profile_repo,
         strategy_profile_repo=storage.strategy_profile_repo,
+        strategy_sleeve_repo=storage.strategy_sleeve_repo,
+        strategy_runtime_repo=storage.strategy_runtime_repo,
         execution_order_repo=storage.execution_order_repo,
         execution_order_history_repo=storage.execution_order_history_repo,
         execution_command_repo=storage.execution_command_repo,
@@ -2086,9 +2222,13 @@ async def build_runtime(
         database_runtime=storage.database_runtime,
         execution_outbox_publisher=execution_outbox_publisher,
         funding_fee_repo=storage.funding_fee_repo,
+        sleeve_pnl_projection_service=sleeve_pnl_projection_service,
         funding_fee_sync_service=funding_fee_sync_service,
     )
+    if runtime.sleeve_pnl_projection_service is not None:
+        runtime.sleeve_pnl_projection_service.rebuild_scope(scope=state_scope)
     from aats.services.operator.query_service import OperatorQueryService
+    from aats.services.governance_engine.recovery_posture import RecoveryPostureEvaluator
 
     runtime.derivatives_live_guard_service = DerivativesLiveGuardService(
         settings=runtime.settings,
@@ -2110,5 +2250,8 @@ async def build_runtime(
     )
     runtime.trial_guard_service.evaluate_now()
     runtime.risk_engine.trial_guard_provider = runtime.trial_guard_service
+    runtime.risk_engine.recovery_status_provider = lambda: RecoveryPostureEvaluator(runtime).finalize_status(
+        base_status=runtime.recovery_status
+    )
     runtime.decision_engine.strategy_profile_service = StrategyProfileControlService(runtime)
     return runtime

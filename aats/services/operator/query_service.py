@@ -11,7 +11,13 @@ from aats.schemas.common import EventEnvelope, utc_now
 from aats.schemas.blocker_control import BlockerControlSnapshot
 from aats.schemas.decision import AIDecisionIntent, BaselineReference, DecisionOutcome, normalize_ai_operating_mode
 from aats.schemas.execution import FillEvent, OrderState, execution_action_from_position_intent
-from aats.schemas.strategy_runtime import StrategyCoordinatorSnapshot, StrategyExecutionBundle
+from aats.schemas.portfolio import SleevePnLRecord
+from aats.schemas.strategy_runtime import (
+    PortfolioAllocationDecision,
+    StrategyCoordinatorSnapshot,
+    StrategyExecutionBundle,
+    StrategySleeveIntent,
+)
 from aats.schemas.operator import (
     AuthSource,
     BlockerSnapshotRecord,
@@ -37,6 +43,7 @@ from aats.services.operator.runtime_queries import RuntimeQueryFacade
 from aats.services.operator.reconciliation_system_queries import ReconciliationSystemQueryFacade
 from aats.services.operator.strategy_profile_queries import StrategyProfileQueryFacade
 from aats.services.operator.strategy_profiles import StrategyProfileControlService
+from aats.services.ledger.lot_projection import LotBasedProjectionBuilder
 from aats.services.portfolio_service.position_keys import build_position_key, position_key_for_snapshot_position
 from aats.services.runtime_scope import (
     fill_outcomes_for_scope,
@@ -44,6 +51,7 @@ from aats.services.runtime_scope import (
     funding_fee_records_for_scope,
     latest_reconciliation_for_scope,
     latest_snapshot_for_scope,
+    sleeve_pnl_records_for_scope,
     order_states_for_scope,
     snapshots_for_scope,
     runtime_state_scope,
@@ -125,6 +133,17 @@ class OperatorQueryService:
             lambda: fill_outcomes_for_scope(self.runtime.fill_outcome_repo, self.state_scope),
         )
 
+    def _refresh_sleeve_pnl_projection(self) -> list[SleevePnLRecord]:
+        service = getattr(self.runtime, "sleeve_pnl_projection_service", None)
+        if service is None:
+            return []
+        cache_key = f"refresh_sleeve_pnl_projection:{self._scope_cache_fragment()}"
+        return self._cached_ttl(
+            cache_key,
+            5,
+            lambda: service.rebuild_scope(scope=self.state_scope),
+        )
+
     def _scoped_funding_fee_records(self):
         return self._cached(
             "scoped_funding_fee_records",
@@ -133,6 +152,16 @@ class OperatorQueryService:
                 if getattr(self.runtime, "funding_fee_repo", None) is not None
                 else []
             ),
+        )
+
+    def _scoped_sleeve_pnl_records(self):
+        self._refresh_sleeve_pnl_projection()
+        repo = getattr(self.runtime, "sleeve_pnl_repo", None)
+        if repo is None:
+            return []
+        return self._cached(
+            "scoped_sleeve_pnl_records",
+            lambda: sleeve_pnl_records_for_scope(repo, self.state_scope),
         )
 
     def _fill_outcome_map(self) -> dict[str, Any]:
@@ -1326,6 +1355,9 @@ class OperatorQueryService:
             return {
                 "audit": None,
                 "decision_context": None,
+                "strategy_coordinator_snapshot": None,
+                "strategy_sleeve_intents": [],
+                "portfolio_allocation_decision": None,
                 "baseline_assessment": None,
                 "position_target": None,
                 "risk_decision": None,
@@ -1339,6 +1371,9 @@ class OperatorQueryService:
             return {
                 "audit": None,
                 "decision_context": None,
+                "strategy_coordinator_snapshot": None,
+                "strategy_sleeve_intents": [],
+                "portfolio_allocation_decision": None,
                 "baseline_assessment": None,
                 "position_target": None,
                 "risk_decision": None,
@@ -1353,6 +1388,13 @@ class OperatorQueryService:
         return {
             "audit": audit,
             "decision_context": self.payload_by_ref(audit.decision_context_ref),
+            "strategy_coordinator_snapshot": self.payload_by_ref(audit.strategy_coordinator_snapshot_ref),
+            "strategy_sleeve_intents": [
+                payload
+                for payload in (self.payload_by_ref(ref) for ref in audit.strategy_sleeve_intent_refs)
+                if payload is not None
+            ],
+            "portfolio_allocation_decision": self.payload_by_ref(audit.portfolio_allocation_decision_ref),
             "baseline_assessment": self.payload_by_ref(audit.baseline_assessment_ref),
             "position_target": position_target,
             "risk_decision": self._risk_decision_payload(self.payload_by_ref(audit.risk_decision_ref)),
@@ -1700,6 +1742,26 @@ class OperatorQueryService:
         payload["_event_timestamp"] = event.event_timestamp
         return payload
 
+    @staticmethod
+    def _strategy_sleeve_intent_payload(event: Any | None) -> dict[str, Any] | None:
+        if event is None:
+            return None
+        intent = StrategySleeveIntent.model_validate(event.payload)
+        payload = intent.model_dump(mode="json")
+        payload["_event_id"] = event.event_id
+        payload["_event_timestamp"] = event.event_timestamp
+        return payload
+
+    @staticmethod
+    def _portfolio_allocation_payload(event: Any | None) -> dict[str, Any] | None:
+        if event is None:
+            return None
+        decision = PortfolioAllocationDecision.model_validate(event.payload)
+        payload = decision.model_dump(mode="json")
+        payload["_event_id"] = event.event_id
+        payload["_event_timestamp"] = event.event_timestamp
+        return payload
+
     def strategy_runtime(self, *, limit: int = 10) -> dict[str, Any]:
         normalized_limit = max(int(limit), 1)
         cache_key = f"strategy_runtime:{self._scope_cache_fragment()}:{normalized_limit}"
@@ -1733,16 +1795,56 @@ class OperatorQueryService:
             )
         )
         recent_snapshots = [self._strategy_snapshot_payload(event) for event in recent_events]
-        recent_bundle_events = list(
-            reversed(
-                self.runtime.event_store.by_topic_scoped(
-                    topics.STRATEGY_EXECUTION_BUNDLES,
-                    scope=self.state_scope,
+        strategy_runtime_repo = getattr(self.runtime, "strategy_runtime_repo", None)
+        if strategy_runtime_repo is not None:
+            recent_sleeve_intents = [
+                item.model_dump(mode="json")
+                for item in strategy_runtime_repo.list_sleeve_intents(
+                    product_type=self.state_scope.product_type,
+                    margin_mode=self.state_scope.margin_mode,
+                    limit=limit * 4,
+                )
+            ]
+            latest_allocation = strategy_runtime_repo.latest_allocation_decision(
+                product_type=self.state_scope.product_type,
+                margin_mode=self.state_scope.margin_mode,
+            )
+            latest_allocation_decision = None if latest_allocation is None else latest_allocation.model_dump(mode="json")
+            recent_bundles = [
+                item.model_dump(mode="json")
+                for item in strategy_runtime_repo.recent_execution_bundles(
+                    product_type=self.state_scope.product_type,
+                    margin_mode=self.state_scope.margin_mode,
                     limit=limit,
                 )
+            ]
+        else:
+            recent_intent_events = list(
+                reversed(
+                    self.runtime.event_store.by_topic_scoped(
+                        topics.STRATEGY_SLEEVE_INTENTS,
+                        scope=self.state_scope,
+                        limit=limit * 4,
+                    )
+                )
             )
-        )
-        recent_bundles = [self._strategy_bundle_payload(event) for event in recent_bundle_events]
+            recent_sleeve_intents = [self._strategy_sleeve_intent_payload(event) for event in recent_intent_events]
+            latest_allocation_event = latest_topic_event_for_scope(
+                self.runtime.event_store,
+                topics.PORTFOLIO_ALLOCATION_DECISIONS,
+                self.state_scope,
+            )
+            latest_allocation_decision = self._portfolio_allocation_payload(latest_allocation_event)
+            recent_bundle_events = list(
+                reversed(
+                    self.runtime.event_store.by_topic_scoped(
+                        topics.STRATEGY_EXECUTION_BUNDLES,
+                        scope=self.state_scope,
+                        limit=limit,
+                    )
+                )
+            )
+            recent_bundles = [self._strategy_bundle_payload(event) for event in recent_bundle_events]
         latest_bundle = recent_bundles[0] if recent_bundles else None
         latest_target_event = latest_topic_event_for_scope(
             self.runtime.event_store,
@@ -1759,11 +1861,20 @@ class OperatorQueryService:
                 "delta_position_qty": target_payload.get("delta_position_qty"),
                 "position_intent": target_payload.get("position_intent"),
                 "strategy_family": target_payload.get("strategy_family", "directional"),
+                "strategy_sleeve_id": target_payload.get("strategy_sleeve_id"),
+                "allocation_id": target_payload.get("allocation_id"),
                 "strategy_route_action": target_payload.get("strategy_route_action", "override_target"),
                 "strategy_reason_codes": list(target_payload.get("strategy_reason_codes") or []),
                 "strategy_headline": target_payload.get("strategy_headline"),
                 "event_timestamp": latest_target_event.event_timestamp,
             }
+        sleeve_records = []
+        sleeve_repo = getattr(self.runtime, "strategy_sleeve_repo", None)
+        if sleeve_repo is not None and hasattr(sleeve_repo, "list_sleeves"):
+            sleeve_records = [
+                sleeve.model_dump(mode="json")
+                for sleeve in sleeve_repo.list_sleeves()
+            ]
         configured_family = self.runtime.settings.strategy_family_active
         family_enablement = {
             "directional": {
@@ -1787,21 +1898,51 @@ class OperatorQueryService:
                 "execution_compatible": self.runtime.settings.trading_product_type == "spot",
             },
         }
+        automation_decisions = [] if latest_snapshot is None else list(latest_snapshot.get("automation_decisions") or [])
+        active_automation = [item for item in automation_decisions if item.get("automation_state") == "active"]
+        contracted_automation = [
+            item for item in automation_decisions if item.get("automation_state") in {"contracted", "protective_only"}
+        ]
+        paused_automation = [item for item in automation_decisions if item.get("automation_state") == "paused"]
         summary = {
             "configured_active_family": configured_family,
             "automatic_selection_enabled": bool(self.runtime.settings.strategy_family_auto_selection_enabled),
+            "auto_parallel_enabled": bool(self.runtime.settings.strategy_sleeve_auto_parallel_enabled),
             "env_template_profile": self.runtime.settings.env_template_profile,
             "latest_selected_family": None if latest_snapshot is None else latest_snapshot.get("selected_family"),
+            "latest_selected_strategy_sleeve_id": (
+                None if latest_target_payload is None else latest_target_payload.get("strategy_sleeve_id")
+            ),
+            "latest_allocation_id": None if latest_target_payload is None else latest_target_payload.get("allocation_id"),
             "latest_selected_state": None if latest_snapshot is None else latest_snapshot.get("selected_state"),
             "latest_selected_route_action": None if latest_snapshot is None else latest_snapshot.get("selected_route_action"),
             "latest_bundle_status": None if latest_bundle is None else latest_bundle.get("status"),
             "latest_bundle_id": None if latest_bundle is None else latest_bundle.get("bundle_id"),
+            "latest_allocator_version": (
+                None if latest_allocation_decision is None else latest_allocation_decision.get("allocator_version")
+            ),
+            "latest_approved_families": (
+                [] if latest_allocation_decision is None else list(latest_allocation_decision.get("approved_families") or [])
+            ),
+            "latest_active_families": (
+                [] if latest_allocation_decision is None else list(latest_allocation_decision.get("active_families") or [])
+            ),
+            "latest_approved_sleeve_weights": (
+                {} if latest_allocation_decision is None else dict(latest_allocation_decision.get("approved_sleeve_weights") or {})
+            ),
             "latest_selection_reason_codes": []
             if latest_snapshot is None
             else list(latest_snapshot.get("selection_reason_codes") or []),
             "protective_fallback_active": bool(
                 latest_snapshot is not None and latest_snapshot.get("selected_route_action") == "protective_fallback"
             ),
+            "automation_active_count": len(active_automation),
+            "automation_contracted_count": len(contracted_automation),
+            "automation_paused_count": len(paused_automation),
+            "latest_automation_states": {
+                item.get("family"): item.get("automation_state")
+                for item in automation_decisions
+            },
             "operator_summary": (
                 "当前还没有产生多策略协调快照。"
                 if latest_snapshot is None
@@ -1825,6 +1966,12 @@ class OperatorQueryService:
             "configured_parameters": {
                 "strategy_family_active": configured_family,
                 "strategy_family_auto_selection_enabled": self.runtime.settings.strategy_family_auto_selection_enabled,
+                "strategy_sleeve_auto_parallel_enabled": self.runtime.settings.strategy_sleeve_auto_parallel_enabled,
+                "strategy_sleeve_auto_min_budget_multiplier": self.runtime.settings.strategy_sleeve_auto_min_budget_multiplier,
+                "strategy_sleeve_auto_reconciliation_contraction_multiplier": self.runtime.settings.strategy_sleeve_auto_reconciliation_contraction_multiplier,
+                "strategy_sleeve_auto_soft_loss_usdt": self.runtime.settings.strategy_sleeve_auto_soft_loss_usdt,
+                "strategy_sleeve_auto_hard_loss_usdt": self.runtime.settings.strategy_sleeve_auto_hard_loss_usdt,
+                "strategy_sleeve_auto_volatility_cap_enabled": self.runtime.settings.strategy_sleeve_auto_volatility_cap_enabled,
                 "env_template_profile": self.runtime.settings.env_template_profile,
                 "smart_arbitrage": {
                     "enabled": self.runtime.settings.smart_arbitrage_enabled,
@@ -1851,13 +1998,16 @@ class OperatorQueryService:
                     "pullback_only_enabled": self.runtime.settings.dca_pullback_only_enabled,
                     "pullback_entry_bps": self.runtime.settings.dca_pullback_entry_bps,
                 },
-            },
+          },
             "latest_snapshot": latest_snapshot,
+            "latest_allocation_decision": latest_allocation_decision,
             "latest_bundle": latest_bundle,
             "latest_applied_target": latest_target_payload,
+            "strategy_sleeves": sleeve_records,
+            "recent_sleeve_intents": recent_sleeve_intents,
             "recent_snapshots": recent_snapshots,
             "recent_execution_bundles": recent_bundles,
-            "truth_source": "strategy_coordinator_snapshots",
+            "truth_source": "strategy_runtime_repo_plus_event_store" if strategy_runtime_repo is not None else "strategy_coordinator_snapshots",
         }
 
     def recent_fills(self, *, limit: int = 50):
@@ -5511,6 +5661,7 @@ class OperatorQueryService:
             "sections": {
                 "profitability": profitability,
                 "position_lifecycle_profitability": lifecycle_profitability,
+                "strategy_attribution": self.strategy_attribution_report(limit=profitability_limit),
                 "execution_anomalies": anomalies,
                 "strategy_segments": segments,
                 "forward_validation": forward_validation,
@@ -5780,8 +5931,179 @@ class OperatorQueryService:
             "truth_source": "fill_outcomes",
         }
 
+    def _open_strategy_lot_rows(self) -> list[dict[str, Any]]:
+        cache_key = f"open_strategy_lot_rows:{self._scope_cache_fragment()}"
+        return self._cached(
+            cache_key,
+            self._build_open_strategy_lot_rows,
+        )
+
+    def _build_open_strategy_lot_rows(self) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]]
+        if getattr(self.runtime, "position_lot_repo", None) is not None:
+            rows = list(
+                self.runtime.position_lot_repo.lots_for_scope(
+                    symbol=None,
+                    product_type=self.state_scope.product_type,
+                    margin_mode=self.state_scope.margin_mode,
+                    open_only=True,
+                )
+            )
+        else:
+            snapshot = LotBasedProjectionBuilder().rebuild_lot_book(fills=self._scoped_fills())
+            rows = [dict(item) for item in snapshot.lots if str(item.get("status") or "") == "OPEN"]
+        return [
+            row
+            for row in rows
+            if row.get("symbol") in {None, ""} or self.state_scope.symbol_allowed(str(row.get("symbol")))
+        ]
+
+    def _strategy_sleeve_inventory_summary(self) -> list[dict[str, Any]]:
+        family_by_sleeve = {
+            item.get("sleeve_id"): item.get("family")
+            for item in (
+                sleeve.model_dump(mode="json")
+                for sleeve in getattr(self.runtime, "strategy_sleeve_repo", None).list_sleeves()
+            )
+        } if getattr(self.runtime, "strategy_sleeve_repo", None) is not None and hasattr(self.runtime.strategy_sleeve_repo, "list_sleeves") else {}
+        grouped: dict[str, dict[str, Any]] = {}
+        for row in self._open_strategy_lot_rows():
+            sleeve_id = str(row.get("strategy_sleeve_id") or "unassigned")
+            bucket = grouped.setdefault(
+                sleeve_id,
+                {
+                    "strategy_sleeve_id": None if sleeve_id == "unassigned" else sleeve_id,
+                    "strategy_family": family_by_sleeve.get(sleeve_id),
+                    "open_lot_count": 0,
+                    "net_inventory_qty": Decimal("0"),
+                    "gross_inventory_qty": Decimal("0"),
+                    "inventory_notional": Decimal("0"),
+                    "symbols": set(),
+                    "allocation_ids": set(),
+                },
+            )
+            qty = self._to_decimal(row.get("signed_quantity_open")) or Decimal("0")
+            entry_price = self._to_decimal(row.get("entry_price")) or Decimal("0")
+            bucket["open_lot_count"] += 1
+            bucket["net_inventory_qty"] += qty
+            bucket["gross_inventory_qty"] += abs(qty)
+            bucket["inventory_notional"] += abs(qty * entry_price)
+            symbol = str(row.get("symbol") or "").strip()
+            if symbol:
+                bucket["symbols"].add(symbol)
+            allocation_id = str(row.get("allocation_id") or "").strip()
+            if allocation_id:
+                bucket["allocation_ids"].add(allocation_id)
+        payload = []
+        for bucket in grouped.values():
+            payload.append(
+                {
+                    "strategy_sleeve_id": bucket["strategy_sleeve_id"],
+                    "strategy_family": bucket["strategy_family"],
+                    "open_lot_count": bucket["open_lot_count"],
+                    "net_inventory_qty": bucket["net_inventory_qty"],
+                    "gross_inventory_qty": bucket["gross_inventory_qty"],
+                    "inventory_notional": bucket["inventory_notional"],
+                    "symbols": sorted(bucket["symbols"]),
+                    "allocation_ids": sorted(bucket["allocation_ids"]),
+                }
+            )
+        payload.sort(
+            key=lambda item: (
+                self._to_decimal(item.get("inventory_notional")) or Decimal("0"),
+                self._to_decimal(item.get("gross_inventory_qty")) or Decimal("0"),
+                str(item.get("strategy_sleeve_id") or ""),
+            ),
+            reverse=True,
+        )
+        return payload
+
+    def _strategy_pnl_bucket_rows(
+        self,
+        *,
+        records: list[SleevePnLRecord],
+        key_name: str,
+        fallback: str,
+    ) -> list[dict[str, Any]]:
+        buckets: dict[str, dict[str, Any]] = {}
+        for record in records:
+            if key_name == "strategy_sleeve_id":
+                bucket_key = str(record.strategy_sleeve_id or fallback)
+            elif key_name == "allocation_id":
+                bucket_key = str(record.allocation_id or fallback)
+            elif key_name == "strategy_bundle_id":
+                bucket_key = str(record.strategy_bundle_id or fallback)
+            elif key_name == "attribution_type":
+                bucket_key = str(record.attribution_type or fallback)
+            elif key_name == "strategy_family":
+                bucket_key = str(record.strategy_family or fallback)
+            else:
+                bucket_key = str(getattr(record, key_name, None) or fallback)
+            bucket = buckets.setdefault(
+                bucket_key,
+                {
+                    key_name: bucket_key,
+                    "record_count": 0,
+                    "fill_event_count": 0,
+                    "funding_fee_event_count": 0,
+                    "realized_pnl": Decimal("0"),
+                    "fee_amount": Decimal("0"),
+                    "funding_fee_amount": Decimal("0"),
+                    "combined_net_realized_pnl": Decimal("0"),
+                    "inventory_move_qty": Decimal("0"),
+                    "symbols": set(),
+                    "families": set(),
+                },
+            )
+            bucket["record_count"] += 1
+            if record.event_type == "fill_realization":
+                bucket["fill_event_count"] += 1
+            elif record.event_type == "funding_fee":
+                bucket["funding_fee_event_count"] += 1
+            bucket["realized_pnl"] += self._to_decimal(record.realized_pnl) or Decimal("0")
+            bucket["fee_amount"] += self._to_decimal(record.fee_amount) or Decimal("0")
+            bucket["funding_fee_amount"] += self._to_decimal(record.funding_fee_amount) or Decimal("0")
+            bucket["combined_net_realized_pnl"] += (
+                (self._to_decimal(record.realized_pnl) or Decimal("0"))
+                + (self._to_decimal(record.funding_fee_amount) or Decimal("0"))
+            )
+            bucket["inventory_move_qty"] += self._to_decimal(record.inventory_move_qty) or Decimal("0")
+            if record.symbol:
+                bucket["symbols"].add(record.symbol)
+            if record.strategy_family:
+                bucket["families"].add(record.strategy_family)
+        payload = []
+        for bucket in buckets.values():
+            payload.append(
+                {
+                    **{key_name: bucket[key_name]},
+                    "record_count": bucket["record_count"],
+                    "fill_event_count": bucket["fill_event_count"],
+                    "funding_fee_event_count": bucket["funding_fee_event_count"],
+                    "realized_pnl": bucket["realized_pnl"],
+                    "fee_amount": bucket["fee_amount"],
+                    "funding_fee_amount": bucket["funding_fee_amount"],
+                    "combined_net_realized_pnl": bucket["combined_net_realized_pnl"],
+                    "inventory_move_qty": bucket["inventory_move_qty"],
+                    "symbols": sorted(bucket["symbols"]),
+                    "families": sorted(bucket["families"]),
+                }
+            )
+        payload.sort(
+            key=lambda item: (
+                self._to_decimal(item.get("combined_net_realized_pnl")) or Decimal("0"),
+                item.get("record_count") or 0,
+                str(item.get(key_name) or ""),
+            ),
+            reverse=True,
+        )
+        return payload
+
     def strategy_attribution_report(self, *, limit: int = 200) -> dict[str, Any]:
         normalized_limit = max(int(limit), 1)
+        sleeve_records = list(self._scoped_sleeve_pnl_records())
+        sleeve_records.sort(key=lambda item: item.event_timestamp or item.created_at, reverse=True)
+        sleeve_rows = sleeve_records[:normalized_limit]
         outcomes = list(self._scoped_fill_outcomes())
         outcomes.sort(key=lambda item: item.ingestion_timestamp or item.created_at, reverse=True)
         rows = [self._execution_quality_row(item) for item in outcomes[:normalized_limit]]
@@ -5833,9 +6155,13 @@ class OperatorQueryService:
             for code in row.get("risk_rejection_reasons") or []:
                 rejection_counts[str(code)] = rejection_counts.get(str(code), 0) + 1
 
+        inventory_summary = self._strategy_sleeve_inventory_summary()
+        top_inventory_sleeve = inventory_summary[0] if inventory_summary else None
+
         return {
             "summary": {
                 "fill_count": len(rows),
+                "sleeve_pnl_record_count": len(sleeve_rows),
                 "protected_fill_count": len(protected_rows),
                 "unprotected_fill_count": len(unprotected_rows),
                 "protected_net_realized_pnl": sum(
@@ -5844,12 +6170,46 @@ class OperatorQueryService:
                 "unprotected_net_realized_pnl": sum(
                     (self._to_decimal(item.get("realized_pnl_delta")) or Decimal("0")) for item in unprotected_rows
                 ),
+                "combined_net_realized_pnl": sum(
+                    (
+                        (self._to_decimal(item.realized_pnl) or Decimal("0"))
+                        + (self._to_decimal(item.funding_fee_amount) or Decimal("0"))
+                    )
+                    for item in sleeve_rows
+                ),
+                "funding_fee_net_pnl": sum(
+                    (self._to_decimal(item.funding_fee_amount) or Decimal("0"))
+                    for item in sleeve_rows
+                ),
+                "top_inventory_sleeve_id": None if top_inventory_sleeve is None else top_inventory_sleeve.get("strategy_sleeve_id"),
+                "top_inventory_notional": None if top_inventory_sleeve is None else top_inventory_sleeve.get("inventory_notional"),
             },
+            "profitability_by_strategy_sleeve": self._strategy_pnl_bucket_rows(
+                records=sleeve_rows,
+                key_name="strategy_sleeve_id",
+                fallback="unassigned",
+            ),
+            "profitability_by_allocation": self._strategy_pnl_bucket_rows(
+                records=sleeve_rows,
+                key_name="allocation_id",
+                fallback="unassigned",
+            ),
+            "profitability_by_strategy_bundle": self._strategy_pnl_bucket_rows(
+                records=sleeve_rows,
+                key_name="strategy_bundle_id",
+                fallback="unassigned",
+            ),
+            "profitability_by_attribution_type": self._strategy_pnl_bucket_rows(
+                records=sleeve_rows,
+                key_name="attribution_type",
+                fallback="unknown",
+            ),
             "profitability_by_regime": _bucket_by("market_regime", "unknown"),
             "profitability_by_strategy_family": _bucket_by("strategy_family", "directional"),
             "profitability_by_strategy_route_action": _bucket_by("strategy_route_action", "override_target"),
             "profitability_by_profile": _bucket_by("active_profile_id", "unassigned"),
             "profitability_by_exit_attribution": _bucket_by("exit_attribution", "none"),
+            "sleeve_inventory_summary": inventory_summary,
             "risk_protection_summary": {
                 "protected_fill_count": len(protected_rows),
                 "unprotected_fill_count": len(unprotected_rows),
@@ -5863,7 +6223,7 @@ class OperatorQueryService:
                 ],
             },
             "source_fill_count": len(rows),
-            "truth_source": "fill_outcomes_plus_decision_audit",
+            "truth_source": "sleeve_pnl_records_plus_fill_outcomes_plus_decision_audit",
         }
 
     def execution_anomaly_report(self, *, limit: int = 100) -> dict[str, Any]:

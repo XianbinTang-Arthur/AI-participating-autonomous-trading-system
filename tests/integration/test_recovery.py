@@ -11,6 +11,7 @@ from aats.bootstrap.config import build_runtime
 from aats.bootstrap.settings import AATSSettings
 from aats.events import topics
 from aats.schemas.common import utc_now
+from aats.schemas.execution import OrderState
 from aats.schemas.exchange import (
     ExchangeAccountSnapshot,
     ExchangeBalance,
@@ -687,6 +688,96 @@ class TestRecovery(unittest.IsolatedAsyncioTestCase):
             recovery["latest_reconciliation"]["recommended_operator_action"],
             "go_close_position_on_exchange",
         )
+
+    async def test_restarted_runtime_tracks_structured_bundle_open_orders_without_halt(self) -> None:
+        with temporary_postgres_url() as (database_url, _admin_engine, _schema_name):
+            settings = self._postgres_settings(database_url)
+            runtime = await build_runtime(settings)
+            try:
+                now = utc_now()
+                runtime.execution_repo.save_order_state(
+                    OrderState(
+                        decision_id="decision_restart_bundle_1",
+                        intent_id="intent_restart_bundle_grid",
+                        symbol=settings.default_symbol,
+                        client_order_id="cl_restart_bundle_grid",
+                        venue="OKX",
+                        exchange_order_id="ord_restart_bundle_grid",
+                        status="SUBMITTED",
+                        submission_mode="guarded_live_submit",
+                        submitted_ts=now,
+                        last_update_ts=now,
+                        requested_qty=0.001,
+                        filled_qty=0.0,
+                        remaining_qty=0.001,
+                        average_fill_price=None,
+                        fees=0.0,
+                        product_type="spot",
+                        margin_mode="cash",
+                        strategy_family="spot_grid",
+                        strategy_sleeve_id="sleeve_restart_grid",
+                        allocation_id="alloc_restart_bundle",
+                        strategy_bundle_id="bundle_restart_inventory",
+                        strategy_leg_role="inventory",
+                        submission_payload={},
+                    )
+                )
+                runtime.execution_repo.save_order_state(
+                    OrderState(
+                        decision_id="decision_restart_bundle_1",
+                        intent_id="intent_restart_bundle_dca",
+                        symbol=settings.default_symbol,
+                        client_order_id="cl_restart_bundle_dca",
+                        venue="OKX",
+                        exchange_order_id="ord_restart_bundle_dca",
+                        status="SUBMITTED",
+                        submission_mode="guarded_live_submit",
+                        submitted_ts=now,
+                        last_update_ts=now,
+                        requested_qty=0.001,
+                        filled_qty=0.0,
+                        remaining_qty=0.001,
+                        average_fill_price=None,
+                        fees=0.0,
+                        product_type="spot",
+                        margin_mode="cash",
+                        strategy_family="dca",
+                        strategy_sleeve_id="sleeve_restart_dca",
+                        allocation_id="alloc_restart_bundle",
+                        strategy_bundle_id="bundle_restart_inventory",
+                        strategy_leg_role="accumulation",
+                        submission_payload={},
+                    )
+                )
+            finally:
+                if runtime.database_runtime is not None:
+                    runtime.database_runtime.dispose()
+
+            recovered_runtime = await build_runtime(settings, bootstrap_portfolio_snapshot=False)
+            try:
+                self.assertFalse(recovered_runtime.recovery_status.halted)
+                self.assertEqual(recovered_runtime.recovery_status.recovery_state, "bundle_recovery")
+                self.assertTrue(recovered_runtime.recovery_status.bundle_recovery_required)
+                self.assertEqual(recovered_runtime.recovery_status.bundle_recovery_count, 1)
+                self.assertEqual(recovered_runtime.recovery_status.open_order_count, 2)
+                self.assertFalse(recovered_runtime.recovery_status.safe_to_trade)
+                self.assertIn(
+                    "strategy_bundle_recovery_in_progress",
+                    recovered_runtime.recovery_status.only_reduce_reasons,
+                )
+
+                query = OperatorQueryService(recovered_runtime)
+                recovery = query.recovery_view()
+                self.assertEqual(recovery["recovery_state"], "bundle_recovery")
+                self.assertEqual(len(recovery["bundle_summaries"]), 1)
+                self.assertEqual(
+                    recovery["bundle_summaries"][0]["participating_families"],
+                    ["spot_grid", "dca"],
+                )
+                self.assertEqual(recovery["bundle_summaries"][0]["open_order_count"], 2)
+            finally:
+                if recovered_runtime.database_runtime is not None:
+                    recovered_runtime.database_runtime.dispose()
 
     async def test_resume_rechecks_blockers_and_stays_halted_when_market_is_stale(self) -> None:
         settings = AATSSettings.model_validate(

@@ -58,6 +58,12 @@ class PostgresPositionLotRepository:
                     source_fill_id=str(lot["source_fill_id"]),
                     target_leverage=float(lot.get("target_leverage") or 1.0),
                     exposure_side=str(lot.get("exposure_side") or "flat"),
+                    strategy_sleeve_id=(
+                        None if lot.get("strategy_sleeve_id") in {None, ""} else str(lot.get("strategy_sleeve_id"))
+                    ),
+                    allocation_id=(
+                        None if lot.get("allocation_id") in {None, ""} else str(lot.get("allocation_id"))
+                    ),
                     status=str(lot["status"]),
                     opened_at=lot["opened_at"],
                     closed_at=lot.get("closed_at"),
@@ -146,6 +152,14 @@ class PostgresLotEventRepository:
                     if event.get("exit_price") is None
                     else Decimal(str(event["exit_price"])),
                     realized_pnl_delta=Decimal(str(event.get("realized_pnl_delta") or "0")),
+                    strategy_sleeve_id=(
+                        None
+                        if event.get("strategy_sleeve_id") in {None, ""}
+                        else str(event.get("strategy_sleeve_id"))
+                    ),
+                    allocation_id=(
+                        None if event.get("allocation_id") in {None, ""} else str(event.get("allocation_id"))
+                    ),
                     created_at=event["created_at"],
                     payload=dump_payload_exact(event.get("payload") or {}),
                 )
@@ -172,6 +186,8 @@ def _lot_row_to_dict(row: PositionLotModel) -> dict:
         "source_fill_id": row.source_fill_id,
         "target_leverage": row.target_leverage,
         "exposure_side": row.exposure_side,
+        "strategy_sleeve_id": row.strategy_sleeve_id,
+        "allocation_id": row.allocation_id,
         "status": row.status,
         "opened_at": row.opened_at,
         "closed_at": row.closed_at,
@@ -193,6 +209,8 @@ def _lot_event_row_to_dict(row: LotEventModel) -> dict:
         "entry_price": row.entry_price,
         "exit_price": row.exit_price,
         "realized_pnl_delta": row.realized_pnl_delta,
+        "strategy_sleeve_id": row.strategy_sleeve_id,
+        "allocation_id": row.allocation_id,
         "created_at": row.created_at,
         "payload": dict(row.payload),
     }

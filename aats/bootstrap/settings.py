@@ -222,6 +222,12 @@ class AATSSettings(BaseSettings):
     strategy_profile_score_divergence_other_penalty: float = -1.0
     strategy_family_active: StrategyFamily = "directional"
     strategy_family_auto_selection_enabled: bool = True
+    strategy_sleeve_auto_parallel_enabled: bool = True
+    strategy_sleeve_auto_min_budget_multiplier: float = 0.35
+    strategy_sleeve_auto_reconciliation_contraction_multiplier: float = 0.50
+    strategy_sleeve_auto_soft_loss_usdt: float = 10.0
+    strategy_sleeve_auto_hard_loss_usdt: float = 25.0
+    strategy_sleeve_auto_volatility_cap_enabled: bool = True
     smart_arbitrage_enabled: bool = False
     smart_arbitrage_companion_spot_symbol: str | None = None
     smart_arbitrage_companion_derivatives_symbol: str | None = None

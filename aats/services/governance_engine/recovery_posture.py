@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 
 from aats.schemas.reconciliation import ReconciliationReport
 from aats.schemas.system import RecoveryStatus
+from aats.services.execution_engine.bundle_recovery import scoped_bundle_recovery_assessment
 from aats.services.runtime_scope import latest_matching_reconciliation, runtime_state_scope
 
 if TYPE_CHECKING:
@@ -37,6 +38,8 @@ class RecoveryPostureEvaluator:
     }
     _PERSISTENT_STATUS_BLOCKERS = {
         "pending_execution_commands",
+        "strategy_bundle_recovery_in_progress",
+        "strategy_bundle_recovery_requires_review",
     }
 
     def __init__(self, runtime: ApplicationRuntime) -> None:
@@ -107,6 +110,7 @@ class RecoveryPostureEvaluator:
             self.runtime.reconciliation_repo.history(),
             self.state_scope,
         )
+        bundle_recovery = self._bundle_recovery_assessment()
         recovery_state = status.recovery_state
         if report is not None:
             if report.halt_required:
@@ -119,6 +123,13 @@ class RecoveryPostureEvaluator:
                 and recovery_state not in {"rebaseline_pending", "rebaseline_completed"}
             ):
                 recovery_state = "review_required"
+        if bundle_recovery.recovery_blocking and recovery_state not in {"rebaseline_pending", "resume_blocked"}:
+            recovery_state = "review_required"
+        elif (
+            bundle_recovery.bundle_recovery_required
+            and recovery_state in {"normal_operation", "only_reduce"}
+        ):
+            recovery_state = "bundle_recovery"
         if status.baseline_requires_operator_review:
             recovery_state = "review_required"
         if self._ai_requires_manual_review():
@@ -128,7 +139,33 @@ class RecoveryPostureEvaluator:
         elif self.runtime.kill_switch.halted and recovery_state in {"normal_operation", "only_reduce"}:
             recovery_state = "resume_blocked"
 
-        normalized = status.model_copy(update={"recovery_state": recovery_state})
+        bundle_only_reduce_reasons = list(status.only_reduce_reasons)
+        bundle_resume_blocked_reasons = list(status.resume_blocked_reasons)
+        if bundle_recovery.bundle_recovery_required:
+            if "strategy_bundle_recovery_in_progress" not in bundle_only_reduce_reasons:
+                bundle_only_reduce_reasons.append("strategy_bundle_recovery_in_progress")
+            blocker = (
+                "strategy_bundle_recovery_requires_review"
+                if bundle_recovery.recovery_blocking
+                else "strategy_bundle_recovery_in_progress"
+            )
+            if blocker not in bundle_resume_blocked_reasons:
+                bundle_resume_blocked_reasons.append(blocker)
+
+        normalized = status.model_copy(
+            update={
+                "recovery_state": recovery_state,
+                "bundle_recovery_required": bundle_recovery.bundle_recovery_required,
+                "bundle_recovery_count": bundle_recovery.open_bundle_count,
+                "recoverable_bundle_count": bundle_recovery.recoverable_bundle_count,
+                "unbundled_open_order_count": bundle_recovery.unbundled_open_order_count,
+                "bundle_summaries": list(bundle_recovery.bundle_summaries),
+                "open_order_count": bundle_recovery.open_order_count,
+                "only_reduce_required": bool(status.only_reduce_required or bundle_recovery.bundle_recovery_required),
+                "only_reduce_reasons": bundle_only_reduce_reasons,
+                "resume_blocked_reasons": bundle_resume_blocked_reasons,
+            }
+        )
         resume_check = self.resume_check(
             include_kill_switch=False,
             base_status=normalized,
@@ -168,6 +205,11 @@ class RecoveryPostureEvaluator:
     ) -> RecoveryStatus:
         status = base_status or self.runtime.recovery_status
         assessment = self.assess(base_status=status, latest_reconciliation=latest_reconciliation)
+        bundle_recovery = self._bundle_recovery_assessment()
+        only_reduce_required = status.only_reduce_required or bundle_recovery.bundle_recovery_required
+        only_reduce_reasons = list(status.only_reduce_reasons)
+        if bundle_recovery.bundle_recovery_required and "strategy_bundle_recovery_in_progress" not in only_reduce_reasons:
+            only_reduce_reasons.append("strategy_bundle_recovery_in_progress")
         updates = {
             "recovery_state": assessment.recovery_state,
             "review_required": assessment.review_required,
@@ -176,16 +218,42 @@ class RecoveryPostureEvaluator:
             "safe_to_trade": assessment.safe_to_trade,
             "halted": self.runtime.kill_switch.halted,
             "resume_blocked_reasons": list(assessment.resume_blocked_reasons),
+            "bundle_recovery_required": bundle_recovery.bundle_recovery_required,
+            "bundle_recovery_count": bundle_recovery.open_bundle_count,
+            "recoverable_bundle_count": bundle_recovery.recoverable_bundle_count,
+            "unbundled_open_order_count": bundle_recovery.unbundled_open_order_count,
+            "bundle_summaries": list(bundle_recovery.bundle_summaries),
+            "open_order_count": bundle_recovery.open_order_count,
+            "only_reduce_required": only_reduce_required,
+            "only_reduce_reasons": only_reduce_reasons,
         }
         if latest_reconciliation is not None:
             updates["latest_reconciliation_id"] = latest_reconciliation.reconciliation_id
             updates["latest_reconciliation_severity"] = latest_reconciliation.severity
             updates["reconciliation_classification"] = latest_reconciliation.recovery_classification
             updates["recovered_reconciliation_available"] = True
-            updates["only_reduce_required"] = bool(latest_reconciliation.only_reduce_required)
-            updates["only_reduce_reasons"] = list(latest_reconciliation.only_reduce_reasons)
+            updates["only_reduce_required"] = bool(
+                latest_reconciliation.only_reduce_required or only_reduce_required
+            )
+            updates["only_reduce_reasons"] = list(
+                dict.fromkeys([*latest_reconciliation.only_reduce_reasons, *only_reduce_reasons])
+            )
             updates["unknown_state_details"] = list(latest_reconciliation.unknown_state_details)
         return status.model_copy(update=updates)
+
+    def _bundle_recovery_assessment(self):
+        order_states_for_scope = getattr(self.runtime.execution_repo, "order_states_for_scope", None)
+        if callable(order_states_for_scope):
+            order_states = order_states_for_scope(scope=self.state_scope)
+        else:
+            order_states = self.runtime.execution_repo.order_states()
+        active_obligations = getattr(self.runtime.obligation_repo, "active_obligations", None)
+        obligations = active_obligations() if callable(active_obligations) else []
+        return scoped_bundle_recovery_assessment(
+            scope=self.state_scope,
+            order_states=order_states,
+            obligations=obligations,
+        )
 
     def execution_blockers(
         self,

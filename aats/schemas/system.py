@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal
 from typing import Any, Literal
 
 from pydantic import Field
@@ -154,6 +155,43 @@ class RuntimeModeState(SchemaBase):
     restart_required: bool = False
 
 
+class RecoveryBundleLegStatus(SchemaBase):
+    client_order_id: str
+    exchange_order_id: str | None = None
+    symbol: str
+    product_type: ProductType
+    margin_mode: MarginModelType
+    side: str
+    status: str
+    strategy_family: str | None = None
+    strategy_sleeve_id: str | None = None
+    strategy_leg_role: str | None = None
+    requested_qty: float | Decimal
+    filled_qty: float | Decimal
+    remaining_qty: float | Decimal
+    submitted_ts: datetime | None = None
+    last_update_ts: datetime | None = None
+
+
+class RecoveryBundleSummary(SchemaBase):
+    bundle_id: str
+    allocation_id: str | None = None
+    participating_families: list[str] = Field(default_factory=list)
+    strategy_sleeve_refs: list[str] = Field(default_factory=list)
+    symbol_scope: list[str] = Field(default_factory=list)
+    product_types: list[str] = Field(default_factory=list)
+    margin_modes: list[str] = Field(default_factory=list)
+    open_order_count: int = 0
+    total_order_count: int = 0
+    terminal_order_count: int = 0
+    active_obligation_count: int = 0
+    recovery_state: str = "structured_open_orders"
+    recoverable: bool = True
+    reason_codes: list[str] = Field(default_factory=list)
+    operator_summary: str | None = None
+    legs: list[RecoveryBundleLegStatus] = Field(default_factory=list)
+
+
 class RecoveryStatus(SchemaBase):
     status: str
     recovery_source: str | None = None
@@ -179,6 +217,11 @@ class RecoveryStatus(SchemaBase):
     rebaseline_available: bool = False
     halted: bool = False
     recovery_action: str | None = None
+    bundle_recovery_required: bool = False
+    bundle_recovery_count: int = 0
+    recoverable_bundle_count: int = 0
+    unbundled_open_order_count: int = 0
+    bundle_summaries: list[RecoveryBundleSummary] = Field(default_factory=list)
     baseline_imported: bool = False
     baseline_status: str | None = None
     baseline_imported_at: datetime | None = None

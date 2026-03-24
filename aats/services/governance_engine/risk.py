@@ -47,6 +47,7 @@ class RiskEngine:
         reconciliation_repo: ReconciliationRepository | None = None,
         live_runtime_guard_provider: Any | None = None,
         trial_guard_provider: Any | None = None,
+        recovery_status_provider: Callable[[], Any] | None = None,
     ) -> None:
         self.settings = settings
         self.account_service = account_service
@@ -64,6 +65,7 @@ class RiskEngine:
         self.reconciliation_repo = reconciliation_repo
         self.live_runtime_guard_provider = live_runtime_guard_provider
         self.trial_guard_provider = trial_guard_provider
+        self.recovery_status_provider = recovery_status_provider
         self.runtime_scope = runtime_state_scope(settings)
 
     def evaluate(self, target: PositionTarget) -> RiskDecision:
@@ -384,6 +386,23 @@ class RiskEngine:
                 abs(current_qty) > EPSILON_DECIMAL_12
                 and abs(flattened_target_qty) <= EPSILON_DECIMAL_12
             )
+        recovery_only_reduce_reasons = self._recovery_status_only_reduce_reasons()
+        if recovery_only_reduce_reasons:
+            only_reduce_required = True
+            risk_limit_breached = True
+            flattened_target_qty = self._reduce_only_target_qty(
+                current_qty=current_qty,
+                target_qty=flattened_target_qty,
+            )
+            constraints_applied.extend(["only_reduce_required", *recovery_only_reduce_reasons])
+            if abs(flattened_target_qty - current_qty) <= EPSILON_DECIMAL_12:
+                approved = False
+                rejection_reasons.extend(recovery_only_reduce_reasons)
+                rejection_reasons.append("only_reduce_mode_active")
+            flatten_required = (
+                abs(current_qty) > EPSILON_DECIMAL_12
+                and abs(flattened_target_qty) <= EPSILON_DECIMAL_12
+            )
         return {
             "approved": approved,
             "capped_qty": flattened_target_qty,
@@ -581,6 +600,12 @@ class RiskEngine:
             return []
         return [str(item) for item in (payload.get("only_reduce_reasons") or []) if str(item).strip()]
 
+    def _recovery_status_only_reduce_reasons(self) -> list[str]:
+        payload = self._recovery_status_payload()
+        if not isinstance(payload, dict) or not bool(payload.get("only_reduce_required")):
+            return []
+        return [str(item) for item in (payload.get("only_reduce_reasons") or []) if str(item).strip()]
+
     def _runtime_guard_state(self) -> dict[str, Any]:
         provider = self.live_runtime_guard_provider
         if provider is None:
@@ -602,9 +627,16 @@ class RiskEngine:
         health_snapshot = self.health_service.snapshot()
         runtime_guard = self._runtime_guard_state()
         trial_guard = self._trial_guard_state()
+        recovery_status = self._recovery_status_payload()
+        recovery_safe_to_trade = bool(recovery_status.get("safe_to_trade", True)) if recovery_status else True
+        recovery_review_required = bool(recovery_status.get("review_required", False)) if recovery_status else False
+        recovery_only_reduce_required = bool(recovery_status.get("only_reduce_required", False)) if recovery_status else False
         safety_state = {
-            "safe_to_trade": not bool(health_snapshot.blockers),
-            "review_required": "operator_rebaseline_required" in (health_snapshot.blockers or []),
+            "safe_to_trade": not bool(health_snapshot.blockers) and recovery_safe_to_trade,
+            "review_required": (
+                "operator_rebaseline_required" in (health_snapshot.blockers or [])
+                or recovery_review_required
+            ),
             "market_snapshot_fresh": not any(
                 blocker == "market_data_stale"
                 for blocker in (health_snapshot.blockers or [])
@@ -631,7 +663,7 @@ class RiskEngine:
             market_snapshot_fresh=bool(safety_state.get("market_snapshot_fresh", True)),
             account_snapshot_fresh=bool(safety_state.get("account_snapshot_fresh", True)),
             reconciliation_clean=reconciliation_clean_from_safety_state(safety_state),
-            only_reduce_required=bool(runtime_guard.get("only_reduce_required")),
+            only_reduce_required=bool(runtime_guard.get("only_reduce_required")) or recovery_only_reduce_required,
             auto_halt_required=bool(runtime_guard.get("auto_halt_required")),
             risk_snapshot_stage=runtime_guard.get("risk_snapshot_stage"),
             trial_guard_breached=str(trial_guard.get("status") or "").lower() == "breached",
@@ -647,7 +679,7 @@ class RiskEngine:
             market_snapshot_fresh=bool(safety_state.get("market_snapshot_fresh", True)),
             account_snapshot_fresh=bool(safety_state.get("account_snapshot_fresh", True)),
             reconciliation_clean=reconciliation_clean_from_safety_state(safety_state),
-            only_reduce_required=bool(runtime_guard.get("only_reduce_required")),
+            only_reduce_required=bool(runtime_guard.get("only_reduce_required")) or recovery_only_reduce_required,
             auto_halt_required=bool(runtime_guard.get("auto_halt_required")),
             risk_snapshot_stage=runtime_guard.get("risk_snapshot_stage"),
             trial_guard_breached=str(trial_guard.get("status") or "").lower() == "breached",
@@ -673,6 +705,18 @@ class RiskEngine:
                 "auto_halt_required": bool(runtime_guard.get("auto_halt_required")),
             },
         }
+
+    def _recovery_status_payload(self) -> dict[str, Any]:
+        provider = self.recovery_status_provider
+        if provider is None:
+            return {}
+        payload = provider() if callable(provider) else provider
+        if payload is None:
+            return {}
+        if hasattr(payload, "model_dump"):
+            dumped = payload.model_dump(mode="json")
+            return dumped if isinstance(dumped, dict) else {}
+        return payload if isinstance(payload, dict) else {}
 
     def _latest_scoped_reconciliation(self):
         if self.reconciliation_repo is None:

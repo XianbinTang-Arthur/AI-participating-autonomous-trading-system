@@ -53,6 +53,12 @@ _EXPECTED_NUMERIC_COLUMNS: tuple[tuple[str, str], ...] = (
     ("lot_events", "entry_price"),
     ("lot_events", "exit_price"),
     ("lot_events", "realized_pnl_delta"),
+    ("sleeve_pnl_records", "realized_pnl"),
+    ("sleeve_pnl_records", "fee_amount"),
+    ("sleeve_pnl_records", "funding_fee_amount"),
+    ("sleeve_pnl_records", "inventory_move_qty"),
+    ("strategy_sleeve_intents", "budget_multiplier"),
+    ("strategy_sleeve_intents", "allocator_weight"),
 )
 
 

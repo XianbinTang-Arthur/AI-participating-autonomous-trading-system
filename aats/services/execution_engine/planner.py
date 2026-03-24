@@ -58,6 +58,8 @@ class ExecutionPlanner:
         risk_limit_breached: bool = False,
         liquidation_buffer_remaining: Decimal | float | None = None,
         strategy_family: str | None = None,
+        strategy_sleeve_id: str | None = None,
+        allocation_id: str | None = None,
         strategy_bundle_id: str | None = None,
         strategy_leg_role: Literal["primary", "hedge", "inventory", "accumulation"] | None = None,
         ai_execution_parameter_suggestion: AIExecutionParameterSuggestionEnvelope | None = None,
@@ -166,6 +168,8 @@ class ExecutionPlanner:
                 None if liquidation_buffer_remaining is None else to_decimal(liquidation_buffer_remaining)
             ),
             strategy_family=strategy_family,
+            strategy_sleeve_id=strategy_sleeve_id,
+            allocation_id=allocation_id,
             strategy_bundle_id=strategy_bundle_id,
             strategy_leg_role=strategy_leg_role,
             product_type=product_type,  # type: ignore[arg-type]
@@ -216,6 +220,8 @@ class ExecutionPlanner:
             risk_limit_breached=plan.risk_limit_breached,
             liquidation_buffer_remaining=plan.liquidation_buffer_remaining,
             strategy_family=plan.strategy_family,
+            strategy_sleeve_id=plan.strategy_sleeve_id,
+            allocation_id=plan.allocation_id,
             strategy_bundle_id=plan.strategy_bundle_id,
             strategy_leg_role=plan.strategy_leg_role,
             idempotency_key=intent_id,

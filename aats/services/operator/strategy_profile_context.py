@@ -10,6 +10,7 @@ from aats.schemas.strategy_profiles import (
     strategy_profile_axes_from_payload,
     summarize_strategy_profile_payload,
 )
+from aats.services.governance_engine.recovery_posture import RecoveryPostureEvaluator
 from aats.services.runtime_scope import fills_for_scope, latest_reconciliation_for_scope, runtime_state_scope, snapshots_for_scope
 
 if TYPE_CHECKING:
@@ -155,10 +156,13 @@ class StrategyProfileContextFacade:
 
     def safety_state(self) -> dict[str, Any]:
         scope = runtime_state_scope(self.owner.settings)
-        recovery = self.owner.runtime.recovery_status
         market_status = self.owner.runtime.market_gateway.status()
         account_status = self.owner.runtime.account_service.status()
         latest_reconciliation = latest_reconciliation_for_scope(self.owner.runtime.reconciliation_repo, scope)
+        recovery = RecoveryPostureEvaluator(self.owner.runtime).finalize_status(
+            base_status=self.owner.runtime.recovery_status,
+            latest_reconciliation=latest_reconciliation,
+        )
         activation = self.owner._activation_state()
         live_guard_service = getattr(self.owner.runtime, "derivatives_live_guard_service", None)
         trial_guard_service = getattr(self.owner.runtime, "trial_guard_service", None)

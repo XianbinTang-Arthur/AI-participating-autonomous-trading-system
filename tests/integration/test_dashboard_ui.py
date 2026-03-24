@@ -75,6 +75,7 @@ class TestDashboardUI(unittest.TestCase):
         self.assertIn('["guardedLivePreflight", "/system/guarded-live-preflight"]', store_text)
         self.assertIn('["guardedLiveRunPacket", "/reports/guarded-live-run-packet"]', store_text)
         self.assertIn('["strategyRuntime", "/strategy/runtime"]', store_text)
+        self.assertIn('["strategyAttribution", "/reports/strategy-attribution?limit=200"]', store_text)
         self.assertNotIn('  ai: [', store_text)
 
         ai_analysis_text = responses["ai_analysis_js"].text
@@ -106,6 +107,9 @@ class TestDashboardUI(unittest.TestCase):
         self.assertIn("strategyRuntimeSummary", strategy_text)
         self.assertIn("renderStrategyCandidateTable", strategy_text)
         self.assertIn("strategyFamilyEnablement", strategy_text)
+        self.assertIn("策略归因", strategy_text)
+        self.assertIn("自动预算与启停", strategy_text)
+        self.assertIn("strategyAttribution", strategy_text)
         self.assertNotIn("记为继续小资金观察", strategy_text)
         self.assertNotIn("记为缩小试盘规模", strategy_text)
         self.assertNotIn("记为暂停试盘并复盘", strategy_text)

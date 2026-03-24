@@ -124,6 +124,22 @@ class DecisionOrchestrator:
                 payload_model=strategy_snapshot,
                 source_component="decision_engine",
             )
+            for sleeve_intent in strategy_snapshot.sleeve_intents:
+                await publish_model(
+                    bus=self.bus,
+                    topic=topics.STRATEGY_SLEEVE_INTENTS,
+                    key=symbol,
+                    payload_model=sleeve_intent,
+                    source_component="decision_engine",
+                )
+            if strategy_snapshot.allocation_decision is not None:
+                await publish_model(
+                    bus=self.bus,
+                    topic=topics.PORTFOLIO_ALLOCATION_DECISIONS,
+                    key=symbol,
+                    payload_model=strategy_snapshot.allocation_decision,
+                    source_component="decision_engine",
+                )
             target = self.strategy_coordinator.apply_selected_target(
                 base_target=target,
                 snapshot=strategy_snapshot,

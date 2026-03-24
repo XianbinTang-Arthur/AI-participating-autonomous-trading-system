@@ -159,6 +159,8 @@ class OrderManager:
                 execution_action=intent.execution_action,
                 position_intent=intent.position_intent,
                 strategy_family=intent.strategy_family,
+                strategy_sleeve_id=intent.strategy_sleeve_id,
+                allocation_id=intent.allocation_id,
                 strategy_bundle_id=intent.strategy_bundle_id,
                 strategy_leg_role=intent.strategy_leg_role,
                 execution_error=str(exc),
@@ -198,6 +200,8 @@ class OrderManager:
             execution_action=intent.execution_action,
             position_intent=intent.position_intent,
             strategy_family=intent.strategy_family,
+            strategy_sleeve_id=intent.strategy_sleeve_id,
+            allocation_id=intent.allocation_id,
             strategy_bundle_id=intent.strategy_bundle_id,
             strategy_leg_role=intent.strategy_leg_role,
             submission_payload={},
@@ -278,6 +282,8 @@ class OrderManager:
                 execution_action=intent.execution_action,
                 position_intent=intent.position_intent,
                 strategy_family=intent.strategy_family,
+                strategy_sleeve_id=intent.strategy_sleeve_id,
+                allocation_id=intent.allocation_id,
                 strategy_bundle_id=intent.strategy_bundle_id,
                 strategy_leg_role=intent.strategy_leg_role,
                 submission_payload={},
@@ -325,6 +331,8 @@ class OrderManager:
                 execution_action=intent.execution_action,
                 position_intent=intent.position_intent,
                 strategy_family=intent.strategy_family,
+                strategy_sleeve_id=intent.strategy_sleeve_id,
+                allocation_id=intent.allocation_id,
                 strategy_bundle_id=intent.strategy_bundle_id,
                 strategy_leg_role=intent.strategy_leg_role,
                 cancel_reason=str(exc),
@@ -644,6 +652,8 @@ class OrderManager:
                 execution_action=intent.execution_action,
                 position_intent=intent.position_intent,
                 strategy_family=intent.strategy_family,
+                strategy_sleeve_id=intent.strategy_sleeve_id,
+                allocation_id=intent.allocation_id,
                 strategy_bundle_id=intent.strategy_bundle_id,
                 strategy_leg_role=intent.strategy_leg_role,
                 execution_error=f"transient_close_retry_cooldown_active:{state.execution_error or state.cancel_reason or 'transient_exchange_failure'}",
@@ -740,6 +750,8 @@ class OrderManager:
             payload.setdefault("position_intent", row.get("position_intent") or "open_long")
             payload.setdefault("execution_action", row.get("execution_action"))
             payload.setdefault("strategy_family", raw_payload.get("strategy_family"))
+            payload.setdefault("strategy_sleeve_id", raw_payload.get("strategy_sleeve_id") or row.get("strategy_sleeve_id"))
+            payload.setdefault("allocation_id", raw_payload.get("allocation_id") or row.get("allocation_id"))
             payload.setdefault("strategy_bundle_id", raw_payload.get("strategy_bundle_id"))
             payload.setdefault("strategy_leg_role", raw_payload.get("strategy_leg_role"))
             payload.setdefault("submission_payload", submission_payload)
@@ -789,6 +801,8 @@ class OrderManager:
             execution_action=row.get("execution_action"),
             position_intent=str(row.get("position_intent") or "open_long"),
             strategy_family=raw_payload.get("strategy_family"),
+            strategy_sleeve_id=raw_payload.get("strategy_sleeve_id") or row.get("strategy_sleeve_id"),
+            allocation_id=raw_payload.get("allocation_id") or row.get("allocation_id"),
             strategy_bundle_id=raw_payload.get("strategy_bundle_id"),
             strategy_leg_role=raw_payload.get("strategy_leg_role"),
             submission_payload={},

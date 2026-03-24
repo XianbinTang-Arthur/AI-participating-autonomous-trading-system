@@ -79,13 +79,14 @@ export function viewSpecs(view, state = null) {
       ["reconciliationLatest", "/reconciliation/latest"],
       ["accountState", "/account/state"],
     ],
-    strategy: [
-      ["strategyRuntime", "/strategy/runtime"],
-      ["latestDecision", "/decision/latest"],
-      ["recentDecisions", `/decision/recent?limit=${limits.recentDecisions}&offset=0`],
-      ["executionLatest", "/execution/latest"],
-      ["trialReviewSummary", "/reports/trial-review-summary?segment_limit=100&window_days=7&period_count=4"],
-    ],
+      strategy: [
+        ["strategyRuntime", "/strategy/runtime"],
+        ["strategyAttribution", "/reports/strategy-attribution?limit=200"],
+        ["latestDecision", "/decision/latest"],
+        ["recentDecisions", `/decision/recent?limit=${limits.recentDecisions}&offset=0`],
+        ["executionLatest", "/execution/latest"],
+        ["trialReviewSummary", "/reports/trial-review-summary?segment_limit=100&window_days=7&period_count=4"],
+      ],
     execution: [
       ["latestDecision", "/decision/latest"],
       ["metrics", "/system/metrics"],

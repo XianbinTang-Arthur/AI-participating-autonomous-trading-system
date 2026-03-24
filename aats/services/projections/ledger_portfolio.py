@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from decimal import Decimal
+from typing import Any
 
 from aats.bootstrap.logging import correlation_fields, get_logger, log_event
 from aats.bootstrap.metrics import MetricsRegistry
@@ -18,6 +19,7 @@ from aats.services.ledger.persistent_lot_book import PersistentLotBookService
 from aats.services.ledger.settlement_posting import FillSettlementProjection, LedgerSettlementPostingService
 from aats.services.portfolio_service.positions import PortfolioService, PortfolioState
 from aats.services.portfolio_service.snapshots import PortfolioSnapshotBuilder
+from aats.services.runtime_scope import RuntimeStateScope
 from aats.storage.base import ExecutionRepository, FillOutcomeRepository, PortfolioRepository
 
 
@@ -34,6 +36,8 @@ class LedgerBackedPortfolioService:
         execution_repo: ExecutionRepository,
         settlement_posting_service: LedgerSettlementPostingService,
         persistent_lot_book_service: PersistentLotBookService | None = None,
+        sleeve_pnl_projection_service: Any | None = None,
+        state_scope: RuntimeStateScope | None = None,
         initial_usdt_balance: Decimal | float,
         metrics: MetricsRegistry | None = None,
     ) -> None:
@@ -46,6 +50,8 @@ class LedgerBackedPortfolioService:
         self.execution_repo = execution_repo
         self.settlement_posting_service = settlement_posting_service
         self.persistent_lot_book_service = persistent_lot_book_service
+        self.sleeve_pnl_projection_service = sleeve_pnl_projection_service
+        self.state_scope = state_scope
         self.initial_usdt_balance = Decimal(str(initial_usdt_balance))
         self.metrics = metrics
         self.logger = get_logger("aats.ledger_portfolio_service")
@@ -136,16 +142,17 @@ class LedgerBackedPortfolioService:
             fee_delta=fee_delta,
         )
         try:
-            self.fill_outcome_repo.save_outcome(
-                FillOutcomeRecord.from_fill_and_balance_delta(
-                    fill=fill,
-                    balance_delta=balance_delta,
-                    starting_position_qty=starting_quantity,
-                    starting_avg_entry_price=starting_avg_entry_price,
-                    ending_position_qty=ending_quantity,
-                    ending_avg_entry_price=ending_avg_entry_price,
-                )
+            outcome = FillOutcomeRecord.from_fill_and_balance_delta(
+                fill=fill,
+                balance_delta=balance_delta,
+                starting_position_qty=starting_quantity,
+                starting_avg_entry_price=starting_avg_entry_price,
+                ending_position_qty=ending_quantity,
+                ending_avg_entry_price=ending_avg_entry_price,
             )
+            self.fill_outcome_repo.save_outcome(outcome)
+            if self.sleeve_pnl_projection_service is not None and self.state_scope is not None:
+                self.sleeve_pnl_projection_service.rebuild_scope(scope=self.state_scope)
         except Exception as exc:
             log_event(
                 self.logger,

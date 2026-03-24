@@ -108,6 +108,18 @@ strategy_profile_emergency_safety_confidence_min: 0.68
 strategy_risk_budget_multiplier_floor: 0.35
 # [常用可调] strategy_execution_aggressiveness_multiplier_floor：执行侵略性自动收缩的最小乘数。可选值：0.1~1.0；推荐值：0.30。
 strategy_execution_aggressiveness_multiplier_floor: 0.30
+# [常用可调] strategy_sleeve_auto_parallel_enabled：是否启用多策略 sleeve 自动并行控制。可选值：true / false；推荐值：true。
+strategy_sleeve_auto_parallel_enabled: true
+# [常用可调] strategy_sleeve_auto_min_budget_multiplier：自动并行下的最小预算倍率。可选值：0.1~1.0；推荐值：0.35。
+strategy_sleeve_auto_min_budget_multiplier: 0.35
+# [常用可调] strategy_sleeve_auto_reconciliation_contraction_multiplier：对账压力下的预算收缩倍率。可选值：0.1~1.0；推荐值：0.50。
+strategy_sleeve_auto_reconciliation_contraction_multiplier: 0.50
+# [常用可调] strategy_sleeve_auto_soft_loss_usdt：单个 sleeve 进入软收缩的最近净亏损阈值。可选值：正数；推荐值：10.0。
+strategy_sleeve_auto_soft_loss_usdt: 10.0
+# [常用可调] strategy_sleeve_auto_hard_loss_usdt：单个 sleeve 在无库存时自动暂停的最近净亏损阈值。可选值：正数；推荐值：25.0。
+strategy_sleeve_auto_hard_loss_usdt: 25.0
+# [常用可调] strategy_sleeve_auto_volatility_cap_enabled：是否按 baseline 波动率目标自动收缩 sleeve 预算。可选值：true / false；推荐值：true。
+strategy_sleeve_auto_volatility_cap_enabled: true
 # [运行必改] ai_provider：AI 提供方。可选值：disabled / openai；基线推荐：disabled。
 ai_provider: disabled
 # [常用可调] ai_model_name：AI 模型名。可选值：可用模型名；推荐值：gpt-4o-mini。

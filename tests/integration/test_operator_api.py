@@ -825,6 +825,9 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             volatility_state: str,
             profile_id: str,
             strategy_family: str,
+            strategy_sleeve_id: str,
+            allocation_id: str,
+            strategy_bundle_id: str,
             strategy_route_action: str,
             exit_attribution: str,
             risk_constraints: list[str],
@@ -974,6 +977,11 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
                     exchange_timestamp=now,
                     ingestion_timestamp=now,
                     order_status_after_fill="FILLED",
+                    strategy_family=strategy_family,
+                    strategy_sleeve_id=strategy_sleeve_id,
+                    allocation_id=allocation_id,
+                    strategy_bundle_id=strategy_bundle_id,
+                    strategy_leg_role="primary",
                     target_leverage=3.0,
                     exposure_side="long",
                     execution_action="reduce_long",
@@ -992,6 +1000,40 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
                     created_at=now,
                 )
             )
+            runtime.execution_repo.save_fill(
+                FillEvent(
+                    fill_id=f"fill_{decision_id}",
+                    decision_id=decision_id,
+                    intent_id=f"intent_{decision_id}",
+                    client_order_id=f"order_{decision_id}",
+                    exchange_order_id=f"venue_{decision_id}",
+                    symbol="BTC-USDT-SWAP",
+                    venue="OKX",
+                    side="sell",
+                    fill_qty=Decimal("0.01"),
+                    fill_price=Decimal("70000"),
+                    fee_amount=Decimal("0.50"),
+                    fee_currency="USDT",
+                    liquidity_role="taker",
+                    exchange_timestamp=now,
+                    ingestion_timestamp=now,
+                    order_status_after_fill="FILLED",
+                    strategy_family=strategy_family,
+                    strategy_sleeve_id=strategy_sleeve_id,
+                    allocation_id=allocation_id,
+                    strategy_bundle_id=strategy_bundle_id,
+                    strategy_leg_role="primary",
+                    target_leverage=3.0,
+                    exposure_side="long",
+                    execution_action="reduce",
+                    position_intent="reduce_long",
+                    position_mode="net_mode",
+                    instrument_family="BTC-USDT",
+                    settle_currency="USDT",
+                    product_type="derivatives",
+                    margin_mode="cross",
+                )
+            )
 
         seed_decision(
             decision_id="decision_attr_trend",
@@ -999,6 +1041,9 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             volatility_state="medium",
             profile_id="trend_normal",
             strategy_family="directional",
+            strategy_sleeve_id="directional_btc_core",
+            allocation_id="alloc_directional_btc",
+            strategy_bundle_id="bundle_directional_btc",
             strategy_route_action="override_target",
             exit_attribution="alpha_decay_reduce",
             risk_constraints=["risk_budget_multiplier_applied", "execution_aggressiveness_contracted"],
@@ -1010,6 +1055,9 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             volatility_state="high",
             profile_id="execution_degraded_safe",
             strategy_family="smart_arbitrage",
+            strategy_sleeve_id="smart_arbitrage_btc_pair",
+            allocation_id="alloc_smart_arb_btc",
+            strategy_bundle_id="bundle_smart_arb_btc",
             strategy_route_action="protective_fallback",
             exit_attribution="emergency_protective_exit",
             risk_constraints=[],
@@ -1023,9 +1071,15 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertGreaterEqual(payload["summary"]["fill_count"], 2)
+        self.assertGreaterEqual(payload["summary"]["sleeve_pnl_record_count"], 2)
         self.assertGreaterEqual(payload["summary"]["protected_fill_count"], 1)
         self.assertGreaterEqual(payload["summary"]["unprotected_fill_count"], 1)
-        self.assertEqual(payload["truth_source"], "fill_outcomes_plus_decision_audit")
+        self.assertEqual(payload["truth_source"], "sleeve_pnl_records_plus_fill_outcomes_plus_decision_audit")
+        self.assertTrue(any(item["strategy_sleeve_id"] == "directional_btc_core" for item in payload["profitability_by_strategy_sleeve"]))
+        self.assertTrue(any(item["allocation_id"] == "alloc_directional_btc" for item in payload["profitability_by_allocation"]))
+        self.assertTrue(any(item["strategy_bundle_id"] == "bundle_directional_btc" for item in payload["profitability_by_strategy_bundle"]))
+        self.assertTrue(any(item["attribution_type"] == "direct_fill" for item in payload["profitability_by_attribution_type"]))
+        self.assertTrue(any(item["strategy_sleeve_id"] == "directional_btc_core" for item in payload["sleeve_inventory_summary"]))
         self.assertTrue(any(item["market_regime"] == "trend" for item in payload["profitability_by_regime"]))
         self.assertTrue(any(item["active_profile_id"] == "trend_normal" for item in payload["profitability_by_profile"]))
         self.assertTrue(any(item["strategy_family"] == "directional" for item in payload["profitability_by_strategy_family"]))

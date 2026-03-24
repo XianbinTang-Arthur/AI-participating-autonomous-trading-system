@@ -34,6 +34,8 @@ class PositionLot:
     pos_side: str | None
     instrument_family: str | None
     settle_currency: str | None
+    strategy_sleeve_id: str | None
+    allocation_id: str | None
     opened_at: object
     closed_at: object | None = None
 
@@ -49,6 +51,8 @@ class LotEventRecord:
     entry_price: Decimal
     exit_price: Decimal | None
     realized_pnl_delta: Decimal
+    strategy_sleeve_id: str | None
+    allocation_id: str | None
     created_at: object
     payload: dict
 
@@ -117,6 +121,8 @@ class LotBasedProjectionBuilder:
                         entry_price=current_lot.entry_price,
                         exit_price=fill_price,
                         realized_pnl_delta=pnl_delta,
+                        strategy_sleeve_id=current_lot.strategy_sleeve_id,
+                        allocation_id=current_lot.allocation_id,
                         created_at=fill.ingestion_timestamp,
                         payload={
                             "side": fill.side,
@@ -126,6 +132,8 @@ class LotBasedProjectionBuilder:
                             "pos_side": current_lot.pos_side,
                             "instrument_family": current_lot.instrument_family,
                             "settle_currency": current_lot.settle_currency,
+                            "strategy_sleeve_id": current_lot.strategy_sleeve_id,
+                            "allocation_id": current_lot.allocation_id,
                         },
                     )
                 )
@@ -147,6 +155,8 @@ class LotBasedProjectionBuilder:
                             pos_side=current_lot.pos_side,
                             instrument_family=current_lot.instrument_family,
                             settle_currency=current_lot.settle_currency,
+                            strategy_sleeve_id=current_lot.strategy_sleeve_id,
+                            allocation_id=current_lot.allocation_id,
                             opened_at=current_lot.opened_at,
                             closed_at=None,
                         )
@@ -161,6 +171,8 @@ class LotBasedProjectionBuilder:
                             "source_fill_id": current_lot.source_fill_id,
                             "target_leverage": current_lot.target_leverage,
                             "exposure_side": current_lot.exposure_side,
+                            "strategy_sleeve_id": current_lot.strategy_sleeve_id,
+                            "allocation_id": current_lot.allocation_id,
                             "status": "CLOSED",
                             "opened_at": current_lot.opened_at,
                             "closed_at": fill.ingestion_timestamp,
@@ -171,6 +183,8 @@ class LotBasedProjectionBuilder:
                                 "pos_side": current_lot.pos_side,
                                 "instrument_family": current_lot.instrument_family,
                                 "settle_currency": current_lot.settle_currency,
+                                "strategy_sleeve_id": current_lot.strategy_sleeve_id,
+                                "allocation_id": current_lot.allocation_id,
                             },
                         }
                     )
@@ -197,6 +211,8 @@ class LotBasedProjectionBuilder:
                         pos_side=pos_side,
                         instrument_family=fill.instrument_family,
                         settle_currency=fill.settle_currency,
+                        strategy_sleeve_id=fill.strategy_sleeve_id,
+                        allocation_id=fill.allocation_id,
                         opened_at=fill.ingestion_timestamp,
                         closed_at=None,
                     )
@@ -212,6 +228,8 @@ class LotBasedProjectionBuilder:
                         entry_price=fill_price,
                         exit_price=None,
                         realized_pnl_delta=Decimal("0"),
+                        strategy_sleeve_id=fill.strategy_sleeve_id,
+                        allocation_id=fill.allocation_id,
                         created_at=fill.ingestion_timestamp,
                         payload={
                             "side": fill.side,
@@ -221,6 +239,8 @@ class LotBasedProjectionBuilder:
                             "pos_side": pos_side,
                             "instrument_family": fill.instrument_family,
                             "settle_currency": fill.settle_currency,
+                            "strategy_sleeve_id": fill.strategy_sleeve_id,
+                            "allocation_id": fill.allocation_id,
                         },
                     )
                 )
@@ -258,6 +278,8 @@ class LotBasedProjectionBuilder:
                         "source_fill_id": lot.source_fill_id,
                         "target_leverage": lot.target_leverage,
                         "exposure_side": lot.exposure_side,
+                        "strategy_sleeve_id": lot.strategy_sleeve_id,
+                        "allocation_id": lot.allocation_id,
                         "status": "OPEN",
                         "opened_at": lot.opened_at,
                         "closed_at": lot.closed_at,
@@ -285,6 +307,8 @@ class LotBasedProjectionBuilder:
                     "entry_price": event.entry_price,
                     "exit_price": event.exit_price,
                     "realized_pnl_delta": event.realized_pnl_delta,
+                    "strategy_sleeve_id": event.strategy_sleeve_id,
+                    "allocation_id": event.allocation_id,
                     "created_at": event.created_at,
                     "payload": event.payload,
                 }

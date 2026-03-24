@@ -944,6 +944,8 @@ class OKXExecutionAdapter(ExchangeAdapter):
             execution_action=intent.execution_action,
             position_intent=intent.position_intent,
             strategy_family=intent.strategy_family,
+            strategy_sleeve_id=intent.strategy_sleeve_id,
+            allocation_id=intent.allocation_id,
             strategy_bundle_id=intent.strategy_bundle_id,
             strategy_leg_role=intent.strategy_leg_role,
             cancel_reason=reason,
@@ -995,6 +997,8 @@ class OKXExecutionAdapter(ExchangeAdapter):
             execution_action=intent.execution_action,
             position_intent=intent.position_intent,
             strategy_family=intent.strategy_family,
+            strategy_sleeve_id=intent.strategy_sleeve_id,
+            allocation_id=intent.allocation_id,
             strategy_bundle_id=intent.strategy_bundle_id,
             strategy_leg_role=intent.strategy_leg_role,
             cancel_reason=None,
@@ -1045,6 +1049,8 @@ class OKXExecutionAdapter(ExchangeAdapter):
             execution_action=intent.execution_action,
             position_intent=intent.position_intent,
             strategy_family=intent.strategy_family,
+            strategy_sleeve_id=intent.strategy_sleeve_id,
+            allocation_id=intent.allocation_id,
             strategy_bundle_id=intent.strategy_bundle_id,
             strategy_leg_role=intent.strategy_leg_role,
             cancel_reason=error,
@@ -1095,6 +1101,8 @@ class OKXExecutionAdapter(ExchangeAdapter):
             execution_action=intent.execution_action,
             position_intent=intent.position_intent,
             strategy_family=intent.strategy_family,
+            strategy_sleeve_id=intent.strategy_sleeve_id,
+            allocation_id=intent.allocation_id,
             strategy_bundle_id=intent.strategy_bundle_id,
             strategy_leg_role=intent.strategy_leg_role,
             cancel_reason=error,
@@ -1239,6 +1247,8 @@ class OKXExecutionAdapter(ExchangeAdapter):
             execution_action=intent.execution_action,
             position_intent=intent.position_intent,
             strategy_family=intent.strategy_family,
+            strategy_sleeve_id=intent.strategy_sleeve_id,
+            allocation_id=intent.allocation_id,
             strategy_bundle_id=intent.strategy_bundle_id,
             strategy_leg_role=intent.strategy_leg_role,
             cancel_reason=str(order_row.get("cancelSource")) if order_row.get("cancelSource") else None,
@@ -1293,6 +1303,8 @@ class OKXExecutionAdapter(ExchangeAdapter):
                     execution_action=intent.execution_action,
                     position_intent=intent.position_intent,
                     strategy_family=intent.strategy_family,
+                    strategy_sleeve_id=intent.strategy_sleeve_id,
+                    allocation_id=intent.allocation_id,
                     strategy_bundle_id=intent.strategy_bundle_id,
                     strategy_leg_role=intent.strategy_leg_role,
                     liquidity_role="taker",
@@ -1326,6 +1338,8 @@ class OKXExecutionAdapter(ExchangeAdapter):
         state_payload.setdefault("instrumentFamily", intent.instrument_family or "")
         state_payload.setdefault("settleCurrency", intent.settle_currency or "")
         state_payload.setdefault("strategyFamily", intent.strategy_family or "")
+        state_payload.setdefault("strategySleeveId", intent.strategy_sleeve_id or "")
+        state_payload.setdefault("allocationId", intent.allocation_id or "")
         state_payload.setdefault("strategyBundleId", intent.strategy_bundle_id or "")
         state_payload.setdefault("strategyLegRole", intent.strategy_leg_role or "")
         state_payload.setdefault("requiredInitialMargin", "" if intent.required_initial_margin is None else str(intent.required_initial_margin))

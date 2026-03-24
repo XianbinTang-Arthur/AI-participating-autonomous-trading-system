@@ -6,10 +6,16 @@ from typing import Protocol
 from aats.schemas.common import EventEnvelope
 from aats.schemas.audit import DecisionAuditRecord
 from aats.schemas.execution import FillEvent, OrderObligation, OrderState
-from aats.schemas.portfolio import FillOutcomeRecord, FundingFeeRecord, PortfolioSnapshot
+from aats.schemas.portfolio import FillOutcomeRecord, FundingFeeRecord, PortfolioSnapshot, SleevePnLRecord
 from aats.schemas.reconciliation import ReconciliationReport
 from aats.schemas.operator import OperatorUserRecord
 from aats.schemas.runtime_profiles import RuntimeProfileActivationState, RuntimeProfileRevision
+from aats.schemas.strategy_runtime import (
+    PortfolioAllocationDecision,
+    StrategyExecutionBundle,
+    StrategySleeveIntent,
+    StrategySleeveRecord,
+)
 from aats.schemas.strategy_profiles import (
     StrategyProfileActivationRecord,
     StrategyProfileActivationState,
@@ -215,6 +221,34 @@ class FundingFeeRepository(Protocol):
         ...
 
 
+class SleevePnLRepository(Protocol):
+    def save_record(self, record: SleevePnLRecord) -> SleevePnLRecord:
+        ...
+
+    def get_record(self, record_id: str) -> SleevePnLRecord | None:
+        ...
+
+    def records(self) -> list[SleevePnLRecord]:
+        ...
+
+    def records_for_scope(
+        self,
+        *,
+        scope: RuntimeStateScope,
+        since: datetime | None = None,
+        limit: int | None = None,
+    ) -> list[SleevePnLRecord]:
+        ...
+
+    def replace_scope(
+        self,
+        *,
+        scope: RuntimeStateScope,
+        records: list[SleevePnLRecord],
+    ) -> None:
+        ...
+
+
 class ReconciliationRepository(Protocol):
     def save_report(self, report: ReconciliationReport) -> None:
         ...
@@ -329,6 +363,17 @@ class StrategyProfileRepository(Protocol):
     def save_activation_state(self, state: StrategyProfileActivationState) -> StrategyProfileActivationState:
         ...
 
+
+class StrategySleeveRepository(Protocol):
+    def save_sleeve(self, sleeve: StrategySleeveRecord) -> StrategySleeveRecord:
+        ...
+
+    def get_sleeve(self, sleeve_id: str) -> StrategySleeveRecord | None:
+        ...
+
+    def list_sleeves(self) -> list[StrategySleeveRecord]:
+        ...
+
     def save_recommendation(self, recommendation: StrategyProfileRecommendation) -> StrategyProfileRecommendation:
         ...
 
@@ -384,4 +429,44 @@ class StrategyProfileRepository(Protocol):
         product_type: str | None = None,
         margin_mode: str | None = None,
     ) -> list[StrategyProfileEvaluationRecord]:
+        ...
+
+
+class StrategyRuntimeRepository(Protocol):
+    def save_sleeve_intent(self, intent: StrategySleeveIntent) -> StrategySleeveIntent:
+        ...
+
+    def list_sleeve_intents(
+        self,
+        *,
+        product_type: str | None = None,
+        margin_mode: str | None = None,
+        symbol: str | None = None,
+        limit: int | None = None,
+    ) -> list[StrategySleeveIntent]:
+        ...
+
+    def save_allocation_decision(self, decision: PortfolioAllocationDecision) -> PortfolioAllocationDecision:
+        ...
+
+    def latest_allocation_decision(
+        self,
+        *,
+        product_type: str | None = None,
+        margin_mode: str | None = None,
+        symbol: str | None = None,
+    ) -> PortfolioAllocationDecision | None:
+        ...
+
+    def save_execution_bundle(self, bundle: StrategyExecutionBundle) -> StrategyExecutionBundle:
+        ...
+
+    def recent_execution_bundles(
+        self,
+        *,
+        product_type: str | None = None,
+        margin_mode: str | None = None,
+        symbol: str | None = None,
+        limit: int | None = None,
+    ) -> list[StrategyExecutionBundle]:
         ...

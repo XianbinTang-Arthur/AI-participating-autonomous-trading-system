@@ -75,6 +75,11 @@ class PostgresExecutionOrderRepository:
                 close_only_reason=intent.close_only_reason,
                 instrument_family=intent.instrument_family,
                 settle_currency=intent.settle_currency,
+                strategy_family=intent.strategy_family,
+                strategy_sleeve_id=intent.strategy_sleeve_id,
+                allocation_id=intent.allocation_id,
+                strategy_bundle_id=intent.strategy_bundle_id,
+                strategy_leg_role=intent.strategy_leg_role,
                 product_type=intent.product_type,
                 margin_mode=intent.margin_mode,
                 execution_action=intent.execution_action,
@@ -199,6 +204,31 @@ class PostgresExecutionOrderRepository:
                 str(order_payload.get("settle_currency"))
                 if order_payload.get("settle_currency") not in {None, ""}
                 else row.settle_currency
+            )
+            row.strategy_family = (
+                str(order_payload.get("strategy_family"))
+                if order_payload.get("strategy_family") not in {None, ""}
+                else row.strategy_family
+            )
+            row.strategy_sleeve_id = (
+                str(order_payload.get("strategy_sleeve_id"))
+                if order_payload.get("strategy_sleeve_id") not in {None, ""}
+                else row.strategy_sleeve_id
+            )
+            row.allocation_id = (
+                str(order_payload.get("allocation_id"))
+                if order_payload.get("allocation_id") not in {None, ""}
+                else row.allocation_id
+            )
+            row.strategy_bundle_id = (
+                str(order_payload.get("strategy_bundle_id"))
+                if order_payload.get("strategy_bundle_id") not in {None, ""}
+                else row.strategy_bundle_id
+            )
+            row.strategy_leg_role = (
+                str(order_payload.get("strategy_leg_role"))
+                if order_payload.get("strategy_leg_role") not in {None, ""}
+                else row.strategy_leg_role
             )
         row.raw_payload = dump_payload_exact(raw_payload)
 
@@ -325,6 +355,11 @@ def _order_row_to_dict(row: ExecutionOrderModel) -> dict:
         "close_only_reason": row.close_only_reason,
         "instrument_family": row.instrument_family,
         "settle_currency": row.settle_currency,
+        "strategy_family": row.strategy_family,
+        "strategy_sleeve_id": row.strategy_sleeve_id,
+        "allocation_id": row.allocation_id,
+        "strategy_bundle_id": row.strategy_bundle_id,
+        "strategy_leg_role": row.strategy_leg_role,
         "product_type": row.product_type,
         "margin_mode": row.margin_mode,
         "execution_action": row.execution_action,

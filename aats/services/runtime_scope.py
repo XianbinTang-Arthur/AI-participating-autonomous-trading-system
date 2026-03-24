@@ -5,7 +5,7 @@ from typing import Any
 
 from aats.bootstrap.settings import AATSSettings
 from aats.schemas.execution import FillEvent, OrderState
-from aats.schemas.portfolio import FillOutcomeRecord, FundingFeeRecord, PortfolioSnapshot
+from aats.schemas.portfolio import FillOutcomeRecord, FundingFeeRecord, PortfolioSnapshot, SleevePnLRecord
 from aats.schemas.reconciliation import ReconciliationReport
 from aats.schemas.system import MarginModelType, ProductType
 
@@ -278,6 +278,44 @@ def funding_fee_records_for_scope(
     if since is not None:
         rows = [record for record in rows if record.created_at >= since]
     rows = filter_funding_fee_records(rows, scope)
+    if limit is not None:
+        rows = rows[-limit:]
+    return rows
+
+
+def sleeve_pnl_record_matches_scope(
+    record: SleevePnLRecord,
+    scope: RuntimeStateScope,
+) -> bool:
+    if record.product_type != scope.product_type:
+        return False
+    if record.margin_mode != scope.margin_mode:
+        return False
+    if record.symbol in {None, ""}:
+        return True
+    return scope.symbol_allowed(record.symbol)
+
+
+def filter_sleeve_pnl_records(
+    records: list[SleevePnLRecord],
+    scope: RuntimeStateScope,
+) -> list[SleevePnLRecord]:
+    return [record for record in records if sleeve_pnl_record_matches_scope(record, scope)]
+
+
+def sleeve_pnl_records_for_scope(
+    repo,
+    scope: RuntimeStateScope,
+    *,
+    since=None,
+    limit: int | None = None,
+) -> list[SleevePnLRecord]:
+    if hasattr(repo, "records_for_scope"):
+        return repo.records_for_scope(scope=scope, since=since, limit=limit)
+    rows = repo.records()
+    if since is not None:
+        rows = [record for record in rows if record.created_at >= since]
+    rows = filter_sleeve_pnl_records(rows, scope)
     if limit is not None:
         rows = rows[-limit:]
     return rows

@@ -263,7 +263,9 @@ class DecisionOutcome(SchemaBase):
     position_management_reason_codes: list[str] = Field(default_factory=list)
     exit_attribution: str | None = None
     selected_strategy_family: StrategyFamily = "directional"
+    selected_strategy_sleeve_id: str | None = None
     selected_strategy_route_action: StrategyRouteAction = "override_target"
+    allocation_id: str | None = None
     strategy_selection_reason_codes: list[str] = Field(default_factory=list)
     strategy_selection_headline: str | None = None
     active_profile_id: str | None = None
@@ -306,9 +308,11 @@ class PositionTarget(SchemaBase):
     expected_cost_bps: float = 0.0
     expected_net_edge_bps: float = 0.0
     strategy_family: StrategyFamily = "directional"
+    strategy_sleeve_id: str | None = None
     strategy_route_action: StrategyRouteAction = "override_target"
     strategy_reason_codes: list[str] = Field(default_factory=list)
     strategy_headline: str | None = None
+    allocation_id: str | None = None
     strategy_bundle_id: str | None = None
     strategy_execution_legs: list[StrategyLegIntent] = Field(default_factory=list)
     guardrail_flags: list[str] = Field(default_factory=list)

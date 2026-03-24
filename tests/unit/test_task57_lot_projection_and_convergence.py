@@ -22,6 +22,8 @@ def _fill(
     product_type: str = "spot",
     position_mode: str | None = None,
     pos_side: str | None = None,
+    strategy_sleeve_id: str | None = None,
+    allocation_id: str | None = None,
 ) -> FillEvent:
     timestamp = utc_now()
     return FillEvent(
@@ -42,6 +44,8 @@ def _fill(
         margin_mode="cash",
         position_mode=position_mode,  # type: ignore[arg-type]
         pos_side=pos_side,  # type: ignore[arg-type]
+        strategy_sleeve_id=strategy_sleeve_id,
+        allocation_id=allocation_id,
         exposure_side="long" if side == "buy" else "short",
         execution_action="enter",
         position_intent="open_long" if side == "buy" else "close_long",
@@ -117,6 +121,37 @@ class TestTask57LotProjectionAndConvergence(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state.positions["BTC-USDT:long"].quantity, Decimal("1.5"))
         self.assertEqual(state.positions["BTC-USDT:short"].quantity, Decimal("-1"))
         self.assertEqual(state.realized_pnl, Decimal("10"))
+
+    def test_lot_projection_preserves_strategy_sleeve_identity(self) -> None:
+        builder = LotBasedProjectionBuilder()
+        fills = [
+            _fill(
+                fill_id="fill_open",
+                side="buy",
+                qty="1",
+                price="100",
+                strategy_sleeve_id="sleeve-smart-arb",
+                allocation_id="alloc-1",
+            ),
+            _fill(
+                fill_id="fill_close",
+                side="sell",
+                qty="0.4",
+                price="110",
+                strategy_sleeve_id="sleeve-smart-arb",
+                allocation_id="alloc-1",
+            ),
+        ]
+
+        lot_book = builder.rebuild_lot_book(fills=fills)
+
+        self.assertTrue(lot_book.lots)
+        self.assertEqual(lot_book.lots[0]["strategy_sleeve_id"], "sleeve-smart-arb")
+        self.assertEqual(lot_book.lots[0]["allocation_id"], "alloc-1")
+        close_events = [event for event in lot_book.events if event["event_type"] == "close"]
+        self.assertTrue(close_events)
+        self.assertEqual(close_events[0]["strategy_sleeve_id"], "sleeve-smart-arb")
+        self.assertEqual(close_events[0]["allocation_id"], "alloc-1")
 
     async def test_financial_convergence_mode_requires_all_strict_guards(self) -> None:
         if not os.getenv("AATS_DATABASE_URL"):

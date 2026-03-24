@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Callable
+from typing import Any, Callable
 
 from aats.bootstrap.logging import correlation_fields, get_logger, log_event
 from aats.bootstrap.metrics import MetricsRegistry
@@ -25,6 +25,7 @@ from aats.services.portfolio_service.position_keys import (
     position_key_for_snapshot_position,
     signed_quantity_for_position_side,
 )
+from aats.services.runtime_scope import RuntimeStateScope
 from aats.storage.base import FillOutcomeRepository, PortfolioRepository
 from aats.services.portfolio_service.snapshots import PortfolioSnapshotBuilder
 
@@ -436,6 +437,10 @@ class PortfolioService:
         portfolio_repo: PortfolioRepository,
         fill_outcome_repo: FillOutcomeRepository,
         price_provider: Callable[[str], Decimal],
+        execution_repo: Any | None = None,
+        persistent_lot_book_service: Any | None = None,
+        sleeve_pnl_projection_service: Any | None = None,
+        state_scope: RuntimeStateScope | None = None,
         metrics: MetricsRegistry | None = None,
     ) -> None:
         self.bus = bus
@@ -444,6 +449,10 @@ class PortfolioService:
         self.portfolio_repo = portfolio_repo
         self.fill_outcome_repo = fill_outcome_repo
         self.price_provider = price_provider
+        self.execution_repo = execution_repo
+        self.persistent_lot_book_service = persistent_lot_book_service
+        self.sleeve_pnl_projection_service = sleeve_pnl_projection_service
+        self.state_scope = state_scope
         self.metrics = metrics
         self.logger = get_logger("aats.portfolio_service")
 
@@ -496,16 +505,18 @@ class PortfolioService:
             fee_delta=result.fee_delta,
         )
         try:
-            self.fill_outcome_repo.save_outcome(
-                FillOutcomeRecord.from_fill_and_balance_delta(
-                    fill=fill,
-                    balance_delta=balance_delta,
-                    starting_position_qty=result.starting_quantity,
-                    starting_avg_entry_price=result.starting_avg_entry_price,
-                    ending_position_qty=result.ending_quantity,
-                    ending_avg_entry_price=result.ending_avg_entry_price,
-                )
+            outcome = FillOutcomeRecord.from_fill_and_balance_delta(
+                fill=fill,
+                balance_delta=balance_delta,
+                starting_position_qty=result.starting_quantity,
+                starting_avg_entry_price=result.starting_avg_entry_price,
+                ending_position_qty=result.ending_quantity,
+                ending_avg_entry_price=result.ending_avg_entry_price,
             )
+            self.fill_outcome_repo.save_outcome(outcome)
+            self._sync_persistent_lots()
+            if self.sleeve_pnl_projection_service is not None and self.state_scope is not None:
+                self.sleeve_pnl_projection_service.rebuild_scope(scope=self.state_scope)
         except Exception as exc:
             log_event(
                 self.logger,
@@ -555,6 +566,15 @@ class PortfolioService:
             key="portfolio",
             payload_model=snapshot,
             source_component="portfolio_service",
+        )
+
+    def _sync_persistent_lots(self) -> None:
+        if self.persistent_lot_book_service is None or self.execution_repo is None:
+            return
+        self.persistent_lot_book_service.rebuild_from_fills(
+            fills=self.execution_repo.fills(),
+            product_type=self.state.default_product_type,
+            margin_mode=self.state.default_margin_mode,
         )
 
     async def _emit_processing_failure(

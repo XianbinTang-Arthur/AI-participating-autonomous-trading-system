@@ -9,8 +9,9 @@ from aats.services.strategy_engines.base import StrategyEngineInput
 
 
 class SpotGridStrategyEngine:
-    def __init__(self, *, settings: AATSSettings) -> None:
+    def __init__(self, *, settings: AATSSettings, sleeve_inventory_loader=None) -> None:
         self.settings = settings
+        self.sleeve_inventory_loader = sleeve_inventory_loader
 
     def evaluate(self, engine_input: StrategyEngineInput) -> StrategyCandidate:
         if not self.settings.spot_grid_enabled:
@@ -95,12 +96,14 @@ class SpotGridStrategyEngine:
         distance_from_upper = upper - clamped_price
         target_fraction = distance_from_upper / (upper - lower) if upper > lower else Decimal("0.5")
         target_qty = min_inventory + ((max_inventory - min_inventory) * target_fraction)
-        current_qty = to_decimal(engine_input.context.current_position_qty)
-        delta_qty = target_qty - current_qty
+        account_current_qty = to_decimal(engine_input.context.current_position_qty)
+        sleeve_current_qty = self._current_sleeve_quantity(engine_input)
+        sleeve_delta_qty = target_qty - sleeve_current_qty
+        account_target_qty = account_current_qty + sleeve_delta_qty
         min_rebalance_qty = max_position_qty * Decimal(
             str(max(min(self.settings.spot_grid_rebalance_min_fraction_of_max_qty, 1.0), 0.0))
         )
-        if abs(delta_qty) < max(min_rebalance_qty, Decimal("1e-8")):
+        if abs(sleeve_delta_qty) < max(min_rebalance_qty, Decimal("1e-8")):
             state = "inactive"
             selectable = False
             headline = "Current inventory is already close to the grid target."
@@ -121,8 +124,8 @@ class SpotGridStrategyEngine:
             route_action="override_target" if selectable else "hold_current",
             headline=headline,
             recommended_symbol=engine_input.context.symbol,
-            target_position_qty=target_qty,
-            delta_position_qty=delta_qty,
+            target_position_qty=account_target_qty,
+            delta_position_qty=sleeve_delta_qty,
             score=score,
             confidence=confidence,
             urgency="medium" if selectable else "low",
@@ -132,9 +135,28 @@ class SpotGridStrategyEngine:
                 "current_price": price,
                 "lower_band": lower,
                 "upper_band": upper,
-                "current_position_qty": current_qty,
+                "current_account_position_qty": account_current_qty,
+                "current_sleeve_position_qty": sleeve_current_qty,
                 "inventory_floor_qty": min_inventory,
                 "inventory_ceiling_qty": max_inventory,
                 "target_inventory_fraction": target_fraction,
+                "target_sleeve_position_qty": target_qty,
+                "target_account_position_qty": account_target_qty,
             },
+        )
+
+    def _current_sleeve_quantity(self, engine_input: StrategyEngineInput) -> Decimal:
+        if self.sleeve_inventory_loader is None:
+            return to_decimal(engine_input.context.current_position_qty)
+        return to_decimal(
+            self.sleeve_inventory_loader.quantity_for_strategy(
+                family="spot_grid",
+                primary_symbol=engine_input.context.symbol,
+                product_scope=engine_input.context.product_type,
+                margin_scope=self.settings.margin_mode,
+                symbol_scope=(engine_input.context.symbol,),
+                symbol=engine_input.context.symbol,
+                product_type=engine_input.context.product_type,
+                margin_mode=self.settings.margin_mode,
+            )
         )

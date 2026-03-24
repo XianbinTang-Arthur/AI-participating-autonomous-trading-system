@@ -37,6 +37,11 @@ class PostgresFillOutcomeRepository:
                     exchange_timestamp=outcome.exchange_timestamp,
                     ingestion_timestamp=outcome.ingestion_timestamp,
                     order_status_after_fill=outcome.order_status_after_fill,
+                    strategy_family=outcome.strategy_family,
+                    strategy_sleeve_id=outcome.strategy_sleeve_id,
+                    allocation_id=outcome.allocation_id,
+                    strategy_bundle_id=outcome.strategy_bundle_id,
+                    strategy_leg_role=outcome.strategy_leg_role,
                     target_leverage=outcome.target_leverage,
                     exposure_side=outcome.exposure_side,
                     execution_action=outcome.execution_action,
@@ -69,6 +74,11 @@ class PostgresFillOutcomeRepository:
                 row.exchange_timestamp = outcome.exchange_timestamp
                 row.ingestion_timestamp = outcome.ingestion_timestamp
                 row.order_status_after_fill = outcome.order_status_after_fill
+                row.strategy_family = outcome.strategy_family
+                row.strategy_sleeve_id = outcome.strategy_sleeve_id
+                row.allocation_id = outcome.allocation_id
+                row.strategy_bundle_id = outcome.strategy_bundle_id
+                row.strategy_leg_role = outcome.strategy_leg_role
                 row.target_leverage = outcome.target_leverage
                 row.exposure_side = outcome.exposure_side
                 row.execution_action = outcome.execution_action
@@ -89,14 +99,14 @@ class PostgresFillOutcomeRepository:
     def get_outcome(self, fill_id: str) -> FillOutcomeRecord | None:
         with self.session_factory() as session:
             row = session.get(FillOutcomeModel, fill_id)
-        return None if row is None else FillOutcomeRecord.model_validate(row.payload)
+        return None if row is None else self._to_outcome(row)
 
     def outcomes(self) -> list[FillOutcomeRecord]:
         with self.session_factory() as session:
             rows = session.scalars(
                 select(FillOutcomeModel).order_by(FillOutcomeModel.created_at, FillOutcomeModel.fill_id)
             ).all()
-        return [FillOutcomeRecord.model_validate(row.payload) for row in rows]
+        return [self._to_outcome(row) for row in rows]
 
     def outcomes_for_scope(
         self,
@@ -112,9 +122,19 @@ class PostgresFillOutcomeRepository:
         with self.session_factory() as session:
             rows = session.scalars(query).all()
         outcomes = filter_fill_outcomes(
-            [FillOutcomeRecord.model_validate(row.payload) for row in reversed(rows)],
+            [self._to_outcome(row) for row in reversed(rows)],
             scope,
         )
         if limit is not None:
             outcomes = outcomes[-limit:]
         return outcomes
+
+    @staticmethod
+    def _to_outcome(row: FillOutcomeModel) -> FillOutcomeRecord:
+        payload = dict(row.payload)
+        payload.setdefault("strategy_family", row.strategy_family)
+        payload.setdefault("strategy_sleeve_id", row.strategy_sleeve_id)
+        payload.setdefault("allocation_id", row.allocation_id)
+        payload.setdefault("strategy_bundle_id", row.strategy_bundle_id)
+        payload.setdefault("strategy_leg_role", row.strategy_leg_role)
+        return FillOutcomeRecord.model_validate(payload)

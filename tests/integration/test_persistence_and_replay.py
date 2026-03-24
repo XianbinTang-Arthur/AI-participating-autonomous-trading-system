@@ -18,13 +18,16 @@ from aats.schemas.execution import ExecutionPlan, FillEvent, OrderIntent, OrderS
 from aats.schemas.governance import PolicyDecision, RiskDecision
 from aats.schemas.market import MarketSnapshot
 from aats.schemas.operator import OperatorActionRecord
+from aats.schemas.portfolio import FillOutcomeRecord, FundingFeeRecord
 from aats.schemas.reconciliation import ReconciliationReport
+from aats.schemas.strategy_runtime import StrategySleeveRecord
 from aats.schemas.system import HealthSnapshot
 from aats.services.portfolio_service.pnl import PortfolioPnLCalculator
 from aats.services.portfolio_service.positions import PortfolioState
 from aats.services.portfolio_service.reconstruction import PortfolioReconstructionService
 from aats.services.portfolio_service.snapshots import PortfolioSnapshotBuilder
 from aats.services.reconciliation_service.replay import ReplayEngine
+from aats.services.runtime_scope import runtime_state_scope
 from aats.storage.audit_repo import InMemoryAuditRepository
 from aats.storage.event_store import InMemoryEventStore
 from tests.support.postgres import temporary_postgres_url
@@ -133,6 +136,8 @@ class TestPersistenceAndReplay(unittest.IsolatedAsyncioTestCase):
 
                 target = await runtime.decision_engine.run_cycle(settings.default_symbol, settings.primary_timeframe)
                 self.assertEqual(target.strategy_family, "smart_arbitrage")
+                self.assertIsNotNone(target.strategy_sleeve_id)
+                self.assertIsNotNone(target.allocation_id)
                 self.assertIsNotNone(target.strategy_bundle_id)
                 self.assertEqual(len(target.strategy_execution_legs), 2)
 
@@ -140,7 +145,9 @@ class TestPersistenceAndReplay(unittest.IsolatedAsyncioTestCase):
                 bundle_record = next(
                     record
                     for record in storage.audit_repo.all()
-                    if record.strategy_execution_bundle_ref is not None and len(record.execution_plan_refs) >= 2
+                    if record.decision_id == target.decision_id
+                    and record.strategy_execution_bundle_ref is not None
+                    and len(record.execution_plan_refs) >= 2
                 )
                 replay = ReplayEngine(
                     event_store=storage.event_store,
@@ -157,10 +164,285 @@ class TestPersistenceAndReplay(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(replay.decision_chain_issues, [])
                 self.assertEqual(replay.execution_chain_issues, [])
                 self.assertEqual(replay.audit_issues, [])
+                self.assertEqual(bundle_record.selected_strategy_sleeve_id, target.strategy_sleeve_id)
+                self.assertEqual(bundle_record.allocation_id, target.allocation_id)
                 self.assertGreaterEqual(len(bundle_record.execution_plan_refs), 2)
                 self.assertGreaterEqual(len(bundle_record.order_intent_refs), 2)
                 self.assertGreaterEqual(len(bundle_record.fill_event_refs), 2)
                 self.assertIsNotNone(storage.event_store.get(bundle_record.strategy_execution_bundle_ref))
+                self.assertTrue(
+                    any(
+                        sleeve.sleeve_id == target.strategy_sleeve_id
+                        for sleeve in storage.strategy_sleeve_repo.list_sleeves()
+                    )
+                )
+                runtime_bundles = storage.strategy_runtime_repo.recent_execution_bundles(
+                    product_type="derivatives",
+                    margin_mode="cross",
+                    symbol="BTC-USDT-SWAP",
+                    limit=5,
+                )
+                self.assertTrue(runtime_bundles)
+                self.assertEqual(runtime_bundles[0].allocation_id, target.allocation_id)
+                runtime_allocation = storage.strategy_runtime_repo.latest_allocation_decision(
+                    product_type="derivatives",
+                    margin_mode="cross",
+                    symbol="BTC-USDT-SWAP",
+                )
+                self.assertIsNotNone(runtime_allocation)
+                self.assertEqual(runtime_allocation.allocation_id, target.allocation_id)
+                runtime_intents = storage.strategy_runtime_repo.list_sleeve_intents(
+                    product_type="derivatives",
+                    margin_mode="cross",
+                    limit=10,
+                )
+                self.assertGreaterEqual(len(runtime_intents), 4)
+                self.assertIsNotNone(storage.position_lot_repo)
+                if storage.position_lot_repo is not None:
+                    spot_lots = storage.position_lot_repo.lots_for_scope(
+                        symbol="BTC-USDT",
+                        product_type="spot",
+                        margin_mode="cash",
+                    )
+                    derivatives_lots = storage.position_lot_repo.lots_for_scope(
+                        symbol="BTC-USDT-SWAP",
+                        product_type="derivatives",
+                        margin_mode="cross",
+                    )
+                    self.assertTrue(spot_lots)
+                    self.assertTrue(derivatives_lots)
+                    self.assertTrue(
+                        any(lot["strategy_sleeve_id"] == target.strategy_sleeve_id for lot in spot_lots)
+                    )
+                    self.assertTrue(
+                        any(lot["strategy_sleeve_id"] == target.strategy_sleeve_id for lot in derivatives_lots)
+                    )
+            finally:
+                if runtime.database_runtime is not None:
+                    runtime.database_runtime.dispose()
+                if storage is not None and storage.database_runtime is not None:
+                    storage.database_runtime.dispose()
+
+    async def test_allocator_postgres_replay_keeps_multi_sleeve_spot_bundle_consistent(self) -> None:
+        with temporary_postgres_url() as (database_url, _admin_engine, _schema_name):
+            settings = self._postgres_settings(
+                database_url,
+                trading_product_type="spot",
+                margin_mode="cash",
+                default_symbol="BTC-USDT",
+                allowed_symbols=("BTC-USDT",),
+                spot_grid_enabled=True,
+                spot_grid_breakout_guard_enabled=False,
+                spot_grid_anchor_lookback_snapshots=4,
+                spot_grid_band_bps=500.0,
+                spot_grid_inventory_floor_fraction=0.0,
+                spot_grid_inventory_ceiling_fraction=1.0,
+                spot_grid_rebalance_min_fraction_of_max_qty=0.05,
+                dca_enabled=True,
+                dca_interval_seconds=0.0,
+                dca_quote_budget_per_cycle=100.0,
+                max_abs_position_qty=2.0,
+            )
+            runtime = await build_runtime(settings)
+            storage = None
+            try:
+                await runtime.market_gateway.run_local_publisher(
+                    symbol=settings.default_symbol,
+                    iterations=4,
+                    interval_seconds=0.0,
+                )
+
+                target = await runtime.decision_engine.run_cycle(settings.default_symbol, settings.primary_timeframe)
+                self.assertEqual(target.strategy_family, "spot_grid")
+                self.assertEqual(len(target.strategy_execution_legs), 2)
+
+                storage = build_storage_backends(settings)
+                bundle_record = next(
+                    record
+                    for record in storage.audit_repo.all()
+                    if record.decision_id == target.decision_id
+                    and record.strategy_execution_bundle_ref is not None
+                    and len(record.order_intent_refs) >= 2
+                )
+                replay = ReplayEngine(
+                    event_store=storage.event_store,
+                    reconstruction_service=PortfolioReconstructionService(
+                        initial_usdt_balance=settings.initial_usdt_balance,
+                        snapshot_builder=PortfolioSnapshotBuilder(pnl_calculator=PortfolioPnLCalculator()),
+                    ),
+                    audit_repo=storage.audit_repo,
+                    portfolio_repo=storage.portfolio_repo,
+                ).replay(decision_id=bundle_record.decision_id)
+
+                self.assertEqual(replay.divergence_count, 0)
+                self.assertEqual(replay.portfolio_issues, [])
+                self.assertEqual(replay.decision_chain_issues, [])
+                self.assertEqual(replay.execution_chain_issues, [])
+                self.assertEqual(replay.audit_issues, [])
+                self.assertIsNotNone(bundle_record.strategy_coordinator_snapshot_ref)
+                self.assertIsNotNone(bundle_record.portfolio_allocation_decision_ref)
+                self.assertGreaterEqual(len(bundle_record.strategy_sleeve_intent_refs), 4)
+                runtime_allocation = storage.strategy_runtime_repo.latest_allocation_decision(
+                    product_type="spot",
+                    margin_mode="cash",
+                    symbol="BTC-USDT",
+                )
+                self.assertIsNotNone(runtime_allocation)
+                runtime_bundles = storage.strategy_runtime_repo.recent_execution_bundles(
+                    product_type="spot",
+                    margin_mode="cash",
+                    symbol="BTC-USDT",
+                    limit=5,
+                )
+                self.assertTrue(runtime_bundles)
+                runtime_intents = storage.strategy_runtime_repo.list_sleeve_intents(
+                    product_type="spot",
+                    margin_mode="cash",
+                    limit=10,
+                )
+                self.assertGreaterEqual(len(runtime_intents), 4)
+            finally:
+                if runtime.database_runtime is not None:
+                    runtime.database_runtime.dispose()
+                if storage is not None and storage.database_runtime is not None:
+                    storage.database_runtime.dispose()
+
+    async def test_postgres_replay_validates_sleeve_pnl_projection_against_fill_and_funding_truth(self) -> None:
+        with temporary_postgres_url() as (database_url, _admin_engine, _schema_name):
+            settings = self._postgres_settings(
+                database_url,
+                trading_product_type="derivatives",
+                margin_mode="cross",
+                default_symbol="BTC-USDT-SWAP",
+                allowed_symbols=("BTC-USDT-SWAP",),
+                account_backend="disabled",
+                account_read_enabled=False,
+                execution_backend="paper",
+                market_data_backend="demo",
+            )
+            runtime = await build_runtime(settings)
+            storage = None
+            try:
+                now = utc_now()
+                scope = runtime_state_scope(settings)
+                runtime.strategy_sleeve_repo.save_sleeve(
+                    StrategySleeveRecord(
+                        sleeve_id="directional_btc_core",
+                        family="directional",
+                        name="directional_btc_core",
+                        product_scope="derivatives",
+                        margin_scope="cross",
+                        symbol_scope=("BTC-USDT-SWAP",),
+                    )
+                )
+                runtime.execution_repo.save_fill(
+                    FillEvent(
+                        fill_id="fill_sleeve_truth",
+                        decision_id="decision_sleeve_truth",
+                        intent_id="intent_sleeve_truth",
+                        client_order_id="order_sleeve_truth",
+                        exchange_order_id="venue_sleeve_truth",
+                        symbol="BTC-USDT-SWAP",
+                        venue="OKX",
+                        side="buy",
+                        fill_qty=Decimal("1"),
+                        fill_price=Decimal("100"),
+                        fee_amount=Decimal("0.10"),
+                        fee_currency="USDT",
+                        liquidity_role="taker",
+                        exchange_timestamp=now - timedelta(minutes=8),
+                        ingestion_timestamp=now - timedelta(minutes=8),
+                        order_status_after_fill="FILLED",
+                        strategy_family="directional",
+                        strategy_sleeve_id="directional_btc_core",
+                        allocation_id="alloc_directional_btc",
+                        strategy_bundle_id="bundle_directional_btc",
+                        strategy_leg_role="primary",
+                        target_leverage=3.0,
+                        exposure_side="long",
+                        execution_action="enter",
+                        position_intent="open_long",
+                        product_type="derivatives",
+                        margin_mode="cross",
+                    )
+                )
+                runtime.fill_outcome_repo.save_outcome(
+                    FillOutcomeRecord(
+                        fill_id="fill_sleeve_truth",
+                        decision_id="decision_sleeve_truth",
+                        intent_id="intent_sleeve_truth",
+                        order_id="order_sleeve_truth",
+                        symbol="BTC-USDT-SWAP",
+                        venue="OKX",
+                        side="buy",
+                        fill_qty=Decimal("1"),
+                        fill_price=Decimal("100"),
+                        fill_notional=Decimal("100"),
+                        fee_amount=Decimal("0.10"),
+                        fee_currency="USDT",
+                        liquidity_role="taker",
+                        exchange_timestamp=now - timedelta(minutes=8),
+                        ingestion_timestamp=now - timedelta(minutes=8),
+                        order_status_after_fill="FILLED",
+                        strategy_family="directional",
+                        strategy_sleeve_id="directional_btc_core",
+                        allocation_id="alloc_directional_btc",
+                        strategy_bundle_id="bundle_directional_btc",
+                        strategy_leg_role="primary",
+                        target_leverage=3.0,
+                        exposure_side="long",
+                        execution_action="open_long",
+                        position_intent="open_long",
+                        starting_position_qty=Decimal("0"),
+                        ending_position_qty=Decimal("1"),
+                        realized_pnl_delta=Decimal("0"),
+                        fee_delta=Decimal("-0.10"),
+                        product_type="derivatives",
+                        margin_mode="cross",
+                        created_at=now - timedelta(minutes=8),
+                    )
+                )
+                runtime.funding_fee_repo.save_record(
+                    FundingFeeRecord(
+                        bill_id="bill_sleeve_truth",
+                        symbol="BTC-USDT-SWAP",
+                        currency="USDT",
+                        amount=Decimal("-1.25"),
+                        bill_type="8",
+                        sub_type="173",
+                        type_label="funding_fee",
+                        sub_type_label="funding_fee_expense",
+                        funding_direction="expense",
+                        bill_ts=now - timedelta(minutes=2),
+                        ledger_posting_state="POSTED",
+                        product_type="derivatives",
+                        margin_mode="cross",
+                    )
+                )
+
+                runtime.sleeve_pnl_projection_service.rebuild_scope(scope=scope)
+                storage = build_storage_backends(settings)
+                records = storage.sleeve_pnl_repo.records_for_scope(scope=scope)
+                self.assertEqual(len(records), 2)
+                self.assertTrue(any(record.fill_id == "fill_sleeve_truth" for record in records))
+                self.assertTrue(any(record.funding_fee_id == "bill_sleeve_truth" for record in records))
+
+                replay = ReplayEngine(
+                    event_store=storage.event_store,
+                    reconstruction_service=PortfolioReconstructionService(
+                        initial_usdt_balance=settings.initial_usdt_balance,
+                        snapshot_builder=PortfolioSnapshotBuilder(pnl_calculator=PortfolioPnLCalculator()),
+                    ),
+                    audit_repo=storage.audit_repo,
+                    portfolio_repo=storage.portfolio_repo,
+                    fill_outcome_repo=storage.fill_outcome_repo,
+                    funding_fee_repo=storage.funding_fee_repo,
+                    sleeve_pnl_repo=storage.sleeve_pnl_repo,
+                    scope=scope,
+                ).replay()
+
+                self.assertEqual(replay.execution_chain_issues, [])
+                self.assertEqual(replay.divergence_count, 0)
             finally:
                 if runtime.database_runtime is not None:
                     runtime.database_runtime.dispose()
@@ -200,6 +482,16 @@ class TestPersistenceAndReplay(unittest.IsolatedAsyncioTestCase):
                         self.assertIsNotNone(event_store.get(record.ai_market_assessment_ref))
                     if record.position_target_ref is not None:
                         self.assertIsNotNone(event_store.get(record.position_target_ref))
+                    if record.strategy_coordinator_snapshot_ref is not None:
+                        snapshot_event = event_store.get(record.strategy_coordinator_snapshot_ref)
+                        self.assertIsNotNone(snapshot_event)
+                        if snapshot_event is not None:
+                            self.assertEqual(snapshot_event.topic, topics.STRATEGY_COORDINATOR_SNAPSHOTS)
+                    if record.portfolio_allocation_decision_ref is not None:
+                        allocation_event = event_store.get(record.portfolio_allocation_decision_ref)
+                        self.assertIsNotNone(allocation_event)
+                        if allocation_event is not None:
+                            self.assertEqual(allocation_event.topic, topics.PORTFOLIO_ALLOCATION_DECISIONS)
                     if record.decision_outcome_ref is not None:
                         outcome_event = event_store.get(record.decision_outcome_ref)
                         self.assertIsNotNone(outcome_event)
@@ -232,6 +524,7 @@ class TestPersistenceAndReplay(unittest.IsolatedAsyncioTestCase):
                     for ref in (
                         record.ai_shadow_decision_refs
                         + record.ai_shadow_evaluation_refs
+                        + record.strategy_sleeve_intent_refs
                         + record.order_intent_refs
                         + record.order_state_refs
                         + record.fill_event_refs

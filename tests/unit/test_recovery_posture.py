@@ -5,6 +5,7 @@ import unittest
 from aats.bootstrap.config import build_runtime
 from aats.bootstrap.settings import AATSSettings
 from aats.schemas.common import utc_now
+from aats.schemas.execution import OrderState
 from aats.schemas.reconciliation import ReconciliationReport
 from aats.schemas.system import RecoveryStatus
 from aats.services.governance_engine.recovery_posture import RecoveryPostureEvaluator
@@ -182,6 +183,99 @@ class TestRecoveryPostureEvaluator(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(final.review_required)
         self.assertTrue(final.only_reduce_required)
         self.assertIn("derivatives_exchange_position_without_local_execution_chain", final.only_reduce_reasons)
+
+    async def test_finalize_status_tracks_dynamic_bundle_recovery_and_clears_after_orders_close(self) -> None:
+        runtime = await build_runtime(
+            AATSSettings.model_validate(
+                {
+                    "mode": "paper_live",
+                    "market_data_backend": "demo",
+                    "execution_backend": "paper",
+                    "account_backend": "disabled",
+                    "account_read_enabled": False,
+                    "storage_mode": "memory",
+                    "event_persistence_mode": "strict",
+                }
+            )
+        )
+        evaluator = RecoveryPostureEvaluator(runtime)
+        await runtime.market_gateway.run_local_publisher(
+            symbol=runtime.settings.default_symbol,
+            iterations=2,
+            interval_seconds=0.0,
+        )
+        now = utc_now()
+        runtime.execution_repo.save_order_state(
+            OrderState(
+                decision_id="decision_bundle_runtime_1",
+                intent_id="intent_bundle_runtime_1",
+                symbol=runtime.settings.default_symbol,
+                client_order_id="cl_bundle_runtime_1",
+                venue="OKX",
+                exchange_order_id="ord_bundle_runtime_1",
+                status="SUBMITTED",
+                submission_mode="guarded_live_submit",
+                submitted_ts=now,
+                last_update_ts=now,
+                requested_qty=0.001,
+                filled_qty=0.0,
+                remaining_qty=0.001,
+                average_fill_price=None,
+                fees=0.0,
+                product_type="spot",
+                margin_mode="cash",
+                strategy_family="spot_grid",
+                strategy_sleeve_id="sleeve_runtime_grid",
+                allocation_id="alloc_runtime_bundle",
+                strategy_bundle_id="bundle_runtime_recovery",
+                strategy_leg_role="inventory",
+                submission_payload={},
+            )
+        )
+
+        pending = evaluator.finalize_status()
+
+        self.assertEqual(pending.recovery_state, "bundle_recovery")
+        self.assertFalse(pending.safe_to_trade)
+        self.assertFalse(pending.resume_eligible)
+        self.assertTrue(pending.bundle_recovery_required)
+        self.assertIn("strategy_bundle_recovery_in_progress", pending.resume_blocked_reasons)
+
+        runtime.execution_repo.save_order_state(
+            OrderState(
+                decision_id="decision_bundle_runtime_1",
+                intent_id="intent_bundle_runtime_1",
+                symbol=runtime.settings.default_symbol,
+                client_order_id="cl_bundle_runtime_1",
+                venue="OKX",
+                exchange_order_id="ord_bundle_runtime_1",
+                status="FILLED",
+                submission_mode="guarded_live_submit",
+                submitted_ts=now,
+                last_update_ts=utc_now(),
+                requested_qty=0.001,
+                filled_qty=0.001,
+                remaining_qty=0.0,
+                average_fill_price=60_000.0,
+                fees=0.0,
+                product_type="spot",
+                margin_mode="cash",
+                strategy_family="spot_grid",
+                strategy_sleeve_id="sleeve_runtime_grid",
+                allocation_id="alloc_runtime_bundle",
+                strategy_bundle_id="bundle_runtime_recovery",
+                strategy_leg_role="inventory",
+                submission_payload={},
+            )
+        )
+
+        cleared = evaluator.finalize_status()
+
+        self.assertEqual(cleared.recovery_state, "normal_operation")
+        self.assertTrue(cleared.safe_to_trade)
+        self.assertTrue(cleared.resume_eligible)
+        self.assertFalse(cleared.bundle_recovery_required)
+        self.assertEqual(cleared.bundle_summaries, [])
 
 
 if __name__ == "__main__":

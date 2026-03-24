@@ -125,6 +125,8 @@ class FillOutcomeRecord(SchemaBase):
     ingestion_timestamp: datetime | None = None
     order_status_after_fill: str | None = None
     strategy_family: str | None = None
+    strategy_sleeve_id: str | None = None
+    allocation_id: str | None = None
     strategy_bundle_id: str | None = None
     strategy_leg_role: Literal["primary", "hedge", "inventory", "accumulation"] | None = None
     target_leverage: float | None = None
@@ -186,6 +188,8 @@ class FillOutcomeRecord(SchemaBase):
                 "ingestion_timestamp": fill.ingestion_timestamp,
                 "order_status_after_fill": fill.order_status_after_fill,
                 "strategy_family": fill.strategy_family,
+                "strategy_sleeve_id": fill.strategy_sleeve_id,
+                "allocation_id": fill.allocation_id,
                 "strategy_bundle_id": fill.strategy_bundle_id,
                 "strategy_leg_role": fill.strategy_leg_role,
                 "target_leverage": fill.target_leverage,
@@ -222,4 +226,28 @@ class FundingFeeRecord(SchemaBase):
     ledger_posted_at: datetime | None = None
     product_type: ProductType = "spot"
     margin_mode: MarginModelType = "cash"
+    raw_payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class SleevePnLRecord(SchemaBase):
+    record_id: str
+    strategy_sleeve_id: str | None = None
+    strategy_family: str | None = None
+    allocation_id: str | None = None
+    strategy_bundle_id: str | None = None
+    strategy_leg_role: Literal["primary", "hedge", "inventory", "accumulation"] | None = None
+    symbol: str | None = None
+    event_type: Literal["fill_realization", "funding_fee"]
+    fill_id: str | None = None
+    funding_fee_id: str | None = None
+    fee_currency: str | None = None
+    realized_pnl: Decimal = Decimal("0")
+    fee_amount: Decimal = Decimal("0")
+    funding_fee_amount: Decimal = Decimal("0")
+    inventory_move_qty: Decimal = Decimal("0")
+    attribution_type: str = "direct"
+    product_type: ProductType = "spot"
+    margin_mode: MarginModelType = "cash"
+    event_timestamp: datetime | None = None
+    created_at: datetime = Field(default_factory=utc_now)
     raw_payload: dict[str, Any] = Field(default_factory=dict)

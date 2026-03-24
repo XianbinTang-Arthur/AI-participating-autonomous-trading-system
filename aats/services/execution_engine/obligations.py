@@ -102,6 +102,8 @@ class ExecutionObligationService:
             product_type=intent.product_type,
             margin_mode=intent.margin_mode,
             strategy_family=intent.strategy_family,
+            strategy_sleeve_id=intent.strategy_sleeve_id,
+            allocation_id=intent.allocation_id,
             strategy_bundle_id=intent.strategy_bundle_id,
             strategy_leg_role=intent.strategy_leg_role,
             reference_price=reference_price,

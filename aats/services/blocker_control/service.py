@@ -391,6 +391,17 @@ class BlockerControlService:
                     expected_effect="在没有其他阻断时解除暂停，恢复自动运行。",
                 )
             )
+        if code in {"strategy_bundle_recovery_in_progress", "strategy_bundle_recovery_requires_review"}:
+            actions.append(
+                BlockerActionDefinition(
+                    action_id="open-recovery-view",
+                    label="查看恢复详情",
+                    kind="client",
+                    endpoint="/system/recovery",
+                    tone="warning",
+                    expected_effect="查看当前 bundle / sleeve 恢复摘要，确认未完成腿的收敛状态。",
+                )
+            )
         if code not in {"kill_switch_active"}:
             actions.append(
                 BlockerActionDefinition(
@@ -562,6 +573,20 @@ class BlockerControlService:
                 "系统正在完成基线确认和恢复状态刷新，请等待这一轮操作结束。",
                 "在基线确认完成前，不应继续恢复自动交易。",
                 "先刷新当前状态，确认这次基线确认是否已完成。",
+            )
+        if code == "strategy_bundle_recovery_in_progress":
+            return (
+                "多腿 bundle 仍在恢复中",
+                "系统检测到至少一个策略 bundle 仍有未完成腿，当前正在按 bundle / sleeve 维度跟踪恢复，不应立即恢复新的扩张交易。",
+                "如果在未完成腿仍未收敛时继续扩张新仓位，后续库存归属、对冲关系和恢复判断都会被污染。",
+                "先查看恢复详情，确认这些 bundle 的未完成腿是否已经自然收敛。",
+            )
+        if code == "strategy_bundle_recovery_requires_review":
+            return (
+                "多腿 bundle 恢复身份不完整",
+                "当前至少有一个未完成 bundle 缺少一致的 sleeve / allocation 身份，系统无法自动确认这些腿该如何恢复。",
+                "在 bundle 身份不完整时继续运行，会让多策略库存归属和恢复链路建立在错误假设上。",
+                "先查看恢复详情，确认哪些 bundle 缺少身份信息或腿状态异常，再决定如何处理。",
             )
         if submit_only:
             return (

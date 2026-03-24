@@ -72,6 +72,9 @@ class AuditReplayQueryFacade:
             ),
             audit_repo=self.owner.runtime.audit_repo,
             portfolio_repo=self.owner.runtime.portfolio_repo,
+            fill_outcome_repo=self.owner.runtime.fill_outcome_repo,
+            funding_fee_repo=getattr(self.owner.runtime, "funding_fee_repo", None),
+            sleeve_pnl_repo=getattr(self.owner.runtime, "sleeve_pnl_repo", None),
             scope=self.owner.state_scope,
         )
         result = engine.replay(decision_id=decision_id)

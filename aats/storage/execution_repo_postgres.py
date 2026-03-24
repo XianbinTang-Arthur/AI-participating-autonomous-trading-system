@@ -81,6 +81,11 @@ class PostgresExecutionRepository:
                 close_only_reason=merged.close_only_reason,
                 instrument_family=merged.instrument_family,
                 settle_currency=merged.settle_currency,
+                strategy_family=merged.strategy_family,
+                strategy_sleeve_id=merged.strategy_sleeve_id,
+                allocation_id=merged.allocation_id,
+                strategy_bundle_id=merged.strategy_bundle_id,
+                strategy_leg_role=merged.strategy_leg_role,
                 product_type=scope["product_type"],
                 margin_mode=scope["margin_mode"],
                 position_intent=scope["position_intent"],
@@ -115,6 +120,11 @@ class PostgresExecutionRepository:
             row.close_only_reason = merged.close_only_reason
             row.instrument_family = merged.instrument_family
             row.settle_currency = merged.settle_currency
+            row.strategy_family = merged.strategy_family
+            row.strategy_sleeve_id = merged.strategy_sleeve_id
+            row.allocation_id = merged.allocation_id
+            row.strategy_bundle_id = merged.strategy_bundle_id
+            row.strategy_leg_role = merged.strategy_leg_role
             row.product_type = scope["product_type"]
             row.margin_mode = scope["margin_mode"]
             row.position_intent = scope["position_intent"]
@@ -164,6 +174,11 @@ class PostgresExecutionRepository:
                 close_only_reason=fill.close_only_reason,
                 instrument_family=fill.instrument_family,
                 settle_currency=fill.settle_currency,
+                strategy_family=fill.strategy_family,
+                strategy_sleeve_id=fill.strategy_sleeve_id,
+                allocation_id=fill.allocation_id,
+                strategy_bundle_id=fill.strategy_bundle_id,
+                strategy_leg_role=fill.strategy_leg_role,
                 product_type=resolved_scope["product_type"],
                 margin_mode=resolved_scope["margin_mode"],
                 position_intent=resolved_scope["position_intent"],
@@ -300,8 +315,8 @@ class PostgresExecutionRepository:
         payload.setdefault("remaining_qty", row.remaining_qty)
         payload.setdefault("average_fill_price", row.average_fill_price)
         payload.setdefault("fees", row.fees)
-        payload.setdefault("reduce_only", row.reduce_only)
-        payload.setdefault("close_only", row.close_only)
+        payload.setdefault("reduce_only", False if row.reduce_only is None else row.reduce_only)
+        payload.setdefault("close_only", False if row.close_only is None else row.close_only)
         payload.setdefault("td_mode", row.td_mode)
         payload.setdefault("position_mode", row.position_mode)
         payload.setdefault("pos_side", row.pos_side)
@@ -309,6 +324,11 @@ class PostgresExecutionRepository:
         payload.setdefault("close_only_reason", row.close_only_reason)
         payload.setdefault("instrument_family", row.instrument_family)
         payload.setdefault("settle_currency", row.settle_currency)
+        payload.setdefault("strategy_family", row.strategy_family)
+        payload.setdefault("strategy_sleeve_id", row.strategy_sleeve_id)
+        payload.setdefault("allocation_id", row.allocation_id)
+        payload.setdefault("strategy_bundle_id", row.strategy_bundle_id)
+        payload.setdefault("strategy_leg_role", row.strategy_leg_role)
         payload.setdefault("product_type", row.product_type)
         payload.setdefault("margin_mode", row.margin_mode)
         payload.setdefault("position_intent", row.position_intent)
@@ -327,8 +347,8 @@ class PostgresExecutionRepository:
         payload.setdefault("fill_qty", row.fill_qty)
         payload.setdefault("fill_price", row.fill_price)
         payload.setdefault("fee_amount", row.fee_amount)
-        payload.setdefault("reduce_only", row.reduce_only)
-        payload.setdefault("close_only", row.close_only)
+        payload.setdefault("reduce_only", False if row.reduce_only is None else row.reduce_only)
+        payload.setdefault("close_only", False if row.close_only is None else row.close_only)
         payload.setdefault("td_mode", row.td_mode)
         payload.setdefault("position_mode", row.position_mode)
         payload.setdefault("pos_side", row.pos_side)
@@ -336,6 +356,11 @@ class PostgresExecutionRepository:
         payload.setdefault("close_only_reason", row.close_only_reason)
         payload.setdefault("instrument_family", row.instrument_family)
         payload.setdefault("settle_currency", row.settle_currency)
+        payload.setdefault("strategy_family", row.strategy_family)
+        payload.setdefault("strategy_sleeve_id", row.strategy_sleeve_id)
+        payload.setdefault("allocation_id", row.allocation_id)
+        payload.setdefault("strategy_bundle_id", row.strategy_bundle_id)
+        payload.setdefault("strategy_leg_role", row.strategy_leg_role)
         payload.setdefault("product_type", row.product_type)
         payload.setdefault("margin_mode", row.margin_mode)
         payload.setdefault("position_intent", row.position_intent)

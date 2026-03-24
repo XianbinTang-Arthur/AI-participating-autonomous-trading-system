@@ -56,6 +56,100 @@ class PortfolioSnapshotModel(Base):
     payload: Mapped[dict] = mapped_column(JSON, nullable=False)
 
 
+class StrategySleeveModel(Base):
+    __tablename__ = "strategy_sleeves"
+    __table_args__ = (
+        Index("ix_strategy_sleeves_family_status", "family", "status"),
+        Index("ix_strategy_sleeves_product_margin", "product_scope", "margin_scope"),
+    )
+
+    sleeve_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    family: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    product_scope: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    margin_scope: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    automatic_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    inventory_policy: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+
+
+class StrategySleeveIntentModel(Base):
+    __tablename__ = "strategy_sleeve_intents"
+    __table_args__ = (
+        Index("ix_strategy_sleeve_intents_scope_created", "product_type", "margin_mode", "created_at"),
+        Index("ix_strategy_sleeve_intents_sleeve_created", "strategy_sleeve_id", "created_at"),
+        Index("ix_strategy_sleeve_intents_decision_created", "decision_id", "created_at"),
+        Index("ix_strategy_sleeve_intents_symbol_created", "symbol", "created_at"),
+    )
+
+    sleeve_intent_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    decision_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    family: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    strategy_sleeve_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    state: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    symbol: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    product_type: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    margin_mode: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    inventory_policy: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    route_action: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    allocation_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    automatic_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    budget_multiplier: Mapped[Decimal] = mapped_column(DECIMAL_36_18, nullable=False, default=Decimal("1"))
+    allocator_weight: Mapped[Decimal] = mapped_column(DECIMAL_36_18, nullable=False, default=Decimal("1"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+
+
+class PortfolioAllocationDecisionModel(Base):
+    __tablename__ = "portfolio_allocation_decisions"
+    __table_args__ = (
+        Index("ix_portfolio_allocation_decisions_scope_created", "product_type", "margin_mode", "created_at"),
+        Index("ix_portfolio_allocation_decisions_decision_created", "decision_id", "created_at"),
+        Index("ix_portfolio_allocation_decisions_symbol_created", "symbol", "created_at"),
+        Index("ix_portfolio_allocation_decisions_primary_family_created", "primary_family", "created_at"),
+    )
+
+    allocation_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    decision_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    symbol: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    product_type: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    margin_mode: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    allocator_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    automatic_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    route_action: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    primary_family: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    primary_strategy_sleeve_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+
+
+class StrategyExecutionBundleModel(Base):
+    __tablename__ = "strategy_execution_bundles"
+    __table_args__ = (
+        Index("ix_strategy_execution_bundles_scope_created", "product_type", "margin_mode", "created_at"),
+        Index("ix_strategy_execution_bundles_decision_created", "decision_id", "created_at"),
+        Index("ix_strategy_execution_bundles_allocation_created", "allocation_id", "created_at"),
+        Index("ix_strategy_execution_bundles_symbol_created", "selected_symbol", "created_at"),
+        Index("ix_strategy_execution_bundles_status_created", "status", "created_at"),
+    )
+
+    bundle_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    decision_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    family: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    strategy_sleeve_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    allocation_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    product_type: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    margin_mode: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    route_action: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    selected_symbol: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+
+
 class OrderStateModel(Base):
     __tablename__ = "order_states"
     __table_args__ = (
@@ -86,6 +180,11 @@ class OrderStateModel(Base):
     close_only_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
     instrument_family: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     settle_currency: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
+    strategy_family: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    strategy_sleeve_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    allocation_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    strategy_bundle_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    strategy_leg_role: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     product_type: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
     margin_mode: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
     position_intent: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
@@ -117,6 +216,11 @@ class FillEventModel(Base):
     close_only_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
     instrument_family: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     settle_currency: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
+    strategy_family: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    strategy_sleeve_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    allocation_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    strategy_bundle_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    strategy_leg_role: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     product_type: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
     margin_mode: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
     position_intent: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
@@ -149,6 +253,11 @@ class FillOutcomeModel(Base):
     exchange_timestamp: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     ingestion_timestamp: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     order_status_after_fill: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    strategy_family: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    strategy_sleeve_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    allocation_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    strategy_bundle_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    strategy_leg_role: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     target_leverage: Mapped[float | None] = mapped_column(Float, nullable=True)
     exposure_side: Mapped[str | None] = mapped_column(String(16), nullable=True)
     execution_action: Mapped[str | None] = mapped_column(String(16), nullable=True)
@@ -193,6 +302,39 @@ class FundingFeeRecordModel(Base):
     payload: Mapped[dict] = mapped_column(JSON, nullable=False)
 
 
+class SleevePnLRecordModel(Base):
+    __tablename__ = "sleeve_pnl_records"
+    __table_args__ = (
+        Index("ix_sleeve_pnl_records_sleeve_created", "strategy_sleeve_id", "created_at"),
+        Index("ix_sleeve_pnl_records_family_created", "strategy_family", "created_at"),
+        Index("ix_sleeve_pnl_records_scope_symbol_created", "product_type", "margin_mode", "symbol", "created_at"),
+        Index("ix_sleeve_pnl_records_allocation_created", "allocation_id", "created_at"),
+        Index("ix_sleeve_pnl_records_bundle_created", "strategy_bundle_id", "created_at"),
+    )
+
+    record_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    strategy_sleeve_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    strategy_family: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    allocation_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    strategy_bundle_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    strategy_leg_role: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    symbol: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    event_type: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    fill_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    funding_fee_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    fee_currency: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    realized_pnl: Mapped[Decimal] = mapped_column(DECIMAL_36_18, nullable=False)
+    fee_amount: Mapped[Decimal] = mapped_column(DECIMAL_36_18, nullable=False)
+    funding_fee_amount: Mapped[Decimal] = mapped_column(DECIMAL_36_18, nullable=False)
+    inventory_move_qty: Mapped[Decimal] = mapped_column(DECIMAL_36_18, nullable=False)
+    attribution_type: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    product_type: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    margin_mode: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    event_timestamp: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+
+
 class OrderObligationModel(Base):
     __tablename__ = "order_obligations"
     __table_args__ = (
@@ -210,6 +352,11 @@ class OrderObligationModel(Base):
     reserved_amount: Mapped[Decimal] = mapped_column(DECIMAL_36_18, nullable=False)
     consumed_amount: Mapped[Decimal] = mapped_column(DECIMAL_36_18, nullable=False)
     released_amount: Mapped[Decimal] = mapped_column(DECIMAL_36_18, nullable=False)
+    strategy_family: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    strategy_sleeve_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    allocation_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    strategy_bundle_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    strategy_leg_role: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     product_type: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
     margin_mode: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
     last_update_ts: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -262,6 +409,11 @@ class ExecutionOrderModel(Base):
     close_only_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
     instrument_family: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     settle_currency: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
+    strategy_family: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    strategy_sleeve_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    allocation_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    strategy_bundle_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    strategy_leg_role: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     product_type: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
     margin_mode: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
     execution_action: Mapped[str | None] = mapped_column(String(32), nullable=True)
@@ -340,6 +492,11 @@ class ExecutionFillModelV2(Base):
     close_only_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
     instrument_family: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     settle_currency: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
+    strategy_family: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    strategy_sleeve_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    allocation_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    strategy_bundle_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    strategy_leg_role: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     liquidity_role: Mapped[str | None] = mapped_column(String(16), nullable=True)
     exchange_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     ingestion_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -451,6 +608,8 @@ class PositionLotModel(Base):
     signed_quantity_open: Mapped[Decimal] = mapped_column(DECIMAL_36_18, nullable=False)
     entry_price: Mapped[Decimal] = mapped_column(DECIMAL_36_18, nullable=False)
     source_fill_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    strategy_sleeve_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    allocation_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     target_leverage: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
     exposure_side: Mapped[str] = mapped_column(String(16), nullable=False, default="flat")
     status: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
@@ -475,6 +634,8 @@ class LotEventModel(Base):
         ForeignKey("position_lots.lot_id", ondelete="CASCADE"),
         nullable=False,
     )
+    strategy_sleeve_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    allocation_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     symbol: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     product_type: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
     margin_mode: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
@@ -545,14 +706,25 @@ class DecisionAuditRecordModel(Base):
     audit_revision_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     decision_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    selected_strategy_sleeve_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    allocation_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     decision_context_ref: Mapped[str] = mapped_column(String(64), nullable=False)
+    strategy_coordinator_snapshot_ref: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    strategy_sleeve_intent_refs: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    portfolio_allocation_decision_ref: Mapped[str | None] = mapped_column(String(64), nullable=True)
     baseline_assessment_ref: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    ai_decision_brief_ref: Mapped[str | None] = mapped_column(String(64), nullable=True)
     ai_market_assessment_ref: Mapped[str | None] = mapped_column(String(64), nullable=True)
     ai_action_proposal_ref: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    ai_shadow_decision_refs: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    ai_shadow_evaluation_refs: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     position_target_ref: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    decision_outcome_ref: Mapped[str | None] = mapped_column(String(64), nullable=True)
     policy_decision_ref: Mapped[str | None] = mapped_column(String(64), nullable=True)
     risk_decision_ref: Mapped[str | None] = mapped_column(String(64), nullable=True)
     execution_plan_ref: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    execution_plan_refs: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    strategy_execution_bundle_ref: Mapped[str | None] = mapped_column(String(64), nullable=True)
     order_intent_refs: Mapped[list] = mapped_column(JSON, nullable=False)
     order_state_refs: Mapped[list] = mapped_column(JSON, nullable=False)
     fill_event_refs: Mapped[list] = mapped_column(JSON, nullable=False)

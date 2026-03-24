@@ -52,10 +52,19 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
         system_payload = system_runtime.json()
         self.assertEqual(strategy_payload["summary"]["configured_active_family"], "spot_grid")
         self.assertEqual(strategy_payload["summary"]["latest_selected_family"], "spot_grid")
+        self.assertIsNotNone(strategy_payload["summary"]["latest_selected_strategy_sleeve_id"])
+        self.assertIsNotNone(strategy_payload["summary"]["latest_allocation_id"])
         self.assertEqual(strategy_payload["summary"]["latest_selected_route_action"], "override_target")
         self.assertEqual(strategy_payload["latest_applied_target"]["strategy_family"], "spot_grid")
+        self.assertIsNotNone(strategy_payload["latest_applied_target"]["strategy_sleeve_id"])
+        self.assertIsNotNone(strategy_payload["latest_applied_target"]["allocation_id"])
         self.assertEqual(strategy_payload["latest_applied_target"]["strategy_route_action"], "override_target")
-        self.assertTrue(any(item["family"] == "spot_grid" for item in strategy_payload["latest_snapshot"]["candidates"]))
+        self.assertTrue(strategy_payload["strategy_sleeves"])
+        spot_grid_candidate = next(
+            item for item in strategy_payload["latest_snapshot"]["candidates"] if item["family"] == "spot_grid"
+        )
+        self.assertIn("current_sleeve_position_qty", spot_grid_candidate["metrics"])
+        self.assertIn("target_account_position_qty", spot_grid_candidate["metrics"])
         self.assertEqual(system_payload["strategy_family_active"], "spot_grid")
         self.assertEqual(
             system_payload["strategy_runtime_summary"]["configured_active_family"],
@@ -95,11 +104,66 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
         payload = strategy_runtime.json()
         self.assertEqual(payload["summary"]["configured_active_family"], "dca")
         self.assertEqual(payload["summary"]["latest_selected_family"], "dca")
+        self.assertIsNotNone(payload["summary"]["latest_selected_strategy_sleeve_id"])
         self.assertEqual(payload["latest_applied_target"]["strategy_family"], "dca")
+        self.assertIsNotNone(payload["latest_applied_target"]["strategy_sleeve_id"])
+        self.assertTrue(payload["summary"]["auto_parallel_enabled"])
+        dca_candidate = next(item for item in payload["latest_snapshot"]["candidates"] if item["family"] == "dca")
+        dca_control = next(item for item in payload["latest_snapshot"]["automation_decisions"] if item["family"] == "dca")
+        self.assertIn("current_sleeve_position_qty", dca_candidate["metrics"])
+        self.assertIn("target_account_position_qty", dca_candidate["metrics"])
+        self.assertIn("auto_budget_multiplier", dca_candidate["metrics"])
+        self.assertEqual(dca_control["automation_state"], "active")
         self.assertEqual(
             payload["configured_parameters"]["dca"]["quote_budget_per_cycle"],
             100.0,
         )
+
+    async def test_allocator_runtime_endpoint_exposes_combined_spot_grid_and_dca_allocation(self) -> None:
+        settings = self._settings(
+            trading_product_type="spot",
+            margin_mode="cash",
+            default_symbol="BTC-USDT",
+            allowed_symbols=("BTC-USDT",),
+            strategy_family_active="spot_grid",
+            spot_grid_enabled=True,
+            spot_grid_breakout_guard_enabled=False,
+            spot_grid_anchor_lookback_snapshots=4,
+            spot_grid_band_bps=500.0,
+            spot_grid_inventory_floor_fraction=0.0,
+            spot_grid_inventory_ceiling_fraction=1.0,
+            spot_grid_rebalance_min_fraction_of_max_qty=0.05,
+            dca_enabled=True,
+            dca_interval_seconds=0.0,
+            dca_quote_budget_per_cycle=100.0,
+            max_abs_position_qty=2.0,
+        )
+        runtime = await build_runtime(settings)
+        await runtime.market_gateway.run_local_publisher(
+            symbol=settings.default_symbol,
+            iterations=4,
+            interval_seconds=0.0,
+        )
+
+        target = await runtime.decision_engine.run_cycle(settings.default_symbol, settings.primary_timeframe)
+
+        self.assertIn(target.strategy_family, {"spot_grid", "dca"})
+        self.assertEqual(len(target.strategy_execution_legs), 2)
+
+        app = self._app(runtime)
+        with TestClient(app) as client:
+            strategy_runtime = client.get("/strategy/runtime")
+
+        self.assertEqual(strategy_runtime.status_code, 200)
+        payload = strategy_runtime.json()
+        self.assertIn(payload["summary"]["latest_selected_family"], {"spot_grid", "dca"})
+        self.assertEqual(payload["summary"]["latest_approved_families"], ["spot_grid", "dca"])
+        self.assertTrue(payload["summary"]["latest_approved_sleeve_weights"])
+        self.assertEqual(payload["latest_allocation_decision"]["approved_families"], ["spot_grid", "dca"])
+        self.assertTrue(payload["latest_allocation_decision"]["approved_sleeve_weights"])
+        self.assertGreaterEqual(len(payload["recent_sleeve_intents"]), 4)
+        self.assertEqual(len(payload["latest_bundle"]["legs"]), 2)
+        self.assertEqual(set(payload["latest_bundle"]["participating_families"]), {"spot_grid", "dca"})
 
     async def test_smart_arbitrage_runtime_endpoint_exposes_executable_bundle_snapshot(self) -> None:
         settings = self._settings(
@@ -139,14 +203,31 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
         payload = strategy_runtime.json()
         self.assertEqual(payload["summary"]["configured_active_family"], "smart_arbitrage")
         self.assertEqual(payload["summary"]["latest_selected_family"], "smart_arbitrage")
+        self.assertIsNotNone(payload["summary"]["latest_selected_strategy_sleeve_id"])
+        self.assertIsNotNone(payload["summary"]["latest_allocation_id"])
         self.assertEqual(payload["summary"]["latest_selected_route_action"], "override_target")
         self.assertTrue(payload["summary"]["automatic_selection_enabled"])
+        self.assertTrue(payload["summary"]["auto_parallel_enabled"])
         self.assertEqual(payload["latest_bundle"]["status"], "submitted")
+        self.assertEqual(
+            payload["latest_bundle"]["strategy_sleeve_id"],
+            payload["latest_applied_target"]["strategy_sleeve_id"],
+        )
+        self.assertEqual(
+            payload["latest_bundle"]["allocation_id"],
+            payload["latest_applied_target"]["allocation_id"],
+        )
         smart_arbitrage_candidate = next(
             item for item in payload["latest_snapshot"]["candidates"] if item["family"] == "smart_arbitrage"
         )
+        smart_arbitrage_control = next(
+            item for item in payload["latest_snapshot"]["automation_decisions"] if item["family"] == "smart_arbitrage"
+        )
         self.assertEqual(smart_arbitrage_candidate["route_action"], "override_target")
         self.assertEqual(len(smart_arbitrage_candidate["legs"]), 2)
+        self.assertIn("current_sleeve_spot_qty", smart_arbitrage_candidate["metrics"])
+        self.assertIn("target_account_derivatives_qty", smart_arbitrage_candidate["metrics"])
+        self.assertEqual(smart_arbitrage_control["automation_state"], "active")
 
     @staticmethod
     def _settings(**overrides) -> AATSSettings:

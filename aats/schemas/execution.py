@@ -187,6 +187,8 @@ class OrderIntent(SchemaBase):
     liquidation_buffer_remaining: Decimal | None = None
     idempotency_key: str
     strategy_family: str | None = None
+    strategy_sleeve_id: str | None = None
+    allocation_id: str | None = None
     strategy_bundle_id: str | None = None
     strategy_leg_role: Literal["primary", "hedge", "inventory", "accumulation"] | None = None
     product_type: ProductType = "spot"
@@ -243,6 +245,8 @@ class ExecutionPlan(SchemaBase):
     risk_limit_breached: bool = False
     liquidation_buffer_remaining: Decimal | None = None
     strategy_family: str | None = None
+    strategy_sleeve_id: str | None = None
+    allocation_id: str | None = None
     strategy_bundle_id: str | None = None
     strategy_leg_role: Literal["primary", "hedge", "inventory", "accumulation"] | None = None
     product_type: ProductType = "spot"
@@ -294,6 +298,8 @@ class OrderState(SchemaBase):
     instrument_family: str | None = None
     settle_currency: str | None = None
     strategy_family: str | None = None
+    strategy_sleeve_id: str | None = None
+    allocation_id: str | None = None
     strategy_bundle_id: str | None = None
     strategy_leg_role: Literal["primary", "hedge", "inventory", "accumulation"] | None = None
     product_type: ProductType = "spot"
@@ -339,6 +345,8 @@ class FillEvent(SchemaBase):
     instrument_family: str | None = None
     settle_currency: str | None = None
     strategy_family: str | None = None
+    strategy_sleeve_id: str | None = None
+    allocation_id: str | None = None
     strategy_bundle_id: str | None = None
     strategy_leg_role: Literal["primary", "hedge", "inventory", "accumulation"] | None = None
     product_type: ProductType = "spot"
@@ -378,6 +386,8 @@ class OrderObligation(SchemaBase):
     product_type: ProductType = "spot"
     margin_mode: MarginModelType = "cash"
     strategy_family: str | None = None
+    strategy_sleeve_id: str | None = None
+    allocation_id: str | None = None
     strategy_bundle_id: str | None = None
     strategy_leg_role: Literal["primary", "hedge", "inventory", "accumulation"] | None = None
     reference_price: Decimal | None = None

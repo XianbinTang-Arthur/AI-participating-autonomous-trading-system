@@ -21,6 +21,96 @@ from aats.schemas.reconciliation import ReconciliationReport
 
 
 class TestExecutionRecovery(unittest.TestCase):
+    def test_recovery_tracks_structured_bundle_open_orders_without_halting(self) -> None:
+        execution_repo = InMemoryExecutionRepository()
+        now = utc_now()
+        for client_order_id, family, sleeve_id in (
+            ("cl_bundle_grid", "spot_grid", "sleeve_grid"),
+            ("cl_bundle_dca", "dca", "sleeve_dca"),
+        ):
+            execution_repo.save_order_state(
+                OrderState(
+                    decision_id="decision_bundle_1",
+                    intent_id=f"intent_{client_order_id}",
+                    symbol="BTC-USDT",
+                    client_order_id=client_order_id,
+                    venue="OKX",
+                    exchange_order_id=f"ord_{client_order_id}",
+                    status="SUBMITTED",
+                    submission_mode="guarded_live_submit",
+                    submitted_ts=now,
+                    last_update_ts=now,
+                    requested_qty=0.001,
+                    filled_qty=0.0,
+                    remaining_qty=0.001,
+                    average_fill_price=None,
+                    fees=0.0,
+                    product_type="spot",
+                    margin_mode="cash",
+                    strategy_family=family,
+                    strategy_sleeve_id=sleeve_id,
+                    allocation_id="alloc_bundle_1",
+                    strategy_bundle_id="bundle_spot_inventory",
+                    strategy_leg_role="inventory",
+                    submission_payload={},
+                )
+            )
+        recovery = self._service(execution_repo=execution_repo)
+
+        artifacts = recovery.recover(portfolio_state=PortfolioState(initial_usdt_balance=10_000.0))
+
+        self.assertFalse(artifacts.status.halted)
+        self.assertEqual(artifacts.status.recovery_state, "bundle_recovery")
+        self.assertTrue(artifacts.status.bundle_recovery_required)
+        self.assertEqual(artifacts.status.bundle_recovery_count, 1)
+        self.assertEqual(artifacts.status.recoverable_bundle_count, 1)
+        self.assertEqual(artifacts.status.open_order_count, 2)
+        self.assertFalse(artifacts.status.safe_to_trade)
+        self.assertTrue(artifacts.status.only_reduce_required)
+        self.assertIn("strategy_bundle_recovery_in_progress", artifacts.status.only_reduce_reasons)
+        self.assertEqual(artifacts.status.bundle_summaries[0].recovery_state, "structured_open_orders")
+
+    def test_recovery_halts_when_bundle_open_orders_missing_identity(self) -> None:
+        execution_repo = InMemoryExecutionRepository()
+        now = utc_now()
+        execution_repo.save_order_state(
+            OrderState(
+                decision_id="decision_bundle_missing_1",
+                intent_id="intent_bundle_missing_1",
+                symbol="BTC-USDT",
+                client_order_id="cl_bundle_missing_1",
+                venue="OKX",
+                exchange_order_id="ord_bundle_missing_1",
+                status="SUBMITTED",
+                submission_mode="guarded_live_submit",
+                submitted_ts=now,
+                last_update_ts=now,
+                requested_qty=0.001,
+                filled_qty=0.0,
+                remaining_qty=0.001,
+                average_fill_price=None,
+                fees=0.0,
+                product_type="spot",
+                margin_mode="cash",
+                strategy_family="spot_grid",
+                allocation_id="alloc_bundle_missing",
+                strategy_bundle_id="bundle_missing_identity",
+                strategy_leg_role="inventory",
+                submission_payload={},
+            )
+        )
+        kill_switch = KillSwitch()
+        recovery = self._service(execution_repo=execution_repo, kill_switch=kill_switch)
+
+        artifacts = recovery.recover(portfolio_state=PortfolioState(initial_usdt_balance=10_000.0))
+
+        self.assertTrue(kill_switch.halted)
+        self.assertTrue(artifacts.status.halted)
+        self.assertTrue(artifacts.status.bundle_recovery_required)
+        self.assertEqual(artifacts.status.recovery_state, "review_required")
+        self.assertIn("strategy_bundle_recovery_requires_review", artifacts.status.resume_blocked_reasons)
+        self.assertEqual(artifacts.status.recovery_action, "halted_open_orders_require_review")
+
     def test_recovery_releases_orphan_active_obligation_without_order_state(self) -> None:
         obligation_repo = InMemoryExecutionObligationRepository()
         obligation_repo.save_obligation(

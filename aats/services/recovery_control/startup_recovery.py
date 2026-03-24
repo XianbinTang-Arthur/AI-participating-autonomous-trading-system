@@ -62,9 +62,9 @@ class ExecutionLedgerRecoveryService:
             count_orders = getattr(self.execution_order_repo, "count_orders", None)
             open_orders = getattr(self.execution_order_repo, "open_orders", None)
             if callable(count_orders):
-                recovered_order_count = int(count_orders())
+                recovered_order_count = max(recovered_order_count, int(count_orders()))
             if callable(open_orders):
-                open_order_count = len(open_orders())
+                open_order_count = max(open_order_count, len(open_orders()))
         if self.execution_command_repo is not None:
             pending_commands = getattr(self.execution_command_repo, "pending_commands", None)
             if callable(pending_commands):
@@ -81,6 +81,8 @@ class ExecutionLedgerRecoveryService:
         review_required = base_status.review_required
         rebaseline_available = base_status.rebaseline_available
         reconciliation_classification = None
+        combined_only_reduce_required = base_status.only_reduce_required
+        combined_only_reduce_reasons = list(base_status.only_reduce_reasons)
 
         if latest_reconciliation is not None:
             reconciliation_classification = latest_reconciliation.recovery_classification
@@ -88,6 +90,12 @@ class ExecutionLedgerRecoveryService:
             if latest_reconciliation.only_reduce_required and not latest_reconciliation.resume_blocking:
                 recovery_state = "only_reduce"
                 notes.append("derivatives_only_reduce_recovery_mode")
+            combined_only_reduce_required = (
+                combined_only_reduce_required or bool(latest_reconciliation.only_reduce_required)
+            )
+            combined_only_reduce_reasons = list(
+                dict.fromkeys([*combined_only_reduce_reasons, *latest_reconciliation.only_reduce_reasons])
+            )
             if latest_reconciliation.resume_blocking:
                 safe_startup = False
                 safe_to_trade = False
@@ -132,16 +140,8 @@ class ExecutionLedgerRecoveryService:
                 "safe_to_trade": safe_to_trade and not self.kill_switch.halted,
                 "resume_eligible": resume_eligible and not self.kill_switch.halted,
                 "review_required": review_required,
-                "only_reduce_required": (
-                    bool(latest_reconciliation.only_reduce_required)
-                    if latest_reconciliation is not None
-                    else base_status.only_reduce_required
-                ),
-                "only_reduce_reasons": (
-                    list(latest_reconciliation.only_reduce_reasons)
-                    if latest_reconciliation is not None
-                    else list(base_status.only_reduce_reasons)
-                ),
+                "only_reduce_required": combined_only_reduce_required,
+                "only_reduce_reasons": combined_only_reduce_reasons,
                 "unknown_state_details": (
                     list(latest_reconciliation.unknown_state_details)
                     if latest_reconciliation is not None
