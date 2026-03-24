@@ -336,7 +336,8 @@ class TestReconciliationComparator(unittest.TestCase):
             trusted_exchange_portfolio_baseline=True,
         )
 
-        self.assertEqual(report.severity, "REVIEW_REQUIRED")
+        self.assertEqual(report.severity, "SOFT_MISMATCH")
+        self.assertFalse(report.review_required)
         self.assertIn("local_position_margin_divergence", report.mismatch_categories)
         self.assertIn(
             "local_position_margin_differs_from_exchange_position_margin",
@@ -1838,6 +1839,193 @@ class TestReconciliationComparator(unittest.TestCase):
 
         self.assertEqual(report.severity, "CLEAN")
         self.assertEqual(report.fill_diff["exchange"], {})
+
+    def test_service_filters_exchange_bills_acknowledged_by_operator_rebaseline(self) -> None:
+        now = utc_now()
+        stored_snapshot = PortfolioSnapshot(
+            snapshot_ts=now,
+            balances={"USDT": 10_000.0},
+            positions=[
+                Position(
+                    symbol="BTC-USDT-SWAP",
+                    position_key="BTC-USDT-SWAP:long",
+                    position_qty=0.0036,
+                    position_notional=250.0,
+                    avg_entry_price=69_298.8,
+                    unrealized_pnl=0.0,
+                    product_type="derivatives",
+                    margin_mode="cross",
+                    position_mode="long_short_mode",
+                    pos_side="long",
+                    margin_allocated=25.057692,
+                    maintenance_margin=1.00230768,
+                    margin_ratio=88.987015892055,
+                    liquidation_price=41_920.72782242313,
+                    margin_source="exchange",
+                )
+            ],
+            cost_basis={"BTC-USDT-SWAP:long": 69_298.8},
+            realized_pnl=0.0,
+            unrealized_pnl=0.0,
+            total_equity=10_000.0,
+            gross_exposure=250.0,
+            net_exposure=250.0,
+            risk_budget_usage={},
+            product_type="derivatives",
+            margin_mode="cross",
+        )
+        baseline_imported_at = now
+        historical_bill_ts = now - timedelta(hours=1)
+        exchange_snapshot = ExchangeAccountSnapshot(
+            account_source="okx",
+            fetched_at=now,
+            balances=[ExchangeBalance(currency="USDT", total=10_000.0, available=10_000.0, frozen=0.0)],
+            positions=[
+                ExchangePosition(
+                    instrument_id="BTC-USDT-SWAP",
+                    symbol="BTC-USDT-SWAP",
+                    quantity=0.0036,
+                    average_entry_price=69_298.8,
+                    mark_price=69_500.0,
+                    side="long",
+                    margin_mode="cross",
+                    margin_allocated=25.031772,
+                    maintenance_margin=1.00127088,
+                    margin_ratio=88.84905296445741,
+                    liquidation_price=41_920.72782242313,
+                )
+            ],
+            open_orders=[],
+            fills=[],
+            instruments=[],
+            account_mode="futures",
+            position_mode="long_short_mode",
+            account_configuration=ExchangeAccountConfiguration(position_mode="long_short_mode"),
+        )
+
+        class _PortfolioRepo:
+            def latest(self):
+                return stored_snapshot
+
+            def history(self):
+                return [stored_snapshot]
+
+        class _ExecutionRepo:
+            def order_states(self):
+                return []
+
+            def fills(self):
+                return []
+
+        class _EventStore:
+            def latest(self, topic: str):
+                if topic != topics.ACCOUNT_BASELINES:
+                    return None
+                return build_envelope(
+                    topic=topics.ACCOUNT_BASELINES,
+                    key="okx",
+                    payload_model=AccountBaselineSnapshot(
+                        account_source="okx",
+                        exchange_snapshot_ts=baseline_imported_at,
+                        imported_at=baseline_imported_at,
+                        product_type="derivatives",
+                        margin_mode="cross",
+                        baseline_status="rebaseline_completed",
+                        baseline_kind="operator_rebaseline",
+                    ),
+                    source_component="test",
+                )
+
+            def by_topic(self, topic: str):
+                latest = self.latest(topic)
+                return [latest] if latest is not None else []
+
+        class _AccountService:
+            def latest_snapshot(self):
+                return exchange_snapshot
+
+            def latest_recent_bills(self):
+                return [
+                    {
+                        "billId": "bill_hist_1",
+                        "type": "2",
+                        "subType": "5",
+                        "ccy": "USDT",
+                        "ts": str(int(historical_bill_ts.timestamp() * 1000)),
+                    }
+                ]
+
+            def recent_bills_summary(self):
+                return {
+                    "available": True,
+                    "count": 1,
+                    "latest_bill_id": "bill_hist_1",
+                    "latest_bill_ts": historical_bill_ts,
+                    "currencies": ["USDT"],
+                    "top_categories": [{"type": "2", "sub_type": "5", "currency": "USDT", "count": 1}],
+                    "funding_fee_summary": {
+                        "available": False,
+                        "count": 0,
+                        "latest_bill_ts": None,
+                        "currencies": [],
+                        "net_total_by_currency": {},
+                        "absolute_total_by_currency": {},
+                        "current_position_notional_usd": None,
+                        "funding_fee_bps_proxy": None,
+                    },
+                    "last_error": None,
+                }
+
+            def recent_bills_summary_since(self, *, since_ts=None):
+                _ = since_ts
+                return {
+                    "available": False,
+                    "count": 0,
+                    "latest_bill_id": None,
+                    "latest_bill_ts": None,
+                    "currencies": [],
+                    "top_categories": [],
+                    "funding_fee_summary": {
+                        "available": False,
+                        "count": 0,
+                        "latest_bill_ts": None,
+                        "currencies": [],
+                        "net_total_by_currency": {},
+                        "absolute_total_by_currency": {},
+                        "current_position_notional_usd": None,
+                        "funding_fee_bps_proxy": None,
+                    },
+                    "last_error": None,
+                }
+
+        service = ReconciliationService(
+            settings=AATSSettings.model_validate({"trading_product_type": "derivatives", "margin_mode": "cross"}),
+            bus=InMemoryEventBus(),
+            fetcher=ExchangeStateFetcher(account_service=_AccountService()),
+            comparator=StateComparator(),
+            repair_service=ReconciliationRepairService(),
+            reconciliation_repo=InMemoryReconciliationRepository(),
+            execution_repo=_ExecutionRepo(),  # type: ignore[arg-type]
+            portfolio_repo=_PortfolioRepo(),  # type: ignore[arg-type]
+            event_store=_EventStore(),  # type: ignore[arg-type]
+            reconstruction_service=PortfolioReconstructionService(
+                initial_usdt_balance=10_000.0,
+                snapshot_builder=PortfolioSnapshotBuilder(pnl_calculator=PortfolioPnLCalculator()),
+            ),
+            price_provider=lambda _symbol: 0.0,
+            bootstrap_portfolio_from_exchange=True,
+        )
+
+        report = service._build_report(
+            decision_id="decision_rebaseline_bills",
+            portfolio_snapshot_ref="evt_portfolio_rebaseline_bills",
+            stored_snapshot=stored_snapshot,
+        )
+
+        self.assertEqual(report.exchange_bills_summary["count"], 0)
+        self.assertNotIn("exchange_bills_activity_available", report.mismatch_categories)
+        self.assertEqual(report.severity, "SOFT_MISMATCH")
+        self.assertFalse(report.review_required)
 
     def test_service_ignores_local_exchange_fills_older_than_visible_exchange_window(self) -> None:
         now = utc_now()

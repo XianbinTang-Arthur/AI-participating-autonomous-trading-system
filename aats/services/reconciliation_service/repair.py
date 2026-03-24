@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from decimal import Decimal
 from typing import Callable
 from dataclasses import dataclass
@@ -10,7 +11,7 @@ from aats.bus.base import EventBus
 from aats.events import topics
 from aats.events.envelopes import parse_envelope, publish_model
 from aats.schemas.execution import FillEvent, OrderState
-from aats.schemas.exchange import ExchangeAccountSnapshot
+from aats.schemas.exchange import AccountBaselineSnapshot, ExchangeAccountSnapshot
 from aats.schemas.operator import ProcessingFailureRecord
 from aats.schemas.portfolio import PortfolioSnapshot, is_baseline_snapshot
 from aats.schemas.reconciliation import ReconciliationReport
@@ -304,18 +305,74 @@ class ReconciliationService:
                 local_fills=fills,
             ),
             trusted_exchange_portfolio_baseline=trusted_exchange_portfolio_baseline,
-            exchange_bills_summary=self._exchange_bills_summary(),
+            exchange_bills_summary=self._exchange_bills_summary(
+                account_baseline=self._latest_account_baseline(),
+            ),
         )
         if self.reconciliation_classifier is not None:
             report = self.reconciliation_classifier.annotate(report)
         return report
 
-    def _exchange_bills_summary(self) -> dict[str, object]:
-        summary_getter = getattr(getattr(self.fetcher, "account_service", None), "recent_bills_summary", None)
+    def _exchange_bills_summary(
+        self,
+        *,
+        account_baseline: AccountBaselineSnapshot | None = None,
+    ) -> dict[str, object]:
+        account_service = getattr(self.fetcher, "account_service", None)
+        summary_getter = getattr(account_service, "recent_bills_summary", None)
         if not callable(summary_getter):
             return {}
-        summary = summary_getter()
+        if account_baseline is None:
+            account_baseline = self._latest_account_baseline()
+        summary_since_getter = getattr(account_service, "recent_bills_summary_since", None)
+        if (
+            account_baseline is not None
+            and account_baseline.baseline_kind == "operator_rebaseline"
+            and callable(summary_since_getter)
+        ):
+            summary = summary_since_getter(since_ts=account_baseline.imported_at)
+        else:
+            summary = summary_getter()
+            latest_bill_ts = summary.get("latest_bill_ts") if isinstance(summary, dict) else None
+            if (
+                account_baseline is not None
+                and account_baseline.baseline_kind == "operator_rebaseline"
+                and isinstance(latest_bill_ts, datetime)
+                and latest_bill_ts <= account_baseline.imported_at
+            ):
+                return {
+                    "available": False,
+                    "count": 0,
+                    "latest_bill_id": None,
+                    "latest_bill_ts": None,
+                    "currencies": [],
+                    "top_categories": [],
+                    "funding_fee_summary": {
+                        "available": False,
+                        "count": 0,
+                        "latest_bill_ts": None,
+                        "currencies": [],
+                        "net_total_by_currency": {},
+                        "absolute_total_by_currency": {},
+                        "current_position_notional_usd": None,
+                        "funding_fee_bps_proxy": None,
+                    },
+                    "last_error": summary.get("last_error") if isinstance(summary, dict) else None,
+                }
         return summary if isinstance(summary, dict) else {}
+
+    def _latest_account_baseline(self) -> AccountBaselineSnapshot | None:
+        latest_baseline = latest_topic_event_for_scope(
+            self.event_store,
+            topics.ACCOUNT_BASELINES,
+            self.runtime_scope,
+        )
+        if latest_baseline is None:
+            return None
+        try:
+            return AccountBaselineSnapshot.model_validate(latest_baseline.payload)
+        except Exception:
+            return None
 
     def _rebuild_snapshot_for_comparison(
         self,

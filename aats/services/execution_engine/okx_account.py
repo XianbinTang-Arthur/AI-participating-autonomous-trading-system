@@ -436,6 +436,19 @@ class OKXAccountService:
 
     def recent_bills_summary(self) -> dict[str, Any]:
         rows = list(self._latest_recent_bills)
+        return self._recent_bills_summary_from_rows(rows)
+
+    def recent_bills_summary_since(self, *, since_ts: datetime | None = None) -> dict[str, Any]:
+        rows = list(self._latest_recent_bills)
+        if since_ts is not None:
+            rows = [
+                row
+                for row in rows
+                if (bill_ts := self._bill_row_timestamp(row)) is not None and bill_ts > since_ts
+            ]
+        return self._recent_bills_summary_from_rows(rows)
+
+    def _recent_bills_summary_from_rows(self, rows: list[dict[str, Any]]) -> dict[str, Any]:
         category_counts: dict[tuple[str, str, str], int] = {}
         latest_ts: datetime | None = None
         latest_bill_id: str | None = None
@@ -469,7 +482,7 @@ class OKXAccountService:
             "latest_bill_ts": latest_ts,
             "currencies": currencies,
             "top_categories": top_categories,
-            "funding_fee_summary": self.recent_funding_fee_summary(),
+            "funding_fee_summary": self._recent_funding_fee_summary_from_rows(rows),
             "last_error": self._last_bills_error,
         }
 
@@ -477,6 +490,19 @@ class OKXAccountService:
         rows = [
             row
             for row in self._latest_recent_bills
+            if self._is_funding_fee_bill(row) and (symbol is None or str(row.get("instId") or "") == symbol)
+        ]
+        return self._recent_funding_fee_summary_from_rows(rows, symbol=symbol)
+
+    def _recent_funding_fee_summary_from_rows(
+        self,
+        rows: list[dict[str, Any]],
+        *,
+        symbol: str | None = None,
+    ) -> dict[str, Any]:
+        rows = [
+            row
+            for row in rows
             if self._is_funding_fee_bill(row) and (symbol is None or str(row.get("instId") or "") == symbol)
         ]
         if not rows:

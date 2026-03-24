@@ -549,8 +549,6 @@ class StateComparator:
                 unexpected_exchange_fills
                 or exchange_balance_diff
                 or exchange_position_diff
-                or exchange_margin_diff
-                or exchange_margin_profile_diff
             )
             and not exchange_order_diff
             and not local_execution_diff
