@@ -54,6 +54,46 @@ class RecoveryPostureEvaluator:
             return False
         return bool(ai_runtime.get("degraded")) and not bool(ai_runtime.get("auto_downgrade_active"))
 
+    def _current_only_reduce_state(
+        self,
+        *,
+        status: RecoveryStatus,
+        report: ReconciliationReport | None,
+        bundle_recovery,
+    ) -> tuple[bool, list[str]]:
+        if report is None:
+            only_reduce_required = bool(status.only_reduce_required)
+            reasons = list(status.only_reduce_reasons)
+        else:
+            only_reduce_required = bool(report.only_reduce_required)
+            reasons = list(report.only_reduce_reasons)
+        if bundle_recovery.bundle_recovery_required and "strategy_bundle_recovery_in_progress" not in reasons:
+            reasons.append("strategy_bundle_recovery_in_progress")
+        return only_reduce_required or bundle_recovery.bundle_recovery_required, reasons
+
+    def _should_clear_lingering_review_state(
+        self,
+        *,
+        status: RecoveryStatus,
+        report: ReconciliationReport | None,
+        bundle_recovery,
+        ai_requires_manual_review: bool,
+    ) -> bool:
+        if status.recovery_state not in {"review_required", "resume_blocked", "bundle_recovery"}:
+            return False
+        if status.baseline_requires_operator_review or ai_requires_manual_review:
+            return False
+        if bundle_recovery.bundle_recovery_required or bundle_recovery.recovery_blocking:
+            return False
+        if report is None:
+            return not status.resume_blocked_reasons and not status.only_reduce_required
+        return not (
+            report.halt_required
+            or report.review_required
+            or bool(getattr(report, "resume_blocking", False))
+            or report.only_reduce_required
+        )
+
     def resume_check(
         self,
         *,
@@ -112,6 +152,7 @@ class RecoveryPostureEvaluator:
         )
         bundle_recovery = self._bundle_recovery_assessment()
         recovery_state = status.recovery_state
+        ai_requires_manual_review = self._ai_requires_manual_review()
         if report is not None:
             if report.halt_required:
                 recovery_state = "resume_blocked"
@@ -132,18 +173,27 @@ class RecoveryPostureEvaluator:
             recovery_state = "bundle_recovery"
         if status.baseline_requires_operator_review:
             recovery_state = "review_required"
-        if self._ai_requires_manual_review():
+        if ai_requires_manual_review:
             recovery_state = "review_required"
+        if self._should_clear_lingering_review_state(
+            status=status,
+            report=report,
+            bundle_recovery=bundle_recovery,
+            ai_requires_manual_review=ai_requires_manual_review,
+        ):
+            recovery_state = "normal_operation"
         if recovery_state == "rebaseline_completed" and not self.runtime.kill_switch.halted:
             recovery_state = "normal_operation"
         elif self.runtime.kill_switch.halted and recovery_state in {"normal_operation", "only_reduce"}:
             recovery_state = "resume_blocked"
 
-        bundle_only_reduce_reasons = list(status.only_reduce_reasons)
+        only_reduce_required, bundle_only_reduce_reasons = self._current_only_reduce_state(
+            status=status,
+            report=report,
+            bundle_recovery=bundle_recovery,
+        )
         bundle_resume_blocked_reasons = list(status.resume_blocked_reasons)
         if bundle_recovery.bundle_recovery_required:
-            if "strategy_bundle_recovery_in_progress" not in bundle_only_reduce_reasons:
-                bundle_only_reduce_reasons.append("strategy_bundle_recovery_in_progress")
             blocker = (
                 "strategy_bundle_recovery_requires_review"
                 if bundle_recovery.recovery_blocking
@@ -161,7 +211,7 @@ class RecoveryPostureEvaluator:
                 "unbundled_open_order_count": bundle_recovery.unbundled_open_order_count,
                 "bundle_summaries": list(bundle_recovery.bundle_summaries),
                 "open_order_count": bundle_recovery.open_order_count,
-                "only_reduce_required": bool(status.only_reduce_required or bundle_recovery.bundle_recovery_required),
+                "only_reduce_required": only_reduce_required,
                 "only_reduce_reasons": bundle_only_reduce_reasons,
                 "resume_blocked_reasons": bundle_resume_blocked_reasons,
             }
@@ -206,10 +256,11 @@ class RecoveryPostureEvaluator:
         status = base_status or self.runtime.recovery_status
         assessment = self.assess(base_status=status, latest_reconciliation=latest_reconciliation)
         bundle_recovery = self._bundle_recovery_assessment()
-        only_reduce_required = status.only_reduce_required or bundle_recovery.bundle_recovery_required
-        only_reduce_reasons = list(status.only_reduce_reasons)
-        if bundle_recovery.bundle_recovery_required and "strategy_bundle_recovery_in_progress" not in only_reduce_reasons:
-            only_reduce_reasons.append("strategy_bundle_recovery_in_progress")
+        only_reduce_required, only_reduce_reasons = self._current_only_reduce_state(
+            status=status,
+            report=latest_reconciliation,
+            bundle_recovery=bundle_recovery,
+        )
         updates = {
             "recovery_state": assessment.recovery_state,
             "review_required": assessment.review_required,
@@ -232,12 +283,8 @@ class RecoveryPostureEvaluator:
             updates["latest_reconciliation_severity"] = latest_reconciliation.severity
             updates["reconciliation_classification"] = latest_reconciliation.recovery_classification
             updates["recovered_reconciliation_available"] = True
-            updates["only_reduce_required"] = bool(
-                latest_reconciliation.only_reduce_required or only_reduce_required
-            )
-            updates["only_reduce_reasons"] = list(
-                dict.fromkeys([*latest_reconciliation.only_reduce_reasons, *only_reduce_reasons])
-            )
+            updates["only_reduce_required"] = only_reduce_required
+            updates["only_reduce_reasons"] = only_reduce_reasons
             updates["unknown_state_details"] = list(latest_reconciliation.unknown_state_details)
         return status.model_copy(update=updates)
 
