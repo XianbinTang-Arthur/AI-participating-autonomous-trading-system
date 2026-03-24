@@ -9,7 +9,7 @@ from aats.schemas.common import dump_payload_exact
 from aats.schemas.execution import FillEvent, OrderIntent, OrderState
 from aats.services.execution_engine.state_machine import OrderStateMachine
 from aats.services.execution_control.shadow import Phase1ExecutionShadowService
-from aats.services.runtime_scope import RuntimeStateScope
+from aats.services.runtime_scope import RuntimeStateScope, filter_fills, filter_order_states
 from aats.storage.base import ExecutionRepository
 from aats.storage.execution_fill_repo_v2_postgres import PostgresExecutionFillRepositoryV2
 from aats.storage.execution_order_repo_postgres import (
@@ -199,14 +199,7 @@ class ConvergedPostgresExecutionRepository(ExecutionRepository):
         limit: int | None = None,
         open_only: bool = False,
     ) -> list[OrderState]:
-        states = [
-            state
-            for state in self.order_states()
-            if state.product_type == scope.product_type and state.margin_mode == scope.margin_mode
-        ]
-        if scope.allowed_symbols:
-            allowed = set(scope.allowed_symbols)
-            states = [state for state in states if state.symbol in allowed]
+        states = filter_order_states(self.order_states(), scope)
         if open_only:
             states = [state for state in states if state.status not in _TERMINAL_STATUSES]
         if statuses is not None:
@@ -223,15 +216,7 @@ class ConvergedPostgresExecutionRepository(ExecutionRepository):
         since: datetime | None = None,
         limit: int | None = None,
     ) -> list[FillEvent]:
-        fills = self.fills_since(since=since, limit=None)
-        fills = [
-            fill
-            for fill in fills
-            if fill.product_type == scope.product_type and fill.margin_mode == scope.margin_mode
-        ]
-        if scope.allowed_symbols:
-            allowed = set(scope.allowed_symbols)
-            fills = [fill for fill in fills if fill.symbol in allowed]
+        fills = filter_fills(self.fills_since(since=since, limit=None), scope)
         if limit is not None:
             return fills[:limit]
         return fills

@@ -14,6 +14,7 @@ StorageMode = Literal["memory", "postgres"]
 PersistenceMode = Literal["strict", "permissive"]
 TradingProductType = Literal["spot", "derivatives"]
 StartupProfile = Literal["spot", "derivatives"]
+EnvTemplateProfile = Literal["spot", "derivatives", "spot_live", "derivatives_live"]
 MarginMode = Literal["cash", "cross", "isolated"]
 ConfigProfile = Literal[
     "local_demo",
@@ -65,6 +66,7 @@ class AATSSettings(BaseSettings):
     environment: EnvironmentName = "dev"
     config_profile: ConfigProfile = "local_demo"
     startup_profile: StartupProfile | None = None
+    env_template_profile: EnvTemplateProfile | None = None
     mode: RuntimeMode = "paper_live"
     default_symbol: str = "BTC-USDT"
     primary_timeframe: SupportedTimeframe = "15m"
@@ -219,12 +221,15 @@ class AATSSettings(BaseSettings):
     strategy_profile_score_divergence_execution_bonus: float = 1.5
     strategy_profile_score_divergence_other_penalty: float = -1.0
     strategy_family_active: StrategyFamily = "directional"
+    strategy_family_auto_selection_enabled: bool = True
     smart_arbitrage_enabled: bool = False
     smart_arbitrage_companion_spot_symbol: str | None = None
     smart_arbitrage_companion_derivatives_symbol: str | None = None
     smart_arbitrage_basis_entry_bps: float = 18.0
     smart_arbitrage_basis_exit_bps: float = 6.0
     smart_arbitrage_estimated_cost_bps: float = 10.0
+    smart_arbitrage_quote_budget_per_trade: float = 200.0
+    smart_arbitrage_max_pair_notional: float = 2_000.0
     spot_grid_enabled: bool = False
     spot_grid_anchor_lookback_snapshots: int = 24
     spot_grid_band_bps: float = 150.0
@@ -371,3 +376,47 @@ class AATSSettings(BaseSettings):
     @property
     def operator_session_configured(self) -> bool:
         return bool(self.operator_session_secret and not is_placeholder_config_value(self.operator_session_secret))
+
+    @staticmethod
+    def _derived_spot_symbol(symbol: str | None) -> str | None:
+        normalized = str(symbol or "").strip().upper()
+        if not normalized:
+            return None
+        if normalized.endswith("-SWAP"):
+            return normalized[:-5]
+        tail = normalized.rsplit("-", 1)[-1]
+        if tail.isdigit():
+            return normalized[: -(len(tail) + 1)]
+        return normalized
+
+    @staticmethod
+    def _derived_derivatives_symbol(symbol: str | None) -> str | None:
+        normalized = str(symbol or "").strip().upper()
+        if not normalized:
+            return None
+        if normalized.endswith("-SWAP"):
+            return normalized
+        tail = normalized.rsplit("-", 1)[-1]
+        if tail.isdigit():
+            return normalized
+        return f"{normalized}-SWAP"
+
+    def expanded_allowed_symbols(self) -> tuple[str, ...]:
+        symbols = list(dict.fromkeys(str(item).upper() for item in self.allowed_symbols if item))
+        if self.default_symbol:
+            default_symbol = str(self.default_symbol).upper()
+            if default_symbol not in symbols:
+                symbols.append(default_symbol)
+        if not self.smart_arbitrage_enabled:
+            return tuple(symbols)
+        companion_candidates = (
+            self.smart_arbitrage_companion_spot_symbol,
+            self.smart_arbitrage_companion_derivatives_symbol,
+            self._derived_spot_symbol(self.default_symbol),
+            self._derived_derivatives_symbol(self.default_symbol),
+        )
+        for symbol in companion_candidates:
+            normalized = str(symbol or "").strip().upper()
+            if normalized and normalized not in symbols:
+                symbols.append(normalized)
+        return tuple(symbols)

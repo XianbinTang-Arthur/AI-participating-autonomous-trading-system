@@ -101,6 +101,9 @@ class ExecutionObligationService:
             status="ACTIVE",
             product_type=intent.product_type,
             margin_mode=intent.margin_mode,
+            strategy_family=intent.strategy_family,
+            strategy_bundle_id=intent.strategy_bundle_id,
+            strategy_leg_role=intent.strategy_leg_role,
             reference_price=reference_price,
             last_update_ts=utc_now(),
         )

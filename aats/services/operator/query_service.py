@@ -11,7 +11,7 @@ from aats.schemas.common import EventEnvelope, utc_now
 from aats.schemas.blocker_control import BlockerControlSnapshot
 from aats.schemas.decision import AIDecisionIntent, BaselineReference, DecisionOutcome, normalize_ai_operating_mode
 from aats.schemas.execution import FillEvent, OrderState, execution_action_from_position_intent
-from aats.schemas.strategy_runtime import StrategyCoordinatorSnapshot
+from aats.schemas.strategy_runtime import StrategyCoordinatorSnapshot, StrategyExecutionBundle
 from aats.schemas.operator import (
     AuthSource,
     BlockerSnapshotRecord,
@@ -1162,6 +1162,7 @@ class OperatorQueryService:
             "runtime_contract": {
                 "config_profile": self.runtime.settings.config_profile,
                 "startup_profile": self.runtime.settings.startup_profile,
+                "env_template_profile": self.runtime.settings.env_template_profile,
                 "execution_route": self.runtime.environment_capabilities.exchange_submission_target,
                 "storage_mode": self.runtime.settings.storage_mode,
             },
@@ -1329,6 +1330,8 @@ class OperatorQueryService:
                 "position_target": None,
                 "risk_decision": None,
                 "execution_plan": None,
+                "execution_plans": [],
+                "strategy_execution_bundle": None,
                 "decision_outcome": None,
             }
         audit = self.runtime.audit_repo.get(decision_id)
@@ -1354,6 +1357,15 @@ class OperatorQueryService:
             "position_target": position_target,
             "risk_decision": self._risk_decision_payload(self.payload_by_ref(audit.risk_decision_ref)),
             "execution_plan": self._execution_plan_payload(self.payload_by_ref(audit.execution_plan_ref)),
+            "execution_plans": [
+                payload
+                for payload in (
+                    self._execution_plan_payload(self.payload_by_ref(ref))
+                    for ref in audit.execution_plan_refs
+                )
+                if payload is not None
+            ],
+            "strategy_execution_bundle": self.payload_by_ref(audit.strategy_execution_bundle_ref),
             "decision_outcome": decision_outcome,
         }
 
@@ -1678,6 +1690,16 @@ class OperatorQueryService:
         payload["_event_timestamp"] = event.event_timestamp
         return payload
 
+    @staticmethod
+    def _strategy_bundle_payload(event: Any | None) -> dict[str, Any] | None:
+        if event is None:
+            return None
+        bundle = StrategyExecutionBundle.model_validate(event.payload)
+        payload = bundle.model_dump(mode="json")
+        payload["_event_id"] = event.event_id
+        payload["_event_timestamp"] = event.event_timestamp
+        return payload
+
     def strategy_runtime(self, *, limit: int = 10) -> dict[str, Any]:
         normalized_limit = max(int(limit), 1)
         cache_key = f"strategy_runtime:{self._scope_cache_fragment()}:{normalized_limit}"
@@ -1711,6 +1733,17 @@ class OperatorQueryService:
             )
         )
         recent_snapshots = [self._strategy_snapshot_payload(event) for event in recent_events]
+        recent_bundle_events = list(
+            reversed(
+                self.runtime.event_store.by_topic_scoped(
+                    topics.STRATEGY_EXECUTION_BUNDLES,
+                    scope=self.state_scope,
+                    limit=limit,
+                )
+            )
+        )
+        recent_bundles = [self._strategy_bundle_payload(event) for event in recent_bundle_events]
+        latest_bundle = recent_bundles[0] if recent_bundles else None
         latest_target_event = latest_topic_event_for_scope(
             self.runtime.event_store,
             topics.POSITION_TARGETS,
@@ -1740,8 +1773,8 @@ class OperatorQueryService:
             },
             "smart_arbitrage": {
                 "enabled": bool(self.runtime.settings.smart_arbitrage_enabled),
-                "runtime_supported": True,
-                "execution_compatible": False,
+                "runtime_supported": self.runtime.settings.trading_product_type == "derivatives",
+                "execution_compatible": self.runtime.settings.trading_product_type == "derivatives",
             },
             "spot_grid": {
                 "enabled": bool(self.runtime.settings.spot_grid_enabled),
@@ -1756,9 +1789,13 @@ class OperatorQueryService:
         }
         summary = {
             "configured_active_family": configured_family,
+            "automatic_selection_enabled": bool(self.runtime.settings.strategy_family_auto_selection_enabled),
+            "env_template_profile": self.runtime.settings.env_template_profile,
             "latest_selected_family": None if latest_snapshot is None else latest_snapshot.get("selected_family"),
             "latest_selected_state": None if latest_snapshot is None else latest_snapshot.get("selected_state"),
             "latest_selected_route_action": None if latest_snapshot is None else latest_snapshot.get("selected_route_action"),
+            "latest_bundle_status": None if latest_bundle is None else latest_bundle.get("status"),
+            "latest_bundle_id": None if latest_bundle is None else latest_bundle.get("bundle_id"),
             "latest_selection_reason_codes": []
             if latest_snapshot is None
             else list(latest_snapshot.get("selection_reason_codes") or []),
@@ -1787,6 +1824,8 @@ class OperatorQueryService:
             "family_enablement": family_enablement,
             "configured_parameters": {
                 "strategy_family_active": configured_family,
+                "strategy_family_auto_selection_enabled": self.runtime.settings.strategy_family_auto_selection_enabled,
+                "env_template_profile": self.runtime.settings.env_template_profile,
                 "smart_arbitrage": {
                     "enabled": self.runtime.settings.smart_arbitrage_enabled,
                     "companion_spot_symbol": self.runtime.settings.smart_arbitrage_companion_spot_symbol,
@@ -1814,8 +1853,10 @@ class OperatorQueryService:
                 },
             },
             "latest_snapshot": latest_snapshot,
+            "latest_bundle": latest_bundle,
             "latest_applied_target": latest_target_payload,
             "recent_snapshots": recent_snapshots,
+            "recent_execution_bundles": recent_bundles,
             "truth_source": "strategy_coordinator_snapshots",
         }
 
@@ -3344,6 +3385,7 @@ class OperatorQueryService:
             "recovery_policy": self.runtime.recovery_policy.to_dict(),
             "profile_source": self.runtime.runtime_profile_resolution.profile_source,
             "startup_profile": self.runtime.settings.startup_profile,
+            "env_template_profile": self.runtime.settings.env_template_profile,
             "config_profile": self.runtime.settings.config_profile,
             "account_configuration": (
                 account_snapshot.account_configuration.model_dump(mode="json")

@@ -76,7 +76,7 @@ class OKXAccountService:
                     self._cached_aux_payload(
                         "instruments",
                         refresh_interval_seconds=self.settings.okx_instruments_refresh_interval_seconds,
-                        fetcher=self.client.get_instruments,
+                        fetcher=lambda: self._get_instruments_payload(tracked_symbols),
                     ),
                 )
                 instruments = self._parse_instruments(instruments_payload)
@@ -713,10 +713,16 @@ class OKXAccountService:
         return [fill for fill in snapshot.fills if fill.symbol == symbol]
 
     def _tracked_symbols(self) -> tuple[str, ...]:
-        symbols = tuple(dict.fromkeys(self.settings.allowed_symbols))
+        symbols = self.settings.expanded_allowed_symbols()
         if symbols:
             return symbols
         return (self.settings.default_symbol,)
+
+    async def _get_instruments_payload(self, tracked_symbols: tuple[str, ...]) -> dict[str, Any]:
+        try:
+            return await self.client.get_instruments(symbols=tracked_symbols)
+        except TypeError:
+            return await self.client.get_instruments()
 
     def _symbol_position_notional_usd(self, symbol: str | None) -> Decimal | None:
         snapshot = self._latest_snapshot

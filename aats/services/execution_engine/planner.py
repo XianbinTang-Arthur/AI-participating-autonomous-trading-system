@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from typing import Literal
 
 from aats.bootstrap.settings import AATSSettings
 from aats.bus.base import EventBus
@@ -56,6 +57,9 @@ class ExecutionPlanner:
         only_reduce_required: bool = False,
         risk_limit_breached: bool = False,
         liquidation_buffer_remaining: Decimal | float | None = None,
+        strategy_family: str | None = None,
+        strategy_bundle_id: str | None = None,
+        strategy_leg_role: Literal["primary", "hedge", "inventory", "accumulation"] | None = None,
         ai_execution_parameter_suggestion: AIExecutionParameterSuggestionEnvelope | None = None,
     ) -> ExecutionPlan | None:
         if abs(to_decimal(delta_qty)) < EPSILON_DECIMAL_12:
@@ -161,6 +165,9 @@ class ExecutionPlanner:
             liquidation_buffer_remaining=(
                 None if liquidation_buffer_remaining is None else to_decimal(liquidation_buffer_remaining)
             ),
+            strategy_family=strategy_family,
+            strategy_bundle_id=strategy_bundle_id,
+            strategy_leg_role=strategy_leg_role,
             product_type=product_type,  # type: ignore[arg-type]
             target_leverage=target_leverage,
             margin_mode=margin_mode,  # type: ignore[arg-type]
@@ -208,6 +215,9 @@ class ExecutionPlanner:
             only_reduce_required=plan.only_reduce_required,
             risk_limit_breached=plan.risk_limit_breached,
             liquidation_buffer_remaining=plan.liquidation_buffer_remaining,
+            strategy_family=plan.strategy_family,
+            strategy_bundle_id=plan.strategy_bundle_id,
+            strategy_leg_role=plan.strategy_leg_role,
             idempotency_key=intent_id,
             product_type=plan.product_type,
             target_leverage=plan.target_leverage,

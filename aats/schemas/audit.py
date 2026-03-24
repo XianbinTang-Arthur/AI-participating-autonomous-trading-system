@@ -19,6 +19,8 @@ class DecisionAuditRecord(SchemaBase):
     policy_decision_ref: str | None = None
     risk_decision_ref: str | None = None
     execution_plan_ref: str | None = None
+    execution_plan_refs: list[str] = Field(default_factory=list)
+    strategy_execution_bundle_ref: str | None = None
     order_intent_refs: list[str] = Field(default_factory=list)
     order_state_refs: list[str] = Field(default_factory=list)
     fill_event_refs: list[str] = Field(default_factory=list)

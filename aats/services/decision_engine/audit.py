@@ -93,9 +93,18 @@ class DecisionAuditService:
         )
 
     async def handle_execution_plan(self, message: dict) -> None:
+        envelope = parse_envelope(message)
+        decision_id = str(envelope.payload["decision_id"])
+        record = self._existing_record(decision_id)
+        updates: dict[str, object] = {"execution_plan_ref": envelope.event_id}
+        if envelope.event_id not in record.execution_plan_refs:
+            updates["execution_plan_refs"] = [*record.execution_plan_refs, envelope.event_id]
+        await self._publish_record(record.model_copy(update=updates))
+
+    async def handle_strategy_execution_bundle(self, message: dict) -> None:
         await self._update_decision_record(
             message=message,
-            ref_field="execution_plan_ref",
+            ref_field="strategy_execution_bundle_ref",
         )
 
     async def handle_order_intent(self, message: dict) -> None:
@@ -185,6 +194,8 @@ class DecisionAuditService:
             **correlation_fields(
                 decision_id=record.decision_id,
                 execution_plan_ref=record.execution_plan_ref,
+                execution_plan_ref_count=len(record.execution_plan_refs),
+                strategy_execution_bundle_ref=record.strategy_execution_bundle_ref,
                 order_intent_ref_count=len(record.order_intent_refs),
                 order_state_ref_count=len(record.order_state_refs),
                 fill_event_ref_count=len(record.fill_event_refs),

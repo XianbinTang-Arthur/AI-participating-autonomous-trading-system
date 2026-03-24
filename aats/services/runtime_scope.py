@@ -29,7 +29,7 @@ def runtime_state_scope(settings: AATSSettings) -> RuntimeStateScope:
     return RuntimeStateScope(
         product_type=settings.trading_product_type,
         margin_mode=settings.margin_mode,
-        allowed_symbols=tuple(settings.allowed_symbols),
+        allowed_symbols=settings.expanded_allowed_symbols(),
         default_symbol=settings.default_symbol,
     )
 
@@ -152,9 +152,15 @@ def order_state_matches_scope(
 ) -> bool:
     if not scope.symbol_allowed(order.symbol):
         return False
-    if inferred_order_state_product_type(order) != scope.product_type:
+    order_product_type = inferred_order_state_product_type(order)
+    order_margin_mode = inferred_order_state_margin_mode(order)
+    if scope.product_type == "derivatives" and getattr(order, "strategy_family", None) == "smart_arbitrage":
+        if order_product_type == "spot":
+            return order_margin_mode == "cash"
+        return order_margin_mode == scope.margin_mode
+    if order_product_type != scope.product_type:
         return False
-    return inferred_order_state_margin_mode(order) == scope.margin_mode
+    return order_margin_mode == scope.margin_mode
 
 
 def order_states_for_scope(
@@ -188,6 +194,10 @@ def fill_event_matches_scope(
 ) -> bool:
     if not scope.symbol_allowed(fill.symbol):
         return False
+    if scope.product_type == "derivatives" and getattr(fill, "strategy_family", None) == "smart_arbitrage":
+        if fill.product_type == "spot":
+            return fill.margin_mode == "cash"
+        return fill.margin_mode == scope.margin_mode
     if fill.product_type != scope.product_type:
         return False
     return fill.margin_mode == scope.margin_mode
@@ -215,6 +225,10 @@ def fill_outcome_matches_scope(
 ) -> bool:
     if not scope.symbol_allowed(outcome.symbol):
         return False
+    if scope.product_type == "derivatives" and getattr(outcome, "strategy_family", None) == "smart_arbitrage":
+        if outcome.product_type == "spot":
+            return outcome.margin_mode == "cash"
+        return outcome.margin_mode == scope.margin_mode
     if outcome.product_type != scope.product_type:
         return False
     return outcome.margin_mode == scope.margin_mode
@@ -353,6 +367,10 @@ def latest_topic_event_for_scope(event_store, topic: str, scope: RuntimeStateSco
     return rows[-1] if rows else None
 
 
+def event_matches_scope(event: Any, scope: RuntimeStateScope) -> bool:
+    return _event_matches_scope(event, scope)
+
+
 def _event_matches_scope(event: Any, scope: RuntimeStateScope) -> bool:
     payload = getattr(event, "payload", None)
     if not isinstance(payload, dict):
@@ -361,14 +379,25 @@ def _event_matches_scope(event: Any, scope: RuntimeStateScope) -> bool:
     allowed_symbols = payload.get("allowed_symbols")
     product_type = payload.get("product_type")
     margin_mode = payload.get("margin_mode")
+    strategy_family = payload.get("strategy_family")
     if product_type is None and isinstance(symbol, str):
         product_type = infer_product_type_from_symbol(symbol)
     if margin_mode is None and product_type == "spot":
         margin_mode = "cash"
-    if product_type is not None and product_type != scope.product_type:
-        return False
-    if margin_mode is not None and margin_mode != scope.margin_mode:
-        return False
+    if scope.product_type == "derivatives" and strategy_family == "smart_arbitrage":
+        if product_type == "spot":
+            if margin_mode != "cash":
+                return False
+        else:
+            if product_type is not None and product_type != scope.product_type:
+                return False
+            if margin_mode is not None and margin_mode != scope.margin_mode:
+                return False
+    else:
+        if product_type is not None and product_type != scope.product_type:
+            return False
+        if margin_mode is not None and margin_mode != scope.margin_mode:
+            return False
     if isinstance(symbol, str):
         return scope.symbol_allowed(symbol)
     if isinstance(allowed_symbols, list) and allowed_symbols:

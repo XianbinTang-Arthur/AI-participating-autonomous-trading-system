@@ -101,7 +101,7 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
             100.0,
         )
 
-    async def test_smart_arbitrage_runtime_endpoint_exposes_advisory_snapshot(self) -> None:
+    async def test_smart_arbitrage_runtime_endpoint_exposes_executable_bundle_snapshot(self) -> None:
         settings = self._settings(
             trading_product_type="derivatives",
             margin_mode="cross",
@@ -127,8 +127,9 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
         target = await runtime.decision_engine.run_cycle(settings.default_symbol, settings.primary_timeframe)
 
         self.assertEqual(target.strategy_family, "smart_arbitrage")
-        self.assertEqual(target.strategy_route_action, "advisory_only")
-        self.assertEqual(target.target_position_qty, target.current_position_qty)
+        self.assertEqual(target.strategy_route_action, "override_target")
+        self.assertIsNotNone(target.strategy_bundle_id)
+        self.assertEqual(len(target.strategy_execution_legs), 2)
 
         app = self._app(runtime)
         with TestClient(app) as client:
@@ -138,11 +139,13 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
         payload = strategy_runtime.json()
         self.assertEqual(payload["summary"]["configured_active_family"], "smart_arbitrage")
         self.assertEqual(payload["summary"]["latest_selected_family"], "smart_arbitrage")
-        self.assertEqual(payload["summary"]["latest_selected_route_action"], "advisory_only")
+        self.assertEqual(payload["summary"]["latest_selected_route_action"], "override_target")
+        self.assertTrue(payload["summary"]["automatic_selection_enabled"])
+        self.assertEqual(payload["latest_bundle"]["status"], "submitted")
         smart_arbitrage_candidate = next(
             item for item in payload["latest_snapshot"]["candidates"] if item["family"] == "smart_arbitrage"
         )
-        self.assertEqual(smart_arbitrage_candidate["route_action"], "advisory_only")
+        self.assertEqual(smart_arbitrage_candidate["route_action"], "override_target")
         self.assertEqual(len(smart_arbitrage_candidate["legs"]), 2)
 
     @staticmethod

@@ -124,6 +124,9 @@ class FillOutcomeRecord(SchemaBase):
     exchange_timestamp: datetime | None = None
     ingestion_timestamp: datetime | None = None
     order_status_after_fill: str | None = None
+    strategy_family: str | None = None
+    strategy_bundle_id: str | None = None
+    strategy_leg_role: Literal["primary", "hedge", "inventory", "accumulation"] | None = None
     target_leverage: float | None = None
     exposure_side: str | None = None
     execution_action: str | None = None
@@ -182,6 +185,9 @@ class FillOutcomeRecord(SchemaBase):
                 "exchange_timestamp": fill.exchange_timestamp,
                 "ingestion_timestamp": fill.ingestion_timestamp,
                 "order_status_after_fill": fill.order_status_after_fill,
+                "strategy_family": fill.strategy_family,
+                "strategy_bundle_id": fill.strategy_bundle_id,
+                "strategy_leg_role": fill.strategy_leg_role,
                 "target_leverage": fill.target_leverage,
                 "exposure_side": fill.exposure_side,
                 "execution_action": fill.execution_action,

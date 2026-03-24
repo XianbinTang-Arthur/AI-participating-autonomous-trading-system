@@ -795,7 +795,7 @@ class OKXExecutionAdapter(ExchangeAdapter):
             return "live_submit_disabled"
         if self._submission_target() not in OKX_SUPPORTED_SUBMISSION_TARGETS:
             return "okx_simulated_trading_required"
-        if intent.symbol not in self.settings.allowed_symbols:
+        if intent.symbol not in self.settings.expanded_allowed_symbols():
             return "symbol_not_allowed"
         if self._current_open_order_count(intent.symbol) >= self.settings.max_open_orders:
             return "max_open_orders_reached"
@@ -943,6 +943,9 @@ class OKXExecutionAdapter(ExchangeAdapter):
             exposure_side=intent.exposure_side,
             execution_action=intent.execution_action,
             position_intent=intent.position_intent,
+            strategy_family=intent.strategy_family,
+            strategy_bundle_id=intent.strategy_bundle_id,
+            strategy_leg_role=intent.strategy_leg_role,
             cancel_reason=reason,
             execution_error=reason,
             submission_payload=self._state_submission_payload(intent=intent, payload=payload),
@@ -991,6 +994,9 @@ class OKXExecutionAdapter(ExchangeAdapter):
             exposure_side=intent.exposure_side,
             execution_action=intent.execution_action,
             position_intent=intent.position_intent,
+            strategy_family=intent.strategy_family,
+            strategy_bundle_id=intent.strategy_bundle_id,
+            strategy_leg_role=intent.strategy_leg_role,
             cancel_reason=None,
             execution_error=None,
             submission_payload=self._state_submission_payload(intent=intent, payload=payload),
@@ -1038,6 +1044,9 @@ class OKXExecutionAdapter(ExchangeAdapter):
             exposure_side=intent.exposure_side,
             execution_action=intent.execution_action,
             position_intent=intent.position_intent,
+            strategy_family=intent.strategy_family,
+            strategy_bundle_id=intent.strategy_bundle_id,
+            strategy_leg_role=intent.strategy_leg_role,
             cancel_reason=error,
             execution_error=error,
             submission_payload=self._state_submission_payload(intent=intent, payload=payload),
@@ -1085,6 +1094,9 @@ class OKXExecutionAdapter(ExchangeAdapter):
             exposure_side=intent.exposure_side,
             execution_action=intent.execution_action,
             position_intent=intent.position_intent,
+            strategy_family=intent.strategy_family,
+            strategy_bundle_id=intent.strategy_bundle_id,
+            strategy_leg_role=intent.strategy_leg_role,
             cancel_reason=error,
             execution_error=error,
             submission_payload=self._state_submission_payload(intent=intent, payload=payload),
@@ -1226,6 +1238,9 @@ class OKXExecutionAdapter(ExchangeAdapter):
             exposure_side=intent.exposure_side,
             execution_action=intent.execution_action,
             position_intent=intent.position_intent,
+            strategy_family=intent.strategy_family,
+            strategy_bundle_id=intent.strategy_bundle_id,
+            strategy_leg_role=intent.strategy_leg_role,
             cancel_reason=str(order_row.get("cancelSource")) if order_row.get("cancelSource") else None,
             execution_error=None,
             submission_payload=self._state_submission_payload(intent=intent, payload=payload),
@@ -1277,6 +1292,9 @@ class OKXExecutionAdapter(ExchangeAdapter):
                     exposure_side=intent.exposure_side,
                     execution_action=intent.execution_action,
                     position_intent=intent.position_intent,
+                    strategy_family=intent.strategy_family,
+                    strategy_bundle_id=intent.strategy_bundle_id,
+                    strategy_leg_role=intent.strategy_leg_role,
                     liquidity_role="taker",
                     exchange_timestamp=fill.fill_ts or utc_now(),
                     ingestion_timestamp=utc_now(),
@@ -1307,6 +1325,9 @@ class OKXExecutionAdapter(ExchangeAdapter):
         state_payload.setdefault("closeOnlyReason", intent.close_only_reason or "")
         state_payload.setdefault("instrumentFamily", intent.instrument_family or "")
         state_payload.setdefault("settleCurrency", intent.settle_currency or "")
+        state_payload.setdefault("strategyFamily", intent.strategy_family or "")
+        state_payload.setdefault("strategyBundleId", intent.strategy_bundle_id or "")
+        state_payload.setdefault("strategyLegRole", intent.strategy_leg_role or "")
         state_payload.setdefault("requiredInitialMargin", "" if intent.required_initial_margin is None else str(intent.required_initial_margin))
         state_payload.setdefault("projectedMarginUsage", "" if intent.projected_margin_usage is None else str(intent.projected_margin_usage))
         state_payload.setdefault("projectedNotional", "" if intent.projected_notional is None else str(intent.projected_notional))
@@ -1556,6 +1577,21 @@ class OKXExecutionAdapter(ExchangeAdapter):
                 or execution_action_from_position_intent(state.position_intent)
             ),
             position_intent=state.position_intent,
+            strategy_family=(
+                str(payload.get("strategyFamily"))
+                if payload.get("strategyFamily") not in {"", None}
+                else state.strategy_family
+            ),
+            strategy_bundle_id=(
+                str(payload.get("strategyBundleId"))
+                if payload.get("strategyBundleId") not in {"", None}
+                else state.strategy_bundle_id
+            ),
+            strategy_leg_role=(
+                str(payload.get("strategyLegRole"))
+                if payload.get("strategyLegRole") not in {"", None}
+                else state.strategy_leg_role
+            ),
         )
 
     def _slippage_gate_error(self, *, intent: OrderIntent) -> str | None:

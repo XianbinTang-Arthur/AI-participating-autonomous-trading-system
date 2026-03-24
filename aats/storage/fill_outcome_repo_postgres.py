@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from aats.schemas.common import dump_payload_exact
 from aats.schemas.portfolio import FillOutcomeRecord
-from aats.services.runtime_scope import RuntimeStateScope
+from aats.services.runtime_scope import RuntimeStateScope, filter_fill_outcomes
 from aats.storage.sqlalchemy_models import FillOutcomeModel
 
 
@@ -105,18 +105,16 @@ class PostgresFillOutcomeRepository:
         since: datetime | None = None,
         limit: int | None = None,
     ) -> list[FillOutcomeRecord]:
-        query = (
-            select(FillOutcomeModel)
-            .where(FillOutcomeModel.product_type == scope.product_type)
-            .where(FillOutcomeModel.margin_mode == scope.margin_mode)
-        )
-        if scope.allowed_symbols:
-            query = query.where(FillOutcomeModel.symbol.in_(tuple(scope.allowed_symbols)))
+        query = select(FillOutcomeModel)
         if since is not None:
             query = query.where(FillOutcomeModel.created_at >= since)
         query = query.order_by(desc(FillOutcomeModel.created_at), desc(FillOutcomeModel.fill_id))
-        if limit is not None:
-            query = query.limit(limit)
         with self.session_factory() as session:
             rows = session.scalars(query).all()
-        return [FillOutcomeRecord.model_validate(row.payload) for row in reversed(rows)]
+        outcomes = filter_fill_outcomes(
+            [FillOutcomeRecord.model_validate(row.payload) for row in reversed(rows)],
+            scope,
+        )
+        if limit is not None:
+            outcomes = outcomes[-limit:]
+        return outcomes

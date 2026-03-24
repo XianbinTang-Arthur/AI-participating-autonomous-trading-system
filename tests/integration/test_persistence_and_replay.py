@@ -99,6 +99,74 @@ class TestPersistenceAndReplay(unittest.IsolatedAsyncioTestCase):
                 if storage is not None and storage.database_runtime is not None:
                     storage.database_runtime.dispose()
 
+    async def test_smart_arbitrage_postgres_replay_keeps_bundle_and_dual_leg_chain_consistent(self) -> None:
+        with temporary_postgres_url() as (database_url, _admin_engine, _schema_name):
+            settings = self._postgres_settings(
+                database_url,
+                trading_product_type="derivatives",
+                margin_mode="cross",
+                default_symbol="BTC-USDT-SWAP",
+                allowed_symbols=("BTC-USDT-SWAP",),
+                smart_arbitrage_enabled=True,
+                smart_arbitrage_basis_entry_bps=0.0,
+                smart_arbitrage_estimated_cost_bps=0.0,
+                smart_arbitrage_quote_budget_per_trade=100.0,
+                smart_arbitrage_max_pair_notional=100.0,
+                account_backend="disabled",
+                account_read_enabled=False,
+                execution_backend="paper",
+                market_data_backend="demo",
+            )
+            runtime = await build_runtime(settings)
+            storage = None
+            try:
+                await runtime.market_gateway.run_local_publisher(
+                    symbol="BTC-USDT",
+                    iterations=3,
+                    interval_seconds=0.0,
+                )
+                await runtime.market_gateway.run_local_publisher(
+                    symbol=settings.default_symbol,
+                    iterations=3,
+                    interval_seconds=0.0,
+                )
+
+                target = await runtime.decision_engine.run_cycle(settings.default_symbol, settings.primary_timeframe)
+                self.assertEqual(target.strategy_family, "smart_arbitrage")
+                self.assertIsNotNone(target.strategy_bundle_id)
+                self.assertEqual(len(target.strategy_execution_legs), 2)
+
+                storage = build_storage_backends(settings)
+                bundle_record = next(
+                    record
+                    for record in storage.audit_repo.all()
+                    if record.strategy_execution_bundle_ref is not None and len(record.execution_plan_refs) >= 2
+                )
+                replay = ReplayEngine(
+                    event_store=storage.event_store,
+                    reconstruction_service=PortfolioReconstructionService(
+                        initial_usdt_balance=settings.initial_usdt_balance,
+                        snapshot_builder=PortfolioSnapshotBuilder(pnl_calculator=PortfolioPnLCalculator()),
+                    ),
+                    audit_repo=storage.audit_repo,
+                    portfolio_repo=storage.portfolio_repo,
+                ).replay(decision_id=bundle_record.decision_id)
+
+                self.assertEqual(replay.divergence_count, 0)
+                self.assertEqual(replay.portfolio_issues, [])
+                self.assertEqual(replay.decision_chain_issues, [])
+                self.assertEqual(replay.execution_chain_issues, [])
+                self.assertEqual(replay.audit_issues, [])
+                self.assertGreaterEqual(len(bundle_record.execution_plan_refs), 2)
+                self.assertGreaterEqual(len(bundle_record.order_intent_refs), 2)
+                self.assertGreaterEqual(len(bundle_record.fill_event_refs), 2)
+                self.assertIsNotNone(storage.event_store.get(bundle_record.strategy_execution_bundle_ref))
+            finally:
+                if runtime.database_runtime is not None:
+                    runtime.database_runtime.dispose()
+                if storage is not None and storage.database_runtime is not None:
+                    storage.database_runtime.dispose()
+
     async def test_audit_records_reference_persisted_events(self) -> None:
         with temporary_postgres_url() as (database_url, _admin_engine, _schema_name):
             settings = self._postgres_settings(database_url)
@@ -147,6 +215,16 @@ class TestPersistenceAndReplay(unittest.IsolatedAsyncioTestCase):
                         self.assertIsNotNone(execution_plan_event)
                         if execution_plan_event is not None:
                             self.assertEqual(execution_plan_event.topic, topics.EXECUTION_PLANS)
+                    for ref in record.execution_plan_refs:
+                        execution_plan_event = event_store.get(ref)
+                        self.assertIsNotNone(execution_plan_event)
+                        if execution_plan_event is not None:
+                            self.assertEqual(execution_plan_event.topic, topics.EXECUTION_PLANS)
+                    if record.strategy_execution_bundle_ref is not None:
+                        bundle_event = event_store.get(record.strategy_execution_bundle_ref)
+                        self.assertIsNotNone(bundle_event)
+                        if bundle_event is not None:
+                            self.assertEqual(bundle_event.topic, topics.STRATEGY_EXECUTION_BUNDLES)
                     if record.portfolio_delta_ref is not None:
                         snapshot_event = event_store.get(record.portfolio_delta_ref)
                         self.assertIsNotNone(snapshot_event)
@@ -1229,7 +1307,7 @@ class TestPersistenceAndReplay(unittest.IsolatedAsyncioTestCase):
         )
 
     @staticmethod
-    def _postgres_settings(database_url: str) -> AATSSettings:
+    def _postgres_settings(database_url: str, **overrides) -> AATSSettings:
         return AATSSettings.model_validate(
             {
                 "storage_mode": "postgres",
@@ -1238,6 +1316,7 @@ class TestPersistenceAndReplay(unittest.IsolatedAsyncioTestCase):
                 "database_single_runtime_guard_enabled": False,
                 "local_publish_iterations": 4,
                 "local_publish_interval_seconds": 0.0,
+                **overrides,
             }
         )
 

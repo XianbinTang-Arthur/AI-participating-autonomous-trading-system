@@ -186,6 +186,9 @@ class OrderIntent(SchemaBase):
     risk_limit_breached: bool = False
     liquidation_buffer_remaining: Decimal | None = None
     idempotency_key: str
+    strategy_family: str | None = None
+    strategy_bundle_id: str | None = None
+    strategy_leg_role: Literal["primary", "hedge", "inventory", "accumulation"] | None = None
     product_type: ProductType = "spot"
     target_leverage: float = 1.0
     margin_mode: MarginModelType = "cash"
@@ -239,6 +242,9 @@ class ExecutionPlan(SchemaBase):
     only_reduce_required: bool = False
     risk_limit_breached: bool = False
     liquidation_buffer_remaining: Decimal | None = None
+    strategy_family: str | None = None
+    strategy_bundle_id: str | None = None
+    strategy_leg_role: Literal["primary", "hedge", "inventory", "accumulation"] | None = None
     product_type: ProductType = "spot"
     target_leverage: float = 1.0
     margin_mode: MarginModelType = "cash"
@@ -287,6 +293,9 @@ class OrderState(SchemaBase):
     close_only_reason: str | None = None
     instrument_family: str | None = None
     settle_currency: str | None = None
+    strategy_family: str | None = None
+    strategy_bundle_id: str | None = None
+    strategy_leg_role: Literal["primary", "hedge", "inventory", "accumulation"] | None = None
     product_type: ProductType = "spot"
     target_leverage: float = 1.0
     margin_mode: MarginModelType = "cash"
@@ -329,6 +338,9 @@ class FillEvent(SchemaBase):
     close_only_reason: str | None = None
     instrument_family: str | None = None
     settle_currency: str | None = None
+    strategy_family: str | None = None
+    strategy_bundle_id: str | None = None
+    strategy_leg_role: Literal["primary", "hedge", "inventory", "accumulation"] | None = None
     product_type: ProductType = "spot"
     target_leverage: float = 1.0
     margin_mode: MarginModelType = "cash"
@@ -365,5 +377,8 @@ class OrderObligation(SchemaBase):
     status: ObligationStatus = "ACTIVE"
     product_type: ProductType = "spot"
     margin_mode: MarginModelType = "cash"
+    strategy_family: str | None = None
+    strategy_bundle_id: str | None = None
+    strategy_leg_role: Literal["primary", "hedge", "inventory", "accumulation"] | None = None
     reference_price: Decimal | None = None
     last_update_ts: datetime | None = None

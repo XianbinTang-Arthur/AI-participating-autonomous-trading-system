@@ -9,7 +9,7 @@ from aats.bootstrap.logging import get_logger, log_event
 from aats.schemas.common import dump_payload_exact
 from aats.schemas.execution import FillEvent, OrderState
 from aats.services.execution_engine.state_machine import OrderStateMachine
-from aats.services.runtime_scope import RuntimeStateScope
+from aats.services.runtime_scope import RuntimeStateScope, filter_fills, filter_order_states
 from aats.storage.scope_metadata import fill_scope_metadata, order_scope_metadata
 from aats.storage.sqlalchemy_models import FillEventModel, OrderStateModel
 
@@ -252,24 +252,19 @@ class PostgresExecutionRepository:
         limit: int | None = None,
         open_only: bool = False,
     ) -> list[OrderState]:
-        query = (
-            select(OrderStateModel)
-            .where(OrderStateModel.product_type == scope.product_type)
-            .where(OrderStateModel.margin_mode == scope.margin_mode)
-        )
-        if scope.allowed_symbols:
-            query = query.where(OrderStateModel.symbol.in_(tuple(scope.allowed_symbols)))
+        query = select(OrderStateModel)
         if open_only:
             final_statuses = ("FILLED", "CANCELED", "REJECTED", "BLOCKED", "DRY_RUN", "FAILED", "EXPIRED")
             query = query.where(~OrderStateModel.status.in_(final_statuses))
         if statuses is not None:
             query = query.where(OrderStateModel.status.in_(tuple(statuses)))
         query = query.order_by(OrderStateModel.created_at, OrderStateModel.client_order_id)
-        if limit is not None:
-            query = query.limit(limit)
         with self.session_factory() as session:
             rows = session.scalars(query).all()
-        return [self._to_order_state(row) for row in rows]
+        states = filter_order_states([self._to_order_state(row) for row in rows], scope)
+        if limit is not None:
+            states = states[-limit:]
+        return states
 
     def fills_for_scope(
         self,
@@ -278,21 +273,16 @@ class PostgresExecutionRepository:
         since: datetime | None = None,
         limit: int | None = None,
     ) -> list[FillEvent]:
-        query = (
-            select(FillEventModel)
-            .where(FillEventModel.product_type == scope.product_type)
-            .where(FillEventModel.margin_mode == scope.margin_mode)
-        )
-        if scope.allowed_symbols:
-            query = query.where(FillEventModel.symbol.in_(tuple(scope.allowed_symbols)))
+        query = select(FillEventModel)
         if since is not None:
             query = query.where(FillEventModel.ingestion_timestamp >= since)
         query = query.order_by(FillEventModel.ingestion_timestamp, FillEventModel.fill_id)
-        if limit is not None:
-            query = query.limit(limit)
         with self.session_factory() as session:
             rows = session.scalars(query).all()
-        return [self._to_fill_event(row) for row in rows]
+        fills = filter_fills([self._to_fill_event(row) for row in rows], scope)
+        if limit is not None:
+            fills = fills[-limit:]
+        return fills
 
     @staticmethod
     def _to_order_state(row: OrderStateModel) -> OrderState:

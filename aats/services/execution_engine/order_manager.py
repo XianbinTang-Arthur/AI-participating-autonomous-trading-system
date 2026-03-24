@@ -158,6 +158,9 @@ class OrderManager:
                 exposure_side=intent.exposure_side,
                 execution_action=intent.execution_action,
                 position_intent=intent.position_intent,
+                strategy_family=intent.strategy_family,
+                strategy_bundle_id=intent.strategy_bundle_id,
+                strategy_leg_role=intent.strategy_leg_role,
                 execution_error=str(exc),
                 submission_payload={},
             )
@@ -194,6 +197,9 @@ class OrderManager:
             exposure_side=intent.exposure_side,
             execution_action=intent.execution_action,
             position_intent=intent.position_intent,
+            strategy_family=intent.strategy_family,
+            strategy_bundle_id=intent.strategy_bundle_id,
+            strategy_leg_role=intent.strategy_leg_role,
             submission_payload={},
         )
         created_state = await self._persist_order_state(
@@ -271,6 +277,9 @@ class OrderManager:
                 exposure_side=intent.exposure_side,
                 execution_action=intent.execution_action,
                 position_intent=intent.position_intent,
+                strategy_family=intent.strategy_family,
+                strategy_bundle_id=intent.strategy_bundle_id,
+                strategy_leg_role=intent.strategy_leg_role,
                 submission_payload={},
             )
         submitting_state = current.model_copy(
@@ -315,6 +324,9 @@ class OrderManager:
                 exposure_side=intent.exposure_side,
                 execution_action=intent.execution_action,
                 position_intent=intent.position_intent,
+                strategy_family=intent.strategy_family,
+                strategy_bundle_id=intent.strategy_bundle_id,
+                strategy_leg_role=intent.strategy_leg_role,
                 cancel_reason=str(exc),
                 execution_error=str(exc),
                 submission_payload={},
@@ -631,6 +643,9 @@ class OrderManager:
                 exposure_side=intent.exposure_side,
                 execution_action=intent.execution_action,
                 position_intent=intent.position_intent,
+                strategy_family=intent.strategy_family,
+                strategy_bundle_id=intent.strategy_bundle_id,
+                strategy_leg_role=intent.strategy_leg_role,
                 execution_error=f"transient_close_retry_cooldown_active:{state.execution_error or state.cancel_reason or 'transient_exchange_failure'}",
                 submission_payload={},
             )
@@ -724,6 +739,9 @@ class OrderManager:
             payload.setdefault("settle_currency", row.get("settle_currency"))
             payload.setdefault("position_intent", row.get("position_intent") or "open_long")
             payload.setdefault("execution_action", row.get("execution_action"))
+            payload.setdefault("strategy_family", raw_payload.get("strategy_family"))
+            payload.setdefault("strategy_bundle_id", raw_payload.get("strategy_bundle_id"))
+            payload.setdefault("strategy_leg_role", raw_payload.get("strategy_leg_role"))
             payload.setdefault("submission_payload", submission_payload)
             if payload.get("pos_side") in {"", None}:
                 payload["pos_side"] = row.get("pos_side") or submission_payload.get("posSide") or None
@@ -770,6 +788,9 @@ class OrderManager:
             exposure_side=str(raw_payload.get("exposure_side") or "flat"),
             execution_action=row.get("execution_action"),
             position_intent=str(row.get("position_intent") or "open_long"),
+            strategy_family=raw_payload.get("strategy_family"),
+            strategy_bundle_id=raw_payload.get("strategy_bundle_id"),
+            strategy_leg_role=raw_payload.get("strategy_leg_role"),
             submission_payload={},
         )
 

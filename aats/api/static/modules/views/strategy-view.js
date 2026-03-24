@@ -13,6 +13,8 @@ export function renderStrategySections(data) {
   const strategyRuntimeSummary = strategyRuntime.summary || {};
   const strategyRuntimeSnapshot = strategyRuntime.latest_snapshot || {};
   const strategyCandidates = strategyRuntimeSnapshot.candidates || [];
+  const latestBundle = strategyRuntime.latest_bundle || {};
+  const recentBundles = strategyRuntime.recent_execution_bundles || [];
   const strategyAppliedTarget = strategyRuntime.latest_applied_target || {};
   const strategyFamilyEnablement = strategyRuntime.family_enablement || {};
   const baseline = latestDecision.baseline_assessment || {};
@@ -95,8 +97,8 @@ export function renderStrategySections(data) {
       content: `
         ${summaryStrip([
           {
-            label: "当前配置家族",
-            value: readableState(strategyRuntimeSummary.configured_active_family || "directional"),
+            label: "策略家族模式",
+            value: strategyRuntimeSummary.automatic_selection_enabled ? "全自动" : readableState(strategyRuntimeSummary.configured_active_family || "directional"),
             meta: familyEnablementSummary(strategyFamilyEnablement),
             tone: "info",
           },
@@ -118,10 +120,19 @@ export function renderStrategySections(data) {
             meta: `${readableState(strategyAppliedTarget.strategy_family || "directional")} | ${readableState(strategyAppliedTarget.strategy_route_action || "override_target")}`,
             tone: "info",
           },
+          {
+            label: "最近执行 Bundle",
+            value: readableState(strategyRuntimeSummary.latest_bundle_status || "unknown"),
+            meta: latestBundle.bundle_id ? middleEllipsis(latestBundle.bundle_id, 10, 8, "当前没有策略执行 bundle") : "当前没有策略执行 bundle",
+            tone: strategyRuntimeSummary.latest_bundle_status === "blocked" ? "warning" : "info",
+          },
         ])}
         ${kvList([
           ["调度结论", strategyRuntimeSummary.operator_summary || "当前还没有多策略调度快照。", reasonListText(strategyRuntimeSummary.latest_selection_reason_codes, "当前没有额外调度原因说明")],
+          ["运行模板", strategyRuntimeSummary.env_template_profile || "当前未记录模板来源", strategyRuntimeSummary.automatic_selection_enabled ? "策略家族当前按系统自动选择运行。" : "策略家族当前不在自动选择模式。"],
+          ["最近 Bundle", readableState(latestBundle.status || "unknown"), reasonListText(latestBundle.reason_codes, "当前没有 bundle 级原因说明")],
           ["最近已应用动作", readableState(strategyAppliedTarget.position_intent || "hold"), reasonListText(strategyAppliedTarget.strategy_reason_codes, "当前没有额外已应用目标说明")],
+          ["最近 Bundle 腿数", formatNumber(recentBundles[0]?.legs?.length ?? latestBundle.legs?.length ?? 0, 0, "0"), latestBundle.operator_summary || "当前没有 bundle 级执行摘要"],
         ])}
         ${renderStrategyCandidateTable(strategyCandidates)}
       `,

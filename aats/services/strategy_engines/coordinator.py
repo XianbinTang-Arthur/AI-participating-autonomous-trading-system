@@ -4,7 +4,9 @@ from decimal import Decimal
 
 from aats.bootstrap.settings import AATSSettings
 from aats.events import topics
+from aats.schemas.common import new_id
 from aats.schemas.decision import BaselineAssessment, DecisionContext, PositionTarget
+from aats.schemas.exchange import ExchangeAccountSnapshot
 from aats.schemas.market import MarketSnapshot
 from aats.schemas.strategy_runtime import (
     StrategyCandidate,
@@ -32,15 +34,18 @@ class StrategyCoordinatorService:
         event_store,
         market_gateway,
         portfolio_repo,
+        account_service=None,
     ) -> None:
         self.settings = settings
         self.event_store = event_store
         self.market_gateway = market_gateway
         self.portfolio_repo = portfolio_repo
+        self.account_service = account_service
         self.state_scope = runtime_state_scope(settings)
         self.smart_arbitrage_engine = SmartArbitrageStrategyEngine(
             settings=settings,
             market_snapshot_loader=self._latest_market_snapshot,
+            account_snapshot_loader=self._latest_account_snapshot,
         )
         self.spot_grid_engine = SpotGridStrategyEngine(settings=settings)
         self.dca_engine = DcaStrategyEngine(settings=settings)
@@ -57,6 +62,7 @@ class StrategyCoordinatorService:
             baseline=baseline,
             directional_target=directional_target,
             latest_snapshot=latest_snapshot_for_scope(self.portfolio_repo, self.state_scope),
+            latest_account_snapshot=self._latest_account_snapshot(),
             latest_market_snapshot=self._latest_market_snapshot(context.symbol),
             recent_market_snapshots=self._recent_market_snapshots(
                 symbols=self._recent_market_symbols(context.symbol),
@@ -69,21 +75,9 @@ class StrategyCoordinatorService:
             "spot_grid": self.spot_grid_engine.evaluate(engine_input),
             "dca": self.dca_engine.evaluate(engine_input),
         }
-        selected_family: StrategyFamily = self.settings.strategy_family_active
-        selected_candidate = candidates_by_family.get(selected_family, candidates_by_family["directional"])
-        selection_reasons = [f"active_strategy_family_{selected_family}"]
-        if selected_family not in candidates_by_family:
-            selected_family = "directional"
-            selected_candidate = candidates_by_family["directional"]
-            selection_reasons.append("strategy_family_unknown_fallback_directional")
-        elif selected_family == "directional":
-            selection_reasons.append("directional_family_selected")
-        elif selected_candidate.route_action == "override_target" and selected_candidate.selectable:
-            selection_reasons.append("non_directional_family_ready")
-        elif selected_candidate.route_action == "advisory_only":
-            selection_reasons.append("non_directional_family_advisory_only")
-        else:
-            selection_reasons.append("non_directional_family_hold_current")
+        selected_family, selected_candidate, selection_reasons = self._select_candidate(
+            candidates_by_family=candidates_by_family,
+        )
 
         candidate_order = [selected_family] + [
             family
@@ -96,7 +90,7 @@ class StrategyCoordinatorService:
             timeframe=context.timeframe,
             product_type=context.product_type,
             margin_mode=self.settings.margin_mode,
-            allowed_symbols=tuple(self.settings.allowed_symbols),
+            allowed_symbols=self.settings.expanded_allowed_symbols(),
             active_family=self.settings.strategy_family_active,
             selected_family=selected_family,
             selected_state=selected_candidate.state,
@@ -122,6 +116,8 @@ class StrategyCoordinatorService:
         target_qty = base_target.target_position_qty
         urgency = base_target.urgency
         source_mix = dict(base_target.source_mix)
+        strategy_bundle_id = None
+        strategy_execution_legs = []
 
         if (
             selected.route_action == "override_target"
@@ -133,6 +129,9 @@ class StrategyCoordinatorService:
             urgency = selected.urgency
             if selected.family != "directional":
                 source_mix = {selected.family: 1.0}
+            if selected.family == "smart_arbitrage" and selected.legs:
+                strategy_bundle_id = new_id("bundle")
+                strategy_execution_legs = [leg.model_copy(deep=True) for leg in selected.legs]
         elif self._is_protective_target(
             current_qty=base_target.current_position_qty,
             target_qty=base_target.target_position_qty,
@@ -188,6 +187,8 @@ class StrategyCoordinatorService:
             "strategy_route_action": applied_route_action,
             "strategy_reason_codes": list(dict.fromkeys(reason_codes)),
             "strategy_headline": snapshot.selected_headline,
+            "strategy_bundle_id": strategy_bundle_id,
+            "strategy_execution_legs": strategy_execution_legs,
             "decision_outcome": decision_outcome,
         }
         if snapshot_ref is not None:
@@ -227,6 +228,15 @@ class StrategyCoordinatorService:
         if latest_event is None:
             return None
         return MarketSnapshot.model_validate(latest_event.payload)
+
+    def _latest_account_snapshot(self) -> ExchangeAccountSnapshot | None:
+        if self.account_service is None:
+            return None
+        getter = getattr(self.account_service, "latest_snapshot", None)
+        if not callable(getter):
+            return None
+        snapshot = getter()
+        return snapshot if isinstance(snapshot, ExchangeAccountSnapshot) else None
 
     def _recent_market_snapshots(self, *, symbols: set[str]) -> dict[str, list[MarketSnapshot]]:
         rows: dict[str, list[MarketSnapshot]] = {}
@@ -273,6 +283,57 @@ class StrategyCoordinatorService:
                 continue
             rows[family].append(StrategyTargetHistory(created_at=event.event_timestamp, target=target))
         return rows
+
+    def _select_candidate(
+        self,
+        *,
+        candidates_by_family: dict[StrategyFamily, StrategyCandidate],
+    ) -> tuple[StrategyFamily, StrategyCandidate, list[str]]:
+        configured_family = self.settings.strategy_family_active
+        if not self.settings.strategy_family_auto_selection_enabled:
+            selected_family = (
+                configured_family
+                if configured_family in candidates_by_family
+                else "directional"
+            )
+            candidate = candidates_by_family.get(selected_family, candidates_by_family["directional"])
+            return (
+                selected_family,
+                candidate,
+                [f"legacy_configured_strategy_family_{selected_family}", *candidate.reason_codes],
+            )
+
+        priority_order: tuple[StrategyFamily, ...] = ("smart_arbitrage", "spot_grid", "dca", "directional")
+        for family in priority_order:
+            candidate = candidates_by_family.get(family)
+            if candidate is None:
+                continue
+            if not candidate.enabled or not candidate.selectable or not candidate.execution_compatible:
+                continue
+            if candidate.route_action == "override_target":
+                return (
+                    family,
+                    candidate,
+                    [f"automatic_strategy_family_{family}", "automatic_strategy_override_target_ready"],
+                )
+        for family in priority_order:
+            candidate = candidates_by_family.get(family)
+            if candidate is None:
+                continue
+            if not candidate.enabled or not candidate.selectable or not candidate.execution_compatible:
+                continue
+            if candidate.route_action == "hold_current":
+                return (
+                    family,
+                    candidate,
+                    [f"automatic_strategy_family_{family}", "automatic_strategy_hold_current_selected"],
+                )
+        directional = candidates_by_family["directional"]
+        return (
+            "directional",
+            directional,
+            ["automatic_strategy_family_directional", "automatic_strategy_directional_fallback"],
+        )
 
     @staticmethod
     def _exposure_side(quantity: Decimal) -> str:

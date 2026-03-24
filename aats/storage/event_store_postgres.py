@@ -6,7 +6,7 @@ from sqlalchemy import Select, desc, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from aats.schemas.common import EventEnvelope
-from aats.services.runtime_scope import RuntimeStateScope
+from aats.services.runtime_scope import RuntimeStateScope, event_matches_scope
 from aats.storage.scope_metadata import envelope_scope_metadata
 from aats.storage.sqlalchemy_models import EventEnvelopeModel
 
@@ -101,13 +101,14 @@ class PostgresEventStore:
         scope: RuntimeStateScope,
         limit: int | None = None,
     ) -> list[EventEnvelope]:
-        query = self._scope_query(select(EventEnvelopeModel).where(EventEnvelopeModel.topic == topic), scope)
-        query = query.order_by(EventEnvelopeModel.sequence_id)
-        if limit is not None:
-            query = query.limit(limit)
+        query = select(EventEnvelopeModel).where(EventEnvelopeModel.topic == topic).order_by(EventEnvelopeModel.sequence_id)
         with self.session_factory() as session:
             rows = session.scalars(query).all()
-        return [self._to_schema(row) for row in rows]
+        envelopes = [self._to_schema(row) for row in rows]
+        envelopes = [envelope for envelope in envelopes if event_matches_scope(envelope, scope)]
+        if limit is not None:
+            envelopes = envelopes[-limit:]
+        return envelopes
 
     def latest_by_topic_scoped(
         self,
@@ -119,10 +120,14 @@ class PostgresEventStore:
         query = select(EventEnvelopeModel).where(EventEnvelopeModel.topic == topic)
         if key is not None:
             query = query.where(EventEnvelopeModel.event_key == key)
-        query = self._scope_query(query, scope).order_by(desc(EventEnvelopeModel.sequence_id)).limit(1)
+        query = query.order_by(desc(EventEnvelopeModel.sequence_id))
         with self.session_factory() as session:
-            row = session.scalar(query)
-        return self._to_schema(row) if row is not None else None
+            rows = session.scalars(query).all()
+        for row in rows:
+            envelope = self._to_schema(row)
+            if event_matches_scope(envelope, scope):
+                return envelope
+        return None
 
     def by_decision(self, decision_id: str) -> list[EventEnvelope]:
         with self.session_factory() as session:

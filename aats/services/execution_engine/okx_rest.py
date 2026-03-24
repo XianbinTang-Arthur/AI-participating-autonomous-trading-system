@@ -15,6 +15,7 @@ except ModuleNotFoundError:  # pragma: no cover - exercised implicitly in enviro
     orjson = None
 
 from aats.bootstrap.settings import AATSSettings
+from aats.services.runtime_scope import infer_product_type_from_symbol
 from aats.schemas.common import utc_now
 
 
@@ -75,11 +76,15 @@ class OKXRESTClient:
         return "SWAP" if self.settings.trading_product_type == "derivatives" else "SPOT"
 
     def _inst_types(self, *, symbol: str | None = None) -> tuple[str, ...]:
-        if self.settings.trading_product_type != "derivatives":
-            return ("SPOT",)
+        if symbol is not None:
+            inferred_product_type = infer_product_type_from_symbol(symbol)
+            if inferred_product_type == "spot":
+                return ("SPOT",)
         inferred = infer_okx_derivatives_inst_type(symbol)
         if inferred is not None:
             return (inferred,)
+        if self.settings.trading_product_type != "derivatives":
+            return ("SPOT",)
         return OKX_DERIVATIVES_INST_TYPES
 
     @staticmethod
@@ -221,8 +226,17 @@ class OKXRESTClient:
             require_auth=True,
         )
 
-    async def get_instruments(self) -> dict[str, Any]:
-        inst_types = self._inst_types()
+    async def get_instruments(self, *, symbols: tuple[str, ...] | None = None) -> dict[str, Any]:
+        inst_types = (
+            tuple(
+                dict.fromkeys(
+                    inst_type
+                    for symbol in (symbols or ())
+                    for inst_type in self._inst_types(symbol=symbol)
+                )
+            )
+            or self._inst_types()
+        )
         if len(inst_types) == 1:
             return await self.request(
                 method="GET",

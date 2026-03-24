@@ -238,12 +238,12 @@ class TestStrategyCoordinator(unittest.TestCase):
         )
         applied = coordinator.apply_selected_target(base_target=base_target, snapshot=snapshot)
 
-        self.assertEqual(snapshot.selected_family, "smart_arbitrage")
-        self.assertEqual(snapshot.selected_route_action, "advisory_only")
-        self.assertEqual(applied.strategy_family, "smart_arbitrage")
-        self.assertEqual(applied.strategy_route_action, "protective_fallback")
+        self.assertEqual(snapshot.selected_family, "directional")
+        self.assertEqual(snapshot.selected_route_action, "override_target")
+        self.assertEqual(applied.strategy_family, "directional")
+        self.assertEqual(applied.strategy_route_action, "override_target")
         self.assertEqual(applied.target_position_qty, Decimal("0"))
-        self.assertEqual(applied.decision_outcome.selected_strategy_route_action, "protective_fallback")
+        self.assertEqual(applied.decision_outcome.selected_strategy_route_action, "override_target")
 
     def test_dca_interval_uses_last_real_dca_target_instead_of_hold_cycles(self) -> None:
         settings = AATSSettings.model_validate(
@@ -303,9 +303,57 @@ class TestStrategyCoordinator(unittest.TestCase):
         )
         selected = next(candidate for candidate in snapshot.candidates if candidate.family == "dca")
 
-        self.assertEqual(snapshot.selected_family, "dca")
+        self.assertEqual(snapshot.selected_family, "directional")
         self.assertEqual(selected.state, "inactive")
         self.assertIn("dca_interval_not_elapsed", selected.reason_codes)
+
+    def test_smart_arbitrage_positive_basis_builds_executable_pair(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "smart_arbitrage_enabled": True,
+                "smart_arbitrage_basis_entry_bps": 5.0,
+                "smart_arbitrage_estimated_cost_bps": 1.0,
+                "smart_arbitrage_quote_budget_per_trade": 100.0,
+                "smart_arbitrage_max_pair_notional": 100.0,
+            }
+        )
+        gateway = _FakeMarketGateway(
+            {
+                "BTC-USDT": _market_snapshot("BTC-USDT", "100"),
+                "BTC-USDT-SWAP": _market_snapshot("BTC-USDT-SWAP", "101"),
+            }
+        )
+        coordinator = StrategyCoordinatorService(
+            settings=settings,
+            event_store=InMemoryEventStore(),
+            market_gateway=gateway,
+            portfolio_repo=InMemoryPortfolioRepository(),
+        )
+        base_target = _position_target(
+            symbol="BTC-USDT-SWAP",
+            product_type="derivatives",
+            margin_mode="cross",
+            current_qty="0",
+            target_qty="0",
+        )
+
+        snapshot = coordinator.evaluate(
+            context=_decision_context(symbol="BTC-USDT-SWAP", product_type="derivatives", current_position_qty="0"),
+            baseline=_baseline(symbol="BTC-USDT-SWAP", regime="trend"),
+            directional_target=base_target,
+        )
+        applied = coordinator.apply_selected_target(base_target=base_target, snapshot=snapshot)
+
+        self.assertEqual(snapshot.selected_family, "smart_arbitrage")
+        self.assertEqual(snapshot.selected_route_action, "override_target")
+        self.assertEqual(applied.strategy_family, "smart_arbitrage")
+        self.assertIsNotNone(applied.strategy_bundle_id)
+        self.assertEqual(len(applied.strategy_execution_legs), 2)
+        self.assertEqual({item.product_type for item in applied.strategy_execution_legs}, {"spot", "derivatives"})
 
 
 if __name__ == "__main__":

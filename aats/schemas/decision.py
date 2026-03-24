@@ -9,7 +9,7 @@ from pydantic import BaseModel
 
 from aats.schemas.common import SchemaBase
 from aats.schemas.execution import AIExecutionParameterSuggestionEnvelope
-from aats.schemas.strategy_runtime import StrategyFamily, StrategyRouteAction
+from aats.schemas.strategy_runtime import StrategyFamily, StrategyLegIntent, StrategyRouteAction
 from aats.schemas.system import MarginModelType, ProductType
 
 
@@ -309,6 +309,8 @@ class PositionTarget(SchemaBase):
     strategy_route_action: StrategyRouteAction = "override_target"
     strategy_reason_codes: list[str] = Field(default_factory=list)
     strategy_headline: str | None = None
+    strategy_bundle_id: str | None = None
+    strategy_execution_legs: list[StrategyLegIntent] = Field(default_factory=list)
     guardrail_flags: list[str] = Field(default_factory=list)
     ai_execution_parameter_suggestion: AIExecutionParameterSuggestionEnvelope | None = None
     ai_decision_intent: AIDecisionIntent | None = None

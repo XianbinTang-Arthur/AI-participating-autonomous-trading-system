@@ -155,12 +155,32 @@ class OKXPrivateWebSocketClient:
         return [{"channel": "balance_and_position"}, *self._orders_subscription_args()]
 
     def _orders_subscription_args(self) -> list[dict[str, str]]:
-        if self.settings.trading_product_type != "derivatives":
-            return [{"channel": "orders", "instType": "SPOT"}]
-        return [
-            {"channel": "orders", "instType": "SWAP"},
-            {"channel": "orders", "instType": "FUTURES"},
-        ]
+        inst_types: list[str] = []
+        for symbol in self.settings.expanded_allowed_symbols():
+            normalized = str(symbol or "").upper()
+            if not normalized:
+                continue
+            if normalized.endswith("-SWAP"):
+                if "SWAP" not in inst_types:
+                    inst_types.append("SWAP")
+                continue
+            tail = normalized.rsplit("-", 1)[-1]
+            if tail.isdigit():
+                if "FUTURES" not in inst_types:
+                    inst_types.append("FUTURES")
+                continue
+            if "SPOT" not in inst_types:
+                inst_types.append("SPOT")
+        if self.settings.trading_product_type == "derivatives":
+            has_derivatives = any(item in {"SWAP", "FUTURES"} for item in inst_types)
+            if not has_derivatives:
+                inst_types = [item for item in inst_types if item == "SPOT" and self.settings.smart_arbitrage_enabled]
+                for item in ("SWAP", "FUTURES"):
+                    if item not in inst_types:
+                        inst_types.append(item)
+        elif not inst_types:
+            inst_types = ["SPOT"]
+        return [{"channel": "orders", "instType": inst_type} for inst_type in inst_types]
 
     def _resolved_private_ws_url(self) -> str:
         url = self.settings.okx_private_ws_url

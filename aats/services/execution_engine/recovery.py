@@ -354,10 +354,20 @@ class ExecutionRecoveryService:
     def _scoped_active_obligations(self) -> list[OrderObligation]:
         obligations: list[OrderObligation] = []
         for obligation in self.obligation_repo.active_obligations():
-            if obligation.product_type != self.runtime_scope.product_type:
-                continue
-            if obligation.margin_mode != self.runtime_scope.margin_mode:
-                continue
+            if self.runtime_scope.product_type == "derivatives" and obligation.strategy_family == "smart_arbitrage":
+                if obligation.product_type == "spot":
+                    if obligation.margin_mode != "cash":
+                        continue
+                else:
+                    if obligation.product_type != self.runtime_scope.product_type:
+                        continue
+                    if obligation.margin_mode != self.runtime_scope.margin_mode:
+                        continue
+            else:
+                if obligation.product_type != self.runtime_scope.product_type:
+                    continue
+                if obligation.margin_mode != self.runtime_scope.margin_mode:
+                    continue
             if self.runtime_scope.allowed_symbols and obligation.symbol not in self.runtime_scope.allowed_symbols:
                 continue
             obligations.append(obligation)

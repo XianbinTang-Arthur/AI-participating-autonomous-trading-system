@@ -742,6 +742,12 @@ class StateComparator:
         stored_positions = StateComparator._position_quantity_map(stored_snapshot.positions)
         replayed_positions = StateComparator._position_quantity_map(reconstructed_snapshot.positions)
         stored_margin = StateComparator._snapshot_position_margin_map(stored_snapshot.positions)
+        stored_exchange_positions = StateComparator._position_quantity_map(
+            [position for position in stored_snapshot.positions if position.product_type == "derivatives"]
+        )
+        stored_exchange_margin = StateComparator._snapshot_position_margin_map(
+            [position for position in stored_snapshot.positions if position.product_type == "derivatives"]
+        )
         reconstructed_mismatches: dict[str, dict[str, Decimal]] = {}
         for symbol in sorted(set(stored_positions) | set(replayed_positions)):
             stored = to_decimal(stored_positions.get(symbol, 0))
@@ -757,13 +763,13 @@ class StateComparator:
         if compare_exchange_portfolio and exchange_snapshot is not None and exchange_snapshot.positions:
             exchange_positions = StateComparator._exchange_position_quantity_map(exchange_snapshot)
             exchange_margin = StateComparator._exchange_position_margin_map(exchange_snapshot)
-            for symbol in sorted(set(stored_positions) | set(exchange_positions)):
-                stored = to_decimal(stored_positions.get(symbol, 0))
+            for symbol in sorted(set(stored_exchange_positions) | set(exchange_positions)):
+                stored = to_decimal(stored_exchange_positions.get(symbol, 0))
                 exchange = to_decimal(exchange_positions.get(symbol, 0))
                 if abs(stored - exchange) > EPSILON_DECIMAL_12:
                     exchange_mismatches[symbol] = {"stored": stored, "exchange": exchange}
-            for position_key in sorted(set(stored_margin) | set(exchange_margin)):
-                local_margin = stored_margin.get(position_key)
+            for position_key in sorted(set(stored_exchange_margin) | set(exchange_margin)):
+                local_margin = stored_exchange_margin.get(position_key)
                 exchange_margin_row = exchange_margin.get(position_key)
                 if local_margin is None or exchange_margin_row is None:
                     continue
