@@ -353,21 +353,9 @@ ALTER TABLE IF EXISTS reconciliation_reports ADD COLUMN IF NOT EXISTS margin_mod
 ALTER TABLE IF EXISTS reconciliation_reports ADD COLUMN IF NOT EXISTS primary_symbol VARCHAR(64);
 ALTER TABLE IF EXISTS reconciliation_reports ADD COLUMN IF NOT EXISTS payload JSON;
 
--- Ensure columns exist on runtime_profile_activation
-ALTER TABLE IF EXISTS runtime_profile_activation ADD COLUMN IF NOT EXISTS activation_id VARCHAR(64);
-ALTER TABLE IF EXISTS runtime_profile_activation ADD COLUMN IF NOT EXISTS payload JSON;
-
--- Ensure columns exist on runtime_profile_revisions
-ALTER TABLE IF EXISTS runtime_profile_revisions ADD COLUMN IF NOT EXISTS revision_id VARCHAR(64);
-ALTER TABLE IF EXISTS runtime_profile_revisions ADD COLUMN IF NOT EXISTS profile_label VARCHAR(128);
-ALTER TABLE IF EXISTS runtime_profile_revisions ADD COLUMN IF NOT EXISTS status VARCHAR(32);
-ALTER TABLE IF EXISTS runtime_profile_revisions ADD COLUMN IF NOT EXISTS change_classification VARCHAR(64);
-ALTER TABLE IF EXISTS runtime_profile_revisions ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITH TIME ZONE;
-ALTER TABLE IF EXISTS runtime_profile_revisions ADD COLUMN IF NOT EXISTS created_by VARCHAR(128);
-ALTER TABLE IF EXISTS runtime_profile_revisions ADD COLUMN IF NOT EXISTS supersedes_revision_id VARCHAR(64);
-ALTER TABLE IF EXISTS runtime_profile_revisions ADD COLUMN IF NOT EXISTS activation_note VARCHAR(512);
-ALTER TABLE IF EXISTS runtime_profile_revisions ADD COLUMN IF NOT EXISTS payload JSON;
-ALTER TABLE IF EXISTS runtime_profile_revisions ADD COLUMN IF NOT EXISTS summary JSON;
+-- Drop deprecated runtime profile control tables
+DROP TABLE IF EXISTS runtime_profile_activation CASCADE;
+DROP TABLE IF EXISTS runtime_profile_revisions CASCADE;
 
 -- Ensure columns exist on sleeve_pnl_records
 ALTER TABLE IF EXISTS sleeve_pnl_records ADD COLUMN IF NOT EXISTS record_id VARCHAR(96);
@@ -976,13 +964,6 @@ CREATE INDEX IF NOT EXISTS ix_reconciliation_reports_primary_symbol ON reconcili
 CREATE INDEX IF NOT EXISTS ix_reconciliation_reports_product_type ON reconciliation_reports (product_type);
 CREATE INDEX IF NOT EXISTS ix_reconciliation_reports_scope_ts ON reconciliation_reports (product_type, margin_mode, as_of_ts);
 CREATE INDEX IF NOT EXISTS ix_reconciliation_reports_severity ON reconciliation_reports (severity);
-
--- Ensure indexes exist on runtime_profile_activation
-
--- Ensure indexes exist on runtime_profile_revisions
-CREATE INDEX IF NOT EXISTS ix_runtime_profile_revisions_created_at ON runtime_profile_revisions (created_at);
-CREATE INDEX IF NOT EXISTS ix_runtime_profile_revisions_profile_label ON runtime_profile_revisions (profile_label);
-CREATE INDEX IF NOT EXISTS ix_runtime_profile_revisions_status ON runtime_profile_revisions (status);
 
 -- Ensure indexes exist on sleeve_pnl_records
 CREATE INDEX IF NOT EXISTS ix_sleeve_pnl_records_allocation_created ON sleeve_pnl_records (allocation_id, created_at);

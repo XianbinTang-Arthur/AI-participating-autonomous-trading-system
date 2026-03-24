@@ -2846,61 +2846,6 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(update_action["details"]["target_username"], "viewer2")
         self.assertEqual(delete_action["details"]["target_username"], "viewer2")
 
-    async def test_runtime_profile_routes_report_env_switch_mode(self) -> None:
-        runtime = await self._runtime(
-            operator_auth_enabled=True,
-            operator_session_secret="session-secret",
-            operator_users=[("admin", "admin-pass")],
-        )
-        app = self._app(runtime)
-
-        with TestClient(app) as client:
-            login = client.post("/auth/login", json={"username": "admin", "password": "admin-pass"})
-            listing = client.get("/runtime-profiles")
-            summary = client.get("/runtime-profiles/summary")
-            created = client.post("/runtime-profiles/drafts", json={"profile_label": "derivatives primary"})
-
-        self.assertEqual(login.status_code, 200)
-        self.assertEqual(listing.status_code, 200)
-        self.assertEqual(summary.status_code, 200)
-        self.assertEqual(listing.json()["profile_source"], "env_fallback")
-        self.assertFalse(listing.json()["management_enabled"])
-        self.assertEqual(
-            set(summary.json().keys()),
-            {"profile_source", "control_plane_status", "current_runtime_payload"},
-        )
-        self.assertEqual(created.status_code, 409)
-        self.assertEqual(created.json()["detail"], "runtime_profile_control_disabled")
-
-    async def test_runtime_profile_stage_routes_are_disabled_in_env_switch_mode(self) -> None:
-        runtime = await self._runtime(
-            operator_auth_enabled=True,
-            operator_session_secret="session-secret",
-            operator_users=[("admin", "admin-pass")],
-        )
-        runtime.execution_repo.save_order_state(
-            OrderState(
-                decision_id="decision_runtime_profile",
-                intent_id="intent_runtime_profile",
-                symbol="BTC-USDT",
-                client_order_id="order_runtime_profile",
-                status="SUBMITTED",
-                requested_qty=0.001,
-                remaining_qty=0.001,
-            )
-        )
-        app = self._app(runtime)
-
-        with TestClient(app) as client:
-            client.post("/auth/login", json={"username": "admin", "password": "admin-pass"})
-            canceled = client.post("/runtime-profiles/pending/cancel")
-            restart = client.post("/runtime-profiles/restart")
-
-        self.assertEqual(canceled.status_code, 409)
-        self.assertEqual(canceled.json()["detail"], "runtime_profile_control_disabled")
-        self.assertEqual(restart.status_code, 409)
-        self.assertEqual(restart.json()["detail"], "runtime_profile_control_disabled")
-
     async def test_strategy_profile_routes_seed_snapshot_and_generate_recommendation(self) -> None:
         runtime = await self._runtime(
             operator_auth_enabled=True,

@@ -408,30 +408,6 @@ CREATE TABLE IF NOT EXISTS reconciliation_reports (
 	payload JSON NOT NULL,
 	PRIMARY KEY (reconciliation_id)
 );
-
-
-CREATE TABLE IF NOT EXISTS runtime_profile_activation (
-	activation_id VARCHAR(64) NOT NULL,
-	payload JSON NOT NULL,
-	PRIMARY KEY (activation_id)
-);
-
-
-CREATE TABLE IF NOT EXISTS runtime_profile_revisions (
-	revision_id VARCHAR(64) NOT NULL,
-	profile_label VARCHAR(128) NOT NULL,
-	status VARCHAR(32) NOT NULL,
-	change_classification VARCHAR(64) NOT NULL,
-	created_at TIMESTAMP WITH TIME ZONE NOT NULL,
-	created_by VARCHAR(128),
-	supersedes_revision_id VARCHAR(64),
-	activation_note VARCHAR(512),
-	payload JSON NOT NULL,
-	summary JSON NOT NULL,
-	PRIMARY KEY (revision_id)
-);
-
-
 CREATE TABLE IF NOT EXISTS sleeve_pnl_records (
 	record_id VARCHAR(96) NOT NULL,
 	strategy_sleeve_id VARCHAR(64),

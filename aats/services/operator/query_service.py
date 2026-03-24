@@ -35,10 +35,7 @@ from aats.services.operator.accounts import (
     enabled_admin_count,
     update_operator_user as update_managed_operator_user,
 )
-from aats.services.operator.runtime_profiles import (
-    readonly_runtime_profile_snapshot,
-    runtime_profile_action_payload,
-)
+from aats.services.operator.runtime_profiles import readonly_runtime_profile_snapshot
 from aats.services.operator.runtime_queries import RuntimeQueryFacade
 from aats.services.operator.reconciliation_system_queries import ReconciliationSystemQueryFacade
 from aats.services.operator.strategy_profile_queries import StrategyProfileQueryFacade
@@ -2507,33 +2504,6 @@ class OperatorQueryService:
             "current_runtime_payload": snapshot.get("current_runtime_payload"),
         }
 
-    def record_runtime_profile_action(
-        self,
-        *,
-        action: str,
-        actor_role: OperatorRole,
-        actor_identity: str | None = None,
-        auth_source: AuthSource = "anonymous",
-        status: str,
-        previous_revision_id: str | None = None,
-        new_revision_id: str | None = None,
-        details: dict[str, Any] | None = None,
-    ) -> None:
-        self._append_event(
-            topic=topics.OPERATOR_ACTIONS,
-            key="runtime_profile",
-            payload_model=runtime_profile_action_payload(
-                action=action,
-                actor_role=actor_role,
-                actor_identity=actor_identity,
-                auth_source=auth_source,
-                status=status,
-                previous_revision_id=previous_revision_id,
-                new_revision_id=new_revision_id,
-                details=details,
-            ),
-        )
-
     def strategy_profile_snapshot(self) -> dict[str, Any]:
         return self.strategy_profile_queries.snapshot()
 
@@ -2842,9 +2812,9 @@ class OperatorQueryService:
         snapshot["review_required"] = recovery["review_required"]
         snapshot["rebaseline_available"] = recovery["rebaseline_available"]
         snapshot["profile_source"] = self.runtime.runtime_profile_resolution.profile_source
-        snapshot["active_profile_revision_id"] = self.runtime.runtime_profile_resolution.activation_state.active_revision_id
-        snapshot["pending_profile_revision_id"] = self.runtime.runtime_profile_resolution.activation_state.pending_revision_id
-        snapshot["restart_required"] = self.runtime.runtime_profile_resolution.activation_state.restart_required
+        snapshot["active_profile_revision_id"] = None
+        snapshot["pending_profile_revision_id"] = None
+        snapshot["restart_required"] = False
         snapshot["trial_guard"] = self.trial_guard()
         return snapshot
 

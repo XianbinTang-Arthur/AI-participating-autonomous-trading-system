@@ -99,7 +99,6 @@ from aats.storage.base import (
     OperatorUserRepository,
     PortfolioRepository,
     ReconciliationRepository,
-    RuntimeProfileRepository,
     StrategyRuntimeRepository,
 )
 from aats.storage.event_store import InMemoryEventStore
@@ -138,8 +137,6 @@ from aats.storage.portfolio_repo_postgres import PostgresPortfolioRepository
 from aats.storage.reconciliation_repo import InMemoryReconciliationRepository
 from aats.storage.reconciliation_repo_postgres import PostgresReconciliationRepository
 from aats.storage.reservation_repo_postgres import PostgresReservationRepository
-from aats.storage.runtime_profile_repo import InMemoryRuntimeProfileRepository
-from aats.storage.runtime_profile_repo_postgres import PostgresRuntimeProfileRepository
 from aats.storage.strategy_profile_repo import InMemoryStrategyProfileRepository
 from aats.storage.strategy_profile_repo_postgres import PostgresStrategyProfileRepository
 from aats.storage.strategy_sleeve_repo import InMemoryStrategySleeveRepository
@@ -241,7 +238,6 @@ class StorageBackends:
     obligation_repo: ExecutionObligationRepository
     reconciliation_repo: ReconciliationRepository
     operator_repo: OperatorUserRepository
-    runtime_profile_repo: RuntimeProfileRepository
     strategy_profile_repo: StrategyProfileRepository
     strategy_sleeve_repo: StrategySleeveRepository
     strategy_runtime_repo: StrategyRuntimeRepository
@@ -313,7 +309,6 @@ class ApplicationRuntime:
     obligation_repo: ExecutionObligationRepository
     reconciliation_repo: ReconciliationRepository
     operator_repo: OperatorUserRepository
-    runtime_profile_repo: RuntimeProfileRepository
     strategy_profile_repo: StrategyProfileRepository
     strategy_sleeve_repo: StrategySleeveRepository
     strategy_runtime_repo: StrategyRuntimeRepository
@@ -781,7 +776,6 @@ def build_storage_backends(settings: AATSSettings) -> StorageBackends:
             outbox_repo=None,
             reconciliation_repo=InMemoryReconciliationRepository(),
             operator_repo=InMemoryOperatorUserRepository(),
-            runtime_profile_repo=InMemoryRuntimeProfileRepository(),
             strategy_profile_repo=InMemoryStrategyProfileRepository(),
             strategy_sleeve_repo=InMemoryStrategySleeveRepository(),
             strategy_runtime_repo=InMemoryStrategyRuntimeRepository(),
@@ -892,7 +886,6 @@ def build_storage_backends(settings: AATSSettings) -> StorageBackends:
         outbox_repo=PostgresOutboxRepository(database_runtime.session_factory),
         reconciliation_repo=PostgresReconciliationRepository(database_runtime.session_factory),
         operator_repo=PostgresOperatorUserRepository(database_runtime.session_factory),
-        runtime_profile_repo=PostgresRuntimeProfileRepository(database_runtime.session_factory),
         strategy_profile_repo=PostgresStrategyProfileRepository(database_runtime.session_factory),
         strategy_sleeve_repo=PostgresStrategySleeveRepository(database_runtime.session_factory),
         strategy_runtime_repo=PostgresStrategyRuntimeRepository(database_runtime.session_factory),
@@ -1674,7 +1667,7 @@ async def build_runtime(
     _validate_runtime_settings(base_settings, base_runtime_layering)
     storage = build_storage_backends(base_settings)
     try:
-        profile_resolution = runtime_profile_resolution(settings=base_settings, repo=storage.runtime_profile_repo)
+        profile_resolution = runtime_profile_resolution(settings=base_settings)
         runtime_settings = AATSSettings.model_validate(profile_resolution.resolved_settings)
         runtime_layering = resolve_runtime_layering(runtime_settings)
         state_scope = runtime_state_scope(runtime_settings)
@@ -2204,7 +2197,6 @@ async def build_runtime(
         obligation_repo=storage.obligation_repo,
         reconciliation_repo=storage.reconciliation_repo,
         operator_repo=storage.operator_repo,
-        runtime_profile_repo=storage.runtime_profile_repo,
         strategy_profile_repo=storage.strategy_profile_repo,
         strategy_sleeve_repo=storage.strategy_sleeve_repo,
         strategy_runtime_repo=storage.strategy_runtime_repo,

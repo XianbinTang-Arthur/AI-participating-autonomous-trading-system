@@ -747,28 +747,6 @@ class OperatorUserModel(Base):
     payload: Mapped[dict] = mapped_column(JSON, nullable=False)
 
 
-class RuntimeProfileRevisionModel(Base):
-    __tablename__ = "runtime_profile_revisions"
-
-    revision_id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    profile_label: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
-    status: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
-    change_classification: Mapped[str] = mapped_column(String(64), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
-    created_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    supersedes_revision_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    activation_note: Mapped[str | None] = mapped_column(String(512), nullable=True)
-    payload: Mapped[dict] = mapped_column(JSON, nullable=False)
-    summary: Mapped[dict] = mapped_column(JSON, nullable=False)
-
-
-class RuntimeProfileActivationModel(Base):
-    __tablename__ = "runtime_profile_activation"
-
-    activation_id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    payload: Mapped[dict] = mapped_column(JSON, nullable=False)
-
-
 class StrategyProfileRevisionModel(Base):
     __tablename__ = "strategy_profile_revisions"
     __table_args__ = (

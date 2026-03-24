@@ -261,7 +261,7 @@ const configHtml = renderAIConfigView({
       },
     },
     runtime_profile: {
-      profile_source: 'env_fallback',
+      profile_source: 'env_only',
       current_runtime_payload: {
         default_symbol: 'BTC-USDT-SWAP',
         allowed_symbols: ['BTC-USDT-SWAP'],

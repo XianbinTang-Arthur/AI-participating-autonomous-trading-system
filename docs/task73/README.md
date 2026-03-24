@@ -698,6 +698,8 @@ allocator 需要新增以下边界：
 
 因为第一步如果不立住，后面所有“多策略并行”都会建立在脏库存和脏归因之上。
 
+allocator 的下一阶段升级任务书见 [task74/README.md](/D:/文件/project/AIParticipatingAutonomousTradingSystem/docs/task74/README.md)。
+
 ## 11. 验收红线
 
 以下任一项未满足，都不应宣称系统已经支持“单账户并行多策略”：

@@ -9,7 +9,6 @@ from aats.schemas.execution import FillEvent, OrderObligation, OrderState
 from aats.schemas.portfolio import FillOutcomeRecord, FundingFeeRecord, PortfolioSnapshot, SleevePnLRecord
 from aats.schemas.reconciliation import ReconciliationReport
 from aats.schemas.operator import OperatorUserRecord
-from aats.schemas.runtime_profiles import RuntimeProfileActivationState, RuntimeProfileRevision
 from aats.schemas.strategy_runtime import (
     PortfolioAllocationDecision,
     StrategyExecutionBundle,
@@ -314,23 +313,6 @@ class OperatorUserRepository(Protocol):
         ...
 
     def delete_user(self, username: str) -> bool:
-        ...
-
-
-class RuntimeProfileRepository(Protocol):
-    def save_revision(self, revision: RuntimeProfileRevision) -> RuntimeProfileRevision:
-        ...
-
-    def get_revision(self, revision_id: str) -> RuntimeProfileRevision | None:
-        ...
-
-    def list_revisions(self) -> list[RuntimeProfileRevision]:
-        ...
-
-    def activation_state(self) -> RuntimeProfileActivationState:
-        ...
-
-    def save_activation_state(self, state: RuntimeProfileActivationState) -> RuntimeProfileActivationState:
         ...
 
 

@@ -43,20 +43,6 @@ class UpdateOperatorUserRequest(BaseModel):
     enabled: bool | None = None
 
 
-class CreateRuntimeProfileDraftRequest(BaseModel):
-    profile_label: str
-
-
-class UpdateRuntimeProfileRequest(BaseModel):
-    profile_label: str | None = None
-    activation_note: str | None = None
-    payload: dict[str, Any]
-
-
-class StageRuntimeProfileRequest(BaseModel):
-    activation_note: str | None = None
-
-
 class StrategyProfileManualActivateRequest(BaseModel):
     reason: str = "manual_activate_strategy_profile"
 
@@ -99,27 +85,6 @@ def _session_payload(request: Request) -> dict[str, Any]:
         "role": principal.role if principal is not None else "anonymous",
         "auth_source": principal.auth_source if principal is not None else "anonymous",
     }
-
-
-def _runtime_profile_control_disabled(
-    request: Request,
-    *,
-    principal: OperatorPrincipal,
-    action: str,
-    details: dict[str, Any] | None = None,
-) -> None:
-    _query(request).record_runtime_profile_action(
-        action=action,
-        actor_role=principal.role,
-        actor_identity=principal.identity,
-        auth_source=principal.auth_source,
-        status="control_disabled",
-        details={
-            "control_plane_status": "deprecated_readonly",
-            **(details or {}),
-        },
-    )
-    raise _runtime_profile_http_error("runtime_profile_control_disabled")
 
 
 @auth_router.get("/auth/session")
@@ -216,100 +181,6 @@ async def auth_users(
     principal: OperatorPrincipal = Depends(require_admin_access),
 ) -> dict[str, Any]:
     return _query(request).operator_users(actor_identity=principal.identity)
-
-
-@auth_router.get("/runtime-profiles")
-async def runtime_profiles(
-    request: Request,
-    principal: OperatorPrincipal = Depends(require_admin_access),
-) -> dict[str, Any]:
-    _ = principal
-    return _query(request).runtime_profile_snapshot()
-
-
-@auth_router.get("/runtime-profiles/summary")
-async def runtime_profiles_summary(
-    request: Request,
-    principal: OperatorPrincipal = Depends(require_admin_access),
-) -> dict[str, Any]:
-    _ = principal
-    return _query(request).runtime_profile_ai_config_snapshot()
-
-
-@auth_router.post("/runtime-profiles/drafts")
-async def create_runtime_profile_draft(
-    request: Request,
-    payload: CreateRuntimeProfileDraftRequest,
-    principal: OperatorPrincipal = Depends(require_admin_access),
-) -> dict[str, Any]:
-    _runtime_profile_control_disabled(
-        request,
-        principal=principal,
-        action="runtime_profile_create",
-        details={"profile_label": payload.profile_label},
-    )
-
-
-@auth_router.patch("/runtime-profiles/revisions/{revision_id}")
-async def update_runtime_profile(
-    request: Request,
-    revision_id: str,
-    payload: UpdateRuntimeProfileRequest,
-    principal: OperatorPrincipal = Depends(require_admin_access),
-) -> dict[str, Any]:
-    _runtime_profile_control_disabled(
-        request,
-        principal=principal,
-        action="runtime_profile_update",
-        details={
-            "revision_id": revision_id,
-            "profile_label": payload.profile_label,
-            "payload_keys": sorted(payload.payload.keys()),
-            "activation_note_present": payload.activation_note is not None,
-        },
-    )
-
-
-@auth_router.post("/runtime-profiles/revisions/{revision_id}/stage")
-async def stage_runtime_profile(
-    request: Request,
-    revision_id: str,
-    payload: StageRuntimeProfileRequest | None = None,
-    principal: OperatorPrincipal = Depends(require_admin_access),
-) -> dict[str, Any]:
-    _runtime_profile_control_disabled(
-        request,
-        principal=principal,
-        action="runtime_profile_stage",
-        details={
-            "revision_id": revision_id,
-            "activation_note_present": payload is not None and payload.activation_note is not None,
-        },
-    )
-
-
-@auth_router.post("/runtime-profiles/pending/cancel")
-async def cancel_pending_runtime_profile(
-    request: Request,
-    principal: OperatorPrincipal = Depends(require_admin_access),
-) -> dict[str, Any]:
-    _runtime_profile_control_disabled(
-        request,
-        principal=principal,
-        action="runtime_profile_cancel_pending",
-    )
-
-
-@auth_router.post("/runtime-profiles/restart")
-async def request_runtime_profile_restart(
-    request: Request,
-    principal: OperatorPrincipal = Depends(require_admin_access),
-) -> dict[str, Any]:
-    _runtime_profile_control_disabled(
-        request,
-        principal=principal,
-        action="runtime_profile_restart_request",
-    )
 
 
 @auth_router.get("/strategy-profiles")
@@ -504,27 +375,5 @@ def _operator_user_http_error(code: str) -> HTTPException:
     if code == "operator_username_conflict":
         return HTTPException(status_code=409, detail=code)
     if code in {"operator_last_admin_required", "operator_self_delete_forbidden", "operator_self_disable_forbidden"}:
-        return HTTPException(status_code=409, detail=code)
-    return HTTPException(status_code=400, detail=code)
-
-
-def _runtime_profile_http_error(code: str) -> HTTPException:
-    if code == "runtime_profile_control_disabled":
-        return HTTPException(status_code=409, detail=code)
-    if code == "runtime_profile_revision_not_found":
-        return HTTPException(status_code=404, detail=code)
-    if code in {
-        "runtime_profile_label_required",
-        "runtime_profile_revision_locked",
-        "runtime_profile_payload_invalid",
-        "runtime_profile_fields_unsupported",
-        "runtime_profile_already_active",
-    }:
-        return HTTPException(status_code=400, detail=code)
-    if code == "runtime_profile_pending_activation_exists":
-        return HTTPException(status_code=409, detail=code)
-    if code.startswith("runtime_profile_fields_unsupported:") or code.startswith("runtime_profile_payload_invalid:"):
-        return HTTPException(status_code=400, detail=code)
-    if code.startswith("runtime_profile_preflight_blocked:"):
         return HTTPException(status_code=409, detail=code)
     return HTTPException(status_code=400, detail=code)
