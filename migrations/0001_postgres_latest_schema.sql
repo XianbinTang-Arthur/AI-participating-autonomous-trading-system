@@ -408,6 +408,107 @@ CREATE TABLE IF NOT EXISTS reconciliation_reports (
 	payload JSON NOT NULL,
 	PRIMARY KEY (reconciliation_id)
 );
+
+
+CREATE TABLE IF NOT EXISTS reconciliation_findings (
+	finding_id VARCHAR(64) NOT NULL,
+	reconciliation_id VARCHAR(64) NOT NULL,
+	product_type VARCHAR(16),
+	margin_mode VARCHAR(16),
+	primary_symbol VARCHAR(64),
+	strategy_sleeve_id VARCHAR(64),
+	allocation_id VARCHAR(64),
+	strategy_bundle_id VARCHAR(64),
+	scope_kind VARCHAR(32) NOT NULL,
+	scope_ref VARCHAR(128),
+	layer VARCHAR(32) NOT NULL,
+	finding_type VARCHAR(64) NOT NULL,
+	severity_class VARCHAR(16) NOT NULL,
+	structural BOOLEAN NOT NULL,
+	financial BOOLEAN NOT NULL,
+	observational BOOLEAN NOT NULL,
+	review_required BOOLEAN NOT NULL,
+	only_reduce_required BOOLEAN NOT NULL,
+	halt_required BOOLEAN NOT NULL,
+	blocks_resume BOOLEAN NOT NULL,
+	reason_code VARCHAR(128) NOT NULL,
+	details JSON NOT NULL,
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+	PRIMARY KEY (finding_id),
+	FOREIGN KEY(reconciliation_id) REFERENCES reconciliation_reports (reconciliation_id)
+);
+
+
+CREATE TABLE IF NOT EXISTS baseline_generations (
+	generation_id VARCHAR(64) NOT NULL,
+	baseline_event_ref VARCHAR(64) NOT NULL,
+	baseline_id VARCHAR(64),
+	baseline_kind VARCHAR(32) NOT NULL,
+	account_source VARCHAR(64) NOT NULL,
+	product_type VARCHAR(16) NOT NULL,
+	margin_mode VARCHAR(16) NOT NULL,
+	allowed_symbols JSON NOT NULL,
+	exchange_snapshot_ts TIMESTAMP WITH TIME ZONE NOT NULL,
+	imported_at TIMESTAMP WITH TIME ZONE NOT NULL,
+	safe_for_automatic_continuation BOOLEAN NOT NULL,
+	requires_operator_review BOOLEAN NOT NULL,
+	previous_generation_id VARCHAR(64),
+	previous_baseline_ref VARCHAR(64),
+	exchange_ack_watermark_id VARCHAR(64),
+	operator_action_ref VARCHAR(64),
+	trigger_reason VARCHAR(256),
+	reason_codes JSON NOT NULL,
+	balance_count INTEGER NOT NULL,
+	position_count INTEGER NOT NULL,
+	open_order_count INTEGER NOT NULL,
+	fill_count INTEGER NOT NULL,
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+	PRIMARY KEY (generation_id)
+);
+
+
+CREATE TABLE IF NOT EXISTS exchange_ack_watermarks (
+	watermark_id VARCHAR(64) NOT NULL,
+	account_source VARCHAR(64) NOT NULL,
+	product_type VARCHAR(16) NOT NULL,
+	margin_mode VARCHAR(16) NOT NULL,
+	allowed_symbols JSON NOT NULL,
+	acknowledged_at TIMESTAMP WITH TIME ZONE NOT NULL,
+	latest_bill_id VARCHAR(128),
+	latest_bill_ts TIMESTAMP WITH TIME ZONE,
+	latest_fill_id VARCHAR(128),
+	latest_fill_ts TIMESTAMP WITH TIME ZONE,
+	latest_order_snapshot_ts TIMESTAMP WITH TIME ZONE,
+	latest_reconciliation_id VARCHAR(64),
+	baseline_event_ref VARCHAR(64),
+	operator_action_ref VARCHAR(64),
+	details JSON NOT NULL,
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+	PRIMARY KEY (watermark_id)
+);
+
+
+CREATE TABLE IF NOT EXISTS reconciliation_state_snapshots (
+	snapshot_id VARCHAR(64) NOT NULL,
+	reconciliation_id VARCHAR(64) NOT NULL,
+	product_type VARCHAR(16),
+	margin_mode VARCHAR(16),
+	primary_symbol VARCHAR(64),
+	recovery_state VARCHAR(32) NOT NULL,
+	resume_eligible BOOLEAN NOT NULL,
+	safe_to_trade BOOLEAN NOT NULL,
+	review_required BOOLEAN NOT NULL,
+	only_reduce_required BOOLEAN NOT NULL,
+	halt_required BOOLEAN NOT NULL,
+	bundle_recovery_required BOOLEAN NOT NULL,
+	resume_blocked_reasons_json JSON NOT NULL,
+	derived_from_generation_id VARCHAR(64),
+	exchange_ack_watermark_id VARCHAR(64),
+	details JSON NOT NULL,
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+	PRIMARY KEY (snapshot_id),
+	FOREIGN KEY(reconciliation_id) REFERENCES reconciliation_reports (reconciliation_id)
+);
 CREATE TABLE IF NOT EXISTS sleeve_pnl_records (
 	record_id VARCHAR(96) NOT NULL,
 	strategy_sleeve_id VARCHAR(64),

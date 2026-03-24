@@ -309,6 +309,33 @@ class ReconciliationService:
                 account_baseline=self._latest_account_baseline(),
             ),
         )
+        latest_generation = None
+        latest_generation_getter = getattr(
+            self.reconciliation_repo,
+            "latest_baseline_generation_for_scope",
+            None,
+        )
+        if callable(latest_generation_getter):
+            latest_generation = latest_generation_getter(scope=self.runtime_scope)
+        latest_ack_watermark = None
+        latest_ack_getter = getattr(
+            self.reconciliation_repo,
+            "latest_exchange_ack_watermark_for_scope",
+            None,
+        )
+        if callable(latest_ack_getter):
+            latest_ack_watermark = latest_ack_getter(scope=self.runtime_scope)
+        if latest_generation is not None or latest_ack_watermark is not None:
+            report = report.model_copy(
+                update={
+                    "baseline_generation_id": (
+                        None if latest_generation is None else latest_generation.generation_id
+                    ),
+                    "exchange_ack_watermark_id": (
+                        None if latest_ack_watermark is None else latest_ack_watermark.watermark_id
+                    ),
+                }
+            )
         if self.reconciliation_classifier is not None:
             report = self.reconciliation_classifier.annotate(report)
         return report
@@ -322,10 +349,24 @@ class ReconciliationService:
         summary_getter = getattr(account_service, "recent_bills_summary", None)
         if not callable(summary_getter):
             return {}
+        acknowledged_watermark = None
+        latest_ack_watermark_for_scope = getattr(
+            self.reconciliation_repo,
+            "latest_exchange_ack_watermark_for_scope",
+            None,
+        )
+        if callable(latest_ack_watermark_for_scope):
+            acknowledged_watermark = latest_ack_watermark_for_scope(scope=self.runtime_scope)
         if account_baseline is None:
             account_baseline = self._latest_account_baseline()
         summary_since_getter = getattr(account_service, "recent_bills_summary_since", None)
         if (
+            acknowledged_watermark is not None
+            and callable(summary_since_getter)
+            and acknowledged_watermark.latest_bill_ts is not None
+        ):
+            summary = summary_since_getter(since_ts=acknowledged_watermark.latest_bill_ts)
+        elif (
             account_baseline is not None
             and account_baseline.baseline_kind == "operator_rebaseline"
             and callable(summary_since_getter)

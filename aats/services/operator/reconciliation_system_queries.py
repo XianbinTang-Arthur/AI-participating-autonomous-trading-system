@@ -27,12 +27,16 @@ class ReconciliationSystemQueryFacade:
     def reconciliation_latest(self) -> dict[str, Any]:
         report = self.owner._latest_scoped_reconciliation()
         latest_validation = self.owner.runtime.event_store.latest(topics.RECONCILIATION_VALIDATIONS)
+        recovery = self.owner.recovery_view()
         return {
             "reconciliation": report.model_dump(mode="json") if report is not None else None,
             "mismatch_summary": self.owner._reconciliation_mismatch_summary(report),
             "exchange_bills_summary": self.owner._exchange_bills_summary(),
             "latest_validation": latest_validation.payload if latest_validation is not None else None,
-            "recovery": self.owner.recovery_view(),
+            "baseline_generation": recovery.get("latest_baseline_generation"),
+            "exchange_ack_watermark": recovery.get("latest_exchange_ack_watermark"),
+            "reconciliation_state_snapshot": recovery.get("latest_state_snapshot"),
+            "recovery": recovery,
         }
 
     def reconciliation_recent(self, *, limit: int = 20, offset: int = 0) -> dict[str, Any]:
@@ -76,6 +80,7 @@ class ReconciliationSystemQueryFacade:
             "mismatch_summary": self.owner._reconciliation_mismatch_summary(report),
             "exchange_bills_summary": self.owner._exchange_bills_summary(),
             "exchange_bills_explanations": report.exchange_bills_explanations,
+            "recovery_state_snapshot": self.owner.recovery_view().get("latest_state_snapshot"),
         }
 
     async def validate_reconciliation(
@@ -298,7 +303,11 @@ class ReconciliationSystemQueryFacade:
             key="system",
             payload_model=action_record,
         )
-        baseline_importer = AccountBaselineImportService(event_store=self.owner.runtime.event_store)
+        baseline_importer = AccountBaselineImportService(
+            event_store=self.owner.runtime.event_store,
+            reconciliation_repo=self.owner.runtime.reconciliation_repo,
+        )
+        recent_bills_summary_getter = getattr(self.owner.runtime.account_service, "recent_bills_summary", None)
         imported = baseline_importer.rebaseline_snapshot(
             exchange_snapshot=exchange_snapshot,
             portfolio_state=self.owner.runtime.portfolio_service.state,
@@ -308,6 +317,11 @@ class ReconciliationSystemQueryFacade:
             previous_baseline_ref=previous_baseline_ref,
             operator_action_ref=action_envelope.event_id,
             trigger_reason=reason,
+            exchange_bills_summary=(
+                recent_bills_summary_getter()
+                if callable(recent_bills_summary_getter)
+                else {}
+            ),
         )
         await self.owner.runtime.portfolio_service.bootstrap_snapshot(snapshot_origin="operator_rebaseline")
         report = await self.owner.runtime.reconciliation_service.validate_now(reason="operator_rebaseline")

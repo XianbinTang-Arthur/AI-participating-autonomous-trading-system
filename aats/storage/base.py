@@ -7,7 +7,13 @@ from aats.schemas.common import EventEnvelope
 from aats.schemas.audit import DecisionAuditRecord
 from aats.schemas.execution import FillEvent, OrderObligation, OrderState
 from aats.schemas.portfolio import FillOutcomeRecord, FundingFeeRecord, PortfolioSnapshot, SleevePnLRecord
-from aats.schemas.reconciliation import ReconciliationReport
+from aats.schemas.reconciliation import (
+    BaselineGenerationRecord,
+    ExchangeAckWatermark,
+    ReconciliationFinding,
+    ReconciliationReport,
+    ReconciliationStateSnapshot,
+)
 from aats.schemas.operator import OperatorUserRecord
 from aats.schemas.strategy_runtime import (
     PortfolioAllocationDecision,
@@ -250,6 +256,42 @@ class SleevePnLRepository(Protocol):
 
 class ReconciliationRepository(Protocol):
     def save_report(self, report: ReconciliationReport) -> None:
+        ...
+
+    def save_findings(self, findings: list[ReconciliationFinding]) -> None:
+        ...
+
+    def findings_for_reconciliation(self, *, reconciliation_id: str) -> list[ReconciliationFinding]:
+        ...
+
+    def save_state_snapshot(self, snapshot: ReconciliationStateSnapshot) -> None:
+        ...
+
+    def latest_state_snapshot_for_scope(
+        self,
+        *,
+        scope: RuntimeStateScope,
+    ) -> ReconciliationStateSnapshot | None:
+        ...
+
+    def save_baseline_generation(self, generation: BaselineGenerationRecord) -> None:
+        ...
+
+    def latest_baseline_generation_for_scope(
+        self,
+        *,
+        scope: RuntimeStateScope,
+    ) -> BaselineGenerationRecord | None:
+        ...
+
+    def save_exchange_ack_watermark(self, watermark: ExchangeAckWatermark) -> None:
+        ...
+
+    def latest_exchange_ack_watermark_for_scope(
+        self,
+        *,
+        scope: RuntimeStateScope,
+    ) -> ExchangeAckWatermark | None:
         ...
 
     def latest(self) -> ReconciliationReport | None:

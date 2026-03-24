@@ -60,11 +60,21 @@ class RecoveryReconciliationClassifier:
                 remediation_action=report.remediation_action or "review_and_rebaseline_if_expected",
             )
         if report.severity == "SOFT_MISMATCH":
+            if report.observational_only:
+                return ReconciliationClassification(
+                    classification="observational_drift",
+                    auto_repairable=False,
+                    resume_blocking=False,
+                    review_required=False,
+                    halt_required=False,
+                    recommended_operator_action=report.recommended_operator_action or "observe_only",
+                    remediation_action=report.remediation_action or "observe_only",
+                )
             return ReconciliationClassification(
-                classification="investigate_state_divergence",
+                classification="soft_divergence_continue",
                 auto_repairable=False,
-                resume_blocking=True,
-                review_required=True,
+                resume_blocking=False,
+                review_required=False,
                 halt_required=False,
                 recommended_operator_action=report.recommended_operator_action or "investigate_state_divergence",
                 remediation_action=report.remediation_action or "investigate_state_divergence",

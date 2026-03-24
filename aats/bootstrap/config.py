@@ -1725,7 +1725,10 @@ async def build_runtime(
         settings=runtime_settings,
         account_service=account_service,
     )
-    baseline_import_service = AccountBaselineImportService(event_store=storage.event_store)
+    baseline_import_service = AccountBaselineImportService(
+        event_store=storage.event_store,
+        reconciliation_repo=storage.reconciliation_repo,
+    )
     bootstrap_from_exchange = runtime_layering.recovery_policy.startup_baseline_import_supported
     execution_adapter = _build_execution_adapter(
         settings=runtime_settings,
@@ -2082,6 +2085,12 @@ async def build_runtime(
 
     if runtime_layering.environment_capabilities.account_state_source_kind == "exchange":
         account_snapshot = await account_service.refresh(force=True)
+        recent_bills_summary_getter = getattr(account_service, "recent_bills_summary", None)
+        exchange_bills_summary = (
+            recent_bills_summary_getter()
+            if callable(recent_bills_summary_getter)
+            else {}
+        )
         funding_fee_sync_posted_count = 0
         if funding_fee_sync_service is not None:
             funding_result = funding_fee_sync_service.sync_recent_bills(
@@ -2104,6 +2113,7 @@ async def build_runtime(
                 product_type=state_scope.product_type,
                 margin_mode=state_scope.margin_mode,
                 allowed_symbols=state_scope.allowed_symbols,
+                exchange_bills_summary=exchange_bills_summary,
             )
             imported_baseline = imported.snapshot
             imported_baseline_event_id = imported.event_id

@@ -31,6 +31,7 @@
   soft_mismatch: "轻度差异",
   hard_mismatch: "严重差异",
   info: "信息提示",
+  degraded_continue: "轻度差异，继续运行",
   manually_halted: "已暂停，待恢复",
   resume_blocked: "恢复受限",
   normal_operation: "正常运行",
@@ -407,6 +408,8 @@ const ERROR_MAP = {
   go_close_position_on_exchange: "建议去交易所核对并处理异常仓位",
   confirm_and_rebaseline: "确认属实后纳入新基线",
   observe_only: "先观察，不建议立即处理",
+  observational_drift: "动态漂移，仅观察",
+  soft_divergence_continue: "轻度差异，允许继续运行",
   live_submit_disabled: "当前没有开放向交易所正式报单。",
   okx_simulated_trading_required: "当前 OKX 模拟盘/实盘环境与运行配置不一致。",
   guarded_execution_dry_run: "当前是只演练不报单模式，系统不会真正下单。",
@@ -523,6 +526,7 @@ export function toneForRuntimeState(runtimeState) {
     case "ready":
       return "positive";
     case "degraded":
+    case "degraded_continue":
     case "review_required":
     case "only_reduce":
     case "derivatives_only_reduce":
@@ -554,6 +558,7 @@ export function toneForReconciliationSeverity(severity) {
 
 export function tradingStatusLabel(recovery = {}) {
   if (recovery.recovery_state === "only_reduce" || recovery.only_reduce_required) return "仅允许减仓";
+  if (recovery.recovery_state === "degraded_continue" && recovery.safe_to_trade) return "轻度漂移，可交易";
   if (recovery.safe_to_trade) return "可交易";
   if (recovery.halted && recovery.resume_eligible) return "待恢复";
   if (recovery.halted) return "已暂停";
@@ -562,6 +567,7 @@ export function tradingStatusLabel(recovery = {}) {
 
 export function recoveryStatusLabel(recovery = {}) {
   if (recovery.recovery_state === "only_reduce" || recovery.only_reduce_required) return "仅允许减仓";
+  if (recovery.recovery_state === "degraded_continue" && recovery.safe_to_trade) return "轻度差异，继续运行";
   if (recovery.safe_to_trade) return "可交易";
   if (recovery.halted && recovery.resume_eligible) return "待恢复";
   if (recovery.review_required) return "待人工确认";
@@ -598,6 +604,7 @@ export function operationalStatusLabel({
   if (health.halted || (recovery.halted && !recovery.resume_eligible)) return "已暂停";
   if ((blockers || []).length > 0) return "已阻断";
   if (reconciliation?.halt_required) return "需先完成对账";
+  if (recovery.recovery_state === "degraded_continue" && recovery.safe_to_trade) return "轻度差异，继续运行";
   if (recovery.review_required) return "待人工确认";
   if (recovery.recovery_state === "only_reduce" || recovery.only_reduce_required) return "仅允许减仓";
   if (recovery.safe_to_trade === false) return "恢复受限";
@@ -618,6 +625,9 @@ export function operationalStatusCopy({
 } = {}) {
   if (recovery.halted && recovery.resume_eligible && !recovery.safe_to_trade) {
     return "当前处于手动暂停状态。确认最新对账和账户快照无误后，可直接恢复自动运行。";
+  }
+  if (recovery.recovery_state === "degraded_continue" && recovery.safe_to_trade) {
+    return "当前只有轻度动态漂移，系统仍可继续运行。建议持续观察保证金和仓位快照，不需要立即人工确认。";
   }
   if (health.halted || (recovery.halted && !recovery.resume_eligible)) {
     return "当前处于暂停状态。请先确认暂停原因和系统状态，再决定后续操作。";

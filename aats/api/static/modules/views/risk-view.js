@@ -323,7 +323,16 @@ export function renderRiskSections(data) {
       content: summaryStrip([
         { label: "对账级别", value: readableState(reconciliation?.severity || "unknown"), meta: middleEllipsis(reconciliation?.reconciliation_id, 10, 6, "当前暂无对账编号"), tone: reconciliation?.halt_required ? "danger" : toneForReconciliationSeverity(reconciliation?.severity) },
         { label: "是否要求停机", value: booleanWord(reconciliation?.halt_required), meta: reconciliation?.exchange_comparison_enabled ? "已比对交易所" : "仅校验本地记录", tone: reconciliation?.halt_required ? "danger" : "positive" },
-        { label: "差异原因", value: listText(mismatchSummary.mismatch_reasons, "当前没有额外差异原因"), meta: listText(mismatchSummary.mismatch_categories, "当前没有额外差异分类"), tone: mismatchSummary.mismatch_reasons?.length ? "warning" : "positive" },
+        {
+          label: "差异分层",
+          value: mismatchSummary.finding_summary
+            ? `${formatNumber(mismatchSummary.finding_summary.structural_count || 0, 0)} / ${formatNumber(mismatchSummary.finding_summary.financial_count || 0, 0)} / ${formatNumber(mismatchSummary.finding_summary.observational_count || 0, 0)}`
+            : "当前没有差异条目",
+          meta: mismatchSummary.observational_only
+            ? "当前只有动态观察值漂移，不需要立即人工确认。"
+            : "顺序为：结构性 / 财务 / 观察值。",
+          tone: mismatchSummary.observational_only ? "info" : mismatchSummary.mismatch_reasons?.length ? "warning" : "positive",
+        },
         { label: "建议动作", value: mismatchSummary.recommended_operator_action ? localizeError(mismatchSummary.recommended_operator_action) : "当前没有额外建议动作", meta: listText(mismatchSummary.safety_impacts, "当前没有额外安全影响说明"), tone: mismatchSummary.recommended_operator_action ? "info" : "neutral" },
       ]),
     }),
@@ -462,6 +471,9 @@ export function reconciliationActionCopy({ reconciliation = null, recovery = {},
   if (reconciliation?.halt_required) {
     return "当前需先完成对账。请先核对差异原因；确认交易所当前状态才是正确状态后，再接受为新基线。";
   }
+  if (reconciliation?.observational_only && !recovery.review_required) {
+    return "当前只有轻度动态漂移，例如保证金或浮盈随行情波动。系统可继续运行，建议持续观察，不需要立即重设基线。";
+  }
   if (reconciliation?.review_required || shouldShowRebaselineAction({ reconciliation, recovery })) {
     return "当前处于待人工确认状态。请先重新对账或核对交易所账单，确认状态符合预期后再接受为新基线。";
   }
@@ -598,6 +610,7 @@ function riskTone({ primaryBlocker, blockers, reconciliation, recovery, health }
   const activeBlockers = primaryBlocker ? [primaryBlocker] : blockers;
   if (isPausedAwaitingResume({ blockers, recovery })) return "warning";
   if (health?.halted || activeBlockers.length > 0 || reconciliation?.halt_required) return "danger";
+  if (reconciliation?.observational_only && recovery.safe_to_trade) return "info";
   if (!recovery.safe_to_trade || recovery.review_required) return "warning";
   return "positive";
 }

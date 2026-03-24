@@ -1076,6 +1076,7 @@ class ReplayEngine:
                     f"decision_chain_missing_reconciliation_ref decision_id={decision_id}"
                 )
 
+            decision_reconciliation_reports: list[ReconciliationReport] = []
             for ref in record.reconciliation_refs:
                 event = self._validate_ref(
                     issues=issues,
@@ -1089,6 +1090,7 @@ class ReplayEngine:
                 if event is None:
                     continue
                 report = ReconciliationReport.model_validate(event.payload)
+                decision_reconciliation_reports.append(report)
                 if report.decision_id != decision_id:
                     issues.append(
                         "decision_chain_reconciliation_decision_mismatch "
@@ -1109,6 +1111,11 @@ class ReplayEngine:
                         f"decision_id={decision_id} reconciliation_id={report.reconciliation_id} "
                         f"portfolio_snapshot_ref={report.portfolio_snapshot_ref} "
                         f"audit_portfolio_snapshot_ref={record.portfolio_delta_ref}"
+                    )
+                if report.mismatch_categories and not report.findings:
+                    issues.append(
+                        "decision_chain_reconciliation_missing_findings "
+                        f"decision_id={decision_id} reconciliation_id={report.reconciliation_id}"
                     )
 
             if policy is not None and not policy.allowed and record.order_intent_refs:
@@ -1148,6 +1155,46 @@ class ReplayEngine:
                             "decision_chain_allocation_active_family_missing_intent "
                             f"decision_id={decision_id}"
                         )
+            if decision_reconciliation_reports:
+                allowed_sleeves = {
+                    str(intent.strategy_sleeve_id)
+                    for intent in sleeve_intents
+                    if intent.strategy_sleeve_id is not None
+                }
+                allocation_id = None if allocation_decision is None else allocation_decision.allocation_id
+                strategy_bundle_id = None if strategy_bundle is None else strategy_bundle.bundle_id
+                for report in decision_reconciliation_reports:
+                    for finding in report.findings:
+                        if (
+                            finding.strategy_sleeve_id is not None
+                            and allowed_sleeves
+                            and str(finding.strategy_sleeve_id) not in allowed_sleeves
+                        ):
+                            issues.append(
+                                "decision_chain_reconciliation_sleeve_scope_mismatch "
+                                f"decision_id={decision_id} reconciliation_id={report.reconciliation_id} "
+                                f"strategy_sleeve_id={finding.strategy_sleeve_id}"
+                            )
+                        if (
+                            finding.allocation_id is not None
+                            and allocation_id is not None
+                            and str(finding.allocation_id) != str(allocation_id)
+                        ):
+                            issues.append(
+                                "decision_chain_reconciliation_allocation_scope_mismatch "
+                                f"decision_id={decision_id} reconciliation_id={report.reconciliation_id} "
+                                f"allocation_id={finding.allocation_id}"
+                            )
+                        if (
+                            finding.strategy_bundle_id is not None
+                            and strategy_bundle_id is not None
+                            and str(finding.strategy_bundle_id) != str(strategy_bundle_id)
+                        ):
+                            issues.append(
+                                "decision_chain_reconciliation_bundle_scope_mismatch "
+                                f"decision_id={decision_id} reconciliation_id={report.reconciliation_id} "
+                                f"strategy_bundle_id={finding.strategy_bundle_id}"
+                            )
             if record.order_intent_refs:
                 if not execution_plans and execution_plan is not None:
                     execution_plans = [execution_plan]

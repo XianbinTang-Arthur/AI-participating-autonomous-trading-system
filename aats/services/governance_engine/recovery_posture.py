@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from aats.schemas.reconciliation import ReconciliationReport
+from aats.schemas.reconciliation import ReconciliationReport, ReconciliationStateSnapshot
 from aats.schemas.system import RecoveryStatus
 from aats.services.execution_engine.bundle_recovery import scoped_bundle_recovery_assessment
 from aats.services.runtime_scope import latest_matching_reconciliation, runtime_state_scope
@@ -159,6 +159,12 @@ class RecoveryPostureEvaluator:
             elif report.only_reduce_required and recovery_state not in {"rebaseline_pending", "rebaseline_completed"}:
                 recovery_state = "only_reduce"
             elif (
+                report.severity == "SOFT_MISMATCH"
+                and not report.review_required
+                and recovery_state not in {"rebaseline_pending", "rebaseline_completed"}
+            ):
+                recovery_state = "degraded_continue"
+            elif (
                 report.review_required
                 and self.runtime.recovery_policy.review_required_blocks_resume
                 and recovery_state not in {"rebaseline_pending", "rebaseline_completed"}
@@ -181,10 +187,18 @@ class RecoveryPostureEvaluator:
             bundle_recovery=bundle_recovery,
             ai_requires_manual_review=ai_requires_manual_review,
         ):
-            recovery_state = "normal_operation"
+            recovery_state = (
+                "degraded_continue"
+                if report is not None and report.severity == "SOFT_MISMATCH" and not report.review_required
+                else "normal_operation"
+            )
         if recovery_state == "rebaseline_completed" and not self.runtime.kill_switch.halted:
-            recovery_state = "normal_operation"
-        elif self.runtime.kill_switch.halted and recovery_state in {"normal_operation", "only_reduce"}:
+            recovery_state = (
+                "degraded_continue"
+                if report is not None and report.severity == "SOFT_MISMATCH" and not report.review_required
+                else "normal_operation"
+            )
+        elif self.runtime.kill_switch.halted and recovery_state in {"normal_operation", "degraded_continue", "only_reduce"}:
             recovery_state = "resume_blocked"
 
         only_reduce_required, bundle_only_reduce_reasons = self._current_only_reduce_state(
@@ -230,11 +244,11 @@ class RecoveryPostureEvaluator:
             and recovery_state in {"review_required", "resume_blocked"}
         )
         resume_eligible = (
-            recovery_state in {"normal_operation", "only_reduce", "rebaseline_completed", "manually_halted"}
+            recovery_state in {"normal_operation", "degraded_continue", "only_reduce", "rebaseline_completed", "manually_halted"}
             and resume_check.runnable
         )
         safe_to_trade = (
-            recovery_state in {"normal_operation", "only_reduce"}
+            recovery_state in {"normal_operation", "degraded_continue", "only_reduce"}
             and resume_check.runnable
             and not self.runtime.kill_switch.halted
         )
@@ -286,7 +300,9 @@ class RecoveryPostureEvaluator:
             updates["only_reduce_required"] = only_reduce_required
             updates["only_reduce_reasons"] = only_reduce_reasons
             updates["unknown_state_details"] = list(latest_reconciliation.unknown_state_details)
-        return status.model_copy(update=updates)
+        finalized = status.model_copy(update=updates)
+        self._persist_state_snapshot_if_changed(finalized=finalized, latest_reconciliation=latest_reconciliation)
+        return finalized
 
     def _bundle_recovery_assessment(self):
         order_states_for_scope = getattr(self.runtime.execution_repo, "order_states_for_scope", None)
@@ -315,3 +331,63 @@ class RecoveryPostureEvaluator:
         if self.runtime.environment_capabilities.exchange_coupled:
             blockers = list(dict.fromkeys(blockers + submit_blocked_reasons))
         return blockers
+
+    def _persist_state_snapshot_if_changed(
+        self,
+        *,
+        finalized: RecoveryStatus,
+        latest_reconciliation: ReconciliationReport | None,
+    ) -> None:
+        if latest_reconciliation is None:
+            return
+        latest_snapshot_getter = getattr(
+            self.runtime.reconciliation_repo,
+            "latest_state_snapshot_for_scope",
+            None,
+        )
+        save_snapshot = getattr(self.runtime.reconciliation_repo, "save_state_snapshot", None)
+        if not callable(latest_snapshot_getter) or not callable(save_snapshot):
+            return
+        latest_snapshot = latest_snapshot_getter(scope=self.state_scope)
+        details = {
+            "reconciliation_severity": latest_reconciliation.severity,
+            "recovery_classification": latest_reconciliation.recovery_classification,
+            "finding_summary": latest_reconciliation.finding_summary,
+            "review_required": latest_reconciliation.review_required,
+            "only_reduce_required": latest_reconciliation.only_reduce_required,
+        }
+        should_persist = latest_snapshot is None or any(
+            (
+                latest_snapshot.reconciliation_id != latest_reconciliation.reconciliation_id,
+                latest_snapshot.recovery_state != finalized.recovery_state,
+                latest_snapshot.resume_eligible != finalized.resume_eligible,
+                latest_snapshot.safe_to_trade != finalized.safe_to_trade,
+                latest_snapshot.review_required != finalized.review_required,
+                latest_snapshot.only_reduce_required != finalized.only_reduce_required,
+                latest_snapshot.halt_required != latest_reconciliation.halt_required,
+                latest_snapshot.bundle_recovery_required != finalized.bundle_recovery_required,
+                list(latest_snapshot.resume_blocked_reasons_json) != list(finalized.resume_blocked_reasons),
+                dict(latest_snapshot.details_json) != details,
+            )
+        )
+        if not should_persist:
+            return
+        save_snapshot(
+            ReconciliationStateSnapshot(
+                reconciliation_id=latest_reconciliation.reconciliation_id,
+                product_type=latest_reconciliation.product_type,
+                margin_mode=latest_reconciliation.margin_mode,
+                primary_symbol=(latest_reconciliation.allowed_symbols or [None])[0],
+                recovery_state=finalized.recovery_state,
+                resume_eligible=finalized.resume_eligible,
+                safe_to_trade=finalized.safe_to_trade,
+                review_required=finalized.review_required,
+                only_reduce_required=finalized.only_reduce_required,
+                halt_required=latest_reconciliation.halt_required,
+                bundle_recovery_required=finalized.bundle_recovery_required,
+                resume_blocked_reasons_json=list(finalized.resume_blocked_reasons),
+                derived_from_generation_id=latest_reconciliation.baseline_generation_id,
+                exchange_ack_watermark_id=latest_reconciliation.exchange_ack_watermark_id,
+                details_json=details,
+            )
+        )

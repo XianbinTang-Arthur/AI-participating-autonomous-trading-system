@@ -2688,6 +2688,36 @@ class OperatorQueryService:
 
     def _build_recovery_view(self) -> dict[str, Any]:
         latest_reconciliation = self._latest_scoped_reconciliation()
+        latest_state_snapshot_getter = getattr(
+            self.runtime.reconciliation_repo,
+            "latest_state_snapshot_for_scope",
+            None,
+        )
+        latest_state_snapshot = (
+            latest_state_snapshot_getter(scope=self.state_scope)
+            if callable(latest_state_snapshot_getter)
+            else None
+        )
+        latest_generation_getter = getattr(
+            self.runtime.reconciliation_repo,
+            "latest_baseline_generation_for_scope",
+            None,
+        )
+        latest_baseline_generation = (
+            latest_generation_getter(scope=self.state_scope)
+            if callable(latest_generation_getter)
+            else None
+        )
+        latest_ack_getter = getattr(
+            self.runtime.reconciliation_repo,
+            "latest_exchange_ack_watermark_for_scope",
+            None,
+        )
+        latest_exchange_ack_watermark = (
+            latest_ack_getter(scope=self.state_scope)
+            if callable(latest_ack_getter)
+            else None
+        )
         latest_baseline = self.latest_account_baseline()
         latest_rebaseline_action = self.latest_operator_action("rebaseline")
         latest_resume_action = self.latest_operator_action("resume")
@@ -2710,6 +2740,21 @@ class OperatorQueryService:
             "last_rebaseline_action": latest_rebaseline_action,
             "last_resume_action": latest_resume_action,
             "latest_account_baseline": latest_baseline,
+            "latest_baseline_generation": (
+                latest_baseline_generation.model_dump(mode="json")
+                if latest_baseline_generation is not None
+                else None
+            ),
+            "latest_exchange_ack_watermark": (
+                latest_exchange_ack_watermark.model_dump(mode="json")
+                if latest_exchange_ack_watermark is not None
+                else None
+            ),
+            "latest_state_snapshot": (
+                latest_state_snapshot.model_dump(mode="json")
+                if latest_state_snapshot is not None
+                else None
+            ),
             "latest_reconciliation": latest_reconciliation.model_dump(mode="json") if latest_reconciliation is not None else None,
             "latest_ai_degradation": self.payload(latest_ai_degradation),
             "latest_ai_shadow_evaluation": self.payload(latest_ai_shadow_evaluation),
@@ -6610,6 +6655,13 @@ class OperatorQueryService:
             "halt_required": report.halt_required,
             "only_reduce_required": report.only_reduce_required,
             "only_reduce_reasons": report.only_reduce_reasons,
+            "structural_review_required": report.structural_review_required,
+            "financial_review_required": report.financial_review_required,
+            "observational_only": report.observational_only,
+            "finding_summary": report.finding_summary,
+            "findings": [item.model_dump(mode="json") for item in report.findings],
+            "baseline_generation_id": report.baseline_generation_id,
+            "exchange_ack_watermark_id": report.exchange_ack_watermark_id,
             "unknown_state_details": report.unknown_state_details,
             "mismatch_categories": report.mismatch_categories,
             "mismatch_reasons": report.mismatch_reasons,

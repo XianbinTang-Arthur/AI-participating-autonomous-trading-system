@@ -353,6 +353,97 @@ ALTER TABLE IF EXISTS reconciliation_reports ADD COLUMN IF NOT EXISTS margin_mod
 ALTER TABLE IF EXISTS reconciliation_reports ADD COLUMN IF NOT EXISTS primary_symbol VARCHAR(64);
 ALTER TABLE IF EXISTS reconciliation_reports ADD COLUMN IF NOT EXISTS payload JSON;
 
+CREATE TABLE IF NOT EXISTS reconciliation_findings (
+    finding_id VARCHAR(64) PRIMARY KEY,
+    reconciliation_id VARCHAR(64) NOT NULL REFERENCES reconciliation_reports(reconciliation_id),
+    product_type VARCHAR(16),
+    margin_mode VARCHAR(16),
+    primary_symbol VARCHAR(64),
+    strategy_sleeve_id VARCHAR(64),
+    allocation_id VARCHAR(64),
+    strategy_bundle_id VARCHAR(64),
+    scope_kind VARCHAR(32) NOT NULL,
+    scope_ref VARCHAR(128),
+    layer VARCHAR(32) NOT NULL,
+    finding_type VARCHAR(64) NOT NULL,
+    severity_class VARCHAR(16) NOT NULL,
+    structural BOOLEAN NOT NULL DEFAULT FALSE,
+    financial BOOLEAN NOT NULL DEFAULT FALSE,
+    observational BOOLEAN NOT NULL DEFAULT FALSE,
+    review_required BOOLEAN NOT NULL DEFAULT FALSE,
+    only_reduce_required BOOLEAN NOT NULL DEFAULT FALSE,
+    halt_required BOOLEAN NOT NULL DEFAULT FALSE,
+    blocks_resume BOOLEAN NOT NULL DEFAULT FALSE,
+    reason_code VARCHAR(128) NOT NULL,
+    details JSON NOT NULL DEFAULT '{}'::json,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS baseline_generations (
+    generation_id VARCHAR(64) PRIMARY KEY,
+    baseline_event_ref VARCHAR(64) NOT NULL,
+    baseline_id VARCHAR(64),
+    baseline_kind VARCHAR(32) NOT NULL,
+    account_source VARCHAR(64) NOT NULL,
+    product_type VARCHAR(16) NOT NULL,
+    margin_mode VARCHAR(16) NOT NULL,
+    allowed_symbols JSON NOT NULL DEFAULT '[]'::json,
+    exchange_snapshot_ts TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+    imported_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+    safe_for_automatic_continuation BOOLEAN NOT NULL DEFAULT TRUE,
+    requires_operator_review BOOLEAN NOT NULL DEFAULT FALSE,
+    previous_generation_id VARCHAR(64),
+    previous_baseline_ref VARCHAR(64),
+    exchange_ack_watermark_id VARCHAR(64),
+    operator_action_ref VARCHAR(64),
+    trigger_reason VARCHAR(256),
+    reason_codes JSON NOT NULL DEFAULT '[]'::json,
+    balance_count INTEGER NOT NULL DEFAULT 0,
+    position_count INTEGER NOT NULL DEFAULT 0,
+    open_order_count INTEGER NOT NULL DEFAULT 0,
+    fill_count INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS exchange_ack_watermarks (
+    watermark_id VARCHAR(64) PRIMARY KEY,
+    account_source VARCHAR(64) NOT NULL,
+    product_type VARCHAR(16) NOT NULL,
+    margin_mode VARCHAR(16) NOT NULL,
+    allowed_symbols JSON NOT NULL DEFAULT '[]'::json,
+    acknowledged_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+    latest_bill_id VARCHAR(128),
+    latest_bill_ts TIMESTAMP WITH TIME ZONE,
+    latest_fill_id VARCHAR(128),
+    latest_fill_ts TIMESTAMP WITH TIME ZONE,
+    latest_order_snapshot_ts TIMESTAMP WITH TIME ZONE,
+    latest_reconciliation_id VARCHAR(64),
+    baseline_event_ref VARCHAR(64),
+    operator_action_ref VARCHAR(64),
+    details JSON NOT NULL DEFAULT '{}'::json,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS reconciliation_state_snapshots (
+    snapshot_id VARCHAR(64) PRIMARY KEY,
+    reconciliation_id VARCHAR(64) NOT NULL REFERENCES reconciliation_reports(reconciliation_id),
+    product_type VARCHAR(16),
+    margin_mode VARCHAR(16),
+    primary_symbol VARCHAR(64),
+    recovery_state VARCHAR(32) NOT NULL,
+    resume_eligible BOOLEAN NOT NULL DEFAULT FALSE,
+    safe_to_trade BOOLEAN NOT NULL DEFAULT FALSE,
+    review_required BOOLEAN NOT NULL DEFAULT FALSE,
+    only_reduce_required BOOLEAN NOT NULL DEFAULT FALSE,
+    halt_required BOOLEAN NOT NULL DEFAULT FALSE,
+    bundle_recovery_required BOOLEAN NOT NULL DEFAULT FALSE,
+    resume_blocked_reasons_json JSON NOT NULL DEFAULT '[]'::json,
+    derived_from_generation_id VARCHAR(64),
+    exchange_ack_watermark_id VARCHAR(64),
+    details JSON NOT NULL DEFAULT '{}'::json,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+);
+
 -- Drop deprecated runtime profile control tables
 DROP TABLE IF EXISTS runtime_profile_activation CASCADE;
 DROP TABLE IF EXISTS runtime_profile_revisions CASCADE;
@@ -964,6 +1055,68 @@ CREATE INDEX IF NOT EXISTS ix_reconciliation_reports_primary_symbol ON reconcili
 CREATE INDEX IF NOT EXISTS ix_reconciliation_reports_product_type ON reconciliation_reports (product_type);
 CREATE INDEX IF NOT EXISTS ix_reconciliation_reports_scope_ts ON reconciliation_reports (product_type, margin_mode, as_of_ts);
 CREATE INDEX IF NOT EXISTS ix_reconciliation_reports_severity ON reconciliation_reports (severity);
+
+-- Ensure indexes exist on reconciliation_findings
+CREATE INDEX IF NOT EXISTS ix_reconciliation_findings_allocation_id ON reconciliation_findings (allocation_id);
+CREATE INDEX IF NOT EXISTS ix_reconciliation_findings_bundle_created ON reconciliation_findings (strategy_bundle_id, created_at);
+CREATE INDEX IF NOT EXISTS ix_reconciliation_findings_created_at ON reconciliation_findings (created_at);
+CREATE INDEX IF NOT EXISTS ix_reconciliation_findings_finding_type ON reconciliation_findings (finding_type);
+CREATE INDEX IF NOT EXISTS ix_reconciliation_findings_layer ON reconciliation_findings (layer);
+CREATE INDEX IF NOT EXISTS ix_reconciliation_findings_layer_created ON reconciliation_findings (layer, created_at);
+CREATE INDEX IF NOT EXISTS ix_reconciliation_findings_margin_mode ON reconciliation_findings (margin_mode);
+CREATE INDEX IF NOT EXISTS ix_reconciliation_findings_primary_symbol ON reconciliation_findings (primary_symbol);
+CREATE INDEX IF NOT EXISTS ix_reconciliation_findings_product_type ON reconciliation_findings (product_type);
+CREATE INDEX IF NOT EXISTS ix_reconciliation_findings_reason_code ON reconciliation_findings (reason_code);
+CREATE INDEX IF NOT EXISTS ix_reconciliation_findings_reconciliation_id ON reconciliation_findings (reconciliation_id);
+CREATE INDEX IF NOT EXISTS ix_reconciliation_findings_recon_created ON reconciliation_findings (reconciliation_id, created_at);
+CREATE INDEX IF NOT EXISTS ix_reconciliation_findings_scope_created ON reconciliation_findings (product_type, margin_mode, created_at);
+CREATE INDEX IF NOT EXISTS ix_reconciliation_findings_scope_kind ON reconciliation_findings (scope_kind);
+CREATE INDEX IF NOT EXISTS ix_reconciliation_findings_scope_ref ON reconciliation_findings (scope_ref);
+CREATE INDEX IF NOT EXISTS ix_reconciliation_findings_severity_class ON reconciliation_findings (severity_class);
+CREATE INDEX IF NOT EXISTS ix_reconciliation_findings_sleeve_created ON reconciliation_findings (strategy_sleeve_id, created_at);
+CREATE INDEX IF NOT EXISTS ix_reconciliation_findings_strategy_bundle_id ON reconciliation_findings (strategy_bundle_id);
+CREATE INDEX IF NOT EXISTS ix_reconciliation_findings_strategy_sleeve_id ON reconciliation_findings (strategy_sleeve_id);
+
+-- Ensure indexes exist on baseline_generations
+CREATE INDEX IF NOT EXISTS ix_baseline_generations_account_source ON baseline_generations (account_source);
+CREATE INDEX IF NOT EXISTS ix_baseline_generations_account_source_imported ON baseline_generations (account_source, imported_at);
+CREATE INDEX IF NOT EXISTS ix_baseline_generations_baseline_event_ref ON baseline_generations (baseline_event_ref);
+CREATE INDEX IF NOT EXISTS ix_baseline_generations_baseline_id ON baseline_generations (baseline_id);
+CREATE INDEX IF NOT EXISTS ix_baseline_generations_baseline_kind ON baseline_generations (baseline_kind);
+CREATE INDEX IF NOT EXISTS ix_baseline_generations_exchange_ack_watermark_id ON baseline_generations (exchange_ack_watermark_id);
+CREATE INDEX IF NOT EXISTS ix_baseline_generations_imported_at ON baseline_generations (imported_at);
+CREATE INDEX IF NOT EXISTS ix_baseline_generations_margin_mode ON baseline_generations (margin_mode);
+CREATE INDEX IF NOT EXISTS ix_baseline_generations_operator_action_ref ON baseline_generations (operator_action_ref);
+CREATE INDEX IF NOT EXISTS ix_baseline_generations_previous_baseline_ref ON baseline_generations (previous_baseline_ref);
+CREATE INDEX IF NOT EXISTS ix_baseline_generations_previous_generation_id ON baseline_generations (previous_generation_id);
+CREATE INDEX IF NOT EXISTS ix_baseline_generations_product_type ON baseline_generations (product_type);
+CREATE INDEX IF NOT EXISTS ix_baseline_generations_scope_imported ON baseline_generations (product_type, margin_mode, imported_at);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_baseline_generations_baseline_event_ref ON baseline_generations (baseline_event_ref);
+
+-- Ensure indexes exist on exchange_ack_watermarks
+CREATE INDEX IF NOT EXISTS ix_exchange_ack_watermarks_account_source ON exchange_ack_watermarks (account_source);
+CREATE INDEX IF NOT EXISTS ix_exchange_ack_watermarks_account_source_ack ON exchange_ack_watermarks (account_source, acknowledged_at);
+CREATE INDEX IF NOT EXISTS ix_exchange_ack_watermarks_acknowledged_at ON exchange_ack_watermarks (acknowledged_at);
+CREATE INDEX IF NOT EXISTS ix_exchange_ack_watermarks_baseline_event_ref ON exchange_ack_watermarks (baseline_event_ref);
+CREATE INDEX IF NOT EXISTS ix_exchange_ack_watermarks_latest_bill_id ON exchange_ack_watermarks (latest_bill_id);
+CREATE INDEX IF NOT EXISTS ix_exchange_ack_watermarks_latest_fill_id ON exchange_ack_watermarks (latest_fill_id);
+CREATE INDEX IF NOT EXISTS ix_exchange_ack_watermarks_latest_reconciliation_id ON exchange_ack_watermarks (latest_reconciliation_id);
+CREATE INDEX IF NOT EXISTS ix_exchange_ack_watermarks_margin_mode ON exchange_ack_watermarks (margin_mode);
+CREATE INDEX IF NOT EXISTS ix_exchange_ack_watermarks_operator_action_ref ON exchange_ack_watermarks (operator_action_ref);
+CREATE INDEX IF NOT EXISTS ix_exchange_ack_watermarks_product_type ON exchange_ack_watermarks (product_type);
+CREATE INDEX IF NOT EXISTS ix_exchange_ack_watermarks_scope_ack ON exchange_ack_watermarks (product_type, margin_mode, acknowledged_at);
+
+-- Ensure indexes exist on reconciliation_state_snapshots
+CREATE INDEX IF NOT EXISTS ix_reconciliation_state_snapshots_created_at ON reconciliation_state_snapshots (created_at);
+CREATE INDEX IF NOT EXISTS ix_reconciliation_state_snapshots_derived_from_generation_id ON reconciliation_state_snapshots (derived_from_generation_id);
+CREATE INDEX IF NOT EXISTS ix_reconciliation_state_snapshots_exchange_ack_watermark_id ON reconciliation_state_snapshots (exchange_ack_watermark_id);
+CREATE INDEX IF NOT EXISTS ix_reconciliation_state_snapshots_margin_mode ON reconciliation_state_snapshots (margin_mode);
+CREATE INDEX IF NOT EXISTS ix_reconciliation_state_snapshots_primary_symbol ON reconciliation_state_snapshots (primary_symbol);
+CREATE INDEX IF NOT EXISTS ix_reconciliation_state_snapshots_product_type ON reconciliation_state_snapshots (product_type);
+CREATE INDEX IF NOT EXISTS ix_reconciliation_state_snapshots_reconciliation_id ON reconciliation_state_snapshots (reconciliation_id);
+CREATE INDEX IF NOT EXISTS ix_reconciliation_state_snapshots_recovery_state ON reconciliation_state_snapshots (recovery_state);
+CREATE INDEX IF NOT EXISTS ix_reconciliation_state_scope_created ON reconciliation_state_snapshots (product_type, margin_mode, created_at);
+CREATE INDEX IF NOT EXISTS ix_reconciliation_state_recovery_created ON reconciliation_state_snapshots (recovery_state, created_at);
 
 -- Ensure indexes exist on sleeve_pnl_records
 CREATE INDEX IF NOT EXISTS ix_sleeve_pnl_records_allocation_created ON sleeve_pnl_records (allocation_id, created_at);

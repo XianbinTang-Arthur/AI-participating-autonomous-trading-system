@@ -700,6 +700,128 @@ class ReconciliationReportModel(Base):
     payload: Mapped[dict] = mapped_column(JSON, nullable=False)
 
 
+class ReconciliationFindingModel(Base):
+    __tablename__ = "reconciliation_findings"
+    __table_args__ = (
+        Index("ix_reconciliation_findings_recon_created", "reconciliation_id", "created_at"),
+        Index("ix_reconciliation_findings_scope_created", "product_type", "margin_mode", "created_at"),
+        Index("ix_reconciliation_findings_layer_created", "layer", "created_at"),
+        Index("ix_reconciliation_findings_sleeve_created", "strategy_sleeve_id", "created_at"),
+        Index("ix_reconciliation_findings_bundle_created", "strategy_bundle_id", "created_at"),
+    )
+
+    finding_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    reconciliation_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("reconciliation_reports.reconciliation_id"), nullable=False, index=True
+    )
+    product_type: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
+    margin_mode: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
+    primary_symbol: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    strategy_sleeve_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    allocation_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    strategy_bundle_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    scope_kind: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    scope_ref: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    layer: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    finding_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    severity_class: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    structural: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    financial: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    observational: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    review_required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    only_reduce_required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    halt_required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    blocks_resume: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    reason_code: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    details_json: Mapped[dict] = mapped_column("details", JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class BaselineGenerationModel(Base):
+    __tablename__ = "baseline_generations"
+    __table_args__ = (
+        Index("ix_baseline_generations_scope_imported", "product_type", "margin_mode", "imported_at"),
+        Index("ix_baseline_generations_account_source_imported", "account_source", "imported_at"),
+    )
+
+    generation_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    baseline_event_ref: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    baseline_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    baseline_kind: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    account_source: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    product_type: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    margin_mode: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    allowed_symbols: Mapped[list] = mapped_column(JSON, nullable=False)
+    exchange_snapshot_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    imported_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    safe_for_automatic_continuation: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    requires_operator_review: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    previous_generation_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    previous_baseline_ref: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    exchange_ack_watermark_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    operator_action_ref: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    trigger_reason: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    reason_codes: Mapped[list] = mapped_column(JSON, nullable=False)
+    balance_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    position_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    open_order_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    fill_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class ExchangeAckWatermarkModel(Base):
+    __tablename__ = "exchange_ack_watermarks"
+    __table_args__ = (
+        Index("ix_exchange_ack_watermarks_scope_ack", "product_type", "margin_mode", "acknowledged_at"),
+        Index("ix_exchange_ack_watermarks_account_source_ack", "account_source", "acknowledged_at"),
+    )
+
+    watermark_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    account_source: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    product_type: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    margin_mode: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    allowed_symbols: Mapped[list] = mapped_column(JSON, nullable=False)
+    acknowledged_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    latest_bill_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    latest_bill_ts: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    latest_fill_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    latest_fill_ts: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    latest_order_snapshot_ts: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    latest_reconciliation_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    baseline_event_ref: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    operator_action_ref: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    details_json: Mapped[dict] = mapped_column("details", JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class ReconciliationStateSnapshotModel(Base):
+    __tablename__ = "reconciliation_state_snapshots"
+    __table_args__ = (
+        Index("ix_reconciliation_state_scope_created", "product_type", "margin_mode", "created_at"),
+        Index("ix_reconciliation_state_recovery_created", "recovery_state", "created_at"),
+    )
+
+    snapshot_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    reconciliation_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("reconciliation_reports.reconciliation_id"), nullable=False, index=True
+    )
+    product_type: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
+    margin_mode: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
+    primary_symbol: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    recovery_state: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    resume_eligible: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    safe_to_trade: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    review_required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    only_reduce_required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    halt_required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    bundle_recovery_required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    resume_blocked_reasons_json: Mapped[list] = mapped_column(JSON, nullable=False)
+    derived_from_generation_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    exchange_ack_watermark_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    details_json: Mapped[dict] = mapped_column("details", JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class DecisionAuditRecordModel(Base):
     __tablename__ = "decision_audit_records"
 
