@@ -168,36 +168,261 @@ class RuntimeQueryFacade:
             serializer=self.owner.payload,
         )
 
-    def recovery_view(self) -> dict[str, Any]:
-        return self.owner._cached("recovery_view", self.owner._build_recovery_view)
+    def system_health(self) -> dict[str, Any]:
+        return self.build_system_health()
 
-    def system_recovery(self) -> dict[str, Any]:
-        recovery = self.recovery_view()
+    def build_system_health(self) -> dict[str, Any]:
+        snapshot = self.owner.runtime.health_service.snapshot()
+        mode_snapshot = self.owner.system_mode()
+        recovery = self.owner.recovery_view()
+        market = self.owner.runtime.market_gateway.status()
+        account = self.owner.runtime.account_service.status()
+        execution = self.owner.runtime.execution_adapter.readiness()
+        phase1_shadow = self.owner.phase1_shadow()
+        derivatives_live_guard = self.owner.derivatives_live_guard()
+        latest_reconciliation = self.owner._latest_scoped_reconciliation()
+        latest_portfolio = self.owner._latest_scoped_snapshot()
+        blockers = self.owner.blockers()
+        account_baseline = self.owner.latest_account_baseline()
+        reconciliation_component = next(
+            (component for component in snapshot.components if component.component == "reconciliation"),
+            None,
+        )
+        warnings = [
+            {
+                "component": component.component,
+                "detail": component.detail,
+                "blockers": component.blockers,
+            }
+            for component in snapshot.components
+            if component.status == "warn"
+        ]
+        if phase1_shadow["status"] in {"degraded", "lagging"}:
+            warnings.append(
+                {
+                    "component": "phase1_shadow",
+                    "detail": phase1_shadow["summary"],
+                    "blockers": [],
+                }
+            )
+        if self.owner.runtime.kill_switch.halted:
+            runtime_state = "halted"
+        elif any(item["affects_execution"] for item in blockers):
+            runtime_state = "blocked"
+        elif warnings:
+            runtime_state = "degraded"
+        else:
+            runtime_state = "healthy"
+        self.owner._persist_blocker_snapshot(
+            source="system_health",
+            runtime_state=runtime_state,
+            mode_snapshot=mode_snapshot,
+            blockers=blockers,
+        )
         return {
+            "overall_status": snapshot.status,
+            "runtime_state": runtime_state,
+            "operating_state": snapshot.operating_state,
+            "mode": snapshot.mode,
+            "runtime_profile": self.owner.runtime.runtime_profile.to_dict(),
+            "environment_capabilities": self.owner.runtime.environment_capabilities.to_dict(),
+            "policy_profile": self.owner.runtime.policy_profile.to_dict(),
+            "recovery_policy": self.owner.runtime.recovery_policy.to_dict(),
+            "profile_control": self.owner.runtime_profile_snapshot(),
+            "halted": self.owner.runtime.kill_switch.halted,
+            "blockers": blockers,
+            "warnings": warnings,
+            "execution_blocked": mode_snapshot["execution_blocked"],
+            "submit_blocked": mode_snapshot["submit_blocked"],
+            "submit_blocked_reasons": mode_snapshot["submit_blocked_reasons"],
+            "subsystems": {
+                "market_data": market,
+                "account_state": account,
+                "execution_adapter": execution,
+                "reconciliation": {
+                    "ready": reconciliation_component.status == "ok" if reconciliation_component is not None else False,
+                    "fresh": reconciliation_component.fresh if reconciliation_component is not None else False,
+                    "last_update_ts": (
+                        reconciliation_component.last_update_ts
+                        if reconciliation_component is not None
+                        else (latest_reconciliation.as_of_ts if latest_reconciliation else None)
+                    ),
+                    "severity": latest_reconciliation.severity if latest_reconciliation else None,
+                    "halt_required": latest_reconciliation.halt_required if latest_reconciliation else False,
+                    "blockers": (
+                        list(reconciliation_component.blockers)
+                        if reconciliation_component is not None
+                        else []
+                    ),
+                },
+                "storage": {
+                    "ready": True,
+                    "fresh": True,
+                    "detail": self.owner.runtime.settings.storage_mode,
+                },
+                "phase1_shadow": phase1_shadow,
+                "derivatives_live_guard": derivatives_live_guard,
+                "audit_replay": {
+                    "ready": True,
+                    "fresh": bool(self.owner.runtime.replay_validation_history),
+                    "audit_record_count": self.owner.runtime.audit_repo.count(),
+                    "last_replay_validation": (
+                        self.owner.runtime.replay_validation_history[-1]
+                        if self.owner.runtime.replay_validation_history
+                        else None
+                    ),
+                },
+            },
+            "freshness": {
+                "market_fresh": market.get("fresh", False),
+                "account_fresh": account.get("fresh", False),
+                "reconciliation_fresh": (
+                    reconciliation_component.fresh if reconciliation_component is not None else False
+                ),
+            },
+            "last_success_timestamps": {
+                "market": market.get("last_update_ts"),
+                "account": account.get("last_update_ts"),
+                "portfolio": latest_portfolio.snapshot_ts if latest_portfolio else None,
+                "reconciliation": latest_reconciliation.as_of_ts if latest_reconciliation else None,
+            },
             "recovery": recovery,
-            "latest_rebaseline_action": recovery["last_rebaseline_action"],
-            "latest_resume_action": recovery["last_resume_action"],
-            "latest_account_baseline": recovery["latest_account_baseline"],
+            "recovery_state": recovery["recovery_state"],
+            "review_required": recovery["review_required"],
+            "rebaseline_available": recovery["rebaseline_available"],
+            "account_baseline": account_baseline,
+            "mode_contract": mode_snapshot,
         }
 
-    def system_mode(self) -> dict[str, Any]:
-        return self.owner._cached("system_mode", self.owner._build_system_mode)
-
-    def blockers(self) -> list[dict[str, Any]]:
-        return self.owner._build_blockers()
-
-    def blocker_control(self) -> dict[str, Any]:
-        return self.owner._build_blocker_control().model_dump(mode="json")
-
-    def blocker_history(self, *, limit: int = 20, offset: int = 0) -> dict[str, Any]:
-        rows = [item.payload for item in reversed(self.owner.runtime.event_store.by_topic(topics.BLOCKER_SNAPSHOTS))]
-        return self.owner._paginate_rows(rows, limit=limit, offset=offset, key="history")
-
-    def system_health(self) -> dict[str, Any]:
-        return self.owner._build_system_health()
-
     def system_runtime(self) -> dict[str, Any]:
-        return self.owner._build_system_runtime()
+        return self.build_system_runtime()
+
+    def build_system_runtime(self) -> dict[str, Any]:
+        latest_decision = self.owner.runtime.event_store.latest(topics.DECISION_CONTEXTS)
+        latest_fill = self.owner.latest_fill()
+        latest_reconciliation = self.owner._latest_scoped_reconciliation()
+        account_baseline = self.owner.latest_account_baseline()
+        account_snapshot = self.owner.runtime.account_service.latest_snapshot()
+        recovery = self.owner.recovery_view()
+        guarded_live_preflight = self.owner.guarded_live_preflight()
+        guarded_live_run_packet = self.owner.guarded_live_run_packet()
+        event_store_archive = self.owner.runtime.event_store.archive_summary()
+        latest_replay_offset = self.owner.runtime.event_store.latest_replay_offset(
+            projection_key="portfolio_replay",
+            scope=self.owner.state_scope,
+        )
+        now = utc_now()
+        return {
+            "runtime_profile": self.owner.runtime.runtime_profile.to_dict(),
+            "environment_capabilities": self.owner.runtime.environment_capabilities.to_dict(),
+            "policy_profile": self.owner.runtime.policy_profile.to_dict(),
+            "recovery_policy": self.owner.runtime.recovery_policy.to_dict(),
+            "profile_source": self.owner.runtime.runtime_profile_resolution.profile_source,
+            "startup_profile": self.owner.runtime.settings.startup_profile,
+            "env_template_profile": self.owner.runtime.settings.env_template_profile,
+            "config_profile": self.owner.runtime.settings.config_profile,
+            "account_configuration": (
+                account_snapshot.account_configuration.model_dump(mode="json")
+                if account_snapshot is not None and account_snapshot.account_configuration is not None
+                else None
+            ),
+            "risk_snapshot": (
+                account_snapshot.risk_snapshot.model_dump(mode="json")
+                if account_snapshot is not None and account_snapshot.risk_snapshot is not None
+                else None
+            ),
+            "primary_instrument_rule": (
+                next(
+                    (
+                        item.model_dump(mode="json")
+                        for item in account_snapshot.instruments
+                        if item.symbol == self.owner.runtime.settings.default_symbol
+                    ),
+                    None,
+                )
+                if account_snapshot is not None
+                else None
+            ),
+            "runtime_profile_control": self.owner.runtime_profile_snapshot(),
+            "strategy_runtime_summary": self.owner.strategy_runtime(limit=5).get("summary"),
+            "symbols": [self.owner.runtime.settings.default_symbol],
+            "enabled_timeframes": list(self.owner.runtime.settings.enabled_decision_timeframes),
+            "decision_cadence": {
+                "decision_min_interval_seconds_15m": self.owner.runtime.settings.decision_min_interval_seconds_15m,
+                "decision_min_interval_seconds_1h": self.owner.runtime.settings.decision_min_interval_seconds_1h,
+                "decision_min_price_move_bps": self.owner.runtime.settings.decision_min_price_move_bps,
+                "decision_min_momentum_delta": self.owner.runtime.settings.decision_min_momentum_delta,
+                "max_decisions_per_minute": self.owner.runtime.settings.max_decisions_per_minute,
+            },
+            "strategy_family_active": self.owner.runtime.settings.strategy_family_active,
+            "storage_mode": self.owner.runtime.settings.storage_mode,
+            "operator_auth_enabled": self.owner.runtime.settings.operator_auth_enabled,
+            "operator_auth": {
+                "auth_enabled": self.owner.runtime.settings.operator_auth_enabled,
+                "session_enabled": self.owner.runtime.settings.operator_session_configured,
+                "database_backed": self.owner.runtime.database_runtime is not None,
+                "stored_user_count": self.owner.runtime.operator_repo.count() if hasattr(self.owner.runtime, "operator_repo") else 0,
+                "api_key_compatibility_enabled": bool(
+                    self.owner.runtime.settings.operator_read_api_key or self.owner.runtime.settings.operator_write_api_key
+                ),
+                "unsafe_write_without_auth": self.owner.runtime.settings.operator_unsafe_write_without_auth,
+                "phase5_hardened": self.owner.runtime.settings.operator_control_plane_execution_ledger_enabled,
+            },
+            "startup_timestamp": self.owner.runtime.started_at,
+            "uptime_seconds": max((now - self.owner.runtime.started_at).total_seconds(), 0.0),
+            "last_decision_timestamp": latest_decision.event_timestamp if latest_decision else None,
+            "last_fill_timestamp": (
+                latest_fill.get("ingestion_timestamp") if isinstance(latest_fill, dict) else latest_fill.ingestion_timestamp
+            ) if latest_fill else None,
+            "last_reconciliation_timestamp": latest_reconciliation.as_of_ts if latest_reconciliation else None,
+            "recovery": {
+                "recovery_state": recovery["recovery_state"],
+                "review_required": recovery["review_required"],
+                "rebaseline_available": recovery["rebaseline_available"],
+                "resume_eligible": recovery["resume_eligible"],
+                "safe_to_trade": recovery["safe_to_trade"],
+            },
+            "baseline_takeover": {
+                "status": self.owner.runtime.recovery_status.baseline_status,
+                "baseline_imported": self.owner.runtime.recovery_status.baseline_imported,
+                "baseline_imported_at": self.owner.runtime.recovery_status.baseline_imported_at,
+                "baseline_source": self.owner.runtime.recovery_status.baseline_source,
+                "baseline_kind": account_baseline.get("baseline_kind") if account_baseline is not None else None,
+                "requires_operator_review": self.owner.runtime.recovery_status.baseline_requires_operator_review,
+                "safe_for_automatic_continuation": self.owner.runtime.recovery_status.baseline_safe_for_automatic_continuation,
+                "balance_count": self.owner.runtime.recovery_status.baseline_balance_count,
+                "position_count": self.owner.runtime.recovery_status.baseline_position_count,
+                "open_order_count": self.owner.runtime.recovery_status.baseline_open_order_count,
+                "fill_count": self.owner.runtime.recovery_status.baseline_fill_count,
+                "event_ref": self.owner.runtime.recovery_status.baseline_event_ref,
+                "last_rebaseline_event_ref": self.owner.runtime.recovery_status.last_rebaseline_event_ref,
+                "last_rebaseline_at": self.owner.runtime.recovery_status.last_rebaseline_at,
+                "snapshot": account_baseline,
+            },
+            "control_plane": {
+                "phase5_enabled": self.owner._phase5_control_plane_enabled(),
+                "order_truth_source": "execution_order_repo" if self.owner._phase5_control_plane_enabled() else "execution_repo",
+                "fill_truth_source": "execution_fill_repo_v2" if self.owner._phase5_control_plane_enabled() else "execution_repo",
+                "balance_truth_source": "ledger_accounts" if self.owner._phase5_control_plane_enabled() else "portfolio_snapshot",
+                "legacy_layer_authoritative": not self.owner._phase5_control_plane_enabled(),
+                "auth_hardened": self.owner.runtime.settings.operator_control_plane_execution_ledger_enabled,
+                "financial_convergence_mode_enabled": self.owner.runtime.settings.financial_convergence_mode_enabled,
+            },
+            "trial_guard": self.owner.trial_guard(),
+            "margin_buffer_overview": self.owner.margin_buffer_risk(),
+            "derivatives_live_guard": self.owner.derivatives_live_guard(),
+            "guarded_live_preflight": guarded_live_preflight,
+            "guarded_live_run_packet_summary": {
+                "status": guarded_live_run_packet.get("status"),
+                "summary": guarded_live_run_packet.get("summary"),
+                "summary_metrics": guarded_live_run_packet.get("summary_metrics"),
+                "operator_actions": guarded_live_run_packet.get("operator_actions"),
+            },
+            "event_store_archive": event_store_archive,
+            "replay_offsets": {
+                "portfolio_replay": None if latest_replay_offset is None else latest_replay_offset.model_dump(mode="json"),
+            },
+        }
 
     def metrics(self) -> dict[str, Any]:
         return self.owner._build_metrics()

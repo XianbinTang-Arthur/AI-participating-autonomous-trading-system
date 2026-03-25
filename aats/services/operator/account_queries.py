@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from aats.services.runtime_scope import snapshots_for_scope
+from aats.services.runtime_scope import (
+    funding_fee_records_for_scope,
+    order_states_for_scope,
+    snapshots_for_scope,
+)
 
 if TYPE_CHECKING:
     from aats.services.operator.query_service import OperatorQueryService
@@ -14,7 +18,15 @@ class AccountQueryFacade:
 
     def portfolio_latest(self) -> dict[str, Any]:
         cache_key = f"portfolio_latest:{self.owner._scope_cache_fragment()}"
-        return self.owner._cached_ttl(cache_key, 10, self.owner._build_portfolio_latest)
+        return self.owner._cached_ttl(cache_key, 10, self.build_portfolio_latest)
+
+    def build_portfolio_latest(self) -> dict[str, Any]:
+        snapshot = self.owner._latest_scoped_snapshot()
+        return {
+            "portfolio": snapshot.model_dump(mode="json") if snapshot is not None else None,
+            "latest_update_timestamp": snapshot.snapshot_ts if snapshot is not None else None,
+            "truth_source": "ledger_backed_snapshot" if self.owner._phase5_control_plane_enabled() else "legacy_portfolio_snapshot",
+        }
 
     def portfolio_history(self, *, limit: int = 20) -> dict[str, Any]:
         history = snapshots_for_scope(self.owner.runtime.portfolio_repo, self.owner.state_scope, limit=limit)
@@ -51,7 +63,101 @@ class AccountQueryFacade:
 
     def account_state(self) -> dict[str, Any]:
         cache_key = f"account_state:{self.owner._scope_cache_fragment()}"
-        return self.owner._cached_ttl(cache_key, 10, self.owner._build_account_state)
+        return self.owner._cached_ttl(cache_key, 10, self.build_account_state)
+
+    def build_account_state(self) -> dict[str, Any]:
+        status = self.owner.runtime.account_service.status()
+        snapshot = self.owner.runtime.account_service.latest_snapshot()
+        local_snapshot = self.owner._latest_scoped_snapshot()
+        recovery = self.owner.recovery_view()
+        reconciliation = self.owner._latest_scoped_reconciliation()
+        tracked_symbols = set(self.owner.runtime.settings.allowed_symbols) | {self.owner.runtime.settings.default_symbol}
+        exchange_funding_fee_summary = (
+            self.owner.runtime.account_service.recent_funding_fee_summary(symbol=self.owner.runtime.settings.default_symbol)
+            if hasattr(self.owner.runtime.account_service, "recent_funding_fee_summary")
+            else None
+        )
+        derivatives_live_guard = self.owner.derivatives_live_guard()
+        return {
+            "backend": self.owner.runtime.settings.account_backend,
+            "read_enabled": self.owner.runtime.settings.account_read_enabled,
+            "last_refresh_timestamp": status.get("last_update_ts"),
+            "fresh": status.get("fresh", False),
+            "connected": status.get("connected", False),
+            "ready": status.get("ready", False),
+            "last_error": status.get("last_error"),
+            "private_ws_connected": status.get("private_ws_connected", False),
+            "private_ws_last_message_ts": status.get("private_ws_last_message_ts"),
+            "private_ws_last_error": status.get("private_ws_last_error"),
+            "private_ws_fresh": status.get("private_ws_fresh", False),
+            "maker_fee_rate": status.get("maker_fee_rate"),
+            "taker_fee_rate": status.get("taker_fee_rate"),
+            "fee_rates_source": status.get("fee_rates_source"),
+            "account_configuration": (
+                snapshot.account_configuration.model_dump(mode="json")
+                if snapshot is not None and snapshot.account_configuration is not None
+                else status.get("account_configuration")
+            ),
+            "fee_schedule": (
+                snapshot.fee_schedule.model_dump(mode="json")
+                if snapshot is not None and snapshot.fee_schedule is not None
+                else status.get("fee_schedule")
+            ),
+            "risk_snapshot": (
+                snapshot.risk_snapshot.model_dump(mode="json")
+                if snapshot is not None and snapshot.risk_snapshot is not None
+                else status.get("risk_snapshot")
+            ),
+            "system_status_items": (
+                [item.model_dump(mode="json") for item in snapshot.system_status_items]
+                if snapshot is not None
+                else status.get("system_status_items", [])
+            ),
+            "tracked_instrument_rules": (
+                [item.model_dump(mode="json") for item in snapshot.instruments if item.symbol in tracked_symbols]
+                if snapshot is not None
+                else []
+            ),
+            "recent_bills_count": status.get("recent_bills_count", 0),
+            "last_bills_error": status.get("last_bills_error"),
+            "exchange_funding_fee_summary": exchange_funding_fee_summary,
+            "persisted_funding_fee_summary": self._recent_persisted_funding_fee_summary(limit=200),
+            "local_position_margin_summary": self.owner._local_position_margin_summary(local_snapshot),
+            "exchange_position_margin_summary": self.owner._exchange_position_margin_summary(snapshot),
+            "margin_reconciliation": self.owner._margin_reconciliation_summary(reconciliation),
+            "margin_buffer_overview": self.owner.margin_buffer_risk(),
+            "derivatives_live_guard": derivatives_live_guard,
+            "blockers": status.get("blockers", []),
+            "current_blocking_reason": next(iter(status.get("blockers", [])), None),
+            "detail": status.get("detail"),
+            "recovery": {
+                "recovery_state": recovery["recovery_state"],
+                "review_required": recovery["review_required"],
+                "rebaseline_available": recovery["rebaseline_available"],
+                "resume_eligible": recovery["resume_eligible"],
+                "safe_to_trade": recovery["safe_to_trade"],
+            },
+            "baseline_takeover": {
+                "status": self.owner.runtime.recovery_status.baseline_status,
+                "baseline_imported": self.owner.runtime.recovery_status.baseline_imported,
+                "baseline_imported_at": self.owner.runtime.recovery_status.baseline_imported_at,
+                "baseline_source": self.owner.runtime.recovery_status.baseline_source,
+                "requires_operator_review": self.owner.runtime.recovery_status.baseline_requires_operator_review,
+                "safe_for_automatic_continuation": self.owner.runtime.recovery_status.baseline_safe_for_automatic_continuation,
+                "balance_count": self.owner.runtime.recovery_status.baseline_balance_count,
+                "position_count": self.owner.runtime.recovery_status.baseline_position_count,
+                "open_order_count": self.owner.runtime.recovery_status.baseline_open_order_count,
+                "fill_count": self.owner.runtime.recovery_status.baseline_fill_count,
+                "event_ref": self.owner.runtime.recovery_status.baseline_event_ref,
+            },
+            "control_plane": {
+                "phase5_enabled": self.owner._phase5_control_plane_enabled(),
+                "order_truth_source": "execution_order_repo" if self.owner._phase5_control_plane_enabled() else "execution_repo",
+                "fill_truth_source": "execution_fill_repo_v2" if self.owner._phase5_control_plane_enabled() else "execution_repo",
+                "balance_truth_source": "ledger_accounts" if self.owner._phase5_control_plane_enabled() else "portfolio_snapshot",
+                "legacy_execution_views_authoritative": not self.owner._phase5_control_plane_enabled(),
+            },
+        }
 
     async def account_recent_bills(self, *, limit: int = 50) -> dict[str, Any]:
         rows = await self.owner.runtime.account_service.recent_bills(
@@ -71,8 +177,31 @@ class AccountQueryFacade:
         return self.owner._cached_ttl(
             cache_key,
             10,
-            lambda: self.owner._build_account_recent_funding_fees(limit=normalized_limit),
+            lambda: self.build_account_recent_funding_fees(limit=normalized_limit),
         )
+
+    def build_account_recent_funding_fees(self, *, limit: int) -> dict[str, Any]:
+        rows = (
+            funding_fee_records_for_scope(
+                getattr(self.owner.runtime, "funding_fee_repo", None),
+                self.owner.state_scope,
+                limit=limit,
+            )
+            if getattr(self.owner.runtime, "funding_fee_repo", None) is not None
+            else []
+        )
+        return {
+            "funding_fees": [row.model_dump(mode="json") for row in rows],
+            "total_available": len(
+                funding_fee_records_for_scope(
+                    getattr(self.owner.runtime, "funding_fee_repo", None),
+                    self.owner.state_scope,
+                )
+            ) if getattr(self.owner.runtime, "funding_fee_repo", None) is not None else 0,
+            "limit": limit,
+            "latest_funding_fee": rows[-1].model_dump(mode="json") if rows else None,
+            "summary": self._recent_persisted_funding_fee_summary(limit=max(limit, 200)),
+        }
 
     def account_open_orders(self) -> dict[str, Any]:
         exchange = self.owner.runtime.account_service.latest_snapshot()
@@ -108,8 +237,35 @@ class AccountQueryFacade:
         return self.owner._cached_ttl(
             cache_key,
             10,
-            lambda: self.owner._build_orders_recent(limit=normalized_limit, offset=normalized_offset),
+            lambda: self.build_orders_recent(limit=normalized_limit, offset=normalized_offset),
         )
+
+    def build_orders_recent(self, *, limit: int, offset: int) -> dict[str, Any]:
+        if self.owner._phase5_control_plane_enabled():
+            all_orders = self.owner._phase5_order_rows()
+            orders = all_orders[offset : offset + limit]
+            return {
+                "orders": [self.owner._execution_record_payload(order) for order in orders],
+                "limit": limit,
+                "offset": offset,
+                "total_available": len(all_orders),
+                "has_more": offset + len(orders) < len(all_orders),
+                "truth_source": "execution_order_repo",
+            }
+        all_orders = sorted(
+            order_states_for_scope(self.owner.runtime.execution_repo, self.owner.state_scope),
+            key=lambda item: (item.last_update_ts or item.created_at, item.client_order_id),
+            reverse=True,
+        )
+        orders = all_orders[offset : offset + limit]
+        return {
+            "orders": [self.owner._execution_record_payload(order) for order in orders],
+            "limit": limit,
+            "offset": offset,
+            "total_available": len(all_orders),
+            "has_more": offset + len(orders) < len(all_orders),
+            "truth_source": "execution_repo",
+        }
 
     def order_detail(self, client_order_id: str) -> dict[str, Any]:
         if self.owner._phase5_control_plane_enabled():
@@ -161,8 +317,32 @@ class AccountQueryFacade:
         return self.owner._cached_ttl(
             cache_key,
             10,
-            lambda: self.owner._build_fills_recent(limit=normalized_limit, offset=normalized_offset),
+            lambda: self.build_fills_recent(limit=normalized_limit, offset=normalized_offset),
         )
+
+    def build_fills_recent(self, *, limit: int, offset: int) -> dict[str, Any]:
+        if self.owner._phase5_control_plane_enabled():
+            all_fills = self.owner._phase5_fill_rows()
+            fills = all_fills[offset : offset + limit]
+            return {
+                "fills": [self.owner._execution_record_payload(fill) for fill in fills],
+                "limit": limit,
+                "offset": offset,
+                "total_available": len(all_fills),
+                "has_more": offset + len(fills) < len(all_fills),
+                "truth_source": "execution_fill_repo_v2",
+            }
+        all_fills = self.owner.recent_fills(limit=limit + offset)
+        fills = all_fills[offset : offset + limit]
+        total_available = len(self.owner._scoped_fills())
+        return {
+            "fills": [self.owner._execution_record_payload(fill) for fill in fills],
+            "limit": limit,
+            "offset": offset,
+            "total_available": total_available,
+            "has_more": offset + len(fills) < total_available,
+            "truth_source": "execution_repo",
+        }
 
     def fill_detail(self, fill_id: str) -> dict[str, Any]:
         if self.owner._phase5_control_plane_enabled():
@@ -187,4 +367,27 @@ class AccountQueryFacade:
 
     def execution_latest(self) -> dict[str, Any]:
         cache_key = f"execution_latest:{self.owner._scope_cache_fragment()}"
-        return self.owner._cached_ttl(cache_key, 10, self.owner._build_execution_latest)
+        return self.owner._cached_ttl(cache_key, 10, self.build_execution_latest)
+
+    def build_execution_latest(self) -> dict[str, Any]:
+        latest_order = self.owner.latest_order()
+        latest_fill = self.owner.latest_fill()
+        latest_reconciliation = self.owner._latest_scoped_reconciliation()
+        recovery = self.owner.recovery_view()
+        return {
+            "mode": self.owner.system_mode(),
+            "execution": self.owner.runtime.execution_adapter.readiness(),
+            "latest_order": self.owner._execution_record_payload(latest_order) if latest_order is not None else None,
+            "latest_fill": self.owner._execution_record_payload(latest_fill) if latest_fill is not None else None,
+            "latest_reconciliation": latest_reconciliation.model_dump(mode="json") if latest_reconciliation is not None else None,
+            "recent_failures": self.owner.execution_errors()["errors"],
+            "recovery": recovery,
+            "truth_source": {
+                "orders": "execution_order_repo" if self.owner._phase5_control_plane_enabled() else "execution_repo",
+                "fills": "execution_fill_repo_v2" if self.owner._phase5_control_plane_enabled() else "execution_repo",
+                "balances": "ledger_accounts" if self.owner._phase5_control_plane_enabled() else "portfolio_snapshot",
+            },
+        }
+
+    def _recent_persisted_funding_fee_summary(self, *, limit: int = 200) -> dict[str, Any]:
+        return self.owner._recent_persisted_funding_fee_summary(limit=limit)
