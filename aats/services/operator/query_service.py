@@ -2876,8 +2876,21 @@ class OperatorQueryService:
         if service is None:
             return {
                 "enabled": False,
+                "enabled_for_runtime": False,
                 "status": "not_configured",
                 "summary": "试盘守护未配置。",
+                "hard_stop": {
+                    "active": False,
+                    "halt_required": False,
+                    "resume_blocked": False,
+                    "breach_count": 0,
+                    "summary": "试盘守护未配置。",
+                    "operator_guidance": "如果这条线是小资金试盘场景，先确认是否应该启用试盘守护。",
+                },
+                "recovery_requirements": {
+                    "resume_allowed": True,
+                    "items": [],
+                },
             }
         cache_key = f"trial_guard:{self._scope_cache_fragment()}"
         return self._cached_ttl(cache_key, 15, service.snapshot)
@@ -4670,6 +4683,61 @@ class OperatorQueryService:
             "reasons": reasons,
         }
 
+    @staticmethod
+    def _trial_guard_hard_stop_payload(trial_guard: dict[str, Any]) -> dict[str, Any]:
+        hard_stop = dict(trial_guard.get("hard_stop") or {})
+        breaches = list(trial_guard.get("breaches") or [])
+        recovery_requirements = dict(trial_guard.get("recovery_requirements") or {})
+        active = bool(hard_stop.get("active")) or str(trial_guard.get("status") or "") == "breached"
+        return {
+            "active": active,
+            "status": trial_guard.get("status"),
+            "summary": hard_stop.get("summary") or trial_guard.get("summary"),
+            "operator_guidance": hard_stop.get("operator_guidance") or trial_guard.get("recommended_action"),
+            "breaches": breaches,
+            "recovery_requirements": recovery_requirements,
+            "resume_blocked": bool(hard_stop.get("resume_blocked")) or active,
+        }
+
+    def _trial_runtime_constraints(
+        self,
+        *,
+        recovery: dict[str, Any],
+        active_blockers: list[dict[str, Any]],
+        trial_guard: dict[str, Any],
+    ) -> dict[str, Any]:
+        hard_stop = self._trial_guard_hard_stop_payload(trial_guard)
+        reasons: list[str] = []
+        if hard_stop.get("active"):
+            reasons.append("trial_guard_hard_stop_active")
+        if recovery.get("halted"):
+            reasons.append("runtime_halted")
+        if not recovery.get("safe_to_trade", False):
+            reasons.append("recovery_not_safe_to_trade")
+        if recovery.get("review_required"):
+            reasons.append("manual_review_required")
+        if active_blockers:
+            reasons.append("active_execution_blockers_present")
+        return {
+            "hard_stop_active": bool(hard_stop.get("active")),
+            "safe_to_trade": bool(recovery.get("safe_to_trade")),
+            "review_required": bool(recovery.get("review_required")),
+            "active_blocker_count": len(active_blockers),
+            "can_continue_runtime": (
+                not hard_stop.get("active")
+                and bool(recovery.get("safe_to_trade"))
+                and not bool(recovery.get("review_required"))
+                and not active_blockers
+            ),
+            "can_scale_up": (
+                not hard_stop.get("active")
+                and bool(recovery.get("safe_to_trade"))
+                and not bool(recovery.get("review_required"))
+                and not active_blockers
+            ),
+            "reasons": list(dict.fromkeys(reasons)),
+        }
+
     def scaling_readiness_report(
         self,
         *,
@@ -4699,7 +4767,13 @@ class OperatorQueryService:
         forward_summary = dict(forward_validation.get("summary") or {})
         recovery = self.recovery_view()
         trial_guard = self.trial_guard()
+        hard_stop = self._trial_guard_hard_stop_payload(trial_guard)
         active_blockers = [item for item in self.blockers() if not item.get("submit_only")]
+        runtime_constraints = self._trial_runtime_constraints(
+            recovery=recovery,
+            active_blockers=active_blockers,
+            trial_guard=trial_guard,
+        )
         latest_review = self.latest_operator_action("capital_scale_review")
 
         consecutive_healthy_periods = 0
@@ -4719,34 +4793,18 @@ class OperatorQueryService:
             reasons.append("trial_guard_not_enabled")
         if not trial_guard.get("profile_active"):
             reasons.append("trial_profile_not_active")
-        if recovery.get("halted"):
-            verdict = "pause_trial"
-            reasons.append("runtime_halted")
-        if not recovery.get("safe_to_trade", False):
-            verdict = "pause_trial"
-            reasons.append("recovery_not_safe_to_trade")
-        if recovery.get("review_required"):
-            verdict = "pause_trial"
-            reasons.append("manual_review_required")
-        if active_blockers:
-            verdict = "pause_trial"
-            reasons.append("active_execution_blockers_present")
-        if trial_guard.get("status") == "breached":
-            verdict = "pause_trial"
-            reasons.append("trial_guard_breached")
 
         forward_verdict = str(forward_summary.get("verdict") or "")
-        if verdict != "pause_trial":
-            if forward_verdict == "pause":
-                verdict = "pause_trial"
-                reasons.append("forward_validation_pause")
-            elif forward_verdict == "shrink":
-                verdict = "shrink_trial"
-                reasons.append("forward_validation_shrink")
-            elif forward_verdict in {"observe", "insufficient_data"}:
-                reasons.append("forward_validation_still_observing")
-            elif forward_verdict == "continue":
-                reasons.append("forward_validation_stable")
+        if forward_verdict == "pause":
+            verdict = "pause_trial"
+            reasons.append("forward_validation_pause")
+        elif forward_verdict == "shrink":
+            verdict = "shrink_trial"
+            reasons.append("forward_validation_shrink")
+        elif forward_verdict in {"observe", "insufficient_data"}:
+            reasons.append("forward_validation_still_observing")
+        elif forward_verdict == "continue":
+            reasons.append("forward_validation_stable")
 
         healthy_period_requirement_met = consecutive_healthy_periods >= 2
         latest_period_has_sample = (
@@ -4764,18 +4822,16 @@ class OperatorQueryService:
             and healthy_period_requirement_met
             and latest_period_has_sample
             and forward_verdict == "continue"
-            and recovery.get("safe_to_trade", False)
-            and not recovery.get("review_required")
-            and not active_blockers
+            and runtime_constraints.get("can_scale_up")
         ):
             verdict = "approve_scale_up"
             reasons.append("scale_up_requirements_met")
 
         summary_map = {
-            "approve_scale_up": "最近多个试盘周期表现稳定，且当前恢复与风控状态正常，可以进入人工放量评审。",
+            "approve_scale_up": "最近多个试盘周期表现稳定，可以进入人工放量评审。",
             "continue_small_capital": "当前仍应保持小资金试盘，继续积累样本，不建议直接放量。",
-            "shrink_trial": "当前边际转弱，建议先缩小试盘规模，再继续观察收益与执行质量。",
-            "pause_trial": "当前不满足继续试盘或放量条件，建议暂停并复盘策略、执行和恢复状态。",
+            "shrink_trial": "最近试盘边际转弱，建议先缩小试盘规模，再继续观察收益与执行质量。",
+            "pause_trial": "最近观察周期已经不满足继续试盘的建议条件，先暂停试盘并复盘收益与执行质量。",
         }
         return {
             "window_days": int(forward_validation.get("window_days") or window_days),
@@ -4791,6 +4847,7 @@ class OperatorQueryService:
                 "healthy_period_requirement_met": healthy_period_requirement_met,
                 "latest_period_has_sample": latest_period_has_sample,
                 "trial_guard_status": trial_guard.get("status"),
+                "trial_guard_hard_stop_active": bool(hard_stop.get("active")),
                 "trial_guard_profile_active": bool(trial_guard.get("profile_active")),
                 "safe_to_trade": bool(recovery.get("safe_to_trade")),
                 "review_required": bool(recovery.get("review_required")),
@@ -4799,6 +4856,8 @@ class OperatorQueryService:
             "latest_forward_validation": latest_period,
             "forward_validation_summary": forward_summary,
             "trial_guard": trial_guard,
+            "trial_guard_hard_stop": hard_stop,
+            "runtime_constraints": runtime_constraints,
             "recovery": recovery,
             "active_blockers": active_blockers,
             "latest_review": latest_review,
@@ -4859,10 +4918,14 @@ class OperatorQueryService:
         scaling_readiness: str,
         high_slippage_count: int,
         slow_submit_to_fill_count: int,
+        trial_guard: dict[str, Any],
         recovery: dict[str, Any],
         blocker_rows: list[dict[str, Any]],
     ) -> list[str]:
         action_items: list[str] = []
+        hard_stop = self._trial_guard_hard_stop_payload(trial_guard)
+        if hard_stop.get("active"):
+            action_items.append("当前已触发试盘守护硬停机，先确认触发阈值为什么命中，再决定是否恢复自动运行。")
         if scaling_readiness == "approve_scale_up":
             action_items.append("最近多个验证周期表现稳定，可以发起下一档资金量的人工评审，但仍要保持 guarded_live 约束。")
         elif scaling_readiness == "continue_small_capital":
@@ -4916,6 +4979,9 @@ class OperatorQueryService:
         scaling_readiness = str(scaling.get("readiness") or "continue_small_capital")
         high_slippage_count = int(latest_period.get("high_slippage_count") or 0)
         slow_submit_to_fill_count = int(latest_period.get("slow_submit_to_fill_count") or 0)
+        trial_guard = scaling.get("trial_guard") or self.trial_guard()
+        hard_stop = scaling.get("trial_guard_hard_stop") or self._trial_guard_hard_stop_payload(trial_guard)
+        runtime_constraints = scaling.get("runtime_constraints") or {}
         return {
             "generated_at": utc_now(),
             "summary": {
@@ -4937,6 +5003,7 @@ class OperatorQueryService:
                     scaling_readiness=scaling_readiness,
                     high_slippage_count=high_slippage_count,
                     slow_submit_to_fill_count=slow_submit_to_fill_count,
+                    trial_guard=trial_guard,
                     recovery=recovery,
                     blocker_rows=blocker_rows,
                 ),
@@ -4947,6 +5014,8 @@ class OperatorQueryService:
                     "periods": forward_validation.get("periods"),
                 },
                 "scaling_readiness": scaling,
+                "trial_guard_hard_stop": hard_stop,
+                "runtime_constraints": runtime_constraints,
                 "guarded_live_run_packet": {
                     "status": self.guarded_live_run_packet().get("status"),
                     "summary": self.guarded_live_run_packet().get("summary"),
@@ -4999,6 +5068,8 @@ class OperatorQueryService:
                 "forward_validation": forward_validation,
                 "scaling_readiness": scaling,
                 "trial_guard": trial_guard,
+                "trial_guard_hard_stop": scaling.get("trial_guard_hard_stop") or self._trial_guard_hard_stop_payload(trial_guard),
+                "runtime_constraints": scaling.get("runtime_constraints") or {},
                 "margin_buffer_overview": self.margin_buffer_risk(),
                 "guarded_live_preflight": self.guarded_live_preflight(),
                 "guarded_live_run_packet": self.guarded_live_run_packet(),

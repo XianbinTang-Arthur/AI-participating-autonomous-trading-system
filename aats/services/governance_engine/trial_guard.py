@@ -78,12 +78,8 @@ class ForwardTrialGuardService:
         fee_ratio = _to_decimal(summary.get("fee_to_notional_ratio"))
         high_slippage_count = int(anomaly_summary.get("high_slippage_count") or 0)
         slow_submit_to_fill_count = int(anomaly_summary.get("slow_submit_to_fill_count") or 0)
-        high_slippage_ratio = (
-            None if fill_count == 0 else round(high_slippage_count / fill_count, 6)
-        )
-        slow_submit_to_fill_ratio = (
-            None if fill_count == 0 else round(slow_submit_to_fill_count / fill_count, 6)
-        )
+        high_slippage_ratio = None if fill_count == 0 else round(high_slippage_count / fill_count, 6)
+        slow_submit_to_fill_ratio = None if fill_count == 0 else round(slow_submit_to_fill_count / fill_count, 6)
 
         breaches: list[dict[str, Any]] = []
         if fill_count >= int(self.settings.trial_guard_min_closed_fills):
@@ -134,12 +130,22 @@ class ForwardTrialGuardService:
                     }
                 )
 
+        previous_status = str(self.last_snapshot.get("status") or "").lower()
+        kill_switch_reason = str(self.kill_switch.status().get("reason") or "")
         status = "breached" if breaches else ("monitoring" if fill_count >= int(self.settings.trial_guard_min_closed_fills) else "warming_up")
+        if (
+            not breaches
+            and fill_count >= int(self.settings.trial_guard_min_closed_fills)
+            and (previous_status == "breached" or kill_switch_reason == "trial_guard_threshold_breached")
+        ):
+            status = "recovered"
+
         recommended_action = (
-            "保持暂停并复核最近成交质量与净收益。"
+            "先核对最近成交、费用拖累和试盘守护阈值命中情况，再决定何时恢复自动运行。"
             if breaches
-            else "继续小资金试盘并观察收益、费用和滑点。"
+            else "继续保持小资金试盘，观察收益、费用和滑点是否稳定。"
         )
+
         snapshot = self._base_snapshot(
             status=status,
             fill_count=fill_count,
@@ -222,8 +228,11 @@ class ForwardTrialGuardService:
         breaches: list[dict[str, Any]] | None = None,
         recommended_action: str | None = None,
     ) -> dict[str, Any]:
+        normalized_breaches = [self._breach_detail(item) for item in breaches or []]
+        hard_stop_active = bool(normalized_breaches)
         return {
             "enabled": bool(self.settings.trial_guard_enabled),
+            "enabled_for_runtime": bool(self.settings.trial_guard_enabled),
             "status": status,
             "profile_label": "small_capital_forward_test",
             "active_config_profile": self.settings.config_profile,
@@ -241,7 +250,20 @@ class ForwardTrialGuardService:
             "fee_to_notional_ratio": fee_to_notional_ratio,
             "high_slippage_ratio": high_slippage_ratio,
             "slow_submit_to_fill_ratio": slow_submit_to_fill_ratio,
-            "breaches": breaches or [],
+            "breaches": normalized_breaches,
+            "hard_stop": {
+                "active": hard_stop_active,
+                "halt_required": hard_stop_active,
+                "resume_blocked": hard_stop_active,
+                "breach_count": len(normalized_breaches),
+                "summary": self._hard_stop_summary(status=status, breaches=normalized_breaches),
+                "operator_guidance": self._operator_guidance(status=status, breaches=normalized_breaches),
+            },
+            "recovery_requirements": self._recovery_requirements(
+                status=status,
+                fill_count=fill_count,
+                breaches=normalized_breaches,
+            ),
             "thresholds": {
                 "max_daily_loss_usdt": self.settings.trial_guard_max_daily_loss_usdt,
                 "max_consecutive_losses": self.settings.trial_guard_max_consecutive_losses,
@@ -251,11 +273,7 @@ class ForwardTrialGuardService:
             },
             "recommended_action": recommended_action,
             "last_evaluated_at": utc_now(),
-            "summary": self._summary(
-                status=status,
-                fill_count=fill_count,
-                breaches=breaches or [],
-            ),
+            "summary": self._summary(status=status, fill_count=fill_count, breaches=normalized_breaches),
         }
 
     @staticmethod
@@ -263,7 +281,117 @@ class ForwardTrialGuardService:
         if status == "disabled":
             return "试盘守护未启用。"
         if status == "warming_up":
-            return f"试盘守护正在预热，当前已记录 {fill_count} 笔已完成成交，尚未达到自动停机判定样本量。"
+            return f"试盘守护仍在预热，当前已记录 {fill_count} 笔已完成成交，尚未达到正式监控所需样本量。"
+        if status == "recovered":
+            return "试盘守护已从 breached 状态恢复，当前不再命中硬停机阈值。"
         if status == "breached":
-            return f"试盘守护已触发自动暂停，原因：{', '.join(item['code'] for item in breaches)}。"
-        return "试盘守护正在运行，当前未触发自动停机阈值。"
+            return f"试盘守护已触发自动停机，原因：{', '.join(str(item['code']) for item in breaches)}。"
+        return "试盘守护正在监控，当前未触发自动停机阈值。"
+
+    @staticmethod
+    def _breach_detail(item: dict[str, Any]) -> dict[str, Any]:
+        code = str(item.get("code") or "trial_guard_unknown")
+        value = item.get("value")
+        threshold = item.get("threshold")
+        title_map = {
+            "trial_guard_daily_loss_limit": "最近 24 小时组合净收益触碰试盘止损线",
+            "trial_guard_consecutive_losses": "连续亏损笔数达到试盘守护上限",
+            "trial_guard_fee_drag_limit": "手续费拖累超过试盘守护阈值",
+            "trial_guard_high_slippage_ratio": "高滑点样本占比超过试盘守护阈值",
+            "trial_guard_slow_fill_ratio": "慢成交样本占比超过试盘守护阈值",
+        }
+        summary_map = {
+            "trial_guard_daily_loss_limit": "最近 24 小时的交易净收益与资金费合计已经跌破允许的试盘亏损上限。",
+            "trial_guard_consecutive_losses": "最近连续闭合成交里，亏损序列已经长到试盘守护不允许继续自动试盘的程度。",
+            "trial_guard_fee_drag_limit": "最近样本里的手续费拖累已经高到继续试盘很难判断策略本身是否有效。",
+            "trial_guard_high_slippage_ratio": "最近成交里高滑点样本占比过高，说明执行质量当前不适合继续自动试盘。",
+            "trial_guard_slow_fill_ratio": "最近成交里 submit 到 fill 的慢成交占比过高，当前执行链路不适合继续自动试盘。",
+        }
+        return {
+            **item,
+            "title": title_map.get(code, code),
+            "summary": summary_map.get(code, "当前试盘守护已经命中一条硬停机阈值。"),
+            "current_value": value,
+            "threshold_value": threshold,
+        }
+
+    @staticmethod
+    def _hard_stop_summary(*, status: str, breaches: list[dict[str, Any]]) -> str:
+        if status == "breached":
+            titles = [str(item.get("title") or item.get("code") or "") for item in breaches]
+            joined = "；".join(title for title in titles if title)
+            return joined or "当前试盘守护已触发自动停机。"
+        if status == "recovered":
+            return "当前试盘守护已经不再命中硬停机阈值，可继续结合恢复状态判断是否允许恢复自动运行。"
+        if status == "warming_up":
+            return "试盘守护还在预热阶段，当前样本不足，只适合继续小资金观察。"
+        if status == "disabled":
+            return "试盘守护当前未启用。"
+        return "当前试盘守护正在监控，尚未触发硬停机。"
+
+    @staticmethod
+    def _operator_guidance(*, status: str, breaches: list[dict[str, Any]]) -> str:
+        if status == "breached":
+            return "先去风险与恢复页确认试盘守护阻断，再到策略判断页查看试盘审查和最近成交，确认触发原因是否已经自然解除。"
+        if status == "recovered":
+            return "试盘守护本身已经恢复，但仍需结合恢复状态、对账和其他 blocker 决定是否允许恢复自动运行。"
+        if status == "warming_up":
+            return "当前样本还不够，继续保持小资金和人工盯盘，不要把预热阶段误当成可以放量。"
+        if status == "disabled":
+            return "如果这条线本来就是试盘场景，先确认是否应该启用试盘守护。"
+        return "继续观察最近成交、费用拖累和滑点质量，确认是否还能维持小资金试盘。"
+
+    def _recovery_requirements(
+        self,
+        *,
+        status: str,
+        fill_count: int,
+        breaches: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        items: list[dict[str, Any]] = []
+        if status == "warming_up":
+            missing = max(int(self.settings.trial_guard_min_closed_fills) - int(fill_count), 0)
+            items.append(
+                {
+                    "code": "trial_guard_warmup_sample_requirement",
+                    "title": "继续积累已完成成交样本",
+                    "requirement": f"至少还需要 {missing} 笔已完成成交，试盘守护才会进入正式监控。",
+                }
+            )
+        elif status == "breached":
+            requirement_map = {
+                "trial_guard_daily_loss_limit": "最近 24 小时组合净收益需要重新回到试盘亏损上限以上。",
+                "trial_guard_consecutive_losses": "连续亏损序列需要被新的非亏损闭合成交打断。",
+                "trial_guard_fee_drag_limit": "手续费拖累比例需要回落到试盘守护阈值以下。",
+                "trial_guard_high_slippage_ratio": "高滑点样本占比需要回落到试盘守护阈值以下。",
+                "trial_guard_slow_fill_ratio": "慢成交样本占比需要回落到试盘守护阈值以下。",
+            }
+            for breach in breaches:
+                code = str(breach.get("code") or "")
+                items.append(
+                    {
+                        "code": code,
+                        "title": str(breach.get("title") or code),
+                        "requirement": requirement_map.get(code, "当前触发的试盘守护阈值需要先自然解除，才能继续恢复自动运行。"),
+                    }
+                )
+        elif status == "recovered":
+            items.append(
+                {
+                    "code": "trial_guard_recovered",
+                    "title": "试盘守护已恢复",
+                    "requirement": "试盘守护本身已不再阻断恢复，后续只需继续确认对账、恢复状态和其他 blocker。",
+                }
+            )
+        else:
+            items.append(
+                {
+                    "code": "trial_guard_monitoring",
+                    "title": "试盘守护正在监控",
+                    "requirement": "当前没有命中试盘守护硬停机阈值，可以继续结合其他恢复条件判断是否允许运行。",
+                }
+            )
+        return {
+            "resume_allowed": status != "breached",
+            "items": items,
+        }

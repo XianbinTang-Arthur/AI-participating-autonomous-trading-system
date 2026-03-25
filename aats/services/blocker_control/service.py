@@ -906,11 +906,25 @@ class BlockerControlService:
                 "先刷新当前状态，确认这次基线确认是否已完成。",
             )
         if code == "trial_guard_threshold_breached":
+            trial_guard_getter = getattr(self.owner, "trial_guard", None)
+            trial_guard = trial_guard_getter() if callable(trial_guard_getter) else {}
+            hard_stop = dict(trial_guard.get("hard_stop") or {})
+            breaches = list(trial_guard.get("breaches") or [])
+            recovery_requirements = list((trial_guard.get("recovery_requirements") or {}).get("items") or [])
+            breach_summary = "；".join(str(item.get("title") or item.get("code") or "") for item in breaches if item)
+            recovery_summary = "；".join(
+                str(item.get("requirement") or "")
+                for item in recovery_requirements
+                if item
+            )
             return (
                 "试盘守护已触发自动停机",
-                "最近一轮小资金试盘已经触发试盘守护阈值，后台会自动暂停交易，避免在连续亏损、手续费拖累或滑点恶化时继续放大风险。",
-                "在试盘守护仍然处于 breached 时，即使手动点击恢复，后台轮询也会再次把系统停回去。",
-                "先查看最近成交和试盘守护摘要，确认连续亏损、资金费拖累或滑点问题是否已经缓解；在 breached 解除前不要强行恢复自动运行。",
+                hard_stop.get("summary")
+                or breach_summary
+                or "最近一轮小资金试盘已经命中试盘守护硬停机阈值，系统会自动暂停，避免继续扩大风险。",
+                "当试盘守护仍处于 breached 时，即使手动点击恢复，后台轮询也会再次把系统停回去。",
+                recovery_summary
+                or "先查看试盘审查和最近成交，确认触发阈值为什么命中，以及这些条件是否已经自然解除。",
             )
         if code == "strategy_bundle_recovery_in_progress":
             return (

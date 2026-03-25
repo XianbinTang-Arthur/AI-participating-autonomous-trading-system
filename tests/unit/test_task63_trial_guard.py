@@ -54,6 +54,9 @@ class TestForwardTrialGuardService(unittest.TestCase):
         self.assertTrue(snapshot["halted"])
         self.assertEqual(service.kill_switch.status()["reason"], "trial_guard_threshold_breached")
         self.assertTrue(any(item["code"] == "trial_guard_daily_loss_limit" for item in snapshot["breaches"]))
+        self.assertTrue(snapshot["hard_stop"]["active"])
+        self.assertFalse(snapshot["recovery_requirements"]["resume_allowed"])
+        self.assertTrue(any(item["title"] for item in snapshot["breaches"]))
 
     def test_trial_guard_stays_warming_up_before_minimum_fill_count(self) -> None:
         settings = AATSSettings.model_validate(
@@ -92,6 +95,8 @@ class TestForwardTrialGuardService(unittest.TestCase):
         self.assertEqual(snapshot["status"], "warming_up")
         self.assertFalse(kill_switch.halted)
         self.assertEqual(snapshot["breaches"], [])
+        self.assertFalse(snapshot["hard_stop"]["active"])
+        self.assertTrue(snapshot["recovery_requirements"]["resume_allowed"])
 
     def test_trial_guard_counts_funding_fee_into_daily_loss_limit(self) -> None:
         now = utc_now()
@@ -144,6 +149,48 @@ class TestForwardTrialGuardService(unittest.TestCase):
         self.assertEqual(snapshot["daily_funding_fee_net"], Decimal("-40"))
         self.assertEqual(snapshot["daily_combined_net_realized"], Decimal("-32"))
         self.assertTrue(any(item["code"] == "trial_guard_daily_loss_limit" for item in snapshot["breaches"]))
+
+    def test_trial_guard_marks_recovered_after_breach_is_cleared(self) -> None:
+        now = utc_now()
+        kill_switch = KillSwitch()
+        kill_switch.halt(reason="trial_guard_threshold_breached")
+        settings = AATSSettings.model_validate(
+            {
+                "trial_guard_enabled": True,
+                "trial_guard_min_closed_fills": 1,
+                "trial_guard_lookback_fills": 10,
+                "trial_guard_max_daily_loss_usdt": 20.0,
+            }
+        )
+        service = ForwardTrialGuardService(
+            settings=settings,
+            kill_switch=kill_switch,
+            event_store=InMemoryEventStore(),
+            metrics=MetricsRegistry(),
+            profitability_provider=lambda _limit: {
+                "summary": {
+                    "closed_fill_count": 2,
+                    "fee_to_notional_ratio": Decimal("0.0001"),
+                },
+                "recent_closed_fills": [
+                    {"realized_pnl_delta": Decimal("4"), "ingestion_timestamp": now - timedelta(minutes=4)},
+                    {"realized_pnl_delta": Decimal("2"), "ingestion_timestamp": now - timedelta(minutes=8)},
+                ],
+            },
+            anomaly_provider=lambda _limit: {
+                "summary": {
+                    "high_slippage_count": 0,
+                    "slow_submit_to_fill_count": 0,
+                }
+            },
+            last_snapshot={"status": "breached"},
+        )
+
+        snapshot = service.evaluate_now()
+
+        self.assertEqual(snapshot["status"], "recovered")
+        self.assertFalse(snapshot["hard_stop"]["active"])
+        self.assertTrue(snapshot["recovery_requirements"]["resume_allowed"])
 
 
 if __name__ == "__main__":

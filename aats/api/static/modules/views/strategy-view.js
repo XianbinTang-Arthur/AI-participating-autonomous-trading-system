@@ -45,6 +45,8 @@ export function renderStrategySections(data) {
   const forwardPeriods = forwardValidation.periods || [];
   const scalingReadiness = trialReviewSections.scaling_readiness || data.scalingReadiness || {};
   const scalingRequirements = scalingReadiness.requirements || {};
+  const trialGuardHardStop = scalingReadiness.trial_guard_hard_stop || trialReviewSections.trial_guard_hard_stop || {};
+  const runtimeConstraints = scalingReadiness.runtime_constraints || trialReviewSections.runtime_constraints || {};
   const latestForwardPeriod = forwardPeriods[0] || {};
   const trialVerdict = chooseTrialVerdict(scalingReadiness.readiness, forwardSummary.verdict, trialReviewSummary.readiness);
   const trialHeadline =
@@ -394,6 +396,7 @@ export function renderStrategySections(data) {
       copy: "这里汇总系统自动给出的试盘建议、最近观察周期表现，以及当前是否满足继续试盘或进入下一步评估的前置条件。",
       actions: renderTrialVerdictActions({
         trialGuardStatus: scalingRequirements.trial_guard_status,
+        trialGuardHardStopActive: Boolean(trialGuardHardStop.active),
         trialVerdict,
       }),
       content: `
@@ -417,10 +420,16 @@ export function renderStrategySections(data) {
             tone: "info",
           },
           {
+            label: "试盘守护硬停机",
+            value: trialGuardHardStopLabel(trialGuardHardStop, scalingRequirements.trial_guard_status),
+            meta: trialGuardHardStop.summary || "当前没有命中试盘守护硬停机阈值。",
+            tone: trialGuardHardStop.active ? "danger" : scalingRequirements.trial_guard_status === "warming_up" ? "warning" : "positive",
+          },
+          {
             label: "运行前置条件",
-            value: scalingRequirements.safe_to_trade ? "当前可继续观察" : "当前先不要推进",
+            value: runtimeConstraints.can_continue_runtime ? "当前可继续观察" : "当前先不要推进",
             meta: `${scalingRequirements.review_required ? "仍需人工复核" : "当前无需人工复核"} | 阻断 ${formatNumber(scalingRequirements.active_blocker_count, 0, "0")} 项`,
-            tone: scalingRequirements.safe_to_trade && !scalingRequirements.review_required && Number(scalingRequirements.active_blocker_count || 0) === 0 ? "positive" : "danger",
+            tone: runtimeConstraints.can_continue_runtime ? "positive" : "danger",
           },
         ])}
         ${kvList([
@@ -428,6 +437,11 @@ export function renderStrategySections(data) {
             "为什么系统给出这个结论",
             trialHeadline,
             reasonListText(trialReasons, "当前没有额外原因说明"),
+          ],
+          [
+            "试盘守护硬停机",
+            trialGuardHardStopLabel(trialGuardHardStop, scalingRequirements.trial_guard_status),
+            hardStopRequirementText(trialGuardHardStop),
           ],
           [
             "最近观察周期",
@@ -438,8 +452,8 @@ export function renderStrategySections(data) {
             "当前运行前置条件",
             scalingRequirements.trial_guard_profile_active ? "试盘守护已启用" : "试盘守护未启用",
             [
-              scalingRequirements.trial_guard_status === "monitoring" ? "试盘守护正在监控" : "当前不在试盘档位",
-              scalingRequirements.safe_to_trade ? "恢复状态允许继续运行" : "恢复状态暂不允许继续自动运行",
+              runtimeConstraints.can_continue_runtime ? "当前运行前置条件已满足" : "当前运行前置条件仍受限",
+              reasonListText(runtimeConstraints.reasons, scalingRequirements.safe_to_trade ? "恢复状态允许继续运行" : "恢复状态暂不允许继续自动运行"),
               Number(scalingRequirements.active_blocker_count || 0) > 0 ? `仍有 ${formatNumber(scalingRequirements.active_blocker_count, 0, "0")} 项阻断未清除` : "当前没有新的执行阻断",
             ].join("；"),
           ],
@@ -774,11 +788,11 @@ function strategyLegSummary(legs) {
     .join(" | ");
 }
 
-function renderTrialVerdictActions({ trialGuardStatus, trialVerdict }) {
+function renderTrialVerdictActions({ trialGuardStatus, trialGuardHardStopActive, trialVerdict }) {
   const actions = [
     actionButton("查看风险与恢复", "navigate-view", "risk", "ghost"),
   ];
-  if (trialGuardStatus === "breached") {
+  if (trialGuardHardStopActive || trialGuardStatus === "breached") {
     actions.push(
       actionButton("查看委托与成交", "navigate-view", "execution", "ghost"),
       actionButton("记录本次复盘", "record-trial-review", "", "secondary"),
@@ -815,6 +829,26 @@ function scalingVerdictTone(value) {
   if (value === "shrink_trial") return "warning";
   if (value === "pause_trial") return "danger";
   return "neutral";
+}
+
+function trialGuardHardStopLabel(hardStop, status) {
+  if (hardStop?.active) return "已触发";
+  if (status === "recovered") return "已恢复";
+  if (status === "warming_up") return "预热中";
+  if (status === "disabled" || status === "not_configured") return "未启用";
+  if (status === "monitoring") return "监控中";
+  return readableState(status || "unknown");
+}
+
+function hardStopRequirementText(hardStop) {
+  const items = hardStop?.recovery_requirements?.items;
+  if (!Array.isArray(items) || !items.length) {
+    return hardStop?.summary || "当前没有额外的试盘守护说明。";
+  }
+  return items
+    .map((item) => String(item?.requirement || "").trim())
+    .filter(Boolean)
+    .join("；");
 }
 
 function formatSegmentLabel(segment) {
@@ -873,6 +907,7 @@ function strategyReasonText(value) {
     forward_validation_loss_limit_breached: "最近一个观察周期已经触碰试盘亏损上限。",
     trial_guard_not_enabled: "试盘守护还没启用，所以当前不适合直接加资金。",
     trial_profile_not_active: "当前不在试盘档位，先不要做放量判断。",
+    trial_guard_hard_stop_active: "试盘守护当前处于硬停机状态，先处理停机原因，再谈恢复或放量。",
     runtime_halted: "系统当前处于暂停状态，先处理暂停原因。",
     recovery_not_safe_to_trade: "当前恢复状态还不允许继续自动交易。",
     manual_review_required: "当前仍有人工复核要求，先处理复核再谈放量。",
