@@ -855,6 +855,113 @@ class TestRecovery(unittest.IsolatedAsyncioTestCase):
                 if recovered_runtime.database_runtime is not None:
                     recovered_runtime.database_runtime.dispose()
 
+    async def test_restarted_runtime_keeps_allocator_truth_visible_during_bundle_recovery(self) -> None:
+        with temporary_postgres_url() as (database_url, _admin_engine, _schema_name):
+            settings = AATSSettings.model_validate(
+                {
+                    **self._postgres_settings(database_url).model_dump(),
+                    "trading_product_type": "spot",
+                    "margin_mode": "cash",
+                    "default_symbol": "BTC-USDT",
+                    "allowed_symbols": ("BTC-USDT",),
+                    "strategy_family_active": "spot_grid",
+                    "spot_grid_enabled": True,
+                    "spot_grid_breakout_guard_enabled": False,
+                    "spot_grid_anchor_lookback_snapshots": 4,
+                    "spot_grid_band_bps": 500.0,
+                    "spot_grid_inventory_floor_fraction": 0.0,
+                    "spot_grid_inventory_ceiling_fraction": 1.0,
+                    "spot_grid_rebalance_min_fraction_of_max_qty": 0.05,
+                    "dca_enabled": True,
+                    "dca_interval_seconds": 0.0,
+                    "dca_quote_budget_per_cycle": 100.0,
+                    "max_abs_position_qty": 2.0,
+                }
+            )
+            runtime = await build_runtime(settings)
+            try:
+                await runtime.market_gateway.run_local_publisher(
+                    symbol=settings.default_symbol,
+                    iterations=4,
+                    interval_seconds=0.0,
+                )
+                target = await runtime.decision_engine.run_cycle(settings.default_symbol, settings.primary_timeframe)
+                self.assertEqual(target.strategy_family, "spot_grid")
+                self.assertIsNotNone(target.allocation_id)
+                self.assertIsNotNone(target.strategy_bundle_id)
+                self.assertEqual(len(target.strategy_execution_legs), 2)
+
+                now = utc_now()
+                for index, leg in enumerate(target.strategy_execution_legs, start=1):
+                    requested_qty = abs(float(leg.delta_position_qty or Decimal("0.001"))) or 0.001
+                    runtime.execution_repo.save_order_state(
+                        OrderState(
+                            decision_id=target.decision_id,
+                            intent_id=f"intent_restart_allocator_{index}",
+                            symbol=leg.symbol,
+                            client_order_id=f"cl_restart_allocator_{index}",
+                            venue="OKX",
+                            exchange_order_id=f"ord_restart_allocator_{index}",
+                            status="SUBMITTED",
+                            submission_mode="guarded_live_submit",
+                            submitted_ts=now,
+                            last_update_ts=now,
+                            requested_qty=requested_qty,
+                            filled_qty=0.0,
+                            remaining_qty=requested_qty,
+                            average_fill_price=None,
+                            fees=0.0,
+                            product_type=leg.product_type,
+                            margin_mode=leg.margin_mode,
+                            strategy_family=leg.family,
+                            strategy_sleeve_id=leg.strategy_sleeve_id,
+                            allocation_id=target.allocation_id,
+                            strategy_bundle_id=target.strategy_bundle_id,
+                            strategy_leg_role=leg.role,
+                            submission_payload={},
+                        )
+                    )
+            finally:
+                if runtime.database_runtime is not None:
+                    runtime.database_runtime.dispose()
+
+            recovered_runtime = await build_runtime(settings, bootstrap_portfolio_snapshot=False)
+            try:
+                self.assertEqual(recovered_runtime.recovery_status.recovery_state, "bundle_recovery")
+                self.assertTrue(recovered_runtime.recovery_status.bundle_recovery_required)
+                query = OperatorQueryService(recovered_runtime)
+                recovery = query.recovery_view()
+                strategy_runtime = query.strategy_runtime(limit=5)
+
+                self.assertEqual(recovery["recovery_state"], "bundle_recovery")
+                self.assertEqual(len(recovery["bundle_summaries"]), 1)
+                self.assertEqual(
+                    recovery["bundle_summaries"][0]["participating_families"],
+                    ["spot_grid", "dca"],
+                )
+                self.assertEqual(
+                    strategy_runtime["latest_allocation_decision"]["allocation_id"],
+                    target.allocation_id,
+                )
+                self.assertEqual(
+                    strategy_runtime["latest_bundle"]["bundle_id"],
+                    target.strategy_bundle_id,
+                )
+                self.assertEqual(
+                    strategy_runtime["latest_bundle"]["allocation_id"],
+                    target.allocation_id,
+                )
+                self.assertEqual(strategy_runtime["latest_bundle"]["bundle_type"], "multi_sleeve")
+                self.assertTrue(strategy_runtime["recent_budget_snapshots"])
+                self.assertTrue(strategy_runtime["recent_conflict_resolutions"] or strategy_runtime["recent_netting_decisions"])
+                self.assertEqual(
+                    set(strategy_runtime["latest_bundle"]["budget_snapshot_ids"]),
+                    set(strategy_runtime["latest_allocation_decision"]["budget_snapshot_ids"]),
+                )
+            finally:
+                if recovered_runtime.database_runtime is not None:
+                    recovered_runtime.database_runtime.dispose()
+
     async def test_resume_rechecks_blockers_and_stays_halted_when_market_is_stale(self) -> None:
         settings = AATSSettings.model_validate(
             {
