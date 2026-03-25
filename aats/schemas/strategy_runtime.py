@@ -124,6 +124,10 @@ class AllocatorBudgetSnapshot(SchemaBase):
     notional_cap: Decimal | None = None
     max_symbol_notional: Decimal | None = None
     hedge_priority_class: AllocatorHedgePriorityClass = "standard"
+    priority_rank: int = 0
+    portfolio_requested_notional: Decimal = Decimal("0")
+    portfolio_approved_notional: Decimal = Decimal("0")
+    portfolio_budget_cut_notional: Decimal = Decimal("0")
     clamped: bool = False
     reason_codes: list[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=utc_now)
@@ -168,7 +172,7 @@ class PortfolioAllocationDecision(SchemaBase):
     symbol: str
     product_type: ProductType
     margin_mode: MarginModelType
-    allocator_version: str = "task76_allocator_v2_phase1"
+    allocator_version: str = "task74_allocator_v2_phase2"
     automatic_enabled: bool = True
     route_action: StrategyRouteAction = "hold_current"
     primary_family: StrategyFamily = "directional"
@@ -185,6 +189,13 @@ class PortfolioAllocationDecision(SchemaBase):
     approved_sleeve_weights: dict[str, Decimal] = Field(default_factory=dict)
     approved_sleeve_budget_multipliers: dict[str, Decimal] = Field(default_factory=dict)
     approved_notional_by_sleeve: dict[str, Decimal] = Field(default_factory=dict)
+    portfolio_requested_notional: Decimal = Decimal("0")
+    portfolio_approved_notional: Decimal = Decimal("0")
+    portfolio_budget_cut_notional: Decimal = Decimal("0")
+    budget_cut_reason_codes: list[str] = Field(default_factory=list)
+    budget_snapshot_ids: list[str] = Field(default_factory=list)
+    expected_edge_bps: Decimal | None = None
+    expected_cost_bps: Decimal | None = None
     budget_assignments: list[SleeveBudgetAssignment] = Field(default_factory=list)
     budget_snapshots: list[AllocatorBudgetSnapshot] = Field(default_factory=list)
     conflict_resolutions: list[AllocatorConflictResolution] = Field(default_factory=list)
@@ -281,10 +292,21 @@ class StrategyExecutionBundle(SchemaBase):
     margin_mode: MarginModelType
     allowed_symbols: tuple[str, ...] = Field(default_factory=tuple)
     route_action: StrategyRouteAction
+    bundle_type: Literal["single_sleeve", "multi_sleeve", "hedge_protected"] = "single_sleeve"
+    bundle_priority: str = "standard"
     status: StrategyExecutionBundleStatus = "planned"
     selected_symbol: str
     operator_summary: str | None = None
     reason_codes: list[str] = Field(default_factory=list)
+    gross_requested_exposure: Decimal = Decimal("0")
+    net_approved_exposure: Decimal = Decimal("0")
+    expected_cost_bps: Decimal | None = None
+    expected_edge_bps: Decimal | None = None
+    budget_snapshot_ids: list[str] = Field(default_factory=list)
+    allocation_snapshot_ref: str | None = None
+    portfolio_risk_budget_state: str | None = None
+    hedge_protected_notional: Decimal = Decimal("0")
+    directional_reduced_notional: Decimal = Decimal("0")
     legs: list[StrategyLegIntent] = Field(default_factory=list)
     execution_plan_refs: list[str] = Field(default_factory=list)
     order_intent_refs: list[str] = Field(default_factory=list)

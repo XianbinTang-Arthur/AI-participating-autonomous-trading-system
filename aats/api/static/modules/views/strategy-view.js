@@ -145,6 +145,11 @@ export function renderStrategySections(data) {
           ["运行模板", strategyRuntimeSummary.env_template_profile || "当前未记录模板来源", strategyRuntimeSummary.automatic_selection_enabled ? "策略家族当前按系统自动选择运行。" : "策略家族当前不在自动选择模式。"],
           ["Allocator 结论", latestAllocationDecision.operator_summary || "当前还没有 allocator 决策。", reasonListText(latestAllocationDecision.reason_codes, "当前没有 allocator 级原因说明")],
           [
+            "组合预算",
+            `${formatSigned(strategyRuntimeSummary.latest_portfolio_requested_notional)} -> ${formatSigned(strategyRuntimeSummary.latest_portfolio_approved_notional)}`,
+            `预算削减 ${formatSigned(strategyRuntimeSummary.latest_portfolio_budget_cut_notional)}`,
+          ],
+          [
             "预算与净额",
             readableState(strategyRuntimeSummary.latest_portfolio_risk_budget_state || "unknown"),
             [
@@ -158,7 +163,17 @@ export function renderStrategySections(data) {
             `${formatSigned(strategyRuntimeSummary.latest_hedge_protected_notional)} / ${formatSigned(strategyRuntimeSummary.latest_directional_reduced_notional)}`,
             "前者表示为保护 hedge 结构而保留的名义金额，后者表示 allocator 主动削减的方向暴露。",
           ],
+          [
+            "预期净优势 / 成本",
+            `${formatSigned(strategyRuntimeSummary.latest_expected_edge_bps)} / ${formatSigned(strategyRuntimeSummary.latest_expected_cost_bps)}`,
+            "按本轮批准后的 sleeve 权重聚合，用于解释 allocator 为什么这样分配预算。",
+          ],
           ["最近 Bundle", readableState(latestBundle.status || "unknown"), reasonListText(latestBundle.reason_codes, "当前没有 bundle 级原因说明")],
+          [
+            "最近 Bundle 类型",
+            `${readableState(strategyRuntimeSummary.latest_bundle_type || "unknown")} / ${readableState(strategyRuntimeSummary.latest_bundle_priority || "standard")}`,
+            `${formatSigned(strategyRuntimeSummary.latest_bundle_gross_requested_exposure)} -> ${formatSigned(strategyRuntimeSummary.latest_bundle_net_approved_exposure)}`,
+          ],
           ["最近已应用动作", readableState(strategyAppliedTarget.position_intent || "hold"), reasonListText(strategyAppliedTarget.strategy_reason_codes, "当前没有额外已应用目标说明")],
           ["最近 Bundle 腿数", formatNumber(recentBundles[0]?.legs?.length ?? latestBundle.legs?.length ?? 0, 0, "0"), latestBundle.operator_summary || "当前没有 bundle 级执行摘要"],
           ["最近 Sleeve Intent", formatNumber(recentSleeveIntents.length, 0, "0"), recentSleeveIntents[0]?.headline || "当前没有最新 sleeve intent 摘要"],

@@ -352,6 +352,11 @@ ALTER TABLE IF EXISTS portfolio_allocation_decisions ADD COLUMN IF NOT EXISTS au
 ALTER TABLE IF EXISTS portfolio_allocation_decisions ADD COLUMN IF NOT EXISTS route_action VARCHAR(32);
 ALTER TABLE IF EXISTS portfolio_allocation_decisions ADD COLUMN IF NOT EXISTS primary_family VARCHAR(32);
 ALTER TABLE IF EXISTS portfolio_allocation_decisions ADD COLUMN IF NOT EXISTS primary_strategy_sleeve_id VARCHAR(64);
+ALTER TABLE IF EXISTS portfolio_allocation_decisions ADD COLUMN IF NOT EXISTS portfolio_requested_notional NUMERIC(36, 18);
+ALTER TABLE IF EXISTS portfolio_allocation_decisions ADD COLUMN IF NOT EXISTS portfolio_approved_notional NUMERIC(36, 18);
+ALTER TABLE IF EXISTS portfolio_allocation_decisions ADD COLUMN IF NOT EXISTS portfolio_budget_cut_notional NUMERIC(36, 18);
+ALTER TABLE IF EXISTS portfolio_allocation_decisions ADD COLUMN IF NOT EXISTS expected_edge_bps NUMERIC(36, 18);
+ALTER TABLE IF EXISTS portfolio_allocation_decisions ADD COLUMN IF NOT EXISTS expected_cost_bps NUMERIC(36, 18);
 ALTER TABLE IF EXISTS portfolio_allocation_decisions ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITH TIME ZONE;
 ALTER TABLE IF EXISTS portfolio_allocation_decisions ADD COLUMN IF NOT EXISTS payload JSON;
 
@@ -524,8 +529,15 @@ ALTER TABLE IF EXISTS strategy_execution_bundles ADD COLUMN IF NOT EXISTS alloca
 ALTER TABLE IF EXISTS strategy_execution_bundles ADD COLUMN IF NOT EXISTS product_type VARCHAR(16);
 ALTER TABLE IF EXISTS strategy_execution_bundles ADD COLUMN IF NOT EXISTS margin_mode VARCHAR(16);
 ALTER TABLE IF EXISTS strategy_execution_bundles ADD COLUMN IF NOT EXISTS route_action VARCHAR(32);
+ALTER TABLE IF EXISTS strategy_execution_bundles ADD COLUMN IF NOT EXISTS bundle_type VARCHAR(32);
+ALTER TABLE IF EXISTS strategy_execution_bundles ADD COLUMN IF NOT EXISTS bundle_priority VARCHAR(32);
 ALTER TABLE IF EXISTS strategy_execution_bundles ADD COLUMN IF NOT EXISTS status VARCHAR(32);
 ALTER TABLE IF EXISTS strategy_execution_bundles ADD COLUMN IF NOT EXISTS selected_symbol VARCHAR(64);
+ALTER TABLE IF EXISTS strategy_execution_bundles ADD COLUMN IF NOT EXISTS gross_requested_exposure NUMERIC(36, 18);
+ALTER TABLE IF EXISTS strategy_execution_bundles ADD COLUMN IF NOT EXISTS net_approved_exposure NUMERIC(36, 18);
+ALTER TABLE IF EXISTS strategy_execution_bundles ADD COLUMN IF NOT EXISTS expected_cost_bps NUMERIC(36, 18);
+ALTER TABLE IF EXISTS strategy_execution_bundles ADD COLUMN IF NOT EXISTS expected_edge_bps NUMERIC(36, 18);
+ALTER TABLE IF EXISTS strategy_execution_bundles ADD COLUMN IF NOT EXISTS portfolio_risk_budget_state VARCHAR(32);
 ALTER TABLE IF EXISTS strategy_execution_bundles ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITH TIME ZONE;
 ALTER TABLE IF EXISTS strategy_execution_bundles ADD COLUMN IF NOT EXISTS payload JSON;
 
@@ -680,10 +692,18 @@ CREATE TABLE IF NOT EXISTS allocator_budget_snapshots (
     notional_cap NUMERIC(36, 18),
     max_symbol_notional NUMERIC(36, 18),
     hedge_priority_class VARCHAR(32) NOT NULL,
+    priority_rank INTEGER NOT NULL,
+    portfolio_requested_notional NUMERIC(36, 18) NOT NULL,
+    portfolio_approved_notional NUMERIC(36, 18) NOT NULL,
+    portfolio_budget_cut_notional NUMERIC(36, 18) NOT NULL,
     clamped BOOLEAN NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE NOT NULL,
     payload JSON NOT NULL
 );
+ALTER TABLE IF EXISTS allocator_budget_snapshots ADD COLUMN IF NOT EXISTS priority_rank INTEGER;
+ALTER TABLE IF EXISTS allocator_budget_snapshots ADD COLUMN IF NOT EXISTS portfolio_requested_notional NUMERIC(36, 18);
+ALTER TABLE IF EXISTS allocator_budget_snapshots ADD COLUMN IF NOT EXISTS portfolio_approved_notional NUMERIC(36, 18);
+ALTER TABLE IF EXISTS allocator_budget_snapshots ADD COLUMN IF NOT EXISTS portfolio_budget_cut_notional NUMERIC(36, 18);
 
 CREATE TABLE IF NOT EXISTS allocator_conflict_resolutions (
     conflict_resolution_id VARCHAR(64) PRIMARY KEY,

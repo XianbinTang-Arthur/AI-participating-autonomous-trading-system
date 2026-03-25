@@ -55,10 +55,13 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(strategy_payload["summary"]["latest_selected_strategy_sleeve_id"])
         self.assertIsNotNone(strategy_payload["summary"]["latest_allocation_id"])
         self.assertEqual(strategy_payload["summary"]["latest_selected_route_action"], "override_target")
-        self.assertEqual(strategy_payload["summary"]["latest_allocator_version"], "task76_allocator_v2_phase1")
+        self.assertEqual(strategy_payload["summary"]["latest_allocator_version"], "task74_allocator_v2_phase2")
         self.assertGreaterEqual(strategy_payload["summary"]["latest_budget_profile_count"], 1)
         self.assertGreaterEqual(strategy_payload["summary"]["latest_budget_assignment_count"], 1)
         self.assertGreaterEqual(strategy_payload["summary"]["latest_budget_snapshot_count"], 1)
+        self.assertIsNotNone(strategy_payload["summary"]["latest_portfolio_requested_notional"])
+        self.assertIsNotNone(strategy_payload["summary"]["latest_portfolio_approved_notional"])
+        self.assertIn(strategy_payload["summary"]["latest_bundle_type"], {"single_sleeve", "multi_sleeve", "hedge_protected"})
         self.assertEqual(strategy_payload["latest_applied_target"]["strategy_family"], "spot_grid")
         self.assertIsNotNone(strategy_payload["latest_applied_target"]["strategy_sleeve_id"])
         self.assertIsNotNone(strategy_payload["latest_applied_target"]["allocation_id"])
@@ -112,10 +115,12 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["summary"]["configured_active_family"], "dca")
         self.assertEqual(payload["summary"]["latest_selected_family"], "dca")
         self.assertIsNotNone(payload["summary"]["latest_selected_strategy_sleeve_id"])
-        self.assertEqual(payload["summary"]["latest_allocator_version"], "task76_allocator_v2_phase1")
+        self.assertEqual(payload["summary"]["latest_allocator_version"], "task74_allocator_v2_phase2")
         self.assertGreaterEqual(payload["summary"]["latest_budget_profile_count"], 1)
         self.assertGreaterEqual(payload["summary"]["latest_budget_assignment_count"], 1)
         self.assertGreaterEqual(payload["summary"]["latest_budget_snapshot_count"], 1)
+        self.assertIsNotNone(payload["summary"]["latest_portfolio_requested_notional"])
+        self.assertIsNotNone(payload["summary"]["latest_portfolio_approved_notional"])
         self.assertEqual(payload["latest_applied_target"]["strategy_family"], "dca")
         self.assertIsNotNone(payload["latest_applied_target"]["strategy_sleeve_id"])
         self.assertTrue(payload["summary"]["auto_parallel_enabled"])
@@ -173,7 +178,7 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertIn(payload["summary"]["latest_selected_family"], {"spot_grid", "dca"})
         self.assertEqual(payload["summary"]["latest_approved_families"], ["spot_grid", "dca"])
         self.assertTrue(payload["summary"]["latest_approved_sleeve_weights"])
-        self.assertEqual(payload["summary"]["latest_allocator_version"], "task76_allocator_v2_phase1")
+        self.assertEqual(payload["summary"]["latest_allocator_version"], "task74_allocator_v2_phase2")
         self.assertGreaterEqual(payload["summary"]["latest_budget_profile_count"], 2)
         self.assertGreaterEqual(payload["summary"]["latest_budget_assignment_count"], 2)
         self.assertGreaterEqual(payload["summary"]["latest_budget_snapshot_count"], 2)
@@ -183,7 +188,9 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(payload["latest_allocation_decision"]["approved_families"], ["spot_grid", "dca"])
         self.assertTrue(payload["latest_allocation_decision"]["approved_sleeve_weights"])
-        self.assertEqual(payload["latest_allocation_decision"]["allocator_version"], "task76_allocator_v2_phase1")
+        self.assertEqual(payload["latest_allocation_decision"]["allocator_version"], "task74_allocator_v2_phase2")
+        self.assertGreater(float(payload["latest_allocation_decision"]["portfolio_requested_notional"]), 0.0)
+        self.assertGreater(float(payload["latest_allocation_decision"]["portfolio_approved_notional"]), 0.0)
         self.assertTrue(payload["recent_budget_profiles"])
         self.assertTrue(payload["recent_budget_assignments"])
         self.assertTrue(payload["recent_budget_snapshots"])
@@ -192,6 +199,12 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(len(payload["recent_sleeve_intents"]), 4)
         self.assertEqual(len(payload["latest_bundle"]["legs"]), 2)
         self.assertEqual(set(payload["latest_bundle"]["participating_families"]), {"spot_grid", "dca"})
+        self.assertEqual(payload["latest_bundle"]["bundle_type"], "multi_sleeve")
+        self.assertIsNotNone(payload["latest_bundle"]["allocation_snapshot_ref"])
+        self.assertEqual(
+            set(payload["latest_bundle"]["budget_snapshot_ids"]),
+            set(payload["latest_allocation_decision"]["budget_snapshot_ids"]),
+        )
 
     async def test_smart_arbitrage_runtime_endpoint_exposes_executable_bundle_snapshot(self) -> None:
         settings = self._settings(
@@ -234,7 +247,7 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(payload["summary"]["latest_selected_strategy_sleeve_id"])
         self.assertIsNotNone(payload["summary"]["latest_allocation_id"])
         self.assertEqual(payload["summary"]["latest_selected_route_action"], "override_target")
-        self.assertEqual(payload["summary"]["latest_allocator_version"], "task76_allocator_v2_phase1")
+        self.assertEqual(payload["summary"]["latest_allocator_version"], "task74_allocator_v2_phase2")
         self.assertGreaterEqual(payload["summary"]["latest_budget_profile_count"], 1)
         self.assertGreaterEqual(payload["summary"]["latest_budget_assignment_count"], 1)
         self.assertGreaterEqual(payload["summary"]["latest_budget_snapshot_count"], 1)
@@ -249,6 +262,14 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             payload["latest_bundle"]["allocation_id"],
             payload["latest_applied_target"]["allocation_id"],
+        )
+        self.assertEqual(payload["latest_bundle"]["bundle_type"], "hedge_protected")
+        self.assertIsNotNone(payload["latest_bundle"]["allocation_snapshot_ref"])
+        self.assertGreaterEqual(float(payload["latest_bundle"]["gross_requested_exposure"]), 0.0)
+        self.assertGreaterEqual(float(payload["latest_bundle"]["net_approved_exposure"]), 0.0)
+        self.assertEqual(
+            set(payload["latest_bundle"]["budget_snapshot_ids"]),
+            set(payload["latest_allocation_decision"]["budget_snapshot_ids"]),
         )
         smart_arbitrage_candidate = next(
             item for item in payload["latest_snapshot"]["candidates"] if item["family"] == "smart_arbitrage"

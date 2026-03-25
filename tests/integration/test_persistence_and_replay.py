@@ -244,6 +244,8 @@ class TestPersistenceAndReplay(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertTrue(runtime_bundles)
                 self.assertEqual(runtime_bundles[0].allocation_id, target.allocation_id)
+                self.assertEqual(runtime_bundles[0].bundle_type, "hedge_protected")
+                self.assertIsNotNone(runtime_bundles[0].allocation_snapshot_ref)
                 runtime_allocation = storage.strategy_runtime_repo.latest_allocation_decision(
                     product_type="derivatives",
                     margin_mode="cross",
@@ -251,6 +253,19 @@ class TestPersistenceAndReplay(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertIsNotNone(runtime_allocation)
                 self.assertEqual(runtime_allocation.allocation_id, target.allocation_id)
+                self.assertEqual(runtime_allocation.allocator_version, "task74_allocator_v2_phase2")
+                self.assertEqual(
+                    runtime_bundles[0].gross_requested_exposure,
+                    runtime_allocation.portfolio_requested_notional,
+                )
+                self.assertEqual(
+                    runtime_bundles[0].net_approved_exposure,
+                    runtime_allocation.portfolio_approved_notional,
+                )
+                self.assertEqual(
+                    set(runtime_bundles[0].budget_snapshot_ids),
+                    set(runtime_allocation.budget_snapshot_ids),
+                )
                 runtime_intents = storage.strategy_runtime_repo.list_sleeve_intents(
                     product_type="derivatives",
                     margin_mode="cross",
@@ -348,6 +363,7 @@ class TestPersistenceAndReplay(unittest.IsolatedAsyncioTestCase):
                     symbol="BTC-USDT",
                 )
                 self.assertIsNotNone(runtime_allocation)
+                self.assertEqual(runtime_allocation.allocator_version, "task74_allocator_v2_phase2")
                 runtime_bundles = storage.strategy_runtime_repo.recent_execution_bundles(
                     product_type="spot",
                     margin_mode="cash",
@@ -355,6 +371,20 @@ class TestPersistenceAndReplay(unittest.IsolatedAsyncioTestCase):
                     limit=5,
                 )
                 self.assertTrue(runtime_bundles)
+                self.assertEqual(runtime_bundles[0].bundle_type, "multi_sleeve")
+                self.assertIsNotNone(runtime_bundles[0].allocation_snapshot_ref)
+                self.assertEqual(
+                    runtime_bundles[0].gross_requested_exposure,
+                    runtime_allocation.portfolio_requested_notional,
+                )
+                self.assertEqual(
+                    runtime_bundles[0].net_approved_exposure,
+                    runtime_allocation.portfolio_approved_notional,
+                )
+                self.assertEqual(
+                    set(runtime_bundles[0].budget_snapshot_ids),
+                    set(runtime_allocation.budget_snapshot_ids),
+                )
                 runtime_intents = storage.strategy_runtime_repo.list_sleeve_intents(
                     product_type="spot",
                     margin_mode="cash",

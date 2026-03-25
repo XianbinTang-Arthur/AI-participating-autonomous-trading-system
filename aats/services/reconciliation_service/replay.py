@@ -1366,6 +1366,91 @@ class ReplayEngine:
                             "decision_chain_allocation_active_family_missing_intent "
                             f"decision_id={decision_id}"
                         )
+            if strategy_bundle is not None and allocation_decision is not None:
+                if (
+                    strategy_bundle.allocation_id is not None
+                    and str(strategy_bundle.allocation_id) != str(allocation_decision.allocation_id)
+                ):
+                    issues.append(
+                        "decision_chain_bundle_allocation_id_mismatch "
+                        f"decision_id={decision_id}"
+                    )
+                if (
+                    strategy_bundle.allocation_snapshot_ref is not None
+                    and allocation_event is not None
+                    and str(strategy_bundle.allocation_snapshot_ref) != str(allocation_event.event_id)
+                ):
+                    issues.append(
+                        "decision_chain_bundle_allocation_snapshot_ref_mismatch "
+                        f"decision_id={decision_id}"
+                    )
+                if set(strategy_bundle.budget_snapshot_ids or []) != set(allocation_decision.budget_snapshot_ids or []):
+                    issues.append(
+                        "decision_chain_bundle_budget_snapshot_ids_mismatch "
+                        f"decision_id={decision_id}"
+                    )
+                if (
+                    abs(
+                        to_decimal(strategy_bundle.gross_requested_exposure)
+                        - to_decimal(allocation_decision.portfolio_requested_notional)
+                    )
+                    > EPSILON_DECIMAL_12
+                ):
+                    issues.append(
+                        "decision_chain_bundle_requested_exposure_mismatch "
+                        f"decision_id={decision_id}"
+                    )
+                if (
+                    abs(
+                        to_decimal(strategy_bundle.net_approved_exposure)
+                        - to_decimal(allocation_decision.portfolio_approved_notional)
+                    )
+                    > EPSILON_DECIMAL_12
+                ):
+                    issues.append(
+                        "decision_chain_bundle_approved_exposure_mismatch "
+                        f"decision_id={decision_id}"
+                    )
+                if (
+                    strategy_bundle.portfolio_risk_budget_state is not None
+                    and strategy_bundle.portfolio_risk_budget_state != allocation_decision.portfolio_risk_budget_state
+                ):
+                    issues.append(
+                        "decision_chain_bundle_budget_state_mismatch "
+                        f"decision_id={decision_id}"
+                    )
+                if strategy_bundle.expected_edge_bps != allocation_decision.expected_edge_bps:
+                    issues.append(
+                        "decision_chain_bundle_expected_edge_bps_mismatch "
+                        f"decision_id={decision_id}"
+                    )
+                if strategy_bundle.expected_cost_bps != allocation_decision.expected_cost_bps:
+                    issues.append(
+                        "decision_chain_bundle_expected_cost_bps_mismatch "
+                        f"decision_id={decision_id}"
+                    )
+                if (
+                    abs(
+                        to_decimal(strategy_bundle.hedge_protected_notional)
+                        - to_decimal(allocation_decision.hedge_protected_notional)
+                    )
+                    > EPSILON_DECIMAL_12
+                ):
+                    issues.append(
+                        "decision_chain_bundle_hedge_protected_notional_mismatch "
+                        f"decision_id={decision_id}"
+                    )
+                if (
+                    abs(
+                        to_decimal(strategy_bundle.directional_reduced_notional)
+                        - to_decimal(allocation_decision.directional_reduced_notional)
+                    )
+                    > EPSILON_DECIMAL_12
+                ):
+                    issues.append(
+                        "decision_chain_bundle_directional_reduced_notional_mismatch "
+                        f"decision_id={decision_id}"
+                    )
             if decision_reconciliation_reports:
                 allowed_sleeves = {
                     str(intent.strategy_sleeve_id)

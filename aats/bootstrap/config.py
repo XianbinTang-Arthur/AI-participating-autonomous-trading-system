@@ -940,6 +940,7 @@ def _build_position_target_handler(
     kill_switch: KillSwitch,
     metrics: MetricsRegistry,
     bus: InMemoryEventBus,
+    event_store: EventStore,
     strategy_runtime_repo: StrategyRuntimeRepository | None = None,
 ):
     def _exposure_side(quantity: Decimal) -> str:
@@ -948,6 +949,19 @@ def _build_position_target_handler(
         if quantity < Decimal("-1e-12"):
             return "short"
         return "flat"
+
+    def _allocation_event_ref(*, allocation_id: str | None) -> str | None:
+        if not allocation_id:
+            return None
+        scope = runtime_state_scope(settings)
+        for event in event_store.by_topic_scoped(
+            topics.PORTFOLIO_ALLOCATION_DECISIONS,
+            scope=scope,
+            limit=50,
+        ):
+            if str(event.payload.get("allocation_id") or "") == str(allocation_id):
+                return event.event_id
+        return None
 
     def _final_action(*, current_qty: Decimal, target_qty: Decimal) -> str:
         current_side = _exposure_side(current_qty)
@@ -1443,6 +1457,29 @@ def _build_position_target_handler(
                 else:
                     bundle_status = "submitted"
 
+            allocation_decision = (
+                None
+                if strategy_runtime_repo is None or target.allocation_id is None
+                else strategy_runtime_repo.get_allocation_decision(target.allocation_id)
+            )
+            bundle_type = "single_sleeve"
+            if allocation_decision is not None:
+                if (
+                    to_decimal(allocation_decision.hedge_protected_notional) > Decimal("0")
+                    or to_decimal(allocation_decision.directional_reduced_notional) > Decimal("0")
+                ):
+                    bundle_type = "hedge_protected"
+                elif len(allocation_decision.approved_families) > 1:
+                    bundle_type = "multi_sleeve"
+            bundle_priority = "standard"
+            if allocation_decision is not None and allocation_decision.budget_snapshots:
+                min_priority_rank = min(item.priority_rank for item in allocation_decision.budget_snapshots)
+                if min_priority_rank <= 0:
+                    bundle_priority = "critical_hedge"
+                elif min_priority_rank == 1:
+                    bundle_priority = "hedge"
+                elif min_priority_rank == 2:
+                    bundle_priority = "inventory"
             bundle = StrategyExecutionBundle(
                 bundle_id=target.strategy_bundle_id or new_id("bundle"),
                 decision_id=target.decision_id,
@@ -1476,6 +1513,8 @@ def _build_position_target_handler(
                 margin_mode=target.margin_mode,
                 allowed_symbols=settings.expanded_allowed_symbols(),
                 route_action=target.strategy_route_action,
+                bundle_type=bundle_type,
+                bundle_priority=bundle_priority,
                 status=bundle_status,
                 selected_symbol=target.symbol,
                 operator_summary=target.strategy_headline,
@@ -1488,6 +1527,33 @@ def _build_position_target_handler(
                             *(extra_blocked_reasons or []),
                         ]
                     )
+                ),
+                gross_requested_exposure=(
+                    Decimal("0")
+                    if allocation_decision is None
+                    else to_decimal(allocation_decision.portfolio_requested_notional)
+                ),
+                net_approved_exposure=(
+                    Decimal("0")
+                    if allocation_decision is None
+                    else to_decimal(allocation_decision.portfolio_approved_notional)
+                ),
+                expected_cost_bps=None if allocation_decision is None else allocation_decision.expected_cost_bps,
+                expected_edge_bps=None if allocation_decision is None else allocation_decision.expected_edge_bps,
+                budget_snapshot_ids=[] if allocation_decision is None else list(allocation_decision.budget_snapshot_ids),
+                allocation_snapshot_ref=_allocation_event_ref(allocation_id=target.allocation_id),
+                portfolio_risk_budget_state=(
+                    None if allocation_decision is None else allocation_decision.portfolio_risk_budget_state
+                ),
+                hedge_protected_notional=(
+                    Decimal("0")
+                    if allocation_decision is None
+                    else to_decimal(allocation_decision.hedge_protected_notional)
+                ),
+                directional_reduced_notional=(
+                    Decimal("0")
+                    if allocation_decision is None
+                    else to_decimal(allocation_decision.directional_reduced_notional)
                 ),
                 legs=published_legs,
                 execution_plan_refs=execution_plan_refs,
@@ -2081,6 +2147,7 @@ async def build_runtime(
         kill_switch=kill_switch,
         metrics=metrics,
         bus=bus,
+        event_store=storage.event_store,
         strategy_runtime_repo=storage.strategy_runtime_repo,
     )
     await _subscribe_critical_handlers(

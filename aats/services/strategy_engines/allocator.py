@@ -19,8 +19,14 @@ from aats.schemas.strategy_runtime import (
 from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, quantize_decimal, to_decimal
 
 
-class PortfolioAllocatorV2Phase1:
+class PortfolioAllocatorV2Phase2:
     _FAMILY_PRIORITY: tuple[StrategyFamily, ...] = ("smart_arbitrage", "spot_grid", "dca", "directional")
+    _HEDGE_PRIORITY_RANK: dict[str, int] = {
+        "critical_hedge": 0,
+        "hedge": 1,
+        "inventory": 2,
+        "standard": 3,
+    }
 
     def __init__(self, *, settings: AATSSettings | None = None) -> None:
         self.settings = settings
@@ -34,6 +40,7 @@ class PortfolioAllocatorV2Phase1:
         sleeve_intents: list[StrategySleeveIntent],
         budget_assignments: list[SleeveBudgetAssignment] | None = None,
     ) -> PortfolioAllocationDecision:
+        allocation_id = self._allocation_id(sleeve_intents)
         assignments_by_sleeve = {
             item.strategy_sleeve_id: item
             for item in (budget_assignments or [])
@@ -58,7 +65,7 @@ class PortfolioAllocatorV2Phase1:
                     blocked_reason_codes.append("allocator_directional_blocked_by_active_smart_arbitrage")
                     conflict_resolutions.append(
                         self._conflict_resolution(
-                            allocation_id=self._allocation_id(sleeve_intents),
+                            allocation_id=allocation_id,
                             base_target=base_target,
                             conflict_type="hedge_priority",
                             resolution_action="directional_reduced_to_protect_hedge",
@@ -96,7 +103,7 @@ class PortfolioAllocatorV2Phase1:
                     blocked_reason_codes.append("allocator_directional_blocked_by_active_inventory_sleeves")
                     conflict_resolutions.append(
                         self._conflict_resolution(
-                            allocation_id=self._allocation_id(sleeve_intents),
+                            allocation_id=allocation_id,
                             base_target=base_target,
                             conflict_type="inventory_priority",
                             resolution_action="directional_reduced_to_preserve_inventory_sleeves",
@@ -129,19 +136,22 @@ class PortfolioAllocatorV2Phase1:
 
         scaled_approved: list[StrategySleeveIntent] = []
         budget_snapshots: list[AllocatorBudgetSnapshot] = []
-        approved_notional_by_sleeve: dict[str, Decimal] = {}
         for intent in approved:
             scaled_intent, snapshot = self._apply_budget_assignment(
                 intent=intent,
                 base_target=base_target,
                 assignment=assignments_by_sleeve.get(intent.strategy_sleeve_id),
-                allocation_id=self._allocation_id(sleeve_intents),
+                allocation_id=allocation_id,
             )
             if self._intent_is_actionable(scaled_intent, include_active_inventory=True):
                 scaled_approved.append(scaled_intent)
             budget_snapshots.append(snapshot)
-            approved_notional_by_sleeve[snapshot.strategy_sleeve_id] = snapshot.approved_notional
 
+        scaled_approved, budget_snapshots, budget_cut_reason_codes = self._apply_portfolio_budget_redistribution(
+            approved=scaled_approved,
+            budget_snapshots=budget_snapshots,
+            base_target=base_target,
+        )
         approved_families = [intent.family for intent in scaled_approved]
         approved_weights = self._normalized_weights(
             approved=scaled_approved,
@@ -154,12 +164,16 @@ class PortfolioAllocatorV2Phase1:
             )
             for intent in scaled_approved
         }
+        approved_notional_by_sleeve = {
+            snapshot.strategy_sleeve_id: snapshot.approved_notional
+            for snapshot in budget_snapshots
+            if snapshot.approved_notional > EPSILON_DECIMAL_12
+        }
         primary_intent = self._primary_intent(
             approved=scaled_approved,
             selected_family=selected_family,
             assignments_by_sleeve=assignments_by_sleeve,
         )
-        allocation_id = self._allocation_id(sleeve_intents)
         execution_legs = self._execution_legs(
             approved=scaled_approved,
             base_target=base_target,
@@ -185,32 +199,49 @@ class PortfolioAllocatorV2Phase1:
             if execution_legs
             else ("hold_current" if approved_families else "advisory_only")
         )
+        portfolio_requested_notional = sum(
+            (snapshot.portfolio_requested_notional for snapshot in budget_snapshots),
+            start=Decimal("0"),
+        )
+        portfolio_approved_notional = sum(
+            (snapshot.portfolio_approved_notional for snapshot in budget_snapshots),
+            start=Decimal("0"),
+        )
+        portfolio_budget_cut_notional = sum(
+            (snapshot.portfolio_budget_cut_notional for snapshot in budget_snapshots),
+            start=Decimal("0"),
+        )
         reason_codes = list(
             dict.fromkeys(
                 [
-                    "allocator_v2_phase1_applied",
+                    "allocator_v2_phase2_applied",
                     f"allocator_primary_family_{primary_intent.family if primary_intent is not None else 'directional'}",
                     *selection_reason_codes,
                     *blocked_reason_codes,
+                    *budget_cut_reason_codes,
                 ]
             )
         )
-        budget_state = "contracted" if any(item.clamped for item in budget_snapshots) else "normal"
+        budget_state = "redistributed" if budget_cut_reason_codes else (
+            "contracted" if any(item.clamped for item in budget_snapshots) else "normal"
+        )
         if conflict_resolutions and budget_state == "normal":
             budget_state = "hedge_protected"
         if execution_legs:
-            operator_summary = "当前 allocator v2 已按 sleeve 预算、冲突净额与 hedge 优先级生成账户级执行目标。"
+            operator_summary = "当前 allocator v2 已按 sleeve 预算、组合预算和净额规则生成账户级执行目标。"
         elif approved_families:
-            operator_summary = "当前 allocator v2 识别到活跃 sleeve，但本轮没有新增可执行 delta。"
+            operator_summary = "当前 allocator v2 识别到活跃 sleeve，但本轮没有新的可执行 delta。"
         else:
             operator_summary = "当前 allocator v2 没有批准新的 sleeve 执行动作，系统保持当前仓位。"
+        if budget_cut_reason_codes:
+            operator_summary = f"{operator_summary} 组合层预算已自动再分配。"
         return PortfolioAllocationDecision(
             allocation_id=allocation_id,
             decision_id=base_target.decision_id,
             symbol=base_target.symbol,
             product_type=base_target.product_type,
             margin_mode=base_target.margin_mode,
-            allocator_version="task76_allocator_v2_phase1",
+            allocator_version="task74_allocator_v2_phase2",
             route_action=route_action,
             primary_family="directional" if primary_intent is None else primary_intent.family,
             primary_strategy_sleeve_id=None if primary_intent is None else primary_intent.strategy_sleeve_id,
@@ -226,6 +257,21 @@ class PortfolioAllocatorV2Phase1:
             approved_sleeve_weights=approved_weights,
             approved_sleeve_budget_multipliers=approved_budget_multipliers,
             approved_notional_by_sleeve=approved_notional_by_sleeve,
+            portfolio_requested_notional=portfolio_requested_notional,
+            portfolio_approved_notional=portfolio_approved_notional,
+            portfolio_budget_cut_notional=portfolio_budget_cut_notional,
+            budget_cut_reason_codes=budget_cut_reason_codes,
+            budget_snapshot_ids=[item.budget_snapshot_id for item in budget_snapshots],
+            expected_edge_bps=self._portfolio_expected_bps(
+                approved=scaled_approved,
+                snapshots=budget_snapshots,
+                kind="edge",
+            ),
+            expected_cost_bps=self._portfolio_expected_bps(
+                approved=scaled_approved,
+                snapshots=budget_snapshots,
+                kind="cost",
+            ),
             budget_assignments=[item.model_copy(deep=True) for item in assignments_by_sleeve.values()],
             budget_snapshots=budget_snapshots,
             conflict_resolutions=conflict_resolutions,
@@ -285,10 +331,88 @@ class PortfolioAllocatorV2Phase1:
             notional_cap=notional_cap,
             max_symbol_notional=max_symbol_notional,
             hedge_priority_class="standard" if assignment is None else assignment.hedge_priority_class,
+            priority_rank=self._hedge_priority_rank("standard" if assignment is None else assignment.hedge_priority_class),
+            portfolio_requested_notional=requested_notional,
+            portfolio_approved_notional=approved_notional,
+            portfolio_budget_cut_notional=Decimal("0"),
             clamped=clamped,
             reason_codes=reason_codes,
         )
         return scaled_intent, snapshot
+
+    def _apply_portfolio_budget_redistribution(
+        self,
+        *,
+        approved: list[StrategySleeveIntent],
+        budget_snapshots: list[AllocatorBudgetSnapshot],
+        base_target: PositionTarget,
+    ) -> tuple[list[StrategySleeveIntent], list[AllocatorBudgetSnapshot], list[str]]:
+        snapshots_by_sleeve = {item.strategy_sleeve_id: item for item in budget_snapshots}
+        budget_cut_reason_codes: list[str] = []
+        portfolio_cap = self._portfolio_notional_cap()
+        portfolio_requested_notional = sum((item.approved_notional for item in budget_snapshots), start=Decimal("0"))
+        approved_notional_by_sleeve = {item.strategy_sleeve_id: item.approved_notional for item in budget_snapshots}
+
+        if (
+            portfolio_cap > EPSILON_DECIMAL_12
+            and portfolio_requested_notional > portfolio_cap + EPSILON_DECIMAL_12
+            and approved
+        ):
+            approved_notional_by_sleeve = self._redistribute_notional_by_priority(
+                approved=approved,
+                snapshots_by_sleeve=snapshots_by_sleeve,
+                portfolio_cap=portfolio_cap,
+            )
+            budget_cut_reason_codes.append("allocator_portfolio_max_total_open_notional_capped")
+
+        portfolio_approved_notional = sum(approved_notional_by_sleeve.values(), start=Decimal("0"))
+        portfolio_budget_cut_notional = quantize_decimal(
+            max(portfolio_requested_notional - portfolio_approved_notional, Decimal("0"))
+        )
+        redistributed_snapshots: list[AllocatorBudgetSnapshot] = []
+        redistributed_intents: list[StrategySleeveIntent] = []
+        for intent in approved:
+            snapshot = snapshots_by_sleeve[intent.strategy_sleeve_id]
+            original_approved_notional = snapshot.approved_notional
+            approved_notional = quantize_decimal(approved_notional_by_sleeve.get(intent.strategy_sleeve_id, Decimal("0")))
+            approved_delta_qty = snapshot.approved_delta_qty
+            redistributed_intent = intent.model_copy(deep=True)
+            if (
+                original_approved_notional > EPSILON_DECIMAL_12
+                and approved_notional + EPSILON_DECIMAL_12 < original_approved_notional
+            ):
+                ratio = max(Decimal("0"), min(Decimal("1"), approved_notional / original_approved_notional))
+                approved_delta_qty = quantize_decimal(snapshot.approved_delta_qty * ratio)
+                redistributed_intent = self._scale_intent(intent=intent, scaled_delta_qty=approved_delta_qty)
+            snapshot_reason_codes = list(snapshot.reason_codes)
+            if approved_notional + EPSILON_DECIMAL_12 < original_approved_notional:
+                snapshot_reason_codes.append("allocator_portfolio_budget_redistributed")
+                if approved_notional <= EPSILON_DECIMAL_12:
+                    snapshot_reason_codes.append("allocator_portfolio_budget_zeroed")
+            redistributed_snapshot = snapshot.model_copy(
+                update={
+                    "approved_notional": approved_notional,
+                    "approved_delta_qty": approved_delta_qty,
+                    "priority_rank": self._hedge_priority_rank(snapshot.hedge_priority_class),
+                    "portfolio_requested_notional": portfolio_requested_notional,
+                    "portfolio_approved_notional": portfolio_approved_notional,
+                    "portfolio_budget_cut_notional": portfolio_budget_cut_notional,
+                    "reason_codes": list(dict.fromkeys(snapshot_reason_codes)),
+                }
+            )
+            redistributed_snapshots.append(redistributed_snapshot)
+            if self._intent_is_actionable(redistributed_intent, include_active_inventory=True):
+                redistributed_intents.append(redistributed_intent)
+
+        updated_snapshot_map = {snap.strategy_sleeve_id: snap for snap in redistributed_snapshots}
+        redistributed_intents.sort(
+            key=lambda item: self._intent_sort_key(
+                item=item,
+                snapshots_by_sleeve=updated_snapshot_map,
+            )
+        )
+        redistributed_snapshots.sort(key=lambda item: (item.priority_rank, item.family, item.strategy_sleeve_id))
+        return redistributed_intents, redistributed_snapshots, budget_cut_reason_codes
 
     @staticmethod
     def _scale_intent(*, intent: StrategySleeveIntent, scaled_delta_qty: Decimal) -> StrategySleeveIntent:
@@ -422,7 +546,7 @@ class PortfolioAllocatorV2Phase1:
                     delta_position_qty=delta_qty,
                     reference_price=self._reference_price(intent),
                     execution_compatible=intent.execution_compatible,
-                    note=f"{intent.family} sleeve delta converted by allocator v2 phase1.",
+                    note=f"{intent.family} sleeve delta converted by allocator v2.",
                 )
             )
         return legs
@@ -587,7 +711,7 @@ class PortfolioAllocatorV2Phase1:
 
     @staticmethod
     def _target_notional(*, base_target: PositionTarget, target_qty: Decimal) -> Decimal:
-        reference_price = PortfolioAllocatorV2Phase1._base_target_reference_price(base_target)
+        reference_price = PortfolioAllocatorV2Phase2._base_target_reference_price(base_target)
         if reference_price <= EPSILON_DECIMAL_12:
             return Decimal("0")
         return abs(target_qty) * reference_price
@@ -632,5 +756,154 @@ class PortfolioAllocatorV2Phase1:
             return intent_weight
         return quantize_decimal(intent_weight * to_decimal(assignment.allocator_base_weight))
 
+    def _portfolio_notional_cap(self) -> Decimal:
+        if self.settings is None:
+            return Decimal("0")
+        return max(to_decimal(self.settings.max_total_open_notional), Decimal("0"))
 
-PortfolioAllocatorV1 = PortfolioAllocatorV2Phase1
+    @classmethod
+    def _hedge_priority_rank(cls, hedge_priority_class: str | None) -> int:
+        return cls._HEDGE_PRIORITY_RANK.get(str(hedge_priority_class or "standard"), cls._HEDGE_PRIORITY_RANK["standard"])
+
+    def _redistribute_notional_by_priority(
+        self,
+        *,
+        approved: list[StrategySleeveIntent],
+        snapshots_by_sleeve: dict[str, AllocatorBudgetSnapshot],
+        portfolio_cap: Decimal,
+    ) -> dict[str, Decimal]:
+        remaining_cap = portfolio_cap
+        approved_by_sleeve: dict[str, Decimal] = {
+            intent.strategy_sleeve_id: Decimal("0")
+            for intent in approved
+        }
+        grouped: dict[int, list[StrategySleeveIntent]] = {}
+        for intent in approved:
+            snapshot = snapshots_by_sleeve[intent.strategy_sleeve_id]
+            grouped.setdefault(self._hedge_priority_rank(snapshot.hedge_priority_class), []).append(intent)
+        for priority_rank in sorted(grouped):
+            intents = grouped[priority_rank]
+            if remaining_cap <= EPSILON_DECIMAL_12:
+                for intent in intents:
+                    approved_by_sleeve[intent.strategy_sleeve_id] = Decimal("0")
+                continue
+            group_total = sum(
+                (snapshots_by_sleeve[intent.strategy_sleeve_id].approved_notional for intent in intents),
+                start=Decimal("0"),
+            )
+            if group_total <= remaining_cap + EPSILON_DECIMAL_12:
+                for intent in intents:
+                    approved_by_sleeve[intent.strategy_sleeve_id] = snapshots_by_sleeve[intent.strategy_sleeve_id].approved_notional
+                remaining_cap = quantize_decimal(remaining_cap - group_total)
+                continue
+            approved_by_sleeve.update(
+                self._weighted_cap_distribution(
+                    intents=intents,
+                    snapshots_by_sleeve=snapshots_by_sleeve,
+                    cap=remaining_cap,
+                )
+            )
+            remaining_cap = Decimal("0")
+        return approved_by_sleeve
+
+    def _weighted_cap_distribution(
+        self,
+        *,
+        intents: list[StrategySleeveIntent],
+        snapshots_by_sleeve: dict[str, AllocatorBudgetSnapshot],
+        cap: Decimal,
+    ) -> dict[str, Decimal]:
+        remaining = cap
+        pending = {intent.strategy_sleeve_id: intent for intent in intents}
+        approved: dict[str, Decimal] = {intent.strategy_sleeve_id: Decimal("0") for intent in intents}
+        while pending and remaining > EPSILON_DECIMAL_12:
+            weighted = {
+                sleeve_id: max(
+                    quantize_decimal(
+                        max(snapshots_by_sleeve[sleeve_id].approved_notional, EPSILON_DECIMAL_12)
+                        * max(self._allocator_weight_for(intent=intent, assignment=None), Decimal("0.05"))
+                    ),
+                    EPSILON_DECIMAL_12,
+                )
+                for sleeve_id, intent in pending.items()
+            }
+            total_weight = sum(weighted.values(), start=Decimal("0"))
+            if total_weight <= EPSILON_DECIMAL_12:
+                equal_share = quantize_decimal(remaining / Decimal(len(pending)))
+                for sleeve_id in list(pending):
+                    limit = snapshots_by_sleeve[sleeve_id].approved_notional
+                    approved_value = min(limit, equal_share)
+                    approved[sleeve_id] += approved_value
+                    remaining -= approved_value
+                break
+            saturated: set[str] = set()
+            for sleeve_id in list(pending):
+                limit = snapshots_by_sleeve[sleeve_id].approved_notional - approved[sleeve_id]
+                proposed = quantize_decimal(remaining * weighted[sleeve_id] / total_weight)
+                if proposed >= limit - EPSILON_DECIMAL_12:
+                    approved[sleeve_id] += max(limit, Decimal("0"))
+                    remaining -= max(limit, Decimal("0"))
+                    saturated.add(sleeve_id)
+            if not saturated:
+                for sleeve_id in list(pending):
+                    proposed = quantize_decimal(remaining * weighted[sleeve_id] / total_weight)
+                    approved[sleeve_id] += proposed
+                break
+            for sleeve_id in saturated:
+                pending.pop(sleeve_id, None)
+        return {key: quantize_decimal(max(value, Decimal("0"))) for key, value in approved.items()}
+
+    def _portfolio_expected_bps(
+        self,
+        *,
+        approved: list[StrategySleeveIntent],
+        snapshots: list[AllocatorBudgetSnapshot],
+        kind: str,
+    ) -> Decimal | None:
+        weights_by_sleeve = {item.strategy_sleeve_id: item.approved_notional for item in snapshots}
+        numerator = Decimal("0")
+        denominator = Decimal("0")
+        for intent in approved:
+            weight = weights_by_sleeve.get(intent.strategy_sleeve_id, Decimal("0"))
+            if weight <= EPSILON_DECIMAL_12:
+                continue
+            metric = self._bps_metric(intent=intent, kind=kind)
+            if metric is None:
+                continue
+            numerator += weight * metric
+            denominator += weight
+        if denominator <= EPSILON_DECIMAL_12:
+            return None
+        return quantize_decimal(numerator / denominator)
+
+    @staticmethod
+    def _bps_metric(*, intent: StrategySleeveIntent, kind: str) -> Decimal | None:
+        keys = (
+            ("expected_net_edge_bps", "net_basis_bps", "basis_bps", "expected_signal_edge_bps")
+            if kind == "edge"
+            else ("expected_cost_bps", "estimated_cost_bps")
+        )
+        for key in keys:
+            value = intent.metrics.get(key)
+            if value is None:
+                continue
+            return to_decimal(value)
+        return None
+
+    @staticmethod
+    def _intent_sort_key(
+        *,
+        item: StrategySleeveIntent,
+        snapshots_by_sleeve: dict[str, AllocatorBudgetSnapshot],
+    ) -> tuple[int, Decimal, float, str]:
+        snapshot = snapshots_by_sleeve[item.strategy_sleeve_id]
+        return (
+            snapshot.priority_rank,
+            -to_decimal(snapshot.approved_notional),
+            -float(item.priority_score),
+            item.strategy_sleeve_id,
+        )
+
+
+PortfolioAllocatorV2Phase1 = PortfolioAllocatorV2Phase2
+PortfolioAllocatorV1 = PortfolioAllocatorV2Phase2

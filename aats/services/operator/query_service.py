@@ -1960,6 +1960,14 @@ class OperatorQueryService:
             "latest_selected_route_action": None if latest_snapshot is None else latest_snapshot.get("selected_route_action"),
             "latest_bundle_status": None if latest_bundle is None else latest_bundle.get("status"),
             "latest_bundle_id": None if latest_bundle is None else latest_bundle.get("bundle_id"),
+            "latest_bundle_type": None if latest_bundle is None else latest_bundle.get("bundle_type"),
+            "latest_bundle_priority": None if latest_bundle is None else latest_bundle.get("bundle_priority"),
+            "latest_bundle_gross_requested_exposure": (
+                None if latest_bundle is None else latest_bundle.get("gross_requested_exposure")
+            ),
+            "latest_bundle_net_approved_exposure": (
+                None if latest_bundle is None else latest_bundle.get("net_approved_exposure")
+            ),
             "latest_allocator_version": (
                 None if latest_allocation_decision is None else latest_allocation_decision.get("allocator_version")
             ),
@@ -1979,6 +1987,21 @@ class OperatorQueryService:
             "latest_netting_decision_count": len(recent_netting_decisions),
             "latest_portfolio_risk_budget_state": (
                 None if latest_allocation_decision is None else latest_allocation_decision.get("portfolio_risk_budget_state")
+            ),
+            "latest_portfolio_requested_notional": (
+                None if latest_allocation_decision is None else latest_allocation_decision.get("portfolio_requested_notional")
+            ),
+            "latest_portfolio_approved_notional": (
+                None if latest_allocation_decision is None else latest_allocation_decision.get("portfolio_approved_notional")
+            ),
+            "latest_portfolio_budget_cut_notional": (
+                None if latest_allocation_decision is None else latest_allocation_decision.get("portfolio_budget_cut_notional")
+            ),
+            "latest_expected_edge_bps": (
+                None if latest_allocation_decision is None else latest_allocation_decision.get("expected_edge_bps")
+            ),
+            "latest_expected_cost_bps": (
+                None if latest_allocation_decision is None else latest_allocation_decision.get("expected_cost_bps")
             ),
             "latest_hedge_protected_notional": (
                 None if latest_allocation_decision is None else latest_allocation_decision.get("hedge_protected_notional")

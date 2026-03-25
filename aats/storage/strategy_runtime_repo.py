@@ -115,6 +115,9 @@ class InMemoryStrategyRuntimeRepository:
             return item
         return None
 
+    def get_allocation_decision(self, allocation_id: str) -> PortfolioAllocationDecision | None:
+        return self._allocations.get(allocation_id)
+
     def save_execution_bundle(self, bundle: StrategyExecutionBundle) -> StrategyExecutionBundle:
         self._bundles[bundle.bundle_id] = bundle
         return bundle

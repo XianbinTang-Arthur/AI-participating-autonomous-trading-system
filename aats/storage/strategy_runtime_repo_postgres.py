@@ -241,6 +241,11 @@ class PostgresStrategyRuntimeRepository:
                     route_action=decision.route_action,
                     primary_family=decision.primary_family,
                     primary_strategy_sleeve_id=decision.primary_strategy_sleeve_id,
+                    portfolio_requested_notional=decision.portfolio_requested_notional,
+                    portfolio_approved_notional=decision.portfolio_approved_notional,
+                    portfolio_budget_cut_notional=decision.portfolio_budget_cut_notional,
+                    expected_edge_bps=decision.expected_edge_bps,
+                    expected_cost_bps=decision.expected_cost_bps,
                     created_at=decision.created_at,
                     payload=payload,
                 )
@@ -255,6 +260,11 @@ class PostgresStrategyRuntimeRepository:
                 row.route_action = decision.route_action
                 row.primary_family = decision.primary_family
                 row.primary_strategy_sleeve_id = decision.primary_strategy_sleeve_id
+                row.portfolio_requested_notional = decision.portfolio_requested_notional
+                row.portfolio_approved_notional = decision.portfolio_approved_notional
+                row.portfolio_budget_cut_notional = decision.portfolio_budget_cut_notional
+                row.expected_edge_bps = decision.expected_edge_bps
+                row.expected_cost_bps = decision.expected_cost_bps
                 row.created_at = decision.created_at
                 row.payload = payload
             self._sync_budget_snapshots(session, decision.budget_snapshots)
@@ -285,6 +295,11 @@ class PostgresStrategyRuntimeRepository:
             row = session.scalar(stmt)
         return None if row is None else PortfolioAllocationDecision.model_validate(row.payload)
 
+    def get_allocation_decision(self, allocation_id: str) -> PortfolioAllocationDecision | None:
+        with self.session_factory() as session:
+            row = session.get(PortfolioAllocationDecisionModel, allocation_id)
+        return None if row is None else PortfolioAllocationDecision.model_validate(row.payload)
+
     def save_execution_bundle(self, bundle: StrategyExecutionBundle) -> StrategyExecutionBundle:
         payload = dump_payload_exact(bundle)
         with self.session_factory() as session:
@@ -299,8 +314,15 @@ class PostgresStrategyRuntimeRepository:
                     product_type=bundle.product_type,
                     margin_mode=bundle.margin_mode,
                     route_action=bundle.route_action,
+                    bundle_type=bundle.bundle_type,
+                    bundle_priority=bundle.bundle_priority,
                     status=bundle.status,
                     selected_symbol=bundle.selected_symbol,
+                    gross_requested_exposure=bundle.gross_requested_exposure,
+                    net_approved_exposure=bundle.net_approved_exposure,
+                    expected_cost_bps=bundle.expected_cost_bps,
+                    expected_edge_bps=bundle.expected_edge_bps,
+                    portfolio_risk_budget_state=bundle.portfolio_risk_budget_state,
                     created_at=bundle.created_at,
                     payload=payload,
                 )
@@ -313,8 +335,15 @@ class PostgresStrategyRuntimeRepository:
                 row.product_type = bundle.product_type
                 row.margin_mode = bundle.margin_mode
                 row.route_action = bundle.route_action
+                row.bundle_type = bundle.bundle_type
+                row.bundle_priority = bundle.bundle_priority
                 row.status = bundle.status
                 row.selected_symbol = bundle.selected_symbol
+                row.gross_requested_exposure = bundle.gross_requested_exposure
+                row.net_approved_exposure = bundle.net_approved_exposure
+                row.expected_cost_bps = bundle.expected_cost_bps
+                row.expected_edge_bps = bundle.expected_edge_bps
+                row.portfolio_risk_budget_state = bundle.portfolio_risk_budget_state
                 row.created_at = bundle.created_at
                 row.payload = payload
             session.commit()
@@ -427,6 +456,10 @@ class PostgresStrategyRuntimeRepository:
                     notional_cap=item.notional_cap,
                     max_symbol_notional=item.max_symbol_notional,
                     hedge_priority_class=item.hedge_priority_class,
+                    priority_rank=item.priority_rank,
+                    portfolio_requested_notional=item.portfolio_requested_notional,
+                    portfolio_approved_notional=item.portfolio_approved_notional,
+                    portfolio_budget_cut_notional=item.portfolio_budget_cut_notional,
                     clamped=item.clamped,
                     created_at=item.created_at,
                     payload=payload,
@@ -450,6 +483,10 @@ class PostgresStrategyRuntimeRepository:
             row.notional_cap = item.notional_cap
             row.max_symbol_notional = item.max_symbol_notional
             row.hedge_priority_class = item.hedge_priority_class
+            row.priority_rank = item.priority_rank
+            row.portfolio_requested_notional = item.portfolio_requested_notional
+            row.portfolio_approved_notional = item.portfolio_approved_notional
+            row.portfolio_budget_cut_notional = item.portfolio_budget_cut_notional
             row.clamped = item.clamped
             row.created_at = item.created_at
             row.payload = payload

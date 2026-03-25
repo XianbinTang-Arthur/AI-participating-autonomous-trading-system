@@ -530,6 +530,9 @@ class StrategyRuntimeRepository(Protocol):
     ) -> PortfolioAllocationDecision | None:
         ...
 
+    def get_allocation_decision(self, allocation_id: str) -> PortfolioAllocationDecision | None:
+        ...
+
     def save_execution_bundle(self, bundle: StrategyExecutionBundle) -> StrategyExecutionBundle:
         ...
 

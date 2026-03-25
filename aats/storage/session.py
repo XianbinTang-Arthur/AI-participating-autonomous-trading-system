@@ -83,6 +83,9 @@ _EXPECTED_NUMERIC_COLUMNS: tuple[tuple[str, str], ...] = (
     ("allocator_budget_snapshots", "margin_budget_limit"),
     ("allocator_budget_snapshots", "notional_cap"),
     ("allocator_budget_snapshots", "max_symbol_notional"),
+    ("allocator_budget_snapshots", "portfolio_requested_notional"),
+    ("allocator_budget_snapshots", "portfolio_approved_notional"),
+    ("allocator_budget_snapshots", "portfolio_budget_cut_notional"),
     ("allocator_conflict_resolutions", "gross_requested_qty"),
     ("allocator_conflict_resolutions", "net_approved_qty"),
     ("allocator_conflict_resolutions", "blocked_qty"),
@@ -91,6 +94,15 @@ _EXPECTED_NUMERIC_COLUMNS: tuple[tuple[str, str], ...] = (
     ("allocator_netting_decisions", "gross_buy_qty"),
     ("allocator_netting_decisions", "gross_sell_qty"),
     ("allocator_netting_decisions", "net_approved_qty"),
+    ("portfolio_allocation_decisions", "portfolio_requested_notional"),
+    ("portfolio_allocation_decisions", "portfolio_approved_notional"),
+    ("portfolio_allocation_decisions", "portfolio_budget_cut_notional"),
+    ("portfolio_allocation_decisions", "expected_edge_bps"),
+    ("portfolio_allocation_decisions", "expected_cost_bps"),
+    ("strategy_execution_bundles", "gross_requested_exposure"),
+    ("strategy_execution_bundles", "net_approved_exposure"),
+    ("strategy_execution_bundles", "expected_cost_bps"),
+    ("strategy_execution_bundles", "expected_edge_bps"),
 )
 
 _SCHEMA_MIGRATIONS_TABLE = "schema_migrations"

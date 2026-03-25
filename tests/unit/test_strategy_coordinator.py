@@ -610,6 +610,69 @@ class TestStrategyCoordinator(unittest.TestCase):
         combined_delta = sum((leg.delta_position_qty for leg in applied.strategy_execution_legs), start=Decimal("0"))
         self.assertEqual(applied.delta_position_qty, combined_delta)
 
+    def test_allocator_redistributes_portfolio_budget_when_total_open_notional_is_capped(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "trading_product_type": "spot",
+                "margin_mode": "cash",
+                "default_symbol": "BTC-USDT",
+                "allowed_symbols": ("BTC-USDT",),
+                "strategy_family_active": "spot_grid",
+                "spot_grid_enabled": True,
+                "spot_grid_breakout_guard_enabled": False,
+                "spot_grid_anchor_lookback_snapshots": 4,
+                "spot_grid_band_bps": 500.0,
+                "spot_grid_inventory_floor_fraction": 0.0,
+                "spot_grid_inventory_ceiling_fraction": 1.0,
+                "spot_grid_rebalance_min_fraction_of_max_qty": 0.05,
+                "dca_enabled": True,
+                "dca_interval_seconds": 0.0,
+                "dca_quote_budget_per_cycle": 100.0,
+                "max_abs_position_qty": 2.0,
+                "max_total_open_notional": 50.0,
+            }
+        )
+        event_store = InMemoryEventStore()
+        gateway = _FakeMarketGateway({"BTC-USDT": _market_snapshot("BTC-USDT", "99")})
+        for price in ("100", "101", "100", "99"):
+            event_store.append(
+                build_envelope(
+                    topic=topics.MARKET_SNAPSHOTS,
+                    key="BTC-USDT",
+                    payload_model=_market_snapshot("BTC-USDT", price),
+                    source_component="test",
+                )
+            )
+        coordinator = StrategyCoordinatorService(
+            settings=settings,
+            event_store=event_store,
+            market_gateway=gateway,
+            portfolio_repo=InMemoryPortfolioRepository(),
+            strategy_sleeve_repo=InMemoryStrategySleeveRepository(),
+        )
+
+        snapshot = coordinator.evaluate(
+            context=_decision_context(symbol="BTC-USDT", product_type="spot", current_position_qty="0.3"),
+            baseline=_baseline(symbol="BTC-USDT", regime="range"),
+            directional_target=_position_target(
+                symbol="BTC-USDT",
+                product_type="spot",
+                margin_mode="cash",
+                current_qty="0.3",
+                target_qty="0.3",
+            ),
+        )
+        allocation = snapshot.allocation_decision
+
+        self.assertIsNotNone(allocation)
+        self.assertEqual(allocation.allocator_version, "task74_allocator_v2_phase2")
+        self.assertIn("allocator_portfolio_max_total_open_notional_capped", allocation.budget_cut_reason_codes)
+        self.assertGreater(allocation.portfolio_requested_notional, allocation.portfolio_approved_notional)
+        self.assertGreater(allocation.portfolio_budget_cut_notional, Decimal("0"))
+        self.assertEqual(allocation.portfolio_risk_budget_state, "redistributed")
+        self.assertTrue(allocation.budget_snapshots)
+        self.assertTrue(allocation.budget_snapshot_ids)
+
     def test_smart_arbitrage_positive_basis_builds_executable_pair(self) -> None:
         settings = AATSSettings.model_validate(
             {

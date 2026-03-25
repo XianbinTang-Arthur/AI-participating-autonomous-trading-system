@@ -772,7 +772,7 @@ class StrategyCoordinatorService:
             allocator_base_weight=allocator_base_weight,
             hedge_priority_class=hedge_priority_class,
             metadata={
-                "source": "task76_allocator_v2_phase1",
+                "source": "task74_allocator_v2_phase2",
                 "default_symbol": base_target.symbol,
             },
             created_at=now,
