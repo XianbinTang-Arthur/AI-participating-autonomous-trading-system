@@ -18,7 +18,9 @@ from aats.bootstrap.managed_profiles import (
 @dataclass(frozen=True, slots=True)
 class EnvFieldSpec:
     key: str
+    tag: str
     comment: str
+    allowed_values: str
     example_value: str
 
 
@@ -29,36 +31,131 @@ class EnvSectionSpec:
     fields: tuple[EnvFieldSpec, ...]
 
 
+def env_field(
+    key: str,
+    *,
+    tag: str,
+    comment: str,
+    allowed_values: str,
+    recommended_value: str,
+) -> EnvFieldSpec:
+    return EnvFieldSpec(
+        key=key,
+        tag=tag,
+        comment=comment,
+        allowed_values=allowed_values,
+        example_value=recommended_value,
+    )
+
+
 COMMON_RUNTIME_FIELDS: tuple[EnvSectionSpec, ...] = (
     EnvSectionSpec(
         title="交易标的与账户规模",
         intro="这里放你最常改、且和账户资金/交易标的直接相关的 override。",
         fields=(
-            EnvFieldSpec("AATS_DEFAULT_SYMBOL", "默认交易标的。改标的先改这里。", "BTC-USDT"),
-            EnvFieldSpec("AATS_ALLOWED_SYMBOLS", "允许交易的标的列表。单标的运行建议只保留一个。", "[\"BTC-USDT\"]"),
-            EnvFieldSpec("AATS_INITIAL_USDT_BALANCE", "本地组合初始 USDT 口径。实盘建议填你准备给这套系统使用的资金规模。", "100.0"),
+            env_field(
+                "AATS_DEFAULT_SYMBOL",
+                tag="运行必改",
+                comment="默认交易标的。改标的先改这里。",
+                allowed_values="交易所支持的现货或合约符号",
+                recommended_value="BTC-USDT",
+            ),
+            env_field(
+                "AATS_ALLOWED_SYMBOLS",
+                tag="常用可调",
+                comment="允许交易的标的列表。单标的运行建议只保留一个。",
+                allowed_values="JSON 数组；推荐单标的只保留一个",
+                recommended_value="[\"BTC-USDT\"]",
+            ),
+            env_field(
+                "AATS_INITIAL_USDT_BALANCE",
+                tag="常用可调",
+                comment="本地组合初始 USDT 口径。实盘建议填你准备给这套系统使用的资金规模。",
+                allowed_values="正数",
+                recommended_value="100.0",
+            ),
         ),
     ),
     EnvSectionSpec(
         title="数据库与运行实例",
         intro="这里放每个运行实例都不同的基础设施参数。",
         fields=(
-            EnvFieldSpec("AATS_DATABASE_URL", "PostgreSQL 连接串。现货/合约建议分库。", "postgresql+psycopg://postgres:123456@localhost:5432/aats_example"),
-            EnvFieldSpec("AATS_DATABASE_RUNTIME_LOCK_KEY", "数据库单实例锁键。现货/合约请保持不同。", "42420001"),
-            EnvFieldSpec("AATS_API_PORT", "API/UI 端口。并行跑多个实例时必须不同。", "8000"),
-            EnvFieldSpec("AATS_LOG_DIR", "日志目录。建议按 profile 分开。", "logs/example"),
+            env_field(
+                "AATS_DATABASE_URL",
+                tag="运行必改",
+                comment="PostgreSQL 连接串。现货/合约建议分库。",
+                allowed_values="合法的 postgresql+psycopg 连接串",
+                recommended_value="postgresql+psycopg://postgres:123456@localhost:5432/aats_example",
+            ),
+            env_field(
+                "AATS_DATABASE_RUNTIME_LOCK_KEY",
+                tag="运行必改",
+                comment="数据库单实例锁键。现货/合约请保持不同。",
+                allowed_values="正整数",
+                recommended_value="42420001",
+            ),
+            env_field(
+                "AATS_API_PORT",
+                tag="运行必改",
+                comment="API/UI 端口。并行跑多个实例时必须不同。",
+                allowed_values="未占用端口",
+                recommended_value="8000",
+            ),
+            env_field(
+                "AATS_LOG_DIR",
+                tag="运行必改",
+                comment="日志目录。建议按 profile 分开。",
+                allowed_values="相对或绝对路径",
+                recommended_value="logs/example",
+            ),
         ),
     ),
     EnvSectionSpec(
         title="交易所与凭证",
         intro="这里只放密钥与会话密钥，不放策略调参。",
         fields=(
-            EnvFieldSpec("AATS_OPENAI_API_KEY", "OpenAI 密钥。只有 strategy profile 里 ai_provider=openai 时才会实际使用。", "REPLACE_WITH_OPENAI_API_KEY"),
-            EnvFieldSpec("AATS_OKX_API_KEY", "OKX API Key。", "REPLACE_WITH_REAL_OKX_API_KEY"),
-            EnvFieldSpec("AATS_OKX_API_SECRET", "OKX API Secret。", "REPLACE_WITH_REAL_OKX_API_SECRET"),
-            EnvFieldSpec("AATS_OKX_API_PASSPHRASE", "OKX API Passphrase。", "REPLACE_WITH_REAL_OKX_API_PASSPHRASE"),
-            EnvFieldSpec("AATS_OPERATOR_SESSION_SECRET", "Operator 会话密钥。请换成足够长的随机串。", "REPLACE_WITH_LONG_RANDOM_OPERATOR_SESSION_SECRET"),
-            EnvFieldSpec("AATS_OPERATOR_SESSION_COOKIE_NAME", "Operator cookie 名称。并行跑多个实例时建议不同。", "aats_operator_session_example"),
+            env_field(
+                "AATS_OPENAI_API_KEY",
+                tag="按需填写",
+                comment="OpenAI 密钥。只有 strategy profile 里 ai_provider=openai 时才会实际使用。",
+                allowed_values="有效的 OpenAI API Key；若 AI provider=disabled 可留占位值",
+                recommended_value="REPLACE_WITH_OPENAI_API_KEY",
+            ),
+            env_field(
+                "AATS_OKX_API_KEY",
+                tag="运行必改",
+                comment="OKX API Key。",
+                allowed_values="与当前交易环境匹配的真实或模拟盘 Key",
+                recommended_value="REPLACE_WITH_REAL_OKX_API_KEY",
+            ),
+            env_field(
+                "AATS_OKX_API_SECRET",
+                tag="运行必改",
+                comment="OKX API Secret。",
+                allowed_values="与当前 OKX API Key 配套的 Secret",
+                recommended_value="REPLACE_WITH_REAL_OKX_API_SECRET",
+            ),
+            env_field(
+                "AATS_OKX_API_PASSPHRASE",
+                tag="运行必改",
+                comment="OKX API Passphrase。",
+                allowed_values="与当前 OKX API Key 配套的 Passphrase",
+                recommended_value="REPLACE_WITH_REAL_OKX_API_PASSPHRASE",
+            ),
+            env_field(
+                "AATS_OPERATOR_SESSION_SECRET",
+                tag="运行必改",
+                comment="Operator 会话密钥。请换成足够长的随机串。",
+                allowed_values="足够长的随机字符串",
+                recommended_value="REPLACE_WITH_LONG_RANDOM_OPERATOR_SESSION_SECRET",
+            ),
+            env_field(
+                "AATS_OPERATOR_SESSION_COOKIE_NAME",
+                tag="常用可调",
+                comment="Operator cookie 名称。并行跑多个实例时建议不同。",
+                allowed_values="自定义字符串",
+                recommended_value="aats_operator_session_example",
+            ),
         ),
     ),
 )
@@ -70,10 +167,10 @@ PROFILE_SPECIFIC_FIELDS: dict[ManagedEnvProfile, tuple[EnvSectionSpec, ...]] = {
             title="现货仓位与下单上限",
             intro="现货 cash 模式固定为 1x；杠杆不在这里暴露。",
             fields=(
-                EnvFieldSpec("AATS_DEFAULT_ORDER_QTY", "默认单笔下单数量。", "0.0005"),
-                EnvFieldSpec("AATS_MAX_ABS_POSITION_QTY", "单标的最大绝对持仓数量。", "0.003"),
-                EnvFieldSpec("AATS_MAX_NOTIONAL_PER_SYMBOL", "单标的最大名义金额。", "100000"),
-                EnvFieldSpec("AATS_MAX_OPEN_ORDERS", "最多同时挂单数。", "2"),
+                env_field("AATS_DEFAULT_ORDER_QTY", tag="常用可调", comment="默认单笔下单数量。", allowed_values="正数", recommended_value="0.0005"),
+                env_field("AATS_MAX_ABS_POSITION_QTY", tag="常用可调", comment="单标的最大绝对持仓数量。", allowed_values="正数", recommended_value="0.003"),
+                env_field("AATS_MAX_NOTIONAL_PER_SYMBOL", tag="常用可调", comment="单标的最大名义金额。", allowed_values="正数", recommended_value="100000"),
+                env_field("AATS_MAX_OPEN_ORDERS", tag="常用可调", comment="最多同时挂单数。", allowed_values="1 ~ 20", recommended_value="2"),
             ),
         ),
     ),
@@ -82,10 +179,10 @@ PROFILE_SPECIFIC_FIELDS: dict[ManagedEnvProfile, tuple[EnvSectionSpec, ...]] = {
             title="现货实盘仓位与下单上限",
             intro="现货 cash 模式固定为 1x；若想调整风格，请改 strategy_profiles/spot_live.yaml。",
             fields=(
-                EnvFieldSpec("AATS_DEFAULT_ORDER_QTY", "默认单笔下单数量。", "0.01"),
-                EnvFieldSpec("AATS_MAX_ABS_POSITION_QTY", "单标的最大绝对持仓数量。", "0.02"),
-                EnvFieldSpec("AATS_MAX_NOTIONAL_PER_SYMBOL", "单标的最大名义金额。", "1000"),
-                EnvFieldSpec("AATS_MAX_OPEN_ORDERS", "最多同时挂单数。", "5"),
+                env_field("AATS_DEFAULT_ORDER_QTY", tag="常用可调", comment="默认单笔下单数量。", allowed_values="正数", recommended_value="0.01"),
+                env_field("AATS_MAX_ABS_POSITION_QTY", tag="常用可调", comment="单标的最大绝对持仓数量。", allowed_values="正数", recommended_value="0.02"),
+                env_field("AATS_MAX_NOTIONAL_PER_SYMBOL", tag="常用可调", comment="单标的最大名义金额。", allowed_values="正数", recommended_value="1000"),
+                env_field("AATS_MAX_OPEN_ORDERS", tag="常用可调", comment="最多同时挂单数。", allowed_values="1 ~ 20", recommended_value="5"),
             ),
         ),
     ),
@@ -94,17 +191,17 @@ PROFILE_SPECIFIC_FIELDS: dict[ManagedEnvProfile, tuple[EnvSectionSpec, ...]] = {
             title="合约仓位、杠杆与风控上限",
             intro="这里只放账户级风险边界；进出场阈值和自动换档去 strategy profile 文件改。",
             fields=(
-                EnvFieldSpec("AATS_DEFAULT_ORDER_QTY", "默认单笔下单数量。", "0.01"),
-                EnvFieldSpec("AATS_MAX_ABS_POSITION_QTY", "单标的最大绝对持仓数量。", "0.08"),
-                EnvFieldSpec("AATS_MAX_NOTIONAL_PER_SYMBOL", "单标的最大名义金额。", "100000"),
-                EnvFieldSpec("AATS_MAX_OPEN_ORDERS", "最多同时挂单数。", "3"),
-                EnvFieldSpec("AATS_MAX_TARGET_LEVERAGE", "最大目标杠杆。", "10"),
-                EnvFieldSpec("AATS_DEFAULT_TARGET_LEVERAGE", "默认目标杠杆。", "3"),
-                EnvFieldSpec("AATS_DERIVATIVES_ONLY_REDUCE_TRIGGER_MARGIN_FRACTION", "达到该保证金占用比例后只允许减仓。", "0.70"),
-                EnvFieldSpec("AATS_DERIVATIVES_AUTO_HALT_MARGIN_USAGE_FRACTION", "达到该保证金占用比例后自动暂停。", "0.85"),
-                EnvFieldSpec("AATS_DERIVATIVES_AUTO_HALT_LIQUIDATION_GAP_FRACTION", "距强平过近时自动暂停。", "0.08"),
-                EnvFieldSpec("AATS_MAX_MARGIN_USAGE_FRACTION", "预估保证金占用上限。", "0.85"),
-                EnvFieldSpec("AATS_LIQUIDATION_BUFFER_FRACTION", "强平缓冲比例。", "0.15"),
+                env_field("AATS_DEFAULT_ORDER_QTY", tag="常用可调", comment="默认单笔下单数量。", allowed_values="正数", recommended_value="0.01"),
+                env_field("AATS_MAX_ABS_POSITION_QTY", tag="常用可调", comment="单标的最大绝对持仓数量。", allowed_values="正数", recommended_value="0.08"),
+                env_field("AATS_MAX_NOTIONAL_PER_SYMBOL", tag="常用可调", comment="单标的最大名义金额。", allowed_values="正数", recommended_value="100000"),
+                env_field("AATS_MAX_OPEN_ORDERS", tag="常用可调", comment="最多同时挂单数。", allowed_values="1 ~ 20", recommended_value="3"),
+                env_field("AATS_MAX_TARGET_LEVERAGE", tag="常用可调", comment="最大目标杠杆。", allowed_values="1.0 ~ 125.0（受交易所和代码约束）", recommended_value="10"),
+                env_field("AATS_DEFAULT_TARGET_LEVERAGE", tag="常用可调", comment="默认目标杠杆。", allowed_values="1.0 ~ AATS_MAX_TARGET_LEVERAGE", recommended_value="3"),
+                env_field("AATS_DERIVATIVES_ONLY_REDUCE_TRIGGER_MARGIN_FRACTION", tag="常用可调", comment="达到该保证金占用比例后只允许减仓。", allowed_values="0.0 ~ 1.0", recommended_value="0.70"),
+                env_field("AATS_DERIVATIVES_AUTO_HALT_MARGIN_USAGE_FRACTION", tag="常用可调", comment="达到该保证金占用比例后自动暂停。", allowed_values="0.0 ~ 1.0", recommended_value="0.85"),
+                env_field("AATS_DERIVATIVES_AUTO_HALT_LIQUIDATION_GAP_FRACTION", tag="常用可调", comment="距强平过近时自动暂停。", allowed_values="0.0 ~ 1.0", recommended_value="0.08"),
+                env_field("AATS_MAX_MARGIN_USAGE_FRACTION", tag="常用可调", comment="预估保证金占用上限。", allowed_values="0.0 ~ 1.0", recommended_value="0.85"),
+                env_field("AATS_LIQUIDATION_BUFFER_FRACTION", tag="常用可调", comment="强平缓冲比例。", allowed_values="0.0 ~ 1.0", recommended_value="0.15"),
             ),
         ),
     ),
@@ -113,17 +210,17 @@ PROFILE_SPECIFIC_FIELDS: dict[ManagedEnvProfile, tuple[EnvSectionSpec, ...]] = {
             title="合约实盘仓位、杠杆与风控上限",
             intro="这里只放账户级风险边界；进出场阈值和自动换档去 strategy_profiles/derivatives_live.yaml 改。",
             fields=(
-                EnvFieldSpec("AATS_DEFAULT_ORDER_QTY", "默认单笔下单数量。", "0.01"),
-                EnvFieldSpec("AATS_MAX_ABS_POSITION_QTY", "单标的最大绝对持仓数量。", "0.02"),
-                EnvFieldSpec("AATS_MAX_NOTIONAL_PER_SYMBOL", "单标的最大名义金额。", "1000"),
-                EnvFieldSpec("AATS_MAX_OPEN_ORDERS", "最多同时挂单数。", "5"),
-                EnvFieldSpec("AATS_MAX_TARGET_LEVERAGE", "最大目标杠杆。", "10"),
-                EnvFieldSpec("AATS_DEFAULT_TARGET_LEVERAGE", "默认目标杠杆。", "5"),
-                EnvFieldSpec("AATS_DERIVATIVES_ONLY_REDUCE_TRIGGER_MARGIN_FRACTION", "达到该保证金占用比例后只允许减仓。", "0.65"),
-                EnvFieldSpec("AATS_DERIVATIVES_AUTO_HALT_MARGIN_USAGE_FRACTION", "达到该保证金占用比例后自动暂停。", "0.75"),
-                EnvFieldSpec("AATS_DERIVATIVES_AUTO_HALT_LIQUIDATION_GAP_FRACTION", "距强平过近时自动暂停。", "0.10"),
-                EnvFieldSpec("AATS_MAX_MARGIN_USAGE_FRACTION", "预估保证金占用上限。", "0.75"),
-                EnvFieldSpec("AATS_LIQUIDATION_BUFFER_FRACTION", "强平缓冲比例。", "0.20"),
+                env_field("AATS_DEFAULT_ORDER_QTY", tag="常用可调", comment="默认单笔下单数量。", allowed_values="正数", recommended_value="0.01"),
+                env_field("AATS_MAX_ABS_POSITION_QTY", tag="常用可调", comment="单标的最大绝对持仓数量。", allowed_values="正数", recommended_value="0.02"),
+                env_field("AATS_MAX_NOTIONAL_PER_SYMBOL", tag="常用可调", comment="单标的最大名义金额。", allowed_values="正数", recommended_value="1000"),
+                env_field("AATS_MAX_OPEN_ORDERS", tag="常用可调", comment="最多同时挂单数。", allowed_values="1 ~ 20", recommended_value="5"),
+                env_field("AATS_MAX_TARGET_LEVERAGE", tag="常用可调", comment="最大目标杠杆。", allowed_values="1.0 ~ 125.0（受交易所和代码约束）", recommended_value="10"),
+                env_field("AATS_DEFAULT_TARGET_LEVERAGE", tag="常用可调", comment="默认目标杠杆。", allowed_values="1.0 ~ AATS_MAX_TARGET_LEVERAGE", recommended_value="5"),
+                env_field("AATS_DERIVATIVES_ONLY_REDUCE_TRIGGER_MARGIN_FRACTION", tag="常用可调", comment="达到该保证金占用比例后只允许减仓。", allowed_values="0.0 ~ 1.0", recommended_value="0.65"),
+                env_field("AATS_DERIVATIVES_AUTO_HALT_MARGIN_USAGE_FRACTION", tag="常用可调", comment="达到该保证金占用比例后自动暂停。", allowed_values="0.0 ~ 1.0", recommended_value="0.75"),
+                env_field("AATS_DERIVATIVES_AUTO_HALT_LIQUIDATION_GAP_FRACTION", tag="常用可调", comment="距强平过近时自动暂停。", allowed_values="0.0 ~ 1.0", recommended_value="0.10"),
+                env_field("AATS_MAX_MARGIN_USAGE_FRACTION", tag="常用可调", comment="预估保证金占用上限。", allowed_values="0.0 ~ 1.0", recommended_value="0.75"),
+                env_field("AATS_LIQUIDATION_BUFFER_FRACTION", tag="常用可调", comment="强平缓冲比例。", allowed_values="0.0 ~ 1.0", recommended_value="0.20"),
             ),
         ),
     ),
@@ -280,7 +377,9 @@ def _render_env(profile: ManagedEnvProfile, values: dict[str, str]) -> str:
         lines.append(f"# {section.title}")
         lines.append(f"# {section.intro}")
         for field in section.fields:
-            lines.append(f"# {field.comment}")
+            lines.append(
+                f"# [{field.tag}] {field.key}：{field.comment}可选值：{field.allowed_values}；推荐值：{field.example_value}。"
+            )
             lines.append(f"{field.key}={values.get(field.key, field.example_value)}")
         lines.append("")
     lines.append("# 提示")
