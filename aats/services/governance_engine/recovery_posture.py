@@ -38,6 +38,7 @@ class RecoveryPostureEvaluator:
     }
     _PERSISTENT_STATUS_BLOCKERS = {
         "pending_execution_commands",
+        "account_snapshot_refresh_failed",
         "strategy_bundle_recovery_in_progress",
         "strategy_bundle_recovery_requires_review",
     }

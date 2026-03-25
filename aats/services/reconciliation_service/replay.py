@@ -21,6 +21,7 @@ from aats.schemas.strategy_runtime import (
     StrategySleeveIntent,
 )
 from aats.schemas.system import HealthSnapshot
+from aats.services.execution_engine.fill_ordering import fill_processing_sort_key
 from aats.services.execution_engine.state_machine import OrderStateMachine
 from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, EPSILON_DECIMAL_9, is_effectively_zero, quantize_decimal, to_decimal
 from aats.services.portfolio_service.position_keys import position_key_for_snapshot_position
@@ -470,7 +471,7 @@ class ReplayEngine:
         state = PortfolioState(initial_usdt_balance=self.reconstruction_service.initial_usdt_balance)
         state.load_portfolio_snapshot(baseline_snapshot)
         baseline_ts = baseline_snapshot.snapshot_ts
-        for fill in sorted(fills, key=lambda item: (item.ingestion_timestamp, item.fill_id)):
+        for fill in sorted(fills, key=fill_processing_sort_key):
             if fill.ingestion_timestamp >= baseline_ts:
                 state.apply_fill(fill)
         return self.reconstruction_service.snapshot_builder.build(
@@ -803,7 +804,7 @@ class ReplayEngine:
             )
             fill_events = sorted(
                 fills_by_intent_id.get(intent_id, []),
-                key=lambda item: (item.ingestion_timestamp, item.fill_id),
+                key=fill_processing_sort_key,
             )
             cumulative_fill_qty = sum((fill.fill_qty for fill in fill_events), start=Decimal("0"))
             if cumulative_fill_qty - order_state.requested_qty > EPSILON_DECIMAL_12:

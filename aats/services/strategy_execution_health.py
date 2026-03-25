@@ -8,6 +8,7 @@ from aats.bootstrap.settings import AATSSettings
 from aats.schemas.execution import FillEvent
 from aats.schemas.portfolio import PortfolioSnapshot
 from aats.services.accounting import fill_fee_cost_in_quote, resolve_symbol_currencies
+from aats.services.execution_engine.fill_ordering import fill_processing_sort_key
 from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, is_effectively_zero, to_decimal
 
 _SMALL_PNL_CHURN_MULTIPLIER = Decimal("1.25")
@@ -135,7 +136,7 @@ def compute_strategy_execution_health(
 ) -> StrategyExecutionHealthSnapshot:
     ordered_fills = sorted(
         [fill for fill in fills if fill.symbol == symbol],
-        key=lambda item: (item.ingestion_timestamp, item.fill_id),
+        key=fill_processing_sort_key,
     )
     ordered_snapshots = sorted(snapshots, key=lambda item: item.snapshot_ts)
     realized_delta_by_fill_id = _realized_delta_by_fill_id(ordered_snapshots)

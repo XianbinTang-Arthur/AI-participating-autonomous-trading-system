@@ -15,6 +15,7 @@ from aats.schemas.exchange import AccountBaselineSnapshot, ExchangeAccountSnapsh
 from aats.schemas.operator import ProcessingFailureRecord
 from aats.schemas.portfolio import PortfolioSnapshot, is_baseline_snapshot
 from aats.schemas.reconciliation import ReconciliationReport
+from aats.services.execution_engine.fill_ordering import fill_processing_sort_key
 from aats.services.portfolio_service.positions import PortfolioState
 from aats.services.portfolio_service.reconstruction import PortfolioReconstructionService
 from aats.services.reconciliation_service.comparator import StateComparator
@@ -173,7 +174,7 @@ class ReconciliationService:
         if not fills:
             return None
 
-        latest_fill = max(fills, key=lambda item: (item.ingestion_timestamp, item.fill_id))
+        latest_fill = max(fills, key=fill_processing_sort_key)
         latest_snapshot = latest_snapshot_for_scope(self.portfolio_repo, self.runtime_scope)
         if latest_snapshot is not None:
             if (
@@ -455,7 +456,7 @@ class ReconciliationService:
         )
         state.load_portfolio_snapshot(baseline_snapshot)
         baseline_ts = baseline_snapshot.snapshot_ts
-        for fill in sorted(fills, key=lambda item: (item.ingestion_timestamp, item.fill_id)):
+        for fill in sorted(fills, key=fill_processing_sort_key):
             if fill.ingestion_timestamp >= baseline_ts:
                 state.apply_fill(fill)
         return self.reconstruction_service.snapshot_builder.build(

@@ -8,6 +8,7 @@ import hashlib
 
 from aats.schemas.execution import FillEvent
 from aats.services.accounting import fill_fee_cost_in_quote
+from aats.services.execution_engine.fill_ordering import fill_processing_sort_key
 from aats.services.portfolio_service.decimals import is_effectively_zero, to_decimal
 from aats.services.portfolio_service.position_keys import (
     exposure_side_from_quantity,
@@ -80,7 +81,7 @@ class LotBasedProjectionBuilder:
         applied_fill_ids: set[str] = set()
         lot_events: list[LotEventRecord] = []
 
-        for fill in sorted(fills, key=lambda item: (item.ingestion_timestamp, item.fill_id)):
+        for fill in sorted(fills, key=fill_processing_sort_key):
             applied_fill_ids.add(fill.fill_id)
             fill_qty = to_decimal(fill.fill_qty)
             if is_effectively_zero(fill_qty):

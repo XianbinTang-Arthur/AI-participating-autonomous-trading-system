@@ -14,6 +14,7 @@ from aats.schemas.reconciliation import ReconciliationReport
 from aats.schemas.system import RecoveryStatus
 from aats.services.accounting import remaining_obligation_amount
 from aats.services.execution_engine.bundle_recovery import scoped_bundle_recovery_assessment
+from aats.services.execution_engine.fill_ordering import fill_processing_sort_key
 from aats.services.governance_engine.kill_switch import KillSwitch
 from aats.services.governance_engine.runtime_layers import RecoveryPolicy
 from aats.services.portfolio_service.position_keys import position_key_for_snapshot_position
@@ -350,7 +351,7 @@ class ExecutionRecoveryService:
         )
         state.load_portfolio_snapshot(baseline_snapshot)
         baseline_ts = baseline_snapshot.snapshot_ts
-        for fill in sorted(fills, key=lambda item: (item.ingestion_timestamp, item.fill_id)):
+        for fill in sorted(fills, key=fill_processing_sort_key):
             if fill.ingestion_timestamp >= baseline_ts:
                 state.apply_fill(fill)
         return self.reconstruction_service.snapshot_builder.build(

@@ -619,6 +619,57 @@ class TestRecovery(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(query.recovery_view()["recovery_state"], recovery_before["recovery_state"])
         self.assertEqual(runtime.kill_switch.halted, halted_before)
 
+    async def test_operator_rebaseline_auto_resume_handles_second_refresh_failure_without_raising(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "storage_mode": "memory",
+                "mode": "guarded_live",
+                "market_data_backend": "demo",
+                "execution_backend": "okx",
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "okx_simulated_trading": True,
+                "live_submit_enabled": False,
+                "guarded_execution_dry_run": True,
+                "bootstrap_portfolio_from_exchange": True,
+            }
+        )
+        FakeBaselineAccountService.SNAPSHOT = ExchangeAccountSnapshot(
+            account_source="okx",
+            fetched_at=utc_now(),
+            balances=[ExchangeBalance(currency="USDT", total=1000.0, available=1000.0, frozen=0.0)],
+            positions=[],
+            open_orders=[],
+            fills=[],
+            instruments=[],
+            account_mode="cash",
+        )
+
+        with patch("aats.bootstrap.config.OKXAccountService", FakeBaselineAccountService):
+            runtime = await build_runtime(settings)
+
+        query = OperatorQueryService(runtime)
+        original_refresh = runtime.account_service.refresh
+        refresh_calls = 0
+
+        async def flaky_refresh(*, force: bool = False):
+            nonlocal refresh_calls
+            refresh_calls += 1
+            if refresh_calls >= 2:
+                raise RuntimeError("simulated_refresh_failure_during_resume")
+            return await original_refresh(force=force)
+
+        runtime.account_service.refresh = flaky_refresh
+
+        rebaseline = await query.rebaseline(reason="accept_current_exchange_state", actor_role="admin")
+
+        self.assertEqual(rebaseline["rebaseline_status"], "rebaseline_completed")
+        self.assertIsNotNone(rebaseline["auto_resume"])
+        self.assertEqual(rebaseline["auto_resume"]["status"], "resume_blocked")
+        self.assertEqual(query.recovery_view()["recovery_state"], "resume_blocked")
+        self.assertIn("account_snapshot_refresh_failed", query.recovery_view()["resume_blocked_reasons"])
+        self.assertTrue(runtime.kill_switch.halted)
+
     async def test_operator_rebaseline_resets_derivatives_risk_snapshot_auto_halt_timer(self) -> None:
         settings = AATSSettings.model_validate(
             {

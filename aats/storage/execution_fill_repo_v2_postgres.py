@@ -116,7 +116,11 @@ class PostgresExecutionFillRepositoryV2:
             rows = session.scalars(
                 select(ExecutionFillModelV2)
                 .where(ExecutionFillModelV2.order_id == order_id)
-                .order_by(asc(ExecutionFillModelV2.ingestion_ts), asc(ExecutionFillModelV2.fill_id))
+                .order_by(
+                    asc(ExecutionFillModelV2.exchange_ts),
+                    asc(ExecutionFillModelV2.ingestion_ts),
+                    asc(ExecutionFillModelV2.fill_id),
+                )
             ).all()
         return [_fill_row_to_dict(row) for row in rows]
 
@@ -127,7 +131,9 @@ class PostgresExecutionFillRepositoryV2:
         limit: int | None = None,
     ) -> list[dict]:
         query = select(ExecutionFillModelV2).order_by(
-            asc(ExecutionFillModelV2.ingestion_ts), asc(ExecutionFillModelV2.fill_id)
+            asc(ExecutionFillModelV2.exchange_ts),
+            asc(ExecutionFillModelV2.ingestion_ts),
+            asc(ExecutionFillModelV2.fill_id),
         )
         if since is not None:
             query = query.where(ExecutionFillModelV2.ingestion_ts >= since)

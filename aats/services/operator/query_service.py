@@ -28,6 +28,7 @@ from aats.schemas.operator import (
 )
 from aats.services.blocker_control import BlockerControlService
 from aats.services.blocker_control.actions import BlockerActionService
+from aats.services.execution_engine.fill_ordering import fill_processing_sort_key
 from aats.services.governance_engine.recovery_posture import RecoveryPostureEvaluator
 from aats.services.operator.account_queries import AccountQueryFacade
 from aats.services.operator.audit_replay_queries import AuditReplayQueryFacade
@@ -2099,7 +2100,7 @@ class OperatorQueryService:
     def recent_fills(self, *, limit: int = 50):
         return sorted(
             self._scoped_fills(),
-            key=lambda item: (item.ingestion_timestamp, item.fill_id),
+            key=fill_processing_sort_key,
             reverse=True,
         )[:limit]
 

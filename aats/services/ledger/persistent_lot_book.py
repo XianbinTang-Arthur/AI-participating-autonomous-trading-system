@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from aats.schemas.execution import FillEvent
+from aats.services.execution_engine.fill_ordering import fill_processing_sort_key
 from aats.services.ledger.lot_projection import LotBasedProjectionBuilder
 from aats.storage.lot_repo import LotEventRepository, PositionLotRepository
 
@@ -51,7 +52,7 @@ class PersistentLotBookService:
         session,
     ) -> None:
         fills_by_scope: dict[tuple[str, str, str], list[FillEvent]] = {}
-        for fill in sorted(fills, key=lambda item: (item.ingestion_timestamp, item.fill_id)):
+        for fill in sorted(fills, key=fill_processing_sort_key):
             scoped_product_type = str(fill.product_type or product_type)
             scoped_margin_mode = str(fill.margin_mode or margin_mode)
             fills_by_scope.setdefault((fill.symbol, scoped_product_type, scoped_margin_mode), []).append(fill)

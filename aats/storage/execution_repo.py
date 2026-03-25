@@ -4,6 +4,7 @@ from datetime import datetime
 
 from aats.schemas.execution import FillEvent, OrderState
 from aats.bootstrap.logging import get_logger, log_event
+from aats.services.execution_engine.fill_ordering import fill_processing_sort_key
 from aats.services.execution_engine.state_machine import OrderStateMachine
 from aats.services.runtime_scope import RuntimeStateScope, filter_fills, filter_order_states
 
@@ -87,7 +88,7 @@ class InMemoryExecutionRepository:
     def fills_for_order(self, client_order_id: str) -> list[FillEvent]:
         return sorted(
             [fill for fill in self._fills_by_fill_id.values() if fill.client_order_id == client_order_id],
-            key=lambda item: (item.ingestion_timestamp, item.fill_id),
+            key=fill_processing_sort_key,
         )
 
     def fills_since(
@@ -98,7 +99,7 @@ class InMemoryExecutionRepository:
     ) -> list[FillEvent]:
         rows = sorted(
             self._fills_by_fill_id.values(),
-            key=lambda item: (item.ingestion_timestamp, item.fill_id),
+            key=fill_processing_sort_key,
         )
         if since is not None:
             rows = [fill for fill in rows if fill.ingestion_timestamp >= since]

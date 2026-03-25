@@ -230,7 +230,11 @@ class PostgresExecutionRepository:
     def fills(self) -> list[FillEvent]:
         with self.session_factory() as session:
             rows = session.scalars(
-                select(FillEventModel).order_by(FillEventModel.ingestion_timestamp, FillEventModel.fill_id)
+                select(FillEventModel).order_by(
+                    FillEventModel.exchange_timestamp,
+                    FillEventModel.ingestion_timestamp,
+                    FillEventModel.fill_id,
+                )
             ).all()
         return [self._to_fill_event(row) for row in rows]
 
@@ -239,7 +243,11 @@ class PostgresExecutionRepository:
             rows = session.scalars(
                 select(FillEventModel)
                 .where(FillEventModel.client_order_id == client_order_id)
-                .order_by(FillEventModel.ingestion_timestamp, FillEventModel.fill_id)
+                .order_by(
+                    FillEventModel.exchange_timestamp,
+                    FillEventModel.ingestion_timestamp,
+                    FillEventModel.fill_id,
+                )
             ).all()
         return [self._to_fill_event(row) for row in rows]
 
@@ -252,7 +260,11 @@ class PostgresExecutionRepository:
         query = select(FillEventModel)
         if since is not None:
             query = query.where(FillEventModel.ingestion_timestamp >= since)
-        query = query.order_by(FillEventModel.ingestion_timestamp, FillEventModel.fill_id)
+        query = query.order_by(
+            FillEventModel.exchange_timestamp,
+            FillEventModel.ingestion_timestamp,
+            FillEventModel.fill_id,
+        )
         if limit is not None:
             query = query.limit(limit)
         with self.session_factory() as session:
@@ -290,7 +302,11 @@ class PostgresExecutionRepository:
         query = select(FillEventModel)
         if since is not None:
             query = query.where(FillEventModel.ingestion_timestamp >= since)
-        query = self._scope_fill_query(query, scope).order_by(FillEventModel.ingestion_timestamp, FillEventModel.fill_id)
+        query = self._scope_fill_query(query, scope).order_by(
+            FillEventModel.exchange_timestamp,
+            FillEventModel.ingestion_timestamp,
+            FillEventModel.fill_id,
+        )
         if limit is not None:
             query = query.limit(limit)
         with self.session_factory() as session:

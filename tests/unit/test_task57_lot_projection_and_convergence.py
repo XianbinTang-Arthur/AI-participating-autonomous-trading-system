@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import unittest
+from datetime import timedelta
 from decimal import Decimal
 
 from aats.bootstrap.config import build_runtime
@@ -9,6 +10,10 @@ from aats.bootstrap.settings import AATSSettings
 from aats.schemas.common import utc_now
 from aats.schemas.execution import FillEvent
 from aats.services.ledger.lot_projection import LotBasedProjectionBuilder
+from aats.services.portfolio_service.pnl import PortfolioPnLCalculator
+from aats.services.portfolio_service.positions import PortfolioState
+from aats.services.portfolio_service.reconstruction import PortfolioReconstructionService
+from aats.services.portfolio_service.snapshots import PortfolioSnapshotBuilder
 from tests.support.postgres import temporary_postgres_url
 
 
@@ -152,6 +157,48 @@ class TestTask57LotProjectionAndConvergence(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(close_events)
         self.assertEqual(close_events[0]["strategy_sleeve_id"], "sleeve-smart-arb")
         self.assertEqual(close_events[0]["allocation_id"], "alloc-1")
+
+    def test_lot_projection_and_reconstruction_follow_exchange_timestamp_when_ingestion_matches(self) -> None:
+        builder = LotBasedProjectionBuilder()
+        base_ts = utc_now()
+        shared_ingestion = base_ts + timedelta(seconds=5)
+        fills = [
+            _fill(fill_id="z_buy_100", side="buy", qty="1", price="100").model_copy(
+                update={"exchange_timestamp": base_ts, "ingestion_timestamp": shared_ingestion}
+            ),
+            _fill(fill_id="y_buy_120", side="buy", qty="1", price="120").model_copy(
+                update={"exchange_timestamp": base_ts + timedelta(milliseconds=1), "ingestion_timestamp": shared_ingestion}
+            ),
+            _fill(fill_id="x_sell_110", side="sell", qty="1", price="110").model_copy(
+                update={"exchange_timestamp": base_ts + timedelta(milliseconds=2), "ingestion_timestamp": shared_ingestion}
+            ),
+        ]
+
+        expected_state = PortfolioState(initial_usdt_balance=Decimal("1000"))
+        for fill in fills:
+            expected_state.apply_fill(fill)
+        expected_snapshot = PortfolioSnapshotBuilder(
+            pnl_calculator=PortfolioPnLCalculator()
+        ).build(state=expected_state, price_provider=lambda _symbol: Decimal("110"))
+
+        lot_book = builder.rebuild_lot_book(fills=fills)
+        reconstructed = PortfolioReconstructionService(
+            initial_usdt_balance=Decimal("1000"),
+            snapshot_builder=PortfolioSnapshotBuilder(pnl_calculator=PortfolioPnLCalculator()),
+        ).rebuild_snapshot(
+            fills=fills,
+            price_provider=lambda _symbol: Decimal("110"),
+        )
+
+        self.assertEqual(reconstructed.positions[0].position_qty, expected_snapshot.positions[0].position_qty)
+        self.assertEqual(reconstructed.positions[0].avg_entry_price, expected_snapshot.positions[0].avg_entry_price)
+        self.assertEqual(reconstructed.realized_pnl, expected_snapshot.realized_pnl)
+        self.assertEqual(reconstructed.balances["USDT"], expected_snapshot.balances["USDT"])
+        self.assertEqual(reconstructed.cost_basis["BTC-USDT"], expected_snapshot.cost_basis["BTC-USDT"])
+        open_lot = next(lot for lot in lot_book.lots if lot["status"] == "OPEN")
+        self.assertEqual(open_lot["entry_price"], Decimal("120"))
+        self.assertEqual(open_lot["signed_quantity_open"], Decimal("1"))
+        self.assertEqual(lot_book.realized_pnl, Decimal("10"))
 
     async def test_financial_convergence_mode_requires_all_strict_guards(self) -> None:
         if not os.getenv("AATS_DATABASE_URL"):

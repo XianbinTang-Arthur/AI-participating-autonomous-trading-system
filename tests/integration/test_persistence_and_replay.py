@@ -298,6 +298,164 @@ class TestPersistenceAndReplay(unittest.IsolatedAsyncioTestCase):
                 if storage is not None and storage.database_runtime is not None:
                     storage.database_runtime.dispose()
 
+    async def test_high_frequency_fill_projection_keeps_snapshot_lots_sleeve_pnl_and_replay_aligned(self) -> None:
+        with temporary_postgres_url() as (database_url, _admin_engine, _schema_name):
+            settings = self._postgres_settings(database_url)
+            runtime = await build_runtime(settings)
+            storage = None
+            try:
+                scope = runtime_state_scope(settings)
+                base_ts = utc_now()
+                shared_ingestion = base_ts + timedelta(seconds=5)
+                fills = [
+                    FillEvent(
+                        fill_id="z_highfreq_buy_100",
+                        decision_id="decision_highfreq_fill",
+                        intent_id="intent_highfreq_fill",
+                        client_order_id="clord_highfreq_fill",
+                        exchange_order_id="ord_highfreq_fill",
+                        symbol=settings.default_symbol,
+                        venue="PAPER",
+                        side="buy",
+                        fill_qty=Decimal("1"),
+                        fill_price=Decimal("100"),
+                        fee_amount=Decimal("0"),
+                        fee_currency="USDT",
+                        liquidity_role="taker",
+                        exchange_timestamp=base_ts,
+                        ingestion_timestamp=shared_ingestion,
+                        order_status_after_fill="FILLED",
+                        strategy_family="directional",
+                        strategy_sleeve_id="sleeve_highfreq",
+                        allocation_id="alloc_highfreq",
+                    ),
+                    FillEvent(
+                        fill_id="y_highfreq_buy_120",
+                        decision_id="decision_highfreq_fill",
+                        intent_id="intent_highfreq_fill",
+                        client_order_id="clord_highfreq_fill",
+                        exchange_order_id="ord_highfreq_fill",
+                        symbol=settings.default_symbol,
+                        venue="PAPER",
+                        side="buy",
+                        fill_qty=Decimal("1"),
+                        fill_price=Decimal("120"),
+                        fee_amount=Decimal("0"),
+                        fee_currency="USDT",
+                        liquidity_role="taker",
+                        exchange_timestamp=base_ts + timedelta(milliseconds=1),
+                        ingestion_timestamp=shared_ingestion,
+                        order_status_after_fill="FILLED",
+                        strategy_family="directional",
+                        strategy_sleeve_id="sleeve_highfreq",
+                        allocation_id="alloc_highfreq",
+                    ),
+                    FillEvent(
+                        fill_id="x_highfreq_sell_110",
+                        decision_id="decision_highfreq_fill",
+                        intent_id="intent_highfreq_fill",
+                        client_order_id="clord_highfreq_fill",
+                        exchange_order_id="ord_highfreq_fill",
+                        symbol=settings.default_symbol,
+                        venue="PAPER",
+                        side="sell",
+                        fill_qty=Decimal("1"),
+                        fill_price=Decimal("110"),
+                        fee_amount=Decimal("0"),
+                        fee_currency="USDT",
+                        liquidity_role="taker",
+                        exchange_timestamp=base_ts + timedelta(milliseconds=2),
+                        ingestion_timestamp=shared_ingestion,
+                        order_status_after_fill="FILLED",
+                        strategy_family="directional",
+                        strategy_sleeve_id="sleeve_highfreq",
+                        allocation_id="alloc_highfreq",
+                    ),
+                ]
+
+                for fill in fills:
+                    self.assertTrue(runtime.execution_repo.save_fill(fill))
+                    await runtime.portfolio_service.handle_fill_event(
+                        {
+                            "topic": topics.FILL_EVENTS,
+                            "key": fill.symbol,
+                            "payload": build_envelope(
+                                topic=topics.FILL_EVENTS,
+                                key=fill.symbol,
+                                payload_model=fill,
+                                source_component="test",
+                            ).model_dump(mode="json"),
+                        }
+                    )
+
+                latest_snapshot = runtime.portfolio_repo.latest()
+                self.assertIsNotNone(latest_snapshot)
+                assert latest_snapshot is not None
+                self.assertEqual(latest_snapshot.positions[0].position_qty, Decimal("1"))
+                self.assertEqual(latest_snapshot.positions[0].avg_entry_price, Decimal("110"))
+                self.assertEqual(latest_snapshot.realized_pnl, Decimal("0"))
+
+                storage = build_storage_backends(settings)
+                self.assertIsNotNone(storage.position_lot_repo)
+                assert storage.position_lot_repo is not None
+                open_lots = storage.position_lot_repo.lots_for_scope(
+                    symbol=settings.default_symbol,
+                    product_type="spot",
+                    margin_mode="cash",
+                    open_only=True,
+                )
+                self.assertEqual(len(open_lots), 1)
+                self.assertEqual(open_lots[0]["signed_quantity_open"], Decimal("1"))
+                self.assertEqual(open_lots[0]["entry_price"], Decimal("120"))
+                self.assertEqual(open_lots[0]["strategy_sleeve_id"], "sleeve_highfreq")
+                close_events = storage.lot_event_repo.events_for_fill("x_highfreq_sell_110")
+                self.assertEqual(len(close_events), 1)
+                self.assertEqual(close_events[0]["realized_pnl_delta"], Decimal("10"))
+
+                outcomes = storage.fill_outcome_repo.outcomes_for_scope(scope=scope)
+                self.assertEqual(len(outcomes), 3)
+                sell_outcome = next(item for item in outcomes if item.fill_id == "x_highfreq_sell_110")
+                self.assertEqual(sell_outcome.realized_pnl_delta, Decimal("0"))
+
+                sleeve_records = storage.sleeve_pnl_repo.records_for_scope(scope=scope)
+                self.assertEqual(len(sleeve_records), 3)
+                self.assertEqual(
+                    sum((Decimal(str(item.realized_pnl)) for item in sleeve_records), start=Decimal("0")),
+                    Decimal("0"),
+                )
+
+                replay = ReplayEngine(
+                    event_store=runtime.event_store,
+                    reconstruction_service=PortfolioReconstructionService(
+                        initial_usdt_balance=settings.initial_usdt_balance,
+                        snapshot_builder=PortfolioSnapshotBuilder(pnl_calculator=PortfolioPnLCalculator()),
+                    ),
+                    audit_repo=storage.audit_repo,
+                    portfolio_repo=storage.portfolio_repo,
+                    fill_outcome_repo=storage.fill_outcome_repo,
+                    funding_fee_repo=storage.funding_fee_repo,
+                    sleeve_pnl_repo=storage.sleeve_pnl_repo,
+                    scope=scope,
+                )
+                reconstructed = replay._rebuild_snapshot(
+                    fills=fills,
+                    baseline_snapshot=None,
+                    price_provider=lambda _symbol: Decimal("0"),
+                )
+
+                self.assertEqual(reconstructed.balances, latest_snapshot.balances)
+                self.assertEqual(
+                    {position.symbol: position.position_qty for position in reconstructed.positions},
+                    {position.symbol: position.position_qty for position in latest_snapshot.positions},
+                )
+                self.assertEqual(reconstructed.cost_basis, latest_snapshot.cost_basis)
+                self.assertEqual(reconstructed.realized_pnl, latest_snapshot.realized_pnl)
+            finally:
+                if runtime.database_runtime is not None:
+                    runtime.database_runtime.dispose()
+                if storage is not None and storage.database_runtime is not None:
+                    storage.database_runtime.dispose()
+
     async def test_allocator_postgres_replay_keeps_multi_sleeve_spot_bundle_consistent(self) -> None:
         with temporary_postgres_url() as (database_url, _admin_engine, _schema_name):
             settings = self._postgres_settings(
