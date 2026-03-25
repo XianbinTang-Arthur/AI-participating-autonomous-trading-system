@@ -61,6 +61,17 @@ class TrialReviewRecordRequest(BaseModel):
     reason: str = "ui_trial_review_snapshot"
 
 
+class TrialReviewActionRequest(BaseModel):
+    action_type: Literal[
+        "review_snapshot",
+        "continue_small_capital",
+        "shrink_trial",
+        "pause_trial",
+        "approve_scale_up",
+    ]
+    reason: str = "ui_trial_review_action"
+
+
 def _runtime(request: Request) -> ApplicationRuntime:
     return cast(ApplicationRuntime, request.app.state.runtime)
 
@@ -783,6 +794,24 @@ async def system_trial_review_record(
         actor_identity=principal.identity,
         auth_source=principal.auth_source,
     )
+
+
+@router.post("/system/trial-review/action")
+async def system_trial_review_action(
+    request: Request,
+    payload: TrialReviewActionRequest,
+    principal: OperatorPrincipal = Depends(require_admin_access),
+) -> dict[str, Any]:
+    try:
+        return _query(request).record_trial_review_action(
+            action_type=payload.action_type,
+            reason=payload.reason,
+            actor_role=principal.role,
+            actor_identity=principal.identity,
+            auth_source=principal.auth_source,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/reconciliation/latest")

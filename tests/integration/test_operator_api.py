@@ -1725,6 +1725,31 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(packet["latest_review"]["action"], "trial_review_snapshot")
         self.assertTrue(history["actions"])
 
+    async def test_operator_can_record_trial_review_action_and_workbench_history(self) -> None:
+        runtime = await self._runtime()
+        app = self._app(runtime)
+        with TestClient(app) as client:
+            response = client.post(
+                "/system/trial-review/action",
+                json={
+                    "action_type": "shrink_trial",
+                    "reason": "test_trial_review_shrink",
+                },
+            )
+            summary = client.get(
+                "/reports/trial-review-summary?segment_limit=100&window_days=7&period_count=4"
+            ).json()
+            history = client.get("/reports/trial-review-history?limit=5").json()
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["action"], "capital_scale_review")
+        self.assertEqual(payload["details"]["trial_review_action_type"], "shrink_trial")
+        self.assertIn("workbench", summary["sections"])
+        self.assertTrue(summary["sections"]["workbench"]["recent_actions"])
+        self.assertEqual(summary["sections"]["workbench"]["latest_action"]["selected_action"], "shrink_trial")
+        self.assertTrue(any(item["selected_action"] == "shrink_trial" for item in history["actions"]))
+
     async def test_metrics_order_intent_count_uses_persisted_events_not_runtime_counter(self) -> None:
         runtime = await self._runtime(
             trading_product_type="derivatives",

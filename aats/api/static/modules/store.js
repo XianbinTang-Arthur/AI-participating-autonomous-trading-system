@@ -86,6 +86,7 @@ export function viewSpecs(view, state = null) {
         ["recentDecisions", `/decision/recent?limit=${limits.recentDecisions}&offset=0`],
         ["executionLatest", "/execution/latest"],
         ["trialReviewSummary", "/reports/trial-review-summary?segment_limit=100&window_days=7&period_count=4"],
+        ["trialReviewHistory", "/reports/trial-review-history?limit=5&offset=0"],
       ],
     execution: [
       ["latestDecision", "/decision/latest"],

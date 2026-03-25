@@ -4944,6 +4944,183 @@ class OperatorQueryService:
             action_items.append("当前仍有执行阻断项，先处理阻断项再讨论继续试盘或放量。")
         return list(dict.fromkeys(action_items))
 
+    @staticmethod
+    def _trial_review_action_catalog(
+        *,
+        hard_stop_active: bool,
+        scaling_readiness: str,
+        runtime_constraints: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        actions: list[dict[str, Any]] = [
+            {
+                "label": "查看风险与恢复",
+                "client_action": "navigate-view",
+                "value": "risk",
+                "tone": "ghost",
+                "category": "navigate",
+            }
+        ]
+        if hard_stop_active:
+            actions.extend(
+                [
+                    {
+                        "label": "查看委托与成交",
+                        "client_action": "navigate-view",
+                        "value": "execution",
+                        "tone": "ghost",
+                        "category": "navigate",
+                    },
+                    {
+                        "label": "记录本次复盘",
+                        "client_action": "record-trial-review-action",
+                        "value": "review_snapshot",
+                        "tone": "secondary",
+                        "category": "record",
+                    },
+                    {
+                        "label": "刷新当前状态",
+                        "client_action": "refresh-dashboard",
+                        "value": "",
+                        "tone": "warning",
+                        "category": "refresh",
+                    },
+                ]
+            )
+            return actions
+
+        verdict_to_button = {
+            "approve_scale_up": ("提交放量评审", "approve_scale_up", "warning"),
+            "continue_small_capital": ("记为继续小资金试盘", "continue_small_capital", "secondary"),
+            "shrink_trial": ("记为缩小试盘规模", "shrink_trial", "warning"),
+            "pause_trial": ("记为暂停试盘并复盘", "pause_trial", "warning"),
+        }
+        verdict_button = verdict_to_button.get(str(scaling_readiness or ""))
+        if verdict_button is not None:
+            label, value, tone = verdict_button
+            actions.append(
+                {
+                    "label": label,
+                    "client_action": "record-trial-review-action",
+                    "value": value,
+                    "tone": tone,
+                    "category": "record",
+                }
+            )
+        actions.append(
+            {
+                "label": "记录本次复盘",
+                "client_action": "record-trial-review-action",
+                "value": "review_snapshot",
+                "tone": "ghost",
+                "category": "record",
+            }
+        )
+        if not runtime_constraints.get("can_continue_runtime", False):
+            actions.append(
+                {
+                    "label": "刷新当前状态",
+                    "client_action": "refresh-dashboard",
+                    "value": "",
+                    "tone": "warning",
+                    "category": "refresh",
+                }
+            )
+        return actions
+
+    @staticmethod
+    def _normalize_trial_review_action_payload(payload: dict[str, Any]) -> dict[str, Any]:
+        action = str(payload.get("action") or "")
+        details = dict(payload.get("details") or {})
+        selected_action = str(
+            details.get("trial_review_action_type")
+            or details.get("selected_verdict")
+            or ("review_snapshot" if action == "trial_review_snapshot" else "")
+        )
+        label_map = {
+            "review_snapshot": "记录本次复盘",
+            "continue_small_capital": "继续小资金试盘",
+            "shrink_trial": "缩小试盘规模",
+            "pause_trial": "暂停试盘并复盘",
+            "approve_scale_up": "提交放量评审",
+        }
+        return {
+            "action_id": payload.get("action_id"),
+            "action": action,
+            "selected_action": selected_action,
+            "label": label_map.get(selected_action, selected_action or action),
+            "status": payload.get("status"),
+            "reason": payload.get("reason"),
+            "actor_role": payload.get("actor_role"),
+            "actor_identity": payload.get("actor_identity"),
+            "auth_source": payload.get("auth_source"),
+            "created_at": payload.get("created_at"),
+            "recovery_state_before": payload.get("recovery_state_before"),
+            "recovery_state_after": payload.get("recovery_state_after"),
+            "details": details,
+        }
+
+    def _latest_trial_review_action(self) -> dict[str, Any] | None:
+        actions = self._cached(
+            "operator_action_events",
+            lambda: self.runtime.event_store.by_topic(topics.OPERATOR_ACTIONS),
+        )
+        for item in reversed(actions):
+            action = str(item.payload.get("action") or "")
+            if action not in {"trial_review_snapshot", "capital_scale_review"}:
+                continue
+            payload = self.payload(item)
+            if payload is None:
+                continue
+            return self._normalize_trial_review_action_payload(payload)
+        return None
+
+    def _trial_review_history_payload(self, *, limit: int = 20, offset: int = 0) -> dict[str, Any]:
+        actions = self._cached(
+            "operator_action_events",
+            lambda: self.runtime.event_store.by_topic(topics.OPERATOR_ACTIONS),
+        )
+        rows: list[dict[str, Any]] = []
+        for item in reversed(actions):
+            action = str(item.payload.get("action") or "")
+            if action not in {"trial_review_snapshot", "capital_scale_review"}:
+                continue
+            payload = self.payload(item)
+            if payload is None:
+                continue
+            rows.append(self._normalize_trial_review_action_payload(payload))
+        return self._paginate_rows(rows, limit=limit, offset=offset, key="actions")
+
+    def _trial_review_workbench_payload(
+        self,
+        *,
+        scaling_readiness: str,
+        scaling: dict[str, Any],
+        trial_guard: dict[str, Any],
+        hard_stop: dict[str, Any],
+        runtime_constraints: dict[str, Any],
+        action_items: list[str],
+    ) -> dict[str, Any]:
+        latest_action = self._latest_trial_review_action()
+        history_preview = self._trial_review_history_payload(limit=5, offset=0)
+        return {
+            "hard_stop": hard_stop,
+            "advisory_recommendation": {
+                "verdict": scaling_readiness,
+                "headline": scaling.get("summary"),
+                "reasons": list(scaling.get("reasons") or []),
+            },
+            "runtime_constraints": runtime_constraints,
+            "action_items": action_items,
+            "available_actions": self._trial_review_action_catalog(
+                hard_stop_active=bool(hard_stop.get("active")),
+                scaling_readiness=scaling_readiness,
+                runtime_constraints=runtime_constraints,
+            ),
+            "latest_action": latest_action,
+            "recent_actions": list(history_preview.get("actions") or []),
+            "trial_guard_status": trial_guard.get("status"),
+        }
+
     def _build_trial_review_summary(
         self,
         *,
@@ -4963,7 +5140,7 @@ class OperatorQueryService:
         segments = self.strategy_segment_report(limit=segment_limit)
         recovery = self.recovery_view()
         blocker_rows = [item for item in self.blockers() if not item.get("submit_only")]
-        latest_review = self.latest_operator_action("trial_review_snapshot")
+        latest_review = self._latest_trial_review_action()
         latest_period = (forward_validation.get("periods") or [None])[0] or {}
         segment_rows = list(segments.get("segments") or [])
         strongest_segment = max(
@@ -4982,6 +5159,14 @@ class OperatorQueryService:
         trial_guard = scaling.get("trial_guard") or self.trial_guard()
         hard_stop = scaling.get("trial_guard_hard_stop") or self._trial_guard_hard_stop_payload(trial_guard)
         runtime_constraints = scaling.get("runtime_constraints") or {}
+        action_items = self._trial_review_action_items(
+            scaling_readiness=scaling_readiness,
+            high_slippage_count=high_slippage_count,
+            slow_submit_to_fill_count=slow_submit_to_fill_count,
+            trial_guard=trial_guard,
+            recovery=recovery,
+            blocker_rows=blocker_rows,
+        )
         return {
             "generated_at": utc_now(),
             "summary": {
@@ -4999,14 +5184,7 @@ class OperatorQueryService:
             "recommendation": {
                 "readiness": scaling_readiness,
                 "reasons": scaling.get("reasons", []),
-                "action_items": self._trial_review_action_items(
-                    scaling_readiness=scaling_readiness,
-                    high_slippage_count=high_slippage_count,
-                    slow_submit_to_fill_count=slow_submit_to_fill_count,
-                    trial_guard=trial_guard,
-                    recovery=recovery,
-                    blocker_rows=blocker_rows,
-                ),
+                "action_items": action_items,
             },
             "sections": {
                 "forward_validation": {
@@ -5016,6 +5194,14 @@ class OperatorQueryService:
                 "scaling_readiness": scaling,
                 "trial_guard_hard_stop": hard_stop,
                 "runtime_constraints": runtime_constraints,
+                "workbench": self._trial_review_workbench_payload(
+                    scaling_readiness=scaling_readiness,
+                    scaling=scaling,
+                    trial_guard=trial_guard,
+                    hard_stop=hard_stop,
+                    runtime_constraints=runtime_constraints,
+                    action_items=action_items,
+                ),
                 "guarded_live_run_packet": {
                     "status": self.guarded_live_run_packet().get("status"),
                     "summary": self.guarded_live_run_packet().get("summary"),
@@ -5056,7 +5242,18 @@ class OperatorQueryService:
         trial_guard = self.trial_guard()
         recovery = self.recovery_view()
         blocker_rows = [item for item in self.blockers() if not item.get("submit_only")]
-        latest_review = self.latest_operator_action("trial_review_snapshot")
+        latest_review = self._latest_trial_review_action()
+        scaling_readiness = str(scaling.get("readiness") or "continue_small_capital")
+        hard_stop = scaling.get("trial_guard_hard_stop") or self._trial_guard_hard_stop_payload(trial_guard)
+        runtime_constraints = scaling.get("runtime_constraints") or {}
+        action_items = self._trial_review_action_items(
+            scaling_readiness=scaling_readiness,
+            high_slippage_count=int(((forward_validation.get("periods") or [None])[0] or {}).get("high_slippage_count") or 0),
+            slow_submit_to_fill_count=int(((forward_validation.get("periods") or [None])[0] or {}).get("slow_submit_to_fill_count") or 0),
+            trial_guard=trial_guard,
+            recovery=recovery,
+            blocker_rows=blocker_rows,
+        )
         return {
             "generated_at": utc_now(),
             "sections": {
@@ -5068,8 +5265,16 @@ class OperatorQueryService:
                 "forward_validation": forward_validation,
                 "scaling_readiness": scaling,
                 "trial_guard": trial_guard,
-                "trial_guard_hard_stop": scaling.get("trial_guard_hard_stop") or self._trial_guard_hard_stop_payload(trial_guard),
-                "runtime_constraints": scaling.get("runtime_constraints") or {},
+                "trial_guard_hard_stop": hard_stop,
+                "runtime_constraints": runtime_constraints,
+                "workbench": self._trial_review_workbench_payload(
+                    scaling_readiness=scaling_readiness,
+                    scaling=scaling,
+                    trial_guard=trial_guard,
+                    hard_stop=hard_stop,
+                    runtime_constraints=runtime_constraints,
+                    action_items=action_items,
+                ),
                 "margin_buffer_overview": self.margin_buffer_risk(),
                 "guarded_live_preflight": self.guarded_live_preflight(),
                 "guarded_live_run_packet": self.guarded_live_run_packet(),
@@ -5120,6 +5325,42 @@ class OperatorQueryService:
     def trial_review_history(self, *, limit: int = 20, offset: int = 0) -> dict[str, Any]:
         return self.report_queries.trial_review_history(limit=limit, offset=offset)
 
+    def record_trial_review_action(
+        self,
+        *,
+        action_type: str,
+        reason: str,
+        actor_role: OperatorRole,
+        actor_identity: str | None = None,
+        auth_source: AuthSource = "anonymous",
+        profitability_limit: int = 100,
+        anomaly_limit: int = 100,
+        segment_limit: int = 100,
+        window_days: int = 7,
+        period_count: int = 4,
+    ) -> dict[str, Any]:
+        if action_type == "review_snapshot":
+            return self.record_trial_review_snapshot(
+                reason=reason,
+                actor_role=actor_role,
+                actor_identity=actor_identity,
+                auth_source=auth_source,
+                profitability_limit=profitability_limit,
+                anomaly_limit=anomaly_limit,
+                segment_limit=segment_limit,
+                window_days=window_days,
+                period_count=period_count,
+            )
+        return self.record_capital_scale_review(
+            verdict=action_type,
+            reason=reason,
+            actor_role=actor_role,
+            actor_identity=actor_identity,
+            auth_source=auth_source,
+            window_days=window_days,
+            period_count=period_count,
+        )
+
     def record_capital_scale_review(
         self,
         *,
@@ -5150,6 +5391,7 @@ class OperatorQueryService:
             recovery_state_before=report.get("recovery", {}).get("recovery_state"),
             recovery_state_after=report.get("recovery", {}).get("recovery_state"),
             details={
+                "trial_review_action_type": verdict,
                 "selected_verdict": verdict,
                 "recommended_readiness": report.get("readiness"),
                 "summary": report.get("summary"),
@@ -5157,6 +5399,8 @@ class OperatorQueryService:
                 "requirements": report.get("requirements", {}),
                 "latest_forward_validation": report.get("latest_forward_validation"),
                 "trial_guard_status": report.get("trial_guard", {}).get("status"),
+                "trial_guard_hard_stop": report.get("trial_guard_hard_stop"),
+                "runtime_constraints": report.get("runtime_constraints"),
                 "recorded_at": utc_now(),
             },
         )
@@ -5200,10 +5444,13 @@ class OperatorQueryService:
             recovery_state_before=packet.get("sections", {}).get("recovery", {}).get("recovery_state"),
             recovery_state_after=packet.get("sections", {}).get("recovery", {}).get("recovery_state"),
             details={
+                "trial_review_action_type": "review_snapshot",
                 "summary": packet.get("summary"),
                 "recommendation": packet.get("recommendation"),
                 "latest_forward_validation": packet.get("sections", {}).get("forward_validation", {}).get("summary"),
                 "scaling_readiness": packet.get("sections", {}).get("scaling_readiness", {}).get("readiness"),
+                "trial_guard_hard_stop": packet.get("sections", {}).get("trial_guard_hard_stop"),
+                "runtime_constraints": packet.get("sections", {}).get("runtime_constraints"),
                 "recorded_at": utc_now(),
             },
         )

@@ -40,6 +40,11 @@ export function renderStrategySections(data) {
   const trialReviewSummary = trialReviewSummaryModel.summary || {};
   const trialReviewRecommendation = trialReviewSummaryModel.recommendation || {};
   const trialReviewSections = trialReviewSummaryModel.sections || {};
+  const trialReviewWorkbench = trialReviewSections.workbench || {};
+  const trialReviewHistory = data.trialReviewHistory || {};
+  const trialReviewActions = trialReviewWorkbench.available_actions || [];
+  const trialReviewRecentActions = trialReviewWorkbench.recent_actions || trialReviewHistory.actions || [];
+  const trialReviewLatestAction = trialReviewWorkbench.latest_action || {};
   const forwardValidation = trialReviewSections.forward_validation || data.forwardValidation || {};
   const forwardSummary = forwardValidation.summary || {};
   const forwardPeriods = forwardValidation.periods || [];
@@ -393,8 +398,8 @@ export function renderStrategySections(data) {
     strategyTrialVerdict: surfaceCard({
       title: "系统自动试盘结论",
       kicker: "试盘审查",
-      copy: "这里汇总系统自动给出的试盘建议、最近观察周期表现，以及当前是否满足继续试盘或进入下一步评估的前置条件。",
-      actions: renderTrialVerdictActions({
+      copy: "这里现在是试盘工作台：会把硬停机、试盘建议、当前运行前置条件和可执行动作拆开显示，不再把所有理由混成一团。",
+      actions: renderTrialVerdictActions(trialReviewActions, {
         trialGuardStatus: scalingRequirements.trial_guard_status,
         trialGuardHardStopActive: Boolean(trialGuardHardStop.active),
         trialVerdict,
@@ -462,10 +467,20 @@ export function renderStrategySections(data) {
             plainListText(trialReviewRecommendation.action_items, "当前没有新的周度动作建议"),
             trialReviewSummary.headline || reasonListText(trialReviewRecommendation.reasons, "当前没有额外复盘说明"),
           ],
+          [
+            "最近处理记录",
+            trialReviewLatestAction.label || "当前还没有新的试盘处理记录",
+            [
+              trialReviewLatestAction.created_at ? `记录时间 ${formatRelativeAge(trialReviewLatestAction.created_at)}` : "",
+              trialReviewLatestAction.actor_identity ? `操作人 ${trialReviewLatestAction.actor_identity}` : "",
+              trialReviewLatestAction.reason ? `原因 ${trialReviewLatestAction.reason}` : "",
+            ].filter(Boolean).join("；") || "当前还没有新的试盘处理记录",
+          ],
           ["最强分层切片", formatSegmentLabel(trialReviewSections.strategy_segments?.strongest_segment?.segment), formatSigned(trialReviewSections.strategy_segments?.strongest_segment?.net_realized_pnl)],
           ["最弱分层切片", formatSegmentLabel(trialReviewSections.strategy_segments?.weakest_segment?.segment), formatSigned(trialReviewSections.strategy_segments?.weakest_segment?.net_realized_pnl)],
         ])}
         ${renderForwardValidationPeriods(forwardPeriods)}
+        ${renderTrialReviewHistory(trialReviewRecentActions)}
       `,
     }),
     strategyHistory: surfaceCard({
@@ -788,7 +803,11 @@ function strategyLegSummary(legs) {
     .join(" | ");
 }
 
-function renderTrialVerdictActions({ trialGuardStatus, trialGuardHardStopActive, trialVerdict }) {
+function renderTrialVerdictActions(workbenchActions, fallback) {
+  if (Array.isArray(workbenchActions) && workbenchActions.length) {
+    return `<div class="stack-actions table-actions--compact">${workbenchActions.map(renderWorkbenchActionButton).join("")}</div>`;
+  }
+  const { trialGuardStatus, trialGuardHardStopActive, trialVerdict } = fallback;
   const actions = [
     actionButton("查看风险与恢复", "navigate-view", "risk", "ghost"),
   ];
@@ -811,6 +830,41 @@ function renderTrialVerdictActions({ trialGuardStatus, trialGuardHardStopActive,
   }
   actions.push(actionButton("记录本次复盘", "record-trial-review", "", "ghost"));
   return `<div class="stack-actions table-actions--compact">${actions.join("")}</div>`;
+}
+
+function renderWorkbenchActionButton(item) {
+  return actionButton(
+    item?.label || "执行动作",
+    item?.client_action || "refresh-dashboard",
+    item?.value || "",
+    item?.tone || "ghost"
+  );
+}
+
+function renderTrialReviewHistory(items) {
+  if (!Array.isArray(items) || !items.length) {
+    return `
+      <div class="section-block">
+        <h4>最近处理记录</h4>
+        <p class="meta-copy">当前还没有新的试盘处理记录。</p>
+      </div>
+    `;
+  }
+  return `
+    <div class="section-block">
+      <h4>最近处理记录</h4>
+      ${responsiveTable(
+        ["时间", "处理动作", "操作人", "说明"],
+        items.map((item) => [
+          `<div><strong>${formatRelativeAge(item.created_at)}</strong><div class="table-meta">${formatMaybeTimestamp(item.created_at)}</div></div>`,
+          `<div><strong>${escapeHtml(item.label || readableState(item.selected_action || item.action || "unknown"))}</strong><div class="table-meta">${escapeHtml(readableState(item.status || "unknown"))}</div></div>`,
+          `<div><strong>${escapeHtml(item.actor_identity || item.actor_role || "操作人待确认")}</strong><div class="table-meta">${escapeHtml(readableState(item.auth_source || "unknown"))}</div></div>`,
+          `<div><strong>${escapeHtml(item.reason || "当前没有额外原因")}</strong></div>`,
+        ]),
+        "当前还没有新的试盘处理记录。"
+      )}
+    </div>
+  `;
 }
 
 function scalingVerdictLabel(value) {

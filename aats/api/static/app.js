@@ -737,6 +737,57 @@ async function recordTrialReview(target = null) {
   );
 }
 
+async function recordTrialReviewAction(actionType, target = null) {
+  if (!actionType) return;
+  const payloadMap = {
+    review_snapshot: {
+      reason: "ui_trial_review_snapshot",
+      successMessage: "已记录本次试盘复盘摘要。",
+      pendingLabel: "正在记录复盘摘要…",
+      confirmMessage: "",
+    },
+    continue_small_capital: {
+      reason: "ui_trial_review_continue_small_capital",
+      successMessage: "已记录继续小资金试盘的处理结论。",
+      pendingLabel: "正在记录处理结论…",
+      confirmMessage: "",
+    },
+    shrink_trial: {
+      reason: "ui_trial_review_shrink_trial",
+      successMessage: "已记录缩小试盘规模的处理结论。",
+      pendingLabel: "正在记录缩容结论…",
+      confirmMessage: "确认记录“缩小试盘规模”处理结论吗？",
+    },
+    pause_trial: {
+      reason: "ui_trial_review_pause_trial",
+      successMessage: "已记录暂停试盘并复盘的处理结论。",
+      pendingLabel: "正在记录暂停结论…",
+      confirmMessage: "确认记录“暂停试盘并复盘”处理结论吗？",
+    },
+    approve_scale_up: {
+      reason: "ui_trial_review_approve_scale_up",
+      successMessage: "已记录进入下一档资金评审的处理结论。",
+      pendingLabel: "正在记录放量评审…",
+      confirmMessage: "确认记录“进入下一档资金评审”处理结论吗？",
+    },
+  };
+  const payload = payloadMap[actionType];
+  if (!payload) return;
+  if (payload.confirmMessage && !window.confirm(payload.confirmMessage)) return;
+  await runAction(
+    "/system/trial-review/action",
+    {
+      action_type: actionType,
+      reason: payload.reason,
+    },
+    payload.successMessage,
+    {
+      target,
+      pendingLabel: payload.pendingLabel,
+    }
+  );
+}
+
 async function logoutOperator() {
   try {
     await requestJson("/auth/logout", { method: "POST" });
@@ -761,6 +812,7 @@ async function dispatchAction(action, value, target = null) {
   if (action === "trigger-halt") return triggerHalt(target);
   if (action === "record-scaling-review") return recordScalingReview(value, target);
   if (action === "record-trial-review") return recordTrialReview(target);
+  if (action === "record-trial-review-action") return recordTrialReviewAction(value, target);
   if (action === "trigger-blocker-action") return triggerBlockerAction(value, target);
   if (action === "resolve-stuck-order") return resolveStuckOrder(value);
   if (action === "select-ai-operating-mode") return selectAIOperatingMode(value, target);

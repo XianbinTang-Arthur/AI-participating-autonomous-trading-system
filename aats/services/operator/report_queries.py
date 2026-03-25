@@ -215,12 +215,7 @@ class ReportQueryFacade:
         )
 
     def trial_review_history(self, *, limit: int = 20, offset: int = 0) -> dict[str, Any]:
-        return self.owner.recent_operator_actions(
-            action="trial_review_snapshot",
-            key="trial_review",
-            limit=limit,
-            offset=offset,
-        )
+        return self.owner._trial_review_history_payload(limit=limit, offset=offset)
 
     def execution_anomaly_report(self, *, limit: int = 100) -> dict[str, Any]:
         rows = self.execution_quality_report(limit=limit, offset=0)["rows"]

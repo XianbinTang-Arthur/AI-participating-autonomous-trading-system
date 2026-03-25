@@ -67,6 +67,7 @@ class TestDashboardUI(unittest.TestCase):
         store_text = responses["store_js"].text
         self.assertIn('["profileControlSummary", "/reports/profile-control-summary"]', store_text)
         self.assertIn('["trialReviewSummary", "/reports/trial-review-summary?segment_limit=100&window_days=7&period_count=4"]', store_text)
+        self.assertIn('["trialReviewHistory", "/reports/trial-review-history?limit=5&offset=0"]', store_text)
         self.assertIn("aiAnalysis", store_text)
         self.assertIn("viewBackgroundSpecs", store_text)
         self.assertIn('["aiRecent", `/ai/recent?limit=${limits.recentAIAssessments}&offset=0`]', store_text)
@@ -107,6 +108,8 @@ class TestDashboardUI(unittest.TestCase):
         self.assertIn("记为缩小试盘规模", strategy_text)
         self.assertIn("记为暂停试盘并复盘", strategy_text)
         self.assertIn("提交放量评审", strategy_text)
+        self.assertIn("最近处理记录", strategy_text)
+        self.assertIn("试盘守护硬停机", strategy_text)
         self.assertNotIn("自动跳档状态", strategy_text)
         self.assertIn("系统自动试盘结论", strategy_text)
         self.assertIn("样本仍少，先继续观察", strategy_text)
