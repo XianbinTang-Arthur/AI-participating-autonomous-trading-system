@@ -484,6 +484,7 @@ const ERROR_MAP = {
   forward_validation_loss_limit_breached: "最近一个观察周期已经触碰试盘亏损上限。",
   trial_guard_not_enabled: "试盘守护还没启用，所以当前不适合直接加资金。",
   trial_profile_not_active: "当前不在试盘档位，先不要做放量判断。",
+  trial_guard_threshold_breached: "试盘守护已经触发自动停机，当前不能直接恢复自动交易。",
   runtime_halted: "系统当前处于暂停状态，先处理暂停原因。",
   recovery_not_safe_to_trade: "当前恢复状态还不允许继续自动交易。",
   manual_review_required: "当前仍有人工复核要求，先处理复核再谈放量。",

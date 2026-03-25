@@ -437,6 +437,8 @@ class BlockerControlService:
             return "phase1_shadow"
         if code.startswith("derivatives_"):
             return "risk_control"
+        if code.startswith("trial_guard"):
+            return "trial_guard"
         if code.startswith("market_"):
             return "market_data"
         if code.startswith("account_"):
@@ -565,6 +567,28 @@ class BlockerControlService:
                     client_action="refresh-dashboard",
                     tone="secondary",
                     expected_effect="重新拉取账户快照、风险缓冲和阻断状态，确认自动停机是否仍然成立。",
+                ),
+            ]
+        if code == "trial_guard_threshold_breached":
+            return [
+                BlockerActionDefinition(
+                    action_id="open-execution-view",
+                    label="查看委托与成交",
+                    kind="client",
+                    method="CLIENT",
+                    client_action="navigate-view",
+                    value="execution",
+                    tone="ghost",
+                    expected_effect="切到委托与成交页，优先核对最近成交、手续费、滑点和成交链路是否符合预期。",
+                ),
+                BlockerActionDefinition(
+                    action_id="refresh-dashboard",
+                    label="刷新当前状态",
+                    kind="client",
+                    method="CLIENT",
+                    client_action="refresh-dashboard",
+                    tone="secondary",
+                    expected_effect="重新拉取试盘守护、恢复状态和最近成交摘要，确认试盘守护是否仍然处于 breached。",
                 ),
             ]
         if reconciliation_id and self._should_show_inspect_reconciliation_action(
@@ -846,6 +870,13 @@ class BlockerControlService:
                 "系统正在完成基线确认和恢复状态刷新，请等待这一轮操作结束。",
                 "在基线确认完成前，不应继续恢复自动交易。",
                 "先刷新当前状态，确认这次基线确认是否已完成。",
+            )
+        if code == "trial_guard_threshold_breached":
+            return (
+                "试盘守护已触发自动停机",
+                "最近一轮小资金试盘已经触发试盘守护阈值，后台会自动暂停交易，避免在连续亏损、手续费拖累或滑点恶化时继续放大风险。",
+                "在试盘守护仍然处于 breached 时，即使手动点击恢复，后台轮询也会再次把系统停回去。",
+                "先查看最近成交和试盘守护摘要，确认连续亏损、资金费拖累或滑点问题是否已经缓解；在 breached 解除前不要强行恢复自动运行。",
             )
         if code == "strategy_bundle_recovery_in_progress":
             return (

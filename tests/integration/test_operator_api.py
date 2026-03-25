@@ -2870,6 +2870,27 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(resumed.json()["halted"])
         self.assertIn(resumed.json()["status"], {"resumed", "already_resumed"})
 
+    async def test_resume_is_blocked_when_trial_guard_is_breached(self) -> None:
+        runtime = await self._runtime()
+        runtime.kill_switch.halt(reason="trial_guard_threshold_breached")
+        runtime.trial_guard_service.last_snapshot = {
+            "enabled": True,
+            "status": "breached",
+            "summary": "试盘守护已触发自动停机。",
+        }
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            resumed = client.post("/system/resume", json={"reason": "operator_test_resume"})
+            blocker_control = client.get("/system/blocker-control")
+
+        self.assertEqual(resumed.status_code, 200)
+        self.assertEqual(resumed.json()["status"], "resume_blocked")
+        self.assertTrue(resumed.json()["halted"])
+        self.assertIn("trial_guard_threshold_breached", resumed.json()["recovery"]["resume_blocked_reasons"])
+        self.assertEqual(blocker_control.status_code, 200)
+        self.assertEqual(blocker_control.json()["primary_blocker"]["blocker"], "trial_guard_threshold_breached")
+
     async def test_system_health_reports_reconciliation_staleness_consistently(self) -> None:
         runtime = await self._runtime()
         latest_report = runtime.reconciliation_repo.latest()

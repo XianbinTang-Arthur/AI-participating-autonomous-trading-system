@@ -124,6 +124,40 @@ class TestRecoveryPostureEvaluator(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(final.safe_to_trade)
         self.assertEqual(final.resume_blocked_reasons, [])
 
+    async def test_trial_guard_breach_blocks_resume_and_is_not_treated_as_manual_pause(self) -> None:
+        runtime = await build_runtime(
+            AATSSettings.model_validate(
+                {
+                    "mode": "paper_live",
+                    "market_data_backend": "demo",
+                    "execution_backend": "paper",
+                    "account_backend": "disabled",
+                    "account_read_enabled": False,
+                    "storage_mode": "memory",
+                    "event_persistence_mode": "strict",
+                }
+            )
+        )
+        await runtime.market_gateway.run_local_publisher(
+            symbol=runtime.settings.default_symbol,
+            iterations=2,
+            interval_seconds=0.0,
+        )
+        runtime.kill_switch.halt(reason="trial_guard_threshold_breached")
+        runtime.trial_guard_service.last_snapshot = {
+            "enabled": True,
+            "status": "breached",
+            "summary": "试盘守护已触发自动停机。",
+        }
+        evaluator = RecoveryPostureEvaluator(runtime)
+
+        final = evaluator.finalize_status()
+
+        self.assertEqual(final.recovery_state, "resume_blocked")
+        self.assertFalse(final.resume_eligible)
+        self.assertFalse(final.safe_to_trade)
+        self.assertIn("trial_guard_threshold_breached", final.resume_blocked_reasons)
+
     async def test_derivatives_only_reduce_recovery_keeps_runtime_runnable(self) -> None:
         runtime = await build_runtime(
             AATSSettings.model_validate(

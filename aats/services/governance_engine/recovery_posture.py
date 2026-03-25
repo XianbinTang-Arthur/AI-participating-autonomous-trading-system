@@ -55,6 +55,16 @@ class RecoveryPostureEvaluator:
             return False
         return bool(ai_runtime.get("degraded")) and not bool(ai_runtime.get("auto_downgrade_active"))
 
+    def _trial_guard_snapshot(self) -> dict[str, object]:
+        service = getattr(self.runtime, "trial_guard_service", None)
+        if service is None or not hasattr(service, "snapshot"):
+            return {}
+        snapshot = service.snapshot()
+        return snapshot if isinstance(snapshot, dict) else {}
+
+    def _trial_guard_breached(self) -> bool:
+        return str(self._trial_guard_snapshot().get("status") or "").lower() == "breached"
+
     def _current_only_reduce_state(
         self,
         *,
@@ -79,10 +89,11 @@ class RecoveryPostureEvaluator:
         report: ReconciliationReport | None,
         bundle_recovery,
         ai_requires_manual_review: bool,
+        trial_guard_breached: bool,
     ) -> bool:
         if status.recovery_state not in {"review_required", "resume_blocked", "bundle_recovery"}:
             return False
-        if status.baseline_requires_operator_review or ai_requires_manual_review:
+        if status.baseline_requires_operator_review or ai_requires_manual_review or trial_guard_breached:
             return False
         if bundle_recovery.bundle_recovery_required or bundle_recovery.recovery_blocking:
             return False
@@ -129,6 +140,8 @@ class RecoveryPostureEvaluator:
             blockers.append("rebaseline_in_progress")
         if self._ai_requires_manual_review() and "ai_degraded_requires_manual_review" not in blockers:
             blockers.append("ai_degraded_requires_manual_review")
+        if self._trial_guard_breached() and "trial_guard_threshold_breached" not in blockers:
+            blockers.append("trial_guard_threshold_breached")
         if self.runtime.environment_capabilities.exchange_coupled:
             submit_blockers = list(self.runtime.execution_adapter.readiness().get("submit_blocked_reasons", []))
             if not include_kill_switch:
@@ -154,6 +167,7 @@ class RecoveryPostureEvaluator:
         bundle_recovery = self._bundle_recovery_assessment()
         recovery_state = status.recovery_state
         ai_requires_manual_review = self._ai_requires_manual_review()
+        trial_guard_breached = self._trial_guard_breached()
         if report is not None:
             if report.halt_required:
                 recovery_state = "resume_blocked"
@@ -182,11 +196,14 @@ class RecoveryPostureEvaluator:
             recovery_state = "review_required"
         if ai_requires_manual_review:
             recovery_state = "review_required"
+        if trial_guard_breached and recovery_state not in {"rebaseline_pending", "review_required"}:
+            recovery_state = "resume_blocked"
         if self._should_clear_lingering_review_state(
             status=status,
             report=report,
             bundle_recovery=bundle_recovery,
             ai_requires_manual_review=ai_requires_manual_review,
+            trial_guard_breached=trial_guard_breached,
         ):
             recovery_state = (
                 "degraded_continue"

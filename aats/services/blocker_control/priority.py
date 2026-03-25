@@ -15,6 +15,7 @@ _BLOCKER_PRIORITY: dict[str, int] = {
     "reconciliation_halt_required": 10,
     "derivatives_margin_buffer_auto_halt": 12,
     "derivatives_liquidation_proximity_auto_halt": 13,
+    "trial_guard_threshold_breached": 14,
     "operator_rebaseline_required": 20,
     "phase1_shadow_degraded": 25,
     "phase1_shadow_lagging": 26,
