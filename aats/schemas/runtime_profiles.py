@@ -38,12 +38,6 @@ def runtime_profile_payload_from_settings(settings: AATSSettings) -> dict[str, A
     return {field: payload[field] for field in RUNTIME_PROFILE_MANAGED_FIELDS}
 
 
-def apply_runtime_profile_payload(settings: AATSSettings, payload: dict[str, Any]) -> AATSSettings:
-    current = settings.model_dump(mode="python")
-    overlay = {key: payload[key] for key in RUNTIME_PROFILE_MANAGED_FIELDS if key in payload}
-    return AATSSettings.model_validate({**current, **overlay})
-
-
 def summarize_runtime_profile_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return {
         "default_symbol": payload.get("default_symbol"),

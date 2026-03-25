@@ -10,7 +10,6 @@ from aats.api.auth import (
     OperatorPrincipal,
     _write_api_key_compatibility_enabled,
     authenticate_operator_user,
-    configured_local_principal,
     configured_operator_roles,
     require_admin_access,
     require_read_access,
@@ -73,8 +72,6 @@ def _session_payload(request: Request) -> dict[str, Any]:
     runtime = _runtime(request)
     settings = runtime.settings
     principal = session_principal(request)
-    if principal is None and not settings.operator_auth_enabled:
-        principal = configured_local_principal(runtime)
     return {
         "auth_enabled": settings.operator_auth_enabled,
         "session_enabled": settings.operator_session_configured,

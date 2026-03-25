@@ -32,12 +32,6 @@ class OperatorLoginResult:
 def _runtime(request: Request) -> ApplicationRuntime:
     return request.app.state.runtime
 
-
-def configured_local_principal(runtime: ApplicationRuntime) -> OperatorPrincipal | None:
-    _ = runtime
-    return None
-
-
 def authenticate_operator_user(runtime: ApplicationRuntime, *, username: str, password: str) -> OperatorLoginResult:
     if not hasattr(runtime, "operator_repo"):
         return OperatorLoginResult(principal=None, failure_code="operator_login_failed")
@@ -137,11 +131,7 @@ def require_read_access(
     runtime = _runtime(request)
     settings = runtime.settings
     if not settings.operator_auth_enabled:
-        return configured_local_principal(runtime) or OperatorPrincipal(
-            role="anonymous",
-            auth_enabled=False,
-            auth_source="anonymous",
-        )
+        return OperatorPrincipal(role="anonymous", auth_enabled=False, auth_source="anonymous")
 
     session_user = session_principal(request)
     if session_user is not None:

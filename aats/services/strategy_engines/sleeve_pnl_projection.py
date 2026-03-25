@@ -41,6 +41,16 @@ class SleevePnLProjectionService:
         self.sleeve_pnl_repo.replace_scope(scope=scope, records=records)
         return records
 
+    def save_fill_outcome_in_session(self, session, *, outcome: FillOutcomeRecord) -> SleevePnLRecord:
+        family_by_sleeve = self._family_by_sleeve()
+        record = self._record_from_fill_outcome(outcome=outcome, family_by_sleeve=family_by_sleeve)
+        save_record = getattr(self.sleeve_pnl_repo, "save_record_in_session", None)
+        if callable(save_record):
+            save_record(session, record)
+        else:
+            self.sleeve_pnl_repo.save_record(record)
+        return record
+
     def _family_by_sleeve(self) -> dict[str, str]:
         repo = self.strategy_sleeve_repo
         if repo is None or not hasattr(repo, "list_sleeves"):

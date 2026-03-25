@@ -85,6 +85,32 @@ class TestPortfolioOutboxPostgres(unittest.IsolatedAsyncioTestCase):
                     1,
                 )
 
+    async def test_persist_fill_projection_rolls_back_pre_commit_actions_atomically(self) -> None:
+        with temporary_postgres_runtime() as (runtime, _admin_engine, _schema_name):
+            bus = InMemoryEventBus()
+            publisher = PostgresPortfolioOutboxPublisher(
+                session_factory=runtime.session_factory,
+                event_store=PostgresEventStore(runtime.session_factory),
+                outbox_repo=PostgresOutboxRepository(runtime.session_factory),
+                bus=bus,
+                portfolio_repo=PostgresPortfolioRepository(runtime.session_factory),
+                fill_outcome_repo=PostgresFillOutcomeRepository(runtime.session_factory),
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "pre_commit_boom"):
+                await publisher.persist_fill_projection(
+                    snapshot=_snapshot(),
+                    balance_delta=_balance_delta(),
+                    outcome=_outcome(),
+                    source_component="test",
+                    pre_commit_actions=(lambda session: (_ for _ in ()).throw(RuntimeError("pre_commit_boom")),),
+                )
+
+            with runtime.session_factory() as session:
+                self.assertEqual(session.scalar(select(func.count()).select_from(PortfolioSnapshotModel)), 0)
+                self.assertEqual(session.scalar(select(func.count()).select_from(FillOutcomeModel)), 0)
+                self.assertEqual(session.scalar(select(func.count()).select_from(OutboxEventModel)), 0)
+
 
 def _snapshot() -> PortfolioSnapshot:
     now = utc_now()

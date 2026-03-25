@@ -524,11 +524,30 @@ class PortfolioService:
                 ending_avg_entry_price=result.ending_avg_entry_price,
             )
             if self.portfolio_outbox_publisher is not None:
+                pre_commit_actions: list[Callable[[Any], None]] = []
+                if self.persistent_lot_book_service is not None and self.execution_repo is not None:
+                    projection_fills = self._fills_for_projection(fill=fill)
+                    pre_commit_actions.append(
+                        lambda session, fills=projection_fills: self.persistent_lot_book_service.rebuild_from_fills_in_session(
+                            session,
+                            fills=fills,
+                            product_type=self.state.default_product_type,
+                            margin_mode=self.state.default_margin_mode,
+                        )
+                    )
+                if self.sleeve_pnl_projection_service is not None:
+                    pre_commit_actions.append(
+                        lambda session, outcome=outcome: self.sleeve_pnl_projection_service.save_fill_outcome_in_session(
+                            session,
+                            outcome=outcome,
+                        )
+                    )
                 await self.portfolio_outbox_publisher.persist_fill_projection(
                     snapshot=snapshot,
                     balance_delta=balance_delta,
                     outcome=outcome,
                     source_component="portfolio_service",
+                    pre_commit_actions=tuple(pre_commit_actions),
                 )
             else:
                 self.fill_outcome_repo.save_outcome(outcome)
@@ -554,30 +573,31 @@ class PortfolioService:
                 retriable=True,
             )
             raise
-        try:
-            self._sync_persistent_lots()
-            if self.sleeve_pnl_projection_service is not None and self.state_scope is not None:
-                self.sleeve_pnl_projection_service.rebuild_scope(scope=self.state_scope)
-        except Exception as exc:
-            log_event(
-                self.logger,
-                "portfolio_projection_rebuild_failed",
-                level="warning",
-                **correlation_fields(
-                    decision_id=fill.decision_id,
-                    intent_id=fill.intent_id,
-                    order_id=fill.client_order_id,
-                    fill_id=fill.fill_id,
-                    symbol=fill.symbol,
-                    error=str(exc),
-                ),
-            )
-            await self._emit_processing_failure(
-                stage="portfolio_projection_rebuild",
-                message=str(exc),
-                fill=fill,
-                retriable=True,
-            )
+        if self.portfolio_outbox_publisher is None:
+            try:
+                self._sync_persistent_lots(fill=fill)
+                if self.sleeve_pnl_projection_service is not None and self.state_scope is not None:
+                    self.sleeve_pnl_projection_service.rebuild_scope(scope=self.state_scope)
+            except Exception as exc:
+                log_event(
+                    self.logger,
+                    "portfolio_projection_rebuild_failed",
+                    level="warning",
+                    **correlation_fields(
+                        decision_id=fill.decision_id,
+                        intent_id=fill.intent_id,
+                        order_id=fill.client_order_id,
+                        fill_id=fill.fill_id,
+                        symbol=fill.symbol,
+                        error=str(exc),
+                    ),
+                )
+                await self._emit_processing_failure(
+                    stage="portfolio_projection_rebuild",
+                    message=str(exc),
+                    fill=fill,
+                    retriable=True,
+                )
         if self.metrics is not None:
             self.metrics.increment("fills_processed")
         log_event(
@@ -610,11 +630,32 @@ class PortfolioService:
                 source_component="portfolio_service",
             )
 
-    def _sync_persistent_lots(self) -> None:
+    def _fills_for_projection(self, *, fill: FillEvent) -> list[FillEvent]:
+        if self.execution_repo is None:
+            return []
+        fills_for_scope = getattr(self.execution_repo, "fills_for_scope", None)
+        if callable(fills_for_scope):
+            return fills_for_scope(
+                scope=RuntimeStateScope(
+                    product_type=fill.product_type,
+                    margin_mode=fill.margin_mode,
+                    allowed_symbols=(fill.symbol,),
+                    default_symbol=fill.symbol,
+                )
+            )
+        return [
+            item
+            for item in self.execution_repo.fills()
+            if item.symbol == fill.symbol
+            and str(item.product_type or self.state.default_product_type) == str(fill.product_type or self.state.default_product_type)
+            and str(item.margin_mode or self.state.default_margin_mode) == str(fill.margin_mode or self.state.default_margin_mode)
+        ]
+
+    def _sync_persistent_lots(self, *, fill: FillEvent) -> None:
         if self.persistent_lot_book_service is None or self.execution_repo is None:
             return
         self.persistent_lot_book_service.rebuild_from_fills(
-            fills=self.execution_repo.fills(),
+            fills=self._fills_for_projection(fill=fill),
             product_type=self.state.default_product_type,
             margin_mode=self.state.default_margin_mode,
         )

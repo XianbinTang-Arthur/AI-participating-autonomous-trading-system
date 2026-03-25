@@ -54,6 +54,11 @@ class ExecutionObligationService:
             return None
         return self.obligation_repo.save_obligation(obligation)
 
+    def persist_previewed_obligation(self, obligation: OrderObligation | None) -> OrderObligation | None:
+        if obligation is None:
+            return None
+        return self.obligation_repo.save_obligation(obligation)
+
     async def preview_reservation_for_intent(
         self,
         *,

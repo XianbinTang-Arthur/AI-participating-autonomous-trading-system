@@ -42,6 +42,8 @@ from aats.services.strategy_engines.sleeve_inventory import StrategySleeveInvent
 
 
 class StrategyCoordinatorService:
+    _RECENT_TARGET_LOOKBACK = 200
+
     def __init__(
         self,
         *,
@@ -462,7 +464,10 @@ class StrategyCoordinatorService:
     def _recent_market_snapshots(self, *, symbols: set[str]) -> dict[str, list[MarketSnapshot]]:
         rows: dict[str, list[MarketSnapshot]] = {}
         limit = max(self.settings.spot_grid_anchor_lookback_snapshots, 1)
-        events = self.event_store.by_topic(topics.MARKET_SNAPSHOTS)
+        events = self.event_store.recent_by_topic(
+            topics.MARKET_SNAPSHOTS,
+            limit=max(limit * max(len(symbols), 1), limit),
+        )
         for symbol in symbols:
             symbol_rows = [
                 MarketSnapshot.model_validate(item.payload)
@@ -495,7 +500,12 @@ class StrategyCoordinatorService:
             "spot_grid": [],
             "dca": [],
         }
-        for event in reversed(self.event_store.by_topic(topics.POSITION_TARGETS)):
+        for event in reversed(
+            self.event_store.recent_by_topic(
+                topics.POSITION_TARGETS,
+                limit=self._RECENT_TARGET_LOOKBACK,
+            )
+        ):
             if event.key != symbol:
                 continue
             target = PositionTarget.model_validate(event.payload)

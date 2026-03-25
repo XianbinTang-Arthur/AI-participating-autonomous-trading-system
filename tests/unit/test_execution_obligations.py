@@ -170,6 +170,16 @@ class _RecordingOutboxPublisher:
         return True
 
 
+class _ExplodingOutboxPublisher:
+    async def persist_order_state(self, *, order_state: OrderState, key: str, obligation=None) -> OrderState:
+        _ = (order_state, key, obligation)
+        raise RuntimeError("persist_order_state_boom")
+
+    async def persist_fill(self, *, fill: FillEvent, obligation=None) -> bool:
+        _ = (fill, obligation)
+        return True
+
+
 class TestExecutionObligations(unittest.IsolatedAsyncioTestCase):
     async def test_second_spot_buy_is_blocked_by_local_reserved_quote_balance(self) -> None:
         snapshot = ExchangeAccountSnapshot(
@@ -408,6 +418,36 @@ class TestExecutionObligations(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(outbox.order_state_obligations[2].released_amount, Decimal("60.03"))
         self.assertEqual(obligation.status, "FAILED")
         self.assertEqual(obligation.released_amount, Decimal("60.03"))
+
+    async def test_outbox_path_does_not_leave_orphan_obligation_when_order_state_persist_fails(self) -> None:
+        snapshot = ExchangeAccountSnapshot(
+            account_source="okx",
+            fetched_at=utc_now(),
+            balances=[ExchangeBalance(currency="USDT", total=100.0, available=100.0, frozen=0.0)],
+        )
+        obligation_repo = InMemoryExecutionObligationRepository()
+        settings = AATSSettings.model_validate({"account_backend": "okx", "account_read_enabled": True})
+        manager = OrderManager(
+            settings=settings,
+            bus=InMemoryEventBus(event_store=InMemoryEventStore(), persistence_mode="strict"),
+            adapter=_SubmittedAdapter(),
+            execution_repo=InMemoryExecutionRepository(),
+            obligation_service=ExecutionObligationService(
+                settings=settings,
+                obligation_repo=obligation_repo,
+                account_snapshot_loader=lambda: _return_snapshot(snapshot),
+                price_provider=lambda _symbol: 60_000.0,
+            ),
+            execution_outbox_publisher=_ExplodingOutboxPublisher(),
+            kill_switch=KillSwitch(),
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "persist_order_state_boom"):
+            await manager.handle_order_intent(
+                _intent_message(_intent("intent_outbox_boom", "decision_outbox_boom", "client_outbox_boom"))
+            )
+
+        self.assertIsNone(obligation_repo.get_obligation("clclient_outbox_boom"))
 
 
 async def _return_snapshot(snapshot: ExchangeAccountSnapshot) -> ExchangeAccountSnapshot:

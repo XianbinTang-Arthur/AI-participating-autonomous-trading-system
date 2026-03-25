@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from decimal import Decimal
 from datetime import timedelta, timezone
 
@@ -62,6 +63,8 @@ class OrderManager:
         self.shadow_ledger_mirror_service = shadow_ledger_mirror_service
         self.kill_switch = kill_switch
         self.order_state_machine = OrderStateMachine()
+        # Serialize reservation preview/persist so concurrent intents cannot over-reserve the same balance window.
+        self._reservation_lock = asyncio.Lock()
         self.logger = get_logger("aats.execution_engine")
 
     async def handle_order_intent(self, message: dict) -> None:
@@ -114,27 +117,75 @@ class OrderManager:
             else None
         ) or intent.idempotency_key or new_id("clord")
         initial_obligation = None
-        try:
-            if self.obligation_service is not None:
-                if self.execution_outbox_publisher is not None:
+        async with self._reservation_lock:
+            if self.execution_repo.has_intent(intent.intent_id):
+                log_event(
+                    self.logger,
+                    "duplicate_order_intent_ignored",
+                    level="warning",
+                    **correlation_fields(
+                        decision_id=intent.decision_id,
+                        intent_id=intent.intent_id,
+                        symbol=intent.symbol,
+                    ),
+                )
+                return
+            try:
+                if self.obligation_service is not None:
                     initial_obligation = await self.obligation_service.preview_reservation_for_intent(
                         intent=intent,
                         client_order_id=preview_client_order_id,
                     )
-                else:
-                    initial_obligation = await self.obligation_service.reserve_for_intent(
-                        intent=intent,
-                        client_order_id=preview_client_order_id,
-                    )
-        except ExecutionReservationError as exc:
-            blocked_state = OrderState(
+            except ExecutionReservationError as exc:
+                blocked_state = OrderState(
+                    decision_id=intent.decision_id,
+                    intent_id=intent.intent_id,
+                    symbol=intent.symbol,
+                    client_order_id=preview_client_order_id,
+                    venue="OKX" if self.adapter.readiness().get("backend") == "okx" else "PAPER",
+                    exchange_order_id=None,
+                    status="BLOCKED",
+                    submission_mode="local_order_manager",
+                    submitted_ts=None,
+                    last_update_ts=utc_now(),
+                    requested_qty=intent.quantity,
+                    filled_qty=Decimal("0"),
+                    remaining_qty=intent.quantity,
+                    average_fill_price=None,
+                    fees=Decimal("0"),
+                    reduce_only=intent.reduce_only,
+                    close_only=intent.close_only,
+                    td_mode=intent.td_mode,
+                    position_mode=intent.position_mode,
+                    pos_side=intent.pos_side,
+                    reduce_only_reason=intent.reduce_only_reason,
+                    close_only_reason=intent.close_only_reason,
+                    instrument_family=intent.instrument_family,
+                    settle_currency=intent.settle_currency,
+                    product_type=intent.product_type,
+                    target_leverage=intent.target_leverage,
+                    margin_mode=intent.margin_mode,
+                    exposure_side=intent.exposure_side,
+                    execution_action=intent.execution_action,
+                    position_intent=intent.position_intent,
+                    strategy_family=intent.strategy_family,
+                    strategy_sleeve_id=intent.strategy_sleeve_id,
+                    allocation_id=intent.allocation_id,
+                    strategy_bundle_id=intent.strategy_bundle_id,
+                    strategy_leg_role=intent.strategy_leg_role,
+                    execution_error=str(exc),
+                    submission_payload={},
+                )
+                await self._persist_order_state(order_state=blocked_state, key=intent.symbol)
+                return
+            created_state = OrderState(
                 decision_id=intent.decision_id,
                 intent_id=intent.intent_id,
                 symbol=intent.symbol,
                 client_order_id=preview_client_order_id,
                 venue="OKX" if self.adapter.readiness().get("backend") == "okx" else "PAPER",
                 exchange_order_id=None,
-                status="BLOCKED",
+                status="CREATED",
                 submission_mode="local_order_manager",
                 submitted_ts=None,
                 last_update_ts=utc_now(),
@@ -163,55 +214,20 @@ class OrderManager:
                 allocation_id=intent.allocation_id,
                 strategy_bundle_id=intent.strategy_bundle_id,
                 strategy_leg_role=intent.strategy_leg_role,
-                execution_error=str(exc),
                 submission_payload={},
             )
-            await self._persist_order_state(order_state=blocked_state, key=intent.symbol)
-            return
-        created_state = OrderState(
-            decision_id=intent.decision_id,
-            intent_id=intent.intent_id,
-            symbol=intent.symbol,
-            client_order_id=preview_client_order_id,
-            venue="OKX" if self.adapter.readiness().get("backend") == "okx" else "PAPER",
-            exchange_order_id=None,
-            status="CREATED",
-            submission_mode="local_order_manager",
-            submitted_ts=None,
-            last_update_ts=utc_now(),
-            requested_qty=intent.quantity,
-            filled_qty=Decimal("0"),
-            remaining_qty=intent.quantity,
-            average_fill_price=None,
-            fees=Decimal("0"),
-            reduce_only=intent.reduce_only,
-            close_only=intent.close_only,
-            td_mode=intent.td_mode,
-            position_mode=intent.position_mode,
-            pos_side=intent.pos_side,
-            reduce_only_reason=intent.reduce_only_reason,
-            close_only_reason=intent.close_only_reason,
-            instrument_family=intent.instrument_family,
-            settle_currency=intent.settle_currency,
-            product_type=intent.product_type,
-            target_leverage=intent.target_leverage,
-            margin_mode=intent.margin_mode,
-            exposure_side=intent.exposure_side,
-            execution_action=intent.execution_action,
-            position_intent=intent.position_intent,
-            strategy_family=intent.strategy_family,
-            strategy_sleeve_id=intent.strategy_sleeve_id,
-            allocation_id=intent.allocation_id,
-            strategy_bundle_id=intent.strategy_bundle_id,
-            strategy_leg_role=intent.strategy_leg_role,
-            submission_payload={},
-        )
-        created_state = await self._persist_order_state(
-            order_state=created_state,
-            key=intent.symbol,
-            obligation=initial_obligation,
-            intent=intent,
-        )
+            created_state = await self._persist_order_state(
+                order_state=created_state,
+                key=intent.symbol,
+                obligation=initial_obligation,
+                intent=intent,
+            )
+            if (
+                self.obligation_service is not None
+                and self.execution_outbox_publisher is None
+                and initial_obligation is not None
+            ):
+                self.obligation_service.persist_previewed_obligation(initial_obligation)
         self._shadow_sync_obligation(initial_obligation, reason="reservation_hold", related_fill=None)
         if self.persistent_order_service is not None:
             self.persistent_order_service.enqueue_submit(

@@ -1644,6 +1644,7 @@ async def _subscribe_critical_handlers(
     await bus.subscribe(topics.FEATURE_SNAPSHOTS, decision_trigger.handle_feature_snapshot)
     await bus.subscribe(topics.ORDER_INTENTS, order_manager.handle_order_intent)
     await bus.subscribe(topics.FILL_EVENTS, portfolio_service.handle_fill_event)
+    await bus.subscribe(topics.PORTFOLIO_SNAPSHOTS, reconciliation_service.handle_portfolio_snapshot)
     await bus.subscribe(
         topics.PORTFOLIO_SNAPSHOTS,
         resilient_subscription_handler(
@@ -1651,10 +1652,9 @@ async def _subscribe_critical_handlers(
             name="audit.handle_portfolio_snapshot",
             handler=audit_service.handle_portfolio_snapshot,
             subscription_class="pre_reconciliation_observer",
-            raise_on_error=True,
+            raise_on_error=False,
         ),
     )
-    await bus.subscribe(topics.PORTFOLIO_SNAPSHOTS, reconciliation_service.handle_portfolio_snapshot)
     await bus.subscribe(topics.POSITION_TARGETS, position_target_handler)
 
 
@@ -1719,7 +1719,7 @@ async def _subscribe_observer_handlers(
                 name=spec.name,
                 handler=spec.handler,
                 subscription_class="observer",
-                raise_on_error=spec.name == "audit.handle_reconciliation_report",
+                raise_on_error=False,
             ),
         )
 
