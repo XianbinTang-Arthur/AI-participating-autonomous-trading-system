@@ -29,6 +29,7 @@ class BlockerControlService:
 
     def snapshot(self) -> BlockerControlSnapshot:
         recovery = self.owner.recovery_view()
+        latest_reconciliation = self.owner._latest_scoped_reconciliation()
         items = self._build_items(recovery=recovery)
         payload = {
             "halted": self.owner.runtime.kill_switch.halted,
@@ -49,7 +50,12 @@ class BlockerControlService:
             primary_blocker=primary,
             secondary_blockers=secondary,
             blockers=items,
-            next_step_summary=self._next_step_summary(primary, secondary),
+            next_step_summary=self._next_step_summary(
+                primary,
+                secondary,
+                recovery=recovery,
+                latest_reconciliation=latest_reconciliation,
+            ),
         )
 
     def has_active_blocker(self, code: str) -> bool:
@@ -603,8 +609,24 @@ class BlockerControlService:
         )
 
     @staticmethod
-    def _next_step_summary(primary: BlockerControlItem | None, secondary: list[BlockerControlItem]) -> str:
+    def _next_step_summary(
+        primary: BlockerControlItem | None,
+        secondary: list[BlockerControlItem],
+        *,
+        recovery: dict[str, Any],
+        latest_reconciliation: Any | None,
+    ) -> str:
         if primary is None:
+            if bool(getattr(latest_reconciliation, "observational_only", False)) and bool(recovery.get("safe_to_trade")):
+                return "当前没有新的主阻断。最新对账只有轻度动态漂移，系统可继续运行，建议持续观察保证金、浮盈和仓位快照。"
+            if bool(recovery.get("review_required")):
+                return "当前没有新的主阻断，但系统仍处于人工确认流程。请优先查看最新对账、恢复状态和交易所账单，确认是否还有未收敛的复核条件。"
+            if bool(recovery.get("halted")) and bool(recovery.get("resume_eligible")):
+                return "当前没有新的主阻断。系统处于手动暂停状态，确认最新对账和账户快照无误后即可恢复自动运行。"
+            if not bool(recovery.get("safe_to_trade")):
+                if recovery.get("resume_blocked_reasons"):
+                    return "当前没有新的主阻断，但系统仍未满足恢复条件。请先处理恢复状态中的限制原因。"
+                return "当前没有新的主阻断，但系统仍未恢复到可自动运行状态。请先查看恢复状态和最新对账。"
             return "当前没有待处理的阻断项。"
         if not secondary:
             return f"先处理“{primary.title}”，处理完成后即可重新评估是否恢复自动运行。"

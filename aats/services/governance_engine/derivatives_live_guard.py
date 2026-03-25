@@ -44,6 +44,45 @@ class DerivativesLiveGuardService:
     def status(self) -> dict[str, Any]:
         return self.snapshot()
 
+    def reset_transient_risk_snapshot_state(self, *, reason: str) -> None:
+        self.risk_snapshot_missing_started_at = None
+        self.risk_snapshot_missing_count = 0
+        self.last_auto_halt_at = None
+        if self.last_snapshot:
+            self.last_snapshot = {
+                **self.last_snapshot,
+                "risk_snapshot_stage": "reset",
+                "risk_snapshot_missing_seconds": None,
+                "risk_snapshot_missing_count": 0,
+                "warnings": list(
+                    dict.fromkeys(
+                        [
+                            *(
+                                item
+                                for item in self.last_snapshot.get("warnings", [])
+                                if item != "derivatives_risk_snapshot_missing_grace_active"
+                            ),
+                            f"risk_snapshot_missing_timer_reset:{reason}",
+                        ]
+                    )
+                ),
+                "auto_halt_required": False,
+                "auto_halt_reasons": [
+                    item
+                    for item in self.last_snapshot.get("auto_halt_reasons", [])
+                    if item != "derivatives_risk_snapshot_missing_auto_halt"
+                ],
+                "blockers": [
+                    item
+                    for item in self.last_snapshot.get("blockers", [])
+                    if item != "derivatives_risk_snapshot_missing_auto_halt"
+                ],
+                "halted": (
+                    self.kill_switch.halted
+                    and self.kill_switch.status().get("reason") == "derivatives_live_risk_auto_halt"
+                ),
+            }
+
     def evaluate_now(self) -> dict[str, Any]:
         if not self._applicable():
             self.last_snapshot = self._base_snapshot(

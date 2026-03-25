@@ -325,6 +325,10 @@ class ReconciliationSystemQueryFacade:
         )
         await self.owner.runtime.portfolio_service.bootstrap_snapshot(snapshot_origin="operator_rebaseline")
         report = await self.owner.runtime.reconciliation_service.validate_now(reason="operator_rebaseline")
+        live_guard_service = getattr(self.owner.runtime, "derivatives_live_guard_service", None)
+        if live_guard_service is not None:
+            live_guard_service.reset_transient_risk_snapshot_state(reason="operator_rebaseline")
+            live_guard_service.evaluate_now()
 
         recovery_state = (
             "resume_blocked"

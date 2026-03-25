@@ -58,7 +58,9 @@ export function renderRiskSections(data) {
         {
           label: "当前阻断数",
           value: formatNumber(blockers.length, 0),
-          meta: primaryBlocker ? textOrFallback(primaryBlocker.title, localizeError(primaryBlocker.blocker)) : "当前没有阻断项",
+          meta: primaryBlocker
+            ? textOrFallback(primaryBlocker.title, localizeError(primaryBlocker.blocker))
+            : noPrimaryBlockerSummary({ recovery, reconciliation }).meta,
           tone: blockers.length > 0 ? "danger" : "positive",
         },
         {
@@ -87,7 +89,7 @@ export function renderRiskSections(data) {
       title: "第一优先级阻断处置",
       kicker: "阻断控制面板",
       copy: blockerControl.next_step_summary || reconciliationActionCopy({ reconciliation, recovery }),
-      content: renderPrimaryBlockerActionPanel({ primaryBlocker, secondaryBlockers, recovery, uiHints }),
+      content: renderPrimaryBlockerActionPanel({ primaryBlocker, secondaryBlockers, recovery, reconciliation, uiHints }),
     }),
     riskEvidence: surfaceCard({
       title: "状态依据",
@@ -486,18 +488,19 @@ export function reconciliationActionCopy({ reconciliation = null, recovery = {},
   return "当前状态稳定。如果想再次确认状态，可以手动重新对账。";
 }
 
-function renderPrimaryBlockerActionPanel({ primaryBlocker = null, secondaryBlockers = [], recovery = {}, uiHints = {} } = {}) {
+function renderPrimaryBlockerActionPanel({ primaryBlocker = null, secondaryBlockers = [], recovery = {}, reconciliation = null, uiHints = {} } = {}) {
   if (!primaryBlocker) {
+    const summary = noPrimaryBlockerSummary({ recovery, reconciliation });
     return `
       ${summaryStrip([
         {
           label: "当前状态",
-          value: recovery.safe_to_trade ? "当前可继续自动运行" : "当前没有新的主阻断",
-          meta: recovery.safe_to_trade ? "系统当前没有硬阻断。" : "当前没有新的主阻断，但仍建议持续观察恢复状态。",
-          tone: recovery.safe_to_trade ? "positive" : "info",
+          value: summary.value,
+          meta: summary.meta,
+          tone: summary.tone,
         },
       ])}
-      <p class="meta-copy">当前没有新的第一优先级阻断。若仍需确认状态，可继续查看最新对账和账户快照。</p>
+      <p class="meta-copy">${escapeHtml(summary.copy)}</p>
     `;
   }
   return `
@@ -595,6 +598,47 @@ function renderBillCategories(rows) {
     .slice(0, 3)
     .map((item) => `${item.type}/${item.sub_type}/${item.currency} x${formatNumber(item.count, 0)}`)
     .join(" | ");
+}
+
+function noPrimaryBlockerSummary({ recovery = {}, reconciliation = null } = {}) {
+  if (recovery.safe_to_trade && reconciliation?.observational_only) {
+    return {
+      value: "轻度差异，建议观察",
+      meta: "当前没有新的主阻断。最新对账只有保证金、浮盈或仓位观察值的动态漂移。",
+      tone: "info",
+      copy: "当前没有新的第一优先级阻断。最新对账只有轻度动态漂移，系统可继续运行，建议持续观察，不需要立即重设基线。",
+    };
+  }
+  if (recovery.review_required) {
+    return {
+      value: "仍需人工确认",
+      meta: "当前没有新的主阻断，但恢复状态仍要求人工确认。这通常表示最近有未完全收敛的对账或恢复事件。",
+      tone: "warning",
+      copy: "当前没有新的第一优先级阻断，但系统仍处于人工确认流程。请优先查看最新对账、恢复状态和交易所账单，确认是否还有未收敛的复核条件。",
+    };
+  }
+  if (recovery.halted && recovery.resume_eligible) {
+    return {
+      value: "手动暂停，待恢复",
+      meta: "当前没有新的主阻断。系统处于手动暂停状态，确认无误后可以恢复自动运行。",
+      tone: "warning",
+      copy: "当前没有新的第一优先级阻断。系统处于手动暂停状态，确认最新对账和账户快照无误后即可恢复自动运行。",
+    };
+  }
+  if (!recovery.safe_to_trade) {
+    return {
+      value: "仍未满足恢复条件",
+      meta: "当前没有新的主阻断，但系统仍未恢复到可自动运行状态。请继续查看恢复状态和恢复受限原因。",
+      tone: "warning",
+      copy: "当前没有新的第一优先级阻断，但系统仍未满足恢复条件。请先查看恢复状态中的限制原因，再判断是否可以继续运行。",
+    };
+  }
+  return {
+    value: "当前可继续自动运行",
+    meta: "系统当前没有硬阻断。",
+    tone: "positive",
+    copy: "当前没有新的第一优先级阻断。若仍需确认状态，可继续查看最新对账和账户快照。",
+  };
 }
 
 function riskHeadline({ primaryBlocker, blockers, reconciliation, recovery }) {

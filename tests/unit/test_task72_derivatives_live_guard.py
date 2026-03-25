@@ -262,6 +262,46 @@ class TestTask72DerivativesLiveGuard(unittest.TestCase):
         self.assertIn("derivatives_risk_snapshot_missing_auto_halt", payload["auto_halt_reasons"])
         self.assertTrue(kill_switch.halted)
 
+    def test_reset_transient_risk_snapshot_state_clears_missing_snapshot_auto_halt_timer(self) -> None:
+        settings = self._settings()
+        snapshot = _snapshot(
+            initial_margin="720",
+            adjusted_equity="1000",
+            mark_price="70000",
+            liquidation_price="42000",
+        ).model_copy(update={"risk_snapshot": None})
+        kill_switch = KillSwitch()
+        service = DerivativesLiveGuardService(
+            settings=settings,
+            kill_switch=kill_switch,
+            account_service=_StubAccountService(snapshot),
+            event_store=InMemoryEventStore(),
+            metrics=MetricsRegistry(),
+        )
+
+        start = utc_now()
+        with patch("aats.services.governance_engine.derivatives_live_guard.utc_now", return_value=start):
+            service.evaluate_now()
+        with patch(
+            "aats.services.governance_engine.derivatives_live_guard.utc_now",
+            return_value=start + timedelta(seconds=settings.derivatives_risk_snapshot_auto_halt_after_seconds + 5),
+        ):
+            halted_payload = service.evaluate_now()
+
+        self.assertTrue(halted_payload["auto_halt_required"])
+
+        service.reset_transient_risk_snapshot_state(reason="operator_rebaseline")
+        with patch(
+            "aats.services.governance_engine.derivatives_live_guard.utc_now",
+            return_value=start + timedelta(seconds=settings.derivatives_risk_snapshot_auto_halt_after_seconds + 6),
+        ):
+            recovered_payload = service.evaluate_now()
+
+        self.assertEqual(recovered_payload["risk_snapshot_stage"], "grace")
+        self.assertFalse(recovered_payload["auto_halt_required"])
+        self.assertFalse(recovered_payload["only_reduce_required"])
+        self.assertIn("derivatives_risk_snapshot_missing_grace_active", recovered_payload["warnings"])
+
     def test_live_guard_auto_halts_when_liquidation_gap_is_too_small(self) -> None:
         settings = self._settings()
         kill_switch = KillSwitch()

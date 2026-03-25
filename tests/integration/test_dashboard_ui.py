@@ -121,6 +121,8 @@ class TestDashboardUI(unittest.TestCase):
         self.assertIn("小资金运行包", risk_text)
         self.assertIn("guardedLivePreflight", risk_text)
         self.assertIn("guardedLiveRunPacket", risk_text)
+        self.assertIn("轻度差异，建议观察", risk_text)
+        self.assertIn("当前没有新的主阻断，但系统仍处于人工确认流程", risk_text)
 
     def test_dashboard_redirects_to_login_when_auth_is_enabled(self) -> None:
         settings = AATSSettings.model_validate(

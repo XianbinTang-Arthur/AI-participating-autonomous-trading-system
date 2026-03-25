@@ -619,6 +619,80 @@ class TestRecovery(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(query.recovery_view()["recovery_state"], recovery_before["recovery_state"])
         self.assertEqual(runtime.kill_switch.halted, halted_before)
 
+    async def test_operator_rebaseline_resets_derivatives_risk_snapshot_auto_halt_timer(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "storage_mode": "memory",
+                "mode": "guarded_live",
+                "market_data_backend": "demo",
+                "execution_backend": "okx",
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "okx_simulated_trading": True,
+                "live_submit_enabled": False,
+                "guarded_execution_dry_run": True,
+                "bootstrap_portfolio_from_exchange": True,
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+            }
+        )
+        now = utc_now()
+        FakeBaselineAccountService.SNAPSHOT = ExchangeAccountSnapshot(
+            account_source="okx",
+            fetched_at=now,
+            balances=[ExchangeBalance(currency="USDT", total=1000.0, available=1000.0, frozen=0.0)],
+            positions=[
+                ExchangePosition(
+                    instrument_id="BTC-USDT-SWAP",
+                    symbol="BTC-USDT-SWAP",
+                    quantity=0.01,
+                    average_entry_price=70000.0,
+                    mark_price=71000.0,
+                    side="net",
+                    margin_mode="cross",
+                )
+            ],
+            open_orders=[],
+            fills=[],
+            instruments=[],
+            account_mode="futures",
+            position_mode="net_mode",
+            risk_snapshot=None,
+        )
+
+        with patch("aats.bootstrap.config.OKXAccountService", FakeBaselineAccountService):
+            runtime = await build_runtime(settings)
+
+        query = OperatorQueryService(runtime)
+        await runtime.market_gateway.run_local_publisher(
+            symbol=runtime.settings.default_symbol,
+            iterations=2,
+            interval_seconds=0.0,
+        )
+        guard = runtime.derivatives_live_guard_service
+        self.assertIsNotNone(guard)
+        assert guard is not None
+        guard.risk_snapshot_missing_started_at = now - timedelta(
+            seconds=settings.derivatives_risk_snapshot_auto_halt_after_seconds + 5
+        )
+        guard.risk_snapshot_missing_count = 10
+        halted_snapshot = guard.evaluate_now()
+        self.assertTrue(halted_snapshot["auto_halt_required"])
+
+        rebaseline = await query.rebaseline(reason="accept_current_exchange_state", actor_role="admin")
+
+        self.assertEqual(rebaseline["rebaseline_status"], "rebaseline_completed")
+        self.assertIsNotNone(rebaseline["auto_resume"])
+        self.assertEqual(rebaseline["auto_resume"]["status"], "resumed")
+        self.assertEqual(query.recovery_view()["recovery_state"], "degraded_continue")
+        self.assertTrue(query.recovery_view()["safe_to_trade"])
+        live_guard_snapshot = query.derivatives_live_guard()
+        self.assertEqual(live_guard_snapshot["risk_snapshot_stage"], "grace")
+        self.assertFalse(live_guard_snapshot["auto_halt_required"])
+        self.assertFalse(runtime.kill_switch.halted)
+
     async def test_derivatives_recovery_view_surfaces_only_reduce_state_without_forcing_halt(self) -> None:
         settings = AATSSettings.model_validate(
             {
