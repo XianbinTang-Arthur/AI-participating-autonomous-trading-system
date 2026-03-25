@@ -133,9 +133,9 @@ class TestDashboardUI(unittest.TestCase):
         self.assertIn("做完后会怎样", risk_text)
         self.assertIn("重新对账（刷新交易所状态）", risk_text)
         self.assertIn("接受当前状态为新基线", risk_text)
-        self.assertIn("继续保持暂停", risk_text)
         self.assertIn("轻度差异，建议观察", risk_text)
         self.assertIn("系统仍处于人工确认流程", risk_text)
+        self.assertNotIn("继续保持暂停", risk_text)
 
     def test_dashboard_redirects_to_login_when_auth_is_enabled(self) -> None:
         settings = AATSSettings.model_validate(
@@ -427,6 +427,185 @@ console.log(JSON.stringify({
         self.assertIn('"manualOnlyProfileButtonsUnlocked":true', result.stdout)
         self.assertIn('"manualOnlyRuntimeCurrentModeLocked":true', result.stdout)
         self.assertIn('"manualOnlyRuntimeAvoidsLegacyButtons":true', result.stdout)
+
+    def test_risk_view_actions_follow_blocker_state(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { renderRiskView } from './aats/api/static/modules/views/risk-view.js';
+
+const healthyHtml = renderRiskView({
+  blockerControl: {
+    primary_task: {
+      kind: 'healthy',
+      title: '当前无需人工处理',
+      summary: '当前没有新的第一优先级任务。',
+      reason: '最新对账和恢复状态都没有给出新的硬阻断或人工复核要求。',
+      completion_outcome: '如果仍需再次确认状态，可以手动重新对账（刷新交易所状态）。',
+      source_blocker: null,
+      secondary_blocker_count: 0,
+      actions: [],
+    },
+    blockers: [],
+    secondary_blockers: [],
+    next_step_summary: '当前没有待处理的阻断项。',
+  },
+  systemRecovery: {
+    recovery: {
+      safe_to_trade: true,
+      review_required: false,
+      resume_eligible: true,
+      halted: false,
+      rebaseline_available: false,
+      resume_blocked_reasons: [],
+    },
+  },
+  reconciliationLatest: {
+    reconciliation: {
+      reconciliation_id: 'recon-clean',
+      severity: 'CLEAN',
+      halt_required: false,
+      review_required: false,
+      observational_only: false,
+      recommended_operator_action: null,
+    },
+  },
+  accountState: { fresh: true, last_refresh_timestamp: '2026-03-25T16:00:00Z', ready: true, blockers: [] },
+  portfolio: { portfolio: { total_equity: 200, realized_pnl: 0, unrealized_pnl: 0, margin_usage: 0, gross_exposure: 0 } },
+  replayStatus: {},
+  metrics: {},
+  health: { runtime_state: 'healthy' },
+  uiHints: { recoveryReasonsText: '', controlPermissionMessage: '' },
+});
+
+const manualHaltHtml = renderRiskView({
+  blockerControl: {
+    primary_task: {
+      kind: 'resume',
+      title: '可以直接恢复自动运行',
+      summary: '当前没有更高优先级阻断。确认无误后直接恢复自动运行。',
+      reason: '系统目前只是处于暂停状态。',
+      completion_outcome: '恢复后系统会立刻重新校验当前状态。',
+      source_blocker: null,
+      secondary_blocker_count: 0,
+      actions: [
+        {
+          action_id: 'resume-system',
+          label: '恢复自动运行',
+          kind: 'client',
+          method: 'CLIENT',
+          client_action: 'trigger-resume',
+          tone: 'warning',
+          enabled: true,
+        },
+      ],
+    },
+    blockers: [{ blocker: 'kill_switch_active', title: '系统处于手动暂停状态', actions: [] }],
+    secondary_blockers: [],
+    next_step_summary: '确认当前状态无误后，直接恢复自动运行。',
+  },
+  systemRecovery: {
+    recovery: {
+      safe_to_trade: false,
+      review_required: false,
+      resume_eligible: true,
+      halted: true,
+      rebaseline_available: false,
+      resume_blocked_reasons: [],
+    },
+  },
+  reconciliationLatest: {
+    reconciliation: {
+      reconciliation_id: 'recon-clean',
+      severity: 'CLEAN',
+      halt_required: false,
+      review_required: false,
+      observational_only: false,
+      recommended_operator_action: null,
+    },
+  },
+  accountState: { fresh: true, last_refresh_timestamp: '2026-03-25T16:00:00Z', ready: true, blockers: [] },
+  portfolio: { portfolio: { total_equity: 200, realized_pnl: 0, unrealized_pnl: 0, margin_usage: 0, gross_exposure: 0 } },
+  replayStatus: {},
+  metrics: {},
+  health: { runtime_state: 'paused', halted: true },
+  uiHints: { recoveryReasonsText: '', controlPermissionMessage: '' },
+});
+
+const reviewHtml = renderRiskView({
+  blockerControl: {
+    primary_task: {
+      kind: 'review_reconciliation',
+      title: '先确认当前账实状态',
+      summary: '先查看最新对账和交易所账单；只有确认当前状态符合预期后，才接受为新基线。',
+      reason: '当前仍处于人工确认流程。',
+      completion_outcome: '确认完成后系统会重新评估是否能够自动恢复运行。',
+      source_blocker: null,
+      secondary_blocker_count: 0,
+      actions: [
+        { action_id: 'inspect-reconciliation:recon-review', label: '查看最新对账', kind: 'client', method: 'CLIENT', client_action: 'inspect-reconciliation', value: 'recon-review', tone: 'ghost', enabled: true },
+        { action_id: 'reconcile-now', label: '重新对账（刷新交易所状态）', kind: 'client', method: 'CLIENT', client_action: 'trigger-reconciliation-validate', tone: 'secondary', enabled: true },
+        { action_id: 'accept-rebaseline', label: '接受当前状态为新基线', kind: 'client', method: 'CLIENT', client_action: 'trigger-rebaseline', tone: 'warning', enabled: true },
+      ],
+    },
+    blockers: [],
+    secondary_blockers: [],
+    next_step_summary: '先确认当前账实状态。',
+  },
+  systemRecovery: {
+    recovery: {
+      safe_to_trade: false,
+      review_required: true,
+      resume_eligible: false,
+      halted: true,
+      rebaseline_available: true,
+      resume_blocked_reasons: [],
+    },
+  },
+  reconciliationLatest: {
+    reconciliation: {
+      reconciliation_id: 'recon-review',
+      severity: 'HARD_MISMATCH',
+      halt_required: true,
+      review_required: true,
+      observational_only: false,
+      recommended_operator_action: 'rebaseline_if_expected',
+    },
+  },
+  accountState: { fresh: true, last_refresh_timestamp: '2026-03-25T16:00:00Z', ready: true, blockers: [] },
+  portfolio: { portfolio: { total_equity: 200, realized_pnl: 0, unrealized_pnl: 0, margin_usage: 0, gross_exposure: 0 } },
+  replayStatus: {},
+  metrics: {},
+  health: { runtime_state: 'halted', halted: true },
+  uiHints: { recoveryReasonsText: '', controlPermissionMessage: '' },
+});
+
+console.log(JSON.stringify({
+  healthyHasNoPause: !healthyHtml.includes('继续保持暂停'),
+  healthyHasNoInspectReconciliation: !healthyHtml.includes('查看最新对账'),
+  manualHaltHasResume: manualHaltHtml.includes('恢复自动运行'),
+  manualHaltHasNoPause: !manualHaltHtml.includes('继续保持暂停'),
+  manualHaltHasNoInspectReconciliation: !manualHaltHtml.includes('查看最新对账'),
+  reviewHasInspectReconciliation: reviewHtml.includes('查看最新对账'),
+  reviewHasRebaseline: reviewHtml.includes('接受当前状态为新基线'),
+  reviewHasNoPause: !reviewHtml.includes('继续保持暂停'),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertIn('"healthyHasNoPause":true', result.stdout)
+        self.assertIn('"healthyHasNoInspectReconciliation":true', result.stdout)
+        self.assertIn('"manualHaltHasResume":true', result.stdout)
+        self.assertIn('"manualHaltHasNoPause":true', result.stdout)
+        self.assertIn('"manualHaltHasNoInspectReconciliation":true', result.stdout)
+        self.assertIn('"reviewHasInspectReconciliation":true', result.stdout)
+        self.assertIn('"reviewHasRebaseline":true', result.stdout)
+        self.assertIn('"reviewHasNoPause":true', result.stdout)
 
 
 if __name__ == "__main__":

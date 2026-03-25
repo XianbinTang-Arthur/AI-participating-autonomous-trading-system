@@ -240,6 +240,9 @@ class BlockerControlService:
                     reconciliation_id=reconciliation_id,
                     recovery=recovery,
                     latest_reconciliation=latest_reconciliation,
+                    include_inspect=True,
+                    include_validate=True,
+                    include_rebaseline=True,
                 ),
             )
         if recovery.get("halted") and recovery.get("resume_eligible"):
@@ -253,6 +256,7 @@ class BlockerControlService:
                     reconciliation_id=reconciliation_id,
                     recovery=recovery,
                     latest_reconciliation=latest_reconciliation,
+                    include_resume=True,
                 ),
             )
         if bool(getattr(latest_reconciliation, "observational_only", False)) and bool(recovery.get("safe_to_trade")):
@@ -266,8 +270,8 @@ class BlockerControlService:
                     reconciliation_id=reconciliation_id,
                     recovery=recovery,
                     latest_reconciliation=latest_reconciliation,
-                    include_rebaseline=False,
-                    include_resume=False,
+                    include_inspect=True,
+                    include_validate=True,
                 ),
             )
         if not recovery.get("safe_to_trade"):
@@ -283,6 +287,8 @@ class BlockerControlService:
                     reconciliation_id=reconciliation_id,
                     recovery=recovery,
                     latest_reconciliation=latest_reconciliation,
+                    include_inspect=True,
+                    include_validate=True,
                 ),
             )
         return BlockerControlTask(
@@ -290,13 +296,11 @@ class BlockerControlService:
             title="当前无需人工处理",
             summary="当前没有新的第一优先级任务，系统已经具备继续自动运行的条件。",
             reason="最新对账和恢复状态都没有给出新的硬阻断或人工复核要求。",
-            completion_outcome="如果仍想再次确认状态，可以手动重新对账或查看最新账户快照。",
+            completion_outcome="如果仍想再次确认状态，可以手动重新对账（刷新交易所状态）。",
             actions=self._generic_task_actions(
                 reconciliation_id=reconciliation_id,
                 recovery=recovery,
                 latest_reconciliation=latest_reconciliation,
-                include_rebaseline=False,
-                include_resume=False,
             ),
         )
 
@@ -306,11 +310,16 @@ class BlockerControlService:
         reconciliation_id: str | None,
         recovery: dict[str, Any],
         latest_reconciliation: Any | None,
-        include_rebaseline: bool = True,
-        include_resume: bool = True,
+        include_inspect: bool = False,
+        include_validate: bool = False,
+        include_rebaseline: bool = False,
+        include_resume: bool = False,
     ) -> list[BlockerActionDefinition]:
         actions: list[BlockerActionDefinition] = []
-        if reconciliation_id:
+        if include_inspect and reconciliation_id and self._should_show_inspect_reconciliation_action(
+            latest_reconciliation=latest_reconciliation,
+            recovery=recovery,
+        ):
             actions.append(
                 BlockerActionDefinition(
                     action_id=f"inspect-reconciliation:{reconciliation_id}",
@@ -323,11 +332,17 @@ class BlockerControlService:
                     expected_effect="打开最新对账详情，先确认当前账实状态。",
                 )
             )
-        if self._should_show_validate_action(latest_reconciliation=latest_reconciliation, recovery=recovery):
+        if include_validate and self._should_show_validate_action(
+            latest_reconciliation=latest_reconciliation,
+            recovery=recovery,
+        ):
             actions.append(
                 BlockerActionDefinition(
                     action_id="reconcile-now",
                     label="重新对账（刷新交易所状态）",
+                    kind="client",
+                    method="CLIENT",
+                    client_action="trigger-reconciliation-validate",
                     tone="secondary",
                     expected_effect="立即刷新当前对账结论，并重新计算恢复资格。",
                 )
@@ -340,6 +355,9 @@ class BlockerControlService:
                 BlockerActionDefinition(
                     action_id="accept-rebaseline",
                     label="接受当前状态为新基线",
+                    kind="client",
+                    method="CLIENT",
+                    client_action="trigger-rebaseline",
                     tone="warning",
                     requires_confirmation=True,
                     confirmation_title="确认接受当前状态为新的人工基线？",
@@ -352,6 +370,9 @@ class BlockerControlService:
                 BlockerActionDefinition(
                     action_id="resume-system",
                     label="恢复自动运行",
+                    kind="client",
+                    method="CLIENT",
+                    client_action="trigger-resume",
                     tone="warning",
                     enabled=bool(recovery.get("resume_eligible")),
                     disabled_reason=(
@@ -362,14 +383,6 @@ class BlockerControlService:
                     expected_effect="在没有剩余阻断时解除暂停，恢复自动运行。",
                 )
             )
-        actions.append(
-            BlockerActionDefinition(
-                action_id="halt-system",
-                label="继续保持暂停",
-                tone="danger",
-                expected_effect="保留当前暂停状态，避免在问题未完全确认前恢复自动交易。",
-            )
-        )
         return actions
 
     @staticmethod
@@ -379,9 +392,22 @@ class BlockerControlService:
         recovery: dict[str, Any],
     ) -> bool:
         return bool(
-            latest_reconciliation is not None
-            or not recovery.get("safe_to_trade")
+            BlockerControlService._reconciliation_requires_attention(latest_reconciliation)
             or recovery.get("review_required")
+        )
+
+    @staticmethod
+    def _should_show_inspect_reconciliation_action(
+        *,
+        latest_reconciliation: Any | None,
+        recovery: dict[str, Any],
+    ) -> bool:
+        return bool(
+            latest_reconciliation is not None
+            and (
+                BlockerControlService._reconciliation_requires_attention(latest_reconciliation)
+                or recovery.get("review_required")
+            )
         )
 
     @staticmethod
@@ -518,13 +544,6 @@ class BlockerControlService:
                     confirmation_copy="这会留下当前影子兼容层状态记录，但不会解除阻断，也不会恢复自动运行。",
                     expected_effect="记录当前人工核查结果，说明系统因为影子兼容层异常而继续保持阻断。",
                 ),
-                BlockerActionDefinition(
-                    action_id="halt-system",
-                    label="继续保持暂停",
-                    endpoint="/system/halt",
-                    tone="danger",
-                    expected_effect="保留当前暂停状态，避免在问题未处理完之前恢复自动交易。",
-                ),
             ]
         if code in {"derivatives_margin_buffer_auto_halt", "derivatives_liquidation_proximity_auto_halt"}:
             return [
@@ -547,50 +566,11 @@ class BlockerControlService:
                     tone="secondary",
                     expected_effect="重新拉取账户快照、风险缓冲和阻断状态，确认自动停机是否仍然成立。",
                 ),
-                BlockerActionDefinition(
-                    action_id="halt-system",
-                    label="继续保持暂停",
-                    endpoint="/system/halt",
-                    tone="danger",
-                    expected_effect="继续保持暂停，避免在保证金风险尚未解除时恢复自动交易。",
-                ),
             ]
-        if code in {"phase1_shadow_lagging", "phase1_shadow_degraded"}:
-            actions.extend(
-                [
-                    BlockerActionDefinition(
-                        action_id="inspect-shadow",
-                        label="查看影子同步状态",
-                        kind="client",
-                        method="CLIENT",
-                        client_action="inspect-shadow",
-                        tone="ghost",
-                        expected_effect="切到风险视图，先确认影子兼容层的阻断状态、积压数量和恢复资格。",
-                    ),
-                    BlockerActionDefinition(
-                        action_id="refresh-dashboard",
-                        label="刷新当前状态",
-                        kind="client",
-                        method="CLIENT",
-                        client_action="refresh-dashboard",
-                        tone="secondary",
-                        expected_effect="重新拉取健康状态、阻断面板和影子兼容层快照，确认异常是否仍然存在。",
-                    ),
-                ]
-            )
-            actions.append(
-                BlockerActionDefinition(
-                    action_id="acknowledge-phase1-shadow",
-                    label="已核查，继续阻断",
-                    endpoint="/system/blocker-actions/acknowledge-phase1-shadow",
-                    tone="warning",
-                    requires_confirmation=True,
-                    confirmation_title="确认已完成人工核查",
-                    confirmation_copy="这会留下当前影子兼容层状态记录，但不会解除阻断，也不会恢复自动运行。",
-                    expected_effect="记录当前人工核查结果，说明系统因为影子兼容层异常而继续保持阻断。",
-                )
-            )
-        if reconciliation_id:
+        if reconciliation_id and self._should_show_inspect_reconciliation_action(
+            latest_reconciliation=latest_reconciliation,
+            recovery=recovery,
+        ):
             actions.append(
                 BlockerActionDefinition(
                     action_id=f"inspect-reconciliation:{reconciliation_id}",
@@ -608,7 +588,9 @@ class BlockerControlService:
                 BlockerActionDefinition(
                     action_id="reconcile-now",
                     label="重新对账",
-                    endpoint="/reconciliation/validate",
+                    kind="client",
+                    method="CLIENT",
+                    client_action="trigger-reconciliation-validate",
                     tone="secondary",
                     expected_effect="立即刷新当前对账结果，并重新计算恢复资格。",
                 )
@@ -618,7 +600,9 @@ class BlockerControlService:
                 BlockerActionDefinition(
                     action_id="accept-rebaseline",
                     label="确认为新基线",
-                    endpoint="/system/rebaseline",
+                    kind="client",
+                    method="CLIENT",
+                    client_action="trigger-rebaseline",
                     tone="warning",
                     requires_confirmation=True,
                     confirmation_title="确认接受当前状态为新基线",
@@ -659,7 +643,7 @@ class BlockerControlService:
                     kind="client",
                     method="CLIENT",
                     client_action="navigate-view",
-                    value="ai",
+                    value="aiAnalysis",
                     tone="ghost",
                     expected_effect="切到 AI 工作台查看最近影子评估、降级原因和窗口统计。",
                 )
@@ -669,7 +653,9 @@ class BlockerControlService:
                 BlockerActionDefinition(
                     action_id="resume-system",
                     label="恢复自动运行",
-                    endpoint="/system/resume",
+                    kind="client",
+                    method="CLIENT",
+                    client_action="trigger-resume",
                     tone="warning",
                     enabled=bool(recovery.get("resume_eligible")),
                     disabled_reason="当前还有更高优先级阻断未处理。" if not recovery.get("resume_eligible") else None,
@@ -679,22 +665,14 @@ class BlockerControlService:
         if code in {"strategy_bundle_recovery_in_progress", "strategy_bundle_recovery_requires_review"}:
             actions.append(
                 BlockerActionDefinition(
-                    action_id="open-recovery-view",
-                    label="查看恢复详情",
+                    action_id="open-execution-view",
+                    label="查看委托与成交",
                     kind="client",
-                    endpoint="/system/recovery",
+                    method="CLIENT",
+                    client_action="navigate-view",
+                    value="execution",
                     tone="warning",
-                    expected_effect="查看当前 bundle / sleeve 恢复摘要，确认未完成腿的收敛状态。",
-                )
-            )
-        if code not in {"kill_switch_active"}:
-            actions.append(
-                BlockerActionDefinition(
-                    action_id="halt-system",
-                    label="继续保持暂停",
-                    endpoint="/system/halt",
-                    tone="danger",
-                    expected_effect="保留当前暂停状态，避免在问题未处理完之前恢复自动交易。",
+                    expected_effect="切到委托与成交页，先确认当前 bundle 对应的委托、成交和异常有没有真正收敛。",
                 )
             )
         if self._supports_exchange_state_refresh(code):
@@ -920,3 +898,14 @@ class BlockerControlService:
         if not secondary:
             return f"先处理“{primary.title}”，处理完成后即可重新评估是否恢复自动运行。"
         return f"先处理“{primary.title}”，处理完成后系统会继续检查剩余 {len(secondary)} 条次级阻断。"
+
+    @staticmethod
+    def _reconciliation_requires_attention(latest_reconciliation: Any | None) -> bool:
+        if latest_reconciliation is None:
+            return False
+        severity = str(getattr(latest_reconciliation, "severity", "") or "").upper()
+        return bool(
+            getattr(latest_reconciliation, "halt_required", False)
+            or getattr(latest_reconciliation, "review_required", False)
+            or severity not in {"", "CLEAN"}
+        )

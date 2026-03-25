@@ -118,6 +118,65 @@ class TestBlockerControlSummary(unittest.TestCase):
         self.assertEqual(task.kind, "resume")
         self.assertIn("恢复自动运行", task.summary)
         self.assertIn("resume-system", [item.action_id for item in task.actions])
+        self.assertNotIn("reconcile-now", [item.action_id for item in task.actions])
+        self.assertNotIn("halt-system", [item.action_id for item in task.actions])
+
+    def test_primary_task_healthy_state_has_no_manual_buttons(self) -> None:
+        service = BlockerControlService(SimpleNamespace())
+        task = service._primary_task(  # type: ignore[attr-defined]
+            primary=None,
+            secondary=[],
+            recovery={
+                "safe_to_trade": True,
+                "review_required": False,
+                "resume_eligible": True,
+                "halted": False,
+                "rebaseline_available": False,
+                "resume_blocked_reasons": [],
+            },
+            latest_reconciliation=SimpleNamespace(
+                reconciliation_id="recon_ok",
+                severity="CLEAN",
+                halt_required=False,
+                review_required=False,
+                observational_only=False,
+                recommended_operator_action=None,
+            ),
+        )
+
+        self.assertEqual(task.kind, "healthy")
+        self.assertEqual(task.actions, [])
+
+    def test_primary_task_review_only_surfaces_reconciliation_actions(self) -> None:
+        service = BlockerControlService(SimpleNamespace())
+        task = service._primary_task(  # type: ignore[attr-defined]
+            primary=None,
+            secondary=[],
+            recovery={
+                "safe_to_trade": False,
+                "review_required": True,
+                "resume_eligible": False,
+                "halted": True,
+                "rebaseline_available": True,
+                "resume_blocked_reasons": [],
+            },
+            latest_reconciliation=SimpleNamespace(
+                reconciliation_id="recon_review",
+                severity="HARD_MISMATCH",
+                halt_required=True,
+                review_required=True,
+                observational_only=False,
+                recommended_operator_action="rebaseline_if_expected",
+            ),
+        )
+
+        action_ids = [item.action_id for item in task.actions]
+        self.assertEqual(task.kind, "review_reconciliation")
+        self.assertIn("reconcile-now", action_ids)
+        self.assertIn("accept-rebaseline", action_ids)
+        self.assertTrue(any(action_id.startswith("inspect-reconciliation:") for action_id in action_ids))
+        self.assertNotIn("resume-system", action_ids)
+        self.assertNotIn("halt-system", action_ids)
 
 
 if __name__ == "__main__":

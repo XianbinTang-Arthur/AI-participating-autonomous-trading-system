@@ -49,7 +49,9 @@ export function renderRiskSections(data) {
         readyCopy: "当前没有硬阻断，可继续关注账户、对账和恢复状态。",
       }),
       tone: riskTone({ primaryBlocker, blockers, reconciliation, recovery, health }),
-      actions: reconciliation?.reconciliation_id ? actionButton("查看最新对账", "inspect-reconciliation", reconciliation.reconciliation_id) : "",
+      actions: shouldShowInspectReconciliation({ reconciliation, recovery })
+        ? actionButton("查看最新对账", "inspect-reconciliation", reconciliation.reconciliation_id, "ghost")
+        : "",
       pills: [
         pill(`运行状态 ${readableState(health.runtime_state || health.overall_status || "unknown")}`, toneForRuntimeState(health.runtime_state || health.overall_status)),
         pill(`自动交易 ${tradingStatusLabel(recovery)}`, recovery.safe_to_trade ? "positive" : recovery.resume_eligible ? "warning" : "danger"),
@@ -430,7 +432,7 @@ export function renderReconciliationControls({
   const permissionMessage = textOrFallback(uiHints.controlPermissionMessage, "");
   const canWrite = !permissionMessage;
   const buttons = [];
-  if (includeInspect && reconciliation?.reconciliation_id) {
+  if (includeInspect && shouldShowInspectReconciliation({ reconciliation, recovery })) {
     buttons.push(actionButton("查看对账", "inspect-reconciliation", reconciliation.reconciliation_id, "ghost"));
   }
   if (shouldShowValidateAction({ reconciliation, recovery })) {
@@ -457,12 +459,6 @@ export function renderReconciliationControls({
       })
     );
   }
-  buttons.push(
-    actionButton("继续保持暂停", "trigger-halt", "", "danger", {
-      disabled: !canWrite,
-      title: permissionMessage,
-    })
-  );
   if (!buttons.length) return `<p class="meta-copy">${reconciliationActionCopy({ reconciliation, recovery })}</p>`;
   return `<div class="stack-actions ${compact ? "table-actions--compact" : ""}">${buttons.join("")}</div>`;
 }
@@ -486,7 +482,7 @@ export function reconciliationActionCopy({ reconciliation = null, recovery = {},
   if (!recovery.safe_to_trade) {
     return operationalStatusCopy({ recovery });
   }
-  return "当前状态稳定。如果想再次确认状态，可以手动重新对账。";
+  return "当前状态稳定。如果想再次确认状态，可以手动重新对账（刷新交易所状态）。";
 }
 
 function renderPrimaryTaskPanel({ primaryTask = null, recovery = {}, reconciliation = null, uiHints = {} } = {}) {
@@ -636,12 +632,12 @@ function noPrimaryBlockerSummary({ recovery = {}, reconciliation = null } = {}) 
     };
   }
   return {
-    value: "当前可继续自动运行",
-    meta: "系统当前没有硬阻断。",
-    tone: "positive",
-    copy: "当前没有新的第一优先级阻断。若仍需确认状态，可继续查看最新对账和账户快照。",
-  };
-}
+      value: "当前可继续自动运行",
+      meta: "系统当前没有硬阻断。",
+      tone: "positive",
+      copy: "当前没有新的第一优先级阻断。若仍需再次确认状态，可手动重新对账（刷新交易所状态）。",
+    };
+  }
 
 function riskHeadline({ primaryBlocker, blockers, reconciliation, recovery }) {
   return operationalStatusHeadline({
@@ -662,7 +658,11 @@ function riskTone({ primaryBlocker, blockers, reconciliation, recovery, health }
 }
 
 function shouldShowValidateAction({ reconciliation, recovery }) {
-  return Boolean(reconciliation?.reconciliation_id || !recovery.safe_to_trade || recovery.review_required);
+  return Boolean(
+    reconciliationNeedsAttention(reconciliation)
+    || reconciliation?.observational_only
+    || recovery.review_required
+  );
 }
 
 function shouldShowRebaselineAction({ reconciliation, recovery }) {
@@ -677,8 +677,24 @@ function shouldShowResumeAction({ recovery }) {
   return Boolean(recovery.halted || recovery.resume_eligible);
 }
 
+function shouldShowInspectReconciliation({ reconciliation, recovery }) {
+  return Boolean(
+    reconciliation?.reconciliation_id
+    && (reconciliationNeedsAttention(reconciliation) || recovery.review_required)
+  );
+}
+
 function actionSuggestsRebaseline(value) {
   return String(value || "").toLowerCase().includes("rebaseline");
+}
+
+function reconciliationNeedsAttention(reconciliation) {
+  const severity = String(reconciliation?.severity || "").toUpperCase();
+  return Boolean(
+    reconciliation?.halt_required
+    || reconciliation?.review_required
+    || (severity && severity !== "CLEAN")
+  );
 }
 
 function resumeActionHint({ recovery, uiHints }) {
