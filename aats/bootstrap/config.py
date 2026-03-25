@@ -9,6 +9,7 @@ from typing import Any
 import yaml
 
 from aats.bootstrap.logging import get_logger, log_event
+from aats.bootstrap.managed_profiles import MANAGED_PROFILE_DERIVED_ENV_KEYS, load_managed_profile_values
 from aats.bootstrap.metrics import MetricsRegistry
 from aats.bootstrap.settings import AATSSettings
 from aats.bus.memory_bus import InMemoryEventBus
@@ -220,18 +221,42 @@ def resilient_subscription_handler(
 
 def load_settings() -> AATSSettings:
     discovered = AATSSettings()
-    yaml_values: dict[str, Any] = {}
+    source_values: dict[str, Any] = {}
     # When startup runs through one of the managed .env profile templates, that
-    # template already contains the full runtime config surface. Keeping the
-    # legacy YAML overlay active in that path makes the effective config harder
-    # to reason about and can silently reintroduce stale profile defaults.
+    # template path, runtime semantics come from managed profile defaults plus
+    # a dedicated strategy tuning file. Legacy YAML overlays remain available
+    # only for non-managed/manual config_profile startup paths.
     if discovered.env_template_profile is None:
-        yaml_values = load_yaml_config(discovered.environment, discovered.config_profile)
+        source_values = load_yaml_config(discovered.environment, discovered.config_profile)
+    else:
+        source_values = load_managed_profile_values(discovered.env_template_profile)
     explicit_overrides = {
         field_name: getattr(discovered, field_name)
         for field_name in discovered.model_fields_set
     }
-    return AATSSettings.model_validate({**yaml_values, **explicit_overrides})
+    if discovered.env_template_profile is not None:
+        derived_field_names = {
+            key.removeprefix("AATS_").lower()
+            for key in MANAGED_PROFILE_DERIVED_ENV_KEYS
+        }
+        ignored_override_fields = sorted(
+            field_name
+            for field_name in explicit_overrides
+            if field_name != "env_template_profile" and field_name in derived_field_names
+        )
+        if ignored_override_fields:
+            log_event(
+                get_logger("aats.config"),
+                "managed_profile_ignored_deprecated_env_overrides",
+                env_template_profile=discovered.env_template_profile,
+                ignored_fields=ignored_override_fields,
+            )
+        explicit_overrides = {
+            field_name: value
+            for field_name, value in explicit_overrides.items()
+            if field_name == "env_template_profile" or field_name not in derived_field_names
+        }
+    return AATSSettings.model_validate({**source_values, **explicit_overrides})
 
 
 @dataclass(slots=True)

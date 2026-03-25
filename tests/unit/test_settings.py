@@ -128,15 +128,13 @@ class TestAATSSettings(unittest.TestCase):
         self.assertEqual(settings.max_daily_realized_loss_usdt, 100.0)
         self.assertEqual(settings.derivatives_only_reduce_trigger_margin_fraction, 0.7)
 
-    def test_load_settings_skips_yaml_overlay_for_managed_env_templates(self) -> None:
+    def test_load_settings_reads_managed_profile_runtime_defaults_and_strategy_tuning(self) -> None:
         with patch.object(AATSSettings, "model_config", {**AATSSettings.model_config, "env_file": None}):
             with patch.dict(
                 os.environ,
                 {
                     **_non_aats_environment(),
                     "AATS_ENV_TEMPLATE_PROFILE": "spot_live",
-                    "AATS_STARTUP_PROFILE": "spot",
-                    "AATS_CONFIG_PROFILE": "guarded_spot_enabled",
                 },
                 clear=True,
             ):
@@ -144,10 +142,39 @@ class TestAATSSettings(unittest.TestCase):
 
         self.assertEqual(settings.env_template_profile, "spot_live")
         self.assertEqual(settings.config_profile, "guarded_spot_enabled")
-        self.assertEqual(settings.mode, "paper_live")
-        self.assertEqual(settings.market_data_backend, "demo")
-        self.assertEqual(settings.execution_backend, "paper")
-        self.assertEqual(settings.account_backend, "disabled")
+        self.assertEqual(settings.startup_profile, "spot")
+        self.assertEqual(settings.mode, "guarded_live")
+        self.assertEqual(settings.market_data_backend, "okx")
+        self.assertEqual(settings.execution_backend, "okx")
+        self.assertEqual(settings.account_backend, "okx")
+        self.assertEqual(settings.ai_execution_suggestion_mode, "diagnostic_only")
+        self.assertFalse(settings.strategy_profile_auto_control_enabled)
+        self.assertEqual(settings.decision_min_interval_seconds_15m, 60.0)
+        self.assertEqual(settings.strategy_min_hold_seconds, 900.0)
+
+    def test_load_settings_ignores_deprecated_runtime_derivations_from_managed_env(self) -> None:
+        with patch.object(AATSSettings, "model_config", {**AATSSettings.model_config, "env_file": None}):
+            with patch.dict(
+                os.environ,
+                {
+                    **_non_aats_environment(),
+                    "AATS_ENV_TEMPLATE_PROFILE": "derivatives_live",
+                    "AATS_MODE": "paper_live",
+                    "AATS_TRADING_PRODUCT_TYPE": "spot",
+                    "AATS_MARGIN_MODE": "cash",
+                    "AATS_MARKET_DATA_BACKEND": "demo",
+                    "AATS_DEFAULT_SYMBOL": "ETH-USDT-SWAP",
+                },
+                clear=True,
+            ):
+                settings = load_settings()
+
+        self.assertEqual(settings.env_template_profile, "derivatives_live")
+        self.assertEqual(settings.mode, "guarded_live")
+        self.assertEqual(settings.trading_product_type, "derivatives")
+        self.assertEqual(settings.margin_mode, "cross")
+        self.assertEqual(settings.market_data_backend, "okx")
+        self.assertEqual(settings.default_symbol, "ETH-USDT-SWAP")
 
     def test_spot_cash_runtime_rejects_non_unit_leverage(self) -> None:
         with self.assertRaisesRegex(ValueError, "spot_cash_runtime_requires_unit_leverage"):

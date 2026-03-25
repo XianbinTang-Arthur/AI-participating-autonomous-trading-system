@@ -1,0 +1,107 @@
+# 合约实盘策略调参
+# 这里只放策略、AI、自动换档、多策略与试盘守护相关参数。
+# 数据库、端口、日志、交易所凭证、仓位上限等运行时 override 请改 `.env.derivatives.live`。
+
+# AI 与自动降级
+ai_operating_mode: baseline_only
+ai_provider: openai
+ai_model_name: gpt-4.1-mini
+ai_timeout_seconds: 10.0
+ai_degrade_after_failures: 3
+ai_recovery_probe_interval_seconds: 180.0
+ai_decision_min_confidence: 0.72
+ai_decision_max_uncertainty: 0.38
+ai_decision_min_directional_edge: 0.16
+ai_shadow_mode_enabled: true
+ai_shadow_evaluation_window: 30
+ai_outcome_review_bad_window_threshold: 3
+ai_outcome_max_fee_ratio_delta: 0.08
+ai_outcome_max_churn_ratio_delta: 0.12
+ai_execution_suggestion_mode: diagnostic_only
+
+# 策略家族与自动换档
+strategy_family_active: directional
+strategy_family_auto_selection_enabled: true
+strategy_profile_auto_control_enabled: false
+strategy_profile_auto_rollback_enabled: true
+strategy_profile_activation_policy_enabled: true
+strategy_profile_emergency_safety_fast_track_enabled: true
+strategy_profile_emergency_safety_confidence_min: 0.68
+
+# 多策略 sleeve 自动控制
+strategy_sleeve_auto_parallel_enabled: true
+strategy_sleeve_auto_min_budget_multiplier: 0.35
+strategy_sleeve_auto_reconciliation_contraction_multiplier: 0.50
+strategy_sleeve_auto_soft_loss_usdt: 10.0
+strategy_sleeve_auto_hard_loss_usdt: 25.0
+strategy_sleeve_auto_volatility_cap_enabled: true
+
+# 多策略启停
+smart_arbitrage_enabled: true
+smart_arbitrage_basis_entry_bps: 18.0
+smart_arbitrage_basis_exit_bps: 6.0
+smart_arbitrage_estimated_cost_bps: 10.0
+smart_arbitrage_quote_budget_per_trade: 200.0
+smart_arbitrage_max_pair_notional: 2000.0
+spot_grid_enabled: true
+spot_grid_anchor_lookback_snapshots: 24
+spot_grid_band_bps: 150.0
+spot_grid_inventory_floor_fraction: 0.15
+spot_grid_inventory_ceiling_fraction: 1.0
+spot_grid_rebalance_min_fraction_of_max_qty: 0.08
+spot_grid_breakout_guard_enabled: true
+dca_enabled: true
+dca_interval_seconds: 86400.0
+dca_quote_budget_per_cycle: 25.0
+dca_max_position_fraction_of_limit: 1.0
+dca_pullback_only_enabled: false
+dca_pullback_entry_bps: 40.0
+
+# 决策节奏
+max_decisions_per_minute: 5
+decision_min_interval_seconds_15m: 60.0
+decision_min_interval_seconds_1h: 240.0
+decision_min_price_move_bps: 4.0
+decision_min_momentum_delta: 0.0003
+
+# directional 细分阈值
+strategy_short_bias_enabled: true
+strategy_dynamic_leverage_enabled: true
+strategy_flat_signal_hold_enabled: true
+strategy_flat_exit_microstructure_threshold: 0.16
+strategy_flat_exit_factor_threshold: 0.24
+strategy_flat_exit_ai_edge_threshold: 0.28
+strategy_expected_slippage_bps_fraction: 0.35
+strategy_edge_noise_buffer_bps: 6.0
+strategy_min_net_edge_bps: 6.0
+strategy_entry_allowed_regimes:
+  - trend
+  - breakout
+strategy_entry_min_signal_edge_bps: 14.0
+strategy_entry_alpha_min: 0.18
+strategy_entry_confidence_min: 0.61
+strategy_scale_in_min_signal_edge_bps: 18.0
+strategy_scale_in_alpha_min: 0.24
+strategy_scale_in_confidence_min: 0.70
+strategy_reversal_min_signal_edge_bps: 24.0
+strategy_reversal_alpha_min: 0.32
+strategy_reversal_confidence_min: 0.80
+strategy_min_hold_seconds: 900.0
+strategy_post_close_cooldown_seconds: 300.0
+strategy_max_fee_drag_ratio: 0.45
+strategy_max_churn_ratio: 0.45
+strategy_low_edge_threshold_bps: 4.0
+strategy_low_edge_streak_limit: 3
+strategy_low_edge_cooldown_seconds: 3600.0
+strategy_transient_close_retry_cooldown_seconds: 90.0
+
+# 试盘守护
+trial_guard_enabled: true
+trial_guard_poll_interval_seconds: 15.0
+trial_guard_lookback_fills: 30
+trial_guard_min_closed_fills: 5
+trial_guard_max_daily_loss_usdt: 20.0
+trial_guard_max_consecutive_losses: 4
+trial_guard_max_fee_to_notional_ratio: 0.0012
+trial_guard_max_high_slippage_ratio: 0.35
+trial_guard_max_slow_submit_to_fill_ratio: 0.35

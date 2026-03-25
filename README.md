@@ -130,12 +130,26 @@ psql postgresql://aats:aats@localhost:5432/aats -f migrations/0007_execution_out
 
 ### 3. 选择运行配置
 
-常用配置：
+当前推荐通过托管 profile 启动：
 
-- `AATS_CONFIG_PROFILE=local_demo`
-- `AATS_CONFIG_PROFILE=real_market_paper`
-- `AATS_CONFIG_PROFILE=guarded_simulated_submit_dry_run`
-- `AATS_CONFIG_PROFILE=guarded_simulated_submit_enabled`
+- `spot`
+- `derivatives`
+- `spot_live`
+- `derivatives_live`
+
+配置职责已经收口成三层：
+
+- 根目录四个 `.env.*`
+  - 只放账户、数据库、端口、日志、交易所凭证、仓位/杠杆硬上限这类最小 override
+- `configs/strategy_profiles/*.yaml`
+  - 只放策略调参、AI、自动换档、多策略 sleeve 参数
+- `aats/bootstrap/settings.py`
+  - 唯一的 schema 与默认值真相
+
+详细说明见：
+
+- [配置目录职责](D:/文件/project/AIParticipatingAutonomousTradingSystem/configs/README.md)
+- [Managed Profile 配置说明](D:/文件/project/AIParticipatingAutonomousTradingSystem/docs/configuration/managed-config-reference.md)
 
 ### 4. 启动 API 与 UI
 
