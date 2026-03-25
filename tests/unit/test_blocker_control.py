@@ -148,6 +148,10 @@ class TestBlockerControlSummary(unittest.TestCase):
         self.assertEqual(snapshot.primary_task.kind, "resolve_blocker")
         self.assertNotIn("resume-system", [item.action_id for item in snapshot.primary_task.actions])
         self.assertIn(
+            "open-strategy-view",
+            [item.action_id for item in snapshot.primary_blocker.actions],
+        )
+        self.assertIn(
             "open-execution-view",
             [item.action_id for item in snapshot.primary_blocker.actions],
         )

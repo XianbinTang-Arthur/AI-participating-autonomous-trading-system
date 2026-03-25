@@ -2890,6 +2890,9 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertIn("trial_guard_threshold_breached", resumed.json()["recovery"]["resume_blocked_reasons"])
         self.assertEqual(blocker_control.status_code, 200)
         self.assertEqual(blocker_control.json()["primary_blocker"]["blocker"], "trial_guard_threshold_breached")
+        action_ids = [item["action_id"] for item in blocker_control.json()["primary_blocker"]["actions"]]
+        self.assertIn("open-strategy-view", action_ids)
+        self.assertIn("open-execution-view", action_ids)
 
     async def test_system_health_reports_reconciliation_staleness_consistently(self) -> None:
         runtime = await self._runtime()

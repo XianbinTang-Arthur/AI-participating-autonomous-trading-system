@@ -101,6 +101,12 @@ class TestDashboardUI(unittest.TestCase):
         self.assertNotIn("查看 AI 分析", ai_config_text)
 
         strategy_text = responses["strategy_js"].text
+        self.assertIn("查看风险与恢复", strategy_text)
+        self.assertIn("记录本次复盘", strategy_text)
+        self.assertIn("记为继续小资金试盘", strategy_text)
+        self.assertIn("记为缩小试盘规模", strategy_text)
+        self.assertIn("记为暂停试盘并复盘", strategy_text)
+        self.assertIn("提交放量评审", strategy_text)
         self.assertNotIn("自动跳档状态", strategy_text)
         self.assertIn("系统自动试盘结论", strategy_text)
         self.assertIn("样本仍少，先继续观察", strategy_text)
@@ -116,11 +122,6 @@ class TestDashboardUI(unittest.TestCase):
         self.assertIn("预算快照", strategy_text)
         self.assertIn("冲突解算", strategy_text)
         self.assertIn("净额决策", strategy_text)
-        self.assertNotIn("记为继续小资金观察", strategy_text)
-        self.assertNotIn("记为缩小试盘规模", strategy_text)
-        self.assertNotIn("记为暂停试盘并复盘", strategy_text)
-        self.assertNotIn("记为允许进入放量评审", strategy_text)
-        self.assertNotIn("记录本次周复盘", strategy_text)
 
         risk_text = responses["risk_js"].text
         self.assertIn("启盘前自检", risk_text)

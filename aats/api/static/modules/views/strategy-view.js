@@ -392,6 +392,10 @@ export function renderStrategySections(data) {
       title: "系统自动试盘结论",
       kicker: "试盘审查",
       copy: "这里汇总系统自动给出的试盘建议、最近观察周期表现，以及当前是否满足继续试盘或进入下一步评估的前置条件。",
+      actions: renderTrialVerdictActions({
+        trialGuardStatus: scalingRequirements.trial_guard_status,
+        trialVerdict,
+      }),
       content: `
         ${summaryStrip([
           {
@@ -768,6 +772,31 @@ function strategyLegSummary(legs) {
   return legs
     .map((item) => `${readableState(item.product_type)} ${readableState(item.side)} ${item.symbol || "标的待确认"}`)
     .join(" | ");
+}
+
+function renderTrialVerdictActions({ trialGuardStatus, trialVerdict }) {
+  const actions = [
+    actionButton("查看风险与恢复", "navigate-view", "risk", "ghost"),
+  ];
+  if (trialGuardStatus === "breached") {
+    actions.push(
+      actionButton("查看委托与成交", "navigate-view", "execution", "ghost"),
+      actionButton("记录本次复盘", "record-trial-review", "", "secondary"),
+      actionButton("刷新当前状态", "refresh-dashboard", "", "warning"),
+    );
+    return `<div class="stack-actions table-actions--compact">${actions.join("")}</div>`;
+  }
+  if (trialVerdict === "approve_scale_up") {
+    actions.push(actionButton("提交放量评审", "record-scaling-review", "approve_scale_up", "warning"));
+  } else if (trialVerdict === "continue_small_capital") {
+    actions.push(actionButton("记为继续小资金试盘", "record-scaling-review", "continue_small_capital", "secondary"));
+  } else if (trialVerdict === "shrink_trial") {
+    actions.push(actionButton("记为缩小试盘规模", "record-scaling-review", "shrink_trial", "warning"));
+  } else if (trialVerdict === "pause_trial") {
+    actions.push(actionButton("记为暂停试盘并复盘", "record-scaling-review", "pause_trial", "warning"));
+  }
+  actions.push(actionButton("记录本次复盘", "record-trial-review", "", "ghost"));
+  return `<div class="stack-actions table-actions--compact">${actions.join("")}</div>`;
 }
 
 function scalingVerdictLabel(value) {

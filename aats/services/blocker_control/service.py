@@ -572,6 +572,16 @@ class BlockerControlService:
         if code == "trial_guard_threshold_breached":
             return [
                 BlockerActionDefinition(
+                    action_id="open-strategy-view",
+                    label="查看试盘审查",
+                    kind="client",
+                    method="CLIENT",
+                    client_action="navigate-view",
+                    value="strategy",
+                    tone="warning",
+                    expected_effect="切到策略判断页，先查看试盘守护和系统自动试盘结论，确认这次自动停机是硬阈值触发，还是只是观察/放量建议收紧。",
+                ),
+                BlockerActionDefinition(
                     action_id="open-execution-view",
                     label="查看委托与成交",
                     kind="client",
@@ -589,6 +599,30 @@ class BlockerControlService:
                     client_action="refresh-dashboard",
                     tone="secondary",
                     expected_effect="重新拉取试盘守护、恢复状态和最近成交摘要，确认试盘守护是否仍然处于 breached。",
+                ),
+            ]
+        if code in {
+            "derivatives_risk_snapshot_missing_grace_active",
+            "derivatives_risk_snapshot_missing_requires_only_reduce",
+            "derivatives_risk_snapshot_missing_auto_halt",
+        }:
+            return [
+                BlockerActionDefinition(
+                    action_id="open-execution-view",
+                    label="查看委托与成交",
+                    kind="client",
+                    method="CLIENT",
+                    client_action="navigate-view",
+                    value="execution",
+                    tone="ghost",
+                    expected_effect="切到委托与成交页，先确认最近的挂单、成交和异常是否已经真实收敛，再决定是否继续刷新交易所状态。",
+                ),
+                BlockerActionDefinition(
+                    action_id="refresh-exchange-state",
+                    endpoint="/system/blocker-actions/refresh-exchange-state",
+                    tone="secondary",
+                    label="刷新交易所状态",
+                    expected_effect="立刻拉取最新行情、账户与风险快照，并在本轮内按最大次数重试，确认当前风险快照阻断是否已经解除。",
                 ),
             ]
         if reconciliation_id and self._should_show_inspect_reconciliation_action(
