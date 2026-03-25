@@ -103,7 +103,9 @@ function renderManualOperatingModePanel({ runtime = {}, canAdmin = false, uiStat
       manualEditing,
       manualAction: "set-ai-mode-editing",
       autoAction: "set-ai-mode-editing",
-      autoTitle: "恢复自动模式",
+      manualLabel: "手动接管",
+      autoLabel: "跟随配置",
+      autoTitle: "恢复跟随配置",
     }),
     content: `
       ${callout({
@@ -121,12 +123,12 @@ function renderManualOperatingModePanel({ runtime = {}, canAdmin = false, uiStat
         },
         {
           label: "当前状态",
-          value: runtime.manual_override_active ? "管理员已接管" : "系统自动运行",
+          value: runtime.manual_override_active ? "管理员已接管" : "跟随配置运行",
           meta: runtime.manual_override_active
             ? runtime.manual_override_freeze_until
               ? `恢复时间：${formatMaybeTimestamp(runtime.manual_override_freeze_until)}`
               : "会一直保持当前模式，直到手动恢复"
-            : "现在没有管理员手动覆盖",
+            : "现在没有管理员手动覆盖，系统按配置模式运行",
           tone: runtime.manual_override_active ? "warning" : "outline",
           badge: actorTags(runtime.manual_override_active ? "admin" : "system"),
         },
@@ -156,7 +158,7 @@ function renderProfileControlPanel({
   const executionAggressiveness = adaptiveControls.execution_aggressiveness || {};
   const configured = Boolean(runtime.strategy_profile_auto_control_configured);
   const manuallyPaused = runtime.strategy_profile_auto_control_reason === "manually_paused_by_admin";
-  const manualEditing = Boolean(uiState.profileManualEditing || manuallyPaused);
+  const manualEditing = Boolean(!configured || uiState.profileManualEditing || manuallyPaused);
   const candidateProfileId = latestOptimizationReport.recommended_profile_id || latestSelectionDecision.candidate_profile_id || "";
   const profileButtons = PROFILE_OPTIONS.map(([profileId, label, tone]) =>
     actionButton(
@@ -186,6 +188,9 @@ function renderProfileControlPanel({
       manualEditing,
       manualAction: "set-profile-editing",
       autoAction: "set-profile-editing",
+      manualLabel: "手动切档",
+      autoLabel: "自动切档",
+      manualTitle: !configured ? "当前配置只允许手动切换档位" : "",
       autoDisabled: !configured,
       autoTitle: !configured ? "恢复自动切档（当前没有启用自动换档）" : "恢复自动切档",
     }),
@@ -264,16 +269,19 @@ function renderControlModeActions({
   manualEditing = false,
   manualAction,
   autoAction,
+  manualLabel = "手动模式",
+  autoLabel = "自动模式",
+  manualTitle = "",
   autoDisabled = false,
   autoTitle = "",
 }) {
   return `
     <div class="table-actions table-actions--compact">
-      ${actionButton("手动模式", manualAction, "manual", manualEditing ? "primary" : "secondary", {
+      ${actionButton(manualLabel, manualAction, "manual", manualEditing ? "primary" : "secondary", {
         disabled: !canAdmin,
-        title: !canAdmin ? "当前账号只有查看权限" : "解锁下面的按钮，允许手动调整",
+        title: !canAdmin ? "当前账号只有查看权限" : manualTitle || "解锁下面的按钮，允许手动调整",
       })}
-      ${actionButton("自动模式", autoAction, "auto", !manualEditing ? "primary" : "secondary", {
+      ${actionButton(autoLabel, autoAction, "auto", !manualEditing ? "primary" : "secondary", {
         disabled: !canAdmin || autoDisabled,
         title: !canAdmin ? "当前账号只有查看权限" : autoTitle || "锁定下面的按钮，并恢复系统自动逻辑",
       })}
@@ -360,8 +368,8 @@ function renderCurrentConfigurationCard({ runtimeProfiles = {}, runtime = {}, ai
 function runtimeModeSummary(runtime = {}) {
   if (!runtime.manual_override_active) {
     return {
-      title: `当前按${readableMode(runtime.configured_operating_mode || "baseline_only")}运行`,
-      copy: "现在没有管理员手动接管。",
+      title: `当前配置模式：${readableMode(runtime.configured_operating_mode || "baseline_only")}`,
+      copy: "现在没有管理员手动接管，系统按配置模式运行。",
       actors: ["system"],
     };
   }

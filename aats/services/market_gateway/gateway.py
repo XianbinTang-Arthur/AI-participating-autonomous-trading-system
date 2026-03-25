@@ -102,6 +102,25 @@ class MarketDataGateway:
     async def seed_demo_snapshot(self, symbol: str | None = None) -> MarketSnapshot:
         return await self.publish_local_snapshot(symbol=symbol)
 
+    async def refresh_snapshot(self, *, symbol: str | None = None) -> MarketSnapshot:
+        trading_symbol = symbol or self.settings.default_symbol
+        self._rest_fallback_last_attempt_ts = utc_now()
+        try:
+            if self.settings.market_data_backend == "okx":
+                snapshot = await self._fetch_okx_rest_snapshot(symbol=trading_symbol)
+                await self._publish_snapshot(snapshot)
+            else:
+                snapshot = await self.publish_local_snapshot(symbol=trading_symbol)
+        except Exception as exc:
+            self._last_error = str(exc)
+            self._rest_fallback_last_error = str(exc)
+            raise
+        self._rest_fallback_last_success_ts = utc_now()
+        self._rest_fallback_last_error = None
+        self._rest_fallback_active = False
+        self._last_error = None
+        return snapshot
+
     async def run_local_publisher(
         self,
         *,

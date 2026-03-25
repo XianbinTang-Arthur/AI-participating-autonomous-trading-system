@@ -313,6 +313,40 @@ const configHtml = renderAIConfigView({
   },
 });
 
+const manualOnlyConfigHtml = renderAIConfigView({
+  session: { role: 'admin' },
+  aiRuntime: {
+    configured_operating_mode: 'baseline_only',
+    effective_operating_mode: 'baseline_only',
+    manual_override_active: false,
+    strategy_profile_auto_control_configured: false,
+    strategy_profile_auto_control_effective: false,
+    strategy_profile_auto_control_reason: 'explicit_setting_disabled',
+  },
+  summary: {
+    ai: {
+      configured_operating_mode: 'baseline_only',
+      effective_operating_mode: 'baseline_only',
+      strategy_profile_auto_control_configured: false,
+      strategy_profile_auto_control_effective: false,
+      strategy_profile_auto_control_reason: 'explicit_setting_disabled',
+    },
+    runtime_profile: {
+      current_runtime_payload: {},
+    },
+    strategy_profile: {
+      activation: { active_profile_id: 'trend_normal' },
+      active_revision: { profile_id: 'trend_normal' },
+      latest_selection_decision: {},
+      latest_optimization_report: {},
+    },
+  },
+  uiState: {
+    modeManualEditing: false,
+    profileManualEditing: false,
+  },
+});
+
 const drawer = buildDecisionDrawer({
   decision_id: 'dec-1',
   decision_context: { symbol: 'BTC-USDT-SWAP', current_position_qty: 0 },
@@ -351,6 +385,11 @@ console.log(JSON.stringify({
   analysisHasAdaptiveControls: analysisHtml.includes('风险预算乘数') && analysisHtml.includes('自动切档闸门'),
   drawerExplainsFallback: drawer.body.includes('当前运行模式允许 AI 参与'),
   drawerUsesHumanDecisionSource: drawer.body.includes('本轮最终回退到基础策略'),
+  manualOnlyProfileDefaultsToManual: /<button class="primary-button" data-action="set-profile-editing" data-value="manual"/.test(manualOnlyConfigHtml),
+  manualOnlyProfileAutoDisabled: /<button class="secondary-button" data-action="set-profile-editing" data-value="auto"[^>]*disabled/.test(manualOnlyConfigHtml),
+  manualOnlyProfileButtonsUnlocked: !/data-action="manual-activate-strategy-profile" data-value="trend_normal"[^>]*disabled/.test(manualOnlyConfigHtml),
+  manualOnlyRuntimeUsesFollowConfigLabel: /<button class="primary-button" data-action="set-ai-mode-editing" data-value="auto"[^>]*>跟随配置<\\/button>/.test(manualOnlyConfigHtml),
+  manualOnlyRuntimeAvoidsAutomaticCopy: !manualOnlyConfigHtml.includes('系统自动运行'),
 }));
 """
         result = subprocess.run(
@@ -379,6 +418,11 @@ console.log(JSON.stringify({
         self.assertIn('"analysisHasAdaptiveControls":true', result.stdout)
         self.assertIn('"drawerExplainsFallback":true', result.stdout)
         self.assertIn('"drawerUsesHumanDecisionSource":true', result.stdout)
+        self.assertIn('"manualOnlyProfileDefaultsToManual":true', result.stdout)
+        self.assertIn('"manualOnlyProfileAutoDisabled":true', result.stdout)
+        self.assertIn('"manualOnlyProfileButtonsUnlocked":true', result.stdout)
+        self.assertIn('"manualOnlyRuntimeUsesFollowConfigLabel":true', result.stdout)
+        self.assertIn('"manualOnlyRuntimeAvoidsAutomaticCopy":true', result.stdout)
 
 
 if __name__ == "__main__":

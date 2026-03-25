@@ -144,6 +144,20 @@ export function renderStrategySections(data) {
           ["调度结论", strategyRuntimeSummary.operator_summary || "当前还没有多策略调度快照。", reasonListText(strategyRuntimeSummary.latest_selection_reason_codes, "当前没有额外调度原因说明")],
           ["运行模板", strategyRuntimeSummary.env_template_profile || "当前未记录模板来源", strategyRuntimeSummary.automatic_selection_enabled ? "策略家族当前按系统自动选择运行。" : "策略家族当前不在自动选择模式。"],
           ["Allocator 结论", latestAllocationDecision.operator_summary || "当前还没有 allocator 决策。", reasonListText(latestAllocationDecision.reason_codes, "当前没有 allocator 级原因说明")],
+          [
+            "预算与净额",
+            readableState(strategyRuntimeSummary.latest_portfolio_risk_budget_state || "unknown"),
+            [
+              `预算快照 ${formatNumber(strategyRuntimeSummary.latest_budget_snapshot_count, 0, "0")} 条`,
+              `冲突解算 ${formatNumber(strategyRuntimeSummary.latest_conflict_resolution_count, 0, "0")} 条`,
+              `净额决策 ${formatNumber(strategyRuntimeSummary.latest_netting_decision_count, 0, "0")} 条`,
+            ].join(" | "),
+          ],
+          [
+            "Hedge 保护 / 方向削减",
+            `${formatSigned(strategyRuntimeSummary.latest_hedge_protected_notional)} / ${formatSigned(strategyRuntimeSummary.latest_directional_reduced_notional)}`,
+            "前者表示为保护 hedge 结构而保留的名义金额，后者表示 allocator 主动削减的方向暴露。",
+          ],
           ["最近 Bundle", readableState(latestBundle.status || "unknown"), reasonListText(latestBundle.reason_codes, "当前没有 bundle 级原因说明")],
           ["最近已应用动作", readableState(strategyAppliedTarget.position_intent || "hold"), reasonListText(strategyAppliedTarget.strategy_reason_codes, "当前没有额外已应用目标说明")],
           ["最近 Bundle 腿数", formatNumber(recentBundles[0]?.legs?.length ?? latestBundle.legs?.length ?? 0, 0, "0"), latestBundle.operator_summary || "当前没有 bundle 级执行摘要"],

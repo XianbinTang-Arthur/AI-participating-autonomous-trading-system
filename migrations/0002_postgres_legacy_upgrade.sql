@@ -66,6 +66,40 @@ ALTER TABLE IF EXISTS event_store ADD COLUMN IF NOT EXISTS product_type VARCHAR(
 ALTER TABLE IF EXISTS event_store ADD COLUMN IF NOT EXISTS margin_mode VARCHAR(16);
 ALTER TABLE IF EXISTS event_store ADD COLUMN IF NOT EXISTS payload JSON;
 
+CREATE TABLE IF NOT EXISTS event_store_archive (
+    archive_sequence_id SERIAL PRIMARY KEY,
+    source_sequence_id INTEGER NOT NULL,
+    event_id VARCHAR(64) NOT NULL,
+    schema_version VARCHAR(16) NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    event_type VARCHAR(128) NOT NULL,
+    event_timestamp TIMESTAMP WITH TIME ZONE NOT NULL,
+    source_component VARCHAR(128) NOT NULL,
+    topic VARCHAR(128) NOT NULL,
+    event_key VARCHAR(128) NOT NULL,
+    decision_id VARCHAR(64),
+    symbol VARCHAR(64),
+    timeframe VARCHAR(16),
+    product_type VARCHAR(16),
+    margin_mode VARCHAR(16),
+    payload JSON NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS projection_replay_offsets (
+    offset_id VARCHAR(64) PRIMARY KEY,
+    projection_key VARCHAR(128) NOT NULL,
+    product_type VARCHAR(16) NOT NULL,
+    margin_mode VARCHAR(16) NOT NULL,
+    allowed_symbols_hash VARCHAR(64) NOT NULL,
+    allowed_symbols_json JSON NOT NULL,
+    last_event_id VARCHAR(64),
+    last_event_timestamp TIMESTAMP WITH TIME ZONE,
+    baseline_generation_id VARCHAR(64),
+    exchange_ack_watermark_id VARCHAR(64),
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    payload JSON NOT NULL
+);
+
 -- Ensure columns exist on execution_orders
 ALTER TABLE IF EXISTS execution_orders ADD COLUMN IF NOT EXISTS order_id VARCHAR(64);
 ALTER TABLE IF EXISTS execution_orders ADD COLUMN IF NOT EXISTS intent_id VARCHAR(64);
@@ -589,6 +623,98 @@ ALTER TABLE IF EXISTS strategy_sleeves ADD COLUMN IF NOT EXISTS created_at TIMES
 ALTER TABLE IF EXISTS strategy_sleeves ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITH TIME ZONE;
 ALTER TABLE IF EXISTS strategy_sleeves ADD COLUMN IF NOT EXISTS payload JSON;
 
+CREATE TABLE IF NOT EXISTS sleeve_budget_profiles (
+    budget_profile_id VARCHAR(64) PRIMARY KEY,
+    family VARCHAR(32) NOT NULL,
+    product_type VARCHAR(16) NOT NULL,
+    margin_mode VARCHAR(16) NOT NULL,
+    symbol_scope_json JSON NOT NULL,
+    quote_budget_limit NUMERIC(36, 18),
+    margin_budget_limit NUMERIC(36, 18),
+    notional_cap NUMERIC(36, 18),
+    max_symbol_notional NUMERIC(36, 18),
+    max_drawdown_usdt NUMERIC(36, 18),
+    allocator_base_weight NUMERIC(36, 18) NOT NULL,
+    hedge_priority_class VARCHAR(32) NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    payload JSON NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sleeve_budget_assignments (
+    assignment_id VARCHAR(64) PRIMARY KEY,
+    budget_profile_id VARCHAR(64) NOT NULL,
+    strategy_sleeve_id VARCHAR(64) NOT NULL,
+    family VARCHAR(32) NOT NULL,
+    symbol VARCHAR(64) NOT NULL,
+    product_type VARCHAR(16) NOT NULL,
+    margin_mode VARCHAR(16) NOT NULL,
+    active_budget_multiplier NUMERIC(36, 18) NOT NULL,
+    allocator_base_weight NUMERIC(36, 18) NOT NULL,
+    effective_quote_budget_limit NUMERIC(36, 18),
+    effective_margin_budget_limit NUMERIC(36, 18),
+    effective_notional_cap NUMERIC(36, 18),
+    effective_max_symbol_notional NUMERIC(36, 18),
+    hedge_priority_class VARCHAR(32) NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    payload JSON NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS allocator_budget_snapshots (
+    budget_snapshot_id VARCHAR(64) PRIMARY KEY,
+    allocation_id VARCHAR(64) NOT NULL,
+    strategy_sleeve_id VARCHAR(64) NOT NULL,
+    family VARCHAR(32) NOT NULL,
+    symbol VARCHAR(64) NOT NULL,
+    product_type VARCHAR(16) NOT NULL,
+    margin_mode VARCHAR(16) NOT NULL,
+    requested_notional NUMERIC(36, 18) NOT NULL,
+    approved_notional NUMERIC(36, 18) NOT NULL,
+    requested_delta_qty NUMERIC(36, 18) NOT NULL,
+    approved_delta_qty NUMERIC(36, 18) NOT NULL,
+    budget_multiplier NUMERIC(36, 18) NOT NULL,
+    allocator_weight NUMERIC(36, 18) NOT NULL,
+    quote_budget_limit NUMERIC(36, 18),
+    margin_budget_limit NUMERIC(36, 18),
+    notional_cap NUMERIC(36, 18),
+    max_symbol_notional NUMERIC(36, 18),
+    hedge_priority_class VARCHAR(32) NOT NULL,
+    clamped BOOLEAN NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    payload JSON NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS allocator_conflict_resolutions (
+    conflict_resolution_id VARCHAR(64) PRIMARY KEY,
+    allocation_id VARCHAR(64) NOT NULL,
+    symbol VARCHAR(64) NOT NULL,
+    product_type VARCHAR(16) NOT NULL,
+    margin_mode VARCHAR(16) NOT NULL,
+    conflict_type VARCHAR(64) NOT NULL,
+    resolution_action VARCHAR(64) NOT NULL,
+    gross_requested_qty NUMERIC(36, 18) NOT NULL,
+    net_approved_qty NUMERIC(36, 18) NOT NULL,
+    blocked_qty NUMERIC(36, 18) NOT NULL,
+    protected_notional NUMERIC(36, 18) NOT NULL,
+    reduced_notional NUMERIC(36, 18) NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    payload JSON NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS allocator_netting_decisions (
+    netting_decision_id VARCHAR(64) PRIMARY KEY,
+    allocation_id VARCHAR(64) NOT NULL,
+    symbol VARCHAR(64) NOT NULL,
+    product_type VARCHAR(16) NOT NULL,
+    margin_mode VARCHAR(16) NOT NULL,
+    gross_buy_qty NUMERIC(36, 18) NOT NULL,
+    gross_sell_qty NUMERIC(36, 18) NOT NULL,
+    net_approved_qty NUMERIC(36, 18) NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    payload JSON NOT NULL
+);
+
 -- Ensure columns exist on execution_commands
 ALTER TABLE IF EXISTS execution_commands ADD COLUMN IF NOT EXISTS command_id VARCHAR(64);
 ALTER TABLE IF EXISTS execution_commands ADD COLUMN IF NOT EXISTS order_id VARCHAR(64);
@@ -878,6 +1004,23 @@ CREATE INDEX IF NOT EXISTS ix_event_store_timeframe ON event_store (timeframe);
 CREATE INDEX IF NOT EXISTS ix_event_store_topic ON event_store (topic);
 CREATE INDEX IF NOT EXISTS ix_event_store_topic_scope_seq ON event_store (topic, product_type, margin_mode, sequence_id);
 CREATE INDEX IF NOT EXISTS ix_event_store_topic_symbol_seq ON event_store (topic, symbol, sequence_id);
+
+-- Ensure indexes exist on event_store_archive
+CREATE UNIQUE INDEX IF NOT EXISTS ix_event_store_archive_source_sequence_id ON event_store_archive (source_sequence_id);
+CREATE UNIQUE INDEX IF NOT EXISTS ix_event_store_archive_event_id ON event_store_archive (event_id);
+CREATE INDEX IF NOT EXISTS ix_event_store_archive_event_timestamp ON event_store_archive (event_timestamp);
+CREATE INDEX IF NOT EXISTS ix_event_store_archive_topic ON event_store_archive (topic);
+CREATE INDEX IF NOT EXISTS ix_event_store_archive_decision_id ON event_store_archive (decision_id);
+CREATE INDEX IF NOT EXISTS ix_event_store_archive_symbol ON event_store_archive (symbol);
+CREATE INDEX IF NOT EXISTS ix_event_store_archive_product_type ON event_store_archive (product_type);
+CREATE INDEX IF NOT EXISTS ix_event_store_archive_margin_mode ON event_store_archive (margin_mode);
+CREATE INDEX IF NOT EXISTS ix_event_store_archive_topic_scope_seq ON event_store_archive (topic, product_type, margin_mode, source_sequence_id);
+CREATE INDEX IF NOT EXISTS ix_event_store_archive_topic_symbol_seq ON event_store_archive (topic, symbol, source_sequence_id);
+
+-- Ensure indexes exist on projection_replay_offsets
+CREATE INDEX IF NOT EXISTS ix_projection_replay_offsets_projection ON projection_replay_offsets (projection_key);
+CREATE INDEX IF NOT EXISTS ix_projection_replay_offsets_scope_updated ON projection_replay_offsets (product_type, margin_mode, updated_at);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_projection_replay_offsets_projection_scope ON projection_replay_offsets (projection_key, product_type, margin_mode, allowed_symbols_hash);
 
 -- Ensure indexes exist on execution_orders
 CREATE INDEX IF NOT EXISTS ix_execution_orders_allocation_id ON execution_orders (allocation_id);
@@ -1229,6 +1372,53 @@ CREATE INDEX IF NOT EXISTS ix_strategy_sleeves_margin_scope ON strategy_sleeves 
 CREATE INDEX IF NOT EXISTS ix_strategy_sleeves_product_margin ON strategy_sleeves (product_scope, margin_scope);
 CREATE INDEX IF NOT EXISTS ix_strategy_sleeves_product_scope ON strategy_sleeves (product_scope);
 CREATE INDEX IF NOT EXISTS ix_strategy_sleeves_status ON strategy_sleeves (status);
+
+-- Ensure indexes exist on sleeve_budget_profiles
+CREATE INDEX IF NOT EXISTS ix_sleeve_budget_profiles_family ON sleeve_budget_profiles (family);
+CREATE INDEX IF NOT EXISTS ix_sleeve_budget_profiles_product_type ON sleeve_budget_profiles (product_type);
+CREATE INDEX IF NOT EXISTS ix_sleeve_budget_profiles_margin_mode ON sleeve_budget_profiles (margin_mode);
+CREATE INDEX IF NOT EXISTS ix_sleeve_budget_profiles_scope_updated ON sleeve_budget_profiles (product_type, margin_mode, updated_at);
+CREATE INDEX IF NOT EXISTS ix_sleeve_budget_profiles_family_updated ON sleeve_budget_profiles (family, updated_at);
+CREATE INDEX IF NOT EXISTS ix_sleeve_budget_profiles_hedge_priority_class ON sleeve_budget_profiles (hedge_priority_class);
+
+-- Ensure indexes exist on sleeve_budget_assignments
+CREATE INDEX IF NOT EXISTS ix_sleeve_budget_assignments_budget_profile_id ON sleeve_budget_assignments (budget_profile_id);
+CREATE INDEX IF NOT EXISTS ix_sleeve_budget_assignments_strategy_sleeve_id ON sleeve_budget_assignments (strategy_sleeve_id);
+CREATE INDEX IF NOT EXISTS ix_sleeve_budget_assignments_family ON sleeve_budget_assignments (family);
+CREATE INDEX IF NOT EXISTS ix_sleeve_budget_assignments_symbol ON sleeve_budget_assignments (symbol);
+CREATE INDEX IF NOT EXISTS ix_sleeve_budget_assignments_product_type ON sleeve_budget_assignments (product_type);
+CREATE INDEX IF NOT EXISTS ix_sleeve_budget_assignments_margin_mode ON sleeve_budget_assignments (margin_mode);
+CREATE INDEX IF NOT EXISTS ix_sleeve_budget_assignments_scope_updated ON sleeve_budget_assignments (product_type, margin_mode, updated_at);
+CREATE INDEX IF NOT EXISTS ix_sleeve_budget_assignments_sleeve_updated ON sleeve_budget_assignments (strategy_sleeve_id, updated_at);
+CREATE INDEX IF NOT EXISTS ix_sleeve_budget_assignments_hedge_priority_class ON sleeve_budget_assignments (hedge_priority_class);
+
+-- Ensure indexes exist on allocator_budget_snapshots
+CREATE INDEX IF NOT EXISTS ix_allocator_budget_snapshots_allocation_id ON allocator_budget_snapshots (allocation_id);
+CREATE INDEX IF NOT EXISTS ix_allocator_budget_snapshots_strategy_sleeve_id ON allocator_budget_snapshots (strategy_sleeve_id);
+CREATE INDEX IF NOT EXISTS ix_allocator_budget_snapshots_symbol ON allocator_budget_snapshots (symbol);
+CREATE INDEX IF NOT EXISTS ix_allocator_budget_snapshots_product_type ON allocator_budget_snapshots (product_type);
+CREATE INDEX IF NOT EXISTS ix_allocator_budget_snapshots_margin_mode ON allocator_budget_snapshots (margin_mode);
+CREATE INDEX IF NOT EXISTS ix_allocator_budget_snapshots_created_at ON allocator_budget_snapshots (created_at);
+CREATE INDEX IF NOT EXISTS ix_allocator_budget_snapshots_allocation_created ON allocator_budget_snapshots (allocation_id, created_at);
+CREATE INDEX IF NOT EXISTS ix_allocator_budget_snapshots_sleeve_created ON allocator_budget_snapshots (strategy_sleeve_id, created_at);
+
+-- Ensure indexes exist on allocator_conflict_resolutions
+CREATE INDEX IF NOT EXISTS ix_allocator_conflict_resolutions_allocation_id ON allocator_conflict_resolutions (allocation_id);
+CREATE INDEX IF NOT EXISTS ix_allocator_conflict_resolutions_symbol ON allocator_conflict_resolutions (symbol);
+CREATE INDEX IF NOT EXISTS ix_allocator_conflict_resolutions_conflict_type ON allocator_conflict_resolutions (conflict_type);
+CREATE INDEX IF NOT EXISTS ix_allocator_conflict_resolutions_resolution_action ON allocator_conflict_resolutions (resolution_action);
+CREATE INDEX IF NOT EXISTS ix_allocator_conflict_resolutions_created_at ON allocator_conflict_resolutions (created_at);
+CREATE INDEX IF NOT EXISTS ix_allocator_conflict_resolutions_allocation_created ON allocator_conflict_resolutions (allocation_id, created_at);
+CREATE INDEX IF NOT EXISTS ix_allocator_conflict_resolutions_symbol_created ON allocator_conflict_resolutions (symbol, created_at);
+
+-- Ensure indexes exist on allocator_netting_decisions
+CREATE INDEX IF NOT EXISTS ix_allocator_netting_decisions_allocation_id ON allocator_netting_decisions (allocation_id);
+CREATE INDEX IF NOT EXISTS ix_allocator_netting_decisions_symbol ON allocator_netting_decisions (symbol);
+CREATE INDEX IF NOT EXISTS ix_allocator_netting_decisions_product_type ON allocator_netting_decisions (product_type);
+CREATE INDEX IF NOT EXISTS ix_allocator_netting_decisions_margin_mode ON allocator_netting_decisions (margin_mode);
+CREATE INDEX IF NOT EXISTS ix_allocator_netting_decisions_created_at ON allocator_netting_decisions (created_at);
+CREATE INDEX IF NOT EXISTS ix_allocator_netting_decisions_allocation_created ON allocator_netting_decisions (allocation_id, created_at);
+CREATE INDEX IF NOT EXISTS ix_allocator_netting_decisions_symbol_created ON allocator_netting_decisions (symbol, created_at);
 
 -- Ensure indexes exist on execution_commands
 CREATE UNIQUE INDEX IF NOT EXISTS ix_execution_commands_idempotency_key ON execution_commands (idempotency_key);

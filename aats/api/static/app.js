@@ -626,8 +626,8 @@ async function runAction(path, body, successMessage, { target = null, pendingLab
   if (state.actionInFlight) return;
   const finishAction = beginAction(target, pendingLabel);
   try {
-    await requestJson(path, { method: "POST", body });
-    state.flash = { tone: "info", message: successMessage };
+    const result = await requestJson(path, { method: "POST", body });
+    state.flash = { tone: "info", message: result?.message || successMessage };
     await refreshDashboard({ manual: true });
   } catch (error) {
     state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
@@ -979,7 +979,7 @@ async function setAIManualOperatingMode(mode, target = null) {
   const modeLabel = target instanceof HTMLElement ? (target.textContent || "").trim() : mode;
   const clearPending = setActionPending(target, "正在切换运行模式…");
   try {
-    if (!window.confirm(`确认立即把 AI 当前运行模式切换为“${modeLabel}”吗？系统会在冻结时间结束后恢复自动模式逻辑。`)) return;
+    if (!window.confirm(`确认立即把 AI 当前运行模式切换为“${modeLabel}”吗？系统会在冻结时间结束后恢复为配置模式。`)) return;
     const result = await requestJson("/ai/operating-mode/override", {
       method: "POST",
       body: { mode, reason: "ui_manual_override_ai_operating_mode" },
@@ -1000,16 +1000,16 @@ async function setAIManualOperatingMode(mode, target = null) {
 }
 
 async function restoreAIAutomaticOperatingMode(target = null) {
-  const clearPending = setActionPending(target, "正在恢复自动模式…");
+  const clearPending = setActionPending(target, "正在恢复配置模式…");
   try {
-    if (!window.confirm("确认提前结束人工覆盖，并恢复 AI 自动运行模式逻辑吗？")) return;
+    if (!window.confirm("确认提前结束人工覆盖，并恢复为配置模式吗？")) return;
     await requestJson("/ai/operating-mode/restore-auto", {
       method: "POST",
       body: { reason: "ui_restore_auto_ai_operating_mode" },
     });
     state.flash = {
       tone: "info",
-      message: "AI 当前运行模式已恢复为自动逻辑控制。",
+      message: "AI 当前运行模式已恢复为配置模式。",
     };
     state.ui.aiConfig.modeManualEditing = false;
     await refreshDashboard({ manual: true });
@@ -1424,6 +1424,7 @@ function defaultBlockerActionReason(actionId) {
     "accept-rebaseline": "operator_rebaseline_from_blocker_panel",
     "resume-system": "operator_resume_from_blocker_panel",
     "halt-system": "operator_keep_halted_from_blocker_panel",
+    "refresh-exchange-state": "operator_refresh_exchange_state_from_blocker_panel",
     "acknowledge-phase1-shadow": "operator_review_phase1_shadow_from_blocker_panel",
     "ai-review-restore": "operator_restore_ai_from_blocker_panel",
     "ai-review-degrade-to-baseline": "operator_degrade_to_baseline_from_blocker_panel",
@@ -1437,6 +1438,7 @@ function blockerActionPendingLabel(actionId) {
     "accept-rebaseline": "正在确认新基线…",
     "resume-system": "正在恢复自动运行…",
     "halt-system": "正在保持暂停状态…",
+    "refresh-exchange-state": "正在刷新交易所状态…",
     "acknowledge-phase1-shadow": "正在记录影子核查结果…",
     "ai-review-restore": "正在恢复 AI 决策…",
     "ai-review-degrade-to-baseline": "正在切到仅基础策略运行…",
@@ -1450,6 +1452,7 @@ function blockerActionSuccessMessage(actionId) {
     "accept-rebaseline": "新基线已确认。",
     "resume-system": "恢复自动运行请求已提交。",
     "halt-system": "系统会继续保持暂停状态。",
+    "refresh-exchange-state": "交易所状态已刷新。",
     "acknowledge-phase1-shadow": "已记录影子兼容层人工核查结果。",
     "ai-review-restore": "AI 复核已处理，已恢复 AI 决策资格。",
     "ai-review-degrade-to-baseline": "AI 复核已处理，系统将以仅基础策略继续运行。",

@@ -17,6 +17,7 @@ StrategyExecutionBundleStatus = Literal["blocked", "planned", "submitted", "part
 StrategySleeveStatus = Literal["active", "inactive", "paused", "retired"]
 StrategyInventoryPolicy = Literal["account_net_inventory", "paired_inventory", "inventory_accumulation"]
 StrategySleeveAutomationState = Literal["active", "contracted", "paused", "protective_only", "disabled"]
+AllocatorHedgePriorityClass = Literal["standard", "inventory", "hedge", "critical_hedge"]
 
 
 class StrategySleeveAutomationDecision(SchemaBase):
@@ -32,6 +33,44 @@ class StrategySleeveAutomationDecision(SchemaBase):
     current_inventory_notional: Decimal = Decimal("0")
     reason_codes: list[str] = Field(default_factory=list)
     operator_summary: str | None = None
+
+
+class SleeveBudgetProfile(SchemaBase):
+    budget_profile_id: str = Field(default_factory=lambda: new_id("budget"))
+    family: StrategyFamily
+    product_type: ProductType
+    margin_mode: MarginModelType
+    symbol_scope: tuple[str, ...] = Field(default_factory=tuple)
+    quote_budget_limit: Decimal | None = None
+    margin_budget_limit: Decimal | None = None
+    notional_cap: Decimal | None = None
+    max_symbol_notional: Decimal | None = None
+    max_drawdown_usdt: Decimal | None = None
+    allocator_base_weight: Decimal = Decimal("1")
+    hedge_priority_class: AllocatorHedgePriorityClass = "standard"
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
+class SleeveBudgetAssignment(SchemaBase):
+    assignment_id: str = Field(default_factory=lambda: new_id("budgetassign"))
+    budget_profile_id: str
+    strategy_sleeve_id: str
+    family: StrategyFamily
+    symbol: str
+    product_type: ProductType
+    margin_mode: MarginModelType
+    active_budget_multiplier: Decimal = Decimal("1")
+    allocator_base_weight: Decimal = Decimal("1")
+    effective_quote_budget_limit: Decimal | None = None
+    effective_margin_budget_limit: Decimal | None = None
+    effective_notional_cap: Decimal | None = None
+    effective_max_symbol_notional: Decimal | None = None
+    hedge_priority_class: AllocatorHedgePriorityClass = "standard"
+    reason_codes: list[str] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
 
 
 class StrategySleeveIntent(SchemaBase):
@@ -66,13 +105,70 @@ class StrategySleeveIntent(SchemaBase):
     created_at: datetime = Field(default_factory=utc_now)
 
 
+class AllocatorBudgetSnapshot(SchemaBase):
+    budget_snapshot_id: str = Field(default_factory=lambda: new_id("budgetsnap"))
+    allocation_id: str
+    strategy_sleeve_id: str
+    family: StrategyFamily
+    symbol: str
+    product_type: ProductType
+    margin_mode: MarginModelType
+    requested_notional: Decimal = Decimal("0")
+    approved_notional: Decimal = Decimal("0")
+    requested_delta_qty: Decimal = Decimal("0")
+    approved_delta_qty: Decimal = Decimal("0")
+    budget_multiplier: Decimal = Decimal("1")
+    allocator_weight: Decimal = Decimal("1")
+    quote_budget_limit: Decimal | None = None
+    margin_budget_limit: Decimal | None = None
+    notional_cap: Decimal | None = None
+    max_symbol_notional: Decimal | None = None
+    hedge_priority_class: AllocatorHedgePriorityClass = "standard"
+    clamped: bool = False
+    reason_codes: list[str] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class AllocatorConflictResolution(SchemaBase):
+    conflict_resolution_id: str = Field(default_factory=lambda: new_id("conflict"))
+    allocation_id: str
+    symbol: str
+    product_type: ProductType
+    margin_mode: MarginModelType
+    conflict_type: str
+    resolution_action: str
+    input_sleeve_ids: list[str] = Field(default_factory=list)
+    approved_sleeve_ids: list[str] = Field(default_factory=list)
+    gross_requested_qty: Decimal = Decimal("0")
+    net_approved_qty: Decimal = Decimal("0")
+    blocked_qty: Decimal = Decimal("0")
+    protected_notional: Decimal = Decimal("0")
+    reduced_notional: Decimal = Decimal("0")
+    reason_codes: list[str] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class AllocatorNettingDecision(SchemaBase):
+    netting_decision_id: str = Field(default_factory=lambda: new_id("netting"))
+    allocation_id: str
+    symbol: str
+    product_type: ProductType
+    margin_mode: MarginModelType
+    gross_buy_qty: Decimal = Decimal("0")
+    gross_sell_qty: Decimal = Decimal("0")
+    net_approved_qty: Decimal = Decimal("0")
+    participating_sleeve_ids: list[str] = Field(default_factory=list)
+    reason_codes: list[str] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=utc_now)
+
+
 class PortfolioAllocationDecision(SchemaBase):
     allocation_id: str = Field(default_factory=lambda: new_id("alloc"))
     decision_id: str
     symbol: str
     product_type: ProductType
     margin_mode: MarginModelType
-    allocator_version: str = "task73_allocator_v1"
+    allocator_version: str = "task76_allocator_v2_phase1"
     automatic_enabled: bool = True
     route_action: StrategyRouteAction = "hold_current"
     primary_family: StrategyFamily = "directional"
@@ -88,6 +184,14 @@ class PortfolioAllocationDecision(SchemaBase):
     target_notional: Decimal | None = None
     approved_sleeve_weights: dict[str, Decimal] = Field(default_factory=dict)
     approved_sleeve_budget_multipliers: dict[str, Decimal] = Field(default_factory=dict)
+    approved_notional_by_sleeve: dict[str, Decimal] = Field(default_factory=dict)
+    budget_assignments: list[SleeveBudgetAssignment] = Field(default_factory=list)
+    budget_snapshots: list[AllocatorBudgetSnapshot] = Field(default_factory=list)
+    conflict_resolutions: list[AllocatorConflictResolution] = Field(default_factory=list)
+    netting_decisions: list[AllocatorNettingDecision] = Field(default_factory=list)
+    hedge_protected_notional: Decimal = Decimal("0")
+    directional_reduced_notional: Decimal = Decimal("0")
+    portfolio_risk_budget_state: str | None = None
     sleeve_intents: list[StrategySleeveIntent] = Field(default_factory=list)
     execution_legs: list["StrategyLegIntent"] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=utc_now)

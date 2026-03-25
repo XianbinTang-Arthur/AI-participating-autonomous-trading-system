@@ -45,7 +45,7 @@ class BlockerControlService:
             "resume_eligible": recovery["resume_eligible"],
             "safe_to_trade": recovery["safe_to_trade"],
             "blockers": [self._version_payload(item) for item in items],
-            "primary_task": primary_task.model_dump(mode="json"),
+            "primary_task": self._version_task_payload(primary_task),
         }
         panel_version = hashlib.sha1(json.dumps(payload, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:12]
         return BlockerControlSnapshot(
@@ -149,7 +149,39 @@ class BlockerControlService:
             "priority": item.priority,
             "category": item.category,
             "root_cause": item.root_cause,
-            "actions": [action.action_id for action in item.actions],
+            "actions": [BlockerControlService._version_action_payload(action) for action in item.actions],
+        }
+
+    @staticmethod
+    def _version_action_payload(action: BlockerActionDefinition) -> dict[str, Any]:
+        return {
+            "action_id": action.action_id,
+            "label": action.label,
+            "kind": action.kind,
+            "tone": action.tone,
+            "endpoint": action.endpoint,
+            "method": action.method,
+            "client_action": action.client_action,
+            "value": action.value,
+            "enabled": action.enabled,
+            "disabled_reason": action.disabled_reason,
+            "requires_confirmation": action.requires_confirmation,
+            "confirmation_title": action.confirmation_title,
+            "confirmation_copy": action.confirmation_copy,
+            "expected_effect": action.expected_effect,
+        }
+
+    @classmethod
+    def _version_task_payload(cls, task: BlockerControlTask) -> dict[str, Any]:
+        return {
+            "kind": task.kind,
+            "title": task.title,
+            "summary": task.summary,
+            "reason": task.reason,
+            "completion_outcome": task.completion_outcome,
+            "source_blocker": task.source_blocker,
+            "secondary_blocker_count": task.secondary_blocker_count,
+            "actions": [cls._version_action_payload(action) for action in task.actions],
         }
 
     @staticmethod
@@ -410,11 +442,23 @@ class BlockerControlService:
     def _resolution_mode_for(code: str, *, submit_only: bool) -> str:
         if submit_only or code == "local_demo_no_exchange_submission":
             return "external_only"
-        if code in {"market_data_stale", "account_state_stale", "account_snapshot_missing", "market_connection_down"}:
+        if BlockerControlService._supports_exchange_state_refresh(code):
             return "manual_or_auto"
         if code == "rebaseline_in_progress":
             return "auto_only"
         return "manual_only"
+
+    @staticmethod
+    def _supports_exchange_state_refresh(code: str) -> bool:
+        return code in {
+            "market_data_stale",
+            "market_connection_down",
+            "account_state_stale",
+            "account_snapshot_missing",
+            "derivatives_risk_snapshot_missing_grace_active",
+            "derivatives_risk_snapshot_missing_requires_only_reduce",
+            "derivatives_risk_snapshot_missing_auto_halt",
+        }
 
     @staticmethod
     def _root_cause_code(blockers: list[tuple[str, str, bool]]) -> str | None:
@@ -653,7 +697,17 @@ class BlockerControlService:
                     expected_effect="保留当前暂停状态，避免在问题未处理完之前恢复自动交易。",
                 )
             )
-        if code in {"market_data_stale", "market_connection_down", "account_state_stale", "account_snapshot_missing", "rebaseline_in_progress"}:
+        if self._supports_exchange_state_refresh(code):
+            actions.append(
+                BlockerActionDefinition(
+                    action_id="refresh-exchange-state",
+                    label="刷新交易所状态",
+                    endpoint="/system/blocker-actions/refresh-exchange-state",
+                    tone="secondary",
+                    expected_effect="立即拉取最新行情、账户与风险快照，并在本轮内按最大次数重试，确认当前阻断是否已经解除。",
+                )
+            )
+        elif code == "rebaseline_in_progress":
             actions.append(
                 BlockerActionDefinition(
                     action_id="refresh-dashboard",

@@ -65,6 +65,20 @@ class ExchangeAckWatermark(SchemaBase):
     details_json: dict[str, Any] = Field(default_factory=dict)
 
 
+class ReplayProjectionOffset(SchemaBase):
+    offset_id: str = Field(default_factory=lambda: new_id("replayoffset"))
+    projection_key: str
+    product_type: ProductType
+    margin_mode: MarginModelType
+    allowed_symbols: list[str] = Field(default_factory=list)
+    last_event_id: str | None = None
+    last_event_timestamp: datetime | None = None
+    baseline_generation_id: str | None = None
+    exchange_ack_watermark_id: str | None = None
+    details_json: dict[str, Any] = Field(default_factory=dict)
+    updated_at: datetime
+
+
 class BaselineGenerationRecord(SchemaBase):
     generation_id: str = Field(default_factory=lambda: new_id("baselinegen"))
     baseline_event_ref: str

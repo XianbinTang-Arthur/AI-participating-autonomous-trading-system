@@ -8,6 +8,31 @@ from aats.services.blocker_control.service import BlockerControlService
 
 
 class TestBlockerControlSummary(unittest.TestCase):
+    def test_snapshot_panel_version_is_stable_when_state_does_not_change(self) -> None:
+        owner = SimpleNamespace(
+            runtime=SimpleNamespace(
+                kill_switch=SimpleNamespace(halted=False),
+                health_service=SimpleNamespace(snapshot=lambda: SimpleNamespace(blockers=[])),
+                ai_service=SimpleNamespace(status=lambda: {}),
+            ),
+            recovery_view=lambda: {
+                "safe_to_trade": True,
+                "review_required": False,
+                "resume_eligible": True,
+                "halted": False,
+                "rebaseline_available": False,
+                "resume_blocked_reasons": [],
+            },
+            _latest_scoped_reconciliation=lambda: None,
+            system_mode=lambda: {"submit_blocked_reasons": []},
+        )
+        service = BlockerControlService(owner)
+
+        first = service.snapshot()
+        second = service.snapshot()
+
+        self.assertEqual(first.panel_version, second.panel_version)
+
     def test_next_step_summary_explains_review_without_primary_blocker(self) -> None:
         summary = BlockerControlService._next_step_summary(  # type: ignore[attr-defined]
             None,

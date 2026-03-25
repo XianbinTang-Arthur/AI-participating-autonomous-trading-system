@@ -245,6 +245,110 @@ class FakeLaggingPhase1ShadowMonitor:
         }
 
 
+def _exchange_snapshot_for_refresh_test(*, with_risk_snapshot: bool) -> ExchangeAccountSnapshot:
+    return ExchangeAccountSnapshot(
+        account_source="okx",
+        fetched_at=utc_now(),
+        balances=[ExchangeBalance(currency="USDT", total=Decimal("1000"), available=Decimal("900"), frozen=Decimal("100"))],
+        positions=[
+            ExchangePosition(
+                instrument_id="BTC-USDT-SWAP",
+                symbol="BTC-USDT-SWAP",
+                quantity=Decimal("0.01"),
+                average_entry_price=Decimal("68000"),
+                mark_price=Decimal("70000"),
+                notional_usd=Decimal("700"),
+                side="long",
+                margin_mode="cross",
+                liquidation_price=Decimal("42000"),
+            )
+        ],
+        open_orders=[],
+        fills=[],
+        instruments=[],
+        account_mode="cross",
+        risk_snapshot=(
+            ExchangeAccountRiskSnapshot(
+                adjusted_equity=Decimal("2500"),
+                total_equity=Decimal("2550"),
+                available_equity=Decimal("2100"),
+                initial_margin_requirement=Decimal("320"),
+                maintenance_margin_requirement=Decimal("140"),
+                margin_ratio=Decimal("5.2"),
+                notional_usd=Decimal("12500"),
+                raw={"adjEq": "2500", "mgnRatio": "5.2"},
+            )
+            if with_risk_snapshot
+            else None
+        ),
+    )
+
+
+class RefreshTestAccountService:
+    def __init__(self, *, initial_snapshot: ExchangeAccountSnapshot, refreshed_snapshot: ExchangeAccountSnapshot) -> None:
+        self._snapshot = initial_snapshot
+        self._refreshed_snapshot = refreshed_snapshot
+        self.refresh_calls = 0
+
+    async def refresh(self, *, force: bool = False):
+        _ = force
+        self.refresh_calls += 1
+        if self.refresh_calls >= 2:
+            self._snapshot = self._refreshed_snapshot
+        return self._snapshot
+
+    def latest_snapshot(self):
+        return self._snapshot
+
+    def latest_recent_bills(self):
+        return []
+
+    def status(self):
+        return {
+            "backend": "okx",
+            "enabled": True,
+            "credentials_configured": True,
+            "connected": True,
+            "fresh": True,
+            "last_update_ts": self._snapshot.fetched_at,
+            "last_error": None,
+            "ready": True,
+            "detail": "refresh_test_account",
+            "blockers": [],
+            "risk_snapshot": (
+                None
+                if self._snapshot.risk_snapshot is None
+                else self._snapshot.risk_snapshot.model_dump(mode="json")
+            ),
+        }
+
+
+class RefreshTestRuntimeGuard:
+    def __init__(self, account_service: RefreshTestAccountService) -> None:
+        self.account_service = account_service
+        self._status: dict[str, object] = {}
+        self.evaluate_now()
+
+    def evaluate_now(self) -> dict[str, object]:
+        snapshot = self.account_service.latest_snapshot()
+        missing_risk_snapshot = bool(snapshot.positions) and snapshot.risk_snapshot is None
+        self._status = {
+            "connected": True,
+            "fresh": True,
+            "ready": not missing_risk_snapshot,
+            "detail": "refresh_test_runtime_guard",
+            "summary": "refresh_test_runtime_guard",
+            "blockers": ["derivatives_risk_snapshot_missing_auto_halt"] if missing_risk_snapshot else [],
+        }
+        return dict(self._status)
+
+    def status(self) -> dict[str, object]:
+        return dict(self._status)
+
+    def snapshot(self) -> dict[str, object]:
+        return dict(self._status)
+
+
 class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
     async def test_system_status_and_mode_endpoints_are_operator_readable(self) -> None:
         runtime = await self._runtime()
@@ -792,7 +896,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         with TestClient(app) as client:
             response = client.get("/reports/profitability-overview?limit=20")
 
-        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.status_code, 200, response.text)
         payload = response.json()
         summary = payload["summary"]
         self.assertEqual(summary["funding_fee_count"], 2)
@@ -1068,7 +1172,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         with TestClient(app) as client:
             response = client.get("/reports/strategy-attribution?limit=10")
 
-        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.status_code, 200, response.text)
         payload = response.json()
         self.assertGreaterEqual(payload["summary"]["fill_count"], 2)
         self.assertGreaterEqual(payload["summary"]["sleeve_pnl_record_count"], 2)
@@ -1567,7 +1671,13 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertIn("chain_health_score", replay_validation)
         self.assertIn("execution_chain_issue_count", replay_validation)
         self.assertEqual(replay_validation["product_type"], runtime.settings.trading_product_type)
+        self.assertIn("incremental_window_start_at", replay_validation)
+        self.assertIn("baseline_generation_id", replay_validation)
+        self.assertIn("exchange_ack_watermark_id", replay_validation)
+        self.assertIn("replay_offset_id", replay_validation)
         self.assertTrue(replay_status_after["recent_validations"])
+        self.assertIn("event_store_archive", replay_status_after)
+        self.assertIn("latest_replay_offset", replay_status_after)
         self.assertTrue(replay_recent["validations"])
         self.assertIn("total_available", replay_recent)
         self.assertIn("has_more", replay_recent)
@@ -2557,6 +2667,128 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.json()["detail"], "blocker_control_state_changed")
+
+    async def test_refresh_exchange_state_action_retries_until_derivatives_risk_snapshot_blocker_clears(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "config_profile": "local_demo",
+                "mode": "paper_live",
+                "market_data_backend": "demo",
+                "execution_backend": "paper",
+                "account_backend": "disabled",
+                "account_read_enabled": False,
+                "storage_mode": "memory",
+                "event_persistence_mode": "strict",
+                "enabled_decision_timeframes": ("15m",),
+                "operator_unsafe_write_without_auth": True,
+            }
+        )
+        runtime = await build_runtime(settings)
+        runtime.settings.operator_exchange_refresh_max_attempts = 3
+        runtime.settings.operator_exchange_refresh_retry_delay_seconds = 0.0
+
+        initial_snapshot = _exchange_snapshot_for_refresh_test(with_risk_snapshot=False)
+        refreshed_snapshot = _exchange_snapshot_for_refresh_test(with_risk_snapshot=True)
+        account_service = RefreshTestAccountService(
+            initial_snapshot=initial_snapshot,
+            refreshed_snapshot=refreshed_snapshot,
+        )
+        runtime_guard = RefreshTestRuntimeGuard(account_service)
+        runtime.account_service = account_service
+        runtime.health_service.account_provider = account_service
+        runtime.derivatives_live_guard_service = runtime_guard
+        runtime.health_service.runtime_guard_provider = runtime_guard
+        runtime.health_service.market_provider = Mock(
+            status=Mock(
+                return_value={
+                    "connected": True,
+                    "fresh": True,
+                    "ready": True,
+                    "blockers": [],
+                    "detail": "refresh_test_market",
+                    "last_update_ts": utc_now(),
+                }
+            )
+        )
+        runtime.health_service.execution_provider = Mock(
+            readiness=Mock(
+                return_value={
+                    "connected": True,
+                    "fresh": True,
+                    "ready": True,
+                    "blockers": [],
+                    "submit_blocked_reasons": [],
+                    "exchange_submit_allowed": True,
+                    "detail": "refresh_test_execution",
+                }
+            )
+        )
+        mode_snapshot = dict(runtime.mode_controller.snapshot())
+        runtime.mode_controller.snapshot = Mock(
+            return_value={
+                **mode_snapshot,
+                "exchange_submit_allowed": True,
+                "submit_blocked_reasons": [],
+                "execution_blocked": False,
+                "blocked_reason": None,
+            }
+        )
+        runtime.execution_adapter = Mock(
+            readiness=Mock(
+                return_value={
+                    "connected": True,
+                    "fresh": True,
+                    "ready": True,
+                    "blockers": [],
+                    "submit_blocked_reasons": [],
+                    "exchange_submit_allowed": True,
+                    "detail": "refresh_test_execution",
+                }
+            )
+        )
+        runtime_guard.evaluate_now()
+
+        runtime.market_gateway.refresh_snapshot = AsyncMock(
+            side_effect=[RuntimeError("market_refresh_temporary"), object()]
+        )
+
+        app = self._app(runtime)
+        with TestClient(app) as client:
+            before = client.get("/system/blocker-control").json()
+            response = client.post(
+                "/system/blocker-actions/refresh-exchange-state",
+                json={
+                    "panel_version": before["panel_version"],
+                    "blocker": "derivatives_risk_snapshot_missing_auto_halt",
+                    "reason": "operator_refresh_exchange_state_for_risk_snapshot",
+                },
+            )
+            after = client.get("/system/blocker-control").json()
+
+        self.assertEqual(before["primary_blocker"]["blocker"], "derivatives_risk_snapshot_missing_auto_halt")
+        self.assertIn(
+            "refresh-exchange-state",
+            [item["action_id"] for item in before["primary_blocker"]["actions"]],
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["action_id"], "refresh-exchange-state")
+        self.assertEqual(response.json()["status"], "completed")
+        self.assertEqual(response.json()["message"], "已刷新交易所状态，当前阻断已解除。")
+        self.assertNotIn(
+            "derivatives_risk_snapshot_missing_auto_halt",
+            [item["blocker"] for item in after["blockers"]],
+        )
+        self.assertEqual(runtime.market_gateway.refresh_snapshot.await_count, 2)
+        self.assertEqual(account_service.refresh_calls, 2)
+
+        actions = [item.payload for item in runtime.event_store.by_topic(topics.OPERATOR_ACTIONS)]
+        refresh_action = next(item for item in reversed(actions) if item["action"] == "refresh_exchange_state")
+        self.assertEqual(refresh_action["details"]["attempts_executed"], 2)
+        self.assertTrue(refresh_action["details"]["market_refresh_completed"])
+        self.assertTrue(refresh_action["details"]["account_refresh_completed"])
+        self.assertTrue(refresh_action["details"]["blocker_cleared"])
+        self.assertEqual(len(refresh_action["details"]["errors"]), 1)
+        self.assertEqual(refresh_action["details"]["errors"][0]["scope"], "market_data")
 
     async def test_provider_degraded_blocker_does_not_offer_manual_review_resolution_buttons(self) -> None:
         runtime = await self._runtime(

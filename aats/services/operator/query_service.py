@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
@@ -28,17 +29,21 @@ from aats.schemas.operator import (
 from aats.services.blocker_control import BlockerControlService
 from aats.services.blocker_control.actions import BlockerActionService
 from aats.services.governance_engine.recovery_posture import RecoveryPostureEvaluator
+from aats.services.operator.account_queries import AccountQueryFacade
 from aats.services.operator.audit_replay_queries import AuditReplayQueryFacade
+from aats.services.operator.blocker_queries import BlockerQueryFacade
 from aats.services.operator.accounts import (
     create_operator_user as create_managed_operator_user,
     delete_operator_user as delete_managed_operator_user,
     enabled_admin_count,
     update_operator_user as update_managed_operator_user,
 )
+from aats.services.operator.report_queries import ReportQueryFacade
 from aats.services.operator.runtime_profiles import readonly_runtime_profile_snapshot
 from aats.services.operator.runtime_queries import RuntimeQueryFacade
 from aats.services.operator.reconciliation_system_queries import ReconciliationSystemQueryFacade
 from aats.services.operator.strategy_profile_queries import StrategyProfileQueryFacade
+from aats.services.operator.strategy_queries import StrategyQueryFacade
 from aats.services.operator.strategy_profiles import StrategyProfileControlService
 from aats.services.ledger.lot_projection import LotBasedProjectionBuilder
 from aats.services.portfolio_service.position_keys import build_position_key, position_key_for_snapshot_position
@@ -78,6 +83,10 @@ class OperatorQueryService:
         self.reconciliation_system_queries = ReconciliationSystemQueryFacade(self)
         self.strategy_profile_queries = StrategyProfileQueryFacade(self)
         self.audit_replay_queries = AuditReplayQueryFacade(self)
+        self.account_queries = AccountQueryFacade(self)
+        self.strategy_queries = StrategyQueryFacade(self)
+        self.report_queries = ReportQueryFacade(self)
+        self.blocker_queries = BlockerQueryFacade(self)
 
     def _cached(self, key: str, loader):
         if key not in self._cache:
@@ -1760,13 +1769,7 @@ class OperatorQueryService:
         return payload
 
     def strategy_runtime(self, *, limit: int = 10) -> dict[str, Any]:
-        normalized_limit = max(int(limit), 1)
-        cache_key = f"strategy_runtime:{self._scope_cache_fragment()}:{normalized_limit}"
-        return self._cached_ttl(
-            cache_key,
-            10,
-            lambda: self._build_strategy_runtime(limit=normalized_limit),
-        )
+        return self.strategy_queries.strategy_runtime(limit=limit)
 
     def _build_strategy_runtime(self, *, limit: int) -> dict[str, Any]:
         latest_event = self._latest_strategy_snapshot_event()
@@ -1807,6 +1810,43 @@ class OperatorQueryService:
                 margin_mode=self.state_scope.margin_mode,
             )
             latest_allocation_decision = None if latest_allocation is None else latest_allocation.model_dump(mode="json")
+            recent_budget_profiles = [
+                item.model_dump(mode="json")
+                for item in strategy_runtime_repo.list_budget_profiles(
+                    product_type=self.state_scope.product_type,
+                    margin_mode=self.state_scope.margin_mode,
+                )[:limit]
+            ]
+            recent_budget_assignments = [
+                item.model_dump(mode="json")
+                for item in strategy_runtime_repo.list_budget_assignments(
+                    product_type=self.state_scope.product_type,
+                    margin_mode=self.state_scope.margin_mode,
+                )[: limit * 4]
+            ]
+            if latest_allocation is not None:
+                recent_budget_snapshots = [
+                    item.model_dump(mode="json")
+                    for item in strategy_runtime_repo.list_budget_snapshots(
+                        allocation_id=latest_allocation.allocation_id,
+                    )
+                ]
+                recent_conflict_resolutions = [
+                    item.model_dump(mode="json")
+                    for item in strategy_runtime_repo.list_conflict_resolutions(
+                        allocation_id=latest_allocation.allocation_id,
+                    )
+                ]
+                recent_netting_decisions = [
+                    item.model_dump(mode="json")
+                    for item in strategy_runtime_repo.list_netting_decisions(
+                        allocation_id=latest_allocation.allocation_id,
+                    )
+                ]
+            else:
+                recent_budget_snapshots = []
+                recent_conflict_resolutions = []
+                recent_netting_decisions = []
             recent_bundles = [
                 item.model_dump(mode="json")
                 for item in strategy_runtime_repo.recent_execution_bundles(
@@ -1832,6 +1872,11 @@ class OperatorQueryService:
                 self.state_scope,
             )
             latest_allocation_decision = self._portfolio_allocation_payload(latest_allocation_event)
+            recent_budget_profiles = []
+            recent_budget_assignments = []
+            recent_budget_snapshots = []
+            recent_conflict_resolutions = []
+            recent_netting_decisions = []
             recent_bundle_events = list(
                 reversed(
                     self.runtime.event_store.by_topic_scoped(
@@ -1927,6 +1972,20 @@ class OperatorQueryService:
             "latest_approved_sleeve_weights": (
                 {} if latest_allocation_decision is None else dict(latest_allocation_decision.get("approved_sleeve_weights") or {})
             ),
+            "latest_budget_profile_count": len(recent_budget_profiles),
+            "latest_budget_assignment_count": len(recent_budget_assignments),
+            "latest_budget_snapshot_count": len(recent_budget_snapshots),
+            "latest_conflict_resolution_count": len(recent_conflict_resolutions),
+            "latest_netting_decision_count": len(recent_netting_decisions),
+            "latest_portfolio_risk_budget_state": (
+                None if latest_allocation_decision is None else latest_allocation_decision.get("portfolio_risk_budget_state")
+            ),
+            "latest_hedge_protected_notional": (
+                None if latest_allocation_decision is None else latest_allocation_decision.get("hedge_protected_notional")
+            ),
+            "latest_directional_reduced_notional": (
+                None if latest_allocation_decision is None else latest_allocation_decision.get("directional_reduced_notional")
+            ),
             "latest_selection_reason_codes": []
             if latest_snapshot is None
             else list(latest_snapshot.get("selection_reason_codes") or []),
@@ -2002,6 +2061,11 @@ class OperatorQueryService:
             "latest_applied_target": latest_target_payload,
             "strategy_sleeves": sleeve_records,
             "recent_sleeve_intents": recent_sleeve_intents,
+            "recent_budget_profiles": recent_budget_profiles,
+            "recent_budget_assignments": recent_budget_assignments,
+            "recent_budget_snapshots": recent_budget_snapshots,
+            "recent_conflict_resolutions": recent_conflict_resolutions,
+            "recent_netting_decisions": recent_netting_decisions,
             "recent_snapshots": recent_snapshots,
             "recent_execution_bundles": recent_bundles,
             "truth_source": "strategy_runtime_repo_plus_event_store" if strategy_runtime_repo is not None else "strategy_coordinator_snapshots",
@@ -2798,10 +2862,10 @@ class OperatorQueryService:
         return self.runtime_queries.system_runtime()
 
     def blockers(self) -> list[dict[str, Any]]:
-        return self.runtime_queries.blockers()
+        return self.blocker_queries.blockers()
 
     def blocker_control(self) -> dict[str, Any]:
-        return self.runtime_queries.blocker_control()
+        return self.blocker_queries.blocker_control()
 
     async def perform_blocker_action(
         self,
@@ -2827,7 +2891,7 @@ class OperatorQueryService:
         ).model_dump(mode="json")
 
     def blocker_history(self, *, limit: int = 20, offset: int = 0) -> dict[str, Any]:
-        return self.runtime_queries.blocker_history(limit=limit, offset=offset)
+        return self.blocker_queries.blocker_history(limit=limit, offset=offset)
 
     def metrics(self) -> dict[str, Any]:
         cache_key = f"metrics:{self._scope_cache_fragment()}"
@@ -3566,6 +3630,11 @@ class OperatorQueryService:
         recovery = self.recovery_view()
         guarded_live_preflight = self.guarded_live_preflight()
         guarded_live_run_packet = self.guarded_live_run_packet()
+        event_store_archive = self.runtime.event_store.archive_summary()
+        latest_replay_offset = self.runtime.event_store.latest_replay_offset(
+            projection_key="portfolio_replay",
+            scope=self.state_scope,
+        )
         now = utc_now()
         return {
             "runtime_profile": self.runtime.runtime_profile.to_dict(),
@@ -3672,6 +3741,10 @@ class OperatorQueryService:
                 "summary": guarded_live_run_packet.get("summary"),
                 "summary_metrics": guarded_live_run_packet.get("summary_metrics"),
                 "operator_actions": guarded_live_run_packet.get("operator_actions"),
+            },
+            "event_store_archive": event_store_archive,
+            "replay_offsets": {
+                "portfolio_replay": None if latest_replay_offset is None else latest_replay_offset.model_dump(mode="json"),
             },
         }
 
@@ -4272,8 +4345,7 @@ class OperatorQueryService:
         return "Phase 1 shadow compatibility layer is configured but has not processed shadow traffic yet."
 
     def portfolio_latest(self) -> dict[str, Any]:
-        cache_key = f"portfolio_latest:{self._scope_cache_fragment()}"
-        return self._cached_ttl(cache_key, 10, self._build_portfolio_latest)
+        return self.account_queries.portfolio_latest()
 
     def _build_portfolio_latest(self) -> dict[str, Any]:
         snapshot = self._latest_scoped_snapshot()
@@ -4284,41 +4356,16 @@ class OperatorQueryService:
         }
 
     def portfolio_history(self, *, limit: int = 20) -> dict[str, Any]:
-        history = snapshots_for_scope(self.runtime.portfolio_repo, self.state_scope, limit=limit)
-        return {
-            "snapshots": [snapshot.model_dump(mode="json") for snapshot in history],
-            "total_available": len(snapshots_for_scope(self.runtime.portfolio_repo, self.state_scope)),
-        }
+        return self.account_queries.portfolio_history(limit=limit)
 
     def balances(self) -> dict[str, Any]:
-        snapshot = self._latest_scoped_snapshot()
-        exchange = self.runtime.account_service.latest_snapshot()
-        return {
-            "local_balances": self._phase5_balance_view(),
-            "exchange_balances": [item.model_dump(mode="json") for item in exchange.balances] if exchange is not None else [],
-            "truth_source": "ledger_accounts" if self._phase5_control_plane_enabled() else "legacy_portfolio_snapshot",
-            "snapshot_balances": snapshot.balances if snapshot is not None else {},
-        }
+        return self.account_queries.balances()
 
     def positions(self) -> dict[str, Any]:
-        snapshot = self._latest_scoped_snapshot()
-        exchange = self.runtime.account_service.latest_snapshot()
-        reconciliation = self._latest_scoped_reconciliation()
-        return {
-            "local_positions": [item.model_dump(mode="json") for item in snapshot.positions] if snapshot is not None else [],
-            "local_net_positions": self._aggregate_local_positions(snapshot),
-            "local_margin_summary": self._local_position_margin_summary(snapshot),
-            "exchange_positions": [item.model_dump(mode="json") for item in exchange.positions] if exchange is not None else [],
-            "exchange_net_positions": self._aggregate_exchange_positions(exchange),
-            "exchange_margin_summary": self._exchange_position_margin_summary(exchange),
-            "margin_reconciliation": self._margin_reconciliation_summary(reconciliation),
-            "margin_buffer_overview": self.margin_buffer_risk(),
-            "truth_source": "ledger_backed_snapshot" if self._phase5_control_plane_enabled() else "legacy_portfolio_snapshot",
-        }
+        return self.account_queries.positions()
 
     def account_state(self) -> dict[str, Any]:
-        cache_key = f"account_state:{self._scope_cache_fragment()}"
-        return self._cached_ttl(cache_key, 10, self._build_account_state)
+        return self.account_queries.account_state()
 
     def _build_account_state(self) -> dict[str, Any]:
         status = self.runtime.account_service.status()
@@ -4419,25 +4466,10 @@ class OperatorQueryService:
         }
 
     async def account_recent_bills(self, *, limit: int = 50) -> dict[str, Any]:
-        rows = await self.runtime.account_service.recent_bills(
-            symbol=self.runtime.settings.default_symbol,
-            limit=limit,
-        )
-        return {
-            "bills": rows[:limit],
-            "total_available": len(rows),
-            "limit": limit,
-            "latest_bill": rows[0] if rows else None,
-        }
+        return await self.account_queries.account_recent_bills(limit=limit)
 
     def account_recent_funding_fees(self, *, limit: int = 50) -> dict[str, Any]:
-        normalized_limit = max(int(limit), 1)
-        cache_key = f"account_recent_funding_fees:{self._scope_cache_fragment()}:{normalized_limit}"
-        return self._cached_ttl(
-            cache_key,
-            10,
-            lambda: self._build_account_recent_funding_fees(limit=normalized_limit),
-        )
+        return self.account_queries.account_recent_funding_fees(limit=limit)
 
     def _build_account_recent_funding_fees(self, *, limit: int) -> dict[str, Any]:
         rows = funding_fee_records_for_scope(
@@ -4510,44 +4542,16 @@ class OperatorQueryService:
         }
 
     def account_open_orders(self) -> dict[str, Any]:
-        exchange = self.runtime.account_service.latest_snapshot()
-        local_open_orders = (
-            [self._execution_record_payload(order) for order in self.runtime.execution_order_repo.open_orders()]
-            if self._phase5_control_plane_enabled()
-            else [order.model_dump(mode="json") for order in self._scoped_open_order_states()]
-        )
-        return {
-            "local_open_orders": local_open_orders,
-            "exchange_open_orders": [order.model_dump(mode="json") for order in exchange.open_orders] if exchange is not None else [],
-        }
+        return self.account_queries.account_open_orders()
 
     def account_recent_fills(self) -> dict[str, Any]:
-        exchange = self.runtime.account_service.latest_snapshot()
-        local_fills = (
-            [self._execution_record_payload(fill) for fill in self._phase5_fill_rows(limit=50)]
-            if self._phase5_control_plane_enabled()
-            else [fill.model_dump(mode="json") for fill in self.recent_fills(limit=50)]
-        )
-        return {
-            "local_fills": local_fills,
-            "exchange_fills": [fill.model_dump(mode="json") for fill in exchange.fills[:50]] if exchange is not None else [],
-        }
+        return self.account_queries.account_recent_fills()
 
     def orders_open(self) -> dict[str, Any]:
-        return self.account_open_orders()
+        return self.account_queries.orders_open()
 
     def orders_recent(self, *, limit: int = 50, offset: int = 0) -> dict[str, Any]:
-        normalized_limit = max(int(limit), 1)
-        normalized_offset = max(int(offset), 0)
-        cache_key = (
-            f"orders_recent:{self._scope_cache_fragment()}:"
-            f"{normalized_limit}:{normalized_offset}"
-        )
-        return self._cached_ttl(
-            cache_key,
-            10,
-            lambda: self._build_orders_recent(limit=normalized_limit, offset=normalized_offset),
-        )
+        return self.account_queries.orders_recent(limit=limit, offset=offset)
 
     def _build_orders_recent(self, *, limit: int, offset: int) -> dict[str, Any]:
         if self._phase5_control_plane_enabled():
@@ -4577,60 +4581,10 @@ class OperatorQueryService:
         }
 
     def order_detail(self, client_order_id: str) -> dict[str, Any]:
-        if self._phase5_control_plane_enabled():
-            order = self.runtime.execution_order_repo.get_order_by_client_order_id(client_order_id)
-            if order is None:
-                raise KeyError(f"order_not_found:{client_order_id}")
-            fills = self.runtime.execution_fill_repo_v2.fills_for_order(client_order_id)
-            control_order = self._control_plane_order_state(client_order_id)
-            return {
-                "order": self._execution_record_payload(order),
-                "fills": [self._execution_record_payload(fill) for fill in fills],
-                "stuck_submission_resolution": (
-                    self._stuck_submission_resolution(
-                        order=control_order,
-                        fills=self._control_plane_fills_for_order(client_order_id),
-                        exchange_snapshot=self.runtime.account_service.latest_snapshot(),
-                    )
-                    if control_order is not None
-                    else {
-                        "eligible": False,
-                        "summary": "当前订单缺少可操作的本地执行状态，暂时不能执行卡单恢复。",
-                        "reason_code": "phase5_order_state_unavailable",
-                    }
-                ),
-                "truth_source": "execution_order_repo",
-            }
-        order = next(
-            (item for item in self._scoped_order_states() if item.client_order_id == client_order_id),
-            None,
-        )
-        if order is None:
-            raise KeyError(f"order_not_found:{client_order_id}")
-        fills = self._scoped_fills_for_order(client_order_id)
-        return {
-            "order": self._execution_record_payload(order),
-            "fills": [self._execution_record_payload(fill) for fill in fills],
-            "stuck_submission_resolution": self._stuck_submission_resolution(
-                order=order,
-                fills=fills,
-                exchange_snapshot=self.runtime.account_service.latest_snapshot(),
-            ),
-            "truth_source": "execution_repo",
-        }
+        return self.account_queries.order_detail(client_order_id)
 
     def fills_recent(self, *, limit: int = 50, offset: int = 0) -> dict[str, Any]:
-        normalized_limit = max(int(limit), 1)
-        normalized_offset = max(int(offset), 0)
-        cache_key = (
-            f"fills_recent:{self._scope_cache_fragment()}:"
-            f"{normalized_limit}:{normalized_offset}"
-        )
-        return self._cached_ttl(
-            cache_key,
-            10,
-            lambda: self._build_fills_recent(limit=normalized_limit, offset=normalized_offset),
-        )
+        return self.account_queries.fills_recent(limit=limit, offset=offset)
 
     def _build_fills_recent(self, *, limit: int, offset: int) -> dict[str, Any]:
         if self._phase5_control_plane_enabled():
@@ -4657,29 +4611,10 @@ class OperatorQueryService:
         }
 
     def fill_detail(self, fill_id: str) -> dict[str, Any]:
-        if self._phase5_control_plane_enabled():
-            fill = self.runtime.execution_fill_repo_v2.get_fill(fill_id)
-            if fill is None:
-                raise KeyError(f"fill_not_found:{fill_id}")
-            outcome = self._fill_outcome_map().get(fill_id)
-            return {
-                "fill": self._execution_record_payload(fill),
-                "fill_outcome": None if outcome is None else outcome.model_dump(mode="json"),
-                "truth_source": "execution_fill_repo_v2",
-            }
-        fill = next((item for item in self._scoped_fills() if item.fill_id == fill_id), None)
-        if fill is None:
-            raise KeyError(f"fill_not_found:{fill_id}")
-        outcome = self._fill_outcome_map().get(fill_id)
-        return {
-            "fill": self._execution_record_payload(fill),
-            "fill_outcome": None if outcome is None else outcome.model_dump(mode="json"),
-            "truth_source": "execution_repo",
-        }
+        return self.account_queries.fill_detail(fill_id)
 
     def execution_latest(self) -> dict[str, Any]:
-        cache_key = f"execution_latest:{self._scope_cache_fragment()}"
-        return self._cached_ttl(cache_key, 10, self._build_execution_latest)
+        return self.account_queries.execution_latest()
 
     def _build_execution_latest(self) -> dict[str, Any]:
         latest_order = self.latest_order()
@@ -4702,18 +4637,7 @@ class OperatorQueryService:
         }
 
     def execution_quality_report(self, *, limit: int = 50, offset: int = 0) -> dict[str, Any]:
-        source_rows = self._phase5_fill_rows(limit=None) if self._phase5_control_plane_enabled() else list(reversed(self._scoped_fills()))
-        rows = [self._execution_quality_row(fill) for fill in source_rows]
-        paged = rows[offset : offset + limit]
-        return {
-            "rows": paged,
-            "limit": limit,
-            "offset": offset,
-            "total_available": len(rows),
-            "has_more": offset + len(paged) < len(rows),
-            "truth_source": "execution_fill_repo_v2" if self._phase5_control_plane_enabled() else "execution_repo",
-            "summary": self._execution_quality_summary(rows),
-        }
+        return self.report_queries.execution_quality_report(limit=limit, offset=offset)
 
     def _execution_quality_summary(self, rows: list[dict[str, Any]]) -> dict[str, Any]:
         if not rows:
@@ -5053,98 +4977,10 @@ class OperatorQueryService:
         }
 
     def profitability_overview(self, *, limit: int = 100) -> dict[str, Any]:
-        normalized_limit = max(int(limit), 1)
-        outcomes = list(self._scoped_fill_outcomes())
-        outcomes.sort(key=lambda item: item.ingestion_timestamp or item.created_at, reverse=True)
-        rows = [self._profitability_fill_row(item) for item in outcomes[:normalized_limit]]
-        funding_records = list(self._scoped_funding_fee_records())
-        funding_records.sort(key=lambda item: self._funding_fee_event_timestamp(item) or datetime.min, reverse=True)
-        funding_rows = [self._funding_fee_profitability_row(item) for item in funding_records[:normalized_limit]]
-        net_realized = sum(
-            (self._to_decimal(item.get("realized_pnl_delta")) or Decimal("0"))
-            for item in rows
-        )
-        gross_realized = sum(
-            (self._to_decimal(item.get("gross_realized_pnl")) or Decimal("0"))
-            for item in rows
-        )
-        total_fees = sum(
-            (self._to_decimal(item.get("fee_amount")) or Decimal("0"))
-            for item in rows
-        )
-        total_notional = sum(
-            (self._to_decimal(item.get("fill_notional")) or Decimal("0"))
-            for item in rows
-        )
-        funding_fee_net = sum(
-            (self._to_decimal(item.get("funding_fee_delta")) or Decimal("0"))
-            for item in funding_rows
-        )
-        combined_net_realized = net_realized + funding_fee_net
-        winning = 0
-        losing = 0
-        for item in rows:
-            pnl = self._to_decimal(item.get("realized_pnl_delta")) or Decimal("0")
-            if pnl > self._DECIMAL_EPSILON:
-                winning += 1
-            elif pnl < -self._DECIMAL_EPSILON:
-                losing += 1
-        recent_realized_events = sorted(
-            rows + funding_rows,
-            key=self._profitability_event_sort_key,
-            reverse=True,
-        )[:normalized_limit]
-        funding_summary = self._profitability_funding_fee_summary(funding_records[:normalized_limit])
-        return {
-            "summary": {
-                "closed_fill_count": len(rows),
-                "trading_fill_count": len(rows),
-                "winning_fill_count": winning,
-                "losing_fill_count": losing,
-                "win_rate": None if not rows else round(winning / len(rows), 6),
-                "gross_realized_pnl": gross_realized,
-                "net_realized_pnl": net_realized,
-                "trading_gross_realized_pnl": gross_realized,
-                "trading_net_realized_pnl": net_realized,
-                "total_fees": total_fees,
-                "trading_total_fees": total_fees,
-                "total_notional": total_notional,
-                "fee_to_notional_ratio": (
-                    None if abs(total_notional) <= self._DECIMAL_EPSILON else total_fees / total_notional
-                ),
-                "avg_realized_pnl_per_fill": (
-                    None if not rows else net_realized / Decimal(len(rows))
-                ),
-                "funding_fee_count": funding_summary["count"],
-                "funding_fee_income_count": funding_summary["income_count"],
-                "funding_fee_expense_count": funding_summary["expense_count"],
-                "funding_fee_net_pnl": funding_summary["net_total"],
-                "funding_fee_absolute_total": funding_summary["absolute_total"],
-                "combined_net_realized_pnl": combined_net_realized,
-                "realized_event_count": len(recent_realized_events),
-            },
-            "execution_quality": self._execution_quality_summary(rows),
-            "funding_fee_summary": funding_summary,
-            "recent_closed_fills": rows,
-            "recent_realized_events": recent_realized_events,
-            "truth_source": "fill_outcomes_plus_funding_fee_records",
-        }
+        return self.report_queries.profitability_overview(limit=limit)
 
     def forward_validation_report(self, *, window_days: int = 7, period_count: int = 4) -> dict[str, Any]:
-        normalized_window_days = max(int(window_days), 1)
-        normalized_period_count = max(int(period_count), 1)
-        cache_key = (
-            f"forward_validation:{self._scope_cache_fragment()}:"
-            f"{normalized_window_days}:{normalized_period_count}"
-        )
-        return self._cached_ttl(
-            cache_key,
-            30,
-            lambda: self._build_forward_validation_report(
-                window_days=normalized_window_days,
-                period_count=normalized_period_count,
-            ),
-        )
+        return self.report_queries.forward_validation_report(window_days=window_days, period_count=period_count)
 
     def _build_forward_validation_report(self, *, window_days: int, period_count: int) -> dict[str, Any]:
         normalized_window_days = max(int(window_days), 1)
@@ -5329,26 +5165,10 @@ class OperatorQueryService:
         period_count: int = 4,
         forward_validation: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        normalized_window_days = max(int(window_days), 1)
-        normalized_period_count = max(int(period_count), 1)
-        if forward_validation is not None:
-            return self._build_scaling_readiness_report(
-                window_days=normalized_window_days,
-                period_count=normalized_period_count,
-                forward_validation=forward_validation,
-            )
-        cache_key = (
-            f"scaling_readiness:{self._scope_cache_fragment()}:"
-            f"{normalized_window_days}:{normalized_period_count}"
-        )
-        return self._cached_ttl(
-            cache_key,
-            30,
-            lambda: self._build_scaling_readiness_report(
-                window_days=normalized_window_days,
-                period_count=normalized_period_count,
-                forward_validation=None,
-            ),
+        return self.report_queries.scaling_readiness_report(
+            window_days=window_days,
+            period_count=period_count,
+            forward_validation=forward_validation,
         )
 
     def _build_scaling_readiness_report(
@@ -5483,26 +5303,12 @@ class OperatorQueryService:
         window_days: int = 7,
         period_count: int = 4,
     ) -> dict[str, Any]:
-        normalized_profitability_limit = max(int(profitability_limit), 1)
-        normalized_anomaly_limit = max(int(anomaly_limit), 1)
-        normalized_segment_limit = max(int(segment_limit), 1)
-        normalized_window_days = max(int(window_days), 1)
-        normalized_period_count = max(int(period_count), 1)
-        cache_key = (
-            f"trial_review_packet:{self._scope_cache_fragment()}:"
-            f"{normalized_profitability_limit}:{normalized_anomaly_limit}:"
-            f"{normalized_segment_limit}:{normalized_window_days}:{normalized_period_count}"
-        )
-        return self._cached_ttl(
-            cache_key,
-            45,
-            lambda: self._build_trial_review_packet(
-                profitability_limit=normalized_profitability_limit,
-                anomaly_limit=normalized_anomaly_limit,
-                segment_limit=normalized_segment_limit,
-                window_days=normalized_window_days,
-                period_count=normalized_period_count,
-            ),
+        return self.report_queries.trial_review_packet(
+            profitability_limit=profitability_limit,
+            anomaly_limit=anomaly_limit,
+            segment_limit=segment_limit,
+            window_days=window_days,
+            period_count=period_count,
         )
 
     def trial_review_summary(
@@ -5512,21 +5318,10 @@ class OperatorQueryService:
         window_days: int = 7,
         period_count: int = 4,
     ) -> dict[str, Any]:
-        normalized_segment_limit = max(int(segment_limit), 1)
-        normalized_window_days = max(int(window_days), 1)
-        normalized_period_count = max(int(period_count), 1)
-        cache_key = (
-            f"trial_review_summary:{self._scope_cache_fragment()}:"
-            f"{normalized_segment_limit}:{normalized_window_days}:{normalized_period_count}"
-        )
-        return self._cached_ttl(
-            cache_key,
-            30,
-            lambda: self._build_trial_review_summary(
-                segment_limit=normalized_segment_limit,
-                window_days=normalized_window_days,
-                period_count=normalized_period_count,
-            ),
+        return self.report_queries.trial_review_summary(
+            segment_limit=segment_limit,
+            window_days=window_days,
+            period_count=period_count,
         )
 
     def trial_review_details(
@@ -5538,26 +5333,12 @@ class OperatorQueryService:
         window_days: int = 7,
         period_count: int = 4,
     ) -> dict[str, Any]:
-        normalized_profitability_limit = max(int(profitability_limit), 1)
-        normalized_anomaly_limit = max(int(anomaly_limit), 1)
-        normalized_segment_limit = max(int(segment_limit), 1)
-        normalized_window_days = max(int(window_days), 1)
-        normalized_period_count = max(int(period_count), 1)
-        cache_key = (
-            f"trial_review_details:{self._scope_cache_fragment()}:"
-            f"{normalized_profitability_limit}:{normalized_anomaly_limit}:"
-            f"{normalized_segment_limit}:{normalized_window_days}:{normalized_period_count}"
-        )
-        return self._cached_ttl(
-            cache_key,
-            45,
-            lambda: self._build_trial_review_details(
-                profitability_limit=normalized_profitability_limit,
-                anomaly_limit=normalized_anomaly_limit,
-                segment_limit=normalized_segment_limit,
-                window_days=normalized_window_days,
-                period_count=normalized_period_count,
-            ),
+        return self.report_queries.trial_review_details(
+            profitability_limit=profitability_limit,
+            anomaly_limit=anomaly_limit,
+            segment_limit=segment_limit,
+            window_days=window_days,
+            period_count=period_count,
         )
 
     def _trial_review_action_items(
@@ -5754,12 +5535,7 @@ class OperatorQueryService:
         }
 
     def trial_review_history(self, *, limit: int = 20, offset: int = 0) -> dict[str, Any]:
-        return self.recent_operator_actions(
-            action="trial_review_snapshot",
-            key="trial_review",
-            limit=limit,
-            offset=offset,
-        )
+        return self.report_queries.trial_review_history(limit=limit, offset=offset)
 
     def record_capital_scale_review(
         self,
@@ -5864,111 +5640,7 @@ class OperatorQueryService:
         limit: int = 200,
         group_by: tuple[str, ...] = ("symbol", "market_regime", "side", "execution_action"),
     ) -> dict[str, Any]:
-        allowed_dimensions = {
-            "symbol",
-            "market_regime",
-            "volatility_state",
-            "timeframe",
-            "side",
-            "execution_action",
-            "position_intent",
-            "active_profile_id",
-            "exit_attribution",
-            "risk_protection",
-        }
-        normalized_group_by = tuple(item for item in group_by if item in allowed_dimensions) or ("symbol",)
-        outcomes = list(self._scoped_fill_outcomes())
-        outcomes.sort(key=lambda item: item.ingestion_timestamp or item.created_at, reverse=True)
-        rows = [self._execution_quality_row(item) for item in outcomes[:limit]]
-        grouped: dict[tuple[Any, ...], dict[str, Any]] = {}
-        for row in rows:
-            segment_payload = {
-                "symbol": row.get("symbol"),
-                "market_regime": row.get("market_regime"),
-                "volatility_state": row.get("volatility_state"),
-                "timeframe": (row.get("decision_context") or {}).get("timeframe"),
-                "side": row.get("side"),
-                "execution_action": row.get("execution_action"),
-                "position_intent": row.get("position_intent"),
-                "active_profile_id": row.get("active_profile_id"),
-                "exit_attribution": row.get("exit_attribution"),
-                "risk_protection": row.get("risk_protection"),
-            }
-            group_key = tuple(segment_payload.get(key) for key in normalized_group_by)
-            bucket = grouped.setdefault(
-                group_key,
-                {
-                    "segment": {key: segment_payload.get(key) for key in normalized_group_by},
-                    "fill_count": 0,
-                    "winning_fill_count": 0,
-                    "losing_fill_count": 0,
-                    "gross_realized_pnl": Decimal("0"),
-                    "net_realized_pnl": Decimal("0"),
-                    "total_fees": Decimal("0"),
-                    "total_notional": Decimal("0"),
-                    "total_adverse_slippage_bps": Decimal("0"),
-                    "slippage_observation_count": 0,
-                },
-            )
-            bucket["fill_count"] += 1
-            realized = self._to_decimal(row.get("realized_pnl_delta")) or Decimal("0")
-            gross = self._to_decimal(row.get("gross_realized_pnl")) or Decimal("0")
-            fees = self._to_decimal(row.get("fee_amount")) or Decimal("0")
-            notional = self._to_decimal(row.get("fill_notional")) or Decimal("0")
-            slippage = self._to_decimal(row.get("adverse_slippage_bps"))
-            bucket["gross_realized_pnl"] += gross
-            bucket["net_realized_pnl"] += realized
-            bucket["total_fees"] += fees
-            bucket["total_notional"] += notional
-            if realized > self._DECIMAL_EPSILON:
-                bucket["winning_fill_count"] += 1
-            elif realized < -self._DECIMAL_EPSILON:
-                bucket["losing_fill_count"] += 1
-            if slippage is not None:
-                bucket["total_adverse_slippage_bps"] += slippage
-                bucket["slippage_observation_count"] += 1
-
-        segments: list[dict[str, Any]] = []
-        for bucket in grouped.values():
-            fill_count = int(bucket["fill_count"])
-            total_notional = bucket["total_notional"]
-            slippage_observation_count = int(bucket["slippage_observation_count"])
-            segments.append(
-                {
-                    "segment": bucket["segment"],
-                    "fill_count": fill_count,
-                    "winning_fill_count": int(bucket["winning_fill_count"]),
-                    "losing_fill_count": int(bucket["losing_fill_count"]),
-                    "win_rate": None if fill_count == 0 else round(int(bucket["winning_fill_count"]) / fill_count, 6),
-                    "gross_realized_pnl": bucket["gross_realized_pnl"],
-                    "net_realized_pnl": bucket["net_realized_pnl"],
-                    "total_fees": bucket["total_fees"],
-                    "total_notional": total_notional,
-                    "fee_to_notional_ratio": (
-                        None if abs(total_notional) <= self._DECIMAL_EPSILON else bucket["total_fees"] / total_notional
-                    ),
-                    "avg_adverse_slippage_bps": (
-                        None
-                        if slippage_observation_count == 0
-                        else bucket["total_adverse_slippage_bps"] / Decimal(slippage_observation_count)
-                    ),
-                }
-            )
-
-        segments.sort(
-            key=lambda item: (
-                self._to_decimal(item.get("net_realized_pnl")) or Decimal("0"),
-                item.get("fill_count") or 0,
-            ),
-            reverse=True,
-        )
-        return {
-            "group_by": list(normalized_group_by),
-            "segments": segments,
-            "total_available": len(segments),
-            "source_fill_count": len(rows),
-            "truth_source": "fill_outcomes",
-        }
+        return self.strategy_queries.strategy_segment_report(limit=limit, group_by=group_by)
 
     def _open_strategy_lot_rows(self) -> list[dict[str, Any]]:
         cache_key = f"open_strategy_lot_rows:{self._scope_cache_fragment()}"
@@ -6139,169 +5811,10 @@ class OperatorQueryService:
         return payload
 
     def strategy_attribution_report(self, *, limit: int = 200) -> dict[str, Any]:
-        normalized_limit = max(int(limit), 1)
-        sleeve_records = list(self._scoped_sleeve_pnl_records())
-        sleeve_records.sort(key=lambda item: item.event_timestamp or item.created_at, reverse=True)
-        sleeve_rows = sleeve_records[:normalized_limit]
-        outcomes = list(self._scoped_fill_outcomes())
-        outcomes.sort(key=lambda item: item.ingestion_timestamp or item.created_at, reverse=True)
-        rows = [self._execution_quality_row(item) for item in outcomes[:normalized_limit]]
-
-        def _bucket_by(key: str, fallback: str) -> list[dict[str, Any]]:
-            buckets: dict[str, dict[str, Any]] = {}
-            for row in rows:
-                bucket_key = str(row.get(key) or fallback)
-                bucket = buckets.setdefault(
-                    bucket_key,
-                    {
-                        key: bucket_key,
-                        "fill_count": 0,
-                        "net_realized_pnl": Decimal("0"),
-                        "gross_realized_pnl": Decimal("0"),
-                        "total_notional": Decimal("0"),
-                        "winning_fill_count": 0,
-                        "losing_fill_count": 0,
-                    },
-                )
-                realized = self._to_decimal(row.get("realized_pnl_delta")) or Decimal("0")
-                gross = self._to_decimal(row.get("gross_realized_pnl")) or Decimal("0")
-                notional = self._to_decimal(row.get("fill_notional")) or Decimal("0")
-                bucket["fill_count"] += 1
-                bucket["net_realized_pnl"] += realized
-                bucket["gross_realized_pnl"] += gross
-                bucket["total_notional"] += notional
-                if realized > self._DECIMAL_EPSILON:
-                    bucket["winning_fill_count"] += 1
-                elif realized < -self._DECIMAL_EPSILON:
-                    bucket["losing_fill_count"] += 1
-            payload = list(buckets.values())
-            payload.sort(
-                key=lambda item: (
-                    self._to_decimal(item.get("net_realized_pnl")) or Decimal("0"),
-                    item.get("fill_count") or 0,
-                ),
-                reverse=True,
-            )
-            return payload
-
-        protected_rows = [row for row in rows if bool(row.get("risk_protection_active"))]
-        unprotected_rows = [row for row in rows if not bool(row.get("risk_protection_active"))]
-        constraint_counts: dict[str, int] = {}
-        rejection_counts: dict[str, int] = {}
-        for row in protected_rows:
-            for code in row.get("risk_constraints_applied") or []:
-                constraint_counts[str(code)] = constraint_counts.get(str(code), 0) + 1
-            for code in row.get("risk_rejection_reasons") or []:
-                rejection_counts[str(code)] = rejection_counts.get(str(code), 0) + 1
-
-        inventory_summary = self._strategy_sleeve_inventory_summary()
-        top_inventory_sleeve = inventory_summary[0] if inventory_summary else None
-
-        return {
-            "summary": {
-                "fill_count": len(rows),
-                "sleeve_pnl_record_count": len(sleeve_rows),
-                "protected_fill_count": len(protected_rows),
-                "unprotected_fill_count": len(unprotected_rows),
-                "protected_net_realized_pnl": sum(
-                    (self._to_decimal(item.get("realized_pnl_delta")) or Decimal("0")) for item in protected_rows
-                ),
-                "unprotected_net_realized_pnl": sum(
-                    (self._to_decimal(item.get("realized_pnl_delta")) or Decimal("0")) for item in unprotected_rows
-                ),
-                "combined_net_realized_pnl": sum(
-                    (
-                        (self._to_decimal(item.realized_pnl) or Decimal("0"))
-                        + (self._to_decimal(item.funding_fee_amount) or Decimal("0"))
-                    )
-                    for item in sleeve_rows
-                ),
-                "funding_fee_net_pnl": sum(
-                    (self._to_decimal(item.funding_fee_amount) or Decimal("0"))
-                    for item in sleeve_rows
-                ),
-                "top_inventory_sleeve_id": None if top_inventory_sleeve is None else top_inventory_sleeve.get("strategy_sleeve_id"),
-                "top_inventory_notional": None if top_inventory_sleeve is None else top_inventory_sleeve.get("inventory_notional"),
-            },
-            "profitability_by_strategy_sleeve": self._strategy_pnl_bucket_rows(
-                records=sleeve_rows,
-                key_name="strategy_sleeve_id",
-                fallback="unassigned",
-            ),
-            "profitability_by_allocation": self._strategy_pnl_bucket_rows(
-                records=sleeve_rows,
-                key_name="allocation_id",
-                fallback="unassigned",
-            ),
-            "profitability_by_strategy_bundle": self._strategy_pnl_bucket_rows(
-                records=sleeve_rows,
-                key_name="strategy_bundle_id",
-                fallback="unassigned",
-            ),
-            "profitability_by_attribution_type": self._strategy_pnl_bucket_rows(
-                records=sleeve_rows,
-                key_name="attribution_type",
-                fallback="unknown",
-            ),
-            "profitability_by_regime": _bucket_by("market_regime", "unknown"),
-            "profitability_by_strategy_family": _bucket_by("strategy_family", "directional"),
-            "profitability_by_strategy_route_action": _bucket_by("strategy_route_action", "override_target"),
-            "profitability_by_profile": _bucket_by("active_profile_id", "unassigned"),
-            "profitability_by_exit_attribution": _bucket_by("exit_attribution", "none"),
-            "sleeve_inventory_summary": inventory_summary,
-            "risk_protection_summary": {
-                "protected_fill_count": len(protected_rows),
-                "unprotected_fill_count": len(unprotected_rows),
-                "top_constraint_codes": [
-                    {"code": key, "count": value}
-                    for key, value in sorted(constraint_counts.items(), key=lambda item: (-item[1], item[0]))[:10]
-                ],
-                "top_rejection_codes": [
-                    {"code": key, "count": value}
-                    for key, value in sorted(rejection_counts.items(), key=lambda item: (-item[1], item[0]))[:10]
-                ],
-            },
-            "source_fill_count": len(rows),
-            "truth_source": "sleeve_pnl_records_plus_fill_outcomes_plus_decision_audit",
-        }
+        return self.strategy_queries.strategy_attribution_report(limit=limit)
 
     def execution_anomaly_report(self, *, limit: int = 100) -> dict[str, Any]:
-        rows = self.execution_quality_report(limit=limit, offset=0)["rows"]
-        flagged_rows: list[dict[str, Any]] = []
-        summary = {
-            "high_slippage_count": 0,
-            "high_fee_ratio_count": 0,
-            "slow_decision_to_submit_count": 0,
-            "slow_submit_to_fill_count": 0,
-        }
-        for row in rows:
-            flags: list[str] = []
-            slippage = self._to_decimal(row.get("adverse_slippage_bps"))
-            fee_ratio = self._to_decimal(row.get("fee_ratio"))
-            decision_to_submit_latency_ms = row.get("decision_to_submit_latency_ms")
-            submit_to_exchange_fill_latency_ms = row.get("submit_to_exchange_fill_latency_ms")
-
-            if slippage is not None and slippage > Decimal(str(max(self.runtime.settings.max_slippage_tolerance_bps * 0.5, 2))):
-                flags.append("high_adverse_slippage")
-                summary["high_slippage_count"] += 1
-            if fee_ratio is not None and fee_ratio > Decimal("0.001"):
-                flags.append("high_fee_ratio")
-                summary["high_fee_ratio_count"] += 1
-            if isinstance(decision_to_submit_latency_ms, (int, float)) and decision_to_submit_latency_ms > 10_000:
-                flags.append("slow_decision_to_submit")
-                summary["slow_decision_to_submit_count"] += 1
-            if isinstance(submit_to_exchange_fill_latency_ms, (int, float)) and submit_to_exchange_fill_latency_ms > 10_000:
-                flags.append("slow_submit_to_fill")
-                summary["slow_submit_to_fill_count"] += 1
-            if flags:
-                flagged_rows.append({**row, "anomaly_flags": flags})
-
-        return {
-            "summary": summary,
-            "rows": flagged_rows,
-            "evaluated_fill_count": len(rows),
-            "truth_source": "fill_outcomes",
-        }
+        return self.report_queries.execution_anomaly_report(limit=limit)
 
     def execution_errors(self) -> dict[str, Any]:
         persisted = [
@@ -6469,6 +5982,133 @@ class OperatorQueryService:
             actor_identity=actor_identity,
             auth_source=auth_source,
         )
+
+    async def refresh_exchange_state(
+        self,
+        *,
+        blocker: str | None,
+        reason: str,
+        actor_role: OperatorRole,
+        actor_identity: str | None = None,
+        auth_source: AuthSource = "anonymous",
+    ) -> dict[str, Any]:
+        recovery_before = self.recovery_view()["recovery_state"]
+        blockers_before = self.blockers()
+        market_before = self.runtime.market_gateway.status()
+        account_before = self.runtime.account_service.status()
+        max_attempts = max(int(self.runtime.settings.operator_exchange_refresh_max_attempts), 1)
+        retry_delay_seconds = max(float(self.runtime.settings.operator_exchange_refresh_retry_delay_seconds), 0.0)
+        errors: list[dict[str, Any]] = []
+        market_refresh_completed = False
+        account_refresh_completed = False
+        attempts_executed = 0
+
+        for attempt in range(1, max_attempts + 1):
+            attempts_executed = attempt
+            try:
+                await self._refresh_market_snapshot_for_operator_resolution()
+                market_refresh_completed = True
+            except Exception as exc:
+                errors.append(
+                    {
+                        "attempt": attempt,
+                        "scope": "market_data",
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                    }
+                )
+            try:
+                await self._refresh_account_state_for_operator_resolution()
+                account_refresh_completed = True
+            except Exception as exc:
+                errors.append(
+                    {
+                        "attempt": attempt,
+                        "scope": "account_state",
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                    }
+                )
+            self._invalidate_cache()
+            if blocker and not self.blocker_control_service.has_active_blocker(blocker):
+                break
+            if attempt >= max_attempts:
+                break
+            if retry_delay_seconds > 0:
+                await asyncio.sleep(retry_delay_seconds)
+
+        if not market_refresh_completed and not account_refresh_completed and errors:
+            raise ValueError("exchange_state_refresh_failed")
+
+        self._invalidate_cache()
+        recovery_after = self.recovery_view()["recovery_state"]
+        blockers_after = self.blockers()
+        market_after = self.runtime.market_gateway.status()
+        account_after = self.runtime.account_service.status()
+        blocker_cleared = False if blocker is None else not self.blocker_control_service.has_active_blocker(blocker)
+        if blocker and blocker_cleared:
+            message = "已刷新交易所状态，当前阻断已解除。"
+        elif blocker:
+            message = "已刷新交易所状态，但当前阻断仍然存在。"
+        else:
+            message = "已刷新交易所状态。"
+
+        self._append_event(
+            topic=topics.OPERATOR_ACTIONS,
+            key="system",
+            payload_model=OperatorActionRecord(
+                action="refresh_exchange_state",
+                actor_role=actor_role,
+                actor_identity=actor_identity,
+                auth_source=auth_source,
+                reason=reason,
+                status="completed",
+                recovery_state_before=recovery_before,
+                recovery_state_after=recovery_after,
+                details={
+                    "target_blocker": blocker,
+                    "attempts_executed": attempts_executed,
+                    "max_attempts": max_attempts,
+                    "retry_delay_seconds": retry_delay_seconds,
+                    "market_refresh_completed": market_refresh_completed,
+                    "account_refresh_completed": account_refresh_completed,
+                    "blocker_cleared": blocker_cleared,
+                    "errors": errors,
+                    "market_before": market_before,
+                    "market_after": market_after,
+                    "account_before": account_before,
+                    "account_after": account_after,
+                    "blockers_before": blockers_before,
+                    "blockers_after": blockers_after,
+                },
+            ),
+        )
+        self._persist_blocker_snapshot(
+            source="refresh_exchange_state",
+            runtime_state=self.system_health()["runtime_state"],
+            mode_snapshot=self.system_mode(),
+            blockers=self.blockers(),
+        )
+        return {
+            "status": "completed",
+            "message": message,
+            "recovery": self.recovery_view(),
+            "blockers": blockers_after,
+            "details": {
+                "target_blocker": blocker,
+                "attempts_executed": attempts_executed,
+                "max_attempts": max_attempts,
+                "retry_delay_seconds": retry_delay_seconds,
+                "market_refresh_completed": market_refresh_completed,
+                "account_refresh_completed": account_refresh_completed,
+                "blocker_cleared": blocker_cleared,
+                "errors": errors,
+                "market_before": market_before,
+                "market_after": market_after,
+                "account_before": account_before,
+                "account_after": account_after,
+            },
+        }
 
     def ai_review_restore(
         self,
@@ -6727,6 +6367,27 @@ class OperatorQueryService:
         if self.runtime.settings.account_backend != "okx" or not self.runtime.settings.account_read_enabled:
             return None
         return await self.runtime.account_service.refresh(force=True)
+
+    async def _refresh_market_snapshot_for_operator_resolution(self):
+        refresh = getattr(self.runtime.market_gateway, "refresh_snapshot", None)
+        if not callable(refresh):
+            return None
+        return await refresh(symbol=self.runtime.settings.default_symbol)
+
+    async def _refresh_account_state_for_operator_resolution(self):
+        refresh = getattr(self.runtime.account_service, "refresh", None)
+        if not callable(refresh):
+            return None
+        try:
+            snapshot = await refresh(force=True)
+        finally:
+            sync_funding = getattr(self.runtime, "_sync_funding_fees_after_refresh", None)
+            if callable(sync_funding):
+                await sync_funding()
+            evaluate_guard = getattr(self.runtime, "_evaluate_derivatives_live_guard_after_refresh", None)
+            if callable(evaluate_guard):
+                evaluate_guard()
+        return snapshot
 
     def _stuck_submission_resolution(
         self,

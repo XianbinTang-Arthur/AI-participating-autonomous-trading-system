@@ -7,14 +7,14 @@ from decimal import Decimal
 
 from aats.events import topics
 from aats.schemas.audit import DecisionAuditRecord
-from aats.schemas.common import EventEnvelope
+from aats.schemas.common import EventEnvelope, utc_now
 from aats.schemas.decision import DecisionContext, DecisionOutcome, PositionTarget
 from aats.schemas.execution import ExecutionPlan, FillEvent, OrderIntent, OrderState
 from aats.schemas.exchange import AccountBaselineSnapshot
 from aats.schemas.governance import PolicyDecision, RiskDecision
 from aats.schemas.market import MarketSnapshot
 from aats.schemas.portfolio import PortfolioSnapshot, is_baseline_snapshot
-from aats.schemas.reconciliation import ReconciliationReport
+from aats.schemas.reconciliation import ReplayProjectionOffset, ReconciliationReport
 from aats.schemas.strategy_runtime import (
     PortfolioAllocationDecision,
     StrategyExecutionBundle,
@@ -25,7 +25,7 @@ from aats.services.execution_engine.state_machine import OrderStateMachine
 from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, EPSILON_DECIMAL_9, is_effectively_zero, quantize_decimal, to_decimal
 from aats.services.portfolio_service.position_keys import position_key_for_snapshot_position
 from aats.services.portfolio_service.positions import PortfolioState
-from aats.storage.base import AuditRepository, EventStore, PortfolioRepository
+from aats.storage.base import AuditRepository, EventStore, PortfolioRepository, ReconciliationRepository
 from aats.services.portfolio_service.reconstruction import PortfolioReconstructionService
 from aats.services.runtime_scope import (
     RuntimeStateScope,
@@ -56,6 +56,10 @@ class ReplayResult:
     final_reconstructed_snapshot: PortfolioSnapshot | None = None
     final_stored_snapshot: PortfolioSnapshot | None = None
     decision_chains: dict[str, DecisionAuditRecord] = field(default_factory=dict)
+    incremental_window_start_at: datetime | None = None
+    baseline_generation_id: str | None = None
+    exchange_ack_watermark_id: str | None = None
+    replay_offset_id: str | None = None
 
 
 class ReplayEngine:
@@ -89,6 +93,32 @@ class ReplayEngine:
         topics.RECONCILIATION_REPORTS,
         topics.AUDIT_RECORDS,
     )
+    _DECISION_VALIDATION_TOPICS: frozenset[str] = frozenset(
+        {
+            topics.HEALTH_SNAPSHOTS,
+            topics.DECISION_CONTEXTS,
+            topics.BASELINE_ASSESSMENTS,
+            topics.AI_DECISION_BRIEFS,
+            topics.AI_ASSESSMENTS,
+            topics.AI_SHADOW_DECISIONS,
+            topics.AI_SHADOW_EVALUATIONS,
+            topics.AI_DEGRADATION_EVENTS,
+            topics.STRATEGY_COORDINATOR_SNAPSHOTS,
+            topics.STRATEGY_SLEEVE_INTENTS,
+            topics.PORTFOLIO_ALLOCATION_DECISIONS,
+            topics.POSITION_TARGETS,
+            topics.DECISION_OUTCOMES,
+            topics.POLICY_DECISIONS,
+            topics.RISK_DECISIONS,
+            topics.EXECUTION_PLANS,
+            topics.STRATEGY_EXECUTION_BUNDLES,
+            topics.ORDER_INTENTS,
+            topics.ORDER_UPDATES,
+            topics.FILL_EVENTS,
+            topics.RECONCILIATION_REPORTS,
+            topics.AUDIT_RECORDS,
+        }
+    )
 
     def __init__(
         self,
@@ -97,6 +127,7 @@ class ReplayEngine:
         reconstruction_service: PortfolioReconstructionService,
         audit_repo: AuditRepository | None = None,
         portfolio_repo: PortfolioRepository | None = None,
+        reconciliation_repo: ReconciliationRepository | None = None,
         fill_outcome_repo=None,
         funding_fee_repo=None,
         sleeve_pnl_repo=None,
@@ -106,6 +137,7 @@ class ReplayEngine:
         self.reconstruction_service = reconstruction_service
         self.audit_repo = audit_repo
         self.portfolio_repo = portfolio_repo
+        self.reconciliation_repo = reconciliation_repo
         self.fill_outcome_repo = fill_outcome_repo
         self.funding_fee_repo = funding_fee_repo
         self.sleeve_pnl_repo = sleeve_pnl_repo
@@ -131,9 +163,22 @@ class ReplayEngine:
         baseline_switches: list[AccountBaselineSnapshot] = []
         stored_snapshot_count = 0
         final_stored_snapshot: PortfolioSnapshot | None = None
-        baseline_snapshot: PortfolioSnapshot | None = None
+        incremental_window_start_at, baseline_generation_id, exchange_ack_watermark_id = self._incremental_window_start_at(
+            decision_id=decision_id,
+            explicit_start_at=start_at,
+        )
+        effective_start_at = start_at if start_at is not None else incremental_window_start_at
+        baseline_snapshot: PortfolioSnapshot | None = self._baseline_seed_snapshot(
+            decision_id=decision_id,
+            start_at=effective_start_at,
+        )
         selected_decision_baseline_seeded = False
-        events = self._select_events(decision_id=decision_id, start_at=start_at, end_at=end_at)
+        events = self._select_events(
+            decision_id=decision_id,
+            start_at=effective_start_at,
+            end_at=end_at,
+            baseline_generation_id=baseline_generation_id,
+        )
         events_by_id = {event.event_id: event for event in events}
         events_by_decision: dict[str, list[EventEnvelope]] = defaultdict(list)
         order_intents_by_intent_id: dict[str, OrderIntent] = {}
@@ -145,7 +190,7 @@ class ReplayEngine:
 
         for envelope in events:
             envelope_decision_id = envelope.payload.get("decision_id")
-            if isinstance(envelope_decision_id, str):
+            if isinstance(envelope_decision_id, str) and envelope.topic in self._DECISION_VALIDATION_TOPICS:
                 decision_ids.add(envelope_decision_id)
                 events_by_decision[envelope_decision_id].append(envelope)
 
@@ -310,6 +355,12 @@ class ReplayEngine:
             *audit_issues,
             *baseline_switch_issues,
         ]
+        replay_offset = self._persist_replay_offset(
+            decision_id=decision_id,
+            baseline_generation_id=baseline_generation_id,
+            exchange_ack_watermark_id=exchange_ack_watermark_id,
+            events=events,
+        )
         return ReplayResult(
             selected_decision_id=selected_decision_id,
             start_at=start_at,
@@ -327,6 +378,10 @@ class ReplayEngine:
             final_reconstructed_snapshot=final_reconstructed_snapshot,
             final_stored_snapshot=final_stored_snapshot,
             decision_chains=decision_chains,
+            incremental_window_start_at=incremental_window_start_at,
+            baseline_generation_id=baseline_generation_id,
+            exchange_ack_watermark_id=exchange_ack_watermark_id,
+            replay_offset_id=None if replay_offset is None else replay_offset.offset_id,
         )
 
     def _validate_sleeve_pnl_projection(self) -> list[str]:
@@ -476,6 +531,7 @@ class ReplayEngine:
         decision_id: str | None,
         start_at: datetime | None,
         end_at: datetime | None,
+        baseline_generation_id: str | None = None,
     ) -> list[EventEnvelope]:
         if decision_id is not None:
             events = self.event_store.by_decision(decision_id)
@@ -545,6 +601,13 @@ class ReplayEngine:
                 if (start_at is None or event.event_timestamp >= start_at)
                 and (end_at is None or event.event_timestamp <= end_at)
             ]
+            if baseline_generation_id is not None and self.reconciliation_repo is not None:
+                generation = self.reconciliation_repo.latest_baseline_generation_for_scope(scope=self.scope)
+                if generation is not None and generation.generation_id == baseline_generation_id:
+                    baseline_event = self.event_store.get(generation.baseline_event_ref)
+                    if baseline_event is not None and all(item.event_id != baseline_event.event_id for item in events):
+                        events.append(baseline_event)
+            events = self._append_referenced_events(events)
             return sorted(
                 events,
                 key=lambda item: (item.event_timestamp, item.created_at, item.event_id),
@@ -552,6 +615,154 @@ class ReplayEngine:
         if start_at is not None or end_at is not None:
             return self.event_store.between(start_at=start_at, end_at=end_at)
         return self.event_store.all()
+
+    def _incremental_window_start_at(
+        self,
+        *,
+        decision_id: str | None,
+        explicit_start_at: datetime | None,
+    ) -> tuple[datetime | None, str | None, str | None]:
+        if explicit_start_at is not None or decision_id is not None or self.scope is None or self.reconciliation_repo is None:
+            return explicit_start_at, None, None
+        baseline_generation = self.reconciliation_repo.latest_baseline_generation_for_scope(scope=self.scope)
+        exchange_ack = self.reconciliation_repo.latest_exchange_ack_watermark_for_scope(scope=self.scope)
+        replay_offset = self.event_store.latest_replay_offset(
+            projection_key="portfolio_replay",
+            scope=self.scope,
+        )
+        candidates = [
+            candidate
+            for candidate in (
+                None if baseline_generation is None else baseline_generation.imported_at,
+                None if exchange_ack is None else exchange_ack.acknowledged_at,
+                None if replay_offset is None else replay_offset.last_event_timestamp,
+            )
+            if candidate is not None
+        ]
+        return (
+            max(candidates) if candidates else None,
+            None if baseline_generation is None else baseline_generation.generation_id,
+            None if exchange_ack is None else exchange_ack.watermark_id,
+        )
+
+    def _persist_replay_offset(
+        self,
+        *,
+        decision_id: str | None,
+        baseline_generation_id: str | None,
+        exchange_ack_watermark_id: str | None,
+        events: list[EventEnvelope],
+    ) -> ReplayProjectionOffset | None:
+        if decision_id is not None or self.scope is None or not events:
+            return None
+        latest_event = max(events, key=lambda item: (item.event_timestamp, item.created_at, item.event_id))
+        offset = ReplayProjectionOffset(
+            projection_key="portfolio_replay",
+            product_type=self.scope.product_type,
+            margin_mode=self.scope.margin_mode,
+            allowed_symbols=list(self.scope.allowed_symbols),
+            last_event_id=latest_event.event_id,
+            last_event_timestamp=latest_event.event_timestamp,
+            baseline_generation_id=baseline_generation_id,
+            exchange_ack_watermark_id=exchange_ack_watermark_id,
+            updated_at=utc_now(),
+        )
+        return self.event_store.save_replay_offset(offset)
+
+    def _append_referenced_events(self, events: list[EventEnvelope]) -> list[EventEnvelope]:
+        appended = list(events)
+        existing_ids = {event.event_id for event in appended}
+
+        decision_ids = {
+            decision_id
+            for event in appended
+            for decision_id in [event.payload.get("decision_id")]
+            if isinstance(decision_id, str)
+        }
+        for decision_id in sorted(decision_ids):
+            for related in self.event_store.by_decision(decision_id):
+                if related.event_id in existing_ids:
+                    continue
+                appended.append(related)
+                existing_ids.add(related.event_id)
+
+        pending = list(self._referenced_event_ids_for_events(appended))
+        while pending:
+            ref = pending.pop()
+            if ref in existing_ids:
+                continue
+            referenced = self.event_store.get(ref)
+            if referenced is None:
+                continue
+            appended.append(referenced)
+            existing_ids.add(referenced.event_id)
+            nested_refs = self._referenced_event_ids_for_events([referenced])
+            pending.extend(nested for nested in nested_refs if nested not in existing_ids)
+        return appended
+
+    def _referenced_event_ids_for_events(self, events: list[EventEnvelope]) -> set[str]:
+        referenced_event_ids: set[str] = set()
+        for event in events:
+            if event.topic == topics.DECISION_CONTEXTS:
+                context = DecisionContext.model_validate(event.payload)
+                referenced_event_ids.update(
+                    {
+                        context.market_snapshot_ref,
+                        context.feature_snapshot_ref,
+                        context.portfolio_snapshot_ref,
+                        context.health_snapshot_ref,
+                    }
+                )
+                continue
+            if event.topic == topics.AUDIT_RECORDS:
+                record = DecisionAuditRecord.model_validate(event.payload)
+                referenced_event_ids.update(
+                    ref
+                    for ref in (
+                        record.decision_context_ref,
+                        record.baseline_assessment_ref,
+                        record.ai_decision_brief_ref,
+                        record.ai_market_assessment_ref,
+                        record.position_target_ref,
+                        record.decision_outcome_ref,
+                        record.policy_decision_ref,
+                        record.risk_decision_ref,
+                        record.execution_plan_ref,
+                        record.strategy_execution_bundle_ref,
+                        *record.execution_plan_refs,
+                        record.portfolio_delta_ref,
+                        *record.order_intent_refs,
+                        *record.order_state_refs,
+                        *record.fill_event_refs,
+                        *record.ai_shadow_decision_refs,
+                        *record.ai_shadow_evaluation_refs,
+                        *record.reconciliation_refs,
+                        record.strategy_coordinator_snapshot_ref,
+                        record.portfolio_allocation_decision_ref,
+                        *record.strategy_sleeve_intent_refs,
+                    )
+                    if ref is not None
+                )
+                continue
+            if event.topic == topics.ACCOUNT_BASELINES:
+                baseline = AccountBaselineSnapshot.model_validate(event.payload)
+                if baseline.previous_baseline_ref is not None:
+                    referenced_event_ids.add(baseline.previous_baseline_ref)
+                if baseline.operator_action_ref is not None:
+                    referenced_event_ids.add(baseline.operator_action_ref)
+        return referenced_event_ids
+
+    def _baseline_seed_snapshot(
+        self,
+        *,
+        decision_id: str | None,
+        start_at: datetime | None,
+    ) -> PortfolioSnapshot | None:
+        if decision_id is not None or start_at is None or self.scope is None or self.portfolio_repo is None:
+            return None
+        snapshots = snapshots_for_scope(self.portfolio_repo, self.scope)
+        candidates = [snapshot for snapshot in snapshots if snapshot.snapshot_ts < start_at]
+        return candidates[-1] if candidates else None
 
     def _validate_execution_chain(
         self,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
+import hashlib
 
 from aats.bootstrap.settings import AATSSettings
 from aats.events import topics
@@ -10,6 +11,8 @@ from aats.schemas.exchange import ExchangeAccountSnapshot
 from aats.schemas.market import MarketSnapshot
 from aats.schemas.strategy_runtime import (
     PortfolioAllocationDecision,
+    SleeveBudgetAssignment,
+    SleeveBudgetProfile,
     StrategyCandidate,
     StrategyCoordinatorSnapshot,
     StrategyFamily,
@@ -17,9 +20,9 @@ from aats.schemas.strategy_runtime import (
     StrategySleeveIntent,
     StrategySleeveRecord,
 )
-from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, to_decimal
+from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, quantize_decimal, to_decimal
 from aats.services.runtime_scope import latest_snapshot_for_scope, runtime_state_scope
-from aats.services.strategy_engines.allocator import PortfolioAllocatorV1
+from aats.services.strategy_engines.allocator import PortfolioAllocatorV2Phase1
 from aats.services.strategy_engines.auto_parallel import StrategySleeveAutoController
 from aats.services.strategy_engines.base import StrategyEngineInput, StrategyTargetHistory
 from aats.services.strategy_engines.dca import DcaStrategyEngine
@@ -84,7 +87,7 @@ class StrategyCoordinatorService:
             settings=settings,
             sleeve_inventory_loader=self.sleeve_inventory_service,
         )
-        self.allocator = PortfolioAllocatorV1()
+        self.allocator = PortfolioAllocatorV2Phase1(settings=settings)
         self.auto_controller = StrategySleeveAutoController(
             settings=settings,
             reconciliation_repo=reconciliation_repo,
@@ -126,6 +129,15 @@ class StrategyCoordinatorService:
             candidates_by_family=candidates_by_family,
             sleeve_intents=sleeve_intents,
         )
+        budget_profiles, budget_assignments = self._budget_assignments_for_intents(
+            base_target=directional_target,
+            sleeve_intents=controlled_intents,
+        )
+        if self.strategy_runtime_repo is not None:
+            for profile in budget_profiles:
+                self.strategy_runtime_repo.save_budget_profile(profile)
+            for assignment in budget_assignments:
+                self.strategy_runtime_repo.save_budget_assignment(assignment)
         if self.strategy_runtime_repo is not None:
             for intent in controlled_intents:
                 self.strategy_runtime_repo.save_sleeve_intent(intent)
@@ -137,6 +149,7 @@ class StrategyCoordinatorService:
             selected_family=selected_family,
             selection_reason_codes=selection_reasons,
             sleeve_intents=controlled_intents,
+            budget_assignments=budget_assignments,
         )
         if self.strategy_runtime_repo is not None:
             self.strategy_runtime_repo.save_allocation_decision(allocation_decision)
@@ -690,3 +703,136 @@ class StrategyCoordinatorService:
             intent.symbol,
             *(leg.symbol for leg in intent.legs if str(leg.symbol).strip()),
         )
+
+    def _budget_assignments_for_intents(
+        self,
+        *,
+        base_target: PositionTarget,
+        sleeve_intents: list[StrategySleeveIntent],
+    ) -> tuple[list[SleeveBudgetProfile], list[SleeveBudgetAssignment]]:
+        profiles: list[SleeveBudgetProfile] = []
+        assignments: list[SleeveBudgetAssignment] = []
+        for intent in sleeve_intents:
+            profile = self._budget_profile_for_intent(base_target=base_target, intent=intent)
+            assignment = self._budget_assignment_for_intent(intent=intent, profile=profile)
+            profiles.append(profile)
+            assignments.append(assignment)
+        return profiles, assignments
+
+    def _budget_profile_for_intent(
+        self,
+        *,
+        base_target: PositionTarget,
+        intent: StrategySleeveIntent,
+    ) -> SleeveBudgetProfile:
+        family = intent.family
+        max_notional = Decimal(str(self.settings.max_notional_per_symbol))
+        if family == "smart_arbitrage":
+            quote_budget_limit = Decimal(str(self.settings.smart_arbitrage_quote_budget_per_trade))
+            notional_cap = Decimal(str(self.settings.smart_arbitrage_max_pair_notional))
+            allocator_base_weight = Decimal("1.15")
+            hedge_priority_class = "critical_hedge"
+        elif family == "spot_grid":
+            quote_budget_limit = quantize_decimal(max_notional * Decimal("0.75"))
+            notional_cap = quantize_decimal(max_notional * Decimal("0.75"))
+            allocator_base_weight = Decimal("0.90")
+            hedge_priority_class = "inventory"
+        elif family == "dca":
+            quote_budget_limit = Decimal(str(self.settings.dca_quote_budget_per_cycle)) * Decimal("4")
+            notional_cap = quote_budget_limit
+            allocator_base_weight = Decimal("0.80")
+            hedge_priority_class = "inventory"
+        else:
+            quote_budget_limit = max_notional
+            notional_cap = max_notional
+            allocator_base_weight = Decimal("1.00")
+            hedge_priority_class = "standard"
+        margin_budget_limit = None
+        if base_target.product_type == "derivatives":
+            leverage = max(Decimal(str(base_target.target_leverage or 1.0)), Decimal("1"))
+            margin_budget_limit = quantize_decimal(notional_cap / leverage)
+        symbol_scope = self._intent_symbol_scope(intent=intent, base_target=base_target)
+        now = intent.created_at
+        return SleeveBudgetProfile(
+            budget_profile_id=self._budget_profile_id(
+                family=family,
+                product_type=base_target.product_type,
+                margin_mode=base_target.margin_mode,
+                symbol_scope=symbol_scope,
+            ),
+            family=family,
+            product_type=base_target.product_type,
+            margin_mode=base_target.margin_mode,
+            symbol_scope=symbol_scope,
+            quote_budget_limit=quantize_decimal(quote_budget_limit),
+            margin_budget_limit=margin_budget_limit,
+            notional_cap=quantize_decimal(notional_cap),
+            max_symbol_notional=quantize_decimal(notional_cap),
+            max_drawdown_usdt=Decimal(str(self.settings.strategy_sleeve_auto_hard_loss_usdt)),
+            allocator_base_weight=allocator_base_weight,
+            hedge_priority_class=hedge_priority_class,
+            metadata={
+                "source": "task76_allocator_v2_phase1",
+                "default_symbol": base_target.symbol,
+            },
+            created_at=now,
+            updated_at=now,
+        )
+
+    def _budget_assignment_for_intent(
+        self,
+        *,
+        intent: StrategySleeveIntent,
+        profile: SleeveBudgetProfile,
+    ) -> SleeveBudgetAssignment:
+        multiplier = to_decimal(intent.budget_multiplier)
+        def _scaled(value: Decimal | None) -> Decimal | None:
+            if value is None:
+                return None
+            return quantize_decimal(value * multiplier)
+        now = intent.created_at
+        return SleeveBudgetAssignment(
+            assignment_id=self._budget_assignment_id(
+                strategy_sleeve_id=intent.strategy_sleeve_id,
+                budget_profile_id=profile.budget_profile_id,
+                symbol=intent.symbol,
+            ),
+            budget_profile_id=profile.budget_profile_id,
+            strategy_sleeve_id=intent.strategy_sleeve_id,
+            family=intent.family,
+            symbol=intent.symbol,
+            product_type=intent.product_type,
+            margin_mode=intent.margin_mode,
+            active_budget_multiplier=multiplier,
+            allocator_base_weight=profile.allocator_base_weight,
+            effective_quote_budget_limit=_scaled(profile.quote_budget_limit),
+            effective_margin_budget_limit=_scaled(profile.margin_budget_limit),
+            effective_notional_cap=_scaled(profile.notional_cap),
+            effective_max_symbol_notional=_scaled(profile.max_symbol_notional),
+            hedge_priority_class=profile.hedge_priority_class,
+            reason_codes=list(dict.fromkeys([*intent.control_reason_codes, "allocator_budget_assignment_active"])),
+            created_at=now,
+            updated_at=now,
+        )
+
+    @staticmethod
+    def _budget_profile_id(
+        *,
+        family: StrategyFamily,
+        product_type: str,
+        margin_mode: str,
+        symbol_scope: tuple[str, ...],
+    ) -> str:
+        scope_text = "|".join(symbol_scope)
+        digest = hashlib.sha1(scope_text.encode("utf-8")).hexdigest()[:12]
+        return f"budget:{family}:{product_type}:{margin_mode}:{digest}"
+
+    @staticmethod
+    def _budget_assignment_id(
+        *,
+        strategy_sleeve_id: str,
+        budget_profile_id: str,
+        symbol: str,
+    ) -> str:
+        digest = hashlib.sha1(f"{strategy_sleeve_id}|{budget_profile_id}|{symbol}".encode("utf-8")).hexdigest()[:16]
+        return f"budgetassign:{digest}"

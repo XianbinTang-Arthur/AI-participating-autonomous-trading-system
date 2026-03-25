@@ -80,6 +80,44 @@ CREATE TABLE IF NOT EXISTS event_store (
 );
 
 
+CREATE TABLE IF NOT EXISTS event_store_archive (
+	archive_sequence_id SERIAL NOT NULL,
+	source_sequence_id INTEGER NOT NULL,
+	event_id VARCHAR(64) NOT NULL,
+	schema_version VARCHAR(16) NOT NULL,
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+	event_type VARCHAR(128) NOT NULL,
+	event_timestamp TIMESTAMP WITH TIME ZONE NOT NULL,
+	source_component VARCHAR(128) NOT NULL,
+	topic VARCHAR(128) NOT NULL,
+	event_key VARCHAR(128) NOT NULL,
+	decision_id VARCHAR(64),
+	symbol VARCHAR(64),
+	timeframe VARCHAR(16),
+	product_type VARCHAR(16),
+	margin_mode VARCHAR(16),
+	payload JSON NOT NULL,
+	PRIMARY KEY (archive_sequence_id)
+);
+
+
+CREATE TABLE IF NOT EXISTS projection_replay_offsets (
+	offset_id VARCHAR(64) NOT NULL,
+	projection_key VARCHAR(128) NOT NULL,
+	product_type VARCHAR(16) NOT NULL,
+	margin_mode VARCHAR(16) NOT NULL,
+	allowed_symbols_hash VARCHAR(64) NOT NULL,
+	allowed_symbols_json JSON NOT NULL,
+	last_event_id VARCHAR(64),
+	last_event_timestamp TIMESTAMP WITH TIME ZONE,
+	baseline_generation_id VARCHAR(64),
+	exchange_ack_watermark_id VARCHAR(64),
+	updated_at TIMESTAMP WITH TIME ZONE NOT NULL,
+	payload JSON NOT NULL,
+	PRIMARY KEY (offset_id)
+);
+
+
 CREATE TABLE IF NOT EXISTS execution_orders (
 	order_id VARCHAR(64) NOT NULL,
 	intent_id VARCHAR(64) NOT NULL,
@@ -662,6 +700,108 @@ CREATE TABLE IF NOT EXISTS strategy_sleeve_intents (
 	created_at TIMESTAMP WITH TIME ZONE NOT NULL,
 	payload JSON NOT NULL,
 	PRIMARY KEY (sleeve_intent_id)
+);
+
+
+CREATE TABLE IF NOT EXISTS sleeve_budget_profiles (
+	budget_profile_id VARCHAR(64) NOT NULL,
+	family VARCHAR(32) NOT NULL,
+	product_type VARCHAR(16) NOT NULL,
+	margin_mode VARCHAR(16) NOT NULL,
+	symbol_scope_json JSON NOT NULL,
+	quote_budget_limit NUMERIC(36, 18),
+	margin_budget_limit NUMERIC(36, 18),
+	notional_cap NUMERIC(36, 18),
+	max_symbol_notional NUMERIC(36, 18),
+	max_drawdown_usdt NUMERIC(36, 18),
+	allocator_base_weight NUMERIC(36, 18) NOT NULL,
+	hedge_priority_class VARCHAR(32) NOT NULL,
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+	updated_at TIMESTAMP WITH TIME ZONE NOT NULL,
+	payload JSON NOT NULL,
+	PRIMARY KEY (budget_profile_id)
+);
+
+
+CREATE TABLE IF NOT EXISTS sleeve_budget_assignments (
+	assignment_id VARCHAR(64) NOT NULL,
+	budget_profile_id VARCHAR(64) NOT NULL,
+	strategy_sleeve_id VARCHAR(64) NOT NULL,
+	family VARCHAR(32) NOT NULL,
+	symbol VARCHAR(64) NOT NULL,
+	product_type VARCHAR(16) NOT NULL,
+	margin_mode VARCHAR(16) NOT NULL,
+	active_budget_multiplier NUMERIC(36, 18) NOT NULL,
+	allocator_base_weight NUMERIC(36, 18) NOT NULL,
+	effective_quote_budget_limit NUMERIC(36, 18),
+	effective_margin_budget_limit NUMERIC(36, 18),
+	effective_notional_cap NUMERIC(36, 18),
+	effective_max_symbol_notional NUMERIC(36, 18),
+	hedge_priority_class VARCHAR(32) NOT NULL,
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+	updated_at TIMESTAMP WITH TIME ZONE NOT NULL,
+	payload JSON NOT NULL,
+	PRIMARY KEY (assignment_id)
+);
+
+
+CREATE TABLE IF NOT EXISTS allocator_budget_snapshots (
+	budget_snapshot_id VARCHAR(64) NOT NULL,
+	allocation_id VARCHAR(64) NOT NULL,
+	strategy_sleeve_id VARCHAR(64) NOT NULL,
+	family VARCHAR(32) NOT NULL,
+	symbol VARCHAR(64) NOT NULL,
+	product_type VARCHAR(16) NOT NULL,
+	margin_mode VARCHAR(16) NOT NULL,
+	requested_notional NUMERIC(36, 18) NOT NULL,
+	approved_notional NUMERIC(36, 18) NOT NULL,
+	requested_delta_qty NUMERIC(36, 18) NOT NULL,
+	approved_delta_qty NUMERIC(36, 18) NOT NULL,
+	budget_multiplier NUMERIC(36, 18) NOT NULL,
+	allocator_weight NUMERIC(36, 18) NOT NULL,
+	quote_budget_limit NUMERIC(36, 18),
+	margin_budget_limit NUMERIC(36, 18),
+	notional_cap NUMERIC(36, 18),
+	max_symbol_notional NUMERIC(36, 18),
+	hedge_priority_class VARCHAR(32) NOT NULL,
+	clamped BOOLEAN NOT NULL,
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+	payload JSON NOT NULL,
+	PRIMARY KEY (budget_snapshot_id)
+);
+
+
+CREATE TABLE IF NOT EXISTS allocator_conflict_resolutions (
+	conflict_resolution_id VARCHAR(64) NOT NULL,
+	allocation_id VARCHAR(64) NOT NULL,
+	symbol VARCHAR(64) NOT NULL,
+	product_type VARCHAR(16) NOT NULL,
+	margin_mode VARCHAR(16) NOT NULL,
+	conflict_type VARCHAR(64) NOT NULL,
+	resolution_action VARCHAR(64) NOT NULL,
+	gross_requested_qty NUMERIC(36, 18) NOT NULL,
+	net_approved_qty NUMERIC(36, 18) NOT NULL,
+	blocked_qty NUMERIC(36, 18) NOT NULL,
+	protected_notional NUMERIC(36, 18) NOT NULL,
+	reduced_notional NUMERIC(36, 18) NOT NULL,
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+	payload JSON NOT NULL,
+	PRIMARY KEY (conflict_resolution_id)
+);
+
+
+CREATE TABLE IF NOT EXISTS allocator_netting_decisions (
+	netting_decision_id VARCHAR(64) NOT NULL,
+	allocation_id VARCHAR(64) NOT NULL,
+	symbol VARCHAR(64) NOT NULL,
+	product_type VARCHAR(16) NOT NULL,
+	margin_mode VARCHAR(16) NOT NULL,
+	gross_buy_qty NUMERIC(36, 18) NOT NULL,
+	gross_sell_qty NUMERIC(36, 18) NOT NULL,
+	net_approved_qty NUMERIC(36, 18) NOT NULL,
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+	payload JSON NOT NULL,
+	PRIMARY KEY (netting_decision_id)
 );
 
 

@@ -10,13 +10,19 @@ from aats.schemas.portfolio import FillOutcomeRecord, FundingFeeRecord, Portfoli
 from aats.schemas.reconciliation import (
     BaselineGenerationRecord,
     ExchangeAckWatermark,
+    ReplayProjectionOffset,
     ReconciliationFinding,
     ReconciliationReport,
     ReconciliationStateSnapshot,
 )
 from aats.schemas.operator import OperatorUserRecord
 from aats.schemas.strategy_runtime import (
+    AllocatorBudgetSnapshot,
+    AllocatorConflictResolution,
+    AllocatorNettingDecision,
     PortfolioAllocationDecision,
+    SleeveBudgetAssignment,
+    SleeveBudgetProfile,
     StrategyExecutionBundle,
     StrategySleeveIntent,
     StrategySleeveRecord,
@@ -83,6 +89,23 @@ class EventStore(Protocol):
         topic: str | None = None,
         decision_id: str | None = None,
     ) -> list[EventEnvelope]:
+        ...
+
+    def archive_before(self, *, before_ts: datetime) -> dict[str, int]:
+        ...
+
+    def archive_summary(self) -> dict[str, object]:
+        ...
+
+    def save_replay_offset(self, offset: ReplayProjectionOffset) -> ReplayProjectionOffset:
+        ...
+
+    def latest_replay_offset(
+        self,
+        *,
+        projection_key: str,
+        scope: RuntimeStateScope,
+    ) -> ReplayProjectionOffset | None:
         ...
 
 
@@ -457,6 +480,31 @@ class StrategySleeveRepository(Protocol):
 
 
 class StrategyRuntimeRepository(Protocol):
+    def save_budget_profile(self, profile: SleeveBudgetProfile) -> SleeveBudgetProfile:
+        ...
+
+    def list_budget_profiles(
+        self,
+        *,
+        product_type: str | None = None,
+        margin_mode: str | None = None,
+        family: str | None = None,
+    ) -> list[SleeveBudgetProfile]:
+        ...
+
+    def save_budget_assignment(self, assignment: SleeveBudgetAssignment) -> SleeveBudgetAssignment:
+        ...
+
+    def list_budget_assignments(
+        self,
+        *,
+        product_type: str | None = None,
+        margin_mode: str | None = None,
+        symbol: str | None = None,
+        strategy_sleeve_id: str | None = None,
+    ) -> list[SleeveBudgetAssignment]:
+        ...
+
     def save_sleeve_intent(self, intent: StrategySleeveIntent) -> StrategySleeveIntent:
         ...
 
@@ -493,4 +541,28 @@ class StrategyRuntimeRepository(Protocol):
         symbol: str | None = None,
         limit: int | None = None,
     ) -> list[StrategyExecutionBundle]:
+        ...
+
+    def list_budget_snapshots(
+        self,
+        *,
+        allocation_id: str | None = None,
+        strategy_sleeve_id: str | None = None,
+    ) -> list[AllocatorBudgetSnapshot]:
+        ...
+
+    def list_conflict_resolutions(
+        self,
+        *,
+        allocation_id: str | None = None,
+        symbol: str | None = None,
+    ) -> list[AllocatorConflictResolution]:
+        ...
+
+    def list_netting_decisions(
+        self,
+        *,
+        allocation_id: str | None = None,
+        symbol: str | None = None,
+    ) -> list[AllocatorNettingDecision]:
         ...

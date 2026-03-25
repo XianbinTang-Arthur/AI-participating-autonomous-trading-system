@@ -81,6 +81,10 @@ class ReplayValidationSummary(SchemaBase):
     baseline_switch_count: int = 0
     baseline_switch_issues: list[str] = Field(default_factory=list)
     baseline_switch_issue_count: int = 0
+    incremental_window_start_at: datetime | None = None
+    baseline_generation_id: str | None = None
+    exchange_ack_watermark_id: str | None = None
+    replay_offset_id: str | None = None
     divergence_density: float = 0.0
     chain_health_score: float = 0.0
     healthy: bool
@@ -150,6 +154,7 @@ class OperatorActionRecord(SchemaBase):
         "ai_review_restore",
         "ai_review_degrade_to_baseline",
         "phase1_shadow_review",
+        "refresh_exchange_state",
         "capital_scale_review",
         "trial_review_snapshot",
     ]

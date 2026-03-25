@@ -102,6 +102,66 @@ class TestPersistenceAndReplay(unittest.IsolatedAsyncioTestCase):
                 if storage is not None and storage.database_runtime is not None:
                     storage.database_runtime.dispose()
 
+    async def test_postgres_event_store_archive_and_incremental_replay_persist_offset(self) -> None:
+        with temporary_postgres_url() as (database_url, _admin_engine, _schema_name):
+            settings = self._postgres_settings(database_url)
+            runtime = await build_runtime(settings)
+            storage = None
+            try:
+                await runtime.market_gateway.run_local_publisher(
+                    symbol=settings.default_symbol,
+                    iterations=4,
+                    interval_seconds=0.0,
+                )
+
+                storage = build_storage_backends(settings)
+                scope = runtime_state_scope(settings)
+                replay_engine = ReplayEngine(
+                    event_store=storage.event_store,
+                    reconstruction_service=PortfolioReconstructionService(
+                        initial_usdt_balance=settings.initial_usdt_balance,
+                        snapshot_builder=PortfolioSnapshotBuilder(pnl_calculator=PortfolioPnLCalculator()),
+                    ),
+                    audit_repo=storage.audit_repo,
+                    portfolio_repo=storage.portfolio_repo,
+                    reconciliation_repo=storage.reconciliation_repo,
+                    scope=scope,
+                )
+                first = replay_engine.replay()
+                first_offset = storage.event_store.latest_replay_offset(
+                    projection_key="portfolio_replay",
+                    scope=scope,
+                )
+                self.assertIsNotNone(first_offset)
+                self.assertEqual(first.replay_offset_id, first_offset.offset_id)
+
+                latest_market_event = storage.event_store.latest_by_topic_scoped(
+                    topic=topics.MARKET_SNAPSHOTS,
+                    scope=scope,
+                )
+                self.assertIsNotNone(latest_market_event)
+                archived = storage.event_store.archive_before(before_ts=latest_market_event.event_timestamp)
+                archive_summary = storage.event_store.archive_summary()
+                self.assertGreater(archived["archived_event_count"], 0)
+                self.assertGreater(archive_summary["archive_event_count"], 0)
+                self.assertGreater(archive_summary["replay_offset_count"], 0)
+
+                second = replay_engine.replay()
+                second_offset = storage.event_store.latest_replay_offset(
+                    projection_key="portfolio_replay",
+                    scope=scope,
+                )
+                self.assertEqual(second.divergence_count, 0)
+                self.assertIsNotNone(second.incremental_window_start_at)
+                self.assertIsNotNone(second_offset)
+                self.assertEqual(second.replay_offset_id, second_offset.offset_id)
+                self.assertEqual(second_offset.last_event_id, first_offset.last_event_id)
+            finally:
+                if runtime.database_runtime is not None:
+                    runtime.database_runtime.dispose()
+                if storage is not None and storage.database_runtime is not None:
+                    storage.database_runtime.dispose()
+
     async def test_smart_arbitrage_postgres_replay_keeps_bundle_and_dual_leg_chain_consistent(self) -> None:
         with temporary_postgres_url() as (database_url, _admin_engine, _schema_name):
             settings = self._postgres_settings(
