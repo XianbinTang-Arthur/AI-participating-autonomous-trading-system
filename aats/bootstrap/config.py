@@ -220,7 +220,13 @@ def resilient_subscription_handler(
 
 def load_settings() -> AATSSettings:
     discovered = AATSSettings()
-    yaml_values = load_yaml_config(discovered.environment, discovered.config_profile)
+    yaml_values: dict[str, Any] = {}
+    # When startup runs through one of the managed .env profile templates, that
+    # template already contains the full runtime config surface. Keeping the
+    # legacy YAML overlay active in that path makes the effective config harder
+    # to reason about and can silently reintroduce stale profile defaults.
+    if discovered.env_template_profile is None:
+        yaml_values = load_yaml_config(discovered.environment, discovered.config_profile)
     explicit_overrides = {
         field_name: getattr(discovered, field_name)
         for field_name in discovered.model_fields_set

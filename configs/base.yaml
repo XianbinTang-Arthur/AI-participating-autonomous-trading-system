@@ -13,9 +13,9 @@ mode: paper_live
 
 # [运行必改] default_symbol：默认交易标的。可选值：交易所支持的符号；基线推荐：BTC-USDT。
 default_symbol: BTC-USDT
-# [常用可调] primary_timeframe：主决策周期。可选值：15m / 1h；推荐值：15m。
+# [常用可调] primary_timeframe：主决策周期。当前实现固定为 15m；若改成 1h，启动时会直接拒绝。
 primary_timeframe: 15m
-# [常用可调] secondary_timeframe：辅助决策周期。可选值：15m / 1h；推荐值：1h。
+# [常用可调] secondary_timeframe：辅助决策周期。当前实现固定为 1h；保留该键仅为兼容旧模板。
 secondary_timeframe: 1h
 # [常用可调] enabled_decision_timeframes：启用的决策周期列表。可选值：仅 15m 或同时启用 15m/1h；推荐值：["15m"]。
 enabled_decision_timeframes:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import AliasChoices, Field
+from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from aats.schemas.decision import AIOperatingMode, CanonicalAIOperatingMode, normalize_ai_operating_mode
 
@@ -337,6 +337,20 @@ class AATSSettings(BaseSettings):
     log_backup_count: int = 7
     exchange_name: str = "PAPER"
     allowed_symbols: tuple[str, ...] = Field(default=("BTC-USDT",))
+
+    @model_validator(mode="after")
+    def validate_supported_runtime_overrides(self) -> "AATSSettings":
+        # The current market/feature pipeline is still built around fixed
+        # 15m + 1h snapshots. Exposing broader timeframe configurability in
+        # env/YAML without enforcing this creates misleading configs.
+        if self.primary_timeframe != "15m":
+            raise ValueError("primary_timeframe_currently_must_be_15m")
+        if self.secondary_timeframe != "1h":
+            raise ValueError("secondary_timeframe_currently_must_be_1h")
+        if self.trading_product_type == "spot" and self.margin_mode == "cash":
+            if float(self.max_target_leverage) != 1.0 or float(self.default_target_leverage) != 1.0:
+                raise ValueError("spot_cash_runtime_requires_unit_leverage")
+        return self
 
     @classmethod
     def model_validate(cls, obj: Any, *args: Any, **kwargs: Any) -> "AATSSettings":

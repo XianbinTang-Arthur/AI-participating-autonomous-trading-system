@@ -128,6 +128,44 @@ class TestAATSSettings(unittest.TestCase):
         self.assertEqual(settings.max_daily_realized_loss_usdt, 100.0)
         self.assertEqual(settings.derivatives_only_reduce_trigger_margin_fraction, 0.7)
 
+    def test_load_settings_skips_yaml_overlay_for_managed_env_templates(self) -> None:
+        with patch.object(AATSSettings, "model_config", {**AATSSettings.model_config, "env_file": None}):
+            with patch.dict(
+                os.environ,
+                {
+                    **_non_aats_environment(),
+                    "AATS_ENV_TEMPLATE_PROFILE": "spot_live",
+                    "AATS_STARTUP_PROFILE": "spot",
+                    "AATS_CONFIG_PROFILE": "guarded_spot_enabled",
+                },
+                clear=True,
+            ):
+                settings = load_settings()
+
+        self.assertEqual(settings.env_template_profile, "spot_live")
+        self.assertEqual(settings.config_profile, "guarded_spot_enabled")
+        self.assertEqual(settings.mode, "paper_live")
+        self.assertEqual(settings.market_data_backend, "demo")
+        self.assertEqual(settings.execution_backend, "paper")
+        self.assertEqual(settings.account_backend, "disabled")
+
+    def test_spot_cash_runtime_rejects_non_unit_leverage(self) -> None:
+        with self.assertRaisesRegex(ValueError, "spot_cash_runtime_requires_unit_leverage"):
+            AATSSettings.model_validate(
+                {
+                    "trading_product_type": "spot",
+                    "margin_mode": "cash",
+                    "max_target_leverage": 3,
+                    "default_target_leverage": 1,
+                }
+            )
+
+    def test_current_runtime_rejects_non_implemented_timeframe_overrides(self) -> None:
+        with self.assertRaisesRegex(ValueError, "primary_timeframe_currently_must_be_15m"):
+            AATSSettings.model_validate({"primary_timeframe": "1h"})
+        with self.assertRaisesRegex(ValueError, "secondary_timeframe_currently_must_be_1h"):
+            AATSSettings.model_validate({"secondary_timeframe": "15m"})
+
 
 if __name__ == "__main__":
     unittest.main()
