@@ -2746,6 +2746,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
                 }
             )
         )
+        runtime.kill_switch.halt(reason="derivatives_live_risk_auto_halt")
         runtime_guard.evaluate_now()
 
         runtime.market_gateway.refresh_snapshot = AsyncMock(
@@ -2773,12 +2774,16 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["action_id"], "refresh-exchange-state")
         self.assertEqual(response.json()["status"], "completed")
-        self.assertEqual(response.json()["message"], "已刷新交易所状态，当前阻断已解除。")
+        self.assertEqual(
+            response.json()["message"],
+            "已刷新交易所状态，风险快照阻断已解除，系统已恢复自动运行。",
+        )
         self.assertNotIn(
             "derivatives_risk_snapshot_missing_auto_halt",
             [item["blocker"] for item in after["blockers"]],
         )
         self.assertEqual(runtime.market_gateway.refresh_snapshot.await_count, 2)
+        self.assertFalse(after["halted"])
         self.assertEqual(account_service.refresh_calls, 2)
 
         actions = [item.payload for item in runtime.event_store.by_topic(topics.OPERATOR_ACTIONS)]
@@ -2787,6 +2792,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(refresh_action["details"]["market_refresh_completed"])
         self.assertTrue(refresh_action["details"]["account_refresh_completed"])
         self.assertTrue(refresh_action["details"]["blocker_cleared"])
+        self.assertEqual(refresh_action["details"]["auto_resume"]["status"], "resumed")
         self.assertEqual(len(refresh_action["details"]["errors"]), 1)
         self.assertEqual(refresh_action["details"]["errors"][0]["scope"], "market_data")
 

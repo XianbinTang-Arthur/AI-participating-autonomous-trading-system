@@ -230,6 +230,50 @@ class TestTask72DerivativesLiveGuard(unittest.TestCase):
         self.assertIn("derivatives_risk_snapshot_missing_requires_only_reduce", payload["only_reduce_reasons"])
         self.assertFalse(payload["auto_halt_required"])
 
+    def test_live_guard_uses_position_margin_fallback_when_okx_risk_payload_lacks_top_level_imr(self) -> None:
+        settings = self._settings()
+        snapshot = _snapshot(
+            initial_margin="320",
+            adjusted_equity="1000",
+            mark_price="70000",
+            liquidation_price="42000",
+        ).model_copy(
+            update={
+                "risk_snapshot": ExchangeAccountRiskSnapshot(
+                    adjusted_equity=None,
+                    total_equity=None,
+                    available_equity=None,
+                    initial_margin_requirement=None,
+                    maintenance_margin_requirement=None,
+                    margin_ratio=None,
+                    notional_usd=Decimal("120.5187115716"),
+                    raw={
+                        "balData": [
+                            {"ccy": "USDT", "eq": "201.0016337876877", "availEq": "201.0016337876877"},
+                        ],
+                        "posData": [
+                            {"instId": "BTC-USDT-SWAP", "notionalUsd": "120.5187115716000000", "pos": "0.17"},
+                        ],
+                    },
+                )
+            }
+        )
+        service = DerivativesLiveGuardService(
+            settings=settings,
+            kill_switch=KillSwitch(),
+            account_service=_StubAccountService(snapshot),
+            event_store=InMemoryEventStore(),
+            metrics=MetricsRegistry(),
+        )
+
+        payload = service.evaluate_now()
+
+        self.assertTrue(payload["risk_snapshot_available"])
+        self.assertEqual(payload["risk_snapshot_stage"], "healthy")
+        self.assertEqual(payload["status"], "healthy")
+        self.assertFalse(payload["auto_halt_required"])
+        self.assertIsNotNone(payload["current_initial_margin_usage_fraction"])
+
     def test_live_guard_auto_halts_when_risk_snapshot_missing_for_too_long(self) -> None:
         settings = self._settings()
         snapshot = _snapshot(

@@ -5558,8 +5558,32 @@ class OperatorQueryService:
         market_after = self.runtime.market_gateway.status()
         account_after = self.runtime.account_service.status()
         blocker_cleared = False if blocker is None else not self.blocker_control_service.has_active_blocker(blocker)
+        auto_resume: dict[str, Any] | None = None
+        if (
+            blocker == "derivatives_risk_snapshot_missing_auto_halt"
+            and blocker_cleared
+            and self.runtime.kill_switch.halted
+            and self.runtime.kill_switch.status().get("reason") == "derivatives_live_risk_auto_halt"
+        ):
+            auto_resume = await self.reconciliation_system_queries.resume(
+                reason="operator_refresh_exchange_state_for_risk_snapshot_recovered",
+                actor_role=actor_role,
+                actor_identity=actor_identity,
+                auth_source=auth_source,
+            )
+            self._invalidate_cache()
+            recovery_after = self.recovery_view()["recovery_state"]
+            blockers_after = self.blockers()
+            market_after = self.runtime.market_gateway.status()
+            account_after = self.runtime.account_service.status()
+            blocker_cleared = not self.blocker_control_service.has_active_blocker(blocker)
         if blocker and blocker_cleared:
-            message = "已刷新交易所状态，当前阻断已解除。"
+            if auto_resume is not None and auto_resume.get("status") in {"resumed", "already_resumed"}:
+                message = "已刷新交易所状态，风险快照阻断已解除，系统已恢复自动运行。"
+            elif auto_resume is not None and auto_resume.get("status") == "resume_blocked":
+                message = "已刷新交易所状态，风险快照阻断已解除，但恢复仍受其他条件限制。"
+            else:
+                message = "已刷新交易所状态，当前阻断已解除。"
         elif blocker:
             message = "已刷新交易所状态，但当前阻断仍然存在。"
         else:
@@ -5592,6 +5616,7 @@ class OperatorQueryService:
                     "account_after": account_after,
                     "blockers_before": blockers_before,
                     "blockers_after": blockers_after,
+                    "auto_resume": auto_resume,
                 },
             ),
         )
@@ -5619,6 +5644,7 @@ class OperatorQueryService:
                 "market_after": market_after,
                 "account_before": account_before,
                 "account_after": account_after,
+                "auto_resume": auto_resume,
             },
         }
 

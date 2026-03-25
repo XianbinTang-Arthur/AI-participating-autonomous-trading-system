@@ -234,6 +234,32 @@ class _FakeMultiPositionDerivativesClient(_FakeDerivativesOKXClient):
             ],
         }
 
+
+class _FakeNestedRiskPayloadDerivativesClient(_FakeDerivativesOKXClient):
+    async def get_account_position_risk(self):
+        return {
+            "code": "0",
+            "data": [
+                {
+                    "adjEq": "",
+                    "balData": [
+                        {"ccy": "USDT", "eq": "201.0016337876877", "availEq": "201.0016337876877"},
+                        {"ccy": "BTC", "eq": "0.0000000086839915", "disEq": "0"},
+                    ],
+                    "posData": [
+                        {
+                            "instId": "BTC-USDT-SWAP",
+                            "instType": "SWAP",
+                            "mgnMode": "cross",
+                            "notionalUsd": "120.5187115716000000",
+                            "pos": "0.17",
+                            "posSide": "long",
+                        }
+                    ],
+                }
+            ],
+        }
+
     async def get_positions(self):
         self.get_positions_called = True
         return {
@@ -610,7 +636,40 @@ class TestOKXAccountService(unittest.IsolatedAsyncioTestCase):
         self.assertEqual({fill.symbol for fill in snapshot.fills}, {"BTC-USDT", "ETH-USDT"})
         self.assertEqual(service.open_order_count("ETH-USDT"), 1)
 
-    async def test_refresh_caches_low_frequency_auxiliary_payloads(self) -> None:
+    async def test_refresh_caches_low_frequency_auxiliary_payloads_without_force(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "okx_api_key": "demo_key",
+                "okx_api_secret": "demo_secret",
+                "okx_api_passphrase": "demo_passphrase",
+                "okx_account_refresh_interval_seconds": 0,
+                "okx_instruments_refresh_interval_seconds": 300,
+                "okx_account_config_refresh_interval_seconds": 300,
+                "okx_trade_fee_refresh_interval_seconds": 300,
+                "okx_account_position_risk_refresh_interval_seconds": 60,
+                "okx_system_status_refresh_interval_seconds": 60,
+                "okx_bills_refresh_interval_seconds": 60,
+            }
+        )
+        client = _CountingAuxClient()
+        service = OKXAccountService(settings=settings, client=client)
+
+        await service.refresh()
+        await service.refresh()
+
+        self.assertEqual(client.balance_calls, 2)
+        self.assertEqual(client.open_order_calls, 2)
+        self.assertEqual(client.fill_calls, 2)
+        self.assertEqual(client.instrument_calls, 1)
+        self.assertEqual(client.account_config_calls, 1)
+        self.assertEqual(client.trade_fee_call_count, 1)
+        self.assertEqual(client.account_risk_calls, 1)
+        self.assertEqual(client.system_status_calls, 1)
+        self.assertEqual(client.bills_calls, 1)
+
+    async def test_force_refresh_bypasses_low_frequency_auxiliary_payload_caches(self) -> None:
         settings = AATSSettings.model_validate(
             {
                 "account_backend": "okx",
@@ -635,12 +694,34 @@ class TestOKXAccountService(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.balance_calls, 2)
         self.assertEqual(client.open_order_calls, 2)
         self.assertEqual(client.fill_calls, 2)
-        self.assertEqual(client.instrument_calls, 1)
-        self.assertEqual(client.account_config_calls, 1)
-        self.assertEqual(client.trade_fee_call_count, 1)
-        self.assertEqual(client.account_risk_calls, 1)
-        self.assertEqual(client.system_status_calls, 1)
-        self.assertEqual(client.bills_calls, 1)
+        self.assertEqual(client.instrument_calls, 2)
+        self.assertEqual(client.account_config_calls, 2)
+        self.assertEqual(client.trade_fee_call_count, 2)
+        self.assertEqual(client.account_risk_calls, 2)
+        self.assertEqual(client.system_status_calls, 2)
+        self.assertEqual(client.bills_calls, 2)
+
+    async def test_refresh_parses_nested_okx_risk_payload_shape(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "okx_api_key": "demo_key",
+                "okx_api_secret": "demo_secret",
+                "okx_api_passphrase": "demo_passphrase",
+                "trading_product_type": "derivatives",
+                "default_symbol": "BTC-USDT-SWAP",
+            }
+        )
+        service = OKXAccountService(settings=settings, client=_FakeNestedRiskPayloadDerivativesClient())
+
+        snapshot = await service.refresh(force=True)
+
+        self.assertIsNotNone(snapshot)
+        self.assertIsNotNone(snapshot.risk_snapshot)
+        self.assertEqual(snapshot.risk_snapshot.adjusted_equity, Decimal("201.0016337876877"))
+        self.assertEqual(snapshot.risk_snapshot.available_equity, Decimal("201.0016337876877"))
+        self.assertEqual(snapshot.risk_snapshot.notional_usd, Decimal("120.5187115716000000"))
 
     async def test_status_blocks_incompatible_derivatives_account_configuration(self) -> None:
         settings = AATSSettings.model_validate(

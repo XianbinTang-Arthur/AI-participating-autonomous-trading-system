@@ -284,19 +284,44 @@ class DerivativesLiveGuardService:
 
     def _current_initial_margin_usage(self, snapshot: Any) -> Decimal | None:
         risk_snapshot = getattr(snapshot, "risk_snapshot", None)
-        if risk_snapshot is None or getattr(risk_snapshot, "initial_margin_requirement", None) is None:
-            return None
-        initial_margin = _to_decimal(risk_snapshot.initial_margin_requirement)
+        initial_margin = None
+        if risk_snapshot is not None:
+            initial_margin = _to_decimal(getattr(risk_snapshot, "initial_margin_requirement", None))
+        if risk_snapshot is not None and initial_margin is None:
+            position_margins = [
+                resolved
+                for resolved in (
+                    _to_decimal(getattr(position, "margin_allocated", None))
+                    for position in getattr(snapshot, "positions", [])
+                )
+                if resolved is not None and resolved > self._EPSILON
+            ]
+            if position_margins:
+                initial_margin = sum(position_margins, Decimal("0"))
+
         equity_base = None
-        for candidate in (
-            getattr(risk_snapshot, "adjusted_equity", None),
-            getattr(risk_snapshot, "total_equity", None),
-            getattr(risk_snapshot, "available_equity", None),
-        ):
-            resolved = _to_decimal(candidate)
-            if resolved is not None and resolved > self._EPSILON:
-                equity_base = resolved
-                break
+        if risk_snapshot is not None:
+            for candidate in (
+                getattr(risk_snapshot, "adjusted_equity", None),
+                getattr(risk_snapshot, "total_equity", None),
+                getattr(risk_snapshot, "available_equity", None),
+            ):
+                resolved = _to_decimal(candidate)
+                if resolved is not None and resolved > self._EPSILON:
+                    equity_base = resolved
+                    break
+        if risk_snapshot is not None and equity_base is None:
+            usdt_balances = [
+                resolved
+                for resolved in (
+                    _to_decimal(getattr(balance, "total", None))
+                    for balance in getattr(snapshot, "balances", [])
+                    if str(getattr(balance, "currency", "")).upper() == "USDT"
+                )
+                if resolved is not None and resolved > self._EPSILON
+            ]
+            if usdt_balances:
+                equity_base = sum(usdt_balances, Decimal("0"))
         if initial_margin is None or equity_base is None or equity_base <= self._EPSILON:
             return None
         return initial_margin / equity_base

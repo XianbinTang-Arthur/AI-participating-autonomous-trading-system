@@ -76,6 +76,7 @@ class OKXAccountService:
                     self._cached_aux_payload(
                         "instruments",
                         refresh_interval_seconds=self.settings.okx_instruments_refresh_interval_seconds,
+                        force=force,
                         fetcher=lambda: self._get_instruments_payload(tracked_symbols),
                     ),
                 )
@@ -99,12 +100,14 @@ class OKXAccountService:
                     self._cached_aux_payload_optional(
                         "account_config",
                         refresh_interval_seconds=self.settings.okx_account_config_refresh_interval_seconds,
+                        force=force,
                         fetcher=self.client.get_account_config,
                         fallback=self._raw_snapshot_value("account_config"),
                     ),
                     self._cached_aux_payload_optional(
                         "trade_fee",
                         refresh_interval_seconds=self.settings.okx_trade_fee_refresh_interval_seconds,
+                        force=force,
                         fetcher=lambda: self._optional_client_call(
                             "get_trade_fee",
                             symbol=self.settings.default_symbol,
@@ -127,18 +130,21 @@ class OKXAccountService:
                     self._cached_aux_payload_optional(
                         "account_position_risk",
                         refresh_interval_seconds=self.settings.okx_account_position_risk_refresh_interval_seconds,
+                        force=force,
                         fetcher=lambda: self._optional_client_call("get_account_position_risk"),
                         fallback=self._raw_snapshot_value("account_position_risk", default={"code": "0", "data": []}),
                     ),
                     self._cached_aux_payload_optional(
                         "system_status",
                         refresh_interval_seconds=self.settings.okx_system_status_refresh_interval_seconds,
+                        force=force,
                         fetcher=lambda: self._optional_client_call("get_system_status"),
                         fallback=self._raw_snapshot_value("system_status", default={"code": "0", "data": []}),
                     ),
                     self._cached_aux_payload_optional(
                         "recent_bills",
                         refresh_interval_seconds=self.settings.okx_bills_refresh_interval_seconds,
+                        force=force,
                         fetcher=lambda: self._optional_client_call(
                             "get_bills_details",
                             limit=self.settings.okx_bills_fetch_limit,
@@ -250,10 +256,11 @@ class OKXAccountService:
         cache_key: str,
         *,
         refresh_interval_seconds: float,
+        force: bool = False,
         fetcher,
     ) -> dict[str, Any]:
         cached = self._aux_payload_cache.get(cache_key)
-        if cached is not None:
+        if cached is not None and not force:
             fetched_at, payload = cached
             if (utc_now() - fetched_at).total_seconds() < refresh_interval_seconds:
                 return payload
@@ -266,6 +273,7 @@ class OKXAccountService:
         cache_key: str,
         *,
         refresh_interval_seconds: float,
+        force: bool = False,
         fetcher,
         fallback: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -273,6 +281,7 @@ class OKXAccountService:
             return await self._cached_aux_payload(
                 cache_key,
                 refresh_interval_seconds=refresh_interval_seconds,
+                force=force,
                 fetcher=fetcher,
             )
         except Exception:
@@ -1284,18 +1293,74 @@ class OKXAccountService:
         row = OKXAccountService._first_data_row(payload)
         if not row:
             return None
+        balance_rows = row.get("balData", [])
+        if not isinstance(balance_rows, list):
+            balance_rows = []
+        position_rows = row.get("posData", [])
+        if not isinstance(position_rows, list):
+            position_rows = []
+
+        def _sum_rows(rows: list[Any], *keys: str) -> Decimal | None:
+            total = Decimal("0")
+            seen = False
+            for item in rows:
+                if not isinstance(item, dict):
+                    continue
+                value = OKXAccountService._decimal_value(item, *keys)
+                if value is None:
+                    continue
+                total += value
+                seen = True
+            return total if seen else None
+
+        def _preferred_equity_from_balances(rows: list[Any]) -> Decimal | None:
+            discounted = _sum_rows(rows, "disEq")
+            if discounted is not None and discounted > Decimal("0"):
+                return discounted
+            stable_total = Decimal("0")
+            stable_seen = False
+            for item in rows:
+                if not isinstance(item, dict):
+                    continue
+                currency = str(item.get("ccy", "")).upper()
+                if currency not in {"USDT", "USDC", "USD"}:
+                    continue
+                value = OKXAccountService._decimal_value(item, "eq")
+                if value is None:
+                    continue
+                stable_total += value
+                stable_seen = True
+            if stable_seen:
+                return stable_total
+            return _sum_rows(rows, "eq")
+
         return ExchangeAccountRiskSnapshot(
-            adjusted_equity=OKXAccountService._decimal_value(row, "adjEq"),
-            total_equity=OKXAccountService._decimal_value(row, "eq", "totalEq"),
-            available_equity=OKXAccountService._decimal_value(row, "availEq", "availBal"),
-            initial_margin_requirement=OKXAccountService._decimal_value(row, "imr"),
+            adjusted_equity=(
+                OKXAccountService._decimal_value(row, "adjEq")
+                or _preferred_equity_from_balances(balance_rows)
+            ),
+            total_equity=(
+                OKXAccountService._decimal_value(row, "eq", "totalEq")
+                or _preferred_equity_from_balances(balance_rows)
+            ),
+            available_equity=(
+                OKXAccountService._decimal_value(row, "availEq", "availBal")
+                or _sum_rows(balance_rows, "availEq", "availBal")
+            ),
+            initial_margin_requirement=(
+                OKXAccountService._decimal_value(row, "imr")
+                or _sum_rows(position_rows, "imr", "margin")
+            ),
             maintenance_margin_requirement=OKXAccountService._decimal_value(row, "mmr"),
             margin_ratio=OKXAccountService._decimal_value(row, "mgnRatio"),
-            notional_usd=OKXAccountService._decimal_value(
-                row,
-                "notionalUsd",
-                "notionalUsdForSwap",
-                "notionalUsdForFutures",
+            notional_usd=(
+                OKXAccountService._decimal_value(
+                    row,
+                    "notionalUsd",
+                    "notionalUsdForSwap",
+                    "notionalUsdForFutures",
+                )
+                or _sum_rows(position_rows, "notionalUsd", "notionalUsdForSwap", "notionalUsdForFutures")
             ),
             raw=row,
         )
