@@ -10,6 +10,7 @@ __pycache__/
 !.env.example
 !.env.spot.example
 !.env.derivatives.example
+!configs/templates/.env.*.example
 
 .idea/
 .vscode/
