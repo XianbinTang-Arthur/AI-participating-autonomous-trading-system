@@ -196,6 +196,12 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(payload["recent_budget_snapshots"])
         self.assertIsInstance(payload["recent_conflict_resolutions"], list)
         self.assertTrue(payload["recent_netting_decisions"])
+        self.assertIn("priority_rank", payload["recent_budget_snapshots"][0])
+        self.assertIn("portfolio_requested_notional", payload["recent_budget_snapshots"][0])
+        self.assertIn("portfolio_approved_notional", payload["recent_budget_snapshots"][0])
+        self.assertIn("portfolio_budget_cut_notional", payload["recent_budget_snapshots"][0])
+        self.assertIn("net_approved_qty", payload["recent_netting_decisions"][0])
+        self.assertIn("participating_sleeve_ids", payload["recent_netting_decisions"][0])
         self.assertGreaterEqual(len(payload["recent_sleeve_intents"]), 4)
         self.assertEqual(len(payload["latest_bundle"]["legs"]), 2)
         self.assertEqual(set(payload["latest_bundle"]["participating_families"]), {"spot_grid", "dca"})
@@ -287,6 +293,13 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(payload["recent_budget_assignments"])
         self.assertTrue(payload["recent_budget_snapshots"])
         self.assertTrue(payload["recent_netting_decisions"])
+        self.assertTrue(payload["recent_conflict_resolutions"])
+        self.assertEqual(
+            payload["recent_conflict_resolutions"][0]["resolution_action"],
+            "directional_reduced_to_protect_hedge",
+        )
+        self.assertIn("protected_notional", payload["recent_conflict_resolutions"][0])
+        self.assertIn("reduced_notional", payload["recent_conflict_resolutions"][0])
 
     @staticmethod
     def _settings(**overrides) -> AATSSettings:

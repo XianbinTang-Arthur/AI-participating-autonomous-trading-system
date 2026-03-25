@@ -17,6 +17,9 @@ export function renderStrategySections(data) {
   const recentBundles = strategyRuntime.recent_execution_bundles || [];
   const latestAllocationDecision = strategyRuntime.latest_allocation_decision || {};
   const recentSleeveIntents = strategyRuntime.recent_sleeve_intents || [];
+  const recentBudgetSnapshots = strategyRuntime.recent_budget_snapshots || [];
+  const recentConflictResolutions = strategyRuntime.recent_conflict_resolutions || [];
+  const recentNettingDecisions = strategyRuntime.recent_netting_decisions || [];
   const strategyAppliedTarget = strategyRuntime.latest_applied_target || {};
   const automationDecisions = strategyRuntimeSnapshot.automation_decisions || [];
   const strategyAttribution = data.strategyAttribution || {};
@@ -179,6 +182,9 @@ export function renderStrategySections(data) {
           ["最近 Sleeve Intent", formatNumber(recentSleeveIntents.length, 0, "0"), recentSleeveIntents[0]?.headline || "当前没有最新 sleeve intent 摘要"],
         ])}
         ${renderStrategyCandidateTable(strategyCandidates)}
+        ${renderAllocatorBudgetSnapshotTable(recentBudgetSnapshots)}
+        ${renderAllocatorConflictResolutionTable(recentConflictResolutions)}
+        ${renderAllocatorNettingDecisionTable(recentNettingDecisions)}
       `,
     }),
     strategyAutomation: surfaceCard({
@@ -672,6 +678,72 @@ function renderStrategyCandidateTable(candidates) {
     ]),
     "当前没有候选策略快照。"
   );
+}
+
+function renderAllocatorBudgetSnapshotTable(items) {
+  if (!Array.isArray(items) || !items.length) {
+    return `<p class="meta-copy">当前还没有 allocator 预算快照。</p>`;
+  }
+  return `
+    <div class="section-block">
+      <h4>预算快照</h4>
+      ${responsiveTable(
+        ["Sleeve", "优先级", "请求名义 / 批准名义", "组合预算变化", "原因"],
+        items.map((item) => [
+          `<div><strong>${escapeHtml(item.strategy_sleeve_id || "未归属")}</strong><div class="table-meta">${escapeHtml(readableState(item.family || "unknown"))}</div></div>`,
+          `<div><strong>${escapeHtml(readableState(item.hedge_priority_class || "standard"))}</strong><div class="table-meta">rank ${escapeHtml(String(item.priority_rank ?? 0))}</div></div>`,
+          `<div><strong>${formatSigned(item.requested_notional)} -> ${formatSigned(item.approved_notional)}</strong><div class="table-meta">${formatSigned(item.requested_delta_qty)} -> ${formatSigned(item.approved_delta_qty)}</div></div>`,
+          `<div><strong>${formatSigned(item.portfolio_requested_notional)} -> ${formatSigned(item.portfolio_approved_notional)}</strong><div class="table-meta">削减 ${formatSigned(item.portfolio_budget_cut_notional)}</div></div>`,
+          `<div><strong>${escapeHtml(item.clamped ? "已裁剪" : "未裁剪")}</strong><div class="table-meta">${escapeHtml(reasonListText(item.reason_codes, "当前没有额外原因"))}</div></div>`,
+        ]),
+        "当前没有 allocator 预算快照。"
+      )}
+    </div>
+  `;
+}
+
+function renderAllocatorConflictResolutionTable(items) {
+  if (!Array.isArray(items) || !items.length) {
+    return `<p class="meta-copy">当前没有新的冲突解算记录。</p>`;
+  }
+  return `
+    <div class="section-block">
+      <h4>冲突解算</h4>
+      ${responsiveTable(
+        ["类型", "参与 Sleeve", "请求 / 批准 / 阻断", "保护 / 削减", "原因"],
+        items.map((item) => [
+          `<div><strong>${escapeHtml(readableState(item.conflict_type || "unknown"))}</strong><div class="table-meta">${escapeHtml(readableState(item.resolution_action || "unknown"))}</div></div>`,
+          `<div><strong>${escapeHtml((item.input_sleeve_ids || []).join(" | ") || "当前没有输入 sleeve")}</strong><div class="table-meta">批准 ${escapeHtml((item.approved_sleeve_ids || []).join(" | ") || "无")}</div></div>`,
+          `<div><strong>${formatSigned(item.gross_requested_qty)} / ${formatSigned(item.net_approved_qty)}</strong><div class="table-meta">阻断 ${formatSigned(item.blocked_qty)}</div></div>`,
+          `<div><strong>${formatSigned(item.protected_notional)}</strong><div class="table-meta">方向削减 ${formatSigned(item.reduced_notional)}</div></div>`,
+          `<div><strong>${escapeHtml(reasonListText(item.reason_codes, "当前没有额外原因"))}</strong></div>`,
+        ]),
+        "当前没有新的冲突解算记录。"
+      )}
+    </div>
+  `;
+}
+
+function renderAllocatorNettingDecisionTable(items) {
+  if (!Array.isArray(items) || !items.length) {
+    return `<p class="meta-copy">当前没有新的净额决策记录。</p>`;
+  }
+  return `
+    <div class="section-block">
+      <h4>净额决策</h4>
+      ${responsiveTable(
+        ["标的", "参与 Sleeve", "总买 / 总卖", "净批准数量", "原因"],
+        items.map((item) => [
+          `<div><strong>${escapeHtml(item.symbol || "标的待确认")}</strong><div class="table-meta">${escapeHtml(readableState(item.product_type || "unknown"))} | ${escapeHtml(readableState(item.margin_mode || "unknown"))}</div></div>`,
+          `<div><strong>${escapeHtml((item.participating_sleeve_ids || []).join(" | ") || "当前没有参与 sleeve")}</strong></div>`,
+          `<div><strong>${formatSigned(item.gross_buy_qty)} / ${formatSigned(item.gross_sell_qty)}</strong></div>`,
+          `<div><strong>${formatSigned(item.net_approved_qty)}</strong></div>`,
+          `<div><strong>${escapeHtml(reasonListText(item.reason_codes, "当前没有额外原因"))}</strong></div>`,
+        ]),
+        "当前没有新的净额决策记录。"
+      )}
+    </div>
+  `;
 }
 
 function familyEnablementSummary(payload) {
