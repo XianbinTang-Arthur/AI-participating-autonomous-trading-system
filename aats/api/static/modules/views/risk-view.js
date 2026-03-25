@@ -21,6 +21,7 @@ export function renderRiskSections(data) {
   const blockers = blockerControl.blockers || data.blockers?.blockers || [];
   const primaryBlocker = blockerControl.primary_blocker || blockers[0] || null;
   const secondaryBlockers = blockerControl.secondary_blockers || [];
+  const primaryTask = blockerControl.primary_task || null;
   const reconciliation = data.reconciliationLatest?.reconciliation || null;
   const mismatchSummary = data.reconciliationLatest?.mismatch_summary || {};
   const billsSummary = data.reconciliationLatest?.exchange_bills_summary || {};
@@ -44,7 +45,7 @@ export function renderRiskSections(data) {
         recovery,
         blockers: primaryBlocker ? [primaryBlocker] : blockers,
         reconciliation,
-        recoveryReasonText: blockerControl.next_step_summary || uiHints.recoveryReasonsText,
+        recoveryReasonText: primaryTask?.summary || blockerControl.next_step_summary || uiHints.recoveryReasonsText,
         readyCopy: "当前没有硬阻断，可继续关注账户、对账和恢复状态。",
       }),
       tone: riskTone({ primaryBlocker, blockers, reconciliation, recovery, health }),
@@ -58,8 +59,8 @@ export function renderRiskSections(data) {
         {
           label: "当前阻断数",
           value: formatNumber(blockers.length, 0),
-          meta: primaryBlocker
-            ? textOrFallback(primaryBlocker.title, localizeError(primaryBlocker.blocker))
+          meta: primaryTask
+            ? textOrFallback(primaryTask.title, "当前没有额外主任务")
             : noPrimaryBlockerSummary({ recovery, reconciliation }).meta,
           tone: blockers.length > 0 ? "danger" : "positive",
         },
@@ -74,7 +75,7 @@ export function renderRiskSections(data) {
           value: recoveryStatusLabel(recovery),
           meta: recovery.halted && recovery.resume_eligible
             ? "系统已手动暂停，确认无误后可直接恢复自动运行。"
-            : blockerControl.next_step_summary || uiHints.recoveryReasonsText || listText(recovery.resume_blocked_reasons, "当前没有额外恢复说明"),
+            : primaryTask?.summary || blockerControl.next_step_summary || uiHints.recoveryReasonsText || listText(recovery.resume_blocked_reasons, "当前没有额外恢复说明"),
           tone: recovery.safe_to_trade ? "positive" : recovery.resume_eligible ? "warning" : recovery.review_required ? "warning" : "danger",
         },
         {
@@ -86,10 +87,10 @@ export function renderRiskSections(data) {
       ],
     }),
     riskActions: surfaceCard({
-      title: "第一优先级阻断处置",
-      kicker: "阻断控制面板",
-      copy: blockerControl.next_step_summary || reconciliationActionCopy({ reconciliation, recovery }),
-      content: renderPrimaryBlockerActionPanel({ primaryBlocker, secondaryBlockers, recovery, reconciliation, uiHints }),
+      title: "你现在先做什么",
+      kicker: "当前主任务",
+      copy: primaryTask?.summary || blockerControl.next_step_summary || reconciliationActionCopy({ reconciliation, recovery }),
+      content: renderPrimaryTaskPanel({ primaryTask, recovery, reconciliation, uiHints }),
     }),
     riskEvidence: surfaceCard({
       title: "状态依据",
@@ -97,10 +98,10 @@ export function renderRiskSections(data) {
       copy: "把最影响自动交易资格的三条证据放在同一处，减少来回跳读。",
       content: summaryStrip([
         {
-          label: "首要阻断",
-          value: primaryBlocker ? textOrFallback(primaryBlocker.title, localizeError(primaryBlocker.blocker)) : "当前没有阻断项",
-          meta: primaryBlocker ? textOrFallback(primaryBlocker.recommended_next_step, localizeError(primaryBlocker.blocker)) : "当前暂无需要立刻处理的阻断项",
-          tone: primaryBlocker ? "danger" : "positive",
+          label: "当前主任务",
+          value: primaryTask ? textOrFallback(primaryTask.title, "当前没有额外主任务") : "当前没有额外主任务",
+          meta: primaryTask ? textOrFallback(primaryTask.summary, "当前没有额外处理建议") : "当前暂无需要立刻处理的动作",
+          tone: primaryTask && primaryTask.kind === "resolve_blocker" ? "danger" : primaryTask ? "warning" : "positive",
         },
         {
           label: "最新对账",
@@ -434,7 +435,7 @@ export function renderReconciliationControls({
   }
   if (shouldShowValidateAction({ reconciliation, recovery })) {
     buttons.push(
-      actionButton("重新对账", "trigger-reconciliation-validate", "", "secondary", {
+      actionButton("重新对账（刷新交易所状态）", "trigger-reconciliation-validate", "", "secondary", {
         disabled: !canWrite,
         title: permissionMessage,
       })
@@ -442,7 +443,7 @@ export function renderReconciliationControls({
   }
   if (shouldShowRebaselineAction({ reconciliation, recovery })) {
     buttons.push(
-      actionButton("确认为新基线", "trigger-rebaseline", "", "warning", {
+      actionButton("接受当前状态为新基线", "trigger-rebaseline", "", "warning", {
         disabled: !canWrite,
         title: permissionMessage,
       })
@@ -457,7 +458,7 @@ export function renderReconciliationControls({
     );
   }
   buttons.push(
-    actionButton("暂停自动运行", "trigger-halt", "", "danger", {
+    actionButton("继续保持暂停", "trigger-halt", "", "danger", {
       disabled: !canWrite,
       title: permissionMessage,
     })
@@ -488,8 +489,8 @@ export function reconciliationActionCopy({ reconciliation = null, recovery = {},
   return "当前状态稳定。如果想再次确认状态，可以手动重新对账。";
 }
 
-function renderPrimaryBlockerActionPanel({ primaryBlocker = null, secondaryBlockers = [], recovery = {}, reconciliation = null, uiHints = {} } = {}) {
-  if (!primaryBlocker) {
+function renderPrimaryTaskPanel({ primaryTask = null, recovery = {}, reconciliation = null, uiHints = {} } = {}) {
+  if (!primaryTask) {
     const summary = noPrimaryBlockerSummary({ recovery, reconciliation });
     return `
       ${summaryStrip([
@@ -501,34 +502,35 @@ function renderPrimaryBlockerActionPanel({ primaryBlocker = null, secondaryBlock
         },
       ])}
       <p class="meta-copy">${escapeHtml(summary.copy)}</p>
+      ${renderReconciliationControls({ reconciliation, recovery, uiHints, includeInspect: true })}
     `;
   }
   return `
     ${summaryStrip([
       {
-        label: "当前第一优先级",
-        value: textOrFallback(primaryBlocker.title, localizeError(primaryBlocker.blocker)),
-        meta: primaryBlocker.root_cause ? "当前应先处理这一条根因阻断。" : "当前应先处理这一条阻断。",
-        tone: primaryBlocker.submit_only ? "warning" : "danger",
+        label: "当前主任务",
+        value: textOrFallback(primaryTask.title, "当前没有额外主任务"),
+        meta: primaryTask.kind === "resolve_blocker" ? "请先完成这一项，再看是否还剩其他阻断。" : "按这一步处理后，系统会重新评估恢复资格。",
+        tone: primaryTask.kind === "resolve_blocker" ? "danger" : primaryTask.kind === "observe" || primaryTask.kind === "healthy" ? "info" : "warning",
       },
       {
-        label: "影响范围",
-        value: textOrFallback(primaryBlocker.impact, "当前阻断会影响自动交易资格。"),
-        meta: primaryBlocker.submit_only ? "当前主要影响真实报单。" : "当前会直接阻止系统继续自动运行。",
-        tone: primaryBlocker.submit_only ? "warning" : "danger",
+        label: "为什么先做这一步",
+        value: textOrFallback(primaryTask.reason, "当前没有额外原因说明。"),
+        meta: primaryTask.kind === "observe" ? "当前以观察为主，不需要立即做高风险人工操作。" : "这一步是当前最直接影响系统状态的处理动作。",
+        tone: primaryTask.kind === "observe" || primaryTask.kind === "healthy" ? "info" : "warning",
       },
       {
-        label: "处理完成后",
-        value: textOrFallback(primaryBlocker.recommended_next_step, "处理完成后系统会重新评估剩余阻断。"),
-        meta: secondaryBlockers.length ? `后面还剩 ${formatNumber(secondaryBlockers.length, 0)} 条次级阻断。` : "处理完成后即可重新评估是否恢复自动运行。",
+        label: "做完后会怎样",
+        value: textOrFallback(primaryTask.completion_outcome, "处理完成后系统会重新评估当前状态。"),
+        meta: primaryTask.secondary_blocker_count > 0 ? `后面还剩 ${formatNumber(primaryTask.secondary_blocker_count, 0)} 条次级阻断。` : "处理完成后即可重新评估是否恢复自动运行。",
         tone: "info",
       },
     ])}
     ${kvList([
-      ["真实原因", textOrFallback(primaryBlocker.description, localizeError(primaryBlocker.blocker)), `来源：${readableState(primaryBlocker.subsystem || "system")}`],
-      ["下一步动作", textOrFallback(primaryBlocker.recommended_next_step, "请先处理这条阻断。"), secondaryBlockers.length ? `处理完后系统会继续检查剩余 ${formatNumber(secondaryBlockers.length, 0)} 条阻断。` : "处理完后可重新判断是否恢复自动运行。"],
+      ["先做什么", textOrFallback(primaryTask.summary, "当前没有额外处理建议。"), primaryTask.kind === "observe" ? "这一栏说的是“现在最推荐做的动作”，不是系统内部状态描述。" : "优先按这一步处理，不要先去点无关按钮。"] ,
+      ["来源", primaryTask.source_blocker ? localizeError(primaryTask.source_blocker) : "当前没有单独的上游阻断代码", primaryTask.source_blocker ? `阻断代码：${primaryTask.source_blocker}` : "这是系统按当前恢复状态综合给出的主任务。"] ,
     ])}
-    ${renderBlockerActions(primaryBlocker.actions || [], primaryBlocker.blocker, uiHints)}
+    ${renderBlockerActions(primaryTask.actions || [], primaryTask.source_blocker || "", uiHints)}
   `;
 }
 
@@ -672,7 +674,7 @@ function shouldShowRebaselineAction({ reconciliation, recovery }) {
 }
 
 function shouldShowResumeAction({ recovery }) {
-  return Boolean(!recovery.safe_to_trade || recovery.resume_eligible);
+  return Boolean(recovery.halted || recovery.resume_eligible);
 }
 
 function actionSuggestsRebaseline(value) {

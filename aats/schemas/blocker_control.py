@@ -13,6 +13,7 @@ BlockerResolutionMode = Literal["manual_only", "auto_only", "manual_or_auto", "e
 BlockerActionKind = Literal["api", "client", "external"]
 BlockerActionTone = Literal["primary", "secondary", "warning", "danger", "ghost"]
 BlockerLifecycleState = Literal["open", "acknowledged", "in_progress", "resolved", "auto_cleared", "superseded"]
+BlockerTaskKind = Literal["resolve_blocker", "review_reconciliation", "resume", "observe", "refresh_state", "healthy"]
 
 
 class BlockerActionDefinition(SchemaBase):
@@ -51,6 +52,17 @@ class BlockerControlItem(SchemaBase):
     actions: list[BlockerActionDefinition] = Field(default_factory=list)
 
 
+class BlockerControlTask(SchemaBase):
+    kind: BlockerTaskKind
+    title: str
+    summary: str
+    reason: str
+    completion_outcome: str
+    source_blocker: str | None = None
+    secondary_blocker_count: int = 0
+    actions: list[BlockerActionDefinition] = Field(default_factory=list)
+
+
 class BlockerControlSnapshot(SchemaBase):
     panel_version: str
     generated_at: datetime = Field(default_factory=utc_now)
@@ -61,6 +73,7 @@ class BlockerControlSnapshot(SchemaBase):
     primary_blocker: BlockerControlItem | None = None
     secondary_blockers: list[BlockerControlItem] = Field(default_factory=list)
     blockers: list[BlockerControlItem] = Field(default_factory=list)
+    primary_task: BlockerControlTask
     next_step_summary: str
 
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 from types import SimpleNamespace
 
+from aats.schemas.blocker_control import BlockerControlItem
 from aats.services.blocker_control.service import BlockerControlService
 
 
@@ -38,6 +39,60 @@ class TestBlockerControlSummary(unittest.TestCase):
         )
 
         self.assertIn("轻度动态漂移", summary)
+
+    def test_surface_halt_never_becomes_first_priority_when_real_root_cause_exists(self) -> None:
+        service = BlockerControlService(SimpleNamespace())
+        primary, secondary = service._primary_and_secondary_items(  # type: ignore[attr-defined]
+            [
+                BlockerControlItem(
+                    blocker="kill_switch_active",
+                    category="system_execution",
+                    subsystem="execution_control",
+                    priority=90,
+                    title="系统当前仍处于暂停状态",
+                    description="暂停是结果。",
+                    impact="暂停会阻止继续自动运行。",
+                    recommended_next_step="先处理更上游的阻断。",
+                    derived_from=["operator_rebaseline_required"],
+                ),
+                BlockerControlItem(
+                    blocker="operator_rebaseline_required",
+                    category="system_execution",
+                    subsystem="reconciliation",
+                    priority=50050,
+                    title="需要人工确认新基线",
+                    description="账实状态需要人工确认。",
+                    impact="未确认前系统不会恢复自动交易。",
+                    recommended_next_step="先查看最新对账，再决定是否接受当前状态为新基线。",
+                    root_cause=True,
+                ),
+            ]
+        )
+
+        self.assertIsNotNone(primary)
+        self.assertEqual(primary.blocker, "operator_rebaseline_required")
+        self.assertEqual(len(secondary), 1)
+        self.assertEqual(secondary[0].blocker, "kill_switch_active")
+
+    def test_primary_task_explains_resume_when_only_manual_pause_remains(self) -> None:
+        service = BlockerControlService(SimpleNamespace())
+        task = service._primary_task(  # type: ignore[attr-defined]
+            primary=None,
+            secondary=[],
+            recovery={
+                "safe_to_trade": False,
+                "review_required": False,
+                "resume_eligible": True,
+                "halted": True,
+                "rebaseline_available": False,
+                "resume_blocked_reasons": [],
+            },
+            latest_reconciliation=None,
+        )
+
+        self.assertEqual(task.kind, "resume")
+        self.assertIn("恢复自动运行", task.summary)
+        self.assertIn("resume-system", [item.action_id for item in task.actions])
 
 
 if __name__ == "__main__":

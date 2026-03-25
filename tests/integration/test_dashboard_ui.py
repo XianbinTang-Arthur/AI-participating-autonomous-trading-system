@@ -121,8 +121,15 @@ class TestDashboardUI(unittest.TestCase):
         self.assertIn("小资金运行包", risk_text)
         self.assertIn("guardedLivePreflight", risk_text)
         self.assertIn("guardedLiveRunPacket", risk_text)
+        self.assertIn("你现在先做什么", risk_text)
+        self.assertIn("当前主任务", risk_text)
+        self.assertIn("为什么先做这一步", risk_text)
+        self.assertIn("做完后会怎样", risk_text)
+        self.assertIn("重新对账（刷新交易所状态）", risk_text)
+        self.assertIn("接受当前状态为新基线", risk_text)
+        self.assertIn("继续保持暂停", risk_text)
         self.assertIn("轻度差异，建议观察", risk_text)
-        self.assertIn("当前没有新的主阻断，但系统仍处于人工确认流程", risk_text)
+        self.assertIn("系统仍处于人工确认流程", risk_text)
 
     def test_dashboard_redirects_to_login_when_auth_is_enabled(self) -> None:
         settings = AATSSettings.model_validate(

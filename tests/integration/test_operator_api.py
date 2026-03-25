@@ -2385,6 +2385,8 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         payload = response.json()
         self.assertEqual(payload["primary_blocker"]["blocker"], "ai_degraded_requires_manual_review")
         self.assertTrue(payload["primary_blocker"]["root_cause"])
+        self.assertEqual(payload["primary_task"]["kind"], "resolve_blocker")
+        self.assertEqual(payload["primary_task"]["source_blocker"], "ai_degraded_requires_manual_review")
         self.assertIn("确认恢复 AI 决策", [item["label"] for item in payload["primary_blocker"]["actions"]])
         self.assertIn("改为仅基础策略继续运行", [item["label"] for item in payload["primary_blocker"]["actions"]])
         self.assertTrue(any(item["blocker"] == "kill_switch_active" for item in payload["secondary_blockers"]))
