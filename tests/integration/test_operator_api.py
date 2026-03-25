@@ -3208,7 +3208,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         )
         return
 
-    async def test_admin_can_manually_override_ai_operating_mode_with_freeze_and_restore_auto(self) -> None:
+    async def test_admin_can_select_ai_operating_mode_and_switch_back_to_configured_mode(self) -> None:
         runtime = await self._runtime(
             operator_auth_enabled=True,
             operator_session_secret="session-secret",
@@ -3219,35 +3219,35 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
 
         with TestClient(app) as client:
             login = client.post("/auth/login", json={"username": "admin", "password": "admin-pass"})
-            override = client.post(
-                "/ai/operating-mode/override",
-                json={"mode": "baseline_only", "reason": "test_manual_override_ai_operating_mode"},
+            select_manual = client.post(
+                "/ai/operating-mode/select",
+                json={"mode": "baseline_only", "reason": "test_manual_select_ai_operating_mode"},
             )
-            runtime_after_override = client.get("/ai/runtime")
-            restore = client.post(
-                "/ai/operating-mode/restore-auto",
-                json={"reason": "test_restore_auto_ai_operating_mode"},
+            runtime_after_manual = client.get("/ai/runtime")
+            select_configured = client.post(
+                "/ai/operating-mode/select",
+                json={"mode": "ai_decision_maker", "reason": "test_select_configured_ai_operating_mode"},
             )
-            runtime_after_restore = client.get("/ai/runtime")
+            runtime_after_configured = client.get("/ai/runtime")
 
         self.assertEqual(login.status_code, 200)
-        self.assertEqual(override.status_code, 200)
-        self.assertEqual(runtime_after_override.status_code, 200)
-        override_payload = override.json()
-        runtime_payload = runtime_after_override.json()
-        self.assertEqual(override_payload["status"], "completed")
+        self.assertEqual(select_manual.status_code, 200)
+        self.assertEqual(runtime_after_manual.status_code, 200)
+        select_manual_payload = select_manual.json()
+        runtime_payload = runtime_after_manual.json()
+        self.assertEqual(select_manual_payload["status"], "completed")
         self.assertEqual(runtime_payload["manual_override_mode"], "baseline_only")
         self.assertTrue(runtime_payload["manual_override_active"])
-        self.assertIsNotNone(runtime_payload["manual_override_freeze_until"])
         self.assertEqual(runtime_payload["effective_operating_mode"], "baseline_only")
+        self.assertEqual(runtime_payload["operating_mode_source"], "manual_selection")
 
-        self.assertEqual(restore.status_code, 200)
-        self.assertEqual(runtime_after_restore.status_code, 200)
-        restored_payload = runtime_after_restore.json()
+        self.assertEqual(select_configured.status_code, 200)
+        self.assertEqual(runtime_after_configured.status_code, 200)
+        restored_payload = runtime_after_configured.json()
         self.assertFalse(restored_payload["manual_override_active"])
         self.assertIsNone(restored_payload["manual_override_mode"])
-        self.assertIsNone(restored_payload["manual_override_freeze_until"])
         self.assertEqual(restored_payload["configured_operating_mode"], "ai_decision_maker_with_profile_control")
+        self.assertEqual(restored_payload["operating_mode_source"], "configured")
         self.assertIn(
             restored_payload["effective_operating_mode"],
             {"ai_decision_maker_with_profile_control", "baseline_only"},
@@ -4588,7 +4588,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(restore_action["details"]["active_profile_id"], "trend_strict")
         self.assertFalse(restore_action["details"]["frozen_by_admin_override"])
 
-    async def test_restore_strategy_profile_auto_is_rejected_when_auto_control_is_disabled(self) -> None:
+    async def test_restore_strategy_profile_auto_can_enable_auto_even_when_config_default_is_manual(self) -> None:
         runtime = await self._runtime(
             operator_auth_enabled=True,
             operator_session_secret="session-secret",
@@ -4604,9 +4604,12 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
                 "/strategy-profiles/restore-auto",
                 json={"reason": "manual_restore_auto_strategy_profile_control"},
             )
+            snapshot = client.get("/strategy-profiles")
 
-        self.assertEqual(restored.status_code, 409)
-        self.assertEqual(restored.json()["detail"], "strategy_profile_auto_control_not_enabled")
+        self.assertEqual(restored.status_code, 200)
+        self.assertEqual(restored.json()["status"], "auto_restored")
+        self.assertEqual(snapshot.status_code, 200)
+        self.assertTrue(snapshot.json()["activation"]["auto_switch_enabled"])
 
     async def test_strategy_profile_activation_is_blocked_when_open_orders_exist(self) -> None:
         runtime = await self._runtime(

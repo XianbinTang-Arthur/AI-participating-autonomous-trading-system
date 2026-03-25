@@ -33,13 +33,22 @@ class RuntimeQueryFacade:
         auto_control_configured = settings.strategy_profile_auto_control_configured
         auto_control_enabled = bool(strategy_profile_state.get("auto_switch_enabled", auto_control_configured))
         status["strategy_profile_auto_control_configured"] = settings.strategy_profile_auto_control_configured
-        status["strategy_profile_auto_control_effective"] = auto_control_configured and auto_control_enabled
-        status["strategy_profile_auto_control_reason"] = (
-            "explicit_setting_disabled"
-            if not auto_control_configured
-            else "manually_paused_by_admin"
-            if not auto_control_enabled
-            else "explicit_setting_enabled"
+        status["strategy_profile_auto_control_effective"] = auto_control_enabled
+        status["strategy_profile_control_configured_mode"] = "auto" if auto_control_configured else "manual"
+        status["strategy_profile_control_effective_mode"] = "auto" if auto_control_enabled else "manual"
+        if auto_control_enabled and auto_control_configured:
+            reason = "configured_auto"
+        elif auto_control_enabled and not auto_control_configured:
+            reason = "operator_enabled_auto"
+        elif not auto_control_enabled and auto_control_configured:
+            reason = "operator_enabled_manual"
+        else:
+            reason = "configured_manual"
+        status["strategy_profile_auto_control_reason"] = reason
+        status["operating_mode_source"] = (
+            "manual_selection"
+            if status.get("manual_override_active")
+            else "configured"
         )
         status["legacy_modes"] = legacy_modes
         return status

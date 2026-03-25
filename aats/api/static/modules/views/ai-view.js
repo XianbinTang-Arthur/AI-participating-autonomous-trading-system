@@ -149,7 +149,7 @@ function effectiveMode(runtime = {}) {
 }
 
 function toneForRuntime(runtime) {
-  if (runtime?.manual_override_active) return "warning";
+  if (runtime?.operating_mode_source === "manual_selection") return "warning";
   if (effectiveMode(runtime) === "baseline_only" && configuredMode(runtime) !== "baseline_only") {
     return "warning";
   }
@@ -526,8 +526,8 @@ function aiRuntimeNarrative(runtime, latestDegradation) {
   if (!runtime || Object.keys(runtime).length === 0) {
     return "当前暂无 AI 决策链路运行状态，可能是页面刚加载完，或当前配置没有启用 AI。";
   }
-  if (runtime.manual_override_active) {
-    return `当前运行模式由管理员手动覆盖为 ${humanState(runtime.manual_override_mode || "baseline_only")}，冻结结束时间 ${formatMaybeTimestamp(runtime.manual_override_freeze_until)}，到期后系统会恢复自动运行模式逻辑。`;
+  if (runtime.operating_mode_source === "manual_selection") {
+    return `当前运行模式已手动切到 ${humanState(effectiveMode(runtime))}。配置默认仍是 ${humanState(configuredMode(runtime))}。`;
   }
   if (effectiveMode(runtime) === "baseline_only" && configuredMode(runtime) !== "baseline_only") {
     return `AI 当前没有真实参与下单决策链路。最近一次降级原因：${humanError(runtime.degradation_reason || latestDegradation?.reason_code)}。`;
@@ -713,29 +713,29 @@ function blockerSummary(latestOutcome, latestAssessment) {
 }
 
 function manualOperatingModeSummary(runtime = {}) {
-  if (!runtime.manual_override_active) {
+  if ((runtime.effective_operating_mode || "baseline_only") === (runtime.configured_operating_mode || "baseline_only")) {
     return {
-      value: "当前未启用管理员手动覆盖",
-      meta: `系统仍按 ${humanState(configuredMode(runtime))} 的自动逻辑运行。`,
+      value: `当前按配置运行：${humanState(configuredMode(runtime))}`,
+      meta: "下面的三个按钮可以随时切到另外两种模式。",
       tone: "outline",
     };
   }
   return {
-    value: `管理员已手动覆盖为 ${humanState(runtime.manual_override_mode || "baseline_only")}`,
-    meta: `冻结到 ${formatMaybeTimestamp(runtime.manual_override_freeze_until)}，到期后恢复系统自动逻辑。`,
+    value: `当前手动切到：${humanState(effectiveMode(runtime))}`,
+    meta: `配置默认仍是 ${humanState(configuredMode(runtime))}。点回对应按钮即可恢复默认。`,
     tone: "warning",
   };
 }
 
 function renderManualOperatingModePanel({ runtime = {}, session = {} }) {
   const canAdmin = session.role === "admin" || session.identity === "api_key_write";
-  const currentMode = String(runtime.manual_override_mode || effectiveMode(runtime) || "").trim();
+  const currentMode = String(effectiveMode(runtime) || "").trim();
   const overrideSummary = manualOperatingModeSummary(runtime);
   const buttons = MANUAL_MODE_OPTIONS.map((option) => {
     const active = option.value === currentMode;
     return actionButton(
       active ? `${option.label}（当前）` : option.label,
-      "manual-set-ai-operating-mode",
+      "select-ai-operating-mode",
       option.value,
       option.tone,
       {
@@ -748,24 +748,10 @@ function renderManualOperatingModePanel({ runtime = {}, session = {} }) {
       },
     );
   }).join("");
-  const restoreButton = actionButton(
-    "恢复自动模式",
-    "restore-ai-operating-mode-auto",
-    "",
-    "secondary",
-    {
-      disabled: !canAdmin || !runtime.manual_override_active,
-      title: !canAdmin
-        ? "当前账号只有查看权限，不能恢复自动模式。"
-        : runtime.manual_override_active
-          ? "提前结束人工覆盖，并恢复自动运行模式逻辑。"
-          : "当前没有人工覆盖中的运行模式。",
-    },
-  );
   return surfaceCard({
-    title: "运行模式切换",
-    kicker: "人工入口",
-    copy: "管理员可以临时手动切换 AI 当前运行模式。冻结时间结束后，系统会恢复之前的自动运行模式逻辑。",
+    title: "AI 策略模式",
+    kicker: "运行入口",
+    copy: "这里决定 AI 是否参与最终交易决策。",
     classes: "is-muted",
     actions: [
       actionButton("切策略档位", "navigate-view", "aiConfig", "secondary"),
@@ -774,25 +760,24 @@ function renderManualOperatingModePanel({ runtime = {}, session = {} }) {
     content: `
       ${summaryStrip([
         {
-          label: "管理员手动覆盖状态",
+          label: "当前状态",
           value: overrideSummary.value,
           meta: overrideSummary.meta,
           tone: overrideSummary.tone === "warning" ? "warning" : "info",
         },
         {
-          label: "恢复系统自动逻辑时间",
-          value: runtime.manual_override_active ? formatMaybeTimestamp(runtime.manual_override_freeze_until) : "当前不适用",
-          meta: `默认冻结 ${formatNumber(runtime.manual_override_default_freeze_seconds ?? 0, 0)} 秒`,
-          tone: runtime.manual_override_active ? "warning" : "outline",
+          label: "配置默认",
+          value: humanState(configuredMode(runtime)),
+          meta: "启动时优先按这个模式运行",
+          tone: "outline",
         },
       ])}
       ${kvList([
         ["默认运行模式", humanState(configuredMode(runtime)), "这是系统启动时默认的 AI 运行模式。"],
-        ["当前运行模式", humanState(effectiveMode(runtime)), runtime.manual_override_active ? "当前由管理员手动覆盖暂时接管。" : "当前仍由系统自动决定。"],
+        ["当前运行模式", humanState(effectiveMode(runtime)), (effectiveMode(runtime) === configuredMode(runtime)) ? "当前与配置默认一致。" : "当前已经手动切到其他模式。"],
       ])}
       <div class="table-actions table-actions--compact manual-profile-switch-actions">
         ${buttons}
-        ${restoreButton}
       </div>
     `,
   });
@@ -928,7 +913,7 @@ export function renderAISections(data) {
             value: humanState(effectiveMode(runtime)),
             meta: `默认运行模式 ${humanState(configuredMode(runtime))}`,
             tone: toneForRuntime(runtime),
-            badge: actorTags(runtime.manual_override_active ? "admin" : "system"),
+            badge: actorTags(runtime.operating_mode_source === "manual_selection" ? "admin" : "system"),
           },
           {
             label: "最近一轮真实决策结果",
@@ -965,7 +950,7 @@ export function renderAISections(data) {
               : "当前允许 AI 参与真实交易决策",
           copy: aiRuntimeNarrative(runtime, latestDegradation),
           pills: [
-            actorTags(runtime.manual_override_active ? "admin" : effectiveMode(runtime) === "baseline_only" ? "system" : "ai"),
+            actorTags(runtime.operating_mode_source === "manual_selection" ? "admin" : effectiveMode(runtime) === "baseline_only" ? "system" : "ai"),
             pill(`策略层 shadow ${runtime.shadow_mode_enabled ? "已开启" : "未开启"}`, runtime.shadow_mode_enabled ? "info" : "outline"),
           ],
         })}

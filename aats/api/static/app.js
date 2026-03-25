@@ -92,8 +92,8 @@ const VIEW_META = {
   aiConfig: {
     docTitle: "AATS 自动交易监控台 | AI 配置",
     eyebrow: "AI 配置",
-    heading: "这里管理 AI 模式、策略档位和自动切换规则",
-    copy: "这里是控制面，只放配置、切换入口和生效规则，不再混入长周期分析卡片。",
+    heading: "这里管理 AI 决策模式与策略换档方式",
+    copy: "左侧决定 AI 在交易里扮演什么角色，右侧决定 6 个策略档位是自动切换还是手动固定。",
     hidePageHead: false,
   },
   admin: {
@@ -763,12 +763,11 @@ async function dispatchAction(action, value, target = null) {
   if (action === "record-trial-review") return recordTrialReview(target);
   if (action === "trigger-blocker-action") return triggerBlockerAction(value, target);
   if (action === "resolve-stuck-order") return resolveStuckOrder(value);
-  if (action === "manual-set-ai-operating-mode") return setAIManualOperatingMode(value, target);
-  if (action === "restore-ai-operating-mode-auto") return restoreAIAutomaticOperatingMode(target);
+  if (action === "select-ai-operating-mode") return selectAIOperatingMode(value, target);
   if (action === "manual-activate-strategy-profile") return activateStrategyProfile(value, target);
   if (action === "restore-strategy-profile-auto") return restoreStrategyProfileAutomaticControl(target);
-  if (action === "set-ai-mode-editing") return setAIConfigModeEditing(value);
-  if (action === "set-profile-editing") return setAIConfigProfileEditing(value);
+  if (action === "pause-strategy-profile-auto") return pauseStrategyProfileAutomaticControl(target);
+  if (action === "set-profile-control-mode") return setStrategyProfileControlMode(value, target);
   if (action === "load-more-orders") return adjustPageLimit("recentOrders", PAGE_LOAD_STEP);
   if (action === "collapse-orders") return resetPageLimit("recentOrders");
   if (action === "load-more-fills") return adjustPageLimit("recentFills", PAGE_LOAD_STEP);
@@ -939,7 +938,6 @@ async function activateStrategyProfile(profileId, target = null) {
       tone: "info",
       message: `当前策略档位已手动切换为 ${readableProfileName(result?.active_revision?.profile_label || result?.active_revision?.profile_id)}。`,
     };
-    state.ui.aiConfig.profileManualEditing = true;
     await refreshDashboard({ manual: true });
   } catch (error) {
     state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
@@ -952,7 +950,7 @@ async function activateStrategyProfile(profileId, target = null) {
 async function restoreStrategyProfileAutomaticControl(target = null) {
   const clearPending = setActionPending(target, "正在恢复自动切档…");
   try {
-    if (!window.confirm("确认提前结束当前策略档位的人工冻结，并恢复自动切档逻辑吗？")) return;
+    if (!window.confirm("确认开启自动切档吗？开启后下面 6 个档位按钮会锁定，由系统自动决定是否换档。")) return;
     const result = await requestJson("/strategy-profiles/restore-auto", {
       method: "POST",
       body: { reason: "ui_restore_auto_strategy_profile_control" },
@@ -964,7 +962,6 @@ async function restoreStrategyProfileAutomaticControl(target = null) {
         ? `策略档位已恢复自动切档逻辑，当前仍保持 ${readableProfileName(result?.active_revision?.profile_label || activation.active_profile_id)}。`
         : "策略档位已恢复自动切档逻辑。",
     };
-    state.ui.aiConfig.profileManualEditing = false;
     await refreshDashboard({ manual: true });
   } catch (error) {
     state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
@@ -974,44 +971,45 @@ async function restoreStrategyProfileAutomaticControl(target = null) {
   }
 }
 
-async function setAIManualOperatingMode(mode, target = null) {
+async function pauseStrategyProfileAutomaticControl(target = null) {
+  const clearPending = setActionPending(target, "正在切到手动切档…");
+  try {
+    if (!window.confirm("确认关闭自动切档吗？关闭后下面 6 个档位按钮会解锁，由你手动切换。")) return;
+    const result = await requestJson("/strategy-profiles/pause-auto", {
+      method: "POST",
+      body: { reason: "ui_pause_auto_strategy_profile_control" },
+    });
+    const activation = result?.activation || {};
+    state.flash = {
+      tone: "info",
+      message: activation?.active_profile_id
+        ? `当前已切到手动切档，系统会保持 ${readableProfileName(result?.active_revision?.profile_label || activation.active_profile_id)}。`
+        : "当前已切到手动切档。",
+    };
+    await refreshDashboard({ manual: true });
+  } catch (error) {
+    state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
+    renderBanners();
+  } finally {
+    clearPending();
+  }
+}
+
+async function selectAIOperatingMode(mode, target = null) {
   if (!mode) return;
   const modeLabel = target instanceof HTMLElement ? (target.textContent || "").trim() : mode;
   const clearPending = setActionPending(target, "正在切换运行模式…");
   try {
-    if (!window.confirm(`确认立即把 AI 当前运行模式切换为“${modeLabel}”吗？系统会在冻结时间结束后恢复为配置模式。`)) return;
-    const result = await requestJson("/ai/operating-mode/override", {
+    if (!window.confirm(`确认立即把 AI 当前运行模式切换为“${modeLabel}”吗？`)) return;
+    const result = await requestJson("/ai/operating-mode/select", {
       method: "POST",
-      body: { mode, reason: "ui_manual_override_ai_operating_mode" },
+      body: { mode, reason: "ui_select_ai_operating_mode" },
     });
     const runtime = result?.ai_runtime || {};
     state.flash = {
       tone: "info",
-      message: `AI 当前运行模式已手动切换为 ${readableState(runtime.manual_override_mode || mode, "目标模式")}，冻结到 ${runtime.manual_override_freeze_until || "待确认"}。`,
+      message: `AI 当前运行模式已切换为 ${readableState(runtime.effective_operating_mode || mode, "目标模式")}。`,
     };
-    state.ui.aiConfig.modeManualEditing = true;
-    await refreshDashboard({ manual: true });
-  } catch (error) {
-    state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
-    renderBanners();
-  } finally {
-    clearPending();
-  }
-}
-
-async function restoreAIAutomaticOperatingMode(target = null) {
-  const clearPending = setActionPending(target, "正在恢复配置模式…");
-  try {
-    if (!window.confirm("确认提前结束人工覆盖，并恢复为配置模式吗？")) return;
-    await requestJson("/ai/operating-mode/restore-auto", {
-      method: "POST",
-      body: { reason: "ui_restore_auto_ai_operating_mode" },
-    });
-    state.flash = {
-      tone: "info",
-      message: "AI 当前运行模式已恢复为配置模式。",
-    };
-    state.ui.aiConfig.modeManualEditing = false;
     await refreshDashboard({ manual: true });
   } catch (error) {
     state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
@@ -1026,26 +1024,14 @@ function readableProfileName(value, fallback = "未知档位") {
   return readableState(String(value), fallback);
 }
 
-function setAIConfigModeEditing(value) {
-  const nextManual = value === "manual";
-  const runtime = state.data.aiRuntime || {};
-  if (!nextManual && runtime.manual_override_active) {
-    void restoreAIAutomaticOperatingMode();
+function setStrategyProfileControlMode(value, target = null) {
+  if (value === "auto") {
+    void restoreStrategyProfileAutomaticControl(target);
     return;
   }
-  state.ui.aiConfig.modeManualEditing = nextManual;
-  renderShell();
-}
-
-function setAIConfigProfileEditing(value) {
-  const nextManual = value === "manual";
-  const runtime = state.data.aiRuntime || {};
-  if (!nextManual && runtime.strategy_profile_auto_control_reason === "manually_paused_by_admin") {
-    void restoreStrategyProfileAutomaticControl();
-    return;
+  if (value === "manual") {
+    void pauseStrategyProfileAutomaticControl(target);
   }
-  state.ui.aiConfig.profileManualEditing = nextManual;
-  renderShell();
 }
 
 async function createOperatorUser() {

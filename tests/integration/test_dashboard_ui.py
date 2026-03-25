@@ -88,15 +88,15 @@ class TestDashboardUI(unittest.TestCase):
         self.assertNotIn("前往 AI 配置", ai_analysis_text)
 
         ai_config_text = responses["ai_config_js"].text
-        self.assertIn("运行模式切换", ai_config_text)
-        self.assertIn("自动换档控制", ai_config_text)
-        self.assertIn("策略档位切换", ai_config_text)
+        self.assertIn("AI 策略模式", ai_config_text)
+        self.assertIn("AI 换档控制", ai_config_text)
         self.assertIn("运行参数概览", ai_config_text)
         self.assertIn("紧急安全切档", ai_config_text)
         self.assertIn("持有与冷却", ai_config_text)
         self.assertIn("策略层 shadow", ai_config_text)
         self.assertIn("执行层 shadow", ai_config_text)
-        self.assertIn("恢复自动切档", ai_config_text)
+        self.assertIn("手动切档", ai_config_text)
+        self.assertIn("自动切档", ai_config_text)
         self.assertNotIn("前往 AI 工作台", ai_config_text)
         self.assertNotIn("查看 AI 分析", ai_config_text)
 
@@ -378,24 +378,23 @@ console.log(JSON.stringify({
   analysisUsesStrategyShadowName: analysisHtml.includes('策略层 shadow'),
   analysisUsesExecutionShadowName: analysisHtml.includes('执行层 shadow'),
   analysisNoTopNavButtons: !analysisHtml.includes('前往 AI 工作台') && !analysisHtml.includes('前往 AI 配置'),
-  configHasRuntimeModeCard: configHtml.includes('运行模式切换'),
-  configHasAutoProfileControlCard: configHtml.includes('自动换档控制'),
-  configHasManualProfileCard: configHtml.includes('策略档位切换'),
+  configHasRuntimeModeCard: configHtml.includes('AI 策略模式'),
+  configHasAutoProfileControlCard: configHtml.includes('AI 换档控制'),
   configHasRuntimeParams: configHtml.includes('运行参数概览'),
   configHasAdaptiveControls: configHtml.includes('风险预算乘数') && configHtml.includes('执行侵略性乘数'),
   configHasTimingControls: configHtml.includes('持有与冷却') && configHtml.includes('低边际保护'),
   configHasStrategyShadow: configHtml.includes('策略层 shadow'),
   configHasExecutionShadow: configHtml.includes('执行层 shadow'),
-  configHasRestoreAutoSwitch: configHtml.includes('恢复自动切档'),
+  configHasProfileControlModeButtons: configHtml.includes('手动切档') && configHtml.includes('自动切档'),
   configNoJumpButtons: !configHtml.includes('前往 AI 工作台') && !configHtml.includes('查看 AI 分析'),
   analysisHasAdaptiveControls: analysisHtml.includes('风险预算乘数') && analysisHtml.includes('自动切档闸门'),
   drawerExplainsFallback: drawer.body.includes('当前运行模式允许 AI 参与'),
   drawerUsesHumanDecisionSource: drawer.body.includes('本轮最终回退到基础策略'),
-  manualOnlyProfileDefaultsToManual: /<button class="primary-button" data-action="set-profile-editing" data-value="manual"/.test(manualOnlyConfigHtml),
-  manualOnlyProfileAutoDisabled: /<button class="secondary-button" data-action="set-profile-editing" data-value="auto"[^>]*disabled/.test(manualOnlyConfigHtml),
-  manualOnlyProfileButtonsUnlocked: !/data-action="manual-activate-strategy-profile" data-value="trend_normal"[^>]*disabled/.test(manualOnlyConfigHtml),
-  manualOnlyRuntimeUsesFollowConfigLabel: /<button class="primary-button" data-action="set-ai-mode-editing" data-value="auto"[^>]*>跟随配置<\\/button>/.test(manualOnlyConfigHtml),
-  manualOnlyRuntimeAvoidsAutomaticCopy: !manualOnlyConfigHtml.includes('系统自动运行'),
+  manualOnlyProfileDefaultsToManual: /<button class="primary-button" data-action="set-profile-control-mode" data-value="manual"[^>]*disabled/.test(manualOnlyConfigHtml),
+  manualOnlyProfileAutoEnabled: /<button class="secondary-button" data-action="set-profile-control-mode" data-value="auto"/.test(manualOnlyConfigHtml),
+  manualOnlyProfileButtonsUnlocked: /data-action="manual-activate-strategy-profile" data-value="trend_strict"/.test(manualOnlyConfigHtml) && !/data-action="manual-activate-strategy-profile" data-value="trend_strict"[^>]*disabled/.test(manualOnlyConfigHtml),
+  manualOnlyRuntimeCurrentModeLocked: /<button class="primary-button" data-action="select-ai-operating-mode" data-value="baseline_only"[^>]*disabled/.test(manualOnlyConfigHtml),
+  manualOnlyRuntimeAvoidsLegacyButtons: !manualOnlyConfigHtml.includes('跟随配置') && !manualOnlyConfigHtml.includes('手动接管'),
 }));
 """
         result = subprocess.run(
@@ -413,22 +412,21 @@ console.log(JSON.stringify({
         self.assertIn('"analysisNoTopNavButtons":true', result.stdout)
         self.assertIn('"configHasRuntimeModeCard":true', result.stdout)
         self.assertIn('"configHasAutoProfileControlCard":true', result.stdout)
-        self.assertIn('"configHasManualProfileCard":true', result.stdout)
         self.assertIn('"configHasRuntimeParams":true', result.stdout)
         self.assertIn('"configHasAdaptiveControls":true', result.stdout)
         self.assertIn('"configHasTimingControls":true', result.stdout)
         self.assertIn('"configHasStrategyShadow":true', result.stdout)
         self.assertIn('"configHasExecutionShadow":true', result.stdout)
-        self.assertIn('"configHasRestoreAutoSwitch":true', result.stdout)
+        self.assertIn('"configHasProfileControlModeButtons":true', result.stdout)
         self.assertIn('"configNoJumpButtons":true', result.stdout)
         self.assertIn('"analysisHasAdaptiveControls":true', result.stdout)
         self.assertIn('"drawerExplainsFallback":true', result.stdout)
         self.assertIn('"drawerUsesHumanDecisionSource":true', result.stdout)
         self.assertIn('"manualOnlyProfileDefaultsToManual":true', result.stdout)
-        self.assertIn('"manualOnlyProfileAutoDisabled":true', result.stdout)
+        self.assertIn('"manualOnlyProfileAutoEnabled":true', result.stdout)
         self.assertIn('"manualOnlyProfileButtonsUnlocked":true', result.stdout)
-        self.assertIn('"manualOnlyRuntimeUsesFollowConfigLabel":true', result.stdout)
-        self.assertIn('"manualOnlyRuntimeAvoidsAutomaticCopy":true', result.stdout)
+        self.assertIn('"manualOnlyRuntimeCurrentModeLocked":true', result.stdout)
+        self.assertIn('"manualOnlyRuntimeAvoidsLegacyButtons":true', result.stdout)
 
 
 if __name__ == "__main__":

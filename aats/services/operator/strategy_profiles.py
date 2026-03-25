@@ -343,6 +343,21 @@ class StrategyProfileControlService:
             reason=reason,
         )
 
+    def pause_auto(
+        self,
+        *,
+        actor_role: OperatorRole,
+        actor_identity: str | None,
+        auth_source: AuthSource,
+        reason: str,
+    ) -> dict[str, Any]:
+        return self.activation.pause_auto(
+            actor_role=actor_role,
+            actor_identity=actor_identity,
+            auth_source=auth_source,
+            reason=reason,
+        )
+
     def rollback(
         self,
         *,

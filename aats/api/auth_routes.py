@@ -51,13 +51,13 @@ class StrategyProfileManualRestoreRequest(BaseModel):
     reason: str = "manual_restore_auto_strategy_profile_control"
 
 
-class AIManualOperatingModeOverrideRequest(BaseModel):
+class StrategyProfileManualPauseRequest(BaseModel):
+    reason: str = "manual_pause_auto_strategy_profile_control"
+
+
+class AISelectOperatingModeRequest(BaseModel):
     mode: str
-    reason: str = "manual_override_ai_operating_mode"
-
-
-class AIManualOperatingModeRestoreRequest(BaseModel):
-    reason: str = "manual_restore_auto_ai_operating_mode"
+    reason: str = "manual_select_ai_operating_mode"
 
 
 def _runtime(request: Request) -> ApplicationRuntime:
@@ -279,14 +279,31 @@ async def restore_strategy_profile_auto(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@auth_router.post("/ai/operating-mode/override")
-async def override_ai_operating_mode(
+@auth_router.post("/strategy-profiles/pause-auto")
+async def pause_strategy_profile_auto(
     request: Request,
-    payload: AIManualOperatingModeOverrideRequest,
+    payload: StrategyProfileManualPauseRequest | None = None,
     principal: OperatorPrincipal = Depends(require_admin_access),
 ) -> dict[str, Any]:
     try:
-        return _query(request).set_ai_operating_mode_override(
+        return _query(request).pause_strategy_profile_auto(
+            reason=payload.reason if payload is not None else "manual_pause_auto_strategy_profile_control",
+            actor_role=principal.role,
+            actor_identity=principal.identity,
+            auth_source=principal.auth_source,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@auth_router.post("/ai/operating-mode/select")
+async def select_ai_operating_mode(
+    request: Request,
+    payload: AISelectOperatingModeRequest,
+    principal: OperatorPrincipal = Depends(require_admin_access),
+) -> dict[str, Any]:
+    try:
+        return _query(request).set_ai_operating_mode(
             mode=payload.mode,
             reason=payload.reason,
             actor_role=principal.role,
@@ -295,20 +312,6 @@ async def override_ai_operating_mode(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@auth_router.post("/ai/operating-mode/restore-auto")
-async def restore_ai_operating_mode_auto(
-    request: Request,
-    payload: AIManualOperatingModeRestoreRequest | None = None,
-    principal: OperatorPrincipal = Depends(require_admin_access),
-) -> dict[str, Any]:
-    return _query(request).clear_ai_operating_mode_override(
-        reason=payload.reason if payload is not None else "manual_restore_auto_ai_operating_mode",
-        actor_role=principal.role,
-        actor_identity=principal.identity,
-        auth_source=principal.auth_source,
-    )
 
 
 @auth_router.post("/auth/users")

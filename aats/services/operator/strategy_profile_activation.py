@@ -320,6 +320,46 @@ class StrategyProfileActivationFacade:
             "active_revision": self.owner._revision_view(self.owner._revision(next_state.active_revision_id)),
         }
 
+    def pause_auto(
+        self,
+        *,
+        actor_role: "OperatorRole",
+        actor_identity: str | None,
+        auth_source: "AuthSource",
+        reason: str,
+    ) -> dict[str, Any]:
+        state = self.owner._activation_state()
+        if not state.auto_switch_enabled:
+            return {
+                "status": "already_manual",
+                "activation": state.model_dump(mode="json"),
+                "active_revision": self.owner._revision_view(self.owner._revision(state.active_revision_id)),
+            }
+
+        next_state = state.model_copy(
+            update={
+                "auto_switch_enabled": False,
+                "frozen_until": None,
+                "last_switch_reason": "operator_pause_auto_strategy_profile_control",
+                "last_switch_actor": actor_identity,
+            }
+        )
+        self.owner.repo.save_activation_state(next_state)
+        self.owner._append_selection_decision_transition(
+            status="manual_profile_auto_switch_paused",
+            candidate_profile_id=next_state.active_profile_id,
+            rollback_profile_id=state.previous_active_revision_id,
+            execution_state="not_executed",
+            recommended_action="manual_profile_selection_allowed",
+            rationale=["operator_pause_auto_strategy_profile_control"],
+            notes=[reason],
+        )
+        return {
+            "status": "manual_paused",
+            "activation": next_state.model_dump(mode="json"),
+            "active_revision": self.owner._revision_view(self.owner._revision(next_state.active_revision_id)),
+        }
+
     def rollback(
         self,
         *,

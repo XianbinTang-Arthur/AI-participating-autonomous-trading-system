@@ -2680,9 +2680,22 @@ class OperatorQueryService:
         actor_identity: str | None,
         auth_source: AuthSource,
     ) -> dict[str, Any]:
-        if not self.ai_runtime().get("strategy_profile_auto_control_configured", False):
-            raise ValueError("strategy_profile_auto_control_not_enabled")
         return self.strategy_profile_queries.restore_auto(
+            reason=reason,
+            actor_role=actor_role,
+            actor_identity=actor_identity,
+            auth_source=auth_source,
+        )
+
+    def pause_strategy_profile_auto(
+        self,
+        *,
+        reason: str,
+        actor_role: OperatorRole,
+        actor_identity: str | None,
+        auth_source: AuthSource,
+    ) -> dict[str, Any]:
+        return self.strategy_profile_queries.pause_auto(
             reason=reason,
             actor_role=actor_role,
             actor_identity=actor_identity,
@@ -5654,7 +5667,7 @@ class OperatorQueryService:
             "ai_runtime": self.ai_runtime(),
         }
 
-    def set_ai_operating_mode_override(
+    def set_ai_operating_mode(
         self,
         *,
         mode: str,
@@ -5665,7 +5678,25 @@ class OperatorQueryService:
     ) -> dict[str, Any]:
         recovery_before = self.recovery_view()["recovery_state"]
         ai_before = dict(self.runtime.ai_service.status())
-        ai_after = self.runtime.ai_service.set_manual_operating_mode_override(mode=mode)
+        configured_mode = normalize_ai_operating_mode(self.runtime.settings.ai_operating_mode)
+        requested_mode = normalize_ai_operating_mode(mode)
+        configured_display_mode = (
+            "ai_decision_maker"
+            if configured_mode == "ai_decision_maker_with_profile_control"
+            else configured_mode
+        )
+        requested_display_mode = (
+            "ai_decision_maker"
+            if requested_mode == "ai_decision_maker_with_profile_control"
+            else requested_mode
+        )
+        if requested_display_mode == configured_display_mode:
+            ai_after = self.runtime.ai_service.clear_manual_operating_mode_override()
+        else:
+            ai_after = self.runtime.ai_service.set_manual_operating_mode_override(
+                mode=requested_mode,
+                freeze_seconds=0.0,
+            )
         self._invalidate_cache()
         self.runtime.recovery_status = self.recovery_posture.finalize_status()
         self._invalidate_cache()
@@ -5674,7 +5705,7 @@ class OperatorQueryService:
             topic=topics.OPERATOR_ACTIONS,
             key="system",
             payload_model=OperatorActionRecord(
-                action="ai_manual_mode_override",
+                action="ai_operating_mode_select",
                 actor_role=actor_role,
                 actor_identity=actor_identity,
                 auth_source=auth_source,
@@ -5685,58 +5716,16 @@ class OperatorQueryService:
                 details={
                     "ai_before": ai_before,
                     "ai_after": ai_after,
-                    "target_mode": ai_after.get("manual_override_mode"),
-                    "freeze_until": ai_after.get("manual_override_freeze_until"),
+                    "configured_mode": configured_mode,
+                    "requested_mode": requested_mode,
+                    "configured_display_mode": configured_display_mode,
+                    "requested_display_mode": requested_display_mode,
+                    "effective_mode": ai_after.get("effective_operating_mode"),
                 },
             ),
         )
         self._persist_blocker_snapshot(
-            source="ai_manual_mode_override",
-            runtime_state=self.system_health()["runtime_state"],
-            mode_snapshot=self.system_mode(),
-            blockers=self.blockers(),
-        )
-        return {
-            "status": "completed",
-            "recovery": self.recovery_view(),
-            "ai_runtime": self.ai_runtime(),
-        }
-
-    def clear_ai_operating_mode_override(
-        self,
-        *,
-        reason: str,
-        actor_role: OperatorRole,
-        actor_identity: str | None = None,
-        auth_source: AuthSource = "anonymous",
-    ) -> dict[str, Any]:
-        recovery_before = self.recovery_view()["recovery_state"]
-        ai_before = dict(self.runtime.ai_service.status())
-        ai_after = self.runtime.ai_service.clear_manual_operating_mode_override()
-        self._invalidate_cache()
-        self.runtime.recovery_status = self.recovery_posture.finalize_status()
-        self._invalidate_cache()
-        recovery_after = self.recovery_view()["recovery_state"]
-        self._append_event(
-            topic=topics.OPERATOR_ACTIONS,
-            key="system",
-            payload_model=OperatorActionRecord(
-                action="ai_manual_mode_restore_auto",
-                actor_role=actor_role,
-                actor_identity=actor_identity,
-                auth_source=auth_source,
-                reason=reason,
-                status="completed",
-                recovery_state_before=recovery_before,
-                recovery_state_after=recovery_after,
-                details={
-                    "ai_before": ai_before,
-                    "ai_after": ai_after,
-                },
-            ),
-        )
-        self._persist_blocker_snapshot(
-            source="ai_manual_mode_restore_auto",
+            source="ai_operating_mode_select",
             runtime_state=self.system_health()["runtime_state"],
             mode_snapshot=self.system_mode(),
             blockers=self.blockers(),
