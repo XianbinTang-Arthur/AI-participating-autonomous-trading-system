@@ -676,8 +676,6 @@ class TargetPositionEngine:
         current_side = self._exposure_side(current_position_qty)
         if adverse_count >= 3:
             return True
-        if desired_side not in {"flat", current_side} and adverse_count >= 2:
-            return True
         if baseline.volatility_state == "high" and baseline.regime in {"breakout", "trend"} and adverse_count >= 2:
             return True
         return False
@@ -1108,7 +1106,23 @@ class TargetPositionEngine:
         return self._clamp(0.85 + conviction, 0.85, 2.5)
 
     def _short_bias_allowed(self, product_type: str) -> bool:
-        return product_type == "derivatives"
+        return product_type == "derivatives" and bool(self.settings.strategy_short_bias_enabled)
+
+    def _normalize_min_actionable_target_qty(
+        self,
+        *,
+        current_position_qty: Decimal,
+        desired_target_qty: Decimal,
+        product_type: str,
+    ) -> Decimal:
+        if product_type != "derivatives":
+            return desired_target_qty
+        if abs(current_position_qty) > EPSILON_DECIMAL_12 or abs(desired_target_qty) <= EPSILON_DECIMAL_12:
+            return desired_target_qty
+        minimum_qty = max(to_decimal(self.settings.default_order_qty), EPSILON_DECIMAL_12)
+        if abs(desired_target_qty) + EPSILON_DECIMAL_12 >= minimum_qty:
+            return desired_target_qty
+        return self._sign(desired_target_qty) * minimum_qty
 
     def _normalize_long_only_target(
         self,
@@ -1140,11 +1154,18 @@ class TargetPositionEngine:
         desired_target_qty: Decimal,
         product_type: str,
     ) -> Decimal:
+        desired_target_qty = self._normalize_min_actionable_target_qty(
+            current_position_qty=current_position_qty,
+            desired_target_qty=desired_target_qty,
+            product_type=product_type,
+        )
         rebalance_band = self._rebalance_band(
             current_position_qty=current_position_qty,
             desired_target_qty=desired_target_qty,
         )
         delta_qty = desired_target_qty - current_position_qty
+        if abs(current_position_qty) < EPSILON_DECIMAL_12:
+            return desired_target_qty
         if abs(desired_target_qty) < EPSILON_DECIMAL_12 and abs(current_position_qty) <= rebalance_band:
             return Decimal("0")
         if abs(delta_qty) <= rebalance_band:

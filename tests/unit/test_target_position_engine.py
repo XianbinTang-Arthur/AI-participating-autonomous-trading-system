@@ -151,6 +151,52 @@ class TestTargetPositionEngine(unittest.TestCase):
         self.assertGreaterEqual(target.target_leverage, 1.0)
         self.assertLessEqual(target.target_leverage, 3.0)
 
+    def test_derivatives_short_bias_setting_disables_short_targets(self) -> None:
+        engine = TargetPositionEngine(
+            settings=AATSSettings.model_validate(
+                {
+                    "default_order_qty": 0.01,
+                    "trading_product_type": "derivatives",
+                    "strategy_short_bias_enabled": False,
+                }
+            )
+        )
+        context = self._context(product_type="derivatives", current_exposure_side="flat")
+        baseline = self._baseline(
+            volatility_target_scale=1.0,
+            suggested_position_scale=1.0,
+            direction_bias="short",
+            confidence=0.92,
+        )
+
+        target = engine.build(context, baseline, self._ai_assessment(direction=-0.55, confidence=0.9))
+
+        self.assertEqual(target.target_position_qty, Decimal("0"))
+        self.assertEqual(target.position_intent, "hold")
+
+    def test_derivatives_flat_entry_is_raised_to_min_actionable_qty(self) -> None:
+        engine = TargetPositionEngine(
+            settings=AATSSettings.model_validate(
+                {
+                    "default_order_qty": 0.01,
+                    "trading_product_type": "derivatives",
+                    "strategy_short_bias_enabled": True,
+                }
+            )
+        )
+        context = self._context(product_type="derivatives", current_exposure_side="flat")
+        baseline = self._baseline(
+            volatility_target_scale=1.0,
+            suggested_position_scale=0.2,
+            direction_bias="short",
+            confidence=0.92,
+        )
+
+        target = engine.build(context, baseline, self._ai_assessment(direction=-0.55, confidence=0.9))
+
+        self.assertEqual(target.target_position_qty, Decimal("-0.01"))
+        self.assertEqual(target.position_intent, "open_short")
+
     def test_spot_context_stays_long_only_even_if_settings_default_to_derivatives(self) -> None:
         engine = TargetPositionEngine(
             settings=AATSSettings.model_validate(
@@ -341,6 +387,33 @@ class TestTargetPositionEngine(unittest.TestCase):
         self.assertEqual(target.position_intent, "close_long")
         self.assertIn("emergency_protective_exit", target.guardrail_flags)
         self.assertEqual(target.decision_outcome.exit_attribution, "emergency_protective_exit")
+
+    def test_derivatives_strong_reversal_is_not_forced_flat_by_only_two_adverse_factors(self) -> None:
+        engine = TargetPositionEngine(
+            settings=AATSSettings.model_validate(
+                {
+                    "default_order_qty": 0.01,
+                    "trading_product_type": "derivatives",
+                    "strategy_short_bias_enabled": True,
+                    "strategy_min_hold_seconds": 0,
+                }
+            )
+        )
+        context = self._context(current_position_qty=0.01, product_type="derivatives", current_exposure_side="long")
+        baseline = self._baseline(
+            direction_bias="short",
+            confidence=0.92,
+            suggested_position_scale=1.0,
+            volatility_target_scale=1.0,
+            volatility_state="medium",
+            factor_scores={"momentum_alpha": -0.22, "trend_alpha": -0.2, "microstructure_alpha": -0.04, "liquidity_scale": 0.9},
+        ).model_copy(update={"composite_alpha_score": -0.42, "regime": "trend"})
+
+        target = engine.build(context, baseline, self._ai_assessment(direction=-0.12, confidence=0.9))
+
+        self.assertLess(target.target_position_qty, Decimal("0"))
+        self.assertEqual(target.position_intent, "reverse_to_short")
+        self.assertNotIn("emergency_protective_exit", target.guardrail_flags)
 
     def test_cost_guard_blocks_weak_derivatives_entry(self) -> None:
         engine = TargetPositionEngine(
