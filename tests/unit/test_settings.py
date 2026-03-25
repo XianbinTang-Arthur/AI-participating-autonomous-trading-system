@@ -152,6 +152,29 @@ class TestAATSSettings(unittest.TestCase):
         self.assertEqual(settings.decision_min_interval_seconds_15m, 60.0)
         self.assertEqual(settings.strategy_min_hold_seconds, 900.0)
 
+    def test_load_settings_bootstraps_managed_derivatives_profile_before_runtime_validation(self) -> None:
+        with patch.object(AATSSettings, "model_config", {**AATSSettings.model_config, "env_file": None}):
+            with patch.dict(
+                os.environ,
+                {
+                    **_non_aats_environment(),
+                    "AATS_ENV_TEMPLATE_PROFILE": "derivatives_live",
+                    "AATS_DEFAULT_ORDER_QTY": "0.01",
+                    "AATS_MAX_ABS_POSITION_QTY": "0.02",
+                    "AATS_MAX_NOTIONAL_PER_SYMBOL": "1000",
+                    "AATS_MAX_TARGET_LEVERAGE": "10",
+                    "AATS_DEFAULT_TARGET_LEVERAGE": "10",
+                },
+                clear=True,
+            ):
+                settings = load_settings()
+
+        self.assertEqual(settings.env_template_profile, "derivatives_live")
+        self.assertEqual(settings.trading_product_type, "derivatives")
+        self.assertEqual(settings.margin_mode, "cross")
+        self.assertEqual(settings.max_target_leverage, 10.0)
+        self.assertEqual(settings.default_target_leverage, 10.0)
+
     def test_load_settings_ignores_deprecated_runtime_derivations_from_managed_env(self) -> None:
         with patch.object(AATSSettings, "model_config", {**AATSSettings.model_config, "env_file": None}):
             with patch.dict(

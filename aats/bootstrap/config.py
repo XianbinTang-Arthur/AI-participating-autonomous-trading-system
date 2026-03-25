@@ -220,21 +220,27 @@ def resilient_subscription_handler(
 
 
 def load_settings() -> AATSSettings:
-    discovered = AATSSettings()
+    sources, init_kwargs = AATSSettings._settings_init_sources()
+    explicit_overrides = AATSSettings._settings_build_values(sources, init_kwargs)
+    env_template_profile = explicit_overrides.get("env_template_profile")
+    environment = explicit_overrides.get(
+        "environment",
+        AATSSettings.model_fields["environment"].default,
+    )
+    config_profile = explicit_overrides.get(
+        "config_profile",
+        AATSSettings.model_fields["config_profile"].default,
+    )
     source_values: dict[str, Any] = {}
     # When startup runs through one of the managed .env profile templates, that
     # template path, runtime semantics come from managed profile defaults plus
     # a dedicated strategy tuning file. Legacy YAML overlays remain available
     # only for non-managed/manual config_profile startup paths.
-    if discovered.env_template_profile is None:
-        source_values = load_yaml_config(discovered.environment, discovered.config_profile)
+    if env_template_profile is None:
+        source_values = load_yaml_config(environment, config_profile)
     else:
-        source_values = load_managed_profile_values(discovered.env_template_profile)
-    explicit_overrides = {
-        field_name: getattr(discovered, field_name)
-        for field_name in discovered.model_fields_set
-    }
-    if discovered.env_template_profile is not None:
+        source_values = load_managed_profile_values(env_template_profile)
+    if env_template_profile is not None:
         derived_field_names = {
             key.removeprefix("AATS_").lower()
             for key in MANAGED_PROFILE_DERIVED_ENV_KEYS
@@ -248,7 +254,7 @@ def load_settings() -> AATSSettings:
             log_event(
                 get_logger("aats.config"),
                 "managed_profile_ignored_deprecated_env_overrides",
-                env_template_profile=discovered.env_template_profile,
+                env_template_profile=env_template_profile,
                 ignored_fields=ignored_override_fields,
             )
         explicit_overrides = {
