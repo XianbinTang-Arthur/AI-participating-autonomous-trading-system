@@ -322,6 +322,8 @@ class AATSSettings(BaseSettings):
     operator_auth_enabled: bool = False
     operator_read_api_key: str | None = None
     operator_write_api_key: str | None = None
+    operator_login_max_failed_attempts: int = 5
+    operator_login_lockout_seconds: int = 900
     operator_unsafe_write_without_auth: bool = False
     operator_session_secret: str | None = None
     operator_session_cookie_name: str = "aats_operator_session"

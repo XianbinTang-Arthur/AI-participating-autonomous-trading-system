@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import desc, select
+from sqlalchemy import and_, desc, or_, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from aats.bootstrap.logging import get_logger, log_event
@@ -273,13 +273,12 @@ class PostgresExecutionRepository:
             query = query.where(~OrderStateModel.status.in_(final_statuses))
         if statuses is not None:
             query = query.where(OrderStateModel.status.in_(tuple(statuses)))
-        query = query.order_by(OrderStateModel.created_at, OrderStateModel.client_order_id)
+        query = self._scope_order_query(query, scope).order_by(OrderStateModel.created_at, OrderStateModel.client_order_id)
+        if limit is not None:
+            query = query.limit(limit)
         with self.session_factory() as session:
             rows = session.scalars(query).all()
-        states = filter_order_states([self._to_order_state(row) for row in rows], scope)
-        if limit is not None:
-            states = states[-limit:]
-        return states
+        return [self._to_order_state(row) for row in rows]
 
     def fills_for_scope(
         self,
@@ -291,13 +290,59 @@ class PostgresExecutionRepository:
         query = select(FillEventModel)
         if since is not None:
             query = query.where(FillEventModel.ingestion_timestamp >= since)
-        query = query.order_by(FillEventModel.ingestion_timestamp, FillEventModel.fill_id)
+        query = self._scope_fill_query(query, scope).order_by(FillEventModel.ingestion_timestamp, FillEventModel.fill_id)
+        if limit is not None:
+            query = query.limit(limit)
         with self.session_factory() as session:
             rows = session.scalars(query).all()
-        fills = filter_fills([self._to_fill_event(row) for row in rows], scope)
-        if limit is not None:
-            fills = fills[-limit:]
-        return fills
+        return [self._to_fill_event(row) for row in rows]
+
+    @staticmethod
+    def _symbol_clause(model, scope: RuntimeStateScope):
+        allowed_symbols = tuple(scope.allowed_symbols) if scope.allowed_symbols else (scope.default_symbol,)
+        return model.symbol.in_(allowed_symbols)
+
+    @classmethod
+    def _scope_order_query(cls, query, scope: RuntimeStateScope):
+        symbol_clause = cls._symbol_clause(OrderStateModel, scope)
+        regular_clause = and_(
+            symbol_clause,
+            OrderStateModel.product_type == scope.product_type,
+            OrderStateModel.margin_mode == scope.margin_mode,
+            or_(OrderStateModel.strategy_family.is_(None), OrderStateModel.strategy_family != "smart_arbitrage"),
+        )
+        if scope.product_type != "derivatives":
+            return query.where(regular_clause)
+        smart_clause = and_(
+            symbol_clause,
+            OrderStateModel.strategy_family == "smart_arbitrage",
+            or_(
+                and_(OrderStateModel.product_type == "spot", OrderStateModel.margin_mode == "cash"),
+                and_(OrderStateModel.product_type == scope.product_type, OrderStateModel.margin_mode == scope.margin_mode),
+            ),
+        )
+        return query.where(or_(regular_clause, smart_clause))
+
+    @classmethod
+    def _scope_fill_query(cls, query, scope: RuntimeStateScope):
+        symbol_clause = cls._symbol_clause(FillEventModel, scope)
+        regular_clause = and_(
+            symbol_clause,
+            FillEventModel.product_type == scope.product_type,
+            FillEventModel.margin_mode == scope.margin_mode,
+            or_(FillEventModel.strategy_family.is_(None), FillEventModel.strategy_family != "smart_arbitrage"),
+        )
+        if scope.product_type != "derivatives":
+            return query.where(regular_clause)
+        smart_clause = and_(
+            symbol_clause,
+            FillEventModel.strategy_family == "smart_arbitrage",
+            or_(
+                and_(FillEventModel.product_type == "spot", FillEventModel.margin_mode == "cash"),
+                and_(FillEventModel.product_type == scope.product_type, FillEventModel.margin_mode == scope.margin_mode),
+            ),
+        )
+        return query.where(or_(regular_clause, smart_clause))
 
     @staticmethod
     def _to_order_state(row: OrderStateModel) -> OrderState:

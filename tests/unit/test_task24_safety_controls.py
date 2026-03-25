@@ -17,6 +17,7 @@ from aats.services.portfolio_service.pnl import PortfolioPnLCalculator
 from aats.services.portfolio_service.positions import PortfolioService, PortfolioState
 from aats.services.portfolio_service.snapshots import PortfolioSnapshotBuilder
 from aats.storage.event_store import InMemoryEventStore
+from aats.storage.fill_outcome_repo import InMemoryFillOutcomeRepository
 from aats.storage.obligation_repo import InMemoryExecutionObligationRepository
 
 
@@ -53,6 +54,7 @@ class TestTask24SafetyControls(unittest.IsolatedAsyncioTestCase):
             state=state,
             snapshot_builder=PortfolioSnapshotBuilder(pnl_calculator=PortfolioPnLCalculator()),
             portfolio_repo=_FailingPortfolioRepository(),
+            fill_outcome_repo=InMemoryFillOutcomeRepository(),
             price_provider=lambda _symbol: 100.0,
         )
         fill = FillEvent(

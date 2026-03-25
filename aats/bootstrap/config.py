@@ -41,6 +41,7 @@ from aats.services.execution_control.shadow import Phase1ExecutionShadowService
 from aats.services.execution_control.subsystem import Phase1ShadowSubsystem
 from aats.services.execution_engine.order_manager import OrderManager
 from aats.services.execution_engine.outbox import PostgresExecutionOutboxPublisher
+from aats.services.portfolio_service.outbox import PostgresPortfolioOutboxPublisher
 from aats.services.execution_engine.paper_adapter import PaperExecutionAdapter
 from aats.services.execution_engine.planner import ExecutionPlanner
 from aats.services.fee_resolver import EffectiveFeeResolver
@@ -1865,6 +1866,7 @@ async def build_runtime(
         fee_resolver=fee_resolver,
     )
     execution_outbox_publisher = None
+    portfolio_outbox_publisher = None
     if (
         storage.database_runtime is not None
         and isinstance(storage.obligation_repo, PostgresExecutionObligationRepository)
@@ -1880,6 +1882,21 @@ async def build_runtime(
             obligation_repo=storage.obligation_repo,
             outbox_repo=storage.outbox_repo,
             bus=bus,
+        )
+    if (
+        storage.database_runtime is not None
+        and isinstance(storage.event_store, PostgresEventStore)
+        and storage.outbox_repo is not None
+        and isinstance(storage.portfolio_repo, PostgresPortfolioRepository)
+        and isinstance(storage.fill_outcome_repo, PostgresFillOutcomeRepository)
+    ):
+        portfolio_outbox_publisher = PostgresPortfolioOutboxPublisher(
+            session_factory=storage.database_runtime.session_factory,
+            event_store=storage.event_store,
+            outbox_repo=storage.outbox_repo,
+            bus=bus,
+            portfolio_repo=storage.portfolio_repo,
+            fill_outcome_repo=storage.fill_outcome_repo,
         )
     execution_order_service = None
     execution_command_processor = None
@@ -1958,6 +1975,7 @@ async def build_runtime(
                 else None
             ),
             sleeve_pnl_projection_service=sleeve_pnl_projection_service,
+            portfolio_outbox_publisher=portfolio_outbox_publisher,
             state_scope=state_scope,
             initial_usdt_balance=runtime_settings.initial_usdt_balance,
             metrics=metrics,
@@ -1981,6 +1999,7 @@ async def build_runtime(
                 else None
             ),
             sleeve_pnl_projection_service=sleeve_pnl_projection_service,
+            portfolio_outbox_publisher=portfolio_outbox_publisher,
             state_scope=state_scope,
             metrics=metrics,
         )
@@ -2086,15 +2105,21 @@ async def build_runtime(
     if runtime_layering.environment_capabilities.account_state_source_kind == "exchange":
         account_snapshot = await account_service.refresh(force=True)
         recent_bills_summary_getter = getattr(account_service, "recent_bills_summary", None)
+        latest_recent_bills_getter = getattr(account_service, "latest_recent_bills", None)
         exchange_bills_summary = (
             recent_bills_summary_getter()
             if callable(recent_bills_summary_getter)
             else {}
         )
+        recent_bills_rows = (
+            latest_recent_bills_getter()
+            if callable(latest_recent_bills_getter)
+            else []
+        )
         funding_fee_sync_posted_count = 0
         if funding_fee_sync_service is not None:
             funding_result = funding_fee_sync_service.sync_recent_bills(
-                rows=account_service.latest_recent_bills(),
+                rows=recent_bills_rows,
                 product_type=state_scope.product_type,
                 margin_mode=state_scope.margin_mode,
             )

@@ -18,6 +18,7 @@ from aats.services.ledger.lot_projection import LotBasedProjectionBuilder
 from aats.services.ledger.persistent_lot_book import PersistentLotBookService
 from aats.services.ledger.settlement_posting import FillSettlementProjection, LedgerSettlementPostingService
 from aats.services.portfolio_service.positions import PortfolioService, PortfolioState
+from aats.services.portfolio_service.outbox import PostgresPortfolioOutboxPublisher
 from aats.services.portfolio_service.snapshots import PortfolioSnapshotBuilder
 from aats.services.runtime_scope import RuntimeStateScope
 from aats.storage.base import ExecutionRepository, FillOutcomeRepository, PortfolioRepository
@@ -37,6 +38,7 @@ class LedgerBackedPortfolioService:
         settlement_posting_service: LedgerSettlementPostingService,
         persistent_lot_book_service: PersistentLotBookService | None = None,
         sleeve_pnl_projection_service: Any | None = None,
+        portfolio_outbox_publisher: PostgresPortfolioOutboxPublisher | None = None,
         state_scope: RuntimeStateScope | None = None,
         initial_usdt_balance: Decimal | float,
         metrics: MetricsRegistry | None = None,
@@ -51,6 +53,7 @@ class LedgerBackedPortfolioService:
         self.settlement_posting_service = settlement_posting_service
         self.persistent_lot_book_service = persistent_lot_book_service
         self.sleeve_pnl_projection_service = sleeve_pnl_projection_service
+        self.portfolio_outbox_publisher = portfolio_outbox_publisher
         self.state_scope = state_scope
         self.initial_usdt_balance = Decimal(str(initial_usdt_balance))
         self.metrics = metrics
@@ -69,15 +72,21 @@ class LedgerBackedPortfolioService:
             snapshot_origin=snapshot_origin,
         )
         self.state = projection_state
-        self.portfolio_repo.save_snapshot(snapshot)
+        if self.portfolio_outbox_publisher is not None:
+            await self.portfolio_outbox_publisher.persist_bootstrap_snapshot(
+                snapshot=snapshot,
+                source_component="ledger_portfolio_service",
+            )
+        else:
+            self.portfolio_repo.save_snapshot(snapshot)
+            await publish_model(
+                bus=self.bus,
+                topic=topics.PORTFOLIO_SNAPSHOTS,
+                key="portfolio",
+                payload_model=snapshot,
+                source_component="ledger_portfolio_service",
+            )
         self._sync_persistent_lots()
-        await publish_model(
-            bus=self.bus,
-            topic=topics.PORTFOLIO_SNAPSHOTS,
-            key="portfolio",
-            payload_model=snapshot,
-            source_component="ledger_portfolio_service",
-        )
 
     async def handle_fill_event(self, message: dict) -> None:
         fill = parse_payload(message, FillEvent)
@@ -110,21 +119,76 @@ class LedgerBackedPortfolioService:
             realized_pnl_delta=realized_pnl_delta + fee_delta,
             fee_delta=fee_delta,
         )
+        balance_delta = None
         try:
-            self.settlement_posting_service.post_fill_effects(fill=fill, projection=projection)
-            after_balances = self._current_balances(fill=fill)
-            after_state = self._rebuild_projection_state(balances_override=after_balances)
-            self.state = after_state
-            snapshot = self.snapshot_builder.build(
-                state=after_state,
-                price_provider=self.price_provider,
-                decision_id=fill.decision_id,
-                source_intent_id=fill.intent_id,
-                source_fill_id=fill.fill_id,
-                snapshot_origin="fill_derived",
-            )
-            self.portfolio_repo.save_snapshot(snapshot)
-            self._sync_persistent_lots()
+            if self.portfolio_outbox_publisher is None:
+                self.settlement_posting_service.post_fill_effects(fill=fill, projection=projection)
+                after_balances = self._current_balances(fill=fill)
+                after_state = self._rebuild_projection_state(balances_override=after_balances)
+                self.state = after_state
+                snapshot = self.snapshot_builder.build(
+                    state=after_state,
+                    price_provider=self.price_provider,
+                    decision_id=fill.decision_id,
+                    source_intent_id=fill.intent_id,
+                    source_fill_id=fill.fill_id,
+                    snapshot_origin="fill_derived",
+                )
+                self.portfolio_repo.save_snapshot(snapshot)
+                self._sync_persistent_lots()
+                balance_delta = PortfolioService._balance_delta_event(
+                    fill=fill,
+                    balances_before=before_balances,
+                    balances_after=after_balances,
+                    realized_pnl_delta=realized_pnl_delta,
+                    fee_delta=fee_delta,
+                )
+            else:
+                with self.portfolio_outbox_publisher.session_factory() as session:
+                    self.settlement_posting_service.post_fill_effects_in_session(
+                        session=session,
+                        fill=fill,
+                        projection=projection,
+                    )
+                    after_balances = self.settlement_posting_service.available_balances_in_session(
+                        session=session,
+                        product_type=fill.product_type,
+                        margin_mode=fill.margin_mode,
+                    )
+                    after_state = self._rebuild_projection_state(balances_override=after_balances)
+                    self.state = after_state
+                    snapshot = self.snapshot_builder.build(
+                        state=after_state,
+                        price_provider=self.price_provider,
+                        decision_id=fill.decision_id,
+                        source_intent_id=fill.intent_id,
+                        source_fill_id=fill.fill_id,
+                        snapshot_origin="fill_derived",
+                    )
+                    balance_delta = PortfolioService._balance_delta_event(
+                        fill=fill,
+                        balances_before=before_balances,
+                        balances_after=after_balances,
+                        realized_pnl_delta=realized_pnl_delta,
+                        fee_delta=fee_delta,
+                    )
+                    outcome = FillOutcomeRecord.from_fill_and_balance_delta(
+                        fill=fill,
+                        balance_delta=balance_delta,
+                        starting_position_qty=starting_quantity,
+                        starting_avg_entry_price=starting_avg_entry_price,
+                        ending_position_qty=ending_quantity,
+                        ending_avg_entry_price=ending_avg_entry_price,
+                    )
+                    self.portfolio_outbox_publisher.persist_fill_projection_in_session(
+                        session=session,
+                        snapshot=snapshot,
+                        balance_delta=balance_delta,
+                        outcome=outcome,
+                        source_component="ledger_portfolio_service",
+                    )
+                    session.commit()
+                await self.portfolio_outbox_publisher.flush_pending()
         except Exception as exc:
             await self._emit_processing_failure(
                 stage="ledger_portfolio_projection",
@@ -134,13 +198,7 @@ class LedgerBackedPortfolioService:
             )
             raise
 
-        balance_delta = PortfolioService._balance_delta_event(
-            fill=fill,
-            balances_before=before_balances,
-            balances_after=after_balances,
-            realized_pnl_delta=realized_pnl_delta,
-            fee_delta=fee_delta,
-        )
+        assert balance_delta is not None
         try:
             outcome = FillOutcomeRecord.from_fill_and_balance_delta(
                 fill=fill,
@@ -150,9 +208,8 @@ class LedgerBackedPortfolioService:
                 ending_position_qty=ending_quantity,
                 ending_avg_entry_price=ending_avg_entry_price,
             )
-            self.fill_outcome_repo.save_outcome(outcome)
-            if self.sleeve_pnl_projection_service is not None and self.state_scope is not None:
-                self.sleeve_pnl_projection_service.rebuild_scope(scope=self.state_scope)
+            if self.portfolio_outbox_publisher is None:
+                self.fill_outcome_repo.save_outcome(outcome)
         except Exception as exc:
             log_event(
                 self.logger,
@@ -169,6 +226,31 @@ class LedgerBackedPortfolioService:
             )
             await self._emit_processing_failure(
                 stage="ledger_fill_outcome_persist",
+                message=str(exc),
+                fill=fill,
+                retriable=True,
+            )
+            raise
+        try:
+            self._sync_persistent_lots()
+            if self.sleeve_pnl_projection_service is not None and self.state_scope is not None:
+                self.sleeve_pnl_projection_service.rebuild_scope(scope=self.state_scope)
+        except Exception as exc:
+            log_event(
+                self.logger,
+                "ledger_projection_rebuild_failed",
+                level="warning",
+                **correlation_fields(
+                    decision_id=fill.decision_id,
+                    intent_id=fill.intent_id,
+                    order_id=fill.client_order_id,
+                    fill_id=fill.fill_id,
+                    symbol=fill.symbol,
+                    error=str(exc),
+                ),
+            )
+            await self._emit_processing_failure(
+                stage="ledger_projection_rebuild",
                 message=str(exc),
                 fill=fill,
                 retriable=True,
@@ -190,20 +272,21 @@ class LedgerBackedPortfolioService:
                 fee_delta=fee_delta,
             ),
         )
-        await publish_model(
-            bus=self.bus,
-            topic=topics.PORTFOLIO_BALANCE_DELTAS,
-            key=fill.symbol,
-            payload_model=balance_delta,
-            source_component="ledger_portfolio_service",
-        )
-        await publish_model(
-            bus=self.bus,
-            topic=topics.PORTFOLIO_SNAPSHOTS,
-            key="portfolio",
-            payload_model=snapshot,
-            source_component="ledger_portfolio_service",
-        )
+        if self.portfolio_outbox_publisher is None:
+            await publish_model(
+                bus=self.bus,
+                topic=topics.PORTFOLIO_BALANCE_DELTAS,
+                key=fill.symbol,
+                payload_model=balance_delta,
+                source_component="ledger_portfolio_service",
+            )
+            await publish_model(
+                bus=self.bus,
+                topic=topics.PORTFOLIO_SNAPSHOTS,
+                key="portfolio",
+                payload_model=snapshot,
+                source_component="ledger_portfolio_service",
+            )
 
     def _ensure_opening_balance(self) -> None:
         self.settlement_posting_service.ensure_initial_balance(

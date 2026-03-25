@@ -305,6 +305,7 @@ const ERROR_MAP = {
   operator_write_access_required: "当前角色不允许执行这项操作。",
   operator_admin_access_required: "只有管理员才能执行这项操作。",
   operator_login_failed: "用户名或密码错误。",
+  operator_login_locked: "登录失败次数过多，账号已被临时锁定，请稍后再试。",
   operator_session_auth_not_configured: "系统没有启用浏览器会话登录。",
   operator_auth_disabled: "当前没有启用操作员认证。",
   operator_last_admin_required: "系统至少需要保留一个启用中的管理员。",

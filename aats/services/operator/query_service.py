@@ -2426,6 +2426,30 @@ class OperatorQueryService:
             ),
         )
 
+    def record_operator_login_failure(
+        self,
+        *,
+        actor_identity: str | None,
+        auth_source: AuthSource = "session",
+        failure_code: str = "operator_login_failed",
+    ) -> None:
+        self._append_event(
+            topic=topics.OPERATOR_ACTIONS,
+            key="auth",
+            payload_model=OperatorActionRecord(
+                action="login",
+                actor_role="anonymous",
+                actor_identity=actor_identity,
+                auth_source=auth_source,
+                reason="operator_login",
+                status="login_failed",
+                details={
+                    "database_backed": self.runtime.database_runtime is not None,
+                    "failure_code": failure_code,
+                },
+            ),
+        )
+
     def operator_users(self, *, actor_identity: str | None = None) -> dict[str, Any]:
         users = self.runtime.operator_repo.all_users()
         protected_last_admin = enabled_admin_count(self.runtime.operator_repo) <= 1

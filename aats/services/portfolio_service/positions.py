@@ -16,6 +16,7 @@ from aats.schemas.operator import ProcessingFailureRecord
 from aats.schemas.portfolio import FillOutcomeRecord, PortfolioBalanceDelta, PortfolioSnapshot, PortfolioSnapshotOrigin
 from aats.services.accounting import fill_fee_cost_in_quote, resolve_symbol_currencies, resolved_fee_currency
 from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, is_effectively_zero, to_decimal
+from aats.services.portfolio_service.outbox import PostgresPortfolioOutboxPublisher
 from aats.services.portfolio_service.position_keys import (
     build_position_key,
     exposure_side_from_quantity,
@@ -440,6 +441,7 @@ class PortfolioService:
         execution_repo: Any | None = None,
         persistent_lot_book_service: Any | None = None,
         sleeve_pnl_projection_service: Any | None = None,
+        portfolio_outbox_publisher: PostgresPortfolioOutboxPublisher | None = None,
         state_scope: RuntimeStateScope | None = None,
         metrics: MetricsRegistry | None = None,
     ) -> None:
@@ -452,6 +454,7 @@ class PortfolioService:
         self.execution_repo = execution_repo
         self.persistent_lot_book_service = persistent_lot_book_service
         self.sleeve_pnl_projection_service = sleeve_pnl_projection_service
+        self.portfolio_outbox_publisher = portfolio_outbox_publisher
         self.state_scope = state_scope
         self.metrics = metrics
         self.logger = get_logger("aats.portfolio_service")
@@ -462,6 +465,12 @@ class PortfolioService:
             price_provider=self.price_provider,
             snapshot_origin=snapshot_origin,
         )
+        if self.portfolio_outbox_publisher is not None:
+            await self.portfolio_outbox_publisher.persist_bootstrap_snapshot(
+                snapshot=snapshot,
+                source_component="portfolio_service",
+            )
+            return
         self.portfolio_repo.save_snapshot(snapshot)
         await publish_model(
             bus=self.bus,
@@ -487,7 +496,8 @@ class PortfolioService:
                 source_fill_id=fill.fill_id,
                 snapshot_origin="fill_derived",
             )
-            self.portfolio_repo.save_snapshot(snapshot)
+            if self.portfolio_outbox_publisher is None:
+                self.portfolio_repo.save_snapshot(snapshot)
         except Exception as exc:
             self.state.restore(checkpoint)
             await self._emit_processing_failure(
@@ -513,11 +523,17 @@ class PortfolioService:
                 ending_position_qty=result.ending_quantity,
                 ending_avg_entry_price=result.ending_avg_entry_price,
             )
-            self.fill_outcome_repo.save_outcome(outcome)
-            self._sync_persistent_lots()
-            if self.sleeve_pnl_projection_service is not None and self.state_scope is not None:
-                self.sleeve_pnl_projection_service.rebuild_scope(scope=self.state_scope)
+            if self.portfolio_outbox_publisher is not None:
+                await self.portfolio_outbox_publisher.persist_fill_projection(
+                    snapshot=snapshot,
+                    balance_delta=balance_delta,
+                    outcome=outcome,
+                    source_component="portfolio_service",
+                )
+            else:
+                self.fill_outcome_repo.save_outcome(outcome)
         except Exception as exc:
+            self.state.restore(checkpoint)
             log_event(
                 self.logger,
                 "fill_outcome_persist_failed",
@@ -533,6 +549,31 @@ class PortfolioService:
             )
             await self._emit_processing_failure(
                 stage="fill_outcome_persist",
+                message=str(exc),
+                fill=fill,
+                retriable=True,
+            )
+            raise
+        try:
+            self._sync_persistent_lots()
+            if self.sleeve_pnl_projection_service is not None and self.state_scope is not None:
+                self.sleeve_pnl_projection_service.rebuild_scope(scope=self.state_scope)
+        except Exception as exc:
+            log_event(
+                self.logger,
+                "portfolio_projection_rebuild_failed",
+                level="warning",
+                **correlation_fields(
+                    decision_id=fill.decision_id,
+                    intent_id=fill.intent_id,
+                    order_id=fill.client_order_id,
+                    fill_id=fill.fill_id,
+                    symbol=fill.symbol,
+                    error=str(exc),
+                ),
+            )
+            await self._emit_processing_failure(
+                stage="portfolio_projection_rebuild",
                 message=str(exc),
                 fill=fill,
                 retriable=True,
@@ -553,20 +594,21 @@ class PortfolioService:
                 fee_delta=result.fee_delta,
             ),
         )
-        await publish_model(
-            bus=self.bus,
-            topic=topics.PORTFOLIO_BALANCE_DELTAS,
-            key=fill.symbol,
-            payload_model=balance_delta,
-            source_component="portfolio_service",
-        )
-        await publish_model(
-            bus=self.bus,
-            topic=topics.PORTFOLIO_SNAPSHOTS,
-            key="portfolio",
-            payload_model=snapshot,
-            source_component="portfolio_service",
-        )
+        if self.portfolio_outbox_publisher is None:
+            await publish_model(
+                bus=self.bus,
+                topic=topics.PORTFOLIO_BALANCE_DELTAS,
+                key=fill.symbol,
+                payload_model=balance_delta,
+                source_component="portfolio_service",
+            )
+            await publish_model(
+                bus=self.bus,
+                topic=topics.PORTFOLIO_SNAPSHOTS,
+                key="portfolio",
+                payload_model=snapshot,
+                source_component="portfolio_service",
+            )
 
     def _sync_persistent_lots(self) -> None:
         if self.persistent_lot_book_service is None or self.execution_repo is None:

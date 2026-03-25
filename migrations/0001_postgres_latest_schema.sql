@@ -19,6 +19,14 @@ CREATE TABLE IF NOT EXISTS command_outbox (
 );
 
 
+CREATE TABLE IF NOT EXISTS schema_migrations (
+	version VARCHAR(256) NOT NULL,
+	checksum VARCHAR(128) NOT NULL,
+	applied_at TIMESTAMP WITH TIME ZONE NOT NULL,
+	PRIMARY KEY (version)
+);
+
+
 CREATE TABLE IF NOT EXISTS decision_audit_records (
 	audit_revision_id SERIAL NOT NULL,
 	decision_id VARCHAR(64) NOT NULL,
@@ -260,6 +268,9 @@ CREATE TABLE IF NOT EXISTS operator_users (
 	created_at TIMESTAMP WITH TIME ZONE NOT NULL,
 	updated_at TIMESTAMP WITH TIME ZONE NOT NULL,
 	last_login_at TIMESTAMP WITH TIME ZONE,
+	last_failed_login_at TIMESTAMP WITH TIME ZONE,
+	failed_login_attempts INTEGER NOT NULL,
+	locked_until TIMESTAMP WITH TIME ZONE,
 	payload JSON NOT NULL,
 	PRIMARY KEY (user_id)
 );

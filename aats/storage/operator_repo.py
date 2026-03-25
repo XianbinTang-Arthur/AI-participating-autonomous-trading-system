@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from aats.schemas.operator import OperatorUserRecord
 
@@ -39,9 +39,38 @@ class InMemoryOperatorUserRepository:
         self._users_by_username[username] = user.model_copy(
             update={
                 "last_login_at": logged_in_at,
+                "last_failed_login_at": None,
+                "failed_login_attempts": 0,
+                "locked_until": None,
                 "updated_at": logged_in_at,
             }
         )
+
+    def record_login_failure(
+        self,
+        username: str,
+        attempted_at: datetime,
+        *,
+        max_failed_attempts: int,
+        lockout_seconds: int,
+    ) -> OperatorUserRecord | None:
+        user = self._users_by_username.get(username)
+        if user is None:
+            return None
+        attempts = max(0, int(user.failed_login_attempts)) + 1
+        locked_until = None
+        if attempts >= max(1, max_failed_attempts):
+            locked_until = attempted_at + timedelta(seconds=max(0, lockout_seconds))
+        updated = user.model_copy(
+            update={
+                "failed_login_attempts": attempts,
+                "last_failed_login_at": attempted_at,
+                "locked_until": locked_until,
+                "updated_at": attempted_at,
+            }
+        )
+        self._users_by_username[username] = updated
+        return updated
 
     def delete_user(self, username: str) -> bool:
         return self._users_by_username.pop(username, None) is not None

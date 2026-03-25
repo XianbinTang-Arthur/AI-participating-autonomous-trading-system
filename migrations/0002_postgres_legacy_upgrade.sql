@@ -1,6 +1,12 @@
 -- AATS PostgreSQL legacy upgrade normalization
 -- Auto-generated schema additions plus legacy backfills needed to upgrade older production schemas.
 
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    version VARCHAR(256) PRIMARY KEY,
+    checksum VARCHAR(128) NOT NULL,
+    applied_at TIMESTAMPTZ NOT NULL
+);
+
 -- Ensure columns exist on command_outbox
 ALTER TABLE IF EXISTS command_outbox ADD COLUMN IF NOT EXISTS event_id VARCHAR(64);
 ALTER TABLE IF EXISTS command_outbox ADD COLUMN IF NOT EXISTS aggregate_type VARCHAR(32);
@@ -227,7 +233,11 @@ ALTER TABLE IF EXISTS operator_users ADD COLUMN IF NOT EXISTS enabled BOOLEAN;
 ALTER TABLE IF EXISTS operator_users ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITH TIME ZONE;
 ALTER TABLE IF EXISTS operator_users ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITH TIME ZONE;
 ALTER TABLE IF EXISTS operator_users ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMP WITH TIME ZONE;
+ALTER TABLE IF EXISTS operator_users ADD COLUMN IF NOT EXISTS last_failed_login_at TIMESTAMP WITH TIME ZONE;
+ALTER TABLE IF EXISTS operator_users ADD COLUMN IF NOT EXISTS failed_login_attempts INTEGER;
+ALTER TABLE IF EXISTS operator_users ADD COLUMN IF NOT EXISTS locked_until TIMESTAMP WITH TIME ZONE;
 ALTER TABLE IF EXISTS operator_users ADD COLUMN IF NOT EXISTS payload JSON;
+UPDATE operator_users SET failed_login_attempts = 0 WHERE failed_login_attempts IS NULL;
 
 -- Ensure columns exist on order_obligations
 ALTER TABLE IF EXISTS order_obligations ADD COLUMN IF NOT EXISTS client_order_id VARCHAR(64);

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 from pathlib import Path
 
 from sqlalchemy import create_engine, text
@@ -62,6 +63,8 @@ _EXPECTED_NUMERIC_COLUMNS: tuple[tuple[str, str], ...] = (
     ("strategy_sleeve_intents", "allocator_weight"),
 )
 
+_SCHEMA_MIGRATIONS_TABLE = "schema_migrations"
+
 
 @dataclass(slots=True)
 class DatabaseRuntime:
@@ -120,13 +123,50 @@ def create_schema(runtime: DatabaseRuntime) -> None:
     Base.metadata.create_all(runtime.engine)
 
 
-def apply_current_migrations(runtime: DatabaseRuntime) -> None:
+def apply_current_migrations(runtime: DatabaseRuntime) -> list[str]:
     migrations_dir = Path(__file__).resolve().parents[2] / "migrations"
+    applied_versions: list[str] = []
     with runtime.engine.begin() as connection:
+        _ensure_schema_migrations_table(connection)
+        applied = _applied_migration_checksums(connection)
         raw_connection = connection.connection
         with raw_connection.cursor() as cursor:
             for migration_path in sorted(migrations_dir.glob("*.sql")):
-                cursor.execute(migration_path.read_text(encoding="utf-8"))
+                version = migration_path.name
+                sql = migration_path.read_text(encoding="utf-8")
+                checksum = hashlib.sha256(sql.encode("utf-8")).hexdigest()
+                recorded_checksum = applied.get(version)
+                if recorded_checksum is not None:
+                    if recorded_checksum != checksum:
+                        raise RuntimeError(f"database_migration_checksum_mismatch:{version}")
+                    continue
+                cursor.execute(sql)
+                connection.execute(
+                    text(
+                        f"""
+                        INSERT INTO {_SCHEMA_MIGRATIONS_TABLE} (version, checksum, applied_at)
+                        VALUES (:version, :checksum, NOW())
+                        """
+                    ),
+                    {"version": version, "checksum": checksum},
+                )
+                applied_versions.append(version)
+    return applied_versions
+
+
+def applied_migrations(runtime: DatabaseRuntime) -> list[str]:
+    with runtime.engine.begin() as connection:
+        _ensure_schema_migrations_table(connection)
+        rows = connection.execute(
+            text(
+                f"""
+                SELECT version
+                FROM {_SCHEMA_MIGRATIONS_TABLE}
+                ORDER BY applied_at, version
+                """
+            )
+        ).scalars().all()
+    return [str(row) for row in rows]
 
 
 def validate_runtime_schema(runtime: DatabaseRuntime) -> None:
@@ -169,3 +209,29 @@ def validate_runtime_schema(runtime: DatabaseRuntime) -> None:
             + (f": missing={missing_text}" if missing_text else "")
             + (f": mismatched={mismatch_text}" if mismatch_text else "")
         )
+
+
+def _ensure_schema_migrations_table(connection: Connection) -> None:
+    connection.execute(
+        text(
+            f"""
+            CREATE TABLE IF NOT EXISTS {_SCHEMA_MIGRATIONS_TABLE} (
+                version VARCHAR(256) PRIMARY KEY,
+                checksum VARCHAR(128) NOT NULL,
+                applied_at TIMESTAMPTZ NOT NULL
+            )
+            """
+        )
+    )
+
+
+def _applied_migration_checksums(connection: Connection) -> dict[str, str]:
+    rows = connection.execute(
+        text(
+            f"""
+            SELECT version, checksum
+            FROM {_SCHEMA_MIGRATIONS_TABLE}
+            """
+        )
+    ).mappings().all()
+    return {str(row["version"]): str(row["checksum"]) for row in rows}

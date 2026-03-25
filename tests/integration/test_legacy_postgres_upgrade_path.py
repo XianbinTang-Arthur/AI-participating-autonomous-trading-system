@@ -9,7 +9,12 @@ from sqlalchemy.engine import make_url
 
 from aats.bootstrap.config import build_runtime
 from aats.bootstrap.settings import AATSSettings
-from aats.storage.session import apply_current_migrations, create_database_runtime, validate_runtime_schema
+from aats.storage.session import (
+    applied_migrations,
+    apply_current_migrations,
+    create_database_runtime,
+    validate_runtime_schema,
+)
 
 
 @unittest.skipUnless(os.getenv("AATS_DATABASE_URL"), "AATS_DATABASE_URL is required for Postgres integration tests")
@@ -117,6 +122,22 @@ class TestLegacyPostgresUpgradePath(unittest.IsolatedAsyncioTestCase):
             runtime.dispose()
             self._drop_schema(admin_engine, schema_name)
 
+    async def test_current_migrations_are_versioned_and_not_reapplied(self) -> None:
+        runtime, admin_engine, schema_name = self._schema_runtime()
+        try:
+            self._apply_legacy_schema(runtime)
+
+            first_applied = self._apply_current_migrations(runtime)
+            second_applied = self._apply_current_migrations(runtime)
+            versions = applied_migrations(runtime)
+
+            self.assertEqual(first_applied, ["0001_postgres_latest_schema.sql", "0002_postgres_legacy_upgrade.sql"])
+            self.assertEqual(second_applied, [])
+            self.assertEqual(versions, ["0001_postgres_latest_schema.sql", "0002_postgres_legacy_upgrade.sql"])
+        finally:
+            runtime.dispose()
+            self._drop_schema(admin_engine, schema_name)
+
     async def test_runtime_builds_against_upgraded_legacy_schema(self) -> None:
         runtime, admin_engine, schema_name = self._schema_runtime()
         app_runtime = None
@@ -208,8 +229,8 @@ class TestLegacyPostgresUpgradePath(unittest.IsolatedAsyncioTestCase):
         return runtime, admin_engine, schema_name
 
     @staticmethod
-    def _apply_current_migrations(runtime) -> None:
-        apply_current_migrations(runtime)
+    def _apply_current_migrations(runtime) -> list[str]:
+        return apply_current_migrations(runtime)
 
     @staticmethod
     def _apply_legacy_schema(runtime) -> None:

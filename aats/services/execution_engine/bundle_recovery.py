@@ -100,7 +100,6 @@ def _build_bundle_summary(
         orders,
         key=lambda item: (
             _sort_ts(item.submitted_ts, item.last_update_ts),
-            str(item.client_order_id),
         ),
     )
     open_orders = [order for order in sorted_orders if _is_open_order(order)]

@@ -2779,6 +2779,36 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(failed.status_code, 401)
         self.assertEqual(failed.json()["detail"], "operator_login_failed")
 
+    async def test_session_login_lockout_kicks_in_after_repeated_failures_and_records_audit(self) -> None:
+        runtime = await self._runtime(
+            operator_auth_enabled=True,
+            operator_session_secret="session-secret",
+            operator_users=[("admin", "correct-pass")],
+            operator_login_max_failed_attempts=2,
+            operator_login_lockout_seconds=300,
+        )
+        app = self._app(runtime)
+        with TestClient(app) as client:
+            first = client.post("/auth/login", json={"username": "admin", "password": "wrong-pass"})
+            second = client.post("/auth/login", json={"username": "admin", "password": "wrong-pass"})
+            locked = client.post("/auth/login", json={"username": "admin", "password": "correct-pass"})
+
+        self.assertEqual(first.status_code, 401)
+        self.assertEqual(second.status_code, 401)
+        self.assertEqual(locked.status_code, 429)
+        self.assertEqual(locked.json()["detail"], "operator_login_locked")
+
+        stored_admin = runtime.operator_repo.get_by_username("admin")
+        self.assertIsNotNone(stored_admin)
+        assert stored_admin is not None
+        self.assertEqual(stored_admin.failed_login_attempts, 2)
+        self.assertIsNotNone(stored_admin.locked_until)
+
+        actions = [item.payload for item in runtime.event_store.by_topic(topics.OPERATOR_ACTIONS)]
+        failed_actions = [item for item in actions if item["action"] == "login" and item["status"] == "login_failed"]
+        self.assertGreaterEqual(len(failed_actions), 3)
+        self.assertEqual(failed_actions[-1]["details"]["failure_code"], "operator_login_locked")
+
     async def test_disabled_database_operator_account_cannot_log_in(self) -> None:
         runtime = await self._runtime(
             operator_auth_enabled=True,

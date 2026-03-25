@@ -8,6 +8,7 @@ from pydantic import BaseModel
 
 from aats.api.auth import (
     OperatorPrincipal,
+    _write_api_key_compatibility_enabled,
     authenticate_operator_user,
     configured_local_principal,
     configured_operator_roles,
@@ -77,7 +78,7 @@ def _session_payload(request: Request) -> dict[str, Any]:
     return {
         "auth_enabled": settings.operator_auth_enabled,
         "session_enabled": settings.operator_session_configured,
-        "api_key_compatibility_enabled": bool(settings.operator_read_api_key or settings.operator_write_api_key),
+        "api_key_compatibility_enabled": bool(settings.operator_read_api_key or _write_api_key_compatibility_enabled(runtime)),
         "database_backed": runtime.database_runtime is not None,
         "stored_user_count": stored_operator_user_count(runtime),
         "authenticated": principal is not None and principal.auth_enabled,
@@ -100,9 +101,17 @@ async def auth_login(request: Request, payload: LoginRequest, response: Response
         raise HTTPException(status_code=400, detail="operator_auth_disabled")
     if not settings.operator_session_configured:
         raise HTTPException(status_code=503, detail="operator_session_auth_not_configured")
-    principal = authenticate_operator_user(runtime, username=payload.username, password=payload.password)
+    login_result = authenticate_operator_user(runtime, username=payload.username, password=payload.password)
+    principal = login_result.principal
     if principal is None:
-        raise HTTPException(status_code=401, detail="operator_login_failed")
+        _query(request).record_operator_login_failure(
+            actor_identity=payload.username,
+            auth_source="session",
+            failure_code=login_result.failure_code or "operator_login_failed",
+        )
+        if login_result.failure_code == "operator_login_locked":
+            raise HTTPException(status_code=429, detail="operator_login_locked")
+        raise HTTPException(status_code=401, detail=login_result.failure_code or "operator_login_failed")
     user = runtime.operator_repo.get_by_username(payload.username)
     if user is None:
         raise HTTPException(status_code=401, detail="operator_login_failed")
@@ -171,7 +180,7 @@ async def auth_providers(request: Request) -> dict[str, Any]:
         "configured_roles": configured_operator_roles(runtime),
         "stored_user_count": stored_operator_user_count(runtime),
         "runtime_profile_control_enabled": False,
-        "api_key_compatibility_enabled": bool(settings.operator_read_api_key or settings.operator_write_api_key),
+        "api_key_compatibility_enabled": bool(settings.operator_read_api_key or _write_api_key_compatibility_enabled(runtime)),
     }
 
 

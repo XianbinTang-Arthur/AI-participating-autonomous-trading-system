@@ -108,6 +108,9 @@ class OperatorUserRecord(SchemaBase):
     session_version: int = 1
     updated_at: datetime = Field(default_factory=utc_now)
     last_login_at: datetime | None = None
+    last_failed_login_at: datetime | None = None
+    failed_login_attempts: int = 0
+    locked_until: datetime | None = None
 
 
 class OperatorActionRecord(SchemaBase):

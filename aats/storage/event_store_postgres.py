@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Select, desc, func, select
+from sqlalchemy import Select, and_, desc, func, or_, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from aats.schemas.common import EventEnvelope
@@ -101,14 +101,17 @@ class PostgresEventStore:
         scope: RuntimeStateScope,
         limit: int | None = None,
     ) -> list[EventEnvelope]:
-        query = select(EventEnvelopeModel).where(EventEnvelopeModel.topic == topic).order_by(EventEnvelopeModel.sequence_id)
+        query = (
+            select(EventEnvelopeModel)
+            .where(EventEnvelopeModel.topic == topic)
+            .order_by(EventEnvelopeModel.sequence_id)
+        )
+        query = self._scope_query(query, scope)
+        if limit is not None:
+            query = query.limit(limit)
         with self.session_factory() as session:
             rows = session.scalars(query).all()
-        envelopes = [self._to_schema(row) for row in rows]
-        envelopes = [envelope for envelope in envelopes if event_matches_scope(envelope, scope)]
-        if limit is not None:
-            envelopes = envelopes[-limit:]
-        return envelopes
+        return [self._to_schema(row) for row in rows]
 
     def latest_by_topic_scoped(
         self,
@@ -120,14 +123,10 @@ class PostgresEventStore:
         query = select(EventEnvelopeModel).where(EventEnvelopeModel.topic == topic)
         if key is not None:
             query = query.where(EventEnvelopeModel.event_key == key)
-        query = query.order_by(desc(EventEnvelopeModel.sequence_id))
+        query = self._scope_query(query, scope).order_by(desc(EventEnvelopeModel.sequence_id)).limit(1)
         with self.session_factory() as session:
-            rows = session.scalars(query).all()
-        for row in rows:
-            envelope = self._to_schema(row)
-            if event_matches_scope(envelope, scope):
-                return envelope
-        return None
+            row = session.scalar(query)
+        return self._to_schema(row) if row is not None else None
 
     def by_decision(self, decision_id: str) -> list[EventEnvelope]:
         with self.session_factory() as session:
@@ -162,16 +161,29 @@ class PostgresEventStore:
 
     @staticmethod
     def _scope_query(query: Select[tuple[EventEnvelopeModel]], scope: RuntimeStateScope) -> Select[tuple[EventEnvelopeModel]]:
-        query = query.where(
-            (EventEnvelopeModel.product_type.is_(None)) | (EventEnvelopeModel.product_type == scope.product_type)
-        ).where(
-            (EventEnvelopeModel.margin_mode.is_(None)) | (EventEnvelopeModel.margin_mode == scope.margin_mode)
+        allowed_symbols = tuple(scope.allowed_symbols) if scope.allowed_symbols else (scope.default_symbol,)
+        symbol_clause = or_(
+            EventEnvelopeModel.symbol.is_(None),
+            EventEnvelopeModel.symbol.in_(allowed_symbols),
         )
-        if scope.allowed_symbols:
-            query = query.where(
-                EventEnvelopeModel.symbol.is_(None) | EventEnvelopeModel.symbol.in_(tuple(scope.allowed_symbols))
-            )
-        return query
+        strategy_family = EventEnvelopeModel.payload["strategy_family"].as_string()
+        regular_clause = and_(
+            symbol_clause,
+            or_(EventEnvelopeModel.product_type.is_(None), EventEnvelopeModel.product_type == scope.product_type),
+            or_(EventEnvelopeModel.margin_mode.is_(None), EventEnvelopeModel.margin_mode == scope.margin_mode),
+            or_(strategy_family.is_(None), strategy_family != "smart_arbitrage"),
+        )
+        if scope.product_type != "derivatives":
+            return query.where(regular_clause)
+        smart_arbitrage_clause = and_(
+            symbol_clause,
+            strategy_family == "smart_arbitrage",
+            or_(
+                and_(EventEnvelopeModel.product_type == "spot", EventEnvelopeModel.margin_mode == "cash"),
+                and_(EventEnvelopeModel.product_type == scope.product_type, EventEnvelopeModel.margin_mode == scope.margin_mode),
+            ),
+        )
+        return query.where(or_(regular_clause, smart_arbitrage_clause))
 
     @staticmethod
     def _decision_id(envelope: EventEnvelope) -> str | None:
