@@ -9,6 +9,7 @@ from aats.schemas.common import utc_now
 from aats.schemas.market import MarketSnapshot
 from aats.services.market_gateway.gateway import MarketDataGateway
 from aats.services.market_gateway.normalizer import MarketSnapshotNormalizer
+from aats.services.market_gateway.okx_websocket import OKXPublicWebSocketClient
 from aats.services.market_gateway.publisher import MarketSnapshotPublisher
 
 
@@ -40,9 +41,12 @@ class _FakeOKXRESTClient:
     def __init__(self) -> None:
         self.ticker_calls = 0
         self.candle_calls = 0
+        self.ticker_symbols: list[str] = []
+        self.candle_symbols: list[tuple[str, str]] = []
 
     async def get_market_ticker(self, *, symbol: str):
         self.ticker_calls += 1
+        self.ticker_symbols.append(symbol)
         return {
             "code": "0",
             "data": [
@@ -61,6 +65,7 @@ class _FakeOKXRESTClient:
 
     async def get_market_candles(self, *, symbol: str, bar: str, limit: int = 1):
         self.candle_calls += 1
+        self.candle_symbols.append((symbol, bar))
         snapshot_ms = str(int(utc_now().timestamp() * 1000))
         return {
             "code": "0",
@@ -71,6 +76,24 @@ class _FakeOKXRESTClient:
 
 
 class TestMarketGatewayStatus(unittest.IsolatedAsyncioTestCase):
+    def test_okx_public_websocket_subscribes_all_tracked_symbols(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "market_data_backend": "okx",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "smart_arbitrage_enabled": True,
+            }
+        )
+        client = OKXPublicWebSocketClient(settings=settings)
+
+        public_args, business_args = client._subscription_args()
+
+        public_symbols = {item["instId"] for item in public_args}
+        business_symbols = {item["instId"] for item in business_args}
+        self.assertEqual(public_symbols, {"BTC-USDT", "BTC-USDT-SWAP"})
+        self.assertEqual(business_symbols, {"BTC-USDT", "BTC-USDT-SWAP"})
+
     async def test_stale_market_data_is_detected(self) -> None:
         settings = AATSSettings.model_validate(
             {
@@ -246,6 +269,35 @@ class TestMarketGatewayStatus(unittest.IsolatedAsyncioTestCase):
         self.assertIn("rest_fallback", status["detail"])
         self.assertEqual(rest_client.ticker_calls, 1)
         self.assertEqual(rest_client.candle_calls, 2)
+
+    async def test_okx_rest_fallback_refreshes_all_stale_tracked_symbols(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "market_data_backend": "okx",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "market_data_stale_after_seconds": 30.0,
+                "okx_market_rest_fallback_enabled": True,
+                "smart_arbitrage_enabled": True,
+            }
+        )
+        rest_client = _FakeOKXRESTClient()
+        gateway = MarketDataGateway(
+            settings=settings,
+            normalizer=MarketSnapshotNormalizer(exchange_name="OKX"),
+            publisher=MarketSnapshotPublisher(bus=InMemoryEventBus()),
+            okx_ws_client=_FakeWSClient(connected_public=False, connected_business=False, last_error="disconnected"),  # type: ignore[arg-type]
+            okx_rest_client=rest_client,  # type: ignore[arg-type]
+        )
+
+        used = await gateway._run_okx_rest_fallback_once()
+
+        self.assertTrue(used)
+        self.assertEqual(set(rest_client.ticker_symbols), {"BTC-USDT", "BTC-USDT-SWAP"})
+        self.assertEqual({symbol for symbol, _ in rest_client.candle_symbols}, {"BTC-USDT", "BTC-USDT-SWAP"})
+        self.assertIsNotNone(gateway.latest_snapshot("BTC-USDT"))
+        self.assertIsNotNone(gateway.latest_snapshot("BTC-USDT-SWAP"))
+        self.assertEqual(gateway.status()["tracked_symbol_count"], 2)
 
     async def test_okx_rest_fallback_does_not_run_when_market_is_already_fresh(self) -> None:
         settings = AATSSettings.model_validate(

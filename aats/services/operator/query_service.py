@@ -6217,7 +6217,7 @@ class OperatorQueryService:
         refresh = getattr(self.runtime.market_gateway, "refresh_snapshot", None)
         if not callable(refresh):
             return None
-        return await refresh(symbol=self.runtime.settings.default_symbol)
+        return await refresh()
 
     async def _refresh_account_state_for_operator_resolution(self):
         refresh = getattr(self.runtime.account_service, "refresh", None)

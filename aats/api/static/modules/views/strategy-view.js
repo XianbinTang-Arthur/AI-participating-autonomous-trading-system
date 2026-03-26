@@ -212,6 +212,7 @@ export function renderStrategySections(data) {
           ],
         ])}
         ${renderStrategyCandidateTable(displayedStrategyCandidates)}
+        ${renderRecentSleeveIntentTable(recentSleeveIntents.slice(0, 5))}
         ${renderExpandableSection("预算快照", renderAllocatorBudgetSnapshotTable(recentBudgetSnapshots), {
           meta: `${formatNumber(strategyRuntimeSummary.latest_budget_snapshot_count, 0, "0")} 条`,
         })}
@@ -755,16 +756,89 @@ function renderStrategyCandidateTable(candidates) {
     return `<p class="meta-copy">当前还没有候选策略快照。</p>`;
   }
   return responsiveTable(
-    ["策略家族", "状态", "路由", "目标", "说明"],
+    ["策略家族", "当前状态", "如何处理", "本轮目标", "原因说明"],
     candidates.map((candidate) => [
       `<div><strong>${escapeHtml(readableState(candidate.family || "unknown"))}</strong><div class="table-meta">${escapeHtml(candidate.recommended_symbol || "当前没有推荐标的")}</div></div>`,
-      `<div><strong>${escapeHtml(readableState(candidate.state || "unknown"))}</strong><div class="table-meta">${escapeHtml(formatNumber(candidate.confidence, 2, "待确认"))}</div></div>`,
-      `<div><strong>${escapeHtml(readableState(candidate.route_action || "hold_current"))}</strong><div class="table-meta">${escapeHtml(readableState(candidate.urgency || "low"))}</div></div>`,
-      `<div><strong>${escapeHtml(formatSigned(candidate.target_position_qty))}</strong><div class="table-meta">${escapeHtml(formatSigned(candidate.delta_position_qty))}</div></div>`,
-      `<div><strong>${escapeHtml(strategyCandidateReason(candidate))}</strong><div class="table-meta">${escapeHtml(strategyLegSummary(candidate.legs))}</div></div>`,
+      `<div><strong>${escapeHtml(strategyCandidateStateLabel(candidate))}</strong><div class="table-meta">${escapeHtml(strategyCandidateStateMeta(candidate))}</div></div>`,
+      `<div><strong>${escapeHtml(strategyCandidateRouteLabel(candidate))}</strong><div class="table-meta">${escapeHtml(strategyCandidateRouteMeta(candidate))}</div></div>`,
+      `<div><strong>${escapeHtml(strategyCandidateTargetLabel(candidate))}</strong><div class="table-meta">${escapeHtml(strategyCandidateTargetMeta(candidate))}</div></div>`,
+      `<div><strong>${escapeHtml(strategyCandidateReason(candidate))}</strong><div class="table-meta">${escapeHtml(strategyLegSummary(candidate))}</div></div>`,
     ]),
     "当前没有候选策略快照。"
   );
+}
+
+function renderRecentSleeveIntentTable(items) {
+  if (!Array.isArray(items) || !items.length) {
+    return `<p class="meta-copy">当前还没有新的 sleeve 意图记录。</p>`;
+  }
+  return responsiveTable(
+    ["最近 Sleeve 意图", "当前状态", "本轮目标", "自动预算", "原因说明"],
+    items.map((item) => [
+      `<div><strong>${escapeHtml(item.strategy_sleeve_id || "未归属")}</strong><div class="table-meta">${escapeHtml(readableState(item.family || "unknown"))} | ${escapeHtml(item.symbol || "标的待确认")}</div></div>`,
+      `<div><strong>${escapeHtml(readableState(item.state || "unknown"))}</strong><div class="table-meta">${escapeHtml(readableState(item.route_action || "hold_current"))}</div></div>`,
+      `<div><strong>${formatSigned(item.target_position_qty)}</strong><div class="table-meta">变化 ${formatSigned(item.delta_position_qty)}</div></div>`,
+      `<div><strong>${item.automatic_enabled ? "自动管理" : "人工冻结"}</strong><div class="table-meta">倍率 ${formatNumber(item.budget_multiplier, 2, "0")} | 权重 ${formatNumber(item.allocator_weight, 2, "0")}</div></div>`,
+      `<div><strong>${escapeHtml(item.control_summary || item.headline || "当前没有额外说明")}</strong><div class="table-meta">${escapeHtml(reasonListText(item.control_reason_codes?.length ? item.control_reason_codes : item.reason_codes, "当前没有额外原因"))}</div></div>`,
+    ]),
+    "当前还没有新的 sleeve 意图记录。"
+  );
+}
+
+function strategyCandidateStateLabel(candidate) {
+  if (candidate?.family === "smart_arbitrage" && candidate?.state === "inactive") {
+    return "当前不参与执行";
+  }
+  if (candidate?.family === "smart_arbitrage" && candidate?.state === "advisory_only") {
+    return "当前只给建议";
+  }
+  return readableState(candidate?.state || "unknown");
+}
+
+function strategyCandidateStateMeta(candidate) {
+  if (candidate?.family === "smart_arbitrage" && candidate?.state === "inactive") {
+    return smartArbitrageMarketAvailability(candidate);
+  }
+  const confidence = Number(candidate?.confidence);
+  if (Number.isFinite(confidence) && confidence > 0) {
+    return `置信度 ${formatNumber(confidence, 2, "0")}`;
+  }
+  return "当前没有额外状态量化信息";
+}
+
+function strategyCandidateRouteLabel(candidate) {
+  if (candidate?.route_action === "advisory_only") return "仅参考，不直接执行";
+  if (candidate?.route_action === "hold_current") return "保持当前仓位";
+  if (candidate?.route_action === "override_target") return "接管本轮目标";
+  return readableState(candidate?.route_action || "hold_current");
+}
+
+function strategyCandidateRouteMeta(candidate) {
+  return `优先级 ${escapeFallbackReadableState(candidate?.urgency, "low")}`;
+}
+
+function strategyCandidateTargetLabel(candidate) {
+  const target = Number(candidate?.target_position_qty ?? 0);
+  const delta = Number(candidate?.delta_position_qty ?? 0);
+  if (!Number.isFinite(target) || !Number.isFinite(delta)) {
+    return "当前没有可用目标";
+  }
+  if (Math.abs(target) < 1e-12 && Math.abs(delta) < 1e-12) {
+    return "当前不生成执行量";
+  }
+  return formatSigned(candidate?.target_position_qty);
+}
+
+function strategyCandidateTargetMeta(candidate) {
+  const target = Number(candidate?.target_position_qty ?? 0);
+  const delta = Number(candidate?.delta_position_qty ?? 0);
+  if (!Number.isFinite(target) || !Number.isFinite(delta)) {
+    return "当前没有数量信息";
+  }
+  if (Math.abs(target) < 1e-12 && Math.abs(delta) < 1e-12) {
+    return "当前没有需要执行的增减仓";
+  }
+  return `本轮变化 ${formatSigned(candidate?.delta_position_qty)}`;
 }
 
 function renderAllocatorBudgetSnapshotTable(items) {
@@ -844,17 +918,41 @@ function familyEnablementSummary(payload) {
 }
 
 function strategyCandidateReason(candidate) {
+  if (candidate?.headline) return candidate.headline;
   const summary = reasonListText(candidate?.reason_codes, "");
   if (summary) return summary;
-  if (candidate?.headline) return candidate.headline;
   return "当前没有额外说明";
 }
 
-function strategyLegSummary(legs) {
-  if (!Array.isArray(legs) || !legs.length) return "当前没有附带腿说明";
+function strategyLegSummary(candidate) {
+  const legs = candidate?.legs;
+  if (!Array.isArray(legs) || !legs.length) {
+    if (candidate?.family === "smart_arbitrage") {
+      return smartArbitrageMarketAvailability(candidate);
+    }
+    return "当前没有附带腿说明";
+  }
   return legs
     .map((item) => `${readableState(item.product_type)} ${readableState(item.side)} ${item.symbol || "标的待确认"}`)
     .join(" | ");
+}
+
+function smartArbitrageMarketAvailability(candidate) {
+  const metrics = candidate?.metrics || {};
+  const spotSymbol = metrics.spot_symbol || candidate?.recommended_symbol || "现货腿";
+  const derivativesSymbol = metrics.derivatives_symbol || "合约腿";
+  const reasonCodes = Array.isArray(candidate?.reason_codes) ? candidate.reason_codes : [];
+  if (reasonCodes.includes("smart_arbitrage_market_pair_incomplete")) {
+    return `当前缺少 ${spotSymbol} 或 ${derivativesSymbol} 的配对行情，暂时不能进入双腿执行。`;
+  }
+  if (reasonCodes.includes("smart_arbitrage_symbol_pair_missing")) {
+    return "当前没有识别到可用的现货/合约配对标的。";
+  }
+  return "当前没有附带套利双腿执行信息。";
+}
+
+function escapeFallbackReadableState(value, fallback) {
+  return readableState(value || fallback || "unknown");
 }
 
 function renderTrialVerdictActions(workbenchActions, fallback) {
