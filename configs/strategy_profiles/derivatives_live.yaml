@@ -75,7 +75,7 @@ smart_arbitrage_basis_exit_bps: 6.0
 # [常用可调] smart_arbitrage_estimated_cost_bps：套利预估综合成本。可选值：0.0 ~ 100.0；推荐值：10.0。
 smart_arbitrage_estimated_cost_bps: 10.0
 # [常用可调] smart_arbitrage_quote_budget_per_trade：每次套利分配的 quote 预算。可选值：正数；推荐值：200.0。
-smart_arbitrage_quote_budget_per_trade: 200.0
+smart_arbitrage_quote_budget_per_trade: 300.0
 # [常用可调] smart_arbitrage_max_pair_notional：单组套利最大名义金额。可选值：正数；推荐值：2000.0。
 smart_arbitrage_max_pair_notional: 2000.0
 # [进阶可调] smart_arbitrage_pair_definitions：智能套利配对定义。默认先显式定义主套利对，后续多 pair 直接在这里扩展。

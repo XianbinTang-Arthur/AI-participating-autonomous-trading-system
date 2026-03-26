@@ -318,6 +318,8 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("v2_enabled", payload["configured_parameters"]["smart_arbitrage"])
         self.assertNotIn("companion_spot_symbol", payload["configured_parameters"]["smart_arbitrage"])
         self.assertNotIn("companion_derivatives_symbol", payload["configured_parameters"]["smart_arbitrage"])
+        self.assertIn("quote_budget_per_trade", payload["configured_parameters"]["smart_arbitrage"])
+        self.assertIn("max_pair_notional", payload["configured_parameters"]["smart_arbitrage"])
         self.assertIn("negative_basis_mode", payload["configured_parameters"]["smart_arbitrage"])
 
     @staticmethod

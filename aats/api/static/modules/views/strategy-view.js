@@ -22,6 +22,7 @@ export function renderStrategySections(data) {
   const recentNettingDecisions = strategyRuntime.recent_netting_decisions || [];
   const strategyAppliedTarget = strategyRuntime.latest_applied_target || {};
   const automationDecisions = strategyRuntimeSnapshot.automation_decisions || [];
+  const smartArbitrageConfig = strategyRuntime.configured_parameters?.smart_arbitrage || {};
   const strategyAttribution = data.strategyAttribution || {};
   const attributionSummary = strategyAttribution.summary || {};
   const sleeveProfitability = strategyAttribution.profitability_by_strategy_sleeve || [];
@@ -211,7 +212,7 @@ export function renderStrategySections(data) {
             `${formatNumber(recentBundles[0]?.legs?.length ?? latestBundle.legs?.length ?? 0, 0, "0")} 条腿 | ${readableState(strategyAppliedTarget.position_intent || "hold")}`,
           ],
         ])}
-        ${renderStrategyCandidateTable(displayedStrategyCandidates)}
+        ${renderStrategyCandidateTable(displayedStrategyCandidates, smartArbitrageConfig)}
         ${renderRecentSleeveIntentTable(recentSleeveIntents.slice(0, 5))}
         ${renderExpandableSection("预算快照", renderAllocatorBudgetSnapshotTable(recentBudgetSnapshots), {
           meta: `${formatNumber(strategyRuntimeSummary.latest_budget_snapshot_count, 0, "0")} 条`,
@@ -224,6 +225,7 @@ export function renderStrategySections(data) {
         })}
       `,
     }),
+    strategySmartArbitrageConfig: renderSmartArbitrageConfigCard(smartArbitrageConfig),
     strategyAutomation: surfaceCard({
       title: "自动预算与启停",
       kicker: "全自动并行运行",
@@ -495,11 +497,376 @@ export function renderStrategyView(data) {
       <div class="span-12">${sections.strategyDecisionWorkbench}</div>
       <div class="span-12">${sections.strategyTrialVerdict}</div>
       <div class="span-12">${sections.strategyCoordinator}</div>
+      <div class="span-12">${sections.strategySmartArbitrageConfig}</div>
       <div class="span-12">${sections.strategyAutomation}</div>
       <div class="span-12">${sections.strategyAttribution}</div>
       <div class="span-12">${sections.strategyHistory}</div>
     </div>
   `;
+}
+
+function renderSmartArbitrageConfigCard(config = {}) {
+  const pairDefinitions = smartArbitrageConfigPairs(config);
+  const risks = smartArbitrageConfigRisks(config);
+  const enabled = config?.enabled === true;
+  return surfaceCard({
+    title: "智能套利配置",
+    kicker: "运行参数",
+    copy: "这里展示当前实际生效的智能套利参数、模式联动关系和主要风险提示。",
+    classes: "strategy-compact-card",
+    content: `
+      ${summaryStrip([
+        {
+          label: "策略开关",
+          value: enabled ? "已启用" : "未启用",
+          meta: enabled ? `当前按 ${formatNumber(pairDefinitions.length, 0, "0")} 组配对持续评估基差` : "当前不会生成新的智能套利候选",
+          tone: enabled ? "positive" : "warning",
+        },
+        {
+          label: "入场 / 退出阈值",
+          value: `${formatBps(config?.basis_entry_bps)} / ${formatBps(config?.basis_exit_bps)}`,
+          meta: smartArbitrageThresholdMeta(config),
+          tone: smartArbitrageThresholdTone(config),
+        },
+        {
+          label: "每次预算 / 单组上限",
+          value: `${formatQuoteAmount(config?.quote_budget_per_trade)} / ${formatQuoteAmount(config?.max_pair_notional)}`,
+          meta: `实际初始名义金额取两者较小值：${formatQuoteAmount(smartArbitrageEffectiveBudget(config), "暂未生效")}`,
+          tone: "info",
+        },
+        {
+          label: "负基差模式",
+          value: smartArbitrageNegativeModeLabel(config),
+          meta: smartArbitrageNegativeModeMeta(config),
+          tone: smartArbitrageNegativeModeTone(config),
+        },
+      ])}
+      ${kvList([
+        ["当前生效范围", smartArbitrageEffectiveScopeLabel(config), smartArbitrageEffectiveScopeMeta(config)],
+        ["配对定义", smartArbitragePairSummary(pairDefinitions), smartArbitragePairSummaryMeta(pairDefinitions)],
+        ["模式联动", smartArbitrageLinkageLabel(config), smartArbitrageLinkageMeta(config)],
+        ["主要风险提示", risks[0] || "当前这组配置关系清晰，没有发现明显冲突。", risks.slice(1).join("；") || "后续若要开负基差自动执行，再开启库存反套或保证金融券相关开关。"],
+      ])}
+      ${responsiveTable(
+        ["参数", "当前值", "联动关系", "风险提示"],
+        smartArbitrageConfigRows(config),
+        "当前还没有智能套利配置。"
+      )}
+    `,
+  });
+}
+
+function smartArbitrageConfigPairs(config = {}) {
+  return Array.isArray(config?.pair_definitions) ? config.pair_definitions : [];
+}
+
+function smartArbitrageConfigRows(config = {}) {
+  const pairDefinitions = smartArbitrageConfigPairs(config);
+  const derivedPairs = pairDefinitions.filter((item) => item?.metadata?.source === "derived_primary_symbol");
+  const enabled = config?.enabled === true;
+  const negativeMode = String(config?.negative_basis_mode || "advisory_only");
+  const inventoryEnabled = config?.inventory_reservation_enabled === true;
+  const marginEnabled = config?.margin_short_enabled === true;
+  const marginReady = config?.margin_short_execution_ready === true;
+  return [
+    smartArbitrageConfigRow(
+      "smart_arbitrage_enabled",
+      "策略总开关",
+      enabled ? "true" : "false",
+      enabled ? "打开后按配对定义持续评估现货/合约基差机会。" : "关闭时其余参数只保留展示，不参与机会评估。",
+      enabled ? "启用后会持续生成智能套利候选，需要配合阈值和预算一起看。" : "当前不会生成新的智能套利候选。"
+    ),
+    smartArbitrageConfigRow(
+      "smart_arbitrage_basis_entry_bps",
+      "基差入场阈值",
+      formatNumber(config?.basis_entry_bps, 1, "待确认"),
+      "基差绝对值达到该阈值后，系统才会考虑新开套利对。",
+      Number(config?.estimated_cost_bps) >= Number(config?.basis_entry_bps)
+        ? "综合成本兜底已经接近或超过入场阈值，自动开新套利对会明显变少。"
+        : "阈值越低越容易进场，但也越容易把噪声当机会。"
+    ),
+    smartArbitrageConfigRow(
+      "smart_arbitrage_basis_exit_bps",
+      "基差退出阈值",
+      formatNumber(config?.basis_exit_bps, 1, "待确认"),
+      "已持有套利对后，基差回归到这里附近时会开始退出或收口。",
+      Number(config?.basis_exit_bps) >= Number(config?.basis_entry_bps)
+        ? "退出阈值不应高于入场阈值，否则容易刚开仓就触发退出。"
+        : "退出阈值越低，套利对持有时间通常越长。"
+    ),
+    smartArbitrageConfigRow(
+      "smart_arbitrage_estimated_cost_bps",
+      "综合成本兜底",
+      formatNumber(config?.estimated_cost_bps, 1, "待确认"),
+      "当细分费率模型没有完整给出结果时，用它作为净优势兜底成本。",
+      Number(config?.estimated_cost_bps) > 0
+        ? "这个值过低会高估机会，过高会错过机会。"
+        : "若保持 0，前端会很难解释为什么系统认为净优势不足。"
+    ),
+    smartArbitrageConfigRow(
+      "smart_arbitrage_quote_budget_per_trade",
+      "每次套利预算",
+      formatQuoteAmount(config?.quote_budget_per_trade),
+      "和单组名义上限一起决定每次新开套利对的初始规模。",
+      Number(config?.quote_budget_per_trade) > Number(config?.max_pair_notional)
+        ? "当前预算高于单组上限，实际会被单组上限裁剪。"
+        : "预算越大，单次开仓的资金占用越高。"
+    ),
+    smartArbitrageConfigRow(
+      "smart_arbitrage_max_pair_notional",
+      "单组套利硬上限",
+      formatQuoteAmount(config?.max_pair_notional),
+      `实际初始名义金额取它和每次预算里的较小值：${formatQuoteAmount(smartArbitrageEffectiveBudget(config), "暂未生效")}。`,
+      Number(config?.max_pair_notional) < Number(config?.quote_budget_per_trade)
+        ? "当前上限比预算更紧，预算不会完全放出来。"
+        : "这是单组套利的最后一道名义金额限制。"
+    ),
+    smartArbitrageConfigRow(
+      "smart_arbitrage_pair_definitions",
+      "可交易配对定义",
+      `${formatNumber(pairDefinitions.length, 0, "0")} 组`,
+      smartArbitragePairSummaryMeta(pairDefinitions),
+      derivedPairs.length
+        ? "有配对来自主标的自动推导；生产环境更建议显式写入 pair_definitions。"
+        : "前端和执行链现在都按这组配对来解释和生成双腿。"
+    ),
+    smartArbitrageConfigRow(
+      "smart_arbitrage_negative_basis_mode",
+      "负基差模式",
+      `${negativeMode} (${smartArbitrageNegativeModeLabel(config)})`,
+      smartArbitrageNegativeModeMeta(config),
+      negativeMode === "advisory_only" || negativeMode === "disabled"
+        ? "当前负基差不会自动生成反向套利执行腿。"
+        : "只有相关能力开关也满足时，这个模式才会真的生效。"
+    ),
+    smartArbitrageConfigRow(
+      "smart_arbitrage_inventory_reservation_enabled",
+      "库存反套开关",
+      inventoryEnabled ? "true" : "false",
+      negativeMode === "inventory_backed"
+        ? "当前直接参与负基差库存反套能力判断。"
+        : "只有 negative_basis_mode=inventory_backed 时它才会生效。",
+      negativeMode === "inventory_backed" && !inventoryEnabled
+        ? "你已经要求库存反套，但库存预留未启用，负基差会停在建议或阻断态。"
+        : "启用后会占用真实现货库存。"
+    ),
+    smartArbitrageConfigRow(
+      "smart_arbitrage_margin_short_enabled",
+      "保证金融券能力声明",
+      marginEnabled ? "true" : "false",
+      negativeMode === "margin_backed"
+        ? "当前直接参与保证金反套能力判断。"
+        : "只有 negative_basis_mode=margin_backed 时它才会真正参与判断。",
+      negativeMode === "margin_backed" && !marginEnabled
+        ? "你已经要求保证金反套，但能力声明未启用，系统会直接阻断。"
+        : "这是“允许做保证金现货腿”的前置声明，不等于执行链已经可用。"
+    ),
+    smartArbitrageConfigRow(
+      "smart_arbitrage_margin_short_execution_ready",
+      "保证金融券执行就绪",
+      marginReady ? "true" : "false",
+      "必须和保证金融券能力声明同时为 true，负基差才会进入 margin_backed 自动执行。",
+      negativeMode === "margin_backed" && (!marginEnabled || !marginReady)
+        ? "当前保证金反套配置链条不完整，负基差仍会被阻断。"
+        : marginReady && !marginEnabled
+          ? "执行就绪标记已开，但能力声明未开，这个标记当前不会生效。"
+          : "只有真的跑通现货保证金卖空与恢复链路后，才应该打开它。"
+    ),
+    smartArbitrageConfigRow(
+      "smart_arbitrage_margin_short_spot_margin_mode",
+      "保证金现货腿模式",
+      String(config?.margin_short_spot_margin_mode || "cross"),
+      negativeMode === "margin_backed"
+        ? "一旦走保证金反套，这个值决定现货腿使用全仓还是逐仓。"
+        : "只有保证金反套真正启用时才会生效。",
+      String(config?.margin_short_spot_margin_mode || "cross") === "isolated"
+        ? "逐仓模式更严格，但也要求账户和恢复链路按逐仓语义一致。"
+        : "首次上线通常先用 cross，更容易和账户总风险口径保持一致。"
+    ),
+  ];
+}
+
+function smartArbitrageConfigRow(parameter, alias, value, linkage, risk) {
+  return [
+    renderConfigTableCell(parameter, alias),
+    renderConfigTableCell(value),
+    renderConfigTableCell(linkage),
+    renderConfigTableCell(risk),
+  ];
+}
+
+function renderConfigTableCell(primary, meta = "") {
+  return `<div><strong>${escapeHtml(primary)}</strong>${meta ? `<div class="table-meta">${escapeHtml(meta)}</div>` : ""}</div>`;
+}
+
+function smartArbitrageConfigRisks(config = {}) {
+  const pairDefinitions = smartArbitrageConfigPairs(config);
+  const risks = [];
+  if (config?.enabled !== true) {
+    risks.push("智能套利当前未启用，这张卡里的其它参数只会作为配置展示。");
+  }
+  if (Number(config?.basis_exit_bps) >= Number(config?.basis_entry_bps)) {
+    risks.push("退出阈值已经接近或超过入场阈值，容易在边界位置来回切换。");
+  }
+  if (Number(config?.estimated_cost_bps) >= Number(config?.basis_entry_bps)) {
+    risks.push("综合成本兜底已经接近或超过入场阈值，自动开仓机会会明显减少。");
+  }
+  if (String(config?.negative_basis_mode || "advisory_only") === "inventory_backed" && config?.inventory_reservation_enabled !== true) {
+    risks.push("负基差已切到库存反套，但库存预留未启用，当前配置链条不完整。");
+  }
+  if (String(config?.negative_basis_mode || "advisory_only") === "margin_backed" && config?.margin_short_enabled !== true) {
+    risks.push("负基差已切到保证金反套，但保证金融券能力声明未启用。");
+  }
+  if (String(config?.negative_basis_mode || "advisory_only") === "margin_backed" && config?.margin_short_execution_ready !== true) {
+    risks.push("负基差已切到保证金反套，但执行链路尚未标记为就绪。");
+  }
+  if (config?.margin_short_execution_ready === true && config?.margin_short_enabled !== true) {
+    risks.push("保证金融券执行就绪标记已打开，但能力声明仍关闭，这个标记当前不会生效。");
+  }
+  if (!pairDefinitions.length) {
+    risks.push("当前没有显式配对定义，系统会退回主标的推导，生产环境不建议长期这样运行。");
+  }
+  if (pairDefinitions.some((item) => item?.metadata?.source === "derived_primary_symbol")) {
+    risks.push("部分配对来自主标的自动推导，建议改成显式 pair_definitions，避免环境切换时配错腿。");
+  }
+  return risks;
+}
+
+function smartArbitrageThresholdMeta(config = {}) {
+  if (Number(config?.basis_exit_bps) >= Number(config?.basis_entry_bps)) {
+    return "当前退出阈值不低于入场阈值，容易在阈值边界频繁收口。";
+  }
+  if (Number(config?.estimated_cost_bps) >= Number(config?.basis_entry_bps)) {
+    return "综合成本兜底已经很接近入场阈值，净优势要足够大才会自动开仓。";
+  }
+  return "入场阈值决定何时新开套利对，退出阈值决定何时把已持仓套利对收回来。";
+}
+
+function smartArbitrageThresholdTone(config = {}) {
+  if (Number(config?.basis_exit_bps) >= Number(config?.basis_entry_bps)) return "warning";
+  if (Number(config?.estimated_cost_bps) >= Number(config?.basis_entry_bps)) return "warning";
+  return "info";
+}
+
+function smartArbitrageEffectiveBudget(config = {}) {
+  const values = [Number(config?.quote_budget_per_trade), Number(config?.max_pair_notional)]
+    .filter((item) => Number.isFinite(item) && item > 0);
+  if (!values.length) return null;
+  return Math.min(...values);
+}
+
+function formatQuoteAmount(value, fallback = "待确认") {
+  const formatted = formatNumber(value, 2, fallback);
+  return formatted === fallback ? fallback : `${formatted} USDT`;
+}
+
+function smartArbitrageNegativeModeLabel(config = {}) {
+  const labels = {
+    disabled: "不处理负基差",
+    advisory_only: "只提示，不自动执行",
+    inventory_backed: "库存反套",
+    margin_backed: "保证金反套",
+  };
+  return labels[String(config?.negative_basis_mode || "advisory_only")] || "待确认";
+}
+
+function smartArbitrageNegativeModeMeta(config = {}) {
+  const mode = String(config?.negative_basis_mode || "advisory_only");
+  if (mode === "disabled") return "当前完全不处理负基差机会。";
+  if (mode === "advisory_only") return "当前负基差只做提示，不会自动生成反向套利双腿。";
+  if (mode === "inventory_backed") {
+    return config?.inventory_reservation_enabled === true
+      ? "只有现货库存足够时，系统才会自动生成库存反套执行腿。"
+      : "当前已选择库存反套，但库存预留开关还没打开。";
+  }
+  if (mode === "margin_backed") {
+    return config?.margin_short_enabled === true && config?.margin_short_execution_ready === true
+      ? `保证金融券反套链路已声明就绪，现货腿将使用 ${String(config?.margin_short_spot_margin_mode || "cross")}。`
+      : "当前已选择保证金反套，但能力声明或执行就绪条件仍未满足。";
+  }
+  return "当前没有额外模式说明。";
+}
+
+function smartArbitrageNegativeModeTone(config = {}) {
+  const mode = String(config?.negative_basis_mode || "advisory_only");
+  if (mode === "disabled") return "warning";
+  if (mode === "advisory_only") return "info";
+  if (mode === "inventory_backed") return config?.inventory_reservation_enabled === true ? "positive" : "warning";
+  if (mode === "margin_backed") {
+    return config?.margin_short_enabled === true && config?.margin_short_execution_ready === true ? "positive" : "warning";
+  }
+  return "info";
+}
+
+function smartArbitrageEffectiveScopeLabel(config = {}) {
+  if (config?.enabled !== true) return "当前整族未启用";
+  const mode = String(config?.negative_basis_mode || "advisory_only");
+  if (mode === "disabled") return "当前只做正基差自动执行";
+  if (mode === "advisory_only") return "当前正基差自动执行，负基差只提示";
+  if (mode === "inventory_backed") {
+    return config?.inventory_reservation_enabled === true
+      ? "当前正基差自动执行，负基差按库存反套自动执行"
+      : "当前正基差自动执行，负基差目标是库存反套但条件未齐";
+  }
+  if (mode === "margin_backed") {
+    return config?.margin_short_enabled === true && config?.margin_short_execution_ready === true
+      ? "当前正负基差都可自动执行"
+      : "当前正基差自动执行，负基差目标是保证金反套但条件未齐";
+  }
+  return "当前按默认模式运行";
+}
+
+function smartArbitrageEffectiveScopeMeta(config = {}) {
+  if (config?.enabled !== true) return "需要先打开策略总开关，前端候选和执行计划才会开始刷新。";
+  const effectiveBudget = smartArbitrageEffectiveBudget(config);
+  const budgetText = effectiveBudget == null ? "当前预算待确认" : `当前单次开仓按 ${formatQuoteAmount(effectiveBudget)} 作为初始名义金额上限`;
+  return `${budgetText}；${smartArbitrageNegativeModeMeta(config)}`;
+}
+
+function smartArbitragePairSummary(pairDefinitions = []) {
+  if (!pairDefinitions.length) return "当前没有显式配对";
+  if (pairDefinitions.length === 1) return "当前有效 1 组配对";
+  return `当前有效 ${formatNumber(pairDefinitions.length, 0, "0")} 组配对`;
+}
+
+function smartArbitragePairSummaryMeta(pairDefinitions = []) {
+  if (!pairDefinitions.length) return "系统会退回主标的推导；生产环境更建议显式写入配对。";
+  return pairDefinitions
+    .slice(0, 3)
+    .map((item) => `${item.spot_symbol || "现货腿"} <-> ${item.hedge_symbol || "合约腿"}`)
+    .join(" | ");
+}
+
+function smartArbitrageLinkageLabel(config = {}) {
+  const mode = String(config?.negative_basis_mode || "advisory_only");
+  if (mode === "inventory_backed" && config?.inventory_reservation_enabled !== true) {
+    return "库存反套链条不完整";
+  }
+  if (mode === "margin_backed" && (config?.margin_short_enabled !== true || config?.margin_short_execution_ready !== true)) {
+    return "保证金反套链条不完整";
+  }
+  if (config?.margin_short_execution_ready === true && config?.margin_short_enabled !== true) {
+    return "执行就绪标记当前不会生效";
+  }
+  return "当前联动关系清晰";
+}
+
+function smartArbitrageLinkageMeta(config = {}) {
+  const mode = String(config?.negative_basis_mode || "advisory_only");
+  if (mode === "advisory_only" || mode === "disabled") {
+    return "库存反套和保证金融券相关开关当前都不会参与自动执行判断。";
+  }
+  if (mode === "inventory_backed") {
+    return config?.inventory_reservation_enabled === true
+      ? "负基差会先检查可用现货库存，再决定是否生成库存反套双腿。"
+      : "要让负基差进入库存反套，negative_basis_mode 和 inventory_reservation_enabled 必须同时满足。";
+  }
+  if (mode === "margin_backed") {
+    return config?.margin_short_enabled === true && config?.margin_short_execution_ready === true
+      ? `负基差当前会按 ${String(config?.margin_short_spot_margin_mode || "cross")} 保证金模式生成现货反套腿。`
+      : "要让负基差进入保证金反套，negative_basis_mode、margin_short_enabled、margin_short_execution_ready 必须同时满足。";
+  }
+  return "当前没有额外联动说明。";
 }
 
 function renderExpandableSection(title, body, options = {}) {
@@ -653,18 +1020,18 @@ function renderForwardValidationPeriods(periods) {
   );
 }
 
-function renderStrategyCandidateTable(candidates) {
+function renderStrategyCandidateTable(candidates, smartArbitrageConfig = {}) {
   if (!Array.isArray(candidates) || !candidates.length) {
     return `<p class="meta-copy">当前还没有候选策略快照。</p>`;
   }
   return responsiveTable(
     ["策略家族", "当前状态", "如何处理", "本轮目标", "原因说明"],
     candidates.map((candidate) => [
-      `<div><strong>${escapeHtml(readableState(candidate.family || "unknown"))}</strong><div class="table-meta">${escapeHtml(candidate.recommended_symbol || "当前没有推荐标的")}</div></div>`,
-      `<div><strong>${escapeHtml(strategyCandidateStateLabel(candidate))}</strong><div class="table-meta">${escapeHtml(strategyCandidateStateMeta(candidate))}</div></div>`,
+      `<div><strong>${escapeHtml(readableState(candidate.family || "unknown"))}</strong><div class="table-meta">${escapeHtml(strategyCandidateSymbolMeta(candidate))}</div></div>`,
+      `<div><strong>${escapeHtml(strategyCandidateStateLabel(candidate))}</strong><div class="table-meta">${escapeHtml(strategyCandidateStateMeta(candidate, smartArbitrageConfig))}</div></div>`,
       `<div><strong>${escapeHtml(strategyCandidateRouteLabel(candidate))}</strong><div class="table-meta">${escapeHtml(strategyCandidateRouteMeta(candidate))}</div></div>`,
       `<div><strong>${escapeHtml(strategyCandidateTargetLabel(candidate))}</strong><div class="table-meta">${escapeHtml(strategyCandidateTargetMeta(candidate))}</div></div>`,
-      `<div><strong>${escapeHtml(strategyCandidateReason(candidate))}</strong><div class="table-meta">${escapeHtml(strategyLegSummary(candidate))}</div></div>`,
+      `<div><strong>${escapeHtml(strategyCandidateReason(candidate, smartArbitrageConfig))}</strong><div class="table-meta">${escapeHtml(strategyLegSummary(candidate, smartArbitrageConfig))}</div></div>`,
     ]),
     "当前没有候选策略快照。"
   );
@@ -687,7 +1054,27 @@ function renderRecentSleeveIntentTable(items) {
   );
 }
 
+function strategyCandidateSymbolMeta(candidate) {
+  if (candidate?.family === "smart_arbitrage") {
+    const spotSymbol = candidate?.metrics?.spot_symbol;
+    const derivativesSymbol = candidate?.metrics?.derivatives_symbol;
+    if (spotSymbol || derivativesSymbol) {
+      return `${spotSymbol || "现货腿"} <-> ${derivativesSymbol || "合约腿"}`;
+    }
+  }
+  return candidate?.recommended_symbol || "当前没有推荐标的";
+}
+
+function smartArbitrageBelowEntryThreshold(candidate) {
+  if (candidate?.family !== "smart_arbitrage") return false;
+  const reasonCodes = Array.isArray(candidate?.reason_codes) ? candidate.reason_codes : [];
+  return reasonCodes.includes("smart_arbitrage_basis_below_entry_threshold");
+}
+
 function strategyCandidateStateLabel(candidate) {
+  if (smartArbitrageBelowEntryThreshold(candidate)) {
+    return "当前继续观察";
+  }
   if (candidate?.family === "smart_arbitrage" && candidate?.state === "inactive") {
     return "当前不参与执行";
   }
@@ -709,9 +1096,9 @@ function strategyCandidateStateLabel(candidate) {
   return readableState(candidate?.state || "unknown");
 }
 
-function strategyCandidateStateMeta(candidate) {
+function strategyCandidateStateMeta(candidate, smartArbitrageConfig = {}) {
   if (candidate?.family === "smart_arbitrage" && candidate?.state === "inactive") {
-    return smartArbitrageMarketAvailability(candidate);
+    return smartArbitrageMarketAvailability(candidate, smartArbitrageConfig);
   }
   if (candidate?.family === "smart_arbitrage") {
     return smartArbitrageStateMeta(candidate);
@@ -846,8 +1233,8 @@ function familyEnablementSummary(payload) {
     .join(" | ");
 }
 
-function strategyCandidateReason(candidate) {
-  const smartArbitrageReason = smartArbitrageReasonText(candidate);
+function strategyCandidateReason(candidate, smartArbitrageConfig = {}) {
+  const smartArbitrageReason = smartArbitrageReasonText(candidate, smartArbitrageConfig);
   if (smartArbitrageReason) return smartArbitrageReason;
   if (candidate?.headline) return candidate.headline;
   const summary = reasonListText(candidate?.reason_codes, "");
@@ -855,11 +1242,11 @@ function strategyCandidateReason(candidate) {
   return "当前没有额外说明";
 }
 
-function strategyLegSummary(candidate) {
+function strategyLegSummary(candidate, smartArbitrageConfig = {}) {
   const legs = candidate?.legs;
   if (!Array.isArray(legs) || !legs.length) {
     if (candidate?.family === "smart_arbitrage") {
-      return smartArbitrageMarketAvailability(candidate);
+      return smartArbitrageMarketAvailability(candidate, smartArbitrageConfig);
     }
     return "当前没有附带腿说明";
   }
@@ -871,11 +1258,16 @@ function strategyLegSummary(candidate) {
     .join(" | ");
 }
 
-function smartArbitrageMarketAvailability(candidate) {
+function smartArbitrageMarketAvailability(candidate, smartArbitrageConfig = {}) {
   const metrics = candidate?.metrics || {};
   const spotSymbol = metrics.spot_symbol || candidate?.recommended_symbol || "现货腿";
   const derivativesSymbol = metrics.derivatives_symbol || "合约腿";
   const reasonCodes = Array.isArray(candidate?.reason_codes) ? candidate.reason_codes : [];
+  if (smartArbitrageBelowEntryThreshold(candidate)) {
+    const basisBps = formatBps(metrics.basis_bps);
+    const entryThreshold = formatBps(smartArbitrageConfig?.basis_entry_bps);
+    return `当前基差 ${basisBps}，还没有达到入场阈值 ${entryThreshold}，系统继续观察。`;
+  }
   if (reasonCodes.includes("smart_arbitrage_market_pair_incomplete")) {
     return `当前缺少 ${spotSymbol} 或 ${derivativesSymbol} 的配对行情，暂时不能进入双腿执行。`;
   }
@@ -903,7 +1295,10 @@ function smartArbitrageNegativeBasisAdvisory(candidate) {
   );
 }
 
-function smartArbitrageReasonText(candidate) {
+function smartArbitrageReasonText(candidate, smartArbitrageConfig = {}) {
+  if (smartArbitrageBelowEntryThreshold(candidate)) {
+    return smartArbitrageMarketAvailability(candidate, smartArbitrageConfig);
+  }
   if (smartArbitrageNegativeBasisAdvisory(candidate)) {
     return "当前是负基差，但自动执行只支持正基差双腿；现货现金模式不能自动做空。";
   }

@@ -116,9 +116,12 @@ class TestDashboardUI(unittest.TestCase):
         self.assertIn("样本仍少，先继续观察", strategy_text)
         self.assertIn("strategyRuntimeSummary", strategy_text)
         self.assertIn("renderStrategyCandidateTable", strategy_text)
+        self.assertIn("renderSmartArbitrageConfigCard", strategy_text)
         self.assertIn("renderAllocatorBudgetSnapshotTable", strategy_text)
         self.assertIn("renderAllocatorConflictResolutionTable", strategy_text)
         self.assertIn("renderAllocatorNettingDecisionTable", strategy_text)
+        self.assertIn("smart_arbitrage_quote_budget_per_trade", strategy_text)
+        self.assertIn("smart_arbitrage_margin_short_execution_ready", strategy_text)
         self.assertIn("strategyFamilyEnablement", strategy_text)
         self.assertIn("策略归因", strategy_text)
         self.assertIn("自动预算与启停", strategy_text)
@@ -432,6 +435,145 @@ console.log(JSON.stringify({
         self.assertIn('"manualOnlyProfileButtonsUnlocked":true', result.stdout)
         self.assertIn('"manualOnlyRuntimeCurrentModeLocked":true', result.stdout)
         self.assertIn('"manualOnlyRuntimeAvoidsLegacyButtons":true', result.stdout)
+
+    def test_strategy_view_renders_smart_arbitrage_config_card_and_threshold_copy(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { renderStrategyView } from './aats/api/static/modules/views/strategy-view.js';
+
+const html = renderStrategyView({
+  latestDecision: {
+    decision_id: 'dec-1',
+    decision_time: '2026-03-26T12:00:00Z',
+    baseline_assessment: { regime: 'range', confidence: 0.41 },
+    position_target: {
+      strategy_family: 'smart_arbitrage',
+      position_intent: 'hold',
+      current_position_qty: 0,
+      target_position_qty: 0,
+      delta_position_qty: 0,
+      product_type: 'derivatives',
+      margin_mode: 'cross',
+    },
+    policy_decision: {
+      execution_allowed: false,
+      blocker_reasons: ['smart_arbitrage_basis_below_entry_threshold'],
+    },
+    risk_decision: {
+      approved: false,
+      rejection_reasons: ['smart_arbitrage_basis_below_entry_threshold'],
+    },
+    decision_outcome: {
+      selected_strategy_family: 'smart_arbitrage',
+    },
+    decision_context: {
+      symbol: 'BTC-USDT-SWAP',
+      current_position_qty: 0,
+      as_of_ts: '2026-03-26T12:00:00Z',
+      product_type: 'derivatives',
+    },
+  },
+  recentDecisions: { decisions: [] },
+  executionLatest: {},
+  strategyRuntime: {
+    summary: {
+      automatic_selection_enabled: true,
+      configured_active_family: 'smart_arbitrage',
+      latest_selected_family: 'smart_arbitrage',
+      latest_selected_state: 'inactive',
+      latest_bundle_status: 'inactive',
+      latest_portfolio_requested_notional: 0,
+      latest_portfolio_approved_notional: 0,
+      latest_portfolio_budget_cut_notional: 0,
+      auto_parallel_enabled: false,
+      automation_active_count: 0,
+      automation_contracted_count: 0,
+      automation_paused_count: 0,
+      latest_approved_sleeve_weights: {},
+      latest_selection_reason_codes: ['smart_arbitrage_basis_below_entry_threshold'],
+    },
+    latest_snapshot: {
+      candidates: [
+        {
+          family: 'smart_arbitrage',
+          state: 'inactive',
+          route_action: 'hold_current',
+          urgency: 'low',
+          target_position_qty: 0,
+          delta_position_qty: 0,
+          reason_codes: ['smart_arbitrage_basis_below_entry_threshold'],
+          pair_id: 'btc_usdt_swap',
+          metrics: {
+            pair_id: 'btc_usdt_swap',
+            spot_symbol: 'BTC-USDT',
+            derivatives_symbol: 'BTC-USDT-SWAP',
+            basis_bps: 12,
+          },
+          legs: [],
+        },
+      ],
+      automation_decisions: [],
+    },
+    configured_parameters: {
+      smart_arbitrage: {
+        enabled: true,
+        pair_definitions: [
+          {
+            pair_id: 'btc_usdt_swap',
+            spot_symbol: 'BTC-USDT',
+            hedge_symbol: 'BTC-USDT-SWAP',
+            metadata: { source: 'configured' },
+          },
+        ],
+        basis_entry_bps: 18,
+        basis_exit_bps: 6,
+        estimated_cost_bps: 10,
+        quote_budget_per_trade: 200,
+        max_pair_notional: 2000,
+        negative_basis_mode: 'advisory_only',
+        inventory_reservation_enabled: false,
+        margin_short_enabled: false,
+        margin_short_execution_ready: false,
+        margin_short_spot_margin_mode: 'cross',
+      },
+    },
+    latest_bundle: {},
+    latest_allocation_decision: {},
+    latest_applied_target: {},
+    recent_execution_bundles: [],
+    recent_sleeve_intents: [],
+    recent_budget_snapshots: [],
+    recent_conflict_resolutions: [],
+    recent_netting_decisions: [],
+    family_enablement: { smart_arbitrage: { enabled: true } },
+  },
+  strategyAttribution: {
+    summary: {},
+    profitability_by_strategy_sleeve: [],
+    sleeve_inventory_summary: [],
+  },
+  trialReviewSummary: { summary: {}, sections: {} },
+});
+
+console.log(JSON.stringify({
+  hasConfigCard: html.includes('smart_arbitrage_quote_budget_per_trade') && html.includes('smart_arbitrage_margin_short_execution_ready'),
+  hasPairLabel: html.includes('BTC-USDT &lt;-&gt; BTC-USDT-SWAP'),
+  hasThresholdCopy: html.includes('还没有达到入场阈值'),
+  hidesGenericNoLegCopy: !html.includes('当前没有附带套利双腿执行信息。'),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertIn('"hasConfigCard":true', result.stdout)
+        self.assertIn('"hasPairLabel":true', result.stdout)
+        self.assertIn('"hasThresholdCopy":true', result.stdout)
+        self.assertIn('"hidesGenericNoLegCopy":true', result.stdout)
 
     def test_risk_view_actions_follow_blocker_state(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]

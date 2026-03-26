@@ -2087,6 +2087,8 @@ class OperatorQueryService:
                     "basis_entry_bps": self.runtime.settings.smart_arbitrage_basis_entry_bps,
                     "basis_exit_bps": self.runtime.settings.smart_arbitrage_basis_exit_bps,
                     "estimated_cost_bps": self.runtime.settings.smart_arbitrage_estimated_cost_bps,
+                    "quote_budget_per_trade": self.runtime.settings.smart_arbitrage_quote_budget_per_trade,
+                    "max_pair_notional": self.runtime.settings.smart_arbitrage_max_pair_notional,
                     "cost_model_enabled": self.runtime.settings.smart_arbitrage_cost_model_enabled,
                     "negative_basis_mode": self.runtime.settings.smart_arbitrage_negative_basis_mode,
                     "inventory_reservation_enabled": self.runtime.settings.smart_arbitrage_inventory_reservation_enabled,
