@@ -150,7 +150,7 @@ class TestAATSSettings(unittest.TestCase):
         self.assertEqual(settings.ai_execution_suggestion_mode, "diagnostic_only")
         self.assertFalse(settings.strategy_profile_auto_control_enabled)
         self.assertEqual(settings.decision_min_interval_seconds_15m, 60.0)
-        self.assertEqual(settings.strategy_min_hold_seconds, 900.0)
+        self.assertEqual(settings.strategy_min_hold_seconds, 420.0)
 
     def test_load_settings_bootstraps_managed_derivatives_profile_before_runtime_validation(self) -> None:
         with patch.object(AATSSettings, "model_config", {**AATSSettings.model_config, "env_file": None}):

@@ -654,11 +654,22 @@ const html = renderStrategyView({
         estimated_cost_bps: 10,
         quote_budget_per_trade: 200,
         max_pair_notional: 2000,
+        cost_model_enabled: true,
+        funding_cost_enabled: false,
+        borrow_cost_enabled: false,
         negative_basis_mode: 'advisory_only',
         inventory_reservation_enabled: false,
         margin_short_enabled: false,
         margin_short_execution_ready: false,
         margin_short_spot_margin_mode: 'cross',
+        margin_short_auto_repay_enabled: false,
+        max_concurrent_pairs: 1,
+        pair_priority_mode: 'net_edge',
+        min_inventory_backed_ratio: 1,
+        estimated_fee_bps: 0,
+        estimated_slippage_bps: 0,
+        estimated_funding_bps: 0,
+        estimated_borrow_bps: 0,
       },
     },
     latest_bundle: {},
@@ -681,6 +692,7 @@ const html = renderStrategyView({
 
 console.log(JSON.stringify({
   hasConfigCard: html.includes('smart_arbitrage_quote_budget_per_trade') && html.includes('smart_arbitrage_margin_short_execution_ready'),
+  hasAdvancedConfig: html.includes('smart_arbitrage_max_concurrent_pairs') && html.includes('smart_arbitrage_cost_model_enabled'),
   hasPairLabel: html.includes('BTC-USDT &lt;-&gt; BTC-USDT-SWAP'),
   hasThresholdCopy: html.includes('还没有达到入场阈值'),
   hidesGenericNoLegCopy: !html.includes('当前没有附带套利双腿执行信息。'),
@@ -695,9 +707,137 @@ console.log(JSON.stringify({
         )
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         self.assertIn('"hasConfigCard":true', result.stdout)
+        self.assertIn('"hasAdvancedConfig":true', result.stdout)
         self.assertIn('"hasPairLabel":true', result.stdout)
         self.assertIn('"hasThresholdCopy":true', result.stdout)
         self.assertIn('"hidesGenericNoLegCopy":true', result.stdout)
+
+    def test_strategy_view_uses_reason_copy_for_blocked_smart_arbitrage_intents_and_multi_pair_targets(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { renderStrategyView } from './aats/api/static/modules/views/strategy-view.js';
+
+const html = renderStrategyView({
+  strategyRuntime: {
+    summary: {},
+    latest_snapshot: {
+      selected_family: 'smart_arbitrage',
+      selected_state: 'opening',
+      selected_route_action: 'override_target',
+      candidates: [
+        {
+          family: 'smart_arbitrage',
+          state: 'opening',
+          route_action: 'override_target',
+          urgency: 'medium',
+          pair_id: 'multi_pair',
+          target_position_qty: null,
+          delta_position_qty: null,
+          reason_codes: ['smart_arbitrage_positive_basis'],
+          metrics: {
+            aggregate_candidate: true,
+            pair_count_selected: 2,
+            selected_pair_summaries: [
+              { pair_id: 'btc_usdt_swap', spot_symbol: 'BTC-USDT', derivatives_symbol: 'BTC-USDT-SWAP' },
+              { pair_id: 'eth_usdt_swap', spot_symbol: 'ETH-USDT', derivatives_symbol: 'ETH-USDT-SWAP' },
+            ],
+          },
+          legs: [
+            { symbol: 'BTC-USDT', product_type: 'spot', side: 'buy', execution_mode: 'spot_carry' },
+            { symbol: 'BTC-USDT-SWAP', product_type: 'derivatives', side: 'sell', execution_mode: 'spot_carry' },
+          ],
+        },
+      ],
+    },
+    configured_parameters: {
+      smart_arbitrage: {
+        enabled: true,
+        pair_definitions: [
+          {
+            pair_id: 'btc_usdt_swap',
+            spot_symbol: 'BTC-USDT',
+            hedge_symbol: 'BTC-USDT-SWAP',
+            execution_modes: ['spot_carry'],
+            metadata: {
+              source: 'pair_registry',
+              configuration_error_codes: ['smart_arbitrage_pair_execution_modes_invalid'],
+            },
+          },
+        ],
+        pair_registry_error_codes: ['smart_arbitrage_pair_execution_modes_invalid'],
+        basis_entry_bps: 18,
+        basis_exit_bps: 6,
+        estimated_cost_bps: 10,
+        quote_budget_per_trade: 200,
+        max_pair_notional: 2000,
+        cost_model_enabled: true,
+        funding_cost_enabled: false,
+        borrow_cost_enabled: false,
+        negative_basis_mode: 'advisory_only',
+        inventory_reservation_enabled: false,
+        margin_short_enabled: false,
+        margin_short_execution_ready: false,
+        margin_short_spot_margin_mode: 'cross',
+        margin_short_auto_repay_enabled: false,
+        max_concurrent_pairs: 2,
+        pair_priority_mode: 'net_edge',
+        min_inventory_backed_ratio: 1,
+        estimated_fee_bps: 0,
+        estimated_slippage_bps: 0,
+        estimated_funding_bps: 0,
+        estimated_borrow_bps: 0,
+      },
+    },
+    recent_sleeve_intents: [
+      {
+        strategy_sleeve_id: 'sintent_smart_arbitrage',
+        family: 'smart_arbitrage',
+        state: 'blocked',
+        route_action: 'advisory_only',
+        pair_id: 'btc_usdt_swap',
+        symbol: 'BTC-USDT-SWAP',
+        target_position_qty: 0,
+        delta_position_qty: 0,
+        automatic_enabled: true,
+        budget_multiplier: 1,
+        allocator_weight: 1,
+        headline: 'Positive basis pair is ready.',
+        reason_codes: ['smart_arbitrage_positive_basis', 'smart_arbitrage_spot_carry_not_allowed'],
+        legs: [],
+      },
+    ],
+    latest_bundle: {},
+    latest_allocation_decision: {},
+    latest_applied_target: {},
+    recent_execution_bundles: [],
+    recent_budget_snapshots: [],
+    recent_conflict_resolutions: [],
+    recent_netting_decisions: [],
+    family_enablement: { smart_arbitrage: { enabled: true } },
+  },
+  strategyAttribution: { summary: {}, profitability_by_strategy_sleeve: [], sleeve_inventory_summary: [] },
+  trialReviewSummary: { summary: {}, sections: {} },
+});
+
+console.log(JSON.stringify({
+  showsMultiPairTargetCopy: html.includes('按多组套利对分别执行'),
+  hidesBlockedReadyHeadline: !html.includes('Positive basis pair is ready.'),
+  showsBlockedReasonCopy: html.includes('当前是正基差，但这组配对没有开放正向现货套利模式，系统暂不执行。'),
+  showsPairConfigRisk: html.includes('execution_modes 配置非法'),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertIn('"showsMultiPairTargetCopy":true', result.stdout)
+        self.assertIn('"hidesBlockedReadyHeadline":true', result.stdout)
+        self.assertIn('"showsBlockedReasonCopy":true', result.stdout)
+        self.assertIn('"showsPairConfigRisk":true', result.stdout)
 
     def test_risk_view_actions_follow_blocker_state(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]

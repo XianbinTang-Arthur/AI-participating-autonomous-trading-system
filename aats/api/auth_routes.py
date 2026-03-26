@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from time import perf_counter
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -327,6 +328,7 @@ async def dashboard_bundle(
     recent_ai_shadow_decisions: int = Query(default=8, alias="recentAIShadowDecisions", ge=1, le=100),
     recent_ai_shadow_evaluations: int = Query(default=8, alias="recentAIShadowEvaluations", ge=1, le=100),
 ) -> dict[str, Any]:
+    request_started_at = perf_counter()
     query = _query(request)
     api_key = request.headers.get("X-AATS-API-Key")
     panel_keys = _normalize_dashboard_panel_keys(panel)
@@ -339,7 +341,9 @@ async def dashboard_bundle(
         read_error = exc
 
     panels: dict[str, dict[str, Any]] = {}
+    panel_timings: dict[str, dict[str, float]] = {}
     for panel_key in panel_keys:
+        panel_started_at = perf_counter()
         try:
             if panel_key == "session":
                 payload = _session_payload(request)
@@ -365,8 +369,19 @@ async def dashboard_bundle(
             panels[panel_key] = {"data": payload, "error": None}
         except Exception as exc:
             panels[panel_key] = {"data": None, "error": _dashboard_panel_error(exc)}
+        finally:
+            panel_timings[panel_key] = {
+                "duration_ms": round((perf_counter() - panel_started_at) * 1000.0, 3),
+            }
 
-    return {"view": view, "panels": panels}
+    return {
+        "view": view,
+        "panels": panels,
+        "timing": {
+            "total_ms": round((perf_counter() - request_started_at) * 1000.0, 3),
+            "panels": panel_timings,
+        },
+    }
 
 
 @auth_router.get("/auth/users")

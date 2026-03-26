@@ -34,6 +34,27 @@ class TestSmartArbitrageV2Components(unittest.TestCase):
         self.assertEqual(pairs[0].hedge_symbol, "BTC-USDT-SWAP")
         self.assertEqual(pairs[1].pair_id, "btc_quarterly")
 
+    def test_pair_registry_dedupes_configured_primary_pair_against_derived_fallback(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "smart_arbitrage_pair_definitions": (
+                    {
+                        "pair_id": "btc_usdt_swap",
+                        "spot_symbol": "BTC-USDT",
+                        "hedge_symbol": "BTC-USDT-SWAP",
+                    },
+                ),
+            }
+        )
+
+        pairs = load_pair_definitions(settings=settings, primary_symbol="BTC-USDT-SWAP")
+
+        self.assertEqual(len(pairs), 1)
+        self.assertEqual(pairs[0].pair_id, "btc_usdt_swap")
+        self.assertEqual(pairs[0].metadata.get("source"), "pair_registry")
+
     def test_capability_resolver_distinguishes_inventory_and_margin_modes(self) -> None:
         inventory_settings = AATSSettings.model_validate(
             {
@@ -145,6 +166,106 @@ class TestSmartArbitrageV2Components(unittest.TestCase):
         self.assertEqual(legs[0].side, "sell")
         self.assertEqual(legs[0].execution_mode, "margin_reverse_carry")
         self.assertEqual(legs[1].target_leverage, 3.0)
+
+    def test_pair_registry_defaults_execution_modes_to_all_supported_live_modes(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "smart_arbitrage_pair_definitions": (
+                    {
+                        "pair_id": "btc_pair",
+                        "spot_symbol": "BTC-USDT",
+                        "hedge_symbol": "BTC-USDT-SWAP",
+                    },
+                ),
+            }
+        )
+
+        pairs = load_pair_definitions(settings=settings, primary_symbol="BTC-USDT-SWAP")
+
+        self.assertEqual(
+            pairs[0].execution_modes,
+            ("spot_carry", "inventory_reverse_carry", "margin_reverse_carry"),
+        )
+
+    def test_pair_registry_invalid_execution_modes_fail_closed(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "smart_arbitrage_pair_definitions": (
+                    {
+                        "pair_id": "btc_pair",
+                        "spot_symbol": "BTC-USDT",
+                        "hedge_symbol": "BTC-USDT-SWAP",
+                        "execution_modes": ("spotcarry_typo",),
+                    },
+                ),
+            }
+        )
+
+        pairs = load_pair_definitions(settings=settings, primary_symbol="BTC-USDT-SWAP")
+
+        self.assertEqual(pairs[0].execution_modes, ())
+        self.assertIn("smart_arbitrage_pair_execution_modes_invalid", pairs[0].metadata["configuration_error_codes"])
+        self.assertEqual(pairs[0].metadata["invalid_execution_modes"], ["spotcarry_typo"])
+
+    def test_pair_registry_renames_conflicting_pair_ids_and_marks_warning(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "smart_arbitrage_pair_definitions": (
+                    {
+                        "pair_id": "duplicate_pair",
+                        "spot_symbol": "BTC-USDT",
+                        "hedge_symbol": "BTC-USDT-SWAP",
+                    },
+                    {
+                        "pair_id": "duplicate_pair",
+                        "spot_symbol": "ETH-USDT",
+                        "hedge_symbol": "ETH-USDT-SWAP",
+                    },
+                ),
+            }
+        )
+
+        pairs = load_pair_definitions(settings=settings, primary_symbol="BTC-USDT-SWAP")
+
+        self.assertEqual(len(pairs), 2)
+        self.assertEqual(pairs[0].pair_id, "duplicate_pair")
+        self.assertEqual(pairs[1].pair_id, "duplicate_pair__scope_conflict_2")
+        self.assertIn("smart_arbitrage_pair_id_conflict_renamed", pairs[1].metadata["configuration_warning_codes"])
+
+    def test_pair_registry_marks_duplicate_scope_pairs_on_retained_pair(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "smart_arbitrage_pair_definitions": (
+                    {
+                        "pair_id": "btc_pair_primary",
+                        "spot_symbol": "BTC-USDT",
+                        "hedge_symbol": "BTC-USDT-SWAP",
+                    },
+                    {
+                        "pair_id": "btc_pair_duplicate",
+                        "spot_symbol": "BTC-USDT",
+                        "hedge_symbol": "BTC-USDT-SWAP",
+                    },
+                ),
+            }
+        )
+
+        pairs = load_pair_definitions(settings=settings, primary_symbol="BTC-USDT-SWAP")
+
+        self.assertEqual(len(pairs), 1)
+        self.assertIn("smart_arbitrage_duplicate_pair_scope_ignored", pairs[0].metadata["configuration_warning_codes"])
+        self.assertEqual(
+            pairs[0].metadata["ignored_duplicate_scope_pairs"][0]["pair_id"],
+            "btc_pair_duplicate",
+        )
 
 
 if __name__ == "__main__":

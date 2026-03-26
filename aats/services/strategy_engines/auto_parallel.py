@@ -258,6 +258,10 @@ class StrategySleeveAutoController:
         )
 
         candidate_state = candidate.state
+        aggregate_smart_arbitrage = (
+            candidate.family == "smart_arbitrage"
+            and bool((candidate.metrics or {}).get("aggregate_candidate"))
+        )
         candidate_route_action = route_action if route_action != "protective_fallback" else candidate.route_action
         candidate_selectable = route_action in {"override_target", "hold_current"} and (
             route_action == "override_target" or active_inventory or protective_intent
@@ -278,8 +282,12 @@ class StrategySleeveAutoController:
                 "selectable": candidate_selectable,
                 "execution_compatible": candidate_execution_compatible,
                 "route_action": candidate_route_action,
-                "target_position_qty": account_target_qty if account_target_qty is not None else target_qty,
-                "delta_position_qty": scaled_delta,
+                "target_position_qty": (
+                    None
+                    if aggregate_smart_arbitrage
+                    else (account_target_qty if account_target_qty is not None else target_qty)
+                ),
+                "delta_position_qty": None if aggregate_smart_arbitrage else scaled_delta,
                 "automatic_enabled": decision.automatic_enabled,
                 "budget_multiplier": decision.budget_multiplier,
                 "allocator_weight": decision.allocator_weight,

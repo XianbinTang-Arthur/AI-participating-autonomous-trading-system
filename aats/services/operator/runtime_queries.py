@@ -75,10 +75,8 @@ class RuntimeQueryFacade:
         return self.owner._ai_performance_overview_impl()
 
     def ai_overview(self) -> dict[str, Any]:
-        latest = self.ai_latest()
-        shadow_latest = self.ai_shadow_latest()
-        latest_decision_id = self.owner.latest_decision_id()
-        latest_decision_detail = self.owner.decision_view(latest_decision_id) if latest_decision_id is not None else None
+        latest = self.owner.ai_latest()
+        shadow_latest = self.owner.ai_shadow_latest()
         latest_degradation = latest_topic_event_for_scope(
             self.owner.runtime.event_store,
             topics.AI_DEGRADATION_EVENTS,
@@ -87,13 +85,13 @@ class RuntimeQueryFacade:
         if not self.owner._ai_history_visible():
             latest_degradation = None
         return {
-            "runtime": self.ai_runtime(),
+            "runtime": self.owner.ai_runtime(),
             "latest_brief": latest.get("brief"),
             "latest_assessment": latest.get("assessment"),
-            "latest_baseline_reference": None if latest_decision_detail is None else latest_decision_detail.get("baseline_reference"),
-            "latest_ai_decision_intent": None if latest_decision_detail is None else latest_decision_detail.get("ai_decision_intent"),
-            "latest_profile_control_decision": None if latest_decision_detail is None else latest_decision_detail.get("profile_control_decision"),
-            "latest_decision_outcome": None if latest_decision_detail is None else latest_decision_detail.get("decision_outcome"),
+            "latest_baseline_reference": latest.get("baseline_reference"),
+            "latest_ai_decision_intent": latest.get("ai_decision_intent"),
+            "latest_profile_control_decision": latest.get("profile_control_decision"),
+            "latest_decision_outcome": latest.get("decision_outcome"),
             "latest_shadow_decision": shadow_latest.get("shadow_decision"),
             "latest_degradation": self.owner.payload(latest_degradation),
             "shadow_summary": self.owner._ai_shadow_summary(),
@@ -101,7 +99,7 @@ class RuntimeQueryFacade:
             "latest_performance_report": self.owner._latest_ai_performance_report_payload(),
             "performance_view": self.ai_performance_overview(),
             "downgrade_state": self.owner._ai_downgrade_state(),
-            "latest_execution_suggestion": None if latest_decision_detail is None else latest_decision_detail.get("ai_execution_suggestion"),
+            "latest_execution_suggestion": latest.get("execution_suggestion"),
         }
 
     def ai_latest(self) -> dict[str, Any]:
@@ -203,7 +201,7 @@ class RuntimeQueryFacade:
         mode_snapshot = self.owner.system_mode()
         recovery = self.owner.recovery_view()
         market = self.owner.runtime.market_gateway.status()
-        account = self.owner.runtime.account_service.status()
+        account = self.owner.account_service_status()
         execution = self.owner.runtime.execution_adapter.readiness()
         phase1_shadow = self.owner.phase1_shadow()
         derivatives_live_guard = self.owner.derivatives_live_guard()
@@ -329,7 +327,7 @@ class RuntimeQueryFacade:
         latest_fill = self.owner.latest_fill()
         latest_reconciliation = self.owner._latest_scoped_reconciliation()
         account_baseline = self.owner.latest_account_baseline()
-        account_snapshot = self.owner.runtime.account_service.latest_snapshot()
+        account_snapshot = self.owner.latest_exchange_snapshot()
         recovery = self.owner.recovery_view()
         guarded_live_preflight = self.owner.guarded_live_preflight()
         guarded_live_run_packet = self.owner.guarded_live_run_packet()

@@ -37,7 +37,7 @@ class AccountQueryFacade:
 
     def balances(self) -> dict[str, Any]:
         snapshot = self.owner._latest_scoped_snapshot()
-        exchange = self.owner.runtime.account_service.latest_snapshot()
+        exchange = self.owner.latest_exchange_snapshot()
         return {
             "local_balances": self.owner._phase5_balance_view(),
             "exchange_balances": [item.model_dump(mode="json") for item in exchange.balances] if exchange is not None else [],
@@ -47,7 +47,7 @@ class AccountQueryFacade:
 
     def positions(self) -> dict[str, Any]:
         snapshot = self.owner._latest_scoped_snapshot()
-        exchange = self.owner.runtime.account_service.latest_snapshot()
+        exchange = self.owner.latest_exchange_snapshot()
         reconciliation = self.owner._latest_scoped_reconciliation()
         return {
             "local_positions": [item.model_dump(mode="json") for item in snapshot.positions] if snapshot is not None else [],
@@ -66,8 +66,8 @@ class AccountQueryFacade:
         return self.owner._cached_ttl(cache_key, 10, self.build_account_state)
 
     def build_account_state(self) -> dict[str, Any]:
-        status = self.owner.runtime.account_service.status()
-        snapshot = self.owner.runtime.account_service.latest_snapshot()
+        status = self.owner.account_service_status()
+        snapshot = self.owner.latest_exchange_snapshot()
         local_snapshot = self.owner._latest_scoped_snapshot()
         recovery = self.owner.recovery_view()
         reconciliation = self.owner._latest_scoped_reconciliation()
@@ -204,7 +204,7 @@ class AccountQueryFacade:
         }
 
     def account_open_orders(self) -> dict[str, Any]:
-        exchange = self.owner.runtime.account_service.latest_snapshot()
+        exchange = self.owner.latest_exchange_snapshot()
         local_open_orders = (
             [self.owner._execution_record_payload(order) for order in self.owner.runtime.execution_order_repo.open_orders()]
             if self.owner._phase5_control_plane_enabled()
@@ -216,7 +216,7 @@ class AccountQueryFacade:
         }
 
     def account_recent_fills(self) -> dict[str, Any]:
-        exchange = self.owner.runtime.account_service.latest_snapshot()
+        exchange = self.owner.latest_exchange_snapshot()
         local_fills = (
             [self.owner._execution_record_payload(fill) for fill in self.owner._phase5_fill_rows(limit=50)]
             if self.owner._phase5_control_plane_enabled()

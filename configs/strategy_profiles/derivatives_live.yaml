@@ -93,6 +93,28 @@ smart_arbitrage_margin_short_enabled: false
 smart_arbitrage_margin_short_execution_ready: false
 # [进阶可调] smart_arbitrage_margin_short_spot_margin_mode：保证金融券现货腿的保证金模式。可选值：cross / isolated；推荐值：cross。
 smart_arbitrage_margin_short_spot_margin_mode: cross
+# [进阶可调] smart_arbitrage_margin_short_auto_repay_enabled：保证金反套平仓后是否自动还币。可选值：true / false；推荐值：false。
+smart_arbitrage_margin_short_auto_repay_enabled: false
+# [进阶可调] smart_arbitrage_cost_model_enabled：是否启用细分成本模型。可选值：true / false；推荐值：true。
+smart_arbitrage_cost_model_enabled: true
+# [进阶可调] smart_arbitrage_funding_cost_enabled：是否把资金费计入细分成本。可选值：true / false；推荐值：false。
+smart_arbitrage_funding_cost_enabled: false
+# [进阶可调] smart_arbitrage_borrow_cost_enabled：是否把借币费计入细分成本。可选值：true / false；推荐值：false。
+smart_arbitrage_borrow_cost_enabled: false
+# [进阶可调] smart_arbitrage_max_concurrent_pairs：最多同时主控多少组不重叠套利对。可选值：正整数；推荐值：1。
+smart_arbitrage_max_concurrent_pairs: 1
+# [进阶可调] smart_arbitrage_pair_priority_mode：多 pair 排序方式。可选值：net_edge / basis_abs；推荐值：net_edge。
+smart_arbitrage_pair_priority_mode: net_edge
+# [进阶可调] smart_arbitrage_min_inventory_backed_ratio：库存反套最小覆盖率。可选值：0.0 以上；推荐值：1.0。
+smart_arbitrage_min_inventory_backed_ratio: 1.0
+# [进阶可调] smart_arbitrage_estimated_fee_bps：细分手续费预估。可选值：0.0 以上；推荐值：0.0。
+smart_arbitrage_estimated_fee_bps: 0.0
+# [进阶可调] smart_arbitrage_estimated_slippage_bps：细分滑点预估。可选值：0.0 以上；推荐值：0.0。
+smart_arbitrage_estimated_slippage_bps: 0.0
+# [进阶可调] smart_arbitrage_estimated_funding_bps：细分资金费预估。可选值：0.0 以上；推荐值：0.0。
+smart_arbitrage_estimated_funding_bps: 0.0
+# [进阶可调] smart_arbitrage_estimated_borrow_bps：细分借币费预估。可选值：0.0 以上；推荐值：0.0。
+smart_arbitrage_estimated_borrow_bps: 0.0
 
 # [常用可调] spot_grid_enabled：是否启用现货网格。可选值：true / false；推荐值：true。
 spot_grid_enabled: true
@@ -140,7 +162,7 @@ strategy_short_bias_enabled: true
 # [常用可调] strategy_dynamic_leverage_enabled：是否允许动态杠杆。可选值：true / false；推荐值：true。
 strategy_dynamic_leverage_enabled: true
 # [常用可调] strategy_flat_signal_hold_enabled：flat 信号时是否优先持有而不是立刻退出。可选值：true / false；推荐值：true。
-strategy_flat_signal_hold_enabled: true
+strategy_flat_signal_hold_enabled: false
 # [常用可调] strategy_flat_exit_microstructure_threshold：flat 退出的微观结构阈值。可选值：0.0 ~ 1.0；推荐值：0.16。
 strategy_flat_exit_microstructure_threshold: 0.16
 # [常用可调] strategy_flat_exit_factor_threshold：flat 退出的因子阈值。可选值：0.0 ~ 1.0；推荐值：0.24。
@@ -148,47 +170,47 @@ strategy_flat_exit_factor_threshold: 0.24
 # [常用可调] strategy_flat_exit_ai_edge_threshold：flat 退出的 AI edge 阈值。可选值：0.0 ~ 1.0；推荐值：0.28。
 strategy_flat_exit_ai_edge_threshold: 0.28
 # [常用可调] strategy_expected_slippage_bps_fraction：预估滑点占保护阈值的比例。可选值：0.0 ~ 1.0；推荐值：0.35。
-strategy_expected_slippage_bps_fraction: 0.35
+strategy_expected_slippage_bps_fraction: 0.25
 # [常用可调] strategy_edge_noise_buffer_bps：边际噪音缓冲。可选值：0.0 ~ 50.0；推荐值：6.0。
-strategy_edge_noise_buffer_bps: 6.0
+strategy_edge_noise_buffer_bps: 4.0
 # [常用可调] strategy_min_net_edge_bps：最小净边际。可选值：0.0 ~ 50.0；推荐值：6.0。
-strategy_min_net_edge_bps: 6.0
+strategy_min_net_edge_bps: 3.5
 # [常用可调] strategy_entry_allowed_regimes：允许新开仓的市场状态。可选值：trend / breakout / range / uncertain / high_volatility；推荐值：trend, breakout。
 strategy_entry_allowed_regimes:
   - trend
   - breakout
 # [常用可调] strategy_entry_min_signal_edge_bps：开仓最低信号边际。可选值：0.0 ~ 100.0；推荐值：14.0。
-strategy_entry_min_signal_edge_bps: 14.0
+strategy_entry_min_signal_edge_bps: 12.0
 # [常用可调] strategy_entry_alpha_min：开仓最低 alpha。可选值：0.0 ~ 1.0；推荐值：0.18。
-strategy_entry_alpha_min: 0.18
+strategy_entry_alpha_min: 0.16
 # [常用可调] strategy_entry_confidence_min：开仓最低置信度。可选值：0.0 ~ 1.0；推荐值：0.67。
-strategy_entry_confidence_min: 0.67
+strategy_entry_confidence_min: 0.64
 # [常用可调] strategy_scale_in_min_signal_edge_bps：加仓最低信号边际。可选值：0.0 ~ 100.0；推荐值：18.0。
-strategy_scale_in_min_signal_edge_bps: 18.0
+strategy_scale_in_min_signal_edge_bps: 16.0
 # [常用可调] strategy_scale_in_alpha_min：加仓最低 alpha。可选值：0.0 ~ 1.0；推荐值：0.24。
-strategy_scale_in_alpha_min: 0.24
+strategy_scale_in_alpha_min: 0.20
 # [常用可调] strategy_scale_in_confidence_min：加仓最低置信度。可选值：0.0 ~ 1.0；推荐值：0.70。
 strategy_scale_in_confidence_min: 0.67
 # [常用可调] strategy_reversal_min_signal_edge_bps：反手最低信号边际。可选值：0.0 ~ 100.0；推荐值：24.0。
-strategy_reversal_min_signal_edge_bps: 24.0
+strategy_reversal_min_signal_edge_bps: 20.0
 # [常用可调] strategy_reversal_alpha_min：反手最低 alpha。可选值：0.0 ~ 1.0；推荐值：0.32。
-strategy_reversal_alpha_min: 0.32
+strategy_reversal_alpha_min: 0.30
 # [常用可调] strategy_reversal_confidence_min：反手最低置信度。可选值：0.0 ~ 1.0；推荐值：0.80。
-strategy_reversal_confidence_min: 0.67
+strategy_reversal_confidence_min: 0.72
 # [常用可调] strategy_min_hold_seconds：最短持仓秒数。可选值：0 ~ 86400；推荐值：900.0。
-strategy_min_hold_seconds: 900.0
+strategy_min_hold_seconds: 480.0
 # [常用可调] strategy_post_close_cooldown_seconds：平仓后冷却秒数。可选值：0 ~ 86400；推荐值：300.0。
-strategy_post_close_cooldown_seconds: 300.0
+strategy_post_close_cooldown_seconds: 180.0
 # [常用可调] strategy_max_fee_drag_ratio：允许的最大费耗比例。可选值：0.0 ~ 1.0；推荐值：0.45。
 strategy_max_fee_drag_ratio: 0.45
 # [常用可调] strategy_max_churn_ratio：允许的最大 churn 比例。可选值：0.0 ~ 1.0；推荐值：0.45。
 strategy_max_churn_ratio: 0.45
 # [常用可调] strategy_low_edge_threshold_bps：低边际识别阈值。可选值：0.0 ~ 50.0；推荐值：4.0。
-strategy_low_edge_threshold_bps: 4.0
+strategy_low_edge_threshold_bps: 3.5
 # [常用可调] strategy_low_edge_streak_limit：低边际连续触发次数上限。可选值：1 ~ 20；推荐值：3。
-strategy_low_edge_streak_limit: 3
+strategy_low_edge_streak_limit: 4
 # [常用可调] strategy_low_edge_cooldown_seconds：低边际触发后的冷却秒数。可选值：0 ~ 86400；推荐值：3600.0。
-strategy_low_edge_cooldown_seconds: 3600.0
+strategy_low_edge_cooldown_seconds: 1200.0
 # [常用可调] strategy_transient_close_retry_cooldown_seconds：瞬时平仓失败后的重试冷却。可选值：0 ~ 3600；推荐值：90.0。
 strategy_transient_close_retry_cooldown_seconds: 90.0
 

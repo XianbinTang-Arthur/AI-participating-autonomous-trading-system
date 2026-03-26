@@ -48,6 +48,7 @@ from aats.schemas.operator import OperatorUserRecord
 from aats.schemas.portfolio import FillOutcomeRecord, FundingFeeRecord
 from aats.schemas.strategy_profiles import StrategyProfileMarketRegimeAssessment, StrategyProfileRecommendation
 from aats.services.ai_service.provider import AIProviderResponse
+from aats.services.operator.query_service import OperatorQueryService
 from aats.services.operator.strategy_profiles import StrategyProfileControlService
 from aats.services.operator.strategy_profiles import _seed_revisions, seed_strategy_profiles
 from aats.services.operator.passwords import hash_password
@@ -487,6 +488,10 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertIn("runtime_state", payload["panels"]["health"]["data"])
         self.assertIn("recovery", payload["panels"]["systemRecovery"]["data"])
         self.assertIn("portfolio", payload["panels"]["portfolio"]["data"])
+        self.assertIn("timing", payload)
+        self.assertGreaterEqual(payload["timing"]["total_ms"], 0.0)
+        self.assertEqual(set(payload["timing"]["panels"].keys()), panel_keys)
+        self.assertGreaterEqual(payload["timing"]["panels"]["health"]["duration_ms"], 0.0)
 
     async def test_dashboard_bundle_keeps_session_context_when_read_access_is_denied(self) -> None:
         runtime = await self._runtime(
@@ -610,6 +615,22 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertIn("assessments", payload["panels"]["aiRecent"]["data"])
         self.assertIn("shadow_decisions", payload["panels"]["aiShadowRecent"]["data"])
         self.assertIn("evaluations", payload["panels"]["aiShadowEvaluations"]["data"])
+
+    async def test_query_service_caches_account_status_and_snapshot_helpers(self) -> None:
+        runtime = await self._runtime()
+        query = OperatorQueryService(runtime)
+
+        with patch.object(runtime.account_service, "status", wraps=runtime.account_service.status) as status_spy:
+            with patch.object(runtime.account_service, "latest_snapshot", wraps=runtime.account_service.latest_snapshot) as snapshot_spy:
+                first_status = query.account_service_status()
+                second_status = query.account_service_status()
+                first_snapshot = query.latest_exchange_snapshot()
+                second_snapshot = query.latest_exchange_snapshot()
+
+        self.assertEqual(first_status, second_status)
+        self.assertIs(first_snapshot, second_snapshot)
+        self.assertEqual(status_spy.call_count, 1)
+        self.assertEqual(snapshot_spy.call_count, 1)
 
     async def test_derivatives_account_state_and_runtime_expose_structured_exchange_snapshots(self) -> None:
         settings = AATSSettings.model_validate(
@@ -2304,6 +2325,34 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             "trend_strict",
         )
         self.assertTrue(decision_detail.json()["decision_outcome"]["finalized"])
+
+    async def test_ai_overview_and_ai_latest_share_cached_latest_payload(self) -> None:
+        runtime = await self._runtime(
+            ai_operating_mode="ai_decision_maker_with_profile_control",
+            strategy_profile_auto_control_enabled=True,
+            ai_provider="openai",
+            openai_api_key="test-key",
+            trading_product_type="derivatives",
+            margin_mode="cross",
+            strategy_short_bias_enabled=True,
+            default_symbol="BTC-USDT-SWAP",
+            allowed_symbols=("BTC-USDT-SWAP",),
+        )
+        runtime.ai_service.provider = FakeShadowProvider()
+        await runtime.decision_engine.run_cycle(runtime.settings.default_symbol, runtime.settings.primary_timeframe)
+
+        query = OperatorQueryService(runtime)
+        with patch.object(query.runtime_queries, "ai_latest", wraps=query.runtime_queries.ai_latest) as ai_latest_spy:
+            with patch.object(query, "decision_view", wraps=query.decision_view) as decision_view_spy:
+                overview = query.ai_overview()
+                latest = query.ai_latest()
+
+        self.assertEqual(ai_latest_spy.call_count, 1)
+        self.assertEqual(decision_view_spy.call_count, 1)
+        self.assertEqual(overview["latest_brief"], latest["brief"])
+        self.assertEqual(overview["latest_assessment"], latest["assessment"])
+        self.assertEqual(overview["latest_decision_outcome"], latest["decision_outcome"])
+        self.assertEqual(overview["latest_execution_suggestion"], latest["execution_suggestion"])
 
     async def test_shadow_evaluation_failure_does_not_block_position_target_publication(self) -> None:
         runtime = await self._runtime(

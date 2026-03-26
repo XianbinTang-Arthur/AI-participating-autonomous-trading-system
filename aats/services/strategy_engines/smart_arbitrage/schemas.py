@@ -41,7 +41,11 @@ class ArbitragePairDefinition(BaseModel):
     spot_product_type: Literal["spot"] = "spot"
     hedge_product_type: Literal["derivatives"] = "derivatives"
     settle_currency: str | None = None
-    execution_modes: tuple[ArbitrageExecutionMode, ...] = ("spot_carry", "inventory_reverse_carry")
+    execution_modes: tuple[ArbitrageExecutionMode, ...] = (
+        "spot_carry",
+        "inventory_reverse_carry",
+        "margin_reverse_carry",
+    )
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 

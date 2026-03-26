@@ -374,6 +374,7 @@ class StrategyCoordinatorService:
                 )
             else:
                 metrics = dict(candidate.metrics or {})
+                aggregate_smart_arbitrage = family == "smart_arbitrage" and self._is_aggregate_smart_arbitrage_candidate(candidate)
                 current_sleeve_qty = self._metric_decimal(metrics, "current_sleeve_position_qty")
                 if current_sleeve_qty is None and family == "smart_arbitrage":
                     current_sleeve_qty = self._metric_decimal(metrics, "current_sleeve_derivatives_qty")
@@ -386,12 +387,26 @@ class StrategyCoordinatorService:
                 account_target_qty = self._metric_decimal(metrics, "target_account_position_qty")
                 if account_target_qty is None and family == "smart_arbitrage":
                     account_target_qty = self._metric_decimal(metrics, "target_account_derivatives_qty")
+                leg_current_qty = Decimal("0")
+                leg_target_qty = Decimal("0")
+                leg_delta_qty = Decimal("0")
+                if aggregate_smart_arbitrage:
+                    leg_current_qty, leg_target_qty, leg_delta_qty = self._leg_quantities_for_symbol(
+                        candidate.legs,
+                        symbol=base_target.symbol,
+                        product_type=base_target.product_type,
+                        margin_mode=base_target.margin_mode,
+                    )
+                    current_sleeve_qty = leg_current_qty
+                    target_sleeve_qty = leg_target_qty
+                    account_current_qty = leg_current_qty
+                    account_target_qty = leg_target_qty
                 intent = StrategySleeveIntent(
                     decision_id=base_target.decision_id,
                     family=family,
                     strategy_sleeve_id=strategy_sleeve_id,
                     state=candidate.state,
-                    symbol=str(candidate.recommended_symbol or base_target.symbol),
+                    symbol=str(base_target.symbol if aggregate_smart_arbitrage else (candidate.recommended_symbol or base_target.symbol)),
                     product_type=base_target.product_type,
                     margin_mode=base_target.margin_mode,
                     inventory_policy=inventory_policy_for_family(family),
@@ -403,15 +418,23 @@ class StrategyCoordinatorService:
                     target_position_qty=(
                         target_sleeve_qty
                         if target_sleeve_qty is not None
-                        else to_decimal(candidate.delta_position_qty or Decimal("0")) + (current_sleeve_qty or Decimal("0"))
+                        else (
+                            leg_target_qty
+                            if aggregate_smart_arbitrage
+                            else to_decimal(candidate.delta_position_qty or Decimal("0")) + (current_sleeve_qty or Decimal("0"))
+                        )
                     ),
-                    delta_position_qty=to_decimal(candidate.delta_position_qty or Decimal("0")),
+                    delta_position_qty=leg_delta_qty if aggregate_smart_arbitrage else to_decimal(candidate.delta_position_qty or Decimal("0")),
                     account_current_position_qty=account_current_qty,
                     account_target_position_qty=account_target_qty,
-                    target_notional=None if candidate.target_position_qty is None else self._target_notional(
-                        base_target=base_target,
-                        target_qty=to_decimal(candidate.target_position_qty),
-                        selected=candidate,
+                    target_notional=(
+                        None
+                        if aggregate_smart_arbitrage or candidate.target_position_qty is None
+                        else self._target_notional(
+                            base_target=base_target,
+                            target_qty=to_decimal(candidate.target_position_qty),
+                            selected=candidate,
+                        )
                     ),
                     priority_score=candidate.score,
                     reason_codes=list(candidate.reason_codes),
@@ -697,6 +720,46 @@ class StrategyCoordinatorService:
         if value is None:
             return None
         return to_decimal(value)
+
+    @staticmethod
+    def _is_aggregate_smart_arbitrage_candidate(candidate: StrategyCandidate) -> bool:
+        return candidate.family == "smart_arbitrage" and (
+            str(candidate.pair_id or "") == "multi_pair" or bool((candidate.metrics or {}).get("aggregate_candidate"))
+        )
+
+    @staticmethod
+    def _leg_quantities_for_symbol(
+        legs: list[StrategyLegIntent],
+        *,
+        symbol: str,
+        product_type: str,
+        margin_mode: str,
+    ) -> tuple[Decimal, Decimal, Decimal]:
+        current_qty = Decimal("0")
+        target_qty = Decimal("0")
+        delta_qty = Decimal("0")
+        for leg in legs:
+            if (
+                str(leg.symbol or "").upper() != str(symbol or "").upper()
+                or str(leg.product_type) != str(product_type)
+                or str(leg.margin_mode) != str(margin_mode)
+            ):
+                continue
+            leg_current_qty = to_decimal(leg.current_position_qty or Decimal("0"))
+            leg_target_qty = (
+                to_decimal(leg.target_position_qty)
+                if leg.target_position_qty is not None
+                else leg_current_qty + to_decimal(leg.delta_position_qty or Decimal("0"))
+            )
+            leg_delta_qty = (
+                to_decimal(leg.delta_position_qty)
+                if leg.delta_position_qty is not None
+                else leg_target_qty - leg_current_qty
+            )
+            current_qty += leg_current_qty
+            target_qty += leg_target_qty
+            delta_qty += leg_delta_qty
+        return current_qty, target_qty, delta_qty
 
     @staticmethod
     def _source_mix_for_allocation(allocation: PortfolioAllocationDecision) -> dict[str, float]:

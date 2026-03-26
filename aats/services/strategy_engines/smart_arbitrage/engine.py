@@ -299,6 +299,7 @@ class SmartArbitrageStrategyEngine:
             )
         if pair_state.current_direction == "positive_carry":
             execution_mode = "spot_carry"
+            existing_mode_not_allowed = not self._pair_supports_execution_mode(pair=pair, execution_mode=execution_mode)
             if pair_state.unwind_required:
                 desired_pair_qty = Decimal("0")
                 state_phase = "unwinding"
@@ -323,10 +324,13 @@ class SmartArbitrageStrategyEngine:
                 reason_codes = ["smart_arbitrage_pair_active_waiting_exit"]
                 urgency = "low"
                 direction = "positive_basis"
+            if existing_mode_not_allowed:
+                reason_codes = [*reason_codes, "smart_arbitrage_existing_pair_mode_not_allowed_by_config"]
             target_spot_qty = desired_pair_qty
             target_hedge_qty = -desired_pair_qty
         elif pair_state.current_direction == "reverse_carry":
             execution_mode = self._active_reverse_execution_mode(pair_state)
+            existing_mode_not_allowed = not self._pair_supports_execution_mode(pair=pair, execution_mode=execution_mode)
             if pair_state.unwind_required:
                 desired_pair_qty = Decimal("0")
                 state_phase = "unwinding"
@@ -351,10 +355,22 @@ class SmartArbitrageStrategyEngine:
                 reason_codes = ["smart_arbitrage_pair_active_waiting_exit"]
                 urgency = "low"
                 direction = "negative_basis"
+            if existing_mode_not_allowed:
+                reason_codes = [*reason_codes, "smart_arbitrage_existing_pair_mode_not_allowed_by_config"]
             target_spot_qty = -desired_pair_qty
             target_hedge_qty = desired_pair_qty
         elif positive_basis_active:
             execution_mode = "spot_carry"
+            if not self._pair_supports_execution_mode(pair=pair, execution_mode=execution_mode):
+                return self._unsupported_execution_mode_opportunity(
+                    pair=pair,
+                    pair_basis_bps=pair_basis_bps,
+                    entry_threshold=entry_threshold,
+                    exit_threshold=exit_threshold,
+                    execution_mode=execution_mode,
+                    direction="positive_basis",
+                    reason_code="smart_arbitrage_spot_carry_not_allowed",
+                )
             desired_pair_qty = entry_pair_qty(
                 settings=self.settings,
                 spot_price=spot_price,
@@ -441,6 +457,32 @@ class SmartArbitrageStrategyEngine:
             desired_pair_qty = Decimal("0")
             target_spot_qty = Decimal("0")
             target_hedge_qty = Decimal("0")
+        elif requested_mode == "inventory_backed" and not self._pair_supports_execution_mode(
+            pair=pair,
+            execution_mode="inventory_reverse_carry",
+        ):
+            return self._unsupported_execution_mode_opportunity(
+                pair=pair,
+                pair_basis_bps=pair_basis_bps,
+                entry_threshold=entry_threshold,
+                exit_threshold=exit_threshold,
+                execution_mode="inventory_reverse_carry",
+                direction="negative_basis",
+                reason_code="smart_arbitrage_inventory_reverse_carry_not_allowed",
+            )
+        elif requested_mode == "margin_backed" and not self._pair_supports_execution_mode(
+            pair=pair,
+            execution_mode="margin_reverse_carry",
+        ):
+            return self._unsupported_execution_mode_opportunity(
+                pair=pair,
+                pair_basis_bps=pair_basis_bps,
+                entry_threshold=entry_threshold,
+                exit_threshold=exit_threshold,
+                execution_mode="margin_reverse_carry",
+                direction="negative_basis",
+                reason_code="smart_arbitrage_margin_reverse_carry_not_allowed",
+            )
         elif capability.inventory_backed_spot_sell_supported:
             execution_mode = "inventory_reverse_carry"
             desired_pair_qty = entry_pair_qty(
@@ -651,6 +693,8 @@ class SmartArbitrageStrategyEngine:
                 "execution_mode": opportunity.execution_mode,
                 "opportunity_kind": opportunity.opportunity_kind,
                 "blocking_reasons": blocking_reasons,
+                "pair_configuration_warning_codes": self._pair_configuration_warning_codes(pair),
+                "pair_configuration_error_codes": self._pair_configuration_error_codes(pair),
                 "inventory_backed_available_qty": capability.available_inventory_qty,
                 "margin_short_execution_ready": capability.margin_short_execution_ready,
                 "spot_margin_mode": capability.spot_margin_mode,
@@ -665,6 +709,8 @@ class SmartArbitrageStrategyEngine:
         if opportunity.opportunity_kind == "market_unavailable":
             return "Paired market snapshots are incomplete."
         if opportunity.opportunity_kind == "positive_basis":
+            if opportunity.state_phase == "blocked":
+                return "Positive basis is detected, but this pair is not allowed to auto open."
             return "Positive basis pair is ready."
         if opportunity.opportunity_kind == "negative_basis":
             if opportunity.state_phase == "opening":
@@ -681,6 +727,57 @@ class SmartArbitrageStrategyEngine:
         if opportunity.state_phase == "active":
             return "Basis remains above the exit threshold; keep the pair open."
         return "Basis is below the configured entry threshold."
+
+    @staticmethod
+    def _pair_supports_execution_mode(*, pair, execution_mode: str) -> bool:
+        allowed_modes = {str(mode) for mode in (pair.execution_modes or ())}
+        return execution_mode in allowed_modes
+
+    @staticmethod
+    def _pair_configuration_warning_codes(pair) -> list[str]:
+        return [str(code) for code in pair.metadata.get("configuration_warning_codes", []) if str(code).strip()]
+
+    @staticmethod
+    def _pair_configuration_error_codes(pair) -> list[str]:
+        return [str(code) for code in pair.metadata.get("configuration_error_codes", []) if str(code).strip()]
+
+    def _unsupported_execution_mode_opportunity(
+        self,
+        *,
+        pair,
+        pair_basis_bps: Decimal,
+        entry_threshold: Decimal,
+        exit_threshold: Decimal,
+        execution_mode: str,
+        direction: str,
+        reason_code: str,
+    ) -> ArbitrageOpportunity:
+        cost_breakdown = build_cost_breakdown(
+            settings=self.settings,
+            basis_bps=pair_basis_bps,
+            execution_mode=execution_mode,
+        )
+        score = float(max(cost_breakdown.net_edge_bps, Decimal("0")) / max(entry_threshold or Decimal("1"), Decimal("1")))
+        confidence = min(0.90, 0.40 + (min(abs(float(pair_basis_bps)), 120.0) / 220.0))
+        return ArbitrageOpportunity(
+            pair_id=pair.pair_id,
+            spot_symbol=pair.spot_symbol,
+            hedge_symbol=pair.hedge_symbol,
+            opportunity_kind="positive_basis" if direction == "positive_basis" else "negative_basis",
+            direction=direction,  # type: ignore[arg-type]
+            execution_mode=execution_mode,  # type: ignore[arg-type]
+            state_phase="blocked",
+            basis_bps=pair_basis_bps,
+            entry_threshold_bps=entry_threshold,
+            exit_threshold_bps=exit_threshold,
+            score=score,
+            confidence=confidence,
+            urgency="medium",
+            reason_codes=[f"smart_arbitrage_{direction}", reason_code],
+            blocking_reasons=[reason_code],
+            route_action="advisory_only",
+            cost_breakdown=cost_breakdown,
+        )
 
     def _select_candidates(self, candidates: list[StrategyCandidate]) -> list[StrategyCandidate]:
         ranked = self._ranked_candidates(candidates)
@@ -701,14 +798,19 @@ class SmartArbitrageStrategyEngine:
                 opening_pairs.append(candidate)
                 if pair_id:
                     seen_pair_ids.add(pair_id)
+        max_pairs = max(int(self.settings.smart_arbitrage_max_concurrent_pairs or 1), 1)
         if active_pairs:
+            safe_opening_pairs = self._parallel_safe_candidates(
+                candidates=opening_pairs,
+                existing=active_pairs,
+                limit=max_pairs - len(active_pairs),
+            )
             max_pairs = max(int(self.settings.smart_arbitrage_max_concurrent_pairs or 1), 1)
             if len(active_pairs) >= max_pairs:
                 return active_pairs
-            return [*active_pairs, *opening_pairs[: max_pairs - len(active_pairs)]]
+            return [*active_pairs, *safe_opening_pairs]
         if opening_pairs:
-            max_pairs = max(int(self.settings.smart_arbitrage_max_concurrent_pairs or 1), 1)
-            return opening_pairs[:max_pairs]
+            return self._parallel_safe_candidates(candidates=opening_pairs, existing=[], limit=max_pairs)
         return ranked[:1]
 
     def _aggregate_candidates(
@@ -733,30 +835,68 @@ class SmartArbitrageStrategyEngine:
             if item.opportunity_kind not in {None, ""}
         }
         aggregate_metrics = dict(top.metrics or {})
+        overlap_detected = self._selected_pairs_have_overlapping_symbol_scope(selected_pairs)
+        selected_pair_summaries = [
+            {
+                "pair_id": item.pair_id,
+                "spot_symbol": item.metrics.get("spot_symbol"),
+                "derivatives_symbol": item.metrics.get("derivatives_symbol"),
+                "execution_mode": item.execution_mode,
+                "state_phase": item.state_phase,
+                "opportunity_kind": item.opportunity_kind,
+                "reason_codes": list(item.reason_codes),
+                "blocking_reasons": list(item.blocking_reasons),
+            }
+            for item in selected_pairs
+        ]
         aggregate_metrics.update(
             {
-                "current_account_spot_qty": self._sum_metric(selected_pairs, "current_account_spot_qty"),
-                "current_account_cash_spot_qty": self._sum_metric(selected_pairs, "current_account_cash_spot_qty"),
-                "current_account_margin_spot_qty": self._sum_metric(selected_pairs, "current_account_margin_spot_qty"),
-                "current_account_derivatives_qty": self._sum_metric(selected_pairs, "current_account_derivatives_qty"),
-                "current_sleeve_spot_qty": self._sum_metric(selected_pairs, "current_sleeve_spot_qty"),
-                "current_sleeve_cash_spot_qty": self._sum_metric(selected_pairs, "current_sleeve_cash_spot_qty"),
-                "current_sleeve_margin_spot_qty": self._sum_metric(selected_pairs, "current_sleeve_margin_spot_qty"),
-                "current_sleeve_derivatives_qty": self._sum_metric(selected_pairs, "current_sleeve_derivatives_qty"),
-                "target_account_spot_qty": self._sum_metric(selected_pairs, "target_account_spot_qty"),
-                "target_account_derivatives_qty": self._sum_metric(selected_pairs, "target_account_derivatives_qty"),
-                "target_sleeve_spot_qty": self._sum_metric(selected_pairs, "target_sleeve_spot_qty"),
-                "target_sleeve_derivatives_qty": self._sum_metric(selected_pairs, "target_sleeve_derivatives_qty"),
+                "aggregate_candidate": True,
+                "selected_pair_summaries": selected_pair_summaries,
+                "selected_spot_symbols": list(
+                    dict.fromkeys(
+                        str(item.metrics.get("spot_symbol")).upper()
+                        for item in selected_pairs
+                        if str(item.metrics.get("spot_symbol") or "").strip()
+                    )
+                ),
+                "selected_derivatives_symbols": list(
+                    dict.fromkeys(
+                        str(item.metrics.get("derivatives_symbol")).upper()
+                        for item in selected_pairs
+                        if str(item.metrics.get("derivatives_symbol") or "").strip()
+                    )
+                ),
                 "target_pair_qty": self._sum_metric(selected_pairs, "target_pair_qty"),
                 "paired_qty": self._sum_metric(selected_pairs, "paired_qty"),
                 "positive_pair_qty": self._sum_metric(selected_pairs, "positive_pair_qty"),
                 "reverse_pair_qty": self._sum_metric(selected_pairs, "reverse_pair_qty"),
                 "inventory_reverse_pair_qty": self._sum_metric(selected_pairs, "inventory_reverse_pair_qty"),
                 "margin_reverse_pair_qty": self._sum_metric(selected_pairs, "margin_reverse_pair_qty"),
-                "foreign_spot_qty": self._sum_metric(selected_pairs, "foreign_spot_qty"),
-                "foreign_derivatives_qty": self._sum_metric(selected_pairs, "foreign_derivatives_qty"),
+                "parallel_scope_overlap_detected": overlap_detected,
             }
         )
+        for key in (
+            "spot_symbol",
+            "derivatives_symbol",
+            "spot_price",
+            "derivatives_price",
+            "current_account_spot_qty",
+            "current_account_cash_spot_qty",
+            "current_account_margin_spot_qty",
+            "current_account_derivatives_qty",
+            "current_sleeve_spot_qty",
+            "current_sleeve_cash_spot_qty",
+            "current_sleeve_margin_spot_qty",
+            "current_sleeve_derivatives_qty",
+            "target_account_spot_qty",
+            "target_account_derivatives_qty",
+            "target_sleeve_spot_qty",
+            "target_sleeve_derivatives_qty",
+            "foreign_spot_qty",
+            "foreign_derivatives_qty",
+        ):
+            aggregate_metrics.pop(key, None)
         return StrategyCandidate(
             family="smart_arbitrage",
             state=top.state,
@@ -768,16 +908,14 @@ class SmartArbitrageStrategyEngine:
                 if any(item.route_action == "override_target" for item in selected_pairs)
                 else "hold_current"
             ),
-            headline=f"Managing {len(selected_pairs)} smart arbitrage pairs across the configured companion markets.",
-            recommended_symbol=top.recommended_symbol,
-            target_position_qty=sum(
-                (to_decimal(item.target_position_qty or Decimal("0")) for item in selected_pairs),
-                start=Decimal("0"),
+            headline=(
+                "Managing multiple smart arbitrage pairs across non-overlapping companion markets."
+                if not overlap_detected
+                else "Managing multiple smart arbitrage pairs, but some pair scopes overlap and are being summarized conservatively."
             ),
-            delta_position_qty=sum(
-                (to_decimal(item.delta_position_qty or Decimal("0")) for item in selected_pairs),
-                start=Decimal("0"),
-            ),
+            recommended_symbol=None,
+            target_position_qty=None,
+            delta_position_qty=None,
             score=max((item.score for item in selected_pairs), default=top.score),
             confidence=max((item.confidence for item in selected_pairs), default=top.confidence),
             urgency=self._highest_urgency(selected_pairs),
@@ -838,6 +976,58 @@ class SmartArbitrageStrategyEngine:
         if self.settings.smart_arbitrage_negative_basis_mode == "margin_backed":
             return "margin_reverse_carry"
         return "inventory_reverse_carry"
+
+    @staticmethod
+    def _candidate_symbol_scope(candidate: StrategyCandidate) -> tuple[str, ...]:
+        metrics = dict(candidate.metrics or {})
+        symbols = [
+            str(symbol).upper()
+            for symbol in (
+                metrics.get("spot_symbol"),
+                metrics.get("derivatives_symbol"),
+                candidate.recommended_symbol,
+            )
+            if str(symbol or "").strip()
+        ]
+        return tuple(dict.fromkeys(symbols))
+
+    def _parallel_safe_candidates(
+        self,
+        *,
+        candidates: list[StrategyCandidate],
+        existing: list[StrategyCandidate],
+        limit: int,
+    ) -> list[StrategyCandidate]:
+        if limit <= 0:
+            return []
+        selected: list[StrategyCandidate] = []
+        seen_symbols = {
+            symbol
+            for candidate in existing
+            for symbol in self._candidate_symbol_scope(candidate)
+        }
+        for candidate in candidates:
+            scope = set(self._candidate_symbol_scope(candidate))
+            if seen_symbols & scope:
+                continue
+            selected.append(candidate)
+            seen_symbols.update(scope)
+            if len(selected) >= limit:
+                break
+        return selected
+
+    def _selected_pairs_have_overlapping_symbol_scope(self, candidates: list[StrategyCandidate]) -> bool:
+        seen_symbols: set[str] = set()
+        for candidate in candidates:
+            scope = {
+                symbol
+                for symbol in self._candidate_symbol_scope(candidate)
+                if str(symbol).strip()
+            }
+            if seen_symbols & scope:
+                return True
+            seen_symbols.update(scope)
+        return False
 
     @staticmethod
     def _selected_spot_quantities(

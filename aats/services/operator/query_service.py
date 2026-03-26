@@ -1722,6 +1722,12 @@ class OperatorQueryService:
         )
         return latest.payload if latest is not None else None
 
+    def account_service_status(self) -> dict[str, Any]:
+        return self._cached("account_service_status", self.runtime.account_service.status)
+
+    def latest_exchange_snapshot(self):
+        return self._cached("latest_exchange_snapshot", self.runtime.account_service.latest_snapshot)
+
     def _latest_strategy_snapshot_event(self):
         return self._cached(
             "latest_strategy_snapshot_event",
@@ -2061,6 +2067,26 @@ class OperatorQueryService:
                 summary["operator_summary"] = "当前选中的策略家族只提供参考，不会直接接管实盘执行。"
             else:
                 summary["operator_summary"] = "当前选中的策略家族没有生成可执行目标，系统继续保持当前仓位。"
+        smart_arbitrage_pairs = load_pair_definitions(
+            settings=self.runtime.settings,
+            primary_symbol=self.runtime.settings.default_symbol,
+        )
+        smart_arbitrage_pair_registry_warning_codes = list(
+            dict.fromkeys(
+                code
+                for pair in smart_arbitrage_pairs
+                for code in pair.metadata.get("configuration_warning_codes", [])
+                if str(code).strip()
+            )
+        )
+        smart_arbitrage_pair_registry_error_codes = list(
+            dict.fromkeys(
+                code
+                for pair in smart_arbitrage_pairs
+                for code in pair.metadata.get("configuration_error_codes", [])
+                if str(code).strip()
+            )
+        )
         return {
             "generated_at": utc_now(),
             "summary": summary,
@@ -2079,17 +2105,18 @@ class OperatorQueryService:
                     "enabled": self.runtime.settings.smart_arbitrage_enabled,
                     "pair_definitions": [
                         pair.model_dump(mode="json")
-                        for pair in load_pair_definitions(
-                            settings=self.runtime.settings,
-                            primary_symbol=self.runtime.settings.default_symbol,
-                        )
+                        for pair in smart_arbitrage_pairs
                     ],
+                    "pair_registry_warning_codes": smart_arbitrage_pair_registry_warning_codes,
+                    "pair_registry_error_codes": smart_arbitrage_pair_registry_error_codes,
                     "basis_entry_bps": self.runtime.settings.smart_arbitrage_basis_entry_bps,
                     "basis_exit_bps": self.runtime.settings.smart_arbitrage_basis_exit_bps,
                     "estimated_cost_bps": self.runtime.settings.smart_arbitrage_estimated_cost_bps,
                     "quote_budget_per_trade": self.runtime.settings.smart_arbitrage_quote_budget_per_trade,
                     "max_pair_notional": self.runtime.settings.smart_arbitrage_max_pair_notional,
                     "cost_model_enabled": self.runtime.settings.smart_arbitrage_cost_model_enabled,
+                    "funding_cost_enabled": self.runtime.settings.smart_arbitrage_funding_cost_enabled,
+                    "borrow_cost_enabled": self.runtime.settings.smart_arbitrage_borrow_cost_enabled,
                     "negative_basis_mode": self.runtime.settings.smart_arbitrage_negative_basis_mode,
                     "inventory_reservation_enabled": self.runtime.settings.smart_arbitrage_inventory_reservation_enabled,
                     "margin_short_enabled": self.runtime.settings.smart_arbitrage_margin_short_enabled,
@@ -2150,7 +2177,7 @@ class OperatorQueryService:
         return latest.decision_id if latest is not None else None
 
     def ai_runtime(self) -> dict[str, Any]:
-        return self.runtime_queries.ai_runtime()
+        return self._cached("ai_runtime", self.runtime_queries.ai_runtime)
 
     def _recent_ai_shadow_evaluation_events(self, *, limit: int | None = None):
         if not self._ai_history_visible():
@@ -2429,7 +2456,7 @@ class OperatorQueryService:
         }
 
     def ai_overview(self) -> dict[str, Any]:
-        return self.runtime_queries.ai_overview()
+        return self._cached("ai_overview", self.runtime_queries.ai_overview)
 
     def ai_config_summary(self) -> dict[str, Any]:
         runtime = self.ai_runtime()
@@ -2456,7 +2483,7 @@ class OperatorQueryService:
         return self.runtime.settings.canonical_ai_operating_mode != "baseline_only"
 
     def ai_latest(self) -> dict[str, Any]:
-        return self.runtime_queries.ai_latest()
+        return self._cached("ai_latest", self.runtime_queries.ai_latest)
 
     def ai_recent(self, *, limit: int, offset: int) -> dict[str, Any]:
         normalized_limit = max(int(limit), 1)
@@ -2472,7 +2499,7 @@ class OperatorQueryService:
         )
 
     def ai_shadow_latest(self) -> dict[str, Any]:
-        return self.runtime_queries.ai_shadow_latest()
+        return self._cached("ai_shadow_latest", self.runtime_queries.ai_shadow_latest)
 
     def ai_shadow_recent(self, *, limit: int, offset: int) -> dict[str, Any]:
         normalized_limit = max(int(limit), 1)
@@ -2864,10 +2891,10 @@ class OperatorQueryService:
         return self.recovery_queries.system_mode()
 
     def system_health(self) -> dict[str, Any]:
-        return self.runtime_queries.system_health()
+        return self._cached("system_health", self.runtime_queries.system_health)
 
     def system_runtime(self) -> dict[str, Any]:
-        return self.runtime_queries.system_runtime()
+        return self._cached("system_runtime", self.runtime_queries.system_runtime)
 
     def blockers(self) -> list[dict[str, Any]]:
         return self.blocker_queries.blockers()
