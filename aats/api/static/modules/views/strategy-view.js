@@ -65,6 +65,11 @@ export function renderStrategySections(data) {
     forwardSummary.reasons,
     trialReviewRecommendation.reasons,
   );
+  const displayedStrategyCandidates = strategyCandidates.slice(0, 4);
+  const displayedAutomationDecisions = automationDecisions.slice(0, 5);
+  const displayedSleeveProfitability = sleeveProfitability.slice(0, 6);
+  const displayedForwardPeriods = forwardPeriods.slice(0, 4);
+  const displayedTrialReviewActions = trialReviewRecentActions.slice(0, 5);
 
   return {
     strategyHero: surfaceCard({
@@ -107,10 +112,63 @@ export function renderStrategySections(data) {
         ])}
       `,
     }),
+    strategyDecisionWorkbench: surfaceCard({
+      title: "本轮判断与执行约束",
+      kicker: "工作区",
+      copy: "把这轮最关键的信号、目标、门禁和执行约束压成一屏，先看这里，不必先翻长表。",
+      classes: "strategy-compact-card",
+      content: `
+        ${summaryStrip([
+          {
+            label: "交易场景",
+            value: decisionScene === "derivatives" ? "合约" : "现货",
+            meta: decisionScene === "derivatives" ? optionalState(target.margin_mode, "保证金模式待确认") : "现金买卖",
+            tone: "info",
+          },
+          {
+            label: "基础信号",
+            value: formattedOrText(baseline.confidence, "待确认"),
+            meta: numberMeta("综合强度", baseline.composite_alpha_score, "当前没有综合强度"),
+            tone: "info",
+          },
+          {
+            label: "AI 参考",
+            value: optionalState(ai.summary || ai.direction_bias, "暂无 AI 参考"),
+            meta: numberMeta("AI 置信度", ai.confidence, "当前没有 AI 置信度"),
+            tone: "info",
+          },
+          {
+            label: decisionScene === "derivatives" ? "目标净仓位" : "目标持仓",
+            value: formatSigned(target.target_position_qty),
+            meta: `${readableState(target.position_intent || "hold")} | ${decisionScene === "derivatives" ? numberMeta("目标杠杆", target.target_leverage, "目标杠杆待确认") : optionalState(target.target_exposure_side, "方向待确认")}`,
+            tone: "info",
+          },
+          {
+            label: "策略门禁",
+            value: policy.execution_allowed ? "允许进入执行" : "仍在阻断",
+            meta: listText(policy.execution_allowed ? policy.allow_reasons : policy.blocker_reasons, "当前没有额外门禁说明"),
+            tone: policy.execution_allowed ? "positive" : "danger",
+          },
+          {
+            label: "风控结论",
+            value: risk.approved ? "风控放行" : "风控拦截",
+            meta: listText(risk.approved ? risk.approval_reasons : risk.rejection_reasons, "当前没有额外风控说明"),
+            tone: risk.approved ? "positive" : "danger",
+          },
+        ])}
+        ${kvList([
+          ["本轮结论", strategyNarrative(latestDecision), `${readableState(target.strategy_family || latestDecision.decision_outcome?.selected_strategy_family || "directional")} | ${regimeLabel}`],
+          ["执行约束", listText(target.guardrail_flags, "当前没有额外执行限制"), `预期净优势 ${formatBps(target.expected_net_edge_bps)} | 信号 ${formatBps(target.expected_signal_edge_bps)} | 成本 ${formatBps(target.expected_cost_bps)}`],
+          ["当前保护规则", listText(strategyHealth.guardrail_flags, "当前没有额外保护规则"), cooldownSummary(strategyHealth.cooldowns)],
+          ["最近执行质量", `${formatNumber(strategyHealth.recent_closed_trade_count, 0)} 笔闭合样本 | 胜率 ${formatRatio(strategyHealth.recent_win_rate)}`, `费用拖累 ${formatRatio(strategyHealth.recent_fee_drag_ratio)} | 来回交易占比 ${formatRatio(strategyHealth.recent_churn_ratio)}`],
+        ])}
+      `,
+    }),
     strategyCoordinator: surfaceCard({
       title: "多策略调度",
       kicker: "并行策略",
-      copy: "这里展示当前配置的主策略家族、最近一次调度结果，以及其他候选策略为什么没有接管执行。",
+      copy: "默认只保留当前调度结论和候选概览；预算快照、冲突解算和净额决策收进展开区，避免这一块占满整页。",
+      classes: "strategy-compact-card",
       content: `
         ${summaryStrip([
           {
@@ -126,78 +184,50 @@ export function renderStrategySections(data) {
             tone: "info",
           },
           {
-            label: "当前路由动作",
-            value: readableState(strategyRuntimeSummary.latest_selected_route_action || "override_target"),
-            meta: strategyRuntimeSummary.protective_fallback_active ? "当前保留了方向策略的保护性减仓/退出" : "当前没有触发保护性回退",
-            tone: strategyRuntimeSummary.protective_fallback_active ? "warning" : "positive",
-          },
-          {
-            label: "最近已应用目标",
-            value: formatSigned(strategyAppliedTarget.target_position_qty),
-            meta: `${readableState(strategyAppliedTarget.strategy_family || "directional")} | ${readableState(strategyAppliedTarget.strategy_route_action || "override_target")}`,
-            tone: "info",
-          },
-          {
             label: "最近执行 Bundle",
             value: readableState(strategyRuntimeSummary.latest_bundle_status || "unknown"),
             meta: latestBundle.bundle_id ? middleEllipsis(latestBundle.bundle_id, 10, 8, "当前没有策略执行 bundle") : "当前没有策略执行 bundle",
             tone: strategyRuntimeSummary.latest_bundle_status === "blocked" ? "warning" : "info",
           },
           {
-            label: "最近批准家族",
-            value: formatNumber((strategyRuntimeSummary.latest_approved_families || []).length, 0, "0"),
-            meta: localizeList(strategyRuntimeSummary.latest_approved_families || [], { fallback: "当前没有被批准的策略家族" }),
+            label: "组合预算变化",
+            value: `${formatSigned(strategyRuntimeSummary.latest_portfolio_requested_notional)} -> ${formatSigned(strategyRuntimeSummary.latest_portfolio_approved_notional)}`,
+            meta: `削减 ${formatSigned(strategyRuntimeSummary.latest_portfolio_budget_cut_notional)}`,
             tone: "info",
           },
         ])}
         ${kvList([
           ["调度结论", strategyRuntimeSummary.operator_summary || "当前还没有多策略调度快照。", reasonListText(strategyRuntimeSummary.latest_selection_reason_codes, "当前没有额外调度原因说明")],
-          ["运行模板", strategyRuntimeSummary.env_template_profile || "当前未记录模板来源", strategyRuntimeSummary.automatic_selection_enabled ? "策略家族当前按系统自动选择运行。" : "策略家族当前不在自动选择模式。"],
+          ["当前路由", readableState(strategyRuntimeSummary.latest_selected_route_action || "override_target"), strategyRuntimeSummary.protective_fallback_active ? "当前保留了保护性减仓/退出路径。" : "当前没有触发保护性回退。"],
           ["Allocator 结论", latestAllocationDecision.operator_summary || "当前还没有 allocator 决策。", reasonListText(latestAllocationDecision.reason_codes, "当前没有 allocator 级原因说明")],
-          [
-            "组合预算",
-            `${formatSigned(strategyRuntimeSummary.latest_portfolio_requested_notional)} -> ${formatSigned(strategyRuntimeSummary.latest_portfolio_approved_notional)}`,
-            `预算削减 ${formatSigned(strategyRuntimeSummary.latest_portfolio_budget_cut_notional)}`,
-          ],
-          [
-            "预算与净额",
-            readableState(strategyRuntimeSummary.latest_portfolio_risk_budget_state || "unknown"),
-            [
-              `预算快照 ${formatNumber(strategyRuntimeSummary.latest_budget_snapshot_count, 0, "0")} 条`,
-              `冲突解算 ${formatNumber(strategyRuntimeSummary.latest_conflict_resolution_count, 0, "0")} 条`,
-              `净额决策 ${formatNumber(strategyRuntimeSummary.latest_netting_decision_count, 0, "0")} 条`,
-            ].join(" | "),
-          ],
           [
             "Hedge 保护 / 方向削减",
             `${formatSigned(strategyRuntimeSummary.latest_hedge_protected_notional)} / ${formatSigned(strategyRuntimeSummary.latest_directional_reduced_notional)}`,
             "前者表示为保护 hedge 结构而保留的名义金额，后者表示 allocator 主动削减的方向暴露。",
           ],
           [
-            "预期净优势 / 成本",
-            `${formatSigned(strategyRuntimeSummary.latest_expected_edge_bps)} / ${formatSigned(strategyRuntimeSummary.latest_expected_cost_bps)}`,
-            "按本轮批准后的 sleeve 权重聚合，用于解释 allocator 为什么这样分配预算。",
+            "最近 Bundle / 已应用目标",
+            `${readableState(latestBundle.status || strategyRuntimeSummary.latest_bundle_status || "unknown")} / ${formatSigned(strategyAppliedTarget.target_position_qty)}`,
+            `${formatNumber(recentBundles[0]?.legs?.length ?? latestBundle.legs?.length ?? 0, 0, "0")} 条腿 | ${readableState(strategyAppliedTarget.position_intent || "hold")}`,
           ],
-          ["最近 Bundle", readableState(latestBundle.status || "unknown"), reasonListText(latestBundle.reason_codes, "当前没有 bundle 级原因说明")],
-          [
-            "最近 Bundle 类型",
-            `${readableState(strategyRuntimeSummary.latest_bundle_type || "unknown")} / ${readableState(strategyRuntimeSummary.latest_bundle_priority || "standard")}`,
-            `${formatSigned(strategyRuntimeSummary.latest_bundle_gross_requested_exposure)} -> ${formatSigned(strategyRuntimeSummary.latest_bundle_net_approved_exposure)}`,
-          ],
-          ["最近已应用动作", readableState(strategyAppliedTarget.position_intent || "hold"), reasonListText(strategyAppliedTarget.strategy_reason_codes, "当前没有额外已应用目标说明")],
-          ["最近 Bundle 腿数", formatNumber(recentBundles[0]?.legs?.length ?? latestBundle.legs?.length ?? 0, 0, "0"), latestBundle.operator_summary || "当前没有 bundle 级执行摘要"],
-          ["最近 Sleeve Intent", formatNumber(recentSleeveIntents.length, 0, "0"), recentSleeveIntents[0]?.headline || "当前没有最新 sleeve intent 摘要"],
         ])}
-        ${renderStrategyCandidateTable(strategyCandidates)}
-        ${renderAllocatorBudgetSnapshotTable(recentBudgetSnapshots)}
-        ${renderAllocatorConflictResolutionTable(recentConflictResolutions)}
-        ${renderAllocatorNettingDecisionTable(recentNettingDecisions)}
+        ${renderStrategyCandidateTable(displayedStrategyCandidates)}
+        ${renderExpandableSection("预算快照", renderAllocatorBudgetSnapshotTable(recentBudgetSnapshots), {
+          meta: `${formatNumber(strategyRuntimeSummary.latest_budget_snapshot_count, 0, "0")} 条`,
+        })}
+        ${renderExpandableSection("冲突解算", renderAllocatorConflictResolutionTable(recentConflictResolutions), {
+          meta: `${formatNumber(strategyRuntimeSummary.latest_conflict_resolution_count, 0, "0")} 条`,
+        })}
+        ${renderExpandableSection("净额决策", renderAllocatorNettingDecisionTable(recentNettingDecisions), {
+          meta: `${formatNumber(strategyRuntimeSummary.latest_netting_decision_count, 0, "0")} 条`,
+        })}
       `,
     }),
     strategyAutomation: surfaceCard({
       title: "自动预算与启停",
       kicker: "全自动并行运行",
-      copy: "系统会按最近归因、恢复状态和波动环境自动决定 sleeve 是否继续运行、给多少预算、是否只保留保护性管理。",
+      copy: "这里保留当前最关键的自动控制结果，更多预算细节已经收进调度卡的展开区。",
+      classes: "strategy-compact-card",
       content: `
         ${summaryStrip([
           {
@@ -245,7 +275,7 @@ export function renderStrategySections(data) {
         ])}
         ${responsiveTable(
           ["Sleeve", "自动状态", "预算倍率", "权重", "最近净收益"],
-          automationDecisions.map((item) => [
+          displayedAutomationDecisions.map((item) => [
             `<div><strong>${escapeHtml(item.strategy_sleeve_id || "未归属")}</strong><div class="table-meta">${escapeHtml(readableState(item.family || "unknown"))}</div></div>`,
             `<div><strong>${escapeHtml(readableState(item.automation_state || "unknown"))}</strong><div class="table-meta">${escapeHtml(item.operator_summary || "当前没有额外说明")}</div></div>`,
             formatNumber(item.budget_multiplier, 2, "0"),
@@ -259,7 +289,8 @@ export function renderStrategySections(data) {
     strategyAttribution: surfaceCard({
       title: "策略归因",
       kicker: "组合报表",
-      copy: "这里把收益、资金费和库存都按 sleeve 收口，便于分清谁在赚钱、谁还占着仓位。",
+      copy: "这里只保留最能解释“谁在赚钱、谁还占库存”的摘要，避免归因卡片本身反过来挤占工作区。",
+      classes: "strategy-compact-card",
       content: `
         ${summaryStrip([
           {
@@ -306,7 +337,7 @@ export function renderStrategySections(data) {
         ])}
         ${responsiveTable(
           ["Sleeve", "净收益", "资金费", "库存变化", "库存名义金额"],
-          sleeveProfitability.slice(0, 8).map((item) => {
+          displayedSleeveProfitability.map((item) => {
             const inventory = sleeveInventorySummary.find((row) => row.strategy_sleeve_id === item.strategy_sleeve_id) || {};
             return [
               `<div><strong>${escapeHtml(item.strategy_sleeve_id || "未归属")}</strong><div class="table-meta">${escapeHtml((item.families || []).join(" / ") || "家族待确认")}</div></div>`,
@@ -398,7 +429,8 @@ export function renderStrategySections(data) {
     strategyTrialVerdict: surfaceCard({
       title: "系统自动试盘结论",
       kicker: "试盘审查",
-      copy: "这里现在是试盘工作台：会把硬停机、试盘建议、当前运行前置条件和可执行动作拆开显示，不再把所有理由混成一团。",
+      copy: "试盘工作台只保留本轮是否该继续、是否硬停机、现在该按哪个按钮处理；历史和周期明细默认折叠。",
+      classes: "strategy-compact-card",
       actions: renderTrialVerdictActions(trialReviewActions, {
         trialGuardStatus: scalingRequirements.trial_guard_status,
         trialGuardHardStopActive: Boolean(trialGuardHardStop.active),
@@ -476,17 +508,21 @@ export function renderStrategySections(data) {
               trialReviewLatestAction.reason ? `原因 ${trialReviewLatestAction.reason}` : "",
             ].filter(Boolean).join("；") || "当前还没有新的试盘处理记录",
           ],
-          ["最强分层切片", formatSegmentLabel(trialReviewSections.strategy_segments?.strongest_segment?.segment), formatSigned(trialReviewSections.strategy_segments?.strongest_segment?.net_realized_pnl)],
-          ["最弱分层切片", formatSegmentLabel(trialReviewSections.strategy_segments?.weakest_segment?.segment), formatSigned(trialReviewSections.strategy_segments?.weakest_segment?.net_realized_pnl)],
+          ["最强 / 最弱分层切片", formatSegmentLabel(trialReviewSections.strategy_segments?.strongest_segment?.segment), `${formatSigned(trialReviewSections.strategy_segments?.strongest_segment?.net_realized_pnl)} | ${formatSigned(trialReviewSections.strategy_segments?.weakest_segment?.net_realized_pnl)}`],
         ])}
-        ${renderForwardValidationPeriods(forwardPeriods)}
-        ${renderTrialReviewHistory(trialReviewRecentActions)}
+        ${renderExpandableSection("最近观察周期", renderForwardValidationPeriods(displayedForwardPeriods), {
+          meta: `${formatNumber(displayedForwardPeriods.length, 0, "0")} 个周期`,
+        })}
+        ${renderExpandableSection("最近处理记录", renderTrialReviewHistory(displayedTrialReviewActions), {
+          meta: `${formatNumber(displayedTrialReviewActions.length, 0, "0")} 条`,
+        })}
       `,
     }),
     strategyHistory: surfaceCard({
       title: "决策记录",
       kicker: "历史记录",
-      copy: "桌面端保留表格，窄屏自动切成卡片，方便值班时在手机上快速扫读。",
+      copy: "这里只保留最近决策和快速详情；更老的记录继续按需展开，不再把历史本身放成主工作区。",
+      classes: "strategy-compact-card",
       content: `${responsiveTable(
         decisionTableHeaders(decisionScene),
         recentDecisions.map((item) => [
@@ -528,16 +564,34 @@ export function renderStrategySections(data) {
 export function renderStrategyView(data) {
   const sections = renderStrategySections(data);
   return `
-    <div class="panel-grid">
-      <div class="span-6">${sections.strategyHero}</div>
-      <div class="span-6">${sections.strategyCoordinator}</div>
-      <div class="span-12">${sections.strategyAutomation}</div>
-      <div class="span-12">${sections.strategyAttribution}</div>
-      <div class="span-12">${sections.strategySignal}</div>
+    <div class="panel-grid strategy-page-grid">
+      <div class="span-12">${sections.strategyHero}</div>
+      <div class="span-7">${sections.strategyDecisionWorkbench}</div>
+      <div class="span-5">${sections.strategyTrialVerdict}</div>
+      <div class="span-7">${sections.strategyCoordinator}</div>
+      <div class="span-5">
+        <div class="workspace-stack strategy-column-stack">
+          ${sections.strategyAutomation}
+          ${sections.strategyAttribution}
+        </div>
+      </div>
       <div class="span-12">${sections.strategyHistory}</div>
-      <div class="span-12">${sections.strategyHealth}</div>
-      <div class="span-12">${sections.strategyTrialVerdict}</div>
     </div>
+  `;
+}
+
+function renderExpandableSection(title, body, options = {}) {
+  const { meta = "", open = false } = options;
+  return `
+    <details class="strategy-details"${open ? " open" : ""}>
+      <summary>
+        <span>${escapeHtml(title)}</span>
+        ${meta ? `<span class="strategy-details__meta">${escapeHtml(meta)}</span>` : ""}
+      </summary>
+      <div class="strategy-details__body">
+        ${body}
+      </div>
+    </details>
   `;
 }
 
