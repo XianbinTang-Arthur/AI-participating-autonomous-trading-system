@@ -16,7 +16,7 @@ ai_degrade_after_failures: 3
 # [常用可调] ai_recovery_probe_interval_seconds：降级后多久做一次恢复探测。可选值：30 ~ 3600；推荐值：180.0。
 ai_recovery_probe_interval_seconds: 180.0
 # [常用可调] ai_decision_min_confidence：AI 决策最低置信度。可选值：0.0 ~ 1.0；推荐值：0.72。
-ai_decision_min_confidence: 0.72
+ai_decision_min_confidence: 0.67
 # [常用可调] ai_decision_max_uncertainty：AI 决策允许的最大不确定度。可选值：0.0 ~ 1.0；推荐值：0.38。
 ai_decision_max_uncertainty: 0.38
 # [常用可调] ai_decision_min_directional_edge：AI 方向信号最低边际。可选值：0.0 ~ 1.0；推荐值：0.16。
@@ -49,7 +49,7 @@ strategy_profile_activation_policy_enabled: true
 # [常用可调] strategy_profile_emergency_safety_fast_track_enabled：风险事件时是否允许快速切到安全档。可选值：true / false；推荐值：true。
 strategy_profile_emergency_safety_fast_track_enabled: true
 # [常用可调] strategy_profile_emergency_safety_confidence_min：快速切档最低置信度。可选值：0.0 ~ 1.0；推荐值：0.68。
-strategy_profile_emergency_safety_confidence_min: 0.68
+strategy_profile_emergency_safety_confidence_min: 0.67
 
 # 多策略 sleeve 自动控制
 # [常用可调] strategy_sleeve_auto_parallel_enabled：是否启用多策略 sleeve 自动并行控制。可选值：true / false；推荐值：true。
@@ -168,13 +168,13 @@ strategy_scale_in_min_signal_edge_bps: 18.0
 # [常用可调] strategy_scale_in_alpha_min：加仓最低 alpha。可选值：0.0 ~ 1.0；推荐值：0.24。
 strategy_scale_in_alpha_min: 0.24
 # [常用可调] strategy_scale_in_confidence_min：加仓最低置信度。可选值：0.0 ~ 1.0；推荐值：0.70。
-strategy_scale_in_confidence_min: 0.70
+strategy_scale_in_confidence_min: 0.67
 # [常用可调] strategy_reversal_min_signal_edge_bps：反手最低信号边际。可选值：0.0 ~ 100.0；推荐值：24.0。
 strategy_reversal_min_signal_edge_bps: 24.0
 # [常用可调] strategy_reversal_alpha_min：反手最低 alpha。可选值：0.0 ~ 1.0；推荐值：0.32。
 strategy_reversal_alpha_min: 0.32
 # [常用可调] strategy_reversal_confidence_min：反手最低置信度。可选值：0.0 ~ 1.0；推荐值：0.80。
-strategy_reversal_confidence_min: 0.80
+strategy_reversal_confidence_min: 0.67
 # [常用可调] strategy_min_hold_seconds：最短持仓秒数。可选值：0 ~ 86400；推荐值：900.0。
 strategy_min_hold_seconds: 900.0
 # [常用可调] strategy_post_close_cooldown_seconds：平仓后冷却秒数。可选值：0 ~ 86400；推荐值：300.0。
