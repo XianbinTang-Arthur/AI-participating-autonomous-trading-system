@@ -143,8 +143,8 @@ strategy_entry_allowed_regimes:
 strategy_entry_min_signal_edge_bps: 14.0
 # [常用可调] strategy_entry_alpha_min：开仓最低 alpha。可选值：0.0 ~ 1.0；推荐值：0.18。
 strategy_entry_alpha_min: 0.18
-# [常用可调] strategy_entry_confidence_min：开仓最低置信度。可选值：0.0 ~ 1.0；推荐值：0.61。
-strategy_entry_confidence_min: 0.61
+# [常用可调] strategy_entry_confidence_min：开仓最低置信度。可选值：0.0 ~ 1.0；推荐值：0.67。
+strategy_entry_confidence_min: 0.67
 # [常用可调] strategy_scale_in_min_signal_edge_bps：加仓最低信号边际。可选值：0.0 ~ 100.0；推荐值：18.0。
 strategy_scale_in_min_signal_edge_bps: 18.0
 # [常用可调] strategy_scale_in_alpha_min：加仓最低 alpha。可选值：0.0 ~ 1.0；推荐值：0.24。
