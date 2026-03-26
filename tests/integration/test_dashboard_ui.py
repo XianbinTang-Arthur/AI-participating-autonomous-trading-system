@@ -108,6 +108,7 @@ class TestDashboardUI(unittest.TestCase):
         self.assertIn("记为缩小试盘规模", strategy_text)
         self.assertIn("记为暂停试盘并复盘", strategy_text)
         self.assertIn("提交放量评审", strategy_text)
+        self.assertIn("当前不在试盘观察流程", strategy_text)
         self.assertIn("最近处理记录", strategy_text)
         self.assertIn("试盘守护硬停机", strategy_text)
         self.assertNotIn("自动跳档状态", strategy_text)

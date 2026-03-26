@@ -157,6 +157,35 @@ class TestBlockerControlSummary(unittest.TestCase):
         )
         self.assertTrue(any(item.blocker == "kill_switch_active" for item in snapshot.secondary_blockers))
 
+    def test_risk_snapshot_auto_halt_surfaces_refresh_exchange_state_actions(self) -> None:
+        owner = SimpleNamespace(
+            runtime=SimpleNamespace(
+                kill_switch=SimpleNamespace(halted=True),
+                health_service=SimpleNamespace(snapshot=lambda: SimpleNamespace(blockers=[])),
+                ai_service=SimpleNamespace(status=lambda: {}),
+            ),
+            recovery_view=lambda: {
+                "safe_to_trade": False,
+                "review_required": False,
+                "resume_eligible": False,
+                "halted": True,
+                "rebaseline_available": False,
+                "resume_blocked_reasons": ["derivatives_risk_snapshot_missing_auto_halt"],
+            },
+            _latest_scoped_reconciliation=lambda: None,
+            system_mode=lambda: {"submit_blocked_reasons": []},
+        )
+        service = BlockerControlService(owner)
+
+        snapshot = service.snapshot()
+
+        self.assertIsNotNone(snapshot.primary_blocker)
+        self.assertEqual(snapshot.primary_blocker.blocker, "derivatives_risk_snapshot_missing_auto_halt")
+        action_ids = [item.action_id for item in snapshot.primary_blocker.actions]
+        self.assertIn("open-execution-view", action_ids)
+        self.assertIn("refresh-exchange-state", action_ids)
+        self.assertFalse(any(action_id.startswith("inspect-reconciliation:") for action_id in action_ids))
+
     def test_primary_task_healthy_state_has_no_manual_buttons(self) -> None:
         service = BlockerControlService(SimpleNamespace())
         task = service._primary_task(  # type: ignore[attr-defined]

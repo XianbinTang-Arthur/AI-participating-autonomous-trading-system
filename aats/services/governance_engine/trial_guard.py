@@ -41,6 +41,9 @@ class ForwardTrialGuardService:
         if not self.settings.trial_guard_enabled:
             self.last_snapshot = self._base_snapshot(status="disabled")
             return dict(self.last_snapshot)
+        if not self._trial_observation_active():
+            self.last_snapshot = self._base_snapshot(status="inactive_for_runtime")
+            return dict(self.last_snapshot)
 
         lookback = max(int(self.settings.trial_guard_lookback_fills), 1)
         profitability = self.profitability_provider(lookback)
@@ -168,6 +171,20 @@ class ForwardTrialGuardService:
         self.last_snapshot = snapshot
         return dict(snapshot)
 
+    def _trial_observation_active(self) -> bool:
+        mode = str(getattr(self.settings, "mode", "") or "").lower()
+        config_profile = str(getattr(self.settings, "config_profile", "") or "")
+        return mode == "guarded_live" or config_profile == "forward_test_small_capital"
+
+    def _trial_observation_label(self) -> str | None:
+        mode = str(getattr(self.settings, "mode", "") or "").lower()
+        config_profile = str(getattr(self.settings, "config_profile", "") or "")
+        if mode == "guarded_live":
+            return "guarded_live_small_capital"
+        if config_profile == "forward_test_small_capital":
+            return "forward_test_small_capital"
+        return None
+
     def _trigger_halt(self, snapshot: dict[str, Any]) -> None:
         reason = "trial_guard_threshold_breached"
         if not self.kill_switch.halted:
@@ -230,13 +247,18 @@ class ForwardTrialGuardService:
     ) -> dict[str, Any]:
         normalized_breaches = [self._breach_detail(item) for item in breaches or []]
         hard_stop_active = bool(normalized_breaches)
+        observation_flow_active = bool(self.settings.trial_guard_enabled) and self._trial_observation_active()
+        observation_label = self._trial_observation_label() if observation_flow_active else None
+        enabled_for_runtime = observation_flow_active
         return {
             "enabled": bool(self.settings.trial_guard_enabled),
-            "enabled_for_runtime": bool(self.settings.trial_guard_enabled),
+            "enabled_for_runtime": enabled_for_runtime,
             "status": status,
-            "profile_label": "small_capital_forward_test",
+            "profile_label": observation_label,
             "active_config_profile": self.settings.config_profile,
-            "profile_active": self.settings.config_profile == "forward_test_small_capital",
+            "profile_active": enabled_for_runtime,
+            "trial_observation_active": observation_flow_active,
+            "trial_observation_label": observation_label,
             "halted": self.kill_switch.halted,
             "reason": self.kill_switch.status().get("reason"),
             "lookback_fills": int(self.settings.trial_guard_lookback_fills),
@@ -280,6 +302,8 @@ class ForwardTrialGuardService:
     def _summary(*, status: str, fill_count: int, breaches: list[dict[str, Any]]) -> str:
         if status == "disabled":
             return "试盘守护未启用。"
+        if status == "inactive_for_runtime":
+            return "试盘守护虽然已配置，但当前运行线不处在试盘观察流程中，因此这条线不会因为试盘守护而自动停机。"
         if status == "warming_up":
             return f"试盘守护仍在预热，当前已记录 {fill_count} 笔已完成成交，尚未达到正式监控所需样本量。"
         if status == "recovered":
@@ -321,6 +345,8 @@ class ForwardTrialGuardService:
             titles = [str(item.get("title") or item.get("code") or "") for item in breaches]
             joined = "；".join(title for title in titles if title)
             return joined or "当前试盘守护已触发自动停机。"
+        if status == "inactive_for_runtime":
+            return "当前运行线不属于试盘观察流程，试盘守护不会在这条线上主动触发硬停机。"
         if status == "recovered":
             return "当前试盘守护已经不再命中硬停机阈值，可继续结合恢复状态判断是否允许恢复自动运行。"
         if status == "warming_up":
@@ -333,6 +359,8 @@ class ForwardTrialGuardService:
     def _operator_guidance(*, status: str, breaches: list[dict[str, Any]]) -> str:
         if status == "breached":
             return "先去风险与恢复页确认试盘守护阻断，再到策略判断页查看试盘审查和最近成交，确认触发原因是否已经自然解除。"
+        if status == "inactive_for_runtime":
+            return "当前运行线不是试盘观察流程。如果你打算让试盘守护真正生效，请切到试盘运行线后再观察是否需要继续小资金试盘。"
         if status == "recovered":
             return "试盘守护本身已经恢复，但仍需结合恢复状态、对账和其他 blocker 决定是否允许恢复自动运行。"
         if status == "warming_up":
@@ -356,6 +384,14 @@ class ForwardTrialGuardService:
                     "code": "trial_guard_warmup_sample_requirement",
                     "title": "继续积累已完成成交样本",
                     "requirement": f"至少还需要 {missing} 笔已完成成交，试盘守护才会进入正式监控。",
+                }
+            )
+        elif status == "inactive_for_runtime":
+            items.append(
+                {
+                    "code": "trial_guard_inactive_for_runtime",
+                    "title": "当前运行线未启用试盘观察流程",
+                    "requirement": "如果要让试盘守护真正介入自动停机，请切到试盘观察流程对应的运行线后再继续。",
                 }
             )
         elif status == "breached":

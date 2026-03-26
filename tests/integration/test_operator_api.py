@@ -1472,6 +1472,101 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(Decimal(str(summary_payload["funding_fee_net_pnl"])), Decimal("-40"))
         self.assertEqual(Decimal(str(summary_payload["combined_net_realized_pnl"])), Decimal("-32"))
 
+    async def test_trial_guard_distinguishes_disabled_from_outside_trial_observation_flow(self) -> None:
+        inactive_runtime = await self._runtime(
+            trial_guard_enabled=True,
+            mode="paper_live",
+            config_profile="local_demo",
+        )
+        inactive_app = self._app(inactive_runtime)
+        with TestClient(inactive_app) as client:
+            inactive_guard = client.get("/system/trial-guard").json()
+            inactive_scaling = client.get("/reports/scaling-readiness?window_days=7&period_count=4").json()
+
+        self.assertEqual(inactive_guard["status"], "inactive_for_runtime")
+        self.assertTrue(inactive_guard["enabled"])
+        self.assertFalse(inactive_guard["enabled_for_runtime"])
+        self.assertFalse(inactive_guard["trial_observation_active"])
+        self.assertIn("trial_observation_flow_inactive", inactive_scaling["reasons"])
+        self.assertNotIn("trial_profile_not_active", inactive_scaling["reasons"])
+        self.assertFalse(inactive_scaling["requirements"]["trial_observation_flow_active"])
+
+        disabled_runtime = await self._runtime(
+            trial_guard_enabled=False,
+            mode="guarded_live",
+            config_profile="guarded_live_enabled",
+        )
+        disabled_app = self._app(disabled_runtime)
+        with TestClient(disabled_app) as client:
+            disabled_guard = client.get("/system/trial-guard").json()
+            disabled_scaling = client.get("/reports/scaling-readiness?window_days=7&period_count=4").json()
+
+        self.assertEqual(disabled_guard["status"], "disabled")
+        self.assertFalse(disabled_guard["enabled"])
+        self.assertFalse(disabled_guard["enabled_for_runtime"])
+        self.assertFalse(disabled_guard["trial_observation_active"])
+        self.assertIn("trial_guard_not_enabled", disabled_scaling["reasons"])
+
+    async def test_advisory_pause_does_not_block_resume(self) -> None:
+        runtime = await self._runtime(
+            trading_product_type="derivatives",
+            margin_mode="cross",
+            default_symbol="BTC-USDT-SWAP",
+            allowed_symbols=("BTC-USDT-SWAP",),
+            trial_guard_enabled=False,
+            trial_guard_min_closed_fills=1,
+            trial_guard_max_daily_loss_usdt=20.0,
+        )
+        now = utc_now()
+        runtime.fill_outcome_repo.save_outcome(
+            FillOutcomeRecord(
+                fill_id="btc_forward_pause_fill",
+                order_id="btc_forward_pause_order",
+                symbol="BTC-USDT-SWAP",
+                position_key="BTC-USDT-SWAP",
+                venue="PAPER",
+                side="sell",
+                fill_qty=Decimal("1"),
+                fill_price=Decimal("90"),
+                fill_notional=Decimal("90"),
+                fee_amount=Decimal("0.10"),
+                fee_currency="USDT",
+                liquidity_role="taker",
+                exchange_timestamp=now - timedelta(minutes=20),
+                ingestion_timestamp=now - timedelta(minutes=20),
+                order_status_after_fill="FILLED",
+                target_leverage=2.0,
+                exposure_side="flat",
+                execution_action="close_long",
+                position_intent="close_long",
+                position_mode="net_mode",
+                pos_side="net",
+                instrument_family="BTC-USDT",
+                settle_currency="USDT",
+                starting_position_qty=Decimal("1"),
+                starting_avg_entry_price=Decimal("120"),
+                ending_position_qty=Decimal("0"),
+                ending_avg_entry_price=Decimal("0"),
+                realized_pnl_delta=Decimal("-30"),
+                fee_delta=Decimal("-0.10"),
+                product_type="derivatives",
+                margin_mode="cross",
+                created_at=now - timedelta(minutes=20),
+            )
+        )
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            scaling = client.get("/reports/scaling-readiness?window_days=1&period_count=2").json()
+            halted = client.post("/system/halt", json={"reason": "operator_test_halt"}).json()
+            resumed = client.post("/system/resume", json={"reason": "operator_test_resume"}).json()
+
+        self.assertEqual(scaling["readiness"], "pause_trial")
+        self.assertIn("forward_validation_pause", scaling["reasons"])
+        self.assertEqual(halted["status"], "halted")
+        self.assertIn(resumed["status"], {"resumed", "already_resumed"})
+        self.assertFalse(resumed["halted"])
+
     async def test_operator_visibility_endpoints_cover_decision_execution_reconciliation_and_audit(self) -> None:
         runtime = await self._runtime()
         app = self._app(runtime)
@@ -1749,6 +1844,55 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(summary["sections"]["workbench"]["recent_actions"])
         self.assertEqual(summary["sections"]["workbench"]["latest_action"]["selected_action"], "shrink_trial")
         self.assertTrue(any(item["selected_action"] == "shrink_trial" for item in history["actions"]))
+
+    async def test_trial_review_workbench_exposes_hard_stop_specific_actions(self) -> None:
+        runtime = await self._runtime()
+        runtime.trial_guard_service.last_snapshot = {
+            "enabled": True,
+            "enabled_for_runtime": True,
+            "trial_observation_active": True,
+            "trial_observation_label": "guarded_live_small_capital",
+            "status": "breached",
+            "summary": "试盘守护已触发自动停机。",
+            "breaches": [
+                {
+                    "code": "trial_guard_consecutive_losses",
+                    "title": "连续亏损笔数达到试盘守护上限",
+                    "summary": "最近连续亏损已经达到试盘守护硬停机阈值。",
+                }
+            ],
+            "hard_stop": {
+                "active": True,
+                "halt_required": True,
+                "resume_blocked": True,
+                "summary": "连续亏损笔数达到试盘守护上限",
+                "operator_guidance": "先查看试盘审查和最近成交。",
+            },
+            "recovery_requirements": {
+                "resume_allowed": False,
+                "items": [
+                    {
+                        "code": "trial_guard_consecutive_losses",
+                        "title": "连续亏损笔数达到试盘守护上限",
+                        "requirement": "连续亏损序列需要被新的非亏损闭合成交打断。",
+                    }
+                ],
+            },
+        }
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            summary = client.get(
+                "/reports/trial-review-summary?segment_limit=100&window_days=7&period_count=4"
+            ).json()
+
+        actions = summary["sections"]["workbench"]["available_actions"]
+        labels = [item["label"] for item in actions]
+        self.assertIn("查看风险与恢复", labels)
+        self.assertIn("查看委托与成交", labels)
+        self.assertIn("记录本次复盘", labels)
+        self.assertIn("刷新当前状态", labels)
+        self.assertNotIn("记为继续小资金试盘", labels)
 
     async def test_metrics_order_intent_count_uses_persisted_events_not_runtime_counter(self) -> None:
         runtime = await self._runtime(

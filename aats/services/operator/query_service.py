@@ -2877,6 +2877,8 @@ class OperatorQueryService:
             return {
                 "enabled": False,
                 "enabled_for_runtime": False,
+                "trial_observation_active": False,
+                "trial_observation_label": None,
                 "status": "not_configured",
                 "summary": "试盘守护未配置。",
                 "hard_stop": {
@@ -4791,8 +4793,8 @@ class OperatorQueryService:
         reasons: list[str] = []
         if not trial_guard.get("enabled"):
             reasons.append("trial_guard_not_enabled")
-        if not trial_guard.get("profile_active"):
-            reasons.append("trial_profile_not_active")
+        elif not trial_guard.get("trial_observation_active"):
+            reasons.append("trial_observation_flow_inactive")
 
         forward_verdict = str(forward_summary.get("verdict") or "")
         if forward_verdict == "pause":
@@ -4819,6 +4821,7 @@ class OperatorQueryService:
         if (
             verdict == "continue_small_capital"
             and trial_guard.get("status") == "monitoring"
+            and trial_guard.get("enabled_for_runtime")
             and healthy_period_requirement_met
             and latest_period_has_sample
             and forward_verdict == "continue"
@@ -4833,12 +4836,18 @@ class OperatorQueryService:
             "shrink_trial": "最近试盘边际转弱，建议先缩小试盘规模，再继续观察收益与执行质量。",
             "pause_trial": "最近观察周期已经不满足继续试盘的建议条件，先暂停试盘并复盘收益与执行质量。",
         }
+        if not trial_guard.get("enabled"):
+            summary = "试盘守护当前未启用，这份试盘建议只能作为观察参考，不应直接拿来做放量判断。"
+        elif not trial_guard.get("trial_observation_active"):
+            summary = "当前运行线不在试盘观察流程里，这份试盘建议仅供参考，不应用来直接决定放量或恢复。"
+        else:
+            summary = summary_map[verdict]
         return {
             "window_days": int(forward_validation.get("window_days") or window_days),
             "period_count": int(forward_validation.get("period_count") or period_count),
             "generated_at": utc_now(),
             "readiness": verdict,
-            "summary": summary_map[verdict],
+            "summary": summary,
             "reasons": list(dict.fromkeys(reasons)),
             "requirements": {
                 "required_healthy_periods": 2,
@@ -4846,6 +4855,10 @@ class OperatorQueryService:
                 "consecutive_healthy_periods": consecutive_healthy_periods,
                 "healthy_period_requirement_met": healthy_period_requirement_met,
                 "latest_period_has_sample": latest_period_has_sample,
+                "trial_guard_enabled": bool(trial_guard.get("enabled")),
+                "trial_guard_enabled_for_runtime": bool(trial_guard.get("enabled_for_runtime")),
+                "trial_observation_flow_active": bool(trial_guard.get("trial_observation_active")),
+                "trial_observation_label": trial_guard.get("trial_observation_label"),
                 "trial_guard_status": trial_guard.get("status"),
                 "trial_guard_hard_stop_active": bool(hard_stop.get("active")),
                 "trial_guard_profile_active": bool(trial_guard.get("profile_active")),

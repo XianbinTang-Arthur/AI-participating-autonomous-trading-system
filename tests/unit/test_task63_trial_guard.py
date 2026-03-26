@@ -18,6 +18,7 @@ class TestForwardTrialGuardService(unittest.TestCase):
         settings = AATSSettings.model_validate(
             {
                 "trial_guard_enabled": True,
+                "mode": "guarded_live",
                 "trial_guard_min_closed_fills": 2,
                 "trial_guard_lookback_fills": 10,
                 "trial_guard_max_daily_loss_usdt": 20.0,
@@ -62,6 +63,7 @@ class TestForwardTrialGuardService(unittest.TestCase):
         settings = AATSSettings.model_validate(
             {
                 "trial_guard_enabled": True,
+                "mode": "guarded_live",
                 "trial_guard_min_closed_fills": 5,
                 "trial_guard_lookback_fills": 10,
             }
@@ -103,6 +105,7 @@ class TestForwardTrialGuardService(unittest.TestCase):
         settings = AATSSettings.model_validate(
             {
                 "trial_guard_enabled": True,
+                "config_profile": "forward_test_small_capital",
                 "trial_guard_min_closed_fills": 1,
                 "trial_guard_lookback_fills": 10,
                 "trial_guard_max_daily_loss_usdt": 20.0,
@@ -157,6 +160,7 @@ class TestForwardTrialGuardService(unittest.TestCase):
         settings = AATSSettings.model_validate(
             {
                 "trial_guard_enabled": True,
+                "mode": "guarded_live",
                 "trial_guard_min_closed_fills": 1,
                 "trial_guard_lookback_fills": 10,
                 "trial_guard_max_daily_loss_usdt": 20.0,
@@ -190,6 +194,31 @@ class TestForwardTrialGuardService(unittest.TestCase):
 
         self.assertEqual(snapshot["status"], "recovered")
         self.assertFalse(snapshot["hard_stop"]["active"])
+        self.assertTrue(snapshot["recovery_requirements"]["resume_allowed"])
+
+    def test_trial_guard_is_inactive_when_runtime_is_not_trial_observation_flow(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "trial_guard_enabled": True,
+                "mode": "paper_live",
+                "config_profile": "local_demo",
+            }
+        )
+        service = ForwardTrialGuardService(
+            settings=settings,
+            kill_switch=KillSwitch(),
+            event_store=InMemoryEventStore(),
+            metrics=MetricsRegistry(),
+            profitability_provider=lambda _limit: {"summary": {"closed_fill_count": 0}},
+            anomaly_provider=lambda _limit: {"summary": {}},
+        )
+
+        snapshot = service.evaluate_now()
+
+        self.assertEqual(snapshot["status"], "inactive_for_runtime")
+        self.assertTrue(snapshot["enabled"])
+        self.assertFalse(snapshot["enabled_for_runtime"])
+        self.assertFalse(snapshot["trial_observation_active"])
         self.assertTrue(snapshot["recovery_requirements"]["resume_allowed"])
 
 

@@ -380,16 +380,20 @@ export function renderRiskView(data) {
 
 function trialGuardStatusLabel(status) {
   if (status === "disabled" || status === "not_configured") return "未启用";
+  if (status === "inactive_for_runtime") return "当前运行线未启用";
   if (status === "warming_up") return "预热中";
   if (status === "breached") return "已触发暂停";
   if (status === "monitoring") return "监控中";
+  if (status === "recovered") return "已恢复";
   return textOrFallback(status, "未知状态");
 }
 
 function trialGuardTone(status) {
   if (status === "breached") return "danger";
+  if (status === "inactive_for_runtime") return "neutral";
   if (status === "warming_up") return "warning";
   if (status === "monitoring") return "positive";
+  if (status === "recovered") return "positive";
   return "neutral";
 }
 

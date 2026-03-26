@@ -455,7 +455,7 @@ export function renderStrategySections(data) {
           ],
           [
             "当前运行前置条件",
-            scalingRequirements.trial_guard_profile_active ? "试盘守护已启用" : "试盘守护未启用",
+            trialObservationLabel(scalingRequirements),
             [
               runtimeConstraints.can_continue_runtime ? "当前运行前置条件已满足" : "当前运行前置条件仍受限",
               reasonListText(runtimeConstraints.reasons, scalingRequirements.safe_to_trade ? "恢复状态允许继续运行" : "恢复状态暂不允许继续自动运行"),
@@ -959,8 +959,9 @@ function strategyReasonText(value) {
     negative_net_realized_pnl: "最近一个观察周期净收益转负，说明试盘边际开始变弱。",
     execution_quality_or_fee_threshold_breached: "最近一个观察周期的执行质量或手续费拖累已经超过允许范围。",
     forward_validation_loss_limit_breached: "最近一个观察周期已经触碰试盘亏损上限。",
-    trial_guard_not_enabled: "试盘守护还没启用，所以当前不适合直接加资金。",
+    trial_guard_not_enabled: "试盘守护当前未启用，这份试盘建议只能作为参考，不适合直接拿来做放量判断。",
     trial_profile_not_active: "当前不在试盘档位，先不要做放量判断。",
+    trial_observation_flow_inactive: "当前运行线不在试盘观察流程里，这份试盘建议只能作为参考，不能直接拿来决定放量或恢复。",
     trial_guard_hard_stop_active: "试盘守护当前处于硬停机状态，先处理停机原因，再谈恢复或放量。",
     runtime_halted: "系统当前处于暂停状态，先处理暂停原因。",
     recovery_not_safe_to_trade: "当前恢复状态还不允许继续自动交易。",
@@ -975,6 +976,12 @@ function strategyReasonText(value) {
     scale_up_requirements_met: "样本、恢复状态和执行质量都达到进入下一档资金评审的条件。",
   };
   return map[String(value || "").trim()] || readableState(value || "unknown");
+}
+
+function trialObservationLabel(requirements) {
+  if (!requirements?.trial_guard_enabled) return "试盘守护未启用";
+  if (!requirements?.trial_observation_flow_active) return "当前不在试盘观察流程";
+  return "试盘守护正在本运行线生效";
 }
 
 function cooldownSummary(cooldowns) {
