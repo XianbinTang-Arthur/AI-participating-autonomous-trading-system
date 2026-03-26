@@ -143,7 +143,7 @@ class ConvergedPostgresExecutionRepository(ExecutionRepository):
             order_id = fill.client_order_id
         else:
             order_id = str(existing["order_id"])
-        return self.execution_fill_repo.save_fill_in_session(
+        saved = self.execution_fill_repo.save_fill_in_session(
             session,
             fill=fill,
             order_id=order_id,
@@ -153,6 +153,9 @@ class ConvergedPostgresExecutionRepository(ExecutionRepository):
                 "fill_event": dump_payload_exact(fill),
             },
         )
+        if saved:
+            self._refresh_synthetic_order_state_from_fills(session, order_id=order_id)
+        return saved
 
     def order_states(self) -> list[OrderState]:
         return [self._hydrate_order_state(row) for row in self.execution_order_repo.list_orders(limit=None)]
@@ -360,6 +363,87 @@ class ConvergedPostgresExecutionRepository(ExecutionRepository):
             position_intent=str(row.get("position_intent") or "open_long"),
             submission_payload={},
         )
+
+    def _refresh_synthetic_order_state_from_fills(self, session: Session, *, order_id: str) -> None:
+        row = session.get(ExecutionOrderModel, order_id)
+        if row is None:
+            return
+        payload = dict(row.raw_payload or {})
+        source_system = str(payload.get("source_system") or "")
+        if isinstance(payload.get("order_state"), dict) and source_system != "converged_fill_backfill":
+            return
+        fill_rows = session.execute(
+            select(ExecutionFillModelV2)
+            .where(ExecutionFillModelV2.order_id == order_id)
+            .order_by(
+                ExecutionFillModelV2.exchange_ts.asc(),
+                ExecutionFillModelV2.ingestion_ts.asc(),
+                ExecutionFillModelV2.fill_id.asc(),
+            )
+        ).scalars().all()
+        if not fill_rows:
+            return
+        fills = [self._hydrate_fill(_fill_model_to_dict(item)) for item in fill_rows]
+        total_filled_qty = sum((fill.fill_qty for fill in fills), Decimal("0"))
+        requested_qty = max(Decimal(str(row.requested_qty or "0")), total_filled_qty)
+        total_notional = sum((fill.fill_qty * fill.fill_price for fill in fills), Decimal("0"))
+        average_fill_price = None
+        if total_filled_qty > Decimal("0"):
+            average_fill_price = total_notional / total_filled_qty
+        total_fees = sum((fill.fee_amount for fill in fills), Decimal("0"))
+        last_fill = fills[-1]
+        remaining_qty = max(requested_qty - total_filled_qty, Decimal("0"))
+        status = last_fill.order_status_after_fill or ("FILLED" if remaining_qty <= Decimal("0") else "PARTIALLY_FILLED")
+        order_state = OrderState(
+            decision_id=str(row.decision_id or last_fill.decision_id or ""),
+            intent_id=str(row.intent_id or last_fill.intent_id or ""),
+            symbol=str(row.symbol or last_fill.symbol),
+            client_order_id=str(row.client_order_id or row.order_id),
+            exchange_order_id=row.venue_order_id or last_fill.exchange_order_id,
+            status=status,
+            submission_mode=str(payload.get("source_system") or "converged_fill_backfill"),
+            submitted_ts=row.created_at,
+            last_update_ts=last_fill.ingestion_timestamp,
+            last_exchange_update_ts=last_fill.exchange_timestamp,
+            requested_qty=requested_qty,
+            filled_qty=total_filled_qty,
+            remaining_qty=remaining_qty,
+            average_fill_price=average_fill_price,
+            fees=total_fees,
+            reduce_only=bool(row.reduce_only),
+            close_only=bool(row.close_only),
+            td_mode=row.td_mode or last_fill.td_mode,
+            position_mode=row.position_mode or last_fill.position_mode,
+            pos_side=row.pos_side or last_fill.pos_side,
+            reduce_only_reason=row.reduce_only_reason or last_fill.reduce_only_reason,
+            close_only_reason=row.close_only_reason or last_fill.close_only_reason,
+            instrument_family=row.instrument_family or last_fill.instrument_family,
+            settle_currency=row.settle_currency or last_fill.settle_currency,
+            strategy_family=row.strategy_family or last_fill.strategy_family,
+            strategy_sleeve_id=row.strategy_sleeve_id or last_fill.strategy_sleeve_id,
+            allocation_id=row.allocation_id or last_fill.allocation_id,
+            strategy_bundle_id=row.strategy_bundle_id or last_fill.strategy_bundle_id,
+            strategy_leg_role=row.strategy_leg_role or last_fill.strategy_leg_role,
+            strategy_pair_id=last_fill.strategy_pair_id,
+            strategy_opportunity_kind=last_fill.strategy_opportunity_kind,
+            strategy_execution_mode=last_fill.strategy_execution_mode,
+            strategy_state_phase=last_fill.strategy_state_phase,
+            product_type=str(row.product_type or last_fill.product_type or "spot"),
+            margin_mode=str(row.margin_mode or last_fill.margin_mode or "cash"),
+            target_leverage=float(last_fill.target_leverage or 1.0),
+            exposure_side=str(last_fill.exposure_side or "flat"),
+            execution_action=row.execution_action or last_fill.execution_action,
+            position_intent=str(row.position_intent or last_fill.position_intent or "open_long"),
+            submission_payload={},
+        )
+        row.state = order_state.status
+        row.venue_order_id = order_state.exchange_order_id or row.venue_order_id
+        row.last_exchange_ts = order_state.last_exchange_update_ts
+        row.updated_at = order_state.last_update_ts or row.updated_at
+        row.raw_payload = {
+            **payload,
+            "order_state": dump_payload_exact(order_state),
+        }
 
     @staticmethod
     def _hydrate_fill(row: dict) -> FillEvent:

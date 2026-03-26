@@ -19,7 +19,6 @@ export function createState() {
     pendingRefresh: false,
     loadingView: null,
     readyViews: {},
-    backgroundGenerations: {},
     refreshTimer: null,
     lastRefreshAt: null,
     flash: null,
@@ -46,7 +45,7 @@ export const CORE_SPECS = [
 ];
 
 export function viewSpecs(view, state = null) {
-  const limits = state?.pageLimits || DEFAULT_PAGE_LIMITS;
+  const limits = { ...DEFAULT_PAGE_LIMITS, ...(state?.pageLimits || {}) };
   const specs = {
     home: [
       ["blockers", "/system/blockers"],
@@ -100,6 +99,9 @@ export function viewSpecs(view, state = null) {
       ["aiLatest", "/ai/latest"],
       ["aiShadowLatest", "/ai/shadow/latest"],
       ["profileControlSummary", "/reports/profile-control-summary"],
+      ["aiRecent", `/ai/recent?limit=${limits.recentAIAssessments}&offset=0`],
+      ["aiShadowRecent", `/ai/shadow/recent?limit=${limits.recentAIShadowDecisions}&offset=0`],
+      ["aiShadowEvaluations", `/ai/shadow/evaluations?limit=${limits.recentAIShadowEvaluations}&offset=0`],
     ],
     aiConfig: [
       ["aiConfigModel", "/ai-config/summary"],
@@ -112,14 +114,31 @@ export function viewSpecs(view, state = null) {
   return specs[view] || [];
 }
 
-export function viewBackgroundSpecs(view, state = null) {
-  const limits = state?.pageLimits || DEFAULT_PAGE_LIMITS;
-  const specs = {
-    aiAnalysis: [
-      ["aiRecent", `/ai/recent?limit=${limits.recentAIAssessments}&offset=0`],
-      ["aiShadowRecent", `/ai/shadow/recent?limit=${limits.recentAIShadowDecisions}&offset=0`],
-      ["aiShadowEvaluations", `/ai/shadow/evaluations?limit=${limits.recentAIShadowEvaluations}&offset=0`],
-    ],
-  };
-  return specs[view] || [];
+export function dashboardBundlePanelKeys(view, state = null) {
+  const seen = new Set();
+  const specs = [...CORE_SPECS, ...viewSpecs(view, state)];
+  return specs
+    .filter(([key]) => {
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .map(([key]) => key);
+}
+
+export function buildDashboardBundlePath(view, state = null) {
+  const limits = { ...DEFAULT_PAGE_LIMITS, ...(state?.pageLimits || {}) };
+  const params = new URLSearchParams({
+    view: String(view || "home"),
+    recentDecisions: String(limits.recentDecisions),
+    recentOrders: String(limits.recentOrders),
+    recentFills: String(limits.recentFills),
+    recentAIAssessments: String(limits.recentAIAssessments),
+    recentAIShadowDecisions: String(limits.recentAIShadowDecisions),
+    recentAIShadowEvaluations: String(limits.recentAIShadowEvaluations),
+  });
+  dashboardBundlePanelKeys(view, state).forEach((key) => {
+    params.append("panel", key);
+  });
+  return `/dashboard/bundle?${params.toString()}`;
 }

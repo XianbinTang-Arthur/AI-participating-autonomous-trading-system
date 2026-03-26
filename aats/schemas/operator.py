@@ -157,6 +157,7 @@ class OperatorActionRecord(SchemaBase):
         "refresh_exchange_state",
         "capital_scale_review",
         "trial_review_snapshot",
+        "trial_guard_manual_reset",
     ]
     actor_role: OperatorRole
     actor_identity: str | None = None

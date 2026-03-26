@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 import unittest
 from pathlib import Path
@@ -58,10 +59,15 @@ class TestDashboardUI(unittest.TestCase):
         js_text = responses["js"].text
         self.assertIn("renderAIAnalysisView", js_text)
         self.assertIn('aiAnalysis: "/ui/ai-analysis"', js_text)
-        self.assertIn("refreshBackgroundPanels", js_text)
-        self.assertIn("backgroundGenerations", js_text)
-        self.assertIn("void refreshBackgroundPanels(refreshingView, backgroundGeneration)", js_text)
-        self.assertIn('if ((state.backgroundGenerations[view] || 0) !== generation) return;', js_text)
+        self.assertIn("fetchDashboardBundle", js_text)
+        self.assertIn("buildDashboardBundlePath", js_text)
+        self.assertIn("fetchDashboardBundle(buildDashboardBundlePath(refreshingView, state))", js_text)
+        self.assertNotIn("refreshBackgroundPanels", js_text)
+        self.assertNotIn("backgroundGenerations", js_text)
+        self.assertNotIn("backgroundControllers", js_text)
+        self.assertNotIn("cancelBackgroundRefresh", js_text)
+        self.assertIn('document.addEventListener("visibilitychange", handleVisibilityChange);', js_text)
+        self.assertIn('if (document.visibilityState !== "visible") return;', js_text)
         self.assertNotIn('ai: "/ui/ai"', js_text)
 
         store_text = responses["store_js"].text
@@ -69,14 +75,21 @@ class TestDashboardUI(unittest.TestCase):
         self.assertIn('["trialReviewSummary", "/reports/trial-review-summary?segment_limit=100&window_days=7&period_count=4"]', store_text)
         self.assertIn('["trialReviewHistory", "/reports/trial-review-history?limit=5&offset=0"]', store_text)
         self.assertIn("aiAnalysis", store_text)
-        self.assertIn("viewBackgroundSpecs", store_text)
         self.assertIn('["aiRecent", `/ai/recent?limit=${limits.recentAIAssessments}&offset=0`]', store_text)
         self.assertIn('["aiShadowRecent", `/ai/shadow/recent?limit=${limits.recentAIShadowDecisions}&offset=0`]', store_text)
         self.assertIn('["aiShadowEvaluations", `/ai/shadow/evaluations?limit=${limits.recentAIShadowEvaluations}&offset=0`]', store_text)
+        self.assertNotIn("viewBackgroundSpecs", store_text)
         self.assertIn('["guardedLivePreflight", "/system/guarded-live-preflight"]', store_text)
         self.assertIn('["guardedLiveRunPacket", "/reports/guarded-live-run-packet"]', store_text)
         self.assertIn('["strategyRuntime", "/strategy/runtime"]', store_text)
         self.assertIn('["strategyAttribution", "/reports/strategy-attribution?limit=200"]', store_text)
+        self.assertIn("dashboardBundlePanelKeys", store_text)
+        self.assertIn('params.append("panel", key);', store_text)
+        self.assertIn('recentAIAssessments: String(limits.recentAIAssessments)', store_text)
+        self.assertIn('recentAIShadowDecisions: String(limits.recentAIShadowDecisions)', store_text)
+        self.assertIn('recentAIShadowEvaluations: String(limits.recentAIShadowEvaluations)', store_text)
+        self.assertIn("buildDashboardBundlePath", store_text)
+        self.assertIn('/dashboard/bundle?', store_text)
         self.assertNotIn('  ai: [', store_text)
 
         ai_analysis_text = responses["ai_analysis_js"].text
@@ -89,8 +102,8 @@ class TestDashboardUI(unittest.TestCase):
         self.assertNotIn("前往 AI 配置", ai_analysis_text)
 
         ai_config_text = responses["ai_config_js"].text
-        self.assertIn("AI 策略模式", ai_config_text)
-        self.assertIn("AI 换档控制", ai_config_text)
+        self.assertIn("运行模式切换", ai_config_text)
+        self.assertIn("自动换档控制", ai_config_text)
         self.assertIn("运行参数概览", ai_config_text)
         self.assertIn("紧急安全切档", ai_config_text)
         self.assertIn("持有与冷却", ai_config_text)
@@ -174,6 +187,117 @@ class TestDashboardUI(unittest.TestCase):
         self.assertEqual(ai_config.headers["location"], "/login")
         self.assertEqual(login.status_code, 200)
         self.assertIn("login", login.text.lower())
+
+    def test_build_dashboard_bundle_path_uses_frontend_panel_registry(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { buildDashboardBundlePath } from './aats/api/static/modules/store.js';
+
+const path = buildDashboardBundlePath('strategy', {
+  pageLimits: {
+    recentDecisions: 5,
+    recentOrders: 7,
+    recentFills: 9,
+  },
+});
+const url = new URL(path, 'http://localhost');
+console.log(JSON.stringify({
+  view: url.searchParams.get('view'),
+  recentDecisions: url.searchParams.get('recentDecisions'),
+  recentOrders: url.searchParams.get('recentOrders'),
+  recentFills: url.searchParams.get('recentFills'),
+  recentAIAssessments: url.searchParams.get('recentAIAssessments'),
+  recentAIShadowDecisions: url.searchParams.get('recentAIShadowDecisions'),
+  recentAIShadowEvaluations: url.searchParams.get('recentAIShadowEvaluations'),
+  panels: url.searchParams.getAll('panel'),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["view"], "strategy")
+        self.assertEqual(payload["recentDecisions"], "5")
+        self.assertEqual(payload["recentOrders"], "7")
+        self.assertEqual(payload["recentFills"], "9")
+        self.assertEqual(payload["recentAIAssessments"], "8")
+        self.assertEqual(payload["recentAIShadowDecisions"], "8")
+        self.assertEqual(payload["recentAIShadowEvaluations"], "8")
+        self.assertEqual(
+            payload["panels"],
+            [
+                "session",
+                "authProviders",
+                "health",
+                "mode",
+                "runtime",
+                "systemRecovery",
+                "blockerControl",
+                "strategyRuntime",
+                "strategyAttribution",
+                "latestDecision",
+                "recentDecisions",
+                "executionLatest",
+                "trialReviewSummary",
+                "trialReviewHistory",
+            ],
+        )
+
+    def test_ai_analysis_bundle_path_includes_recent_panels_and_ai_limits(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { buildDashboardBundlePath } from './aats/api/static/modules/store.js';
+
+const path = buildDashboardBundlePath('aiAnalysis', {
+  pageLimits: {
+    recentAIAssessments: 11,
+    recentAIShadowDecisions: 13,
+    recentAIShadowEvaluations: 15,
+  },
+});
+const url = new URL(path, 'http://localhost');
+console.log(JSON.stringify({
+  recentAIAssessments: url.searchParams.get('recentAIAssessments'),
+  recentAIShadowDecisions: url.searchParams.get('recentAIShadowDecisions'),
+  recentAIShadowEvaluations: url.searchParams.get('recentAIShadowEvaluations'),
+  panels: url.searchParams.getAll('panel'),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["recentAIAssessments"], "11")
+        self.assertEqual(payload["recentAIShadowDecisions"], "13")
+        self.assertEqual(payload["recentAIShadowEvaluations"], "15")
+        self.assertEqual(
+            payload["panels"],
+            [
+                "session",
+                "authProviders",
+                "health",
+                "mode",
+                "runtime",
+                "systemRecovery",
+                "blockerControl",
+                "aiOverview",
+                "aiRuntime",
+                "aiLatest",
+                "aiShadowLatest",
+                "profileControlSummary",
+                "aiRecent",
+                "aiShadowRecent",
+                "aiShadowEvaluations",
+            ],
+        )
 
     def test_ai_views_render_in_node_smoke_test(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
@@ -386,8 +510,8 @@ console.log(JSON.stringify({
   analysisUsesStrategyShadowName: analysisHtml.includes('策略层 shadow'),
   analysisUsesExecutionShadowName: analysisHtml.includes('执行层 shadow'),
   analysisNoTopNavButtons: !analysisHtml.includes('前往 AI 工作台') && !analysisHtml.includes('前往 AI 配置'),
-  configHasRuntimeModeCard: configHtml.includes('AI 策略模式'),
-  configHasAutoProfileControlCard: configHtml.includes('AI 换档控制'),
+  configHasRuntimeModeCard: configHtml.includes('运行模式切换'),
+  configHasAutoProfileControlCard: configHtml.includes('自动换档控制'),
   configHasRuntimeParams: configHtml.includes('运行参数概览'),
   configOmitsAdaptiveControls: !configHtml.includes('风险预算乘数') && !configHtml.includes('执行侵略性乘数'),
   configHasTimingControls: configHtml.includes('持有与冷却') && configHtml.includes('低边际保护'),

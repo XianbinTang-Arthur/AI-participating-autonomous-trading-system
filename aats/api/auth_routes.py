@@ -19,6 +19,7 @@ from aats.api.auth import (
 from aats.api.session_auth import issue_session_token
 from aats.bootstrap.config import ApplicationRuntime
 from aats.schemas.common import utc_now
+from aats.schemas.system import RuntimeModeState
 from aats.services.operator.query_service import OperatorQueryService
 
 
@@ -83,6 +84,149 @@ def _session_payload(request: Request) -> dict[str, Any]:
         "role": principal.role if principal is not None else "anonymous",
         "auth_source": principal.auth_source if principal is not None else "anonymous",
     }
+
+
+def _auth_providers_payload(request: Request) -> dict[str, Any]:
+    runtime = _runtime(request)
+    settings = runtime.settings
+    return {
+        "auth_enabled": settings.operator_auth_enabled,
+        "session_enabled": settings.operator_session_configured,
+        "database_backed": runtime.database_runtime is not None,
+        "configured_roles": configured_operator_roles(runtime),
+        "stored_user_count": stored_operator_user_count(runtime),
+        "runtime_profile_control_enabled": False,
+        "api_key_compatibility_enabled": bool(settings.operator_read_api_key or _write_api_key_compatibility_enabled(runtime)),
+    }
+
+
+def _system_health_payload(request: Request, query: OperatorQueryService) -> dict[str, Any]:
+    health = query.system_health()
+    operator_metrics = query.metrics()
+    runtime = _runtime(request)
+    health["execution_summary"] = {
+        "order_count": len(query._scoped_order_states()),
+        "fill_count": len(query._scoped_fills()),
+        "open_order_count": len(query._scoped_open_order_states()),
+        "order_intents_generated": runtime.metrics.snapshot().get("order_intents_generated", 0),
+        "fills_processed": runtime.metrics.snapshot().get("fills_processed", 0),
+        "processing_failures": operator_metrics.get("processing_failure_count", 0),
+        "portfolio_snapshot_repairs": operator_metrics.get("portfolio_snapshot_repair_count", 0),
+        "fills_without_snapshot": operator_metrics.get("fill_without_snapshot_count", 0),
+        "snapshots_without_reconciliation": operator_metrics.get("snapshot_without_reconciliation_count", 0),
+        "phase1_shadow_status": operator_metrics.get("phase1_shadow", {}).get("status"),
+        "phase1_shadow_failure_count": operator_metrics.get("phase1_shadow_failure_count", 0),
+        "phase1_shadow_alert_count": operator_metrics.get("phase1_shadow_alert_count", 0),
+        "phase1_shadow_recovery_count": operator_metrics.get("phase1_shadow_recovery_count", 0),
+        "phase1_shadow_order_backlog": operator_metrics.get("phase1_shadow_order_backlog"),
+        "phase1_shadow_fill_backlog": operator_metrics.get("phase1_shadow_fill_backlog"),
+        "phase1_shadow_obligation_backlog": operator_metrics.get("phase1_shadow_obligation_backlog"),
+    }
+    return health
+
+
+def _dashboard_panel_error(exc: Exception) -> str:
+    if isinstance(exc, HTTPException):
+        detail = exc.detail
+        if isinstance(detail, str):
+            return detail
+        return str(detail)
+    return str(exc)
+
+
+def _normalize_dashboard_panel_keys(panel_keys: list[str]) -> tuple[str, ...]:
+    normalized = [str(panel_key or "").strip() for panel_key in panel_keys]
+    filtered = [panel_key for panel_key in normalized if panel_key]
+    return tuple(dict.fromkeys(filtered))
+
+
+def _protected_dashboard_panel_payload(
+    *,
+    request: Request,
+    query: OperatorQueryService,
+    panel_key: str,
+    recent_decisions_limit: int,
+    recent_orders_limit: int,
+    recent_fills_limit: int,
+    recent_ai_assessments_limit: int,
+    recent_ai_shadow_decisions_limit: int,
+    recent_ai_shadow_evaluations_limit: int,
+) -> dict[str, Any]:
+    if panel_key == "health":
+        return _system_health_payload(request, query)
+    if panel_key == "mode":
+        return RuntimeModeState(**query.system_mode()).model_dump(mode="json")
+    if panel_key == "runtime":
+        return query.system_runtime()
+    if panel_key == "systemRecovery":
+        return query.system_recovery()
+    if panel_key == "blockerControl":
+        return query.blocker_control()
+    if panel_key == "blockers":
+        blockers = query.blockers()
+        return {
+            "blocked": bool(blockers),
+            "halted": _runtime(request).kill_switch.halted,
+            "blockers": blockers,
+            "recent_history": query.blocker_history(limit=20, offset=0)["history"],
+        }
+    if panel_key == "metrics":
+        return query.metrics()
+    if panel_key == "portfolio":
+        return query.portfolio_latest()
+    if panel_key == "latestDecision":
+        return query.latest_decision()
+    if panel_key == "executionLatest":
+        return query.execution_latest()
+    if panel_key == "reconciliationLatest":
+        return query.reconciliation_latest()
+    if panel_key == "accountState":
+        return query.account_state()
+    if panel_key == "strategyRuntime":
+        return query.strategy_runtime()
+    if panel_key == "strategyAttribution":
+        return query.strategy_attribution_report(limit=200)
+    if panel_key == "recentDecisions":
+        return query.recent_decisions(limit=recent_decisions_limit, offset=0)
+    if panel_key == "trialReviewSummary":
+        return query.trial_review_summary(segment_limit=100, window_days=7, period_count=4)
+    if panel_key == "trialReviewHistory":
+        return query.trial_review_history(limit=5, offset=0)
+    if panel_key == "recentOrders":
+        return query.orders_recent(limit=recent_orders_limit, offset=0)
+    if panel_key == "recentFills":
+        return query.fills_recent(limit=recent_fills_limit, offset=0)
+    if panel_key == "executionErrors":
+        return query.execution_errors()
+    if panel_key == "phase1Shadow":
+        return query.phase1_shadow()
+    if panel_key == "trialGuard":
+        return query.trial_guard()
+    if panel_key == "guardedLivePreflight":
+        return query.guarded_live_preflight()
+    if panel_key == "guardedLiveRunPacket":
+        return query.guarded_live_run_packet()
+    if panel_key == "replayStatus":
+        return query.replay_status()
+    if panel_key == "aiOverview":
+        return query.ai_overview()
+    if panel_key == "aiRuntime":
+        return query.ai_runtime()
+    if panel_key == "aiLatest":
+        return query.ai_latest()
+    if panel_key == "aiShadowLatest":
+        return query.ai_shadow_latest()
+    if panel_key == "profileControlSummary":
+        return query.profile_control_summary_report()
+    if panel_key == "aiConfigModel":
+        return query.ai_config_summary()
+    if panel_key == "aiRecent":
+        return query.ai_recent(limit=recent_ai_assessments_limit, offset=0)
+    if panel_key == "aiShadowRecent":
+        return query.ai_shadow_recent(limit=recent_ai_shadow_decisions_limit, offset=0)
+    if panel_key == "aiShadowEvaluations":
+        return query.ai_shadow_evaluations(limit=recent_ai_shadow_evaluations_limit, offset=0)
+    raise KeyError(f"dashboard_bundle_panel_not_found:{panel_key}")
 
 
 @auth_router.get("/auth/session")
@@ -168,17 +312,61 @@ async def auth_whoami(
 
 @auth_router.get("/auth/providers")
 async def auth_providers(request: Request) -> dict[str, Any]:
-    runtime = _runtime(request)
-    settings = runtime.settings
-    return {
-        "auth_enabled": settings.operator_auth_enabled,
-        "session_enabled": settings.operator_session_configured,
-        "database_backed": runtime.database_runtime is not None,
-        "configured_roles": configured_operator_roles(runtime),
-        "stored_user_count": stored_operator_user_count(runtime),
-        "runtime_profile_control_enabled": False,
-        "api_key_compatibility_enabled": bool(settings.operator_read_api_key or _write_api_key_compatibility_enabled(runtime)),
-    }
+    return _auth_providers_payload(request)
+
+
+@auth_router.get("/dashboard/bundle")
+async def dashboard_bundle(
+    request: Request,
+    panel: list[str] = Query(default=[]),
+    view: str | None = Query(default=None),
+    recent_decisions: int = Query(default=8, alias="recentDecisions", ge=1, le=100),
+    recent_orders: int = Query(default=8, alias="recentOrders", ge=1, le=200),
+    recent_fills: int = Query(default=8, alias="recentFills", ge=1, le=200),
+    recent_ai_assessments: int = Query(default=8, alias="recentAIAssessments", ge=1, le=100),
+    recent_ai_shadow_decisions: int = Query(default=8, alias="recentAIShadowDecisions", ge=1, le=100),
+    recent_ai_shadow_evaluations: int = Query(default=8, alias="recentAIShadowEvaluations", ge=1, le=100),
+) -> dict[str, Any]:
+    query = _query(request)
+    api_key = request.headers.get("X-AATS-API-Key")
+    panel_keys = _normalize_dashboard_panel_keys(panel)
+    if not panel_keys:
+        raise HTTPException(status_code=400, detail="dashboard_bundle_panel_required")
+    try:
+        require_read_access(request, api_key)
+        read_error: HTTPException | None = None
+    except HTTPException as exc:
+        read_error = exc
+
+    panels: dict[str, dict[str, Any]] = {}
+    for panel_key in panel_keys:
+        try:
+            if panel_key == "session":
+                payload = _session_payload(request)
+            elif panel_key == "authProviders":
+                payload = _auth_providers_payload(request)
+            elif panel_key == "operatorUsers":
+                principal = require_admin_access(request, api_key)
+                payload = query.operator_users(actor_identity=principal.identity)
+            else:
+                if read_error is not None:
+                    raise read_error
+                payload = _protected_dashboard_panel_payload(
+                    request=request,
+                    query=query,
+                    panel_key=panel_key,
+                    recent_decisions_limit=recent_decisions,
+                    recent_orders_limit=recent_orders,
+                    recent_fills_limit=recent_fills,
+                    recent_ai_assessments_limit=recent_ai_assessments,
+                    recent_ai_shadow_decisions_limit=recent_ai_shadow_decisions,
+                    recent_ai_shadow_evaluations_limit=recent_ai_shadow_evaluations,
+                )
+            panels[panel_key] = {"data": payload, "error": None}
+        except Exception as exc:
+            panels[panel_key] = {"data": None, "error": _dashboard_panel_error(exc)}
+
+    return {"view": view, "panels": panels}
 
 
 @auth_router.get("/auth/users")

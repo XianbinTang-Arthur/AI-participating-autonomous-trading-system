@@ -138,6 +138,54 @@ class TestExecutionRecovery(unittest.TestCase):
         self.assertEqual(obligation.released_amount, Decimal("60.0"))
         self.assertIn("released_orphan_obligations:1", artifacts.status.notes)
 
+    def test_recovery_scopes_margin_backed_smart_arbitrage_spot_obligation_into_derivatives_runtime(self) -> None:
+        obligation_repo = InMemoryExecutionObligationRepository()
+        obligation_repo.save_obligation(
+            OrderObligation(
+                client_order_id="cl_margin_backed_orphan_1",
+                decision_id="decision_margin_backed_orphan_1",
+                intent_id="intent_margin_backed_orphan_1",
+                symbol="BTC-USDT",
+                side="sell",
+                reserve_currency="BTC",
+                reserved_amount=0.25,
+                status="ACTIVE",
+                product_type="spot",
+                margin_mode="cross",
+                strategy_family="smart_arbitrage",
+                strategy_bundle_id="bundle_margin_backed_1",
+                strategy_leg_role="hedge",
+                last_update_ts=utc_now(),
+            )
+        )
+        recovery = self._service(
+            obligation_repo=obligation_repo,
+            settings_override={
+                "config_profile": "guarded_derivatives_dry_run",
+                "mode": "guarded_live",
+                "execution_backend": "okx",
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ["BTC-USDT-SWAP", "BTC-USDT"],
+                "smart_arbitrage_enabled": True,
+                "smart_arbitrage_negative_basis_mode": "margin_backed",
+                "smart_arbitrage_margin_short_enabled": True,
+                "smart_arbitrage_margin_short_execution_ready": True,
+                "smart_arbitrage_margin_short_spot_margin_mode": "cross",
+            },
+        )
+
+        artifacts = recovery.recover(portfolio_state=PortfolioState(initial_usdt_balance=10_000.0))
+
+        obligation = obligation_repo.get_obligation("cl_margin_backed_orphan_1")
+        self.assertIsNotNone(obligation)
+        self.assertEqual(obligation.status, "FAILED")
+        self.assertEqual(obligation.released_amount, Decimal("0.25"))
+        self.assertIn("released_orphan_obligations:1", artifacts.status.notes)
+
     def test_recovery_finalizes_active_obligation_for_terminal_order_state(self) -> None:
         execution_repo = InMemoryExecutionRepository()
         now = utc_now()

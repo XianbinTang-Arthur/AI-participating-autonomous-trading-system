@@ -224,11 +224,24 @@ class OrderManager:
                 strategy_state_phase=intent.strategy_state_phase,
                 submission_payload={},
             )
+            submit_command = None
+            if self.persistent_order_service is not None:
+                submit_command = {
+                    "command_id": new_id("cmd"),
+                    "command_type": "submit",
+                    "idempotency_key": self.persistent_order_service.submit_command_idempotency_key(intent.intent_id),
+                    "payload": self.persistent_order_service.submit_command_payload(
+                        intent=intent,
+                        client_order_id=created_state.client_order_id,
+                    ),
+                    "created_at": utc_now(),
+                }
             created_state = await self._persist_order_state(
                 order_state=created_state,
                 key=intent.symbol,
                 obligation=initial_obligation,
                 intent=intent,
+                command=submit_command,
             )
             if (
                 self.obligation_service is not None
@@ -238,10 +251,30 @@ class OrderManager:
                 self.obligation_service.persist_previewed_obligation(initial_obligation)
         self._shadow_sync_obligation(initial_obligation, reason="reservation_hold", related_fill=None)
         if self.persistent_order_service is not None:
-            self.persistent_order_service.enqueue_submit(
-                intent=intent,
-                client_order_id=created_state.client_order_id,
-            )
+            if not self._submit_command_persisted_transactionally():
+                try:
+                    self.persistent_order_service.enqueue_submit(
+                        intent=intent,
+                        client_order_id=created_state.client_order_id,
+                    )
+                except Exception as exc:
+                    failed_state = created_state.model_copy(
+                        update={
+                            "status": "FAILED",
+                            "submission_mode": "phase2_enqueue_failed",
+                            "submitted_ts": utc_now(),
+                            "last_update_ts": utc_now(),
+                            "cancel_reason": str(exc),
+                            "execution_error": str(exc),
+                        }
+                    )
+                    failed_state = await self._persist_order_state(
+                        order_state=failed_state,
+                        key=intent.symbol,
+                        obligation=self._terminal_outbox_obligation(order_state=failed_state, fills=[]),
+                    )
+                    self._finalize_obligation(order_state=failed_state)
+                    raise
             return
         await self.process_submit_command(intent=intent, client_order_id=created_state.client_order_id)
 
@@ -490,13 +523,26 @@ class OrderManager:
         key: str,
         obligation=None,
         intent: OrderIntent | None = None,
+        command: dict | None = None,
     ) -> OrderState:
         if self.execution_outbox_publisher is not None:
-            persisted = await self.execution_outbox_publisher.persist_order_state(
-                order_state=order_state,
-                key=key,
-                obligation=obligation,
-            )
+            if command is not None and self._submit_command_persisted_transactionally():
+                persisted = await self.execution_outbox_publisher.persist_order_state_and_command(
+                    order_state=order_state,
+                    key=key,
+                    obligation=obligation,
+                    command_id=str(command["command_id"]),
+                    command_type=str(command["command_type"]),
+                    command_idempotency_key=str(command["idempotency_key"]),
+                    command_payload=dict(command["payload"]),
+                    command_created_at=command["created_at"],
+                )
+            else:
+                persisted = await self.execution_outbox_publisher.persist_order_state(
+                    order_state=order_state,
+                    key=key,
+                    obligation=obligation,
+                )
             log_event(
                 self.logger,
                 "order_state_persisted",
@@ -537,6 +583,11 @@ class OrderManager:
         await self._publish_execution_error_summary(previous=previous, persisted=persisted)
         self._shadow_write_order_state(order_state=persisted, intent=intent)
         return persisted
+
+    def _submit_command_persisted_transactionally(self) -> bool:
+        if self.execution_outbox_publisher is None:
+            return False
+        return getattr(self.execution_outbox_publisher, "execution_command_repo", None) is not None
 
     async def _persist_fill(self, fill: FillEvent) -> None:
         obligation = None

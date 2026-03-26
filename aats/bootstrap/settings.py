@@ -169,6 +169,7 @@ class AATSSettings(BaseSettings):
     okx_execution_sync_interval_seconds: float = 5.0
     execution_command_flow_enabled: bool = False
     execution_command_poll_interval_seconds: float = 1.0
+    execution_command_sent_retry_after_seconds: float = 30.0
     portfolio_ledger_truth_enabled: bool = False
     recovery_reconciliation_execution_ledger_enabled: bool = False
     operator_control_plane_execution_ledger_enabled: bool = False
@@ -443,12 +444,22 @@ class AATSSettings(BaseSettings):
             return normalized
         return f"{normalized}-SWAP"
 
-    def expanded_allowed_symbols(self) -> tuple[str, ...]:
+    def decision_cycle_symbols(self) -> tuple[str, ...]:
         symbols = list(dict.fromkeys(str(item).upper() for item in self.allowed_symbols if item))
         if self.default_symbol:
             default_symbol = str(self.default_symbol).upper()
             if default_symbol not in symbols:
                 symbols.append(default_symbol)
+        return tuple(symbols)
+
+    def symbol_allowed_for_decision_cycle(self, symbol: str | None) -> bool:
+        normalized = str(symbol or "").strip().upper()
+        if not normalized:
+            return False
+        return normalized in self.decision_cycle_symbols()
+
+    def expanded_allowed_symbols(self) -> tuple[str, ...]:
+        symbols = list(self.decision_cycle_symbols())
         if not self.smart_arbitrage_enabled:
             return tuple(symbols)
         for symbol in (

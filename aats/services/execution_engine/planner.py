@@ -7,6 +7,7 @@ from aats.bootstrap.settings import AATSSettings
 from aats.bus.base import EventBus
 from aats.events import topics
 from aats.events.envelopes import publish_model
+from aats.schemas.exchange import InstrumentMetadata
 from aats.schemas.common import new_id
 from aats.schemas.execution import (
     AIExecutionParameterSuggestionEnvelope,
@@ -21,6 +22,7 @@ from aats.schemas.execution import (
     pos_side_from_position_intent,
     reduce_only_from_position_intent,
 )
+from aats.services.execution_engine.quantity_rules import minimum_internal_order_quantity, quantized_internal_quantity
 from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, to_decimal
 
 
@@ -47,6 +49,7 @@ class ExecutionPlanner:
         instrument_family: str | None = None,
         settle_currency: str | None = None,
         td_mode: str | None = None,
+        instrument_rule: InstrumentMetadata | None = None,
         required_initial_margin: Decimal | float | None = None,
         projected_margin_usage: Decimal | float | None = None,
         projected_notional: Decimal | float | None = None,
@@ -68,24 +71,35 @@ class ExecutionPlanner:
         strategy_state_phase: str | None = None,
         ai_execution_parameter_suggestion: AIExecutionParameterSuggestionEnvelope | None = None,
     ) -> ExecutionPlan | None:
-        if abs(to_decimal(delta_qty)) < EPSILON_DECIMAL_12:
+        normalized_current_position_qty = to_decimal(current_position_qty)
+        normalized_target_position_qty = to_decimal(target_position_qty)
+        normalized_approved_target_position_qty = to_decimal(approved_target_position_qty)
+        normalized_delta_qty = to_decimal(delta_qty)
+        normalized_approved_target_position_qty, normalized_delta_qty = self._normalize_delta_to_instrument_rule(
+            symbol=symbol,
+            current_position_qty=normalized_current_position_qty,
+            approved_target_position_qty=normalized_approved_target_position_qty,
+            delta_qty=normalized_delta_qty,
+            instrument_rule=instrument_rule,
+        )
+        if abs(normalized_delta_qty) < EPSILON_DECIMAL_12:
             return None
 
         normalized_urgency = urgency if urgency in {"low", "medium", "high"} else "medium"
-        side = "buy" if delta_qty > 0 else "sell"
+        side = "buy" if normalized_delta_qty > 0 else "sell"
         execution_action = self._execution_action(
-            current_position_qty=current_position_qty,
-            target_position_qty=approved_target_position_qty,
+            current_position_qty=normalized_current_position_qty,
+            target_position_qty=normalized_approved_target_position_qty,
         )
         position_intent = self._position_intent(
-            current_position_qty=current_position_qty,
-            target_position_qty=approved_target_position_qty,
+            current_position_qty=normalized_current_position_qty,
+            target_position_qty=normalized_approved_target_position_qty,
         )
         reduce_only = reduce_only_from_position_intent(position_intent)
         close_only = close_only_from_position_intent(position_intent)
         resolved_position_mode = position_mode if position_mode in {"net_mode", "long_short_mode"} else None
         resolved_td_mode = td_mode or margin_mode
-        exposure_side = self._exposure_side(approved_target_position_qty)
+        exposure_side = self._exposure_side(normalized_approved_target_position_qty)
         normalized_execution_multiplier = self._normalized_multiplier(execution_aggressiveness_multiplier)
         effective_slippage_tolerance_bps = self._effective_slippage_tolerance_bps(
             max_slippage_tolerance_bps=max_slippage_tolerance_bps,
@@ -124,10 +138,10 @@ class ExecutionPlanner:
             plan_id=new_id("plan"),
             decision_id=decision_id,
             symbol=symbol,
-            current_position_qty=current_position_qty,
-            target_position_qty=target_position_qty,
-            approved_target_position_qty=approved_target_position_qty,
-            delta_qty=delta_qty,
+            current_position_qty=normalized_current_position_qty,
+            target_position_qty=normalized_target_position_qty,
+            approved_target_position_qty=normalized_approved_target_position_qty,
+            delta_qty=normalized_delta_qty,
             side=side,
             execution_style=execution_style,
             order_type=order_type,  # type: ignore[arg-type]
@@ -188,6 +202,32 @@ class ExecutionPlanner:
             position_intent=position_intent,  # type: ignore[arg-type]
             ai_execution_parameter_suggestion=translated_suggestion,
         )
+
+    def _normalize_delta_to_instrument_rule(
+        self,
+        *,
+        symbol: str,
+        current_position_qty: Decimal,
+        approved_target_position_qty: Decimal,
+        delta_qty: Decimal,
+        instrument_rule: InstrumentMetadata | None,
+    ) -> tuple[Decimal, Decimal]:
+        if instrument_rule is None:
+            return approved_target_position_qty, delta_qty
+        normalized_delta_qty = quantized_internal_quantity(
+            symbol=symbol,
+            quantity=delta_qty,
+            instrument=instrument_rule,
+        )
+        minimum_delta_qty = minimum_internal_order_quantity(
+            symbol=symbol,
+            instrument=instrument_rule,
+        )
+        if abs(normalized_delta_qty) < EPSILON_DECIMAL_12:
+            return current_position_qty, Decimal("0")
+        if minimum_delta_qty > EPSILON_DECIMAL_12 and abs(normalized_delta_qty) + EPSILON_DECIMAL_12 < minimum_delta_qty:
+            return current_position_qty, Decimal("0")
+        return current_position_qty + normalized_delta_qty, normalized_delta_qty
 
     def build_intent(self, *, plan: ExecutionPlan) -> OrderIntent | None:
         if abs(plan.delta_qty) < EPSILON_DECIMAL_12:

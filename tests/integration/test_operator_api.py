@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 from datetime import timedelta
 from decimal import Decimal
+from urllib.parse import urlencode
 from unittest.mock import AsyncMock, Mock, patch
 
 from fastapi import FastAPI
@@ -432,6 +433,184 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertIn("has_more", blocker_history_payload)
         self.assertIn(health_payload["runtime_state"], {"healthy", "degraded", "blocked", "halted"})
 
+    async def test_dashboard_bundle_aggregates_core_and_home_panels(self) -> None:
+        runtime = await self._runtime()
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            response = client.get(
+                self._dashboard_bundle_url(
+                    view="home",
+                    panels=[
+                        "session",
+                        "authProviders",
+                        "health",
+                        "mode",
+                        "runtime",
+                        "systemRecovery",
+                        "blockerControl",
+                        "blockers",
+                        "metrics",
+                        "portfolio",
+                        "latestDecision",
+                        "executionLatest",
+                        "reconciliationLatest",
+                        "accountState",
+                    ],
+                )
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["view"], "home")
+        panel_keys = set(payload["panels"].keys())
+        self.assertTrue(
+            {
+                "session",
+                "authProviders",
+                "health",
+                "mode",
+                "runtime",
+                "systemRecovery",
+                "blockerControl",
+                "blockers",
+                "metrics",
+                "portfolio",
+                "latestDecision",
+                "executionLatest",
+                "reconciliationLatest",
+                "accountState",
+            }.issubset(panel_keys)
+        )
+        self.assertIsNone(payload["panels"]["session"]["error"])
+        self.assertIsNone(payload["panels"]["health"]["error"])
+        self.assertIn("runtime_state", payload["panels"]["health"]["data"])
+        self.assertIn("recovery", payload["panels"]["systemRecovery"]["data"])
+        self.assertIn("portfolio", payload["panels"]["portfolio"]["data"])
+
+    async def test_dashboard_bundle_keeps_session_context_when_read_access_is_denied(self) -> None:
+        runtime = await self._runtime(
+            operator_users=[("admin", "secret-pass")],
+            operator_auth_enabled=True,
+            operator_session_secret="session-secret",
+        )
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            response = client.get(
+                self._dashboard_bundle_url(
+                    view="home",
+                    panels=["session", "authProviders", "health"],
+                )
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertFalse(payload["panels"]["session"]["data"]["authenticated"])
+        self.assertTrue(payload["panels"]["authProviders"]["data"]["auth_enabled"])
+        self.assertEqual(payload["panels"]["health"]["error"], "operator_auth_required")
+        self.assertIsNone(payload["panels"]["session"]["error"])
+        self.assertIsNone(payload["panels"]["authProviders"]["error"])
+
+    async def test_dashboard_bundle_preserves_admin_panel_permissions(self) -> None:
+        runtime = await self._runtime(
+            operator_users=[("operator", "secret-pass")],
+            operator_auth_enabled=True,
+            operator_session_secret="session-secret",
+        )
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            login = client.post("/auth/login", json={"username": "operator", "password": "secret-pass"})
+            response = client.get(
+                self._dashboard_bundle_url(
+                    view="admin",
+                    panels=[
+                        "session",
+                        "authProviders",
+                        "health",
+                        "mode",
+                        "runtime",
+                        "systemRecovery",
+                        "blockerControl",
+                        "operatorUsers",
+                    ],
+                )
+            )
+
+        self.assertEqual(login.status_code, 200)
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertIsNone(payload["panels"]["health"]["error"])
+        self.assertEqual(payload["panels"]["operatorUsers"]["error"], "operator_admin_access_required")
+
+    async def test_dashboard_bundle_requires_explicit_panels(self) -> None:
+        runtime = await self._runtime()
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            response = client.get("/dashboard/bundle?view=home")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["detail"], "dashboard_bundle_panel_required")
+
+    async def test_dashboard_bundle_uses_requested_panel_list_without_duplicates(self) -> None:
+        runtime = await self._runtime()
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            response = client.get(
+                self._dashboard_bundle_url(
+                    view="risk",
+                    panels=["session", "health", "session", "metrics"],
+                )
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(list(payload["panels"].keys()), ["session", "health", "metrics"])
+        self.assertNotIn("runtime", payload["panels"])
+
+    async def test_dashboard_bundle_supports_ai_analysis_recent_panels(self) -> None:
+        runtime = await self._runtime()
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            response = client.get(
+                self._dashboard_bundle_url(
+                    view="aiAnalysis",
+                    panels=[
+                        "session",
+                        "authProviders",
+                        "health",
+                        "mode",
+                        "runtime",
+                        "systemRecovery",
+                        "blockerControl",
+                        "aiOverview",
+                        "aiRuntime",
+                        "aiLatest",
+                        "aiShadowLatest",
+                        "profileControlSummary",
+                        "aiRecent",
+                        "aiShadowRecent",
+                        "aiShadowEvaluations",
+                    ],
+                    recent_ai_assessments=5,
+                    recent_ai_shadow_decisions=6,
+                    recent_ai_shadow_evaluations=7,
+                )
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertIsNone(payload["panels"]["aiRecent"]["error"])
+        self.assertIsNone(payload["panels"]["aiShadowRecent"]["error"])
+        self.assertIsNone(payload["panels"]["aiShadowEvaluations"]["error"])
+        self.assertIn("assessments", payload["panels"]["aiRecent"]["data"])
+        self.assertIn("shadow_decisions", payload["panels"]["aiShadowRecent"]["data"])
+        self.assertIn("evaluations", payload["panels"]["aiShadowEvaluations"]["data"])
+
     async def test_derivatives_account_state_and_runtime_expose_structured_exchange_snapshots(self) -> None:
         settings = AATSSettings.model_validate(
             {
@@ -765,7 +944,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
 
                 self.assertEqual(preflight_payload["status"], "fail")
                 self.assertFalse(preflight_payload["launch_ready"])
-                self.assertTrue(any(item["check_id"] == "real_money_route_ready" and item["status"] == "fail" for item in preflight_payload["checks"]))
+                self.assertTrue(any(item["check_id"] == "real_money_route_ready" and item["status"] == "pass" for item in preflight_payload["checks"]))
                 self.assertTrue(any(item["check_id"] == "margin_buffer_safe" and item["status"] == "fail" for item in preflight_payload["checks"]))
                 self.assertEqual(run_packet_payload["status"], "critical")
                 self.assertTrue(run_packet_payload["derivatives_live_guard"]["auto_halt_required"])
@@ -1890,6 +2069,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         labels = [item["label"] for item in actions]
         self.assertIn("查看风险与恢复", labels)
         self.assertIn("查看委托与成交", labels)
+        self.assertIn("人工重置试盘守护", labels)
         self.assertIn("记录本次复盘", labels)
         self.assertIn("刷新当前状态", labels)
         self.assertNotIn("记为继续小资金试盘", labels)
@@ -3063,6 +3243,61 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         action_ids = [item["action_id"] for item in blocker_control.json()["primary_blocker"]["actions"]]
         self.assertIn("open-strategy-view", action_ids)
         self.assertIn("open-execution-view", action_ids)
+        self.assertIn("reset-trial-guard", action_ids)
+
+    async def test_operator_can_reset_trial_guard_and_then_resume(self) -> None:
+        runtime = await self._runtime(
+            trial_guard_enabled=True,
+            mode="guarded_live",
+            trial_guard_min_closed_fills=1,
+            trial_guard_lookback_fills=10,
+            trial_guard_max_consecutive_losses=1,
+        )
+        now = utc_now()
+        runtime.trial_guard_service.profitability_provider = lambda _limit: {
+            "summary": {
+                "closed_fill_count": 1,
+                "fee_to_notional_ratio": Decimal("0.0005"),
+            },
+            "recent_closed_fills": [
+                {"realized_pnl_delta": Decimal("-5"), "ingestion_timestamp": now - timedelta(minutes=5)},
+            ],
+        }
+        runtime.trial_guard_service.anomaly_provider = lambda _limit: {
+            "summary": {
+                "high_slippage_count": 0,
+                "slow_submit_to_fill_count": 0,
+            }
+        }
+        breached = runtime.trial_guard_service.evaluate_now()
+        self.assertEqual(breached["status"], "breached")
+        self.assertTrue(runtime.kill_switch.halted)
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            reset = client.post(
+                "/system/trial-review/action",
+                json={"action_type": "reset_trial_guard", "reason": "test_trial_guard_manual_reset"},
+            )
+            resumed = client.post("/system/resume", json={"reason": "operator_resume_after_trial_guard_reset"})
+            trial_guard = client.get("/system/trial-guard")
+            history = client.get("/reports/trial-review-history?limit=5").json()
+
+        self.assertEqual(reset.status_code, 200)
+        reset_payload = reset.json()
+        self.assertEqual(reset_payload["action"], "trial_guard_manual_reset")
+        self.assertEqual(reset_payload["details"]["trial_review_action_type"], "reset_trial_guard")
+        self.assertEqual(reset_payload["details"]["trial_guard_status_before"], "breached")
+        self.assertEqual(reset_payload["details"]["trial_guard_status_after"], "warming_up")
+        self.assertEqual(resumed.status_code, 200)
+        self.assertIn(resumed.json()["status"], {"resumed", "already_resumed"})
+        self.assertFalse(resumed.json()["halted"])
+        self.assertEqual(trial_guard.status_code, 200)
+        trial_guard_payload = trial_guard.json()
+        self.assertEqual(trial_guard_payload["status"], "warming_up")
+        self.assertTrue(trial_guard_payload["manual_reset_active"])
+        self.assertFalse(trial_guard_payload["hard_stop"]["active"])
+        self.assertTrue(any(item["selected_action"] == "reset_trial_guard" for item in history["actions"]))
 
     async def test_system_health_reports_reconciliation_staleness_consistently(self) -> None:
         runtime = await self._runtime()
@@ -5761,6 +5996,33 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["detail"], "rebaseline_not_supported_for_runtime_profile")
+
+    @staticmethod
+    def _dashboard_bundle_url(
+        *,
+        view: str,
+        panels: list[str],
+        recent_decisions: int = 8,
+        recent_orders: int = 8,
+        recent_fills: int = 8,
+        recent_ai_assessments: int = 8,
+        recent_ai_shadow_decisions: int = 8,
+        recent_ai_shadow_evaluations: int = 8,
+    ) -> str:
+        query = urlencode(
+            [
+                ("view", view),
+                ("recentDecisions", str(recent_decisions)),
+                ("recentOrders", str(recent_orders)),
+                ("recentFills", str(recent_fills)),
+                ("recentAIAssessments", str(recent_ai_assessments)),
+                ("recentAIShadowDecisions", str(recent_ai_shadow_decisions)),
+                ("recentAIShadowEvaluations", str(recent_ai_shadow_evaluations)),
+                *[("panel", panel) for panel in panels],
+            ],
+            doseq=True,
+        )
+        return f"/dashboard/bundle?{query}"
 
     async def _runtime(self, operator_users: list[tuple[str, str]] | None = None, **overrides):
         settings = AATSSettings.model_validate(

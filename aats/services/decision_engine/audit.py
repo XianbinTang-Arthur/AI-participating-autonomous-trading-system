@@ -241,7 +241,20 @@ class DecisionAuditService:
     def _existing_record(self, decision_id: str) -> DecisionAuditRecord:
         record = self.audit_repo.get(decision_id)
         if record is None:
-            raise RuntimeError(f"Audit record missing for decision_id={decision_id}")
+            record = DecisionAuditRecord(
+                decision_id=decision_id,
+                decision_context_ref=f"synthetic_execution_seed:{decision_id}",
+            )
+            self.audit_repo.upsert(record)
+            log_event(
+                self.logger,
+                "decision_audit_synthetic_seeded",
+                level="warning",
+                **correlation_fields(
+                    decision_id=decision_id,
+                    reason="missing_audit_record_seeded_from_execution_flow",
+                ),
+            )
         return record
 
     async def _update_decision_record(self, *, message: dict, ref_field: str) -> None:

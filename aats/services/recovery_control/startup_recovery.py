@@ -58,13 +58,16 @@ class ExecutionLedgerRecoveryService:
         recovered_order_count = base_status.recovered_order_count
         open_order_count = base_status.open_order_count
         pending_command_count = 0
+        stranded_submit_order_count = 0
         if self.execution_order_repo is not None:
             count_orders = getattr(self.execution_order_repo, "count_orders", None)
             open_orders = getattr(self.execution_order_repo, "open_orders", None)
             if callable(count_orders):
                 recovered_order_count = max(recovered_order_count, int(count_orders()))
             if callable(open_orders):
-                open_order_count = max(open_order_count, len(open_orders()))
+                scoped_open_orders = list(open_orders())
+                open_order_count = max(open_order_count, len(scoped_open_orders))
+                stranded_submit_order_count = self._stranded_submit_order_count(scoped_open_orders)
         if self.execution_command_repo is not None:
             pending_commands = getattr(self.execution_command_repo, "pending_commands", None)
             if callable(pending_commands):
@@ -123,6 +126,18 @@ class ExecutionLedgerRecoveryService:
                 resume_blocked_reasons.append("pending_execution_commands")
             notes.append(f"pending_execution_commands:{pending_command_count}")
 
+        if stranded_submit_order_count:
+            self.kill_switch.halt(reason="phase4_created_orders_missing_submit_commands")
+            safe_startup = False
+            safe_to_trade = False
+            resume_eligible = False
+            rebaseline_available = True
+            recovery_state = "resume_blocked"
+            recovery_action = recovery_action or "halted_created_orders_missing_submit_commands"
+            if "created_orders_missing_submit_commands" not in resume_blocked_reasons:
+                resume_blocked_reasons.append("created_orders_missing_submit_commands")
+            notes.append(f"created_orders_missing_submit_commands:{stranded_submit_order_count}")
+
         latest_snapshot = latest_snapshot_for_scope(self.portfolio_repo, self.runtime_scope)
         return base_status.model_copy(
             update={
@@ -154,3 +169,24 @@ class ExecutionLedgerRecoveryService:
                 "notes": list(dict.fromkeys(notes)),
             }
         )
+
+    def _stranded_submit_order_count(self, open_orders: list[dict]) -> int:
+        if self.execution_command_repo is None:
+            return 0
+        get_by_idempotency_key = getattr(self.execution_command_repo, "get_by_idempotency_key", None)
+        if not callable(get_by_idempotency_key):
+            return 0
+        stranded = 0
+        for row in open_orders:
+            state = str(row.get("state") or "").upper()
+            if state not in {"CREATED", "SUBMITTING"}:
+                continue
+            if row.get("venue_order_id"):
+                continue
+            intent_id = str(row.get("intent_id") or "")
+            if not intent_id:
+                stranded += 1
+                continue
+            if get_by_idempotency_key(f"submit:{intent_id}") is None:
+                stranded += 1
+        return stranded

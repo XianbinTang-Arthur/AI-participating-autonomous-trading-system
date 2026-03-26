@@ -237,7 +237,7 @@ class OKXRESTClient:
         )
 
     async def get_instruments(self, *, symbols: tuple[str, ...] | None = None) -> dict[str, Any]:
-        inst_types = (
+        inst_types = list(
             tuple(
                 dict.fromkeys(
                     inst_type
@@ -247,6 +247,11 @@ class OKXRESTClient:
             )
             or self._inst_types()
         )
+        if self.settings.trading_product_type == "derivatives":
+            for inst_type in OKX_DERIVATIVES_INST_TYPES:
+                if inst_type not in inst_types:
+                    inst_types.append(inst_type)
+        inst_types = tuple(inst_types)
         if len(inst_types) == 1:
             return await self.request(
                 method="GET",

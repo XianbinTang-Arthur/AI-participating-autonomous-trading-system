@@ -1,5 +1,6 @@
 ﻿import { fetchPanels, requestJson } from "./modules/api-client.js";
 import { notice, pill, primaryStatusPanel } from "./modules/components.js";
+import { fetchDashboardBundle } from "./modules/api-client.js";
 import {
   emptyState,
   formatMaybeTimestamp,
@@ -15,7 +16,7 @@ import {
   buildReconciliationDrawer,
 } from "./modules/detail-drawers.js";
 import { buildPhase1ShadowDrawer } from "./modules/shadow-drawer.js";
-import { AUTO_REFRESH_MS, CORE_SPECS, DEFAULT_PAGE_LIMITS, PAGE_LOAD_STEP, createState, viewBackgroundSpecs, viewSpecs } from "./modules/store.js";
+import { AUTO_REFRESH_MS, CORE_SPECS, DEFAULT_PAGE_LIMITS, PAGE_LOAD_STEP, createState, viewSpecs } from "./modules/store.js";
 import {
   localizeError,
   operationalStatusCopy,
@@ -26,6 +27,7 @@ import {
   toneForRuntimeState,
   tradingStatusLabel,
 } from "./modules/terms.js";
+import { buildDashboardBundlePath } from "./modules/store.js";
 import { renderAIAnalysisView } from "./modules/views/ai-analysis-view.js";
 import { renderAIConfigView } from "./modules/views/ai-config-view.js";
 import { renderAdminView } from "./modules/views/admin-view.js";
@@ -173,6 +175,7 @@ function bindEvents() {
     if (!event.persisted) return;
     setActiveView(resolveViewFromLocation(), { refresh: true });
   });
+  document.addEventListener("visibilitychange", handleVisibilityChange);
 
   nodes.refreshButton?.addEventListener("click", () => void refreshDashboard({ manual: true }));
   nodes.resumeButton?.addEventListener("click", () => void triggerResume(nodes.resumeButton));
@@ -208,6 +211,10 @@ function bindEvents() {
 }
 
 async function refreshDashboard({ manual = false } = {}) {
+  if (!manual && document.visibilityState !== "visible") {
+    cancelScheduledRefresh();
+    return;
+  }
   if (state.actionInFlight && !manual) {
     state.pendingRefresh = true;
     return;
@@ -217,18 +224,12 @@ async function refreshDashboard({ manual = false } = {}) {
     return;
   }
   const refreshingView = state.activeView;
-  const backgroundGeneration = (state.backgroundGenerations[refreshingView] || 0) + 1;
-  state.backgroundGenerations[refreshingView] = backgroundGeneration;
   cancelScheduledRefresh();
   state.refreshing = true;
   renderShell();
   try {
-    const specs = dedupeSpecs([...CORE_SPECS, ...viewSpecs(refreshingView, state)]);
-    const results = await fetchPanels(specs);
-    for (const [key, result] of Object.entries(results)) {
-      state.data[key] = result.data;
-      state.errors[key] = result.error;
-    }
+    const results = await fetchDashboardBundle(buildDashboardBundlePath(refreshingView, state));
+    applyPanelResults(results);
     state.readyViews[refreshingView] = true;
     if (shouldRedirectToLogin()) {
       window.location.replace("/login");
@@ -238,7 +239,6 @@ async function refreshDashboard({ manual = false } = {}) {
     if (manual) {
       state.flash = { tone: "info", message: "页面数据已刷新。" };
     }
-    void refreshBackgroundPanels(refreshingView, backgroundGeneration);
   } finally {
     state.refreshing = false;
     if (state.loadingView === refreshingView) {
@@ -254,17 +254,11 @@ async function refreshDashboard({ manual = false } = {}) {
   }
 }
 
-async function refreshBackgroundPanels(view, generation) {
-  const specs = dedupeSpecs(viewBackgroundSpecs(view, state));
-  if (!specs.length) return;
-  const results = await fetchPanels(specs);
-  if (state.activeView !== view) return;
-  if ((state.backgroundGenerations[view] || 0) !== generation) return;
-  for (const [key, result] of Object.entries(results)) {
+function applyPanelResults(results) {
+  for (const [key, result] of Object.entries(results || {})) {
     state.data[key] = result.data;
     state.errors[key] = result.error;
   }
-  renderShell();
 }
 
 function renderShell() {
@@ -743,6 +737,12 @@ async function recordTrialReviewAction(actionType, target = null) {
       successMessage: "已记录本次试盘复盘摘要。",
       pendingLabel: "正在记录复盘摘要…",
       confirmMessage: "",
+    },
+    reset_trial_guard: {
+      reason: "ui_trial_guard_manual_reset",
+      successMessage: "已重置试盘守护，新的试盘样本窗口会从本次操作后重新开始。",
+      pendingLabel: "正在重置试盘守护…",
+      confirmMessage: "确认人工重置试盘守护吗？这会清空当前试盘守护的历史观察窗口，但系统仍会保持暂停，后续还需要你手动恢复自动运行。",
     },
     continue_small_capital: {
       reason: "ui_trial_review_continue_small_capital",
@@ -1451,7 +1451,21 @@ function scheduleRefresh() {
   cancelScheduledRefresh();
   if (state.actionInFlight) return;
   if (nodes.autoRefreshToggle && !nodes.autoRefreshToggle.checked) return;
+  if (document.visibilityState !== "visible") return;
   state.refreshTimer = window.setTimeout(() => void refreshDashboard(), AUTO_REFRESH_MS);
+}
+
+function handleVisibilityChange() {
+  if (document.visibilityState !== "visible") {
+    cancelScheduledRefresh();
+    return;
+  }
+  if (nodes.autoRefreshToggle && !nodes.autoRefreshToggle.checked) return;
+  if (state.refreshing) {
+    state.pendingRefresh = true;
+    return;
+  }
+  void refreshDashboard();
 }
 
 function defaultBlockerActionReason(actionId) {
@@ -1529,15 +1543,6 @@ function closeDrawer() {
   nodes.detailDrawer.classList.remove("is-open");
   nodes.detailDrawer.setAttribute("aria-hidden", "true");
   nodes.drawerBackdrop.hidden = true;
-}
-
-function dedupeSpecs(specs) {
-  const seen = new Set();
-  return specs.filter(([key]) => {
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
 }
 
 function patchRenderedSections(sections, containerGetter, fallbackRenderer) {

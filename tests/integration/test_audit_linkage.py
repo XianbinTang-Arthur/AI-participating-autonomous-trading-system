@@ -19,12 +19,19 @@ class TestAuditLinkage(unittest.IsolatedAsyncioTestCase):
                 "storage_mode": "memory",
                 "event_persistence_mode": "strict",
                 "enabled_decision_timeframes": ("15m",),
+                "default_symbol": "BTC-USDT",
+                "allowed_symbols": ("BTC-USDT", "ETH-USDT"),
             }
         )
         runtime = await build_runtime(settings)
 
         await runtime.market_gateway.run_local_publisher(
-            symbol=settings.default_symbol,
+            symbol="BTC-USDT",
+            iterations=6,
+            interval_seconds=0.0,
+        )
+        await runtime.market_gateway.run_local_publisher(
+            symbol="ETH-USDT",
             iterations=6,
             interval_seconds=0.0,
         )

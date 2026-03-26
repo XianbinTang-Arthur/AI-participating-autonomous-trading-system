@@ -11,13 +11,14 @@ from aats.services.runtime_scope import infer_product_type_from_symbol
 
 def envelope_scope_metadata(envelope: EventEnvelope) -> dict[str, str | None]:
     payload = envelope.payload
-    symbol = _string(payload.get("symbol"))
+    details = payload.get("details") if isinstance(payload.get("details"), dict) else {}
+    symbol = _string(payload.get("symbol")) or _string(details.get("symbol"))
     timeframe = _string(payload.get("timeframe"))
-    product_type = _product_type(payload.get("product_type"))
-    margin_mode = _margin_mode(payload.get("margin_mode"))
+    product_type = _product_type(payload.get("product_type")) or _product_type(details.get("product_type"))
+    margin_mode = _margin_mode(payload.get("margin_mode")) or _margin_mode(details.get("margin_mode"))
 
     if symbol is None:
-        symbol = _first_string(payload.get("allowed_symbols"))
+        symbol = _first_string(payload.get("allowed_symbols")) or _first_string(details.get("allowed_symbols"))
 
     if product_type is None and symbol is not None:
         product_type = infer_product_type_from_symbol(symbol)

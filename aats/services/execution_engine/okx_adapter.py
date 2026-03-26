@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Callable
 from datetime import datetime, timezone
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal
 from typing import Any
 
 from aats.bootstrap.settings import AATSSettings
@@ -22,6 +22,7 @@ from aats.schemas.execution import (
 from aats.schemas.exchange import ExchangeAccountSnapshot, ExchangeFill, ExchangePosition, InstrumentMetadata
 from aats.services.execution_engine.exchange_adapter import ExchangeAdapter
 from aats.services.execution_engine.okx_account import OKXAccountService, datetime_from_ms
+from aats.services.execution_engine.quantity_rules import exchange_quantity_from_internal, round_down_to_step
 from aats.services.execution_engine.okx_rest import OKXRESTClient, OKXRequestError, infer_okx_derivatives_inst_type
 from aats.services.governance_engine.health import SystemHealthService
 from aats.services.governance_engine.mode import RuntimeModeController
@@ -113,16 +114,11 @@ class OKXOrderPayloadBuilder:
 
     @staticmethod
     def _exchange_quantity(*, intent: OrderIntent, instrument: InstrumentMetadata) -> Decimal:
-        if intent.product_type != "derivatives":
-            return intent.quantity
-        instrument_type = str(getattr(instrument, "instrument_type", "") or "").upper()
-        inferred_inst_type = infer_okx_derivatives_inst_type(intent.symbol)
-        if instrument_type not in {"SWAP", "FUTURES"} and inferred_inst_type not in {"SWAP", "FUTURES"}:
-            return intent.quantity
-        contract_value = max(instrument.contract_value, Decimal("0"))
-        if contract_value <= 0:
-            return intent.quantity
-        return intent.quantity / contract_value
+        return exchange_quantity_from_internal(
+            symbol=intent.symbol,
+            quantity=intent.quantity,
+            instrument=instrument,
+        )
 
     def _rounded_exchange_quantity(
         self,
@@ -139,22 +135,13 @@ class OKXOrderPayloadBuilder:
 
     @staticmethod
     def _client_order_id(intent: OrderIntent) -> str:
-        sanitized = "".join(
-            ch for ch in intent.idempotency_key if ch.isascii() and ch.isalnum()
-        )
-        if not sanitized:
-            sanitized = "".join(
-                ch for ch in new_id("okx") if ch.isascii() and ch.isalnum()
-            )
-        digest = hashlib.sha256(sanitized.encode("utf-8")).hexdigest()
+        raw_key = str(intent.idempotency_key or intent.intent_id or f"{intent.decision_id}:{intent.symbol}")
+        digest = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
         return f"cl{digest[:30]}"
 
     @staticmethod
     def _round_down(*, value: Decimal, step: Decimal) -> Decimal:
-        if step <= 0:
-            return value
-        ratio = value / step
-        return ratio.quantize(Decimal("1"), rounding=ROUND_DOWN) * step
+        return round_down_to_step(value=value, step=step)
 
     @staticmethod
     def _render_decimal(value: Decimal) -> str:

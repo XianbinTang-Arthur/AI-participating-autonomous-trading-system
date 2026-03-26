@@ -4,11 +4,29 @@ import unittest
 from decimal import Decimal
 
 from aats.bootstrap.settings import AATSSettings
+from aats.schemas.exchange import InstrumentMetadata
 from aats.schemas.execution import AIExecutionParameterSuggestionEnvelope, ExecutionParameterSuggestion, ExecutionPlan
 from aats.services.execution_engine.planner import ExecutionPlanner
 
 
 class TestExecutionPlanner(unittest.TestCase):
+    @staticmethod
+    def _swap_instrument() -> InstrumentMetadata:
+        return InstrumentMetadata(
+            instrument_id="BTC-USDT-SWAP",
+            symbol="BTC-USDT-SWAP",
+            base_currency="BTC",
+            quote_currency="USDT",
+            lot_size=Decimal("0.01"),
+            tick_size=Decimal("0.1"),
+            min_size=Decimal("0.01"),
+            contract_value=Decimal("0.01"),
+            instrument_type="SWAP",
+            instrument_family="BTC-USDT",
+            settle_currency="USDT",
+            state="live",
+        )
+
     def test_build_plan_exposes_abstract_execution_action_for_scale_in(self) -> None:
         planner = ExecutionPlanner(settings=AATSSettings.model_validate({}))
 
@@ -368,6 +386,53 @@ class TestExecutionPlanner(unittest.TestCase):
         self.assertEqual(plan.ai_execution_parameter_suggestion.suggestion.slice_count, 2)
         self.assertEqual(plan.ai_execution_parameter_suggestion.suggestion.max_participation_rate, Decimal("0.2"))
         self.assertEqual(plan.ai_execution_parameter_suggestion.suggestion.cancel_replace_patience_ms, 2000)
+
+    def test_build_plan_skips_derivatives_delta_below_exchange_minimum_trade_quantity(self) -> None:
+        planner = ExecutionPlanner(settings=AATSSettings.model_validate({}))
+
+        plan = planner.build_plan(
+            decision_id="decision_below_min_trade_qty",
+            symbol="BTC-USDT-SWAP",
+            current_position_qty=Decimal("0.000300000000"),
+            target_position_qty=Decimal("0.000264674954"),
+            approved_target_position_qty=Decimal("0.000264674954"),
+            delta_qty=Decimal("-0.000035325046"),
+            urgency="medium",
+            max_slippage_tolerance_bps=25,
+            product_type="derivatives",
+            margin_mode="cross",
+            instrument_rule=self._swap_instrument(),
+        )
+
+        self.assertIsNone(plan)
+
+    def test_build_plan_quantizes_derivatives_delta_to_exchange_step_before_intent(self) -> None:
+        planner = ExecutionPlanner(settings=AATSSettings.model_validate({}))
+
+        plan = planner.build_plan(
+            decision_id="decision_quantized_trade_qty",
+            symbol="BTC-USDT-SWAP",
+            current_position_qty=Decimal("0"),
+            target_position_qty=Decimal("0.000235"),
+            approved_target_position_qty=Decimal("0.000235"),
+            delta_qty=Decimal("0.000235"),
+            urgency="medium",
+            max_slippage_tolerance_bps=25,
+            product_type="derivatives",
+            margin_mode="cross",
+            instrument_rule=self._swap_instrument(),
+        )
+
+        self.assertIsNotNone(plan)
+        assert plan is not None
+        self.assertEqual(plan.delta_qty, Decimal("0.0002"))
+        self.assertEqual(plan.approved_target_position_qty, Decimal("0.0002"))
+
+        intent = planner.build_intent(plan=plan)
+
+        self.assertIsNotNone(intent)
+        assert intent is not None
+        self.assertEqual(intent.quantity, Decimal("0.0002"))
 
 
 if __name__ == "__main__":

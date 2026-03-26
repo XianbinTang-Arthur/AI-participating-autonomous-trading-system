@@ -64,6 +64,7 @@ class TrialReviewRecordRequest(BaseModel):
 class TrialReviewActionRequest(BaseModel):
     action_type: Literal[
         "review_snapshot",
+        "reset_trial_guard",
         "continue_small_capital",
         "shrink_trial",
         "pause_trial",

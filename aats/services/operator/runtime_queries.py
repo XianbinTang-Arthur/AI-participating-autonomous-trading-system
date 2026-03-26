@@ -14,6 +14,24 @@ class RuntimeQueryFacade:
     def __init__(self, owner: "OperatorQueryService") -> None:
         self.owner = owner
 
+    def _control_plane_consistency(self) -> dict[str, Any]:
+        phase5_enabled = bool(self.owner._phase5_control_plane_enabled())
+        financial_convergence_enabled = bool(self.owner.runtime.settings.financial_convergence_mode_enabled)
+        warnings: list[str] = []
+        status = "converged"
+        if phase5_enabled and not financial_convergence_enabled:
+            status = "transitional"
+            warnings.append("phase5_control_plane_running_without_financial_convergence")
+        if not phase5_enabled and self.owner.runtime.settings.portfolio_ledger_truth_enabled:
+            status = "transitional"
+            warnings.append("portfolio_ledger_truth_enabled_without_phase5_control_plane")
+        return {
+            "status": status,
+            "warning_codes": warnings,
+            "phase5_enabled": phase5_enabled,
+            "financial_convergence_mode_enabled": financial_convergence_enabled,
+        }
+
     def ai_runtime(self) -> dict[str, Any]:
         status = dict(self.owner.runtime.ai_service.status())
         legacy_modes = {
@@ -320,6 +338,7 @@ class RuntimeQueryFacade:
             projection_key="portfolio_replay",
             scope=self.owner.state_scope,
         )
+        control_plane_consistency = self._control_plane_consistency()
         now = utc_now()
         return {
             "runtime_profile": self.owner.runtime.runtime_profile.to_dict(),
@@ -409,13 +428,15 @@ class RuntimeQueryFacade:
                 "snapshot": account_baseline,
             },
             "control_plane": {
-                "phase5_enabled": self.owner._phase5_control_plane_enabled(),
-                "order_truth_source": "execution_order_repo" if self.owner._phase5_control_plane_enabled() else "execution_repo",
-                "fill_truth_source": "execution_fill_repo_v2" if self.owner._phase5_control_plane_enabled() else "execution_repo",
-                "balance_truth_source": "ledger_accounts" if self.owner._phase5_control_plane_enabled() else "portfolio_snapshot",
-                "legacy_layer_authoritative": not self.owner._phase5_control_plane_enabled(),
+                "phase5_enabled": control_plane_consistency["phase5_enabled"],
+                "order_truth_source": "execution_order_repo" if control_plane_consistency["phase5_enabled"] else "execution_repo",
+                "fill_truth_source": "execution_fill_repo_v2" if control_plane_consistency["phase5_enabled"] else "execution_repo",
+                "balance_truth_source": "ledger_accounts" if control_plane_consistency["phase5_enabled"] else "portfolio_snapshot",
+                "legacy_layer_authoritative": not control_plane_consistency["phase5_enabled"],
                 "auth_hardened": self.owner.runtime.settings.operator_control_plane_execution_ledger_enabled,
-                "financial_convergence_mode_enabled": self.owner.runtime.settings.financial_convergence_mode_enabled,
+                "financial_convergence_mode_enabled": control_plane_consistency["financial_convergence_mode_enabled"],
+                "truth_consistency_status": control_plane_consistency["status"],
+                "consistency_warning_codes": control_plane_consistency["warning_codes"],
             },
             "trial_guard": self.owner.trial_guard(),
             "margin_buffer_overview": self.owner.margin_buffer_risk(),

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from datetime import timedelta
 from threading import Lock
 from typing import Any
 
@@ -20,10 +21,14 @@ class ExecutionCommandProcessor:
         execution_command_repo: ExecutionCommandRepository,
         submit_executor: SubmitExecutor,
         cancel_executor: CancelExecutor,
+        can_execute_command: Callable[[dict[str, Any]], bool] | None = None,
+        sent_retry_after_seconds: float = 0.0,
     ) -> None:
         self.execution_command_repo = execution_command_repo
         self.submit_executor = submit_executor
         self.cancel_executor = cancel_executor
+        self.can_execute_command = can_execute_command or (lambda _command: True)
+        self.sent_retry_after_seconds = max(0.0, float(sent_retry_after_seconds))
         self.logger = get_logger("aats.execution_control.command_service")
         self._lock = Lock()
         self._attempt_count = 0
@@ -36,10 +41,30 @@ class ExecutionCommandProcessor:
         self._last_error = None
 
     async def process_pending(self, *, limit: int = 20) -> int:
-        commands = self.execution_command_repo.pending_commands(limit=limit)
+        sent_stale_before = utc_now() - timedelta(seconds=self.sent_retry_after_seconds)
+        commands = self.execution_command_repo.pending_commands(limit=limit, sent_stale_before=sent_stale_before)
         processed = 0
         for command in commands:
-            await self._process_command(command)
+            command_type = str(command.get("command_type") or "")
+            command_state = str(command.get("state") or "PENDING").upper()
+            # A submit command that was already marked SENT is ambiguous: the venue may have
+            # accepted it while the local runtime crashed before ack. Do not blindly replay it.
+            if command_type == "submit" and command_state != "PENDING":
+                continue
+            if not self.can_execute_command(command):
+                continue
+            claimed_at = utc_now()
+            if not self.execution_command_repo.claim_command(
+                command_id=str(command["command_id"]),
+                expected_state=command_state,
+                expected_updated_at=command["updated_at"],
+                updated_at=claimed_at,
+            ):
+                continue
+            claimed = dict(command)
+            claimed["state"] = "SENT"
+            claimed["updated_at"] = claimed_at
+            await self._process_command(claimed)
             processed += 1
         return processed
 
@@ -66,8 +91,6 @@ class ExecutionCommandProcessor:
     async def _process_command(self, command: dict[str, Any]) -> None:
         command_id = str(command["command_id"])
         command_type = str(command["command_type"])
-        now = utc_now()
-        self.execution_command_repo.mark_sent(command_id, updated_at=now)
         with self._lock:
             self._attempt_count += 1
         try:

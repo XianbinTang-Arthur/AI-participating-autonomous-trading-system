@@ -13,7 +13,7 @@ from aats.schemas.execution import FillEvent, OrderObligation, OrderState
 from aats.schemas.reconciliation import ReconciliationReport
 from aats.schemas.system import RecoveryStatus
 from aats.services.accounting import remaining_obligation_amount
-from aats.services.execution_engine.bundle_recovery import scoped_bundle_recovery_assessment
+from aats.services.execution_engine.bundle_recovery import obligation_matches_scope, scoped_bundle_recovery_assessment
 from aats.services.execution_engine.fill_ordering import fill_processing_sort_key
 from aats.services.governance_engine.kill_switch import KillSwitch
 from aats.services.governance_engine.runtime_layers import RecoveryPolicy
@@ -394,21 +394,7 @@ class ExecutionRecoveryService:
     def _scoped_active_obligations(self) -> list[OrderObligation]:
         obligations: list[OrderObligation] = []
         for obligation in self.obligation_repo.active_obligations():
-            if self.runtime_scope.product_type == "derivatives" and obligation.strategy_family == "smart_arbitrage":
-                if obligation.product_type == "spot":
-                    if obligation.margin_mode != "cash":
-                        continue
-                else:
-                    if obligation.product_type != self.runtime_scope.product_type:
-                        continue
-                    if obligation.margin_mode != self.runtime_scope.margin_mode:
-                        continue
-            else:
-                if obligation.product_type != self.runtime_scope.product_type:
-                    continue
-                if obligation.margin_mode != self.runtime_scope.margin_mode:
-                    continue
-            if self.runtime_scope.allowed_symbols and obligation.symbol not in self.runtime_scope.allowed_symbols:
+            if not obligation_matches_scope(obligation, self.runtime_scope):
                 continue
             obligations.append(obligation)
         return obligations

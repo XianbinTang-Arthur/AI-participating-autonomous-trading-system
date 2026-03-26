@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Callable
 
@@ -11,6 +11,7 @@ from aats.events.envelopes import build_envelope
 from aats.schemas.common import utc_now
 from aats.schemas.operator import ExecutionErrorSummary, ProcessingFailureRecord
 from aats.services.governance_engine.kill_switch import KillSwitch
+from aats.services.runtime_scope import event_matches_scope, runtime_state_scope
 
 
 def _to_decimal(value: Any) -> Decimal | None:
@@ -22,6 +23,23 @@ def _to_decimal(value: Any) -> Decimal | None:
         return None
 
 
+def _coerce_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value.astimezone(timezone.utc) if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+    if isinstance(value, str):
+        normalized = value.strip()
+        if not normalized:
+            return None
+        if normalized.endswith("Z"):
+            normalized = normalized[:-1] + "+00:00"
+        try:
+            parsed = datetime.fromisoformat(normalized)
+        except ValueError:
+            return None
+        return parsed.astimezone(timezone.utc) if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+    return None
+
+
 @dataclass(slots=True)
 class ForwardTrialGuardService:
     settings: Any
@@ -31,19 +49,40 @@ class ForwardTrialGuardService:
     profitability_provider: Callable[[int], dict[str, Any]]
     anomaly_provider: Callable[[int], dict[str, Any]]
     last_snapshot: dict[str, Any] = field(default_factory=dict)
+    manual_reset_after: datetime | None = None
 
     def snapshot(self) -> dict[str, Any]:
         if not self.last_snapshot:
             return self._base_snapshot(status="idle")
         return dict(self.last_snapshot)
 
+    def manual_reset(self, *, effective_after: datetime | None = None) -> dict[str, Any]:
+        self.manual_reset_after = effective_after or utc_now()
+        self.last_snapshot = {}
+        return self.evaluate_now()
+
+    def preview_manual_reset(self, *, effective_after: datetime | None = None) -> dict[str, Any]:
+        return self._evaluate(manual_reset_after_override=effective_after or utc_now(), persist=False)
+
     def evaluate_now(self) -> dict[str, Any]:
+        return self._evaluate(manual_reset_after_override=None, persist=True)
+
+    def _evaluate(
+        self,
+        *,
+        manual_reset_after_override: datetime | None,
+        persist: bool,
+    ) -> dict[str, Any]:
         if not self.settings.trial_guard_enabled:
-            self.last_snapshot = self._base_snapshot(status="disabled")
-            return dict(self.last_snapshot)
+            snapshot = self._base_snapshot(status="disabled")
+            if persist:
+                self.last_snapshot = snapshot
+            return dict(snapshot)
         if not self._trial_observation_active():
-            self.last_snapshot = self._base_snapshot(status="inactive_for_runtime")
-            return dict(self.last_snapshot)
+            snapshot = self._base_snapshot(status="inactive_for_runtime")
+            if persist:
+                self.last_snapshot = snapshot
+            return dict(snapshot)
 
         lookback = max(int(self.settings.trial_guard_lookback_fills), 1)
         profitability = self.profitability_provider(lookback)
@@ -52,6 +91,24 @@ class ForwardTrialGuardService:
         recent_realized_events = list(profitability.get("recent_realized_events") or [])
         summary = dict(profitability.get("summary") or {})
         anomaly_summary = dict(anomalies.get("summary") or {})
+        anomaly_rows = list(anomalies.get("rows") or [])
+        manual_reset_after = self._effective_manual_reset_cutoff(manual_reset_after_override=manual_reset_after_override)
+        if manual_reset_after is not None:
+            recent_rows = self._filter_rows_after(
+                recent_rows,
+                cutoff=manual_reset_after,
+                timestamp_keys=("ingestion_timestamp", "exchange_fill_timestamp"),
+            )
+            recent_realized_events = self._filter_rows_after(
+                recent_realized_events,
+                cutoff=manual_reset_after,
+                timestamp_keys=("event_timestamp",),
+            )
+            anomaly_rows = self._filter_rows_after(
+                anomaly_rows,
+                cutoff=manual_reset_after,
+                timestamp_keys=("ingestion_timestamp", "exchange_fill_timestamp"),
+            )
         now = utc_now()
         daily_cutoff = now - timedelta(hours=24)
 
@@ -60,8 +117,8 @@ class ForwardTrialGuardService:
         consecutive_losses = 0
         for row in recent_rows:
             pnl = _to_decimal(row.get("realized_pnl_delta")) or Decimal("0")
-            observed_at = row.get("ingestion_timestamp") or row.get("exchange_fill_timestamp")
-            if isinstance(observed_at, datetime) and observed_at >= daily_cutoff:
+            observed_at = _coerce_datetime(row.get("ingestion_timestamp") or row.get("exchange_fill_timestamp"))
+            if observed_at is not None and observed_at >= daily_cutoff:
                 daily_trading_net_realized += pnl
             if pnl < Decimal("0"):
                 consecutive_losses += 1
@@ -71,16 +128,25 @@ class ForwardTrialGuardService:
         for row in recent_realized_events:
             if str(row.get("event_kind") or "") != "funding_fee":
                 continue
-            observed_at = row.get("event_timestamp")
-            if isinstance(observed_at, datetime) and observed_at >= daily_cutoff:
+            observed_at = _coerce_datetime(row.get("event_timestamp"))
+            if observed_at is not None and observed_at >= daily_cutoff:
                 daily_funding_fee_net += _to_decimal(row.get("funding_fee_delta")) or Decimal("0")
 
         daily_combined_net_realized = daily_trading_net_realized + daily_funding_fee_net
 
-        fill_count = int(summary.get("closed_fill_count") or 0)
-        fee_ratio = _to_decimal(summary.get("fee_to_notional_ratio"))
-        high_slippage_count = int(anomaly_summary.get("high_slippage_count") or 0)
-        slow_submit_to_fill_count = int(anomaly_summary.get("slow_submit_to_fill_count") or 0)
+        fill_count = len(recent_rows) if manual_reset_after is not None else int(summary.get("closed_fill_count") or 0)
+        if manual_reset_after is not None:
+            fee_ratio = self._fee_to_notional_ratio(recent_rows)
+            high_slippage_count = sum(
+                1 for row in anomaly_rows if "high_adverse_slippage" in list(row.get("anomaly_flags") or [])
+            )
+            slow_submit_to_fill_count = sum(
+                1 for row in anomaly_rows if "slow_submit_to_fill" in list(row.get("anomaly_flags") or [])
+            )
+        else:
+            fee_ratio = _to_decimal(summary.get("fee_to_notional_ratio"))
+            high_slippage_count = int(anomaly_summary.get("high_slippage_count") or 0)
+            slow_submit_to_fill_count = int(anomaly_summary.get("slow_submit_to_fill_count") or 0)
         high_slippage_ratio = None if fill_count == 0 else round(high_slippage_count / fill_count, 6)
         slow_submit_to_fill_ratio = None if fill_count == 0 else round(slow_submit_to_fill_count / fill_count, 6)
 
@@ -139,6 +205,7 @@ class ForwardTrialGuardService:
         if (
             not breaches
             and fill_count >= int(self.settings.trial_guard_min_closed_fills)
+            and manual_reset_after is None
             and (previous_status == "breached" or kill_switch_reason == "trial_guard_threshold_breached")
         ):
             status = "recovered"
@@ -146,6 +213,8 @@ class ForwardTrialGuardService:
         recommended_action = (
             "先核对最近成交、费用拖累和试盘守护阈值命中情况，再决定何时恢复自动运行。"
             if breaches
+            else "试盘守护已人工重置，当前先用更小样本重新观察，再决定是否恢复放量。"
+            if manual_reset_after is not None
             else "继续保持小资金试盘，观察收益、费用和滑点是否稳定。"
         )
 
@@ -162,14 +231,81 @@ class ForwardTrialGuardService:
             slow_submit_to_fill_ratio=slow_submit_to_fill_ratio,
             breaches=breaches,
             recommended_action=recommended_action,
+            manual_reset_after=manual_reset_after,
         )
-        if breaches:
+        if breaches and persist:
             snapshot["halted"] = True
             self._trigger_halt(snapshot)
         else:
             snapshot["halted"] = self.kill_switch.halted and self.kill_switch.status().get("reason") == "trial_guard_threshold_breached"
-        self.last_snapshot = snapshot
+        if persist:
+            self.last_snapshot = snapshot
         return dict(snapshot)
+
+    def _effective_manual_reset_cutoff(self, *, manual_reset_after_override: datetime | None = None) -> datetime | None:
+        latest_recorded = self._latest_manual_reset_cutoff()
+        local_cutoff = manual_reset_after_override if manual_reset_after_override is not None else self.manual_reset_after
+        if latest_recorded is None:
+            return local_cutoff
+        if local_cutoff is None:
+            return latest_recorded
+        return max(latest_recorded, local_cutoff)
+
+    def _latest_manual_reset_cutoff(self) -> datetime | None:
+        events = self._operator_action_events()
+        if not events:
+            return None
+        for item in reversed(events):
+            payload = getattr(item, "payload", None)
+            if not isinstance(payload, dict):
+                continue
+            if str(payload.get("action") or "") != "trial_guard_manual_reset":
+                continue
+            details = dict(payload.get("details") or {})
+            cutoff = _coerce_datetime(details.get("effective_after"))
+            if cutoff is not None:
+                return cutoff
+            return _coerce_datetime(payload.get("created_at"))
+        return None
+
+    def _operator_action_events(self) -> list[Any]:
+        by_topic_scoped = getattr(self.event_store, "by_topic_scoped", None)
+        if callable(by_topic_scoped):
+            try:
+                return list(by_topic_scoped(topics.OPERATOR_ACTIONS, scope=runtime_state_scope(self.settings)))
+            except Exception:
+                pass
+        by_topic = getattr(self.event_store, "by_topic", None)
+        if not callable(by_topic):
+            return []
+        scope = runtime_state_scope(self.settings)
+        return [item for item in by_topic(topics.OPERATOR_ACTIONS) if event_matches_scope(item, scope)]
+
+    @staticmethod
+    def _filter_rows_after(
+        rows: list[dict[str, Any]],
+        *,
+        cutoff: datetime,
+        timestamp_keys: tuple[str, ...],
+    ) -> list[dict[str, Any]]:
+        filtered: list[dict[str, Any]] = []
+        for row in rows:
+            observed_at = None
+            for key in timestamp_keys:
+                observed_at = _coerce_datetime(row.get(key))
+                if observed_at is not None:
+                    break
+            if observed_at is not None and observed_at >= cutoff:
+                filtered.append(row)
+        return filtered
+
+    @staticmethod
+    def _fee_to_notional_ratio(rows: list[dict[str, Any]]) -> Decimal | None:
+        total_fees = sum((_to_decimal(item.get("fee_amount")) or Decimal("0")) for item in rows)
+        total_notional = sum((_to_decimal(item.get("fill_notional")) or Decimal("0")) for item in rows)
+        if abs(total_notional) <= Decimal("1e-12"):
+            return None
+        return total_fees / total_notional
 
     def _trial_observation_active(self) -> bool:
         mode = str(getattr(self.settings, "mode", "") or "").lower()
@@ -244,6 +380,7 @@ class ForwardTrialGuardService:
         slow_submit_to_fill_ratio: float | None = None,
         breaches: list[dict[str, Any]] | None = None,
         recommended_action: str | None = None,
+        manual_reset_after: datetime | None = None,
     ) -> dict[str, Any]:
         normalized_breaches = [self._breach_detail(item) for item in breaches or []]
         hard_stop_active = bool(normalized_breaches)
@@ -293,6 +430,8 @@ class ForwardTrialGuardService:
                 "max_high_slippage_ratio": self.settings.trial_guard_max_high_slippage_ratio,
                 "max_slow_submit_to_fill_ratio": self.settings.trial_guard_max_slow_submit_to_fill_ratio,
             },
+            "manual_reset_active": manual_reset_after is not None,
+            "manual_reset_effective_after": manual_reset_after,
             "recommended_action": recommended_action,
             "last_evaluated_at": utc_now(),
             "summary": self._summary(status=status, fill_count=fill_count, breaches=normalized_breaches),

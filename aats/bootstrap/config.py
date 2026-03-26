@@ -150,6 +150,7 @@ from aats.storage.session import (
     apply_current_migrations,
     create_database_runtime,
     create_schema,
+    scoped_runtime_lock_key,
     validate_runtime_schema,
 )
 from aats.schemas.system import RecoveryStatus
@@ -830,7 +831,12 @@ def build_storage_backends(settings: AATSSettings) -> StorageBackends:
     apply_current_migrations(database_runtime)
     validate_runtime_schema(database_runtime)
     if settings.database_single_runtime_guard_enabled:
-        database_runtime.acquire_single_runtime_lock(settings.database_runtime_lock_key)
+        database_runtime.acquire_single_runtime_lock(
+            scoped_runtime_lock_key(
+                database_url=settings.database_url,
+                base_lock_key=settings.database_runtime_lock_key,
+            )
+        )
 
     execution_order_repo = PostgresExecutionOrderRepository(database_runtime.session_factory)
     execution_order_history_repo = PostgresExecutionOrderHistoryRepository(database_runtime.session_factory)
@@ -1149,6 +1155,7 @@ def _build_position_target_handler(
                 if account_configuration is None
                 else account_configuration.position_mode
             ),
+            instrument_rule=instrument_rule,
             instrument_family=(
                 None
                 if instrument_rule is None
@@ -1946,7 +1953,20 @@ async def build_runtime(
         orchestrator=decision_engine,
         market_gateway=market_gateway,
         policy=decision_trigger_policy,
-        can_trigger=lambda *, symbol: (not kill_switch.halted, "kill_switch_active" if kill_switch.halted else "ready"),
+        can_trigger=lambda *, symbol: (
+            False,
+            "kill_switch_active",
+        )
+        if kill_switch.halted
+        else (
+            True,
+            "ready",
+        )
+        if runtime_settings.symbol_allowed_for_decision_cycle(symbol)
+        else (
+            False,
+            "symbol_not_enabled_for_decision_cycle",
+        ),
     )
     audit_service = DecisionAuditService(bus=bus, audit_repo=storage.audit_repo)
 
@@ -1996,6 +2016,13 @@ async def build_runtime(
             obligation_repo=storage.obligation_repo,
             outbox_repo=storage.outbox_repo,
             bus=bus,
+            execution_command_repo=(
+                storage.execution_command_repo
+                if isinstance(storage.execution_command_repo, PostgresExecutionCommandRepository)
+                else None
+            ),
+            execution_order_repo=storage.execution_order_repo,
+            execution_order_history_repo=storage.execution_order_history_repo,
         )
     if (
         storage.database_runtime is not None
@@ -2045,6 +2072,11 @@ async def build_runtime(
             cancel_executor=lambda client_order_id: order_manager.process_cancel_command(
                 client_order_id=client_order_id,
             ),
+            can_execute_command=lambda command: (
+                str(command.get("command_type") or "").lower() != "submit"
+                or not kill_switch.halted
+            ),
+            sent_retry_after_seconds=runtime_settings.execution_command_sent_retry_after_seconds,
         )
 
     portfolio_state = PortfolioState(

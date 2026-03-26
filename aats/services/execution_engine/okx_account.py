@@ -22,7 +22,8 @@ from aats.schemas.exchange import (
 )
 from aats.services.execution_engine.okx_private_websocket import OKXPrivateWebSocketClient
 from aats.services.execution_engine.okx_bills import enrich_okx_bill_category
-from aats.services.execution_engine.okx_rest import OKXRESTClient, infer_okx_derivatives_inst_type
+from aats.services.execution_engine.okx_rest import OKXRESTClient
+from aats.services.execution_engine.quantity_rules import internal_quantity_from_exchange
 from aats.services.portfolio_service.decimals import to_decimal
 from aats.services.strategy_engines.smart_arbitrage.pair_registry import load_pair_definitions
 
@@ -1254,15 +1255,11 @@ class OKXAccountService:
         quantity: Decimal,
         instrument_map: dict[str, InstrumentMetadata],
     ) -> Decimal:
-        instrument = instrument_map.get(symbol)
-        instrument_type = str(getattr(instrument, "instrument_type", "") or "").upper()
-        inferred_inst_type = infer_okx_derivatives_inst_type(symbol)
-        if instrument is None or (instrument_type not in {"SWAP", "FUTURES"} and inferred_inst_type not in {"SWAP", "FUTURES"}):
-            return quantity
-        contract_value = max(instrument.contract_value, Decimal("0"))
-        if contract_value <= 0:
-            return quantity
-        return quantity * contract_value
+        return internal_quantity_from_exchange(
+            symbol=symbol,
+            quantity=quantity,
+            instrument=instrument_map.get(symbol),
+        )
 
     @staticmethod
     def _instrument_currencies(row: dict[str, Any]) -> tuple[str, str]:

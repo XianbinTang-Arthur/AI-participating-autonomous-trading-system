@@ -58,6 +58,8 @@ class DecisionContextBuilder:
     ) -> DecisionContext:
         if timeframe not in self.settings.supported_timeframes:
             raise ValueError(f"Unsupported timeframe: {timeframe}")
+        if not self.settings.symbol_allowed_for_decision_cycle(symbol):
+            raise ValueError(f"symbol_not_enabled_for_decision_cycle:{symbol}")
 
         market_event = self.event_store.latest(topics.MARKET_SNAPSHOTS, key=symbol)
         feature_event = self.event_store.latest(topics.FEATURE_SNAPSHOTS, key=symbol)

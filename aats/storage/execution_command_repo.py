@@ -23,7 +23,17 @@ class ExecutionCommandRepository(Protocol):
     def get_by_idempotency_key(self, idempotency_key: str) -> dict | None:
         ...
 
-    def pending_commands(self, *, limit: int) -> list[dict]:
+    def pending_commands(self, *, limit: int, sent_stale_before: datetime | None = None) -> list[dict]:
+        ...
+
+    def claim_command(
+        self,
+        *,
+        command_id: str,
+        expected_state: str,
+        expected_updated_at: datetime,
+        updated_at: datetime,
+    ) -> bool:
         ...
 
     def mark_sent(self, command_id: str, updated_at: datetime) -> None:

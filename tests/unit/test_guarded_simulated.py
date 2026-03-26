@@ -678,6 +678,59 @@ class TestGuardedSimulatedExecution(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("_", payload["clOrdId"])
         self.assertNotEqual(payload["clOrdId"], f"cl{intent.idempotency_key}".replace("_", "")[:32])
 
+    def test_okx_client_order_id_is_stable_for_non_ascii_idempotency_keys(self) -> None:
+        intent = make_intent().model_copy(update={"idempotency_key": "套利-测试-01"})
+        builder = OKXOrderPayloadBuilder()
+
+        first = builder.build(
+            intent=intent,
+            instrument=InstrumentMetadata(
+                instrument_id="BTC-USDT",
+                symbol="BTC-USDT",
+                base_currency="BTC",
+                quote_currency="USDT",
+                lot_size=0.0001,
+                tick_size=0.1,
+                min_size=0.0001,
+                state="live",
+            ),
+        )["clOrdId"]
+        second = builder.build(
+            intent=intent,
+            instrument=InstrumentMetadata(
+                instrument_id="BTC-USDT",
+                symbol="BTC-USDT",
+                base_currency="BTC",
+                quote_currency="USDT",
+                lot_size=0.0001,
+                tick_size=0.1,
+                min_size=0.0001,
+                state="live",
+            ),
+        )["clOrdId"]
+
+        self.assertEqual(first, second)
+        self.assertTrue(first.isalnum())
+        self.assertLessEqual(len(first), 32)
+
+    def test_okx_client_order_id_does_not_alias_distinct_sanitized_keys(self) -> None:
+        builder = OKXOrderPayloadBuilder()
+        instrument = InstrumentMetadata(
+            instrument_id="BTC-USDT",
+            symbol="BTC-USDT",
+            base_currency="BTC",
+            quote_currency="USDT",
+            lot_size=0.0001,
+            tick_size=0.1,
+            min_size=0.0001,
+            state="live",
+        )
+
+        payload_a = builder.build(intent=make_intent().model_copy(update={"idempotency_key": "ab"}), instrument=instrument)
+        payload_b = builder.build(intent=make_intent().model_copy(update={"idempotency_key": "a-b"}), instrument=instrument)
+
+        self.assertNotEqual(payload_a["clOrdId"], payload_b["clOrdId"])
+
     def test_spot_margin_close_payload_includes_reduce_only(self) -> None:
         intent = OrderIntent(
             intent_id="intent_spot_margin_close",

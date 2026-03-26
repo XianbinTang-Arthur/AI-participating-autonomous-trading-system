@@ -90,7 +90,7 @@ function renderManualOperatingModePanel({ runtime = {}, canAdmin = false }) {
   ).join("");
 
   return surfaceCard({
-    title: "AI 策略模式",
+    title: "运行模式切换",
     kicker: "交易决策入口",
     copy: "这里决定最终下单前由谁拍板：完全按基础策略、让 AI 辅助判断，还是直接由 AI 参与决策。配置文件只负责设默认值，你仍可在这里临时切换。",
     content: `
@@ -164,8 +164,8 @@ function renderProfileControlPanel({
   ).join("");
 
   return surfaceCard({
-    title: "AI 换档控制",
-    kicker: "档位决定权",
+    title: "自动换档控制",
+    kicker: "策略档位切换",
     copy: "这里决定 6 个策略档位是交给系统自动切换，还是由你手动固定。自动切档开启时，下方 6 个档位按钮会锁定；切回手动后才能再次点击。",
     actions: renderProfileControlModeActions({ canAdmin, autoEnabled }),
     content: `

@@ -592,6 +592,16 @@ class BlockerControlService:
                     expected_effect="切到委托与成交页，优先核对最近成交、手续费、滑点和成交链路是否符合预期。",
                 ),
                 BlockerActionDefinition(
+                    action_id="reset-trial-guard",
+                    label="人工重置试盘守护",
+                    kind="client",
+                    method="CLIENT",
+                    client_action="record-trial-review-action",
+                    value="reset_trial_guard",
+                    tone="warning",
+                    expected_effect="在确认这次硬停机已经完成复盘后，把试盘守护切回新的观察窗口；系统仍会保持暂停，后续还需要人工点击恢复。",
+                ),
+                BlockerActionDefinition(
                     action_id="refresh-dashboard",
                     label="刷新当前状态",
                     kind="client",
@@ -922,7 +932,7 @@ class BlockerControlService:
                 hard_stop.get("summary")
                 or breach_summary
                 or "最近一轮小资金试盘已经命中试盘守护硬停机阈值，系统会自动暂停，避免继续扩大风险。",
-                "当试盘守护仍处于 breached 时，即使手动点击恢复，后台轮询也会再次把系统停回去。",
+                "当试盘守护仍处于 breached 时，即使手动点击恢复，后台轮询也会再次把系统停回去；如果确认要重新开始采样，应先人工重置试盘守护。",
                 recovery_summary
                 or "先查看试盘审查和最近成交，确认触发阈值为什么命中，以及这些条件是否已经自然解除。",
             )

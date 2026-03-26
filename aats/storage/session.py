@@ -145,6 +145,27 @@ class DatabaseRuntime:
         self.engine.dispose()
 
 
+def scoped_runtime_lock_key(*, database_url: str, base_lock_key: int) -> int:
+    parsed = make_url(database_url)
+    query = dict(parsed.query)
+    options = str(query.get("options") or "")
+    search_path = "public"
+    for token in options.split():
+        if not token.startswith("-csearch_path="):
+            continue
+        candidate = token.split("=", 1)[1].strip()
+        if candidate:
+            search_path = candidate
+        break
+    seed = (
+        f"{int(base_lock_key)}|{parsed.drivername}|{parsed.host or ''}|{parsed.port or ''}|"
+        f"{parsed.database or ''}|{search_path}"
+    )
+    digest = hashlib.sha256(seed.encode("utf-8")).digest()
+    derived = int.from_bytes(digest[:8], byteorder="big", signed=False) & ((1 << 63) - 1)
+    return derived or int(base_lock_key)
+
+
 def create_database_runtime(database_url: str) -> DatabaseRuntime:
     parsed_url = make_url(database_url)
     if parsed_url.get_backend_name() != "postgresql":

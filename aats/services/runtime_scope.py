@@ -422,10 +422,11 @@ def _event_matches_scope(event: Any, scope: RuntimeStateScope) -> bool:
     payload = getattr(event, "payload", None)
     if not isinstance(payload, dict):
         return False
-    symbol = payload.get("symbol")
-    allowed_symbols = payload.get("allowed_symbols")
-    product_type = payload.get("product_type")
-    margin_mode = payload.get("margin_mode")
+    details = payload.get("details") if isinstance(payload.get("details"), dict) else {}
+    symbol = payload.get("symbol") or details.get("symbol")
+    allowed_symbols = payload.get("allowed_symbols") or details.get("allowed_symbols")
+    product_type = payload.get("product_type") or details.get("product_type")
+    margin_mode = payload.get("margin_mode") or details.get("margin_mode")
     strategy_family = payload.get("strategy_family")
     if product_type is None and isinstance(symbol, str):
         product_type = infer_product_type_from_symbol(symbol)

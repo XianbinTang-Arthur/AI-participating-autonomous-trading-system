@@ -10,10 +10,16 @@ from aats.bus.memory_bus import InMemoryEventBus
 from aats.events import topics
 from aats.events.envelopes import build_envelope
 from aats.schemas.common import EventEnvelope
-from aats.schemas.execution import FillEvent, OrderObligation, OrderState
+from aats.schemas.execution import FillEvent, OrderIntent, OrderObligation, OrderState
 from aats.schemas.operator import ExecutionErrorSummary
+from aats.services.execution_control.order_service import ExecutionOrderService
 from aats.storage.event_store_postgres import PostgresEventStore
 from aats.storage.base import ExecutionRepository
+from aats.storage.execution_command_repo_postgres import PostgresExecutionCommandRepository
+from aats.storage.execution_order_repo_postgres import (
+    PostgresExecutionOrderHistoryRepository,
+    PostgresExecutionOrderRepository,
+)
 from aats.storage.obligation_repo_postgres import PostgresExecutionObligationRepository
 from aats.storage.outbox_repo_postgres import PostgresOutboxRepository
 
@@ -27,6 +33,9 @@ class PostgresExecutionOutboxPublisher:
     obligation_repo: PostgresExecutionObligationRepository
     outbox_repo: PostgresOutboxRepository
     bus: InMemoryEventBus
+    execution_command_repo: PostgresExecutionCommandRepository | None = None
+    execution_order_repo: PostgresExecutionOrderRepository | None = None
+    execution_order_history_repo: PostgresExecutionOrderHistoryRepository | None = None
     logger: Any = field(init=False)
 
     def __post_init__(self) -> None:
@@ -53,6 +62,98 @@ class PostgresExecutionOutboxPublisher:
             session.commit()
         await self.flush_pending()
         return persisted
+
+    async def persist_order_state_and_command(
+        self,
+        *,
+        order_state: OrderState,
+        key: str,
+        command_id: str,
+        command_type: str,
+        command_idempotency_key: str,
+        command_payload: dict[str, Any],
+        command_created_at,
+        obligation: OrderObligation | None = None,
+    ) -> OrderState:
+        if self.execution_command_repo is None:
+            return await self.persist_order_state(order_state=order_state, key=key, obligation=obligation)
+        with self.session_factory() as session:
+            persisted, previous = self.execution_repo.save_order_state_in_session(session, order_state)  # type: ignore[attr-defined]
+            self._ensure_execution_order_row(
+                session,
+                order_state=persisted,
+                command_type=command_type,
+                command_payload=command_payload,
+            )
+            if obligation is not None:
+                self.obligation_repo.save_obligation_in_session(session, obligation)
+            envelopes = [self._order_update_envelope(key=key, persisted=persisted)]
+            summary = self._execution_error_summary(previous=previous, persisted=persisted)
+            if summary is not None:
+                envelopes.append(summary)
+            for envelope in envelopes:
+                self.event_store.append_in_session(session, envelope)
+                self.outbox_repo.enqueue_in_session(session, envelope)
+            self.execution_command_repo.enqueue_command_in_session(
+                session,
+                command_id=command_id,
+                order_id=persisted.client_order_id,
+                command_type=command_type,
+                idempotency_key=command_idempotency_key,
+                payload=command_payload,
+                created_at=command_created_at,
+            )
+            session.commit()
+        await self.flush_pending()
+        return persisted
+
+    def _ensure_execution_order_row(
+        self,
+        session: Session,
+        *,
+        order_state: OrderState,
+        command_type: str | None = None,
+        command_payload: dict[str, Any] | None = None,
+    ) -> None:
+        if self.execution_order_repo is None:
+            return
+        existing = self.execution_order_repo.get_order_by_client_order_id_in_session(
+            session,
+            order_state.client_order_id,
+            for_update=True,
+        )
+        if existing is not None:
+            return
+        intent = self._seed_intent_from_command_payload(command_type=command_type, command_payload=command_payload)
+        if intent is None:
+            intent = ExecutionOrderService._intent_from_order_state(order_state)
+        created_at = order_state.created_at
+        self.execution_order_repo.create_order_in_session(
+            session,
+            order_id=order_state.client_order_id,
+            intent=intent,
+            initial_state=order_state.status,
+            created_at=created_at,
+            raw_payload={
+                "client_order_id": order_state.client_order_id,
+                "venue_order_id": order_state.exchange_order_id,
+                "source_system": order_state.submission_mode or "execution_outbox_publisher",
+                "intent": intent.model_dump(mode="python"),
+                "order_state": order_state.model_dump(mode="python"),
+            },
+        )
+        if self.execution_order_history_repo is not None:
+            self.execution_order_history_repo.append_transition_in_session(
+                session,
+                order_id=order_state.client_order_id,
+                from_state=None,
+                to_state=order_state.status,
+                reason_code="execution_outbox_seed",
+                source="execution_outbox",
+                source_message_id=order_state.intent_id,
+                payload=order_state.model_dump(mode="python"),
+                created_at=created_at,
+            )
 
     async def persist_fill(
         self,
@@ -104,6 +205,23 @@ class PostgresExecutionOutboxPublisher:
                 )
                 if status != "FAILED":
                     break
+
+    @staticmethod
+    def _seed_intent_from_command_payload(
+        *,
+        command_type: str | None,
+        command_payload: dict[str, Any] | None,
+    ) -> OrderIntent | None:
+        if str(command_type or "").lower() != "submit":
+            return None
+        payload = dict(command_payload or {})
+        intent_payload = payload.get("intent")
+        if not isinstance(intent_payload, dict):
+            return None
+        try:
+            return OrderIntent.model_validate(intent_payload)
+        except Exception:
+            return None
 
     @staticmethod
     def _order_update_envelope(*, key: str, persisted: OrderState) -> EventEnvelope:

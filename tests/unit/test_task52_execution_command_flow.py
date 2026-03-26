@@ -61,9 +61,36 @@ class _InMemoryExecutionCommandRepository:
                 return deepcopy(row)
         return None
 
-    def pending_commands(self, *, limit: int) -> list[dict]:
-        claimable = [row for row in self.rows.values() if row["state"] in {"PENDING", "SENT"}]
+    def pending_commands(self, *, limit: int, sent_stale_before: datetime | None = None) -> list[dict]:
+        claimable = []
+        for row in self.rows.values():
+            if row["state"] == "PENDING":
+                claimable.append(row)
+                continue
+            if row["state"] != "SENT":
+                continue
+            if sent_stale_before is None or row["updated_at"] <= sent_stale_before:
+                claimable.append(row)
         return [deepcopy(row) for row in claimable[:limit]]
+
+    def claim_command(
+        self,
+        *,
+        command_id: str,
+        expected_state: str,
+        expected_updated_at: datetime,
+        updated_at: datetime,
+    ) -> bool:
+        row = self.rows.get(command_id)
+        if row is None:
+            return False
+        if row["state"] != expected_state or row["updated_at"] != expected_updated_at:
+            return False
+        row["state"] = "SENT"
+        row["attempt_count"] += 1
+        row["updated_at"] = updated_at
+        row["last_error"] = None
+        return True
 
     def mark_sent(self, command_id: str, updated_at: datetime) -> None:
         row = self.rows[command_id]
@@ -274,7 +301,7 @@ class TestTask52ExecutionCommandFlow(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state.status, "FILLED")
         self.assertEqual(len(manager.execution_repo.fills()), 1)
 
-    async def test_phase2_sent_submit_command_is_idempotently_acked_when_order_already_terminal(self) -> None:
+    async def test_phase2_sent_submit_command_is_not_replayed_after_claim_ambiguity(self) -> None:
         command_repo = _InMemoryExecutionCommandRepository()
         intent = _intent(suffix="phase2_replay")
         command_repo.enqueue_command(
@@ -332,9 +359,45 @@ class TestTask52ExecutionCommandFlow(unittest.IsolatedAsyncioTestCase):
 
         processed = await processor.process_pending()
 
-        self.assertEqual(processed, 1)
+        self.assertEqual(processed, 0)
         self.assertEqual(adapter.submit_count, 0)
-        self.assertEqual(command_repo.get_command("cmd_phase2_replay")["state"], "ACKED")
+        self.assertEqual(command_repo.get_command("cmd_phase2_replay")["state"], "SENT")
+
+    async def test_phase2_sent_cancel_command_can_be_retried(self) -> None:
+        command_repo = _InMemoryExecutionCommandRepository()
+        adapter = _SubmittedThenCanceledAdapter()
+        manager = OrderManager(
+            settings=AATSSettings.model_validate({"execution_command_flow_enabled": True}),
+            bus=InMemoryEventBus(event_store=InMemoryEventStore(), persistence_mode="strict"),
+            adapter=adapter,
+            execution_repo=InMemoryExecutionRepository(),
+            persistent_order_service=ExecutionOrderService(execution_command_repo=command_repo),
+            kill_switch=KillSwitch(),
+        )
+        processor = ExecutionCommandProcessor(
+            execution_command_repo=command_repo,
+            submit_executor=lambda next_intent, client_order_id=None: manager.process_submit_command(
+                intent=next_intent,
+                client_order_id=client_order_id,
+            ),
+            cancel_executor=lambda client_order_id: manager.process_cancel_command(client_order_id=client_order_id),
+        )
+        intent = _intent(suffix="phase2_sent_cancel")
+
+        await manager.handle_order_intent(_intent_message(intent))
+        await processor.process_pending()
+        await manager.cancel_order("clphase2_sent_cancel")
+
+        cancel_command = command_repo.get_by_idempotency_key("cancel:clphase2_sent_cancel")
+        self.assertIsNotNone(cancel_command)
+        assert cancel_command is not None
+        command_repo.mark_sent(str(cancel_command["command_id"]), updated_at=utc_now())
+
+        processed = await processor.process_pending()
+
+        self.assertEqual(processed, 1)
+        self.assertEqual(adapter.cancel_count, 1)
+        self.assertEqual(command_repo.get_by_idempotency_key("cancel:clphase2_sent_cancel")["state"], "ACKED")
 
     async def test_phase2_cancel_command_is_enqueued_then_applied_by_command_processor(self) -> None:
         command_repo = _InMemoryExecutionCommandRepository()

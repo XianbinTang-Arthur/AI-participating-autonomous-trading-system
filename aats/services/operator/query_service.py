@@ -4980,6 +4980,7 @@ class OperatorQueryService:
         hard_stop = self._trial_guard_hard_stop_payload(trial_guard)
         if hard_stop.get("active"):
             action_items.append("当前已触发试盘守护硬停机，先确认触发阈值为什么命中，再决定是否恢复自动运行。")
+            action_items.append("如果确认要重新开始采样，应先人工重置试盘守护，再手动恢复自动运行。")
         if scaling_readiness == "approve_scale_up":
             action_items.append("最近多个验证周期表现稳定，可以发起下一档资金量的人工评审，但仍要保持 guarded_live 约束。")
         elif scaling_readiness == "continue_small_capital":
@@ -5023,6 +5024,13 @@ class OperatorQueryService:
                         "value": "execution",
                         "tone": "ghost",
                         "category": "navigate",
+                    },
+                    {
+                        "label": "人工重置试盘守护",
+                        "client_action": "record-trial-review-action",
+                        "value": "reset_trial_guard",
+                        "tone": "warning",
+                        "category": "record",
                     },
                     {
                         "label": "记录本次复盘",
@@ -5092,6 +5100,7 @@ class OperatorQueryService:
         )
         label_map = {
             "review_snapshot": "记录本次复盘",
+            "reset_trial_guard": "人工重置试盘守护",
             "continue_small_capital": "继续小资金试盘",
             "shrink_trial": "缩小试盘规模",
             "pause_trial": "暂停试盘并复盘",
@@ -5120,7 +5129,7 @@ class OperatorQueryService:
         )
         for item in reversed(actions):
             action = str(item.payload.get("action") or "")
-            if action not in {"trial_review_snapshot", "capital_scale_review"}:
+            if action not in {"trial_review_snapshot", "capital_scale_review", "trial_guard_manual_reset"}:
                 continue
             payload = self.payload(item)
             if payload is None:
@@ -5136,7 +5145,7 @@ class OperatorQueryService:
         rows: list[dict[str, Any]] = []
         for item in reversed(actions):
             action = str(item.payload.get("action") or "")
-            if action not in {"trial_review_snapshot", "capital_scale_review"}:
+            if action not in {"trial_review_snapshot", "capital_scale_review", "trial_guard_manual_reset"}:
                 continue
             payload = self.payload(item)
             if payload is None:
@@ -5405,6 +5414,13 @@ class OperatorQueryService:
                 window_days=window_days,
                 period_count=period_count,
             )
+        if action_type == "reset_trial_guard":
+            return self.record_trial_guard_manual_reset(
+                reason=reason,
+                actor_role=actor_role,
+                actor_identity=actor_identity,
+                auth_source=auth_source,
+            )
         return self.record_capital_scale_review(
             verdict=action_type,
             reason=reason,
@@ -5414,6 +5430,74 @@ class OperatorQueryService:
             window_days=window_days,
             period_count=period_count,
         )
+
+    def record_trial_guard_manual_reset(
+        self,
+        *,
+        reason: str,
+        actor_role: OperatorRole,
+        actor_identity: str | None = None,
+        auth_source: AuthSource = "anonymous",
+    ) -> dict[str, Any]:
+        service = getattr(self.runtime, "trial_guard_service", None)
+        if service is None or not hasattr(service, "manual_reset") or not hasattr(service, "snapshot"):
+            raise ValueError("trial_guard_not_configured")
+        before = service.snapshot()
+        if str(before.get("status") or "").lower() != "breached":
+            raise ValueError("trial_guard_reset_not_required")
+        recovery_before = self.recovery_view()["recovery_state"]
+        effective_after = utc_now()
+        preview_reset = getattr(service, "preview_manual_reset", None)
+        after_preview = (
+            preview_reset(effective_after=effective_after)
+            if callable(preview_reset)
+            else {
+                "status": "warming_up",
+                "hard_stop": {"active": False},
+                "breaches": [],
+            }
+        )
+        action = OperatorActionRecord(
+            action="trial_guard_manual_reset",
+            actor_role=actor_role,
+            actor_identity=actor_identity,
+            auth_source=auth_source,
+            reason=reason,
+            status="reset_recorded",
+            recovery_state_before=recovery_before,
+            recovery_state_after=None,
+            details={
+                "trial_review_action_type": "reset_trial_guard",
+                "summary": "人工重置试盘守护，新的试盘样本窗口会从本次操作后重新开始。",
+                "effective_after": effective_after,
+                "product_type": self.state_scope.product_type,
+                "margin_mode": self.state_scope.margin_mode,
+                "allowed_symbols": list(self.state_scope.allowed_symbols),
+                "trial_guard_status_before": before.get("status"),
+                "trial_guard_status_after": after_preview.get("status"),
+                "trial_guard_hard_stop_before": before.get("hard_stop"),
+                "trial_guard_hard_stop_after": after_preview.get("hard_stop"),
+                "breaches_before": list(before.get("breaches") or []),
+                "breaches_after": list(after_preview.get("breaches") or []),
+                "recorded_at": utc_now(),
+            },
+        )
+        envelope = self._append_event(
+            topic=topics.OPERATOR_ACTIONS,
+            key="trial_guard",
+            payload_model=action,
+        )
+        after = service.manual_reset(effective_after=effective_after)
+        self._invalidate_cache()
+        recovery_after = self.recovery_view()["recovery_state"]
+        payload = action.model_dump(mode="json")
+        payload["recovery_state_after"] = recovery_after
+        payload["details"]["trial_guard_status_after"] = after.get("status")
+        payload["details"]["trial_guard_hard_stop_after"] = after.get("hard_stop")
+        payload["details"]["breaches_after"] = list(after.get("breaches") or [])
+        payload["_event_id"] = envelope.event_id
+        payload["_topic"] = envelope.topic
+        return payload
 
     def record_capital_scale_review(
         self,
