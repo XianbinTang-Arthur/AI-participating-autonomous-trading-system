@@ -56,6 +56,22 @@ class TestTargetPositionEngine(unittest.TestCase):
         self.assertGreater(abs(aggressive_target.target_position_qty), abs(conservative_target.target_position_qty))
         self.assertGreater(conservative_target.target_position_qty, 0.0)
 
+    def test_baseline_target_qty_does_not_reapply_volatility_scale(self) -> None:
+        engine = TargetPositionEngine(settings=AATSSettings.model_validate({"default_order_qty": 0.001}))
+
+        low_vol_target = engine.build(
+            self._context(),
+            self._baseline(volatility_target_scale=0.6, suggested_position_scale=0.35),
+            self._ai_assessment(),
+        )
+        high_vol_target = engine.build(
+            self._context(),
+            self._baseline(volatility_target_scale=1.0, suggested_position_scale=0.35),
+            self._ai_assessment(),
+        )
+
+        self.assertEqual(low_vol_target.target_position_qty, high_vol_target.target_position_qty)
+
     def test_rebalance_band_keeps_existing_position_when_delta_is_tiny(self) -> None:
         engine = TargetPositionEngine(settings=AATSSettings.model_validate({"default_order_qty": 0.001}))
         context = self._context(current_position_qty=0.00039)

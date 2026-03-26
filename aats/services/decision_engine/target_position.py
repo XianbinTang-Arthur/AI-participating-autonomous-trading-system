@@ -510,9 +510,9 @@ class TargetPositionEngine:
 
     def _baseline_target_qty(self, *, baseline: BaselineAssessment, product_type: str) -> Decimal:
         scale = to_decimal(self._clamp(baseline.suggested_position_scale, 0.0, 1.0))
-        target_qty = self._qty_from_bias(baseline.direction_bias, product_type=product_type) * scale
-        target_qty *= self._volatility_target_multiplier(baseline)
-        return target_qty
+        # FeatureCalculator already applies volatility_target_scale when computing
+        # suggested_position_scale. Reapplying it here would shrink exposure twice.
+        return self._qty_from_bias(baseline.direction_bias, product_type=product_type) * scale
 
     def _volatility_target_multiplier(self, baseline: BaselineAssessment) -> Decimal:
         floor = to_decimal(self.settings.strategy_volatility_target_scale_floor)
