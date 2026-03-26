@@ -111,6 +111,10 @@ class ExecutionObligationService:
             allocation_id=intent.allocation_id,
             strategy_bundle_id=intent.strategy_bundle_id,
             strategy_leg_role=intent.strategy_leg_role,
+            strategy_pair_id=intent.strategy_pair_id,
+            strategy_opportunity_kind=intent.strategy_opportunity_kind,
+            strategy_execution_mode=intent.strategy_execution_mode,
+            strategy_state_phase=intent.strategy_state_phase,
             reference_price=reference_price,
             last_update_ts=utc_now(),
         )
@@ -196,6 +200,8 @@ class ExecutionObligationService:
                 if quote_currency is None or reserved_amount is None or reserved_amount <= Decimal("0"):
                     return None, Decimal("0"), reference_price
                 return quote_currency, reserved_amount, reference_price
+            if self._is_margin_backed_smart_arbitrage_spot_short(intent=intent):
+                return None, Decimal("0"), reference_price
             if base_currency is None:
                 return None, Decimal("0"), reference_price
             return base_currency, intent.quantity, reference_price
@@ -208,6 +214,18 @@ class ExecutionObligationService:
         if quote_currency is None or reserved_amount is None or reserved_amount <= Decimal("0"):
             return None, Decimal("0"), reference_price
         return quote_currency, reserved_amount, reference_price
+
+    @staticmethod
+    def _is_margin_backed_smart_arbitrage_spot_short(*, intent: OrderIntent) -> bool:
+        if intent.product_type != "spot" or intent.side != "sell":
+            return False
+        if intent.margin_mode not in {"cross", "isolated"}:
+            return False
+        if intent.strategy_family != "smart_arbitrage":
+            return False
+        if intent.strategy_execution_mode is None:
+            return True
+        return intent.strategy_execution_mode == "margin_reverse_carry"
 
     def _fill_consumption_amount(
         self,

@@ -24,6 +24,7 @@ from aats.services.execution_engine.okx_private_websocket import OKXPrivateWebSo
 from aats.services.execution_engine.okx_bills import enrich_okx_bill_category
 from aats.services.execution_engine.okx_rest import OKXRESTClient, infer_okx_derivatives_inst_type
 from aats.services.portfolio_service.decimals import to_decimal
+from aats.services.strategy_engines.smart_arbitrage.pair_registry import load_pair_definitions
 
 
 class OKXAccountService:
@@ -748,10 +749,18 @@ class OKXAccountService:
         return [fill for fill in snapshot.fills if fill.symbol == symbol]
 
     def _tracked_symbols(self) -> tuple[str, ...]:
-        symbols = self.settings.expanded_allowed_symbols()
-        if symbols:
-            return symbols
-        return (self.settings.default_symbol,)
+        tracked = list(self.settings.expanded_allowed_symbols())
+        if not tracked:
+            tracked = [self.settings.default_symbol]
+        if self.settings.trading_product_type == "derivatives" and self.settings.smart_arbitrage_enabled:
+            for pair in load_pair_definitions(
+                settings=self.settings,
+                primary_symbol=self.settings.default_symbol,
+            ):
+                for symbol in (pair.spot_symbol, pair.hedge_symbol):
+                    if symbol not in tracked:
+                        tracked.append(symbol)
+        return tuple(tracked)
 
     async def _get_instruments_payload(self, tracked_symbols: tuple[str, ...]) -> dict[str, Any]:
         try:
@@ -813,11 +822,15 @@ class OKXAccountService:
     ) -> list[ExchangePosition]:
         if not updates:
             return list(base)
-        merged: dict[tuple[str, str], ExchangePosition] = {
-            (item.symbol, item.side): item for item in base
+        merged: dict[tuple[str, str, str | None], ExchangePosition] = {
+            (item.symbol, item.side, item.margin_mode): item for item in base
         }
         for item in updates:
-            key = (item.symbol, item.side)
+            key = (item.symbol, item.side, item.margin_mode)
+            if item.margin_mode in {None, ""}:
+                matching_keys = [existing_key for existing_key in merged if existing_key[:2] == (item.symbol, item.side)]
+                if len(matching_keys) == 1:
+                    key = matching_keys[0]
             if item.quantity == Decimal("0"):
                 merged.pop(key, None)
                 continue
@@ -1036,6 +1049,12 @@ class OKXAccountService:
         for row in payload.get("data", []):
             symbol = str(row.get("instId"))
             instrument = instrument_map.get(symbol)
+            inst_type = str(row.get("instType") or "").upper()
+            if inst_type == "MARGIN":
+                margin_position = OKXAccountService._parse_margin_position_row(row=row, instrument=instrument)
+                if margin_position is not None:
+                    positions.append(margin_position)
+                continue
             positions.append(
                 ExchangePosition(
                     instrument_id=symbol,
@@ -1066,6 +1085,59 @@ class OKXAccountService:
                 )
             )
         return positions
+
+    @staticmethod
+    def _parse_margin_position_row(
+        *,
+        row: dict[str, Any],
+        instrument: InstrumentMetadata | None,
+    ) -> ExchangePosition | None:
+        symbol = str(row.get("instId"))
+        base_currency = (
+            str(getattr(instrument, "base_currency", "") or "").upper()
+            or str(symbol.split("-", 1)[0] if "-" in symbol else "").upper()
+        )
+        quote_currency = (
+            str(getattr(instrument, "quote_currency", "") or "").upper()
+            or str(symbol.split("-", 1)[1] if "-" in symbol else "").upper()
+        )
+        liability = abs(to_decimal(row.get("liab") or row.get("liabAmt") or "0"))
+        liability_currency = str(row.get("liabCcy") or "").upper()
+        raw_position = to_decimal(row.get("pos") or row.get("baseBal") or row.get("availPos") or "0")
+        average_entry_price = to_decimal(row.get("avgPx")) if row.get("avgPx") not in {None, ""} else None
+        mark_price = to_decimal(row.get("markPx")) if row.get("markPx") not in {None, ""} else None
+        side = "net"
+        quantity = Decimal("0")
+        if liability > 0 and liability_currency and liability_currency == base_currency:
+            side = "short"
+            quantity = liability
+        elif abs(raw_position) > Decimal("0"):
+            quantity = abs(raw_position)
+            side = "long" if raw_position > 0 else "short"
+        elif liability > 0 and liability_currency and liability_currency == quote_currency and average_entry_price not in {None, Decimal("0")}:
+            quantity = liability / average_entry_price
+            side = "long"
+        if quantity <= Decimal("0"):
+            return None
+        return ExchangePosition(
+            instrument_id=symbol,
+            symbol=symbol,
+            quantity=quantity,
+            average_entry_price=average_entry_price,
+            mark_price=mark_price,
+            notional_usd=(to_decimal(row.get("notionalUsd")) if row.get("notionalUsd") not in {None, ""} else None),
+            side=side,
+            margin_mode=OKXAccountService._text_value(row, "mgnMode"),
+            margin_currency=OKXAccountService._text_value(row, "ccy", "liabCcy"),
+            leverage=OKXAccountService._decimal_value(row, "lever"),
+            margin_allocated=OKXAccountService._decimal_value(row, "margin", "imr"),
+            maintenance_margin=OKXAccountService._decimal_value(row, "mmr"),
+            margin_ratio=OKXAccountService._decimal_value(row, "mgnRatio"),
+            liquidation_price=OKXAccountService._decimal_value(row, "liqPx"),
+            unrealized_pnl=OKXAccountService._decimal_value(row, "upl"),
+            instrument_family=None if instrument is None else instrument.instrument_family,
+            settle_currency=None if instrument is None else instrument.settle_currency,
+        )
 
     @staticmethod
     def _parse_open_orders(

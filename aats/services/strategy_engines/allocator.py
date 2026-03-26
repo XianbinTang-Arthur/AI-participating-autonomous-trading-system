@@ -484,7 +484,12 @@ class PortfolioAllocatorV2Phase2:
 
     @staticmethod
     def _intent_has_delta(intent: StrategySleeveIntent) -> bool:
-        return abs(to_decimal(intent.delta_position_qty)) > EPSILON_DECIMAL_12
+        if abs(to_decimal(intent.delta_position_qty)) > EPSILON_DECIMAL_12:
+            return True
+        return any(
+            abs(to_decimal(leg.delta_position_qty or Decimal("0"))) > EPSILON_DECIMAL_12
+            for leg in intent.legs
+        )
 
     def _intent_is_actionable(
         self,
@@ -496,6 +501,11 @@ class PortfolioAllocatorV2Phase2:
             return False
         if intent.route_action == "override_target" and intent.selectable:
             return True
+        if intent.family == "smart_arbitrage":
+            if any(abs(to_decimal(leg.target_position_qty or Decimal("0"))) > EPSILON_DECIMAL_12 for leg in intent.legs):
+                return True
+            if any(abs(to_decimal(leg.current_position_qty or Decimal("0"))) > EPSILON_DECIMAL_12 for leg in intent.legs):
+                return True
         if include_active_inventory and abs(to_decimal(intent.current_position_qty)) > EPSILON_DECIMAL_12:
             return True
         return intent.route_action == "hold_current" and abs(to_decimal(intent.target_position_qty)) > EPSILON_DECIMAL_12

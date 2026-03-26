@@ -124,8 +124,6 @@ const nodes = {
   authStateChip: document.getElementById("authStateChip"),
   logoutButton: document.getElementById("logoutButton"),
   refreshButton: document.getElementById("refreshButton"),
-  reconcileButton: document.getElementById("reconcileButton"),
-  rebaselineButton: document.getElementById("rebaselineButton"),
   resumeButton: document.getElementById("resumeButton"),
   haltButton: document.getElementById("haltButton"),
   autoRefreshToggle: document.getElementById("autoRefreshToggle"),

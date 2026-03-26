@@ -253,6 +253,16 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(payload["summary"]["latest_selected_strategy_sleeve_id"])
         self.assertIsNotNone(payload["summary"]["latest_allocation_id"])
         self.assertEqual(payload["summary"]["latest_selected_route_action"], "override_target")
+        self.assertIsNotNone(payload["summary"]["latest_selected_pair_id"])
+        self.assertEqual(payload["summary"]["latest_selected_execution_mode"], "spot_carry")
+        self.assertIn(
+            payload["summary"]["latest_selected_opportunity_kind"],
+            {"positive_basis", "pair_hold", "pair_exit", "pair_recovery"},
+        )
+        self.assertIn(
+            payload["summary"]["latest_selected_state_phase"],
+            {"opening", "active", "unwinding", "recovery"},
+        )
         self.assertEqual(payload["summary"]["latest_allocator_version"], "task74_allocator_v2_phase2")
         self.assertGreaterEqual(payload["summary"]["latest_budget_profile_count"], 1)
         self.assertGreaterEqual(payload["summary"]["latest_budget_assignment_count"], 1)
@@ -284,9 +294,13 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
             item for item in payload["latest_snapshot"]["automation_decisions"] if item["family"] == "smart_arbitrage"
         )
         self.assertEqual(smart_arbitrage_candidate["route_action"], "override_target")
+        self.assertEqual(smart_arbitrage_candidate["pair_id"], payload["summary"]["latest_selected_pair_id"])
+        self.assertEqual(smart_arbitrage_candidate["execution_mode"], "spot_carry")
+        self.assertIn(smart_arbitrage_candidate["state_phase"], {"opening", "active", "unwinding", "recovery"})
         self.assertEqual(len(smart_arbitrage_candidate["legs"]), 2)
         self.assertIn("current_sleeve_spot_qty", smart_arbitrage_candidate["metrics"])
         self.assertIn("target_account_derivatives_qty", smart_arbitrage_candidate["metrics"])
+        self.assertIn("inventory_backed_available_qty", smart_arbitrage_candidate["metrics"])
         self.assertEqual(smart_arbitrage_control["automation_state"], "active")
         self.assertIsNotNone(payload["summary"]["latest_hedge_protected_notional"])
         self.assertTrue(payload["recent_budget_profiles"])
@@ -300,6 +314,11 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("protected_notional", payload["recent_conflict_resolutions"][0])
         self.assertIn("reduced_notional", payload["recent_conflict_resolutions"][0])
+        self.assertIn("pair_definitions", payload["configured_parameters"]["smart_arbitrage"])
+        self.assertNotIn("v2_enabled", payload["configured_parameters"]["smart_arbitrage"])
+        self.assertNotIn("companion_spot_symbol", payload["configured_parameters"]["smart_arbitrage"])
+        self.assertNotIn("companion_derivatives_symbol", payload["configured_parameters"]["smart_arbitrage"])
+        self.assertIn("negative_basis_mode", payload["configured_parameters"]["smart_arbitrage"])
 
     @staticmethod
     def _settings(**overrides) -> AATSSettings:

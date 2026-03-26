@@ -30,6 +30,7 @@ from aats.services.strategy_engines.smart_arbitrage import (
     SmartArbitrageStrategyEngine,
     _derived_derivatives_symbol,
     _derived_spot_symbol,
+    configured_market_symbols,
 )
 from aats.services.strategy_engines.spot_grid import SpotGridStrategyEngine
 from aats.services.strategy_engines.sleeve_identity import (
@@ -305,7 +306,12 @@ class StrategyCoordinatorService:
             "strategy_family": snapshot.selected_family,
             "strategy_sleeve_id": strategy_sleeve_id,
             "strategy_route_action": applied_route_action,
+            "strategy_pair_id": selected.pair_id,
+            "strategy_opportunity_kind": selected.opportunity_kind,
+            "strategy_execution_mode": selected.execution_mode,
+            "strategy_state_phase": selected.state_phase,
             "strategy_reason_codes": list(dict.fromkeys(reason_codes)),
+            "strategy_blocking_reasons": list(selected.blocking_reasons or []),
             "strategy_headline": snapshot.selected_headline,
             "allocation_id": allocation_id,
             "strategy_bundle_id": strategy_bundle_id,
@@ -359,6 +365,11 @@ class StrategyCoordinatorService:
                     target_notional=to_decimal(base_target.target_notional),
                     priority_score=candidate.score,
                     reason_codes=list(candidate.reason_codes),
+                    pair_id=candidate.pair_id,
+                    opportunity_kind=candidate.opportunity_kind,
+                    execution_mode=candidate.execution_mode,
+                    state_phase=candidate.state_phase,
+                    blocking_reasons=list(candidate.blocking_reasons),
                     metrics=dict(candidate.metrics or {}),
                 )
             else:
@@ -404,6 +415,11 @@ class StrategyCoordinatorService:
                     ),
                     priority_score=candidate.score,
                     reason_codes=list(candidate.reason_codes),
+                    pair_id=candidate.pair_id,
+                    opportunity_kind=candidate.opportunity_kind,
+                    execution_mode=candidate.execution_mode,
+                    state_phase=candidate.state_phase,
+                    blocking_reasons=list(candidate.blocking_reasons),
                     metrics=metrics,
                     legs=[
                         leg.model_copy(
@@ -478,13 +494,7 @@ class StrategyCoordinatorService:
         return rows
 
     def _recent_market_symbols(self, symbol: str) -> set[str]:
-        symbols = {symbol}
-        companion_spot = self.settings.smart_arbitrage_companion_spot_symbol
-        companion_derivatives = self.settings.smart_arbitrage_companion_derivatives_symbol
-        if companion_spot:
-            symbols.add(companion_spot)
-        if companion_derivatives:
-            symbols.add(companion_derivatives)
+        symbols = configured_market_symbols(self.settings, symbol)
         derived_spot = _derived_spot_symbol(symbol)
         derived_derivatives = _derived_derivatives_symbol(symbol)
         if derived_spot:
@@ -784,6 +794,10 @@ class StrategyCoordinatorService:
             metadata={
                 "source": "task74_allocator_v2_phase2",
                 "default_symbol": base_target.symbol,
+                "pair_id": intent.pair_id,
+                "opportunity_kind": intent.opportunity_kind,
+                "execution_mode": intent.execution_mode,
+                "state_phase": intent.state_phase,
             },
             created_at=now,
             updated_at=now,

@@ -16,6 +16,7 @@ class RuntimeStateScope:
     margin_mode: MarginModelType
     allowed_symbols: tuple[str, ...]
     default_symbol: str
+    smart_arbitrage_spot_margin_modes: tuple[MarginModelType, ...] = ("cash",)
 
     def symbol_allowed(self, symbol: str | None) -> bool:
         if not symbol:
@@ -26,11 +27,19 @@ class RuntimeStateScope:
 
 
 def runtime_state_scope(settings: AATSSettings) -> RuntimeStateScope:
+    smart_arbitrage_spot_margin_modes: tuple[MarginModelType, ...] = ("cash",)
+    configured_margin_mode = getattr(settings, "smart_arbitrage_margin_short_spot_margin_mode", "cross")
+    if (
+        settings.smart_arbitrage_margin_short_enabled
+        or settings.smart_arbitrage_negative_basis_mode == "margin_backed"
+    ) and configured_margin_mode in {"cross", "isolated"}:
+        smart_arbitrage_spot_margin_modes = ("cash", configured_margin_mode)
     return RuntimeStateScope(
         product_type=settings.trading_product_type,
         margin_mode=settings.margin_mode,
         allowed_symbols=settings.expanded_allowed_symbols(),
         default_symbol=settings.default_symbol,
+        smart_arbitrage_spot_margin_modes=smart_arbitrage_spot_margin_modes,
     )
 
 
@@ -156,7 +165,7 @@ def order_state_matches_scope(
     order_margin_mode = inferred_order_state_margin_mode(order)
     if scope.product_type == "derivatives" and getattr(order, "strategy_family", None) == "smart_arbitrage":
         if order_product_type == "spot":
-            return order_margin_mode == "cash"
+            return order_margin_mode in scope.smart_arbitrage_spot_margin_modes
         return order_margin_mode == scope.margin_mode
     if order_product_type != scope.product_type:
         return False
@@ -196,7 +205,7 @@ def fill_event_matches_scope(
         return False
     if scope.product_type == "derivatives" and getattr(fill, "strategy_family", None) == "smart_arbitrage":
         if fill.product_type == "spot":
-            return fill.margin_mode == "cash"
+            return fill.margin_mode in scope.smart_arbitrage_spot_margin_modes
         return fill.margin_mode == scope.margin_mode
     if fill.product_type != scope.product_type:
         return False
@@ -227,7 +236,7 @@ def fill_outcome_matches_scope(
         return False
     if scope.product_type == "derivatives" and getattr(outcome, "strategy_family", None) == "smart_arbitrage":
         if outcome.product_type == "spot":
-            return outcome.margin_mode == "cash"
+            return outcome.margin_mode in scope.smart_arbitrage_spot_margin_modes
         return outcome.margin_mode == scope.margin_mode
     if outcome.product_type != scope.product_type:
         return False
@@ -424,7 +433,7 @@ def _event_matches_scope(event: Any, scope: RuntimeStateScope) -> bool:
         margin_mode = "cash"
     if scope.product_type == "derivatives" and strategy_family == "smart_arbitrage":
         if product_type == "spot":
-            if margin_mode != "cash":
+            if margin_mode not in scope.smart_arbitrage_spot_margin_modes:
                 return False
         else:
             if product_type is not None and product_type != scope.product_type:

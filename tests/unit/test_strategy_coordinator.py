@@ -732,6 +732,457 @@ class TestStrategyCoordinator(unittest.TestCase):
             {applied.allocation_id},
         )
 
+    def test_smart_arbitrage_negative_basis_stays_advisory_without_executable_pair(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "smart_arbitrage_enabled": True,
+                "smart_arbitrage_basis_entry_bps": 5.0,
+                "smart_arbitrage_estimated_cost_bps": 1.0,
+            }
+        )
+        gateway = _FakeMarketGateway(
+            {
+                "BTC-USDT": _market_snapshot("BTC-USDT", "101"),
+                "BTC-USDT-SWAP": _market_snapshot("BTC-USDT-SWAP", "100"),
+            }
+        )
+        coordinator = StrategyCoordinatorService(
+            settings=settings,
+            event_store=InMemoryEventStore(),
+            market_gateway=gateway,
+            portfolio_repo=InMemoryPortfolioRepository(),
+            strategy_sleeve_repo=InMemoryStrategySleeveRepository(),
+        )
+        base_target = _position_target(
+            symbol="BTC-USDT-SWAP",
+            product_type="derivatives",
+            margin_mode="cross",
+            current_qty="0",
+            target_qty="0",
+        )
+
+        snapshot = coordinator.evaluate(
+            context=_decision_context(symbol="BTC-USDT-SWAP", product_type="derivatives", current_position_qty="0"),
+            baseline=_baseline(symbol="BTC-USDT-SWAP", regime="trend"),
+            directional_target=base_target,
+        )
+        candidate = next(item for item in snapshot.candidates if item.family == "smart_arbitrage")
+
+        self.assertEqual(candidate.state, "advisory_only")
+        self.assertEqual(candidate.route_action, "advisory_only")
+        self.assertFalse(candidate.execution_compatible)
+        self.assertFalse(candidate.legs)
+        self.assertIn("smart_arbitrage_negative_basis", candidate.reason_codes)
+        self.assertIn("smart_arbitrage_spot_short_not_supported", candidate.reason_codes)
+
+    def test_smart_arbitrage_negative_basis_inventory_backed_builds_executable_pair(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "smart_arbitrage_enabled": True,
+                "smart_arbitrage_negative_basis_mode": "inventory_backed",
+                "smart_arbitrage_inventory_reservation_enabled": True,
+                "smart_arbitrage_basis_entry_bps": 5.0,
+                "smart_arbitrage_estimated_cost_bps": 1.0,
+                "smart_arbitrage_quote_budget_per_trade": 100.0,
+                "smart_arbitrage_max_pair_notional": 100.0,
+            }
+        )
+        account_snapshot = ExchangeAccountSnapshot(
+            account_source="okx",
+            fetched_at=utc_now(),
+            balances=[
+                ExchangeBalance(currency="BTC", total=Decimal("2"), available=Decimal("2")),
+                ExchangeBalance(currency="USDT", total=Decimal("1000"), available=Decimal("1000")),
+            ],
+            positions=[],
+            account_mode="cross",
+        )
+        gateway = _FakeMarketGateway(
+            {
+                "BTC-USDT": _market_snapshot("BTC-USDT", "101"),
+                "BTC-USDT-SWAP": _market_snapshot("BTC-USDT-SWAP", "100"),
+            }
+        )
+        coordinator = StrategyCoordinatorService(
+            settings=settings,
+            event_store=InMemoryEventStore(),
+            market_gateway=gateway,
+            portfolio_repo=InMemoryPortfolioRepository(),
+            account_service=_StaticAccountService(account_snapshot),
+            strategy_sleeve_repo=InMemoryStrategySleeveRepository(),
+        )
+        base_target = _position_target(
+            symbol="BTC-USDT-SWAP",
+            product_type="derivatives",
+            margin_mode="cross",
+            current_qty="0",
+            target_qty="0",
+        )
+
+        snapshot = coordinator.evaluate(
+            context=_decision_context(symbol="BTC-USDT-SWAP", product_type="derivatives", current_position_qty="0"),
+            baseline=_baseline(symbol="BTC-USDT-SWAP", regime="trend"),
+            directional_target=base_target,
+        )
+        candidate = next(item for item in snapshot.candidates if item.family == "smart_arbitrage")
+        applied = coordinator.apply_selected_target(base_target=base_target, snapshot=snapshot)
+
+        self.assertEqual(candidate.state, "opening")
+        self.assertEqual(candidate.execution_mode, "inventory_reverse_carry")
+        self.assertEqual(candidate.state_phase, "opening")
+        self.assertIn("smart_arbitrage_inventory_backed_ready", candidate.reason_codes)
+        self.assertEqual(len(candidate.legs), 2)
+        self.assertEqual(candidate.legs[0].margin_mode, "cash")
+        self.assertEqual(applied.strategy_execution_mode, "inventory_reverse_carry")
+        self.assertEqual(len(applied.strategy_execution_legs), 2)
+
+    def test_smart_arbitrage_negative_basis_margin_backed_builds_executable_pair_when_ready(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "smart_arbitrage_enabled": True,
+                "smart_arbitrage_negative_basis_mode": "margin_backed",
+                "smart_arbitrage_margin_short_enabled": True,
+                "smart_arbitrage_margin_short_execution_ready": True,
+                "smart_arbitrage_margin_short_spot_margin_mode": "cross",
+                "smart_arbitrage_basis_entry_bps": 5.0,
+                "smart_arbitrage_estimated_cost_bps": 1.0,
+                "smart_arbitrage_quote_budget_per_trade": 100.0,
+                "smart_arbitrage_max_pair_notional": 100.0,
+            }
+        )
+        account_snapshot = ExchangeAccountSnapshot(
+            account_source="okx",
+            fetched_at=utc_now(),
+            balances=[ExchangeBalance(currency="USDT", total=Decimal("1000"), available=Decimal("1000"))],
+            positions=[],
+            account_mode="cross",
+        )
+        gateway = _FakeMarketGateway(
+            {
+                "BTC-USDT": _market_snapshot("BTC-USDT", "101"),
+                "BTC-USDT-SWAP": _market_snapshot("BTC-USDT-SWAP", "100"),
+            }
+        )
+        coordinator = StrategyCoordinatorService(
+            settings=settings,
+            event_store=InMemoryEventStore(),
+            market_gateway=gateway,
+            portfolio_repo=InMemoryPortfolioRepository(),
+            account_service=_StaticAccountService(account_snapshot),
+            strategy_sleeve_repo=InMemoryStrategySleeveRepository(),
+        )
+        base_target = _position_target(
+            symbol="BTC-USDT-SWAP",
+            product_type="derivatives",
+            margin_mode="cross",
+            current_qty="0",
+            target_qty="0",
+        )
+
+        snapshot = coordinator.evaluate(
+            context=_decision_context(symbol="BTC-USDT-SWAP", product_type="derivatives", current_position_qty="0"),
+            baseline=_baseline(symbol="BTC-USDT-SWAP", regime="trend"),
+            directional_target=base_target,
+        )
+        candidate = next(item for item in snapshot.candidates if item.family == "smart_arbitrage")
+        applied = coordinator.apply_selected_target(base_target=base_target, snapshot=snapshot)
+
+        self.assertEqual(candidate.state, "opening")
+        self.assertEqual(candidate.execution_mode, "margin_reverse_carry")
+        self.assertIn("smart_arbitrage_margin_short_ready", candidate.reason_codes)
+        self.assertEqual(len(candidate.legs), 2)
+        self.assertEqual(candidate.legs[0].margin_mode, "cross")
+        self.assertEqual(applied.strategy_execution_mode, "margin_reverse_carry")
+        self.assertEqual(applied.strategy_execution_legs[0].margin_mode, "cross")
+
+    def test_smart_arbitrage_uses_derived_primary_pair_when_registry_is_empty(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "smart_arbitrage_enabled": True,
+                "smart_arbitrage_basis_entry_bps": 5.0,
+                "smart_arbitrage_estimated_cost_bps": 1.0,
+                "smart_arbitrage_quote_budget_per_trade": 100.0,
+                "smart_arbitrage_max_pair_notional": 100.0,
+            }
+        )
+        gateway = _FakeMarketGateway(
+            {
+                "BTC-USDT": _market_snapshot("BTC-USDT", "100"),
+                "BTC-USDT-SWAP": _market_snapshot("BTC-USDT-SWAP", "101"),
+            }
+        )
+        coordinator = StrategyCoordinatorService(
+            settings=settings,
+            event_store=InMemoryEventStore(),
+            market_gateway=gateway,
+            portfolio_repo=InMemoryPortfolioRepository(),
+            strategy_sleeve_repo=InMemoryStrategySleeveRepository(),
+        )
+        base_target = _position_target(
+            symbol="BTC-USDT-SWAP",
+            product_type="derivatives",
+            margin_mode="cross",
+            current_qty="0",
+            target_qty="0",
+        )
+
+        snapshot = coordinator.evaluate(
+            context=_decision_context(symbol="BTC-USDT-SWAP", product_type="derivatives", current_position_qty="0"),
+            baseline=_baseline(symbol="BTC-USDT-SWAP", regime="trend"),
+            directional_target=base_target,
+        )
+        candidate = next(item for item in snapshot.candidates if item.family == "smart_arbitrage")
+
+        self.assertEqual(candidate.state, "opening")
+        self.assertEqual(candidate.pair_id, "btc_usdt__btc_usdt_swap")
+        self.assertEqual(candidate.execution_mode, "spot_carry")
+        self.assertEqual(len(candidate.legs), 2)
+
+    def test_smart_arbitrage_selects_highest_scoring_pair_from_registry(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "smart_arbitrage_enabled": True,
+                "smart_arbitrage_basis_entry_bps": 5.0,
+                "smart_arbitrage_estimated_cost_bps": 1.0,
+                "smart_arbitrage_quote_budget_per_trade": 100.0,
+                "smart_arbitrage_max_pair_notional": 100.0,
+                "smart_arbitrage_pair_definitions": (
+                    {
+                        "pair_id": "btc_quarterly",
+                        "spot_symbol": "BTC-USDT",
+                        "hedge_symbol": "BTC-USDT-260626",
+                    },
+                ),
+            }
+        )
+        gateway = _FakeMarketGateway(
+            {
+                "BTC-USDT": _market_snapshot("BTC-USDT", "100"),
+                "BTC-USDT-SWAP": _market_snapshot("BTC-USDT-SWAP", "100.8"),
+                "BTC-USDT-260626": _market_snapshot("BTC-USDT-260626", "102"),
+            }
+        )
+        coordinator = StrategyCoordinatorService(
+            settings=settings,
+            event_store=InMemoryEventStore(),
+            market_gateway=gateway,
+            portfolio_repo=InMemoryPortfolioRepository(),
+            strategy_sleeve_repo=InMemoryStrategySleeveRepository(),
+        )
+        base_target = _position_target(
+            symbol="BTC-USDT-SWAP",
+            product_type="derivatives",
+            margin_mode="cross",
+            current_qty="0",
+            target_qty="0",
+        )
+
+        snapshot = coordinator.evaluate(
+            context=_decision_context(symbol="BTC-USDT-SWAP", product_type="derivatives", current_position_qty="0"),
+            baseline=_baseline(symbol="BTC-USDT-SWAP", regime="trend"),
+            directional_target=base_target,
+        )
+        candidate = next(item for item in snapshot.candidates if item.family == "smart_arbitrage")
+        evaluated_pairs = candidate.metrics["evaluated_pairs"]
+
+        self.assertEqual(candidate.pair_id, "btc_quarterly")
+        self.assertEqual(candidate.execution_mode, "spot_carry")
+        self.assertGreaterEqual(len(evaluated_pairs), 2)
+        self.assertTrue(any(item["pair_id"] == "btc_quarterly" for item in evaluated_pairs))
+
+    def test_smart_arbitrage_active_margin_reverse_carry_uses_margin_scoped_spot_inventory(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "strategy_family_active": "smart_arbitrage",
+                "smart_arbitrage_enabled": True,
+                "smart_arbitrage_negative_basis_mode": "margin_backed",
+                "smart_arbitrage_margin_short_enabled": True,
+                "smart_arbitrage_margin_short_execution_ready": True,
+                "smart_arbitrage_margin_short_spot_margin_mode": "cross",
+                "smart_arbitrage_basis_entry_bps": 5.0,
+                "smart_arbitrage_basis_exit_bps": 5.0,
+            }
+        )
+        execution_repo = InMemoryExecutionRepository()
+        sleeve_id = build_strategy_sleeve_id(
+            family="smart_arbitrage",
+            primary_symbol="BTC-USDT-SWAP",
+            product_scope="derivatives",
+            margin_scope="cross",
+            symbol_scope=("BTC-USDT", "BTC-USDT-SWAP"),
+        )
+        execution_repo.save_fill(
+            _fill_event(
+                fill_id="fill_margin_spot_short",
+                symbol="BTC-USDT",
+                side="sell",
+                qty="0.5",
+                price="100",
+                product_type="spot",
+                margin_mode="cross",
+                strategy_family="smart_arbitrage",
+                strategy_sleeve_id=sleeve_id,
+                strategy_leg_role="primary",
+                position_intent="open_short",
+            )
+        )
+        execution_repo.save_fill(
+            _fill_event(
+                fill_id="fill_margin_hedge_long",
+                symbol="BTC-USDT-SWAP",
+                side="buy",
+                qty="0.5",
+                price="99",
+                product_type="derivatives",
+                margin_mode="cross",
+                strategy_family="smart_arbitrage",
+                strategy_sleeve_id=sleeve_id,
+                strategy_leg_role="hedge",
+                position_intent="open_long",
+            )
+        )
+        account_snapshot = ExchangeAccountSnapshot(
+            account_source="okx",
+            fetched_at=utc_now(),
+            balances=[ExchangeBalance(currency="USDT", total=Decimal("1000"), available=Decimal("1000"))],
+            positions=[
+                ExchangePosition(
+                    instrument_id="BTC-USDT",
+                    symbol="BTC-USDT",
+                    quantity=Decimal("0.5"),
+                    side="short",
+                    margin_mode="cross",
+                ),
+                ExchangePosition(
+                    instrument_id="BTC-USDT-SWAP",
+                    symbol="BTC-USDT-SWAP",
+                    quantity=Decimal("0.5"),
+                    side="long",
+                    margin_mode="cross",
+                ),
+            ],
+            account_mode="cross",
+        )
+        coordinator = StrategyCoordinatorService(
+            settings=settings,
+            event_store=InMemoryEventStore(),
+            market_gateway=_FakeMarketGateway(
+                {
+                    "BTC-USDT": _market_snapshot("BTC-USDT", "101"),
+                    "BTC-USDT-SWAP": _market_snapshot("BTC-USDT-SWAP", "100"),
+                }
+            ),
+            portfolio_repo=InMemoryPortfolioRepository(),
+            execution_repo=execution_repo,
+            account_service=_StaticAccountService(account_snapshot),
+            strategy_sleeve_repo=InMemoryStrategySleeveRepository(),
+        )
+        base_target = _position_target(
+            symbol="BTC-USDT-SWAP",
+            product_type="derivatives",
+            margin_mode="cross",
+            current_qty="0.5",
+            target_qty="0.5",
+            position_intent="hold",
+        )
+
+        snapshot = coordinator.evaluate(
+            context=_decision_context(symbol="BTC-USDT-SWAP", product_type="derivatives", current_position_qty="0.5"),
+            baseline=_baseline(symbol="BTC-USDT-SWAP", regime="trend"),
+            directional_target=base_target,
+        )
+        candidate = next(item for item in snapshot.candidates if item.family == "smart_arbitrage")
+        applied = coordinator.apply_selected_target(base_target=base_target, snapshot=snapshot)
+
+        self.assertEqual(candidate.state_phase, "active")
+        self.assertEqual(candidate.execution_mode, "margin_reverse_carry")
+        self.assertEqual(candidate.metrics["current_account_spot_qty"], Decimal("-0.5"))
+        self.assertEqual(candidate.metrics["current_sleeve_spot_qty"], Decimal("-0.5"))
+        self.assertEqual(candidate.metrics["current_sleeve_cash_spot_qty"], Decimal("0"))
+        self.assertEqual(candidate.metrics["current_sleeve_margin_spot_qty"], Decimal("-0.5"))
+        self.assertEqual(candidate.delta_position_qty, Decimal("0"))
+        self.assertEqual(applied.strategy_family, "smart_arbitrage")
+        self.assertEqual(len(applied.strategy_execution_legs), 0)
+
+    def test_smart_arbitrage_can_select_multiple_pairs_up_to_configured_limit(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "smart_arbitrage_enabled": True,
+                "smart_arbitrage_basis_entry_bps": 5.0,
+                "smart_arbitrage_quote_budget_per_trade": 100.0,
+                "smart_arbitrage_max_pair_notional": 100.0,
+                "smart_arbitrage_max_concurrent_pairs": 2,
+                "smart_arbitrage_pair_definitions": (
+                    {
+                        "pair_id": "btc_quarterly",
+                        "spot_symbol": "BTC-USDT",
+                        "hedge_symbol": "BTC-USDT-260626",
+                    },
+                ),
+            }
+        )
+        coordinator = StrategyCoordinatorService(
+            settings=settings,
+            event_store=InMemoryEventStore(),
+            market_gateway=_FakeMarketGateway(
+                {
+                    "BTC-USDT": _market_snapshot("BTC-USDT", "100"),
+                    "BTC-USDT-SWAP": _market_snapshot("BTC-USDT-SWAP", "101"),
+                    "BTC-USDT-260626": _market_snapshot("BTC-USDT-260626", "102"),
+                }
+            ),
+            portfolio_repo=InMemoryPortfolioRepository(),
+            strategy_sleeve_repo=InMemoryStrategySleeveRepository(),
+        )
+        base_target = _position_target(
+            symbol="BTC-USDT-SWAP",
+            product_type="derivatives",
+            margin_mode="cross",
+            current_qty="0",
+            target_qty="0",
+        )
+
+        snapshot = coordinator.evaluate(
+            context=_decision_context(symbol="BTC-USDT-SWAP", product_type="derivatives", current_position_qty="0"),
+            baseline=_baseline(symbol="BTC-USDT-SWAP", regime="trend"),
+            directional_target=base_target,
+        )
+        candidate = next(item for item in snapshot.candidates if item.family == "smart_arbitrage")
+        applied = coordinator.apply_selected_target(base_target=base_target, snapshot=snapshot)
+
+        self.assertEqual(candidate.metrics["pair_count_selected"], 2)
+        self.assertEqual(len(candidate.legs), 4)
+        self.assertEqual({leg.symbol for leg in candidate.legs}, {"BTC-USDT", "BTC-USDT-SWAP", "BTC-USDT-260626"})
+        self.assertEqual(len(applied.strategy_execution_legs), 4)
+
     def test_allocator_blocks_directional_derivatives_target_while_arbitrage_pair_is_active(self) -> None:
         settings = AATSSettings.model_validate(
             {

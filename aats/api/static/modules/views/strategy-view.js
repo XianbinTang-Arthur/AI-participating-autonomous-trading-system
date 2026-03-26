@@ -91,12 +91,12 @@ export function renderStrategySections(data) {
         ${statGrid([
           {
             label: decisionScene === "derivatives" ? "目标净仓位变化" : "目标持仓变化",
-            value: formatSigned(target.delta_position_qty),
-            meta: readableState(target.target_exposure_side || target.position_intent, "方向待确认"),
+            value: targetDeltaValue(target, decisionScene),
+            meta: targetDirectionLabel(target, decisionScene),
           },
           {
             label: decisionScene === "derivatives" ? "当前净仓位" : "当前持仓",
-            value: formatSigned(target.current_position_qty),
+            value: currentPositionValue(target, decisionScene),
             meta: decisionScene === "derivatives" ? "按净仓位口径展示" : "按现货持仓口径展示",
           },
           {
@@ -106,7 +106,7 @@ export function renderStrategySections(data) {
           },
           {
             label: "最近执行结果",
-            value: readableState(executionLatest.latest_order?.status || "unknown"),
+            value: latestOrderStatusLabel(executionLatest.latest_order),
             meta: middleEllipsis(executionLatest.latest_order?.client_order_id, 10, 6, "暂未生成委托"),
           },
         ])}
@@ -122,12 +122,12 @@ export function renderStrategySections(data) {
           {
             label: "交易场景",
             value: decisionScene === "derivatives" ? "合约" : "现货",
-            meta: decisionScene === "derivatives" ? optionalState(target.margin_mode, "保证金模式待确认") : "现金买卖",
+            meta: decisionScene === "derivatives" ? optionalState(target.margin_mode, "当前没有保证金模式信息") : "现金买卖",
             tone: "info",
           },
           {
             label: "基础信号",
-            value: formattedOrText(baseline.confidence, "待确认"),
+            value: formattedOrText(baseline.confidence, "暂无基础信号"),
             meta: numberMeta("综合强度", baseline.composite_alpha_score, "当前没有综合强度"),
             tone: "info",
           },
@@ -139,8 +139,8 @@ export function renderStrategySections(data) {
           },
           {
             label: decisionScene === "derivatives" ? "目标净仓位" : "目标持仓",
-            value: formatSigned(target.target_position_qty),
-            meta: `${readableState(target.position_intent || "hold")} | ${decisionScene === "derivatives" ? numberMeta("目标杠杆", target.target_leverage, "目标杠杆待确认") : optionalState(target.target_exposure_side, "方向待确认")}`,
+            value: targetPositionValue(target, decisionScene),
+            meta: targetPlanMeta(target, decisionScene),
             tone: "info",
           },
           {
@@ -268,7 +268,7 @@ export function renderStrategySections(data) {
             "自动控制阈值",
             strategyRuntime.configured_parameters?.strategy_sleeve_auto_parallel_enabled ? "按运行参数自动控制" : "当前未启用自动控制",
             [
-              `最小预算倍率 ${formatNumber(strategyRuntime.configured_parameters?.strategy_sleeve_auto_min_budget_multiplier, 2, "待确认")}`,
+              `最小预算倍率 ${formatNumber(strategyRuntime.configured_parameters?.strategy_sleeve_auto_min_budget_multiplier, 2, "暂无预算阈值")}`,
               `软亏损 ${formatSigned(strategyRuntime.configured_parameters?.strategy_sleeve_auto_soft_loss_usdt)}`,
               `硬亏损 ${formatSigned(strategyRuntime.configured_parameters?.strategy_sleeve_auto_hard_loss_usdt)}`,
             ].join(" | "),
@@ -341,7 +341,7 @@ export function renderStrategySections(data) {
           displayedSleeveProfitability.map((item) => {
             const inventory = sleeveInventorySummary.find((row) => row.strategy_sleeve_id === item.strategy_sleeve_id) || {};
             return [
-              `<div><strong>${escapeHtml(item.strategy_sleeve_id || "未归属")}</strong><div class="table-meta">${escapeHtml((item.families || []).join(" / ") || "家族待确认")}</div></div>`,
+              `<div><strong>${escapeHtml(item.strategy_sleeve_id || "未归属")}</strong><div class="table-meta">${escapeHtml((item.families || []).join(" / ") || "当前没有家族标签")}</div></div>`,
               `<div><strong>${formatSigned(item.combined_net_realized_pnl)}</strong><div class="table-meta">实现 ${formatSigned(item.realized_pnl)}</div></div>`,
               `<div><strong>${formatSigned(item.funding_fee_amount)}</strong><div class="table-meta">费用 ${formatSigned(item.fee_amount)}</div></div>`,
               `<div><strong>${formatSigned(item.inventory_move_qty)}</strong><div class="table-meta">${formatNumber(item.record_count, 0, "0")} 条记录</div></div>`,
@@ -350,81 +350,6 @@ export function renderStrategySections(data) {
           }),
           "当前还没有可展示的 sleeve 归因记录。"
         )}
-      `,
-    }),
-    strategySignal: surfaceCard({
-      title: "信号说明",
-      kicker: "结论依据",
-      copy: "先看四个核心摘要，再看门禁和拦截原因。",
-      classes: "strategy-signal-card",
-      content: `
-        ${renderSignalGrid([
-          {
-            label: "交易场景",
-            value: decisionScene === "derivatives" ? "合约" : "现货",
-            meta: decisionScene === "derivatives" ? optionalState(target.margin_mode, "保证金模式待确认") : "现金买卖",
-            tone: "info",
-          },
-          {
-            label: "基础信号强度",
-            value: formattedOrText(baseline.confidence, "待确认"),
-            meta: numberMeta("综合强度", baseline.composite_alpha_score, "本轮还没有综合强度结果"),
-            tone: "info",
-          },
-          {
-            label: "AI 参考",
-            value: optionalState(ai.summary || ai.direction_bias, "暂无 AI 参考"),
-            meta: numberMeta("置信度", ai.confidence, "当前没有 AI 置信度"),
-            tone: "info",
-          },
-          {
-            label: decisionScene === "derivatives" ? "目标净仓位" : "目标持仓",
-            value: formatSigned(target.target_position_qty),
-            meta: decisionScene === "derivatives" ? numberMeta("目标杠杆", target.target_leverage, "目标杠杆待确认") : optionalState(target.target_exposure_side, "目标方向待确认"),
-            tone: "info",
-          },
-        ])}
-        ${kvList([
-          ["基础信号说明", summarizeLocalizedList(baseline.reasons, { fallback: "本轮没有额外信号说明", limit: 4 }), numberMeta("微观结构强度", baseline.microstructure_alpha, "当前没有微观结构强度")],
-          ["策略门禁", policy.execution_allowed ? "本轮允许进入执行" : "策略层未放行", policy.execution_allowed ? listText(policy.allow_reasons, "当前没有额外门禁说明") : listText(policy.blocker_reasons, "当前没有给出具体拦截原因")],
-          ["风控结论", risk.approved ? "风控允许执行" : "风控仍在拦截", risk.approved ? listText(risk.approval_reasons, "当前没有额外放行说明") : listText(risk.rejection_reasons, "当前没有额外拦截说明")],
-        ])}
-      `,
-    }),
-    strategyHealth: surfaceCard({
-      title: "执行约束",
-      kicker: "质量约束",
-      copy: "把最近成交质量、冷却状态和保护规则直接摆出来，便于一眼判断当前是不是在无效来回交易。",
-      content: `
-        ${statGrid([
-          {
-            label: "最近平仓样本",
-            value: formatNumber(strategyHealth.recent_closed_trade_count, 0),
-            meta: strategyHealth.latest_fill_timestamp ? `最近成交 ${formatRelativeAge(strategyHealth.latest_fill_timestamp)}` : "当前暂无平仓样本",
-          },
-          {
-            label: "胜率",
-            value: formatRatio(strategyHealth.recent_win_rate),
-            meta: "按最近已闭合交易统计",
-          },
-          {
-            label: "手续费拖累",
-            value: formatRatio(strategyHealth.recent_fee_drag_ratio),
-            meta: formatSigned(strategyHealth.recent_fee_total),
-          },
-          {
-            label: "来回交易占比",
-            value: formatRatio(strategyHealth.recent_churn_ratio),
-            meta: `连续低净优势 ${formatNumber(strategyHealth.recent_low_edge_trade_streak, 0)} 笔`,
-          },
-        ])}
-        ${kvList([
-          ["当前保护规则", listText(strategyHealth.guardrail_flags, "当前没有额外保护规则"), cooldownSummary(strategyHealth.cooldowns)],
-          ["最早持仓开始", formatMaybeTimestamp(latestDecision.decision_context?.current_position_opened_at || strategyHealth.current_position_opened_at), holdAge(latestDecision.decision_context?.current_position_opened_at || strategyHealth.current_position_opened_at)],
-          ["最近平仓时间", formatMaybeTimestamp(latestDecision.decision_context?.last_position_closed_at || strategyHealth.last_position_closed_at), formatRelativeAge(latestDecision.decision_context?.last_position_closed_at || strategyHealth.last_position_closed_at)],
-          ["预期净优势", formatBps(target.expected_net_edge_bps), `信号优势 ${formatBps(target.expected_signal_edge_bps)} / 成本 ${formatBps(target.expected_cost_bps)}`],
-          ["本轮执行限制", listText(target.guardrail_flags, "当前没有额外执行限制"), `目标动作 ${readableState(target.position_intent || "hold")}`],
-        ])}
       `,
     }),
     strategyTrialVerdict: surfaceCard({
@@ -567,15 +492,11 @@ export function renderStrategyView(data) {
   return `
     <div class="panel-grid strategy-page-grid">
       <div class="span-12">${sections.strategyHero}</div>
-      <div class="span-7">${sections.strategyDecisionWorkbench}</div>
-      <div class="span-5">${sections.strategyTrialVerdict}</div>
-      <div class="span-7">${sections.strategyCoordinator}</div>
-      <div class="span-5">
-        <div class="workspace-stack strategy-column-stack">
-          ${sections.strategyAutomation}
-          ${sections.strategyAttribution}
-        </div>
-      </div>
+      <div class="span-12">${sections.strategyDecisionWorkbench}</div>
+      <div class="span-12">${sections.strategyTrialVerdict}</div>
+      <div class="span-12">${sections.strategyCoordinator}</div>
+      <div class="span-12">${sections.strategyAutomation}</div>
+      <div class="span-12">${sections.strategyAttribution}</div>
       <div class="span-12">${sections.strategyHistory}</div>
     </div>
   `;
@@ -593,25 +514,6 @@ function renderExpandableSection(title, body, options = {}) {
         ${body}
       </div>
     </details>
-  `;
-}
-
-function renderSignalGrid(items) {
-  if (!items.length) return "";
-  return `
-    <div class="summary-strip summary-strip--quad">
-      ${items
-        .map(
-          (item) => `
-            <article class="summary-tile tone-${escapeHtml(item.tone || "neutral")}">
-              <span class="summary-tile__label">${escapeHtml(item.label)}</span>
-              <strong class="summary-tile__value">${escapeHtml(item.value)}</strong>
-              ${item.meta ? `<span class="summary-tile__meta">${escapeHtml(item.meta)}</span>` : ""}
-            </article>
-          `
-        )
-        .join("")}
-    </div>
   `;
 }
 
@@ -792,12 +694,27 @@ function strategyCandidateStateLabel(candidate) {
   if (candidate?.family === "smart_arbitrage" && candidate?.state === "advisory_only") {
     return "当前只给建议";
   }
+  if (candidate?.family === "smart_arbitrage" && candidate?.state === "blocked") {
+    return "当前机会被阻断";
+  }
+  if (candidate?.family === "smart_arbitrage" && candidate?.state === "opening") {
+    return "当前准备开仓";
+  }
+  if (candidate?.family === "smart_arbitrage" && candidate?.state === "recovery") {
+    return "当前正在补齐双腿";
+  }
+  if (candidate?.family === "smart_arbitrage" && candidate?.state === "unwinding") {
+    return "当前准备退出套利对";
+  }
   return readableState(candidate?.state || "unknown");
 }
 
 function strategyCandidateStateMeta(candidate) {
   if (candidate?.family === "smart_arbitrage" && candidate?.state === "inactive") {
     return smartArbitrageMarketAvailability(candidate);
+  }
+  if (candidate?.family === "smart_arbitrage") {
+    return smartArbitrageStateMeta(candidate);
   }
   const confidence = Number(candidate?.confidence);
   if (Number.isFinite(confidence) && confidence > 0) {
@@ -818,6 +735,12 @@ function strategyCandidateRouteMeta(candidate) {
 }
 
 function strategyCandidateTargetLabel(candidate) {
+  if (smartArbitrageNegativeBasisAdvisory(candidate)) {
+    return "当前负基差不自动下单";
+  }
+  if (candidate?.family === "smart_arbitrage" && candidate?.state === "blocked") {
+    return "当前机会被阻断";
+  }
   const target = Number(candidate?.target_position_qty ?? 0);
   const delta = Number(candidate?.delta_position_qty ?? 0);
   if (!Number.isFinite(target) || !Number.isFinite(delta)) {
@@ -830,6 +753,12 @@ function strategyCandidateTargetLabel(candidate) {
 }
 
 function strategyCandidateTargetMeta(candidate) {
+  if (smartArbitrageNegativeBasisAdvisory(candidate)) {
+    return "自动执行当前只支持正基差双腿，现货现金模式不会为负基差生成执行量";
+  }
+  if (candidate?.family === "smart_arbitrage" && candidate?.state === "blocked") {
+    return smartArbitrageBlockingSummary(candidate);
+  }
   const target = Number(candidate?.target_position_qty ?? 0);
   const delta = Number(candidate?.delta_position_qty ?? 0);
   if (!Number.isFinite(target) || !Number.isFinite(delta)) {
@@ -918,6 +847,8 @@ function familyEnablementSummary(payload) {
 }
 
 function strategyCandidateReason(candidate) {
+  const smartArbitrageReason = smartArbitrageReasonText(candidate);
+  if (smartArbitrageReason) return smartArbitrageReason;
   if (candidate?.headline) return candidate.headline;
   const summary = reasonListText(candidate?.reason_codes, "");
   if (summary) return summary;
@@ -933,7 +864,10 @@ function strategyLegSummary(candidate) {
     return "当前没有附带腿说明";
   }
   return legs
-    .map((item) => `${readableState(item.product_type)} ${readableState(item.side)} ${item.symbol || "标的待确认"}`)
+    .map((item) => {
+      const mode = item?.execution_mode ? ` (${readableState(item.execution_mode)})` : "";
+      return `${readableState(item.product_type)} ${readableState(item.side)} ${item.symbol || "标的待确认"}${mode}`;
+    })
     .join(" | ");
 }
 
@@ -948,7 +882,75 @@ function smartArbitrageMarketAvailability(candidate) {
   if (reasonCodes.includes("smart_arbitrage_symbol_pair_missing")) {
     return "当前没有识别到可用的现货/合约配对标的。";
   }
+  if (smartArbitrageNegativeBasisAdvisory(candidate)) {
+    return "当前是负基差提示单，系统不会下发套利双腿执行计划。";
+  }
+  if (reasonCodes.includes("smart_arbitrage_inventory_backed_insufficient")) {
+    return "当前识别到负基差，但可用于反套的现货库存不足。";
+  }
+  if (reasonCodes.includes("smart_arbitrage_margin_short_execution_not_ready")) {
+    return "当前识别到负基差，但保证金融券执行链路尚未接通。";
+  }
   return "当前没有附带套利双腿执行信息。";
+}
+
+function smartArbitrageNegativeBasisAdvisory(candidate) {
+  if (candidate?.family !== "smart_arbitrage") return false;
+  const reasonCodes = Array.isArray(candidate?.reason_codes) ? candidate.reason_codes : [];
+  return (
+    reasonCodes.includes("smart_arbitrage_negative_basis") &&
+    reasonCodes.includes("smart_arbitrage_spot_short_not_supported")
+  );
+}
+
+function smartArbitrageReasonText(candidate) {
+  if (smartArbitrageNegativeBasisAdvisory(candidate)) {
+    return "当前是负基差，但自动执行只支持正基差双腿；现货现金模式不能自动做空。";
+  }
+  const reasonCodes = Array.isArray(candidate?.reason_codes) ? candidate.reason_codes : [];
+  if (reasonCodes.includes("smart_arbitrage_inventory_backed_ready")) {
+    return "当前是负基差，且账户现货库存足够，系统会按库存反套模式生成双腿计划。";
+  }
+  if (reasonCodes.includes("smart_arbitrage_margin_short_ready")) {
+    return "当前是负基差，且保证金融券反套链路已就绪，系统会按借币卖出现货并买入合约的模式生成双腿计划。";
+  }
+  if (reasonCodes.includes("smart_arbitrage_inventory_backed_insufficient")) {
+    return "当前识别到负基差，但现货库存不足，不能自动生成库存反套执行计划。";
+  }
+  if (reasonCodes.includes("smart_arbitrage_margin_short_execution_not_ready")) {
+    return "当前识别到负基差，配置要求走保证金融券反套，但执行链路尚未接通。";
+  }
+  if (reasonCodes.includes("smart_arbitrage_margin_short_margin_mode_mismatch")) {
+    return "当前识别到负基差，但保证金融券反套的现货保证金模式与运行配置不一致，系统暂不执行。";
+  }
+  if (reasonCodes.includes("smart_arbitrage_mixed_pair_direction_detected")) {
+    return "当前套利对存在方向混杂或脏仓位，系统暂不接管，避免在污染状态上继续叠加双腿。";
+  }
+  return "";
+}
+
+function smartArbitrageStateMeta(candidate) {
+  const parts = [];
+  const pairId = candidate?.pair_id || candidate?.metrics?.pair_id;
+  const statePhase = candidate?.state_phase || candidate?.metrics?.state_phase;
+  const executionMode = candidate?.execution_mode || candidate?.metrics?.execution_mode;
+  const confidence = Number(candidate?.confidence);
+  if (pairId) parts.push(`pair ${pairId}`);
+  if (statePhase) parts.push(`阶段 ${readableState(statePhase)}`);
+  if (executionMode) parts.push(`模式 ${readableState(executionMode)}`);
+  if (Number.isFinite(confidence) && confidence > 0) parts.push(`置信度 ${formatNumber(confidence, 2, "0")}`);
+  return parts.join(" | ") || "当前没有额外状态量化信息";
+}
+
+function smartArbitrageBlockingSummary(candidate) {
+  const blockingReasons = Array.isArray(candidate?.blocking_reasons)
+    ? candidate.blocking_reasons
+    : Array.isArray(candidate?.metrics?.blocking_reasons)
+      ? candidate.metrics.blocking_reasons
+      : [];
+  const summary = reasonListText(blockingReasons, "");
+  if (summary) return summary;
+  return "当前存在阻断条件，因此暂不生成自动执行量。";
 }
 
 function escapeFallbackReadableState(value, fallback) {
@@ -1144,13 +1146,6 @@ function cooldownSummary(cooldowns) {
   return parts.length ? parts.join(" | ") : "当前没有冷却限制";
 }
 
-function holdAge(value) {
-  if (!value) return "持仓时长待确认";
-  const date = new Date(String(value).replace("Z", "+00:00"));
-  if (Number.isNaN(date.getTime())) return "持仓时长待确认";
-  return formatDuration(Math.max((Date.now() - date.getTime()) / 1000, 0));
-}
-
 function humanCooldownLabel(key) {
   const normalized = String(key || "").replaceAll("_remaining_seconds", "");
   const labels = {
@@ -1177,4 +1172,60 @@ function formattedOrText(value, fallback) {
 function numberMeta(label, value, fallback) {
   const text = formatNumber(value, 4, fallback);
   return text === fallback ? fallback : `${label} ${text}`;
+}
+
+function isHoldIntent(target = {}) {
+  return String(target.position_intent || target.route_action || "").trim().toLowerCase() === "hold";
+}
+
+function targetDeltaValue(target = {}, decisionScene) {
+  if (target.delta_position_qty === null || target.delta_position_qty === undefined || target.delta_position_qty === "") {
+    return isHoldIntent(target)
+      ? decisionScene === "derivatives"
+        ? "保持净仓位"
+        : "保持持仓"
+      : "暂无目标变化";
+  }
+  return formatSigned(target.delta_position_qty);
+}
+
+function currentPositionValue(target = {}, decisionScene) {
+  if (target.current_position_qty === null || target.current_position_qty === undefined || target.current_position_qty === "") {
+    return decisionScene === "derivatives" ? "暂无净仓位" : "暂无持仓";
+  }
+  return formatSigned(target.current_position_qty);
+}
+
+function targetDirectionLabel(target = {}, decisionScene) {
+  if (isHoldIntent(target)) {
+    return decisionScene === "derivatives" ? "保持当前净仓位" : "保持当前持仓";
+  }
+  return readableState(
+    target.target_exposure_side || target.position_intent,
+    decisionScene === "derivatives" ? "当前没有新的方向调整" : "当前没有新的持仓方向调整",
+  );
+}
+
+function targetPositionValue(target = {}, decisionScene) {
+  if (target.target_position_qty === null || target.target_position_qty === undefined || target.target_position_qty === "") {
+    return isHoldIntent(target)
+      ? decisionScene === "derivatives"
+        ? "保持当前净仓位"
+        : "保持当前持仓"
+      : "暂无目标仓位";
+  }
+  return formatSigned(target.target_position_qty);
+}
+
+function targetPlanMeta(target = {}, decisionScene) {
+  return `${readableState(target.position_intent || "hold")} | ${
+    decisionScene === "derivatives"
+      ? numberMeta("目标杠杆", target.target_leverage, "当前没有目标杠杆")
+      : optionalState(target.target_exposure_side, "当前没有方向补充说明")
+  }`;
+}
+
+function latestOrderStatusLabel(order = null) {
+  if (!order) return "暂无委托";
+  return readableState(order.status || "unknown");
 }

@@ -2196,8 +2196,9 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIsNotNone(runtime.decision_engine.strategy_profile_service)
         runtime.ai_service.should_attempt_assessment = Mock(return_value=True)
+        effective_modes = iter(["ai_decision_maker_with_profile_control", "baseline_only"])
         runtime.ai_service.effective_operating_mode = Mock(
-            side_effect=["ai_decision_maker_with_profile_control", "baseline_only"]
+            side_effect=lambda: next(effective_modes, "baseline_only")
         )
         runtime.ai_service.canonical_effective_operating_mode = Mock(return_value="baseline_only")
         runtime.ai_service.assess = AsyncMock(

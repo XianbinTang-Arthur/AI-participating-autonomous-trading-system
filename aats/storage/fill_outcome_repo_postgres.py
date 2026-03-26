@@ -145,7 +145,10 @@ class PostgresFillOutcomeRepository:
             symbol_clause,
             FillOutcomeModel.strategy_family == "smart_arbitrage",
             or_(
-                and_(FillOutcomeModel.product_type == "spot", FillOutcomeModel.margin_mode == "cash"),
+                and_(
+                    FillOutcomeModel.product_type == "spot",
+                    FillOutcomeModel.margin_mode.in_(tuple(scope.smart_arbitrage_spot_margin_modes)),
+                ),
                 and_(FillOutcomeModel.product_type == scope.product_type, FillOutcomeModel.margin_mode == scope.margin_mode),
             ),
         )

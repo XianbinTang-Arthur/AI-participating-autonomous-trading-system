@@ -386,7 +386,7 @@ console.log(JSON.stringify({
   configHasRuntimeModeCard: configHtml.includes('AI 策略模式'),
   configHasAutoProfileControlCard: configHtml.includes('AI 换档控制'),
   configHasRuntimeParams: configHtml.includes('运行参数概览'),
-  configHasAdaptiveControls: configHtml.includes('风险预算乘数') && configHtml.includes('执行侵略性乘数'),
+  configOmitsAdaptiveControls: !configHtml.includes('风险预算乘数') && !configHtml.includes('执行侵略性乘数'),
   configHasTimingControls: configHtml.includes('持有与冷却') && configHtml.includes('低边际保护'),
   configHasStrategyShadow: configHtml.includes('策略层 shadow'),
   configHasExecutionShadow: configHtml.includes('执行层 shadow'),
@@ -418,7 +418,7 @@ console.log(JSON.stringify({
         self.assertIn('"configHasRuntimeModeCard":true', result.stdout)
         self.assertIn('"configHasAutoProfileControlCard":true', result.stdout)
         self.assertIn('"configHasRuntimeParams":true', result.stdout)
-        self.assertIn('"configHasAdaptiveControls":true', result.stdout)
+        self.assertIn('"configOmitsAdaptiveControls":true', result.stdout)
         self.assertIn('"configHasTimingControls":true', result.stdout)
         self.assertIn('"configHasStrategyShadow":true', result.stdout)
         self.assertIn('"configHasExecutionShadow":true', result.stdout)

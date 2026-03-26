@@ -173,6 +173,8 @@ class OKXPrivateWebSocketClient:
                 inst_types.append("SPOT")
         if self.settings.trading_product_type == "derivatives":
             has_derivatives = any(item in {"SWAP", "FUTURES"} for item in inst_types)
+            if self.settings.smart_arbitrage_enabled and "SPOT" not in inst_types:
+                inst_types.append("SPOT")
             if not has_derivatives:
                 inst_types = [item for item in inst_types if item == "SPOT" and self.settings.smart_arbitrage_enabled]
                 for item in ("SWAP", "FUTURES"):

@@ -85,6 +85,8 @@ class TestMainlineTradingChain(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(record.order_state_refs)
             self.assertTrue(record.fill_event_refs)
             self.assertIsNotNone(record.portfolio_delta_ref)
+            self.assertTrue(record.portfolio_delta_refs)
+            self.assertIn(record.portfolio_delta_ref, record.portfolio_delta_refs)
             self.assertTrue(record.reconciliation_refs)
 
             fill_ids: set[str] = set()
@@ -106,7 +108,7 @@ class TestMainlineTradingChain(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNotNone(reconciliation_event)
                 report = ReconciliationReport.model_validate(reconciliation_event.payload)
                 self.assertEqual(report.decision_id, decision_id)
-                self.assertEqual(report.portfolio_snapshot_ref, record.portfolio_delta_ref)
+                self.assertIn(report.portfolio_snapshot_ref, record.portfolio_delta_refs)
 
         self.assertTrue(executed_decision_ids)
 

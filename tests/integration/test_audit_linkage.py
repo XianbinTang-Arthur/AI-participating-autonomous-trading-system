@@ -39,6 +39,8 @@ class TestAuditLinkage(unittest.IsolatedAsyncioTestCase):
 
         for record in records_with_execution:
             self.assertIsNotNone(record.portfolio_delta_ref)
+            self.assertTrue(record.portfolio_delta_refs)
+            self.assertIn(record.portfolio_delta_ref, record.portfolio_delta_refs)
             snapshot_event = event_store.get(record.portfolio_delta_ref)
             self.assertIsNotNone(snapshot_event)
             self.assertEqual(snapshot_event.payload.get("decision_id"), record.decision_id)
@@ -55,9 +57,53 @@ class TestAuditLinkage(unittest.IsolatedAsyncioTestCase):
                 reconciliation_event = event_store.get(reconciliation_ref)
                 self.assertIsNotNone(reconciliation_event)
                 self.assertEqual(reconciliation_event.payload.get("decision_id"), record.decision_id)
-                self.assertEqual(
+                self.assertIn(
                     reconciliation_event.payload.get("portfolio_snapshot_ref"),
-                    record.portfolio_delta_ref,
+                    record.portfolio_delta_refs,
+                )
+
+    async def test_smart_arbitrage_dual_fill_keeps_all_snapshot_refs_available_for_reconciliation(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "mode": "paper_live",
+                "market_data_backend": "demo",
+                "execution_backend": "paper",
+                "account_backend": "disabled",
+                "account_read_enabled": False,
+                "storage_mode": "memory",
+                "event_persistence_mode": "strict",
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "smart_arbitrage_enabled": True,
+                "smart_arbitrage_basis_entry_bps": 0.0,
+                "smart_arbitrage_estimated_cost_bps": 0.0,
+                "smart_arbitrage_quote_budget_per_trade": 100.0,
+                "smart_arbitrage_max_pair_notional": 100.0,
+            }
+        )
+        runtime = await build_runtime(settings)
+
+        await runtime.market_gateway.run_local_publisher(symbol="BTC-USDT", iterations=3, interval_seconds=0.0)
+        await runtime.market_gateway.run_local_publisher(symbol=settings.default_symbol, iterations=3, interval_seconds=0.0)
+        target = await runtime.decision_engine.run_cycle(settings.default_symbol, settings.primary_timeframe)
+
+        record = runtime.audit_repo.get(target.decision_id)
+        self.assertIsNotNone(record)
+        assert record is not None
+        self.assertGreaterEqual(len(record.fill_event_refs), 2)
+        self.assertGreaterEqual(len(record.portfolio_delta_refs), 2)
+        self.assertTrue(record.reconciliation_refs)
+        self.assertIn(record.portfolio_delta_ref, record.portfolio_delta_refs)
+
+        for reconciliation_ref in record.reconciliation_refs:
+            reconciliation_event = runtime.event_store.get(reconciliation_ref)
+            self.assertIsNotNone(reconciliation_event)
+            if reconciliation_event is not None:
+                self.assertIn(
+                    reconciliation_event.payload.get("portfolio_snapshot_ref"),
+                    record.portfolio_delta_refs,
                 )
 
 

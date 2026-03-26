@@ -43,6 +43,7 @@ strategy_family_auto_selection_enabled: true
 strategy_profile_auto_control_enabled: false
 # [常用可调] strategy_profile_auto_rollback_enabled：自动换档后是否允许自动回滚。可选值：true / false；推荐值：true。
 strategy_profile_auto_rollback_enabled: true
+
 # [常用可调] strategy_profile_activation_policy_enabled：是否启用自动换档激活策略。可选值：true / false；推荐值：true。
 strategy_profile_activation_policy_enabled: true
 # [常用可调] strategy_profile_emergency_safety_fast_track_enabled：风险事件时是否允许快速切到安全档。可选值：true / false；推荐值：true。
@@ -77,6 +78,22 @@ smart_arbitrage_estimated_cost_bps: 10.0
 smart_arbitrage_quote_budget_per_trade: 200.0
 # [常用可调] smart_arbitrage_max_pair_notional：单组套利最大名义金额。可选值：正数；推荐值：2000.0。
 smart_arbitrage_max_pair_notional: 2000.0
+# [进阶可调] smart_arbitrage_pair_definitions：智能套利配对定义。默认先显式定义主套利对，后续多 pair 直接在这里扩展。
+smart_arbitrage_pair_definitions:
+  - pair_id: btc_usdt_swap
+    spot_symbol: BTC-USDT
+    hedge_symbol: BTC-USDT-SWAP
+# [进阶可调] smart_arbitrage_negative_basis_mode：负基差执行模式。可选值：disabled / advisory_only / inventory_backed / margin_backed；推荐值：advisory_only。
+smart_arbitrage_negative_basis_mode: advisory_only
+# [进阶可调] smart_arbitrage_inventory_reservation_enabled：是否允许使用现货库存做库存反套。可选值：true / false；推荐值：false。
+smart_arbitrage_inventory_reservation_enabled: false
+# [进阶可调] smart_arbitrage_margin_short_enabled：是否启用保证金融券反套能力声明。可选值：true / false；推荐值：false。
+smart_arbitrage_margin_short_enabled: false
+# [进阶可调] smart_arbitrage_margin_short_execution_ready：执行适配层是否已经接通保证金融券反套。可选值：true / false；推荐值：false。
+smart_arbitrage_margin_short_execution_ready: false
+# [进阶可调] smart_arbitrage_margin_short_spot_margin_mode：保证金融券现货腿的保证金模式。可选值：cross / isolated；推荐值：cross。
+smart_arbitrage_margin_short_spot_margin_mode: cross
+
 # [常用可调] spot_grid_enabled：是否启用现货网格。可选值：true / false；推荐值：true。
 spot_grid_enabled: true
 # [常用可调] spot_grid_anchor_lookback_snapshots：网格锚点回看快照数。可选值：5 ~ 500；推荐值：24。
@@ -91,6 +108,7 @@ spot_grid_inventory_ceiling_fraction: 1.0
 spot_grid_rebalance_min_fraction_of_max_qty: 0.08
 # [常用可调] spot_grid_breakout_guard_enabled：是否启用突破保护。合约 profile 当前即使不作为主执行，也保留统一调参。可选值：true / false；推荐值：true。
 spot_grid_breakout_guard_enabled: true
+
 # [常用可调] dca_enabled：是否启用定投策略。可选值：true / false；推荐值：true。
 dca_enabled: true
 # [常用可调] dca_interval_seconds：定投周期秒数。可选值：正数；推荐值：86400.0。
@@ -186,7 +204,7 @@ trial_guard_min_closed_fills: 5
 # [常用可调] trial_guard_max_daily_loss_usdt：当日最大亏损阈值。可选值：正数；推荐值：20.0。
 trial_guard_max_daily_loss_usdt: 20.0
 # [常用可调] trial_guard_max_consecutive_losses：最大连续亏损次数。可选值：1 ~ 20；推荐值：4。
-trial_guard_max_consecutive_losses: 4
+trial_guard_max_consecutive_losses: 10
 # [常用可调] trial_guard_max_fee_to_notional_ratio：最大费耗/名义金额比。可选值：0.0 ~ 1.0；推荐值：0.0012。
 trial_guard_max_fee_to_notional_ratio: 0.0012
 # [常用可调] trial_guard_max_high_slippage_ratio：高滑点成交占比上限。可选值：0.0 ~ 1.0；推荐值：0.35。

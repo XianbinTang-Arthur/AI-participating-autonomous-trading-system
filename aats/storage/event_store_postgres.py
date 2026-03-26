@@ -378,7 +378,10 @@ class PostgresEventStore:
             symbol_clause,
             strategy_family == "smart_arbitrage",
             or_(
-                and_(model.product_type == "spot", model.margin_mode == "cash"),
+                and_(
+                    model.product_type == "spot",
+                    model.margin_mode.in_(tuple(scope.smart_arbitrage_spot_margin_modes)),
+                ),
                 and_(model.product_type == scope.product_type, model.margin_mode == scope.margin_mode),
             ),
         )

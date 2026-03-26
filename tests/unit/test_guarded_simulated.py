@@ -678,6 +678,46 @@ class TestGuardedSimulatedExecution(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("_", payload["clOrdId"])
         self.assertNotEqual(payload["clOrdId"], f"cl{intent.idempotency_key}".replace("_", "")[:32])
 
+    def test_spot_margin_close_payload_includes_reduce_only(self) -> None:
+        intent = OrderIntent(
+            intent_id="intent_spot_margin_close",
+            decision_id="decision_spot_margin_close",
+            symbol="BTC-USDT",
+            side="buy",
+            quantity=0.1,
+            execution_style="taker",
+            order_type="market",
+            urgency="medium",
+            time_in_force="IOC",
+            idempotency_key="intent_spot_margin_close",
+            product_type="spot",
+            margin_mode="cross",
+            td_mode="cross",
+            reduce_only=True,
+            close_only=True,
+            strategy_family="smart_arbitrage",
+            strategy_execution_mode="margin_reverse_carry",
+            position_intent="close_short",
+        )
+
+        payload = OKXOrderPayloadBuilder().build(
+            intent=intent,
+            instrument=InstrumentMetadata(
+                instrument_id="BTC-USDT",
+                symbol="BTC-USDT",
+                base_currency="BTC",
+                quote_currency="USDT",
+                lot_size=0.0001,
+                tick_size=0.1,
+                min_size=0.0001,
+                state="live",
+            ),
+        )
+
+        self.assertEqual(payload["tdMode"], "cross")
+        self.assertEqual(payload["reduceOnly"], "true")
+        self.assertEqual(payload["tgtCcy"], "base_ccy")
+
     def test_limit_ioc_payload_uses_ioc_order_type_and_price_cap(self) -> None:
         intent = OrderIntent(
             intent_id="intent_limit_ioc",

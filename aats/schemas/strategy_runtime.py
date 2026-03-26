@@ -11,7 +11,20 @@ from aats.schemas.system import MarginModelType, ProductType
 
 
 StrategyFamily = Literal["directional", "smart_arbitrage", "spot_grid", "dca"]
-StrategyCandidateState = Literal["ready", "inactive", "disabled", "incompatible", "advisory_only"]
+StrategyCandidateState = Literal[
+    "ready",
+    "inactive",
+    "disabled",
+    "incompatible",
+    "advisory_only",
+    "candidate",
+    "blocked",
+    "opening",
+    "active",
+    "rebalancing",
+    "unwinding",
+    "recovery",
+]
 StrategyRouteAction = Literal["override_target", "hold_current", "advisory_only", "protective_fallback"]
 StrategyExecutionBundleStatus = Literal["blocked", "planned", "submitted", "partial_fill_recovery", "recovered"]
 StrategySleeveStatus = Literal["active", "inactive", "paused", "retired"]
@@ -100,6 +113,11 @@ class StrategySleeveIntent(SchemaBase):
     allocator_weight: Decimal = Decimal("1")
     control_reason_codes: list[str] = Field(default_factory=list)
     control_summary: str | None = None
+    pair_id: str | None = None
+    opportunity_kind: str | None = None
+    execution_mode: str | None = None
+    state_phase: str | None = None
+    blocking_reasons: list[str] = Field(default_factory=list)
     metrics: dict[str, Any] = Field(default_factory=dict)
     legs: list["StrategyLegIntent"] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=utc_now)
@@ -230,6 +248,10 @@ class StrategyLegIntent(SchemaBase):
     risk_constraints_applied: list[str] = Field(default_factory=list)
     execution_plan_ref: str | None = None
     order_intent_ref: str | None = None
+    pair_id: str | None = None
+    opportunity_kind: str | None = None
+    execution_mode: str | None = None
+    state_phase: str | None = None
     note: str | None = None
 
 
@@ -253,6 +275,11 @@ class StrategyCandidate(SchemaBase):
     allocator_weight: Decimal = Decimal("1")
     control_reason_codes: list[str] = Field(default_factory=list)
     control_summary: str | None = None
+    pair_id: str | None = None
+    opportunity_kind: str | None = None
+    execution_mode: str | None = None
+    state_phase: str | None = None
+    blocking_reasons: list[str] = Field(default_factory=list)
     metrics: dict[str, Any] = Field(default_factory=dict)
     legs: list[StrategyLegIntent] = Field(default_factory=list)
 

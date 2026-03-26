@@ -199,9 +199,17 @@ class DecisionAuditService:
         if not isinstance(decision_id, str):
             return
         record = self._existing_record(decision_id)
-        if record.portfolio_delta_ref == envelope.event_id:
+        if record.portfolio_delta_ref == envelope.event_id and envelope.event_id in record.portfolio_delta_refs:
             return
-        updated = record.model_copy(update={"portfolio_delta_ref": envelope.event_id})
+        portfolio_delta_refs = list(record.portfolio_delta_refs)
+        if envelope.event_id not in portfolio_delta_refs:
+            portfolio_delta_refs.append(envelope.event_id)
+        updated = record.model_copy(
+            update={
+                "portfolio_delta_ref": envelope.event_id,
+                "portfolio_delta_refs": portfolio_delta_refs,
+            }
+        )
         await self._publish_record(updated)
 
     async def handle_reconciliation_report(self, message: dict) -> None:
@@ -211,10 +219,13 @@ class DecisionAuditService:
             return
         record = self._existing_record(decision_id)
         report_snapshot_ref = envelope.payload.get("portfolio_snapshot_ref")
+        valid_snapshot_refs = set(record.portfolio_delta_refs)
+        if record.portfolio_delta_ref is not None:
+            valid_snapshot_refs.add(record.portfolio_delta_ref)
         if (
             isinstance(report_snapshot_ref, str)
-            and record.portfolio_delta_ref is not None
-            and report_snapshot_ref != record.portfolio_delta_ref
+            and valid_snapshot_refs
+            and report_snapshot_ref not in valid_snapshot_refs
         ):
             raise RuntimeError(
                 "Reconciliation report snapshot reference does not match audit-linked portfolio snapshot "
@@ -254,6 +265,7 @@ class DecisionAuditService:
                 strategy_coordinator_snapshot_ref=record.strategy_coordinator_snapshot_ref,
                 strategy_sleeve_intent_ref_count=len(record.strategy_sleeve_intent_refs),
                 portfolio_allocation_decision_ref=record.portfolio_allocation_decision_ref,
+                portfolio_delta_ref_count=len(record.portfolio_delta_refs),
                 order_intent_ref_count=len(record.order_intent_refs),
                 order_state_ref_count=len(record.order_state_refs),
                 fill_event_ref_count=len(record.fill_event_refs),

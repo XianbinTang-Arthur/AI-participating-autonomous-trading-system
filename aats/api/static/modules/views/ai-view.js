@@ -82,13 +82,6 @@ const AI_ERROR_MAP = {
   live_translation_requires_slippage_guard: "缺少滑点保护，不能启用受限实盘翻译。",
 };
 
-const MANUAL_MODE_OPTIONS = [
-  { value: "baseline_only", label: "仅按基础策略运行", tone: "warning" },
-  { value: "ai_assisted", label: "AI 辅助决策", tone: "secondary" },
-  { value: "ai_decision_maker", label: "AI 决策者", tone: "primary" },
-  { value: "ai_decision_maker_with_profile_control", label: "AI 决策者并控制策略档位", tone: "primary" },
-];
-
 const EXECUTION_SUGGESTION_LABELS = {
   passive_bias: "被动倾向",
   maker_taker_bias: "主被动偏向",
@@ -318,6 +311,14 @@ export function renderAIAnalysisSectionCards(data) {
   const shadowSummary = aiOverview.shadow_summary || {};
   const performanceView = aiOverview.performance_view || {};
   const performanceWindows = performanceView.windows || {};
+  const recentReports = performanceView.recent_reports || [];
+  const replayContext = performanceView.replay_context || {};
+  const hasHistoryRecords = recentAssessments.length > 0 || shadowRecent.length > 0 || evaluations.length > 0;
+  const hasPerformanceRecords =
+    recentReports.length > 0
+    || Number(performanceView.report_count ?? 0) > 0
+    || Number(replayContext.validation_count ?? 0) > 0
+    || Boolean(replayContext.latest_validation?.validated_at);
 
   return {
     aiExecutionSuggestion: surfaceCard({
@@ -334,190 +335,209 @@ export function renderAIAnalysisSectionCards(data) {
       title: "AI 记录",
       kicker: "历史记录",
       copy: "这里集中看策略层 shadow 的动作记录和收益评估。",
-      content: `
-        <div class="panel-grid">
-          <div class="span-12">
-            ${historyCallout(shadowSummary, performanceWindows)}
-          </div>
-          <div class="span-12">
-            ${summaryStrip([
-              {
-                label: "近 3 窗口净收益差",
-                value: signedOrFallback(performanceWindows.short?.net_pnl_delta_total, 4, "暂未形成结论"),
-                meta: `跑赢率 ${formatNumber(performanceWindows.short?.outperformed_rate ?? 0, 3)} | 正数通常表示策略层 shadow 更好`,
-                tone: Number(performanceWindows.short?.net_pnl_delta_total || 0) >= 0 ? "positive" : "warning",
-              },
-              {
-                label: "近 5 窗口净收益差",
-                value: signedOrFallback(performanceWindows.medium?.net_pnl_delta_total, 4, "暂未形成结论"),
-                meta: `跑赢率 ${formatNumber(performanceWindows.medium?.outperformed_rate ?? 0, 3)} | 正数通常表示策略层 shadow 更好`,
-                tone: Number(performanceWindows.medium?.net_pnl_delta_total || 0) >= 0 ? "positive" : "warning",
-              },
-              {
-                label: "近 10 窗口手续费拖累差",
-                value: signedOrFallback(performanceWindows.long?.avg_fee_ratio_delta, 4, "暂未形成结论"),
-                meta: `需复核 ${formatNumber(performanceWindows.long?.review_required_count ?? 0, 0)} 次 | 负数通常更好`,
-                tone: Number(performanceWindows.long?.avg_fee_ratio_delta || 0) <= 0 ? "positive" : "warning",
-              },
-              {
-                label: "近 10 窗口来回交易差",
-                value: signedOrFallback(performanceWindows.long?.avg_churn_ratio_delta, 4, "暂未形成结论"),
-                meta: `样本 ${formatNumber(performanceWindows.long?.sample_size ?? 0, 0)} | 负数通常更好`,
-                tone: Number(performanceWindows.long?.avg_churn_ratio_delta || 0) <= 0 ? "positive" : "warning",
-              },
-            ])}
-          </div>
-
-          <div class="span-12">
-        ${summaryStrip([
-              {
-                label: "策略层 shadow 状态",
-                value: humanState(shadowSummary.status || "insufficient_data"),
-                meta: shadowSummary.review_required ? "需要人工复核" : "当前未触发人工复核",
-                tone: toneForShadowSummary(shadowSummary),
-              },
-              {
-                label: "最新净收益差值",
-                value: signedOrFallback(shadowSummary.latest_net_pnl_delta, 4, "暂未形成结论"),
-                meta: "策略层 shadow 净收益 - 基础策略净收益，正数通常更好",
-                tone: Number(shadowSummary.latest_net_pnl_delta || 0) >= 0 ? "positive" : "warning",
-              },
-              {
-                label: "最新手续费拖累差值",
-                value: signedOrFallback(shadowSummary.latest_fee_ratio_delta, 4, "暂未形成结论"),
-                meta: "策略层 shadow 手续费比例 - 基础策略手续费比例，负数通常更好",
-                tone: Number(shadowSummary.latest_fee_ratio_delta || 0) <= 0 ? "positive" : "warning",
-              },
-              {
-                label: "最新来回交易差值",
-                value: signedOrFallback(shadowSummary.latest_churn_ratio_delta, 4, "暂未形成结论"),
-                meta: "策略层 shadow 来回交易比例 - 基础策略来回交易比例，负数通常更好",
-                tone: Number(shadowSummary.latest_churn_ratio_delta || 0) <= 0 ? "positive" : "warning",
-              },
-            ])}
-          </div>
-
-          <div class="span-12">
-            ${responsiveTable(
-              ["时间", "这轮怎么看市场", "AI 会不会改主策略", "值不值得做", "最终怎么处理"],
-              recentAssessments.map((item) => [
-                `<div><strong>${formatRelativeAge(item.created_at)}</strong><div class="table-meta">${formatMaybeTimestamp(item.created_at)}</div><div class="inline-pills">${actorTags(item.fallback_used ? "system" : "ai", item.fallback_used ? "ai" : null)}</div></div>`,
-                `<div><strong>${humanState(item.regime || "unknown")}</strong><div class="table-meta">方向优势 ${formatNumber(item.directional_edge ?? 0, 2)}</div></div>`,
-                `<div><strong>${item.baseline_override_recommended ? "建议改写基础策略" : "不建议改写"}</strong><div class="table-meta">${localizeList(item.override_reason_codes, "当前没有额外改写理由。")}</div></div>`,
-                `<div><strong>${item.economically_actionable ? "值得继续做" : "现在不值得做"}</strong><div class="table-meta">净边际 ${basisPoints(item.estimated_net_edge_bps, 2)}</div></div>`,
-                `<div><strong>${item.fallback_used ? "最终回退到基础策略" : "最终采用模型结果"}</strong><div class="table-meta">${localizeList(item.rejection_flags || item.validation_flags, "当前没有额外处理说明。")}</div></div>`,
-              ]),
-              "当前还没有可复盘的 AI 判断记录。",
-              assessmentCards(recentAssessments)
-            )}
-            ${renderPaginationFooter(recentPayload, {
-              key: "AI 判断记录",
-              loadAction: "load-more-ai-assessments",
-              collapseAction: "collapse-ai-assessments",
+      content: hasHistoryRecords
+        ? `
+            <div class="panel-grid">
+              <div class="span-12">
+                ${historyCallout(shadowSummary, performanceWindows)}
+              </div>
+              <div class="span-12">
+                ${summaryStrip([
+                  {
+                    label: "近 3 窗口净收益差",
+                    value: signedOrFallback(performanceWindows.short?.net_pnl_delta_total, 4, "暂未形成结论"),
+                    meta: `跑赢率 ${formatNumber(performanceWindows.short?.outperformed_rate ?? 0, 3)} | 正数通常表示策略层 shadow 更好`,
+                    tone: Number(performanceWindows.short?.net_pnl_delta_total || 0) >= 0 ? "positive" : "warning",
+                  },
+                  {
+                    label: "近 5 窗口净收益差",
+                    value: signedOrFallback(performanceWindows.medium?.net_pnl_delta_total, 4, "暂未形成结论"),
+                    meta: `跑赢率 ${formatNumber(performanceWindows.medium?.outperformed_rate ?? 0, 3)} | 正数通常表示策略层 shadow 更好`,
+                    tone: Number(performanceWindows.medium?.net_pnl_delta_total || 0) >= 0 ? "positive" : "warning",
+                  },
+                  {
+                    label: "近 10 窗口手续费拖累差",
+                    value: signedOrFallback(performanceWindows.long?.avg_fee_ratio_delta, 4, "暂未形成结论"),
+                    meta: `需复核 ${formatNumber(performanceWindows.long?.review_required_count ?? 0, 0)} 次 | 负数通常更好`,
+                    tone: Number(performanceWindows.long?.avg_fee_ratio_delta || 0) <= 0 ? "positive" : "warning",
+                  },
+                  {
+                    label: "近 10 窗口来回交易差",
+                    value: signedOrFallback(performanceWindows.long?.avg_churn_ratio_delta, 4, "暂未形成结论"),
+                    meta: `样本 ${formatNumber(performanceWindows.long?.sample_size ?? 0, 0)} | 负数通常更好`,
+                    tone: Number(performanceWindows.long?.avg_churn_ratio_delta || 0) <= 0 ? "positive" : "warning",
+                  },
+                ])}
+              </div>
+              <div class="span-12">
+                ${summaryStrip([
+                  {
+                    label: "策略层 shadow 状态",
+                    value: humanState(shadowSummary.status || "insufficient_data"),
+                    meta: shadowSummary.review_required ? "需要人工复核" : "当前未触发人工复核",
+                    tone: toneForShadowSummary(shadowSummary),
+                  },
+                  {
+                    label: "最新净收益差值",
+                    value: signedOrFallback(shadowSummary.latest_net_pnl_delta, 4, "暂未形成结论"),
+                    meta: "策略层 shadow 净收益 - 基础策略净收益，正数通常更好",
+                    tone: Number(shadowSummary.latest_net_pnl_delta || 0) >= 0 ? "positive" : "warning",
+                  },
+                  {
+                    label: "最新手续费拖累差值",
+                    value: signedOrFallback(shadowSummary.latest_fee_ratio_delta, 4, "暂未形成结论"),
+                    meta: "策略层 shadow 手续费比例 - 基础策略手续费比例，负数通常更好",
+                    tone: Number(shadowSummary.latest_fee_ratio_delta || 0) <= 0 ? "positive" : "warning",
+                  },
+                  {
+                    label: "最新来回交易差值",
+                    value: signedOrFallback(shadowSummary.latest_churn_ratio_delta, 4, "暂未形成结论"),
+                    meta: "策略层 shadow 来回交易比例 - 基础策略来回交易比例，负数通常更好",
+                    tone: Number(shadowSummary.latest_churn_ratio_delta || 0) <= 0 ? "positive" : "warning",
+                  },
+                ])}
+              </div>
+              <div class="span-12">
+                ${responsiveTable(
+                  ["时间", "这轮怎么看市场", "AI 会不会改主策略", "值不值得做", "最终怎么处理"],
+                  recentAssessments.map((item) => [
+                    `<div><strong>${formatRelativeAge(item.created_at)}</strong><div class="table-meta">${formatMaybeTimestamp(item.created_at)}</div><div class="inline-pills">${actorTags(item.fallback_used ? "system" : "ai", item.fallback_used ? "ai" : null)}</div></div>`,
+                    `<div><strong>${humanState(item.regime || "unknown")}</strong><div class="table-meta">方向优势 ${formatNumber(item.directional_edge ?? 0, 2)}</div></div>`,
+                    `<div><strong>${item.baseline_override_recommended ? "建议改写基础策略" : "不建议改写"}</strong><div class="table-meta">${localizeList(item.override_reason_codes, "当前没有额外改写理由。")}</div></div>`,
+                    `<div><strong>${item.economically_actionable ? "值得继续做" : "现在不值得做"}</strong><div class="table-meta">净边际 ${basisPoints(item.estimated_net_edge_bps, 2)}</div></div>`,
+                    `<div><strong>${item.fallback_used ? "最终回退到基础策略" : "最终采用模型结果"}</strong><div class="table-meta">${localizeList(item.rejection_flags || item.validation_flags, "当前没有额外处理说明。")}</div></div>`,
+                  ]),
+                  "当前还没有可复盘的 AI 判断记录。",
+                  assessmentCards(recentAssessments)
+                )}
+                ${renderPaginationFooter(recentPayload, {
+                  key: "AI 判断记录",
+                  loadAction: "load-more-ai-assessments",
+                  collapseAction: "collapse-ai-assessments",
+                })}
+              </div>
+              <div class="span-12">
+                ${responsiveTable(
+                  ["时间", "基础策略会怎么做", "AI 影子会怎么做", "会不会真的改动", "主要差异"],
+                  shadowRecent.map((item) => [
+                    `<div><strong>${formatRelativeAge(item.created_at)}</strong><div class="table-meta">${formatMaybeTimestamp(item.created_at)}</div><div class="inline-pills">${actorTags("system", "ai")}</div></div>`,
+                    `<div><strong>${humanState(item.baseline_action || "unknown")}</strong><div class="table-meta">目标 ${formatNumber(item.baseline_target_qty ?? 0)}</div></div>`,
+                    `<div><strong>${humanState(item.ai_shadow_action || "unknown")}</strong><div class="table-meta">目标 ${formatNumber(item.ai_shadow_target_qty ?? 0)}</div></div>`,
+                    item.would_override_baseline ? pill("会改写基础策略", "warning") : pill("与基础策略一致", "positive"),
+                    `<div><strong>${humanState(item.shadow_action_type || "unknown")}</strong><div class="table-meta">${localizeList(item.reason_codes, "当前没有额外差异说明。")}</div></div>`,
+                  ]),
+                  "当前还没有可复盘的影子动作记录。",
+                  shadowDecisionCards(shadowRecent)
+                )}
+                ${renderPaginationFooter(shadowRecentPayload, {
+                  key: "影子动作",
+                  loadAction: "load-more-ai-shadow-decisions",
+                  collapseAction: "collapse-ai-shadow-decisions",
+                })}
+              </div>
+              <div class="span-12">
+                ${summaryStrip([
+                  {
+                    label: "人工复核",
+                    value: shadowSummary.review_required ? "需要人工复核" : "当前未触发",
+                    meta: `窗口状态 ${humanState(shadowSummary.status || "insufficient_data")}`,
+                    tone: shadowSummary.review_required ? "danger" : toneForShadowSummary(shadowSummary),
+                  },
+                ])}
+                ${responsiveTable(
+                  ["评估窗口", "基础策略结果", "AI 影子结果", "成本与来回交易", "这一窗谁更好"],
+                  evaluations.map((item) => [
+                    `<div><strong>${formatMaybeTimestamp(item.window_end)}</strong><div class="table-meta">${formatMaybeTimestamp(item.window_start)} ~ ${formatMaybeTimestamp(item.window_end)}</div><div class="inline-pills">${actorTags("system")}</div></div>`,
+                    `<div><strong>净收益 ${formatNumber(item.baseline_net_pnl ?? 0)}</strong><div class="table-meta">毛收益 ${formatNumber(item.baseline_gross_pnl ?? 0)} / 成交 ${formatNumber(item.baseline_trade_count ?? 0, 0)} 笔</div></div>`,
+                    `<div><strong>净收益 ${formatNumber(item.shadow_net_pnl ?? 0)}</strong><div class="table-meta">毛收益 ${formatNumber(item.shadow_gross_pnl ?? 0)} / 成交 ${formatNumber(item.shadow_trade_count ?? 0, 0)} 笔</div></div>`,
+                    `<div><strong>手续费差值 ${formatSigned((Number(item.shadow_fee_ratio ?? 0) - Number(item.baseline_fee_ratio ?? 0)), 4)}</strong><div class="table-meta">来回交易差值 ${formatSigned((Number(item.shadow_churn_ratio ?? 0) - Number(item.baseline_churn_ratio ?? 0)), 4)}</div></div>`,
+                    item.shadow_outperformed === null
+                      ? pill("尚未得出结论", "outline")
+                      : item.shadow_outperformed
+                        ? pill("影子结果更优", "positive")
+                        : pill("基础策略更优", "warning"),
+                  ]),
+                  "当前还没有影子收益对比结果。",
+                  shadowEvaluationCards(evaluations)
+                )}
+                ${renderPaginationFooter(evaluationsPayload, {
+                  key: "影子收益评估",
+                  loadAction: "load-more-ai-shadow-evaluations",
+                  collapseAction: "collapse-ai-shadow-evaluations",
+                })}
+              </div>
+            </div>
+          `
+        : `
+            ${callout({
+              title: "当前暂无可复盘的 AI 历史记录",
+              copy: "后端当前还没有 AI 判断、影子动作或收益对比样本。这不是断链，而是当前样本确实为 0。",
+              pills: [
+                pill(`AI 判断 ${formatNumber(recentPayload.total_available ?? recentAssessments.length, 0)} 条`, "outline"),
+                pill(`影子动作 ${formatNumber(shadowRecentPayload.total_available ?? shadowRecent.length, 0)} 条`, "outline"),
+                pill(`收益对比 ${formatNumber(evaluationsPayload.total_available ?? evaluations.length, 0)} 条`, "outline"),
+              ],
             })}
-          </div>
-
-          <div class="span-12">
-            ${responsiveTable(
-              ["时间", "基础策略会怎么做", "AI 影子会怎么做", "会不会真的改动", "主要差异"],
-              shadowRecent.map((item) => [
-                `<div><strong>${formatRelativeAge(item.created_at)}</strong><div class="table-meta">${formatMaybeTimestamp(item.created_at)}</div><div class="inline-pills">${actorTags("system", "ai")}</div></div>`,
-                `<div><strong>${humanState(item.baseline_action || "unknown")}</strong><div class="table-meta">目标 ${formatNumber(item.baseline_target_qty ?? 0)}</div></div>`,
-                `<div><strong>${humanState(item.ai_shadow_action || "unknown")}</strong><div class="table-meta">目标 ${formatNumber(item.ai_shadow_target_qty ?? 0)}</div></div>`,
-                item.would_override_baseline ? pill("会改写基础策略", "warning") : pill("与基础策略一致", "positive"),
-                `<div><strong>${humanState(item.shadow_action_type || "unknown")}</strong><div class="table-meta">${localizeList(item.reason_codes, "当前没有额外差异说明。")}</div></div>`,
-              ]),
-              "当前还没有可复盘的影子动作记录。",
-              shadowDecisionCards(shadowRecent)
-            )}
-            ${renderPaginationFooter(shadowRecentPayload, {
-              key: "影子动作",
-              loadAction: "load-more-ai-shadow-decisions",
-              collapseAction: "collapse-ai-shadow-decisions",
-            })}
-          </div>
-
-          <div class="span-12">
-            ${summaryStrip([
-              {
-                label: "人工复核",
-                value: shadowSummary.review_required ? "需要人工复核" : "当前未触发",
-                meta: `窗口状态 ${humanState(shadowSummary.status || "insufficient_data")}`,
-                tone: shadowSummary.review_required ? "danger" : toneForShadowSummary(shadowSummary),
-              },
-            ])}
-            ${responsiveTable(
-              ["评估窗口", "基础策略结果", "AI 影子结果", "成本与来回交易", "这一窗谁更好"],
-              evaluations.map((item) => [
-                `<div><strong>${formatMaybeTimestamp(item.window_end)}</strong><div class="table-meta">${formatMaybeTimestamp(item.window_start)} ~ ${formatMaybeTimestamp(item.window_end)}</div><div class="inline-pills">${actorTags("system")}</div></div>`,
-                `<div><strong>净收益 ${formatNumber(item.baseline_net_pnl ?? 0)}</strong><div class="table-meta">毛收益 ${formatNumber(item.baseline_gross_pnl ?? 0)} / 成交 ${formatNumber(item.baseline_trade_count ?? 0, 0)} 笔</div></div>`,
-                `<div><strong>净收益 ${formatNumber(item.shadow_net_pnl ?? 0)}</strong><div class="table-meta">毛收益 ${formatNumber(item.shadow_gross_pnl ?? 0)} / 成交 ${formatNumber(item.shadow_trade_count ?? 0, 0)} 笔</div></div>`,
-                `<div><strong>手续费差值 ${formatSigned((Number(item.shadow_fee_ratio ?? 0) - Number(item.baseline_fee_ratio ?? 0)), 4)}</strong><div class="table-meta">来回交易差值 ${formatSigned((Number(item.shadow_churn_ratio ?? 0) - Number(item.baseline_churn_ratio ?? 0)), 4)}</div></div>`,
-                item.shadow_outperformed === null
-                  ? pill("尚未得出结论", "outline")
-                  : item.shadow_outperformed
-                    ? pill("影子结果更优", "positive")
-                    : pill("基础策略更优", "warning"),
-              ]),
-              "当前还没有影子收益对比结果。",
-              shadowEvaluationCards(evaluations)
-            )}
-            ${renderPaginationFooter(evaluationsPayload, {
-              key: "影子收益评估",
-              loadAction: "load-more-ai-shadow-evaluations",
-              collapseAction: "collapse-ai-shadow-evaluations",
-            })}
-          </div>
-        </div>
-      `,
+          `,
     }),
     aiPerformanceReports: surfaceCard({
       title: "表现报告",
       kicker: "长期表现",
       copy: "这里不再只看单次影子评估，而是看已经持久化的长期表现序列，以及最近回放健康度对 AI 决策链路的约束。",
-      content: `
-        ${performanceCallout(performanceView)}
-        ${summaryStrip([
-          {
-            label: "已持久化报告",
-            value: formatNumber(performanceView.report_count ?? 0, 0),
-            meta: Object.keys(performanceView.status_counts || {}).length
-              ? Object.entries(performanceView.status_counts || {}).map(([key, value]) => `${humanState(key)} ${value} 条`).join("、")
-              : "当前暂无已持久化状态统计。",
-            tone: "info",
-          },
-          {
-            label: "平均短窗净收益差",
-            value: signedOrFallback(performanceView.trend?.avg_short_net_pnl_delta, 4, "暂未形成结论"),
-            meta: "基于最近 3 个窗口，正数通常表示 AI 影子更好",
-            tone: Number(performanceView.trend?.avg_short_net_pnl_delta || 0) >= 0 ? "positive" : "warning",
-          },
-          {
-            label: "平均中窗净收益差",
-            value: signedOrFallback(performanceView.trend?.avg_medium_net_pnl_delta, 4, "暂未形成结论"),
-            meta: "基于最近 5 个窗口，正数通常表示 AI 影子更好",
-            tone: Number(performanceView.trend?.avg_medium_net_pnl_delta || 0) >= 0 ? "positive" : "warning",
-          },
-          {
-            label: "回放健康率",
-            value: formatNumber(performanceView.replay_context?.healthy_rate ?? 0, 3),
-            meta: `验证 ${formatNumber(performanceView.replay_context?.validation_count ?? 0, 0)} 次 | 越接近 1 越稳定`,
-            tone: Number(performanceView.replay_context?.healthy_rate || 0) >= 0.8 ? "positive" : "warning",
-          },
-        ])}
-        ${responsiveTable(
-          ["时间", "整体状态", "收益差趋势", "是否需要人工复核", "回放健康度"],
-          (performanceView.recent_reports || []).map((item) => [
-            `<div><strong>${formatRelativeAge(item.generated_at)}</strong><div class="table-meta">${formatMaybeTimestamp(item.generated_at)}</div><div class="inline-pills">${actorTags("system")}</div></div>`,
-            pill(humanState(item.latest_status || "insufficient_data"), item.review_required ? "warning" : item.latest_status === "healthy" ? "positive" : "outline"),
-            `<div><strong>${formatSigned(item.windows?.short?.net_pnl_delta_total ?? 0, 4)}</strong><div class="table-meta">中窗 ${formatSigned(item.windows?.medium?.net_pnl_delta_total ?? 0, 4)} / 长窗 ${formatSigned(item.windows?.long?.net_pnl_delta_total ?? 0, 4)}</div></div>`,
-            `<div><strong>${item.review_required ? "需要复核" : "暂不需要"}</strong><div class="table-meta">短窗 ${formatNumber(item.windows?.short?.review_required_count ?? 0, 0)} / 中窗 ${formatNumber(item.windows?.medium?.review_required_count ?? 0, 0)} / 长窗 ${formatNumber(item.windows?.long?.review_required_count ?? 0, 0)}</div></div>`,
-            `<div><strong>${formatMaybeTimestamp(performanceView.replay_context?.latest_validation?.validated_at)}</strong><div class="table-meta">最近回放偏差 ${formatNumber(performanceView.replay_context?.latest_validation?.divergence_count ?? 0, 0)}</div></div>`,
-          ]),
-          "当前暂无持久化的 AI 长周期表现报告。",
-          performanceReportCards(performanceView.recent_reports || [], performanceView.replay_context || {})
-        )}
-      `,
+      content: hasPerformanceRecords
+        ? `
+            ${performanceCallout(performanceView)}
+            ${summaryStrip([
+              {
+                label: "已持久化报告",
+                value: formatNumber(performanceView.report_count ?? 0, 0),
+                meta: Object.keys(performanceView.status_counts || {}).length
+                  ? Object.entries(performanceView.status_counts || {}).map(([key, value]) => `${humanState(key)} ${value} 条`).join("、")
+                  : "当前暂无已持久化状态统计。",
+                tone: "info",
+              },
+              {
+                label: "平均短窗净收益差",
+                value: signedOrFallback(performanceView.trend?.avg_short_net_pnl_delta, 4, "暂未形成结论"),
+                meta: "基于最近 3 个窗口，正数通常表示 AI 影子更好",
+                tone: Number(performanceView.trend?.avg_short_net_pnl_delta || 0) >= 0 ? "positive" : "warning",
+              },
+              {
+                label: "平均中窗净收益差",
+                value: signedOrFallback(performanceView.trend?.avg_medium_net_pnl_delta, 4, "暂未形成结论"),
+                meta: "基于最近 5 个窗口，正数通常表示 AI 影子更好",
+                tone: Number(performanceView.trend?.avg_medium_net_pnl_delta || 0) >= 0 ? "positive" : "warning",
+              },
+              {
+                label: "回放健康率",
+                value: formatNumber(replayContext.healthy_rate ?? 0, 3),
+                meta: `验证 ${formatNumber(replayContext.validation_count ?? 0, 0)} 次 | 越接近 1 越稳定`,
+                tone: Number(replayContext.healthy_rate || 0) >= 0.8 ? "positive" : "warning",
+              },
+            ])}
+            ${responsiveTable(
+              ["时间", "整体状态", "收益差趋势", "是否需要人工复核", "回放健康度"],
+              recentReports.map((item) => [
+                `<div><strong>${formatRelativeAge(item.generated_at)}</strong><div class="table-meta">${formatMaybeTimestamp(item.generated_at)}</div><div class="inline-pills">${actorTags("system")}</div></div>`,
+                pill(humanState(item.latest_status || "insufficient_data"), item.review_required ? "warning" : item.latest_status === "healthy" ? "positive" : "outline"),
+                `<div><strong>${formatSigned(item.windows?.short?.net_pnl_delta_total ?? 0, 4)}</strong><div class="table-meta">中窗 ${formatSigned(item.windows?.medium?.net_pnl_delta_total ?? 0, 4)} / 长窗 ${formatSigned(item.windows?.long?.net_pnl_delta_total ?? 0, 4)}</div></div>`,
+                `<div><strong>${item.review_required ? "需要复核" : "暂不需要"}</strong><div class="table-meta">短窗 ${formatNumber(item.windows?.short?.review_required_count ?? 0, 0)} / 中窗 ${formatNumber(item.windows?.medium?.review_required_count ?? 0, 0)} / 长窗 ${formatNumber(item.windows?.long?.review_required_count ?? 0, 0)}</div></div>`,
+                `<div><strong>${formatMaybeTimestamp(replayContext.latest_validation?.validated_at)}</strong><div class="table-meta">最近回放偏差 ${formatNumber(replayContext.latest_validation?.divergence_count ?? 0, 0)}</div></div>`,
+              ]),
+              "当前暂无持久化的 AI 长周期表现报告。",
+              performanceReportCards(recentReports, replayContext)
+            )}
+          `
+        : `
+            ${callout({
+              title: "当前还没有长期表现报告",
+              copy: "后端当前没有持久化的 AI 长周期表现，也没有新的回放验证结果，所以这里先不铺开长表。",
+              pills: [
+                pill(`已持久化报告 ${formatNumber(performanceView.report_count ?? 0, 0)} 条`, "outline"),
+                pill(`回放验证 ${formatNumber(replayContext.validation_count ?? 0, 0)} 次`, "outline"),
+              ],
+            })}
+          `,
     }),
   };
 }
@@ -712,77 +732,6 @@ function blockerSummary(latestOutcome, latestAssessment) {
   };
 }
 
-function manualOperatingModeSummary(runtime = {}) {
-  if ((runtime.effective_operating_mode || "baseline_only") === (runtime.configured_operating_mode || "baseline_only")) {
-    return {
-      value: `当前按配置运行：${humanState(configuredMode(runtime))}`,
-      meta: "下面的三个按钮可以随时切到另外两种模式。",
-      tone: "outline",
-    };
-  }
-  return {
-    value: `当前手动切到：${humanState(effectiveMode(runtime))}`,
-    meta: `配置默认仍是 ${humanState(configuredMode(runtime))}。点回对应按钮即可恢复默认。`,
-    tone: "warning",
-  };
-}
-
-function renderManualOperatingModePanel({ runtime = {}, session = {} }) {
-  const canAdmin = session.role === "admin" || session.identity === "api_key_write";
-  const currentMode = String(effectiveMode(runtime) || "").trim();
-  const overrideSummary = manualOperatingModeSummary(runtime);
-  const buttons = MANUAL_MODE_OPTIONS.map((option) => {
-    const active = option.value === currentMode;
-    return actionButton(
-      active ? `${option.label}（当前）` : option.label,
-      "select-ai-operating-mode",
-      option.value,
-      option.tone,
-      {
-        disabled: !canAdmin || active,
-        title: !canAdmin
-          ? "当前账号只有查看权限，不能手动切换 AI 运行模式。"
-          : active
-            ? "当前运行模式已经生效，无需重复切换。"
-            : `切换到 ${option.label}`,
-      },
-    );
-  }).join("");
-  return surfaceCard({
-    title: "AI 策略模式",
-    kicker: "运行入口",
-    copy: "这里决定 AI 是否参与最终交易决策。",
-    classes: "is-muted",
-    actions: [
-      actionButton("切策略档位", "navigate-view", "aiConfig", "secondary"),
-      actionButton("查看 AI 分析", "navigate-view", "aiAnalysis", "ghost"),
-    ].join(""),
-    content: `
-      ${summaryStrip([
-        {
-          label: "当前状态",
-          value: overrideSummary.value,
-          meta: overrideSummary.meta,
-          tone: overrideSummary.tone === "warning" ? "warning" : "info",
-        },
-        {
-          label: "配置默认",
-          value: humanState(configuredMode(runtime)),
-          meta: "启动时优先按这个模式运行",
-          tone: "outline",
-        },
-      ])}
-      ${kvList([
-        ["默认运行模式", humanState(configuredMode(runtime)), "这是系统启动时默认的 AI 运行模式。"],
-        ["当前运行模式", humanState(effectiveMode(runtime)), (effectiveMode(runtime) === configuredMode(runtime)) ? "当前与配置默认一致。" : "当前已经手动切到其他模式。"],
-      ])}
-      <div class="table-actions table-actions--compact manual-profile-switch-actions">
-        ${buttons}
-      </div>
-    `,
-  });
-}
-
 function assessmentCards(assessments) {
   return assessments.map((item) => ({
     kicker: "判断复盘",
@@ -898,6 +847,7 @@ export function renderAISections(data) {
   const downgradeState = overview.downgrade_state || {};
   const executionSuggestion = overview.latest_execution_suggestion || latest.execution_suggestion || {};
   const aiReviewBlocker = (blockerControl.blockers || []).find((item) => item?.blocker === "ai_degraded_requires_manual_review") || null;
+  const latestEconomicRows = economicGateRows(latestAssessment, latestOutcome, latestProfileControl);
 
   const analysisSections = renderAIAnalysisSectionCards(data);
   return {
@@ -1065,13 +1015,15 @@ export function renderAISections(data) {
               ["策略档位控制", profileControlSummary(latestOutcome, latestProfileControl).value, profileControlSummary(latestOutcome, latestProfileControl).meta],
               ["最新策略层 shadow 动作", humanState(latestShadowDecision?.ai_shadow_action || "unknown"), latestShadowDecision ? `相对基础策略：${humanState(latestShadowDecision.shadow_action_type)}` : "当前暂无策略层 shadow 动作"],
             ])}
-            ${surfaceCard({
-              title: "经济性概览",
-              kicker: "经济门槛",
-              copy: "这里把预期优势、成本、净优势和决策链路阻断拆开看。",
-              classes: "is-muted",
-              content: kvList(economicGateRows(latestAssessment, latestOutcome, latestProfileControl)),
-            })}
+            ${latestEconomicRows.length
+              ? surfaceCard({
+                  title: "经济性概览",
+                  kicker: "经济门槛",
+                  copy: "这里把预期优势、成本、净优势和决策链路阻断拆开看。",
+                  classes: "is-muted",
+                  content: kvList(latestEconomicRows),
+                })
+              : ""}
           `
         : callout({
             title: "当前暂无新的 AI 判断",
@@ -1114,17 +1066,6 @@ export function renderAISections(data) {
     aiHistory: analysisSections.aiHistory,
     aiPerformanceReports: analysisSections.aiPerformanceReports,
   };
-}
-
-export function renderAIView(data) {
-  const sections = renderAISections(data);
-  return `
-    <div class="panel-grid">
-      <div class="span-4">${sections.aiHero}</div>
-      <div class="span-8">${sections.aiLatest}</div>
-      ${sections.aiReview ? `<div class="span-12">${sections.aiReview}</div>` : ""}
-    </div>
-  `;
 }
 
 function renderReviewActions(blocker) {

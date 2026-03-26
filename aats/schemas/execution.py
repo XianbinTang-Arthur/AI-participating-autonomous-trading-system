@@ -191,6 +191,10 @@ class OrderIntent(SchemaBase):
     allocation_id: str | None = None
     strategy_bundle_id: str | None = None
     strategy_leg_role: Literal["primary", "hedge", "inventory", "accumulation"] | None = None
+    strategy_pair_id: str | None = None
+    strategy_opportunity_kind: str | None = None
+    strategy_execution_mode: str | None = None
+    strategy_state_phase: str | None = None
     product_type: ProductType = "spot"
     target_leverage: float = 1.0
     margin_mode: MarginModelType = "cash"
@@ -249,6 +253,10 @@ class ExecutionPlan(SchemaBase):
     allocation_id: str | None = None
     strategy_bundle_id: str | None = None
     strategy_leg_role: Literal["primary", "hedge", "inventory", "accumulation"] | None = None
+    strategy_pair_id: str | None = None
+    strategy_opportunity_kind: str | None = None
+    strategy_execution_mode: str | None = None
+    strategy_state_phase: str | None = None
     product_type: ProductType = "spot"
     target_leverage: float = 1.0
     margin_mode: MarginModelType = "cash"
@@ -302,6 +310,10 @@ class OrderState(SchemaBase):
     allocation_id: str | None = None
     strategy_bundle_id: str | None = None
     strategy_leg_role: Literal["primary", "hedge", "inventory", "accumulation"] | None = None
+    strategy_pair_id: str | None = None
+    strategy_opportunity_kind: str | None = None
+    strategy_execution_mode: str | None = None
+    strategy_state_phase: str | None = None
     product_type: ProductType = "spot"
     target_leverage: float = 1.0
     margin_mode: MarginModelType = "cash"
@@ -349,6 +361,10 @@ class FillEvent(SchemaBase):
     allocation_id: str | None = None
     strategy_bundle_id: str | None = None
     strategy_leg_role: Literal["primary", "hedge", "inventory", "accumulation"] | None = None
+    strategy_pair_id: str | None = None
+    strategy_opportunity_kind: str | None = None
+    strategy_execution_mode: str | None = None
+    strategy_state_phase: str | None = None
     product_type: ProductType = "spot"
     target_leverage: float = 1.0
     margin_mode: MarginModelType = "cash"
@@ -390,5 +406,9 @@ class OrderObligation(SchemaBase):
     allocation_id: str | None = None
     strategy_bundle_id: str | None = None
     strategy_leg_role: Literal["primary", "hedge", "inventory", "accumulation"] | None = None
+    strategy_pair_id: str | None = None
+    strategy_opportunity_kind: str | None = None
+    strategy_execution_mode: str | None = None
+    strategy_state_phase: str | None = None
     reference_price: Decimal | None = None
     last_update_ts: datetime | None = None

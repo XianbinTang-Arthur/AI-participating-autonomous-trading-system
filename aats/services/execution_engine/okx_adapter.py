@@ -93,9 +93,12 @@ class OKXOrderPayloadBuilder:
 
     @staticmethod
     def _build_spot_payload(*, intent: OrderIntent) -> dict[str, str]:
+        payload: dict[str, str] = {}
         if intent.order_type == "market" and intent.side == "buy":
-            return {"tgtCcy": "base_ccy"}
-        return {}
+            payload["tgtCcy"] = "base_ccy"
+        if intent.margin_mode in {"cross", "isolated"} and intent.reduce_only:
+            payload["reduceOnly"] = "true"
+        return payload
 
     @staticmethod
     def _order_type(intent: OrderIntent) -> str:
@@ -224,6 +227,12 @@ class OKXExecutionAdapter(ExchangeAdapter):
             snapshot=snapshot,
             payload=payload,
         )
+        if semantic_error is None:
+            semantic_error = self._spot_margin_submission_semantic_error(
+                intent=intent,
+                snapshot=snapshot,
+                payload=payload,
+            )
         if semantic_error is not None:
             self._last_error = semantic_error
             self._log_blocked_submit(intent=intent, reason=semantic_error)
@@ -734,6 +743,57 @@ class OKXExecutionAdapter(ExchangeAdapter):
             return "okx_reduce_only_required_by_risk"
         return None
 
+    def _spot_margin_submission_semantic_error(
+        self,
+        *,
+        intent: OrderIntent,
+        snapshot: ExchangeAccountSnapshot,
+        payload: dict[str, str],
+    ) -> str | None:
+        if intent.product_type != "spot" or intent.margin_mode not in {"cross", "isolated"}:
+            return None
+        td_mode = str(intent.td_mode or payload.get("tdMode") or intent.margin_mode or "").strip().lower()
+        if td_mode not in {"cross", "isolated"}:
+            return "okx_td_mode_incompatible_with_spot_margin"
+        if td_mode != intent.margin_mode:
+            return "okx_td_mode_margin_mode_mismatch"
+        account_level_code = None if snapshot.account_configuration is None else snapshot.account_configuration.account_level_code
+        if account_level_code in {None, "", "1"}:
+            return "okx_spot_margin_account_mode_incompatible"
+        reduce_path = bool(
+            intent.reduce_only
+            or intent.only_reduce_required
+            or reduce_only_from_position_intent(intent.position_intent)
+            or intent.execution_action in {"reduce", "exit"}
+        )
+        close_path = bool(intent.close_only or close_only_from_position_intent(intent.position_intent))
+        reducible_qty = self._reducible_position_quantity(
+            snapshot=snapshot,
+            symbol=intent.symbol,
+            position_mode=self._account_position_mode(snapshot),
+            pos_side=intent.pos_side,
+            side=intent.side,
+        )
+        if close_path and not reduce_path:
+            return "okx_close_only_requires_reduce_only"
+        if close_path and reducible_qty <= EPSILON_DECIMAL_12:
+            return "okx_close_only_without_reducible_position"
+        if close_path and intent.quantity - reducible_qty > EPSILON_DECIMAL_12:
+            return "okx_close_only_exceeds_reducible_position"
+        if reduce_path and str(payload.get("reduceOnly", "false")).lower() != "true":
+            return "okx_spot_margin_reduce_only_missing"
+        if reduce_path and reducible_qty <= EPSILON_DECIMAL_12:
+            return "okx_reduce_only_without_reducible_position"
+        if reduce_path and intent.quantity - reducible_qty > EPSILON_DECIMAL_12:
+            return (
+                "okx_reduce_only_required_by_risk"
+                if intent.only_reduce_required
+                else "okx_reduce_only_would_increase_exposure"
+            )
+        if intent.only_reduce_required and not reduce_path:
+            return "okx_reduce_only_required_by_risk"
+        return None
+
     @staticmethod
     def _account_position_mode(snapshot: ExchangeAccountSnapshot) -> str | None:
         if snapshot.account_configuration is not None and snapshot.account_configuration.position_mode not in {None, ""}:
@@ -948,6 +1008,10 @@ class OKXExecutionAdapter(ExchangeAdapter):
             allocation_id=intent.allocation_id,
             strategy_bundle_id=intent.strategy_bundle_id,
             strategy_leg_role=intent.strategy_leg_role,
+            strategy_pair_id=intent.strategy_pair_id,
+            strategy_opportunity_kind=intent.strategy_opportunity_kind,
+            strategy_execution_mode=intent.strategy_execution_mode,
+            strategy_state_phase=intent.strategy_state_phase,
             cancel_reason=reason,
             execution_error=reason,
             submission_payload=self._state_submission_payload(intent=intent, payload=payload),
@@ -1001,6 +1065,10 @@ class OKXExecutionAdapter(ExchangeAdapter):
             allocation_id=intent.allocation_id,
             strategy_bundle_id=intent.strategy_bundle_id,
             strategy_leg_role=intent.strategy_leg_role,
+            strategy_pair_id=intent.strategy_pair_id,
+            strategy_opportunity_kind=intent.strategy_opportunity_kind,
+            strategy_execution_mode=intent.strategy_execution_mode,
+            strategy_state_phase=intent.strategy_state_phase,
             cancel_reason=None,
             execution_error=None,
             submission_payload=self._state_submission_payload(intent=intent, payload=payload),
@@ -1053,6 +1121,10 @@ class OKXExecutionAdapter(ExchangeAdapter):
             allocation_id=intent.allocation_id,
             strategy_bundle_id=intent.strategy_bundle_id,
             strategy_leg_role=intent.strategy_leg_role,
+            strategy_pair_id=intent.strategy_pair_id,
+            strategy_opportunity_kind=intent.strategy_opportunity_kind,
+            strategy_execution_mode=intent.strategy_execution_mode,
+            strategy_state_phase=intent.strategy_state_phase,
             cancel_reason=error,
             execution_error=error,
             submission_payload=self._state_submission_payload(intent=intent, payload=payload),
@@ -1105,6 +1177,10 @@ class OKXExecutionAdapter(ExchangeAdapter):
             allocation_id=intent.allocation_id,
             strategy_bundle_id=intent.strategy_bundle_id,
             strategy_leg_role=intent.strategy_leg_role,
+            strategy_pair_id=intent.strategy_pair_id,
+            strategy_opportunity_kind=intent.strategy_opportunity_kind,
+            strategy_execution_mode=intent.strategy_execution_mode,
+            strategy_state_phase=intent.strategy_state_phase,
             cancel_reason=error,
             execution_error=error,
             submission_payload=self._state_submission_payload(intent=intent, payload=payload),
@@ -1251,6 +1327,10 @@ class OKXExecutionAdapter(ExchangeAdapter):
             allocation_id=intent.allocation_id,
             strategy_bundle_id=intent.strategy_bundle_id,
             strategy_leg_role=intent.strategy_leg_role,
+            strategy_pair_id=intent.strategy_pair_id,
+            strategy_opportunity_kind=intent.strategy_opportunity_kind,
+            strategy_execution_mode=intent.strategy_execution_mode,
+            strategy_state_phase=intent.strategy_state_phase,
             cancel_reason=str(order_row.get("cancelSource")) if order_row.get("cancelSource") else None,
             execution_error=None,
             submission_payload=self._state_submission_payload(intent=intent, payload=payload),
@@ -1307,6 +1387,10 @@ class OKXExecutionAdapter(ExchangeAdapter):
                     allocation_id=intent.allocation_id,
                     strategy_bundle_id=intent.strategy_bundle_id,
                     strategy_leg_role=intent.strategy_leg_role,
+                    strategy_pair_id=intent.strategy_pair_id,
+                    strategy_opportunity_kind=intent.strategy_opportunity_kind,
+                    strategy_execution_mode=intent.strategy_execution_mode,
+                    strategy_state_phase=intent.strategy_state_phase,
                     liquidity_role="taker",
                     exchange_timestamp=fill.fill_ts or utc_now(),
                     ingestion_timestamp=utc_now(),
@@ -1342,6 +1426,10 @@ class OKXExecutionAdapter(ExchangeAdapter):
         state_payload.setdefault("allocationId", intent.allocation_id or "")
         state_payload.setdefault("strategyBundleId", intent.strategy_bundle_id or "")
         state_payload.setdefault("strategyLegRole", intent.strategy_leg_role or "")
+        state_payload.setdefault("strategyPairId", intent.strategy_pair_id or "")
+        state_payload.setdefault("strategyOpportunityKind", intent.strategy_opportunity_kind or "")
+        state_payload.setdefault("strategyExecutionMode", intent.strategy_execution_mode or "")
+        state_payload.setdefault("strategyStatePhase", intent.strategy_state_phase or "")
         state_payload.setdefault("requiredInitialMargin", "" if intent.required_initial_margin is None else str(intent.required_initial_margin))
         state_payload.setdefault("projectedMarginUsage", "" if intent.projected_margin_usage is None else str(intent.projected_margin_usage))
         state_payload.setdefault("projectedNotional", "" if intent.projected_notional is None else str(intent.projected_notional))
@@ -1596,6 +1684,16 @@ class OKXExecutionAdapter(ExchangeAdapter):
                 if payload.get("strategyFamily") not in {"", None}
                 else state.strategy_family
             ),
+            strategy_sleeve_id=(
+                str(payload.get("strategySleeveId"))
+                if payload.get("strategySleeveId") not in {"", None}
+                else state.strategy_sleeve_id
+            ),
+            allocation_id=(
+                str(payload.get("allocationId"))
+                if payload.get("allocationId") not in {"", None}
+                else state.allocation_id
+            ),
             strategy_bundle_id=(
                 str(payload.get("strategyBundleId"))
                 if payload.get("strategyBundleId") not in {"", None}
@@ -1605,6 +1703,26 @@ class OKXExecutionAdapter(ExchangeAdapter):
                 str(payload.get("strategyLegRole"))
                 if payload.get("strategyLegRole") not in {"", None}
                 else state.strategy_leg_role
+            ),
+            strategy_pair_id=(
+                str(payload.get("strategyPairId"))
+                if payload.get("strategyPairId") not in {"", None}
+                else state.strategy_pair_id
+            ),
+            strategy_opportunity_kind=(
+                str(payload.get("strategyOpportunityKind"))
+                if payload.get("strategyOpportunityKind") not in {"", None}
+                else state.strategy_opportunity_kind
+            ),
+            strategy_execution_mode=(
+                str(payload.get("strategyExecutionMode"))
+                if payload.get("strategyExecutionMode") not in {"", None}
+                else state.strategy_execution_mode
+            ),
+            strategy_state_phase=(
+                str(payload.get("strategyStatePhase"))
+                if payload.get("strategyStatePhase") not in {"", None}
+                else state.strategy_state_phase
             ),
         )
 

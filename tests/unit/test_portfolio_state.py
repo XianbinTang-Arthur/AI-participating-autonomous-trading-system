@@ -171,6 +171,26 @@ class TestPortfolioState(unittest.TestCase):
 
         self.assertEqual(state.positions["BTC-USDT"].quantity, Decimal("0.001"))
 
+    def test_spot_cash_and_cross_positions_use_distinct_position_keys(self) -> None:
+        state = PortfolioState(initial_usdt_balance=10_000.0)
+
+        state.apply_fill(build_fill(fill_id="fill_cash_buy", side="buy", qty=1.0, price=100.0, fee=0.0))
+        state.apply_fill(
+            build_fill(
+                fill_id="fill_cross_sell",
+                side="sell",
+                qty=0.2,
+                price=101.0,
+                fee=0.0,
+                margin_mode="cross",
+            )
+        )
+
+        self.assertIn("BTC-USDT", state.positions)
+        self.assertIn("BTC-USDT:spot:cross", state.positions)
+        self.assertEqual(state.positions["BTC-USDT"].quantity, Decimal("1.0"))
+        self.assertEqual(state.positions["BTC-USDT:spot:cross"].quantity, Decimal("-0.2"))
+
     def test_derivatives_fill_updates_position_without_spot_notional_balance_transfer(self) -> None:
         state = PortfolioState(initial_usdt_balance=10_000.0, default_product_type="derivatives", default_margin_mode="cross")
 

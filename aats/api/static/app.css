@@ -915,10 +915,6 @@ h3 {
   align-items: start;
 }
 
-.strategy-column-stack {
-  gap: 16px;
-}
-
 .strategy-compact-card {
   gap: 12px;
 }

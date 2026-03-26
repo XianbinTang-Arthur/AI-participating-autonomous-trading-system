@@ -26,7 +26,7 @@ from aats.services.portfolio_service.position_keys import (
     position_key_for_snapshot_position,
     signed_quantity_for_position_side,
 )
-from aats.services.runtime_scope import RuntimeStateScope
+from aats.services.runtime_scope import RuntimeStateScope, infer_product_type_from_symbol
 from aats.storage.base import FillOutcomeRepository, PortfolioRepository
 from aats.services.portfolio_service.snapshots import PortfolioSnapshotBuilder
 
@@ -168,6 +168,10 @@ class PortfolioState:
             else snapshot.position_mode
         )
         for position in snapshot.positions:
+            position_product_type = getattr(position, "product_type", None) or infer_product_type_from_symbol(position.symbol)
+            position_margin_mode = getattr(position, "margin_mode", None) or (
+                "cash" if position_product_type == "spot" else self.default_margin_mode
+            )
             signed_quantity = signed_quantity_for_position_side(
                 position.quantity,
                 pos_side=getattr(position, "side", None),
@@ -177,7 +181,8 @@ class PortfolioState:
                 continue
             position_key = build_position_key(
                 symbol=position.symbol,
-                product_type=self.default_product_type,
+                product_type=position_product_type,
+                margin_mode=position_margin_mode,
                 position_mode=snapshot_position_mode,
                 pos_side=getattr(position, "side", None),
             )
@@ -186,9 +191,9 @@ class PortfolioState:
                 position_key=position_key,
                 quantity=signed_quantity,
                 avg_entry_price=to_decimal(position.average_entry_price),
-                product_type=getattr(position, "product_type", self.default_product_type),
+                product_type=position_product_type,
                 target_leverage=float(getattr(position, "leverage", None) or 1.0),
-                margin_mode=getattr(position, "margin_mode", None) or self.default_margin_mode,
+                margin_mode=position_margin_mode,
                 position_mode=normalize_position_mode(snapshot_position_mode),
                 pos_side=normalize_position_side(getattr(position, "side", None), position_mode=snapshot_position_mode),
                 instrument_family=getattr(position, "instrument_family", None),
@@ -405,7 +410,7 @@ class PortfolioState:
         for instrument in snapshot.instruments:
             if instrument.quote_currency != "USDT":
                 continue
-            if instrument.symbol in self.positions:
+            if any(record.symbol == instrument.symbol for record in self.positions.values()):
                 continue
             quantity = self.balances.get(instrument.base_currency, Decimal("0"))
             if is_effectively_zero(quantity):

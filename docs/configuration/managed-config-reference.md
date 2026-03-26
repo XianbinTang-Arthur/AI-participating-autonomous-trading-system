@@ -137,11 +137,13 @@
 - 改 `configs/strategy_profiles/<profile>.yaml`。
 - 主要字段：
   - `smart_arbitrage_enabled`
+  - `smart_arbitrage_pair_definitions`
   - `smart_arbitrage_basis_entry_bps`
   - `smart_arbitrage_basis_exit_bps`
   - `smart_arbitrage_estimated_cost_bps`
   - `smart_arbitrage_quote_budget_per_trade`
   - `smart_arbitrage_max_pair_notional`
+  - `smart_arbitrage_negative_basis_mode`
 
 ### 想改现货网格（spot_grid）去哪
 

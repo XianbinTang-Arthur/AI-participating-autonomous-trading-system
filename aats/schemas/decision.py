@@ -310,7 +310,12 @@ class PositionTarget(SchemaBase):
     strategy_family: StrategyFamily = "directional"
     strategy_sleeve_id: str | None = None
     strategy_route_action: StrategyRouteAction = "override_target"
+    strategy_pair_id: str | None = None
+    strategy_opportunity_kind: str | None = None
+    strategy_execution_mode: str | None = None
+    strategy_state_phase: str | None = None
     strategy_reason_codes: list[str] = Field(default_factory=list)
+    strategy_blocking_reasons: list[str] = Field(default_factory=list)
     strategy_headline: str | None = None
     allocation_id: str | None = None
     strategy_bundle_id: str | None = None

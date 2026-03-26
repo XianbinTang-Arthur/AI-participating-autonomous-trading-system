@@ -295,6 +295,48 @@ class TestExecutionObligations(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(obligation)
         self.assertEqual(obligation.reserved_amount, Decimal("60.06"))
 
+    async def test_margin_backed_smart_arbitrage_spot_short_open_skips_base_inventory_reservation(self) -> None:
+        snapshot = ExchangeAccountSnapshot(
+            account_source="okx",
+            fetched_at=utc_now(),
+            balances=[ExchangeBalance(currency="USDT", total=1000.0, available=1000.0, frozen=0.0)],
+        )
+        service = ExecutionObligationService(
+            settings=AATSSettings.model_validate(
+                {
+                    "account_backend": "okx",
+                    "account_read_enabled": True,
+                    "smart_arbitrage_margin_short_enabled": True,
+                }
+            ),
+            obligation_repo=InMemoryExecutionObligationRepository(),
+            account_snapshot_loader=lambda: _return_snapshot(snapshot),
+            price_provider=lambda _symbol: Decimal("100"),
+        )
+
+        obligation = await service.preview_reservation_for_intent(
+            intent=OrderIntent(
+                intent_id="intent_margin_short_open",
+                decision_id="decision_margin_short_open",
+                symbol="BTC-USDT",
+                side="sell",
+                quantity=Decimal("0.1"),
+                execution_style="exchange",
+                order_type="market",
+                urgency="medium",
+                time_in_force="IOC",
+                idempotency_key="margin_short_open",
+                product_type="spot",
+                margin_mode="cross",
+                strategy_family="smart_arbitrage",
+                strategy_execution_mode="margin_reverse_carry",
+                position_intent="open_short",
+            ),
+            client_order_id="cl_margin_short_open",
+        )
+
+        self.assertIsNone(obligation)
+
     async def test_missing_exchange_account_snapshot_blocks_reservation(self) -> None:
         service = ExecutionObligationService(
             settings=AATSSettings.model_validate({"account_backend": "okx", "account_read_enabled": True}),

@@ -87,6 +87,16 @@ class OKXRESTClient:
             return ("SPOT",)
         return OKX_DERIVATIVES_INST_TYPES
 
+    def _position_inst_types(self) -> tuple[str, ...]:
+        if self.settings.trading_product_type != "derivatives":
+            return ("SPOT",)
+        if (
+            self.settings.smart_arbitrage_margin_short_enabled
+            or self.settings.smart_arbitrage_negative_basis_mode == "margin_backed"
+        ):
+            return (*OKX_DERIVATIVES_INST_TYPES, "MARGIN")
+        return OKX_DERIVATIVES_INST_TYPES
+
     @staticmethod
     def _merge_payloads(payloads: list[dict[str, Any]]) -> dict[str, Any]:
         merged_rows: list[Any] = []
@@ -190,7 +200,7 @@ class OKXRESTClient:
         return await self.request(method="GET", path="/api/v5/account/balance", require_auth=True)
 
     async def get_positions(self) -> dict[str, Any]:
-        inst_types = self._inst_types()
+        inst_types = self._position_inst_types()
         if len(inst_types) == 1:
             return await self.request(
                 method="GET",

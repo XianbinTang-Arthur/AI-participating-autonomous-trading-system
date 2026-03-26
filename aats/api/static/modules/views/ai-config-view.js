@@ -1,6 +1,6 @@
 import { actorTags, actionButton, callout, kvList, summaryStrip, surfaceCard } from "../components.js";
 import { summarizeLocalizedList } from "../copy.js";
-import { formatMaybeTimestamp, formatNumber } from "../formatters.js";
+import { formatNumber } from "../formatters.js";
 import { readableState } from "../terms.js";
 
 const PROFILE_OPTIONS = [
@@ -142,13 +142,8 @@ function renderProfileControlPanel({
 }) {
   const activeProfileId = currentStrategyProfile(activeRevision, activation);
   const summary = autoControlSummary(runtime, latestProfileControl, latestSelectionDecision, latestOptimizationReport);
-  const controlSummary = latestOptimizationReport.control_summary || {};
-  const adaptiveControls = controlSummary.adaptive_controls || {};
-  const riskBudget = adaptiveControls.risk_budget || {};
-  const executionAggressiveness = adaptiveControls.execution_aggressiveness || {};
   const configured = Boolean(runtime.strategy_profile_auto_control_configured);
   const autoEnabled = Boolean(runtime.strategy_profile_auto_control_effective);
-  const candidateProfileId = latestOptimizationReport.recommended_profile_id || latestSelectionDecision.candidate_profile_id || "";
   const profileButtons = PROFILE_OPTIONS.map(([profileId, label, tone]) =>
     actionButton(
       profileId === activeProfileId ? `${label}（当前）` : label,
@@ -215,35 +210,6 @@ function renderProfileControlPanel({
       <div class="table-actions table-actions--compact manual-profile-switch-actions manual-profile-switch-actions--centered">
         ${profileButtons}
       </div>
-      ${kvList([
-        [
-          "候选策略档位",
-          readableProfile(candidateProfileId, "当前没有新的候选策略档位"),
-          autoEnabled
-            ? summarizeList(latestSelectionDecision.blocked_reasons, "当前没有新的自动切档阻断原因。")
-            : "当前处于手动切档，候选档位只做参考，不会自动生效。",
-        ],
-        [
-          "切换分类",
-          readableState(latestSelectionDecision.transition_class || "unknown"),
-          textOrFallback(latestSelectionDecision.operator_summary, "当前没有额外切换摘要。"),
-        ],
-        [
-          "自动切档闸门",
-          profileGateSummary(latestSelectionDecision),
-          latestSelectionDecision.gating_state?.reconciliation_clean ? "当前对账状态干净，可以继续评估。" : "当前对账未完全干净，系统会更谨慎。",
-        ],
-        [
-          "风险预算乘数",
-          multiplierLabel(riskBudget.multiplier, riskBudget.status),
-          summarizeAdaptiveReasons(riskBudget, "当前风险预算没有自动收缩。"),
-        ],
-        [
-          "执行侵略性乘数",
-          multiplierLabel(executionAggressiveness.multiplier, executionAggressiveness.status),
-          summarizeAdaptiveReasons(executionAggressiveness, "当前执行侵略性没有自动收缩。"),
-        ],
-      ])}
     `,
   });
 }
@@ -492,39 +458,4 @@ function listText(value, fallback = "暂无") {
 function summarizeList(items, fallback = "当前没有额外说明") {
   if (!Array.isArray(items) || !items.length) return fallback;
   return items.slice(0, 2).map((item) => readableState(String(item), String(item))).join("；");
-}
-
-function profileGateSummary(selection = {}) {
-  const gating = selection.gating_state || {};
-  const parts = [];
-  if (gating.confidence_floor !== null && gating.confidence_floor !== undefined) {
-    parts.push(`最低置信度 ${formatNumber(gating.confidence_floor, 2, "待确认")}`);
-  }
-  if (gating.next_eligible_switch_at) {
-    parts.push(`最早可切换时间 ${formatMaybeTimestamp(gating.next_eligible_switch_at)}`);
-  }
-  if ((gating.remaining_closed_trades || 0) > 0 || (gating.remaining_replay_validations || 0) > 0) {
-    parts.push(
-      `还差 ${formatNumber(gating.remaining_closed_trades, 0, "0")} 笔已平仓交易、${formatNumber(gating.remaining_replay_validations, 0, "0")} 次 replay`,
-    );
-  }
-  if ((gating.remaining_consecutive_wins || 0) > 0) {
-    parts.push(`还差 ${formatNumber(gating.remaining_consecutive_wins, 0, "0")} 次连续胜出`);
-  }
-  return parts.join("；") || "当前没有额外闸门说明。";
-}
-
-function multiplierLabel(multiplier, status) {
-  return `${formatNumber(multiplier, 2, "待确认")}（${readableState(status || "unknown")}）`;
-}
-
-function summarizeAdaptiveReasons(state = {}, fallback = "当前没有额外说明。") {
-  const localizedReasons = summarizeLocalizedList(state.reasons, {
-    fallback,
-    limit: 2,
-  });
-  if (state.multiplier === null || state.multiplier === undefined) {
-    return localizedReasons;
-  }
-  return `当前乘数 ${formatNumber(state.multiplier, 2, "待确认")}，${localizedReasons}`;
 }

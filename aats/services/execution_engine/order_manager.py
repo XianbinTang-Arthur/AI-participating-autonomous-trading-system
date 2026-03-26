@@ -173,6 +173,10 @@ class OrderManager:
                     allocation_id=intent.allocation_id,
                     strategy_bundle_id=intent.strategy_bundle_id,
                     strategy_leg_role=intent.strategy_leg_role,
+                    strategy_pair_id=intent.strategy_pair_id,
+                    strategy_opportunity_kind=intent.strategy_opportunity_kind,
+                    strategy_execution_mode=intent.strategy_execution_mode,
+                    strategy_state_phase=intent.strategy_state_phase,
                     execution_error=str(exc),
                     submission_payload={},
                 )
@@ -214,6 +218,10 @@ class OrderManager:
                 allocation_id=intent.allocation_id,
                 strategy_bundle_id=intent.strategy_bundle_id,
                 strategy_leg_role=intent.strategy_leg_role,
+                strategy_pair_id=intent.strategy_pair_id,
+                strategy_opportunity_kind=intent.strategy_opportunity_kind,
+                strategy_execution_mode=intent.strategy_execution_mode,
+                strategy_state_phase=intent.strategy_state_phase,
                 submission_payload={},
             )
             created_state = await self._persist_order_state(

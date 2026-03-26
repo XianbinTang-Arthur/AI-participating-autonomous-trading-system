@@ -189,7 +189,6 @@ def test_generated_managed_config_artifacts_exist_and_match_profile_layout() -> 
         assert data["strategy_family_active"] == "directional"
         assert "ai_operating_mode" in data
         assert "max_decisions_per_minute" in data
-
         example_env = repo_root / "configs" / "templates" / f".env.{profile}.example"
         assert example_env.exists(), example_env
         values = _load_env_file(example_env)

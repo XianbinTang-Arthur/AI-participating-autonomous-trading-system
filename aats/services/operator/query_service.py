@@ -61,6 +61,7 @@ from aats.services.runtime_scope import (
     runtime_state_scope,
     latest_topic_event_for_scope,
 )
+from aats.services.strategy_engines.smart_arbitrage.pair_registry import load_pair_definitions
 from aats.services.strategy_execution_health import compute_strategy_execution_health
 
 if TYPE_CHECKING:
@@ -1944,6 +1945,13 @@ class OperatorQueryService:
             },
         }
         automation_decisions = [] if latest_snapshot is None else list(latest_snapshot.get("automation_decisions") or [])
+        selected_candidate_payload = None
+        if latest_snapshot is not None:
+            selected_family = latest_snapshot.get("selected_family")
+            for item in latest_snapshot.get("candidates") or []:
+                if item.get("family") == selected_family:
+                    selected_candidate_payload = item
+                    break
         active_automation = [item for item in automation_decisions if item.get("automation_state") == "active"]
         contracted_automation = [
             item for item in automation_decisions if item.get("automation_state") in {"contracted", "protective_only"}
@@ -1961,6 +1969,18 @@ class OperatorQueryService:
             "latest_allocation_id": None if latest_target_payload is None else latest_target_payload.get("allocation_id"),
             "latest_selected_state": None if latest_snapshot is None else latest_snapshot.get("selected_state"),
             "latest_selected_route_action": None if latest_snapshot is None else latest_snapshot.get("selected_route_action"),
+            "latest_selected_pair_id": (
+                None if selected_candidate_payload is None else selected_candidate_payload.get("pair_id")
+            ),
+            "latest_selected_opportunity_kind": (
+                None if selected_candidate_payload is None else selected_candidate_payload.get("opportunity_kind")
+            ),
+            "latest_selected_execution_mode": (
+                None if selected_candidate_payload is None else selected_candidate_payload.get("execution_mode")
+            ),
+            "latest_selected_state_phase": (
+                None if selected_candidate_payload is None else selected_candidate_payload.get("state_phase")
+            ),
             "latest_bundle_status": None if latest_bundle is None else latest_bundle.get("status"),
             "latest_bundle_id": None if latest_bundle is None else latest_bundle.get("bundle_id"),
             "latest_bundle_type": None if latest_bundle is None else latest_bundle.get("bundle_type"),
@@ -2057,11 +2077,30 @@ class OperatorQueryService:
                 "env_template_profile": self.runtime.settings.env_template_profile,
                 "smart_arbitrage": {
                     "enabled": self.runtime.settings.smart_arbitrage_enabled,
-                    "companion_spot_symbol": self.runtime.settings.smart_arbitrage_companion_spot_symbol,
-                    "companion_derivatives_symbol": self.runtime.settings.smart_arbitrage_companion_derivatives_symbol,
+                    "pair_definitions": [
+                        pair.model_dump(mode="json")
+                        for pair in load_pair_definitions(
+                            settings=self.runtime.settings,
+                            primary_symbol=self.runtime.settings.default_symbol,
+                        )
+                    ],
                     "basis_entry_bps": self.runtime.settings.smart_arbitrage_basis_entry_bps,
                     "basis_exit_bps": self.runtime.settings.smart_arbitrage_basis_exit_bps,
                     "estimated_cost_bps": self.runtime.settings.smart_arbitrage_estimated_cost_bps,
+                    "cost_model_enabled": self.runtime.settings.smart_arbitrage_cost_model_enabled,
+                    "negative_basis_mode": self.runtime.settings.smart_arbitrage_negative_basis_mode,
+                    "inventory_reservation_enabled": self.runtime.settings.smart_arbitrage_inventory_reservation_enabled,
+                    "margin_short_enabled": self.runtime.settings.smart_arbitrage_margin_short_enabled,
+                    "margin_short_execution_ready": self.runtime.settings.smart_arbitrage_margin_short_execution_ready,
+                    "margin_short_spot_margin_mode": self.runtime.settings.smart_arbitrage_margin_short_spot_margin_mode,
+                    "margin_short_auto_repay_enabled": self.runtime.settings.smart_arbitrage_margin_short_auto_repay_enabled,
+                    "max_concurrent_pairs": self.runtime.settings.smart_arbitrage_max_concurrent_pairs,
+                    "pair_priority_mode": self.runtime.settings.smart_arbitrage_pair_priority_mode,
+                    "min_inventory_backed_ratio": self.runtime.settings.smart_arbitrage_min_inventory_backed_ratio,
+                    "estimated_fee_bps": self.runtime.settings.smart_arbitrage_estimated_fee_bps,
+                    "estimated_slippage_bps": self.runtime.settings.smart_arbitrage_estimated_slippage_bps,
+                    "estimated_funding_bps": self.runtime.settings.smart_arbitrage_estimated_funding_bps,
+                    "estimated_borrow_bps": self.runtime.settings.smart_arbitrage_estimated_borrow_bps,
                 },
                 "spot_grid": {
                     "enabled": self.runtime.settings.spot_grid_enabled,

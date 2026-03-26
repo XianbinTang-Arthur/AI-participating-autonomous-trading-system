@@ -903,6 +903,68 @@ class TestGuardedLive(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(decision.approved)
         self.assertIn("insufficient_base_balance", decision.rejection_reasons)
 
+    def test_risk_allows_margin_backed_smart_arbitrage_spot_short_without_base_inventory(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "mode": "guarded_live",
+                "execution_backend": "okx",
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "okx_simulated_trading": True,
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "smart_arbitrage_margin_short_enabled": True,
+                "smart_arbitrage_margin_short_execution_ready": True,
+                "smart_arbitrage_margin_short_spot_margin_mode": "cross",
+            }
+        )
+        kill_switch = KillSwitch()
+        mode_controller = RuntimeModeController(settings=settings, kill_switch=kill_switch)
+        health_service = SystemHealthService(
+            settings=settings,
+            mode_controller=mode_controller,
+            kill_switch=kill_switch,
+            market_provider=FakeHealthyMarketProvider(),  # type: ignore[arg-type]
+            account_provider=FakeAccountService(btc_available=0.0, usdt_available=500.0),  # type: ignore[arg-type]
+            execution_provider=FakeExecutionProvider(),  # type: ignore[arg-type]
+            reconciliation_repo=FakeHealthyReconciliationRepo(),  # type: ignore[arg-type]
+        )
+        risk = RiskEngine(
+            settings=settings,
+            account_service=FakeAccountService(btc_available=0.0, usdt_available=500.0),  # type: ignore[arg-type]
+            health_service=health_service,
+            trigger_policy=DecisionTriggerPolicy(settings=settings),
+            price_provider=lambda _symbol: 67_000.0,
+            mode_controller=mode_controller,
+        )
+
+        decision = risk.evaluate(
+            PositionTarget(
+                decision_id="decision_margin_backed_spot_short",
+                symbol="BTC-USDT",
+                current_position_qty=0.0,
+                target_position_qty=-0.001,
+                delta_position_qty=-0.001,
+                current_notional=0.0,
+                target_notional=67.0,
+                rebalance_reason="smart_arbitrage_margin_short",
+                urgency="medium",
+                max_slippage_tolerance_bps=20,
+                source_mix={"smart_arbitrage": 1.0},
+                decision_expiry_ts=utc_now(),
+                product_type="spot",
+                current_exposure_side="flat",
+                target_exposure_side="short",
+                position_intent="open_short",
+                margin_mode="cross",
+                strategy_family="smart_arbitrage",
+                strategy_execution_mode="margin_reverse_carry",
+            )
+        )
+
+        self.assertTrue(decision.approved)
+        self.assertNotIn("insufficient_base_balance", decision.rejection_reasons)
+
     def test_derivatives_risk_allows_short_without_base_inventory_but_enforces_margin_and_leverage(self) -> None:
         settings = AATSSettings.model_validate(
             {

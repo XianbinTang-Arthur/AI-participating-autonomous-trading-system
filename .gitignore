@@ -33,3 +33,5 @@ logs/
 *.db-shm
 *.db-wal
 docs/user.txt
+artifacts/
+loginpassword

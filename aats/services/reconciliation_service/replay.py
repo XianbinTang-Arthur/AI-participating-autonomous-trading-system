@@ -1310,10 +1310,12 @@ class ReplayEngine:
                     )
                 valid_snapshot_refs = {
                     record.portfolio_delta_ref,
+                    *record.portfolio_delta_refs,
                     *(
                         item.event_id
-                        for item in events_by_decision.get(decision_id, [])
+                        for item in events_by_id.values()
                         if item.topic == topics.PORTFOLIO_SNAPSHOTS
+                        and item.payload.get("decision_id") == decision_id
                     ),
                 }
                 valid_snapshot_refs.discard(None)

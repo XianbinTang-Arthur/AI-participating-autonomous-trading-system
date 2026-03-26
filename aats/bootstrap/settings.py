@@ -36,6 +36,9 @@ ExecutionBackend = Literal["paper", "okx"]
 AccountBackend = Literal["disabled", "okx"]
 AIExecutionSuggestionMode = Literal["disabled", "diagnostic_only", "shadow_translation", "enabled_live"]
 StrategyFamily = Literal["directional", "smart_arbitrage", "spot_grid", "dca"]
+SmartArbitrageNegativeBasisMode = Literal["disabled", "advisory_only", "inventory_backed", "margin_backed"]
+SmartArbitragePairPriorityMode = Literal["net_edge", "basis_abs"]
+SmartArbitrageSpotMarginMode = Literal["cross", "isolated"]
 
 _PLACEHOLDER_TOKENS = (
     "REPLACE_WITH_",
@@ -229,13 +232,28 @@ class AATSSettings(BaseSettings):
     strategy_sleeve_auto_hard_loss_usdt: float = 25.0
     strategy_sleeve_auto_volatility_cap_enabled: bool = True
     smart_arbitrage_enabled: bool = False
-    smart_arbitrage_companion_spot_symbol: str | None = None
-    smart_arbitrage_companion_derivatives_symbol: str | None = None
     smart_arbitrage_basis_entry_bps: float = 18.0
     smart_arbitrage_basis_exit_bps: float = 6.0
     smart_arbitrage_estimated_cost_bps: float = 10.0
     smart_arbitrage_quote_budget_per_trade: float = 200.0
     smart_arbitrage_max_pair_notional: float = 2_000.0
+    smart_arbitrage_pair_definitions: tuple[dict[str, Any], ...] = Field(default=())
+    smart_arbitrage_negative_basis_mode: SmartArbitrageNegativeBasisMode = "advisory_only"
+    smart_arbitrage_cost_model_enabled: bool = True
+    smart_arbitrage_funding_cost_enabled: bool = False
+    smart_arbitrage_borrow_cost_enabled: bool = False
+    smart_arbitrage_inventory_reservation_enabled: bool = False
+    smart_arbitrage_margin_short_enabled: bool = False
+    smart_arbitrage_margin_short_execution_ready: bool = False
+    smart_arbitrage_margin_short_spot_margin_mode: SmartArbitrageSpotMarginMode = "cross"
+    smart_arbitrage_margin_short_auto_repay_enabled: bool = False
+    smart_arbitrage_max_concurrent_pairs: int = 1
+    smart_arbitrage_pair_priority_mode: SmartArbitragePairPriorityMode = "net_edge"
+    smart_arbitrage_min_inventory_backed_ratio: float = 1.0
+    smart_arbitrage_estimated_fee_bps: float = 0.0
+    smart_arbitrage_estimated_slippage_bps: float = 0.0
+    smart_arbitrage_estimated_funding_bps: float = 0.0
+    smart_arbitrage_estimated_borrow_bps: float = 0.0
     spot_grid_enabled: bool = False
     spot_grid_anchor_lookback_snapshots: int = 24
     spot_grid_band_bps: float = 150.0
@@ -433,14 +451,18 @@ class AATSSettings(BaseSettings):
                 symbols.append(default_symbol)
         if not self.smart_arbitrage_enabled:
             return tuple(symbols)
-        companion_candidates = (
-            self.smart_arbitrage_companion_spot_symbol,
-            self.smart_arbitrage_companion_derivatives_symbol,
+        for symbol in (
             self._derived_spot_symbol(self.default_symbol),
             self._derived_derivatives_symbol(self.default_symbol),
-        )
-        for symbol in companion_candidates:
+        ):
             normalized = str(symbol or "").strip().upper()
             if normalized and normalized not in symbols:
                 symbols.append(normalized)
+        for pair in self.smart_arbitrage_pair_definitions:
+            if not isinstance(pair, dict):
+                continue
+            for key in ("spot_symbol", "hedge_symbol", "derivatives_symbol"):
+                normalized = str(pair.get(key) or "").strip().upper()
+                if normalized and normalized not in symbols:
+                    symbols.append(normalized)
         return tuple(symbols)

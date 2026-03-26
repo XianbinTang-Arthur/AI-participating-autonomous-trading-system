@@ -327,13 +327,24 @@ class PostgresExecutionRepository:
             OrderStateModel.margin_mode == scope.margin_mode,
             or_(OrderStateModel.strategy_family.is_(None), OrderStateModel.strategy_family != "smart_arbitrage"),
         )
+        if scope.product_type == "spot":
+            smart_clause = and_(
+                symbol_clause,
+                OrderStateModel.strategy_family == "smart_arbitrage",
+                OrderStateModel.product_type == "spot",
+                OrderStateModel.margin_mode.in_(tuple(scope.smart_arbitrage_spot_margin_modes)),
+            )
+            return query.where(or_(regular_clause, smart_clause))
         if scope.product_type != "derivatives":
             return query.where(regular_clause)
         smart_clause = and_(
             symbol_clause,
             OrderStateModel.strategy_family == "smart_arbitrage",
             or_(
-                and_(OrderStateModel.product_type == "spot", OrderStateModel.margin_mode == "cash"),
+                and_(
+                    OrderStateModel.product_type == "spot",
+                    OrderStateModel.margin_mode.in_(tuple(scope.smart_arbitrage_spot_margin_modes)),
+                ),
                 and_(OrderStateModel.product_type == scope.product_type, OrderStateModel.margin_mode == scope.margin_mode),
             ),
         )
@@ -348,13 +359,24 @@ class PostgresExecutionRepository:
             FillEventModel.margin_mode == scope.margin_mode,
             or_(FillEventModel.strategy_family.is_(None), FillEventModel.strategy_family != "smart_arbitrage"),
         )
+        if scope.product_type == "spot":
+            smart_clause = and_(
+                symbol_clause,
+                FillEventModel.strategy_family == "smart_arbitrage",
+                FillEventModel.product_type == "spot",
+                FillEventModel.margin_mode.in_(tuple(scope.smart_arbitrage_spot_margin_modes)),
+            )
+            return query.where(or_(regular_clause, smart_clause))
         if scope.product_type != "derivatives":
             return query.where(regular_clause)
         smart_clause = and_(
             symbol_clause,
             FillEventModel.strategy_family == "smart_arbitrage",
             or_(
-                and_(FillEventModel.product_type == "spot", FillEventModel.margin_mode == "cash"),
+                and_(
+                    FillEventModel.product_type == "spot",
+                    FillEventModel.margin_mode.in_(tuple(scope.smart_arbitrage_spot_margin_modes)),
+                ),
                 and_(FillEventModel.product_type == scope.product_type, FillEventModel.margin_mode == scope.margin_mode),
             ),
         )

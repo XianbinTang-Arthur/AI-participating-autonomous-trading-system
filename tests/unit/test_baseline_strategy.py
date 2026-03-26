@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import unittest
-
 from aats.events import topics
 from aats.events.envelopes import build_envelope
 from aats.schemas.common import utc_now

@@ -59,8 +59,3 @@ export function meaningfulEntries(value) {
     return true;
   });
 }
-
-export function explanationOrEmpty(value, fallback = "") {
-  if (!hasMeaningfulValue(value)) return fallback;
-  return String(value).trim();
-}

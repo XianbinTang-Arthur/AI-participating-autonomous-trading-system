@@ -165,13 +165,9 @@ class FillOutcomeRecord(SchemaBase):
         ending_position_qty: Decimal | None = None,
         ending_avg_entry_price: Decimal | None = None,
     ) -> "FillOutcomeRecord":
-        position_key = fill.symbol
-        if (
-            fill.product_type == "derivatives"
-            and fill.position_mode == "long_short_mode"
-            and fill.pos_side in {"long", "short"}
-        ):
-            position_key = f"{fill.symbol}:{fill.pos_side}"
+        from aats.services.portfolio_service.position_keys import position_key_for_fill
+
+        position_key = position_key_for_fill(fill)
         return cls.model_validate(
             {
                 **balance_delta.model_dump(mode="python"),

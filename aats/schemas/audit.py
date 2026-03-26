@@ -30,4 +30,5 @@ class DecisionAuditRecord(SchemaBase):
     order_state_refs: list[str] = Field(default_factory=list)
     fill_event_refs: list[str] = Field(default_factory=list)
     portfolio_delta_ref: str | None = None
+    portfolio_delta_refs: list[str] = Field(default_factory=list)
     reconciliation_refs: list[str] = Field(default_factory=list)

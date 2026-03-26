@@ -11,19 +11,6 @@ export const DEFAULT_PAGE_LIMITS = {
 
 export const PAGE_LOAD_STEP = 12;
 
-export const CORE_BLOCKING_SPECS = [
-  ["session", "/auth/session"],
-  ["health", "/system/health"],
-  ["mode", "/system/mode"],
-  ["runtime", "/system/runtime"],
-];
-
-export const CORE_BACKGROUND_SPECS = [
-  ["authProviders", "/auth/providers"],
-  ["systemRecovery", "/system/recovery"],
-  ["blockerControl", "/system/blocker-control"],
-];
-
 export function createState() {
   return {
     activeView: "home",

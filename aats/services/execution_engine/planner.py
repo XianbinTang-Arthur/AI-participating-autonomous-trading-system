@@ -62,6 +62,10 @@ class ExecutionPlanner:
         allocation_id: str | None = None,
         strategy_bundle_id: str | None = None,
         strategy_leg_role: Literal["primary", "hedge", "inventory", "accumulation"] | None = None,
+        strategy_pair_id: str | None = None,
+        strategy_opportunity_kind: str | None = None,
+        strategy_execution_mode: str | None = None,
+        strategy_state_phase: str | None = None,
         ai_execution_parameter_suggestion: AIExecutionParameterSuggestionEnvelope | None = None,
     ) -> ExecutionPlan | None:
         if abs(to_decimal(delta_qty)) < EPSILON_DECIMAL_12:
@@ -172,6 +176,10 @@ class ExecutionPlanner:
             allocation_id=allocation_id,
             strategy_bundle_id=strategy_bundle_id,
             strategy_leg_role=strategy_leg_role,
+            strategy_pair_id=strategy_pair_id,
+            strategy_opportunity_kind=strategy_opportunity_kind,
+            strategy_execution_mode=strategy_execution_mode,
+            strategy_state_phase=strategy_state_phase,
             product_type=product_type,  # type: ignore[arg-type]
             target_leverage=target_leverage,
             margin_mode=margin_mode,  # type: ignore[arg-type]
@@ -224,6 +232,10 @@ class ExecutionPlanner:
             allocation_id=plan.allocation_id,
             strategy_bundle_id=plan.strategy_bundle_id,
             strategy_leg_role=plan.strategy_leg_role,
+            strategy_pair_id=plan.strategy_pair_id,
+            strategy_opportunity_kind=plan.strategy_opportunity_kind,
+            strategy_execution_mode=plan.strategy_execution_mode,
+            strategy_state_phase=plan.strategy_state_phase,
             idempotency_key=intent_id,
             product_type=plan.product_type,
             target_leverage=plan.target_leverage,

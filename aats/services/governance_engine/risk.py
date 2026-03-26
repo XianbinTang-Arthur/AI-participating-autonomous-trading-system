@@ -206,6 +206,16 @@ class RiskEngine:
         delta_qty = capped_qty - to_decimal(target.current_position_qty)
         base_currency, quote_currency = self._symbol_currencies(target.symbol)
         taker_fee_bps = self.fee_resolver.taker_fee_bps_decimal(symbol=target.symbol)
+        margin_short_reasons = self._smart_arbitrage_margin_short_reasons(
+            target=target,
+            delta_qty=delta_qty,
+        )
+        if margin_short_reasons:
+            return margin_short_reasons
+        margin_short_open_sell = self._is_smart_arbitrage_margin_short_open(
+            target=target,
+            delta_qty=delta_qty,
+        )
         if delta_qty > EPSILON_DECIMAL_12 and quote_currency is not None:
             required_quote = spot_buy_quote_requirement(
                 quantity=abs(delta_qty),
@@ -216,12 +226,42 @@ class RiskEngine:
             available_quote = self._available_balance(quote_currency)
             if available_quote + EPSILON_DECIMAL_12 < required_quote:
                 return ["insufficient_quote_balance"]
-        if delta_qty < -EPSILON_DECIMAL_12 and base_currency is not None:
+        if not margin_short_open_sell and delta_qty < -EPSILON_DECIMAL_12 and base_currency is not None:
             required_base = abs(delta_qty)
             available_base = self._available_balance(base_currency)
             if available_base + EPSILON_DECIMAL_12 < required_base:
                 return ["insufficient_base_balance"]
         return []
+
+    def _smart_arbitrage_margin_short_reasons(
+        self,
+        *,
+        target: PositionTarget,
+        delta_qty: Decimal,
+    ) -> list[str]:
+        if not self._is_smart_arbitrage_margin_short_open(target=target, delta_qty=delta_qty):
+            return []
+        if not self.settings.smart_arbitrage_margin_short_enabled:
+            return ["smart_arbitrage_margin_short_disabled"]
+        if not self.settings.smart_arbitrage_margin_short_execution_ready:
+            return ["smart_arbitrage_margin_short_execution_not_ready"]
+        configured_mode = getattr(self.settings, "smart_arbitrage_margin_short_spot_margin_mode", "cross")
+        if target.margin_mode != configured_mode:
+            return ["smart_arbitrage_margin_short_margin_mode_mismatch"]
+        return []
+
+    @staticmethod
+    def _is_smart_arbitrage_margin_short_open(
+        *,
+        target: PositionTarget,
+        delta_qty: Decimal,
+    ) -> bool:
+        return bool(
+            target.strategy_family == "smart_arbitrage"
+            and target.product_type == "spot"
+            and target.strategy_execution_mode == "margin_reverse_carry"
+            and delta_qty < -EPSILON_DECIMAL_12
+        )
 
     def _evaluate_derivatives_pretrade(
         self,

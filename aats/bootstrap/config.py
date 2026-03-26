@@ -1173,6 +1173,10 @@ def _build_position_target_handler(
             strategy_sleeve_id=target.strategy_sleeve_id,
             allocation_id=target.allocation_id,
             strategy_bundle_id=target.strategy_bundle_id,
+            strategy_pair_id=target.strategy_pair_id,
+            strategy_opportunity_kind=target.strategy_opportunity_kind,
+            strategy_execution_mode=target.strategy_execution_mode,
+            strategy_state_phase=target.strategy_state_phase,
             ai_execution_parameter_suggestion=target.ai_execution_parameter_suggestion,
         )
 
@@ -1231,7 +1235,12 @@ def _build_position_target_handler(
             strategy_family=str(getattr(leg, "family", None) or base_target.strategy_family),
             strategy_sleeve_id=leg.strategy_sleeve_id or base_target.strategy_sleeve_id,
             strategy_route_action=base_target.strategy_route_action,
+            strategy_pair_id=getattr(leg, "pair_id", None) or base_target.strategy_pair_id,
+            strategy_opportunity_kind=getattr(leg, "opportunity_kind", None) or base_target.strategy_opportunity_kind,
+            strategy_execution_mode=getattr(leg, "execution_mode", None) or base_target.strategy_execution_mode,
+            strategy_state_phase=getattr(leg, "state_phase", None) or base_target.strategy_state_phase,
             strategy_reason_codes=list(base_target.strategy_reason_codes),
+            strategy_blocking_reasons=list(base_target.strategy_blocking_reasons),
             strategy_headline=base_target.strategy_headline,
             allocation_id=leg.allocation_id or base_target.allocation_id,
             strategy_bundle_id=base_target.strategy_bundle_id,
@@ -1500,7 +1509,9 @@ def _build_position_target_handler(
                 else strategy_runtime_repo.get_allocation_decision(target.allocation_id)
             )
             bundle_type = "single_sleeve"
-            if allocation_decision is not None:
+            if target.strategy_family == "smart_arbitrage" and len(published_legs) >= 2:
+                bundle_type = "hedge_protected"
+            elif allocation_decision is not None:
                 if (
                     to_decimal(allocation_decision.hedge_protected_notional) > Decimal("0")
                     or to_decimal(allocation_decision.directional_reduced_notional) > Decimal("0")
@@ -1681,7 +1692,6 @@ async def _subscribe_critical_handlers(
     await bus.subscribe(topics.FEATURE_SNAPSHOTS, decision_trigger.handle_feature_snapshot)
     await bus.subscribe(topics.ORDER_INTENTS, order_manager.handle_order_intent)
     await bus.subscribe(topics.FILL_EVENTS, portfolio_service.handle_fill_event)
-    await bus.subscribe(topics.PORTFOLIO_SNAPSHOTS, reconciliation_service.handle_portfolio_snapshot)
     await bus.subscribe(
         topics.PORTFOLIO_SNAPSHOTS,
         resilient_subscription_handler(
@@ -1692,6 +1702,7 @@ async def _subscribe_critical_handlers(
             raise_on_error=False,
         ),
     )
+    await bus.subscribe(topics.PORTFOLIO_SNAPSHOTS, reconciliation_service.handle_portfolio_snapshot)
     await bus.subscribe(topics.POSITION_TARGETS, position_target_handler)
 
 

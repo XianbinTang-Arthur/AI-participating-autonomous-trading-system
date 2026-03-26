@@ -251,13 +251,24 @@ class ConvergedPostgresExecutionRepository(ExecutionRepository):
             ExecutionOrderModel.margin_mode == scope.margin_mode,
             or_(ExecutionOrderModel.strategy_family.is_(None), ExecutionOrderModel.strategy_family != "smart_arbitrage"),
         )
+        if scope.product_type == "spot":
+            smart_clause = and_(
+                symbol_clause,
+                ExecutionOrderModel.strategy_family == "smart_arbitrage",
+                ExecutionOrderModel.product_type == "spot",
+                ExecutionOrderModel.margin_mode.in_(tuple(scope.smart_arbitrage_spot_margin_modes)),
+            )
+            return query.where(or_(regular_clause, smart_clause))
         if scope.product_type != "derivatives":
             return query.where(regular_clause)
         smart_clause = and_(
             symbol_clause,
             ExecutionOrderModel.strategy_family == "smart_arbitrage",
             or_(
-                and_(ExecutionOrderModel.product_type == "spot", ExecutionOrderModel.margin_mode == "cash"),
+                and_(
+                    ExecutionOrderModel.product_type == "spot",
+                    ExecutionOrderModel.margin_mode.in_(tuple(scope.smart_arbitrage_spot_margin_modes)),
+                ),
                 and_(ExecutionOrderModel.product_type == scope.product_type, ExecutionOrderModel.margin_mode == scope.margin_mode),
             ),
         )
@@ -273,13 +284,24 @@ class ConvergedPostgresExecutionRepository(ExecutionRepository):
             ExecutionOrderModel.margin_mode == scope.margin_mode,
             or_(ExecutionOrderModel.strategy_family.is_(None), ExecutionOrderModel.strategy_family != "smart_arbitrage"),
         )
+        if scope.product_type == "spot":
+            smart_clause = and_(
+                symbol_clause,
+                ExecutionOrderModel.strategy_family == "smart_arbitrage",
+                ExecutionOrderModel.product_type == "spot",
+                ExecutionOrderModel.margin_mode.in_(tuple(scope.smart_arbitrage_spot_margin_modes)),
+            )
+            return query.where(or_(regular_clause, smart_clause))
         if scope.product_type != "derivatives":
             return query.where(regular_clause)
         smart_clause = and_(
             symbol_clause,
             ExecutionOrderModel.strategy_family == "smart_arbitrage",
             or_(
-                and_(ExecutionOrderModel.product_type == "spot", ExecutionOrderModel.margin_mode == "cash"),
+                and_(
+                    ExecutionOrderModel.product_type == "spot",
+                    ExecutionOrderModel.margin_mode.in_(tuple(scope.smart_arbitrage_spot_margin_modes)),
+                ),
                 and_(ExecutionOrderModel.product_type == scope.product_type, ExecutionOrderModel.margin_mode == scope.margin_mode),
             ),
         )
@@ -326,6 +348,10 @@ class ConvergedPostgresExecutionRepository(ExecutionRepository):
             allocation_id=row.get("allocation_id") or payload.get("allocation_id"),
             strategy_bundle_id=row.get("strategy_bundle_id") or payload.get("strategy_bundle_id"),
             strategy_leg_role=row.get("strategy_leg_role") or payload.get("strategy_leg_role"),
+            strategy_pair_id=payload.get("strategy_pair_id"),
+            strategy_opportunity_kind=payload.get("strategy_opportunity_kind"),
+            strategy_execution_mode=payload.get("strategy_execution_mode"),
+            strategy_state_phase=payload.get("strategy_state_phase"),
             product_type=str(row.get("product_type") or "spot"),
             margin_mode=str(row.get("margin_mode") or "cash"),
             target_leverage=float(payload.get("target_leverage") or 1.0),
@@ -368,6 +394,10 @@ class ConvergedPostgresExecutionRepository(ExecutionRepository):
             allocation_id=row.get("allocation_id") or payload.get("allocation_id"),
             strategy_bundle_id=row.get("strategy_bundle_id") or payload.get("strategy_bundle_id"),
             strategy_leg_role=row.get("strategy_leg_role") or payload.get("strategy_leg_role"),
+            strategy_pair_id=payload.get("strategy_pair_id"),
+            strategy_opportunity_kind=payload.get("strategy_opportunity_kind"),
+            strategy_execution_mode=payload.get("strategy_execution_mode"),
+            strategy_state_phase=payload.get("strategy_state_phase"),
             liquidity_role=str(row.get("liquidity_role") or "taker"),
             exchange_timestamp=row["exchange_ts"],
             ingestion_timestamp=row["ingestion_ts"],
@@ -402,6 +432,10 @@ class ConvergedPostgresExecutionRepository(ExecutionRepository):
             allocation_id=order_state.allocation_id,
             strategy_bundle_id=order_state.strategy_bundle_id,
             strategy_leg_role=order_state.strategy_leg_role,
+            strategy_pair_id=order_state.strategy_pair_id,
+            strategy_opportunity_kind=order_state.strategy_opportunity_kind,
+            strategy_execution_mode=order_state.strategy_execution_mode,
+            strategy_state_phase=order_state.strategy_state_phase,
             idempotency_key=order_state.client_order_id,
             product_type=order_state.product_type,
             target_leverage=order_state.target_leverage,

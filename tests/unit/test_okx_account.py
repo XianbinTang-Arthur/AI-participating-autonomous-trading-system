@@ -234,6 +234,93 @@ class _FakeMultiPositionDerivativesClient(_FakeDerivativesOKXClient):
             ],
         }
 
+    async def get_positions(self):
+        self.get_positions_called = True
+        return {
+            "code": "0",
+            "data": [
+                {
+                    "instId": "BTC-USDT-SWAP",
+                    "pos": "0.02",
+                    "avgPx": "80000",
+                    "markPx": "80100",
+                    "notionalUsd": "1602",
+                    "posSide": "long",
+                },
+                {
+                    "instId": "ETH-USDT-SWAP",
+                    "pos": "1",
+                    "avgPx": "4000",
+                    "markPx": "4010",
+                    "notionalUsd": "4010",
+                    "posSide": "long",
+                },
+            ],
+        }
+
+
+class _FakeSmartArbitrageMarginClient(_FakeDerivativesOKXClient):
+    async def get_instruments(self):
+        return {
+            "code": "0",
+            "data": [
+                {
+                    "instId": "BTC-USDT-SWAP",
+                    "instType": "SWAP",
+                    "instFamily": "BTC-USDT",
+                    "baseCcy": "",
+                    "quoteCcy": "",
+                    "uly": "BTC-USDT",
+                    "settleCcy": "USDT",
+                    "ctValCcy": "BTC",
+                    "ctVal": "0.01",
+                    "lotSz": "0.01",
+                    "tickSz": "0.1",
+                    "minSz": "0.01",
+                    "state": "live",
+                },
+                {
+                    "instId": "BTC-USDT",
+                    "instType": "SPOT",
+                    "baseCcy": "BTC",
+                    "quoteCcy": "USDT",
+                    "lotSz": "0.00000001",
+                    "tickSz": "0.1",
+                    "minSz": "0.00001",
+                    "state": "live",
+                },
+            ],
+        }
+
+    async def get_positions(self):
+        self.get_positions_called = True
+        return {
+            "code": "0",
+            "data": [
+                {
+                    "instId": "BTC-USDT-SWAP",
+                    "instType": "SWAP",
+                    "pos": "0.05",
+                    "avgPx": "80000",
+                    "markPx": "80100",
+                    "notionalUsd": "4005",
+                    "posSide": "long",
+                    "mgnMode": "cross",
+                    "ccy": "USDT",
+                },
+                {
+                    "instId": "BTC-USDT",
+                    "instType": "MARGIN",
+                    "mgnMode": "cross",
+                    "liab": "0.25",
+                    "liabCcy": "BTC",
+                    "avgPx": "79000",
+                    "markPx": "79100",
+                    "notionalUsd": "19775",
+                },
+            ],
+        }
+
 
 class _FakeNestedRiskPayloadDerivativesClient(_FakeDerivativesOKXClient):
     async def get_account_position_risk(self):
@@ -722,6 +809,33 @@ class TestOKXAccountService(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot.risk_snapshot.adjusted_equity, Decimal("201.0016337876877"))
         self.assertEqual(snapshot.risk_snapshot.available_equity, Decimal("201.0016337876877"))
         self.assertEqual(snapshot.risk_snapshot.notional_usd, Decimal("120.5187115716000000"))
+
+    async def test_derivatives_refresh_parses_margin_liability_into_short_spot_position(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "okx_api_key": "demo_key",
+                "okx_api_secret": "demo_secret",
+                "okx_api_passphrase": "demo_passphrase",
+                "trading_product_type": "derivatives",
+                "default_symbol": "BTC-USDT-SWAP",
+                "smart_arbitrage_enabled": True,
+                "smart_arbitrage_negative_basis_mode": "margin_backed",
+                "smart_arbitrage_margin_short_enabled": True,
+                "smart_arbitrage_margin_short_execution_ready": True,
+                "smart_arbitrage_margin_short_spot_margin_mode": "cross",
+            }
+        )
+        service = OKXAccountService(settings=settings, client=_FakeSmartArbitrageMarginClient())
+
+        snapshot = await service.refresh(force=True)
+
+        self.assertIsNotNone(snapshot)
+        margin_position = next(item for item in snapshot.positions if item.symbol == "BTC-USDT")
+        self.assertEqual(margin_position.side, "short")
+        self.assertEqual(margin_position.quantity, Decimal("0.25"))
+        self.assertEqual(margin_position.margin_mode, "cross")
 
     async def test_status_blocks_incompatible_derivatives_account_configuration(self) -> None:
         settings = AATSSettings.model_validate(

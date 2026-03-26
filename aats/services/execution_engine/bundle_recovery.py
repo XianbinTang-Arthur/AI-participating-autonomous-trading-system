@@ -75,7 +75,7 @@ def scoped_bundle_recovery_assessment(
 def obligation_matches_scope(obligation: OrderObligation, scope: RuntimeStateScope) -> bool:
     if scope.product_type == "derivatives" and obligation.strategy_family == "smart_arbitrage":
         if obligation.product_type == "spot":
-            if obligation.margin_mode != "cash":
+            if obligation.margin_mode not in scope.smart_arbitrage_spot_margin_modes:
                 return False
         else:
             if obligation.product_type != scope.product_type:
