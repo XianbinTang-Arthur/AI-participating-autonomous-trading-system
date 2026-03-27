@@ -521,7 +521,7 @@ function renderTradeCostConfigCard(config = {}) {
   return surfaceCard({
     title: "统一交易成本配置",
     kicker: "全局手续费与磨损",
-    copy: "现货趋势、定投、现货网格、合约趋势和智能套利都共享这条交易成本链路；不同产品类型只是在这里读取不同的一组费率和磨损参数。",
+    copy: "现货趋势、定投、现货网格、合约趋势和智能套利都共享这条交易成本链路；这里的手续费值按 bps 填写，是百分比费率兜底，不是固定 USDT。实盘优先读取账户费率，拿不到时再回退到这里。",
     classes: "strategy-compact-card",
     content: `
       ${summaryStrip([
@@ -544,15 +544,17 @@ function renderTradeCostConfigCard(config = {}) {
           tone: "info",
         },
         {
-          label: "交割 / 提现额外费",
-          value: `${formatBps(config?.delivery_settlement_fee_bps)} / ${formatBps(sumBps(config?.withdrawal_bps, config?.fiat_cashout_bps), "0 bps")}`,
-          meta: "交割结算费 / 链上提币与法币提现",
+          label: "费率口径 / 来源",
+          value: `${String(config?.rate_unit || "bps").toUpperCase()} | 8 = 0.08%`,
+          meta: config?.live_fee_resolution === "account_schedule_fallback_to_configured"
+            ? "实盘优先账户费率，失败时回退到配置兜底"
+            : "当前按配置兜底费率解释",
           tone: "info",
         },
       ])}
       ${kvList([
         ["当前适用策略", "现货趋势 / 定投 / 现货网格 -> 现货；合约趋势 / 智能套利对冲腿 -> 合约；保证金反套 -> 保证金现货。", "同一个产品类型的费率、spread 和 slippage 会被统一复用。"],
-        ["统一链路", "当前所有主策略都通过统一手续费解析器和磨损模型估算成本。", "修改这里会同时影响趋势、定投、网格和智能套利，而不是只影响某一条策略。"],
+        ["统一链路", "当前所有主策略都通过统一手续费解析器和磨损模型估算成本。", "这里填的是 bps 百分比费率兜底，修改后会同时影响趋势、定投、网格和智能套利。"],
         ["当前主要提示", tradeCostPrimaryRisk(config), tradeCostSecondaryRisk(config)],
       ])}
       ${responsiveTable(
@@ -797,13 +799,13 @@ function tradeCostAdvancedConfigRows(config = {}) {
         : "当前保持 0 代表没有额外结算成本兜底。"
     ),
     tradeCostConfigRow(
-      "trade_cost_withdrawal_bps / trade_cost_fiat_cashout_bps",
-      "提币 / 法币出金",
-      `${formatBps(config?.withdrawal_bps, "0 bps")} / ${formatBps(config?.fiat_cashout_bps, "0 bps")}`,
-      "当前主策略一般不直接走跨平台提币或法币出金，但统一成本链已为这些方式预留挂载点。",
-      sumBps(config?.withdrawal_bps, config?.fiat_cashout_bps) > 0
-        ? "如果未来引入跨平台搬砖或现金提取，这些成本会直接进入统一磨损模型。"
-        : "当前保持 0 代表这两类费用暂未进入主策略成本计算。"
+      "trade_cost_*",
+      "费率口径 / 实盘来源",
+      `${String(config?.rate_unit || "bps").toUpperCase()} | ${config?.rate_example || "8 = 0.08%"}`,
+      "配置文件里的统一交易成本按 bps 填写，本质上是百分比费率的万分之一；8 代表 0.08%，5 代表 0.05%。",
+      config?.live_fee_resolution === "account_schedule_fallback_to_configured"
+        ? "实盘优先读取账户费率 schedule，只有拿不到账户费率时才会回退到这组配置。"
+        : "当前统一交易成本按配置兜底解释。"
     ),
   ];
 }
@@ -1009,7 +1011,7 @@ function smartArbitrageAdvancedConfigRows(config = {}) {
     smartArbitrageConfigRow(
       "smart_arbitrage_estimated_borrow_apr / smart_arbitrage_borrow_interest_free_ratio",
       "借币 APR / 免息比例",
-      `${formatNumber(config?.estimated_borrow_apr, 4, "0")} / ${formatNumber(config?.borrow_interest_free_ratio, 2, "0")}`,
+      `${formatNumber(config?.estimated_borrow_apr, 2, "0")}% / ${formatNumber(config?.borrow_interest_free_ratio, 2, "0")}`,
       "只有 borrow_source_mode=apr_window_model 且负基差走保证金反套时，它才真正参与离散借币窗口估算。",
       Number(config?.estimated_borrow_apr) > 0 && String(config?.borrow_source_mode || "configured") !== "apr_window_model"
         ? "当前 APR 已配置，但借币来源还不是窗口模型，这个值暂时不会真正生效。"
@@ -1713,10 +1715,18 @@ function smartArbitragePairLabel(candidate) {
 function smartArbitrageInactiveStateMeta(candidate, smartArbitrageConfig = {}) {
   if (smartArbitrageBelowEntryThreshold(candidate)) {
     const basisBps = formatBps(candidate?.metrics?.basis_bps);
-    const entryThreshold = formatBps(smartArbitrageConfig?.basis_entry_bps);
+    const entryThreshold = formatBps(smartArbitrageEntryThreshold(candidate, smartArbitrageConfig));
     return `${smartArbitragePairLabel(candidate)} | 基差 ${basisBps} | 入场阈值 ${entryThreshold}`;
   }
   return smartArbitrageMarketAvailability(candidate, smartArbitrageConfig);
+}
+
+function smartArbitrageEntryThreshold(candidate, smartArbitrageConfig = {}) {
+  const candidateThreshold = candidate?.metrics?.entry_threshold_bps;
+  if (candidateThreshold !== undefined && candidateThreshold !== null) {
+    return candidateThreshold;
+  }
+  return smartArbitrageConfig?.basis_entry_bps;
 }
 
 function strategyCandidateStateLabel(candidate) {
@@ -1968,7 +1978,7 @@ function smartArbitrageMarketAvailability(candidate, smartArbitrageConfig = {}) 
   const reasonCodes = Array.isArray(candidate?.reason_codes) ? candidate.reason_codes : [];
   if (smartArbitrageBelowEntryThreshold(candidate)) {
     const basisBps = formatBps(metrics.basis_bps);
-    const entryThreshold = formatBps(smartArbitrageConfig?.basis_entry_bps);
+    const entryThreshold = formatBps(smartArbitrageEntryThreshold(candidate, smartArbitrageConfig));
     const breakeven = metrics?.breakeven_basis_bps;
     return breakeven !== undefined && breakeven !== null
       ? `当前基差 ${basisBps}，还没有达到入场阈值 ${entryThreshold}；按当前磨损估算，盈亏平衡约需要 ${formatBps(breakeven)}。`

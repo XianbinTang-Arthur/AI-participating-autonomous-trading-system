@@ -329,9 +329,11 @@ def _borrow_cost_component(
     source_flags: list[str] = []
 
     if settings.smart_arbitrage_borrow_source_mode == "apr_window_model":
-        apr = max(to_decimal(settings.smart_arbitrage_estimated_borrow_apr), Decimal("0"))
+        # Config uses percentage semantics: `18` means `18% APR`, not `18x`.
+        apr_percent = max(to_decimal(settings.smart_arbitrage_estimated_borrow_apr), Decimal("0"))
         interest_free_ratio = min(max(to_decimal(settings.smart_arbitrage_borrow_interest_free_ratio), Decimal("0")), Decimal("1"))
-        if apr > Decimal("0") and borrow_hour_windows > 0:
+        if apr_percent > Decimal("0") and borrow_hour_windows > 0:
+            apr = apr_percent / Decimal("100")
             effective_ratio = max(Decimal("1") - interest_free_ratio, Decimal("0"))
             borrow_bps = effective_ratio * apr * Decimal(borrow_hour_windows) / Decimal("8760") * Decimal("10000")
             source_flags.append("borrow_apr_window_model")

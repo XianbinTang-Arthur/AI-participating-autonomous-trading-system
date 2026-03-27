@@ -73,13 +73,13 @@ local_publish_iterations: 6
 local_publish_interval_seconds: 0.0
 
 # [常用可调] decision_min_interval_seconds_15m：15m 周期最小决策间隔秒数。可选值：0.0~300.0；基线推荐：0.0。
-decision_min_interval_seconds_15m: 0.0
+decision_min_interval_seconds_15m: 60.0
 # [常用可调] decision_min_interval_seconds_1h：1h 周期最小决策间隔秒数。可选值：0.0~900.0；基线推荐：0.0。
-decision_min_interval_seconds_1h: 0.0
+decision_min_interval_seconds_1h: 240.0
 # [常用可调] decision_min_price_move_bps：触发新决策前要求的最小价格变动。可选值：0.0~20.0；基线推荐：0.0。
-decision_min_price_move_bps: 0.0
+decision_min_price_move_bps: 4.0
 # [常用可调] decision_min_momentum_delta：触发新决策前要求的最小动量变化。可选值：0.0~0.01；基线推荐：0.0。
-decision_min_momentum_delta: 0.0
+decision_min_momentum_delta: 0.0003
 
 # [常用可调] paper_taker_fee_bps：paper 执行 taker 手续费估计。可选值：0.0~100.0；推荐值：5.0。
 paper_taker_fee_bps: 5.0

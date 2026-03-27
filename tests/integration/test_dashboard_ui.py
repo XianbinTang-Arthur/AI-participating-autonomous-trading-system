@@ -640,6 +640,9 @@ const html = renderStrategyView({
     },
     configured_parameters: {
       trade_costs: {
+        rate_unit: 'bps',
+        rate_example: '8 = 0.08%',
+        live_fee_resolution: 'account_schedule_fallback_to_configured',
         spot_maker_fee_bps: 8,
         spot_taker_fee_bps: 10,
         margin_maker_fee_bps: 8,
@@ -653,8 +656,6 @@ const html = renderStrategyView({
         margin_slippage_bps: 0.5,
         derivatives_spread_bps: 0.8,
         derivatives_slippage_bps: 0.4,
-        withdrawal_bps: 0,
-        fiat_cashout_bps: 0,
       },
       smart_arbitrage: {
         enabled: true,
@@ -666,7 +667,6 @@ const html = renderStrategyView({
             metadata: { source: 'configured' },
           },
         ],
-        basis_entry_bps: 40,
         basis_exit_bps: 6,
         estimated_cost_bps: 34,
         quote_budget_per_trade: 200,
@@ -743,6 +743,7 @@ const html = renderStrategyView({
 
 console.log(JSON.stringify({
   hasTradeCostCard: html.includes('trade_cost_spot_taker_fee_bps') && html.includes('trade_cost_derivatives_taker_fee_bps') && html.includes('trade_cost_delivery_settlement_fee_bps'),
+  hasTradeCostBpsCopy: html.includes('8 = 0.08%') && html.includes('账户费率'),
   hasConfigCard: html.includes('smart_arbitrage_quote_budget_per_trade') && html.includes('smart_arbitrage_margin_short_execution_ready'),
   hasAdvancedConfig: html.includes('smart_arbitrage_max_concurrent_pairs') && html.includes('smart_arbitrage_cost_model_enabled') && html.includes('trade_costs.*'),
   hasCostCard: html.includes('智能套利磨损模型') && html.includes('理论净优势') && html.includes('实际总磨损'),
@@ -761,6 +762,7 @@ console.log(JSON.stringify({
         )
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         self.assertIn('"hasTradeCostCard":true', result.stdout)
+        self.assertIn('"hasTradeCostBpsCopy":true', result.stdout)
         self.assertIn('"hasConfigCard":true', result.stdout)
         self.assertIn('"hasAdvancedConfig":true', result.stdout)
         self.assertIn('"hasCostCard":true', result.stdout)
@@ -920,6 +922,7 @@ const html = renderStrategyView({
             spot_symbol: 'BTC-USDT',
             derivatives_symbol: 'BTC-USDT-SWAP',
             basis_bps: -4.7,
+            entry_threshold_bps: 40,
           },
           legs: [],
         },
@@ -937,7 +940,6 @@ const html = renderStrategyView({
             metadata: { source: 'configured' },
           },
         ],
-        basis_entry_bps: 40,
         basis_exit_bps: 6,
         estimated_cost_bps: 34,
         quote_budget_per_trade: 200,
@@ -965,6 +967,7 @@ console.log(JSON.stringify({
   hasObserveRoute: html.includes('本轮不入场'),
   hasObserveTarget: html.includes('暂不生成套利双腿'),
   hasNoLegPlanCopy: html.includes('当前还没有生成套利双腿。'),
+  avoidsPendingThresholdCopy: !html.includes('BTC-USDT <-> BTC-USDT-SWAP | 基差 -4.7 个基点 | 入场阈值 待确认'),
 }));
 """
         result = subprocess.run(
@@ -979,6 +982,7 @@ console.log(JSON.stringify({
         self.assertIn('"hasObserveRoute":true', result.stdout)
         self.assertIn('"hasObserveTarget":true', result.stdout)
         self.assertIn('"hasNoLegPlanCopy":true', result.stdout)
+        self.assertIn('"avoidsPendingThresholdCopy":true', result.stdout)
 
     def test_risk_view_actions_follow_blocker_state(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]

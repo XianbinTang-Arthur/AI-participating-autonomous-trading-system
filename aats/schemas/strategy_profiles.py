@@ -42,14 +42,19 @@ STRATEGY_PROFILE_MANAGED_FIELDS: tuple[str, ...] = (
     "strategy_expected_slippage_bps_fraction",
     "strategy_min_net_edge_bps",
     "strategy_entry_allowed_regimes",
+    "strategy_entry_min_signal_edge_bps",
     "strategy_entry_alpha_min",
     "strategy_entry_confidence_min",
+    "strategy_scale_in_min_signal_edge_bps",
     "strategy_scale_in_alpha_min",
     "strategy_scale_in_confidence_min",
+    "strategy_reversal_min_signal_edge_bps",
     "strategy_reversal_alpha_min",
     "strategy_reversal_confidence_min",
     "strategy_min_hold_seconds",
     "strategy_post_close_cooldown_seconds",
+    "strategy_max_fee_drag_ratio",
+    "strategy_max_churn_ratio",
     "strategy_low_edge_threshold_bps",
     "strategy_low_edge_streak_limit",
     "strategy_low_edge_cooldown_seconds",
@@ -72,14 +77,19 @@ class StrategyProfilePayload(SchemaBase):
     strategy_expected_slippage_bps_fraction: float
     strategy_min_net_edge_bps: float
     strategy_entry_allowed_regimes: tuple[str, ...]
+    strategy_entry_min_signal_edge_bps: float
     strategy_entry_alpha_min: float
     strategy_entry_confidence_min: float
+    strategy_scale_in_min_signal_edge_bps: float
     strategy_scale_in_alpha_min: float
     strategy_scale_in_confidence_min: float
+    strategy_reversal_min_signal_edge_bps: float
     strategy_reversal_alpha_min: float
     strategy_reversal_confidence_min: float
     strategy_min_hold_seconds: float
     strategy_post_close_cooldown_seconds: float
+    strategy_max_fee_drag_ratio: float
+    strategy_max_churn_ratio: float
     strategy_low_edge_threshold_bps: float
     strategy_low_edge_streak_limit: int
     strategy_low_edge_cooldown_seconds: float
@@ -345,11 +355,16 @@ def summarize_strategy_profile_payload(payload: StrategyProfilePayload | dict[st
         "decision_min_momentum_delta": raw.get("decision_min_momentum_delta"),
         "strategy_min_net_edge_bps": raw.get("strategy_min_net_edge_bps"),
         "strategy_entry_allowed_regimes": raw.get("strategy_entry_allowed_regimes"),
+        "strategy_entry_min_signal_edge_bps": raw.get("strategy_entry_min_signal_edge_bps"),
         "strategy_entry_alpha_min": raw.get("strategy_entry_alpha_min"),
+        "strategy_scale_in_min_signal_edge_bps": raw.get("strategy_scale_in_min_signal_edge_bps"),
         "strategy_scale_in_alpha_min": raw.get("strategy_scale_in_alpha_min"),
+        "strategy_reversal_min_signal_edge_bps": raw.get("strategy_reversal_min_signal_edge_bps"),
         "strategy_reversal_alpha_min": raw.get("strategy_reversal_alpha_min"),
         "strategy_min_hold_seconds": raw.get("strategy_min_hold_seconds"),
         "strategy_post_close_cooldown_seconds": raw.get("strategy_post_close_cooldown_seconds"),
+        "strategy_max_fee_drag_ratio": raw.get("strategy_max_fee_drag_ratio"),
+        "strategy_max_churn_ratio": raw.get("strategy_max_churn_ratio"),
         "strategy_low_edge_threshold_bps": raw.get("strategy_low_edge_threshold_bps"),
         "strategy_low_edge_streak_limit": raw.get("strategy_low_edge_streak_limit"),
         "strategy_low_edge_cooldown_seconds": raw.get("strategy_low_edge_cooldown_seconds"),

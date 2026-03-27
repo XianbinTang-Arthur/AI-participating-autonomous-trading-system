@@ -79,10 +79,10 @@ class TestAATSSettings(unittest.TestCase):
                 settings = load_settings()
 
         self.assertEqual(settings.config_profile, "guarded_simulated_submit_enabled")
-        self.assertEqual(settings.decision_min_interval_seconds_15m, 30.0)
-        self.assertEqual(settings.decision_min_interval_seconds_1h, 120.0)
+        self.assertEqual(settings.decision_min_interval_seconds_15m, 60.0)
+        self.assertEqual(settings.decision_min_interval_seconds_1h, 240.0)
         self.assertEqual(settings.decision_min_price_move_bps, 4.0)
-        self.assertEqual(settings.decision_min_momentum_delta, 0.0005)
+        self.assertEqual(settings.decision_min_momentum_delta, 0.0003)
 
     def test_load_settings_allows_explicit_env_override_on_top_of_yaml_profile(self) -> None:
         with patch.object(AATSSettings, "model_config", {**AATSSettings.model_config, "env_file": None}):
@@ -98,7 +98,7 @@ class TestAATSSettings(unittest.TestCase):
                 settings = load_settings()
 
         self.assertEqual(settings.decision_min_interval_seconds_15m, 5.0)
-        self.assertEqual(settings.decision_min_interval_seconds_1h, 120.0)
+        self.assertEqual(settings.decision_min_interval_seconds_1h, 240.0)
 
     def test_load_settings_reads_dedicated_derivatives_profile_and_startup_marker(self) -> None:
         with patch.object(AATSSettings, "model_config", {**AATSSettings.model_config, "env_file": None}):
@@ -150,7 +150,7 @@ class TestAATSSettings(unittest.TestCase):
         self.assertEqual(settings.ai_execution_suggestion_mode, "diagnostic_only")
         self.assertFalse(settings.strategy_profile_auto_control_enabled)
         self.assertEqual(settings.decision_min_interval_seconds_15m, 60.0)
-        self.assertEqual(settings.strategy_min_hold_seconds, 420.0)
+        self.assertEqual(settings.strategy_min_hold_seconds, 720.0)
 
     def test_load_settings_bootstraps_managed_derivatives_profile_before_runtime_validation(self) -> None:
         with patch.object(AATSSettings, "model_config", {**AATSSettings.model_config, "env_file": None}):

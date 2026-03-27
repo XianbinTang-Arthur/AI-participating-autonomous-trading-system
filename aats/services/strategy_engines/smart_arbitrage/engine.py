@@ -715,6 +715,8 @@ class SmartArbitrageStrategyEngine:
                 "spot_price": spot_price,
                 "derivatives_price": hedge_price,
                 "basis_bps": opportunity.basis_bps,
+                "entry_threshold_bps": opportunity.entry_threshold_bps,
+                "exit_threshold_bps": opportunity.exit_threshold_bps,
                 "net_basis_bps": opportunity.cost_breakdown.executable_edge_bps,
                 "ideal_cost_bps": opportunity.cost_breakdown.ideal_total_cost_bps,
                 "executable_cost_bps": opportunity.cost_breakdown.executable_total_drag_bps,
@@ -983,6 +985,8 @@ class SmartArbitrageStrategyEngine:
                 "ideal_edge_bps": self._average_metric(selected_pairs, "ideal_edge_bps"),
                 "executable_edge_bps": self._average_metric(selected_pairs, "executable_edge_bps"),
                 "breakeven_basis_bps": self._average_metric(selected_pairs, "breakeven_basis_bps"),
+                "entry_threshold_bps": self._average_metric(selected_pairs, "entry_threshold_bps"),
+                "exit_threshold_bps": self._average_metric(selected_pairs, "exit_threshold_bps"),
                 "cost_confidence": self._average_metric(selected_pairs, "cost_confidence"),
                 "aggregate_cost_source_flags": sorted(
                     {

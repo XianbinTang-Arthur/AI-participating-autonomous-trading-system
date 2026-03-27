@@ -2103,6 +2103,10 @@ class OperatorQueryService:
                 "strategy_sleeve_auto_volatility_cap_enabled": self.runtime.settings.strategy_sleeve_auto_volatility_cap_enabled,
                 "env_template_profile": self.runtime.settings.env_template_profile,
                 "trade_costs": {
+                    "rate_unit": "bps",
+                    "rate_semantics": "percentage_basis_points",
+                    "rate_example": "8 = 0.08%",
+                    "live_fee_resolution": "account_schedule_fallback_to_configured",
                     "spot_maker_fee_bps": self.runtime.settings.trade_cost_spot_maker_fee_bps,
                     "spot_taker_fee_bps": self.runtime.settings.trade_cost_spot_taker_fee_bps,
                     "margin_maker_fee_bps": self.runtime.settings.trade_cost_margin_maker_fee_bps,
@@ -2116,8 +2120,6 @@ class OperatorQueryService:
                     "margin_slippage_bps": self.runtime.settings.trade_cost_margin_slippage_bps,
                     "derivatives_spread_bps": self.runtime.settings.trade_cost_derivatives_spread_bps,
                     "derivatives_slippage_bps": self.runtime.settings.trade_cost_derivatives_slippage_bps,
-                    "withdrawal_bps": self.runtime.settings.trade_cost_withdrawal_bps,
-                    "fiat_cashout_bps": self.runtime.settings.trade_cost_fiat_cashout_bps,
                 },
                 "smart_arbitrage": {
                     "enabled": self.runtime.settings.smart_arbitrage_enabled,
