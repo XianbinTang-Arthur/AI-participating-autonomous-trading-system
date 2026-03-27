@@ -4288,7 +4288,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             operator_auth_enabled=True,
             operator_session_secret="session-secret",
             operator_users=[("admin", "admin-pass")],
-            strategy_profile_activation_policy_enabled=False,
+            strategy_profile_auto_control_enabled=False,
         )
         app = self._app(runtime)
 
@@ -4351,7 +4351,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             operator_auth_enabled=True,
             operator_session_secret="session-secret",
             operator_users=[("admin", "admin-pass")],
-            strategy_profile_activation_policy_enabled=True,
+            strategy_profile_auto_control_enabled=True,
         )
         conservative = runtime.strategy_profile_repo.list_revisions(
             product_type=runtime.settings.trading_product_type,
@@ -4415,7 +4415,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             operator_auth_enabled=True,
             operator_session_secret="session-secret",
             operator_users=[("admin", "admin-pass")],
-            strategy_profile_activation_policy_enabled=True,
+            strategy_profile_auto_control_enabled=True,
         )
         conservative = runtime.strategy_profile_repo.list_revisions(
             product_type=runtime.settings.trading_product_type,

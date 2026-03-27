@@ -110,7 +110,6 @@
   - `ai_execution_suggestion_mode`
   - `strategy_profile_auto_control_enabled`
   - `strategy_profile_auto_rollback_enabled`
-  - `strategy_profile_activation_policy_enabled`
   - `strategy_profile_emergency_safety_fast_track_enabled`
 
 ### 想改 directional 去哪
@@ -216,7 +215,6 @@
 - `ai_execution_suggestion_mode`
 - `strategy_profile_auto_control_enabled`
 - `strategy_profile_auto_rollback_enabled`
-- `strategy_profile_activation_policy_enabled`
 - `strategy_profile_emergency_safety_fast_track_enabled`
 - `strategy_profile_emergency_safety_confidence_min`
 

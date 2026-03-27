@@ -216,7 +216,6 @@ class AATSSettings(BaseSettings):
     strategy_profile_auto_activation_min_recommendation_strength: float = 0.0
     strategy_profile_auto_activation_require_positive_replay_consensus: bool = False
     strategy_profile_auto_activation_disallow_when_shadow_review_required: bool = False
-    strategy_profile_activation_policy_enabled: bool = False
     strategy_profile_activation_policy_allowed_symbols: tuple[str, ...] = Field(default=tuple())
     strategy_profile_activation_policy_allowed_regimes: tuple[str, ...] = Field(default=tuple())
     strategy_profile_activation_policy_allowed_profiles: tuple[str, ...] = Field(default=tuple())

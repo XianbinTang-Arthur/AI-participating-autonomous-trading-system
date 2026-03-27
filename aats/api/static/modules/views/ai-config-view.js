@@ -166,7 +166,7 @@ function renderProfileControlPanel({
   return surfaceCard({
     title: "自动换档控制",
     kicker: "策略档位切换",
-    copy: "这里决定 6 个策略档位是交给系统自动切换，还是由你手动固定。自动切档开启时，下方 6 个档位按钮会锁定；切回手动后才能再次点击。",
+    copy: "这里用唯一的自动换档主开关决定 6 个策略档位是由系统自动评估并自动激活，还是由你手动固定。开启自动换档后，系统会默认启用自动激活规则，并锁定下面 6 个档位按钮；切回手动后才能再次点击。",
     actions: renderProfileControlModeActions({ canAdmin, autoEnabled }),
     content: `
       ${callout({
@@ -178,14 +178,14 @@ function renderProfileControlPanel({
         {
           label: "配置默认",
           value: configured ? "自动切档" : "手动切档",
-          meta: configured ? "配置文件默认允许自动换档" : "配置文件默认要求手动切档",
+          meta: configured ? "配置文件默认启用自动换档，系统会按规则自动评估并自动激活档位" : "配置文件默认关闭自动换档，当前只允许手动切档",
           tone: "outline",
           badge: actorTags("config"),
         },
         {
           label: "当前控制",
           value: autoEnabled ? "自动切档" : "手动切档",
-          meta: autoEnabled ? "系统会自动评估并切换档位" : "现在由你手动点击下面的档位按钮",
+          meta: autoEnabled ? "系统会自动评估候选档位，并按激活规则自动切换" : "现在由你手动固定档位，系统不会自动评估或自动激活",
           tone: autoEnabled ? "positive" : "warning",
           badge: actorTags(autoEnabled ? "system" : "admin"),
         },
@@ -333,7 +333,7 @@ function autoControlSummary(runtime = {}, latestProfileControl = {}, latestSelec
   if (!configured && !enabled) {
     return {
       title: "当前按配置手动切档",
-      copy: "配置文件默认关闭自动换档，所以现在由你手动选择下面 6 个档位。系统不会自己改档，除非你点击右上角开启自动切档。",
+      copy: "配置文件默认关闭自动换档，所以现在由你手动选择下面 6 个档位。系统不会自动评估或自动激活档位，直到你重新开启自动换档。",
       tone: "outline",
       actors: ["config", "admin"],
     };
@@ -341,7 +341,7 @@ function autoControlSummary(runtime = {}, latestProfileControl = {}, latestSelec
   if (configured && !enabled) {
     return {
       title: "当前改为手动切档",
-      copy: "配置文件默认允许自动换档，但你现在临时改成了手动切档。系统会保持当前档位，不会自己切，直到你重新开启自动切档。",
+      copy: "配置文件默认启用自动换档，但你现在临时切到了手动模式。系统会保持当前档位，不会自动评估或自动激活，直到你重新开启自动换档。",
       tone: "warning",
       actors: ["admin", "config"],
     };
@@ -349,7 +349,7 @@ function autoControlSummary(runtime = {}, latestProfileControl = {}, latestSelec
   if (!configured && enabled) {
     return {
       title: "当前已开启自动切档",
-      copy: "配置文件默认是手动切档，但你已经从页面临时开启了自动切档。现在由系统自动决定 6 个档位何时切换，下方按钮会锁定。",
+      copy: "配置文件默认是手动切档，但你已经从页面临时开启了自动换档。现在由系统自动评估候选档位，并按自动激活规则切换，下方按钮会锁定。",
       tone: "positive",
       actors: ["admin", "system"],
     };
@@ -373,7 +373,7 @@ function autoControlSummary(runtime = {}, latestProfileControl = {}, latestSelec
   if (enabled) {
     return {
       title: "当前按配置自动切档",
-      copy: "当前已经按配置交给系统自动切档。本轮还没有新的切档动作，所以继续保持现有档位。",
+      copy: "当前已按配置启用自动换档。系统会自动评估候选档位，并按自动激活规则决定是否切换；本轮没有新的切档动作，所以继续保持现有档位。",
       tone: "info",
       actors: ["config", "system"],
     };
