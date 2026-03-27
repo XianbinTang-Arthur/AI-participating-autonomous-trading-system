@@ -2121,6 +2121,45 @@ class OperatorQueryService:
                     "derivatives_spread_bps": self.runtime.settings.trade_cost_derivatives_spread_bps,
                     "derivatives_slippage_bps": self.runtime.settings.trade_cost_derivatives_slippage_bps,
                 },
+                "directional": {
+                    "product_type": self.runtime.settings.trading_product_type,
+                    "shorting_runtime_supported": self.runtime.settings.trading_product_type == "derivatives",
+                    "shorting_config_enabled": self.runtime.settings.strategy_short_bias_enabled,
+                    "short_bias_enabled": self.runtime.settings.strategy_short_bias_enabled,
+                    "effective_short_bias_enabled": (
+                        self.runtime.settings.trading_product_type == "derivatives"
+                        and self.runtime.settings.strategy_short_bias_enabled
+                        and not self.runtime.kill_switch.halted
+                    ),
+                    "runtime_shorting_blockers": (
+                        ["kill_switch_active"]
+                        if (
+                            self.runtime.settings.trading_product_type == "derivatives"
+                            and self.runtime.kill_switch.halted
+                        )
+                        else []
+                    ),
+                    "entry_allowed_regimes": list(self.runtime.settings.strategy_entry_allowed_regimes),
+                    "entry_min_signal_edge_bps": self.runtime.settings.strategy_entry_min_signal_edge_bps,
+                    "entry_alpha_min": self.runtime.settings.strategy_entry_alpha_min,
+                    "entry_confidence_min": self.runtime.settings.strategy_entry_confidence_min,
+                    "scale_in_min_signal_edge_bps": self.runtime.settings.strategy_scale_in_min_signal_edge_bps,
+                    "scale_in_alpha_min": self.runtime.settings.strategy_scale_in_alpha_min,
+                    "scale_in_confidence_min": self.runtime.settings.strategy_scale_in_confidence_min,
+                    "reversal_min_signal_edge_bps": self.runtime.settings.strategy_reversal_min_signal_edge_bps,
+                    "reversal_alpha_min": self.runtime.settings.strategy_reversal_alpha_min,
+                    "reversal_confidence_min": self.runtime.settings.strategy_reversal_confidence_min,
+                    "short_entry_allowed_regimes": list(self.runtime.settings.strategy_short_entry_allowed_regimes),
+                    "short_entry_min_signal_edge_bps": self.runtime.settings.strategy_short_entry_min_signal_edge_bps,
+                    "short_entry_alpha_min": self.runtime.settings.strategy_short_entry_alpha_min,
+                    "short_entry_confidence_min": self.runtime.settings.strategy_short_entry_confidence_min,
+                    "short_scale_in_min_signal_edge_bps": self.runtime.settings.strategy_short_scale_in_min_signal_edge_bps,
+                    "short_scale_in_alpha_min": self.runtime.settings.strategy_short_scale_in_alpha_min,
+                    "short_scale_in_confidence_min": self.runtime.settings.strategy_short_scale_in_confidence_min,
+                    "short_reversal_min_signal_edge_bps": self.runtime.settings.strategy_short_reversal_min_signal_edge_bps,
+                    "short_reversal_alpha_min": self.runtime.settings.strategy_short_reversal_alpha_min,
+                    "short_reversal_confidence_min": self.runtime.settings.strategy_short_reversal_confidence_min,
+                },
                 "smart_arbitrage": {
                     "enabled": self.runtime.settings.smart_arbitrage_enabled,
                     "pair_definitions": [
@@ -2153,6 +2192,7 @@ class OperatorQueryService:
                     "expected_hold_hours": self.runtime.settings.smart_arbitrage_expected_hold_hours,
                     "funding_interval_hours": self.runtime.settings.smart_arbitrage_funding_interval_hours,
                     "expected_funding_events": self.runtime.settings.smart_arbitrage_expected_funding_events,
+                    "hedge_target_leverage": self.runtime.settings.smart_arbitrage_hedge_target_leverage,
                     "estimated_execution_mismatch_bps": self.runtime.settings.smart_arbitrage_estimated_execution_mismatch_bps,
                     "estimated_transfer_cost_bps": self.runtime.settings.smart_arbitrage_estimated_transfer_cost_bps,
                     "time_decay_bps_per_hour": self.runtime.settings.smart_arbitrage_time_decay_bps_per_hour,

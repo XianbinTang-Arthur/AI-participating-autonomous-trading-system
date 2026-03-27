@@ -46,6 +46,17 @@ def _balanced_profile_payload(payload: StrategyProfilePayload) -> StrategyProfil
         ),
         strategy_entry_alpha_min=_clamp_float(payload.strategy_entry_alpha_min, lower=0.17, upper=0.19),
         strategy_entry_confidence_min=_clamp_float(payload.strategy_entry_confidence_min, lower=0.63, upper=0.67),
+        strategy_short_entry_min_signal_edge_bps=_clamp_float(
+            payload.strategy_short_entry_min_signal_edge_bps,
+            lower=11.0,
+            upper=13.0,
+        ),
+        strategy_short_entry_alpha_min=_clamp_float(payload.strategy_short_entry_alpha_min, lower=0.15, upper=0.18),
+        strategy_short_entry_confidence_min=_clamp_float(
+            payload.strategy_short_entry_confidence_min,
+            lower=0.58,
+            upper=0.62,
+        ),
         strategy_scale_in_min_signal_edge_bps=_clamp_float(
             payload.strategy_scale_in_min_signal_edge_bps,
             lower=17.0,
@@ -53,6 +64,21 @@ def _balanced_profile_payload(payload: StrategyProfilePayload) -> StrategyProfil
         ),
         strategy_scale_in_alpha_min=_clamp_float(payload.strategy_scale_in_alpha_min, lower=0.23, upper=0.26),
         strategy_scale_in_confidence_min=_clamp_float(payload.strategy_scale_in_confidence_min, lower=0.70, upper=0.74),
+        strategy_short_scale_in_min_signal_edge_bps=_clamp_float(
+            payload.strategy_short_scale_in_min_signal_edge_bps,
+            lower=15.0,
+            upper=17.0,
+        ),
+        strategy_short_scale_in_alpha_min=_clamp_float(
+            payload.strategy_short_scale_in_alpha_min,
+            lower=0.20,
+            upper=0.23,
+        ),
+        strategy_short_scale_in_confidence_min=_clamp_float(
+            payload.strategy_short_scale_in_confidence_min,
+            lower=0.64,
+            upper=0.69,
+        ),
         strategy_reversal_min_signal_edge_bps=_clamp_float(
             payload.strategy_reversal_min_signal_edge_bps,
             lower=22.0,
@@ -60,6 +86,21 @@ def _balanced_profile_payload(payload: StrategyProfilePayload) -> StrategyProfil
         ),
         strategy_reversal_alpha_min=_clamp_float(payload.strategy_reversal_alpha_min, lower=0.32, upper=0.36),
         strategy_reversal_confidence_min=_clamp_float(payload.strategy_reversal_confidence_min, lower=0.78, upper=0.82),
+        strategy_short_reversal_min_signal_edge_bps=_clamp_float(
+            payload.strategy_short_reversal_min_signal_edge_bps,
+            lower=18.0,
+            upper=22.0,
+        ),
+        strategy_short_reversal_alpha_min=_clamp_float(
+            payload.strategy_short_reversal_alpha_min,
+            lower=0.20,
+            upper=0.26,
+        ),
+        strategy_short_reversal_confidence_min=_clamp_float(
+            payload.strategy_short_reversal_confidence_min,
+            lower=0.60,
+            upper=0.68,
+        ),
         strategy_min_hold_seconds=_clamp_float(payload.strategy_min_hold_seconds, lower=600.0, upper=900.0),
         strategy_post_close_cooldown_seconds=_clamp_float(
             payload.strategy_post_close_cooldown_seconds,
@@ -129,18 +170,51 @@ def _seed_revisions(*, settings: AATSSettings, payload: StrategyProfilePayload) 
                 ),
                 strategy_entry_alpha_min=min(balanced_payload.strategy_entry_alpha_min, 0.15),
                 strategy_entry_confidence_min=min(balanced_payload.strategy_entry_confidence_min, 0.60),
+                strategy_short_entry_min_signal_edge_bps=min(
+                    balanced_payload.strategy_short_entry_min_signal_edge_bps,
+                    10.0,
+                ),
+                strategy_short_entry_alpha_min=min(balanced_payload.strategy_short_entry_alpha_min, 0.14),
+                strategy_short_entry_confidence_min=min(
+                    balanced_payload.strategy_short_entry_confidence_min,
+                    0.56,
+                ),
                 strategy_scale_in_min_signal_edge_bps=min(
                     balanced_payload.strategy_scale_in_min_signal_edge_bps,
                     15.0,
                 ),
                 strategy_scale_in_alpha_min=min(balanced_payload.strategy_scale_in_alpha_min, 0.20),
                 strategy_scale_in_confidence_min=min(balanced_payload.strategy_scale_in_confidence_min, 0.66),
+                strategy_short_scale_in_min_signal_edge_bps=min(
+                    balanced_payload.strategy_short_scale_in_min_signal_edge_bps,
+                    13.0,
+                ),
+                strategy_short_scale_in_alpha_min=min(
+                    balanced_payload.strategy_short_scale_in_alpha_min,
+                    0.18,
+                ),
+                strategy_short_scale_in_confidence_min=min(
+                    balanced_payload.strategy_short_scale_in_confidence_min,
+                    0.62,
+                ),
                 strategy_reversal_min_signal_edge_bps=max(
                     balanced_payload.strategy_reversal_min_signal_edge_bps,
                     22.0,
                 ),
                 strategy_reversal_alpha_min=max(balanced_payload.strategy_reversal_alpha_min, 0.32),
                 strategy_reversal_confidence_min=max(balanced_payload.strategy_reversal_confidence_min, 0.78),
+                strategy_short_reversal_min_signal_edge_bps=min(
+                    balanced_payload.strategy_short_reversal_min_signal_edge_bps,
+                    17.0,
+                ),
+                strategy_short_reversal_alpha_min=min(
+                    balanced_payload.strategy_short_reversal_alpha_min,
+                    0.18,
+                ),
+                strategy_short_reversal_confidence_min=min(
+                    balanced_payload.strategy_short_reversal_confidence_min,
+                    0.58,
+                ),
                 strategy_min_hold_seconds=min(balanced_payload.strategy_min_hold_seconds, 480.0),
                 strategy_post_close_cooldown_seconds=min(
                     balanced_payload.strategy_post_close_cooldown_seconds,
@@ -200,18 +274,51 @@ def _seed_revisions(*, settings: AATSSettings, payload: StrategyProfilePayload) 
                 ),
                 strategy_entry_alpha_min=max(balanced_payload.strategy_entry_alpha_min, 0.20),
                 strategy_entry_confidence_min=max(balanced_payload.strategy_entry_confidence_min, 0.69),
+                strategy_short_entry_min_signal_edge_bps=max(
+                    balanced_payload.strategy_short_entry_min_signal_edge_bps,
+                    14.0,
+                ),
+                strategy_short_entry_alpha_min=max(balanced_payload.strategy_short_entry_alpha_min, 0.18),
+                strategy_short_entry_confidence_min=max(
+                    balanced_payload.strategy_short_entry_confidence_min,
+                    0.64,
+                ),
                 strategy_scale_in_min_signal_edge_bps=max(
                     balanced_payload.strategy_scale_in_min_signal_edge_bps,
                     20.0,
                 ),
                 strategy_scale_in_alpha_min=max(balanced_payload.strategy_scale_in_alpha_min, 0.27),
                 strategy_scale_in_confidence_min=max(balanced_payload.strategy_scale_in_confidence_min, 0.76),
+                strategy_short_scale_in_min_signal_edge_bps=max(
+                    balanced_payload.strategy_short_scale_in_min_signal_edge_bps,
+                    18.0,
+                ),
+                strategy_short_scale_in_alpha_min=max(
+                    balanced_payload.strategy_short_scale_in_alpha_min,
+                    0.24,
+                ),
+                strategy_short_scale_in_confidence_min=max(
+                    balanced_payload.strategy_short_scale_in_confidence_min,
+                    0.72,
+                ),
                 strategy_reversal_min_signal_edge_bps=max(
                     balanced_payload.strategy_reversal_min_signal_edge_bps,
                     26.0,
                 ),
                 strategy_reversal_alpha_min=max(balanced_payload.strategy_reversal_alpha_min, 0.38),
                 strategy_reversal_confidence_min=max(balanced_payload.strategy_reversal_confidence_min, 0.83),
+                strategy_short_reversal_min_signal_edge_bps=max(
+                    balanced_payload.strategy_short_reversal_min_signal_edge_bps,
+                    22.0,
+                ),
+                strategy_short_reversal_alpha_min=max(
+                    balanced_payload.strategy_short_reversal_alpha_min,
+                    0.28,
+                ),
+                strategy_short_reversal_confidence_min=max(
+                    balanced_payload.strategy_short_reversal_confidence_min,
+                    0.70,
+                ),
                 strategy_min_hold_seconds=max(balanced_payload.strategy_min_hold_seconds, 960.0),
                 strategy_post_close_cooldown_seconds=max(
                     balanced_payload.strategy_post_close_cooldown_seconds,
@@ -250,24 +357,58 @@ def _seed_revisions(*, settings: AATSSettings, payload: StrategyProfilePayload) 
                 ),
                 strategy_min_net_edge_bps=max(balanced_payload.strategy_min_net_edge_bps, 8.0),
                 strategy_entry_allowed_regimes=("breakout",),
+                strategy_short_entry_allowed_regimes=("breakout",),
                 strategy_entry_min_signal_edge_bps=max(
                     balanced_payload.strategy_entry_min_signal_edge_bps,
                     18.0,
                 ),
                 strategy_entry_alpha_min=max(balanced_payload.strategy_entry_alpha_min, 0.23),
                 strategy_entry_confidence_min=max(balanced_payload.strategy_entry_confidence_min, 0.72),
+                strategy_short_entry_min_signal_edge_bps=max(
+                    balanced_payload.strategy_short_entry_min_signal_edge_bps,
+                    16.0,
+                ),
+                strategy_short_entry_alpha_min=max(balanced_payload.strategy_short_entry_alpha_min, 0.20),
+                strategy_short_entry_confidence_min=max(
+                    balanced_payload.strategy_short_entry_confidence_min,
+                    0.68,
+                ),
                 strategy_scale_in_min_signal_edge_bps=max(
                     balanced_payload.strategy_scale_in_min_signal_edge_bps,
                     22.0,
                 ),
                 strategy_scale_in_alpha_min=max(balanced_payload.strategy_scale_in_alpha_min, 0.30),
                 strategy_scale_in_confidence_min=max(balanced_payload.strategy_scale_in_confidence_min, 0.80),
+                strategy_short_scale_in_min_signal_edge_bps=max(
+                    balanced_payload.strategy_short_scale_in_min_signal_edge_bps,
+                    20.0,
+                ),
+                strategy_short_scale_in_alpha_min=max(
+                    balanced_payload.strategy_short_scale_in_alpha_min,
+                    0.26,
+                ),
+                strategy_short_scale_in_confidence_min=max(
+                    balanced_payload.strategy_short_scale_in_confidence_min,
+                    0.76,
+                ),
                 strategy_reversal_min_signal_edge_bps=max(
                     balanced_payload.strategy_reversal_min_signal_edge_bps,
                     28.0,
                 ),
                 strategy_reversal_alpha_min=max(balanced_payload.strategy_reversal_alpha_min, 0.42),
                 strategy_reversal_confidence_min=max(balanced_payload.strategy_reversal_confidence_min, 0.86),
+                strategy_short_reversal_min_signal_edge_bps=max(
+                    balanced_payload.strategy_short_reversal_min_signal_edge_bps,
+                    24.0,
+                ),
+                strategy_short_reversal_alpha_min=max(
+                    balanced_payload.strategy_short_reversal_alpha_min,
+                    0.32,
+                ),
+                strategy_short_reversal_confidence_min=max(
+                    balanced_payload.strategy_short_reversal_confidence_min,
+                    0.78,
+                ),
                 strategy_min_hold_seconds=max(balanced_payload.strategy_min_hold_seconds, 1_320.0),
                 strategy_post_close_cooldown_seconds=max(
                     balanced_payload.strategy_post_close_cooldown_seconds,
@@ -306,24 +447,58 @@ def _seed_revisions(*, settings: AATSSettings, payload: StrategyProfilePayload) 
                 ),
                 strategy_min_net_edge_bps=max(balanced_payload.strategy_min_net_edge_bps, 10.0),
                 strategy_entry_allowed_regimes=("breakout",),
+                strategy_short_entry_allowed_regimes=("breakout",),
                 strategy_entry_min_signal_edge_bps=max(
                     balanced_payload.strategy_entry_min_signal_edge_bps,
                     20.0,
                 ),
                 strategy_entry_alpha_min=max(balanced_payload.strategy_entry_alpha_min, 0.27),
                 strategy_entry_confidence_min=max(balanced_payload.strategy_entry_confidence_min, 0.78),
+                strategy_short_entry_min_signal_edge_bps=max(
+                    balanced_payload.strategy_short_entry_min_signal_edge_bps,
+                    18.0,
+                ),
+                strategy_short_entry_alpha_min=max(balanced_payload.strategy_short_entry_alpha_min, 0.24),
+                strategy_short_entry_confidence_min=max(
+                    balanced_payload.strategy_short_entry_confidence_min,
+                    0.74,
+                ),
                 strategy_scale_in_min_signal_edge_bps=max(
                     balanced_payload.strategy_scale_in_min_signal_edge_bps,
                     24.0,
                 ),
                 strategy_scale_in_alpha_min=max(balanced_payload.strategy_scale_in_alpha_min, 0.34),
                 strategy_scale_in_confidence_min=max(balanced_payload.strategy_scale_in_confidence_min, 0.84),
+                strategy_short_scale_in_min_signal_edge_bps=max(
+                    balanced_payload.strategy_short_scale_in_min_signal_edge_bps,
+                    22.0,
+                ),
+                strategy_short_scale_in_alpha_min=max(
+                    balanced_payload.strategy_short_scale_in_alpha_min,
+                    0.30,
+                ),
+                strategy_short_scale_in_confidence_min=max(
+                    balanced_payload.strategy_short_scale_in_confidence_min,
+                    0.82,
+                ),
                 strategy_reversal_min_signal_edge_bps=max(
                     balanced_payload.strategy_reversal_min_signal_edge_bps,
                     30.0,
                 ),
                 strategy_reversal_alpha_min=max(balanced_payload.strategy_reversal_alpha_min, 0.44),
                 strategy_reversal_confidence_min=max(balanced_payload.strategy_reversal_confidence_min, 0.88),
+                strategy_short_reversal_min_signal_edge_bps=max(
+                    balanced_payload.strategy_short_reversal_min_signal_edge_bps,
+                    28.0,
+                ),
+                strategy_short_reversal_alpha_min=max(
+                    balanced_payload.strategy_short_reversal_alpha_min,
+                    0.38,
+                ),
+                strategy_short_reversal_confidence_min=max(
+                    balanced_payload.strategy_short_reversal_confidence_min,
+                    0.84,
+                ),
                 strategy_min_hold_seconds=max(balanced_payload.strategy_min_hold_seconds, 1_500.0),
                 strategy_post_close_cooldown_seconds=max(
                     balanced_payload.strategy_post_close_cooldown_seconds,
@@ -363,24 +538,58 @@ def _seed_revisions(*, settings: AATSSettings, payload: StrategyProfilePayload) 
                 ),
                 strategy_min_net_edge_bps=max(balanced_payload.strategy_min_net_edge_bps, 12.0),
                 strategy_entry_allowed_regimes=("breakout",),
+                strategy_short_entry_allowed_regimes=("breakout",),
                 strategy_entry_min_signal_edge_bps=max(
                     balanced_payload.strategy_entry_min_signal_edge_bps,
                     22.0,
                 ),
                 strategy_entry_alpha_min=max(balanced_payload.strategy_entry_alpha_min, 0.30),
                 strategy_entry_confidence_min=max(balanced_payload.strategy_entry_confidence_min, 0.82),
+                strategy_short_entry_min_signal_edge_bps=max(
+                    balanced_payload.strategy_short_entry_min_signal_edge_bps,
+                    20.0,
+                ),
+                strategy_short_entry_alpha_min=max(balanced_payload.strategy_short_entry_alpha_min, 0.26),
+                strategy_short_entry_confidence_min=max(
+                    balanced_payload.strategy_short_entry_confidence_min,
+                    0.78,
+                ),
                 strategy_scale_in_min_signal_edge_bps=max(
                     balanced_payload.strategy_scale_in_min_signal_edge_bps,
                     26.0,
                 ),
                 strategy_scale_in_alpha_min=max(balanced_payload.strategy_scale_in_alpha_min, 0.36),
                 strategy_scale_in_confidence_min=max(balanced_payload.strategy_scale_in_confidence_min, 0.88),
+                strategy_short_scale_in_min_signal_edge_bps=max(
+                    balanced_payload.strategy_short_scale_in_min_signal_edge_bps,
+                    24.0,
+                ),
+                strategy_short_scale_in_alpha_min=max(
+                    balanced_payload.strategy_short_scale_in_alpha_min,
+                    0.32,
+                ),
+                strategy_short_scale_in_confidence_min=max(
+                    balanced_payload.strategy_short_scale_in_confidence_min,
+                    0.86,
+                ),
                 strategy_reversal_min_signal_edge_bps=max(
                     balanced_payload.strategy_reversal_min_signal_edge_bps,
                     32.0,
                 ),
                 strategy_reversal_alpha_min=max(balanced_payload.strategy_reversal_alpha_min, 0.46),
                 strategy_reversal_confidence_min=max(balanced_payload.strategy_reversal_confidence_min, 0.90),
+                strategy_short_reversal_min_signal_edge_bps=max(
+                    balanced_payload.strategy_short_reversal_min_signal_edge_bps,
+                    30.0,
+                ),
+                strategy_short_reversal_alpha_min=max(
+                    balanced_payload.strategy_short_reversal_alpha_min,
+                    0.40,
+                ),
+                strategy_short_reversal_confidence_min=max(
+                    balanced_payload.strategy_short_reversal_confidence_min,
+                    0.88,
+                ),
                 strategy_min_hold_seconds=max(balanced_payload.strategy_min_hold_seconds, 2_100.0),
                 strategy_post_close_cooldown_seconds=max(
                     balanced_payload.strategy_post_close_cooldown_seconds,

@@ -34,11 +34,13 @@ ai_outcome_max_churn_ratio_delta: 0.10
 # [常用可调] ai_execution_suggestion_mode：AI 执行建议输出模式。可选值：disabled / diagnostic_only / shadow_translation / enabled_live；推荐值：diagnostic_only。
 ai_execution_suggestion_mode: diagnostic_only
 
-# 策略家族与自动换档
+# 策略家族
 # [常用可调] strategy_family_active：默认主策略家族。可选值：directional / smart_arbitrage / spot_grid / dca；推荐值：directional。
 strategy_family_active: directional
 # [常用可调] strategy_family_auto_selection_enabled：是否允许系统自动选择策略家族。可选值：true / false；推荐值：true。
 strategy_family_auto_selection_enabled: true
+
+# ai自动换档
 # [常用可调] strategy_profile_auto_control_enabled：是否启用策略档位自动换档。这是唯一主开关；true 时系统会自动评估并默认启用自动激活规则，false 时只允许手动切档。可选值：true / false；推荐值：false。
 strategy_profile_auto_control_enabled: false
 # [常用可调] strategy_profile_auto_rollback_enabled：自动换档后是否允许自动回滚。可选值：true / false；推荐值：true。
@@ -91,6 +93,8 @@ smart_arbitrage_estimated_cost_bps: 34.0
 smart_arbitrage_quote_budget_per_trade: 200.0
 # [常用可调] smart_arbitrage_max_pair_notional：单组套利最大名义金额。可选值：正数；推荐值：2000.0。
 smart_arbitrage_max_pair_notional: 2000.0
+# [进阶可调] smart_arbitrage_hedge_target_leverage：智能套利合约对冲腿目标杠杆。只在合约运行域自动双腿执行时真正生效，不再复用 directional 的 default_target_leverage。可选值：1.0 ~ max_target_leverage；推荐值：3.0。
+smart_arbitrage_hedge_target_leverage: 3.0
 # [进阶可调] smart_arbitrage_pair_definitions：智能套利配对定义。默认先显式定义主套利对，后续多 pair 直接在这里扩展。
 smart_arbitrage_pair_definitions:
   - pair_id: btc_usdt_swap
@@ -207,28 +211,55 @@ strategy_expected_slippage_bps_fraction: 0.30
 strategy_edge_noise_buffer_bps: 4.5
 # [常用可调] strategy_min_net_edge_bps：最小净边际。可选值：0.0 ~ 50.0；推荐值：8.0。
 strategy_min_net_edge_bps: 5.0
+
 # [常用可调] strategy_entry_allowed_regimes：允许新开仓的市场状态。可选值：trend / breakout / range / uncertain / high_volatility；推荐值：trend, breakout。
 strategy_entry_allowed_regimes:
   - trend
   - breakout
+# [进阶可调] strategy_short_entry_allowed_regimes：允许新开空的市场状态。现货 cash 运行域当前忽略该项，仅为多运行域统一配置保留。可选值：trend / breakout / range / uncertain / high_volatility；推荐值：trend, breakout。
+strategy_short_entry_allowed_regimes:
+  - trend
+  - breakout
+  -
 # [常用可调] strategy_entry_min_signal_edge_bps：开仓最低信号边际。可选值：0.0 ~ 100.0；推荐值：16.0。
 strategy_entry_min_signal_edge_bps: 14.0
 # [常用可调] strategy_entry_alpha_min：开仓最低 alpha。可选值：0.0 ~ 1.0；推荐值：0.20。
 strategy_entry_alpha_min: 0.18
 # [常用可调] strategy_entry_confidence_min：开仓最低置信度。可选值：0.0 ~ 1.0；推荐值：0.60。
 strategy_entry_confidence_min: 0.63
+# [进阶可调] strategy_short_entry_min_signal_edge_bps：新开空最低信号边际。现货 cash 运行域当前忽略该项，仅为多运行域统一配置保留。可选值：0.0 ~ 100.0；推荐值：12.0。
+strategy_short_entry_min_signal_edge_bps: 12.0
+# [进阶可调] strategy_short_entry_alpha_min：新开空最低 alpha。现货 cash 运行域当前忽略该项，仅为多运行域统一配置保留。可选值：0.0 ~ 1.0；推荐值：0.16。
+strategy_short_entry_alpha_min: 0.16
+# [进阶可调] strategy_short_entry_confidence_min：新开空最低置信度。现货 cash 运行域当前忽略该项，仅为多运行域统一配置保留。可选值：0.0 ~ 1.0；推荐值：0.58。
+strategy_short_entry_confidence_min: 0.58
+
 # [常用可调] strategy_scale_in_min_signal_edge_bps：加仓最低信号边际。可选值：0.0 ~ 100.0；推荐值：20.0。
 strategy_scale_in_min_signal_edge_bps: 18.0
 # [常用可调] strategy_scale_in_alpha_min：加仓最低 alpha。可选值：0.0 ~ 1.0；推荐值：0.26。
 strategy_scale_in_alpha_min: 0.24
 # [常用可调] strategy_scale_in_confidence_min：加仓最低置信度。可选值：0.0 ~ 1.0；推荐值：0.74。
 strategy_scale_in_confidence_min: 0.71
+# [进阶可调] strategy_short_scale_in_min_signal_edge_bps：继续加空最低信号边际。现货 cash 运行域当前忽略该项，仅为多运行域统一配置保留。可选值：0.0 ~ 100.0；推荐值：16.0。
+strategy_short_scale_in_min_signal_edge_bps: 16.0
+# [进阶可调] strategy_short_scale_in_alpha_min：继续加空最低 alpha。现货 cash 运行域当前忽略该项，仅为多运行域统一配置保留。可选值：0.0 ~ 1.0；推荐值：0.20。
+strategy_short_scale_in_alpha_min: 0.20
+# [进阶可调] strategy_short_scale_in_confidence_min：继续加空最低置信度。现货 cash 运行域当前忽略该项，仅为多运行域统一配置保留。可选值：0.0 ~ 1.0；推荐值：0.64。
+strategy_short_scale_in_confidence_min: 0.64
+
 # [常用可调] strategy_reversal_min_signal_edge_bps：反手最低信号边际。可选值：0.0 ~ 100.0；推荐值：26.0。
 strategy_reversal_min_signal_edge_bps: 24.0
 # [常用可调] strategy_reversal_alpha_min：反手最低 alpha。可选值：0.0 ~ 1.0；推荐值：0.36。
 strategy_reversal_alpha_min: 0.34
 # [常用可调] strategy_reversal_confidence_min：反手最低置信度。可选值：0.0 ~ 1.0；推荐值：0.82。
 strategy_reversal_confidence_min: 0.79
+# [进阶可调] strategy_short_reversal_min_signal_edge_bps：反手做空最低信号边际。现货 cash 运行域当前忽略该项，仅为多运行域统一配置保留。可选值：0.0 ~ 100.0；推荐值：18.0。
+strategy_short_reversal_min_signal_edge_bps: 18.0
+# [进阶可调] strategy_short_reversal_alpha_min：反手做空最低 alpha。现货 cash 运行域当前忽略该项，仅为多运行域统一配置保留。可选值：0.0 ~ 1.0；推荐值：0.22。
+strategy_short_reversal_alpha_min: 0.22
+# [进阶可调] strategy_short_reversal_confidence_min：反手做空最低置信度。现货 cash 运行域当前忽略该项，仅为多运行域统一配置保留。可选值：0.0 ~ 1.0；推荐值：0.60。
+strategy_short_reversal_confidence_min: 0.60
+
 # [常用可调] strategy_min_hold_seconds：最短持仓秒数。可选值：0 ~ 86400；推荐值：900.0。
 strategy_min_hold_seconds: 720.0
 # [常用可调] strategy_post_close_cooldown_seconds：平仓后冷却秒数。可选值：0 ~ 86400；推荐值：600.0。

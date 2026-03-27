@@ -1496,6 +1496,41 @@ h3 {
   scroll-margin-top: 24px;
 }
 
+.strategy-workspace {
+  gap: 22px;
+}
+
+.strategy-section-nav {
+  position: sticky;
+  top: 12px;
+  z-index: 2;
+  padding: 10px 0 2px;
+  background: linear-gradient(180deg, rgba(5, 12, 19, 0.96), rgba(5, 12, 19, 0.72), transparent);
+}
+
+.strategy-workspace-section {
+  display: grid;
+  gap: 14px;
+}
+
+.strategy-workspace-section__head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 16px;
+}
+
+.strategy-workspace-section__copy {
+  display: grid;
+  gap: 6px;
+  max-width: 78ch;
+}
+
+.strategy-workspace-section__copy h2 {
+  font-size: clamp(24px, 2.4vw, 34px);
+  line-height: 1.02;
+}
+
 .admin-side-panel,
 .ai-side-panel {
   display: grid;
@@ -2044,6 +2079,16 @@ input::placeholder {
     display: grid;
     grid-template-columns: 1fr;
     gap: 8px;
+  }
+
+  .strategy-section-nav {
+    position: static;
+    padding: 0;
+    background: transparent;
+  }
+
+  .strategy-workspace-section__head {
+    align-items: flex-start;
   }
 
   .section-nav__link {

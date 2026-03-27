@@ -216,7 +216,9 @@ class TestSmartArbitrageV2Components(unittest.TestCase):
         settings = AATSSettings.model_validate(
             {
                 "margin_mode": "cross",
-                "default_target_leverage": 3.0,
+                "default_target_leverage": 10.0,
+                "max_target_leverage": 20.0,
+                "smart_arbitrage_hedge_target_leverage": 3.0,
                 "smart_arbitrage_margin_short_spot_margin_mode": "cross",
             }
         )
@@ -252,6 +254,45 @@ class TestSmartArbitrageV2Components(unittest.TestCase):
         self.assertEqual(legs[0].side, "sell")
         self.assertEqual(legs[0].execution_mode, "margin_reverse_carry")
         self.assertEqual(legs[1].target_leverage, 3.0)
+
+    def test_leg_planner_clamps_smart_arbitrage_hedge_leverage_to_runtime_max(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "margin_mode": "cross",
+                "default_target_leverage": 10.0,
+                "max_target_leverage": 2.5,
+                "smart_arbitrage_hedge_target_leverage": 3.0,
+                "smart_arbitrage_margin_short_spot_margin_mode": "cross",
+            }
+        )
+        pair = ArbitragePairDefinition(pair_id="btc_pair", spot_symbol="BTC-USDT", hedge_symbol="BTC-USDT-SWAP")
+        opportunity = ArbitrageOpportunity(
+            pair_id="btc_pair",
+            spot_symbol="BTC-USDT",
+            hedge_symbol="BTC-USDT-SWAP",
+            opportunity_kind="positive_basis",
+            direction="positive_basis",
+            execution_mode="spot_carry",
+            state_phase="opening",
+            desired_pair_qty=Decimal("1"),
+            target_spot_qty=Decimal("1"),
+            target_hedge_qty=Decimal("-1"),
+            route_action="override_target",
+        )
+
+        legs = build_legs(
+            settings=settings,
+            pair=pair,
+            opportunity=opportunity,
+            account_spot_qty=Decimal("0"),
+            account_hedge_qty=Decimal("0"),
+            sleeve_spot_qty=Decimal("0"),
+            sleeve_hedge_qty=Decimal("0"),
+            spot_price=Decimal("100"),
+            hedge_price=Decimal("99"),
+        )
+
+        self.assertEqual(legs[1].target_leverage, 2.5)
 
     def test_pair_registry_defaults_execution_modes_to_all_supported_live_modes(self) -> None:
         settings = AATSSettings.model_validate(

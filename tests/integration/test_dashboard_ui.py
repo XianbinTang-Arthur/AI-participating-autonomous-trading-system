@@ -62,6 +62,8 @@ class TestDashboardUI(unittest.TestCase):
         self.assertIn("fetchDashboardBundle", js_text)
         self.assertIn("buildDashboardBundlePath", js_text)
         self.assertIn("fetchDashboardBundle(buildDashboardBundlePath(refreshingView, state))", js_text)
+        self.assertIn("当前正在刷新，已排队一次新的刷新请求。", js_text)
+        self.assertIn("当前已在${VIEW_LABELS[nextView] || \"当前页面\"}，已刷新当前状态。", js_text)
         self.assertNotIn("refreshBackgroundPanels", js_text)
         self.assertNotIn("backgroundGenerations", js_text)
         self.assertNotIn("backgroundControllers", js_text)
@@ -129,10 +131,13 @@ class TestDashboardUI(unittest.TestCase):
         self.assertIn("样本仍少，先继续观察", strategy_text)
         self.assertIn("strategyRuntimeSummary", strategy_text)
         self.assertIn("renderStrategyCandidateTable", strategy_text)
+        self.assertIn("renderDirectionalShortConfigCard", strategy_text)
         self.assertIn("renderSmartArbitrageConfigCard", strategy_text)
         self.assertIn("renderAllocatorBudgetSnapshotTable", strategy_text)
         self.assertIn("renderAllocatorConflictResolutionTable", strategy_text)
         self.assertIn("renderAllocatorNettingDecisionTable", strategy_text)
+        self.assertIn("short_entry_min_signal_edge_bps", strategy_text)
+        self.assertIn("short_reversal_confidence_min", strategy_text)
         self.assertIn("smart_arbitrage_quote_budget_per_trade", strategy_text)
         self.assertIn("smart_arbitrage_margin_short_execution_ready", strategy_text)
         self.assertIn("strategyFamilyEnablement", strategy_text)
@@ -156,6 +161,7 @@ class TestDashboardUI(unittest.TestCase):
         self.assertIn("接受当前状态为新基线", risk_text)
         self.assertIn("轻度差异，建议观察", risk_text)
         self.assertIn("系统仍处于人工确认流程", risk_text)
+        self.assertIn('action.client_action === "navigate-view" && action.value === "risk"', risk_text)
         self.assertNotIn("继续保持暂停", risk_text)
 
     def test_dashboard_redirects_to_login_when_auth_is_enabled(self) -> None:
@@ -680,6 +686,7 @@ const html = renderStrategyView({
         expected_hold_hours: 8,
         funding_interval_hours: 8,
         expected_funding_events: 1,
+        hedge_target_leverage: 3,
         negative_basis_mode: 'margin_backed',
         inventory_reservation_enabled: false,
         margin_short_enabled: true,
@@ -746,6 +753,7 @@ console.log(JSON.stringify({
   hasTradeCostBpsCopy: html.includes('8 = 0.08%') && html.includes('账户费率'),
   hasConfigCard: html.includes('smart_arbitrage_quote_budget_per_trade') && html.includes('smart_arbitrage_margin_short_execution_ready'),
   hasAdvancedConfig: html.includes('smart_arbitrage_max_concurrent_pairs') && html.includes('smart_arbitrage_cost_model_enabled') && html.includes('trade_costs.*'),
+  hasHedgeLeverageConfig: html.includes('smart_arbitrage_hedge_target_leverage') && html.includes('对冲腿目标杠杆'),
   hasCostCard: html.includes('智能套利磨损模型') && html.includes('理论净优势') && html.includes('实际总磨损'),
   hasPairLabel: html.includes('BTC-USDT &lt;-&gt; BTC-USDT-SWAP'),
   hasThresholdCopy: html.includes('还没有达到入场阈值'),
@@ -765,11 +773,118 @@ console.log(JSON.stringify({
         self.assertIn('"hasTradeCostBpsCopy":true', result.stdout)
         self.assertIn('"hasConfigCard":true', result.stdout)
         self.assertIn('"hasAdvancedConfig":true', result.stdout)
+        self.assertIn('"hasHedgeLeverageConfig":true', result.stdout)
         self.assertIn('"hasCostCard":true', result.stdout)
         self.assertIn('"hasPairLabel":true', result.stdout)
         self.assertIn('"hasThresholdCopy":true', result.stdout)
         self.assertIn('"hidesGenericNoLegCopy":true', result.stdout)
         self.assertIn('"hasCostSourceCopy":true', result.stdout)
+
+    def test_strategy_view_organizes_workspace_into_outcome_opportunity_reference_and_history_sections(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { renderStrategyView } from './aats/api/static/modules/views/strategy-view.js';
+
+const html = renderStrategyView({
+  latestDecision: {
+    decision_id: 'dec-structure',
+    decision_time: '2026-03-27T12:00:00Z',
+    baseline_assessment: { regime: 'trend', confidence: 0.67 },
+    position_target: {
+      strategy_family: 'directional',
+      position_intent: 'hold',
+      current_position_qty: 0,
+      target_position_qty: 0,
+      delta_position_qty: 0,
+      product_type: 'derivatives',
+      margin_mode: 'cross',
+    },
+    policy_decision: { execution_allowed: true, allow_reasons: ['signal_edge_clear'] },
+    risk_decision: { approved: true, approval_reasons: ['risk_within_limits'] },
+    decision_outcome: { selected_strategy_family: 'directional' },
+    decision_context: {
+      symbol: 'BTC-USDT-SWAP',
+      current_position_qty: 0,
+      as_of_ts: '2026-03-27T12:00:00Z',
+      product_type: 'derivatives',
+    },
+  },
+  recentDecisions: { decisions: [] },
+  executionLatest: {},
+  strategyRuntime: {
+    summary: {
+      automatic_selection_enabled: true,
+      configured_active_family: 'directional',
+      latest_selected_family: 'directional',
+      latest_selected_state: 'ready',
+      latest_bundle_status: 'inactive',
+      latest_portfolio_requested_notional: 0,
+      latest_portfolio_approved_notional: 0,
+      latest_portfolio_budget_cut_notional: 0,
+      auto_parallel_enabled: true,
+      automation_active_count: 1,
+      automation_contracted_count: 0,
+      automation_paused_count: 0,
+      latest_approved_sleeve_weights: {},
+      latest_selection_reason_codes: ['signal_edge_clear'],
+    },
+    latest_snapshot: { candidates: [], automation_decisions: [] },
+    configured_parameters: {
+      trade_costs: {
+        rate_unit: 'bps',
+        rate_example: '8 = 0.08%',
+        live_fee_resolution: 'account_schedule_fallback_to_configured',
+        spot_maker_fee_bps: 8,
+        spot_taker_fee_bps: 10,
+        margin_maker_fee_bps: 8,
+        margin_taker_fee_bps: 10,
+        derivatives_maker_fee_bps: 2,
+        derivatives_taker_fee_bps: 5,
+      },
+      directional: {
+        short_bias_enabled: true,
+      },
+      smart_arbitrage: {
+        enabled: true,
+        pair_definitions: [],
+      },
+    },
+    smart_arbitrage_cost_summary: {},
+    latest_bundle: {},
+    latest_allocation_decision: {},
+    latest_applied_target: {},
+    recent_execution_bundles: [],
+    recent_sleeve_intents: [],
+    recent_budget_snapshots: [],
+    recent_conflict_resolutions: [],
+    recent_netting_decisions: [],
+    family_enablement: { smart_arbitrage: { enabled: true, runtime_supported: true, execution_compatible: true } },
+  },
+  strategyAttribution: { summary: {} },
+  trialReviewSummary: { summary: {}, sections: {} },
+});
+
+console.log(JSON.stringify({
+  hasNav: html.includes('href="#strategy-overview"') && html.includes('href="#strategy-reference"') && html.includes('href="#strategy-history"'),
+  hasOutcomeSection: html.includes('本轮策略到底想做什么') && html.includes('当前候选与自动调度') && html.includes('试盘与自动运行状态'),
+  hasCollapsedReference: html.includes('展开配置与成本参考') && html.includes('默认折叠，避免配置卡占满主工作区'),
+  hasCollapsedHistory: html.includes('展开归因与历史记录') && html.includes('默认折叠，保留复盘能力但不抢主视线'),
+  keepsConfigCards: html.includes('统一交易成本配置') && html.includes('方向策略做空能力') && html.includes('智能套利配置'),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertIn('"hasNav":true', result.stdout)
+        self.assertIn('"hasOutcomeSection":true', result.stdout)
+        self.assertIn('"hasCollapsedReference":true', result.stdout)
+        self.assertIn('"hasCollapsedHistory":true', result.stdout)
+        self.assertIn('"keepsConfigCards":true', result.stdout)
 
     def test_strategy_view_uses_reason_copy_for_blocked_smart_arbitrage_intents_and_multi_pair_targets(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
@@ -983,6 +1098,212 @@ console.log(JSON.stringify({
         self.assertIn('"hasObserveTarget":true', result.stdout)
         self.assertIn('"hasNoLegPlanCopy":true', result.stdout)
         self.assertIn('"avoidsPendingThresholdCopy":true', result.stdout)
+
+    def test_strategy_view_distinguishes_waiting_exit_vs_kill_switch_blocked_exit_and_short_card_states(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { renderStrategyView } from './aats/api/static/modules/views/strategy-view.js';
+
+const waitingHtml = renderStrategyView({
+  strategyRuntime: {
+    summary: {},
+    configured_parameters: {
+      directional: {
+        product_type: 'derivatives',
+        shorting_runtime_supported: true,
+        short_bias_enabled: true,
+        runtime_shorting_blockers: [],
+        short_entry_allowed_regimes: ['trend'],
+        short_entry_min_signal_edge_bps: 12,
+        short_entry_alpha_min: 0.18,
+        short_entry_confidence_min: 0.58,
+        short_scale_in_min_signal_edge_bps: 10,
+        short_scale_in_alpha_min: 0.2,
+        short_scale_in_confidence_min: 0.6,
+        short_reversal_min_signal_edge_bps: 24,
+        short_reversal_alpha_min: 0.34,
+        short_reversal_confidence_min: 0.8,
+      },
+      smart_arbitrage: {
+        enabled: true,
+        basis_entry_bps: 40,
+        basis_exit_bps: 6,
+        hedge_target_leverage: 3,
+        pair_definitions: [{ pair_id: 'btc_usdt_swap', spot_symbol: 'BTC-USDT', hedge_symbol: 'BTC-USDT-SWAP' }],
+      },
+    },
+    latest_snapshot: {
+      candidates: [
+        {
+          family: 'smart_arbitrage',
+          state: 'active',
+          state_phase: 'active',
+          route_action: 'hold_current',
+          urgency: 'low',
+          pair_id: 'btc_usdt_swap',
+          target_position_qty: 0,
+          delta_position_qty: 0,
+          reason_codes: ['smart_arbitrage_pair_active_waiting_exit'],
+          metrics: {
+            pair_id: 'btc_usdt_swap',
+            spot_symbol: 'BTC-USDT',
+            derivatives_symbol: 'BTC-USDT-SWAP',
+          },
+          legs: [
+            { symbol: 'BTC-USDT', product_type: 'spot', side: 'buy', execution_mode: 'spot_carry' },
+            { symbol: 'BTC-USDT-SWAP', product_type: 'derivatives', side: 'sell', execution_mode: 'spot_carry' },
+          ],
+        },
+      ],
+      automation_decisions: [],
+    },
+    recent_sleeve_intents: [],
+    latest_bundle: {},
+    latest_allocation_decision: {},
+    latest_applied_target: {},
+    recent_execution_bundles: [],
+    recent_budget_snapshots: [],
+    recent_conflict_resolutions: [],
+    recent_netting_decisions: [],
+    family_enablement: { smart_arbitrage: { enabled: true, runtime_supported: true, execution_compatible: true } },
+  },
+  latestDecision: {
+    baseline_assessment: {
+      direction_bias: 'flat',
+      composite_alpha_score: 0.03,
+      confidence: 0.61,
+    },
+    ai_assessment: {
+      directional_edge: 0.04,
+    },
+    position_target: {
+      position_intent: 'hold',
+      target_exposure_side: 'flat',
+      current_position_qty: 0,
+      target_position_qty: 0,
+      delta_position_qty: 0,
+      guardrail_flags: [],
+    },
+    policy_decision: { execution_allowed: true, rejection_reasons: [] },
+    risk_decision: { approved: true, rejection_reasons: [], constraints_applied: [] },
+  },
+  strategyAttribution: { summary: {}, profitability_by_strategy_sleeve: [], sleeve_inventory_summary: [] },
+  trialReviewSummary: { summary: {}, sections: {} },
+});
+
+const blockedHtml = renderStrategyView({
+  strategyRuntime: {
+    summary: {},
+    configured_parameters: {
+      directional: {
+        product_type: 'derivatives',
+        shorting_runtime_supported: true,
+        short_bias_enabled: true,
+        runtime_shorting_blockers: ['kill_switch_active'],
+        short_entry_allowed_regimes: ['trend'],
+        short_entry_min_signal_edge_bps: 12,
+        short_entry_alpha_min: 0.18,
+        short_entry_confidence_min: 0.58,
+        short_scale_in_min_signal_edge_bps: 10,
+        short_scale_in_alpha_min: 0.2,
+        short_scale_in_confidence_min: 0.6,
+        short_reversal_min_signal_edge_bps: 24,
+        short_reversal_alpha_min: 0.34,
+        short_reversal_confidence_min: 0.8,
+      },
+      smart_arbitrage: {
+        enabled: true,
+        basis_entry_bps: 40,
+        basis_exit_bps: 6,
+        hedge_target_leverage: 3,
+        pair_definitions: [{ pair_id: 'btc_usdt_swap', spot_symbol: 'BTC-USDT', hedge_symbol: 'BTC-USDT-SWAP' }],
+      },
+    },
+    latest_snapshot: {
+      candidates: [
+        {
+          family: 'smart_arbitrage',
+          state: 'unwinding',
+          state_phase: 'unwinding',
+          route_action: 'hold_current',
+          urgency: 'high',
+          pair_id: 'btc_usdt_swap',
+          target_position_qty: 0,
+          delta_position_qty: 0,
+          reason_codes: ['smart_arbitrage_exit_ready'],
+          blocking_reasons: ['kill_switch_active'],
+          metrics: {
+            pair_id: 'btc_usdt_swap',
+            spot_symbol: 'BTC-USDT',
+            derivatives_symbol: 'BTC-USDT-SWAP',
+          },
+          legs: [
+            { symbol: 'BTC-USDT', product_type: 'spot', side: 'buy', execution_mode: 'spot_carry' },
+            { symbol: 'BTC-USDT-SWAP', product_type: 'derivatives', side: 'sell', execution_mode: 'spot_carry' },
+          ],
+        },
+      ],
+      automation_decisions: [],
+    },
+    recent_sleeve_intents: [],
+    latest_bundle: {},
+    latest_allocation_decision: {},
+    latest_applied_target: {},
+    recent_execution_bundles: [],
+    recent_budget_snapshots: [],
+    recent_conflict_resolutions: [],
+    recent_netting_decisions: [],
+    family_enablement: { smart_arbitrage: { enabled: true, runtime_supported: true, execution_compatible: true } },
+  },
+  latestDecision: {
+    baseline_assessment: {
+      direction_bias: 'short',
+      composite_alpha_score: -0.26,
+      confidence: 0.64,
+    },
+    ai_assessment: {
+      directional_edge: -0.12,
+    },
+    position_target: {
+      position_intent: 'reduce_long',
+      target_exposure_side: 'flat',
+      current_position_qty: 1,
+      target_position_qty: 0,
+      delta_position_qty: -1,
+      guardrail_flags: [],
+    },
+    policy_decision: { execution_allowed: false, rejection_reasons: ['kill_switch_active'] },
+    risk_decision: { approved: false, rejection_reasons: ['kill_switch_active'], constraints_applied: [] },
+  },
+  strategyAttribution: { summary: {}, profitability_by_strategy_sleeve: [], sleeve_inventory_summary: [] },
+  trialReviewSummary: { summary: {}, sections: {} },
+});
+
+console.log(JSON.stringify({
+  waitingShowsHoldCopy: waitingHtml.includes('这不是挂单未成'),
+  waitingHidesKillSwitchCopy: !waitingHtml.includes('平仓提交被 kill switch 阻断') && !waitingHtml.includes('配置允许，但当前运行线已暂停'),
+  blockedShowsKillSwitchCopy: blockedHtml.includes('kill switch') && blockedHtml.includes('交易所里并没有新的退出挂单'),
+  shortCardShowsConfigEnabled: waitingHtml.includes('配置允许自动做空'),
+  shortCardPrefersNoBearishSignalReason: waitingHtml.includes('当前这轮基础信号并不偏空'),
+  shortCardShowsRuntimePauseWhenBlocked: blockedHtml.includes('配置允许，但当前运行线已暂停'),
+  shortCardShowsKillSwitchReasonWhenBearish: blockedHtml.includes('当前已经识别到偏空机会，但 kill switch 正在阻断任何新增暴露。'),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertIn('"waitingShowsHoldCopy":true', result.stdout)
+        self.assertIn('"waitingHidesKillSwitchCopy":true', result.stdout)
+        self.assertIn('"blockedShowsKillSwitchCopy":true', result.stdout)
+        self.assertIn('"shortCardShowsConfigEnabled":true', result.stdout)
+        self.assertIn('"shortCardPrefersNoBearishSignalReason":true', result.stdout)
+        self.assertIn('"shortCardShowsRuntimePauseWhenBlocked":true', result.stdout)
+        self.assertIn('"shortCardShowsKillSwitchReasonWhenBearish":true', result.stdout)
 
     def test_risk_view_actions_follow_blocker_state(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]

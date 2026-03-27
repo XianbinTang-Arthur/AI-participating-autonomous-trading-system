@@ -39,6 +39,10 @@ def build_legs(
         "inventory_reverse_carry": "Derivatives hedge leg offsets the inventory-backed reverse carry.",
         "margin_reverse_carry": "Derivatives hedge leg offsets the borrow-backed reverse carry.",
     }.get(opportunity.execution_mode, "Arbitrage hedge leg driven by sleeve inventory truth.")
+    hedge_target_leverage = min(
+        max(float(settings.smart_arbitrage_hedge_target_leverage), 1.0),
+        max(float(settings.max_target_leverage), 1.0),
+    )
     return [
         StrategyLegIntent(
             symbol=pair.spot_symbol,
@@ -64,7 +68,7 @@ def build_legs(
             side="buy" if hedge_delta_qty >= 0 else "sell",
             role="hedge",
             margin_mode=settings.margin_mode,
-            target_leverage=settings.default_target_leverage,
+            target_leverage=hedge_target_leverage,
             current_position_qty=to_decimal(account_hedge_qty),
             target_position_qty=hedge_account_target_qty,
             delta_position_qty=hedge_delta_qty,

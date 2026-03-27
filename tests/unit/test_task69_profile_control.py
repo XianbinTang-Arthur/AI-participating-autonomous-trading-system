@@ -171,3 +171,11 @@ class Task69ProfileControlTests(IsolatedAsyncioTestCase):
             by_profile["range_defensive"].payload.strategy_low_edge_cooldown_seconds,
             by_profile["trend_normal"].payload.strategy_low_edge_cooldown_seconds,
         )
+        self.assertLess(
+            by_profile["trend_aggressive"].payload.strategy_short_reversal_min_signal_edge_bps,
+            by_profile["trend_normal"].payload.strategy_short_reversal_min_signal_edge_bps,
+        )
+        self.assertGreater(
+            by_profile["execution_degraded_safe"].payload.strategy_short_entry_confidence_min,
+            by_profile["trend_normal"].payload.strategy_short_entry_confidence_min,
+        )

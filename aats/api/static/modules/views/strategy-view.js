@@ -73,6 +73,7 @@ export function renderStrategySections(data) {
   const displayedForwardPeriods = forwardPeriods.slice(0, 4);
   const displayedTrialReviewActions = trialReviewRecentActions.slice(0, 5);
   const tradeCostConfig = strategyRuntime.configured_parameters?.trade_costs || {};
+  const directionalConfig = strategyRuntime.configured_parameters?.directional || {};
 
   return {
     strategyHero: surfaceCard({
@@ -214,8 +215,8 @@ export function renderStrategySections(data) {
             `${formatNumber(recentBundles[0]?.legs?.length ?? latestBundle.legs?.length ?? 0, 0, "0")} 条腿 | ${readableState(strategyAppliedTarget.position_intent || "hold")}`,
           ],
         ])}
-        ${renderStrategyCandidateTable(displayedStrategyCandidates, smartArbitrageConfig)}
-        ${renderRecentSleeveIntentTable(recentSleeveIntents.slice(0, 5))}
+        ${renderStrategyCandidateTable(displayedStrategyCandidates, smartArbitrageConfig, { policy, risk })}
+        ${renderRecentSleeveIntentTable(recentSleeveIntents.slice(0, 5), { policy, risk })}
         ${renderExpandableSection("预算快照", renderAllocatorBudgetSnapshotTable(recentBudgetSnapshots), {
           meta: `${formatNumber(strategyRuntimeSummary.latest_budget_snapshot_count, 0, "0")} 条`,
         })}
@@ -228,6 +229,7 @@ export function renderStrategySections(data) {
       `,
     }),
     strategyTradeCosts: renderTradeCostConfigCard(tradeCostConfig),
+    strategyDirectionalConfig: renderDirectionalShortConfigCard(directionalConfig, latestDecision, decisionScene),
     strategySmartArbitrageConfig: renderSmartArbitrageConfigCard(
       smartArbitrageConfig,
       tradeCostConfig,
@@ -500,18 +502,99 @@ export function renderStrategySections(data) {
 export function renderStrategyView(data) {
   const sections = renderStrategySections(data);
   return `
-    <div class="panel-grid strategy-page-grid">
-      <div class="span-12">${sections.strategyHero}</div>
-      <div class="span-12">${sections.strategyDecisionWorkbench}</div>
-      <div class="span-12">${sections.strategyTrialVerdict}</div>
-      <div class="span-12">${sections.strategyCoordinator}</div>
-      <div class="span-12">${sections.strategyTradeCosts}</div>
-      <div class="span-12">${sections.strategySmartArbitrageConfig}</div>
-      <div class="span-12">${sections.strategySmartArbitrageCost}</div>
-      <div class="span-12">${sections.strategyAutomation}</div>
-      <div class="span-12">${sections.strategyAttribution}</div>
-      <div class="span-12">${sections.strategyHistory}</div>
+    <div class="workspace-stack strategy-workspace">
+      <nav class="section-nav strategy-section-nav" aria-label="策略判断分区导航">
+        <a class="section-nav__link" href="#strategy-overview">本轮结论</a>
+        <a class="section-nav__link" href="#strategy-opportunities">当前机会</a>
+        <a class="section-nav__link" href="#strategy-health">运行质量</a>
+        <a class="section-nav__link" href="#strategy-reference">配置参考</a>
+        <a class="section-nav__link" href="#strategy-history">历史归因</a>
+      </nav>
+      ${renderStrategyWorkspaceSection(
+        "strategy-overview",
+        "当前结论",
+        "本轮策略到底想做什么",
+        "先看当前决策、门禁和目标变化。这里回答的是“这轮会不会动手”，不是配置细节。 ",
+        `
+          <div class="panel-grid strategy-page-grid">
+            <div class="span-7">${sections.strategyHero}</div>
+            <div class="span-5">${sections.strategyDecisionWorkbench}</div>
+          </div>
+        `
+      )}
+      ${renderStrategyWorkspaceSection(
+        "strategy-opportunities",
+        "当前机会",
+        "当前候选与自动调度",
+        "这里只保留这轮真的会影响下单的候选、路由和 sleeve 状态；预算明细已经在卡片内部折叠。",
+        `
+          <div class="panel-grid strategy-page-grid">
+            <div class="span-12">${sections.strategyCoordinator}</div>
+          </div>
+        `
+      )}
+      ${renderStrategyWorkspaceSection(
+        "strategy-health",
+        "运行质量",
+        "试盘与自动运行状态",
+        "这部分只回答一个问题：这条运行线现在适不适合继续放量，还是应该先缩容、暂停或复盘。",
+        `
+          <div class="panel-grid strategy-page-grid">
+            <div class="span-7">${sections.strategyTrialVerdict}</div>
+            <div class="span-5">${sections.strategyAutomation}</div>
+          </div>
+        `
+      )}
+      ${renderStrategyWorkspaceSection(
+        "strategy-reference",
+        "配置参考",
+        "配置与成本参考",
+        "默认折叠。只有在你需要调阈值、解释为什么不做、或者核对成本假设时，再展开这一层。",
+        renderExpandableSection(
+          "展开配置与成本参考",
+          `
+            <div class="panel-grid strategy-page-grid">
+              <div class="span-6">${sections.strategyTradeCosts}</div>
+              <div class="span-6">${sections.strategyDirectionalConfig}</div>
+              <div class="span-7">${sections.strategySmartArbitrageConfig}</div>
+              <div class="span-5">${sections.strategySmartArbitrageCost}</div>
+            </div>
+          `,
+          { meta: "默认折叠，避免配置卡占满主工作区" }
+        )
+      )}
+      ${renderStrategyWorkspaceSection(
+        "strategy-history",
+        "历史归因",
+        "归因与历史记录",
+        "默认折叠。只有在复盘最近为什么赚钱/亏钱、或者核对历史策略输出时，再展开这一层。",
+        renderExpandableSection(
+          "展开归因与历史记录",
+          `
+            <div class="panel-grid strategy-page-grid">
+              <div class="span-12">${sections.strategyAttribution}</div>
+              <div class="span-12">${sections.strategyHistory}</div>
+            </div>
+          `,
+          { meta: "默认折叠，保留复盘能力但不抢主视线" }
+        )
+      )}
     </div>
+  `;
+}
+
+function renderStrategyWorkspaceSection(id, kicker, title, copy, content) {
+  return `
+    <section class="workspace-section strategy-workspace-section" id="${escapeHtml(id)}">
+      <header class="strategy-workspace-section__head">
+        <div class="strategy-workspace-section__copy">
+          <p class="panel-kicker">${escapeHtml(kicker)}</p>
+          <h2>${escapeHtml(title)}</h2>
+          <p class="meta-copy">${escapeHtml(copy)}</p>
+        </div>
+      </header>
+      ${content}
+    </section>
   `;
 }
 
@@ -572,6 +655,69 @@ function renderTradeCostConfigCard(config = {}) {
         {
           meta: "交割结算、提现与保守兜底说明",
         }
+      )}
+    `,
+  });
+}
+
+function renderDirectionalShortConfigCard(config = {}, latestDecision = {}, decisionScene = "spot") {
+  const baseline = latestDecision?.baseline_assessment || {};
+  const target = latestDecision?.position_target || {};
+  const shortingSupported = config?.shorting_runtime_supported === true;
+  const shortBiasEnabled = config?.short_bias_enabled === true;
+  const effectiveShortBiasEnabled = (
+    config?.short_bias_enabled === true
+    && !(Array.isArray(config?.runtime_shorting_blockers) && config.runtime_shorting_blockers.length)
+  );
+  return surfaceCard({
+    title: "方向策略做空能力",
+    kicker: "做空开关与阈值",
+    copy: "方向策略现在把 long 和 short 的开仓、加仓、反手阈值拆开配置。这里重点回答两件事：当前能不能自动做空，以及这轮为什么没有触发做空。",
+    classes: "strategy-compact-card",
+    content: `
+      ${summaryStrip([
+        {
+          label: "做空能力",
+          value: directionalShortCapabilityLabel(config, decisionScene),
+          meta: directionalShortCapabilityMeta(config, decisionScene),
+          tone: effectiveShortBiasEnabled ? "positive" : "warning",
+        },
+        {
+          label: "当前偏空信号",
+          value: directionalShortSignalLabel(baseline, latestDecision?.ai_assessment || {}),
+          meta: directionalShortSignalMeta(baseline, latestDecision?.ai_assessment || {}),
+          tone: baseline?.direction_bias === "short" ? "warning" : "info",
+        },
+        {
+          label: "做空开仓门槛",
+          value: directionalThresholdTriple(
+            config?.short_entry_min_signal_edge_bps,
+            config?.short_entry_alpha_min,
+            config?.short_entry_confidence_min
+          ),
+          meta: `允许状态 ${localizeList(config?.short_entry_allowed_regimes || [], "、") || "全部"}`,
+          tone: shortingSupported && shortBiasEnabled ? "info" : "warning",
+        },
+        {
+          label: "做空反手门槛",
+          value: directionalThresholdTriple(
+            config?.short_reversal_min_signal_edge_bps,
+            config?.short_reversal_alpha_min,
+            config?.short_reversal_confidence_min
+          ),
+          meta: `当前执行 ${escapeHtml(readableState(target?.position_intent || "hold"))}`,
+          tone: shortingSupported && shortBiasEnabled ? "info" : "warning",
+        },
+      ])}
+      ${kvList([
+        ["当前未触发原因", directionalShortReasonText(latestDecision, config, decisionScene), directionalShortReasonMeta(target)],
+        ["当前路径", directionalCurrentPathSummary(latestDecision), directionalCurrentPathMeta(latestDecision)],
+        ["阈值对比", directionalThresholdComparison(config), "上面一组是当前 long/共享阈值，下面一组是 short 独立阈值；现在不会再只靠一个布尔值决定能不能翻空。"],
+      ])}
+      ${responsiveTable(
+        ["参数", "当前值", "适用阶段", "说明"],
+        directionalShortConfigRows(config),
+        "当前没有方向策略做空参数。"
       )}
     `,
   });
@@ -642,6 +788,169 @@ function renderSmartArbitrageConfigCard(config = {}, tradeCosts = {}, familyStat
       )}
     `,
   });
+}
+
+function directionalShortCapabilityLabel(config = {}, decisionScene = "spot") {
+  const productType = config?.product_type || decisionScene;
+  if (productType !== "derivatives" || config?.shorting_runtime_supported !== true) return "当前运行域不支持";
+  if (Array.isArray(config?.runtime_shorting_blockers) && config.runtime_shorting_blockers.includes("kill_switch_active")) {
+    return "配置允许，但当前运行线已暂停";
+  }
+  return config?.short_bias_enabled === true ? "配置允许自动做空" : "配置关闭自动做空";
+}
+
+function directionalShortCapabilityMeta(config = {}, decisionScene = "spot") {
+  const productType = config?.product_type || decisionScene;
+  if (productType !== "derivatives" || config?.shorting_runtime_supported !== true) {
+    return "现货 cash 运行域当前不会生成方向空头仓位。";
+  }
+  if (config?.short_bias_enabled !== true) {
+    return "当前运行域支持做空，但 direction short bias 开关仍是关闭状态。";
+  }
+  if (Array.isArray(config?.runtime_shorting_blockers) && config.runtime_shorting_blockers.includes("kill_switch_active")) {
+    return "当前虽然是合约运行域，且配置允许做空，但 kill switch 正在阻断任何新增暴露。";
+  }
+  return "当前是合约运行域，且配置允许独立按 short 开仓、加仓和反手阈值触发做空；实际仍会受冷却、风控、only-reduce 和 kill switch 约束。";
+}
+
+function directionalShortSignalLabel(baseline = {}, ai = {}) {
+  if (baseline?.direction_bias === "short") return "baseline 偏空";
+  const aiEdge = Number(ai?.directional_edge);
+  if (Number.isFinite(aiEdge) && aiEdge < 0) return "AI 偏空";
+  if (baseline?.direction_bias === "flat") return "当前偏中性";
+  return "当前不偏空";
+}
+
+function directionalShortSignalMeta(baseline = {}, ai = {}) {
+  const parts = [];
+  if (baseline?.direction_bias) parts.push(`baseline ${readableState(baseline.direction_bias)}`);
+  if (baseline?.composite_alpha_score !== undefined && baseline?.composite_alpha_score !== null) {
+    parts.push(`alpha ${formatNumber(Math.abs(Number(baseline.composite_alpha_score)), 2, "0.00")}`);
+  }
+  if (baseline?.confidence !== undefined && baseline?.confidence !== null) {
+    parts.push(`置信度 ${formatNumber(baseline.confidence, 2, "0.00")}`);
+  }
+  if (ai?.directional_edge !== undefined && ai?.directional_edge !== null) {
+    parts.push(`AI edge ${formatSigned(ai.directional_edge)}`);
+  }
+  return parts.join(" | ") || "当前没有足够的偏空信号摘要。";
+}
+
+function directionalThresholdTriple(edge, alpha, confidence) {
+  return `edge ${formatBps(edge)} | alpha ${formatNumber(alpha, 2, "待确认")} | 置信度 ${formatNumber(confidence, 2, "待确认")}`;
+}
+
+function directionalShortReasonText(latestDecision = {}, config = {}, decisionScene = "spot") {
+  const baseline = latestDecision?.baseline_assessment || {};
+  const ai = latestDecision?.ai_assessment || {};
+  const target = latestDecision?.position_target || {};
+  const flags = Array.isArray(target?.guardrail_flags) ? target.guardrail_flags : [];
+  const shortFlags = flags.filter((value) => String(value || "").startsWith("short_") || value === "short_bias_disabled");
+  const productType = config?.product_type || decisionScene;
+  const bearishSignal = baseline?.direction_bias === "short" || Number(ai?.directional_edge) < 0;
+  if (productType !== "derivatives" || config?.shorting_runtime_supported !== true) {
+    return "当前运行域不是合约，方向策略不会自动开空。";
+  }
+  if (target?.target_exposure_side === "short" || String(target?.position_intent || "").includes("short")) {
+    return "当前这轮已经触发做空路径，系统会按开空、减空或反手做空执行。";
+  }
+  if (!bearishSignal) {
+    return "当前这轮基础信号并不偏空，所以不会主动走做空路径。";
+  }
+  if (Array.isArray(config?.runtime_shorting_blockers) && config.runtime_shorting_blockers.includes("kill_switch_active")) {
+    return "当前已经识别到偏空机会，但 kill switch 正在阻断任何新增暴露。";
+  }
+  if (shortFlags.length) {
+    return summarizeLocalizedList(shortFlags, { limit: 4, suffix: "等阻断原因" });
+  }
+  if (config?.short_bias_enabled !== true) {
+    return "当前已经识别到偏空机会，但方向策略做空开关仍是关闭状态。";
+  }
+  if (target?.position_intent === "reduce_long") {
+    return "当前已经识别到偏空，但强度只够减多，还没有达到新开空或反手做空门槛。";
+  }
+  if (target?.position_intent === "hold") {
+    return "当前虽然出现偏空信号，但还没有达到做空开仓或反手阈值。";
+  }
+  return "当前没有触发方向做空；通常是偏空信号、冷却、风控或已有持仓状态共同作用。";
+}
+
+function directionalShortReasonMeta(target = {}) {
+  const flags = Array.isArray(target?.guardrail_flags) ? target.guardrail_flags : [];
+  return flags.length
+    ? `当前 guardrail：${localizeList(flags)}`
+    : "当前没有额外的 short guardrail 标志。";
+}
+
+function directionalCurrentPathSummary(latestDecision = {}) {
+  const baseline = latestDecision?.baseline_assessment || {};
+  const target = latestDecision?.position_target || {};
+  return [
+    `baseline ${readableState(baseline?.direction_bias || "unknown")}`,
+    `${readableState(target?.position_intent || "hold")}`,
+    `目标 ${readableState(target?.target_exposure_side || "flat")}`,
+  ].join(" -> ");
+}
+
+function directionalCurrentPathMeta(latestDecision = {}) {
+  const target = latestDecision?.position_target || {};
+  return `当前仓位 ${formatSigned(target?.current_position_qty)} | 目标仓位 ${formatSigned(target?.target_position_qty)} | 变化 ${formatSigned(target?.delta_position_qty)}`;
+}
+
+function directionalThresholdComparison(config = {}) {
+  return [
+    `long/共享：${directionalThresholdTriple(config?.entry_min_signal_edge_bps, config?.entry_alpha_min, config?.entry_confidence_min)}`,
+    `short：${directionalThresholdTriple(config?.short_entry_min_signal_edge_bps, config?.short_entry_alpha_min, config?.short_entry_confidence_min)}`,
+  ].join("；");
+}
+
+function directionalShortConfigRows(config = {}) {
+  return [
+    [
+      "strategy_short_bias_enabled",
+      config?.short_bias_enabled ? "true" : "false",
+      "总开关",
+      config?.shorting_runtime_supported
+        ? "合约运行域才会真正用到这个开关；关闭后偏空信号最多只会减多，不会新开空。"
+        : "当前运行域本身就不支持自动做空，这个开关会被忽略。",
+    ],
+    [
+      "strategy_short_entry_allowed_regimes",
+      localizeList(config?.short_entry_allowed_regimes || [], "、") || "全部",
+      "新开空",
+      "只有 baseline/AI 给出偏空，且市场状态属于这些 regime 时，方向策略才允许从空仓直接开空。",
+    ],
+    [
+      "strategy_short_entry_*",
+      directionalThresholdTriple(
+        config?.short_entry_min_signal_edge_bps,
+        config?.short_entry_alpha_min,
+        config?.short_entry_confidence_min
+      ),
+      "新开空",
+      "用于 flat -> short；现在不会再和做多开仓共用一组阈值。",
+    ],
+    [
+      "strategy_short_scale_in_*",
+      directionalThresholdTriple(
+        config?.short_scale_in_min_signal_edge_bps,
+        config?.short_scale_in_alpha_min,
+        config?.short_scale_in_confidence_min
+      ),
+      "加空",
+      "用于已有 short 持仓时继续加空；数值越高，系统越少追加空头。",
+    ],
+    [
+      "strategy_short_reversal_*",
+      directionalThresholdTriple(
+        config?.short_reversal_min_signal_edge_bps,
+        config?.short_reversal_alpha_min,
+        config?.short_reversal_confidence_min
+      ),
+      "反手做空",
+      "用于 long -> short；如果这组门槛过高，系统就会长期只减多不翻空。",
+    ],
+  ];
 }
 
 function renderSmartArbitrageCostCard(summary = {}) {
@@ -1000,6 +1309,15 @@ function smartArbitrageAdvancedConfigRows(config = {}) {
       Number(config?.expected_hold_hours) > 24
         ? "持有窗口越长，funding 和 time-decay 越容易成为主要磨损来源。"
         : "短持有窗口更适合先把手续费、spread 和 slippage 估清楚。"
+    ),
+    smartArbitrageConfigRow(
+      "smart_arbitrage_hedge_target_leverage",
+      "对冲腿目标杠杆",
+      `${formatNumber(config?.hedge_target_leverage, 1, "待确认")}x`,
+      "只作用于智能套利合约对冲腿，不再复用 directional 的 default_target_leverage；现货腿仍固定按 1x 解释。",
+      Number(config?.hedge_target_leverage) > 5
+        ? "对冲腿杠杆较高，虽然不改变套利方向，但会明显放大保证金波动和被动减仓风险。"
+        : "独立配置后，智能套利合约腿不会再被方向策略默认杠杆带偏。"
     ),
     smartArbitrageConfigRow(
       "smart_arbitrage_estimated_execution_mismatch_bps / smart_arbitrage_estimated_transfer_cost_bps / smart_arbitrage_time_decay_bps_per_hour",
@@ -1644,7 +1962,7 @@ function renderForwardValidationPeriods(periods) {
   );
 }
 
-function renderStrategyCandidateTable(candidates, smartArbitrageConfig = {}) {
+function renderStrategyCandidateTable(candidates, smartArbitrageConfig = {}, context = {}) {
   if (!Array.isArray(candidates) || !candidates.length) {
     return `<p class="meta-copy">当前还没有候选策略快照。</p>`;
   }
@@ -1654,14 +1972,14 @@ function renderStrategyCandidateTable(candidates, smartArbitrageConfig = {}) {
       `<div><strong>${escapeHtml(readableState(candidate.family || "unknown"))}</strong><div class="table-meta">${escapeHtml(strategyCandidateSymbolMeta(candidate))}</div></div>`,
       `<div><strong>${escapeHtml(strategyCandidateStateLabel(candidate))}</strong><div class="table-meta">${escapeHtml(strategyCandidateStateMeta(candidate, smartArbitrageConfig))}</div></div>`,
       `<div><strong>${escapeHtml(strategyCandidateRouteLabel(candidate))}</strong><div class="table-meta">${escapeHtml(strategyCandidateRouteMeta(candidate))}</div></div>`,
-      `<div><strong>${escapeHtml(strategyCandidateTargetLabel(candidate))}</strong><div class="table-meta">${escapeHtml(strategyCandidateTargetMeta(candidate))}</div></div>`,
-      `<div><strong>${escapeHtml(strategyCandidateReason(candidate, smartArbitrageConfig))}</strong><div class="table-meta">${escapeHtml(strategyLegSummary(candidate, smartArbitrageConfig))}</div></div>`,
+      `<div><strong>${escapeHtml(strategyCandidateTargetLabel(candidate))}</strong><div class="table-meta">${escapeHtml(strategyCandidateTargetMeta(candidate, context))}</div></div>`,
+      `<div><strong>${escapeHtml(strategyCandidateReason(candidate, smartArbitrageConfig, context))}</strong><div class="table-meta">${escapeHtml(strategyLegSummary(candidate, smartArbitrageConfig))}</div></div>`,
     ]),
     "当前没有候选策略快照。"
   );
 }
 
-function renderRecentSleeveIntentTable(items) {
+function renderRecentSleeveIntentTable(items, context = {}) {
   if (!Array.isArray(items) || !items.length) {
     return `<p class="meta-copy">当前还没有新的 sleeve 意图记录。</p>`;
   }
@@ -1670,9 +1988,9 @@ function renderRecentSleeveIntentTable(items) {
     items.map((item) => [
       `<div><strong>${escapeHtml(item.strategy_sleeve_id || "未归属")}</strong><div class="table-meta">${escapeHtml(readableState(item.family || "unknown"))} | ${escapeHtml(item.symbol || "标的待确认")}</div></div>`,
       `<div><strong>${escapeHtml(readableState(item.state || "unknown"))}</strong><div class="table-meta">${escapeHtml(readableState(item.route_action || "hold_current"))}</div></div>`,
-      `<div><strong>${escapeHtml(strategySleeveIntentTargetLabel(item))}</strong><div class="table-meta">${escapeHtml(strategySleeveIntentTargetMeta(item))}</div></div>`,
+      `<div><strong>${escapeHtml(strategySleeveIntentTargetLabel(item))}</strong><div class="table-meta">${escapeHtml(strategySleeveIntentTargetMeta(item, context))}</div></div>`,
       `<div><strong>${item.automatic_enabled ? "自动管理" : "人工冻结"}</strong><div class="table-meta">倍率 ${formatNumber(item.budget_multiplier, 2, "0")} | 权重 ${formatNumber(item.allocator_weight, 2, "0")}</div></div>`,
-      `<div><strong>${escapeHtml(strategySleeveIntentReason(item))}</strong><div class="table-meta">${escapeHtml(reasonListText(item.control_reason_codes?.length ? item.control_reason_codes : item.reason_codes, "当前没有额外原因"))}</div></div>`,
+      `<div><strong>${escapeHtml(strategySleeveIntentReason(item, context))}</strong><div class="table-meta">${escapeHtml(reasonListText(item.control_reason_codes?.length ? item.control_reason_codes : item.reason_codes, "当前没有额外原因"))}</div></div>`,
     ]),
     "当前还没有新的 sleeve 意图记录。"
   );
@@ -1804,7 +2122,7 @@ function strategyCandidateTargetLabel(candidate) {
   return formatSigned(candidate?.target_position_qty);
 }
 
-function strategyCandidateTargetMeta(candidate) {
+function strategyCandidateTargetMeta(candidate, context = {}) {
   if (smartArbitrageBelowEntryThreshold(candidate)) {
     const breakeven = candidate?.metrics?.breakeven_basis_bps;
     return breakeven !== undefined && breakeven !== null
@@ -1820,6 +2138,12 @@ function strategyCandidateTargetMeta(candidate) {
   }
   if (candidate?.family === "smart_arbitrage" && candidate?.state === "blocked") {
     return smartArbitrageBlockingSummary(candidate);
+  }
+  if (smartArbitrageExitBlockedByKillSwitch(candidate, context)) {
+    return "当前已经进入退出阶段，但平仓提交被 kill switch 阻断，交易所里并没有新的退出挂单。";
+  }
+  if (smartArbitrageWaitingExit(candidate, context)) {
+    return "当前双腿已经建好，系统正在等待基差回到退出阈值；这不是挂单未成。";
   }
   const target = Number(candidate?.target_position_qty ?? 0);
   const delta = Number(candidate?.delta_position_qty ?? 0);
@@ -1908,8 +2232,8 @@ function familyEnablementSummary(payload) {
     .join(" | ");
 }
 
-function strategyCandidateReason(candidate, smartArbitrageConfig = {}) {
-  const smartArbitrageReason = smartArbitrageReasonText(candidate, smartArbitrageConfig);
+function strategyCandidateReason(candidate, smartArbitrageConfig = {}, context = {}) {
+  const smartArbitrageReason = smartArbitrageReasonText(candidate, smartArbitrageConfig, context);
   if (smartArbitrageReason) return smartArbitrageReason;
   if (candidate?.headline) return candidate.headline;
   const summary = reasonListText(candidate?.reason_codes, "");
@@ -1917,9 +2241,9 @@ function strategyCandidateReason(candidate, smartArbitrageConfig = {}) {
   return "当前没有额外说明";
 }
 
-function strategySleeveIntentReason(item) {
+function strategySleeveIntentReason(item, context = {}) {
   if (item?.family === "smart_arbitrage") {
-    const reason = smartArbitrageReasonText(item, {});
+    const reason = smartArbitrageReasonText(item, {}, context);
     if (reason) return reason;
   }
   return item?.control_summary || item?.headline || "当前没有额外说明";
@@ -1935,13 +2259,19 @@ function strategySleeveIntentTargetLabel(item) {
   return formatSigned(item?.target_position_qty);
 }
 
-function strategySleeveIntentTargetMeta(item) {
+function strategySleeveIntentTargetMeta(item, context = {}) {
   if (smartArbitrageBelowEntryThreshold(item)) {
     return "当前还没有生成套利双腿。";
   }
   if (item?.family === "smart_arbitrage" && item?.pair_id === "multi_pair") {
     const legCount = Array.isArray(item?.legs) ? item.legs.length : 0;
     return `当前以 ${formatNumber(legCount, 0, "0")} 条执行腿表达，不再展示单一聚合数量。`;
+  }
+  if (smartArbitrageExitBlockedByKillSwitch(item, context)) {
+    return "当前已经进入退出阶段，但平仓提交被 kill switch 阻断，交易所里并没有新的退出挂单。";
+  }
+  if (smartArbitrageWaitingExit(item, context)) {
+    return "当前双腿已经建好，系统正在等待基差回到退出阈值；这不是挂单未成。";
   }
   return `变化 ${formatSigned(item?.delta_position_qty)}`;
 }
@@ -2020,11 +2350,46 @@ function smartArbitrageNegativeBasisAdvisory(candidate) {
   );
 }
 
-function smartArbitrageReasonText(candidate, smartArbitrageConfig = {}) {
+function smartArbitrageContextCodes(candidate = {}, context = {}) {
+  const candidateCodes = [
+    ...(Array.isArray(candidate?.reason_codes) ? candidate.reason_codes : []),
+    ...(Array.isArray(candidate?.blocking_reasons) ? candidate.blocking_reasons : []),
+    ...(Array.isArray(candidate?.control_reason_codes) ? candidate.control_reason_codes : []),
+  ];
+  const policyCodes = Array.isArray(context?.policy?.blocker_reasons) ? context.policy.blocker_reasons : [];
+  const riskCodes = Array.isArray(context?.risk?.rejection_reasons) ? context.risk.rejection_reasons : [];
+  return Array.from(new Set([...candidateCodes, ...policyCodes, ...riskCodes]));
+}
+
+function smartArbitrageExitBlockedByKillSwitch(candidate = {}, context = {}) {
+  if (candidate?.family !== "smart_arbitrage") return false;
+  const reasonCodes = smartArbitrageContextCodes(candidate, context);
+  const state = String(candidate?.state || "");
+  const statePhase = String(candidate?.state_phase || candidate?.metrics?.state_phase || "");
+  const opportunityKind = String(candidate?.opportunity_kind || "").trim();
+  const wantsExit = (
+    reasonCodes.includes("smart_arbitrage_exit_ready")
+    || state === "unwinding"
+    || statePhase === "unwinding"
+    || opportunityKind === "pair_exit"
+  );
+  return wantsExit && reasonCodes.includes("kill_switch_active");
+}
+
+function smartArbitrageWaitingExit(candidate = {}, context = {}) {
+  if (candidate?.family !== "smart_arbitrage") return false;
+  const reasonCodes = smartArbitrageContextCodes(candidate, context);
+  return (
+    reasonCodes.includes("smart_arbitrage_pair_active_waiting_exit")
+    && !smartArbitrageExitBlockedByKillSwitch(candidate, context)
+  );
+}
+
+function smartArbitrageReasonText(candidate, smartArbitrageConfig = {}, context = {}) {
   if (smartArbitrageBelowEntryThreshold(candidate)) {
     return smartArbitrageMarketAvailability(candidate, smartArbitrageConfig);
   }
-  const reasonCodes = Array.isArray(candidate?.reason_codes) ? candidate.reason_codes : [];
+  const reasonCodes = smartArbitrageContextCodes(candidate, context);
   if (reasonCodes.includes("smart_arbitrage_market_pair_incomplete")) {
     return smartArbitrageMarketAvailability(candidate, smartArbitrageConfig);
   }
@@ -2073,11 +2438,14 @@ function smartArbitrageReasonText(candidate, smartArbitrageConfig = {}) {
   if (reasonCodes.includes("smart_arbitrage_existing_pair_mode_not_allowed_by_config")) {
     return "当前这组套利对来自旧配置，虽然新开模式已不再允许，但系统仍会继续恢复或退出现有双腿。";
   }
+  if (smartArbitrageExitBlockedByKillSwitch(candidate, context)) {
+    return "当前套利对已经进入退出阶段，但平仓提交被 kill switch 阻断，双腿暂时只能原地保持。";
+  }
   if (reasonCodes.includes("smart_arbitrage_exit_ready")) {
     return "当前套利对已经达到退出条件，系统会优先收口双腿。";
   }
-  if (reasonCodes.includes("smart_arbitrage_pair_active_waiting_exit")) {
-    return "当前套利对仍在持有区间，系统继续保持现有双腿。";
+  if (smartArbitrageWaitingExit(candidate, context)) {
+    return "当前套利对仍在持有区间，系统继续保持现有双腿；这不是挂单未成。";
   }
   if (reasonCodes.includes("smart_arbitrage_partial_fill_recovery")) {
     return "当前套利双腿不平衡，系统会优先恢复缺失腿。";

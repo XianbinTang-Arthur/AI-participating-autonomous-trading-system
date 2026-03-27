@@ -189,6 +189,99 @@ class TestTargetPositionEngine(unittest.TestCase):
 
         self.assertEqual(target.target_position_qty, Decimal("0"))
         self.assertEqual(target.position_intent, "hold")
+        self.assertIn("short_bias_disabled", target.guardrail_flags)
+
+    def test_derivatives_short_entry_uses_independent_short_thresholds(self) -> None:
+        engine = TargetPositionEngine(
+            settings=AATSSettings.model_validate(
+                {
+                    "default_order_qty": 0.01,
+                    "trading_product_type": "derivatives",
+                    "strategy_short_bias_enabled": True,
+                    "strategy_cost_guard_enabled": False,
+                    "strategy_entry_min_signal_edge_bps": 30.0,
+                    "strategy_entry_alpha_min": 0.30,
+                    "strategy_entry_confidence_min": 0.80,
+                    "strategy_short_entry_min_signal_edge_bps": 12.0,
+                    "strategy_short_entry_alpha_min": 0.18,
+                    "strategy_short_entry_confidence_min": 0.58,
+                }
+            )
+        )
+        context = self._context(product_type="derivatives", current_exposure_side="flat")
+        baseline = self._baseline(
+            volatility_target_scale=1.0,
+            suggested_position_scale=1.0,
+            direction_bias="short",
+            confidence=0.60,
+        ).model_copy(update={"composite_alpha_score": -0.22})
+
+        target = engine.build(context, baseline, self._ai_assessment(direction=-0.22, confidence=0.60))
+
+        self.assertEqual(target.target_position_qty, Decimal("-0.01"))
+        self.assertEqual(target.position_intent, "open_short")
+        self.assertNotIn("short_entry_alpha_below_threshold", target.guardrail_flags)
+
+    def test_derivatives_short_reversal_uses_independent_short_thresholds(self) -> None:
+        engine = TargetPositionEngine(
+            settings=AATSSettings.model_validate(
+                {
+                    "default_order_qty": 0.10,
+                    "trading_product_type": "derivatives",
+                    "strategy_short_bias_enabled": True,
+                    "strategy_cost_guard_enabled": False,
+                    "strategy_reversal_min_signal_edge_bps": 30.0,
+                    "strategy_reversal_alpha_min": 0.30,
+                    "strategy_reversal_confidence_min": 0.80,
+                    "strategy_short_reversal_min_signal_edge_bps": 18.0,
+                    "strategy_short_reversal_alpha_min": 0.20,
+                    "strategy_short_reversal_confidence_min": 0.60,
+                    "strategy_edge_noise_buffer_bps": 0.0,
+                }
+            )
+        )
+        context = self._context(current_position_qty=0.05, product_type="derivatives", current_exposure_side="long")
+        baseline = self._baseline(
+            volatility_target_scale=1.0,
+            suggested_position_scale=1.0,
+            direction_bias="short",
+            confidence=0.61,
+        ).model_copy(update={"composite_alpha_score": -0.24})
+
+        target = engine.build(context, baseline, self._ai_assessment(direction=-0.24, confidence=0.61))
+
+        self.assertLess(target.target_position_qty, Decimal("0"))
+        self.assertEqual(target.position_intent, "reverse_to_short")
+        self.assertNotIn("short_reversal_alpha_below_threshold", target.guardrail_flags)
+
+    def test_derivatives_bearish_signal_reports_short_reversal_blocker_when_below_short_threshold(self) -> None:
+        engine = TargetPositionEngine(
+            settings=AATSSettings.model_validate(
+                {
+                    "default_order_qty": 0.10,
+                    "trading_product_type": "derivatives",
+                    "strategy_short_bias_enabled": True,
+                    "strategy_cost_guard_enabled": False,
+                    "strategy_short_reversal_min_signal_edge_bps": 18.0,
+                    "strategy_short_reversal_alpha_min": 0.20,
+                    "strategy_short_reversal_confidence_min": 0.66,
+                    "strategy_edge_noise_buffer_bps": 0.0,
+                }
+            )
+        )
+        context = self._context(current_position_qty=0.05, product_type="derivatives", current_exposure_side="long")
+        baseline = self._baseline(
+            volatility_target_scale=1.0,
+            suggested_position_scale=1.0,
+            direction_bias="short",
+            confidence=0.60,
+        ).model_copy(update={"composite_alpha_score": -0.24})
+
+        target = engine.build(context, baseline, self._ai_assessment(direction=-0.24, confidence=0.60))
+
+        self.assertGreater(target.target_position_qty, Decimal("0"))
+        self.assertEqual(target.position_intent, "hold")
+        self.assertIn("short_reversal_confidence_below_threshold", target.guardrail_flags)
 
     def test_derivatives_flat_entry_is_raised_to_min_actionable_qty(self) -> None:
         engine = TargetPositionEngine(
@@ -550,6 +643,8 @@ class TestTargetPositionEngine(unittest.TestCase):
                     "strategy_short_bias_enabled": True,
                     "strategy_reversal_alpha_min": 0.3,
                     "strategy_reversal_confidence_min": 0.75,
+                    "strategy_short_reversal_alpha_min": 0.3,
+                    "strategy_short_reversal_confidence_min": 0.75,
                 }
             )
         )

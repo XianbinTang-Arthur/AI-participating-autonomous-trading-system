@@ -564,12 +564,15 @@ function renderBlockerControlList({ blockers = [], primaryBlocker = null, uiHint
 function renderBlockerActions(actions = [], blocker = "", uiHints = {}) {
   if (!actions.length) return "";
   const permissionMessage = textOrFallback(uiHints.controlPermissionMessage, "");
-  const rendered = actions.map((action) => {
+  const rendered = actions.flatMap((action) => {
+    if (action.kind === "client" && action.client_action === "navigate-view" && action.value === "risk") {
+      return [];
+    }
     const isApi = action.kind !== "client";
     const disabledReason = isApi ? permissionMessage || action.disabled_reason : action.disabled_reason;
     const disabled = Boolean((isApi && permissionMessage) || action.enabled === false);
     if (action.kind === "client") {
-      return actionButton(
+      return [actionButton(
         action.label,
         textOrFallback(action.client_action, "refresh-dashboard"),
         textOrFallback(action.value, ""),
@@ -578,9 +581,9 @@ function renderBlockerActions(actions = [], blocker = "", uiHints = {}) {
           disabled,
           title: disabledReason || action.expected_effect || "",
         },
-      );
+      )];
     }
-    return actionButton(
+    return [actionButton(
       action.label,
       "trigger-blocker-action",
       `${action.action_id}::${blocker}`,
@@ -589,8 +592,9 @@ function renderBlockerActions(actions = [], blocker = "", uiHints = {}) {
         disabled,
         title: disabledReason || action.expected_effect || "",
       },
-    );
+    )];
   });
+  if (!rendered.length) return "";
   return `<div class="stack-actions">${rendered.join("")}</div>`;
 }
 

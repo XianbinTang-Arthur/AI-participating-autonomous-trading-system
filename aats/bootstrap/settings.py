@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import AliasChoices, Field, model_validator
+from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from aats.schemas.decision import AIOperatingMode, CanonicalAIOperatingMode, normalize_ai_operating_mode
 
@@ -272,6 +272,7 @@ class AATSSettings(BaseSettings):
     smart_arbitrage_expected_hold_hours: float = 8.0
     smart_arbitrage_funding_interval_hours: float = 8.0
     smart_arbitrage_expected_funding_events: int = 0
+    smart_arbitrage_hedge_target_leverage: float = 3.0
     smart_arbitrage_estimated_execution_mismatch_bps: float = 0.0
     smart_arbitrage_estimated_transfer_cost_bps: float = 0.0
     smart_arbitrage_time_decay_bps_per_hour: float = 0.0
@@ -317,12 +318,22 @@ class AATSSettings(BaseSettings):
     strategy_entry_min_signal_edge_bps: float = 12.0
     strategy_entry_alpha_min: float = 0.17
     strategy_entry_confidence_min: float = 0.64
+    strategy_short_entry_allowed_regimes: tuple[str, ...] = Field(default=("trend", "breakout"))
+    strategy_short_entry_min_signal_edge_bps: float = 11.0
+    strategy_short_entry_alpha_min: float = 0.16
+    strategy_short_entry_confidence_min: float = 0.58
     strategy_scale_in_min_signal_edge_bps: float = 16.0
     strategy_scale_in_alpha_min: float = 0.22
     strategy_scale_in_confidence_min: float = 0.70
+    strategy_short_scale_in_min_signal_edge_bps: float = 14.0
+    strategy_short_scale_in_alpha_min: float = 0.20
+    strategy_short_scale_in_confidence_min: float = 0.64
     strategy_reversal_min_signal_edge_bps: float = 22.0
     strategy_reversal_alpha_min: float = 0.32
     strategy_reversal_confidence_min: float = 0.78
+    strategy_short_reversal_min_signal_edge_bps: float = 18.0
+    strategy_short_reversal_alpha_min: float = 0.22
+    strategy_short_reversal_confidence_min: float = 0.60
     strategy_min_hold_seconds: float = 720.0
     strategy_post_close_cooldown_seconds: float = 300.0
     strategy_health_lookback_trades: int = 12
@@ -380,6 +391,24 @@ class AATSSettings(BaseSettings):
     log_backup_count: int = 7
     exchange_name: str = "PAPER"
     allowed_symbols: tuple[str, ...] = Field(default=("BTC-USDT",))
+
+    @field_validator("strategy_entry_allowed_regimes", "strategy_short_entry_allowed_regimes", mode="before")
+    @classmethod
+    def normalize_allowed_regimes(cls, value: Any) -> Any:
+        if value is None:
+            return tuple()
+        if isinstance(value, str):
+            items = value.split(",")
+        elif isinstance(value, (list, tuple, set)):
+            items = list(value)
+        else:
+            return value
+        normalized = []
+        for item in items:
+            text = "" if item is None else str(item).strip()
+            if text:
+                normalized.append(text)
+        return tuple(normalized)
 
     @model_validator(mode="after")
     def validate_supported_runtime_overrides(self) -> "AATSSettings":

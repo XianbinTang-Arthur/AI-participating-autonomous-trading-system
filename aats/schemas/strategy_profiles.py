@@ -4,7 +4,7 @@ from datetime import datetime
 from hashlib import sha256
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from aats.bootstrap.settings import AATSSettings
 from aats.schemas.common import SchemaBase, new_id, utc_now
@@ -45,12 +45,22 @@ STRATEGY_PROFILE_MANAGED_FIELDS: tuple[str, ...] = (
     "strategy_entry_min_signal_edge_bps",
     "strategy_entry_alpha_min",
     "strategy_entry_confidence_min",
+    "strategy_short_entry_allowed_regimes",
+    "strategy_short_entry_min_signal_edge_bps",
+    "strategy_short_entry_alpha_min",
+    "strategy_short_entry_confidence_min",
     "strategy_scale_in_min_signal_edge_bps",
     "strategy_scale_in_alpha_min",
     "strategy_scale_in_confidence_min",
+    "strategy_short_scale_in_min_signal_edge_bps",
+    "strategy_short_scale_in_alpha_min",
+    "strategy_short_scale_in_confidence_min",
     "strategy_reversal_min_signal_edge_bps",
     "strategy_reversal_alpha_min",
     "strategy_reversal_confidence_min",
+    "strategy_short_reversal_min_signal_edge_bps",
+    "strategy_short_reversal_alpha_min",
+    "strategy_short_reversal_confidence_min",
     "strategy_min_hold_seconds",
     "strategy_post_close_cooldown_seconds",
     "strategy_max_fee_drag_ratio",
@@ -80,12 +90,22 @@ class StrategyProfilePayload(SchemaBase):
     strategy_entry_min_signal_edge_bps: float
     strategy_entry_alpha_min: float
     strategy_entry_confidence_min: float
+    strategy_short_entry_allowed_regimes: tuple[str, ...]
+    strategy_short_entry_min_signal_edge_bps: float
+    strategy_short_entry_alpha_min: float
+    strategy_short_entry_confidence_min: float
     strategy_scale_in_min_signal_edge_bps: float
     strategy_scale_in_alpha_min: float
     strategy_scale_in_confidence_min: float
+    strategy_short_scale_in_min_signal_edge_bps: float
+    strategy_short_scale_in_alpha_min: float
+    strategy_short_scale_in_confidence_min: float
     strategy_reversal_min_signal_edge_bps: float
     strategy_reversal_alpha_min: float
     strategy_reversal_confidence_min: float
+    strategy_short_reversal_min_signal_edge_bps: float
+    strategy_short_reversal_alpha_min: float
+    strategy_short_reversal_confidence_min: float
     strategy_min_hold_seconds: float
     strategy_post_close_cooldown_seconds: float
     strategy_max_fee_drag_ratio: float
@@ -94,6 +114,30 @@ class StrategyProfilePayload(SchemaBase):
     strategy_low_edge_streak_limit: int
     strategy_low_edge_cooldown_seconds: float
     strategy_transient_close_retry_cooldown_seconds: float
+
+    @model_validator(mode="before")
+    @classmethod
+    def backfill_legacy_short_thresholds(cls, raw: Any) -> Any:
+        if not isinstance(raw, dict):
+            return raw
+        payload = dict(raw)
+        fallback_pairs = (
+            ("strategy_short_entry_allowed_regimes", "strategy_entry_allowed_regimes"),
+            ("strategy_short_entry_min_signal_edge_bps", "strategy_entry_min_signal_edge_bps"),
+            ("strategy_short_entry_alpha_min", "strategy_entry_alpha_min"),
+            ("strategy_short_entry_confidence_min", "strategy_entry_confidence_min"),
+            ("strategy_short_scale_in_min_signal_edge_bps", "strategy_scale_in_min_signal_edge_bps"),
+            ("strategy_short_scale_in_alpha_min", "strategy_scale_in_alpha_min"),
+            ("strategy_short_scale_in_confidence_min", "strategy_scale_in_confidence_min"),
+            ("strategy_short_reversal_min_signal_edge_bps", "strategy_reversal_min_signal_edge_bps"),
+            ("strategy_short_reversal_alpha_min", "strategy_reversal_alpha_min"),
+            ("strategy_short_reversal_confidence_min", "strategy_reversal_confidence_min"),
+        )
+        for short_field, legacy_field in fallback_pairs:
+            value = payload.get(short_field)
+            if value is None and legacy_field in payload:
+                payload[short_field] = payload.get(legacy_field)
+        return payload
 
 
 class StrategyProfileAxes(SchemaBase):
@@ -357,10 +401,23 @@ def summarize_strategy_profile_payload(payload: StrategyProfilePayload | dict[st
         "strategy_entry_allowed_regimes": raw.get("strategy_entry_allowed_regimes"),
         "strategy_entry_min_signal_edge_bps": raw.get("strategy_entry_min_signal_edge_bps"),
         "strategy_entry_alpha_min": raw.get("strategy_entry_alpha_min"),
+        "strategy_entry_confidence_min": raw.get("strategy_entry_confidence_min"),
+        "strategy_short_entry_allowed_regimes": raw.get("strategy_short_entry_allowed_regimes"),
+        "strategy_short_entry_min_signal_edge_bps": raw.get("strategy_short_entry_min_signal_edge_bps"),
+        "strategy_short_entry_alpha_min": raw.get("strategy_short_entry_alpha_min"),
+        "strategy_short_entry_confidence_min": raw.get("strategy_short_entry_confidence_min"),
         "strategy_scale_in_min_signal_edge_bps": raw.get("strategy_scale_in_min_signal_edge_bps"),
         "strategy_scale_in_alpha_min": raw.get("strategy_scale_in_alpha_min"),
+        "strategy_scale_in_confidence_min": raw.get("strategy_scale_in_confidence_min"),
+        "strategy_short_scale_in_min_signal_edge_bps": raw.get("strategy_short_scale_in_min_signal_edge_bps"),
+        "strategy_short_scale_in_alpha_min": raw.get("strategy_short_scale_in_alpha_min"),
+        "strategy_short_scale_in_confidence_min": raw.get("strategy_short_scale_in_confidence_min"),
         "strategy_reversal_min_signal_edge_bps": raw.get("strategy_reversal_min_signal_edge_bps"),
         "strategy_reversal_alpha_min": raw.get("strategy_reversal_alpha_min"),
+        "strategy_reversal_confidence_min": raw.get("strategy_reversal_confidence_min"),
+        "strategy_short_reversal_min_signal_edge_bps": raw.get("strategy_short_reversal_min_signal_edge_bps"),
+        "strategy_short_reversal_alpha_min": raw.get("strategy_short_reversal_alpha_min"),
+        "strategy_short_reversal_confidence_min": raw.get("strategy_short_reversal_confidence_min"),
         "strategy_min_hold_seconds": raw.get("strategy_min_hold_seconds"),
         "strategy_post_close_cooldown_seconds": raw.get("strategy_post_close_cooldown_seconds"),
         "strategy_max_fee_drag_ratio": raw.get("strategy_max_fee_drag_ratio"),
@@ -408,11 +465,23 @@ def strategy_profile_axes_from_payload(payload: StrategyProfilePayload | dict[st
         (float(raw.get("strategy_min_hold_seconds", 0.0) or 0.0) / 8.0),
         float(raw.get("strategy_low_edge_cooldown_seconds", 0.0) or 0.0) / 12.0,
     )
+    entry_alpha_signal = max(
+        float(raw.get("strategy_entry_alpha_min", 0.0) or 0.0),
+        float(raw.get("strategy_short_entry_alpha_min", 0.0) or 0.0),
+    )
+    scale_in_alpha_signal = max(
+        float(raw.get("strategy_scale_in_alpha_min", 0.0) or 0.0),
+        float(raw.get("strategy_short_scale_in_alpha_min", 0.0) or 0.0),
+    )
+    reversal_alpha_signal = max(
+        float(raw.get("strategy_reversal_alpha_min", 0.0) or 0.0),
+        float(raw.get("strategy_short_reversal_alpha_min", 0.0) or 0.0),
+    )
     return StrategyProfileAxes(
         frequency=level(frequency_signal, low=1.5, medium=2.5, high=4.0),
-        entry_threshold=level(float(raw.get("strategy_entry_alpha_min", 0.0) or 0.0), low=0.16, medium=0.22, high=0.28),
-        scale_in_threshold=level(float(raw.get("strategy_scale_in_alpha_min", 0.0) or 0.0), low=0.2, medium=0.28, high=0.34),
-        reversal_threshold=level(float(raw.get("strategy_reversal_alpha_min", 0.0) or 0.0), low=0.26, medium=0.34, high=0.4),
+        entry_threshold=level(entry_alpha_signal, low=0.16, medium=0.22, high=0.28),
+        scale_in_threshold=level(scale_in_alpha_signal, low=0.2, medium=0.28, high=0.34),
+        reversal_threshold=level(reversal_alpha_signal, low=0.26, medium=0.34, high=0.4),
         cost_protection=level(cost_signal, low=5.0, medium=8.0, high=12.0),
         cooldown_fuse=level(cooldown_signal, low=90.0, medium=180.0, high=300.0),
     )

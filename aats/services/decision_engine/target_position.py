@@ -190,6 +190,15 @@ class TargetPositionEngine:
             signal_edge_bps=signal_edge_bps,
             guardrail_flags=guardrail_flags,
         )
+        if (
+            not self._short_bias_allowed(context.product_type)
+            and (
+                baseline.direction_bias == "short"
+                or target_qty < Decimal("0")
+                or (ai_decision_intent is not None and ai_decision_intent.direction == "short")
+            )
+        ):
+            guardrail_flags.append("short_bias_disabled")
         if not self._short_bias_allowed(context.product_type):
             target_qty = self._normalize_long_only_target(
                 current_position_qty=context.current_position_qty,
@@ -826,42 +835,50 @@ class TargetPositionEngine:
         )
         if trade_kind is None:
             return desired_target_qty
-        if not self._regime_allowed_for_entry(baseline.regime):
-            guardrail_flags.append("entry_regime_not_allowed")
+        target_side = self._exposure_side(desired_target_qty)
+        if trade_kind == "entry" and not self._regime_allowed_for_entry(
+            baseline.regime,
+            desired_target_qty=desired_target_qty,
+        ):
+            guardrail_flags.append("short_entry_regime_not_allowed" if target_side == "short" else "entry_regime_not_allowed")
             return current_position_qty
         alpha = abs(baseline.composite_alpha_score)
         confidence = baseline.confidence
+        edge_threshold, alpha_threshold, confidence_threshold, flag_prefix = self._trade_thresholds(
+            trade_kind=trade_kind,
+            desired_target_qty=desired_target_qty,
+        )
         if trade_kind == "entry":
-            if alpha + float(EPSILON_DECIMAL_12) < self.settings.strategy_entry_alpha_min:
-                guardrail_flags.append("entry_alpha_below_threshold")
+            if alpha + float(EPSILON_DECIMAL_12) < alpha_threshold:
+                guardrail_flags.append(f"{flag_prefix}_alpha_below_threshold")
                 return current_position_qty
-            if confidence + float(EPSILON_DECIMAL_12) < self.settings.strategy_entry_confidence_min:
-                guardrail_flags.append("entry_confidence_below_threshold")
+            if confidence + float(EPSILON_DECIMAL_12) < confidence_threshold:
+                guardrail_flags.append(f"{flag_prefix}_confidence_below_threshold")
                 return current_position_qty
-            if signal_edge_bps + float(EPSILON_DECIMAL_12) < self.settings.strategy_entry_min_signal_edge_bps:
-                guardrail_flags.append("entry_signal_edge_below_threshold")
+            if signal_edge_bps + float(EPSILON_DECIMAL_12) < edge_threshold:
+                guardrail_flags.append(f"{flag_prefix}_signal_edge_below_threshold")
                 return current_position_qty
             return desired_target_qty
         if trade_kind == "scale_in":
-            if alpha + float(EPSILON_DECIMAL_12) < self.settings.strategy_scale_in_alpha_min:
-                guardrail_flags.append("scale_in_alpha_below_threshold")
+            if alpha + float(EPSILON_DECIMAL_12) < alpha_threshold:
+                guardrail_flags.append(f"{flag_prefix}_alpha_below_threshold")
                 return current_position_qty
-            if confidence + float(EPSILON_DECIMAL_12) < self.settings.strategy_scale_in_confidence_min:
-                guardrail_flags.append("scale_in_confidence_below_threshold")
+            if confidence + float(EPSILON_DECIMAL_12) < confidence_threshold:
+                guardrail_flags.append(f"{flag_prefix}_confidence_below_threshold")
                 return current_position_qty
-            if signal_edge_bps + float(EPSILON_DECIMAL_12) < self.settings.strategy_scale_in_min_signal_edge_bps:
-                guardrail_flags.append("scale_in_signal_edge_below_threshold")
+            if signal_edge_bps + float(EPSILON_DECIMAL_12) < edge_threshold:
+                guardrail_flags.append(f"{flag_prefix}_signal_edge_below_threshold")
                 return current_position_qty
             return desired_target_qty
         if trade_kind == "reversal":
-            if alpha + float(EPSILON_DECIMAL_12) < self.settings.strategy_reversal_alpha_min:
-                guardrail_flags.append("reversal_alpha_below_threshold")
+            if alpha + float(EPSILON_DECIMAL_12) < alpha_threshold:
+                guardrail_flags.append(f"{flag_prefix}_alpha_below_threshold")
                 return current_position_qty
-            if confidence + float(EPSILON_DECIMAL_12) < self.settings.strategy_reversal_confidence_min:
-                guardrail_flags.append("reversal_confidence_below_threshold")
+            if confidence + float(EPSILON_DECIMAL_12) < confidence_threshold:
+                guardrail_flags.append(f"{flag_prefix}_confidence_below_threshold")
                 return current_position_qty
-            if signal_edge_bps + float(EPSILON_DECIMAL_12) < self.settings.strategy_reversal_min_signal_edge_bps:
-                guardrail_flags.append("reversal_signal_edge_below_threshold")
+            if signal_edge_bps + float(EPSILON_DECIMAL_12) < edge_threshold:
+                guardrail_flags.append(f"{flag_prefix}_signal_edge_below_threshold")
                 return current_position_qty
         return desired_target_qty
 
@@ -904,8 +921,15 @@ class TargetPositionEngine:
             if self._performance_degraded(context):
                 guardrail_flags.append("execution_churn_guard_active")
                 return current_position_qty
-            if trade_kind == "reversal" and self._reversal_requires_additional_edge(signal_edge_bps):
-                guardrail_flags.append("reversal_edge_not_strong_enough")
+            if trade_kind == "reversal" and self._reversal_requires_additional_edge(
+                signal_edge_bps=signal_edge_bps,
+                desired_target_qty=desired_target_qty,
+            ):
+                guardrail_flags.append(
+                    "short_reversal_edge_not_strong_enough"
+                    if self._exposure_side(desired_target_qty) == "short"
+                    else "reversal_edge_not_strong_enough"
+                )
                 return current_position_qty
         return desired_target_qty
 
@@ -927,11 +951,65 @@ class TargetPositionEngine:
             return "reversal"
         return None
 
-    def _regime_allowed_for_entry(self, regime: str) -> bool:
-        allowed_regimes = {value.lower() for value in self.settings.strategy_entry_allowed_regimes if value}
+    def _regime_allowed_for_entry(self, regime: str, *, desired_target_qty: Decimal) -> bool:
+        allowed_regimes_source = (
+            self.settings.strategy_short_entry_allowed_regimes
+            if self._exposure_side(desired_target_qty) == "short"
+            else self.settings.strategy_entry_allowed_regimes
+        )
+        allowed_regimes = {value.lower() for value in allowed_regimes_source if value}
         if not allowed_regimes:
             return True
         return regime.lower() in allowed_regimes
+
+    def _trade_thresholds(
+        self,
+        *,
+        trade_kind: str,
+        desired_target_qty: Decimal,
+    ) -> tuple[float, float, float, str]:
+        target_side = self._exposure_side(desired_target_qty)
+        if trade_kind == "entry":
+            if target_side == "short":
+                return (
+                    self.settings.strategy_short_entry_min_signal_edge_bps,
+                    self.settings.strategy_short_entry_alpha_min,
+                    self.settings.strategy_short_entry_confidence_min,
+                    "short_entry",
+                )
+            return (
+                self.settings.strategy_entry_min_signal_edge_bps,
+                self.settings.strategy_entry_alpha_min,
+                self.settings.strategy_entry_confidence_min,
+                "entry",
+            )
+        if trade_kind == "scale_in":
+            if target_side == "short":
+                return (
+                    self.settings.strategy_short_scale_in_min_signal_edge_bps,
+                    self.settings.strategy_short_scale_in_alpha_min,
+                    self.settings.strategy_short_scale_in_confidence_min,
+                    "short_scale_in",
+                )
+            return (
+                self.settings.strategy_scale_in_min_signal_edge_bps,
+                self.settings.strategy_scale_in_alpha_min,
+                self.settings.strategy_scale_in_confidence_min,
+                "scale_in",
+            )
+        if target_side == "short":
+            return (
+                self.settings.strategy_short_reversal_min_signal_edge_bps,
+                self.settings.strategy_short_reversal_alpha_min,
+                self.settings.strategy_short_reversal_confidence_min,
+                "short_reversal",
+            )
+        return (
+            self.settings.strategy_reversal_min_signal_edge_bps,
+            self.settings.strategy_reversal_alpha_min,
+            self.settings.strategy_reversal_confidence_min,
+            "reversal",
+        )
 
     def _should_hold_on_flat_signal(
         self,
@@ -1010,8 +1088,18 @@ class TargetPositionEngine:
             or context.recent_churn_ratio > self.settings.strategy_max_churn_ratio
         )
 
-    def _reversal_requires_additional_edge(self, signal_edge_bps: float) -> bool:
-        required = self.settings.strategy_reversal_min_signal_edge_bps + max(self.settings.strategy_edge_noise_buffer_bps, 0.0)
+    def _reversal_requires_additional_edge(
+        self,
+        signal_edge_bps: float,
+        *,
+        desired_target_qty: Decimal,
+    ) -> bool:
+        reversal_threshold = (
+            self.settings.strategy_short_reversal_min_signal_edge_bps
+            if self._exposure_side(desired_target_qty) == "short"
+            else self.settings.strategy_reversal_min_signal_edge_bps
+        )
+        required = reversal_threshold + max(self.settings.strategy_edge_noise_buffer_bps, 0.0)
         return signal_edge_bps + float(EPSILON_DECIMAL_12) < required
 
     @staticmethod

@@ -216,6 +216,17 @@ class TestAATSSettings(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "secondary_timeframe_currently_must_be_1h"):
             AATSSettings.model_validate({"secondary_timeframe": "15m"})
 
+    def test_allowed_regime_lists_ignore_blank_entries(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "strategy_entry_allowed_regimes": ["trend", None, " breakout ", ""],
+                "strategy_short_entry_allowed_regimes": ["trend", "", None, "breakout"],
+            }
+        )
+
+        self.assertEqual(settings.strategy_entry_allowed_regimes, ("trend", "breakout"))
+        self.assertEqual(settings.strategy_short_entry_allowed_regimes, ("trend", "breakout"))
+
 
 if __name__ == "__main__":
     unittest.main()

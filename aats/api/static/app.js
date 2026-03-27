@@ -107,6 +107,17 @@ const VIEW_META = {
   },
 };
 
+const VIEW_LABELS = {
+  home: "主页",
+  overview: "交易总览",
+  strategy: "策略判断",
+  execution: "委托与成交",
+  risk: "风险与恢复",
+  aiAnalysis: "AI 分析",
+  aiConfig: "AI 配置",
+  admin: "账户与权限",
+};
+
 const state = createState();
 state.activeView = resolveViewFromLocation();
 state.loadingView = state.activeView;
@@ -221,6 +232,10 @@ async function refreshDashboard({ manual = false } = {}) {
   }
   if (state.refreshing) {
     state.pendingRefresh = true;
+    if (manual) {
+      state.flash = { tone: "info", message: "当前正在刷新，已排队一次新的刷新请求。" };
+      renderBanners();
+    }
     return;
   }
   const refreshingView = state.activeView;
@@ -798,7 +813,16 @@ async function logoutOperator() {
 
 async function dispatchAction(action, value, target = null) {
   if (action === "refresh-dashboard") return refreshDashboard({ manual: true });
-  if (action === "navigate-view") return setActiveView(value || "home", { pushHistory: true });
+  if (action === "navigate-view") {
+    const nextView = VIEW_ROUTES[value] ? value : "home";
+    if (state.activeView === nextView) {
+      state.flash = { tone: "info", message: `当前已在${VIEW_LABELS[nextView] || "当前页面"}，已刷新当前状态。` };
+      renderBanners();
+      window.scrollTo({ top: 0, behavior: "smooth" });
+      return refreshDashboard({ manual: true });
+    }
+    return setActiveView(nextView, { pushHistory: true });
+  }
   if (action === "inspect-decision") return inspectDecision(value);
   if (action === "inspect-order") return inspectOrder(value);
   if (action === "inspect-fill") return inspectFill(value);
