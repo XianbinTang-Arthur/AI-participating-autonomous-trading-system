@@ -44,8 +44,9 @@ strategy_profile_auto_control_enabled: true
 # [常用可调] strategy_profile_auto_rollback_enabled：自动换档后是否允许自动回滚。可选值：true / false；推荐值：true。
 strategy_profile_auto_rollback_enabled: true
 
+# AI自动换档
 # [常用可调] strategy_profile_activation_policy_enabled：是否启用自动换档激活策略。可选值：true / false；推荐值：true。
-strategy_profile_activation_policy_enabled: true
+strategy_profile_activation_policy_enabled: false
 # [常用可调] strategy_profile_emergency_safety_fast_track_enabled：风险事件时是否允许快速切到安全档。可选值：true / false；推荐值：true。
 strategy_profile_emergency_safety_fast_track_enabled: true
 # [常用可调] strategy_profile_emergency_safety_confidence_min：快速切档最低置信度。可选值：0.0 ~ 1.0；推荐值：0.68。
@@ -199,7 +200,7 @@ strategy_short_bias_enabled: true
 # [常用可调] strategy_dynamic_leverage_enabled：是否允许动态杠杆。可选值：true / false；推荐值：true。
 strategy_dynamic_leverage_enabled: true
 # [常用可调] strategy_flat_signal_hold_enabled：flat 信号时是否优先持有而不是立刻退出。可选值：true / false；推荐值：true。
-strategy_flat_signal_hold_enabled: false
+strategy_flat_signal_hold_enabled: true
 # [常用可调] strategy_flat_exit_microstructure_threshold：flat 退出的微观结构阈值。可选值：0.0 ~ 1.0；推荐值：0.16。
 strategy_flat_exit_microstructure_threshold: 0.16
 # [常用可调] strategy_flat_exit_factor_threshold：flat 退出的因子阈值。可选值：0.0 ~ 1.0；推荐值：0.24。
@@ -253,7 +254,7 @@ strategy_transient_close_retry_cooldown_seconds: 90.0
 
 # 试盘守护
 # [常用可调] trial_guard_enabled：是否启用试盘守护。可选值：true / false；推荐值：true。
-trial_guard_enabled: true
+trial_guard_enabled: false
 # [常用可调] trial_guard_poll_interval_seconds：试盘守护轮询间隔。可选值：1.0 ~ 300.0；推荐值：15.0。
 trial_guard_poll_interval_seconds: 15.0
 # [常用可调] trial_guard_lookback_fills：回看成交数量。可选值：1 ~ 500；推荐值：30。
