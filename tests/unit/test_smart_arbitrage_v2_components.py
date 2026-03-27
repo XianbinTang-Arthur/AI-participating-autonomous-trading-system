@@ -108,8 +108,15 @@ class TestSmartArbitrageV2Components(unittest.TestCase):
         settings = AATSSettings.model_validate(
             {
                 "smart_arbitrage_cost_model_enabled": True,
-                "smart_arbitrage_estimated_fee_bps": 2.0,
-                "smart_arbitrage_estimated_slippage_bps": 3.0,
+                "trade_cost_spot_taker_fee_bps": 0.5,
+                "trade_cost_margin_taker_fee_bps": 0.5,
+                "trade_cost_derivatives_taker_fee_bps": 0.5,
+                "trade_cost_spot_spread_bps": 0.0,
+                "trade_cost_margin_spread_bps": 0.0,
+                "trade_cost_derivatives_spread_bps": 0.0,
+                "trade_cost_spot_slippage_bps": 1.5,
+                "trade_cost_margin_slippage_bps": 1.5,
+                "trade_cost_derivatives_slippage_bps": 1.5,
                 "smart_arbitrage_funding_cost_enabled": True,
                 "smart_arbitrage_estimated_funding_bps": 4.0,
                 "smart_arbitrage_borrow_cost_enabled": True,
@@ -123,8 +130,65 @@ class TestSmartArbitrageV2Components(unittest.TestCase):
             execution_mode="margin_reverse_carry",
         )
 
+        self.assertEqual(cost.ideal_open_fee_bps, Decimal("1"))
+        self.assertEqual(cost.ideal_close_fee_bps, Decimal("1"))
+        self.assertEqual(cost.ideal_total_fee_bps, Decimal("2"))
+        self.assertEqual(cost.ideal_total_cost_bps, Decimal("11"))
+        self.assertEqual(cost.executable_slippage_bps, Decimal("3"))
+        self.assertEqual(cost.funding_cost_bps, Decimal("4"))
+        self.assertEqual(cost.borrow_cost_bps, Decimal("5"))
+        self.assertEqual(cost.expected_funding_events, 1)
+        self.assertEqual(cost.borrow_hour_windows, 8)
+        self.assertIn("fee_trade_cost_defaults", cost.cost_source_flags)
+        self.assertIn("slippage_trade_cost_defaults", cost.cost_source_flags)
+        self.assertIn("funding_configured_per_event", cost.cost_source_flags)
+        self.assertIn("borrow_configured_total", cost.cost_source_flags)
         self.assertEqual(cost.estimated_total_cost_bps, Decimal("14"))
+        self.assertEqual(cost.executable_total_drag_bps, Decimal("14"))
+        self.assertEqual(cost.ideal_edge_bps, Decimal("29"))
         self.assertEqual(cost.net_edge_bps, Decimal("26"))
+        self.assertEqual(cost.executable_edge_bps, Decimal("26"))
+        self.assertEqual(cost.breakeven_basis_bps, Decimal("14"))
+
+    def test_cost_model_supports_funding_event_and_borrow_window_projection(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "smart_arbitrage_cost_model_enabled": True,
+                "trade_cost_spot_taker_fee_bps": 0.0,
+                "trade_cost_margin_taker_fee_bps": 0.0,
+                "trade_cost_derivatives_taker_fee_bps": 0.0,
+                "trade_cost_spot_spread_bps": 0.0,
+                "trade_cost_margin_spread_bps": 0.0,
+                "trade_cost_derivatives_spread_bps": 0.0,
+                "trade_cost_spot_slippage_bps": 0.0,
+                "trade_cost_margin_slippage_bps": 0.0,
+                "trade_cost_derivatives_slippage_bps": 0.0,
+                "smart_arbitrage_funding_cost_enabled": True,
+                "smart_arbitrage_funding_source_mode": "configured",
+                "smart_arbitrage_estimated_funding_bps": 1.5,
+                "smart_arbitrage_expected_hold_hours": 16.0,
+                "smart_arbitrage_funding_interval_hours": 8.0,
+                "smart_arbitrage_borrow_cost_enabled": True,
+                "smart_arbitrage_borrow_source_mode": "apr_window_model",
+                "smart_arbitrage_estimated_borrow_apr": 21.9,
+                "smart_arbitrage_borrow_interest_free_ratio": 0.5,
+            }
+        )
+
+        cost = build_cost_breakdown(
+            settings=settings,
+            basis_bps=Decimal("-100"),
+            execution_mode="margin_reverse_carry",
+        )
+
+        self.assertEqual(cost.expected_funding_events, 2)
+        self.assertEqual(cost.funding_cost_bps, Decimal("3.0"))
+        self.assertEqual(cost.borrow_hour_windows, 16)
+        self.assertEqual(cost.borrow_cost_bps, Decimal("200"))
+        self.assertIn("funding_configured_per_event", cost.cost_source_flags)
+        self.assertIn("borrow_apr_window_model", cost.cost_source_flags)
+        self.assertEqual(cost.executable_total_drag_bps, Decimal("203.0"))
+        self.assertEqual(cost.executable_edge_bps, Decimal("-103.0"))
 
     def test_leg_planner_builds_margin_reverse_carry_spot_leg_in_margin_mode(self) -> None:
         settings = AATSSettings.model_validate(

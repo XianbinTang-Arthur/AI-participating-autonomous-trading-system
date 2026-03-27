@@ -25,11 +25,13 @@ class SmartArbitrageStrategyEngine:
         market_snapshot_loader,
         account_snapshot_loader=None,
         sleeve_inventory_loader=None,
+        account_service=None,
     ) -> None:
         self.settings = settings
         self.market_snapshot_loader = market_snapshot_loader
         self.account_snapshot_loader = account_snapshot_loader
         self.sleeve_inventory_loader = sleeve_inventory_loader
+        self.account_service = account_service
 
     def evaluate(self, engine_input: StrategyEngineInput) -> StrategyCandidate:
         if not self.settings.smart_arbitrage_enabled:
@@ -278,6 +280,9 @@ class SmartArbitrageStrategyEngine:
                 settings=self.settings,
                 basis_bps=pair_basis_bps,
                 execution_mode=None,
+                spot_symbol=pair.spot_symbol,
+                hedge_symbol=pair.hedge_symbol,
+                account_service=self.account_service,
             )
             return ArbitrageOpportunity(
                 pair_id=pair.pair_id,
@@ -289,7 +294,10 @@ class SmartArbitrageStrategyEngine:
                 basis_bps=pair_basis_bps,
                 entry_threshold_bps=entry_threshold,
                 exit_threshold_bps=exit_threshold,
-                score=float(max(cost_breakdown.net_edge_bps, Decimal("0")) / max(entry_threshold or Decimal("1"), Decimal("1"))),
+                score=float(
+                    max(cost_breakdown.executable_edge_bps, Decimal("0"))
+                    / max(entry_threshold or Decimal("1"), Decimal("1"))
+                ),
                 confidence=0.40,
                 urgency="high",
                 reason_codes=["smart_arbitrage_mixed_pair_direction_detected"],
@@ -395,6 +403,25 @@ class SmartArbitrageStrategyEngine:
                 spot_price=spot_price,
             )
         else:
+            observation_mode = (
+                "spot_carry"
+                if pair_basis_bps >= Decimal("0")
+                else (
+                    "margin_reverse_carry"
+                    if self.settings.smart_arbitrage_negative_basis_mode == "margin_backed"
+                    else "inventory_reverse_carry"
+                    if self.settings.smart_arbitrage_negative_basis_mode == "inventory_backed"
+                    else None
+                )
+            )
+            cost_breakdown = build_cost_breakdown(
+                settings=self.settings,
+                basis_bps=pair_basis_bps,
+                execution_mode=observation_mode,
+                spot_symbol=pair.spot_symbol,
+                hedge_symbol=pair.hedge_symbol,
+                account_service=self.account_service,
+            )
             return ArbitrageOpportunity(
                 pair_id=pair.pair_id,
                 spot_symbol=pair.spot_symbol,
@@ -408,13 +435,26 @@ class SmartArbitrageStrategyEngine:
                 reason_codes=["smart_arbitrage_basis_below_entry_threshold"],
                 route_action="hold_current",
                 urgency="low",
+                cost_breakdown=cost_breakdown,
             )
         cost_breakdown = build_cost_breakdown(
             settings=self.settings,
             basis_bps=pair_basis_bps,
             execution_mode=execution_mode,
+            spot_symbol=pair.spot_symbol,
+            hedge_symbol=pair.hedge_symbol,
+            account_service=self.account_service,
         )
-        score = float(max(cost_breakdown.net_edge_bps, Decimal("0")) / max(entry_threshold or Decimal("1"), Decimal("1")))
+        opening_block_reason = None
+        if state_phase == "opening" and cost_breakdown.executable_edge_bps <= Decimal("0"):
+            state_phase = "blocked"
+            route_action = "advisory_only"
+            opening_block_reason = self._drag_blocking_reason(cost_breakdown=cost_breakdown)
+            reason_codes = list(dict.fromkeys([*reason_codes, opening_block_reason]))
+        score = float(
+            max(cost_breakdown.executable_edge_bps, Decimal("0"))
+            / max(entry_threshold or Decimal("1"), Decimal("1"))
+        )
         confidence = min(0.96, 0.50 + (min(abs(float(pair_basis_bps)), 120.0) / 180.0))
         return ArbitrageOpportunity(
             pair_id=pair.pair_id,
@@ -434,6 +474,7 @@ class SmartArbitrageStrategyEngine:
             confidence=confidence,
             urgency=urgency,  # type: ignore[arg-type]
             reason_codes=reason_codes,
+            blocking_reasons=[] if opening_block_reason is None else [opening_block_reason],
             route_action=route_action,
             cost_breakdown=cost_breakdown,
         )
@@ -542,8 +583,20 @@ class SmartArbitrageStrategyEngine:
             settings=self.settings,
             basis_bps=pair_basis_bps,
             execution_mode=execution_mode,
+            spot_symbol=pair.spot_symbol,
+            hedge_symbol=pair.hedge_symbol,
+            account_service=self.account_service,
         )
-        score = float(max(cost_breakdown.net_edge_bps, Decimal("0")) / max(entry_threshold or Decimal("1"), Decimal("1")))
+        if state_phase == "opening" and cost_breakdown.executable_edge_bps <= Decimal("0"):
+            state_phase = "blocked"
+            route_action = "advisory_only"
+            drag_reason = self._drag_blocking_reason(cost_breakdown=cost_breakdown)
+            reason_codes = list(dict.fromkeys([*reason_codes, drag_reason]))
+            blocking_reasons = list(dict.fromkeys([*blocking_reasons, drag_reason]))
+        score = float(
+            max(cost_breakdown.executable_edge_bps, Decimal("0"))
+            / max(entry_threshold or Decimal("1"), Decimal("1"))
+        )
         confidence = min(0.95, 0.45 + (min(abs(float(pair_basis_bps)), 120.0) / 200.0))
         route_action = "override_target" if state_phase == "opening" else "advisory_only"
         return ArbitrageOpportunity(
@@ -662,7 +715,27 @@ class SmartArbitrageStrategyEngine:
                 "spot_price": spot_price,
                 "derivatives_price": hedge_price,
                 "basis_bps": opportunity.basis_bps,
-                "net_basis_bps": opportunity.cost_breakdown.net_edge_bps,
+                "net_basis_bps": opportunity.cost_breakdown.executable_edge_bps,
+                "ideal_cost_bps": opportunity.cost_breakdown.ideal_total_cost_bps,
+                "executable_cost_bps": opportunity.cost_breakdown.executable_total_drag_bps,
+                "ideal_edge_bps": opportunity.cost_breakdown.ideal_edge_bps,
+                "executable_edge_bps": opportunity.cost_breakdown.executable_edge_bps,
+                "breakeven_basis_bps": opportunity.cost_breakdown.breakeven_basis_bps,
+                "ideal_open_fee_bps": opportunity.cost_breakdown.ideal_open_fee_bps,
+                "ideal_close_fee_bps": opportunity.cost_breakdown.ideal_close_fee_bps,
+                "ideal_total_fee_bps": opportunity.cost_breakdown.ideal_total_fee_bps,
+                "executable_spread_bps": opportunity.cost_breakdown.executable_spread_bps,
+                "executable_slippage_bps": opportunity.cost_breakdown.executable_slippage_bps,
+                "execution_mismatch_bps": opportunity.cost_breakdown.execution_mismatch_bps,
+                "funding_cost_bps": opportunity.cost_breakdown.funding_cost_bps,
+                "borrow_cost_bps": opportunity.cost_breakdown.borrow_cost_bps,
+                "transfer_cost_bps": opportunity.cost_breakdown.transfer_cost_bps,
+                "time_decay_cost_bps": opportunity.cost_breakdown.time_decay_cost_bps,
+                "expected_hold_hours": opportunity.cost_breakdown.expected_hold_hours,
+                "expected_funding_events": opportunity.cost_breakdown.expected_funding_events,
+                "borrow_hour_windows": opportunity.cost_breakdown.borrow_hour_windows,
+                "cost_confidence": opportunity.cost_breakdown.cost_confidence,
+                "cost_source_flags": list(opportunity.cost_breakdown.cost_source_flags),
                 "estimated_cost_bps": opportunity.cost_breakdown.estimated_total_cost_bps,
                 "estimated_fee_bps": opportunity.cost_breakdown.estimated_fee_bps,
                 "estimated_slippage_bps": opportunity.cost_breakdown.estimated_slippage_bps,
@@ -704,12 +777,22 @@ class SmartArbitrageStrategyEngine:
 
     @staticmethod
     def _headline_for(opportunity: ArbitrageOpportunity) -> str:
+        reason_codes = set(opportunity.reason_codes or [])
         if opportunity.opportunity_kind == "protective_exit":
             return "Current posture looks like a protective directional exit; smart arbitrage will not take over this cycle."
         if opportunity.opportunity_kind == "market_unavailable":
             return "Paired market snapshots are incomplete."
         if opportunity.opportunity_kind == "positive_basis":
             if opportunity.state_phase == "blocked":
+                if "smart_arbitrage_funding_window_unfavorable" in reason_codes:
+                    return "Positive basis exists, but the upcoming funding window makes the executable edge unattractive."
+                if "smart_arbitrage_borrow_window_unfavorable" in reason_codes:
+                    return "Positive basis exists, but the borrow/holding window makes the executable edge unattractive."
+                if {
+                    "smart_arbitrage_drag_exceeds_basis",
+                    "smart_arbitrage_executable_edge_negative",
+                } & reason_codes:
+                    return "Positive basis exists, but executable drag consumes the edge."
                 return "Positive basis is detected, but this pair is not allowed to auto open."
             return "Positive basis pair is ready."
         if opportunity.opportunity_kind == "negative_basis":
@@ -718,6 +801,15 @@ class SmartArbitrageStrategyEngine:
                     return "Negative basis reverse carry is ready with margin-backed spot execution."
                 return "Negative basis reverse carry is ready with inventory-backed spot execution."
             if opportunity.state_phase == "blocked":
+                if "smart_arbitrage_funding_window_unfavorable" in reason_codes:
+                    return "Negative basis exists, but the upcoming funding window makes reverse carry unattractive."
+                if "smart_arbitrage_borrow_window_unfavorable" in reason_codes:
+                    return "Negative basis exists, but the borrow window makes reverse carry unattractive."
+                if {
+                    "smart_arbitrage_drag_exceeds_basis",
+                    "smart_arbitrage_executable_edge_negative",
+                } & reason_codes:
+                    return "Negative basis exists, but executable drag consumes the edge."
                 return "Negative basis is detected, but the configured reverse-carry execution path is blocked."
             return "Negative basis is detected, but reverse-carry auto execution is not available."
         if opportunity.opportunity_kind == "pair_recovery":
@@ -756,8 +848,14 @@ class SmartArbitrageStrategyEngine:
             settings=self.settings,
             basis_bps=pair_basis_bps,
             execution_mode=execution_mode,
+            spot_symbol=pair.spot_symbol,
+            hedge_symbol=pair.hedge_symbol,
+            account_service=self.account_service,
         )
-        score = float(max(cost_breakdown.net_edge_bps, Decimal("0")) / max(entry_threshold or Decimal("1"), Decimal("1")))
+        score = float(
+            max(cost_breakdown.executable_edge_bps, Decimal("0"))
+            / max(entry_threshold or Decimal("1"), Decimal("1"))
+        )
         confidence = min(0.90, 0.40 + (min(abs(float(pair_basis_bps)), 120.0) / 220.0))
         return ArbitrageOpportunity(
             pair_id=pair.pair_id,
@@ -841,6 +939,12 @@ class SmartArbitrageStrategyEngine:
                 "pair_id": item.pair_id,
                 "spot_symbol": item.metrics.get("spot_symbol"),
                 "derivatives_symbol": item.metrics.get("derivatives_symbol"),
+                "basis_bps": item.metrics.get("basis_bps"),
+                "ideal_cost_bps": item.metrics.get("ideal_cost_bps"),
+                "executable_cost_bps": item.metrics.get("executable_cost_bps"),
+                "ideal_edge_bps": item.metrics.get("ideal_edge_bps"),
+                "executable_edge_bps": item.metrics.get("executable_edge_bps"),
+                "breakeven_basis_bps": item.metrics.get("breakeven_basis_bps"),
                 "execution_mode": item.execution_mode,
                 "state_phase": item.state_phase,
                 "opportunity_kind": item.opportunity_kind,
@@ -874,6 +978,20 @@ class SmartArbitrageStrategyEngine:
                 "inventory_reverse_pair_qty": self._sum_metric(selected_pairs, "inventory_reverse_pair_qty"),
                 "margin_reverse_pair_qty": self._sum_metric(selected_pairs, "margin_reverse_pair_qty"),
                 "parallel_scope_overlap_detected": overlap_detected,
+                "ideal_cost_bps": self._average_metric(selected_pairs, "ideal_cost_bps"),
+                "executable_cost_bps": self._average_metric(selected_pairs, "executable_cost_bps"),
+                "ideal_edge_bps": self._average_metric(selected_pairs, "ideal_edge_bps"),
+                "executable_edge_bps": self._average_metric(selected_pairs, "executable_edge_bps"),
+                "breakeven_basis_bps": self._average_metric(selected_pairs, "breakeven_basis_bps"),
+                "cost_confidence": self._average_metric(selected_pairs, "cost_confidence"),
+                "aggregate_cost_source_flags": sorted(
+                    {
+                        str(flag)
+                        for item in selected_pairs
+                        for flag in (item.metrics.get("cost_source_flags") or [])
+                        if str(flag).strip()
+                    }
+                ),
             }
         )
         for key in (
@@ -949,13 +1067,30 @@ class SmartArbitrageStrategyEngine:
         }.get(candidate.route_action, 0)
         if self.settings.smart_arbitrage_pair_priority_mode == "basis_abs":
             priority_metric = abs(float(candidate.metrics.get("basis_bps") or 0.0))
+        elif self.settings.smart_arbitrage_pair_priority_mode == "ideal_edge":
+            priority_metric = float(candidate.metrics.get("ideal_edge_bps") or candidate.score or 0.0)
         else:
-            priority_metric = float(candidate.score)
+            priority_metric = float(
+                candidate.metrics.get("executable_edge_bps")
+                or candidate.metrics.get("net_basis_bps")
+                or candidate.score
+            )
         return (phase_rank, route_rank, priority_metric)
 
     @staticmethod
     def _sum_metric(candidates: list[StrategyCandidate], key: str) -> Decimal:
         return sum((to_decimal(item.metrics.get(key) or Decimal("0")) for item in candidates), start=Decimal("0"))
+
+    @staticmethod
+    def _average_metric(candidates: list[StrategyCandidate], key: str) -> Decimal | None:
+        values = [
+            to_decimal(item.metrics.get(key))
+            for item in candidates
+            if item.metrics.get(key) is not None
+        ]
+        if not values:
+            return None
+        return sum(values, start=Decimal("0")) / Decimal(len(values))
 
     @staticmethod
     def _highest_urgency(candidates: list[StrategyCandidate]) -> str:
@@ -976,6 +1111,22 @@ class SmartArbitrageStrategyEngine:
         if self.settings.smart_arbitrage_negative_basis_mode == "margin_backed":
             return "margin_reverse_carry"
         return "inventory_reverse_carry"
+
+    @staticmethod
+    def _drag_blocking_reason(*, cost_breakdown) -> str:
+        if cost_breakdown.borrow_cost_bps >= max(
+            cost_breakdown.funding_cost_bps,
+            cost_breakdown.executable_spread_bps + cost_breakdown.executable_slippage_bps,
+            Decimal("0"),
+        ) and cost_breakdown.borrow_cost_bps > Decimal("0"):
+            return "smart_arbitrage_borrow_window_unfavorable"
+        if cost_breakdown.funding_cost_bps >= max(
+            cost_breakdown.borrow_cost_bps,
+            cost_breakdown.executable_spread_bps + cost_breakdown.executable_slippage_bps,
+            Decimal("0"),
+        ) and cost_breakdown.funding_cost_bps > Decimal("0"):
+            return "smart_arbitrage_funding_window_unfavorable"
+        return "smart_arbitrage_drag_exceeds_basis"
 
     @staticmethod
     def _candidate_symbol_scope(candidate: StrategyCandidate) -> tuple[str, ...]:

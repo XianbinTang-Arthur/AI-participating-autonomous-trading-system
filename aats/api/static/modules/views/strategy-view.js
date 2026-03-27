@@ -23,6 +23,7 @@ export function renderStrategySections(data) {
   const strategyAppliedTarget = strategyRuntime.latest_applied_target || {};
   const automationDecisions = strategyRuntimeSnapshot.automation_decisions || [];
   const smartArbitrageConfig = strategyRuntime.configured_parameters?.smart_arbitrage || {};
+  const smartArbitrageCostSummary = strategyRuntime.smart_arbitrage_cost_summary || {};
   const strategyAttribution = data.strategyAttribution || {};
   const attributionSummary = strategyAttribution.summary || {};
   const sleeveProfitability = strategyAttribution.profitability_by_strategy_sleeve || [];
@@ -71,6 +72,7 @@ export function renderStrategySections(data) {
   const displayedSleeveProfitability = sleeveProfitability.slice(0, 6);
   const displayedForwardPeriods = forwardPeriods.slice(0, 4);
   const displayedTrialReviewActions = trialReviewRecentActions.slice(0, 5);
+  const tradeCostConfig = strategyRuntime.configured_parameters?.trade_costs || {};
 
   return {
     strategyHero: surfaceCard({
@@ -225,7 +227,13 @@ export function renderStrategySections(data) {
         })}
       `,
     }),
-    strategySmartArbitrageConfig: renderSmartArbitrageConfigCard(smartArbitrageConfig),
+    strategyTradeCosts: renderTradeCostConfigCard(tradeCostConfig),
+    strategySmartArbitrageConfig: renderSmartArbitrageConfigCard(
+      smartArbitrageConfig,
+      tradeCostConfig,
+      strategyFamilyEnablement?.smart_arbitrage || {}
+    ),
+    strategySmartArbitrageCost: renderSmartArbitrageCostCard(smartArbitrageCostSummary),
     strategyAutomation: surfaceCard({
       title: "自动预算与启停",
       kicker: "全自动并行运行",
@@ -497,7 +505,9 @@ export function renderStrategyView(data) {
       <div class="span-12">${sections.strategyDecisionWorkbench}</div>
       <div class="span-12">${sections.strategyTrialVerdict}</div>
       <div class="span-12">${sections.strategyCoordinator}</div>
+      <div class="span-12">${sections.strategyTradeCosts}</div>
       <div class="span-12">${sections.strategySmartArbitrageConfig}</div>
+      <div class="span-12">${sections.strategySmartArbitrageCost}</div>
       <div class="span-12">${sections.strategyAutomation}</div>
       <div class="span-12">${sections.strategyAttribution}</div>
       <div class="span-12">${sections.strategyHistory}</div>
@@ -505,16 +515,79 @@ export function renderStrategyView(data) {
   `;
 }
 
-function renderSmartArbitrageConfigCard(config = {}) {
+function renderTradeCostConfigCard(config = {}) {
+  const commonRows = tradeCostCommonConfigRows(config);
+  const advancedRows = tradeCostAdvancedConfigRows(config);
+  return surfaceCard({
+    title: "统一交易成本配置",
+    kicker: "全局手续费与磨损",
+    copy: "现货趋势、定投、现货网格、合约趋势和智能套利都共享这条交易成本链路；不同产品类型只是在这里读取不同的一组费率和磨损参数。",
+    classes: "strategy-compact-card",
+    content: `
+      ${summaryStrip([
+        {
+          label: "现货费率",
+          value: `${formatBps(config?.spot_maker_fee_bps)} / ${formatBps(config?.spot_taker_fee_bps)}`,
+          meta: "现货趋势、定投、现货网格与套利现货腿",
+          tone: "info",
+        },
+        {
+          label: "保证金费率",
+          value: `${formatBps(config?.margin_maker_fee_bps)} / ${formatBps(config?.margin_taker_fee_bps)}`,
+          meta: "保证金现货与 margin-backed 反套现货腿",
+          tone: "info",
+        },
+        {
+          label: "合约费率",
+          value: `${formatBps(config?.derivatives_maker_fee_bps)} / ${formatBps(config?.derivatives_taker_fee_bps)}`,
+          meta: "合约趋势与智能套利对冲腿",
+          tone: "info",
+        },
+        {
+          label: "交割 / 提现额外费",
+          value: `${formatBps(config?.delivery_settlement_fee_bps)} / ${formatBps(sumBps(config?.withdrawal_bps, config?.fiat_cashout_bps), "0 bps")}`,
+          meta: "交割结算费 / 链上提币与法币提现",
+          tone: "info",
+        },
+      ])}
+      ${kvList([
+        ["当前适用策略", "现货趋势 / 定投 / 现货网格 -> 现货；合约趋势 / 智能套利对冲腿 -> 合约；保证金反套 -> 保证金现货。", "同一个产品类型的费率、spread 和 slippage 会被统一复用。"],
+        ["统一链路", "当前所有主策略都通过统一手续费解析器和磨损模型估算成本。", "修改这里会同时影响趋势、定投、网格和智能套利，而不是只影响某一条策略。"],
+        ["当前主要提示", tradeCostPrimaryRisk(config), tradeCostSecondaryRisk(config)],
+      ])}
+      ${responsiveTable(
+        ["参数", "当前值", "适用范围", "风险提示"],
+        commonRows,
+        "当前没有统一交易成本配置。"
+      )}
+      ${renderExpandableSection(
+        "高级参数",
+        responsiveTable(
+          ["参数", "当前值", "适用范围", "风险提示"],
+          advancedRows,
+          "当前没有额外交易成本参数。"
+        ),
+        {
+          meta: "交割结算、提现与保守兜底说明",
+        }
+      )}
+    `,
+  });
+}
+
+function renderSmartArbitrageConfigCard(config = {}, tradeCosts = {}, familyStatus = {}) {
   const pairDefinitions = smartArbitrageConfigPairs(config);
-  const risks = smartArbitrageConfigRisks(config);
-  const commonRows = smartArbitrageCommonConfigRows(config);
-  const advancedRows = smartArbitrageAdvancedConfigRows(config);
+  const risks = smartArbitrageConfigRisks(config, tradeCosts, familyStatus);
+  const commonRows = smartArbitrageCommonConfigRows(config, tradeCosts);
+  const advancedRows = smartArbitrageAdvancedConfigRows(config, tradeCosts);
   const enabled = config?.enabled === true;
+  const runtimeSupported = familyStatus?.runtime_supported !== false;
   return surfaceCard({
     title: "智能套利配置",
     kicker: "运行参数",
-    copy: "这里展示当前实际生效的智能套利参数、模式联动关系和主要风险提示。",
+    copy: runtimeSupported
+      ? "这里展示智能套利自己的机会阈值、配对和持有窗口参数；当前默认按双向套利设计，正基差走现货-永续 carry，负基差走保证金反套。手续费、spread 和 slippage 已统一收口到上面的全局交易成本链路。"
+      : "这里展示智能套利自己的机会阈值、配对和持有窗口参数；当前配置按双向套利设计，但自动双腿执行仍只在合约运行域生效。手续费、spread 和 slippage 已统一收口到上面的全局交易成本链路。",
     classes: "strategy-compact-card",
     content: `
       ${summaryStrip([
@@ -544,9 +617,10 @@ function renderSmartArbitrageConfigCard(config = {}) {
         },
       ])}
       ${kvList([
-        ["当前生效范围", smartArbitrageEffectiveScopeLabel(config), smartArbitrageEffectiveScopeMeta(config)],
+        ["当前生效范围", smartArbitrageEffectiveScopeLabel(config, familyStatus), smartArbitrageEffectiveScopeMeta(config, familyStatus)],
         ["配对定义", smartArbitragePairSummary(pairDefinitions), smartArbitragePairSummaryMeta(pairDefinitions)],
-        ["主要风险提示", risks[0] || "当前这组配置关系清晰，没有发现明显冲突。", risks.slice(1).join("；") || "后续若要开负基差自动执行，再开启库存反套或保证金融券相关开关。"],
+        ["统一交易成本", tradeCostCompactLabel(tradeCosts), "现货腿、保证金现货腿和对冲腿的手续费 / spread / slippage 已从智能套利专属配置剥离，统一使用全局 trade_costs。"],
+        ["主要风险提示", risks[0] || "当前这组配置关系清晰，正负基差的自动执行链条都已经明确。", risks.slice(1).join("；") || "当前主要需要继续盯真实磨损、funding 和借币窗口，而不是再补旧的策略私有费用字段。"],
       ])}
       ${responsiveTable(
         ["参数", "当前值", "联动关系", "风险提示"],
@@ -565,6 +639,69 @@ function renderSmartArbitrageConfigCard(config = {}) {
         }
       )}
     `,
+  });
+}
+
+function renderSmartArbitrageCostCard(summary = {}) {
+  const predicted = summary?.predicted || {};
+  const realized = summary?.realized || {};
+  const calibration = summary?.calibration || {};
+  const available = summary?.available === true;
+  return surfaceCard({
+    title: "智能套利磨损模型",
+    kicker: "理论收益与可执行收益",
+    copy: available
+      ? "这里把本轮智能套利的理论收益、可执行收益、主要磨损来源和预测偏差放在一起，方便判断为什么做或为什么不做。"
+      : "当前还没有可展示的智能套利成本摘要；通常是本轮还没有产生智能套利候选。",
+    classes: "strategy-compact-card",
+    content: available
+      ? `
+        ${summaryStrip([
+          {
+            label: "理论净优势",
+            value: formatBps(predicted?.ideal_edge_bps),
+            meta: `理论总成本 ${formatBps(predicted?.ideal_cost_bps)}`,
+            tone: Number(predicted?.ideal_edge_bps) > 0 ? "positive" : "warning",
+          },
+          {
+            label: "可执行净优势",
+            value: formatBps(predicted?.executable_edge_bps),
+            meta: `可执行总磨损 ${formatBps(predicted?.executable_cost_bps)}`,
+            tone: Number(predicted?.executable_edge_bps) > 0 ? "positive" : "danger",
+          },
+          {
+            label: "盈亏平衡基差",
+            value: formatBps(predicted?.breakeven_basis_bps),
+            meta: `当前基差 ${formatBps(predicted?.basis_bps)}`,
+            tone: "info",
+          },
+          {
+            label: "实际总磨损",
+            value: formatBps(realized?.realized_total_drag_bps, "待回填"),
+            meta: `手续费 ${formatBps(realized?.realized_fee_bps, "待回填")} | 资金费 ${formatBps(realized?.realized_funding_bps, "待回填")}`,
+            tone: realized?.realized_total_drag_bps === null || realized?.realized_total_drag_bps === undefined ? "info" : "warning",
+          },
+        ])}
+        ${kvList([
+          ["本轮配对", summary?.pair_label || "当前没有智能套利配对摘要", smartArbitragePrimaryDragDriver(predicted)],
+          ["主要成本来源", smartArbitrageCostSourceText(predicted?.cost_source_flags), `置信度 ${formatNumber(predicted?.cost_confidence, 2, "0.00")}`],
+          ["校准偏差", formatBps(calibration?.predicted_vs_realized_total_drag_error_bps, "待回填"), "正值代表预测磨损高于当前已回填磨损，负值代表预测偏保守不足。"],
+        ])}
+        ${responsiveTable(
+          ["成本项", "预测值", "实际值", "说明"],
+          [
+            smartArbitrageCostRow("手续费", predicted?.ideal_total_fee_bps, realized?.realized_fee_bps, "双腿开平仓显性费用"),
+            smartArbitrageCostRow("spread", predicted?.executable_spread_bps, null, "盘口价差带来的半边磨损"),
+            smartArbitrageCostRow("slippage", predicted?.executable_slippage_bps, null, "按经验滑点或行情冲击估算"),
+            smartArbitrageCostRow("腿间错配", predicted?.execution_mismatch_bps, null, "两腿不同步成交带来的额外磨损"),
+            smartArbitrageCostRow("资金费", predicted?.funding_cost_bps, realized?.realized_funding_bps, "持仓跨 funding 窗口才会显著放大"),
+            smartArbitrageCostRow("借币费", predicted?.borrow_cost_bps, realized?.realized_borrow_bps, "目前真实借币费仍按待支持处理"),
+            smartArbitrageCostRow("transfer / time", sumBps(predicted?.transfer_cost_bps, predicted?.time_decay_cost_bps), null, "固定转移成本与持有时间磨损"),
+          ],
+          "当前没有可展示的磨损分解。"
+        )}
+      `
+      : `<p class="meta-copy">当前没有智能套利成本摘要。通常是本轮没有可计算的智能套利候选，或智能套利当前未启用。</p>`,
   });
 }
 
@@ -589,7 +726,89 @@ function smartArbitragePairConfigIssues(pairDefinitions = []) {
   });
 }
 
-function smartArbitrageCommonConfigRows(config = {}) {
+function tradeCostCommonConfigRows(config = {}) {
+  return [
+    tradeCostConfigRow(
+      "trade_cost_spot_maker_fee_bps / trade_cost_spot_taker_fee_bps",
+      "现货 maker / taker",
+      `${formatBps(config?.spot_maker_fee_bps, "待确认")} / ${formatBps(config?.spot_taker_fee_bps, "待确认")}`,
+      "现货趋势、定投、现货网格和智能套利现货腿都会读取这里的默认手续费。",
+      Number(config?.spot_taker_fee_bps) < Number(config?.spot_maker_fee_bps)
+        ? "taker 费率不应低于 maker；请检查配置是否填反。"
+        : "现货单腿大多更适合保守按 taker 估算。"
+    ),
+    tradeCostConfigRow(
+      "trade_cost_margin_maker_fee_bps / trade_cost_margin_taker_fee_bps",
+      "保证金现货 maker / taker",
+      `${formatBps(config?.margin_maker_fee_bps, "待确认")} / ${formatBps(config?.margin_taker_fee_bps, "待确认")}`,
+      "主要用于保证金现货腿和 margin-backed 智能套利，不影响纯现金现货策略。",
+      Number(config?.margin_taker_fee_bps) < Number(config?.margin_maker_fee_bps)
+        ? "taker 费率不应低于 maker；请检查配置是否填反。"
+        : "保证金现货腿和现金现货腿分开配置后，反套成本解释会更准确。"
+    ),
+    tradeCostConfigRow(
+      "trade_cost_derivatives_maker_fee_bps / trade_cost_derivatives_taker_fee_bps",
+      "合约 maker / taker",
+      `${formatBps(config?.derivatives_maker_fee_bps, "待确认")} / ${formatBps(config?.derivatives_taker_fee_bps, "待确认")}`,
+      "合约趋势和智能套利对冲腿都会读取这里的默认手续费。",
+      Number(config?.derivatives_taker_fee_bps) < Number(config?.derivatives_maker_fee_bps)
+        ? "taker 费率不应低于 maker；请检查配置是否填反。"
+        : "合约腿更依赖这一组费率，不再走策略私有的磨损配置。"
+    ),
+    tradeCostConfigRow(
+      "trade_cost_spot_spread_bps / trade_cost_spot_slippage_bps",
+      "现货 spread / slippage",
+      `${formatBps(config?.spot_spread_bps, "待确认")} / ${formatBps(config?.spot_slippage_bps, "待确认")}`,
+      "现货趋势、定投、现货网格和智能套利现货腿的执行磨损统一从这里读取。",
+      sumBps(config?.spot_spread_bps, config?.spot_slippage_bps) <= 0
+        ? "当前现货执行磨损为 0，理论收益和可执行收益会更接近，通常偏乐观。"
+        : "spread 与 slippage 已分开计量，更方便回头校准。"
+    ),
+    tradeCostConfigRow(
+      "trade_cost_margin_spread_bps / trade_cost_margin_slippage_bps",
+      "保证金现货 spread / slippage",
+      `${formatBps(config?.margin_spread_bps, "待确认")} / ${formatBps(config?.margin_slippage_bps, "待确认")}`,
+      "主要服务于 margin-backed 反套和未来保证金现货执行链。",
+      sumBps(config?.margin_spread_bps, config?.margin_slippage_bps) <= 0
+        ? "当前保证金现货执行磨损为 0，负基差反套的可执行成本会被低估。"
+        : "保证金现货单独建模后，不再和现金现货共用一组执行磨损。"
+    ),
+    tradeCostConfigRow(
+      "trade_cost_derivatives_spread_bps / trade_cost_derivatives_slippage_bps",
+      "合约 spread / slippage",
+      `${formatBps(config?.derivatives_spread_bps, "待确认")} / ${formatBps(config?.derivatives_slippage_bps, "待确认")}`,
+      "合约趋势和智能套利对冲腿统一从这里读取。",
+      sumBps(config?.derivatives_spread_bps, config?.derivatives_slippage_bps) <= 0
+        ? "当前合约执行磨损为 0，合约趋势和套利对冲腿的净优势会偏乐观。"
+        : "这组参数会同时影响方向合约策略和智能套利对冲腿。"
+    ),
+  ];
+}
+
+function tradeCostAdvancedConfigRows(config = {}) {
+  return [
+    tradeCostConfigRow(
+      "trade_cost_delivery_settlement_fee_bps",
+      "交割合约结算费",
+      formatBps(config?.delivery_settlement_fee_bps, "待确认"),
+      "只在交割合约到期结算时参与成本链路；永续和现货不会读它。",
+      Number(config?.delivery_settlement_fee_bps) > 0
+        ? "如果后续引入交割合约策略，这个值会直接进入到期结算磨损。"
+        : "当前保持 0 代表没有额外结算成本兜底。"
+    ),
+    tradeCostConfigRow(
+      "trade_cost_withdrawal_bps / trade_cost_fiat_cashout_bps",
+      "提币 / 法币出金",
+      `${formatBps(config?.withdrawal_bps, "0 bps")} / ${formatBps(config?.fiat_cashout_bps, "0 bps")}`,
+      "当前主策略一般不直接走跨平台提币或法币出金，但统一成本链已为这些方式预留挂载点。",
+      sumBps(config?.withdrawal_bps, config?.fiat_cashout_bps) > 0
+        ? "如果未来引入跨平台搬砖或现金提取，这些成本会直接进入统一磨损模型。"
+        : "当前保持 0 代表这两类费用暂未进入主策略成本计算。"
+    ),
+  ];
+}
+
+function smartArbitrageCommonConfigRows(config = {}, tradeCosts = {}) {
   const pairDefinitions = smartArbitrageConfigPairs(config);
   const derivedPairs = pairDefinitions.filter((item) => item?.metadata?.source === "derived_primary_symbol");
   const pairIssues = smartArbitragePairConfigIssues(pairDefinitions);
@@ -715,6 +934,13 @@ function smartArbitrageCommonConfigRows(config = {}) {
         ? "逐仓模式更严格，但也要求账户和恢复链路按逐仓语义一致。"
         : "首次上线通常先用 cross，更容易和账户总风险口径保持一致。"
     ),
+    smartArbitrageConfigRow(
+      "trade_costs.*",
+      "统一手续费 / spread / slippage",
+      tradeCostCompactLabel(tradeCosts),
+      "现货腿、保证金现货腿和对冲腿的手续费、spread 和 slippage 已统一从 trade_costs 读取。",
+      "修改全局交易成本会同时影响趋势、定投、网格和智能套利，不再是套利专属配置。"
+    ),
   ];
 }
 
@@ -758,6 +984,38 @@ function smartArbitrageAdvancedConfigRows(config = {}) {
         : "不开启时，保证金反套仍可评估，但借币成本不会被细分计入。"
     ),
     smartArbitrageConfigRow(
+      "smart_arbitrage_fee_source_mode / smart_arbitrage_funding_source_mode / smart_arbitrage_borrow_source_mode",
+      "成本来源模式",
+      `${String(config?.fee_source_mode || "configured")} / ${String(config?.funding_source_mode || "configured")} / ${String(config?.borrow_source_mode || "configured")}`,
+      "分别决定手续费、资金费、借币费优先按账户实时数据还是按配置参数建模。",
+      "来源模式决定成本解释力，也决定细分成本模型到底有多接近真实账户。"
+    ),
+    smartArbitrageConfigRow(
+      "smart_arbitrage_expected_hold_hours / smart_arbitrage_funding_interval_hours / smart_arbitrage_expected_funding_events",
+      "持有与资金费窗口",
+      `${formatNumber(config?.expected_hold_hours, 1, "待确认")}h / ${formatNumber(config?.funding_interval_hours, 1, "待确认")}h / ${formatNumber(config?.expected_funding_events, 0, "自动推导")}`,
+      "决定 funding 事件数、borrow 窗口和 time-decay 的估算周期。",
+      Number(config?.expected_hold_hours) > 24
+        ? "持有窗口越长，funding 和 time-decay 越容易成为主要磨损来源。"
+        : "短持有窗口更适合先把手续费、spread 和 slippage 估清楚。"
+    ),
+    smartArbitrageConfigRow(
+      "smart_arbitrage_estimated_execution_mismatch_bps / smart_arbitrage_estimated_transfer_cost_bps / smart_arbitrage_time_decay_bps_per_hour",
+      "错配 / transfer / 时间磨损",
+      `${formatBps(config?.estimated_execution_mismatch_bps, "0 bps")} / ${formatBps(config?.estimated_transfer_cost_bps, "0 bps")} / ${formatBps(config?.time_decay_bps_per_hour, "0 bps/h")}`,
+      "分别描述双腿不同步、固定转移成本和持有时长磨损。",
+      "这三项往往是“理论上看起来能做，但系统最终不做”的关键原因。"
+    ),
+    smartArbitrageConfigRow(
+      "smart_arbitrage_estimated_borrow_apr / smart_arbitrage_borrow_interest_free_ratio",
+      "借币 APR / 免息比例",
+      `${formatNumber(config?.estimated_borrow_apr, 4, "0")} / ${formatNumber(config?.borrow_interest_free_ratio, 2, "0")}`,
+      "只有 borrow_source_mode=apr_window_model 且负基差走保证金反套时，它才真正参与离散借币窗口估算。",
+      Number(config?.estimated_borrow_apr) > 0 && String(config?.borrow_source_mode || "configured") !== "apr_window_model"
+        ? "当前 APR 已配置，但借币来源还不是窗口模型，这个值暂时不会真正生效。"
+        : "如果还没准备启用保证金反套，这组参数可以先保守维持。"
+    ),
+    smartArbitrageConfigRow(
       "smart_arbitrage_max_concurrent_pairs",
       "最多并行套利对",
       formatNumber(maxConcurrentPairs, 0, "1"),
@@ -774,9 +1032,13 @@ function smartArbitrageAdvancedConfigRows(config = {}) {
       pairPriorityMode,
       pairPriorityMode === "basis_abs"
         ? "当前优先看基差绝对值，而不是扣完成本后的净优势。"
+        : pairPriorityMode === "ideal_edge"
+        ? "当前优先看理论净优势，适合诊断，不是最保守的生产排序。"
         : "当前优先看净优势分数，成本越高的机会越容易被压后。",
       pairPriorityMode === "basis_abs"
         ? "只按基差绝对值排序更激进，可能把毛机会排在净优势更好的 pair 前面。"
+        : pairPriorityMode === "ideal_edge"
+          ? "只按理论净优势排序会弱化执行磨损影响，生产上应谨慎使用。"
         : "这是更偏保守的生产排序方式。"
     ),
     smartArbitrageConfigRow(
@@ -798,20 +1060,6 @@ function smartArbitrageAdvancedConfigRows(config = {}) {
       autoRepayEnabled && negativeMode !== "margin_backed"
         ? "自动还币开关当前是闲置状态，因为负基差并没有走保证金反套。"
         : "只有确认账户和交易所适配层的还币语义已经打通后，才应该打开它。"
-    ),
-    smartArbitrageConfigRow(
-      "smart_arbitrage_estimated_fee_bps",
-      "细分手续费 bps",
-      formatNumber(config?.estimated_fee_bps, 1, "待确认"),
-      "细分成本模型开启时，会优先把它计入净优势估算。",
-      costModelEnabled ? "如果填 0，系统会更多依赖综合成本兜底。" : "成本模型关闭时，这个值当前不会真正生效。"
-    ),
-    smartArbitrageConfigRow(
-      "smart_arbitrage_estimated_slippage_bps",
-      "细分滑点 bps",
-      formatNumber(config?.estimated_slippage_bps, 1, "待确认"),
-      "细分成本模型开启时，会把它作为入场和退出的滑点预估。",
-      costModelEnabled ? "若长期保持 0，净优势通常会被高估。" : "成本模型关闭时，这个值当前不会真正生效。"
     ),
     smartArbitrageConfigRow(
       "smart_arbitrage_estimated_funding_bps",
@@ -847,11 +1095,154 @@ function smartArbitrageConfigRow(parameter, alias, value, linkage, risk) {
   ];
 }
 
+function tradeCostConfigRow(parameter, alias, value, linkage, risk) {
+  return smartArbitrageConfigRow(parameter, alias, value, linkage, risk);
+}
+
 function renderConfigTableCell(primary, meta = "") {
   return `<div><strong>${escapeHtml(primary)}</strong>${meta ? `<div class="table-meta">${escapeHtml(meta)}</div>` : ""}</div>`;
 }
 
-function smartArbitrageConfigRisks(config = {}) {
+function tradeCostCompactLabel(config = {}) {
+  return [
+    `现货 taker ${formatBps(config?.spot_taker_fee_bps, "待确认")}`,
+    `保证金 taker ${formatBps(config?.margin_taker_fee_bps, "待确认")}`,
+    `合约 taker ${formatBps(config?.derivatives_taker_fee_bps, "待确认")}`,
+  ].join(" | ");
+}
+
+function tradeCostPrimaryRisk(config = {}) {
+  if (
+    sumBps(
+      config?.spot_spread_bps,
+      config?.spot_slippage_bps,
+      config?.margin_spread_bps,
+      config?.margin_slippage_bps,
+      config?.derivatives_spread_bps,
+      config?.derivatives_slippage_bps
+    ) <= 0
+  ) {
+    return "当前三套产品的 spread / slippage 都是 0，理论收益和可执行收益会更接近，整体偏乐观。";
+  }
+  return "当前统一交易成本链已区分现货、保证金现货和合约，不同策略会自动读取各自产品类型的成本。";
+}
+
+function tradeCostSecondaryRisk(config = {}) {
+  if (
+    Number(config?.spot_taker_fee_bps) < Number(config?.spot_maker_fee_bps)
+    || Number(config?.margin_taker_fee_bps) < Number(config?.margin_maker_fee_bps)
+    || Number(config?.derivatives_taker_fee_bps) < Number(config?.derivatives_maker_fee_bps)
+  ) {
+    return "至少有一组 taker 费率低于 maker，看起来像是配置填反了。";
+  }
+  return "如果以后接入跨平台搬砖或期权，再继续在这条统一成本链上扩展，而不是回退到策略私有费用字段。";
+}
+
+function smartArbitrageCostRow(label, predicted, realized, note) {
+  return [
+    renderConfigTableCell(label),
+    renderConfigTableCell(formatBps(predicted, "待确认")),
+    renderConfigTableCell(formatBps(realized, "待回填")),
+    renderConfigTableCell(note),
+  ];
+}
+
+function sumBps(...values) {
+  let total = 0;
+  let hasValue = false;
+  values.forEach((value) => {
+    const normalized = Number(value);
+    if (!Number.isFinite(normalized)) return;
+    total += normalized;
+    hasValue = true;
+  });
+  return hasValue ? total : null;
+}
+
+function smartArbitrageCostSourceText(flags) {
+  const rows = Array.isArray(flags) ? flags : [];
+  if (!rows.length) return "当前没有成本来源说明";
+  return rows.map((item) => smartArbitrageCostSourceLabel(item)).join(" | ");
+}
+
+function smartArbitrageCostSourceLabel(value) {
+  switch (String(value || "").trim()) {
+    case "fee_account_schedule":
+      return "手续费按账户费率";
+    case "fee_trade_cost_defaults":
+      return "手续费按统一交易成本默认值";
+    case "fee_configured_per_leg":
+      return "手续费按逐腿配置";
+    case "fee_configured_total_fallback":
+      return "手续费按总量兜底";
+    case "spread_trade_cost_defaults":
+      return "spread 按统一交易成本默认值";
+    case "spread_configured_per_leg":
+      return "spread 按逐腿配置";
+    case "slippage_trade_cost_defaults":
+      return "slippage 按统一交易成本默认值";
+    case "slippage_configured_per_leg":
+      return "slippage 按逐腿配置";
+    case "slippage_configured_total_fallback":
+      return "slippage 按总量兜底";
+    case "settlement_fee_trade_cost_service":
+      return "交割结算费按统一交易成本";
+    case "funding_account_proxy_per_event":
+      return "资金费按账户代理和事件数";
+    case "funding_account_proxy_total":
+      return "资金费按账户代理总量";
+    case "funding_configured_per_event":
+      return "资金费按配置和事件数";
+    case "funding_configured_total":
+      return "资金费按配置总量";
+    case "borrow_apr_window_model":
+      return "借币费按 APR 和计息窗口";
+    case "borrow_configured_total":
+      return "借币费按配置总量";
+    case "execution_mismatch_configured":
+      return "腿间错配按配置";
+    case "transfer_cost_configured":
+      return "transfer 成本按配置";
+    case "time_decay_configured":
+      return "时间磨损按每小时配置";
+    case "legacy_estimated_cost_fallback":
+      return "仍回退综合成本兜底";
+    case "cost_model_disabled":
+      return "细分成本模型关闭";
+    default:
+      return String(value || "未知来源");
+  }
+}
+
+function smartArbitragePrimaryDragDriver(predicted = {}) {
+  const candidates = [
+    ["手续费", Number(predicted?.ideal_total_fee_bps)],
+    ["spread", Number(predicted?.executable_spread_bps)],
+    ["slippage", Number(predicted?.executable_slippage_bps)],
+    ["腿间错配", Number(predicted?.execution_mismatch_bps)],
+    ["资金费", Number(predicted?.funding_cost_bps)],
+    ["借币费", Number(predicted?.borrow_cost_bps)],
+    ["transfer", Number(predicted?.transfer_cost_bps)],
+    ["时间磨损", Number(predicted?.time_decay_cost_bps)],
+  ].filter((item) => Number.isFinite(item[1]) && item[1] > 0);
+  if (!candidates.length) return "当前没有识别到明显的主磨损来源。";
+  candidates.sort((a, b) => b[1] - a[1]);
+  return `当前主磨损来源：${candidates[0][0]} ${formatBps(candidates[0][1])}`;
+}
+
+function smartArbitrageCostCompact(candidate = {}) {
+  const metrics = candidate?.metrics || {};
+  const idealEdge = metrics?.ideal_edge_bps;
+  const executableEdge = metrics?.executable_edge_bps ?? metrics?.net_basis_bps;
+  const executableCost = metrics?.executable_cost_bps ?? metrics?.estimated_cost_bps;
+  const segments = [];
+  if (idealEdge !== undefined && idealEdge !== null) segments.push(`理论净优势 ${formatBps(idealEdge)}`);
+  if (executableEdge !== undefined && executableEdge !== null) segments.push(`可执行净优势 ${formatBps(executableEdge)}`);
+  if (executableCost !== undefined && executableCost !== null) segments.push(`总磨损 ${formatBps(executableCost)}`);
+  return segments.join(" | ");
+}
+
+function smartArbitrageConfigRisks(config = {}, tradeCosts = {}, familyStatus = {}) {
   const pairDefinitions = smartArbitrageConfigPairs(config);
   const pairIssues = smartArbitragePairConfigIssues(pairDefinitions);
   const risks = [];
@@ -859,11 +1250,21 @@ function smartArbitrageConfigRisks(config = {}) {
   if (config?.enabled !== true) {
     risks.push("智能套利当前未启用，这张卡里的其它参数只会作为配置展示。");
   }
+  if (familyStatus?.runtime_supported === false) {
+    risks.push("当前运行域不是合约运行域，双向配置仍会展示，但自动双腿执行不会在这里生效。");
+  }
   if (Number(config?.basis_exit_bps) >= Number(config?.basis_entry_bps)) {
     risks.push("退出阈值已经接近或超过入场阈值，容易在边界位置来回切换。");
   }
   if (Number(config?.estimated_cost_bps) >= Number(config?.basis_entry_bps)) {
     risks.push("综合成本兜底已经接近或超过入场阈值，自动开仓机会会明显减少。");
+  }
+  if (
+    Number(config?.basis_entry_bps) > 0
+    && Number(config?.estimated_cost_bps) > 0
+    && Number(config?.basis_entry_bps) - Number(config?.estimated_cost_bps) < 4
+  ) {
+    risks.push("入场阈值和综合成本兜底之间的缓冲很薄，真实 spread / slippage 稍有放大就会把机会吃掉。");
   }
   if (String(config?.negative_basis_mode || "advisory_only") === "inventory_backed" && config?.inventory_reservation_enabled !== true) {
     risks.push("负基差已切到库存反套，但库存预留未启用，当前配置链条不完整。");
@@ -879,6 +1280,18 @@ function smartArbitrageConfigRisks(config = {}) {
   }
   if (config?.cost_model_enabled === false) {
     risks.push("细分成本模型当前关闭，净优势只看综合成本兜底，解释力会明显下降。");
+  }
+  if (
+    sumBps(
+      tradeCosts?.spot_spread_bps,
+      tradeCosts?.spot_slippage_bps,
+      tradeCosts?.margin_spread_bps,
+      tradeCosts?.margin_slippage_bps,
+      tradeCosts?.derivatives_spread_bps,
+      tradeCosts?.derivatives_slippage_bps
+    ) <= 0
+  ) {
+    risks.push("统一交易成本里的 spread / slippage 仍全部为 0，智能套利的可执行磨损通常会偏乐观。");
   }
   if (Number(config?.estimated_funding_bps) > 0 && config?.funding_cost_enabled !== true) {
     risks.push("当前填了 funding bps，但资金费成本开关没有打开，这部分还没真正参与净优势计算。");
@@ -979,8 +1392,19 @@ function smartArbitrageNegativeModeTone(config = {}) {
   return "info";
 }
 
-function smartArbitrageEffectiveScopeLabel(config = {}) {
+function smartArbitrageBidirectionalReady(config = {}) {
+  return String(config?.negative_basis_mode || "advisory_only") === "margin_backed"
+    && config?.margin_short_enabled === true
+    && config?.margin_short_execution_ready === true;
+}
+
+function smartArbitrageEffectiveScopeLabel(config = {}, familyStatus = {}) {
   if (config?.enabled !== true) return "当前整族未启用";
+  if (familyStatus?.runtime_supported === false) {
+    return smartArbitrageBidirectionalReady(config)
+      ? "当前配置支持双向套利，但自动执行仍受限于运行域"
+      : "当前配置会保留智能套利参数，但自动执行仍受限于运行域";
+  }
   const mode = String(config?.negative_basis_mode || "advisory_only");
   if (mode === "disabled") return "当前只做正基差自动执行";
   if (mode === "advisory_only") return "当前正基差自动执行，负基差只提示";
@@ -997,14 +1421,17 @@ function smartArbitrageEffectiveScopeLabel(config = {}) {
   return "当前按默认模式运行";
 }
 
-function smartArbitrageEffectiveScopeMeta(config = {}) {
+function smartArbitrageEffectiveScopeMeta(config = {}, familyStatus = {}) {
   if (config?.enabled !== true) return "需要先打开策略总开关，前端候选和执行计划才会开始刷新。";
   const effectiveBudget = smartArbitrageEffectiveBudget(config);
   const budgetText = effectiveBudget == null ? "当前预算待确认" : `当前单次开仓按 ${formatQuoteAmount(effectiveBudget)} 作为初始名义金额上限`;
   const parallelText = Math.max(Number(config?.max_concurrent_pairs) || 1, 1) > 1
     ? "当前允许多 pair，但只会并行挑选不共享 symbol scope 的组合"
     : "当前一次只会主控 1 组套利对";
-  return `${budgetText}；${parallelText}；${smartArbitrageNegativeModeMeta(config)}`;
+  const runtimeText = familyStatus?.runtime_supported === false
+    ? "当前运行域不是合约运行域，因此这里只保留配置可见性，不会自动下发双腿执行计划"
+    : null;
+  return [budgetText, parallelText, runtimeText, smartArbitrageNegativeModeMeta(config)].filter(Boolean).join("；");
 }
 
 function smartArbitragePairSummary(pairDefinitions = []) {
@@ -1274,6 +1701,24 @@ function smartArbitrageBelowEntryThreshold(candidate) {
   return reasonCodes.includes("smart_arbitrage_basis_below_entry_threshold");
 }
 
+function smartArbitragePairLabel(candidate) {
+  const spotSymbol = candidate?.metrics?.spot_symbol;
+  const derivativesSymbol = candidate?.metrics?.derivatives_symbol;
+  if (spotSymbol || derivativesSymbol) {
+    return `${spotSymbol || "现货腿"} <-> ${derivativesSymbol || "合约腿"}`;
+  }
+  return candidate?.recommended_symbol || "套利对待确认";
+}
+
+function smartArbitrageInactiveStateMeta(candidate, smartArbitrageConfig = {}) {
+  if (smartArbitrageBelowEntryThreshold(candidate)) {
+    const basisBps = formatBps(candidate?.metrics?.basis_bps);
+    const entryThreshold = formatBps(smartArbitrageConfig?.basis_entry_bps);
+    return `${smartArbitragePairLabel(candidate)} | 基差 ${basisBps} | 入场阈值 ${entryThreshold}`;
+  }
+  return smartArbitrageMarketAvailability(candidate, smartArbitrageConfig);
+}
+
 function strategyCandidateStateLabel(candidate) {
   if (smartArbitrageBelowEntryThreshold(candidate)) {
     return "当前继续观察";
@@ -1301,7 +1746,7 @@ function strategyCandidateStateLabel(candidate) {
 
 function strategyCandidateStateMeta(candidate, smartArbitrageConfig = {}) {
   if (candidate?.family === "smart_arbitrage" && candidate?.state === "inactive") {
-    return smartArbitrageMarketAvailability(candidate, smartArbitrageConfig);
+    return smartArbitrageInactiveStateMeta(candidate, smartArbitrageConfig);
   }
   if (candidate?.family === "smart_arbitrage") {
     return smartArbitrageStateMeta(candidate);
@@ -1314,6 +1759,7 @@ function strategyCandidateStateMeta(candidate, smartArbitrageConfig = {}) {
 }
 
 function strategyCandidateRouteLabel(candidate) {
+  if (smartArbitrageBelowEntryThreshold(candidate)) return "本轮不入场";
   if (candidate?.route_action === "advisory_only") return "仅参考，不直接执行";
   if (candidate?.route_action === "hold_current") return "保持当前仓位";
   if (candidate?.route_action === "override_target") return "接管本轮目标";
@@ -1325,6 +1771,9 @@ function strategyCandidateRouteMeta(candidate) {
 }
 
 function strategyCandidateTargetLabel(candidate) {
+  if (smartArbitrageBelowEntryThreshold(candidate)) {
+    return "暂不生成套利双腿";
+  }
   if (smartArbitrageNegativeBasisAdvisory(candidate)) {
     return "当前负基差不自动下单";
   }
@@ -1346,6 +1795,12 @@ function strategyCandidateTargetLabel(candidate) {
 }
 
 function strategyCandidateTargetMeta(candidate) {
+  if (smartArbitrageBelowEntryThreshold(candidate)) {
+    const breakeven = candidate?.metrics?.breakeven_basis_bps;
+    return breakeven !== undefined && breakeven !== null
+      ? `当前盈亏平衡基差约 ${formatBps(breakeven)}；达到阈值后再计算双腿执行量。`
+      : "等基差达到入场阈值后，再计算双腿执行量。";
+  }
   if (smartArbitrageNegativeBasisAdvisory(candidate)) {
     return "自动执行当前只支持正基差双腿，现货现金模式不会为负基差生成执行量";
   }
@@ -1461,6 +1916,9 @@ function strategySleeveIntentReason(item) {
 }
 
 function strategySleeveIntentTargetLabel(item) {
+  if (smartArbitrageBelowEntryThreshold(item)) {
+    return "继续观察";
+  }
   if (item?.family === "smart_arbitrage" && item?.pair_id === "multi_pair") {
     return "按多组套利对分别执行";
   }
@@ -1468,6 +1926,9 @@ function strategySleeveIntentTargetLabel(item) {
 }
 
 function strategySleeveIntentTargetMeta(item) {
+  if (smartArbitrageBelowEntryThreshold(item)) {
+    return "当前还没有生成套利双腿。";
+  }
   if (item?.family === "smart_arbitrage" && item?.pair_id === "multi_pair") {
     const legCount = Array.isArray(item?.legs) ? item.legs.length : 0;
     return `当前以 ${formatNumber(legCount, 0, "0")} 条执行腿表达，不再展示单一聚合数量。`;
@@ -1479,16 +1940,25 @@ function strategyLegSummary(candidate, smartArbitrageConfig = {}) {
   const legs = candidate?.legs;
   if (!Array.isArray(legs) || !legs.length) {
     if (candidate?.family === "smart_arbitrage") {
-      return smartArbitrageMarketAvailability(candidate, smartArbitrageConfig);
+      if (smartArbitrageBelowEntryThreshold(candidate)) {
+        const compact = smartArbitrageCostCompact(candidate);
+        return compact ? `当前还没有生成套利双腿。 | ${compact}` : "当前还没有生成套利双腿。";
+      }
+      const marketAvailability = smartArbitrageMarketAvailability(candidate, smartArbitrageConfig);
+      const compact = smartArbitrageCostCompact(candidate);
+      return compact ? `${marketAvailability} | ${compact}` : marketAvailability;
     }
     return "当前没有附带腿说明";
   }
-  return legs
+  const legSummary = legs
     .map((item) => {
       const mode = item?.execution_mode ? ` (${readableState(item.execution_mode)})` : "";
       return `${readableState(item.product_type)} ${readableState(item.side)} ${item.symbol || "标的待确认"}${mode}`;
     })
     .join(" | ");
+  if (candidate?.family !== "smart_arbitrage") return legSummary;
+  const compact = smartArbitrageCostCompact(candidate);
+  return compact ? `${legSummary} | ${compact}` : legSummary;
 }
 
 function smartArbitrageMarketAvailability(candidate, smartArbitrageConfig = {}) {
@@ -1499,7 +1969,10 @@ function smartArbitrageMarketAvailability(candidate, smartArbitrageConfig = {}) 
   if (smartArbitrageBelowEntryThreshold(candidate)) {
     const basisBps = formatBps(metrics.basis_bps);
     const entryThreshold = formatBps(smartArbitrageConfig?.basis_entry_bps);
-    return `当前基差 ${basisBps}，还没有达到入场阈值 ${entryThreshold}，系统继续观察。`;
+    const breakeven = metrics?.breakeven_basis_bps;
+    return breakeven !== undefined && breakeven !== null
+      ? `当前基差 ${basisBps}，还没有达到入场阈值 ${entryThreshold}；按当前磨损估算，盈亏平衡约需要 ${formatBps(breakeven)}。`
+      : `当前基差 ${basisBps}，还没有达到入场阈值 ${entryThreshold}，系统继续观察。`;
   }
   if (reasonCodes.includes("smart_arbitrage_market_pair_incomplete")) {
     return `当前缺少 ${spotSymbol} 或 ${derivativesSymbol} 的配对行情，暂时不能进入双腿执行。`;
@@ -1566,6 +2039,18 @@ function smartArbitrageReasonText(candidate, smartArbitrageConfig = {}) {
   if (reasonCodes.includes("smart_arbitrage_margin_short_margin_mode_mismatch")) {
     return "当前识别到负基差，但保证金融券反套的现货保证金模式与运行配置不一致，系统暂不执行。";
   }
+  if (reasonCodes.includes("smart_arbitrage_drag_exceeds_basis")) {
+    return `当前有基差，但扣掉可执行磨损后净优势已经不够。${smartArbitragePrimaryDragDriver(candidate?.metrics || {})}`;
+  }
+  if (reasonCodes.includes("smart_arbitrage_executable_edge_negative")) {
+    return `当前理论上有价差，但按可执行磨损估算已经不值得做。${smartArbitragePrimaryDragDriver(candidate?.metrics || {})}`;
+  }
+  if (reasonCodes.includes("smart_arbitrage_funding_window_unfavorable")) {
+    return "当前主要被资金费窗口拖累，可执行净优势已经不足，系统暂不进场。";
+  }
+  if (reasonCodes.includes("smart_arbitrage_borrow_window_unfavorable")) {
+    return "当前主要被借币计息窗口拖累，可执行净优势已经不足，系统暂不进场。";
+  }
   if (reasonCodes.includes("smart_arbitrage_spot_carry_not_allowed")) {
     return "当前是正基差，但这组配对没有开放正向现货套利模式，系统暂不执行。";
   }
@@ -1611,6 +2096,9 @@ function smartArbitrageStateMeta(candidate) {
   if (pairId) parts.push(`pair ${pairId}`);
   if (statePhase) parts.push(`阶段 ${readableState(statePhase)}`);
   if (executionMode) parts.push(`模式 ${readableState(executionMode)}`);
+  if (candidate?.metrics?.executable_edge_bps !== undefined && candidate?.metrics?.executable_edge_bps !== null) {
+    parts.push(`可执行净优势 ${formatBps(candidate.metrics.executable_edge_bps)}`);
+  }
   if (Number.isFinite(confidence) && confidence > 0) parts.push(`置信度 ${formatNumber(confidence, 2, "0")}`);
   return parts.join(" | ") || "当前没有额外状态量化信息";
 }

@@ -185,7 +185,7 @@ class TestPersistenceAndReplay(unittest.IsolatedAsyncioTestCase):
             try:
                 await runtime.market_gateway.run_local_publisher(
                     symbol="BTC-USDT",
-                    iterations=3,
+                    iterations=1,
                     interval_seconds=0.0,
                 )
                 await runtime.market_gateway.run_local_publisher(

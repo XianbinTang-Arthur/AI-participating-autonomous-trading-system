@@ -37,8 +37,11 @@ AccountBackend = Literal["disabled", "okx"]
 AIExecutionSuggestionMode = Literal["disabled", "diagnostic_only", "shadow_translation", "enabled_live"]
 StrategyFamily = Literal["directional", "smart_arbitrage", "spot_grid", "dca"]
 SmartArbitrageNegativeBasisMode = Literal["disabled", "advisory_only", "inventory_backed", "margin_backed"]
-SmartArbitragePairPriorityMode = Literal["net_edge", "basis_abs"]
+SmartArbitragePairPriorityMode = Literal["net_edge", "executable_edge", "ideal_edge", "basis_abs"]
 SmartArbitrageSpotMarginMode = Literal["cross", "isolated"]
+SmartArbitrageFeeSourceMode = Literal["configured", "account_schedule"]
+SmartArbitrageFundingSourceMode = Literal["configured", "account_proxy"]
+SmartArbitrageBorrowSourceMode = Literal["configured", "apr_window_model"]
 
 _PLACEHOLDER_TOKENS = (
     "REPLACE_WITH_",
@@ -101,6 +104,21 @@ class AATSSettings(BaseSettings):
     decision_min_price_move_bps: float = 0.0
     decision_min_momentum_delta: float = 0.0
     paper_taker_fee_bps: float = 5.0
+    trade_cost_spot_maker_fee_bps: float = 8.0
+    trade_cost_spot_taker_fee_bps: float = 10.0
+    trade_cost_margin_maker_fee_bps: float = 8.0
+    trade_cost_margin_taker_fee_bps: float = 10.0
+    trade_cost_derivatives_maker_fee_bps: float = 2.0
+    trade_cost_derivatives_taker_fee_bps: float = 5.0
+    trade_cost_delivery_settlement_fee_bps: float = 1.0
+    trade_cost_spot_spread_bps: float = 1.0
+    trade_cost_spot_slippage_bps: float = 1.5
+    trade_cost_margin_spread_bps: float = 1.0
+    trade_cost_margin_slippage_bps: float = 1.5
+    trade_cost_derivatives_spread_bps: float = 0.5
+    trade_cost_derivatives_slippage_bps: float = 1.0
+    trade_cost_withdrawal_bps: float = 0.0
+    trade_cost_fiat_cashout_bps: float = 0.0
     max_slippage_tolerance_bps: int = 20
     ai_operating_mode: AIOperatingMode = "baseline_only"
     ai_provider: Literal["disabled", "openai"] = "disabled"
@@ -233,9 +251,9 @@ class AATSSettings(BaseSettings):
     strategy_sleeve_auto_hard_loss_usdt: float = 25.0
     strategy_sleeve_auto_volatility_cap_enabled: bool = True
     smart_arbitrage_enabled: bool = False
-    smart_arbitrage_basis_entry_bps: float = 18.0
+    smart_arbitrage_basis_entry_bps: float = 40.0
     smart_arbitrage_basis_exit_bps: float = 6.0
-    smart_arbitrage_estimated_cost_bps: float = 10.0
+    smart_arbitrage_estimated_cost_bps: float = 34.0
     smart_arbitrage_quote_budget_per_trade: float = 200.0
     smart_arbitrage_max_pair_notional: float = 2_000.0
     smart_arbitrage_pair_definitions: tuple[dict[str, Any], ...] = Field(default=())
@@ -251,8 +269,17 @@ class AATSSettings(BaseSettings):
     smart_arbitrage_max_concurrent_pairs: int = 1
     smart_arbitrage_pair_priority_mode: SmartArbitragePairPriorityMode = "net_edge"
     smart_arbitrage_min_inventory_backed_ratio: float = 1.0
-    smart_arbitrage_estimated_fee_bps: float = 0.0
-    smart_arbitrage_estimated_slippage_bps: float = 0.0
+    smart_arbitrage_fee_source_mode: SmartArbitrageFeeSourceMode = "configured"
+    smart_arbitrage_funding_source_mode: SmartArbitrageFundingSourceMode = "configured"
+    smart_arbitrage_borrow_source_mode: SmartArbitrageBorrowSourceMode = "configured"
+    smart_arbitrage_expected_hold_hours: float = 8.0
+    smart_arbitrage_funding_interval_hours: float = 8.0
+    smart_arbitrage_expected_funding_events: int = 0
+    smart_arbitrage_estimated_execution_mismatch_bps: float = 0.0
+    smart_arbitrage_estimated_transfer_cost_bps: float = 0.0
+    smart_arbitrage_time_decay_bps_per_hour: float = 0.0
+    smart_arbitrage_estimated_borrow_apr: float = 0.0
+    smart_arbitrage_borrow_interest_free_ratio: float = 0.0
     smart_arbitrage_estimated_funding_bps: float = 0.0
     smart_arbitrage_estimated_borrow_bps: float = 0.0
     spot_grid_enabled: bool = False

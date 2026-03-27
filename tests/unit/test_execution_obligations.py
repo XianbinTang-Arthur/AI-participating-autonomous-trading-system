@@ -238,7 +238,7 @@ class TestExecutionObligations(unittest.IsolatedAsyncioTestCase):
         obligation = obligation_repo.get_obligation("clclient_failed")
         self.assertIsNotNone(obligation)
         self.assertEqual(obligation.status, "FAILED")
-        self.assertEqual(obligation.released_amount, Decimal("60.03"))
+        self.assertEqual(obligation.released_amount, Decimal("60.06"))
         self.assertEqual(ExecutionObligationService.remaining_amount(obligation), Decimal("0"))
 
     async def test_filled_order_consumes_reserved_amount(self) -> None:
@@ -269,7 +269,7 @@ class TestExecutionObligations(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(obligation)
         self.assertEqual(obligation.status, "RELEASED")
         self.assertEqual(obligation.consumed_amount, Decimal("60.0"))
-        self.assertEqual(obligation.released_amount, Decimal("0.03"))
+        self.assertEqual(obligation.released_amount, Decimal("0.06"))
 
     async def test_spot_buy_reservation_prefers_dynamic_fee_resolver(self) -> None:
         snapshot = ExchangeAccountSnapshot(
@@ -422,7 +422,7 @@ class TestExecutionObligations(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(outbox.fill_obligations[0].released_amount, Decimal("0"))
         self.assertEqual(obligation.status, "RELEASED")
         self.assertEqual(obligation.consumed_amount, Decimal("60.0"))
-        self.assertEqual(obligation.released_amount, Decimal("0.03"))
+        self.assertEqual(obligation.released_amount, Decimal("0.06"))
 
     async def test_outbox_path_finalizes_failed_zero_fill_obligation_with_terminal_state(self) -> None:
         snapshot = ExchangeAccountSnapshot(
@@ -457,9 +457,9 @@ class TestExecutionObligations(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(outbox.order_state_obligations[1], None)
         self.assertIsNotNone(outbox.order_state_obligations[2])
         self.assertEqual(outbox.order_state_obligations[2].status, "FAILED")
-        self.assertEqual(outbox.order_state_obligations[2].released_amount, Decimal("60.03"))
+        self.assertEqual(outbox.order_state_obligations[2].released_amount, Decimal("60.06"))
         self.assertEqual(obligation.status, "FAILED")
-        self.assertEqual(obligation.released_amount, Decimal("60.03"))
+        self.assertEqual(obligation.released_amount, Decimal("60.06"))
 
     async def test_outbox_path_does_not_leave_orphan_obligation_when_order_state_persist_fails(self) -> None:
         snapshot = ExchangeAccountSnapshot(

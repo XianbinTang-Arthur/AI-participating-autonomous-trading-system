@@ -6,12 +6,14 @@ from aats.bootstrap.settings import AATSSettings
 from aats.schemas.strategy_runtime import StrategyCandidate
 from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, to_decimal
 from aats.services.strategy_engines.base import StrategyEngineInput
+from aats.services.trade_costs import TradeCostService
 
 
 class SpotGridStrategyEngine:
-    def __init__(self, *, settings: AATSSettings, sleeve_inventory_loader=None) -> None:
+    def __init__(self, *, settings: AATSSettings, sleeve_inventory_loader=None, account_service=None) -> None:
         self.settings = settings
         self.sleeve_inventory_loader = sleeve_inventory_loader
+        self.trade_cost_service = TradeCostService(settings=settings, account_service=account_service)
 
     def evaluate(self, engine_input: StrategyEngineInput) -> StrategyCandidate:
         if not self.settings.spot_grid_enabled:
@@ -115,6 +117,13 @@ class SpotGridStrategyEngine:
             reason_codes = ["spot_grid_inventory_target_ready", f"regime_{engine_input.baseline.regime}"]
         score = float(abs(price - anchor) / band_width)
         confidence = min(0.92, 0.50 + (engine_input.baseline.confidence * 0.25) + (score * 0.1))
+        cost_estimate = self.trade_cost_service.estimate_single_leg_entry(
+            model_name="spot_grid_inventory_rebalance",
+            symbol=engine_input.context.symbol,
+            product_type="spot",
+            margin_mode="cash",
+            include_spread=True,
+        )
         return StrategyCandidate(
             family="spot_grid",
             state=state,
@@ -142,6 +151,9 @@ class SpotGridStrategyEngine:
                 "target_inventory_fraction": target_fraction,
                 "target_sleeve_position_qty": target_qty,
                 "target_account_position_qty": account_target_qty,
+                "expected_cost_bps": cost_estimate.executable_total_drag_bps,
+                "ideal_cost_bps": cost_estimate.ideal_total_cost_bps,
+                "executable_cost_bps": cost_estimate.executable_total_drag_bps,
             },
         )
 

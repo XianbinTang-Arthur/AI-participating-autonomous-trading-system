@@ -129,7 +129,7 @@ class TestTask24SafetyControls(unittest.IsolatedAsyncioTestCase):
         )
         obligation = await service.reserve_for_intent(intent=intent, client_order_id="clord_obligation_idempotent")
         self.assertIsNotNone(obligation)
-        self.assertEqual(obligation.reserved_amount, Decimal("101.0505"))
+        self.assertEqual(obligation.reserved_amount, Decimal("101.1010000"))
 
         fill = FillEvent(
             fill_id="fill_duplicate_once",

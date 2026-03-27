@@ -95,6 +95,31 @@ class ArbitragePairState(BaseModel):
 
 
 class ArbitrageCostBreakdown(BaseModel):
+    ideal_open_fee_bps: Decimal = Decimal("0")
+    ideal_close_fee_bps: Decimal = Decimal("0")
+    ideal_total_fee_bps: Decimal = Decimal("0")
+    executable_spread_bps: Decimal = Decimal("0")
+    executable_slippage_bps: Decimal = Decimal("0")
+    execution_mismatch_bps: Decimal = Decimal("0")
+    funding_cost_bps: Decimal = Decimal("0")
+    borrow_cost_bps: Decimal = Decimal("0")
+    transfer_cost_bps: Decimal = Decimal("0")
+    time_decay_cost_bps: Decimal = Decimal("0")
+    ideal_total_cost_bps: Decimal = Decimal("0")
+    executable_total_drag_bps: Decimal = Decimal("0")
+    ideal_edge_bps: Decimal = Decimal("0")
+    executable_edge_bps: Decimal = Decimal("0")
+    breakeven_basis_bps: Decimal = Decimal("0")
+    expected_hold_hours: Decimal = Decimal("0")
+    expected_funding_events: int = 0
+    borrow_hour_windows: int = 0
+    cost_confidence: float = 0.0
+    cost_source_flags: list[str] = Field(default_factory=list)
+    realized_fee_bps: Decimal | None = None
+    realized_funding_bps: Decimal | None = None
+    realized_borrow_bps: Decimal | None = None
+    realized_total_drag_bps: Decimal | None = None
+    predicted_vs_realized_total_drag_error_bps: Decimal | None = None
     estimated_fee_bps: Decimal = Decimal("0")
     estimated_slippage_bps: Decimal = Decimal("0")
     estimated_funding_bps: Decimal = Decimal("0")

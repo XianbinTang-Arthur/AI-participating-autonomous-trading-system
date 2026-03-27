@@ -64,15 +64,32 @@ strategy_sleeve_auto_hard_loss_usdt: 25.0
 # [常用可调] strategy_sleeve_auto_volatility_cap_enabled：是否按波动率目标自动收缩预算。可选值：true / false；推荐值：true。
 strategy_sleeve_auto_volatility_cap_enabled: true
 
+# 统一交易成本
+trade_cost_spot_maker_fee_bps: 8.0
+trade_cost_spot_taker_fee_bps: 10.0
+trade_cost_margin_maker_fee_bps: 8.0
+trade_cost_margin_taker_fee_bps: 10.0
+trade_cost_derivatives_maker_fee_bps: 2.0
+trade_cost_derivatives_taker_fee_bps: 5.0
+trade_cost_delivery_settlement_fee_bps: 1.0
+trade_cost_spot_spread_bps: 1.0
+trade_cost_spot_slippage_bps: 1.5
+trade_cost_margin_spread_bps: 1.0
+trade_cost_margin_slippage_bps: 1.5
+trade_cost_derivatives_spread_bps: 0.5
+trade_cost_derivatives_slippage_bps: 1.0
+trade_cost_withdrawal_bps: 0.0
+trade_cost_fiat_cashout_bps: 0.0
+
 # 多策略启停
 # [常用可调] smart_arbitrage_enabled：是否启用智能套利策略。可选值：true / false；推荐值：true。
 smart_arbitrage_enabled: true
 # [常用可调] smart_arbitrage_basis_entry_bps：基差入场阈值。可选值：0.0 ~ 200.0；推荐值：18.0。
-smart_arbitrage_basis_entry_bps: 18.0
+smart_arbitrage_basis_entry_bps: 40.0
 # [常用可调] smart_arbitrage_basis_exit_bps：基差退出阈值。可选值：0.0 ~ 200.0；推荐值：6.0。
 smart_arbitrage_basis_exit_bps: 6.0
 # [常用可调] smart_arbitrage_estimated_cost_bps：套利预估综合成本。可选值：0.0 ~ 100.0；推荐值：10.0。
-smart_arbitrage_estimated_cost_bps: 10.0
+smart_arbitrage_estimated_cost_bps: 34.0
 # [常用可调] smart_arbitrage_quote_budget_per_trade：每次套利分配的 quote 预算。可选值：正数；推荐值：200.0。
 smart_arbitrage_quote_budget_per_trade: 200.0
 # [常用可调] smart_arbitrage_max_pair_notional：单组套利最大名义金额。可选值：正数；推荐值：2000.0。
@@ -82,14 +99,17 @@ smart_arbitrage_pair_definitions:
   - pair_id: btc_usdt_swap
     spot_symbol: BTC-USDT
     hedge_symbol: BTC-USDT-SWAP
+    execution_modes:
+      - spot_carry
+      - margin_reverse_carry
 # [进阶可调] smart_arbitrage_negative_basis_mode：负基差执行模式。可选值：disabled / advisory_only / inventory_backed / margin_backed；推荐值：advisory_only。
-smart_arbitrage_negative_basis_mode: advisory_only
+smart_arbitrage_negative_basis_mode: margin_backed
 # [进阶可调] smart_arbitrage_inventory_reservation_enabled：是否允许使用现货库存做库存反套。可选值：true / false；推荐值：false。
 smart_arbitrage_inventory_reservation_enabled: false
 # [进阶可调] smart_arbitrage_margin_short_enabled：是否启用保证金融券反套能力声明。可选值：true / false；推荐值：false。
-smart_arbitrage_margin_short_enabled: false
+smart_arbitrage_margin_short_enabled: true
 # [进阶可调] smart_arbitrage_margin_short_execution_ready：执行适配层是否已经接通保证金融券反套。可选值：true / false；推荐值：false。
-smart_arbitrage_margin_short_execution_ready: false
+smart_arbitrage_margin_short_execution_ready: true
 # [进阶可调] smart_arbitrage_margin_short_spot_margin_mode：保证金融券现货腿的保证金模式。可选值：cross / isolated；推荐值：cross。
 smart_arbitrage_margin_short_spot_margin_mode: cross
 # [进阶可调] smart_arbitrage_margin_short_auto_repay_enabled：保证金反套平仓后是否自动还币。可选值：true / false；推荐值：false。
@@ -99,17 +119,35 @@ smart_arbitrage_cost_model_enabled: true
 # [进阶可调] smart_arbitrage_funding_cost_enabled：是否把资金费计入细分成本。可选值：true / false；推荐值：false。
 smart_arbitrage_funding_cost_enabled: false
 # [进阶可调] smart_arbitrage_borrow_cost_enabled：是否把借币费计入细分成本。可选值：true / false；推荐值：false。
-smart_arbitrage_borrow_cost_enabled: false
+smart_arbitrage_borrow_cost_enabled: true
 # [进阶可调] smart_arbitrage_max_concurrent_pairs：最多同时主控多少组不重叠套利对。可选值：正整数；推荐值：1。
 smart_arbitrage_max_concurrent_pairs: 1
 # [进阶可调] smart_arbitrage_pair_priority_mode：多 pair 排序方式。可选值：net_edge / basis_abs；推荐值：net_edge。
 smart_arbitrage_pair_priority_mode: net_edge
 # [进阶可调] smart_arbitrage_min_inventory_backed_ratio：库存反套最小覆盖率。可选值：0.0 以上；推荐值：1.0。
 smart_arbitrage_min_inventory_backed_ratio: 1.0
-# [进阶可调] smart_arbitrage_estimated_fee_bps：细分手续费预估。可选值：0.0 以上；推荐值：0.0。
-smart_arbitrage_estimated_fee_bps: 0.0
-# [进阶可调] smart_arbitrage_estimated_slippage_bps：细分滑点预估。可选值：0.0 以上；推荐值：0.0。
-smart_arbitrage_estimated_slippage_bps: 0.0
+# [进阶可调] smart_arbitrage_fee_source_mode：手续费来源。可选值：configured / account_schedule；推荐值：configured。
+smart_arbitrage_fee_source_mode: configured
+# [进阶可调] smart_arbitrage_funding_source_mode：资金费来源。可选值：configured / account_proxy；推荐值：configured。
+smart_arbitrage_funding_source_mode: configured
+# [进阶可调] smart_arbitrage_borrow_source_mode：借币费来源。可选值：configured / apr_window_model；推荐值：configured。
+smart_arbitrage_borrow_source_mode: apr_window_model
+# [进阶可调] smart_arbitrage_expected_hold_hours：预计持有小时数。可选值：0.0 以上；推荐值：8.0。
+smart_arbitrage_expected_hold_hours: 8.0
+# [进阶可调] smart_arbitrage_funding_interval_hours：资金费结算间隔小时数。可选值：1.0 以上；推荐值：8.0。
+smart_arbitrage_funding_interval_hours: 8.0
+# [进阶可调] smart_arbitrage_expected_funding_events：预计 funding 事件数。0 代表按持有窗口自动推导；推荐值：0。
+smart_arbitrage_expected_funding_events: 0
+# [进阶可调] smart_arbitrage_estimated_execution_mismatch_bps：双腿不同步磨损估算。可选值：0.0 以上；推荐值：0.0。
+smart_arbitrage_estimated_execution_mismatch_bps: 0.0
+# [进阶可调] smart_arbitrage_estimated_transfer_cost_bps：固定转移/搬移成本估算。可选值：0.0 以上；推荐值：0.0。
+smart_arbitrage_estimated_transfer_cost_bps: 0.0
+# [进阶可调] smart_arbitrage_time_decay_bps_per_hour：每小时时间磨损估算。可选值：0.0 以上；推荐值：0.0。
+smart_arbitrage_time_decay_bps_per_hour: 0.0
+# [进阶可调] smart_arbitrage_estimated_borrow_apr：借币 APR 估算。可选值：0.0 以上；推荐值：0.0。
+smart_arbitrage_estimated_borrow_apr: 18.0
+# [进阶可调] smart_arbitrage_borrow_interest_free_ratio：借币免息比例估算。可选值：0.0 ~ 1.0；推荐值：0.0。
+smart_arbitrage_borrow_interest_free_ratio: 0.0
 # [进阶可调] smart_arbitrage_estimated_funding_bps：细分资金费预估。可选值：0.0 以上；推荐值：0.0。
 smart_arbitrage_estimated_funding_bps: 0.0
 # [进阶可调] smart_arbitrage_estimated_borrow_bps：细分借币费预估。可选值：0.0 以上；推荐值：0.0。

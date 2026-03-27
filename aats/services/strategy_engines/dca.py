@@ -7,12 +7,14 @@ from aats.bootstrap.settings import AATSSettings
 from aats.schemas.strategy_runtime import StrategyCandidate
 from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, to_decimal
 from aats.services.strategy_engines.base import StrategyEngineInput
+from aats.services.trade_costs import TradeCostService
 
 
 class DcaStrategyEngine:
-    def __init__(self, *, settings: AATSSettings, sleeve_inventory_loader=None) -> None:
+    def __init__(self, *, settings: AATSSettings, sleeve_inventory_loader=None, account_service=None) -> None:
         self.settings = settings
         self.sleeve_inventory_loader = sleeve_inventory_loader
+        self.trade_cost_service = TradeCostService(settings=settings, account_service=account_service)
 
     def evaluate(self, engine_input: StrategyEngineInput) -> StrategyCandidate:
         if not self.settings.dca_enabled:
@@ -138,6 +140,13 @@ class DcaStrategyEngine:
         sleeve_delta_qty = target_qty - sleeve_current_qty
         account_target_qty = account_current_qty + sleeve_delta_qty
         confidence = min(0.90, 0.55 + (engine_input.baseline.confidence * 0.15))
+        cost_estimate = self.trade_cost_service.estimate_single_leg_entry(
+            model_name="dca_spot_accumulation",
+            symbol=engine_input.context.symbol,
+            product_type="spot",
+            margin_mode="cash",
+            include_spread=True,
+        )
         return StrategyCandidate(
             family="dca",
             state="ready",
@@ -162,6 +171,9 @@ class DcaStrategyEngine:
                 "target_sleeve_position_qty": target_qty,
                 "target_account_position_qty": account_target_qty,
                 "position_cap_qty": max_position_qty,
+                "expected_cost_bps": cost_estimate.executable_total_drag_bps,
+                "ideal_cost_bps": cost_estimate.ideal_total_cost_bps,
+                "executable_cost_bps": cost_estimate.executable_total_drag_bps,
             },
         )
 

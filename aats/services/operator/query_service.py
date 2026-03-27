@@ -2087,6 +2087,7 @@ class OperatorQueryService:
                 if str(code).strip()
             )
         )
+        smart_arbitrage_cost_summary = self._smart_arbitrage_cost_summary(latest_snapshot=latest_snapshot)
         return {
             "generated_at": utc_now(),
             "summary": summary,
@@ -2101,6 +2102,23 @@ class OperatorQueryService:
                 "strategy_sleeve_auto_hard_loss_usdt": self.runtime.settings.strategy_sleeve_auto_hard_loss_usdt,
                 "strategy_sleeve_auto_volatility_cap_enabled": self.runtime.settings.strategy_sleeve_auto_volatility_cap_enabled,
                 "env_template_profile": self.runtime.settings.env_template_profile,
+                "trade_costs": {
+                    "spot_maker_fee_bps": self.runtime.settings.trade_cost_spot_maker_fee_bps,
+                    "spot_taker_fee_bps": self.runtime.settings.trade_cost_spot_taker_fee_bps,
+                    "margin_maker_fee_bps": self.runtime.settings.trade_cost_margin_maker_fee_bps,
+                    "margin_taker_fee_bps": self.runtime.settings.trade_cost_margin_taker_fee_bps,
+                    "derivatives_maker_fee_bps": self.runtime.settings.trade_cost_derivatives_maker_fee_bps,
+                    "derivatives_taker_fee_bps": self.runtime.settings.trade_cost_derivatives_taker_fee_bps,
+                    "delivery_settlement_fee_bps": self.runtime.settings.trade_cost_delivery_settlement_fee_bps,
+                    "spot_spread_bps": self.runtime.settings.trade_cost_spot_spread_bps,
+                    "spot_slippage_bps": self.runtime.settings.trade_cost_spot_slippage_bps,
+                    "margin_spread_bps": self.runtime.settings.trade_cost_margin_spread_bps,
+                    "margin_slippage_bps": self.runtime.settings.trade_cost_margin_slippage_bps,
+                    "derivatives_spread_bps": self.runtime.settings.trade_cost_derivatives_spread_bps,
+                    "derivatives_slippage_bps": self.runtime.settings.trade_cost_derivatives_slippage_bps,
+                    "withdrawal_bps": self.runtime.settings.trade_cost_withdrawal_bps,
+                    "fiat_cashout_bps": self.runtime.settings.trade_cost_fiat_cashout_bps,
+                },
                 "smart_arbitrage": {
                     "enabled": self.runtime.settings.smart_arbitrage_enabled,
                     "pair_definitions": [
@@ -2112,6 +2130,7 @@ class OperatorQueryService:
                     "basis_entry_bps": self.runtime.settings.smart_arbitrage_basis_entry_bps,
                     "basis_exit_bps": self.runtime.settings.smart_arbitrage_basis_exit_bps,
                     "estimated_cost_bps": self.runtime.settings.smart_arbitrage_estimated_cost_bps,
+                    "uses_global_trade_costs": True,
                     "quote_budget_per_trade": self.runtime.settings.smart_arbitrage_quote_budget_per_trade,
                     "max_pair_notional": self.runtime.settings.smart_arbitrage_max_pair_notional,
                     "cost_model_enabled": self.runtime.settings.smart_arbitrage_cost_model_enabled,
@@ -2126,8 +2145,17 @@ class OperatorQueryService:
                     "max_concurrent_pairs": self.runtime.settings.smart_arbitrage_max_concurrent_pairs,
                     "pair_priority_mode": self.runtime.settings.smart_arbitrage_pair_priority_mode,
                     "min_inventory_backed_ratio": self.runtime.settings.smart_arbitrage_min_inventory_backed_ratio,
-                    "estimated_fee_bps": self.runtime.settings.smart_arbitrage_estimated_fee_bps,
-                    "estimated_slippage_bps": self.runtime.settings.smart_arbitrage_estimated_slippage_bps,
+                    "fee_source_mode": self.runtime.settings.smart_arbitrage_fee_source_mode,
+                    "funding_source_mode": self.runtime.settings.smart_arbitrage_funding_source_mode,
+                    "borrow_source_mode": self.runtime.settings.smart_arbitrage_borrow_source_mode,
+                    "expected_hold_hours": self.runtime.settings.smart_arbitrage_expected_hold_hours,
+                    "funding_interval_hours": self.runtime.settings.smart_arbitrage_funding_interval_hours,
+                    "expected_funding_events": self.runtime.settings.smart_arbitrage_expected_funding_events,
+                    "estimated_execution_mismatch_bps": self.runtime.settings.smart_arbitrage_estimated_execution_mismatch_bps,
+                    "estimated_transfer_cost_bps": self.runtime.settings.smart_arbitrage_estimated_transfer_cost_bps,
+                    "time_decay_bps_per_hour": self.runtime.settings.smart_arbitrage_time_decay_bps_per_hour,
+                    "estimated_borrow_apr": self.runtime.settings.smart_arbitrage_estimated_borrow_apr,
+                    "borrow_interest_free_ratio": self.runtime.settings.smart_arbitrage_borrow_interest_free_ratio,
                     "estimated_funding_bps": self.runtime.settings.smart_arbitrage_estimated_funding_bps,
                     "estimated_borrow_bps": self.runtime.settings.smart_arbitrage_estimated_borrow_bps,
                 },
@@ -2162,7 +2190,150 @@ class OperatorQueryService:
             "recent_netting_decisions": recent_netting_decisions,
             "recent_snapshots": recent_snapshots,
             "recent_execution_bundles": recent_bundles,
+            "smart_arbitrage_cost_summary": smart_arbitrage_cost_summary,
             "truth_source": "strategy_runtime_repo_plus_event_store" if strategy_runtime_repo is not None else "strategy_coordinator_snapshots",
+        }
+
+    def _smart_arbitrage_cost_summary(self, *, latest_snapshot: dict[str, Any] | None) -> dict[str, Any]:
+        smart_candidate = None
+        if latest_snapshot is not None:
+            smart_candidate = next(
+                (
+                    candidate
+                    for candidate in (latest_snapshot.get("candidates") or [])
+                    if candidate.get("family") == "smart_arbitrage"
+                ),
+                None,
+            )
+        metrics = {} if smart_candidate is None else dict(smart_candidate.get("metrics") or {})
+        fill_rows = [
+            item
+            for item in self._scoped_fill_outcomes()
+            if str(getattr(item, "strategy_family", "") or "") == "smart_arbitrage"
+        ]
+        fill_notional = sum(
+            (
+                abs(self._to_decimal(getattr(item, "fill_notional", None)) or Decimal("0"))
+                for item in fill_rows
+            ),
+            start=Decimal("0"),
+        )
+        realized_fee_amount = sum(
+            (
+                abs(
+                    self._to_decimal(getattr(item, "fee_amount", None))
+                    or self._to_decimal(getattr(item, "fee_delta", None))
+                    or Decimal("0")
+                )
+                for item in fill_rows
+            ),
+            start=Decimal("0"),
+        )
+        funding_rows = list(self._scoped_funding_fee_records())
+        smart_symbols = {
+            str(metrics.get("spot_symbol") or "").upper(),
+            str(metrics.get("derivatives_symbol") or "").upper(),
+            *(
+                str(item.get("spot_symbol") or "").upper()
+                for item in (metrics.get("selected_pair_summaries") or [])
+                if isinstance(item, dict)
+            ),
+            *(
+                str(item.get("derivatives_symbol") or "").upper()
+                for item in (metrics.get("selected_pair_summaries") or [])
+                if isinstance(item, dict)
+            ),
+        }
+        smart_symbols.discard("")
+        funding_cost_amount = sum(
+            (
+                abs(self._to_decimal(getattr(item, "amount", None)) or Decimal("0"))
+                for item in funding_rows
+                if (
+                    str(getattr(item, "funding_direction", "") or "").lower() == "expense"
+                    and (
+                        not smart_symbols
+                        or str(getattr(item, "symbol", "") or "").upper() in smart_symbols
+                    )
+                )
+            ),
+            start=Decimal("0"),
+        )
+        realized_fee_bps = (
+            None
+            if fill_notional <= self._DECIMAL_EPSILON
+            else (realized_fee_amount / fill_notional) * Decimal("10000")
+        )
+        realized_funding_bps = (
+            None
+            if fill_notional <= self._DECIMAL_EPSILON
+            else (funding_cost_amount / fill_notional) * Decimal("10000")
+        )
+        realized_total_drag_bps = None
+        if realized_fee_bps is not None or realized_funding_bps is not None:
+            realized_total_drag_bps = (realized_fee_bps or Decimal("0")) + (realized_funding_bps or Decimal("0"))
+        predicted_drag = self._to_decimal(metrics.get("executable_cost_bps"))
+        return {
+            "available": smart_candidate is not None,
+            "pair_label": None if smart_candidate is None else (
+                f"{metrics.get('spot_symbol') or '现货腿'} <-> {metrics.get('derivatives_symbol') or '合约腿'}"
+                if not metrics.get("aggregate_candidate")
+                else f"{len(metrics.get('selected_pair_summaries') or [])} 组套利对聚合"
+            ),
+            "predicted": {
+                "basis_bps": metrics.get("basis_bps"),
+                "ideal_cost_bps": metrics.get("ideal_cost_bps"),
+                "executable_cost_bps": metrics.get("executable_cost_bps"),
+                "ideal_edge_bps": metrics.get("ideal_edge_bps"),
+                "executable_edge_bps": metrics.get("executable_edge_bps"),
+                "breakeven_basis_bps": metrics.get("breakeven_basis_bps"),
+                "ideal_total_fee_bps": metrics.get("ideal_total_fee_bps"),
+                "executable_spread_bps": metrics.get("executable_spread_bps"),
+                "executable_slippage_bps": metrics.get("executable_slippage_bps"),
+                "execution_mismatch_bps": metrics.get("execution_mismatch_bps"),
+                "funding_cost_bps": metrics.get("funding_cost_bps"),
+                "borrow_cost_bps": metrics.get("borrow_cost_bps"),
+                "transfer_cost_bps": metrics.get("transfer_cost_bps"),
+                "time_decay_cost_bps": metrics.get("time_decay_cost_bps"),
+                "expected_hold_hours": metrics.get("expected_hold_hours"),
+                "expected_funding_events": metrics.get("expected_funding_events"),
+                "borrow_hour_windows": metrics.get("borrow_hour_windows"),
+                "cost_confidence": metrics.get("cost_confidence"),
+                "cost_source_flags": list(metrics.get("cost_source_flags") or metrics.get("aggregate_cost_source_flags") or []),
+            },
+            "realized": {
+                "fill_count": len(fill_rows),
+                "fill_notional": fill_notional,
+                "realized_fee_amount": realized_fee_amount,
+                "realized_fee_bps": realized_fee_bps,
+                "funding_fee_event_count": sum(
+                    1
+                    for item in funding_rows
+                    if (
+                        str(getattr(item, "funding_direction", "") or "").lower() == "expense"
+                        and (
+                            not smart_symbols
+                            or str(getattr(item, "symbol", "") or "").upper() in smart_symbols
+                        )
+                    )
+                ),
+                "realized_funding_cost_amount": funding_cost_amount,
+                "realized_funding_bps": realized_funding_bps,
+                "realized_borrow_bps": None,
+                "realized_total_drag_bps": realized_total_drag_bps,
+            },
+            "calibration": {
+                "predicted_vs_realized_total_drag_error_bps": (
+                    None
+                    if predicted_drag is None or realized_total_drag_bps is None
+                    else predicted_drag - realized_total_drag_bps
+                ),
+                "realized_source_flags": [
+                    "fill_outcomes_fee_bps",
+                    "funding_fee_records_expense_only",
+                    "borrow_realized_unavailable",
+                ],
+            },
         }
 
     def recent_fills(self, *, limit: int = 50):

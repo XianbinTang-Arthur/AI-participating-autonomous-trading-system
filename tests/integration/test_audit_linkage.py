@@ -92,7 +92,7 @@ class TestAuditLinkage(unittest.IsolatedAsyncioTestCase):
         )
         runtime = await build_runtime(settings)
 
-        await runtime.market_gateway.run_local_publisher(symbol="BTC-USDT", iterations=3, interval_seconds=0.0)
+        await runtime.market_gateway.run_local_publisher(symbol="BTC-USDT", iterations=1, interval_seconds=0.0)
         await runtime.market_gateway.run_local_publisher(symbol=settings.default_symbol, iterations=3, interval_seconds=0.0)
         target = await runtime.decision_engine.run_cycle(settings.default_symbol, settings.primary_timeframe)
 

@@ -889,9 +889,9 @@ class PortfolioAllocatorV2Phase2:
     @staticmethod
     def _bps_metric(*, intent: StrategySleeveIntent, kind: str) -> Decimal | None:
         keys = (
-            ("expected_net_edge_bps", "net_basis_bps", "basis_bps", "expected_signal_edge_bps")
+            ("expected_net_edge_bps", "executable_edge_bps", "ideal_edge_bps", "net_basis_bps", "basis_bps", "expected_signal_edge_bps")
             if kind == "edge"
-            else ("expected_cost_bps", "estimated_cost_bps")
+            else ("expected_cost_bps", "executable_cost_bps", "ideal_cost_bps", "estimated_cost_bps")
         )
         for key in keys:
             value = intent.metrics.get(key)

@@ -81,14 +81,17 @@ class StrategyCoordinatorService:
             market_snapshot_loader=self._latest_market_snapshot,
             account_snapshot_loader=self._latest_account_snapshot,
             sleeve_inventory_loader=self.sleeve_inventory_service,
+            account_service=account_service,
         )
         self.spot_grid_engine = SpotGridStrategyEngine(
             settings=settings,
             sleeve_inventory_loader=self.sleeve_inventory_service,
+            account_service=account_service,
         )
         self.dca_engine = DcaStrategyEngine(
             settings=settings,
             sleeve_inventory_loader=self.sleeve_inventory_service,
+            account_service=account_service,
         )
         self.allocator = PortfolioAllocatorV2Phase1(settings=settings)
         self.auto_controller = StrategySleeveAutoController(

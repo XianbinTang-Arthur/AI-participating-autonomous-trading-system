@@ -19,6 +19,7 @@ from aats.schemas.decision import (
 )
 from aats.services.fee_resolver import EffectiveFeeResolver
 from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, to_decimal
+from aats.services.trade_costs import TradeCostService
 
 
 class TargetPositionEngine:
@@ -30,6 +31,7 @@ class TargetPositionEngine:
     ) -> None:
         self.settings = settings
         self.fee_resolver = fee_resolver or EffectiveFeeResolver(settings=settings)
+        self.trade_cost_service = TradeCostService(settings=settings, fee_resolver=self.fee_resolver)
 
     def build(
         self,
@@ -1487,15 +1489,20 @@ class TargetPositionEngine:
         )
         envelope = None if ai_assessment is None else ai_assessment.ai_execution_parameter_suggestion
         suggestion = None if envelope is None else envelope.suggestion
-        estimated_fee_bps = self.fee_resolver.estimated_execution_fee_bps(
+        estimate = self.trade_cost_service.estimate_single_leg_entry(
+            model_name="directional_target_position",
             symbol=symbol,
+            product_type=product_type,
+            margin_mode=self.settings.margin_mode,
             execution_style="bounded_limit_ioc" if suggestion is not None else "taker",
             order_type="limit" if suggestion is not None else "market",
             passive_bias=None if suggestion is None else suggestion.passive_bias,
             maker_taker_bias=None if suggestion is None else suggestion.maker_taker_bias,
+            expected_slippage_bps=expected_slippage_bps,
+            include_spread=False,
+            include_funding=product_type == "derivatives",
         )
-        funding_fee_bps = self.fee_resolver.funding_fee_bps(symbol=symbol) if product_type == "derivatives" else 0.0
-        return estimated_fee_bps + expected_slippage_bps + funding_fee_bps
+        return float(estimate.executable_total_drag_bps)
 
     def _signal_edge_bps(
         self,
