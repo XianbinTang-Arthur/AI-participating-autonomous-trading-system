@@ -12,7 +12,11 @@ from aats.bootstrap.env_profiles import (
     reset_profiled_dotenv_state,
     resolve_profile_dotenv_path,
 )
-from aats.bootstrap.managed_profiles import MANAGED_PROFILE_DEFINITIONS, MANAGED_PROFILE_DERIVED_ENV_KEYS
+from aats.bootstrap.managed_profiles import (
+    MANAGED_PROFILE_DEFINITIONS,
+    MANAGED_PROFILE_DERIVED_ENV_KEYS,
+    load_managed_profile_values,
+)
 from aats.bootstrap.settings import AATSSettings
 
 
@@ -205,6 +209,26 @@ def test_generated_managed_config_artifacts_exist_and_match_profile_layout() -> 
     configs_readme = repo_root / "configs" / "README.md"
     assert configs_readme.exists()
     assert "strategy_profiles" in configs_readme.read_text(encoding="utf-8")
+
+
+def test_derivatives_managed_profiles_use_relaxed_directional_thresholds() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    for profile in ("derivatives", "derivatives_live"):
+        values = load_managed_profile_values(profile, project_root=repo_root)
+
+        assert values["strategy_entry_allowed_regimes"] == ["trend", "breakout", "uncertain"]
+        assert values["strategy_short_entry_allowed_regimes"] == ["trend", "breakout", "uncertain"]
+        assert values["strategy_scale_in_min_signal_edge_bps"] == 16.0
+        assert values["strategy_scale_in_alpha_min"] == 0.22
+        assert values["strategy_scale_in_confidence_min"] == 0.68
+        assert values["strategy_reversal_min_signal_edge_bps"] == 20.0
+        assert values["strategy_reversal_alpha_min"] == 0.28
+        assert values["strategy_reversal_confidence_min"] == 0.72
+        assert values["strategy_max_fee_drag_ratio"] == 0.48
+        assert values["strategy_max_churn_ratio"] == 0.42
+        assert values["strategy_low_edge_threshold_bps"] == 4.0
+        assert values["strategy_low_edge_streak_limit"] == 4
+        assert values["strategy_low_edge_cooldown_seconds"] == 900.0
 
 
 def test_profile_templates_use_distinct_parallel_runtime_defaults() -> None:

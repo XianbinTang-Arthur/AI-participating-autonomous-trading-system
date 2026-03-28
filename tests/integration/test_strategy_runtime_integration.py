@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import unittest
+from unittest.mock import patch
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -419,6 +421,57 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
             "predicted_vs_realized_total_drag_error_bps",
             payload["smart_arbitrage_cost_summary"]["calibration"],
         )
+
+    async def test_smart_arbitrage_runtime_cost_summary_skips_funding_without_boundary_crossing(self) -> None:
+        settings = self._settings(
+            trading_product_type="derivatives",
+            margin_mode="cross",
+            default_symbol="BTC-USDT-SWAP",
+            allowed_symbols=("BTC-USDT-SWAP",),
+            strategy_family_active="smart_arbitrage",
+            smart_arbitrage_enabled=True,
+            smart_arbitrage_basis_entry_bps=0.0,
+            smart_arbitrage_estimated_cost_bps=0.0,
+            smart_arbitrage_funding_cost_enabled=True,
+            smart_arbitrage_funding_source_mode="configured",
+            smart_arbitrage_estimated_funding_bps=2.0,
+            smart_arbitrage_expected_hold_hours=6.0,
+            smart_arbitrage_funding_interval_hours=8.0,
+            trade_cost_spot_taker_fee_bps=0.0,
+            trade_cost_margin_taker_fee_bps=0.0,
+            trade_cost_derivatives_taker_fee_bps=0.0,
+            trade_cost_spot_spread_bps=0.0,
+            trade_cost_margin_spread_bps=0.0,
+            trade_cost_derivatives_spread_bps=0.0,
+            trade_cost_spot_slippage_bps=0.0,
+            trade_cost_margin_slippage_bps=0.0,
+            trade_cost_derivatives_slippage_bps=0.0,
+        )
+        frozen_now = datetime(2026, 3, 27, 9, 0, tzinfo=timezone.utc)
+        with patch("aats.services.strategy_engines.smart_arbitrage.cost_model.utc_now", return_value=frozen_now):
+            runtime = await build_runtime(settings)
+            await runtime.market_gateway.run_local_publisher(
+                symbol="BTC-USDT",
+                iterations=1,
+                interval_seconds=0.0,
+            )
+            await runtime.market_gateway.run_local_publisher(
+                symbol=settings.default_symbol,
+                iterations=2,
+                interval_seconds=0.0,
+            )
+            await runtime.decision_engine.run_cycle(settings.default_symbol, settings.primary_timeframe)
+
+            app = self._app(runtime)
+            with TestClient(app) as client:
+                strategy_runtime = client.get("/strategy/runtime")
+
+        self.assertEqual(strategy_runtime.status_code, 200)
+        payload = strategy_runtime.json()
+        predicted = payload["smart_arbitrage_cost_summary"]["predicted"]
+        self.assertEqual(predicted["expected_funding_events"], 0)
+        self.assertEqual(float(predicted["funding_cost_bps"]), 0.0)
+        self.assertIn("funding_outside_projected_hold_window", predicted["cost_source_flags"])
 
     @staticmethod
     def _settings(**overrides) -> AATSSettings:

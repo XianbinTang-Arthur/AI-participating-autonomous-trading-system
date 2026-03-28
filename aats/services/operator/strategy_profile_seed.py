@@ -29,7 +29,8 @@ def _clamp_int(value: int, *, lower: int, upper: int) -> int:
     return min(max(int(value), lower), upper)
 
 
-def _balanced_profile_payload(payload: StrategyProfilePayload) -> StrategyProfilePayload:
+def _balanced_profile_payload(payload: StrategyProfilePayload, *, product_type: str) -> StrategyProfilePayload:
+    derivatives_runtime = product_type == "derivatives"
     return _copy_payload(
         payload,
         strategy_flat_signal_hold_enabled=False,
@@ -59,11 +60,19 @@ def _balanced_profile_payload(payload: StrategyProfilePayload) -> StrategyProfil
         ),
         strategy_scale_in_min_signal_edge_bps=_clamp_float(
             payload.strategy_scale_in_min_signal_edge_bps,
-            lower=17.0,
+            lower=16.0 if derivatives_runtime else 17.0,
             upper=20.0,
         ),
-        strategy_scale_in_alpha_min=_clamp_float(payload.strategy_scale_in_alpha_min, lower=0.23, upper=0.26),
-        strategy_scale_in_confidence_min=_clamp_float(payload.strategy_scale_in_confidence_min, lower=0.70, upper=0.74),
+        strategy_scale_in_alpha_min=_clamp_float(
+            payload.strategy_scale_in_alpha_min,
+            lower=0.22 if derivatives_runtime else 0.23,
+            upper=0.26,
+        ),
+        strategy_scale_in_confidence_min=_clamp_float(
+            payload.strategy_scale_in_confidence_min,
+            lower=0.68 if derivatives_runtime else 0.70,
+            upper=0.74,
+        ),
         strategy_short_scale_in_min_signal_edge_bps=_clamp_float(
             payload.strategy_short_scale_in_min_signal_edge_bps,
             lower=15.0,
@@ -81,11 +90,19 @@ def _balanced_profile_payload(payload: StrategyProfilePayload) -> StrategyProfil
         ),
         strategy_reversal_min_signal_edge_bps=_clamp_float(
             payload.strategy_reversal_min_signal_edge_bps,
-            lower=22.0,
+            lower=20.0 if derivatives_runtime else 22.0,
             upper=26.0,
         ),
-        strategy_reversal_alpha_min=_clamp_float(payload.strategy_reversal_alpha_min, lower=0.32, upper=0.36),
-        strategy_reversal_confidence_min=_clamp_float(payload.strategy_reversal_confidence_min, lower=0.78, upper=0.82),
+        strategy_reversal_alpha_min=_clamp_float(
+            payload.strategy_reversal_alpha_min,
+            lower=0.28 if derivatives_runtime else 0.32,
+            upper=0.36,
+        ),
+        strategy_reversal_confidence_min=_clamp_float(
+            payload.strategy_reversal_confidence_min,
+            lower=0.72 if derivatives_runtime else 0.78,
+            upper=0.82,
+        ),
         strategy_short_reversal_min_signal_edge_bps=_clamp_float(
             payload.strategy_short_reversal_min_signal_edge_bps,
             lower=18.0,
@@ -107,13 +124,21 @@ def _balanced_profile_payload(payload: StrategyProfilePayload) -> StrategyProfil
             lower=240.0,
             upper=360.0,
         ),
-        strategy_max_fee_drag_ratio=_clamp_float(payload.strategy_max_fee_drag_ratio, lower=0.36, upper=0.42),
-        strategy_max_churn_ratio=_clamp_float(payload.strategy_max_churn_ratio, lower=0.30, upper=0.38),
+        strategy_max_fee_drag_ratio=_clamp_float(
+            payload.strategy_max_fee_drag_ratio,
+            lower=0.36,
+            upper=0.48 if derivatives_runtime else 0.42,
+        ),
+        strategy_max_churn_ratio=_clamp_float(
+            payload.strategy_max_churn_ratio,
+            lower=0.30,
+            upper=0.42 if derivatives_runtime else 0.38,
+        ),
         strategy_low_edge_threshold_bps=_clamp_float(payload.strategy_low_edge_threshold_bps, lower=4.0, upper=5.0),
         strategy_low_edge_streak_limit=_clamp_int(payload.strategy_low_edge_streak_limit, lower=3, upper=4),
         strategy_low_edge_cooldown_seconds=_clamp_float(
             payload.strategy_low_edge_cooldown_seconds,
-            lower=1_500.0,
+            lower=900.0 if derivatives_runtime else 1_500.0,
             upper=2_400.0,
         ),
     )
@@ -138,7 +163,7 @@ def _sync_system_seed_revision(
 
 
 def _seed_revisions(*, settings: AATSSettings, payload: StrategyProfilePayload) -> list[StrategyProfileRevision]:
-    balanced_payload = _balanced_profile_payload(payload)
+    balanced_payload = _balanced_profile_payload(payload, product_type=settings.trading_product_type)
     common = {
         "product_type": settings.trading_product_type,
         "margin_mode": settings.margin_mode,

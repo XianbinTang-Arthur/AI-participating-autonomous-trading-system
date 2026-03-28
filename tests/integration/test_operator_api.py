@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 from aats.api.auth_routes import auth_router
 from aats.api.routes import router
 from aats.bootstrap.config import build_runtime
+from aats.bootstrap.managed_profiles import load_managed_profile_values
 from aats.bootstrap.settings import AATSSettings
 from aats.events.envelopes import build_envelope
 from aats.schemas.audit import DecisionAuditRecord
@@ -3646,6 +3647,102 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(selection_decisions.json()["decisions"], [])
         self.assertIn("history", activation_history.json())
         return
+
+    async def test_derivatives_strategy_profile_snapshot_reflects_relaxed_directional_baseline(self) -> None:
+        runtime = await self._runtime(
+            operator_users=[("admin", "admin-pass")],
+            operator_auth_enabled=True,
+            operator_session_secret="session-secret",
+            trading_product_type="derivatives",
+            margin_mode="cross",
+            default_symbol="BTC-USDT-SWAP",
+            allowed_symbols=("BTC-USDT-SWAP",),
+            strategy_short_bias_enabled=True,
+            strategy_dynamic_leverage_enabled=True,
+            strategy_entry_allowed_regimes=("trend", "breakout", "uncertain"),
+            strategy_short_entry_allowed_regimes=("trend", "breakout", "uncertain"),
+            strategy_scale_in_min_signal_edge_bps=16.0,
+            strategy_scale_in_alpha_min=0.22,
+            strategy_scale_in_confidence_min=0.68,
+            strategy_reversal_min_signal_edge_bps=20.0,
+            strategy_reversal_alpha_min=0.28,
+            strategy_reversal_confidence_min=0.72,
+            strategy_max_fee_drag_ratio=0.48,
+            strategy_max_churn_ratio=0.42,
+            strategy_low_edge_threshold_bps=4.0,
+            strategy_low_edge_streak_limit=4,
+            strategy_low_edge_cooldown_seconds=900.0,
+        )
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            login = client.post("/auth/login", json={"username": "admin", "password": "admin-pass"})
+            snapshot = client.get("/strategy-profiles")
+
+        self.assertEqual(login.status_code, 200)
+        self.assertEqual(snapshot.status_code, 200)
+        payload = snapshot.json()
+        self.assertEqual(payload["active_revision"]["profile_id"], "trend_normal")
+        summary = payload["active_revision"]["payload_summary"]
+        self.assertEqual(summary["strategy_entry_allowed_regimes"], ["trend", "breakout", "uncertain"])
+        self.assertEqual(summary["strategy_short_entry_allowed_regimes"], ["trend", "breakout", "uncertain"])
+        self.assertEqual(summary["strategy_scale_in_min_signal_edge_bps"], 16.0)
+        self.assertEqual(summary["strategy_scale_in_alpha_min"], 0.22)
+        self.assertEqual(summary["strategy_scale_in_confidence_min"], 0.68)
+        self.assertEqual(summary["strategy_reversal_min_signal_edge_bps"], 20.0)
+        self.assertEqual(summary["strategy_reversal_alpha_min"], 0.28)
+        self.assertEqual(summary["strategy_reversal_confidence_min"], 0.72)
+        self.assertEqual(summary["strategy_max_fee_drag_ratio"], 0.48)
+        self.assertEqual(summary["strategy_max_churn_ratio"], 0.42)
+        self.assertEqual(summary["strategy_low_edge_threshold_bps"], 4.0)
+        self.assertEqual(summary["strategy_low_edge_streak_limit"], 4)
+        self.assertEqual(summary["strategy_low_edge_cooldown_seconds"], 900.0)
+
+    async def test_managed_derivatives_profile_snapshot_reflects_relaxed_directional_baseline(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        managed_values = load_managed_profile_values("derivatives", project_root=repo_root)
+        managed_values.update(
+            {
+                "mode": "paper_live",
+                "market_data_backend": "demo",
+                "execution_backend": "paper",
+                "account_backend": "disabled",
+                "account_read_enabled": False,
+                "storage_mode": "memory",
+                "event_persistence_mode": "strict",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+            }
+        )
+        runtime = await self._runtime(
+            operator_users=[("admin", "admin-pass")],
+            operator_session_secret="session-secret",
+            **managed_values,
+        )
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            login = client.post("/auth/login", json={"username": "admin", "password": "admin-pass"})
+            snapshot = client.get("/strategy-profiles")
+
+        self.assertEqual(login.status_code, 200)
+        self.assertEqual(snapshot.status_code, 200)
+        payload = snapshot.json()
+        self.assertEqual(payload["active_revision"]["profile_id"], "trend_normal")
+        summary = payload["active_revision"]["payload_summary"]
+        self.assertEqual(summary["strategy_entry_allowed_regimes"], ["trend", "breakout", "uncertain"])
+        self.assertEqual(summary["strategy_short_entry_allowed_regimes"], ["trend", "breakout", "uncertain"])
+        self.assertEqual(summary["strategy_scale_in_min_signal_edge_bps"], 16.0)
+        self.assertEqual(summary["strategy_scale_in_alpha_min"], 0.22)
+        self.assertEqual(summary["strategy_scale_in_confidence_min"], 0.68)
+        self.assertEqual(summary["strategy_reversal_min_signal_edge_bps"], 20.0)
+        self.assertEqual(summary["strategy_reversal_alpha_min"], 0.28)
+        self.assertEqual(summary["strategy_reversal_confidence_min"], 0.72)
+        self.assertEqual(summary["strategy_max_fee_drag_ratio"], 0.48)
+        self.assertEqual(summary["strategy_max_churn_ratio"], 0.42)
+        self.assertEqual(summary["strategy_low_edge_threshold_bps"], 4.0)
+        self.assertEqual(summary["strategy_low_edge_streak_limit"], 4)
+        self.assertEqual(summary["strategy_low_edge_cooldown_seconds"], 900.0)
 
     async def test_ai_config_summary_route_returns_only_ai_config_page_fields(self) -> None:
         runtime = await self._runtime(

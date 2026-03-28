@@ -209,14 +209,16 @@ strategy_expected_slippage_bps_fraction: 0.28
 strategy_edge_noise_buffer_bps: 4.5
 # [常用可调] strategy_min_net_edge_bps：最小净边际。可选值：0.0 ~ 50.0；推荐值：6.0。
 strategy_min_net_edge_bps: 5.0
-# [常用可调] strategy_entry_allowed_regimes：允许新开仓的市场状态。可选值：trend / breakout / range / uncertain / high_volatility；推荐值：trend, breakout。
+# [常用可调] strategy_entry_allowed_regimes：允许新开仓的市场状态。可选值：trend / breakout / range / uncertain / high_volatility；推荐值：trend, breakout, uncertain。
 strategy_entry_allowed_regimes:
   - trend
   - breakout
-# [进阶可调] strategy_short_entry_allowed_regimes：允许新开空的市场状态。当前只在合约运行域生效。可选值：trend / breakout / range / uncertain / high_volatility；推荐值：trend, breakout。
+  - uncertain
+# [进阶可调] strategy_short_entry_allowed_regimes：允许新开空的市场状态。当前只在合约运行域生效。可选值：trend / breakout / range / uncertain / high_volatility；推荐值：trend, breakout, uncertain。
 strategy_short_entry_allowed_regimes:
   - trend
   - breakout
+  - uncertain
 # [常用可调] strategy_entry_min_signal_edge_bps：开仓最低信号边际。可选值：0.0 ~ 100.0；推荐值：14.0。
 strategy_entry_min_signal_edge_bps: 14.0
 # [常用可调] strategy_entry_alpha_min：开仓最低 alpha。可选值：0.0 ~ 1.0；推荐值：0.18。
@@ -229,24 +231,24 @@ strategy_short_entry_min_signal_edge_bps: 12.0
 strategy_short_entry_alpha_min: 0.15
 # [进阶可调] strategy_short_entry_confidence_min：新开空最低置信度。当前只在合约运行域生效。可选值：0.0 ~ 1.0；推荐值：0.55。
 strategy_short_entry_confidence_min: 0.55
-# [常用可调] strategy_scale_in_min_signal_edge_bps：加仓最低信号边际。可选值：0.0 ~ 100.0；推荐值：18.0。
-strategy_scale_in_min_signal_edge_bps: 18.0
-# [常用可调] strategy_scale_in_alpha_min：加仓最低 alpha。可选值：0.0 ~ 1.0；推荐值：0.24。
-strategy_scale_in_alpha_min: 0.24
-# [常用可调] strategy_scale_in_confidence_min：加仓最低置信度。可选值：0.0 ~ 1.0；推荐值：0.72。
-strategy_scale_in_confidence_min: 0.72
+# [常用可调] strategy_scale_in_min_signal_edge_bps：加仓最低信号边际。可选值：0.0 ~ 100.0；推荐值：16.0。
+strategy_scale_in_min_signal_edge_bps: 16.0
+# [常用可调] strategy_scale_in_alpha_min：加仓最低 alpha。可选值：0.0 ~ 1.0；推荐值：0.22。
+strategy_scale_in_alpha_min: 0.22
+# [常用可调] strategy_scale_in_confidence_min：加仓最低置信度。可选值：0.0 ~ 1.0；推荐值：0.68。
+strategy_scale_in_confidence_min: 0.68
 # [进阶可调] strategy_short_scale_in_min_signal_edge_bps：继续加空最低信号边际。当前只在合约运行域生效。可选值：0.0 ~ 100.0；推荐值：16.0。
 strategy_short_scale_in_min_signal_edge_bps: 16.0
 # [进阶可调] strategy_short_scale_in_alpha_min：继续加空最低 alpha。当前只在合约运行域生效。可选值：0.0 ~ 1.0；推荐值：0.20。
 strategy_short_scale_in_alpha_min: 0.20
 # [进阶可调] strategy_short_scale_in_confidence_min：继续加空最低置信度。当前只在合约运行域生效。可选值：0.0 ~ 1.0；推荐值：0.64。
 strategy_short_scale_in_confidence_min: 0.64
-# [常用可调] strategy_reversal_min_signal_edge_bps：反手最低信号边际。可选值：0.0 ~ 100.0；推荐值：24.0。
-strategy_reversal_min_signal_edge_bps: 24.0
-# [常用可调] strategy_reversal_alpha_min：反手最低 alpha。可选值：0.0 ~ 1.0；推荐值：0.32。
-strategy_reversal_alpha_min: 0.34
-# [常用可调] strategy_reversal_confidence_min：反手最低置信度。可选值：0.0 ~ 1.0；推荐值：0.80。
-strategy_reversal_confidence_min: 0.80
+# [常用可调] strategy_reversal_min_signal_edge_bps：反手最低信号边际。可选值：0.0 ~ 100.0；推荐值：20.0。
+strategy_reversal_min_signal_edge_bps: 20.0
+# [常用可调] strategy_reversal_alpha_min：反手最低 alpha。可选值：0.0 ~ 1.0；推荐值：0.28。
+strategy_reversal_alpha_min: 0.28
+# [常用可调] strategy_reversal_confidence_min：反手最低置信度。可选值：0.0 ~ 1.0；推荐值：0.72。
+strategy_reversal_confidence_min: 0.72
 # [进阶可调] strategy_short_reversal_min_signal_edge_bps：反手做空最低信号边际。当前只在合约运行域生效；推荐值低于做多反手，避免明显偏空时系统只减多。可选值：0.0 ~ 100.0；推荐值：14.0。
 strategy_short_reversal_min_signal_edge_bps: 14.0
 # [进阶可调] strategy_short_reversal_alpha_min：反手做空最低 alpha。当前只在合约运行域生效。可选值：0.0 ~ 1.0；推荐值：0.18。
@@ -257,16 +259,16 @@ strategy_short_reversal_confidence_min: 0.55
 strategy_min_hold_seconds: 720.0
 # [常用可调] strategy_post_close_cooldown_seconds：平仓后冷却秒数。可选值：0 ~ 86400；推荐值：1200.0。
 strategy_post_close_cooldown_seconds: 300.0
-# [常用可调] strategy_max_fee_drag_ratio：允许的最大费耗比例。可选值：0.0 ~ 1.0；推荐值：0.45。
-strategy_max_fee_drag_ratio: 0.40
-# [常用可调] strategy_max_churn_ratio：允许的最大 churn 比例。可选值：0.0 ~ 1.0；推荐值：0.45。
-strategy_max_churn_ratio: 0.35
+# [常用可调] strategy_max_fee_drag_ratio：允许的最大费耗比例。可选值：0.0 ~ 1.0；推荐值：0.48。
+strategy_max_fee_drag_ratio: 0.48
+# [常用可调] strategy_max_churn_ratio：允许的最大 churn 比例。可选值：0.0 ~ 1.0；推荐值：0.42。
+strategy_max_churn_ratio: 0.42
 # [常用可调] strategy_low_edge_threshold_bps：低边际识别阈值。可选值：0.0 ~ 50.0；推荐值：4.0。
-strategy_low_edge_threshold_bps: 4.5
-# [常用可调] strategy_low_edge_streak_limit：低边际连续触发次数上限。可选值：1 ~ 20；推荐值：3。
-strategy_low_edge_streak_limit: 3
-# [常用可调] strategy_low_edge_cooldown_seconds：低边际触发后的冷却秒数。可选值：0 ~ 86400；推荐值：3600.0。
-strategy_low_edge_cooldown_seconds: 1800.0
+strategy_low_edge_threshold_bps: 4.0
+# [常用可调] strategy_low_edge_streak_limit：低边际连续触发次数上限。可选值：1 ~ 20；推荐值：4。
+strategy_low_edge_streak_limit: 4
+# [常用可调] strategy_low_edge_cooldown_seconds：低边际触发后的冷却秒数。可选值：0 ~ 86400；推荐值：900.0。
+strategy_low_edge_cooldown_seconds: 900.0
 # [常用可调] strategy_transient_close_retry_cooldown_seconds：瞬时平仓失败后的重试冷却。可选值：0 ~ 3600；推荐值：90.0。
 strategy_transient_close_retry_cooldown_seconds: 90.0
 

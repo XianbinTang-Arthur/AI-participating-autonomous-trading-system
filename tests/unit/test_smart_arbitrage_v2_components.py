@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from decimal import Decimal
 import unittest
+from unittest.mock import patch
 
 from aats.bootstrap.settings import AATSSettings
 from aats.services.strategy_engines.smart_arbitrage.capabilities import resolve_execution_capability
@@ -150,7 +152,7 @@ class TestSmartArbitrageV2Components(unittest.TestCase):
         self.assertEqual(cost.executable_edge_bps, Decimal("26"))
         self.assertEqual(cost.breakeven_basis_bps, Decimal("14"))
 
-    def test_cost_model_supports_funding_event_and_borrow_window_projection(self) -> None:
+    def test_cost_model_projects_funding_events_from_next_boundary_crossings(self) -> None:
         settings = AATSSettings.model_validate(
             {
                 "smart_arbitrage_cost_model_enabled": True,
@@ -175,11 +177,13 @@ class TestSmartArbitrageV2Components(unittest.TestCase):
             }
         )
 
-        cost = build_cost_breakdown(
-            settings=settings,
-            basis_bps=Decimal("-100"),
-            execution_mode="margin_reverse_carry",
-        )
+        frozen_now = datetime(2026, 3, 27, 6, 30, tzinfo=timezone.utc)
+        with patch("aats.services.strategy_engines.smart_arbitrage.cost_model.utc_now", return_value=frozen_now):
+            cost = build_cost_breakdown(
+                settings=settings,
+                basis_bps=Decimal("-100"),
+                execution_mode="margin_reverse_carry",
+            )
 
         self.assertEqual(cost.expected_funding_events, 2)
         self.assertEqual(cost.funding_cost_bps, Decimal("3.0"))
@@ -189,6 +193,83 @@ class TestSmartArbitrageV2Components(unittest.TestCase):
         self.assertIn("borrow_apr_window_model", cost.cost_source_flags)
         self.assertEqual(cost.executable_total_drag_bps, Decimal("5.0000"))
         self.assertEqual(cost.executable_edge_bps, Decimal("95.0000"))
+
+    def test_cost_model_skips_funding_when_hold_window_does_not_reach_next_boundary(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "smart_arbitrage_cost_model_enabled": True,
+                "trade_cost_spot_taker_fee_bps": 0.0,
+                "trade_cost_margin_taker_fee_bps": 0.0,
+                "trade_cost_derivatives_taker_fee_bps": 0.0,
+                "trade_cost_spot_spread_bps": 0.0,
+                "trade_cost_margin_spread_bps": 0.0,
+                "trade_cost_derivatives_spread_bps": 0.0,
+                "trade_cost_spot_slippage_bps": 0.0,
+                "trade_cost_margin_slippage_bps": 0.0,
+                "trade_cost_derivatives_slippage_bps": 0.0,
+                "smart_arbitrage_funding_cost_enabled": True,
+                "smart_arbitrage_funding_source_mode": "configured",
+                "smart_arbitrage_estimated_funding_bps": 2.0,
+                "smart_arbitrage_estimated_cost_bps": 0.0,
+                "smart_arbitrage_expected_hold_hours": 6.0,
+                "smart_arbitrage_funding_interval_hours": 8.0,
+            }
+        )
+
+        frozen_now = datetime(2026, 3, 27, 9, 0, tzinfo=timezone.utc)
+        with patch("aats.services.strategy_engines.smart_arbitrage.cost_model.utc_now", return_value=frozen_now):
+            cost = build_cost_breakdown(
+                settings=settings,
+                basis_bps=Decimal("40"),
+                execution_mode="spot_carry",
+            )
+
+        self.assertEqual(cost.expected_funding_events, 0)
+        self.assertEqual(cost.funding_cost_bps, Decimal("0"))
+        self.assertIn("funding_outside_projected_hold_window", cost.cost_source_flags)
+        self.assertEqual(cost.executable_total_drag_bps, Decimal("0"))
+        self.assertEqual(cost.executable_edge_bps, Decimal("40"))
+
+    def test_cost_model_reads_account_proxy_funding_without_fee_schedule_mode(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "smart_arbitrage_cost_model_enabled": True,
+                "smart_arbitrage_fee_source_mode": "configured",
+                "smart_arbitrage_funding_cost_enabled": True,
+                "smart_arbitrage_funding_source_mode": "account_proxy",
+                "smart_arbitrage_expected_hold_hours": 8.0,
+                "smart_arbitrage_funding_interval_hours": 8.0,
+                "smart_arbitrage_estimated_cost_bps": 0.0,
+                "trade_cost_spot_taker_fee_bps": 0.0,
+                "trade_cost_margin_taker_fee_bps": 0.0,
+                "trade_cost_derivatives_taker_fee_bps": 0.0,
+                "trade_cost_spot_spread_bps": 0.0,
+                "trade_cost_margin_spread_bps": 0.0,
+                "trade_cost_derivatives_spread_bps": 0.0,
+                "trade_cost_spot_slippage_bps": 0.0,
+                "trade_cost_margin_slippage_bps": 0.0,
+                "trade_cost_derivatives_slippage_bps": 0.0,
+            }
+        )
+
+        class _AccountProxy:
+            @staticmethod
+            def funding_fee_bps_proxy(*, symbol: str | None = None) -> Decimal:
+                return Decimal("1.25") if symbol == "BTC-USDT-SWAP" else Decimal("0")
+
+        frozen_now = datetime(2026, 3, 27, 8, 0, tzinfo=timezone.utc)
+        with patch("aats.services.strategy_engines.smart_arbitrage.cost_model.utc_now", return_value=frozen_now):
+            cost = build_cost_breakdown(
+                settings=settings,
+                basis_bps=Decimal("40"),
+                execution_mode="spot_carry",
+                hedge_symbol="BTC-USDT-SWAP",
+                account_service=_AccountProxy(),
+            )
+
+        self.assertEqual(cost.expected_funding_events, 1)
+        self.assertEqual(cost.funding_cost_bps, Decimal("1.25"))
+        self.assertIn("funding_account_proxy_per_event", cost.cost_source_flags)
 
     def test_cost_model_treats_estimated_borrow_apr_as_percentage(self) -> None:
         settings = AATSSettings.model_validate(
