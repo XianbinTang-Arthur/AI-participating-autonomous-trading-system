@@ -151,32 +151,7 @@ smart_arbitrage_borrow_interest_free_ratio: 0.0
 smart_arbitrage_estimated_funding_bps: 0.0
 # [进阶可调] smart_arbitrage_estimated_borrow_bps：细分借币费预估。可选值：0.0 以上；推荐值：0.0。
 smart_arbitrage_estimated_borrow_bps: 0.0
-# [常用可调] spot_grid_enabled：是否启用现货网格。可选值：true / false；推荐值：true。
-spot_grid_enabled: true
-# [常用可调] spot_grid_anchor_lookback_snapshots：网格锚点回看快照数。可选值：5 ~ 500；推荐值：24。
-spot_grid_anchor_lookback_snapshots: 24
-# [常用可调] spot_grid_band_bps：网格带宽。可选值：10.0 ~ 1000.0；推荐值：150.0。
-spot_grid_band_bps: 150.0
-# [常用可调] spot_grid_inventory_floor_fraction：网格库存下限占比。可选值：0.0 ~ 1.0；推荐值：0.15。
-spot_grid_inventory_floor_fraction: 0.15
-# [常用可调] spot_grid_inventory_ceiling_fraction：网格库存上限占比。可选值：0.0 ~ 1.5；推荐值：1.0。
-spot_grid_inventory_ceiling_fraction: 1.0
-# [常用可调] spot_grid_rebalance_min_fraction_of_max_qty：触发再平衡的最小仓位占比。可选值：0.0 ~ 1.0；推荐值：0.08。
-spot_grid_rebalance_min_fraction_of_max_qty: 0.08
-# [常用可调] spot_grid_breakout_guard_enabled：是否启用突破保护。合约 profile 当前即使不作为主执行，也保留统一调参。可选值：true / false；推荐值：true。
-spot_grid_breakout_guard_enabled: true
-# [常用可调] dca_enabled：是否启用定投策略。可选值：true / false；推荐值：true。
-dca_enabled: true
-# [常用可调] dca_interval_seconds：定投周期秒数。可选值：正数；推荐值：86400.0。
-dca_interval_seconds: 86400.0
-# [常用可调] dca_quote_budget_per_cycle：每次定投预算。可选值：正数；推荐值：25.0。
-dca_quote_budget_per_cycle: 25.0
-# [常用可调] dca_max_position_fraction_of_limit：定投最多吃到仓位上限的比例。可选值：0.0 ~ 1.0；推荐值：1.0。
-dca_max_position_fraction_of_limit: 1.0
-# [常用可调] dca_pullback_only_enabled：是否只在回撤时买入。可选值：true / false；推荐值：false。
-dca_pullback_only_enabled: false
-# [常用可调] dca_pullback_entry_bps：回撤买入阈值。可选值：0.0 ~ 500.0；推荐值：40.0。
-dca_pullback_entry_bps: 40.0
+# 现货专属的 spot_grid / dca 参数统一维护在 spot*.yaml；合约 profile 不再重复保留这些历史遗留项。
 
 # 决策节奏
 # [常用可调] max_decisions_per_minute：每分钟最多允许多少次决策。可选值：1 ~ 20；推荐值：3。

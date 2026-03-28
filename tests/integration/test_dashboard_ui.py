@@ -787,6 +787,149 @@ console.log(JSON.stringify({
         self.assertIn('"hidesGenericNoLegCopy":true', result.stdout)
         self.assertIn('"hasCostSourceCopy":true', result.stdout)
 
+    def test_strategy_view_hides_derivatives_only_reference_blocks_for_spot_runtime(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { renderStrategyView } from './aats/api/static/modules/views/strategy-view.js';
+
+const html = renderStrategyView({
+  latestDecision: {
+    decision_id: 'dec-spot-reference',
+    decision_time: '2026-03-27T12:00:00Z',
+    baseline_assessment: { regime: 'trend', direction_bias: 'flat', confidence: 0.55 },
+    ai_assessment: { directional_edge: 0.03 },
+    position_target: {
+      strategy_family: 'spot_grid',
+      position_intent: 'hold',
+      current_position_qty: 0.2,
+      target_position_qty: 0.2,
+      delta_position_qty: 0,
+      product_type: 'spot',
+      margin_mode: 'cash',
+      target_exposure_side: 'long',
+      guardrail_flags: [],
+    },
+    policy_decision: { execution_allowed: true, allow_reasons: ['spot_grid_rebalance_ready'] },
+    risk_decision: { approved: true, approval_reasons: ['risk_within_limits'] },
+    decision_outcome: { selected_strategy_family: 'spot_grid' },
+    decision_context: {
+      symbol: 'BTC-USDT',
+      current_position_qty: 0.2,
+      as_of_ts: '2026-03-27T12:00:00Z',
+      product_type: 'spot',
+    },
+  },
+  recentDecisions: { decisions: [] },
+  executionLatest: {},
+  strategyRuntime: {
+    summary: {
+      automatic_selection_enabled: true,
+      configured_active_family: 'spot_grid',
+      latest_selected_family: 'spot_grid',
+      latest_selected_state: 'ready',
+      latest_bundle_status: 'single_sleeve',
+      latest_portfolio_requested_notional: 100,
+      latest_portfolio_approved_notional: 100,
+      latest_portfolio_budget_cut_notional: 0,
+      auto_parallel_enabled: true,
+      automation_active_count: 1,
+      automation_contracted_count: 0,
+      automation_paused_count: 0,
+      latest_approved_sleeve_weights: {},
+      latest_selection_reason_codes: ['spot_grid_rebalance_ready'],
+    },
+    latest_snapshot: { candidates: [], automation_decisions: [] },
+    configured_parameters: {
+      trade_costs: {
+        rate_unit: 'bps',
+        rate_example: '8 = 0.08%',
+        live_fee_resolution: 'account_schedule_fallback_to_configured',
+        spot_maker_fee_bps: 8,
+        spot_taker_fee_bps: 10,
+        margin_maker_fee_bps: 8,
+        margin_taker_fee_bps: 10,
+        derivatives_maker_fee_bps: 2,
+        derivatives_taker_fee_bps: 5,
+        delivery_settlement_fee_bps: 1,
+        spot_spread_bps: 1.2,
+        spot_slippage_bps: 0.6,
+        margin_spread_bps: 1.0,
+        margin_slippage_bps: 0.5,
+        derivatives_spread_bps: 0.8,
+        derivatives_slippage_bps: 0.4,
+      },
+      directional: {
+        product_type: 'spot',
+        shorting_runtime_supported: false,
+        short_bias_enabled: false,
+        entry_allowed_regimes: ['trend', 'breakout'],
+        entry_min_signal_edge_bps: 14,
+        entry_alpha_min: 0.18,
+        entry_confidence_min: 0.63,
+        scale_in_min_signal_edge_bps: 16,
+        scale_in_alpha_min: 0.22,
+        scale_in_confidence_min: 0.68,
+        reversal_min_signal_edge_bps: 20,
+        reversal_alpha_min: 0.28,
+        reversal_confidence_min: 0.72,
+      },
+      spot_grid: {
+        enabled: true,
+        anchor_lookback_snapshots: 24,
+        band_bps: 150,
+        inventory_floor_fraction: 0.15,
+        inventory_ceiling_fraction: 1.0,
+        rebalance_min_fraction_of_max_qty: 0.08,
+        breakout_guard_enabled: true,
+      },
+      dca: {
+        enabled: true,
+        interval_seconds: 86400,
+        quote_budget_per_cycle: 25,
+        max_position_fraction_of_limit: 1.0,
+        pullback_only_enabled: false,
+        pullback_entry_bps: 40,
+      },
+    },
+    smart_arbitrage_cost_summary: {},
+    latest_bundle: {},
+    latest_allocation_decision: {},
+    latest_applied_target: {},
+    recent_execution_bundles: [],
+    recent_sleeve_intents: [],
+    recent_budget_snapshots: [],
+    recent_conflict_resolutions: [],
+    recent_netting_decisions: [],
+    family_enablement: { smart_arbitrage: { enabled: false, runtime_supported: false, execution_compatible: false } },
+  },
+  strategyAttribution: {
+    summary: {},
+    profitability_by_strategy_sleeve: [],
+    sleeve_inventory_summary: [],
+  },
+  trialReviewSummary: { summary: {}, sections: {} },
+});
+
+console.log(JSON.stringify({
+  hasSpotOnlyCopy: html.includes('当前运行域不支持自动做空') && html.includes('long/共享开仓阈值'),
+  hidesShortKeys: !html.includes('strategy_short_entry_allowed_regimes') && !html.includes('strategy_short_entry_*') && !html.includes('strategy_short_reversal_*'),
+  hidesSmartArbitrageCards: !html.includes('智能套利配置') && !html.includes('智能套利磨损模型') && !html.includes('smart_arbitrage_quote_budget_per_trade'),
+  keepsTradeCostCard: html.includes('trade_cost_spot_taker_fee_bps') && html.includes('trade_cost_derivatives_taker_fee_bps'),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertIn('"hasSpotOnlyCopy":true', result.stdout)
+        self.assertIn('"hidesShortKeys":true', result.stdout)
+        self.assertIn('"hidesSmartArbitrageCards":true', result.stdout)
+        self.assertIn('"keepsTradeCostCard":true', result.stdout)
+
     def test_strategy_view_organizes_workspace_into_outcome_opportunity_reference_and_history_sections(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
         script = """

@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 
 from aats.bootstrap.settings import AATSSettings
-from aats.services.operator.runtime_profiles import runtime_profile_resolution
+from aats.services.operator.runtime_profiles import readonly_runtime_profile_snapshot, runtime_profile_resolution
 
 
 class TestRuntimeProfiles(unittest.TestCase):
@@ -29,6 +29,60 @@ class TestRuntimeProfiles(unittest.TestCase):
 
         self.assertEqual(resolution.profile_source, "env_only")
         self.assertEqual(resolution.resolved_settings["default_symbol"], "BTC-USDT")
+
+    def test_spot_runtime_profile_snapshot_hides_derivatives_only_fields(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "trading_product_type": "spot",
+                "margin_mode": "cash",
+                "default_symbol": "BTC-USDT",
+            }
+        )
+
+        snapshot = readonly_runtime_profile_snapshot(
+            settings=settings,
+            resolution=runtime_profile_resolution(settings=settings),
+        )
+
+        payload = snapshot["current_runtime_payload"]
+        summary = snapshot["current_runtime_summary"]
+        self.assertNotIn("strategy_short_bias_enabled", payload)
+        self.assertNotIn("strategy_dynamic_leverage_enabled", payload)
+        self.assertNotIn("max_target_leverage", payload)
+        self.assertNotIn("default_target_leverage", payload)
+        self.assertNotIn("strategy_short_bias_enabled", summary)
+        self.assertNotIn("strategy_dynamic_leverage_enabled", summary)
+        self.assertNotIn("max_target_leverage", summary)
+        self.assertNotIn("default_target_leverage", summary)
+
+    def test_derivatives_runtime_profile_snapshot_keeps_derivatives_only_fields(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "default_symbol": "BTC-USDT-SWAP",
+                "strategy_short_bias_enabled": True,
+                "strategy_dynamic_leverage_enabled": True,
+                "max_target_leverage": 5.0,
+                "default_target_leverage": 3.0,
+            }
+        )
+
+        snapshot = readonly_runtime_profile_snapshot(
+            settings=settings,
+            resolution=runtime_profile_resolution(settings=settings),
+        )
+
+        payload = snapshot["current_runtime_payload"]
+        summary = snapshot["current_runtime_summary"]
+        self.assertTrue(payload["strategy_short_bias_enabled"])
+        self.assertTrue(payload["strategy_dynamic_leverage_enabled"])
+        self.assertEqual(payload["max_target_leverage"], 5.0)
+        self.assertEqual(payload["default_target_leverage"], 3.0)
+        self.assertTrue(summary["strategy_short_bias_enabled"])
+        self.assertTrue(summary["strategy_dynamic_leverage_enabled"])
+        self.assertEqual(summary["max_target_leverage"], 5.0)
+        self.assertEqual(summary["default_target_leverage"], 3.0)
 
 
 if __name__ == "__main__":

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import tempfile
 import unittest
 from pathlib import Path
 from datetime import timedelta
@@ -19,7 +18,6 @@ from aats.bootstrap.settings import AATSSettings
 from aats.events.envelopes import build_envelope
 from aats.schemas.audit import DecisionAuditRecord
 from aats.schemas.ai_brief import AIDecisionBrief
-from aats.schemas.ai_shadow import AIDegradationEvent
 from aats.schemas.common import utc_now
 from aats.schemas.decision import (
     AIMarketAssessment,
@@ -47,11 +45,15 @@ from aats.events import topics
 from aats.schemas.operator import ExecutionErrorSummary, ReplayValidationSummary
 from aats.schemas.operator import OperatorUserRecord
 from aats.schemas.portfolio import FillOutcomeRecord, FundingFeeRecord
-from aats.schemas.strategy_profiles import StrategyProfileMarketRegimeAssessment, StrategyProfileRecommendation
+from aats.schemas.strategy_profiles import (
+    StrategyProfileMarketRegimeAssessment,
+    StrategyProfileRecommendation,
+    StrategyProfileRevision,
+)
 from aats.services.ai_service.provider import AIProviderResponse
 from aats.services.operator.query_service import OperatorQueryService
 from aats.services.operator.strategy_profiles import StrategyProfileControlService
-from aats.services.operator.strategy_profiles import _seed_revisions, seed_strategy_profiles
+from aats.services.operator.strategy_profile_seed import _seed_revisions, seed_strategy_profiles
 from aats.services.operator.passwords import hash_password
 from aats.schemas.strategy_profiles import strategy_profile_payload_from_settings
 from tests.support.postgres import temporary_postgres_url
@@ -3744,6 +3746,111 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(summary["strategy_low_edge_streak_limit"], 4)
         self.assertEqual(summary["strategy_low_edge_cooldown_seconds"], 900.0)
 
+    async def test_spot_operator_snapshots_hide_derivatives_only_runtime_and_profile_fields(self) -> None:
+        runtime = await self._runtime(
+            operator_users=[("admin", "admin-pass")],
+            operator_auth_enabled=True,
+            operator_session_secret="session-secret",
+            trading_product_type="spot",
+            margin_mode="cash",
+            default_symbol="BTC-USDT",
+            allowed_symbols=("BTC-USDT",),
+            strategy_entry_allowed_regimes=("trend", "breakout"),
+            strategy_entry_min_signal_edge_bps=14.0,
+            strategy_entry_alpha_min=0.18,
+            strategy_entry_confidence_min=0.63,
+            strategy_scale_in_min_signal_edge_bps=18.0,
+            strategy_scale_in_alpha_min=0.24,
+            strategy_scale_in_confidence_min=0.71,
+            strategy_reversal_min_signal_edge_bps=24.0,
+            strategy_reversal_alpha_min=0.34,
+            strategy_reversal_confidence_min=0.79,
+            strategy_short_entry_allowed_regimes=("uncertain",),
+            strategy_short_entry_min_signal_edge_bps=11.0,
+            strategy_short_entry_alpha_min=0.15,
+            strategy_short_entry_confidence_min=0.55,
+            strategy_short_scale_in_min_signal_edge_bps=16.0,
+            strategy_short_scale_in_alpha_min=0.20,
+            strategy_short_scale_in_confidence_min=0.64,
+            strategy_short_reversal_min_signal_edge_bps=14.0,
+            strategy_short_reversal_alpha_min=0.18,
+            strategy_short_reversal_confidence_min=0.55,
+        )
+        legacy_revision = runtime.strategy_profile_repo.list_revisions(
+            product_type=runtime.settings.trading_product_type,
+            margin_mode=runtime.settings.margin_mode,
+        )[0]
+        legacy_payload = legacy_revision.payload.model_copy(
+            update={
+                "strategy_entry_alpha_min": 0.16,
+                "strategy_short_entry_alpha_min": 0.32,
+                "strategy_scale_in_alpha_min": 0.20,
+                "strategy_short_scale_in_alpha_min": 0.36,
+                "strategy_reversal_alpha_min": 0.26,
+                "strategy_short_reversal_alpha_min": 0.42,
+            }
+        )
+        runtime.strategy_profile_repo.save_revision(
+            StrategyProfileRevision.model_validate(
+                {
+                    **legacy_revision.model_dump(mode="python"),
+                    "revision_id": "strp_rev_legacy_spot_uncoupled",
+                    "profile_id": "legacy_spot_uncoupled",
+                    "profile_label": "Legacy Spot Uncoupled",
+                    "status": "draft",
+                    "payload": legacy_payload,
+                    "description": "legacy spot profile with stale short-side thresholds",
+                    "created_reason": "test",
+                    "updated_at": utc_now(),
+                }
+            )
+        )
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            login = client.post("/auth/login", json={"username": "admin", "password": "admin-pass"})
+            strategy_snapshot = client.get("/strategy-profiles")
+            ai_config_summary = client.get("/ai-config/summary")
+
+        self.assertEqual(login.status_code, 200)
+        self.assertEqual(strategy_snapshot.status_code, 200)
+        self.assertEqual(ai_config_summary.status_code, 200)
+
+        strategy_payload = strategy_snapshot.json()
+        summary = strategy_payload["active_revision"]["payload_summary"]
+        self.assertEqual(strategy_payload["active_revision"]["profile_id"], "trend_normal")
+        self.assertEqual(summary["strategy_entry_allowed_regimes"], ["trend", "breakout"])
+        self.assertEqual(summary["strategy_entry_min_signal_edge_bps"], 14.0)
+        self.assertEqual(summary["strategy_scale_in_min_signal_edge_bps"], 18.0)
+        self.assertEqual(summary["strategy_reversal_confidence_min"], 0.79)
+        self.assertNotIn("strategy_short_entry_allowed_regimes", summary)
+        self.assertNotIn("strategy_short_entry_min_signal_edge_bps", summary)
+        self.assertNotIn("strategy_short_reversal_confidence_min", summary)
+        legacy_profile = next(
+            item
+            for item in strategy_payload["profile_space"]["registered_profiles"]
+            if item["profile_id"] == "legacy_spot_uncoupled"
+        )
+        self.assertEqual(legacy_profile["axes"]["entry_threshold"], "relaxed")
+        self.assertEqual(legacy_profile["axes"]["scale_in_threshold"], "relaxed")
+        self.assertEqual(legacy_profile["axes"]["reversal_threshold"], "relaxed")
+        comparison_row = next(
+            item
+            for item in strategy_payload["comparison_report"]["rows"]
+            if item["profile_id"] == "legacy_spot_uncoupled"
+        )
+        self.assertEqual(comparison_row["axes"]["entry_threshold"], "relaxed")
+        self.assertEqual(comparison_row["axes"]["scale_in_threshold"], "relaxed")
+        self.assertEqual(comparison_row["axes"]["reversal_threshold"], "relaxed")
+
+        runtime_payload = ai_config_summary.json()["runtime_profile"]["current_runtime_payload"]
+        self.assertEqual(runtime_payload["trading_product_type"], "spot")
+        self.assertEqual(runtime_payload["margin_mode"], "cash")
+        self.assertNotIn("strategy_short_bias_enabled", runtime_payload)
+        self.assertNotIn("strategy_dynamic_leverage_enabled", runtime_payload)
+        self.assertNotIn("max_target_leverage", runtime_payload)
+        self.assertNotIn("default_target_leverage", runtime_payload)
+
     async def test_ai_config_summary_route_returns_only_ai_config_page_fields(self) -> None:
         runtime = await self._runtime(
             operator_auth_enabled=True,
@@ -4324,7 +4431,6 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
                 },
             )
             fetched = client.get("/strategy-profiles/auto-rollback-policy")
-            snapshot = client.get("/strategy-profiles")
 
         self.assertEqual(updated.status_code, 200)
         self.assertEqual(fetched.status_code, 200)
@@ -4407,7 +4513,6 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
                 },
             )
             fetched = client.get("/strategy-profiles/activation-policy")
-            snapshot = client.get("/strategy-profiles")
 
         self.assertEqual(updated.status_code, 200)
         self.assertEqual(fetched.status_code, 200)

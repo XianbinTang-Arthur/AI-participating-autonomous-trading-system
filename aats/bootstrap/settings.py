@@ -196,6 +196,7 @@ class AATSSettings(BaseSettings):
     okx_account_config_refresh_interval_seconds: float = 300.0
     okx_account_position_risk_refresh_interval_seconds: float = 60.0
     okx_bills_refresh_interval_seconds: float = 60.0
+    okx_funding_rate_refresh_interval_seconds: float = 60.0
     okx_trade_fee_refresh_interval_seconds: float = 300.0
     okx_system_status_refresh_interval_seconds: float = 60.0
     okx_max_order_quantity_precheck_enabled: bool = True

@@ -85,7 +85,10 @@ def build_comparison_report(
                 profile_label=revision.profile_label,
                 risk_level=revision.risk_level,
                 market_intent=revision.market_intent,
-                axes=strategy_profile_axes_from_payload(revision.payload),
+                axes=strategy_profile_axes_from_payload(
+                    revision.payload,
+                    product_type=revision.product_type,
+                ),
                 evaluation_count=evaluation_count,
                 total_trade_count=trade_count,
                 avg_net_realized_pnl=avg_net_realized_pnl,
@@ -98,7 +101,10 @@ def build_comparison_report(
                 score=score,
                 score_breakdown=score_breakdown,
                 expected_behavior=list(revision.expected_behavior),
-                summary=summarize_strategy_profile_payload(revision.payload),
+                summary=summarize_strategy_profile_payload(
+                    revision.payload,
+                    product_type=revision.product_type,
+                ),
             )
         )
     rows.sort(key=lambda item: (-item.score, item.profile_id))

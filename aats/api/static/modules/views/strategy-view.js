@@ -501,6 +501,19 @@ export function renderStrategySections(data) {
 
 export function renderStrategyView(data) {
   const sections = renderStrategySections(data);
+  const hasSmartArbitrageReference = Object.keys(
+    data?.strategyRuntime?.configured_parameters?.smart_arbitrage || {}
+  ).length > 0;
+  const referenceCards = [
+    `<div class="span-6">${sections.strategyTradeCosts}</div>`,
+    `<div class="span-6">${sections.strategyDirectionalConfig}</div>`,
+  ];
+  if (hasSmartArbitrageReference) {
+    referenceCards.push(
+      `<div class="span-7">${sections.strategySmartArbitrageConfig}</div>`,
+      `<div class="span-5">${sections.strategySmartArbitrageCost}</div>`
+    );
+  }
   return `
     <div class="workspace-stack strategy-workspace">
       <nav class="section-nav strategy-section-nav" aria-label="策略判断分区导航">
@@ -554,10 +567,7 @@ export function renderStrategyView(data) {
           "展开配置与成本参考",
           `
             <div class="panel-grid strategy-page-grid">
-              <div class="span-6">${sections.strategyTradeCosts}</div>
-              <div class="span-6">${sections.strategyDirectionalConfig}</div>
-              <div class="span-7">${sections.strategySmartArbitrageConfig}</div>
-              <div class="span-5">${sections.strategySmartArbitrageCost}</div>
+              ${referenceCards.join("")}
             </div>
           `,
           { meta: "默认折叠，避免配置卡占满主工作区" }
@@ -664,55 +674,81 @@ function renderDirectionalShortConfigCard(config = {}, latestDecision = {}, deci
   const baseline = latestDecision?.baseline_assessment || {};
   const target = latestDecision?.position_target || {};
   const shortingSupported = config?.shorting_runtime_supported === true;
+  const shortConfigVisible = shortingSupported && (config?.product_type || decisionScene) === "derivatives";
   const shortBiasEnabled = config?.short_bias_enabled === true;
   const effectiveShortBiasEnabled = (
     config?.short_bias_enabled === true
     && !(Array.isArray(config?.runtime_shorting_blockers) && config.runtime_shorting_blockers.length)
   );
+  const summaryItems = [
+    {
+      label: "做空能力",
+      value: directionalShortCapabilityLabel(config, decisionScene),
+      meta: directionalShortCapabilityMeta(config, decisionScene),
+      tone: effectiveShortBiasEnabled ? "positive" : "warning",
+    },
+    {
+      label: "当前偏空信号",
+      value: directionalShortSignalLabel(baseline, latestDecision?.ai_assessment || {}),
+      meta: directionalShortSignalMeta(baseline, latestDecision?.ai_assessment || {}),
+      tone: baseline?.direction_bias === "short" ? "warning" : "info",
+    },
+    shortConfigVisible
+      ? {
+        label: "做空开仓门槛",
+        value: directionalThresholdTriple(
+          config?.short_entry_min_signal_edge_bps,
+          config?.short_entry_alpha_min,
+          config?.short_entry_confidence_min
+        ),
+        meta: `允许状态 ${localizeList(config?.short_entry_allowed_regimes || [], "、") || "全部"}`,
+        tone: shortBiasEnabled ? "info" : "warning",
+      }
+      : {
+        label: "当前运行说明",
+        value: "当前运行域不支持自动做空",
+        meta: "现货 cash 运行域不会生成方向空头仓位，也不会展示合约专属的 short 阈值。",
+        tone: "warning",
+      },
+    shortConfigVisible
+      ? {
+        label: "做空反手门槛",
+        value: directionalThresholdTriple(
+          config?.short_reversal_min_signal_edge_bps,
+          config?.short_reversal_alpha_min,
+          config?.short_reversal_confidence_min
+        ),
+        meta: `当前执行 ${escapeHtml(readableState(target?.position_intent || "hold"))}`,
+        tone: shortBiasEnabled ? "info" : "warning",
+      }
+      : {
+        label: "long/共享门槛",
+        value: directionalThresholdTriple(
+          config?.entry_min_signal_edge_bps,
+          config?.entry_alpha_min,
+          config?.entry_confidence_min
+        ),
+        meta: `允许状态 ${localizeList(config?.entry_allowed_regimes || [], "、") || "全部"}`,
+        tone: "info",
+      },
+  ];
   return surfaceCard({
     title: "方向策略做空能力",
     kicker: "做空开关与阈值",
     copy: "方向策略现在把 long 和 short 的开仓、加仓、反手阈值拆开配置。这里重点回答两件事：当前能不能自动做空，以及这轮为什么没有触发做空。",
     classes: "strategy-compact-card",
     content: `
-      ${summaryStrip([
-        {
-          label: "做空能力",
-          value: directionalShortCapabilityLabel(config, decisionScene),
-          meta: directionalShortCapabilityMeta(config, decisionScene),
-          tone: effectiveShortBiasEnabled ? "positive" : "warning",
-        },
-        {
-          label: "当前偏空信号",
-          value: directionalShortSignalLabel(baseline, latestDecision?.ai_assessment || {}),
-          meta: directionalShortSignalMeta(baseline, latestDecision?.ai_assessment || {}),
-          tone: baseline?.direction_bias === "short" ? "warning" : "info",
-        },
-        {
-          label: "做空开仓门槛",
-          value: directionalThresholdTriple(
-            config?.short_entry_min_signal_edge_bps,
-            config?.short_entry_alpha_min,
-            config?.short_entry_confidence_min
-          ),
-          meta: `允许状态 ${localizeList(config?.short_entry_allowed_regimes || [], "、") || "全部"}`,
-          tone: shortingSupported && shortBiasEnabled ? "info" : "warning",
-        },
-        {
-          label: "做空反手门槛",
-          value: directionalThresholdTriple(
-            config?.short_reversal_min_signal_edge_bps,
-            config?.short_reversal_alpha_min,
-            config?.short_reversal_confidence_min
-          ),
-          meta: `当前执行 ${escapeHtml(readableState(target?.position_intent || "hold"))}`,
-          tone: shortingSupported && shortBiasEnabled ? "info" : "warning",
-        },
-      ])}
+      ${summaryStrip(summaryItems)}
       ${kvList([
         ["当前未触发原因", directionalShortReasonText(latestDecision, config, decisionScene), directionalShortReasonMeta(target)],
         ["当前路径", directionalCurrentPathSummary(latestDecision), directionalCurrentPathMeta(latestDecision)],
-        ["阈值对比", directionalThresholdComparison(config), "上面一组是当前 long/共享阈值，下面一组是 short 独立阈值；现在不会再只靠一个布尔值决定能不能翻空。"],
+        [
+          "阈值对比",
+          directionalThresholdComparison(config),
+          shortConfigVisible
+            ? "上面一组是当前 long/共享阈值，下面一组是 short 独立阈值；现在不会再只靠一个布尔值决定能不能翻空。"
+            : "当前运行域不支持自动做空；这里只保留 long/共享阈值，避免把合约 short 参数误当成现货配置。",
+        ],
       ])}
       ${responsiveTable(
         ["参数", "当前值", "适用阶段", "说明"],
@@ -898,6 +934,9 @@ function directionalCurrentPathMeta(latestDecision = {}) {
 }
 
 function directionalThresholdComparison(config = {}) {
+  if (config?.shorting_runtime_supported !== true) {
+    return `long/共享：${directionalThresholdTriple(config?.entry_min_signal_edge_bps, config?.entry_alpha_min, config?.entry_confidence_min)}；当前运行域不支持自动做空`;
+  }
   return [
     `long/共享：${directionalThresholdTriple(config?.entry_min_signal_edge_bps, config?.entry_alpha_min, config?.entry_confidence_min)}`,
     `short：${directionalThresholdTriple(config?.short_entry_min_signal_edge_bps, config?.short_entry_alpha_min, config?.short_entry_confidence_min)}`,
@@ -905,6 +944,36 @@ function directionalThresholdComparison(config = {}) {
 }
 
 function directionalShortConfigRows(config = {}) {
+  if (config?.shorting_runtime_supported !== true) {
+    return [
+      [
+        "运行说明",
+        "当前运行域不支持自动做空",
+        "适用范围",
+        "现货运行域只展示做空能力说明；合约专属的 short 开仓、加仓和反手阈值不在这里展示。",
+      ],
+      [
+        "long/共享开仓阈值",
+        directionalThresholdTriple(
+          config?.entry_min_signal_edge_bps,
+          config?.entry_alpha_min,
+          config?.entry_confidence_min
+        ),
+        "当前仍生效的方向开仓门槛",
+        `允许状态 ${localizeList(config?.entry_allowed_regimes || [], "、") || "全部"}`,
+      ],
+      [
+        "long/共享反手阈值",
+        directionalThresholdTriple(
+          config?.reversal_min_signal_edge_bps,
+          config?.reversal_alpha_min,
+          config?.reversal_confidence_min
+        ),
+        "当前仍生效的方向反手门槛",
+        "现货只按 long/共享阈值评估减仓、持有和退出。",
+      ],
+    ];
+  }
   return [
     [
       "strategy_short_bias_enabled",

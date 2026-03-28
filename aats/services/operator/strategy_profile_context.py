@@ -76,8 +76,14 @@ class StrategyProfileContextFacade:
                     "risk_level": item.risk_level,
                     "market_intent": item.market_intent,
                     "status": item.status,
-                    "axes": strategy_profile_axes_from_payload(item.payload).model_dump(mode="json"),
-                    "payload_summary": summarize_strategy_profile_payload(item.payload),
+                    "axes": strategy_profile_axes_from_payload(
+                        item.payload,
+                        product_type=item.product_type,
+                    ).model_dump(mode="json"),
+                    "payload_summary": summarize_strategy_profile_payload(
+                        item.payload,
+                        product_type=item.product_type,
+                    ),
                     "expected_behavior": list(item.expected_behavior),
                     "description": item.description,
                 }

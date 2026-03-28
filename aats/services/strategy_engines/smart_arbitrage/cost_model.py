@@ -103,11 +103,18 @@ def build_cost_breakdown(
         source_flags.append("time_decay_configured")
 
     funding_reference_ts = _funding_reference_ts(account_service=account_service)
-    expected_funding_events, funding_event_projection_active = _expected_funding_events(
+    funding_schedule = _funding_schedule(
+        account_service=account_service,
+        hedge_symbol=hedge_symbol,
+    )
+    expected_funding_events, funding_event_projection_active, funding_schedule_source_flag = _expected_funding_events(
         settings=settings,
         expected_hold_hours=expected_hold_hours,
         reference_ts=funding_reference_ts,
+        funding_schedule=funding_schedule,
     )
+    if funding_schedule_source_flag is not None:
+        source_flags.append(funding_schedule_source_flag)
     funding_cost_bps, funding_flags = _funding_cost_component(
         settings=settings,
         fee_resolver=funding_fee_resolver,
@@ -282,31 +289,41 @@ def _expected_funding_events(
     settings: AATSSettings,
     expected_hold_hours: Decimal,
     reference_ts: datetime | None,
-) -> tuple[int, bool]:
+    funding_schedule: dict[str, Any] | None,
+) -> tuple[int, bool, str | None]:
     explicit_events = max(int(settings.smart_arbitrage_expected_funding_events or 0), 0)
     if explicit_events > 0:
-        return explicit_events, False
-    interval_hours = max(to_decimal(settings.smart_arbitrage_funding_interval_hours), Decimal("0"))
-    if interval_hours <= Decimal("0") or expected_hold_hours <= Decimal("0"):
-        return 0, False
+        return explicit_events, False, "funding_events_explicit_override"
     normalized_reference_ts = _normalize_reference_ts(reference_ts or utc_now())
-    hold_window = _decimal_hours_to_timedelta(expected_hold_hours)
+    if expected_hold_hours <= Decimal("0"):
+        return 0, False, None
+    if funding_schedule:
+        next_funding_ts = funding_schedule.get("next_funding_time")
+        interval_hours = funding_schedule.get("funding_interval_hours")
+        updated_at = funding_schedule.get("updated_at")
+        schedule_reference_ts = updated_at if isinstance(updated_at, datetime) else normalized_reference_ts
+        if isinstance(next_funding_ts, datetime):
+            count, projection_active = _count_funding_events(
+                reference_ts=schedule_reference_ts,
+                expected_hold_hours=expected_hold_hours,
+                next_funding_ts=next_funding_ts,
+                interval_hours=None if interval_hours in {None, ""} else to_decimal(interval_hours),
+            )
+            return count, projection_active, "funding_schedule_exchange_actual"
+    interval_hours = max(to_decimal(settings.smart_arbitrage_funding_interval_hours), Decimal("0"))
+    if interval_hours <= Decimal("0"):
+        return 0, False, None
     next_funding_ts = _next_funding_timestamp(
         reference_ts=normalized_reference_ts,
         interval_hours=interval_hours,
     )
-    if next_funding_ts is None:
-        return 0, False
-    hold_end_ts = normalized_reference_ts + hold_window
-    if hold_end_ts < next_funding_ts:
-        return 0, True
-    interval_window = _decimal_hours_to_timedelta(interval_hours)
-    remaining_seconds = Decimal(str((hold_end_ts - next_funding_ts).total_seconds()))
-    interval_seconds = Decimal(str(interval_window.total_seconds()))
-    additional_events = 0
-    if interval_seconds > Decimal("0") and remaining_seconds > Decimal("0"):
-        additional_events = int((remaining_seconds / interval_seconds).to_integral_value(rounding=ROUND_FLOOR))
-    return 1 + additional_events, True
+    count, projection_active = _count_funding_events(
+        reference_ts=normalized_reference_ts,
+        expected_hold_hours=expected_hold_hours,
+        next_funding_ts=next_funding_ts,
+        interval_hours=interval_hours,
+    )
+    return count, projection_active, "funding_schedule_projected_from_config"
 
 
 def _funding_reference_ts(*, account_service: Any | None) -> datetime:
@@ -329,6 +346,25 @@ def _decimal_hours_to_timedelta(hours: Decimal) -> timedelta:
     return timedelta(seconds=float(hours * Decimal("3600")))
 
 
+def _funding_schedule(
+    *,
+    account_service: Any | None,
+    hedge_symbol: str | None,
+) -> dict[str, Any] | None:
+    if hedge_symbol in {None, ""}:
+        return None
+    getter = getattr(account_service, "funding_schedule", None)
+    if not callable(getter):
+        return None
+    try:
+        schedule = getter(symbol=hedge_symbol)
+    except TypeError:
+        schedule = getter(hedge_symbol)
+    if not isinstance(schedule, dict) or not schedule.get("available"):
+        return None
+    return schedule
+
+
 def _next_funding_timestamp(
     *,
     reference_ts: datetime,
@@ -346,6 +382,37 @@ def _next_funding_timestamp(
     if next_ts <= reference_ts:
         return next_ts + interval_window
     return next_ts
+
+
+def _count_funding_events(
+    *,
+    reference_ts: datetime,
+    expected_hold_hours: Decimal,
+    next_funding_ts: datetime | None,
+    interval_hours: Decimal | None,
+) -> tuple[int, bool]:
+    if next_funding_ts is None:
+        return 0, False
+    normalized_reference_ts = _normalize_reference_ts(reference_ts)
+    normalized_next_funding_ts = _normalize_reference_ts(next_funding_ts)
+    hold_window = _decimal_hours_to_timedelta(expected_hold_hours)
+    hold_end_ts = normalized_reference_ts + hold_window
+    if hold_end_ts < normalized_next_funding_ts:
+        return 0, True
+    resolved_interval_hours = None
+    if interval_hours is not None:
+        resolved_interval_hours = max(to_decimal(interval_hours), Decimal("0"))
+    if resolved_interval_hours is None or resolved_interval_hours <= Decimal("0"):
+        return 1, True
+    interval_window = _decimal_hours_to_timedelta(resolved_interval_hours)
+    interval_seconds = Decimal(str(interval_window.total_seconds()))
+    if interval_seconds <= Decimal("0"):
+        return 1, True
+    remaining_seconds = Decimal(str((hold_end_ts - normalized_next_funding_ts).total_seconds()))
+    additional_events = 0
+    if remaining_seconds > Decimal("0"):
+        additional_events = int((remaining_seconds / interval_seconds).to_integral_value(rounding=ROUND_FLOOR))
+    return 1 + additional_events, True
 
 
 def _funding_cost_component(

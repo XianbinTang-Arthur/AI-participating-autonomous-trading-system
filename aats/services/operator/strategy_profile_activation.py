@@ -823,7 +823,11 @@ class StrategyProfileActivationFacade:
             reason_detail=reason_detail,
             hot_safe=True,
             restart_required=False,
-            diff=diff_strategy_profile_payload(previous_payload, target.payload),
+            diff=diff_strategy_profile_payload(
+                previous_payload,
+                target.payload,
+                product_type=target.product_type,
+            ),
         )
         self.owner.repo.save_activation_record(record)
         self.owner.event_store.append(

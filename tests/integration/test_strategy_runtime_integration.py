@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import unittest
 from unittest.mock import patch
 
@@ -72,6 +72,17 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(strategy_payload["recent_budget_profiles"])
         self.assertTrue(strategy_payload["recent_budget_assignments"])
         self.assertTrue(strategy_payload["recent_budget_snapshots"])
+        self.assertIn("spot_grid", strategy_payload["configured_parameters"])
+        self.assertIn("dca", strategy_payload["configured_parameters"])
+        self.assertNotIn("smart_arbitrage", strategy_payload["configured_parameters"])
+        self.assertNotIn(
+            "short_entry_min_signal_edge_bps",
+            strategy_payload["configured_parameters"]["directional"],
+        )
+        self.assertNotIn(
+            "short_reversal_confidence_min",
+            strategy_payload["configured_parameters"]["directional"],
+        )
         spot_grid_candidate = next(
             item for item in strategy_payload["latest_snapshot"]["candidates"] if item["family"] == "spot_grid"
         )
@@ -358,6 +369,8 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("protected_notional", payload["recent_conflict_resolutions"][0])
         self.assertIn("reduced_notional", payload["recent_conflict_resolutions"][0])
+        self.assertNotIn("spot_grid", payload["configured_parameters"])
+        self.assertNotIn("dca", payload["configured_parameters"])
         self.assertIn("pair_definitions", payload["configured_parameters"]["smart_arbitrage"])
         self.assertIn("pair_registry_warning_codes", payload["configured_parameters"]["smart_arbitrage"])
         self.assertIn("pair_registry_error_codes", payload["configured_parameters"]["smart_arbitrage"])
@@ -409,6 +422,8 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("estimated_hedge_spread_bps", payload["configured_parameters"]["smart_arbitrage"])
         self.assertNotIn("estimated_spot_slippage_bps", payload["configured_parameters"]["smart_arbitrage"])
         self.assertNotIn("estimated_hedge_slippage_bps", payload["configured_parameters"]["smart_arbitrage"])
+        self.assertIn("short_entry_min_signal_edge_bps", payload["configured_parameters"]["directional"])
+        self.assertIn("short_reversal_confidence_min", payload["configured_parameters"]["directional"])
         self.assertTrue(payload["smart_arbitrage_cost_summary"]["available"])
         self.assertIn("predicted", payload["smart_arbitrage_cost_summary"])
         self.assertIn("realized", payload["smart_arbitrage_cost_summary"])
@@ -472,6 +487,67 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(predicted["expected_funding_events"], 0)
         self.assertEqual(float(predicted["funding_cost_bps"]), 0.0)
         self.assertIn("funding_outside_projected_hold_window", predicted["cost_source_flags"])
+
+    async def test_smart_arbitrage_runtime_cost_summary_prefers_exchange_funding_schedule(self) -> None:
+        settings = self._settings(
+            trading_product_type="derivatives",
+            margin_mode="cross",
+            default_symbol="BTC-USDT-SWAP",
+            allowed_symbols=("BTC-USDT-SWAP",),
+            strategy_family_active="smart_arbitrage",
+            smart_arbitrage_enabled=True,
+            smart_arbitrage_basis_entry_bps=0.0,
+            smart_arbitrage_estimated_cost_bps=0.0,
+            smart_arbitrage_funding_cost_enabled=True,
+            smart_arbitrage_funding_source_mode="configured",
+            smart_arbitrage_estimated_funding_bps=2.0,
+            smart_arbitrage_expected_hold_hours=6.0,
+            smart_arbitrage_funding_interval_hours=8.0,
+            trade_cost_spot_taker_fee_bps=0.0,
+            trade_cost_margin_taker_fee_bps=0.0,
+            trade_cost_derivatives_taker_fee_bps=0.0,
+            trade_cost_spot_spread_bps=0.0,
+            trade_cost_margin_spread_bps=0.0,
+            trade_cost_derivatives_spread_bps=0.0,
+            trade_cost_spot_slippage_bps=0.0,
+            trade_cost_margin_slippage_bps=0.0,
+            trade_cost_derivatives_slippage_bps=0.0,
+        )
+        frozen_now = datetime(2026, 3, 27, 9, 0, tzinfo=timezone.utc)
+        with patch("aats.services.strategy_engines.smart_arbitrage.cost_model.utc_now", return_value=frozen_now):
+            runtime = await build_runtime(settings)
+            runtime.account_service.funding_schedule = lambda symbol=None: {  # type: ignore[attr-defined]
+                "available": symbol == "BTC-USDT-SWAP",
+                "symbol": symbol,
+                "funding_time": frozen_now - timedelta(hours=1),
+                "next_funding_time": frozen_now + timedelta(hours=3),
+                "funding_interval_hours": 4.0,
+                "updated_at": frozen_now,
+                "source": "okx_public_funding_rate",
+            }
+            await runtime.market_gateway.run_local_publisher(
+                symbol="BTC-USDT",
+                iterations=1,
+                interval_seconds=0.0,
+            )
+            await runtime.market_gateway.run_local_publisher(
+                symbol=settings.default_symbol,
+                iterations=2,
+                interval_seconds=0.0,
+            )
+            await runtime.decision_engine.run_cycle(settings.default_symbol, settings.primary_timeframe)
+
+            app = self._app(runtime)
+            with TestClient(app) as client:
+                strategy_runtime = client.get("/strategy/runtime")
+
+        self.assertEqual(strategy_runtime.status_code, 200)
+        payload = strategy_runtime.json()
+        predicted = payload["smart_arbitrage_cost_summary"]["predicted"]
+        self.assertEqual(predicted["expected_funding_events"], 1)
+        self.assertEqual(float(predicted["funding_cost_bps"]), 2.0)
+        self.assertIn("funding_schedule_exchange_actual", predicted["cost_source_flags"])
+        self.assertNotIn("funding_schedule_projected_from_config", predicted["cost_source_flags"])
 
     @staticmethod
     def _settings(**overrides) -> AATSSettings:

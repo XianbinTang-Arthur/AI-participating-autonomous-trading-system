@@ -22,7 +22,7 @@ from aats.schemas.exchange import (
 )
 from aats.services.execution_engine.okx_private_websocket import OKXPrivateWebSocketClient
 from aats.services.execution_engine.okx_bills import enrich_okx_bill_category
-from aats.services.execution_engine.okx_rest import OKXRESTClient
+from aats.services.execution_engine.okx_rest import OKXRESTClient, infer_okx_derivatives_inst_type
 from aats.services.execution_engine.quantity_rules import internal_quantity_from_exchange
 from aats.services.portfolio_service.decimals import to_decimal
 from aats.services.strategy_engines.smart_arbitrage.pair_registry import load_pair_definitions
@@ -98,7 +98,7 @@ class OKXAccountService:
                     ]),
                     self._positions_payload(),
                 )
-                account_config_payload, trade_fee_payload, account_risk_payload, system_status_payload, bills_payload = await asyncio.gather(
+                account_config_payload, trade_fee_payload, account_risk_payload, system_status_payload, bills_payload, funding_rate_payloads = await asyncio.gather(
                     self._cached_aux_payload_optional(
                         "account_config",
                         refresh_interval_seconds=self.settings.okx_account_config_refresh_interval_seconds,
@@ -153,6 +153,10 @@ class OKXAccountService:
                         ),
                         fallback=self._raw_snapshot_value("recent_bills", default={"code": "0", "data": []}),
                     ),
+                    self._funding_rate_payloads(
+                        tracked_symbols=tracked_symbols,
+                        force=force,
+                    ),
                 )
                 self._latest_recent_bills = [
                     dict(row) for row in bills_payload.get("data", []) if isinstance(row, dict)
@@ -197,6 +201,7 @@ class OKXAccountService:
                         "account_position_risk": account_risk_payload,
                         "system_status": system_status_payload,
                         "recent_bills": bills_payload,
+                        "funding_rate_by_symbol": funding_rate_payloads,
                     },
                 )
                 rest_fetched_at = snapshot.fetched_at
@@ -304,6 +309,33 @@ class OKXAccountService:
 
     def latest_snapshot(self) -> ExchangeAccountSnapshot | None:
         return self._latest_snapshot
+
+    async def _funding_rate_payloads(
+        self,
+        *,
+        tracked_symbols: tuple[str, ...],
+        force: bool,
+    ) -> dict[str, dict[str, Any]]:
+        funding_symbols = self._tracked_funding_symbols(tracked_symbols)
+        if not funding_symbols:
+            return {}
+        payloads = await asyncio.gather(
+            *[
+                self._cached_aux_payload_optional(
+                    f"funding_rate:{symbol}",
+                    refresh_interval_seconds=self.settings.okx_funding_rate_refresh_interval_seconds,
+                    force=force,
+                    fetcher=lambda symbol=symbol: self._optional_client_call("get_funding_rate", symbol=symbol),
+                    fallback=self._raw_funding_rate_payload(symbol),
+                )
+                for symbol in funding_symbols
+            ]
+        )
+        return {
+            symbol: payload
+            for symbol, payload in zip(funding_symbols, payloads, strict=False)
+            if isinstance(payload, dict)
+        }
 
     async def run_private_ws_forever(self) -> None:
         if self.private_ws_client is None or not self.settings.okx_private_balance_position_ws_enabled:
@@ -504,6 +536,37 @@ class OKXAccountService:
             if self._is_funding_fee_bill(row) and (symbol is None or str(row.get("instId") or "") == symbol)
         ]
         return self._recent_funding_fee_summary_from_rows(rows, symbol=symbol)
+
+    def funding_schedule(self, *, symbol: str | None = None) -> dict[str, Any]:
+        schedule_symbol = str(symbol or self.settings.default_symbol or "").upper()
+        row = self._funding_rate_row(schedule_symbol)
+        if row is None:
+            return {
+                "available": False,
+                "symbol": schedule_symbol,
+                "funding_time": None,
+                "next_funding_time": None,
+                "funding_interval_hours": None,
+                "updated_at": None,
+                "source": "unavailable",
+            }
+        funding_time = self._funding_rate_timestamp(row.get("fundingTime"))
+        next_funding_time = self._funding_rate_timestamp(row.get("nextFundingTime"))
+        updated_at = self._funding_rate_timestamp(row.get("ts"))
+        funding_interval_hours = None
+        if funding_time is not None and next_funding_time is not None and next_funding_time > funding_time:
+            funding_interval_hours = (
+                Decimal(str((next_funding_time - funding_time).total_seconds())) / Decimal("3600")
+            )
+        return {
+            "available": True,
+            "symbol": schedule_symbol,
+            "funding_time": funding_time,
+            "next_funding_time": next_funding_time,
+            "funding_interval_hours": funding_interval_hours,
+            "updated_at": updated_at,
+            "source": "okx_public_funding_rate",
+        }
 
     def _recent_funding_fee_summary_from_rows(
         self,
@@ -741,6 +804,18 @@ class OKXAccountService:
             return None
         return to_decimal(proxy)
 
+    def next_funding_time(self, symbol: str | None = None) -> datetime | None:
+        schedule = self.funding_schedule(symbol=symbol)
+        next_funding_time = schedule.get("next_funding_time")
+        return next_funding_time if isinstance(next_funding_time, datetime) else None
+
+    def funding_interval_hours(self, symbol: str | None = None) -> Decimal | None:
+        schedule = self.funding_schedule(symbol=symbol)
+        interval = schedule.get("funding_interval_hours")
+        if interval in {None, ""}:
+            return None
+        return to_decimal(interval)
+
     def recent_fills(self, symbol: str | None = None) -> list[ExchangeFill]:
         snapshot = self._latest_snapshot
         if snapshot is None:
@@ -762,6 +837,45 @@ class OKXAccountService:
                     if symbol not in tracked:
                         tracked.append(symbol)
         return tuple(tracked)
+
+    @staticmethod
+    def _tracked_funding_symbols(tracked_symbols: tuple[str, ...]) -> tuple[str, ...]:
+        return tuple(
+            dict.fromkeys(
+                symbol
+                for symbol in tracked_symbols
+                if infer_okx_derivatives_inst_type(symbol) == "SWAP"
+            )
+        )
+
+    def _raw_funding_rate_payload(self, symbol: str) -> dict[str, Any]:
+        if self._latest_snapshot is None:
+            return {"code": "0", "data": []}
+        raw = self._latest_snapshot.raw.get("funding_rate_by_symbol")
+        if isinstance(raw, dict):
+            payload = raw.get(symbol)
+            if isinstance(payload, dict):
+                return payload
+        return {"code": "0", "data": []}
+
+    def _funding_rate_row(self, symbol: str) -> dict[str, Any] | None:
+        payload = self._raw_funding_rate_payload(symbol)
+        rows = payload.get("data", [])
+        if not isinstance(rows, list):
+            return None
+        for row in rows:
+            if isinstance(row, dict) and str(row.get("instId") or "").upper() == symbol:
+                return row
+        return None
+
+    @staticmethod
+    def _funding_rate_timestamp(value: Any) -> datetime | None:
+        if value in {None, ""}:
+            return None
+        try:
+            return datetime_from_ms(str(value))
+        except (TypeError, ValueError):
+            return None
 
     async def _get_instruments_payload(self, tracked_symbols: tuple[str, ...]) -> dict[str, Any]:
         try:

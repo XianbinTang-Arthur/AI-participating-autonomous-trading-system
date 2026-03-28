@@ -231,6 +231,29 @@ def test_derivatives_managed_profiles_use_relaxed_directional_thresholds() -> No
         assert values["strategy_low_edge_cooldown_seconds"] == 900.0
 
 
+def test_managed_profiles_drop_legacy_cross_runtime_strategy_tuning() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+
+    for profile in ("spot", "spot_live"):
+        values = load_managed_profile_values(profile, project_root=repo_root)
+
+        assert "smart_arbitrage_enabled" not in values
+        assert "smart_arbitrage_negative_basis_mode" not in values
+        assert "strategy_short_bias_enabled" not in values
+        assert "strategy_dynamic_leverage_enabled" not in values
+        assert "strategy_short_entry_allowed_regimes" not in values
+        assert "strategy_short_entry_min_signal_edge_bps" not in values
+        assert "strategy_short_reversal_confidence_min" not in values
+
+    for profile in ("derivatives", "derivatives_live"):
+        values = load_managed_profile_values(profile, project_root=repo_root)
+
+        assert "spot_grid_enabled" not in values
+        assert "spot_grid_band_bps" not in values
+        assert "dca_enabled" not in values
+        assert "dca_pullback_entry_bps" not in values
+
+
 def test_profile_templates_use_distinct_parallel_runtime_defaults() -> None:
     repo_root = Path(__file__).resolve().parents[2]
 

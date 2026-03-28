@@ -449,7 +449,6 @@ class OperatorQueryService:
     def _local_position_margin_summary(self, snapshot) -> dict[str, Any]:
         if snapshot is None:
             return self._empty_position_margin_summary()
-        summary = self._empty_position_margin_summary()
         margin_mode_counts: dict[str, int] = {}
         margin_source_counts: dict[str, int] = {}
         settle_currencies: set[str] = set()
@@ -481,7 +480,6 @@ class OperatorQueryService:
     def _exchange_position_margin_summary(self, exchange) -> dict[str, Any]:
         if exchange is None:
             return self._empty_position_margin_summary()
-        summary = self._empty_position_margin_summary()
         margin_mode_counts: dict[str, int] = {}
         settle_currencies: set[str] = set()
         margin_allocated_total = Decimal("0")
@@ -685,7 +683,6 @@ class OperatorQueryService:
         )
         liquidation_summary = self._exchange_liquidation_risk_summary(snapshot)
         nearest_gap = self._to_decimal(liquidation_summary.get("nearest_liquidation_gap_ratio"))
-        projected_margin_usage = None if projected_context is None else self._to_decimal(projected_context.get("projected_margin_usage"))
         status = "healthy"
         if (
             (nearest_gap is not None and nearest_gap <= Decimal("0"))
@@ -1784,17 +1781,8 @@ class OperatorQueryService:
     def _build_strategy_runtime(self, *, limit: int) -> dict[str, Any]:
         latest_event = self._latest_strategy_snapshot_event()
         latest_snapshot = self._strategy_snapshot_payload(latest_event)
-        selected_candidate = None
         if latest_snapshot is not None:
             selected_family = latest_snapshot.get("selected_family")
-            selected_candidate = next(
-                (
-                    candidate
-                    for candidate in latest_snapshot.get("candidates", [])
-                    if candidate.get("family") == selected_family
-                ),
-                None,
-            )
         recent_events = list(
             reversed(
                 self.runtime.event_store.by_topic_scoped(
@@ -2092,133 +2080,12 @@ class OperatorQueryService:
             "generated_at": utc_now(),
             "summary": summary,
             "family_enablement": family_enablement,
-            "configured_parameters": {
-                "strategy_family_active": configured_family,
-                "strategy_family_auto_selection_enabled": self.runtime.settings.strategy_family_auto_selection_enabled,
-                "strategy_sleeve_auto_parallel_enabled": self.runtime.settings.strategy_sleeve_auto_parallel_enabled,
-                "strategy_sleeve_auto_min_budget_multiplier": self.runtime.settings.strategy_sleeve_auto_min_budget_multiplier,
-                "strategy_sleeve_auto_reconciliation_contraction_multiplier": self.runtime.settings.strategy_sleeve_auto_reconciliation_contraction_multiplier,
-                "strategy_sleeve_auto_soft_loss_usdt": self.runtime.settings.strategy_sleeve_auto_soft_loss_usdt,
-                "strategy_sleeve_auto_hard_loss_usdt": self.runtime.settings.strategy_sleeve_auto_hard_loss_usdt,
-                "strategy_sleeve_auto_volatility_cap_enabled": self.runtime.settings.strategy_sleeve_auto_volatility_cap_enabled,
-                "env_template_profile": self.runtime.settings.env_template_profile,
-                "trade_costs": {
-                    "rate_unit": "bps",
-                    "rate_semantics": "percentage_basis_points",
-                    "rate_example": "8 = 0.08%",
-                    "live_fee_resolution": "account_schedule_fallback_to_configured",
-                    "spot_maker_fee_bps": self.runtime.settings.trade_cost_spot_maker_fee_bps,
-                    "spot_taker_fee_bps": self.runtime.settings.trade_cost_spot_taker_fee_bps,
-                    "margin_maker_fee_bps": self.runtime.settings.trade_cost_margin_maker_fee_bps,
-                    "margin_taker_fee_bps": self.runtime.settings.trade_cost_margin_taker_fee_bps,
-                    "derivatives_maker_fee_bps": self.runtime.settings.trade_cost_derivatives_maker_fee_bps,
-                    "derivatives_taker_fee_bps": self.runtime.settings.trade_cost_derivatives_taker_fee_bps,
-                    "delivery_settlement_fee_bps": self.runtime.settings.trade_cost_delivery_settlement_fee_bps,
-                    "spot_spread_bps": self.runtime.settings.trade_cost_spot_spread_bps,
-                    "spot_slippage_bps": self.runtime.settings.trade_cost_spot_slippage_bps,
-                    "margin_spread_bps": self.runtime.settings.trade_cost_margin_spread_bps,
-                    "margin_slippage_bps": self.runtime.settings.trade_cost_margin_slippage_bps,
-                    "derivatives_spread_bps": self.runtime.settings.trade_cost_derivatives_spread_bps,
-                    "derivatives_slippage_bps": self.runtime.settings.trade_cost_derivatives_slippage_bps,
-                },
-                "directional": {
-                    "product_type": self.runtime.settings.trading_product_type,
-                    "shorting_runtime_supported": self.runtime.settings.trading_product_type == "derivatives",
-                    "shorting_config_enabled": self.runtime.settings.strategy_short_bias_enabled,
-                    "short_bias_enabled": self.runtime.settings.strategy_short_bias_enabled,
-                    "effective_short_bias_enabled": (
-                        self.runtime.settings.trading_product_type == "derivatives"
-                        and self.runtime.settings.strategy_short_bias_enabled
-                        and not self.runtime.kill_switch.halted
-                    ),
-                    "runtime_shorting_blockers": (
-                        ["kill_switch_active"]
-                        if (
-                            self.runtime.settings.trading_product_type == "derivatives"
-                            and self.runtime.kill_switch.halted
-                        )
-                        else []
-                    ),
-                    "entry_allowed_regimes": list(self.runtime.settings.strategy_entry_allowed_regimes),
-                    "entry_min_signal_edge_bps": self.runtime.settings.strategy_entry_min_signal_edge_bps,
-                    "entry_alpha_min": self.runtime.settings.strategy_entry_alpha_min,
-                    "entry_confidence_min": self.runtime.settings.strategy_entry_confidence_min,
-                    "scale_in_min_signal_edge_bps": self.runtime.settings.strategy_scale_in_min_signal_edge_bps,
-                    "scale_in_alpha_min": self.runtime.settings.strategy_scale_in_alpha_min,
-                    "scale_in_confidence_min": self.runtime.settings.strategy_scale_in_confidence_min,
-                    "reversal_min_signal_edge_bps": self.runtime.settings.strategy_reversal_min_signal_edge_bps,
-                    "reversal_alpha_min": self.runtime.settings.strategy_reversal_alpha_min,
-                    "reversal_confidence_min": self.runtime.settings.strategy_reversal_confidence_min,
-                    "short_entry_allowed_regimes": list(self.runtime.settings.strategy_short_entry_allowed_regimes),
-                    "short_entry_min_signal_edge_bps": self.runtime.settings.strategy_short_entry_min_signal_edge_bps,
-                    "short_entry_alpha_min": self.runtime.settings.strategy_short_entry_alpha_min,
-                    "short_entry_confidence_min": self.runtime.settings.strategy_short_entry_confidence_min,
-                    "short_scale_in_min_signal_edge_bps": self.runtime.settings.strategy_short_scale_in_min_signal_edge_bps,
-                    "short_scale_in_alpha_min": self.runtime.settings.strategy_short_scale_in_alpha_min,
-                    "short_scale_in_confidence_min": self.runtime.settings.strategy_short_scale_in_confidence_min,
-                    "short_reversal_min_signal_edge_bps": self.runtime.settings.strategy_short_reversal_min_signal_edge_bps,
-                    "short_reversal_alpha_min": self.runtime.settings.strategy_short_reversal_alpha_min,
-                    "short_reversal_confidence_min": self.runtime.settings.strategy_short_reversal_confidence_min,
-                },
-                "smart_arbitrage": {
-                    "enabled": self.runtime.settings.smart_arbitrage_enabled,
-                    "pair_definitions": [
-                        pair.model_dump(mode="json")
-                        for pair in smart_arbitrage_pairs
-                    ],
-                    "pair_registry_warning_codes": smart_arbitrage_pair_registry_warning_codes,
-                    "pair_registry_error_codes": smart_arbitrage_pair_registry_error_codes,
-                    "basis_entry_bps": self.runtime.settings.smart_arbitrage_basis_entry_bps,
-                    "basis_exit_bps": self.runtime.settings.smart_arbitrage_basis_exit_bps,
-                    "estimated_cost_bps": self.runtime.settings.smart_arbitrage_estimated_cost_bps,
-                    "uses_global_trade_costs": True,
-                    "quote_budget_per_trade": self.runtime.settings.smart_arbitrage_quote_budget_per_trade,
-                    "max_pair_notional": self.runtime.settings.smart_arbitrage_max_pair_notional,
-                    "cost_model_enabled": self.runtime.settings.smart_arbitrage_cost_model_enabled,
-                    "funding_cost_enabled": self.runtime.settings.smart_arbitrage_funding_cost_enabled,
-                    "borrow_cost_enabled": self.runtime.settings.smart_arbitrage_borrow_cost_enabled,
-                    "negative_basis_mode": self.runtime.settings.smart_arbitrage_negative_basis_mode,
-                    "inventory_reservation_enabled": self.runtime.settings.smart_arbitrage_inventory_reservation_enabled,
-                    "margin_short_enabled": self.runtime.settings.smart_arbitrage_margin_short_enabled,
-                    "margin_short_execution_ready": self.runtime.settings.smart_arbitrage_margin_short_execution_ready,
-                    "margin_short_spot_margin_mode": self.runtime.settings.smart_arbitrage_margin_short_spot_margin_mode,
-                    "margin_short_auto_repay_enabled": self.runtime.settings.smart_arbitrage_margin_short_auto_repay_enabled,
-                    "max_concurrent_pairs": self.runtime.settings.smart_arbitrage_max_concurrent_pairs,
-                    "pair_priority_mode": self.runtime.settings.smart_arbitrage_pair_priority_mode,
-                    "min_inventory_backed_ratio": self.runtime.settings.smart_arbitrage_min_inventory_backed_ratio,
-                    "fee_source_mode": self.runtime.settings.smart_arbitrage_fee_source_mode,
-                    "funding_source_mode": self.runtime.settings.smart_arbitrage_funding_source_mode,
-                    "borrow_source_mode": self.runtime.settings.smart_arbitrage_borrow_source_mode,
-                    "expected_hold_hours": self.runtime.settings.smart_arbitrage_expected_hold_hours,
-                    "funding_interval_hours": self.runtime.settings.smart_arbitrage_funding_interval_hours,
-                    "expected_funding_events": self.runtime.settings.smart_arbitrage_expected_funding_events,
-                    "hedge_target_leverage": self.runtime.settings.smart_arbitrage_hedge_target_leverage,
-                    "estimated_execution_mismatch_bps": self.runtime.settings.smart_arbitrage_estimated_execution_mismatch_bps,
-                    "estimated_transfer_cost_bps": self.runtime.settings.smart_arbitrage_estimated_transfer_cost_bps,
-                    "time_decay_bps_per_hour": self.runtime.settings.smart_arbitrage_time_decay_bps_per_hour,
-                    "estimated_borrow_apr": self.runtime.settings.smart_arbitrage_estimated_borrow_apr,
-                    "borrow_interest_free_ratio": self.runtime.settings.smart_arbitrage_borrow_interest_free_ratio,
-                    "estimated_funding_bps": self.runtime.settings.smart_arbitrage_estimated_funding_bps,
-                    "estimated_borrow_bps": self.runtime.settings.smart_arbitrage_estimated_borrow_bps,
-                },
-                "spot_grid": {
-                    "enabled": self.runtime.settings.spot_grid_enabled,
-                    "anchor_lookback_snapshots": self.runtime.settings.spot_grid_anchor_lookback_snapshots,
-                    "band_bps": self.runtime.settings.spot_grid_band_bps,
-                    "inventory_floor_fraction": self.runtime.settings.spot_grid_inventory_floor_fraction,
-                    "inventory_ceiling_fraction": self.runtime.settings.spot_grid_inventory_ceiling_fraction,
-                    "rebalance_min_fraction_of_max_qty": self.runtime.settings.spot_grid_rebalance_min_fraction_of_max_qty,
-                    "breakout_guard_enabled": self.runtime.settings.spot_grid_breakout_guard_enabled,
-                },
-                "dca": {
-                    "enabled": self.runtime.settings.dca_enabled,
-                    "interval_seconds": self.runtime.settings.dca_interval_seconds,
-                    "quote_budget_per_cycle": self.runtime.settings.dca_quote_budget_per_cycle,
-                    "max_position_fraction_of_limit": self.runtime.settings.dca_max_position_fraction_of_limit,
-                    "pullback_only_enabled": self.runtime.settings.dca_pullback_only_enabled,
-                    "pullback_entry_bps": self.runtime.settings.dca_pullback_entry_bps,
-                },
-          },
+            "configured_parameters": self._configured_strategy_runtime_parameters(
+                configured_family=configured_family,
+                smart_arbitrage_pairs=smart_arbitrage_pairs,
+                smart_arbitrage_pair_registry_warning_codes=smart_arbitrage_pair_registry_warning_codes,
+                smart_arbitrage_pair_registry_error_codes=smart_arbitrage_pair_registry_error_codes,
+            ),
             "latest_snapshot": latest_snapshot,
             "latest_allocation_decision": latest_allocation_decision,
             "latest_bundle": latest_bundle,
@@ -2234,6 +2101,171 @@ class OperatorQueryService:
             "recent_execution_bundles": recent_bundles,
             "smart_arbitrage_cost_summary": smart_arbitrage_cost_summary,
             "truth_source": "strategy_runtime_repo_plus_event_store" if strategy_runtime_repo is not None else "strategy_coordinator_snapshots",
+        }
+
+    def _configured_strategy_runtime_parameters(
+        self,
+        *,
+        configured_family: str,
+        smart_arbitrage_pairs: list[Any],
+        smart_arbitrage_pair_registry_warning_codes: list[str],
+        smart_arbitrage_pair_registry_error_codes: list[str],
+    ) -> dict[str, Any]:
+        configured_parameters: dict[str, Any] = {
+            "strategy_family_active": configured_family,
+            "strategy_family_auto_selection_enabled": self.runtime.settings.strategy_family_auto_selection_enabled,
+            "strategy_sleeve_auto_parallel_enabled": self.runtime.settings.strategy_sleeve_auto_parallel_enabled,
+            "strategy_sleeve_auto_min_budget_multiplier": self.runtime.settings.strategy_sleeve_auto_min_budget_multiplier,
+            "strategy_sleeve_auto_reconciliation_contraction_multiplier": self.runtime.settings.strategy_sleeve_auto_reconciliation_contraction_multiplier,
+            "strategy_sleeve_auto_soft_loss_usdt": self.runtime.settings.strategy_sleeve_auto_soft_loss_usdt,
+            "strategy_sleeve_auto_hard_loss_usdt": self.runtime.settings.strategy_sleeve_auto_hard_loss_usdt,
+            "strategy_sleeve_auto_volatility_cap_enabled": self.runtime.settings.strategy_sleeve_auto_volatility_cap_enabled,
+            "env_template_profile": self.runtime.settings.env_template_profile,
+            "trade_costs": self._trade_cost_configured_parameters(),
+            "directional": self._directional_configured_parameters(),
+        }
+        if self.runtime.settings.trading_product_type == "derivatives":
+            configured_parameters["smart_arbitrage"] = self._smart_arbitrage_configured_parameters(
+                smart_arbitrage_pairs=smart_arbitrage_pairs,
+                smart_arbitrage_pair_registry_warning_codes=smart_arbitrage_pair_registry_warning_codes,
+                smart_arbitrage_pair_registry_error_codes=smart_arbitrage_pair_registry_error_codes,
+            )
+        if self.runtime.settings.trading_product_type == "spot":
+            configured_parameters["spot_grid"] = {
+                "enabled": self.runtime.settings.spot_grid_enabled,
+                "anchor_lookback_snapshots": self.runtime.settings.spot_grid_anchor_lookback_snapshots,
+                "band_bps": self.runtime.settings.spot_grid_band_bps,
+                "inventory_floor_fraction": self.runtime.settings.spot_grid_inventory_floor_fraction,
+                "inventory_ceiling_fraction": self.runtime.settings.spot_grid_inventory_ceiling_fraction,
+                "rebalance_min_fraction_of_max_qty": self.runtime.settings.spot_grid_rebalance_min_fraction_of_max_qty,
+                "breakout_guard_enabled": self.runtime.settings.spot_grid_breakout_guard_enabled,
+            }
+            configured_parameters["dca"] = {
+                "enabled": self.runtime.settings.dca_enabled,
+                "interval_seconds": self.runtime.settings.dca_interval_seconds,
+                "quote_budget_per_cycle": self.runtime.settings.dca_quote_budget_per_cycle,
+                "max_position_fraction_of_limit": self.runtime.settings.dca_max_position_fraction_of_limit,
+                "pullback_only_enabled": self.runtime.settings.dca_pullback_only_enabled,
+                "pullback_entry_bps": self.runtime.settings.dca_pullback_entry_bps,
+            }
+        return configured_parameters
+
+    def _trade_cost_configured_parameters(self) -> dict[str, Any]:
+        return {
+            "rate_unit": "bps",
+            "rate_semantics": "percentage_basis_points",
+            "rate_example": "8 = 0.08%",
+            "live_fee_resolution": "account_schedule_fallback_to_configured",
+            "spot_maker_fee_bps": self.runtime.settings.trade_cost_spot_maker_fee_bps,
+            "spot_taker_fee_bps": self.runtime.settings.trade_cost_spot_taker_fee_bps,
+            "margin_maker_fee_bps": self.runtime.settings.trade_cost_margin_maker_fee_bps,
+            "margin_taker_fee_bps": self.runtime.settings.trade_cost_margin_taker_fee_bps,
+            "derivatives_maker_fee_bps": self.runtime.settings.trade_cost_derivatives_maker_fee_bps,
+            "derivatives_taker_fee_bps": self.runtime.settings.trade_cost_derivatives_taker_fee_bps,
+            "delivery_settlement_fee_bps": self.runtime.settings.trade_cost_delivery_settlement_fee_bps,
+            "spot_spread_bps": self.runtime.settings.trade_cost_spot_spread_bps,
+            "spot_slippage_bps": self.runtime.settings.trade_cost_spot_slippage_bps,
+            "margin_spread_bps": self.runtime.settings.trade_cost_margin_spread_bps,
+            "margin_slippage_bps": self.runtime.settings.trade_cost_margin_slippage_bps,
+            "derivatives_spread_bps": self.runtime.settings.trade_cost_derivatives_spread_bps,
+            "derivatives_slippage_bps": self.runtime.settings.trade_cost_derivatives_slippage_bps,
+        }
+
+    def _directional_configured_parameters(self) -> dict[str, Any]:
+        runtime_shorting_blockers = (
+            ["kill_switch_active"]
+            if (
+                self.runtime.settings.trading_product_type == "derivatives"
+                and self.runtime.kill_switch.halted
+            )
+            else []
+        )
+        configured_parameters: dict[str, Any] = {
+            "product_type": self.runtime.settings.trading_product_type,
+            "shorting_runtime_supported": self.runtime.settings.trading_product_type == "derivatives",
+            "shorting_config_enabled": self.runtime.settings.strategy_short_bias_enabled,
+            "short_bias_enabled": self.runtime.settings.strategy_short_bias_enabled,
+            "effective_short_bias_enabled": (
+                self.runtime.settings.trading_product_type == "derivatives"
+                and self.runtime.settings.strategy_short_bias_enabled
+                and not self.runtime.kill_switch.halted
+            ),
+            "runtime_shorting_blockers": runtime_shorting_blockers,
+            "entry_allowed_regimes": list(self.runtime.settings.strategy_entry_allowed_regimes),
+            "entry_min_signal_edge_bps": self.runtime.settings.strategy_entry_min_signal_edge_bps,
+            "entry_alpha_min": self.runtime.settings.strategy_entry_alpha_min,
+            "entry_confidence_min": self.runtime.settings.strategy_entry_confidence_min,
+            "scale_in_min_signal_edge_bps": self.runtime.settings.strategy_scale_in_min_signal_edge_bps,
+            "scale_in_alpha_min": self.runtime.settings.strategy_scale_in_alpha_min,
+            "scale_in_confidence_min": self.runtime.settings.strategy_scale_in_confidence_min,
+            "reversal_min_signal_edge_bps": self.runtime.settings.strategy_reversal_min_signal_edge_bps,
+            "reversal_alpha_min": self.runtime.settings.strategy_reversal_alpha_min,
+            "reversal_confidence_min": self.runtime.settings.strategy_reversal_confidence_min,
+        }
+        if self.runtime.settings.trading_product_type == "derivatives":
+            configured_parameters.update(
+                {
+                    "short_entry_allowed_regimes": list(self.runtime.settings.strategy_short_entry_allowed_regimes),
+                    "short_entry_min_signal_edge_bps": self.runtime.settings.strategy_short_entry_min_signal_edge_bps,
+                    "short_entry_alpha_min": self.runtime.settings.strategy_short_entry_alpha_min,
+                    "short_entry_confidence_min": self.runtime.settings.strategy_short_entry_confidence_min,
+                    "short_scale_in_min_signal_edge_bps": self.runtime.settings.strategy_short_scale_in_min_signal_edge_bps,
+                    "short_scale_in_alpha_min": self.runtime.settings.strategy_short_scale_in_alpha_min,
+                    "short_scale_in_confidence_min": self.runtime.settings.strategy_short_scale_in_confidence_min,
+                    "short_reversal_min_signal_edge_bps": self.runtime.settings.strategy_short_reversal_min_signal_edge_bps,
+                    "short_reversal_alpha_min": self.runtime.settings.strategy_short_reversal_alpha_min,
+                    "short_reversal_confidence_min": self.runtime.settings.strategy_short_reversal_confidence_min,
+                }
+            )
+        return configured_parameters
+
+    def _smart_arbitrage_configured_parameters(
+        self,
+        *,
+        smart_arbitrage_pairs: list[Any],
+        smart_arbitrage_pair_registry_warning_codes: list[str],
+        smart_arbitrage_pair_registry_error_codes: list[str],
+    ) -> dict[str, Any]:
+        return {
+            "enabled": self.runtime.settings.smart_arbitrage_enabled,
+            "pair_definitions": [
+                pair.model_dump(mode="json")
+                for pair in smart_arbitrage_pairs
+            ],
+            "pair_registry_warning_codes": smart_arbitrage_pair_registry_warning_codes,
+            "pair_registry_error_codes": smart_arbitrage_pair_registry_error_codes,
+            "basis_entry_bps": self.runtime.settings.smart_arbitrage_basis_entry_bps,
+            "basis_exit_bps": self.runtime.settings.smart_arbitrage_basis_exit_bps,
+            "estimated_cost_bps": self.runtime.settings.smart_arbitrage_estimated_cost_bps,
+            "uses_global_trade_costs": True,
+            "quote_budget_per_trade": self.runtime.settings.smart_arbitrage_quote_budget_per_trade,
+            "max_pair_notional": self.runtime.settings.smart_arbitrage_max_pair_notional,
+            "cost_model_enabled": self.runtime.settings.smart_arbitrage_cost_model_enabled,
+            "funding_cost_enabled": self.runtime.settings.smart_arbitrage_funding_cost_enabled,
+            "borrow_cost_enabled": self.runtime.settings.smart_arbitrage_borrow_cost_enabled,
+            "negative_basis_mode": self.runtime.settings.smart_arbitrage_negative_basis_mode,
+            "inventory_reservation_enabled": self.runtime.settings.smart_arbitrage_inventory_reservation_enabled,
+            "margin_short_enabled": self.runtime.settings.smart_arbitrage_margin_short_enabled,
+            "margin_short_execution_ready": self.runtime.settings.smart_arbitrage_margin_short_execution_ready,
+            "margin_short_spot_margin_mode": self.runtime.settings.smart_arbitrage_margin_short_spot_margin_mode,
+            "margin_short_auto_repay_enabled": self.runtime.settings.smart_arbitrage_margin_short_auto_repay_enabled,
+            "max_concurrent_pairs": self.runtime.settings.smart_arbitrage_max_concurrent_pairs,
+            "pair_priority_mode": self.runtime.settings.smart_arbitrage_pair_priority_mode,
+            "min_inventory_backed_ratio": self.runtime.settings.smart_arbitrage_min_inventory_backed_ratio,
+            "fee_source_mode": self.runtime.settings.smart_arbitrage_fee_source_mode,
+            "funding_source_mode": self.runtime.settings.smart_arbitrage_funding_source_mode,
+            "borrow_source_mode": self.runtime.settings.smart_arbitrage_borrow_source_mode,
+            "expected_hold_hours": self.runtime.settings.smart_arbitrage_expected_hold_hours,
+            "funding_interval_hours": self.runtime.settings.smart_arbitrage_funding_interval_hours,
+            "expected_funding_events": self.runtime.settings.smart_arbitrage_expected_funding_events,
+            "hedge_target_leverage": self.runtime.settings.smart_arbitrage_hedge_target_leverage,
+            "estimated_execution_mismatch_bps": self.runtime.settings.smart_arbitrage_estimated_execution_mismatch_bps,
+            "estimated_transfer_cost_bps": self.runtime.settings.smart_arbitrage_estimated_transfer_cost_bps,
+            "time_decay_bps_per_hour": self.runtime.settings.smart_arbitrage_time_decay_bps_per_hour,
+            "estimated_borrow_apr": self.runtime.settings.smart_arbitrage_estimated_borrow_apr,
+            "borrow_interest_free_ratio": self.runtime.settings.smart_arbitrage_borrow_interest_free_ratio,
+            "estimated_funding_bps": self.runtime.settings.smart_arbitrage_estimated_funding_bps,
+            "estimated_borrow_bps": self.runtime.settings.smart_arbitrage_estimated_borrow_bps,
         }
 
     def _smart_arbitrage_cost_summary(self, *, latest_snapshot: dict[str, Any] | None) -> dict[str, Any]:

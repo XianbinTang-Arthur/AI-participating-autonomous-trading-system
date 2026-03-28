@@ -71,6 +71,42 @@ STRATEGY_PROFILE_MANAGED_FIELDS: tuple[str, ...] = (
     "strategy_transient_close_retry_cooldown_seconds",
 )
 
+STRATEGY_PROFILE_SHORT_FIELD_PAIRS: tuple[tuple[str, str], ...] = (
+    ("strategy_short_entry_allowed_regimes", "strategy_entry_allowed_regimes"),
+    ("strategy_short_entry_min_signal_edge_bps", "strategy_entry_min_signal_edge_bps"),
+    ("strategy_short_entry_alpha_min", "strategy_entry_alpha_min"),
+    ("strategy_short_entry_confidence_min", "strategy_entry_confidence_min"),
+    ("strategy_short_scale_in_min_signal_edge_bps", "strategy_scale_in_min_signal_edge_bps"),
+    ("strategy_short_scale_in_alpha_min", "strategy_scale_in_alpha_min"),
+    ("strategy_short_scale_in_confidence_min", "strategy_scale_in_confidence_min"),
+    ("strategy_short_reversal_min_signal_edge_bps", "strategy_reversal_min_signal_edge_bps"),
+    ("strategy_short_reversal_alpha_min", "strategy_reversal_alpha_min"),
+    ("strategy_short_reversal_confidence_min", "strategy_reversal_confidence_min"),
+)
+
+STRATEGY_PROFILE_SHORT_FIELDS: tuple[str, ...] = tuple(
+    short_field for short_field, _legacy_field in STRATEGY_PROFILE_SHORT_FIELD_PAIRS
+)
+
+
+def normalize_strategy_profile_payload_for_product_type(
+    payload: "StrategyProfilePayload | dict[str, Any]",
+    *,
+    product_type: str,
+) -> "StrategyProfilePayload":
+    raw = payload.model_dump(mode="python") if isinstance(payload, StrategyProfilePayload) else dict(payload)
+    normalized = dict(raw)
+    if product_type == "spot":
+        for short_field, shared_field in STRATEGY_PROFILE_SHORT_FIELD_PAIRS:
+            normalized[short_field] = normalized.get(shared_field)
+    return StrategyProfilePayload.model_validate(normalized)
+
+
+def _strategy_profile_summary_fields(*, product_type: str | None) -> tuple[str, ...]:
+    if product_type == "spot":
+        return tuple(field for field in STRATEGY_PROFILE_MANAGED_FIELDS if field not in STRATEGY_PROFILE_SHORT_FIELDS)
+    return STRATEGY_PROFILE_MANAGED_FIELDS
+
 
 class StrategyProfilePayload(SchemaBase):
     decision_min_interval_seconds_15m: float
@@ -379,20 +415,33 @@ class StrategyProfileEvaluationRecord(SchemaBase):
 def strategy_profile_payload_from_settings(settings: AATSSettings) -> StrategyProfilePayload:
     payload = settings.model_dump(mode="python")
     selected = {field: payload[field] for field in STRATEGY_PROFILE_MANAGED_FIELDS}
-    return StrategyProfilePayload.model_validate(selected)
+    return normalize_strategy_profile_payload_for_product_type(
+        selected,
+        product_type=settings.trading_product_type,
+    )
 
 
 def apply_strategy_profile_payload(settings: AATSSettings, payload: StrategyProfilePayload | dict[str, Any]) -> None:
-    raw = payload.model_dump(mode="python") if isinstance(payload, StrategyProfilePayload) else dict(payload)
+    raw = normalize_strategy_profile_payload_for_product_type(
+        payload,
+        product_type=settings.trading_product_type,
+    ).model_dump(mode="python")
     for field in STRATEGY_PROFILE_MANAGED_FIELDS:
         if field in raw:
             setattr(settings, field, raw[field])
 
 
-def summarize_strategy_profile_payload(payload: StrategyProfilePayload | dict[str, Any]) -> dict[str, Any]:
-    raw = payload.model_dump(mode="python") if isinstance(payload, StrategyProfilePayload) else dict(payload)
-    return {
-        "axes": strategy_profile_axes_from_payload(raw).model_dump(mode="json"),
+def summarize_strategy_profile_payload(
+    payload: StrategyProfilePayload | dict[str, Any],
+    *,
+    product_type: str | None = None,
+) -> dict[str, Any]:
+    raw = normalize_strategy_profile_payload_for_product_type(
+        payload,
+        product_type=product_type or "derivatives",
+    ).model_dump(mode="python")
+    summary = {
+        "axes": strategy_profile_axes_from_payload(raw, product_type=product_type).model_dump(mode="json"),
         "decision_min_interval_seconds_15m": raw.get("decision_min_interval_seconds_15m"),
         "max_decisions_per_minute": raw.get("max_decisions_per_minute"),
         "decision_min_price_move_bps": raw.get("decision_min_price_move_bps"),
@@ -426,10 +475,21 @@ def summarize_strategy_profile_payload(payload: StrategyProfilePayload | dict[st
         "strategy_low_edge_streak_limit": raw.get("strategy_low_edge_streak_limit"),
         "strategy_low_edge_cooldown_seconds": raw.get("strategy_low_edge_cooldown_seconds"),
     }
+    if product_type == "spot":
+        for field in STRATEGY_PROFILE_SHORT_FIELDS:
+            summary.pop(field, None)
+    return summary
 
 
-def strategy_profile_axes_from_payload(payload: StrategyProfilePayload | dict[str, Any]) -> StrategyProfileAxes:
-    raw = payload.model_dump(mode="python") if isinstance(payload, StrategyProfilePayload) else dict(payload)
+def strategy_profile_axes_from_payload(
+    payload: StrategyProfilePayload | dict[str, Any],
+    *,
+    product_type: str | None = None,
+) -> StrategyProfileAxes:
+    raw = normalize_strategy_profile_payload_for_product_type(
+        payload,
+        product_type=product_type or "derivatives",
+    ).model_dump(mode="python")
 
     def level(
         value: float,
@@ -490,16 +550,21 @@ def strategy_profile_axes_from_payload(payload: StrategyProfilePayload | dict[st
 def diff_strategy_profile_payload(
     previous: StrategyProfilePayload | dict[str, Any],
     next_payload: StrategyProfilePayload | dict[str, Any],
+    *,
+    product_type: str | None = None,
 ) -> dict[str, Any]:
-    previous_raw = previous.model_dump(mode="python") if isinstance(previous, StrategyProfilePayload) else dict(previous)
-    next_raw = (
-        next_payload.model_dump(mode="python")
-        if isinstance(next_payload, StrategyProfilePayload)
-        else dict(next_payload)
-    )
+    normalized_product_type = product_type or "derivatives"
+    previous_raw = normalize_strategy_profile_payload_for_product_type(
+        previous,
+        product_type=normalized_product_type,
+    ).model_dump(mode="python")
+    next_raw = normalize_strategy_profile_payload_for_product_type(
+        next_payload,
+        product_type=normalized_product_type,
+    ).model_dump(mode="python")
     changed_fields = [
         field
-        for field in STRATEGY_PROFILE_MANAGED_FIELDS
+        for field in _strategy_profile_summary_fields(product_type=product_type)
         if previous_raw.get(field) != next_raw.get(field)
     ]
     return {

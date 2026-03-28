@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from datetime import datetime
-from decimal import Decimal
 from typing import Any
 
 from aats.bootstrap.settings import AATSSettings
@@ -10,6 +8,7 @@ from aats.schemas.strategy_profiles import (
     StrategyProfileGuardrails,
     StrategyProfilePayload,
     StrategyProfileRevision,
+    normalize_strategy_profile_payload_for_product_type,
     strategy_profile_payload_from_settings,
 )
 from aats.storage.base import StrategyProfileRepository
@@ -172,7 +171,7 @@ def _seed_revisions(*, settings: AATSSettings, payload: StrategyProfilePayload) 
         "created_by": "system_seed",
         "created_reason": "initial_seed",
     }
-    return [
+    revisions = [
         StrategyProfileRevision(
             profile_id="trend_aggressive",
             profile_label="Trend Aggressive",
@@ -637,6 +636,19 @@ def _seed_revisions(*, settings: AATSSettings, payload: StrategyProfilePayload) 
             **common,
         ),
     ]
+    if settings.trading_product_type != "derivatives":
+        revisions = [
+            revision.model_copy(
+                update={
+                    "payload": normalize_strategy_profile_payload_for_product_type(
+                        revision.payload,
+                        product_type=settings.trading_product_type,
+                    )
+                }
+            )
+            for revision in revisions
+        ]
+    return revisions
 
 
 def seed_strategy_profiles(*, settings: AATSSettings, repo: StrategyProfileRepository) -> None:

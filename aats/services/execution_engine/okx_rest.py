@@ -274,6 +274,14 @@ class OKXRESTClient:
             require_auth=True,
         )
 
+    async def get_funding_rate(self, *, symbol: str) -> dict[str, Any]:
+        return await self.request(
+            method="GET",
+            path="/api/v5/public/funding-rate",
+            params={"instId": symbol},
+            require_auth=False,
+        )
+
     async def get_trade_fee(
         self,
         *,

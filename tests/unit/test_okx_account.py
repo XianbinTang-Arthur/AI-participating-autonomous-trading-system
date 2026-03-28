@@ -6,7 +6,7 @@ from decimal import Decimal
 
 from aats.bootstrap.settings import AATSSettings
 from aats.schemas.common import utc_now
-from aats.services.execution_engine.okx_account import OKXAccountService
+from aats.services.execution_engine.okx_account import OKXAccountService, datetime_from_ms
 
 
 def _ms_from_now(offset_seconds: int) -> str:
@@ -17,6 +17,7 @@ class _FakeOKXClient:
     def __init__(self) -> None:
         self.get_positions_called = False
         self.trade_fee_calls: list[dict[str, object | None]] = []
+        self.funding_rate_calls: list[str] = []
 
     async def get_balance(self):
         return {
@@ -75,6 +76,10 @@ class _FakeOKXClient:
         return {"code": "0", "data": [{"adjEq": "1000", "imr": "10", "mmr": "5", "mgnRatio": "100"}]}
 
     async def get_system_status(self):
+        return {"code": "0", "data": []}
+
+    async def get_funding_rate(self, *, symbol: str):
+        self.funding_rate_calls.append(symbol)
         return {"code": "0", "data": []}
 
     async def get_positions(self):
@@ -149,6 +154,23 @@ class _FakeDerivativesOKXClient(_FakeOKXClient):
         return {
             "code": "0",
             "data": [{"acctLv": "2", "posMode": "net_mode", "autoLoan": True, "greeksType": "PA", "ctIsoMode": "automatic"}],
+        }
+
+    async def get_funding_rate(self, *, symbol: str):
+        self.funding_rate_calls.append(symbol)
+        if symbol != "BTC-USDT-SWAP":
+            return {"code": "0", "data": []}
+        return {
+            "code": "0",
+            "data": [
+                {
+                    "instId": symbol,
+                    "fundingRate": "0.0001",
+                    "fundingTime": "1700000000000",
+                    "nextFundingTime": "1700014400000",
+                    "ts": "1700003600000",
+                }
+            ],
         }
 
 
@@ -658,6 +680,15 @@ class TestOKXAccountService(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot.position_mode, "net_mode")
         self.assertEqual(snapshot.fee_rates["taker"], "0.001")
         self.assertIsNotNone(snapshot.account_configuration)
+        schedule = service.funding_schedule(symbol="BTC-USDT-SWAP")
+        self.assertTrue(schedule["available"])
+        self.assertEqual(schedule["funding_time"], datetime_from_ms("1700000000000"))
+        self.assertEqual(schedule["next_funding_time"], datetime_from_ms("1700014400000"))
+        self.assertEqual(schedule["updated_at"], datetime_from_ms("1700003600000"))
+        self.assertEqual(schedule["funding_interval_hours"], Decimal("4"))
+        self.assertEqual(service.next_funding_time("BTC-USDT-SWAP"), datetime_from_ms("1700014400000"))
+        self.assertEqual(service.funding_interval_hours("BTC-USDT-SWAP"), Decimal("4"))
+        self.assertEqual(client.funding_rate_calls, ["BTC-USDT-SWAP"])
 
     async def test_derivatives_refresh_converts_futures_contract_quantity_to_internal_units(self) -> None:
         settings = AATSSettings.model_validate(
