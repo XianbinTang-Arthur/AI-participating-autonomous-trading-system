@@ -1303,10 +1303,10 @@ class StateComparator:
             add_finding(
                 layer="structural",
                 finding_type="derivatives_exchange_position_without_local_execution_chain",
-                severity_class="soft",
+                severity_class="review",
                 reason_code="derivatives_exchange_position_not_replayed_locally",
                 only_reduce_required=derivatives_assessment.only_reduce_required,
-                blocks_resume=False,
+                blocks_resume=True,
             )
 
         for detail in derivatives_assessment.unknown_state_details:
@@ -1316,17 +1316,17 @@ class StateComparator:
                 for finding in findings
             ):
                 continue
-            soft_only_reduce_kind = kind == "exchange_position_without_local_execution_chain"
+            review_only_reduce_kind = kind == "exchange_position_without_local_execution_chain"
             add_finding(
                 layer="structural",
                 finding_type=kind,
-                severity_class="soft" if soft_only_reduce_kind else "halt",
+                severity_class="review" if review_only_reduce_kind else "halt",
                 reason_code=kind,
                 scope_kind="position" if "position" in kind else "order",
                 scope_ref=str(detail.get("order_key") or detail.get("position_key") or detail.get("symbol") or ""),
                 primary_symbol_override=str(detail.get("symbol") or primary_symbol or ""),
                 only_reduce_required=derivatives_assessment.only_reduce_required,
-                blocks_resume=not soft_only_reduce_kind,
+                blocks_resume=True,
                 details_json={str(key): value for key, value in detail.items()},
             )
 

@@ -208,7 +208,17 @@ class ExecutionRecoveryService:
             if latest_reconciliation is not None
             else []
         )
+        reconciliation_only_reduce_required = bool(
+            latest_reconciliation is not None and latest_reconciliation.only_reduce_required
+        )
+        reconciliation_review_required = bool(
+            latest_reconciliation is not None and latest_reconciliation.review_required
+        )
         resume_blocked_reasons: list[str] = []
+        if reconciliation_review_required:
+            resume_blocked_reasons.append("operator_rebaseline_required")
+        if reconciliation_only_reduce_required:
+            resume_blocked_reasons.extend(only_reduce_reasons or ["only_reduce_required"])
         if bundle_recovery.bundle_recovery_required:
             only_reduce_reasons.append("strategy_bundle_recovery_in_progress")
             resume_blocked_reasons.append(
@@ -249,15 +259,27 @@ class ExecutionRecoveryService:
             open_order_count=len(open_orders),
             divergence_count=divergence_count,
             safe_startup=safe_startup and not self.kill_switch.halted,
-            safe_to_trade=safe_startup and not self.kill_switch.halted and not bundle_recovery.bundle_recovery_required,
-            resume_eligible=safe_startup and not self.kill_switch.halted and not bundle_recovery.bundle_recovery_required,
+            safe_to_trade=(
+                safe_startup
+                and not self.kill_switch.halted
+                and not bundle_recovery.bundle_recovery_required
+                and not reconciliation_only_reduce_required
+                and not reconciliation_review_required
+            ),
+            resume_eligible=(
+                safe_startup
+                and not self.kill_switch.halted
+                and not bundle_recovery.bundle_recovery_required
+                and not reconciliation_only_reduce_required
+                and not reconciliation_review_required
+            ),
             review_required=bool(
                 (account_baseline is not None and account_baseline.requires_operator_review)
-                or (latest_reconciliation is not None and latest_reconciliation.review_required)
+                or reconciliation_review_required
                 or bundle_recovery.recovery_blocking
             ),
             only_reduce_required=bool(
-                (latest_reconciliation is not None and latest_reconciliation.only_reduce_required)
+                reconciliation_only_reduce_required
                 or bundle_recovery.bundle_recovery_required
             ),
             only_reduce_reasons=only_reduce_reasons,
@@ -304,7 +326,7 @@ class ExecutionRecoveryService:
                 if account_baseline is not None and account_baseline.baseline_kind == "operator_rebaseline"
                 else None
             ),
-            resume_blocked_reasons=resume_blocked_reasons,
+            resume_blocked_reasons=self._dedupe_notes(resume_blocked_reasons),
             notes=self._dedupe_notes(notes),
         )
         return RecoveryArtifacts(

@@ -744,7 +744,7 @@ class TestRecovery(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(live_guard_snapshot["auto_halt_required"])
         self.assertFalse(runtime.kill_switch.halted)
 
-    async def test_derivatives_recovery_view_surfaces_only_reduce_state_without_forcing_halt(self) -> None:
+    async def test_derivatives_recovery_view_surfaces_manual_review_when_exchange_position_origin_is_unknown(self) -> None:
         settings = AATSSettings.model_validate(
             {
                 "storage_mode": "memory",
@@ -786,8 +786,10 @@ class TestRecovery(unittest.IsolatedAsyncioTestCase):
                 mismatch_categories=["derivatives_exchange_position_without_local_execution_chain"],
                 mismatch_reasons=["derivatives_exchange_position_not_replayed_locally"],
                 safety_impacts=["derivatives_only_reduce_until_position_reconciled"],
-                severity="SOFT_MISMATCH",
-                recovery_classification="derivatives_only_reduce",
+                severity="REVIEW_REQUIRED",
+                review_required=True,
+                resume_blocking=True,
+                recovery_classification="manual_review_required",
                 only_reduce_required=True,
                 only_reduce_reasons=["derivatives_exchange_position_without_local_execution_chain"],
                 unknown_state_details=[
@@ -805,16 +807,79 @@ class TestRecovery(unittest.IsolatedAsyncioTestCase):
         query = OperatorQueryService(runtime)
         recovery = query.recovery_view()
 
-        self.assertEqual(recovery["recovery_state"], "only_reduce")
-        self.assertTrue(recovery["safe_to_trade"])
-        self.assertTrue(recovery["resume_eligible"])
+        self.assertEqual(recovery["recovery_state"], "review_required")
+        self.assertFalse(recovery["safe_to_trade"])
+        self.assertFalse(recovery["resume_eligible"])
+        self.assertTrue(recovery["review_required"])
         self.assertTrue(recovery["only_reduce_required"])
         self.assertIn("derivatives_exchange_position_without_local_execution_chain", recovery["only_reduce_reasons"])
-        self.assertEqual(recovery["latest_reconciliation"]["recovery_classification"], "derivatives_only_reduce")
+        self.assertEqual(recovery["latest_reconciliation"]["recovery_classification"], "manual_review_required")
         self.assertEqual(
             recovery["latest_reconciliation"]["recommended_operator_action"],
             "go_close_position_on_exchange",
         )
+
+    async def test_resume_stays_blocked_when_derivatives_only_reduce_recovery_is_active(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "storage_mode": "memory",
+                "mode": "paper_live",
+                "market_data_backend": "demo",
+                "execution_backend": "paper",
+                "account_backend": "disabled",
+                "account_read_enabled": False,
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+            }
+        )
+        runtime = await build_runtime(settings)
+        await runtime.market_gateway.run_local_publisher(
+            symbol=settings.default_symbol,
+            iterations=2,
+            interval_seconds=0.0,
+        )
+        only_reduce_report = ReconciliationReport(
+            reconciliation_id="recon_only_reduce_resume_blocked",
+            as_of_ts=utc_now(),
+            product_type="derivatives",
+            margin_mode="cross",
+            allowed_symbols=["BTC-USDT-SWAP"],
+            exchange_comparison_enabled=True,
+            order_diff={"reconstructed": {}, "exchange": {}},
+            fill_diff={"replayed": {}, "exchange": {}},
+            balance_diff={"reconstructed": {}, "exchange": {}},
+            position_diff={"stored": {}, "reconstructed": {}, "reconstructed_mismatches": {}, "exchange": {}, "exchange_mismatches": {}},
+            mismatch_categories=["derivatives_runtime_margin_guard"],
+            mismatch_reasons=["derivatives_margin_usage_requires_only_reduce"],
+            safety_impacts=["derivatives_only_reduce_until_position_reconciled"],
+            severity="SOFT_MISMATCH",
+            recovery_classification="derivatives_only_reduce",
+            only_reduce_required=True,
+            only_reduce_reasons=["derivatives_margin_usage_requires_only_reduce"],
+            recommended_operator_action="go_close_position_on_exchange",
+        )
+        runtime.reconciliation_repo.save_report(only_reduce_report)
+        async def validate_only_reduce(*, reason: str):
+            _ = reason
+            return only_reduce_report
+        runtime.reconciliation_service.validate_now = validate_only_reduce  # type: ignore[method-assign]
+
+        query = OperatorQueryService(runtime)
+        recovery_before = query.recovery_view()
+
+        self.assertEqual(recovery_before["recovery_state"], "only_reduce")
+        self.assertFalse(recovery_before["safe_to_trade"])
+        self.assertFalse(recovery_before["resume_eligible"])
+
+        query.halt(reason="prepare_only_reduce_resume", actor_role="admin")
+        resumed = await query.resume(reason="resume_with_only_reduce_active", actor_role="admin")
+
+        self.assertEqual(resumed["status"], "resume_blocked")
+        self.assertTrue(resumed["halted"])
+        self.assertFalse(resumed["runnable"])
+        self.assertIn("derivatives_margin_usage_requires_only_reduce", resumed["recovery"]["resume_blocked_reasons"])
 
     async def test_restarted_runtime_tracks_structured_bundle_open_orders_without_halt(self) -> None:
         with temporary_postgres_url() as (database_url, _admin_engine, _schema_name):

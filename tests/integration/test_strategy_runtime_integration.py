@@ -214,6 +214,49 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
             set(payload["latest_allocation_decision"]["budget_snapshot_ids"]),
         )
 
+    async def test_spot_runtime_falls_back_from_incompatible_fixed_family(self) -> None:
+        settings = self._settings(
+            trading_product_type="spot",
+            margin_mode="cash",
+            default_symbol="BTC-USDT",
+            allowed_symbols=("BTC-USDT",),
+            strategy_family_active="smart_arbitrage",
+            strategy_family_auto_selection_enabled=False,
+            smart_arbitrage_enabled=True,
+            max_abs_position_qty=1.0,
+        )
+        runtime = await build_runtime(settings)
+        await runtime.market_gateway.run_local_publisher(
+            symbol=settings.default_symbol,
+            iterations=2,
+            interval_seconds=0.0,
+        )
+
+        target = await runtime.decision_engine.run_cycle(settings.default_symbol, settings.primary_timeframe)
+
+        self.assertEqual(target.strategy_family, "directional")
+
+        app = self._app(runtime)
+        with TestClient(app) as client:
+            strategy_runtime = client.get("/strategy/runtime")
+
+        self.assertEqual(strategy_runtime.status_code, 200)
+        payload = strategy_runtime.json()
+        self.assertEqual(payload["summary"]["configured_active_family"], "smart_arbitrage")
+        self.assertEqual(payload["summary"]["latest_selected_family"], "directional")
+        self.assertIn(
+            "legacy_configured_strategy_directional_fallback",
+            payload["summary"]["latest_selection_reason_codes"],
+        )
+        self.assertIn(
+            "smart_arbitrage_derivatives_runtime_required",
+            payload["summary"]["latest_selection_reason_codes"],
+        )
+        self.assertNotIn(
+            "legacy_configured_strategy_family_smart_arbitrage",
+            payload["summary"]["latest_selection_reason_codes"],
+        )
+
     async def test_smart_arbitrage_runtime_endpoint_exposes_executable_bundle_snapshot(self) -> None:
         settings = self._settings(
             trading_product_type="derivatives",

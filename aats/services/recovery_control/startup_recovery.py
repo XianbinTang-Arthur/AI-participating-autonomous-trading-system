@@ -92,7 +92,13 @@ class ExecutionLedgerRecoveryService:
             notes.append(f"reconciliation_classification:{reconciliation_classification}")
             if latest_reconciliation.only_reduce_required and not latest_reconciliation.resume_blocking:
                 recovery_state = "only_reduce"
+                safe_to_trade = False
+                resume_eligible = False
                 notes.append("derivatives_only_reduce_recovery_mode")
+                only_reduce_blockers = list(latest_reconciliation.only_reduce_reasons) or ["only_reduce_required"]
+                resume_blocked_reasons.extend(
+                    blocker for blocker in only_reduce_blockers if blocker not in resume_blocked_reasons
+                )
             combined_only_reduce_required = (
                 combined_only_reduce_required or bool(latest_reconciliation.only_reduce_required)
             )

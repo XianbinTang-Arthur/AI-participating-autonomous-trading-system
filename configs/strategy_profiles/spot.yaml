@@ -225,10 +225,10 @@ strategy_entry_alpha_min: 0.18
 strategy_entry_confidence_min: 0.63
 # [进阶可调] strategy_short_entry_min_signal_edge_bps：新开空最低信号边际。现货 cash 运行域当前忽略该项，仅为多运行域统一配置保留。可选值：0.0 ~ 100.0；推荐值：12.0。
 strategy_short_entry_min_signal_edge_bps: 12.0
-# [进阶可调] strategy_short_entry_alpha_min：新开空最低 alpha。现货 cash 运行域当前忽略该项，仅为多运行域统一配置保留。可选值：0.0 ~ 1.0；推荐值：0.16。
-strategy_short_entry_alpha_min: 0.16
-# [进阶可调] strategy_short_entry_confidence_min：新开空最低置信度。现货 cash 运行域当前忽略该项，仅为多运行域统一配置保留。可选值：0.0 ~ 1.0；推荐值：0.58。
-strategy_short_entry_confidence_min: 0.58
+# [进阶可调] strategy_short_entry_alpha_min：新开空最低 alpha。现货 cash 运行域当前忽略该项，仅为多运行域统一配置保留。可选值：0.0 ~ 1.0；推荐值：0.15。
+strategy_short_entry_alpha_min: 0.15
+# [进阶可调] strategy_short_entry_confidence_min：新开空最低置信度。现货 cash 运行域当前忽略该项，仅为多运行域统一配置保留。可选值：0.0 ~ 1.0；推荐值：0.55。
+strategy_short_entry_confidence_min: 0.55
 # [常用可调] strategy_scale_in_min_signal_edge_bps：加仓最低信号边际。可选值：0.0 ~ 100.0；推荐值：20.0。
 strategy_scale_in_min_signal_edge_bps: 18.0
 # [常用可调] strategy_scale_in_alpha_min：加仓最低 alpha。可选值：0.0 ~ 1.0；推荐值：0.26。
@@ -247,12 +247,12 @@ strategy_reversal_min_signal_edge_bps: 24.0
 strategy_reversal_alpha_min: 0.34
 # [常用可调] strategy_reversal_confidence_min：反手最低置信度。可选值：0.0 ~ 1.0；推荐值：0.82。
 strategy_reversal_confidence_min: 0.79
-# [进阶可调] strategy_short_reversal_min_signal_edge_bps：反手做空最低信号边际。现货 cash 运行域当前忽略该项，仅为多运行域统一配置保留。可选值：0.0 ~ 100.0；推荐值：18.0。
-strategy_short_reversal_min_signal_edge_bps: 18.0
-# [进阶可调] strategy_short_reversal_alpha_min：反手做空最低 alpha。现货 cash 运行域当前忽略该项，仅为多运行域统一配置保留。可选值：0.0 ~ 1.0；推荐值：0.22。
-strategy_short_reversal_alpha_min: 0.22
-# [进阶可调] strategy_short_reversal_confidence_min：反手做空最低置信度。现货 cash 运行域当前忽略该项，仅为多运行域统一配置保留。可选值：0.0 ~ 1.0；推荐值：0.60。
-strategy_short_reversal_confidence_min: 0.60
+# [进阶可调] strategy_short_reversal_min_signal_edge_bps：反手做空最低信号边际。现货 cash 运行域当前忽略该项，仅为多运行域统一配置保留。可选值：0.0 ~ 100.0；推荐值：14.0。
+strategy_short_reversal_min_signal_edge_bps: 14.0
+# [进阶可调] strategy_short_reversal_alpha_min：反手做空最低 alpha。现货 cash 运行域当前忽略该项，仅为多运行域统一配置保留。可选值：0.0 ~ 1.0；推荐值：0.18。
+strategy_short_reversal_alpha_min: 0.18
+# [进阶可调] strategy_short_reversal_confidence_min：反手做空最低置信度。现货 cash 运行域当前忽略该项，仅为多运行域统一配置保留。可选值：0.0 ~ 1.0；推荐值：0.55。
+strategy_short_reversal_confidence_min: 0.55
 # [常用可调] strategy_min_hold_seconds：最短持仓秒数。可选值：0 ~ 86400；推荐值：2400.0。
 strategy_min_hold_seconds: 720.0
 # [常用可调] strategy_post_close_cooldown_seconds：平仓后冷却秒数。可选值：0 ~ 86400；推荐值：1800.0。

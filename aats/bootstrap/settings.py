@@ -320,8 +320,8 @@ class AATSSettings(BaseSettings):
     strategy_entry_confidence_min: float = 0.64
     strategy_short_entry_allowed_regimes: tuple[str, ...] = Field(default=("trend", "breakout"))
     strategy_short_entry_min_signal_edge_bps: float = 11.0
-    strategy_short_entry_alpha_min: float = 0.16
-    strategy_short_entry_confidence_min: float = 0.58
+    strategy_short_entry_alpha_min: float = 0.15
+    strategy_short_entry_confidence_min: float = 0.55
     strategy_scale_in_min_signal_edge_bps: float = 16.0
     strategy_scale_in_alpha_min: float = 0.22
     strategy_scale_in_confidence_min: float = 0.70
@@ -331,9 +331,9 @@ class AATSSettings(BaseSettings):
     strategy_reversal_min_signal_edge_bps: float = 22.0
     strategy_reversal_alpha_min: float = 0.32
     strategy_reversal_confidence_min: float = 0.78
-    strategy_short_reversal_min_signal_edge_bps: float = 18.0
-    strategy_short_reversal_alpha_min: float = 0.22
-    strategy_short_reversal_confidence_min: float = 0.60
+    strategy_short_reversal_min_signal_edge_bps: float = 14.0
+    strategy_short_reversal_alpha_min: float = 0.18
+    strategy_short_reversal_confidence_min: float = 0.55
     strategy_min_hold_seconds: float = 720.0
     strategy_post_close_cooldown_seconds: float = 300.0
     strategy_health_lookback_trades: int = 12

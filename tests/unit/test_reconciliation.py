@@ -2191,7 +2191,7 @@ class TestReconciliationComparator(unittest.TestCase):
         self.assertEqual(report.severity, "CLEAN")
         self.assertEqual(report.fill_diff["exchange"], {})
 
-    def test_compare_marks_derivatives_exchange_position_without_local_execution_chain_as_only_reduce(self) -> None:
+    def test_compare_marks_derivatives_exchange_position_without_local_execution_chain_as_review_required(self) -> None:
         comparator = StateComparator()
         now = utc_now()
         report = comparator.compare(
@@ -2255,10 +2255,11 @@ class TestReconciliationComparator(unittest.TestCase):
             compare_exchange_portfolio=True,
         )
 
-        self.assertEqual(report.severity, "SOFT_MISMATCH")
-        self.assertFalse(report.review_required)
+        self.assertEqual(report.severity, "REVIEW_REQUIRED")
+        self.assertTrue(report.review_required)
         self.assertFalse(report.halt_required)
         self.assertTrue(report.only_reduce_required)
+        self.assertTrue(report.structural_review_required)
         self.assertIn("derivatives_exchange_position_without_local_execution_chain", report.mismatch_categories)
         self.assertIn("derivatives_exchange_position_not_replayed_locally", report.mismatch_reasons)
         self.assertEqual(report.recommended_operator_action, "go_close_position_on_exchange")

@@ -565,17 +565,32 @@ class StrategyCoordinatorService:
         candidates_by_family: dict[StrategyFamily, StrategyCandidate],
     ) -> tuple[StrategyFamily, StrategyCandidate, list[str]]:
         configured_family = self.settings.strategy_family_active
+        directional = candidates_by_family["directional"]
         if not self.settings.strategy_family_auto_selection_enabled:
             selected_family = (
                 configured_family
                 if configured_family in candidates_by_family
                 else "directional"
             )
-            candidate = candidates_by_family.get(selected_family, candidates_by_family["directional"])
+            candidate = candidates_by_family.get(selected_family, directional)
+            if candidate.enabled and candidate.selectable and candidate.execution_compatible:
+                return (
+                    selected_family,
+                    candidate,
+                    [f"legacy_configured_strategy_family_{selected_family}", *candidate.reason_codes],
+                )
             return (
-                selected_family,
-                candidate,
-                [f"legacy_configured_strategy_family_{selected_family}", *candidate.reason_codes],
+                "directional",
+                directional,
+                list(
+                    dict.fromkeys(
+                        [
+                            f"legacy_configured_strategy_family_{selected_family}_unavailable",
+                            *candidate.reason_codes,
+                            "legacy_configured_strategy_directional_fallback",
+                        ]
+                    )
+                ),
             )
 
         priority_order: tuple[StrategyFamily, ...] = ("smart_arbitrage", "spot_grid", "dca", "directional")

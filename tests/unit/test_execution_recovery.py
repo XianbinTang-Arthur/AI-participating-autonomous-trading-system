@@ -275,7 +275,7 @@ class TestExecutionRecovery(unittest.TestCase):
         self.assertFalse(artifacts.status.safe_to_trade)
         self.assertIn("stored_snapshot_differs_from_fill_reconstruction", artifacts.status.notes)
 
-    def test_recovery_marks_derivatives_only_reduce_when_latest_reconciliation_requires_it(self) -> None:
+    def test_recovery_marks_unknown_derivatives_position_as_review_required(self) -> None:
         reconciliation_repo = InMemoryReconciliationRepository()
         reconciliation_repo.save_report(
             ReconciliationReport(
@@ -298,9 +298,59 @@ class TestExecutionRecovery(unittest.TestCase):
                 mismatch_categories=["derivatives_exchange_position_without_local_execution_chain"],
                 mismatch_reasons=["derivatives_exchange_position_not_replayed_locally"],
                 safety_impacts=["derivatives_only_reduce_until_position_reconciled"],
-                severity="SOFT_MISMATCH",
+                severity="REVIEW_REQUIRED",
+                review_required=True,
                 only_reduce_required=True,
                 only_reduce_reasons=["derivatives_exchange_position_without_local_execution_chain"],
+                recovery_classification="manual_review_required",
+                recommended_operator_action="go_close_position_on_exchange",
+            )
+        )
+        recovery = self._service(
+            reconciliation_repo=reconciliation_repo,
+            settings_override={
+                "config_profile": "guarded_derivatives_dry_run",
+                "mode": "guarded_live",
+                "execution_backend": "okx",
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "margin_mode": "cross",
+                "trading_product_type": "derivatives",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ["BTC-USDT-SWAP"],
+            },
+        )
+
+        artifacts = recovery.recover(portfolio_state=PortfolioState(initial_usdt_balance=10_000.0))
+
+        self.assertEqual(artifacts.status.recovery_state, "review_required")
+        self.assertFalse(artifacts.status.safe_to_trade)
+        self.assertFalse(artifacts.status.resume_eligible)
+        self.assertTrue(artifacts.status.review_required)
+        self.assertTrue(artifacts.status.only_reduce_required)
+        self.assertIn("derivatives_exchange_position_without_local_execution_chain", artifacts.status.only_reduce_reasons)
+        self.assertIn("operator_rebaseline_required", artifacts.status.resume_blocked_reasons)
+
+    def test_recovery_marks_derivatives_only_reduce_as_not_resumable_even_without_review(self) -> None:
+        reconciliation_repo = InMemoryReconciliationRepository()
+        reconciliation_repo.save_report(
+            ReconciliationReport(
+                reconciliation_id="recon_margin_only_reduce_recovery",
+                as_of_ts=utc_now(),
+                product_type="derivatives",
+                margin_mode="cross",
+                allowed_symbols=["BTC-USDT-SWAP"],
+                exchange_comparison_enabled=True,
+                order_diff={"reconstructed": {}, "exchange": {}},
+                fill_diff={"replayed": {}, "exchange": {}},
+                balance_diff={"reconstructed": {}, "exchange": {}},
+                position_diff={"stored": {}, "reconstructed": {}, "reconstructed_mismatches": {}, "exchange": {}, "exchange_mismatches": {}},
+                mismatch_categories=["derivatives_runtime_margin_guard"],
+                mismatch_reasons=["derivatives_margin_usage_requires_only_reduce"],
+                safety_impacts=["derivatives_only_reduce_until_position_reconciled"],
+                severity="SOFT_MISMATCH",
+                only_reduce_required=True,
+                only_reduce_reasons=["derivatives_margin_usage_requires_only_reduce"],
                 recovery_classification="derivatives_only_reduce",
                 recommended_operator_action="go_close_position_on_exchange",
             )
@@ -323,10 +373,10 @@ class TestExecutionRecovery(unittest.TestCase):
         artifacts = recovery.recover(portfolio_state=PortfolioState(initial_usdt_balance=10_000.0))
 
         self.assertEqual(artifacts.status.recovery_state, "only_reduce")
-        self.assertTrue(artifacts.status.safe_to_trade)
-        self.assertTrue(artifacts.status.resume_eligible)
+        self.assertFalse(artifacts.status.safe_to_trade)
+        self.assertFalse(artifacts.status.resume_eligible)
         self.assertTrue(artifacts.status.only_reduce_required)
-        self.assertIn("derivatives_exchange_position_without_local_execution_chain", artifacts.status.only_reduce_reasons)
+        self.assertIn("derivatives_margin_usage_requires_only_reduce", artifacts.status.resume_blocked_reasons)
 
     @staticmethod
     def _service(

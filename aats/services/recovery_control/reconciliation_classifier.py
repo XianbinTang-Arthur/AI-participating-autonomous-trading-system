@@ -29,16 +29,6 @@ class RecoveryReconciliationClassifier:
                 recommended_operator_action=report.recommended_operator_action or "halt_execution_and_investigate_state_divergence",
                 remediation_action=report.remediation_action or "halt_execution_and_investigate_state_divergence",
             )
-        if report.only_reduce_required:
-            return ReconciliationClassification(
-                classification="derivatives_only_reduce",
-                auto_repairable=False,
-                resume_blocking=False,
-                review_required=False,
-                halt_required=False,
-                recommended_operator_action=report.recommended_operator_action or "go_close_position_on_exchange",
-                remediation_action=report.remediation_action or "go_close_position_on_exchange",
-            )
         if local_projection_only:
             return ReconciliationClassification(
                 classification="projection_rebuild_required",
@@ -58,6 +48,16 @@ class RecoveryReconciliationClassifier:
                 halt_required=False,
                 recommended_operator_action=report.recommended_operator_action or "review_and_rebaseline_if_expected",
                 remediation_action=report.remediation_action or "review_and_rebaseline_if_expected",
+            )
+        if report.only_reduce_required:
+            return ReconciliationClassification(
+                classification="derivatives_only_reduce",
+                auto_repairable=False,
+                resume_blocking=False,
+                review_required=False,
+                halt_required=False,
+                recommended_operator_action=report.recommended_operator_action or "go_close_position_on_exchange",
+                remediation_action=report.remediation_action or "go_close_position_on_exchange",
             )
         if report.severity == "SOFT_MISMATCH":
             if report.observational_only:

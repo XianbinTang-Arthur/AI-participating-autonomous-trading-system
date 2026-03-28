@@ -405,6 +405,46 @@ class TestStrategyCoordinator(unittest.TestCase):
         self.assertEqual(applied.target_position_qty, Decimal("0"))
         self.assertEqual(applied.decision_outcome.selected_strategy_route_action, "override_target")
 
+    def test_spot_fixed_incompatible_family_falls_back_to_directional_selection(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "trading_product_type": "spot",
+                "margin_mode": "cash",
+                "default_symbol": "BTC-USDT",
+                "allowed_symbols": ("BTC-USDT",),
+                "strategy_family_active": "smart_arbitrage",
+                "strategy_family_auto_selection_enabled": False,
+                "smart_arbitrage_enabled": True,
+            }
+        )
+        coordinator = StrategyCoordinatorService(
+            settings=settings,
+            event_store=InMemoryEventStore(),
+            market_gateway=_FakeMarketGateway({"BTC-USDT": _market_snapshot("BTC-USDT", "100")}),
+            portfolio_repo=InMemoryPortfolioRepository(),
+            strategy_sleeve_repo=InMemoryStrategySleeveRepository(),
+        )
+        base_target = _position_target(
+            symbol="BTC-USDT",
+            product_type="spot",
+            margin_mode="cash",
+            current_qty="0",
+            target_qty="0",
+        )
+
+        snapshot = coordinator.evaluate(
+            context=_decision_context(symbol="BTC-USDT", product_type="spot", current_position_qty="0"),
+            baseline=_baseline(symbol="BTC-USDT", regime="range"),
+            directional_target=base_target,
+        )
+        applied = coordinator.apply_selected_target(base_target=base_target, snapshot=snapshot)
+
+        self.assertEqual(snapshot.selected_family, "directional")
+        self.assertEqual(applied.strategy_family, "directional")
+        self.assertIn("legacy_configured_strategy_directional_fallback", snapshot.selection_reason_codes)
+        self.assertIn("smart_arbitrage_derivatives_runtime_required", snapshot.selection_reason_codes)
+        self.assertNotIn("legacy_configured_strategy_family_smart_arbitrage", snapshot.selection_reason_codes)
+
     def test_dca_interval_uses_last_real_dca_target_instead_of_hold_cycles(self) -> None:
         settings = AATSSettings.model_validate(
             {

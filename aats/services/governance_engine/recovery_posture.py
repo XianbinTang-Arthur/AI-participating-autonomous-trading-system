@@ -136,6 +136,12 @@ class RecoveryPostureEvaluator:
                 and "operator_rebaseline_required" not in blockers
             ):
                 blockers.append("operator_rebaseline_required")
+            if report.only_reduce_required:
+                only_reduce_reasons = list(report.only_reduce_reasons) or ["only_reduce_required"]
+                blockers.extend(reason for reason in only_reduce_reasons if reason not in blockers)
+        elif status.only_reduce_required:
+            only_reduce_reasons = list(status.only_reduce_reasons) or ["only_reduce_required"]
+            blockers.extend(reason for reason in only_reduce_reasons if reason not in blockers)
         if status.recovery_state == "rebaseline_pending" and "rebaseline_in_progress" not in blockers:
             blockers.append("rebaseline_in_progress")
         if self._ai_requires_manual_review() and "ai_degraded_requires_manual_review" not in blockers:
@@ -171,6 +177,17 @@ class RecoveryPostureEvaluator:
         if report is not None:
             if report.halt_required:
                 recovery_state = "resume_blocked"
+            elif (
+                (
+                    bool(getattr(report, "resume_blocking", False))
+                    or (
+                        report.review_required
+                        and self.runtime.recovery_policy.review_required_blocks_resume
+                    )
+                )
+                and recovery_state not in {"rebaseline_pending", "rebaseline_completed"}
+            ):
+                recovery_state = "review_required"
             elif report.only_reduce_required and recovery_state not in {"rebaseline_pending", "rebaseline_completed"}:
                 recovery_state = "only_reduce"
             elif (
@@ -179,12 +196,6 @@ class RecoveryPostureEvaluator:
                 and recovery_state not in {"rebaseline_pending", "rebaseline_completed"}
             ):
                 recovery_state = "degraded_continue"
-            elif (
-                report.review_required
-                and self.runtime.recovery_policy.review_required_blocks_resume
-                and recovery_state not in {"rebaseline_pending", "rebaseline_completed"}
-            ):
-                recovery_state = "review_required"
         if bundle_recovery.recovery_blocking and recovery_state not in {"rebaseline_pending", "resume_blocked"}:
             recovery_state = "review_required"
         elif (
@@ -262,11 +273,11 @@ class RecoveryPostureEvaluator:
             and recovery_state in {"review_required", "resume_blocked"}
         )
         resume_eligible = (
-            recovery_state in {"normal_operation", "degraded_continue", "only_reduce", "rebaseline_completed", "manually_halted"}
+            recovery_state in {"normal_operation", "degraded_continue", "rebaseline_completed", "manually_halted"}
             and resume_check.runnable
         )
         safe_to_trade = (
-            recovery_state in {"normal_operation", "degraded_continue", "only_reduce"}
+            recovery_state in {"normal_operation", "degraded_continue"}
             and resume_check.runnable
             and not self.runtime.kill_switch.halted
         )
