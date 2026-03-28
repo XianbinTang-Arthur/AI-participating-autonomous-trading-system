@@ -1,6 +1,7 @@
 ﻿import { fetchPanels, requestJson } from "./modules/api-client.js";
 import { notice, pill, primaryStatusPanel } from "./modules/components.js";
 import { fetchDashboardBundle } from "./modules/api-client.js";
+import { syncRefreshDisabledButtons } from "./modules/refresh-interactivity.js";
 import {
   emptyState,
   formatMaybeTimestamp,
@@ -287,6 +288,7 @@ function renderShell() {
   renderRefreshIndicators();
   updateActionAccess();
   updateRefreshLabel();
+  syncRefreshInteractivity();
 }
 
 function renderPageChrome() {
@@ -588,6 +590,20 @@ function updateRefreshLabel() {
     nodes.refreshButton.disabled = false;
   }
   patchText(nodes.lastRefreshLabel, `最近刷新：${formatMaybeTimestamp(state.lastRefreshAt)}（${formatRelativeAge(state.lastRefreshAt)}）`);
+}
+
+function syncRefreshInteractivity() {
+  syncRefreshDisabledButtons({
+    roots: currentRefreshInteractivityRoots(),
+    refreshing: state.refreshing,
+    reason: "当前区域正在刷新，请等待刷新完成后再操作。",
+  });
+}
+
+function currentRefreshInteractivityRoots() {
+  const activeSection = viewSections.find((section) => section.dataset.view === state.activeView) || null;
+  const openDrawer = nodes.detailDrawer?.classList.contains("is-open") ? nodes.detailDrawer : null;
+  return [activeSection, openDrawer].filter(Boolean);
 }
 
 function setActiveView(view, { pushHistory = false, refresh = true } = {}) {

@@ -32,6 +32,7 @@ class TestDashboardUI(unittest.TestCase):
                 "css": client.get("/ui/app.css"),
                 "js": client.get("/ui/app.js"),
                 "store_js": client.get("/ui/modules/store.js"),
+                "refresh_interactivity_js": client.get("/ui/modules/refresh-interactivity.js"),
                 "ai_view_js": client.get("/ui/modules/views/ai-view.js"),
                 "ai_analysis_js": client.get("/ui/modules/views/ai-analysis-view.js"),
                 "ai_config_js": client.get("/ui/modules/views/ai-config-view.js"),
@@ -61,6 +62,8 @@ class TestDashboardUI(unittest.TestCase):
         self.assertIn('aiAnalysis: "/ui/ai-analysis"', js_text)
         self.assertIn("fetchDashboardBundle", js_text)
         self.assertIn("buildDashboardBundlePath", js_text)
+        self.assertIn("syncRefreshDisabledButtons", js_text)
+        self.assertIn("currentRefreshInteractivityRoots", js_text)
         self.assertIn("fetchDashboardBundle(buildDashboardBundlePath(refreshingView, state))", js_text)
         self.assertIn("当前正在刷新，已排队一次新的刷新请求。", js_text)
         self.assertIn("当前已在${VIEW_LABELS[nextView] || \"当前页面\"}，已刷新当前状态。", js_text)
@@ -163,6 +166,10 @@ class TestDashboardUI(unittest.TestCase):
         self.assertIn("系统仍处于人工确认流程", risk_text)
         self.assertIn('action.client_action === "navigate-view" && action.value === "risk"', risk_text)
         self.assertNotIn("继续保持暂停", risk_text)
+
+        refresh_interactivity_text = responses["refresh_interactivity_js"].text
+        self.assertIn("syncRefreshDisabledButtons", refresh_interactivity_text)
+        self.assertIn("当前区域正在刷新，请等待刷新完成后再操作。", refresh_interactivity_text)
 
     def test_dashboard_redirects_to_login_when_auth_is_enabled(self) -> None:
         settings = AATSSettings.model_validate(
@@ -1483,6 +1490,36 @@ console.log(JSON.stringify({
         self.assertIn('"reviewHasInspectReconciliation":true', result.stdout)
         self.assertIn('"reviewHasRebaseline":true', result.stdout)
         self.assertIn('"reviewHasNoPause":true', result.stdout)
+
+    def test_terms_prioritize_manual_review_over_only_reduce_labels(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { tradingStatusLabel, recoveryStatusLabel } from './aats/api/static/modules/terms.js';
+
+const recovery = {
+  recovery_state: 'review_required',
+  review_required: true,
+  only_reduce_required: true,
+  safe_to_trade: false,
+  resume_eligible: false,
+  halted: false,
+};
+
+console.log(JSON.stringify({
+  tradingReview: tradingStatusLabel(recovery) === '待人工确认',
+  recoveryReview: recoveryStatusLabel(recovery) === '待人工确认',
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertIn('"tradingReview":true', result.stdout)
+        self.assertIn('"recoveryReview":true', result.stdout)
 
 
 if __name__ == "__main__":

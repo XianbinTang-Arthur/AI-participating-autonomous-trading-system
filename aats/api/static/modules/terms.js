@@ -616,6 +616,7 @@ export function toneForReconciliationSeverity(severity) {
 }
 
 export function tradingStatusLabel(recovery = {}) {
+  if (recovery.review_required) return "待人工确认";
   if (recovery.recovery_state === "only_reduce" || recovery.only_reduce_required) return "仅允许减仓";
   if (recovery.recovery_state === "degraded_continue" && recovery.safe_to_trade) return "轻度漂移，可交易";
   if (recovery.safe_to_trade) return "可交易";
@@ -625,11 +626,11 @@ export function tradingStatusLabel(recovery = {}) {
 }
 
 export function recoveryStatusLabel(recovery = {}) {
+  if (recovery.review_required) return "待人工确认";
   if (recovery.recovery_state === "only_reduce" || recovery.only_reduce_required) return "仅允许减仓";
   if (recovery.recovery_state === "degraded_continue" && recovery.safe_to_trade) return "轻度差异，继续运行";
   if (recovery.safe_to_trade) return "可交易";
   if (recovery.halted && recovery.resume_eligible) return "待恢复";
-  if (recovery.review_required) return "待人工确认";
   return "恢复受限";
 }
 
