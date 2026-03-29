@@ -596,7 +596,7 @@ class ExecutionPlanner:
         target_qty = to_decimal(target_position_qty)
         if current_qty > EPSILON_DECIMAL_12:
             if target_qty > current_qty:
-                return "open_long"
+                return "scale_in_long"
             if target_qty > EPSILON_DECIMAL_12:
                 return "reduce_long"
             if target_qty < -EPSILON_DECIMAL_12:
@@ -604,7 +604,7 @@ class ExecutionPlanner:
             return "close_long"
         if current_qty < -EPSILON_DECIMAL_12:
             if target_qty < current_qty:
-                return "open_short"
+                return "scale_in_short"
             if target_qty < -EPSILON_DECIMAL_12:
                 return "reduce_short"
             if target_qty > EPSILON_DECIMAL_12:

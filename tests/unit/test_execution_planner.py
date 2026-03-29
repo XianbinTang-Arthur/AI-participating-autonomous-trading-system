@@ -43,13 +43,13 @@ class TestExecutionPlanner(unittest.TestCase):
 
         self.assertIsNotNone(plan)
         self.assertEqual(plan.execution_action, "scale_in")
-        self.assertEqual(plan.position_intent, "open_long")
+        self.assertEqual(plan.position_intent, "scale_in_long")
 
         intent = planner.build_intent(plan=plan)
 
         self.assertIsNotNone(intent)
         self.assertEqual(intent.execution_action, "scale_in")
-        self.assertEqual(intent.position_intent, "open_long")
+        self.assertEqual(intent.position_intent, "scale_in_long")
 
     def test_build_leg_plan_and_intent_preserve_derivatives_execution_semantics(self) -> None:
         planner = ExecutionPlanner(settings=AATSSettings.model_validate({}))

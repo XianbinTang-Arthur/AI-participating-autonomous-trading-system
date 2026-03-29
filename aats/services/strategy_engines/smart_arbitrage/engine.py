@@ -167,29 +167,37 @@ class SmartArbitrageStrategyEngine:
             engine_input=engine_input,
             hedge_symbol=pair.hedge_symbol,
         )
+        sleeve_product_scope = str(engine_input.directional_target.product_type or engine_input.context.product_type)
+        sleeve_margin_scope = str(engine_input.directional_target.margin_mode or self.settings.margin_mode)
         sleeve_cash_spot_qty = self._current_sleeve_quantity(
             engine_input=engine_input,
             primary_symbol=engine_input.context.symbol,
+            sleeve_product_scope=sleeve_product_scope,
+            sleeve_margin_scope=sleeve_margin_scope,
             symbol_scope=(pair.spot_symbol, pair.hedge_symbol),
             symbol=pair.spot_symbol,
-            product_type="spot",
-            margin_mode="cash",
+            leg_product_type="spot",
+            leg_margin_mode="cash",
         )
         sleeve_margin_spot_qty = self._current_sleeve_quantity(
             engine_input=engine_input,
             primary_symbol=engine_input.context.symbol,
+            sleeve_product_scope=sleeve_product_scope,
+            sleeve_margin_scope=sleeve_margin_scope,
             symbol_scope=(pair.spot_symbol, pair.hedge_symbol),
             symbol=pair.spot_symbol,
-            product_type="spot",
-            margin_mode=self.settings.smart_arbitrage_margin_short_spot_margin_mode,
+            leg_product_type="spot",
+            leg_margin_mode=self.settings.smart_arbitrage_margin_short_spot_margin_mode,
         )
         sleeve_hedge_qty = self._current_sleeve_quantity(
             engine_input=engine_input,
             primary_symbol=engine_input.context.symbol,
+            sleeve_product_scope=sleeve_product_scope,
+            sleeve_margin_scope=sleeve_margin_scope,
             symbol_scope=(pair.spot_symbol, pair.hedge_symbol),
             symbol=pair.hedge_symbol,
-            product_type="derivatives",
-            margin_mode=self.settings.margin_mode,
+            leg_product_type="derivatives",
+            leg_margin_mode=sleeve_margin_scope,
         )
         pair_state = resolve_pair_state(
             pair_id=pair.pair_id,
@@ -1336,10 +1344,12 @@ class SmartArbitrageStrategyEngine:
         *,
         engine_input: StrategyEngineInput,
         primary_symbol: str,
+        sleeve_product_scope: str,
+        sleeve_margin_scope: str,
         symbol_scope: tuple[str, ...],
         symbol: str,
-        product_type: str,
-        margin_mode: str,
+        leg_product_type: str,
+        leg_margin_mode: str,
     ) -> Decimal:
         if self.sleeve_inventory_loader is None:
             if symbol == engine_input.context.symbol:
@@ -1349,12 +1359,12 @@ class SmartArbitrageStrategyEngine:
             self.sleeve_inventory_loader.quantity_for_strategy(
                 family="smart_arbitrage",
                 primary_symbol=primary_symbol,
-                product_scope=engine_input.context.product_type,
-                margin_scope=self.settings.margin_mode,
+                product_scope=sleeve_product_scope,
+                margin_scope=sleeve_margin_scope,
                 symbol_scope=symbol_scope,
                 symbol=symbol,
-                product_type=product_type,
-                margin_mode=margin_mode,
+                product_type=leg_product_type,
+                margin_mode=leg_margin_mode,
             )
         )
 

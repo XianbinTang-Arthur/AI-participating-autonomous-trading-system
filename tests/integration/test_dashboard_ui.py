@@ -2442,7 +2442,7 @@ const overviewHtml = renderOverviewView({
 const drawer = buildDecisionDrawer({
   decision_id: 'dec-hedge',
   decision_context: { symbol: 'BTC-USDT-SWAP', current_position_qty: 0.01 },
-  position_target: { position_intent: 'open_long', current_position_qty: 0.01, target_position_qty: 0.03 },
+  position_target: { position_intent: 'scale_in_long', current_position_qty: 0.01, target_position_qty: 0.03 },
   policy_decision: { execution_allowed: true },
   risk_decision: { approved: true },
   hedge_mode_audit: {

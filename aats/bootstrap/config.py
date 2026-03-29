@@ -1213,7 +1213,7 @@ def _build_position_target_handler(
     def _position_intent_for_target(*, current_qty: Decimal, target_qty: Decimal) -> str:
         if current_qty > Decimal("1e-12"):
             if target_qty > current_qty:
-                return "open_long"
+                return "scale_in_long"
             if target_qty > Decimal("1e-12"):
                 return "reduce_long"
             if target_qty < Decimal("-1e-12"):
@@ -1221,7 +1221,7 @@ def _build_position_target_handler(
             return "close_long"
         if current_qty < Decimal("-1e-12"):
             if target_qty < current_qty:
-                return "open_short"
+                return "scale_in_short"
             if target_qty < Decimal("-1e-12"):
                 return "reduce_short"
             if target_qty > Decimal("1e-12"):

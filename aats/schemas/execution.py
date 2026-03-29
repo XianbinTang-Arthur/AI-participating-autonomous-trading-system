@@ -44,7 +44,9 @@ def execution_action_from_position_intent(position_intent: str | None) -> Execut
     mapping: dict[str, ExecutionAction] = {
         "hold": "hold",
         "open_long": "enter",
+        "scale_in_long": "scale_in",
         "open_short": "enter",
+        "scale_in_short": "scale_in",
         "reduce_long": "reduce",
         "reduce_short": "reduce",
         "close_long": "exit",
@@ -137,10 +139,12 @@ def pos_side_from_position_intent(
     normalized = None if position_intent is None else str(position_intent).strip().lower()
     mapping: dict[str, PositionSide] = {
         "open_long": "long",
+        "scale_in_long": "long",
         "reduce_long": "long",
         "close_long": "long",
         "reverse_to_long": "long",
         "open_short": "short",
+        "scale_in_short": "short",
         "reduce_short": "short",
         "close_short": "short",
         "reverse_to_short": "short",
@@ -276,9 +280,11 @@ class OrderIntent(SchemaBase):
     leg_action: LegOrderAction | None = None
     position_intent: Literal[
         "open_long",
+        "scale_in_long",
         "reduce_long",
         "close_long",
         "open_short",
+        "scale_in_short",
         "reduce_short",
         "close_short",
         "reverse_to_long",
@@ -389,9 +395,11 @@ class ExecutionPlan(SchemaBase):
     leg_action: LegOrderAction | None = None
     position_intent: Literal[
         "open_long",
+        "scale_in_long",
         "reduce_long",
         "close_long",
         "open_short",
+        "scale_in_short",
         "reduce_short",
         "close_short",
         "reverse_to_long",
@@ -450,9 +458,11 @@ class LegExecutionPlan(SchemaBase):
     execution_action: ExecutionAction | None = None
     position_intent: Literal[
         "open_long",
+        "scale_in_long",
         "reduce_long",
         "close_long",
         "open_short",
+        "scale_in_short",
         "reduce_short",
         "close_short",
     ]
@@ -507,9 +517,11 @@ class OrderState(SchemaBase):
     leg_action: LegOrderAction | None = None
     position_intent: Literal[
         "open_long",
+        "scale_in_long",
         "reduce_long",
         "close_long",
         "open_short",
+        "scale_in_short",
         "reduce_short",
         "close_short",
         "reverse_to_long",
@@ -560,9 +572,11 @@ class FillEvent(SchemaBase):
     leg_action: LegOrderAction | None = None
     position_intent: Literal[
         "open_long",
+        "scale_in_long",
         "reduce_long",
         "close_long",
         "open_short",
+        "scale_in_short",
         "reduce_short",
         "close_short",
         "reverse_to_long",

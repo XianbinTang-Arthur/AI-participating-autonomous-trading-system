@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import unittest
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from unittest.mock import patch
 
@@ -92,6 +92,9 @@ class TestTargetPositionEngine(unittest.TestCase):
 
         self.assertGreater(target.target_position_qty, context.current_position_qty)
         self.assertLess(target.target_position_qty, 0.001)
+        self.assertEqual(target.position_intent, "scale_in_long")
+        assert target.decision_outcome is not None
+        self.assertEqual(target.decision_outcome.final_action, "scale_in")
 
     def test_long_only_spot_holds_existing_long_when_signal_flips_short(self) -> None:
         engine = TargetPositionEngine(settings=AATSSettings.model_validate({"default_order_qty": 0.001}))
@@ -721,6 +724,33 @@ class TestTargetPositionEngine(unittest.TestCase):
         self.assertIn("post_close_cooldown_active", target.guardrail_flags)
         self.assertIn("post_close_cooldown_blocks_entry", target.guardrail_flags)
 
+    def test_post_close_cooldown_uses_context_as_of_ts_for_historical_replay(self) -> None:
+        engine = TargetPositionEngine(
+            settings=AATSSettings.model_validate(
+                {
+                    "default_order_qty": 0.001,
+                    "strategy_post_close_cooldown_seconds": 900,
+                }
+            )
+        )
+        replay_ts = datetime(2026, 3, 1, 12, 0, tzinfo=timezone.utc)
+        context = self._context(
+            as_of_ts=replay_ts,
+            last_position_closed_seconds_ago=300,
+            current_exposure_side="flat",
+        )
+        baseline = self._baseline(
+            volatility_target_scale=1.0,
+            suggested_position_scale=1.0,
+            direction_bias="long",
+        )
+
+        target = engine.build(context, baseline, self._ai_assessment(direction=0.1))
+
+        self.assertIn("post_close_cooldown_active", target.guardrail_flags)
+        self.assertIn("post_close_cooldown_blocks_entry", target.guardrail_flags)
+        self.assertEqual(target.target_position_qty, Decimal("0"))
+
     def test_low_edge_streak_blocks_new_entry(self) -> None:
         engine = TargetPositionEngine(
             settings=AATSSettings.model_validate(
@@ -1036,6 +1066,60 @@ class TestTargetPositionEngine(unittest.TestCase):
         self.assertFalse(target.hedge_overlay_decision.active)
         self.assertIsNone(next((item for item in target.strategy_execution_legs if item.role == "hedge"), None))
 
+    def test_derivatives_protective_overlay_uses_context_as_of_ts_for_rebalance_cooldown(self) -> None:
+        engine = TargetPositionEngine(
+            settings=AATSSettings.model_validate(
+                {
+                    "default_order_qty": 0.01,
+                    "trading_product_type": "derivatives",
+                    "margin_mode": "cross",
+                    "derivatives_position_mode": "hedge",
+                    "strategy_short_bias_enabled": True,
+                    "strategy_hedge_overlay_enabled": True,
+                    "strategy_hedge_rebalance_cooldown_seconds": 120.0,
+                    "strategy_cost_guard_enabled": False,
+                    "strategy_entry_min_signal_edge_bps": 0.0,
+                    "strategy_entry_alpha_min": 0.0,
+                    "strategy_entry_confidence_min": 0.0,
+                    "strategy_reversal_min_signal_edge_bps": 50.0,
+                    "strategy_reversal_alpha_min": 0.60,
+                    "strategy_reversal_confidence_min": 0.95,
+                    "strategy_short_reversal_min_signal_edge_bps": 50.0,
+                    "strategy_short_reversal_alpha_min": 0.60,
+                    "strategy_short_reversal_confidence_min": 0.95,
+                    "strategy_edge_noise_buffer_bps": 0.0,
+                }
+            )
+        )
+        replay_ts = datetime(2026, 3, 1, 12, 0, tzinfo=timezone.utc)
+        context = self._context(
+            as_of_ts=replay_ts,
+            current_position_qty=0.05,
+            current_long_position_qty=0.05,
+            product_type="derivatives",
+            current_exposure_side="long",
+            last_short_leg_closed_seconds_ago=30,
+        )
+        baseline = self._baseline(
+            direction_bias="short",
+            confidence=0.85,
+            suggested_position_scale=1.0,
+            volatility_target_scale=1.0,
+            volatility_state="high",
+            factor_scores={
+                "momentum_alpha": -0.22,
+                "trend_alpha": 0.03,
+                "microstructure_alpha": -0.21,
+                "liquidity_scale": 0.9,
+            },
+        ).model_copy(update={"regime": "range", "composite_alpha_score": -0.40})
+
+        target = engine.build(context, baseline, self._ai_assessment(direction=-0.12, confidence=0.83))
+
+        assert target.hedge_overlay_decision is not None
+        self.assertIn("protective_overlay_rebalance_cooldown_active", target.hedge_overlay_decision.blocked_reasons)
+        self.assertGreater(target.hedge_overlay_decision.rebalance_cooldown_remaining_seconds, 0.0)
+
     def test_derivatives_opportunistic_overlay_opens_short_opportunity_leg_against_existing_long(self) -> None:
         engine = TargetPositionEngine(
             settings=AATSSettings.model_validate(
@@ -1215,6 +1299,52 @@ class TestTargetPositionEngine(unittest.TestCase):
         self.assertGreater(target.hedge_overlay_decision.min_hold_remaining_seconds, 0.0)
         self.assertEqual(target.hedge_overlay_decision.hedge_leg_target_qty, Decimal("0.02"))
         self.assertIsNone(next((item for item in target.strategy_execution_legs if item.role == "hedge"), None))
+
+    def test_derivatives_opportunistic_overlay_uses_context_as_of_ts_for_min_hold(self) -> None:
+        engine = TargetPositionEngine(
+            settings=AATSSettings.model_validate(
+                {
+                    "default_order_qty": 0.01,
+                    "trading_product_type": "derivatives",
+                    "margin_mode": "cross",
+                    "derivatives_position_mode": "hedge",
+                    "strategy_short_bias_enabled": True,
+                    "strategy_hedge_overlay_enabled": True,
+                    "strategy_hedge_overlay_mode": "opportunistic",
+                    "strategy_hedge_opportunistic_enabled": True,
+                    "strategy_hedge_opportunistic_min_hold_seconds": 180.0,
+                }
+            )
+        )
+        replay_ts = datetime(2026, 3, 1, 12, 0, tzinfo=timezone.utc)
+        context = self._context(
+            as_of_ts=replay_ts,
+            current_position_qty=0.03,
+            current_long_position_qty=0.05,
+            current_short_position_qty=0.02,
+            product_type="derivatives",
+            current_exposure_side="long",
+            current_short_leg_opened_seconds_ago=60,
+            latest_short_leg_fill_seconds_ago=60,
+        )
+        baseline = self._baseline(
+            direction_bias="long",
+            confidence=0.72,
+            suggested_position_scale=1.0,
+            volatility_target_scale=1.0,
+            factor_scores={
+                "momentum_alpha": 0.16,
+                "trend_alpha": 0.12,
+                "microstructure_alpha": 0.18,
+                "liquidity_scale": 0.92,
+            },
+        ).model_copy(update={"regime": "trend", "composite_alpha_score": 0.24})
+
+        target = engine.build(context, baseline, self._ai_assessment(direction=0.12, confidence=0.70))
+
+        assert target.hedge_overlay_decision is not None
+        self.assertIn("opportunistic_overlay_min_hold_active", target.hedge_overlay_decision.blocked_reasons)
+        self.assertGreater(target.hedge_overlay_decision.min_hold_remaining_seconds, 0.0)
 
     def test_derivatives_opportunistic_overlay_respects_rebalance_cooldown_before_reopening(self) -> None:
         engine = TargetPositionEngine(
@@ -1479,6 +1609,60 @@ class TestTargetPositionEngine(unittest.TestCase):
         self.assertEqual(long_leg.action, "open")
         self.assertEqual(long_leg.execution_mode, "independent_long_book")
         self.assertIsNone(short_leg)
+
+    def test_derivatives_independent_books_use_context_as_of_ts_for_leg_cooldowns(self) -> None:
+        engine = TargetPositionEngine(
+            settings=AATSSettings.model_validate(
+                {
+                    "default_order_qty": 0.01,
+                    "trading_product_type": "derivatives",
+                    "margin_mode": "cross",
+                    "derivatives_position_mode": "hedge",
+                    "strategy_short_bias_enabled": True,
+                    "strategy_hedge_overlay_enabled": True,
+                    "strategy_hedge_overlay_mode": "independent",
+                    "strategy_hedge_independent_enabled": True,
+                    "strategy_post_close_cooldown_seconds": 300.0,
+                    "strategy_cost_guard_enabled": False,
+                    "strategy_entry_min_signal_edge_bps": 0.0,
+                    "strategy_entry_alpha_min": 0.0,
+                    "strategy_entry_confidence_min": 0.0,
+                }
+            )
+        )
+        replay_ts = datetime(2026, 3, 1, 12, 0, tzinfo=timezone.utc)
+        context = self._context(
+            as_of_ts=replay_ts,
+            product_type="derivatives",
+            current_exposure_side="flat",
+            last_short_leg_closed_seconds_ago=30,
+        )
+        baseline = self._baseline(
+            direction_bias="long",
+            confidence=0.84,
+            suggested_position_scale=1.0,
+            volatility_target_scale=1.0,
+            factor_scores={
+                "momentum_alpha": 0.48,
+                "trend_alpha": 0.42,
+                "microstructure_alpha": 0.18,
+                "liquidity_scale": 0.95,
+            },
+        ).model_copy(update={"regime": "trend", "composite_alpha_score": 0.32})
+
+        with patch.object(
+            engine,
+            "_independent_book_score",
+            side_effect=lambda *, leg, baseline, ai_assessment: 0.78 if leg == "long" else 0.75,
+        ):
+            target = engine.build(context, baseline, self._ai_assessment(direction=0.25, confidence=0.82))
+
+        assert target.hedge_overlay_decision is not None
+        self.assertIn(
+            "independent_short_book_post_close_cooldown_active",
+            target.hedge_overlay_decision.short_leg_blocked_reasons,
+        )
+        self.assertGreater(target.hedge_overlay_decision.rebalance_cooldown_remaining_seconds, 0.0)
 
     def test_derivatives_independent_books_keep_short_book_when_long_book_trial_guard_is_bad(self) -> None:
         engine = TargetPositionEngine(
@@ -2016,6 +2200,7 @@ class TestTargetPositionEngine(unittest.TestCase):
     @staticmethod
     def _context(
         *,
+        as_of_ts: datetime | None = None,
         current_position_qty: float = 0.0,
         current_long_position_qty: float | None = None,
         current_short_position_qty: float | None = None,
@@ -2036,7 +2221,7 @@ class TestTargetPositionEngine(unittest.TestCase):
         recent_churn_ratio: float = 0.0,
         leg_strategy_health: dict[str, dict[str, object]] | None = None,
     ) -> DecisionContext:
-        now = utc_now()
+        now = as_of_ts or utc_now()
         derived_long_qty = (
             current_position_qty
             if current_long_position_qty is None and current_position_qty > 0

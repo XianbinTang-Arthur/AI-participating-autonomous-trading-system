@@ -352,9 +352,11 @@ class PositionTarget(SchemaBase):
     position_intent: Literal[
         "hold",
         "open_long",
+        "scale_in_long",
         "reduce_long",
         "close_long",
         "open_short",
+        "scale_in_short",
         "reduce_short",
         "close_short",
         "reverse_to_long",

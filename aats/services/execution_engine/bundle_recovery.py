@@ -402,8 +402,8 @@ def _order_side(order: OrderState) -> str:
     if payload_side in {"buy", "sell"}:
         return payload_side
     position_intent = str(order.position_intent or "").strip().lower()
-    if position_intent in {"open_long", "reduce_short", "close_short", "reverse_to_long"}:
+    if position_intent in {"open_long", "scale_in_long", "reduce_short", "close_short", "reverse_to_long"}:
         return "buy"
-    if position_intent in {"open_short", "reduce_long", "close_long", "reverse_to_short"}:
+    if position_intent in {"open_short", "scale_in_short", "reduce_long", "close_long", "reverse_to_short"}:
         return "sell"
     return "buy"

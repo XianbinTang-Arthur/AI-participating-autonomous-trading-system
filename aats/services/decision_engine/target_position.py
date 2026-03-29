@@ -5,7 +5,6 @@ from decimal import Decimal
 
 from aats.bootstrap.settings import AATSSettings
 from aats.schemas.ai_shadow import AIShadowDecision
-from aats.schemas.common import utc_now
 from aats.schemas.decision import (
     AIDecisionIntent,
     AIMarketAssessment,
@@ -61,6 +60,10 @@ class TargetPositionEngine:
             profile_control_decision=profile_control_decision,
             operating_mode=effective_mode,
         )
+
+    @staticmethod
+    def _decision_as_of(context: DecisionContext):
+        return context.as_of_ts
 
     def build_shadow(
         self,
@@ -273,7 +276,7 @@ class TargetPositionEngine:
             ),
             max_slippage_tolerance_bps=self.settings.max_slippage_tolerance_bps,
             source_mix=source_mix,
-            decision_expiry_ts=utc_now() + timedelta(minutes=15),
+            decision_expiry_ts=self._decision_as_of(context) + timedelta(minutes=15),
             product_type=context.product_type,
             current_exposure_side=context.current_exposure_side,
             target_exposure_side=target_exposure_side,
@@ -1063,7 +1066,7 @@ class TargetPositionEngine:
             or abs(current_position_qty) < EPSILON_DECIMAL_12
         ):
             return False
-        held_for = max((utc_now() - context.current_position_opened_at).total_seconds(), 0.0)
+        held_for = max((self._decision_as_of(context) - context.current_position_opened_at).total_seconds(), 0.0)
         if held_for + float(EPSILON_DECIMAL_12) >= self.settings.strategy_min_hold_seconds:
             return False
         if not self._is_reducing_or_closing(
@@ -1083,7 +1086,7 @@ class TargetPositionEngine:
             or self.settings.strategy_post_close_cooldown_seconds <= 0
         ):
             return False
-        return max((utc_now() - context.last_position_closed_at).total_seconds(), 0.0) < self.settings.strategy_post_close_cooldown_seconds
+        return max((self._decision_as_of(context) - context.last_position_closed_at).total_seconds(), 0.0) < self.settings.strategy_post_close_cooldown_seconds
 
     def _low_edge_cooldown_active(self, context: DecisionContext) -> bool:
         if (
@@ -1092,7 +1095,7 @@ class TargetPositionEngine:
             or self.settings.strategy_low_edge_cooldown_seconds <= 0
         ):
             return False
-        return max((utc_now() - context.recent_low_edge_trade_at).total_seconds(), 0.0) < self.settings.strategy_low_edge_cooldown_seconds
+        return max((self._decision_as_of(context) - context.recent_low_edge_trade_at).total_seconds(), 0.0) < self.settings.strategy_low_edge_cooldown_seconds
 
     def _performance_degraded(self, context: DecisionContext) -> bool:
         if context.recent_closed_trade_count < self.settings.strategy_performance_guard_min_closed_trades:
@@ -1737,7 +1740,7 @@ class TargetPositionEngine:
             reason_codes.append("protective_overlay_pressure_below_open_threshold")
 
         hedge_leg_target_qty = main_leg_target_qty * target_ratio
-        now = utc_now()
+        now = self._decision_as_of(context)
         if hedge_leg_current_qty > EPSILON_DECIMAL_12:
             held_for = (
                 0.0
@@ -1949,7 +1952,7 @@ class TargetPositionEngine:
                 hedge_leg_target_qty = hedge_leg_current_qty
                 blocked_reasons.append("opportunistic_overlay_churn_guard_active")
 
-        now = utc_now()
+        now = self._decision_as_of(context)
         if hedge_leg_current_qty > EPSILON_DECIMAL_12:
             held_for = (
                 0.0
@@ -2218,7 +2221,7 @@ class TargetPositionEngine:
         )
         if opened_at is None or min_hold_seconds <= 0 or current_qty <= EPSILON_DECIMAL_12:
             return 0.0
-        held_for = max((utc_now() - opened_at).total_seconds(), 0.0)
+        held_for = max((self._decision_as_of(context) - opened_at).total_seconds(), 0.0)
         return max(float(min_hold_seconds) - held_for, 0.0)
 
     def _independent_rebalance_remaining_seconds(
@@ -2242,7 +2245,7 @@ class TargetPositionEngine:
             anchor = context.last_long_leg_closed_at if leg == "long" else context.last_short_leg_closed_at
         if anchor is None:
             return 0.0
-        since_anchor = max((utc_now() - anchor).total_seconds(), 0.0)
+        since_anchor = max((self._decision_as_of(context) - anchor).total_seconds(), 0.0)
         return max(self.settings.strategy_hedge_independent_rebalance_cooldown_seconds - since_anchor, 0.0)
 
     def _independent_post_close_cooldown_active(self, *, context: DecisionContext, leg: str) -> bool:
@@ -2252,7 +2255,7 @@ class TargetPositionEngine:
         if closed_at is None:
             return False
         return (
-            max((utc_now() - closed_at).total_seconds(), 0.0)
+            max((self._decision_as_of(context) - closed_at).total_seconds(), 0.0)
             < self.settings.strategy_post_close_cooldown_seconds
         )
 
@@ -2266,7 +2269,7 @@ class TargetPositionEngine:
         if recent_at is None:
             return False
         return (
-            max((utc_now() - recent_at).total_seconds(), 0.0)
+            max((self._decision_as_of(context) - recent_at).total_seconds(), 0.0)
             < self.settings.strategy_low_edge_cooldown_seconds
         )
 
@@ -2539,11 +2542,11 @@ class TargetPositionEngine:
         if current_side != target_side:
             return "reverse_to_long" if target_side == "long" else "reverse_to_short"
         if current_side == "long":
-            if abs(target_position_qty) >= abs(current_position_qty):
-                return "open_long"
+            if abs(target_position_qty) > abs(current_position_qty) + EPSILON_DECIMAL_12:
+                return "scale_in_long"
             return "reduce_long"
-        if abs(target_position_qty) >= abs(current_position_qty):
-            return "open_short"
+        if abs(target_position_qty) > abs(current_position_qty) + EPSILON_DECIMAL_12:
+            return "scale_in_short"
         return "reduce_short"
 
     @staticmethod
@@ -2665,7 +2668,9 @@ class TargetPositionEngine:
         action_map = {
             "hold": "hold",
             "open_long": "enter",
+            "scale_in_long": "scale_in",
             "open_short": "enter",
+            "scale_in_short": "scale_in",
             "reduce_long": "reduce",
             "reduce_short": "reduce",
             "close_long": "exit",
