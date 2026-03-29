@@ -106,6 +106,26 @@ def _fill(*, client_order_id: str, fill_id: str) -> FillEvent:
     )
 
 
+class TestConvergedExecutionIntentCompatibility(unittest.TestCase):
+    def test_converged_repo_side_inference_supports_scale_in_short(self) -> None:
+        order_state = _order_state(client_order_id="cl_task58_scale_in_short").model_copy(
+            update={
+                "position_intent": "scale_in_short",
+                "pos_side": "short",
+                "exposure_side": "short",
+                "reduce_only": False,
+                "close_only": False,
+                "reduce_only_reason": None,
+                "close_only_reason": None,
+            }
+        )
+
+        intent = ConvergedPostgresExecutionRepository._intent_from_order_state(order_state)
+
+        self.assertEqual(intent.side, "sell")
+        self.assertEqual(intent.position_intent, "scale_in_short")
+
+
 @unittest.skipUnless(os.getenv("AATS_DATABASE_URL"), "AATS_DATABASE_URL is required for PostgreSQL-backed tests")
 class TestTask58ConvergedExecutionTruth(unittest.IsolatedAsyncioTestCase):
     async def test_financial_convergence_mode_builds_runtime_with_converged_execution_repo(self) -> None:

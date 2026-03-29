@@ -2498,6 +2498,50 @@ console.log(JSON.stringify({
         self.assertIn('"drawerHasLegOrderAudit":true', result.stdout)
         self.assertIn('"drawerHasLegReconciliationAudit":true', result.stdout)
 
+    def _legacy_test_terms_localize_scale_in_position_intents(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { readableState } from './aats/api/static/modules/terms.js';
+
+console.log(JSON.stringify({
+  scaleInLong: readableState('scale_in_long'),
+  scaleInShort: readableState('scale_in_short'),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertIn('"scaleInLong":"加多"', result.stdout)
+        self.assertIn('"scaleInShort":"加空"', result.stdout)
+
+    def test_terms_localize_scale_in_position_intents(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { readableState } from './aats/api/static/modules/terms.js';
+
+console.log(JSON.stringify({
+  scaleInLong: readableState('scale_in_long'),
+  scaleInShort: readableState('scale_in_short'),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        stdout = result.stdout or ""
+        self.assertIn('"scaleInLong":"加多"', stdout)
+        self.assertIn('"scaleInShort":"加空"', stdout)
+
     def test_decision_drawer_surfaces_independent_overlay_audit_and_leg_trial_guard(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
         script = """

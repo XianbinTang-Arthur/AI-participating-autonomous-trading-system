@@ -340,6 +340,18 @@ class LegOrderIntent(SchemaBase):
     target_leverage: float = 1.0
     margin_mode: MarginModelType = "cross"
     exposure_side: Literal["long", "short", "flat"] = "flat"
+    position_intent: Literal[
+        "open_long",
+        "scale_in_long",
+        "reduce_long",
+        "close_long",
+        "open_short",
+        "scale_in_short",
+        "reduce_short",
+        "close_short",
+        "reverse_to_long",
+        "reverse_to_short",
+    ] | None = None
     ai_execution_parameter_suggestion: AIExecutionParameterSuggestionEnvelope | None = None
 
 
@@ -670,12 +682,13 @@ def leg_intent_from_order_intent(intent: OrderIntent) -> LegOrderIntent | None:
         target_leverage=intent.target_leverage,
         margin_mode=intent.margin_mode,
         exposure_side=intent.exposure_side,
+        position_intent=intent.position_intent,
         ai_execution_parameter_suggestion=intent.ai_execution_parameter_suggestion,
     )
 
 
 def order_intent_from_leg_order_intent(leg_intent: LegOrderIntent) -> OrderIntent:
-    position_intent = position_intent_from_leg_intent(
+    position_intent = leg_intent.position_intent or position_intent_from_leg_intent(
         side=leg_intent.side,
         pos_side=leg_intent.pos_side,
         action=leg_intent.action,

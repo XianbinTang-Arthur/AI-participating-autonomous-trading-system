@@ -5,7 +5,12 @@ from decimal import Decimal
 
 from aats.bootstrap.settings import AATSSettings
 from aats.schemas.exchange import InstrumentMetadata
-from aats.schemas.execution import AIExecutionParameterSuggestionEnvelope, ExecutionParameterSuggestion, ExecutionPlan
+from aats.schemas.execution import (
+    AIExecutionParameterSuggestionEnvelope,
+    ExecutionParameterSuggestion,
+    ExecutionPlan,
+    order_intent_from_leg_order_intent,
+)
 from aats.services.execution_engine.planner import ExecutionPlanner
 
 
@@ -98,6 +103,46 @@ class TestExecutionPlanner(unittest.TestCase):
         self.assertEqual(intent.action, "close")
         self.assertEqual(intent.instrument_family, "BTC-USDT")
         self.assertEqual(intent.settle_currency, "USDT")
+
+    def test_build_leg_plan_and_intent_preserve_scale_in_position_intent(self) -> None:
+        planner = ExecutionPlanner(settings=AATSSettings.model_validate({}))
+
+        plan = planner.build_leg_plan(
+            decision_id="decision_scale_in_leg",
+            symbol="BTC-USDT-SWAP",
+            side="buy",
+            pos_side="long",
+            action="open",
+            quantity=Decimal("0.01"),
+            urgency="medium",
+            max_slippage_tolerance_bps=25,
+            product_type="derivatives",
+            target_leverage=3.0,
+            margin_mode="cross",
+            td_mode="cross",
+            position_mode="long_short_mode",
+            instrument_family="BTC-USDT",
+            settle_currency="USDT",
+            position_intent="scale_in_long",
+        )
+
+        self.assertIsNotNone(plan)
+        assert plan is not None
+        self.assertEqual(plan.position_intent, "scale_in_long")
+        self.assertEqual(plan.execution_action, "enter")
+
+        leg_intent = planner.build_leg_intent(plan=plan)
+
+        self.assertIsNotNone(leg_intent)
+        assert leg_intent is not None
+        self.assertEqual(leg_intent.position_intent, "scale_in_long")
+        self.assertEqual(leg_intent.action, "open")
+
+        order_intent = order_intent_from_leg_order_intent(leg_intent)
+
+        self.assertEqual(order_intent.position_intent, "scale_in_long")
+        self.assertEqual(order_intent.execution_action, "enter")
+        self.assertEqual(order_intent.side, "buy")
 
     def test_build_plan_rejects_signed_derivatives_flow_in_long_short_mode(self) -> None:
         planner = ExecutionPlanner(settings=AATSSettings.model_validate({}))

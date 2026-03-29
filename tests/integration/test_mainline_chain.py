@@ -444,6 +444,132 @@ class TestMainlineTradingChain(unittest.IsolatedAsyncioTestCase):
         self.assertIn("risk_max_gross_notional_exceeded", blocked_short_legs[0].risk_rejection_reasons)
         self.assertIsNone(blocked_short_legs[0].order_intent_ref)
 
+    async def test_independent_overlay_mainline_chain_preserves_scale_in_long_intent_for_same_side_expansion(self) -> None:
+        runtime = await build_runtime(self._derivatives_overlay_settings(mode="independent"))
+        self._seed_overlay_cycle_inputs(
+            runtime,
+            snapshot=self._portfolio_snapshot(
+                symbol=runtime.settings.default_symbol,
+                positions=[
+                    Position(
+                        symbol=runtime.settings.default_symbol,
+                        position_qty=Decimal("0.01"),
+                        position_notional=Decimal("800"),
+                        avg_entry_price=Decimal("80000"),
+                        unrealized_pnl=Decimal("0"),
+                        product_type="derivatives",
+                        exposure_side="long",
+                        target_leverage=2.0,
+                        margin_mode="cross",
+                        position_mode="long_short_mode",
+                        pos_side="long",
+                        instrument_family="BTC-USDT",
+                        settle_currency="USDT",
+                    )
+                ],
+            ),
+        )
+
+        def _scale_in_target(context, *_args, **_kwargs):
+            target = self._overlay_target(context, mode="independent")
+            scaled_long_leg = target.strategy_execution_legs[0].model_copy(
+                update={
+                    "current_position_qty": Decimal("0.01"),
+                    "target_position_qty": Decimal("0.02"),
+                    "delta_position_qty": Decimal("0.01"),
+                }
+            )
+            return target.model_copy(
+                update={
+                    "current_position_qty": Decimal("0.01"),
+                    "target_position_qty": Decimal("0.02"),
+                    "delta_position_qty": Decimal("0.01"),
+                    "position_intent": "scale_in_long",
+                    "strategy_execution_legs": [scaled_long_leg, target.strategy_execution_legs[1]],
+                }
+            )
+
+        with (
+            patch.object(
+                runtime.decision_engine.target_engine,
+                "build",
+                side_effect=_scale_in_target,
+            ),
+            patch.object(
+                runtime.risk_engine,
+                "evaluate_leg_order",
+                side_effect=lambda leg_intent: self._approved_leg_risk_decision(
+                    decision_id=leg_intent.decision_id,
+                    projected_qty=Decimal("0.02") if leg_intent.pos_side == "long" else Decimal("-0.01"),
+                ),
+            ),
+            patch.object(
+                runtime.order_manager,
+                "leg_risk_evaluator",
+                new=lambda leg_intent: self._approved_leg_risk_decision(
+                    decision_id=leg_intent.decision_id,
+                    projected_qty=Decimal("0.02") if leg_intent.pos_side == "long" else Decimal("-0.01"),
+                ),
+            ),
+            patch.object(
+                runtime.risk_engine,
+                "evaluate_leg_order_bundle",
+                return_value=self._bundle_risk_decision(
+                    decision_id="bundle_independent_scale_in",
+                    approved=True,
+                    capped_target_qty=Decimal("0.02"),
+                    current_exposure=DerivativesExposureMetrics(
+                        long_position_qty=Decimal("0.01"),
+                        short_position_qty=Decimal("0"),
+                        net_position_qty=Decimal("0.01"),
+                        gross_position_qty=Decimal("0.01"),
+                        long_notional=Decimal("800"),
+                        short_notional=Decimal("0"),
+                        net_notional=Decimal("800"),
+                        gross_notional=Decimal("800"),
+                        net_exposure_side="long",
+                    ),
+                    projected_exposure=DerivativesExposureMetrics(
+                        long_position_qty=Decimal("0.02"),
+                        short_position_qty=Decimal("0.01"),
+                        net_position_qty=Decimal("0.01"),
+                        gross_position_qty=Decimal("0.03"),
+                        long_notional=Decimal("1600"),
+                        short_notional=Decimal("800"),
+                        net_notional=Decimal("800"),
+                        gross_notional=Decimal("2400"),
+                        net_exposure_side="long",
+                    ),
+                ),
+            ),
+        ):
+            target = await runtime.decision_engine.run_cycle(
+                runtime.settings.default_symbol,
+                runtime.settings.primary_timeframe,
+            )
+
+        self._assert_overlay_execution_chain(
+            runtime=runtime,
+            target=target,
+            expected_leg_modes={"independent_long_book", "independent_short_book"},
+            expected_leg_count=2,
+        )
+        record = runtime.audit_repo.get(target.decision_id)
+        assert record is not None
+        events_by_id = {event.event_id: event for event in runtime.event_store.all()}
+        order_intents = [
+            events_by_id[ref].payload
+            for ref in record.order_intent_refs
+            if ref in events_by_id
+        ]
+        self.assertTrue(
+            any(
+                str(item.get("strategy_execution_mode") or "") == "independent_long_book"
+                and str(item.get("position_intent") or "") == "scale_in_long"
+                for item in order_intents
+            )
+        )
+
     async def _assert_complete_mainline_chain(self, *, runtime, iterations: int) -> None:
         await runtime.market_gateway.run_local_publisher(
             symbol=runtime.settings.default_symbol,

@@ -1308,6 +1308,7 @@ def _build_position_target_handler(
             "action": action,
             "side": side,
             "quantity": quantity,
+            "position_intent": _position_intent_for_target(current_qty=current_qty, target_qty=target_qty),
         }
 
     def _plan_for_strategy_leg(
@@ -1384,6 +1385,7 @@ def _build_position_target_handler(
                 strategy_opportunity_kind=getattr(leg, "opportunity_kind", None) or base_target.strategy_opportunity_kind,
                 strategy_execution_mode=getattr(leg, "execution_mode", None) or base_target.strategy_execution_mode,
                 strategy_state_phase=getattr(leg, "state_phase", None) or base_target.strategy_state_phase,
+                position_intent=semantics["position_intent"],
                 ai_execution_parameter_suggestion=base_target.ai_execution_parameter_suggestion,
             )
             if provisional_plan is None:

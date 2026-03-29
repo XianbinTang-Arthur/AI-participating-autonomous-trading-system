@@ -339,6 +339,7 @@ class ExecutionPlanner:
         strategy_opportunity_kind: str | None = None,
         strategy_execution_mode: str | None = None,
         strategy_state_phase: str | None = None,
+        position_intent: str | None = None,
         ai_execution_parameter_suggestion: AIExecutionParameterSuggestionEnvelope | None = None,
     ) -> LegExecutionPlan | None:
         normalized_quantity = to_decimal(quantity)
@@ -354,7 +355,7 @@ class ExecutionPlanner:
         )
         if normalized_quantity <= EPSILON_DECIMAL_12:
             return None
-        position_intent = position_intent_from_leg_intent(
+        resolved_position_intent = position_intent or position_intent_from_leg_intent(
             side=side,
             pos_side=pos_side,
             action=action,
@@ -414,12 +415,12 @@ class ExecutionPlanner:
             td_mode=(td_mode or margin_mode),  # type: ignore[arg-type]
             position_mode="long_short_mode",
             reduce_only_reason=default_reduce_only_reason(
-                position_intent=position_intent,
+                position_intent=resolved_position_intent,
                 leg_action=action,
                 reduce_only=reduce_only,
             ),
             close_only_reason=default_close_only_reason(
-                position_intent=position_intent,
+                position_intent=resolved_position_intent,
                 leg_action=action,
                 close_only=close_only,
             ),
@@ -459,7 +460,7 @@ class ExecutionPlanner:
             margin_mode=margin_mode,  # type: ignore[arg-type]
             exposure_side=self._leg_exposure_side(pos_side=pos_side, action=action),  # type: ignore[arg-type]
             execution_action=execution_action_from_leg_action(action),
-            position_intent=position_intent,
+            position_intent=resolved_position_intent,
             ai_execution_parameter_suggestion=translated_suggestion,
         )
 
@@ -513,6 +514,7 @@ class ExecutionPlanner:
             target_leverage=plan.target_leverage,
             margin_mode=plan.margin_mode,
             exposure_side=plan.exposure_side,
+            position_intent=plan.position_intent,
             ai_execution_parameter_suggestion=plan.ai_execution_parameter_suggestion,
         )
 
