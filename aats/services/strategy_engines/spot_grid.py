@@ -72,6 +72,7 @@ class SpotGridStrategyEngine:
                     "anchor_history_available": len(recent_snapshots),
                 },
             )
+        recent_snapshots = recent_snapshots[-required_anchor_snapshots:]
         anchor = sum((to_decimal(item.last_price) for item in recent_snapshots), start=Decimal("0")) / Decimal(
             len(recent_snapshots)
         )
@@ -178,15 +179,16 @@ class SpotGridStrategyEngine:
     def _current_sleeve_quantity(self, engine_input: StrategyEngineInput) -> Decimal:
         if self.sleeve_inventory_loader is None:
             return to_decimal(engine_input.context.current_position_qty)
+        # spot_grid is a spot-only sleeve; inventory attribution must always use cash scope.
         return to_decimal(
             self.sleeve_inventory_loader.quantity_for_strategy(
                 family="spot_grid",
                 primary_symbol=engine_input.context.symbol,
                 product_scope=engine_input.context.product_type,
-                margin_scope=self.settings.margin_mode,
+                margin_scope="cash",
                 symbol_scope=(engine_input.context.symbol,),
                 symbol=engine_input.context.symbol,
                 product_type=engine_input.context.product_type,
-                margin_mode=self.settings.margin_mode,
+                margin_mode="cash",
             )
         )

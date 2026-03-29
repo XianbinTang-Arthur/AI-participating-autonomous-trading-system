@@ -771,6 +771,141 @@ class TestStrategyCoordinator(unittest.TestCase):
         self.assertEqual(selected.state, "inactive")
         self.assertIn("dca_interval_not_elapsed", selected.reason_codes)
 
+    def test_dca_interval_uses_target_margin_mode_for_sleeve_history_scope(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "trading_product_type": "spot",
+                "margin_mode": "cross",
+                "default_symbol": "BTC-USDT",
+                "allowed_symbols": ("BTC-USDT",),
+                "strategy_family_active": "dca",
+                "dca_enabled": True,
+                "dca_interval_seconds": 3600.0,
+                "dca_quote_budget_per_cycle": 100.0,
+                "max_abs_position_qty": 2.0,
+            }
+        )
+        event_store = InMemoryEventStore()
+        sleeve_id = build_strategy_sleeve_id(
+            family="dca",
+            primary_symbol="BTC-USDT",
+            product_scope="spot",
+            margin_scope="cash",
+            symbol_scope=("BTC-USDT",),
+        )
+        prior_target = _position_target(
+            symbol="BTC-USDT",
+            product_type="spot",
+            margin_mode="cash",
+            current_qty="0",
+            target_qty="0.5",
+            rebalance_reason="dca_strategy",
+            position_intent="open_long",
+        ).model_copy(
+            update={
+                "strategy_family": "dca",
+                "strategy_sleeve_id": sleeve_id,
+                "strategy_route_action": "override_target",
+                "strategy_reason_codes": ["dca_interval_elapsed"],
+            }
+        )
+        prior_event = build_envelope(
+            topic=topics.POSITION_TARGETS,
+            key="BTC-USDT",
+            payload_model=prior_target,
+            source_component="test",
+        ).model_copy(update={"event_timestamp": utc_now() - timedelta(minutes=10)})
+        event_store.append(prior_event)
+        coordinator = StrategyCoordinatorService(
+            settings=settings,
+            event_store=event_store,
+            market_gateway=_FakeMarketGateway({"BTC-USDT": _market_snapshot("BTC-USDT", "100")}),
+            portfolio_repo=InMemoryPortfolioRepository(),
+            strategy_sleeve_repo=InMemoryStrategySleeveRepository(),
+        )
+
+        snapshot = coordinator.evaluate(
+            context=_decision_context(symbol="BTC-USDT", product_type="spot", current_position_qty="0.5"),
+            baseline=_baseline(symbol="BTC-USDT", regime="range"),
+            directional_target=_position_target(
+                symbol="BTC-USDT",
+                product_type="spot",
+                margin_mode="cash",
+                current_qty="0.5",
+                target_qty="0.5",
+            ),
+        )
+        selected = next(candidate for candidate in snapshot.candidates if candidate.family == "dca")
+
+        self.assertEqual(snapshot.selected_family, "directional")
+        self.assertEqual(selected.state, "inactive")
+        self.assertIn("dca_interval_not_elapsed", selected.reason_codes)
+
+    def test_dca_position_cap_uses_target_margin_mode_for_sleeve_inventory_scope(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "trading_product_type": "spot",
+                "margin_mode": "cross",
+                "default_symbol": "BTC-USDT",
+                "allowed_symbols": ("BTC-USDT",),
+                "strategy_family_active": "dca",
+                "dca_enabled": True,
+                "dca_interval_seconds": 0.0,
+                "dca_quote_budget_per_cycle": 100.0,
+                "dca_max_position_fraction_of_limit": 0.5,
+                "max_abs_position_qty": 2.0,
+            }
+        )
+        execution_repo = InMemoryExecutionRepository()
+        sleeve_id = build_strategy_sleeve_id(
+            family="dca",
+            primary_symbol="BTC-USDT",
+            product_scope="spot",
+            margin_scope="cash",
+            symbol_scope=("BTC-USDT",),
+        )
+        execution_repo.save_fill(
+            _fill_event(
+                fill_id="fill_dca_cash_scope",
+                symbol="BTC-USDT",
+                side="buy",
+                qty="1.0",
+                price="100",
+                product_type="spot",
+                margin_mode="cash",
+                strategy_family="dca",
+                strategy_sleeve_id=sleeve_id,
+            )
+        )
+        coordinator = StrategyCoordinatorService(
+            settings=settings,
+            event_store=InMemoryEventStore(),
+            market_gateway=_FakeMarketGateway({"BTC-USDT": _market_snapshot("BTC-USDT", "100")}),
+            portfolio_repo=InMemoryPortfolioRepository(),
+            execution_repo=execution_repo,
+            strategy_sleeve_repo=InMemoryStrategySleeveRepository(),
+        )
+        base_target = _position_target(
+            symbol="BTC-USDT",
+            product_type="spot",
+            margin_mode="cash",
+            current_qty="1.0",
+            target_qty="1.0",
+        )
+
+        snapshot = coordinator.evaluate(
+            context=_decision_context(symbol="BTC-USDT", product_type="spot", current_position_qty="1.0"),
+            baseline=_baseline(symbol="BTC-USDT", regime="range"),
+            directional_target=base_target,
+        )
+        applied = coordinator.apply_selected_target(base_target=base_target, snapshot=snapshot)
+        selected = next(candidate for candidate in snapshot.candidates if candidate.family == "dca")
+
+        self.assertEqual(snapshot.selected_family, "directional")
+        self.assertEqual(selected.state, "inactive")
+        self.assertIn("dca_position_cap_reached", selected.reason_codes)
+        self.assertEqual(applied.target_position_qty, Decimal("1.0"))
+
     def test_dca_pullback_only_requires_anchor_history_before_activation(self) -> None:
         settings = AATSSettings.model_validate(
             {
@@ -1258,6 +1393,130 @@ class TestStrategyCoordinator(unittest.TestCase):
         self.assertEqual(candidate.legs[0].margin_mode, "cross")
         self.assertEqual(applied.strategy_execution_mode, "margin_reverse_carry")
         self.assertEqual(applied.strategy_execution_legs[0].margin_mode, "cross")
+
+    def test_smart_arbitrage_negative_basis_margin_backed_does_not_switch_to_inventory_mode(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "smart_arbitrage_enabled": True,
+                "smart_arbitrage_negative_basis_mode": "margin_backed",
+                "smart_arbitrage_inventory_reservation_enabled": True,
+                "smart_arbitrage_margin_short_enabled": True,
+                "smart_arbitrage_margin_short_execution_ready": True,
+                "smart_arbitrage_margin_short_spot_margin_mode": "cross",
+                "smart_arbitrage_basis_entry_bps": 5.0,
+                "smart_arbitrage_estimated_cost_bps": 1.0,
+                "smart_arbitrage_quote_budget_per_trade": 100.0,
+                "smart_arbitrage_max_pair_notional": 100.0,
+            }
+        )
+        account_snapshot = ExchangeAccountSnapshot(
+            account_source="okx",
+            fetched_at=utc_now(),
+            balances=[
+                ExchangeBalance(currency="BTC", total=Decimal("2"), available=Decimal("2")),
+                ExchangeBalance(currency="USDT", total=Decimal("1000"), available=Decimal("1000")),
+            ],
+            positions=[],
+            account_mode="cross",
+        )
+        coordinator = StrategyCoordinatorService(
+            settings=settings,
+            event_store=InMemoryEventStore(),
+            market_gateway=_FakeMarketGateway(
+                {
+                    "BTC-USDT": _market_snapshot("BTC-USDT", "101"),
+                    "BTC-USDT-SWAP": _market_snapshot("BTC-USDT-SWAP", "100"),
+                }
+            ),
+            portfolio_repo=InMemoryPortfolioRepository(),
+            account_service=_StaticAccountService(account_snapshot),
+            strategy_sleeve_repo=InMemoryStrategySleeveRepository(),
+        )
+        base_target = _position_target(
+            symbol="BTC-USDT-SWAP",
+            product_type="derivatives",
+            margin_mode="cross",
+            current_qty="0",
+            target_qty="0",
+        )
+
+        snapshot = coordinator.evaluate(
+            context=_decision_context(symbol="BTC-USDT-SWAP", product_type="derivatives", current_position_qty="0"),
+            baseline=_baseline(symbol="BTC-USDT-SWAP", regime="trend"),
+            directional_target=base_target,
+        )
+        candidate = next(item for item in snapshot.candidates if item.family == "smart_arbitrage")
+
+        self.assertEqual(candidate.state, "opening")
+        self.assertEqual(candidate.execution_mode, "margin_reverse_carry")
+        self.assertIn("smart_arbitrage_margin_short_ready", candidate.reason_codes)
+        self.assertNotIn("smart_arbitrage_inventory_backed_ready", candidate.reason_codes)
+        self.assertEqual(candidate.legs[0].margin_mode, "cross")
+
+    def test_smart_arbitrage_negative_basis_inventory_backed_does_not_fall_back_to_margin_mode(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "smart_arbitrage_enabled": True,
+                "smart_arbitrage_negative_basis_mode": "inventory_backed",
+                "smart_arbitrage_inventory_reservation_enabled": True,
+                "smart_arbitrage_margin_short_enabled": True,
+                "smart_arbitrage_margin_short_execution_ready": True,
+                "smart_arbitrage_margin_short_spot_margin_mode": "cross",
+                "smart_arbitrage_basis_entry_bps": 5.0,
+                "smart_arbitrage_estimated_cost_bps": 1.0,
+                "smart_arbitrage_quote_budget_per_trade": 100.0,
+                "smart_arbitrage_max_pair_notional": 100.0,
+            }
+        )
+        account_snapshot = ExchangeAccountSnapshot(
+            account_source="okx",
+            fetched_at=utc_now(),
+            balances=[ExchangeBalance(currency="USDT", total=Decimal("1000"), available=Decimal("1000"))],
+            positions=[],
+            account_mode="cross",
+        )
+        coordinator = StrategyCoordinatorService(
+            settings=settings,
+            event_store=InMemoryEventStore(),
+            market_gateway=_FakeMarketGateway(
+                {
+                    "BTC-USDT": _market_snapshot("BTC-USDT", "101"),
+                    "BTC-USDT-SWAP": _market_snapshot("BTC-USDT-SWAP", "100"),
+                }
+            ),
+            portfolio_repo=InMemoryPortfolioRepository(),
+            account_service=_StaticAccountService(account_snapshot),
+            strategy_sleeve_repo=InMemoryStrategySleeveRepository(),
+        )
+        base_target = _position_target(
+            symbol="BTC-USDT-SWAP",
+            product_type="derivatives",
+            margin_mode="cross",
+            current_qty="0",
+            target_qty="0",
+        )
+
+        snapshot = coordinator.evaluate(
+            context=_decision_context(symbol="BTC-USDT-SWAP", product_type="derivatives", current_position_qty="0"),
+            baseline=_baseline(symbol="BTC-USDT-SWAP", regime="trend"),
+            directional_target=base_target,
+        )
+        candidate = next(item for item in snapshot.candidates if item.family == "smart_arbitrage")
+
+        self.assertEqual(candidate.state, "blocked")
+        self.assertEqual(candidate.route_action, "advisory_only")
+        self.assertEqual(candidate.execution_mode, "inventory_reverse_carry")
+        self.assertIn("smart_arbitrage_inventory_backed_spot_balance_unavailable", candidate.reason_codes)
+        self.assertNotIn("smart_arbitrage_margin_short_ready", candidate.reason_codes)
+        self.assertFalse(candidate.legs)
 
     def test_smart_arbitrage_uses_derived_primary_pair_when_registry_is_empty(self) -> None:
         settings = AATSSettings.model_validate(

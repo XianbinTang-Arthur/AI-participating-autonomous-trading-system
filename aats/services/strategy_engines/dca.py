@@ -200,29 +200,35 @@ class DcaStrategyEngine:
     def _current_sleeve_quantity(self, engine_input: StrategyEngineInput) -> Decimal:
         if self.sleeve_inventory_loader is None:
             return to_decimal(engine_input.context.current_position_qty)
+        margin_mode = self._margin_mode(engine_input)
         return to_decimal(
             self.sleeve_inventory_loader.quantity_for_strategy(
                 family="dca",
                 primary_symbol=engine_input.context.symbol,
                 product_scope=engine_input.context.product_type,
-                margin_scope=self.settings.margin_mode,
+                margin_scope=margin_mode,
                 symbol_scope=(engine_input.context.symbol,),
                 symbol=engine_input.context.symbol,
                 product_type=engine_input.context.product_type,
-                margin_mode=self.settings.margin_mode,
+                margin_mode=margin_mode,
             )
         )
 
     def _sleeve_id(self, engine_input: StrategyEngineInput) -> str | None:
         if self.sleeve_inventory_loader is None:
             return None
+        margin_mode = self._margin_mode(engine_input)
         return self.sleeve_inventory_loader.sleeve_id_for(
             family="dca",
             primary_symbol=engine_input.context.symbol,
             product_scope=engine_input.context.product_type,
-            margin_scope=self.settings.margin_mode,
+            margin_scope=margin_mode,
             symbol_scope=(engine_input.context.symbol,),
         )
+
+    @staticmethod
+    def _margin_mode(engine_input: StrategyEngineInput) -> str:
+        return str(engine_input.directional_target.margin_mode or "cash")
 
     @staticmethod
     def _last_dca_target_at(engine_input: StrategyEngineInput, *, sleeve_id: str | None) -> datetime | None:

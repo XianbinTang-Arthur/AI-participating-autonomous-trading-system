@@ -2657,6 +2657,10 @@ function familyEnablementSummary(payload) {
 function strategyCandidateReason(candidate, smartArbitrageConfig = {}, context = {}) {
   const smartArbitrageReason = smartArbitrageReasonText(candidate, smartArbitrageConfig, context);
   if (smartArbitrageReason) return smartArbitrageReason;
+  if (candidate?.family === "smart_arbitrage") {
+    const summary = smartArbitrageLocalizedReasonSummary(candidate, context);
+    if (summary) return summary;
+  }
   if (candidate?.headline) return candidate.headline;
   const summary = reasonListText(candidate?.reason_codes, "");
   if (summary) return summary;
@@ -2667,6 +2671,8 @@ function strategySleeveIntentReason(item, context = {}) {
   if (item?.family === "smart_arbitrage") {
     const reason = smartArbitrageReasonText(item, {}, context);
     if (reason) return reason;
+    const summary = smartArbitrageLocalizedReasonSummary(item, context);
+    if (summary) return summary;
   }
   return item?.control_summary || item?.headline || "当前没有额外说明";
 }
@@ -2727,7 +2733,7 @@ function smartArbitrageMarketAvailability(candidate, smartArbitrageConfig = {}) 
   const metrics = candidate?.metrics || {};
   const spotSymbol = metrics.spot_symbol || candidate?.recommended_symbol || "现货腿";
   const derivativesSymbol = metrics.derivatives_symbol || "合约腿";
-  const reasonCodes = Array.isArray(candidate?.reason_codes) ? candidate.reason_codes : [];
+  const reasonCodes = smartArbitrageContextCodes(candidate);
   if (smartArbitrageBelowEntryThreshold(candidate)) {
     const basisBps = formatBps(metrics.basis_bps);
     const entryThreshold = formatBps(smartArbitrageEntryThreshold(candidate, smartArbitrageConfig));
@@ -2742,11 +2748,17 @@ function smartArbitrageMarketAvailability(candidate, smartArbitrageConfig = {}) 
   if (reasonCodes.includes("smart_arbitrage_symbol_pair_missing")) {
     return "当前没有识别到可用的现货/合约配对标的。";
   }
-  if (smartArbitrageNegativeBasisAdvisory(candidate)) {
+  if (smartArbitrageNegativeBasisAdvisory(candidate) || reasonCodes.includes("smart_arbitrage_negative_basis_advisory_only")) {
     return "当前是负基差提示单，系统不会下发套利双腿执行计划。";
+  }
+  if (reasonCodes.includes("smart_arbitrage_inventory_backed_spot_balance_unavailable")) {
+    return "当前识别到负基差，但账户里没有可用于反套的现货余额。";
   }
   if (reasonCodes.includes("smart_arbitrage_inventory_backed_insufficient")) {
     return "当前识别到负基差，但可用于反套的现货库存不足。";
+  }
+  if (reasonCodes.includes("smart_arbitrage_margin_short_disabled")) {
+    return "当前识别到负基差，但保证金融券反套模式当前未启用。";
   }
   if (reasonCodes.includes("smart_arbitrage_margin_short_execution_not_ready")) {
     return "当前识别到负基差，但保证金融券执行链路尚未接通。";
@@ -2765,7 +2777,7 @@ function smartArbitrageMarketAvailability(candidate, smartArbitrageConfig = {}) 
 
 function smartArbitrageNegativeBasisAdvisory(candidate) {
   if (candidate?.family !== "smart_arbitrage") return false;
-  const reasonCodes = Array.isArray(candidate?.reason_codes) ? candidate.reason_codes : [];
+  const reasonCodes = smartArbitrageContextCodes(candidate);
   return (
     reasonCodes.includes("smart_arbitrage_negative_basis") &&
     reasonCodes.includes("smart_arbitrage_spot_short_not_supported")
@@ -2781,6 +2793,10 @@ function smartArbitrageContextCodes(candidate = {}, context = {}) {
   const policyCodes = Array.isArray(context?.policy?.blocker_reasons) ? context.policy.blocker_reasons : [];
   const riskCodes = Array.isArray(context?.risk?.rejection_reasons) ? context.risk.rejection_reasons : [];
   return Array.from(new Set([...candidateCodes, ...policyCodes, ...riskCodes]));
+}
+
+function smartArbitrageLocalizedReasonSummary(candidate = {}, context = {}) {
+  return reasonListText(smartArbitrageContextCodes(candidate, context), "");
 }
 
 function smartArbitrageExitBlockedByKillSwitch(candidate = {}, context = {}) {
@@ -2818,7 +2834,7 @@ function smartArbitrageReasonText(candidate, smartArbitrageConfig = {}, context 
   if (reasonCodes.includes("smart_arbitrage_symbol_pair_missing")) {
     return smartArbitrageMarketAvailability(candidate, smartArbitrageConfig);
   }
-  if (smartArbitrageNegativeBasisAdvisory(candidate)) {
+  if (smartArbitrageNegativeBasisAdvisory(candidate) || reasonCodes.includes("smart_arbitrage_negative_basis_advisory_only")) {
     return "当前是负基差，但自动执行只支持正基差双腿；现货现金模式不能自动做空。";
   }
   if (reasonCodes.includes("smart_arbitrage_inventory_backed_ready")) {
@@ -2827,8 +2843,14 @@ function smartArbitrageReasonText(candidate, smartArbitrageConfig = {}, context 
   if (reasonCodes.includes("smart_arbitrage_margin_short_ready")) {
     return "当前是负基差，且保证金融券反套链路已就绪，系统会按借币卖出现货并买入合约的模式生成双腿计划。";
   }
+  if (reasonCodes.includes("smart_arbitrage_inventory_backed_spot_balance_unavailable")) {
+    return "当前识别到负基差，但账户里没有可用于反套的现货余额，不能自动生成库存反套执行计划。";
+  }
   if (reasonCodes.includes("smart_arbitrage_inventory_backed_insufficient")) {
     return "当前识别到负基差，但现货库存不足，不能自动生成库存反套执行计划。";
+  }
+  if (reasonCodes.includes("smart_arbitrage_margin_short_disabled")) {
+    return "当前识别到负基差，配置要求走保证金融券反套，但这条执行模式当前未启用。";
   }
   if (reasonCodes.includes("smart_arbitrage_margin_short_execution_not_ready")) {
     return "当前识别到负基差，配置要求走保证金融券反套，但执行链路尚未接通。";

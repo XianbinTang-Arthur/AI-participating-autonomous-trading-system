@@ -1663,6 +1663,188 @@ console.log(JSON.stringify({
         self.assertIn('"showsBlockedReasonCopy":true', result.stdout)
         self.assertIn('"showsPairConfigRisk":true', result.stdout)
 
+    def test_strategy_view_localizes_negative_basis_reason_copy_across_advisory_opening_and_blocked_states(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { renderStrategyView } from './aats/api/static/modules/views/strategy-view.js';
+
+const html = renderStrategyView({
+  strategyRuntime: {
+    summary: {},
+    latest_snapshot: {
+      selected_family: 'smart_arbitrage',
+      selected_state: 'opening',
+      selected_route_action: 'override_target',
+      candidates: [
+        {
+          family: 'smart_arbitrage',
+          state: 'advisory_only',
+          state_phase: 'advisory',
+          route_action: 'advisory_only',
+          urgency: 'low',
+          pair_id: 'btc_usdt_swap',
+          target_position_qty: 0,
+          delta_position_qty: 0,
+          headline: 'Negative basis is detected, but reverse-carry auto execution is not available.',
+          reason_codes: ['smart_arbitrage_negative_basis', 'smart_arbitrage_spot_short_not_supported'],
+          blocking_reasons: ['smart_arbitrage_negative_basis_advisory_only'],
+          metrics: {
+            pair_id: 'btc_usdt_swap',
+            spot_symbol: 'BTC-USDT',
+            derivatives_symbol: 'BTC-USDT-SWAP',
+          },
+          legs: [],
+        },
+        {
+          family: 'smart_arbitrage',
+          state: 'opening',
+          state_phase: 'opening',
+          route_action: 'override_target',
+          urgency: 'high',
+          pair_id: 'eth_usdt_swap',
+          execution_mode: 'margin_reverse_carry',
+          target_position_qty: -1,
+          delta_position_qty: -1,
+          headline: 'Negative basis reverse carry is ready with margin-backed spot execution.',
+          reason_codes: ['smart_arbitrage_negative_basis', 'smart_arbitrage_margin_short_ready'],
+          metrics: {
+            pair_id: 'eth_usdt_swap',
+            spot_symbol: 'ETH-USDT',
+            derivatives_symbol: 'ETH-USDT-SWAP',
+            execution_mode: 'margin_reverse_carry',
+          },
+          legs: [
+            { symbol: 'ETH-USDT', product_type: 'spot', side: 'sell', execution_mode: 'margin_reverse_carry' },
+            { symbol: 'ETH-USDT-SWAP', product_type: 'derivatives', side: 'buy', execution_mode: 'margin_reverse_carry' },
+          ],
+        },
+        {
+          family: 'smart_arbitrage',
+          state: 'blocked',
+          state_phase: 'blocked',
+          route_action: 'advisory_only',
+          urgency: 'medium',
+          pair_id: 'sol_usdt_swap',
+          execution_mode: 'inventory_reverse_carry',
+          target_position_qty: 0,
+          delta_position_qty: 0,
+          headline: 'Negative basis is detected, but the configured reverse-carry execution path is blocked.',
+          reason_codes: ['smart_arbitrage_negative_basis', 'smart_arbitrage_inventory_backed_spot_balance_unavailable'],
+          blocking_reasons: ['smart_arbitrage_inventory_backed_spot_balance_unavailable'],
+          metrics: {
+            pair_id: 'sol_usdt_swap',
+            spot_symbol: 'SOL-USDT',
+            derivatives_symbol: 'SOL-USDT-SWAP',
+            execution_mode: 'inventory_reverse_carry',
+          },
+          legs: [],
+        },
+        {
+          family: 'smart_arbitrage',
+          state: 'blocked',
+          state_phase: 'blocked',
+          route_action: 'advisory_only',
+          urgency: 'medium',
+          pair_id: 'ada_usdt_swap',
+          execution_mode: 'margin_reverse_carry',
+          target_position_qty: 0,
+          delta_position_qty: 0,
+          headline: 'Negative basis is detected, but the configured reverse-carry execution path is blocked.',
+          reason_codes: ['smart_arbitrage_negative_basis', 'smart_arbitrage_margin_short_disabled'],
+          blocking_reasons: ['smart_arbitrage_margin_short_disabled'],
+          metrics: {
+            pair_id: 'ada_usdt_swap',
+            spot_symbol: 'ADA-USDT',
+            derivatives_symbol: 'ADA-USDT-SWAP',
+            execution_mode: 'margin_reverse_carry',
+          },
+          legs: [],
+        },
+      ],
+      automation_decisions: [],
+    },
+    configured_parameters: {
+      smart_arbitrage: {
+        enabled: true,
+        basis_entry_bps: 40,
+        basis_exit_bps: 6,
+        quote_budget_per_trade: 200,
+        max_pair_notional: 2000,
+        negative_basis_mode: 'margin_backed',
+        margin_short_enabled: true,
+        margin_short_execution_ready: true,
+            pair_definitions: [
+              { pair_id: 'btc_usdt_swap', spot_symbol: 'BTC-USDT', hedge_symbol: 'BTC-USDT-SWAP' },
+              { pair_id: 'eth_usdt_swap', spot_symbol: 'ETH-USDT', hedge_symbol: 'ETH-USDT-SWAP' },
+              { pair_id: 'sol_usdt_swap', spot_symbol: 'SOL-USDT', hedge_symbol: 'SOL-USDT-SWAP' },
+              { pair_id: 'ada_usdt_swap', spot_symbol: 'ADA-USDT', hedge_symbol: 'ADA-USDT-SWAP' },
+              { pair_id: 'xrp_usdt_swap', spot_symbol: 'XRP-USDT', hedge_symbol: 'XRP-USDT-SWAP' },
+            ],
+          },
+        },
+    recent_sleeve_intents: [
+      {
+        strategy_sleeve_id: 'sintent_smart_arbitrage',
+        family: 'smart_arbitrage',
+        state: 'blocked',
+        state_phase: 'blocked',
+        route_action: 'advisory_only',
+        pair_id: 'xrp_usdt_swap',
+        symbol: 'XRP-USDT-SWAP',
+        target_position_qty: 0,
+        delta_position_qty: 0,
+        automatic_enabled: true,
+        budget_multiplier: 1,
+        allocator_weight: 1,
+        headline: 'Negative basis is detected, but the configured reverse-carry execution path is blocked.',
+        reason_codes: ['smart_arbitrage_negative_basis', 'smart_arbitrage_margin_short_disabled'],
+        blocking_reasons: ['smart_arbitrage_margin_short_disabled'],
+        legs: [],
+      },
+    ],
+    latest_bundle: {},
+    latest_allocation_decision: {},
+    latest_applied_target: {},
+    recent_execution_bundles: [],
+    recent_budget_snapshots: [],
+    recent_conflict_resolutions: [],
+    recent_netting_decisions: [],
+    family_enablement: { smart_arbitrage: { enabled: true, runtime_supported: true, execution_compatible: true } },
+  },
+  strategyAttribution: { summary: {}, profitability_by_strategy_sleeve: [], sleeve_inventory_summary: [] },
+  trialReviewSummary: { summary: {}, sections: {} },
+});
+
+console.log(JSON.stringify({
+  showsAdvisoryCopy: html.includes('当前是负基差，但自动执行只支持正基差双腿；现货现金模式不能自动做空。'),
+  showsOpeningCopy: html.includes('当前是负基差，且保证金融券反套链路已就绪，系统会按借币卖出现货并买入合约的模式生成双腿计划。'),
+  showsBlockedInventoryCopy: html.includes('当前识别到负基差，但账户里没有可用于反套的现货余额，不能自动生成库存反套执行计划。'),
+  showsBlockedMarginDisabledIntentCopy: html.includes('当前识别到负基差，配置要求走保证金融券反套，但这条执行模式当前未启用。'),
+  showsBlockedInventoryLegCopy: html.includes('当前识别到负基差，但账户里没有可用于反套的现货余额。'),
+  showsBlockedMarginDisabledLegCopy: html.includes('当前识别到负基差，但保证金融券反套模式当前未启用。'),
+  hidesAdvisoryHeadline: !html.includes('Negative basis is detected, but reverse-carry auto execution is not available.'),
+  hidesOpeningHeadline: !html.includes('Negative basis reverse carry is ready with margin-backed spot execution.'),
+  hidesBlockedHeadline: !html.includes('Negative basis is detected, but the configured reverse-carry execution path is blocked.'),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertIn('"showsAdvisoryCopy":true', result.stdout)
+        self.assertIn('"showsOpeningCopy":true', result.stdout)
+        self.assertIn('"showsBlockedInventoryCopy":true', result.stdout)
+        self.assertIn('"showsBlockedMarginDisabledIntentCopy":true', result.stdout)
+        self.assertIn('"showsBlockedInventoryLegCopy":true', result.stdout)
+        self.assertIn('"showsBlockedMarginDisabledLegCopy":true', result.stdout)
+        self.assertIn('"hidesAdvisoryHeadline":true', result.stdout)
+        self.assertIn('"hidesOpeningHeadline":true', result.stdout)
+        self.assertIn('"hidesBlockedHeadline":true', result.stdout)
+
     def test_strategy_view_compacts_observe_only_smart_arbitrage_copy(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
         script = """

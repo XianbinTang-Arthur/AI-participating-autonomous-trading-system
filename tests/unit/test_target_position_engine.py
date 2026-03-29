@@ -1576,10 +1576,10 @@ class TestTargetPositionEngine(unittest.TestCase):
             )
         )
         context = self._context(
-            current_position_qty=0.01,
-            current_long_position_qty=0.01,
+            current_position_qty=0.0,
+            current_long_position_qty=0.0,
             product_type="derivatives",
-            current_exposure_side="long",
+            current_exposure_side="flat",
         )
         baseline = self._baseline(
             direction_bias="long",
@@ -1607,8 +1607,56 @@ class TestTargetPositionEngine(unittest.TestCase):
         )
         self.assertFalse(target.strategy_execution_legs)
         self.assertEqual(target.target_position_qty, Decimal("0.01"))
-        self.assertEqual(target.current_position_qty, Decimal("0.01"))
+        self.assertEqual(target.current_position_qty, Decimal("0"))
         self.assertIsNone(next((item for item in target.strategy_execution_legs if item.pos_side == "long"), None))
+
+    def test_derivatives_independent_books_disabled_falls_back_to_directional_target(self) -> None:
+        engine = TargetPositionEngine(
+            settings=AATSSettings.model_validate(
+                {
+                    "default_order_qty": 0.01,
+                    "trading_product_type": "derivatives",
+                    "margin_mode": "cross",
+                    "derivatives_position_mode": "hedge",
+                    "strategy_short_bias_enabled": True,
+                    "strategy_hedge_overlay_enabled": True,
+                    "strategy_hedge_overlay_mode": "independent",
+                    "strategy_hedge_independent_enabled": False,
+                    "strategy_cost_guard_enabled": False,
+                    "strategy_entry_min_signal_edge_bps": 0.0,
+                    "strategy_entry_alpha_min": 0.0,
+                    "strategy_entry_confidence_min": 0.0,
+                }
+            )
+        )
+        context = self._context(
+            current_position_qty=0.0,
+            current_long_position_qty=0.0,
+            product_type="derivatives",
+            current_exposure_side="flat",
+        )
+        baseline = self._baseline(
+            direction_bias="long",
+            confidence=0.82,
+            suggested_position_scale=1.0,
+            volatility_target_scale=1.0,
+            factor_scores={
+                "momentum_alpha": 0.42,
+                "trend_alpha": 0.38,
+                "microstructure_alpha": 0.16,
+                "liquidity_scale": 0.92,
+            },
+        ).model_copy(update={"regime": "trend", "composite_alpha_score": 0.28})
+
+        target = engine.build(context, baseline, self._ai_assessment(direction=0.22, confidence=0.80))
+
+        self.assertIsNotNone(target.hedge_overlay_decision)
+        assert target.hedge_overlay_decision is not None
+        self.assertEqual(target.hedge_overlay_decision.state, "blocked")
+        self.assertIn("independent_books_not_enabled", target.hedge_overlay_decision.blocked_reasons)
+        self.assertFalse(target.strategy_execution_legs)
+        self.assertEqual(target.target_position_qty, Decimal("0.01"))
+        self.assertEqual(target.position_intent, "open_long")
 
     def test_expected_cost_uses_injected_dynamic_fee_resolver(self) -> None:
         engine = TargetPositionEngine(

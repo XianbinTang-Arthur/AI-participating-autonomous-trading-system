@@ -1384,7 +1384,7 @@ class TargetPositionEngine:
         if not self.settings.strategy_hedge_independent_enabled:
             guardrail_flags.append("independent_books_blocked")
             return (
-                context.current_net_position_qty,
+                to_decimal(directional_target_qty),
                 [],
                 HedgeOverlayDecision(
                     enabled=True,
@@ -1399,7 +1399,7 @@ class TargetPositionEngine:
         if not rollout["runtime_allowed"]:
             guardrail_flags.append("independent_books_blocked")
             return (
-                context.current_net_position_qty,
+                to_decimal(directional_target_qty),
                 [],
                 HedgeOverlayDecision(
                     enabled=True,

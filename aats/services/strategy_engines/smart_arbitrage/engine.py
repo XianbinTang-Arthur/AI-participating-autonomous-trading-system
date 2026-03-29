@@ -498,33 +498,21 @@ class SmartArbitrageStrategyEngine:
             desired_pair_qty = Decimal("0")
             target_spot_qty = Decimal("0")
             target_hedge_qty = Decimal("0")
-        elif requested_mode == "inventory_backed" and not self._pair_supports_execution_mode(
-            pair=pair,
-            execution_mode="inventory_reverse_carry",
-        ):
-            return self._unsupported_execution_mode_opportunity(
+        elif requested_mode == "inventory_backed":
+            execution_mode = "inventory_reverse_carry"
+            if not self._pair_supports_execution_mode(
                 pair=pair,
-                pair_basis_bps=pair_basis_bps,
-                entry_threshold=entry_threshold,
-                exit_threshold=exit_threshold,
-                execution_mode="inventory_reverse_carry",
-                direction="negative_basis",
-                reason_code="smart_arbitrage_inventory_reverse_carry_not_allowed",
-            )
-        elif requested_mode == "margin_backed" and not self._pair_supports_execution_mode(
-            pair=pair,
-            execution_mode="margin_reverse_carry",
-        ):
-            return self._unsupported_execution_mode_opportunity(
-                pair=pair,
-                pair_basis_bps=pair_basis_bps,
-                entry_threshold=entry_threshold,
-                exit_threshold=exit_threshold,
-                execution_mode="margin_reverse_carry",
-                direction="negative_basis",
-                reason_code="smart_arbitrage_margin_reverse_carry_not_allowed",
-            )
-        elif capability.inventory_backed_spot_sell_supported:
+                execution_mode=execution_mode,
+            ):
+                return self._unsupported_execution_mode_opportunity(
+                    pair=pair,
+                    pair_basis_bps=pair_basis_bps,
+                    entry_threshold=entry_threshold,
+                    exit_threshold=exit_threshold,
+                    execution_mode=execution_mode,
+                    direction="negative_basis",
+                    reason_code="smart_arbitrage_inventory_reverse_carry_not_allowed",
+                )
             execution_mode = "inventory_reverse_carry"
             desired_pair_qty = entry_pair_qty(
                 settings=self.settings,
@@ -540,16 +528,32 @@ class SmartArbitrageStrategyEngine:
                 if desired_pair_qty <= EPSILON_DECIMAL_12
                 else capability.available_inventory_qty / desired_pair_qty
             )
+            inventory_blocking_reasons = list(capability.blocking_reasons)
             if desired_pair_qty <= EPSILON_DECIMAL_12 or supported_ratio + EPSILON_DECIMAL_12 < minimum_ratio:
                 state_phase = "blocked"
-                reason_codes = ["smart_arbitrage_negative_basis", "smart_arbitrage_inventory_backed_insufficient"]
-                blocking_reasons = ["smart_arbitrage_inventory_backed_insufficient"]
+                if not inventory_blocking_reasons:
+                    inventory_blocking_reasons = ["smart_arbitrage_inventory_backed_insufficient"]
+                reason_codes = ["smart_arbitrage_negative_basis", *inventory_blocking_reasons]
+                blocking_reasons = list(dict.fromkeys(inventory_blocking_reasons))
             else:
                 state_phase = "opening"
                 reason_codes = ["smart_arbitrage_negative_basis", "smart_arbitrage_inventory_backed_ready"]
                 blocking_reasons = []
-        elif capability.spot_margin_short_supported and capability.margin_short_execution_ready:
+        elif requested_mode == "margin_backed":
             execution_mode = "margin_reverse_carry"
+            if not self._pair_supports_execution_mode(
+                pair=pair,
+                execution_mode=execution_mode,
+            ):
+                return self._unsupported_execution_mode_opportunity(
+                    pair=pair,
+                    pair_basis_bps=pair_basis_bps,
+                    entry_threshold=entry_threshold,
+                    exit_threshold=exit_threshold,
+                    execution_mode=execution_mode,
+                    direction="negative_basis",
+                    reason_code="smart_arbitrage_margin_reverse_carry_not_allowed",
+                )
             desired_pair_qty = entry_pair_qty(
                 settings=self.settings,
                 spot_price=spot_price,
@@ -558,27 +562,29 @@ class SmartArbitrageStrategyEngine:
             )
             target_spot_qty = -desired_pair_qty
             target_hedge_qty = desired_pair_qty
-            if desired_pair_qty <= EPSILON_DECIMAL_12:
+            margin_blocking_reasons = list(capability.blocking_reasons)
+            if (
+                desired_pair_qty <= EPSILON_DECIMAL_12
+                or not capability.spot_margin_short_supported
+                or not capability.margin_short_execution_ready
+            ):
                 state_phase = "blocked"
-                reason_codes = ["smart_arbitrage_negative_basis", "smart_arbitrage_margin_short_disabled"]
-                blocking_reasons = ["smart_arbitrage_margin_short_disabled"]
+                if not margin_blocking_reasons:
+                    margin_blocking_reasons = ["smart_arbitrage_margin_short_disabled"]
+                reason_codes = ["smart_arbitrage_negative_basis", *margin_blocking_reasons]
+                blocking_reasons = list(dict.fromkeys(margin_blocking_reasons))
             else:
                 state_phase = "opening"
                 reason_codes = ["smart_arbitrage_negative_basis", "smart_arbitrage_margin_short_ready"]
                 blocking_reasons = []
         else:
-            execution_mode = "margin_reverse_carry" if requested_mode == "margin_backed" else None
+            execution_mode = None
             desired_pair_qty = Decimal("0")
             target_spot_qty = Decimal("0")
             target_hedge_qty = Decimal("0")
-            if requested_mode == "margin_backed":
-                state_phase = "blocked"
-                reason_codes = ["smart_arbitrage_negative_basis", *capability.blocking_reasons]
-                blocking_reasons = list(capability.blocking_reasons)
-            else:
-                state_phase = "advisory"
-                reason_codes = ["smart_arbitrage_negative_basis", "smart_arbitrage_spot_short_not_supported"]
-                blocking_reasons = ["smart_arbitrage_spot_short_not_supported"]
+            state_phase = "advisory"
+            reason_codes = ["smart_arbitrage_negative_basis", "smart_arbitrage_spot_short_not_supported"]
+            blocking_reasons = ["smart_arbitrage_spot_short_not_supported"]
         cost_breakdown = build_cost_breakdown(
             settings=self.settings,
             basis_bps=pair_basis_bps,
