@@ -2418,6 +2418,82 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertIn("total_available", replay_recent)
         self.assertIn("has_more", replay_recent)
 
+    async def test_execution_payloads_preserve_directional_position_intent_in_execution_action_summary(self) -> None:
+        runtime = await self._runtime(
+            trading_product_type="derivatives",
+            margin_mode="cross",
+            default_symbol="BTC-USDT-SWAP",
+            allowed_symbols=("BTC-USDT-SWAP",),
+        )
+        now = utc_now()
+        runtime.execution_repo.save_order_state(
+            OrderState(
+                decision_id="decision_directional_action_summary",
+                intent_id="intent_directional_action_summary",
+                symbol="BTC-USDT-SWAP",
+                client_order_id="order_directional_action_summary",
+                venue="PAPER",
+                status="SUBMITTED",
+                submission_mode="paper_local",
+                submitted_ts=now,
+                last_update_ts=now,
+                requested_qty=Decimal("0.01"),
+                filled_qty=Decimal("0"),
+                remaining_qty=Decimal("0.01"),
+                position_mode="long_short_mode",
+                pos_side="short",
+                product_type="derivatives",
+                target_leverage=3.0,
+                margin_mode="cross",
+                exposure_side="short",
+                execution_action="enter",
+                position_intent="open_short",
+            )
+        )
+        runtime.execution_repo.save_fill(
+            FillEvent(
+                fill_id="fill_directional_action_summary",
+                decision_id="decision_directional_action_summary",
+                intent_id="intent_directional_action_summary",
+                client_order_id="order_directional_action_summary",
+                exchange_order_id="venue_directional_action_summary",
+                symbol="BTC-USDT-SWAP",
+                venue="PAPER",
+                side="buy",
+                fill_qty=Decimal("0.01"),
+                fill_price=Decimal("66500"),
+                fee_amount=Decimal("0.10"),
+                fee_currency="USDT",
+                liquidity_role="taker",
+                exchange_timestamp=now + timedelta(seconds=1),
+                ingestion_timestamp=now + timedelta(seconds=1),
+                order_status_after_fill="FILLED",
+                position_mode="long_short_mode",
+                pos_side="long",
+                product_type="derivatives",
+                target_leverage=3.0,
+                margin_mode="cross",
+                exposure_side="long",
+                execution_action="scale_in",
+                position_intent="scale_in_long",
+            )
+        )
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            orders_recent = client.get("/orders/recent?limit=1").json()
+            order_detail = client.get("/orders/order_directional_action_summary").json()
+            fills_recent = client.get("/fills/recent?limit=1").json()
+            fill_detail = client.get("/fills/fill_directional_action_summary").json()
+            execution_latest = client.get("/execution/latest").json()
+
+        self.assertEqual(orders_recent["orders"][0]["execution_action"], "open_short")
+        self.assertEqual(order_detail["order"]["execution_action"], "open_short")
+        self.assertEqual(fills_recent["fills"][0]["execution_action"], "scale_in_long")
+        self.assertEqual(fill_detail["fill"]["execution_action"], "scale_in_long")
+        self.assertEqual(execution_latest["latest_order"]["execution_action"], "open_short")
+        self.assertEqual(execution_latest["latest_fill"]["execution_action"], "scale_in_long")
+
     async def test_operator_can_record_capital_scaling_review(self) -> None:
         runtime = await self._runtime()
         app = self._app(runtime)

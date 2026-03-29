@@ -164,7 +164,18 @@ function derivativesOrderAction(order = {}) {
 
 function preferredDerivativesPositionAction(record = {}) {
   const positionIntent = String(record.position_intent || "").toLowerCase();
-  if (positionIntent === "reverse_to_long" || positionIntent === "reverse_to_short") {
+  if (
+    positionIntent === "open_long" ||
+    positionIntent === "scale_in_long" ||
+    positionIntent === "open_short" ||
+    positionIntent === "scale_in_short" ||
+    positionIntent === "reduce_long" ||
+    positionIntent === "reduce_short" ||
+    positionIntent === "close_long" ||
+    positionIntent === "close_short" ||
+    positionIntent === "reverse_to_long" ||
+    positionIntent === "reverse_to_short"
+  ) {
     return positionIntent;
   }
   return record.execution_action || record.position_intent;

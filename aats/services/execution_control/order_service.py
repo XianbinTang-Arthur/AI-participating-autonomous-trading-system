@@ -5,7 +5,7 @@ from typing import Any
 
 from aats.bootstrap.logging import correlation_fields, get_logger, log_event
 from aats.schemas.common import new_id, utc_now
-from aats.schemas.execution import OrderIntent, OrderState
+from aats.schemas.execution import OrderIntent, OrderState, side_from_position_intent
 from aats.storage.execution_command_repo import ExecutionCommandRepository
 from aats.storage.execution_order_repo import ExecutionOrderHistoryRepository, ExecutionOrderRepository
 
@@ -183,15 +183,7 @@ class ExecutionOrderService:
 
     @staticmethod
     def _intent_from_order_state(order_state: OrderState) -> OrderIntent:
-        side = "buy"
-        if order_state.position_intent in {
-            "open_short",
-            "scale_in_short",
-            "reduce_short",
-            "close_short",
-            "reverse_to_short",
-        }:
-            side = "sell"
+        side = side_from_position_intent(order_state.position_intent) or "buy"
         return OrderIntent(
             intent_id=order_state.intent_id,
             leg_intent_id=order_state.leg_intent_id,

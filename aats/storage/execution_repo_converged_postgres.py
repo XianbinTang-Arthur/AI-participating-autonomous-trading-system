@@ -7,7 +7,7 @@ from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from aats.schemas.common import dump_payload_exact
-from aats.schemas.execution import FillEvent, OrderIntent, OrderState
+from aats.schemas.execution import FillEvent, OrderIntent, OrderState, side_from_position_intent
 from aats.services.accounting import fill_fee_cost_in_quote
 from aats.services.execution_engine.state_machine import OrderStateMachine
 from aats.services.execution_control.shadow import Phase1ExecutionShadowService
@@ -490,15 +490,7 @@ class ConvergedPostgresExecutionRepository(ExecutionRepository):
 
     @staticmethod
     def _intent_from_order_state(order_state: OrderState) -> OrderIntent:
-        side = "buy"
-        if order_state.position_intent in {
-            "open_short",
-            "scale_in_short",
-            "reduce_short",
-            "close_short",
-            "reverse_to_short",
-        }:
-            side = "sell"
+        side = side_from_position_intent(order_state.position_intent) or "buy"
         return OrderIntent(
             intent_id=order_state.intent_id,
             decision_id=order_state.decision_id,

@@ -3483,17 +3483,27 @@ class OperatorQueryService:
         return "flat"
 
     @staticmethod
-    def _action_from_position_intent(position_intent: Any) -> str | None:
+    def _directional_action_from_position_intent(position_intent: Any) -> str | None:
+        if position_intent is None:
+            return None
+        normalized = str(position_intent).strip().lower()
+        return normalized or "hold"
+
+    @staticmethod
+    def _abstract_action_from_position_intent(position_intent: Any) -> str | None:
         if position_intent is None:
             return None
         return execution_action_from_position_intent(str(position_intent)) or "hold"
 
     def _action_from_execution_fields(self, *, execution_action: Any, position_intent: Any) -> str | None:
+        directional_action = self._directional_action_from_position_intent(position_intent)
+        if directional_action is not None:
+            return directional_action
         if execution_action is not None:
             normalized = str(execution_action).strip().lower()
             if normalized:
                 return normalized
-        return self._action_from_position_intent(position_intent)
+        return None
 
     def _execution_record_payload(self, record: Any) -> dict[str, Any]:
         if isinstance(record, dict):
@@ -4145,7 +4155,9 @@ class OperatorQueryService:
             ) or ai_direction or (
                 None if baseline_assessment is None else baseline_assessment.get("direction_bias")
             ),
-            final_action=self._action_from_position_intent(None if position_target is None else position_target.get("position_intent")),
+            final_action=self._abstract_action_from_position_intent(
+                None if position_target is None else position_target.get("position_intent")
+            ),
             final_target_qty=None if final_target_qty is None else Decimal(str(final_target_qty)),
             baseline_reference=self._baseline_reference_payload(
                 baseline_assessment=baseline_assessment,

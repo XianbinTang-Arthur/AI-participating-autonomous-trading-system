@@ -2602,6 +2602,206 @@ console.log(JSON.stringify({
         self.assertIn('"orderDrawerIsDirectional":true', stdout)
         self.assertIn('"fillDrawerIsDirectional":true', stdout)
 
+    def test_trade_display_preserves_reduce_and_close_direction_specific_labels(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { fillDrawerRows, fillRowTitle, orderDrawerRows, orderRowTitle } from './aats/api/static/modules/trade-display.js';
+
+const reduceLongOrder = {
+  product_type: 'derivatives',
+  symbol: 'BTC-USDT-SWAP',
+  execution_action: 'reduce',
+  position_intent: 'reduce_long',
+  margin_mode: 'cross',
+  exposure_side: 'long',
+  target_leverage: 5,
+  status: 'SUBMITTED',
+  requested_qty: 0.01,
+  remaining_qty: 0.01,
+  filled_qty: 0,
+};
+
+const closeShortOrder = {
+  product_type: 'derivatives',
+  symbol: 'BTC-USDT-SWAP',
+  execution_action: 'exit',
+  position_intent: 'close_short',
+  margin_mode: 'cross',
+  exposure_side: 'short',
+  target_leverage: 5,
+  status: 'SUBMITTED',
+  requested_qty: 0.01,
+  remaining_qty: 0.01,
+  filled_qty: 0,
+};
+
+const reduceShortFill = {
+  product_type: 'derivatives',
+  symbol: 'BTC-USDT-SWAP',
+  execution_action: 'reduce',
+  position_intent: 'reduce_short',
+  margin_mode: 'cross',
+  exposure_side: 'short',
+  side: 'buy',
+  liquidity_role: 'taker',
+  fill_qty: 0.01,
+  fill_price: 66500,
+  starting_position_qty: -0.02,
+  ending_position_qty: -0.01,
+  fee_amount: 0,
+};
+
+const closeLongFill = {
+  product_type: 'derivatives',
+  symbol: 'BTC-USDT-SWAP',
+  execution_action: 'exit',
+  position_intent: 'close_long',
+  margin_mode: 'cross',
+  exposure_side: 'long',
+  side: 'sell',
+  liquidity_role: 'taker',
+  fill_qty: 0.01,
+  fill_price: 66500,
+  starting_position_qty: 0.01,
+  ending_position_qty: 0,
+  fee_amount: 0,
+};
+
+const reduceLongRows = orderDrawerRows(reduceLongOrder);
+const closeShortRows = orderDrawerRows(closeShortOrder);
+const reduceShortFillRows = fillDrawerRows(reduceShortFill);
+const closeLongFillRows = fillDrawerRows(closeLongFill);
+
+console.log(JSON.stringify({
+  reduceLongOrderTitle: orderRowTitle(reduceLongOrder),
+  reduceLongOrderDrawer: reduceLongRows[1][1],
+  closeShortOrderTitle: orderRowTitle(closeShortOrder),
+  closeShortOrderDrawer: closeShortRows[1][1],
+  reduceShortFillTitle: fillRowTitle(reduceShortFill),
+  reduceShortFillDrawer: reduceShortFillRows[1][1],
+  closeLongFillTitle: fillRowTitle(closeLongFill),
+  closeLongFillDrawer: closeLongFillRows[1][1],
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        stdout = result.stdout or ""
+        self.assertIn('"reduceLongOrderTitle":"减多"', stdout)
+        self.assertIn('"reduceLongOrderDrawer":"减多"', stdout)
+        self.assertIn('"closeShortOrderTitle":"平空"', stdout)
+        self.assertIn('"closeShortOrderDrawer":"平空"', stdout)
+        self.assertIn('"reduceShortFillTitle":"减空"', stdout)
+        self.assertIn('"reduceShortFillDrawer":"减空"', stdout)
+        self.assertIn('"closeLongFillTitle":"平多"', stdout)
+        self.assertIn('"closeLongFillDrawer":"平多"', stdout)
+
+    def test_trade_display_preserves_open_and_scale_in_direction_specific_labels(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { fillDrawerRows, fillRowTitle, orderDrawerRows, orderRowTitle } from './aats/api/static/modules/trade-display.js';
+
+const openLongOrder = {
+  product_type: 'derivatives',
+  symbol: 'BTC-USDT-SWAP',
+  execution_action: 'enter',
+  position_intent: 'open_long',
+  margin_mode: 'cross',
+  exposure_side: 'long',
+  target_leverage: 5,
+  status: 'SUBMITTED',
+  requested_qty: 0.01,
+  remaining_qty: 0.01,
+  filled_qty: 0,
+};
+
+const openShortOrder = {
+  product_type: 'derivatives',
+  symbol: 'BTC-USDT-SWAP',
+  execution_action: 'enter',
+  position_intent: 'open_short',
+  margin_mode: 'cross',
+  exposure_side: 'short',
+  target_leverage: 5,
+  status: 'SUBMITTED',
+  requested_qty: 0.01,
+  remaining_qty: 0.01,
+  filled_qty: 0,
+};
+
+const scaleInLongFill = {
+  product_type: 'derivatives',
+  symbol: 'BTC-USDT-SWAP',
+  execution_action: 'scale_in',
+  position_intent: 'scale_in_long',
+  margin_mode: 'cross',
+  exposure_side: 'long',
+  side: 'buy',
+  liquidity_role: 'taker',
+  fill_qty: 0.01,
+  fill_price: 66500,
+  starting_position_qty: 0.01,
+  ending_position_qty: 0.02,
+  fee_amount: 0,
+};
+
+const scaleInShortFill = {
+  product_type: 'derivatives',
+  symbol: 'BTC-USDT-SWAP',
+  execution_action: 'scale_in',
+  position_intent: 'scale_in_short',
+  margin_mode: 'cross',
+  exposure_side: 'short',
+  side: 'sell',
+  liquidity_role: 'taker',
+  fill_qty: 0.01,
+  fill_price: 66500,
+  starting_position_qty: -0.01,
+  ending_position_qty: -0.02,
+  fee_amount: 0,
+};
+
+const openLongRows = orderDrawerRows(openLongOrder);
+const openShortRows = orderDrawerRows(openShortOrder);
+const scaleInLongFillRows = fillDrawerRows(scaleInLongFill);
+const scaleInShortFillRows = fillDrawerRows(scaleInShortFill);
+
+console.log(JSON.stringify({
+  openLongOrderTitle: orderRowTitle(openLongOrder),
+  openLongOrderDrawer: openLongRows[1][1],
+  openShortOrderTitle: orderRowTitle(openShortOrder),
+  openShortOrderDrawer: openShortRows[1][1],
+  scaleInLongFillTitle: fillRowTitle(scaleInLongFill),
+  scaleInLongFillDrawer: scaleInLongFillRows[1][1],
+  scaleInShortFillTitle: fillRowTitle(scaleInShortFill),
+  scaleInShortFillDrawer: scaleInShortFillRows[1][1],
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        stdout = result.stdout or ""
+        self.assertIn('"openLongOrderTitle":"开多"', stdout)
+        self.assertIn('"openLongOrderDrawer":"开多"', stdout)
+        self.assertIn('"openShortOrderTitle":"开空"', stdout)
+        self.assertIn('"openShortOrderDrawer":"开空"', stdout)
+        self.assertIn('"scaleInLongFillTitle":"加多"', stdout)
+        self.assertIn('"scaleInLongFillDrawer":"加多"', stdout)
+        self.assertIn('"scaleInShortFillTitle":"加空"', stdout)
+        self.assertIn('"scaleInShortFillDrawer":"加空"', stdout)
+
     def test_decision_drawer_surfaces_independent_overlay_audit_and_leg_trial_guard(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
         script = """

@@ -70,6 +70,25 @@ def execution_action_from_leg_action(action: LegOrderAction | None) -> Execution
     return mapping.get(str(action).strip().lower())
 
 
+def side_from_position_intent(position_intent: str | None) -> Literal["buy", "sell"] | None:
+    if position_intent is None:
+        return None
+    normalized = str(position_intent).strip().lower()
+    mapping: dict[str, Literal["buy", "sell"]] = {
+        "open_long": "buy",
+        "scale_in_long": "buy",
+        "reduce_long": "sell",
+        "close_long": "sell",
+        "reverse_to_long": "buy",
+        "open_short": "sell",
+        "scale_in_short": "sell",
+        "reduce_short": "buy",
+        "close_short": "buy",
+        "reverse_to_short": "sell",
+    }
+    return mapping.get(normalized)
+
+
 def reduce_only_from_position_intent(position_intent: str | None) -> bool:
     if position_intent is None:
         return False

@@ -10,6 +10,26 @@ from aats.services.operator.query_service import OperatorQueryService
 
 
 class TestOperatorPositionStates(unittest.TestCase):
+    def test_execution_action_summary_prefers_directional_position_intent(self) -> None:
+        query = OperatorQueryService.__new__(OperatorQueryService)
+
+        action = query._action_from_execution_fields(
+            execution_action="reduce",
+            position_intent="reduce_long",
+        )
+
+        self.assertEqual(action, "reduce_long")
+
+    def test_abstract_action_from_position_intent_keeps_final_action_semantics(self) -> None:
+        self.assertEqual(
+            OperatorQueryService._abstract_action_from_position_intent("open_short"),
+            "enter",
+        )
+        self.assertEqual(
+            OperatorQueryService._abstract_action_from_position_intent("scale_in_long"),
+            "scale_in",
+        )
+
     def test_aggregate_local_positions_exposes_dual_leg_state(self) -> None:
         snapshot = PortfolioSnapshot(
             snapshot_ts=datetime.now(timezone.utc),
