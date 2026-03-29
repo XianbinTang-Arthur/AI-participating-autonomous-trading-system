@@ -26,7 +26,6 @@ class DecisionCycleTrigger:
 
     async def handle_feature_snapshot(self, message: dict) -> None:
         snapshot = parse_payload(message, FeatureSnapshot)
-        market_snapshot = self.market_gateway.latest_snapshot(snapshot.symbol)
         if self.can_trigger is not None:
             allowed, _reason = self.can_trigger(symbol=snapshot.symbol)
             if not allowed:

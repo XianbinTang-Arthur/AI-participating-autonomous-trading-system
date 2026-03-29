@@ -162,10 +162,13 @@ class RecoveryBundleLegStatus(SchemaBase):
     product_type: ProductType
     margin_mode: MarginModelType
     side: str
+    pos_side: str | None = None
+    leg_action: str | None = None
     status: str
     strategy_family: str | None = None
     strategy_sleeve_id: str | None = None
     strategy_leg_role: str | None = None
+    strategy_execution_mode: str | None = None
     requested_qty: float | Decimal
     filled_qty: float | Decimal
     remaining_qty: float | Decimal

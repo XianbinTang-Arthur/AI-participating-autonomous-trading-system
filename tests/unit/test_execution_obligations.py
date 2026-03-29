@@ -10,6 +10,7 @@ from aats.bootstrap.settings import AATSSettings
 from aats.schemas.common import utc_now
 from aats.schemas.execution import FillEvent, OrderIntent, OrderState
 from aats.schemas.exchange import ExchangeAccountSnapshot, ExchangeBalance
+from aats.services.accounting import derivatives_initial_margin_requirement
 from aats.services.execution_engine.obligations import ExecutionObligationService
 from aats.services.execution_engine.order_manager import OrderManager
 from aats.services.execution_engine.paper_adapter import PaperExecutionAdapter
@@ -490,6 +491,19 @@ class TestExecutionObligations(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertIsNone(obligation_repo.get_obligation("clclient_outbox_boom"))
+
+
+class TestAccountingHelpers(unittest.TestCase):
+    def test_derivatives_initial_margin_requirement_accepts_string_quantity(self) -> None:
+        self.assertEqual(
+            derivatives_initial_margin_requirement(
+                quantity="0.1",
+                reference_price="100",
+                target_leverage="5",
+                max_slippage_tolerance_bps=10,
+            ),
+            Decimal("2.002"),
+        )
 
 
 async def _return_snapshot(snapshot: ExchangeAccountSnapshot) -> ExchangeAccountSnapshot:

@@ -222,6 +222,32 @@ class _FakeFuturesDerivativesClient(_FakeDerivativesOKXClient):
         }
 
 
+class _FakeShortDerivativesClient(_FakeDerivativesOKXClient):
+    async def get_positions(self):
+        self.get_positions_called = True
+        return {
+            "code": "0",
+            "data": [
+                {
+                    "instId": "BTC-USDT-SWAP",
+                    "pos": "0.18",
+                    "avgPx": "66404.8",
+                    "markPx": "66838.5",
+                    "notionalUsd": "120.22748967599999",
+                    "posSide": "short",
+                    "mgnMode": "cross",
+                    "ccy": "USDT",
+                    "lever": "10",
+                    "imr": "12.03093",
+                    "mmr": "0.4812372",
+                    "mgnRatio": "214.10086239723972",
+                    "liqPx": "130646.40339573975",
+                    "upl": "-0.7806599999999948",
+                }
+            ],
+        }
+
+
 class _FakeMultiPositionDerivativesClient(_FakeDerivativesOKXClient):
     async def get_instruments(self):
         return {
@@ -690,6 +716,32 @@ class TestOKXAccountService(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(service.funding_interval_hours("BTC-USDT-SWAP"), Decimal("4"))
         self.assertEqual(client.funding_rate_calls, ["BTC-USDT-SWAP"])
 
+    async def test_derivatives_refresh_keeps_short_side_when_okx_reports_positive_position_size(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "okx_api_key": "demo_key",
+                "okx_api_secret": "demo_secret",
+                "okx_api_passphrase": "demo_passphrase",
+                "trading_product_type": "derivatives",
+                "default_symbol": "BTC-USDT-SWAP",
+            }
+        )
+        client = _FakeShortDerivativesClient()
+        service = OKXAccountService(settings=settings, client=client)
+
+        snapshot = await service.refresh(force=True)
+
+        self.assertIsNotNone(snapshot)
+        self.assertTrue(client.get_positions_called)
+        self.assertEqual(len(snapshot.positions), 1)
+        self.assertEqual(snapshot.positions[0].symbol, "BTC-USDT-SWAP")
+        self.assertEqual(snapshot.positions[0].side, "short")
+        self.assertEqual(snapshot.positions[0].quantity, Decimal("0.0018"))
+        self.assertEqual(snapshot.positions[0].mark_price, Decimal("66838.5"))
+        self.assertEqual(snapshot.positions[0].liquidation_price, Decimal("130646.40339573975"))
+
     async def test_derivatives_refresh_converts_futures_contract_quantity_to_internal_units(self) -> None:
         settings = AATSSettings.model_validate(
             {
@@ -724,6 +776,7 @@ class TestOKXAccountService(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(snapshot.fee_schedule)
         self.assertEqual(snapshot.fee_schedule.taker, Decimal("0.001"))
         self.assertEqual(snapshot.fee_schedule.maker, Decimal("-0.0008"))
+        self.assertEqual(service.effective_maker_fee_bps(), Decimal("-8.0000"))
         self.assertIsNotNone(snapshot.risk_snapshot)
         self.assertEqual(snapshot.risk_snapshot.adjusted_equity, Decimal("1000"))
         self.assertEqual(snapshot.risk_snapshot.initial_margin_requirement, Decimal("10"))
@@ -891,6 +944,64 @@ class TestOKXAccountService(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(status["account_configuration"])
         self.assertEqual(status["account_configuration"]["account_level_code"], "1")
         self.assertEqual(status["account_configuration"]["account_level_label"], "simple")
+
+    async def test_status_surfaces_derivatives_position_mode_contract_and_blocks_mismatch(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "okx_api_key": "demo_key",
+                "okx_api_secret": "demo_secret",
+                "okx_api_passphrase": "demo_passphrase",
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "default_symbol": "BTC-USDT-SWAP",
+                "derivatives_position_mode": "hedge",
+            }
+        )
+        service = OKXAccountService(settings=settings, client=_FakeDerivativesOKXClient())
+
+        await service.refresh(force=True)
+        status = service.status()
+
+        self.assertFalse(status["ready"])
+        self.assertIn("okx_position_mode_mismatch", status["blockers"])
+        contract = status["position_mode_contract"]
+        self.assertEqual(contract["configured_derivatives_position_mode"], "hedge")
+        self.assertEqual(contract["required_exchange_position_mode"], "long_short_mode")
+        self.assertEqual(contract["exchange_position_mode"], "net_mode")
+        self.assertFalse(contract["exchange_position_mode_matches_configured"])
+        self.assertEqual(contract["startup_error_code"], "derivatives_exchange_runtime_position_mode_mismatch")
+
+    async def test_status_can_observe_position_mode_mismatch_without_blocking_when_match_requirement_disabled(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "okx_api_key": "demo_key",
+                "okx_api_secret": "demo_secret",
+                "okx_api_passphrase": "demo_passphrase",
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "default_symbol": "BTC-USDT-SWAP",
+                "derivatives_position_mode": "hedge",
+                "derivatives_require_exchange_pos_mode_match": False,
+            }
+        )
+        service = OKXAccountService(settings=settings, client=_FakeDerivativesOKXClient())
+
+        await service.refresh(force=True)
+        status = service.status()
+
+        self.assertTrue(status["ready"])
+        self.assertNotIn("okx_position_mode_mismatch", status["blockers"])
+        contract = status["position_mode_contract"]
+        self.assertEqual(contract["configured_derivatives_position_mode"], "hedge")
+        self.assertEqual(contract["required_exchange_position_mode"], "long_short_mode")
+        self.assertEqual(contract["exchange_position_mode"], "net_mode")
+        self.assertFalse(contract["position_mode_match_required"])
+        self.assertFalse(contract["exchange_position_mode_matches_configured"])
+        self.assertIsNone(contract["startup_error_code"])
 
     async def test_status_blocks_when_okx_system_status_reports_incident(self) -> None:
         settings = AATSSettings.model_validate(
@@ -1336,6 +1447,61 @@ class TestOKXAccountService(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(summary["top_categories"][0]["count"], 2)
         self.assertEqual(summary["top_categories"][0]["semantic_group"], "funding_fee")
         self.assertEqual(summary["top_categories"][0]["sub_type_label"], "funding_fee_expense")
+
+    async def test_recent_funding_fee_summary_exposes_total_and_per_event_bps_proxy(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "okx_api_key": "demo_key",
+                "okx_api_secret": "demo_secret",
+                "okx_api_passphrase": "demo_passphrase",
+                "trading_product_type": "derivatives",
+                "default_symbol": "BTC-USDT-SWAP",
+            }
+        )
+
+        class _FundingBillsClient(_FakeDerivativesOKXClient):
+            async def get_bills_details(self, *, symbol: str | None = None, limit: int | None = None, begin=None, end=None):
+                _ = symbol
+                _ = limit
+                _ = begin
+                _ = end
+                return {
+                    "code": "0",
+                    "data": [
+                        {
+                            "billId": "funding_1",
+                            "instId": "BTC-USDT-SWAP",
+                            "type": "8",
+                            "subType": "173",
+                            "ccy": "USDT",
+                            "amount": "-1.602",
+                            "ts": "1700000001000",
+                        },
+                        {
+                            "billId": "funding_2",
+                            "instId": "BTC-USDT-SWAP",
+                            "type": "8",
+                            "subType": "173",
+                            "ccy": "USDT",
+                            "amount": "-1.602",
+                            "ts": "1700000002000",
+                        },
+                    ],
+                }
+
+        service = OKXAccountService(settings=settings, client=_FundingBillsClient())
+        await service.refresh(force=True)
+        await service.recent_bills(limit=10)
+
+        summary = service.recent_funding_fee_summary(symbol="BTC-USDT-SWAP")
+
+        self.assertEqual(summary["count"], 2)
+        self.assertEqual(summary["funding_fee_bps_proxy"], Decimal("20"))
+        self.assertEqual(summary["funding_fee_bps_proxy_per_event"], Decimal("10"))
+        self.assertEqual(service.funding_fee_bps_proxy(symbol="BTC-USDT-SWAP"), Decimal("20"))
+        self.assertEqual(service.funding_fee_bps_proxy_per_event(symbol="BTC-USDT-SWAP"), Decimal("10"))
 
     async def test_private_orders_ws_updates_latest_snapshot_and_fill_cache(self) -> None:
         settings = AATSSettings.model_validate(

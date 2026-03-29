@@ -37,6 +37,7 @@ ExecutionSuggestionMode = Literal["disabled", "diagnostic_only", "shadow_transla
 ExecutionAction = Literal["hold", "enter", "scale_in", "reduce", "exit", "reverse"]
 PositionMode = Literal["net_mode", "long_short_mode"]
 PositionSide = Literal["net", "long", "short"]
+LegOrderAction = Literal["open", "reduce", "close"]
 
 
 def execution_action_from_position_intent(position_intent: str | None) -> ExecutionAction | None:
@@ -56,6 +57,17 @@ def execution_action_from_position_intent(position_intent: str | None) -> Execut
     return mapping.get(str(position_intent).strip().lower())
 
 
+def execution_action_from_leg_action(action: LegOrderAction | None) -> ExecutionAction | None:
+    mapping: dict[str, ExecutionAction] = {
+        "open": "enter",
+        "reduce": "reduce",
+        "close": "exit",
+    }
+    if action is None:
+        return None
+    return mapping.get(str(action).strip().lower())
+
+
 def reduce_only_from_position_intent(position_intent: str | None) -> bool:
     if position_intent is None:
         return False
@@ -67,19 +79,36 @@ def reduce_only_from_position_intent(position_intent: str | None) -> bool:
     }
 
 
+def reduce_only_from_leg_action(action: LegOrderAction | None) -> bool:
+    if action is None:
+        return False
+    return str(action).strip().lower() in {"reduce", "close"}
+
+
 def close_only_from_position_intent(position_intent: str | None) -> bool:
     if position_intent is None:
         return False
     return str(position_intent).strip().lower() in {"close_long", "close_short"}
 
 
+def close_only_from_leg_action(action: LegOrderAction | None) -> bool:
+    if action is None:
+        return False
+    return str(action).strip().lower() == "close"
+
+
 def default_reduce_only_reason(
     *,
     position_intent: str | None,
+    leg_action: LegOrderAction | None = None,
     reduce_only: bool,
 ) -> str | None:
     if not reduce_only:
         return None
+    if close_only_from_leg_action(leg_action):
+        return "explicit_leg_close_path"
+    if reduce_only_from_leg_action(leg_action):
+        return "explicit_leg_reduce_path"
     if close_only_from_position_intent(position_intent):
         return "position_intent_close_path"
     return "position_intent_reduce_path"
@@ -88,10 +117,13 @@ def default_reduce_only_reason(
 def default_close_only_reason(
     *,
     position_intent: str | None,
+    leg_action: LegOrderAction | None = None,
     close_only: bool,
 ) -> str | None:
     if not close_only:
         return None
+    if close_only_from_leg_action(leg_action):
+        return "explicit_leg_close_path"
     return "position_intent_close_path"
 
 
@@ -114,6 +146,46 @@ def pos_side_from_position_intent(
         "reverse_to_short": "short",
     }
     return mapping.get(normalized) if normalized is not None else None
+
+
+def position_intent_from_leg_intent(
+    *,
+    side: Literal["buy", "sell"],
+    pos_side: PositionSide | None,
+    action: LegOrderAction,
+    position_mode: PositionMode | None,
+) -> Literal[
+    "open_long",
+    "reduce_long",
+    "close_long",
+    "open_short",
+    "reduce_short",
+    "close_short",
+]:
+    if position_mode != "long_short_mode":
+        raise ValueError("explicit_leg_order_requires_long_short_mode")
+    if pos_side not in {"long", "short"}:
+        raise ValueError("explicit_leg_order_requires_pos_side")
+    normalized_action = str(action).strip().lower()
+    if pos_side == "long":
+        expected_side = "buy" if normalized_action == "open" else "sell"
+        if side != expected_side:
+            raise ValueError("explicit_leg_order_side_pos_side_mismatch")
+        mapping = {
+            "open": "open_long",
+            "reduce": "reduce_long",
+            "close": "close_long",
+        }
+        return mapping[normalized_action]  # type: ignore[return-value]
+    expected_side = "sell" if normalized_action == "open" else "buy"
+    if side != expected_side:
+        raise ValueError("explicit_leg_order_side_pos_side_mismatch")
+    mapping = {
+        "open": "open_short",
+        "reduce": "reduce_short",
+        "close": "close_short",
+    }
+    return mapping[normalized_action]  # type: ignore[return-value]
 
 
 class ExecutionParameterSuggestion(SchemaBase):
@@ -155,6 +227,7 @@ class AIExecutionParameterSuggestionEnvelope(SchemaBase):
 
 class OrderIntent(SchemaBase):
     intent_id: str
+    leg_intent_id: str | None = None
     decision_id: str
     symbol: str
     side: Literal["buy", "sell"]
@@ -200,6 +273,7 @@ class OrderIntent(SchemaBase):
     margin_mode: MarginModelType = "cash"
     exposure_side: Literal["long", "short", "flat"] = "flat"
     execution_action: ExecutionAction | None = None
+    leg_action: LegOrderAction | None = None
     position_intent: Literal[
         "open_long",
         "reduce_long",
@@ -210,6 +284,56 @@ class OrderIntent(SchemaBase):
         "reverse_to_long",
         "reverse_to_short",
     ] = "open_long"
+    ai_execution_parameter_suggestion: AIExecutionParameterSuggestionEnvelope | None = None
+
+
+class LegOrderIntent(SchemaBase):
+    leg_intent_id: str
+    decision_id: str
+    symbol: str
+    side: Literal["buy", "sell"]
+    pos_side: Literal["long", "short"]
+    action: LegOrderAction
+    quantity: Decimal
+    execution_style: str
+    order_type: Literal["market", "limit"]
+    limit_price: Decimal | None = None
+    reference_price: Decimal | None = None
+    urgency: Literal["low", "medium", "high"]
+    time_in_force: str
+    max_slippage_tolerance_bps: int | None = None
+    reduce_only: bool = False
+    close_only: bool = False
+    td_mode: MarginModelType | None = None
+    position_mode: PositionMode = "long_short_mode"
+    reduce_only_reason: str | None = None
+    close_only_reason: str | None = None
+    instrument_family: str | None = None
+    settle_currency: str | None = None
+    required_initial_margin: Decimal | None = None
+    projected_margin_usage: Decimal | None = None
+    projected_notional: Decimal | None = None
+    risk_budget_multiplier: Decimal | None = None
+    risk_budget_state: dict[str, object] = Field(default_factory=dict)
+    execution_aggressiveness_multiplier: Decimal | None = None
+    execution_aggressiveness_state: dict[str, object] = Field(default_factory=dict)
+    only_reduce_required: bool = False
+    risk_limit_breached: bool = False
+    liquidation_buffer_remaining: Decimal | None = None
+    idempotency_key: str
+    strategy_family: str | None = None
+    strategy_sleeve_id: str | None = None
+    allocation_id: str | None = None
+    strategy_bundle_id: str | None = None
+    strategy_leg_role: Literal["primary", "hedge", "inventory", "accumulation"] | None = None
+    strategy_pair_id: str | None = None
+    strategy_opportunity_kind: str | None = None
+    strategy_execution_mode: str | None = None
+    strategy_state_phase: str | None = None
+    product_type: ProductType = "derivatives"
+    target_leverage: float = 1.0
+    margin_mode: MarginModelType = "cross"
+    exposure_side: Literal["long", "short", "flat"] = "flat"
     ai_execution_parameter_suggestion: AIExecutionParameterSuggestionEnvelope | None = None
 
 
@@ -262,6 +386,7 @@ class ExecutionPlan(SchemaBase):
     margin_mode: MarginModelType = "cash"
     exposure_side: Literal["long", "short", "flat"] = "flat"
     execution_action: ExecutionAction | None = None
+    leg_action: LegOrderAction | None = None
     position_intent: Literal[
         "open_long",
         "reduce_long",
@@ -275,9 +400,69 @@ class ExecutionPlan(SchemaBase):
     ai_execution_parameter_suggestion: AIExecutionParameterSuggestionEnvelope | None = None
 
 
+class LegExecutionPlan(SchemaBase):
+    plan_id: str
+    leg_intent_id: str
+    decision_id: str
+    symbol: str
+    side: Literal["buy", "sell"]
+    pos_side: Literal["long", "short"]
+    action: LegOrderAction
+    quantity: Decimal
+    execution_style: str
+    order_type: Literal["market", "limit"]
+    limit_price: Decimal | None = None
+    time_in_force: str = "IOC"
+    urgency: Literal["low", "medium", "high"]
+    max_slippage_tolerance_bps: int
+    reference_price: Decimal | None = None
+    reduce_only: bool = False
+    close_only: bool = False
+    td_mode: MarginModelType | None = None
+    position_mode: PositionMode = "long_short_mode"
+    reduce_only_reason: str | None = None
+    close_only_reason: str | None = None
+    instrument_family: str | None = None
+    settle_currency: str | None = None
+    required_initial_margin: Decimal | None = None
+    projected_margin_usage: Decimal | None = None
+    projected_notional: Decimal | None = None
+    risk_budget_multiplier: Decimal | None = None
+    risk_budget_state: dict[str, object] = Field(default_factory=dict)
+    execution_aggressiveness_multiplier: Decimal | None = None
+    execution_aggressiveness_state: dict[str, object] = Field(default_factory=dict)
+    only_reduce_required: bool = False
+    risk_limit_breached: bool = False
+    liquidation_buffer_remaining: Decimal | None = None
+    strategy_family: str | None = None
+    strategy_sleeve_id: str | None = None
+    allocation_id: str | None = None
+    strategy_bundle_id: str | None = None
+    strategy_leg_role: Literal["primary", "hedge", "inventory", "accumulation"] | None = None
+    strategy_pair_id: str | None = None
+    strategy_opportunity_kind: str | None = None
+    strategy_execution_mode: str | None = None
+    strategy_state_phase: str | None = None
+    product_type: ProductType = "derivatives"
+    target_leverage: float = 1.0
+    margin_mode: MarginModelType = "cross"
+    exposure_side: Literal["long", "short", "flat"] = "flat"
+    execution_action: ExecutionAction | None = None
+    position_intent: Literal[
+        "open_long",
+        "reduce_long",
+        "close_long",
+        "open_short",
+        "reduce_short",
+        "close_short",
+    ]
+    ai_execution_parameter_suggestion: AIExecutionParameterSuggestionEnvelope | None = None
+
+
 class OrderState(SchemaBase):
     decision_id: str
     intent_id: str
+    leg_intent_id: str | None = None
     symbol: str
     client_order_id: str
     venue: str = "PAPER"
@@ -319,6 +504,7 @@ class OrderState(SchemaBase):
     margin_mode: MarginModelType = "cash"
     exposure_side: Literal["long", "short", "flat"] = "flat"
     execution_action: ExecutionAction | None = None
+    leg_action: LegOrderAction | None = None
     position_intent: Literal[
         "open_long",
         "reduce_long",
@@ -338,6 +524,7 @@ class FillEvent(SchemaBase):
     fill_id: str
     decision_id: str
     intent_id: str
+    leg_intent_id: str | None = None
     client_order_id: str
     exchange_order_id: str
     symbol: str
@@ -370,6 +557,7 @@ class FillEvent(SchemaBase):
     margin_mode: MarginModelType = "cash"
     exposure_side: Literal["long", "short", "flat"] = "flat"
     execution_action: ExecutionAction | None = None
+    leg_action: LegOrderAction | None = None
     position_intent: Literal[
         "open_long",
         "reduce_long",
@@ -412,3 +600,138 @@ class OrderObligation(SchemaBase):
     strategy_state_phase: str | None = None
     reference_price: Decimal | None = None
     last_update_ts: datetime | None = None
+
+
+def leg_intent_from_order_intent(intent: OrderIntent) -> LegOrderIntent | None:
+    if intent.position_mode != "long_short_mode":
+        return None
+    if intent.pos_side not in {"long", "short"}:
+        return None
+    if intent.leg_action not in {"open", "reduce", "close"}:
+        return None
+    return LegOrderIntent(
+        leg_intent_id=intent.leg_intent_id or intent.intent_id,
+        decision_id=intent.decision_id,
+        symbol=intent.symbol,
+        side=intent.side,
+        pos_side=intent.pos_side,
+        action=intent.leg_action,
+        quantity=intent.quantity,
+        execution_style=intent.execution_style,
+        order_type=intent.order_type,
+        limit_price=intent.limit_price,
+        reference_price=intent.reference_price,
+        urgency=intent.urgency,
+        time_in_force=intent.time_in_force,
+        max_slippage_tolerance_bps=intent.max_slippage_tolerance_bps,
+        reduce_only=intent.reduce_only,
+        close_only=intent.close_only,
+        td_mode=intent.td_mode,
+        position_mode="long_short_mode",
+        reduce_only_reason=intent.reduce_only_reason,
+        close_only_reason=intent.close_only_reason,
+        instrument_family=intent.instrument_family,
+        settle_currency=intent.settle_currency,
+        required_initial_margin=intent.required_initial_margin,
+        projected_margin_usage=intent.projected_margin_usage,
+        projected_notional=intent.projected_notional,
+        risk_budget_multiplier=intent.risk_budget_multiplier,
+        risk_budget_state=dict(intent.risk_budget_state),
+        execution_aggressiveness_multiplier=intent.execution_aggressiveness_multiplier,
+        execution_aggressiveness_state=dict(intent.execution_aggressiveness_state),
+        only_reduce_required=intent.only_reduce_required,
+        risk_limit_breached=intent.risk_limit_breached,
+        liquidation_buffer_remaining=intent.liquidation_buffer_remaining,
+        idempotency_key=intent.idempotency_key,
+        strategy_family=intent.strategy_family,
+        strategy_sleeve_id=intent.strategy_sleeve_id,
+        allocation_id=intent.allocation_id,
+        strategy_bundle_id=intent.strategy_bundle_id,
+        strategy_leg_role=intent.strategy_leg_role,
+        strategy_pair_id=intent.strategy_pair_id,
+        strategy_opportunity_kind=intent.strategy_opportunity_kind,
+        strategy_execution_mode=intent.strategy_execution_mode,
+        strategy_state_phase=intent.strategy_state_phase,
+        product_type=intent.product_type,
+        target_leverage=intent.target_leverage,
+        margin_mode=intent.margin_mode,
+        exposure_side=intent.exposure_side,
+        ai_execution_parameter_suggestion=intent.ai_execution_parameter_suggestion,
+    )
+
+
+def order_intent_from_leg_order_intent(leg_intent: LegOrderIntent) -> OrderIntent:
+    position_intent = position_intent_from_leg_intent(
+        side=leg_intent.side,
+        pos_side=leg_intent.pos_side,
+        action=leg_intent.action,
+        position_mode=leg_intent.position_mode,
+    )
+    reduce_only = bool(leg_intent.reduce_only or reduce_only_from_leg_action(leg_intent.action))
+    close_only = bool(leg_intent.close_only or close_only_from_leg_action(leg_intent.action))
+    return OrderIntent(
+        intent_id=leg_intent.leg_intent_id,
+        leg_intent_id=leg_intent.leg_intent_id,
+        decision_id=leg_intent.decision_id,
+        symbol=leg_intent.symbol,
+        side=leg_intent.side,
+        quantity=leg_intent.quantity,
+        execution_style=leg_intent.execution_style,
+        order_type=leg_intent.order_type,
+        limit_price=leg_intent.limit_price,
+        reference_price=leg_intent.reference_price,
+        urgency=leg_intent.urgency,
+        time_in_force=leg_intent.time_in_force,
+        max_slippage_tolerance_bps=leg_intent.max_slippage_tolerance_bps,
+        reduce_only=reduce_only,
+        close_only=close_only,
+        td_mode=leg_intent.td_mode,
+        position_mode=leg_intent.position_mode,
+        pos_side=leg_intent.pos_side,
+        reduce_only_reason=(
+            leg_intent.reduce_only_reason
+            or default_reduce_only_reason(
+                position_intent=position_intent,
+                leg_action=leg_intent.action,
+                reduce_only=reduce_only,
+            )
+        ),
+        close_only_reason=(
+            leg_intent.close_only_reason
+            or default_close_only_reason(
+                position_intent=position_intent,
+                leg_action=leg_intent.action,
+                close_only=close_only,
+            )
+        ),
+        instrument_family=leg_intent.instrument_family,
+        settle_currency=leg_intent.settle_currency,
+        required_initial_margin=leg_intent.required_initial_margin,
+        projected_margin_usage=leg_intent.projected_margin_usage,
+        projected_notional=leg_intent.projected_notional,
+        risk_budget_multiplier=leg_intent.risk_budget_multiplier,
+        risk_budget_state=dict(leg_intent.risk_budget_state),
+        execution_aggressiveness_multiplier=leg_intent.execution_aggressiveness_multiplier,
+        execution_aggressiveness_state=dict(leg_intent.execution_aggressiveness_state),
+        only_reduce_required=leg_intent.only_reduce_required,
+        risk_limit_breached=leg_intent.risk_limit_breached,
+        liquidation_buffer_remaining=leg_intent.liquidation_buffer_remaining,
+        idempotency_key=leg_intent.idempotency_key,
+        strategy_family=leg_intent.strategy_family,
+        strategy_sleeve_id=leg_intent.strategy_sleeve_id,
+        allocation_id=leg_intent.allocation_id,
+        strategy_bundle_id=leg_intent.strategy_bundle_id,
+        strategy_leg_role=leg_intent.strategy_leg_role,
+        strategy_pair_id=leg_intent.strategy_pair_id,
+        strategy_opportunity_kind=leg_intent.strategy_opportunity_kind,
+        strategy_execution_mode=leg_intent.strategy_execution_mode,
+        strategy_state_phase=leg_intent.strategy_state_phase,
+        product_type=leg_intent.product_type,
+        target_leverage=leg_intent.target_leverage,
+        margin_mode=leg_intent.margin_mode,
+        exposure_side=leg_intent.exposure_side,
+        execution_action=execution_action_from_leg_action(leg_intent.action),
+        leg_action=leg_intent.action,
+        position_intent=position_intent,
+        ai_execution_parameter_suggestion=leg_intent.ai_execution_parameter_suggestion,
+    )

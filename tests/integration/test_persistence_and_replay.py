@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-import os
 import unittest
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from pathlib import Path
+from unittest.mock import patch
 
 from aats.bootstrap.config import build_runtime, build_storage_backends
 from aats.bootstrap.settings import AATSSettings
@@ -12,15 +11,16 @@ from aats.events import topics
 from aats.events.envelopes import build_envelope, publish_model
 from aats.schemas.audit import DecisionAuditRecord
 from aats.schemas.common import utc_now
-from aats.schemas.decision import BaselineAssessment, DecisionContext, PositionTarget
+from aats.schemas.decision import BaselineAssessment, DecisionContext, HedgeOverlayDecision, PositionTarget
 from aats.schemas.exchange import AccountBaselineSnapshot
 from aats.schemas.execution import ExecutionPlan, FillEvent, OrderIntent, OrderState
+from aats.schemas.features import FeatureSnapshot
 from aats.schemas.governance import PolicyDecision, RiskDecision
 from aats.schemas.market import MarketSnapshot
 from aats.schemas.operator import OperatorActionRecord
-from aats.schemas.portfolio import FillOutcomeRecord, FundingFeeRecord
+from aats.schemas.portfolio import FillOutcomeRecord, FundingFeeRecord, PortfolioSnapshot
 from aats.schemas.reconciliation import ReconciliationReport
-from aats.schemas.strategy_runtime import StrategySleeveRecord
+from aats.schemas.strategy_runtime import StrategyLegIntent, StrategySleeveRecord
 from aats.schemas.system import HealthSnapshot
 from aats.services.portfolio_service.pnl import PortfolioPnLCalculator
 from aats.services.portfolio_service.positions import PortfolioState
@@ -549,6 +549,97 @@ class TestPersistenceAndReplay(unittest.IsolatedAsyncioTestCase):
                     limit=10,
                 )
                 self.assertGreaterEqual(len(runtime_intents), 4)
+            finally:
+                if runtime.database_runtime is not None:
+                    runtime.database_runtime.dispose()
+                if storage is not None and storage.database_runtime is not None:
+                    storage.database_runtime.dispose()
+
+    async def test_postgres_replay_keeps_independent_overlay_bundle_consistent(self) -> None:
+        with temporary_postgres_url() as (database_url, _admin_engine, _schema_name):
+            settings = self._postgres_settings(
+                database_url,
+                mode="guarded_live",
+                market_data_backend="demo",
+                execution_backend="paper",
+                account_backend="disabled",
+                account_read_enabled=False,
+                live_submit_enabled=True,
+                guarded_execution_dry_run=False,
+                trading_product_type="derivatives",
+                margin_mode="cross",
+                default_symbol="BTC-USDT-SWAP",
+                allowed_symbols=("BTC-USDT-SWAP",),
+                derivatives_position_mode="hedge",
+                strategy_short_bias_enabled=True,
+                strategy_hedge_overlay_enabled=True,
+                strategy_hedge_overlay_mode="independent",
+                strategy_hedge_independent_enabled=True,
+                strategy_hedge_independent_rollout_stage="live",
+                strategy_cost_guard_enabled=False,
+                strategy_entry_min_signal_edge_bps=0.0,
+                strategy_entry_alpha_min=0.0,
+                strategy_entry_confidence_min=0.0,
+                strategy_short_entry_min_signal_edge_bps=0.0,
+                strategy_short_entry_alpha_min=0.0,
+                strategy_short_entry_confidence_min=0.0,
+                initial_usdt_balance=75_000.0,
+                max_abs_position_qty=1.0,
+                max_notional_per_symbol=100_000.0,
+                max_target_leverage=3.0,
+                max_pending_notional_per_symbol=100_000.0,
+                max_total_open_notional=200_000.0,
+                risk_max_long_notional=100_000.0,
+                risk_max_short_notional=100_000.0,
+                risk_max_gross_notional=200_000.0,
+                risk_max_net_notional=100_000.0,
+            )
+            runtime = await build_runtime(settings)
+            storage = None
+            try:
+                self._seed_overlay_cycle_inputs(
+                    runtime,
+                    snapshot=self._overlay_portfolio_snapshot(symbol=settings.default_symbol),
+                )
+                with patch.object(
+                    runtime.decision_engine.target_engine,
+                    "build",
+                    side_effect=lambda context, *_args, **_kwargs: self._independent_overlay_target(context),
+                ):
+                    target = await runtime.decision_engine.run_cycle(
+                        settings.default_symbol,
+                        settings.primary_timeframe,
+                    )
+
+                storage = build_storage_backends(settings)
+                replay = ReplayEngine(
+                    event_store=storage.event_store,
+                    reconstruction_service=PortfolioReconstructionService(
+                        initial_usdt_balance=settings.initial_usdt_balance,
+                        snapshot_builder=PortfolioSnapshotBuilder(pnl_calculator=PortfolioPnLCalculator()),
+                    ),
+                    audit_repo=storage.audit_repo,
+                    portfolio_repo=storage.portfolio_repo,
+                    reconciliation_repo=storage.reconciliation_repo,
+                ).replay(decision_id=target.decision_id)
+
+                self.assertEqual(replay.divergence_count, 0)
+                self.assertEqual(replay.portfolio_issues, [])
+                self.assertEqual(replay.decision_chain_issues, [])
+                self.assertEqual(replay.execution_chain_issues, [])
+                self.assertEqual(replay.audit_issues, [])
+                latest_bundle = storage.strategy_runtime_repo.recent_execution_bundles(
+                    product_type="derivatives",
+                    margin_mode="cross",
+                    symbol=settings.default_symbol,
+                    limit=1,
+                )[0]
+                self.assertEqual(latest_bundle.decision_id, target.decision_id)
+                self.assertEqual(latest_bundle.status, "submitted")
+                self.assertEqual(
+                    {str(leg.execution_mode) for leg in latest_bundle.legs},
+                    {"independent_long_book", "independent_short_book"},
+                )
             finally:
                 if runtime.database_runtime is not None:
                     runtime.database_runtime.dispose()
@@ -1875,6 +1966,177 @@ class TestPersistenceAndReplay(unittest.IsolatedAsyncioTestCase):
                 "event_persistence_mode": "strict",
                 "enabled_decision_timeframes": ("15m",),
             }
+        )
+
+    @staticmethod
+    def _seed_overlay_cycle_inputs(runtime, *, snapshot: PortfolioSnapshot) -> None:
+        runtime.portfolio_repo.save_snapshot(snapshot)
+        runtime.portfolio_service.state.load_portfolio_snapshot(snapshot)
+        market_snapshot = MarketSnapshot(
+            symbol=runtime.settings.default_symbol,
+            exchange="OKX",
+            snapshot_ts=datetime.now(timezone.utc),
+            best_bid=80_000.0,
+            best_ask=80_001.0,
+            last_price=80_000.5,
+            bid_size=1.0,
+            ask_size=1.0,
+            volume_24h=10_000_000.0,
+            kline_15m={"open": 79_900.0, "high": 80_100.0, "low": 79_800.0, "close": 80_000.5},
+            kline_1h={"open": 79_700.0, "high": 80_200.0, "low": 79_600.0, "close": 80_000.5},
+        )
+        runtime.market_gateway._latest_snapshots[runtime.settings.default_symbol] = market_snapshot
+        runtime.event_store.append(
+            build_envelope(
+                topic=topics.MARKET_SNAPSHOTS,
+                key=runtime.settings.default_symbol,
+                payload_model=market_snapshot,
+                source_component="test",
+            )
+        )
+        runtime.event_store.append(
+            build_envelope(
+                topic=topics.FEATURE_SNAPSHOTS,
+                key=runtime.settings.default_symbol,
+                payload_model=FeatureSnapshot(
+                    symbol=runtime.settings.default_symbol,
+                    snapshot_ts=datetime.now(timezone.utc),
+                    market_snapshot_ref="evt_market_overlay_replay",
+                    trend_strength=0.7,
+                    volatility_state="medium",
+                    volatility_value=0.18,
+                    momentum_score=10.0,
+                    liquidity_score=0.9,
+                    regime_indicator="trend",
+                    regime_confidence=0.8,
+                    multi_timeframe_alignment=0.72,
+                    composite_alpha_score=0.34,
+                    suggested_position_scale=1.0,
+                    volatility_target_scale=1.0,
+                    feature_version="test",
+                ),
+                source_component="test",
+            )
+        )
+
+    @staticmethod
+    def _overlay_portfolio_snapshot(*, symbol: str) -> PortfolioSnapshot:
+        return PortfolioSnapshot(
+            snapshot_ts=datetime.now(timezone.utc),
+            balances={"USDT": Decimal("75000")},
+            positions=[],
+            cost_basis={},
+            realized_pnl=Decimal("0"),
+            unrealized_pnl=Decimal("0"),
+            total_equity=Decimal("75000"),
+            gross_exposure=Decimal("0"),
+            net_exposure=Decimal("0"),
+            risk_budget_usage={},
+            product_type="derivatives",
+            margin_mode="cross",
+        )
+
+    @staticmethod
+    def _independent_overlay_target(context) -> PositionTarget:
+        symbol = context.symbol
+        decision_id = context.decision_id
+        return PositionTarget(
+            decision_id=decision_id,
+            symbol=symbol,
+            current_position_qty=Decimal("0"),
+            target_position_qty=Decimal("0.01"),
+            delta_position_qty=Decimal("0.01"),
+            current_notional=Decimal("0"),
+            target_notional=Decimal("800"),
+            rebalance_reason="independent_overlay_replay_test",
+            urgency="medium",
+            max_slippage_tolerance_bps=5_000,
+            source_mix={"directional": 1.0},
+            decision_expiry_ts=datetime.now(timezone.utc) + timedelta(minutes=5),
+            product_type="derivatives",
+            current_exposure_side="flat",
+            target_exposure_side="long",
+            position_intent="open_long",
+            target_leverage=2.0,
+            margin_mode="cross",
+            strategy_family="directional",
+            strategy_sleeve_id="sleeve_directional_primary",
+            strategy_route_action="override_target",
+            strategy_execution_mode="independent_books",
+            strategy_state_phase="active",
+            strategy_reason_codes=["independent_books_active"],
+            strategy_headline="独立双书回放测试。",
+            allocation_id=f"alloc_{decision_id}",
+            strategy_bundle_id=f"bundle_{decision_id}",
+            strategy_execution_legs=[
+                StrategyLegIntent(
+                    symbol=symbol,
+                    product_type="derivatives",
+                    side="buy",
+                    position_mode="long_short_mode",
+                    pos_side="long",
+                    action="open",
+                    family="directional",
+                    role="primary",
+                    strategy_sleeve_id="sleeve_independent_long",
+                    allocation_id=f"alloc_{decision_id}",
+                    margin_mode="cross",
+                    target_leverage=2.0,
+                    current_position_qty=Decimal("0"),
+                    target_position_qty=Decimal("0.02"),
+                    delta_position_qty=Decimal("0.02"),
+                    reference_price=Decimal("80000"),
+                    execution_compatible=True,
+                    execution_mode="independent_long_book",
+                    state_phase="active",
+                    overlay_mode="independent",
+                    trigger_reason_codes=["independent_long_book_signal_above_entry_threshold"],
+                ),
+                StrategyLegIntent(
+                    symbol=symbol,
+                    product_type="derivatives",
+                    side="sell",
+                    position_mode="long_short_mode",
+                    pos_side="short",
+                    action="open",
+                    family="directional",
+                    role="primary",
+                    strategy_sleeve_id="sleeve_independent_short",
+                    allocation_id=f"alloc_{decision_id}",
+                    margin_mode="cross",
+                    target_leverage=2.0,
+                    current_position_qty=Decimal("0"),
+                    target_position_qty=Decimal("-0.01"),
+                    delta_position_qty=Decimal("-0.01"),
+                    reference_price=Decimal("80000"),
+                    execution_compatible=True,
+                    execution_mode="independent_short_book",
+                    state_phase="active",
+                    overlay_mode="independent",
+                    trigger_reason_codes=["independent_short_book_signal_above_entry_threshold"],
+                ),
+            ],
+            hedge_overlay_decision=HedgeOverlayDecision(
+                enabled=True,
+                runtime_supported=True,
+                configured_mode="independent",
+                effective_mode="independent",
+                overlay_source="independent_books",
+                active=True,
+                state="opening",
+                main_leg_signal="long",
+                hedge_leg_signal="short",
+                long_leg_score=0.76,
+                short_leg_score=0.69,
+                long_leg_reason_codes=["independent_long_book_signal_above_entry_threshold"],
+                short_leg_reason_codes=["independent_short_book_signal_above_entry_threshold"],
+                reason_codes=[
+                    "independent_long_book_signal_above_entry_threshold",
+                    "independent_short_book_signal_above_entry_threshold",
+                ],
+                rollout_stage="live",
+                runtime_rollout_stage="live",
+            ),
         )
 
     @staticmethod

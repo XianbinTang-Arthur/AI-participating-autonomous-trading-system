@@ -9,7 +9,7 @@ from aats.bootstrap.logging import get_logger, log_event
 from aats.schemas.common import dump_payload_exact
 from aats.schemas.execution import FillEvent, OrderState
 from aats.services.execution_engine.state_machine import OrderStateMachine
-from aats.services.runtime_scope import RuntimeStateScope, filter_fills, filter_order_states
+from aats.services.runtime_scope import RuntimeStateScope
 from aats.storage.scope_metadata import fill_scope_metadata, order_scope_metadata
 from aats.storage.sqlalchemy_models import FillEventModel, OrderStateModel
 

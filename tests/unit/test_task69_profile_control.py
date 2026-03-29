@@ -52,7 +52,7 @@ class Task69ProfileControlTests(IsolatedAsyncioTestCase):
         self.assertEqual(report["recommended_profile_id"], "trend_normal")
 
     async def test_activation_gate_blocks_non_safety_switch_during_cold_start(self) -> None:
-        result = await self.control.evaluate_now(allow_auto_activation=False)
+        await self.control.evaluate_now(allow_auto_activation=False)
         report = self.control._latest_optimization_report()
         self.assertIsNotNone(report)
         recommendation = StrategyProfileRecommendation(

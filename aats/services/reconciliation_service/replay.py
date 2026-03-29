@@ -5,11 +5,13 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 
+from pydantic import ValidationError
+
 from aats.events import topics
 from aats.schemas.audit import DecisionAuditRecord
 from aats.schemas.common import EventEnvelope, utc_now
 from aats.schemas.decision import DecisionContext, DecisionOutcome, PositionTarget
-from aats.schemas.execution import ExecutionPlan, FillEvent, OrderIntent, OrderState
+from aats.schemas.execution import ExecutionPlan, FillEvent, LegExecutionPlan, OrderIntent, OrderState
 from aats.schemas.exchange import AccountBaselineSnapshot
 from aats.schemas.governance import PolicyDecision, RiskDecision
 from aats.schemas.market import MarketSnapshot
@@ -23,7 +25,7 @@ from aats.schemas.strategy_runtime import (
 from aats.schemas.system import HealthSnapshot
 from aats.services.execution_engine.fill_ordering import fill_processing_sort_key
 from aats.services.execution_engine.state_machine import OrderStateMachine
-from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, EPSILON_DECIMAL_9, is_effectively_zero, quantize_decimal, to_decimal
+from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, is_effectively_zero, quantize_decimal, to_decimal
 from aats.services.portfolio_service.position_keys import position_key_for_snapshot_position
 from aats.services.portfolio_service.positions import PortfolioState
 from aats.storage.base import AuditRepository, EventStore, PortfolioRepository, ReconciliationRepository
@@ -1174,12 +1176,12 @@ class ReplayEngine:
             )
             risk = RiskDecision.model_validate(risk_event.payload) if risk_event is not None else None
             execution_plan = (
-                ExecutionPlan.model_validate(execution_plan_event.payload)
+                self._parse_execution_plan_payload(execution_plan_event.payload)
                 if execution_plan_event is not None
                 else None
             )
             execution_plans = [
-                ExecutionPlan.model_validate(event.payload)
+                self._parse_execution_plan_payload(event.payload)
                 for event in execution_plan_events
             ]
             strategy_bundle = (
@@ -1510,6 +1512,7 @@ class ReplayEngine:
                                 )
                             if (
                                 risk is not None
+                                and hasattr(plan, "approved_target_position_qty")
                                 and abs(
                                     plan.approved_target_position_qty - to_decimal(risk.capped_target_position_qty)
                                 ) > EPSILON_DECIMAL_12
@@ -1540,6 +1543,13 @@ class ReplayEngine:
                     )
 
         return issues
+
+    @staticmethod
+    def _parse_execution_plan_payload(payload: dict[str, object]) -> ExecutionPlan | LegExecutionPlan:
+        try:
+            return ExecutionPlan.model_validate(payload)
+        except ValidationError:
+            return LegExecutionPlan.model_validate(payload)
 
     def _validate_context_health_link(
         self,

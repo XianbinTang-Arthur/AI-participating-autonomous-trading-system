@@ -16,6 +16,7 @@ from aats.schemas.strategy_runtime import (
     StrategyCandidate,
     StrategyCoordinatorSnapshot,
     StrategyFamily,
+    StrategyLegIntent,
     StrategyRouteAction,
     StrategySleeveIntent,
     StrategySleeveRecord,
@@ -227,8 +228,16 @@ class StrategyCoordinatorService:
                 symbol_scope=symbol_scope,
             )
         allocation_id = new_id("alloc") if allocation is None else allocation.allocation_id
-        strategy_bundle_id = None
-        strategy_execution_legs = []
+        strategy_bundle_id = None if not base_target.strategy_execution_legs else new_id("bundle")
+        strategy_execution_legs = [
+            leg.model_copy(
+                deep=True,
+                update={
+                    "allocation_id": leg.allocation_id or allocation_id,
+                },
+            )
+            for leg in (base_target.strategy_execution_legs or [])
+        ]
 
         if allocation is not None:
             target_qty = to_decimal(allocation.target_position_qty)
@@ -255,6 +264,10 @@ class StrategyCoordinatorService:
             urgency = base_target.urgency
             applied_route_action = "protective_fallback"
             reason_codes.append("strategy_family_protective_fallback_retained")
+        elif snapshot.selected_family == "directional" and strategy_execution_legs:
+            target_qty = base_target.target_position_qty
+            urgency = "high" if any(leg.role == "hedge" for leg in strategy_execution_legs) else base_target.urgency
+            reason_codes.append("directional_strategy_execution_legs_retained")
         else:
             target_qty = base_target.current_position_qty
             urgency = "low"
@@ -374,6 +387,16 @@ class StrategyCoordinatorService:
                     state_phase=candidate.state_phase,
                     blocking_reasons=list(candidate.blocking_reasons),
                     metrics=dict(candidate.metrics or {}),
+                    legs=[
+                        leg.model_copy(
+                            deep=True,
+                            update={
+                                "family": family,
+                                "strategy_sleeve_id": leg.strategy_sleeve_id or strategy_sleeve_id,
+                            },
+                        )
+                        for leg in (base_target.strategy_execution_legs or [])
+                    ],
                 )
             else:
                 metrics = dict(candidate.metrics or {})
@@ -463,6 +486,14 @@ class StrategyCoordinatorService:
         return [intent.model_copy(update={"allocation_id": shared_allocation_id}) for intent in intents]
 
     def _directional_candidate(self, target: PositionTarget) -> StrategyCandidate:
+        reason_codes = list(
+            dict.fromkeys(
+                [
+                    *(target.strategy_reason_codes or []),
+                    "directional_strategy_target",
+                ]
+            )
+        )
         return StrategyCandidate(
             family="directional",
             state="ready",
@@ -470,19 +501,25 @@ class StrategyCoordinatorService:
             selectable=True,
             execution_compatible=True,
             route_action="override_target",
-            headline="Use the directional strategy target.",
+            headline=target.strategy_headline or "Use the directional strategy target.",
             recommended_symbol=target.symbol,
             target_position_qty=target.target_position_qty,
             delta_position_qty=target.delta_position_qty,
             score=max(abs(float(target.expected_net_edge_bps)), 0.0),
             confidence=min(0.95, 0.45 + max(target.expected_signal_edge_bps, 0.0) / 100.0),
             urgency=target.urgency,
-            reason_codes=["directional_strategy_target"],
+            reason_codes=reason_codes,
+            pair_id=target.strategy_pair_id,
+            opportunity_kind=target.strategy_opportunity_kind,
+            execution_mode=target.strategy_execution_mode,
+            state_phase=target.strategy_state_phase,
+            blocking_reasons=list(target.strategy_blocking_reasons or []),
             metrics={
                 "expected_signal_edge_bps": target.expected_signal_edge_bps,
                 "expected_cost_bps": target.expected_cost_bps,
                 "expected_net_edge_bps": target.expected_net_edge_bps,
             },
+            legs=[leg.model_copy(deep=True) for leg in (target.strategy_execution_legs or [])],
         )
 
     def _latest_market_snapshot(self, symbol: str) -> MarketSnapshot | None:
@@ -746,6 +783,24 @@ class StrategyCoordinatorService:
         )
 
     @staticmethod
+    def _smart_arbitrage_pair_count(intent: StrategySleeveIntent) -> int:
+        pair_ids = {
+            str(leg.pair_id or "").strip()
+            for leg in intent.legs
+            if str(leg.pair_id or "").strip()
+        }
+        if pair_ids:
+            return max(len(pair_ids), 1)
+        metrics = intent.metrics or {}
+        summaries = metrics.get("selected_pair_summaries")
+        if isinstance(summaries, list) and summaries:
+            return len(summaries)
+        try:
+            return max(int(metrics.get("pair_count_selected") or 1), 1)
+        except (TypeError, ValueError):
+            return 1
+
+    @staticmethod
     def _leg_quantities_for_symbol(
         legs: list[StrategyLegIntent],
         *,
@@ -829,8 +884,9 @@ class StrategyCoordinatorService:
         family = intent.family
         max_notional = Decimal(str(self.settings.max_notional_per_symbol))
         if family == "smart_arbitrage":
-            quote_budget_limit = Decimal(str(self.settings.smart_arbitrage_quote_budget_per_trade))
-            notional_cap = Decimal(str(self.settings.smart_arbitrage_max_pair_notional))
+            pair_count = Decimal(str(self._smart_arbitrage_pair_count(intent)))
+            quote_budget_limit = Decimal(str(self.settings.smart_arbitrage_quote_budget_per_trade)) * pair_count
+            notional_cap = Decimal(str(self.settings.smart_arbitrage_max_pair_notional)) * pair_count
             allocator_base_weight = Decimal("1.15")
             hedge_priority_class = "critical_hedge"
         elif family == "spot_grid":
@@ -876,6 +932,7 @@ class StrategyCoordinatorService:
                 "source": "task74_allocator_v2_phase2",
                 "default_symbol": base_target.symbol,
                 "pair_id": intent.pair_id,
+                "pair_count": self._smart_arbitrage_pair_count(intent) if family == "smart_arbitrage" else 1,
                 "opportunity_kind": intent.opportunity_kind,
                 "execution_mode": intent.execution_mode,
                 "state_phase": intent.state_phase,

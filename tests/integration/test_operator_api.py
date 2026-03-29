@@ -24,6 +24,7 @@ from aats.schemas.decision import (
     BaselineAssessment,
     DecisionContext,
     DecisionOutcome,
+    HedgeOverlayDecision,
     PositionTarget,
     ProfileControlDecision,
 )
@@ -44,12 +45,14 @@ from aats.schemas.governance import PolicyDecision, RiskDecision
 from aats.events import topics
 from aats.schemas.operator import ExecutionErrorSummary, ReplayValidationSummary
 from aats.schemas.operator import OperatorUserRecord
-from aats.schemas.portfolio import FillOutcomeRecord, FundingFeeRecord
+from aats.schemas.portfolio import FillOutcomeRecord, FundingFeeRecord, PortfolioSnapshot, Position
+from aats.schemas.reconciliation import ReconciliationReport
 from aats.schemas.strategy_profiles import (
     StrategyProfileMarketRegimeAssessment,
     StrategyProfileRecommendation,
     StrategyProfileRevision,
 )
+from aats.schemas.strategy_runtime import StrategyLegIntent
 from aats.services.ai_service.provider import AIProviderResponse
 from aats.services.operator.query_service import OperatorQueryService
 from aats.services.operator.strategy_profiles import StrategyProfileControlService
@@ -579,6 +582,29 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(list(payload["panels"].keys()), ["session", "health", "metrics"])
         self.assertNotIn("runtime", payload["panels"])
 
+    async def test_dashboard_bundle_supports_positions_panel(self) -> None:
+        runtime = await self._runtime(
+            trading_product_type="derivatives",
+            margin_mode="cross",
+            default_symbol="BTC-USDT-SWAP",
+            allowed_symbols=("BTC-USDT-SWAP",),
+        )
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            response = client.get(
+                self._dashboard_bundle_url(
+                    view="overview",
+                    panels=["session", "positions", "accountState"],
+                )
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertIn("positions", payload["panels"])
+        self.assertIn("local_instrument_positions", payload["panels"]["positions"]["data"])
+        self.assertIn("exchange_instrument_positions", payload["panels"]["positions"]["data"])
+
     async def test_dashboard_bundle_supports_ai_analysis_recent_panels(self) -> None:
         runtime = await self._runtime()
         app = self._app(runtime)
@@ -647,6 +673,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
                 "account_read_enabled": True,
                 "trading_product_type": "derivatives",
                 "margin_mode": "cross",
+                "derivatives_position_mode": "hedge",
                 "default_symbol": "BTC-USDT-SWAP",
                 "allowed_symbols": ("BTC-USDT-SWAP", "ETH-USDT-SWAP"),
                 "storage_mode": "memory",
@@ -804,6 +831,11 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(account_state_payload["backend"], "okx")
             self.assertEqual(account_state_payload["account_configuration"]["account_level_code"], "4")
             self.assertEqual(account_state_payload["account_configuration"]["position_mode_label"], "long_short")
+            self.assertEqual(account_state_payload["configured_derivatives_position_mode"], "hedge")
+            self.assertEqual(account_state_payload["required_exchange_position_mode"], "long_short_mode")
+            self.assertEqual(account_state_payload["exchange_position_mode"], "long_short_mode")
+            self.assertTrue(account_state_payload["exchange_position_mode_matches_configured"])
+            self.assertTrue(account_state_payload["position_mode_match_required"])
             self.assertEqual(account_state_payload["fee_schedule"]["taker"], "0.0005")
             self.assertEqual(account_state_payload["risk_snapshot"]["margin_ratio"], "5.2")
             self.assertEqual(account_state_payload["system_status_items"][0]["title"], "All Systems Operational")
@@ -839,6 +871,21 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(margin_buffer_payload["liquidation"]["closest_position"]["symbol"], "BTC-USDT-SWAP")
             self.assertEqual(account_state_payload["margin_buffer_overview"]["status"], "healthy")
             self.assertEqual(runtime_payload["startup_profile"], "derivatives")
+            self.assertEqual(
+                runtime_payload["runtime_profile_control"]["current_runtime_payload"]["derivatives_position_mode"],
+                "hedge",
+            )
+            self.assertEqual(
+                runtime_payload["runtime_profile_control"]["current_runtime_summary"]["derivatives_position_mode"],
+                "hedge",
+            )
+            self.assertEqual(
+                runtime_payload["account_position_mode_contract"]["required_exchange_position_mode"],
+                "long_short_mode",
+            )
+            self.assertTrue(
+                runtime_payload["account_position_mode_contract"]["exchange_position_mode_matches_configured"]
+            )
             self.assertEqual(runtime_payload["account_configuration"]["account_level_label"], "portfolio_margin")
             self.assertEqual(runtime_payload["risk_snapshot"]["initial_margin_requirement"], "320")
             self.assertEqual(runtime_payload["primary_instrument_rule"]["symbol"], "BTC-USDT-SWAP")
@@ -849,6 +896,337 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             FakeOperatorAccountService.SNAPSHOT = None
             FakeOperatorAccountService.PRIVATE_ORDER_ROW = None
             FakeOperatorAccountService.PRIVATE_ORDER_FILLS = None
+
+    async def test_audit_detail_exposes_hedge_mode_order_and_leg_mismatch_summary(self) -> None:
+        runtime = await self._runtime(
+            trading_product_type="derivatives",
+            margin_mode="cross",
+            default_symbol="BTC-USDT-SWAP",
+            allowed_symbols=("BTC-USDT-SWAP",),
+            derivatives_position_mode="hedge",
+        )
+        decision_id = "decision_hedge_audit"
+        now = utc_now()
+        decision_context = DecisionContext(
+            decision_id=decision_id,
+            symbol="BTC-USDT-SWAP",
+            timeframe="15m",
+            as_of_ts=now,
+            market_snapshot_ref="evt_market_snapshot_hedge_audit",
+            feature_snapshot_ref="evt_feature_snapshot_hedge_audit",
+            portfolio_snapshot_ref="evt_portfolio_snapshot_hedge_audit",
+            health_snapshot_ref="evt_health_snapshot_hedge_audit",
+            mode="paper_live",
+            market_regime="uncertain",
+            current_position_qty=Decimal("0.01"),
+            current_exposure_side="long",
+            product_type="derivatives",
+            margin_mode="cross",
+        )
+        context_event = build_envelope(
+            topic=topics.DECISION_CONTEXTS,
+            key="BTC-USDT-SWAP",
+            payload_model=decision_context,
+            source_component="test",
+        )
+        order_intent = OrderIntent(
+            intent_id="intent_hedge_audit_long",
+            leg_intent_id="leg_hedge_audit_long",
+            decision_id=decision_id,
+            symbol="BTC-USDT-SWAP",
+            side="buy",
+            quantity=Decimal("0.02"),
+            execution_style="taker",
+            order_type="market",
+            urgency="high",
+            time_in_force="IOC",
+            position_mode="long_short_mode",
+            pos_side="long",
+            idempotency_key="hedge-audit-long",
+            product_type="derivatives",
+            margin_mode="cross",
+            exposure_side="long",
+            leg_action="open",
+            position_intent="open_long",
+        )
+        order_event = build_envelope(
+            topic=topics.ORDER_INTENTS,
+            key="BTC-USDT-SWAP",
+            payload_model=order_intent,
+            source_component="test",
+        )
+        reconciliation = ReconciliationReport(
+            reconciliation_id="recon_hedge_audit",
+            decision_id=decision_id,
+            as_of_ts=now,
+            exchange_snapshot_ts=now,
+            product_type="derivatives",
+            margin_mode="cross",
+            allowed_symbols=["BTC-USDT-SWAP"],
+            exchange_comparison_enabled=True,
+            order_diff={},
+            fill_diff={},
+            balance_diff={},
+            position_diff={
+                "exchange_leg_mismatches": {
+                    "BTC-USDT-SWAP:short": {
+                        "symbol": "BTC-USDT-SWAP",
+                        "leg_side": "short",
+                        "stored_qty": Decimal("0"),
+                        "exchange_qty": Decimal("-0.01"),
+                    }
+                },
+                "exchange_instrument_mismatches": {},
+            },
+            findings=[],
+            finding_summary={},
+            mismatch_categories=["derivatives_leg_position_mismatch"],
+            mismatch_reasons=["derivatives_leg_position_differs_from_exchange"],
+            safety_impacts=["derivatives_leg_state_requires_review"],
+            severity="hard_mismatch",
+            review_required=True,
+            unknown_state_details=[
+                {
+                    "kind": "exchange_position_without_local_execution_chain",
+                    "position_key": "BTC-USDT-SWAP:short",
+                    "symbol": "BTC-USDT-SWAP",
+                    "leg_side": "short",
+                    "stored_qty": "0",
+                    "exchange_qty": "-0.01",
+                }
+            ],
+            recommended_operator_action="operator_rebaseline_required",
+        )
+        reconciliation_event = build_envelope(
+            topic=topics.RECONCILIATION_REPORTS,
+            key="BTC-USDT-SWAP",
+            payload_model=reconciliation,
+            source_component="test",
+        )
+        runtime.event_store.append(context_event)
+        runtime.event_store.append(order_event)
+        runtime.event_store.append(reconciliation_event)
+        runtime.audit_repo.upsert(
+            DecisionAuditRecord(
+                decision_id=decision_id,
+                decision_context_ref=context_event.event_id,
+                order_intent_refs=[order_event.event_id],
+                reconciliation_refs=[reconciliation_event.event_id],
+            )
+        )
+
+        app = self._app(runtime)
+        with TestClient(app) as client:
+            payload = client.get(f"/audit/{decision_id}").json()
+
+        self.assertEqual(payload["audit"]["decision_id"], decision_id)
+        self.assertEqual(
+            payload["hedge_mode_audit"]["position_mode"]["configured_derivatives_position_mode"],
+            "hedge",
+        )
+        self.assertEqual(
+            payload["hedge_mode_audit"]["position_mode"]["observed_position_modes"],
+            ["long_short_mode"],
+        )
+        self.assertEqual(payload["hedge_mode_audit"]["leg_orders"]["total_count"], 1)
+        self.assertEqual(payload["hedge_mode_audit"]["leg_orders"]["items"][0]["action"], "open")
+        self.assertEqual(payload["hedge_mode_audit"]["leg_reconciliation"]["total_count"], 1)
+        self.assertEqual(
+            payload["hedge_mode_audit"]["leg_reconciliation"]["items"][0]["kind"],
+            "missing_execution_chain",
+        )
+
+    async def test_audit_detail_exposes_independent_overlay_sources_and_leg_trial_guard(self) -> None:
+        runtime = await self._runtime(
+            trading_product_type="derivatives",
+            margin_mode="cross",
+            default_symbol="BTC-USDT-SWAP",
+            allowed_symbols=("BTC-USDT-SWAP",),
+            derivatives_position_mode="hedge",
+            strategy_hedge_overlay_enabled=True,
+            strategy_hedge_overlay_mode="independent",
+            strategy_hedge_independent_enabled=True,
+            strategy_hedge_independent_trial_guard_enabled=True,
+            strategy_performance_guard_min_closed_trades=4,
+        )
+        decision_id = "decision_independent_overlay_audit"
+        now = utc_now()
+        decision_context = DecisionContext(
+            decision_id=decision_id,
+            symbol="BTC-USDT-SWAP",
+            timeframe="15m",
+            as_of_ts=now,
+            market_snapshot_ref="evt_market_snapshot_independent_overlay",
+            feature_snapshot_ref="evt_feature_snapshot_independent_overlay",
+            portfolio_snapshot_ref="evt_portfolio_snapshot_independent_overlay",
+            health_snapshot_ref="evt_health_snapshot_independent_overlay",
+            mode="paper_live",
+            market_regime="uncertain",
+            current_position_qty=Decimal("0.01"),
+            current_long_position_qty=Decimal("0.03"),
+            current_short_position_qty=Decimal("0.02"),
+            current_exposure_side="long",
+            product_type="derivatives",
+            margin_mode="cross",
+            leg_strategy_health={
+                "long": {
+                    "recent_closed_trade_count": 5,
+                    "recent_win_rate": 0.20,
+                    "recent_fee_drag_ratio": 0.04,
+                    "recent_churn_ratio": 0.08,
+                    "recent_low_edge_trade_streak": 1,
+                    "recent_net_realized_pnl": -12.0,
+                    "guardrail_flags": ["fee_drag_elevated"],
+                    "cooldowns": {},
+                },
+                "short": {
+                    "recent_closed_trade_count": 5,
+                    "recent_win_rate": 0.80,
+                    "recent_fee_drag_ratio": 0.02,
+                    "recent_churn_ratio": 0.04,
+                    "recent_low_edge_trade_streak": 0,
+                    "recent_net_realized_pnl": 8.0,
+                    "guardrail_flags": [],
+                    "cooldowns": {"min_hold_remaining_seconds": 30.0},
+                },
+            },
+        )
+        context_event = build_envelope(
+            topic=topics.DECISION_CONTEXTS,
+            key="BTC-USDT-SWAP",
+            payload_model=decision_context,
+            source_component="test",
+        )
+        position_target = PositionTarget(
+            decision_id=decision_id,
+            symbol="BTC-USDT-SWAP",
+            current_position_qty=Decimal("0.01"),
+            target_position_qty=Decimal("0.01"),
+            delta_position_qty=Decimal("0"),
+            current_notional=Decimal("700"),
+            target_notional=Decimal("700"),
+            rebalance_reason="independent_overlay_audit_test",
+            urgency="medium",
+            max_slippage_tolerance_bps=20,
+            source_mix={"baseline": 1.0},
+            decision_expiry_ts=now + timedelta(minutes=5),
+            product_type="derivatives",
+            current_exposure_side="long",
+            target_exposure_side="long",
+            position_intent="hold",
+            target_leverage=1.0,
+            margin_mode="cross",
+            strategy_family="directional",
+            strategy_execution_mode="independent_books",
+            strategy_reason_codes=["independent_books_active"],
+            strategy_execution_legs=[
+                StrategyLegIntent(
+                    symbol="BTC-USDT-SWAP",
+                    product_type="derivatives",
+                    side="buy",
+                    position_mode="long_short_mode",
+                    pos_side="long",
+                    action="open",
+                    family="directional",
+                    role="primary",
+                    margin_mode="cross",
+                    target_leverage=1.0,
+                    current_position_qty=Decimal("0.01"),
+                    target_position_qty=Decimal("0.03"),
+                    delta_position_qty=Decimal("0.02"),
+                    reference_price=Decimal("70000.5"),
+                    execution_compatible=True,
+                    execution_mode="independent_long_book",
+                    overlay_mode="independent",
+                    trigger_reason_codes=["independent_long_book_signal_above_entry_threshold"],
+                    note="Independent long book 决策腿。",
+                ),
+                StrategyLegIntent(
+                    symbol="BTC-USDT-SWAP",
+                    product_type="derivatives",
+                    side="buy",
+                    position_mode="long_short_mode",
+                    pos_side="short",
+                    action="reduce",
+                    family="directional",
+                    role="primary",
+                    margin_mode="cross",
+                    target_leverage=1.0,
+                    current_position_qty=Decimal("-0.02"),
+                    target_position_qty=Decimal("-0.01"),
+                    delta_position_qty=Decimal("0.01"),
+                    reference_price=Decimal("70000.5"),
+                    execution_compatible=True,
+                    execution_mode="independent_short_book",
+                    overlay_mode="independent",
+                    trigger_reason_codes=["independent_short_book_hold_above_entry_threshold"],
+                    note="Independent short book 决策腿。",
+                ),
+            ],
+            hedge_overlay_decision=HedgeOverlayDecision(
+                enabled=True,
+                runtime_supported=True,
+                configured_mode="independent",
+                effective_mode="independent",
+                overlay_source="independent_books",
+                active=True,
+                state="holding",
+                main_leg_signal="long",
+                hedge_leg_signal="short",
+                main_leg_current_qty=Decimal("0.03"),
+                hedge_leg_current_qty=Decimal("0.02"),
+                main_leg_target_qty=Decimal("0.03"),
+                hedge_leg_target_qty=Decimal("0.01"),
+                hedge_ratio=Decimal("0.3333"),
+                max_ratio=Decimal("1"),
+                pressure_score=0.74,
+                open_threshold=0.66,
+                close_threshold=0.64,
+                fee_drag_ratio=0.04,
+                churn_ratio=0.08,
+                long_leg_score=0.74,
+                short_leg_score=0.68,
+                long_leg_reason_codes=["independent_long_book_signal_above_entry_threshold"],
+                short_leg_reason_codes=["independent_short_book_hold_above_entry_threshold"],
+                long_leg_blocked_reasons=["independent_long_book_trial_guard_active"],
+                short_leg_blocked_reasons=[],
+                reason_codes=[
+                    "independent_long_book_signal_above_entry_threshold",
+                    "independent_short_book_hold_above_entry_threshold",
+                ],
+            ),
+        )
+        target_event = build_envelope(
+            topic=topics.POSITION_TARGETS,
+            key="BTC-USDT-SWAP",
+            payload_model=position_target,
+            source_component="test",
+        )
+        runtime.event_store.append(context_event)
+        runtime.event_store.append(target_event)
+        runtime.audit_repo.upsert(
+            DecisionAuditRecord(
+                decision_id=decision_id,
+                decision_context_ref=context_event.event_id,
+                position_target_ref=target_event.event_id,
+            )
+        )
+
+        app = self._app(runtime)
+        with TestClient(app) as client:
+            payload = client.get(f"/audit/{decision_id}").json()
+
+        self.assertEqual(payload["hedge_mode_audit"]["overlay"]["effective_mode"], "independent")
+        self.assertEqual(payload["hedge_mode_audit"]["overlay"]["overlay_source"], "independent_books")
+        self.assertEqual(payload["hedge_mode_audit"]["overlay"]["items"][0]["execution_mode"], "independent_long_book")
+        self.assertEqual(payload["hedge_mode_audit"]["overlay"]["items"][1]["overlay_mode"], "independent")
+        self.assertTrue(payload["hedge_mode_audit"]["leg_trial_guard"]["enabled"])
+        self.assertEqual(payload["hedge_mode_audit"]["leg_trial_guard"]["active_count"], 1)
+        long_guard = next(item for item in payload["hedge_mode_audit"]["leg_trial_guard"]["items"] if item["leg"] == "long")
+        short_guard = next(item for item in payload["hedge_mode_audit"]["leg_trial_guard"]["items"] if item["leg"] == "short")
+        self.assertTrue(long_guard["active"])
+        self.assertEqual(long_guard["reason_code"], "independent_long_book_trial_guard_active")
+        self.assertEqual(short_guard["status"], "clear")
 
     async def test_guarded_live_preflight_and_run_packet_surface_structural_and_margin_failures(self) -> None:
         FakeOperatorAccountService.SNAPSHOT = ExchangeAccountSnapshot(
@@ -1105,6 +1483,9 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(summary["funding_fee_count"], 2)
         self.assertEqual(summary["funding_fee_income_count"], 1)
         self.assertEqual(summary["funding_fee_expense_count"], 1)
+        self.assertIn("fee_to_notional_ratio", summary)
+        self.assertIn("high_slippage_ratio", summary)
+        self.assertIn("slow_submit_to_fill_ratio", summary)
         self.assertEqual(Decimal(str(summary["funding_fee_net_pnl"])), Decimal("-1.25"))
         self.assertEqual(
             Decimal(str(summary["combined_net_realized_pnl"])),
@@ -1115,6 +1496,63 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["funding_fee_summary"]["net_total_by_currency"]["USDT"], "-1.25")
         self.assertTrue(any(item["event_kind"] == "funding_fee" for item in payload["recent_realized_events"]))
         self.assertEqual(payload["truth_source"], "fill_outcomes_plus_funding_fee_records")
+
+    async def test_profitability_overview_normalizes_legacy_negative_fee_delta_for_gross_pnl(self) -> None:
+        runtime = await self._runtime(
+            trading_product_type="derivatives",
+            margin_mode="cross",
+            default_symbol="BTC-USDT-SWAP",
+            allowed_symbols=("BTC-USDT-SWAP",),
+        )
+        now = utc_now()
+        runtime.fill_outcome_repo.save_outcome(
+            FillOutcomeRecord(
+                fill_id="fill_legacy_fee_sign",
+                order_id="order_legacy_fee_sign",
+                symbol="BTC-USDT-SWAP",
+                position_key="BTC-USDT-SWAP",
+                venue="OKX",
+                side="sell",
+                fill_qty=Decimal("1"),
+                fill_price=Decimal("100"),
+                fill_notional=Decimal("100"),
+                fee_amount=Decimal("0.50"),
+                fee_currency="USDT",
+                liquidity_role="taker",
+                exchange_timestamp=now,
+                ingestion_timestamp=now,
+                order_status_after_fill="FILLED",
+                target_leverage=2.0,
+                exposure_side="flat",
+                execution_action="close_long",
+                position_intent="close_long",
+                position_mode="net_mode",
+                pos_side="net",
+                instrument_family="BTC-USDT",
+                settle_currency="USDT",
+                starting_position_qty=Decimal("1"),
+                starting_avg_entry_price=Decimal("95"),
+                ending_position_qty=Decimal("0"),
+                ending_avg_entry_price=Decimal("0"),
+                realized_pnl_delta=Decimal("4.5"),
+                fee_delta=Decimal("-0.50"),
+                product_type="derivatives",
+                margin_mode="cross",
+                created_at=now,
+            )
+        )
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            response = client.get("/reports/profitability-overview?limit=1")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        row = next(item for item in payload["recent_closed_fills"] if item["fill_id"] == "fill_legacy_fee_sign")
+        self.assertEqual(Decimal(str(row["fee_delta"])), Decimal("0.50"))
+        self.assertEqual(Decimal(str(row["gross_realized_pnl"])), Decimal("5.0"))
+        self.assertEqual(Decimal(str(payload["summary"]["gross_realized_pnl"])), Decimal("5.0"))
+        self.assertEqual(Decimal(str(payload["summary"]["net_realized_pnl"])), Decimal("4.5"))
 
     async def test_strategy_attribution_report_groups_regime_profile_exit_and_risk_protection(self) -> None:
         runtime = await self._runtime(
@@ -6247,6 +6685,74 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["detail"], "rebaseline_not_supported_for_runtime_profile")
+
+    async def test_positions_endpoint_exposes_dual_leg_instrument_state_for_derivatives_snapshot(self) -> None:
+        runtime = await self._runtime(
+            trading_product_type="derivatives",
+            margin_mode="cross",
+            default_symbol="BTC-USDT-SWAP",
+            allowed_symbols=("BTC-USDT-SWAP",),
+        )
+        runtime.portfolio_repo.save_snapshot(
+            PortfolioSnapshot(
+                snapshot_ts=utc_now(),
+                balances={"USDT": 75_000.0},
+                positions=[
+                    Position(
+                        symbol="BTC-USDT-SWAP",
+                        position_key="BTC-USDT-SWAP:long",
+                        position_qty=Decimal("0.02"),
+                        position_notional=Decimal("1400"),
+                        avg_entry_price=Decimal("70000"),
+                        unrealized_pnl=Decimal("15"),
+                        product_type="derivatives",
+                        margin_mode="cross",
+                        position_mode="long_short_mode",
+                        pos_side="long",
+                    ),
+                    Position(
+                        symbol="BTC-USDT-SWAP",
+                        position_key="BTC-USDT-SWAP:short",
+                        position_qty=Decimal("-0.01"),
+                        position_notional=Decimal("-700"),
+                        avg_entry_price=Decimal("70500"),
+                        unrealized_pnl=Decimal("-3"),
+                        product_type="derivatives",
+                        margin_mode="cross",
+                        position_mode="long_short_mode",
+                        pos_side="short",
+                    ),
+                ],
+                cost_basis={},
+                realized_pnl=0.0,
+                unrealized_pnl=12.0,
+                total_equity=75_012.0,
+                gross_exposure=2100.0,
+                net_exposure=700.0,
+                risk_budget_usage={},
+                product_type="derivatives",
+                margin_mode="cross",
+            )
+        )
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            response = client.get("/positions")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertIn("local_instrument_positions", payload)
+        self.assertIn("exchange_instrument_positions", payload)
+        self.assertEqual(payload["local_instrument_positions"], payload["local_net_positions"])
+        row = payload["local_instrument_positions"][0]
+        self.assertTrue(row["dual_legged"])
+        self.assertEqual(Decimal(str(row["net_position_qty"])), Decimal("0.01"))
+        self.assertEqual(Decimal(str(row["gross_position_qty"])), Decimal("0.03"))
+        self.assertEqual(Decimal(str(row["long_position_qty"])), Decimal("0.02"))
+        self.assertEqual(Decimal(str(row["short_position_qty"])), Decimal("0.01"))
+        self.assertEqual(Decimal(str(row["net_position_notional"])), Decimal("700"))
+        self.assertEqual(Decimal(str(row["gross_position_notional"])), Decimal("2100"))
+        self.assertEqual(len(row["legs"]), 2)
 
     @staticmethod
     def _dashboard_bundle_url(

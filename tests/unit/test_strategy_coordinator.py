@@ -14,6 +14,7 @@ from aats.schemas.exchange import ExchangeAccountSnapshot, ExchangeBalance, Exch
 from aats.schemas.market import MarketSnapshot
 from aats.schemas.portfolio import SleevePnLRecord
 from aats.schemas.reconciliation import ReconciliationReport
+from aats.schemas.strategy_runtime import StrategyLegIntent
 from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, to_decimal
 from aats.services.strategy_engines.coordinator import StrategyCoordinatorService
 from aats.services.strategy_engines.sleeve_identity import build_strategy_sleeve_id
@@ -355,6 +356,177 @@ class TestStrategyCoordinator(unittest.TestCase):
         self.assertEqual(candidate.delta_position_qty, Decimal("0.4"))
         self.assertEqual(applied.target_position_qty, Decimal("0.9"))
 
+    def test_spot_grid_requires_full_anchor_history_before_becoming_actionable(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "trading_product_type": "spot",
+                "margin_mode": "cash",
+                "default_symbol": "BTC-USDT",
+                "allowed_symbols": ("BTC-USDT",),
+                "strategy_family_active": "spot_grid",
+                "spot_grid_enabled": True,
+                "spot_grid_breakout_guard_enabled": False,
+                "spot_grid_anchor_lookback_snapshots": 4,
+                "spot_grid_band_bps": 500.0,
+                "spot_grid_inventory_floor_fraction": 0.0,
+                "spot_grid_inventory_ceiling_fraction": 1.0,
+                "spot_grid_rebalance_min_fraction_of_max_qty": 0.05,
+                "max_abs_position_qty": 1.0,
+            }
+        )
+        event_store = InMemoryEventStore()
+        event_store.append(
+            build_envelope(
+                topic=topics.MARKET_SNAPSHOTS,
+                key="BTC-USDT",
+                payload_model=_market_snapshot("BTC-USDT", "100"),
+                source_component="test",
+            )
+        )
+        coordinator = StrategyCoordinatorService(
+            settings=settings,
+            event_store=event_store,
+            market_gateway=_FakeMarketGateway({"BTC-USDT": _market_snapshot("BTC-USDT", "100")}),
+            portfolio_repo=InMemoryPortfolioRepository(),
+            strategy_sleeve_repo=InMemoryStrategySleeveRepository(),
+        )
+        base_target = _position_target(
+            symbol="BTC-USDT",
+            product_type="spot",
+            margin_mode="cash",
+            current_qty="0",
+            target_qty="0",
+        )
+
+        snapshot = coordinator.evaluate(
+            context=_decision_context(symbol="BTC-USDT", product_type="spot", current_position_qty="0"),
+            baseline=_baseline(symbol="BTC-USDT", regime="range"),
+            directional_target=base_target,
+        )
+        applied = coordinator.apply_selected_target(base_target=base_target, snapshot=snapshot)
+        candidate = next(item for item in snapshot.candidates if item.family == "spot_grid")
+
+        self.assertEqual(candidate.state, "inactive")
+        self.assertEqual(candidate.route_action, "hold_current")
+        self.assertIn("spot_grid_anchor_history_insufficient", candidate.reason_codes)
+        self.assertEqual(snapshot.selected_family, "directional")
+        self.assertEqual(applied.strategy_family, "directional")
+        self.assertEqual(applied.target_position_qty, Decimal("0"))
+
+    def test_spot_grid_respects_inventory_ceiling_fraction_above_one(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "trading_product_type": "spot",
+                "margin_mode": "cash",
+                "default_symbol": "BTC-USDT",
+                "allowed_symbols": ("BTC-USDT",),
+                "strategy_family_active": "spot_grid",
+                "spot_grid_enabled": True,
+                "spot_grid_breakout_guard_enabled": False,
+                "spot_grid_anchor_lookback_snapshots": 4,
+                "spot_grid_band_bps": 500.0,
+                "spot_grid_inventory_floor_fraction": 0.0,
+                "spot_grid_inventory_ceiling_fraction": 1.5,
+                "spot_grid_rebalance_min_fraction_of_max_qty": 0.0,
+                "max_abs_position_qty": 1.0,
+            }
+        )
+        event_store = InMemoryEventStore()
+        for _ in range(4):
+            event_store.append(
+                build_envelope(
+                    topic=topics.MARKET_SNAPSHOTS,
+                    key="BTC-USDT",
+                    payload_model=_market_snapshot("BTC-USDT", "100"),
+                    source_component="test",
+                )
+            )
+        coordinator = StrategyCoordinatorService(
+            settings=settings,
+            event_store=event_store,
+            market_gateway=_FakeMarketGateway({"BTC-USDT": _market_snapshot("BTC-USDT", "95")}),
+            portfolio_repo=InMemoryPortfolioRepository(),
+            strategy_sleeve_repo=InMemoryStrategySleeveRepository(),
+        )
+        base_target = _position_target(
+            symbol="BTC-USDT",
+            product_type="spot",
+            margin_mode="cash",
+            current_qty="0",
+            target_qty="0",
+        )
+
+        snapshot = coordinator.evaluate(
+            context=_decision_context(symbol="BTC-USDT", product_type="spot", current_position_qty="0"),
+            baseline=_baseline(symbol="BTC-USDT", regime="range"),
+            directional_target=base_target,
+        )
+        applied = coordinator.apply_selected_target(base_target=base_target, snapshot=snapshot)
+        candidate = next(item for item in snapshot.candidates if item.family == "spot_grid")
+
+        self.assertEqual(snapshot.selected_family, "spot_grid")
+        self.assertEqual(candidate.metrics["inventory_ceiling_qty"], Decimal("1.5"))
+        self.assertEqual(candidate.metrics["target_sleeve_position_qty"], Decimal("1.5"))
+        self.assertEqual(candidate.metrics["target_account_position_qty"], Decimal("1.5"))
+        self.assertEqual(applied.target_position_qty, Decimal("1.5"))
+
+    def test_spot_grid_fails_closed_when_band_width_config_is_non_positive(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "trading_product_type": "spot",
+                "margin_mode": "cash",
+                "default_symbol": "BTC-USDT",
+                "allowed_symbols": ("BTC-USDT",),
+                "strategy_family_active": "spot_grid",
+                "spot_grid_enabled": True,
+                "spot_grid_breakout_guard_enabled": False,
+                "spot_grid_anchor_lookback_snapshots": 4,
+                "spot_grid_band_bps": 0.0,
+                "spot_grid_inventory_floor_fraction": 0.0,
+                "spot_grid_inventory_ceiling_fraction": 1.0,
+                "spot_grid_rebalance_min_fraction_of_max_qty": 0.0,
+                "max_abs_position_qty": 1.0,
+            }
+        )
+        event_store = InMemoryEventStore()
+        for _ in range(4):
+            event_store.append(
+                build_envelope(
+                    topic=topics.MARKET_SNAPSHOTS,
+                    key="BTC-USDT",
+                    payload_model=_market_snapshot("BTC-USDT", "100"),
+                    source_component="test",
+                )
+            )
+        coordinator = StrategyCoordinatorService(
+            settings=settings,
+            event_store=event_store,
+            market_gateway=_FakeMarketGateway({"BTC-USDT": _market_snapshot("BTC-USDT", "100")}),
+            portfolio_repo=InMemoryPortfolioRepository(),
+            strategy_sleeve_repo=InMemoryStrategySleeveRepository(),
+        )
+        base_target = _position_target(
+            symbol="BTC-USDT",
+            product_type="spot",
+            margin_mode="cash",
+            current_qty="0",
+            target_qty="0",
+        )
+
+        snapshot = coordinator.evaluate(
+            context=_decision_context(symbol="BTC-USDT", product_type="spot", current_position_qty="0"),
+            baseline=_baseline(symbol="BTC-USDT", regime="range"),
+            directional_target=base_target,
+        )
+        applied = coordinator.apply_selected_target(base_target=base_target, snapshot=snapshot)
+        candidate = next(item for item in snapshot.candidates if item.family == "spot_grid")
+
+        self.assertEqual(candidate.state, "inactive")
+        self.assertEqual(candidate.route_action, "hold_current")
+        self.assertIn("spot_grid_band_invalid", candidate.reason_codes)
+        self.assertEqual(snapshot.selected_family, "directional")
+        self.assertEqual(applied.target_position_qty, Decimal("0"))
+
     def test_smart_arbitrage_keeps_protective_directional_exit(self) -> None:
         settings = AATSSettings.model_validate(
             {
@@ -404,6 +576,89 @@ class TestStrategyCoordinator(unittest.TestCase):
         self.assertEqual(applied.strategy_route_action, "override_target")
         self.assertEqual(applied.target_position_qty, Decimal("0"))
         self.assertEqual(applied.decision_outcome.selected_strategy_route_action, "override_target")
+
+    def test_directional_selection_preserves_execution_metadata_for_strategy_legs(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+            }
+        )
+        coordinator = StrategyCoordinatorService(
+            settings=settings,
+            event_store=InMemoryEventStore(),
+            market_gateway=_FakeMarketGateway({"BTC-USDT-SWAP": _market_snapshot("BTC-USDT-SWAP", "80000")}),
+            portfolio_repo=InMemoryPortfolioRepository(),
+            strategy_sleeve_repo=InMemoryStrategySleeveRepository(),
+        )
+        base_target = _position_target(
+            symbol="BTC-USDT-SWAP",
+            product_type="derivatives",
+            margin_mode="cross",
+            current_qty="0.05",
+            target_qty="0.05",
+        ).model_copy(
+            update={
+                "strategy_execution_mode": "protective_overlay",
+                "strategy_state_phase": "active",
+                "strategy_reason_codes": [
+                    "protective_overlay_signal_above_open_threshold",
+                ],
+                "strategy_headline": "protective overlay 主链测试",
+                "strategy_execution_legs": [
+                    StrategyLegIntent(
+                        symbol="BTC-USDT-SWAP",
+                        product_type="derivatives",
+                        side="sell",
+                        position_mode="long_short_mode",
+                        pos_side="short",
+                        action="open",
+                        family="directional",
+                        role="hedge",
+                        strategy_sleeve_id="sleeve_protective_short",
+                        allocation_id="alloc_test",
+                        margin_mode="cross",
+                        target_leverage=2.0,
+                        current_position_qty=Decimal("0"),
+                        target_position_qty=Decimal("-0.02"),
+                        delta_position_qty=Decimal("-0.02"),
+                        reference_price=Decimal("80000"),
+                        execution_compatible=True,
+                        execution_mode="protective_overlay",
+                        state_phase="active",
+                        overlay_mode="protective",
+                        trigger_reason_codes=["protective_overlay_signal_above_open_threshold"],
+                    )
+                ],
+            }
+        )
+
+        snapshot = coordinator.evaluate(
+            context=_decision_context(symbol="BTC-USDT-SWAP", product_type="derivatives", current_position_qty="0.05"),
+            baseline=_baseline(symbol="BTC-USDT-SWAP", regime="trend"),
+            directional_target=base_target,
+        )
+        applied = coordinator.apply_selected_target(base_target=base_target, snapshot=snapshot)
+        directional_candidate = next(item for item in snapshot.candidates if item.family == "directional")
+
+        self.assertEqual(snapshot.selected_family, "directional")
+        self.assertEqual(directional_candidate.execution_mode, "protective_overlay")
+        self.assertEqual(directional_candidate.state_phase, "active")
+        self.assertIn(
+            "protective_overlay_signal_above_open_threshold",
+            directional_candidate.reason_codes,
+        )
+        self.assertEqual(directional_candidate.headline, "protective overlay 主链测试")
+        self.assertEqual(applied.strategy_execution_mode, "protective_overlay")
+        self.assertEqual(applied.strategy_state_phase, "active")
+        self.assertIn(
+            "protective_overlay_signal_above_open_threshold",
+            applied.strategy_reason_codes,
+        )
+        self.assertEqual(len(applied.strategy_execution_legs), 1)
+        self.assertEqual(applied.strategy_execution_legs[0].execution_mode, "protective_overlay")
 
     def test_spot_fixed_incompatible_family_falls_back_to_directional_selection(self) -> None:
         settings = AATSSettings.model_validate(
@@ -515,6 +770,59 @@ class TestStrategyCoordinator(unittest.TestCase):
         self.assertEqual(snapshot.selected_family, "directional")
         self.assertEqual(selected.state, "inactive")
         self.assertIn("dca_interval_not_elapsed", selected.reason_codes)
+
+    def test_dca_pullback_only_requires_anchor_history_before_activation(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "trading_product_type": "spot",
+                "margin_mode": "cash",
+                "default_symbol": "BTC-USDT",
+                "allowed_symbols": ("BTC-USDT",),
+                "strategy_family_active": "dca",
+                "dca_enabled": True,
+                "dca_interval_seconds": 0.0,
+                "dca_quote_budget_per_cycle": 100.0,
+                "dca_pullback_only_enabled": True,
+                "dca_pullback_entry_bps": 0.0,
+                "max_abs_position_qty": 2.0,
+            }
+        )
+        event_store = InMemoryEventStore()
+        event_store.append(
+            build_envelope(
+                topic=topics.MARKET_SNAPSHOTS,
+                key="BTC-USDT",
+                payload_model=_market_snapshot("BTC-USDT", "100"),
+                source_component="test",
+            )
+        )
+        coordinator = StrategyCoordinatorService(
+            settings=settings,
+            event_store=event_store,
+            market_gateway=_FakeMarketGateway({"BTC-USDT": _market_snapshot("BTC-USDT", "100")}),
+            portfolio_repo=InMemoryPortfolioRepository(),
+            strategy_sleeve_repo=InMemoryStrategySleeveRepository(),
+        )
+
+        snapshot = coordinator.evaluate(
+            context=_decision_context(symbol="BTC-USDT", product_type="spot", current_position_qty="0"),
+            baseline=_baseline(symbol="BTC-USDT", regime="range"),
+            directional_target=_position_target(
+                symbol="BTC-USDT",
+                product_type="spot",
+                margin_mode="cash",
+                current_qty="0",
+                target_qty="0",
+            ),
+        )
+        selected = next(candidate for candidate in snapshot.candidates if candidate.family == "dca")
+
+        self.assertEqual(snapshot.selected_family, "directional")
+        self.assertEqual(selected.state, "inactive")
+        self.assertEqual(selected.route_action, "hold_current")
+        self.assertIn("dca_pullback_anchor_history_insufficient", selected.reason_codes)
+        self.assertEqual(selected.metrics["anchor_history_required"], 2)
+        self.assertEqual(selected.metrics["anchor_history_available"], 1)
 
     def test_dca_uses_sleeve_history_and_inventory_truth(self) -> None:
         settings = AATSSettings.model_validate(
@@ -755,9 +1063,12 @@ class TestStrategyCoordinator(unittest.TestCase):
             directional_target=base_target,
         )
         applied = coordinator.apply_selected_target(base_target=base_target, snapshot=snapshot)
+        budget_snapshot = next(item for item in snapshot.allocation_decision.budget_snapshots if item.family == "smart_arbitrage")
 
         self.assertEqual(snapshot.selected_family, "smart_arbitrage")
         self.assertEqual(snapshot.selected_route_action, "override_target")
+        self.assertEqual(budget_snapshot.requested_notional, Decimal("100"))
+        self.assertEqual(budget_snapshot.approved_notional, Decimal("100"))
         self.assertEqual(applied.strategy_family, "smart_arbitrage")
         self.assertIsNotNone(applied.strategy_sleeve_id)
         self.assertIsNotNone(applied.allocation_id)
@@ -1220,6 +1531,9 @@ class TestStrategyCoordinator(unittest.TestCase):
         candidate = next(item for item in snapshot.candidates if item.family == "smart_arbitrage")
         applied = coordinator.apply_selected_target(base_target=base_target, snapshot=snapshot)
         sleeve_intent = next(item for item in snapshot.sleeve_intents if item.family == "smart_arbitrage")
+        budget_assignment = next(
+            item for item in snapshot.allocation_decision.budget_assignments if item.family == "smart_arbitrage"
+        )
         budget_snapshot = next(item for item in snapshot.allocation_decision.budget_snapshots if item.family == "smart_arbitrage")
 
         self.assertEqual(candidate.pair_id, "multi_pair")
@@ -1231,7 +1545,10 @@ class TestStrategyCoordinator(unittest.TestCase):
         self.assertEqual({leg.symbol for leg in candidate.legs}, {"BTC-USDT", "BTC-USDT-SWAP", "ETH-USDT", "ETH-USDT-SWAP"})
         self.assertEqual(sleeve_intent.symbol, "BTC-USDT-SWAP")
         self.assertIsNone(sleeve_intent.target_notional)
-        self.assertGreater(budget_snapshot.requested_notional, Decimal("0"))
+        self.assertEqual(budget_assignment.effective_quote_budget_limit, Decimal("200"))
+        self.assertEqual(budget_assignment.effective_notional_cap, Decimal("200"))
+        self.assertEqual(budget_snapshot.requested_notional, Decimal("202.5"))
+        self.assertEqual(budget_snapshot.approved_notional, Decimal("200"))
         self.assertEqual(len(applied.strategy_execution_legs), 4)
 
     def test_smart_arbitrage_does_not_parallel_open_pairs_with_overlapping_symbol_scope(self) -> None:

@@ -50,10 +50,16 @@ class TestRuntimeProfiles(unittest.TestCase):
         self.assertNotIn("strategy_dynamic_leverage_enabled", payload)
         self.assertNotIn("max_target_leverage", payload)
         self.assertNotIn("default_target_leverage", payload)
+        self.assertNotIn("derivatives_position_mode", payload)
+        self.assertNotIn("derivatives_hedge_transition_mode", payload)
+        self.assertNotIn("derivatives_require_exchange_pos_mode_match", payload)
         self.assertNotIn("strategy_short_bias_enabled", summary)
         self.assertNotIn("strategy_dynamic_leverage_enabled", summary)
         self.assertNotIn("max_target_leverage", summary)
         self.assertNotIn("default_target_leverage", summary)
+        self.assertNotIn("derivatives_position_mode", summary)
+        self.assertNotIn("derivatives_hedge_transition_mode", summary)
+        self.assertNotIn("derivatives_require_exchange_pos_mode_match", summary)
 
     def test_derivatives_runtime_profile_snapshot_keeps_derivatives_only_fields(self) -> None:
         settings = AATSSettings.model_validate(
@@ -61,6 +67,9 @@ class TestRuntimeProfiles(unittest.TestCase):
                 "trading_product_type": "derivatives",
                 "margin_mode": "cross",
                 "default_symbol": "BTC-USDT-SWAP",
+                "derivatives_position_mode": "hedge",
+                "derivatives_hedge_transition_mode": "close_then_open",
+                "derivatives_require_exchange_pos_mode_match": True,
                 "strategy_short_bias_enabled": True,
                 "strategy_dynamic_leverage_enabled": True,
                 "max_target_leverage": 5.0,
@@ -77,10 +86,16 @@ class TestRuntimeProfiles(unittest.TestCase):
         summary = snapshot["current_runtime_summary"]
         self.assertTrue(payload["strategy_short_bias_enabled"])
         self.assertTrue(payload["strategy_dynamic_leverage_enabled"])
+        self.assertEqual(payload["derivatives_position_mode"], "hedge")
+        self.assertEqual(payload["derivatives_hedge_transition_mode"], "close_then_open")
+        self.assertTrue(payload["derivatives_require_exchange_pos_mode_match"])
         self.assertEqual(payload["max_target_leverage"], 5.0)
         self.assertEqual(payload["default_target_leverage"], 3.0)
         self.assertTrue(summary["strategy_short_bias_enabled"])
         self.assertTrue(summary["strategy_dynamic_leverage_enabled"])
+        self.assertEqual(summary["derivatives_position_mode"], "hedge")
+        self.assertEqual(summary["derivatives_hedge_transition_mode"], "close_then_open")
+        self.assertTrue(summary["derivatives_require_exchange_pos_mode_match"])
         self.assertEqual(summary["max_target_leverage"], 5.0)
         self.assertEqual(summary["default_target_leverage"], 3.0)
 

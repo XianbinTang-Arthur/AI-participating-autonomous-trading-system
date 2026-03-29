@@ -122,6 +122,9 @@ class InMemoryStrategyRuntimeRepository:
         self._bundles[bundle.bundle_id] = bundle
         return bundle
 
+    def get_execution_bundle(self, bundle_id: str) -> StrategyExecutionBundle | None:
+        return self._bundles.get(bundle_id)
+
     def recent_execution_bundles(
         self,
         *,

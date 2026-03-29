@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable
 from decimal import Decimal
 from typing import Any
 

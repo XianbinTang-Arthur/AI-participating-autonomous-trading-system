@@ -39,8 +39,6 @@ class EffectiveFeeResolver:
         if resolved is None:
             return fallback
         fee_bps = to_decimal(resolved)
-        if fee_bps < Decimal("0"):
-            return fallback
         return fee_bps
 
     def taker_fee_bps(
@@ -80,8 +78,6 @@ class EffectiveFeeResolver:
         if resolved is None:
             return fallback
         fee_bps = to_decimal(resolved)
-        if fee_bps < Decimal("0"):
-            return fallback
         return fee_bps
 
     def maker_fee_bps(
@@ -101,16 +97,52 @@ class EffectiveFeeResolver:
 
     def funding_fee_bps_decimal(self, *, symbol: str | None = None) -> Decimal:
         getter = getattr(self.account_service, "funding_fee_bps_proxy", None)
-        if not callable(getter):
+        if callable(getter):
+            try:
+                resolved = getter(symbol=symbol)
+            except TypeError:
+                resolved = getter(symbol) if symbol is not None else getter()
+            if resolved is not None:
+                fee_bps = to_decimal(resolved)
+                return max(fee_bps, Decimal("0"))
+        summary_getter = getattr(self.account_service, "recent_funding_fee_summary", None)
+        if not callable(summary_getter):
             return Decimal("0")
         try:
-            resolved = getter(symbol=symbol)
+            summary = summary_getter(symbol=symbol)
         except TypeError:
-            resolved = getter(symbol) if symbol is not None else getter()
-        if resolved is None:
+            summary = summary_getter(symbol) if symbol is not None else summary_getter()
+        if not isinstance(summary, dict):
+            return Decimal("0")
+        resolved = summary.get("funding_fee_bps_proxy")
+        if resolved in {None, ""}:
             return Decimal("0")
         fee_bps = to_decimal(resolved)
         return max(fee_bps, Decimal("0"))
+
+    def funding_fee_bps_per_event_decimal(self, *, symbol: str | None = None) -> Decimal | None:
+        getter = getattr(self.account_service, "funding_fee_bps_proxy_per_event", None)
+        if callable(getter):
+            try:
+                resolved = getter(symbol=symbol)
+            except TypeError:
+                resolved = getter(symbol) if symbol is not None else getter()
+            if resolved is not None:
+                return max(to_decimal(resolved), Decimal("0"))
+
+        summary_getter = getattr(self.account_service, "recent_funding_fee_summary", None)
+        if not callable(summary_getter):
+            return None
+        try:
+            summary = summary_getter(symbol=symbol)
+        except TypeError:
+            summary = summary_getter(symbol) if symbol is not None else summary_getter()
+        if not isinstance(summary, dict):
+            return None
+        resolved = summary.get("funding_fee_bps_proxy_per_event")
+        if resolved in {None, ""}:
+            return None
+        return max(to_decimal(resolved), Decimal("0"))
 
     def funding_fee_bps(self, *, symbol: str | None = None) -> float:
         return float(self.funding_fee_bps_decimal(symbol=symbol))

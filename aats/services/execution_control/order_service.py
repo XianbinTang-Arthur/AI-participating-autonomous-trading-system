@@ -188,6 +188,7 @@ class ExecutionOrderService:
             side = "sell"
         return OrderIntent(
             intent_id=order_state.intent_id,
+            leg_intent_id=order_state.leg_intent_id,
             decision_id=order_state.decision_id,
             symbol=order_state.symbol,
             side=side,
@@ -211,5 +212,6 @@ class ExecutionOrderService:
             margin_mode=order_state.margin_mode,
             exposure_side=order_state.exposure_side,
             execution_action=order_state.execution_action,
+            leg_action=order_state.leg_action,
             position_intent=order_state.position_intent,
         )

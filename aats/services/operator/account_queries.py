@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from aats.services.execution_engine.okx_account import derivatives_position_mode_contract
 from aats.services.runtime_scope import (
     funding_fee_records_for_scope,
     order_states_for_scope,
@@ -49,12 +50,16 @@ class AccountQueryFacade:
         snapshot = self.owner._latest_scoped_snapshot()
         exchange = self.owner.latest_exchange_snapshot()
         reconciliation = self.owner._latest_scoped_reconciliation()
+        local_instrument_positions = self.owner._aggregate_local_positions(snapshot)
+        exchange_instrument_positions = self.owner._aggregate_exchange_positions(exchange)
         return {
             "local_positions": [item.model_dump(mode="json") for item in snapshot.positions] if snapshot is not None else [],
-            "local_net_positions": self.owner._aggregate_local_positions(snapshot),
+            "local_instrument_positions": local_instrument_positions,
+            "local_net_positions": local_instrument_positions,
             "local_margin_summary": self.owner._local_position_margin_summary(snapshot),
             "exchange_positions": [item.model_dump(mode="json") for item in exchange.positions] if exchange is not None else [],
-            "exchange_net_positions": self.owner._aggregate_exchange_positions(exchange),
+            "exchange_instrument_positions": exchange_instrument_positions,
+            "exchange_net_positions": exchange_instrument_positions,
             "exchange_margin_summary": self.owner._exchange_position_margin_summary(exchange),
             "margin_reconciliation": self.owner._margin_reconciliation_summary(reconciliation),
             "margin_buffer_overview": self.owner.margin_buffer_risk(),
@@ -77,6 +82,10 @@ class AccountQueryFacade:
             if hasattr(self.owner.runtime.account_service, "recent_funding_fee_summary")
             else None
         )
+        position_mode_contract = status.get("position_mode_contract") or derivatives_position_mode_contract(
+            settings=self.owner.runtime.settings,
+            snapshot=snapshot,
+        )
         derivatives_live_guard = self.owner.derivatives_live_guard()
         return {
             "backend": self.owner.runtime.settings.account_backend,
@@ -93,6 +102,15 @@ class AccountQueryFacade:
             "maker_fee_rate": status.get("maker_fee_rate"),
             "taker_fee_rate": status.get("taker_fee_rate"),
             "fee_rates_source": status.get("fee_rates_source"),
+            "position_mode_contract": position_mode_contract,
+            "configured_derivatives_position_mode": position_mode_contract.get("configured_derivatives_position_mode"),
+            "required_exchange_position_mode": position_mode_contract.get("required_exchange_position_mode"),
+            "exchange_position_mode": position_mode_contract.get("exchange_position_mode"),
+            "exchange_position_mode_label": position_mode_contract.get("exchange_position_mode_label"),
+            "exchange_position_mode_matches_configured": position_mode_contract.get(
+                "exchange_position_mode_matches_configured"
+            ),
+            "position_mode_match_required": position_mode_contract.get("position_mode_match_required"),
             "account_configuration": (
                 snapshot.account_configuration.model_dump(mode="json")
                 if snapshot is not None and snapshot.account_configuration is not None

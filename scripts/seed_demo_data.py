@@ -9,10 +9,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from aats.bootstrap.config import build_runtime, load_settings
-
 
 async def main() -> dict:
+    from aats.bootstrap.config import build_runtime, load_settings
+
     settings = load_settings()
     runtime = await build_runtime(settings)
     snapshot = await runtime.market_gateway.seed_demo_snapshot(settings.default_symbol)

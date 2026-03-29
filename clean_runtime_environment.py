@@ -6,7 +6,6 @@ import shutil
 import sys
 from pathlib import Path
 from typing import Iterable
-from typing import cast
 
 from sqlalchemy import text
 from sqlalchemy.engine import Engine, make_url
@@ -14,10 +13,6 @@ from sqlalchemy.engine import Engine, make_url
 ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-
-from aats.bootstrap.config import load_settings
-from aats.bootstrap.env_profiles import EnvTemplateProfile, load_profiled_dotenv_into_process
-from aats.storage.session import create_database_runtime, create_schema, validate_runtime_schema
 
 
 DEFAULT_KEEP_TABLES = ("operator_users",)
@@ -82,7 +77,9 @@ def parse_args() -> argparse.Namespace:
 def apply_profile(project_root: Path, profile: str | None) -> Path | None:
     if profile is None:
         return None
-    return load_profiled_dotenv_into_process(project_root, profile=cast(EnvTemplateProfile, profile))
+    from aats.bootstrap.env_profiles import load_profiled_dotenv_into_process
+
+    return load_profiled_dotenv_into_process(project_root, profile=profile)
 
 
 def resolve_log_directories(project_root: Path, configured_log_dirs: Iterable[str]) -> list[Path]:
@@ -193,6 +190,9 @@ def normalize_keep_tables(items: Iterable[str]) -> list[str]:
 
 
 def main() -> int:
+    from aats.bootstrap.config import load_settings
+    from aats.storage.session import create_database_runtime, create_schema, validate_runtime_schema
+
     args = parse_args()
     dotenv_path = apply_profile(ROOT, args.profile)
     os.chdir(ROOT)

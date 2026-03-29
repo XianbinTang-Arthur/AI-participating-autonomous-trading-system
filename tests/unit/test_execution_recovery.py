@@ -7,6 +7,7 @@ from aats.bootstrap.settings import AATSSettings
 from aats.schemas.common import utc_now
 from aats.schemas.execution import OrderObligation, OrderState
 from aats.schemas.portfolio import PortfolioSnapshot
+from aats.schemas.strategy_runtime import StrategyExecutionBundle, StrategyLegIntent
 from aats.services.execution_engine.recovery import ExecutionRecoveryService
 from aats.services.governance_engine.kill_switch import KillSwitch
 from aats.services.portfolio_service.positions import PortfolioState
@@ -17,6 +18,7 @@ from aats.storage.execution_repo import InMemoryExecutionRepository
 from aats.storage.obligation_repo import InMemoryExecutionObligationRepository
 from aats.storage.portfolio_repo import InMemoryPortfolioRepository
 from aats.storage.reconciliation_repo import InMemoryReconciliationRepository
+from aats.storage.strategy_runtime_repo import InMemoryStrategyRuntimeRepository
 from aats.schemas.reconciliation import ReconciliationReport
 
 
@@ -69,6 +71,94 @@ class TestExecutionRecovery(unittest.TestCase):
         self.assertTrue(artifacts.status.only_reduce_required)
         self.assertIn("strategy_bundle_recovery_in_progress", artifacts.status.only_reduce_reasons)
         self.assertEqual(artifacts.status.bundle_summaries[0].recovery_state, "structured_open_orders")
+
+    def test_recovery_blocks_resume_when_overlay_bundle_is_persisted_as_review_required(self) -> None:
+        strategy_runtime_repo = InMemoryStrategyRuntimeRepository()
+        strategy_runtime_repo.save_execution_bundle(
+            StrategyExecutionBundle(
+                bundle_id="bundle_overlay_review",
+                decision_id="decision_overlay_review",
+                family="directional",
+                participating_families=["directional"],
+                strategy_sleeve_refs=["sleeve_directional_core", "sleeve_overlay_short"],
+                allocation_id="alloc_overlay_review",
+                product_type="derivatives",
+                margin_mode="cross",
+                allowed_symbols=("BTC-USDT-SWAP",),
+                route_action="override_target",
+                bundle_type="hedge_protected",
+                status="review_required",
+                selected_symbol="BTC-USDT-SWAP",
+                operator_summary="overlay bundle mixed terminal outcome",
+                reason_codes=["strategy_bundle_review_required"],
+                legs=[
+                    StrategyLegIntent(
+                        symbol="BTC-USDT-SWAP",
+                        product_type="derivatives",
+                        side="buy",
+                        position_mode="long_short_mode",
+                        pos_side="long",
+                        action="open",
+                        family="directional",
+                        role="primary",
+                        strategy_sleeve_id="sleeve_directional_core",
+                        margin_mode="cross",
+                        current_position_qty=Decimal("0"),
+                        target_position_qty=Decimal("0.02"),
+                        delta_position_qty=Decimal("0.02"),
+                        execution_compatible=True,
+                        execution_mode="independent_long_book",
+                    ),
+                    StrategyLegIntent(
+                        symbol="BTC-USDT-SWAP",
+                        product_type="derivatives",
+                        side="sell",
+                        position_mode="long_short_mode",
+                        pos_side="short",
+                        action="open",
+                        family="directional",
+                        role="hedge",
+                        strategy_sleeve_id="sleeve_overlay_short",
+                        margin_mode="cross",
+                        current_position_qty=Decimal("0"),
+                        target_position_qty=Decimal("-0.01"),
+                        delta_position_qty=Decimal("-0.01"),
+                        execution_compatible=True,
+                        execution_mode="opportunistic_overlay",
+                        overlay_mode="opportunistic",
+                    ),
+                ],
+            )
+        )
+        recovery = self._service(
+            settings_override={
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ["BTC-USDT-SWAP"],
+            },
+            strategy_runtime_repo=strategy_runtime_repo,
+        )
+
+        artifacts = recovery.recover(portfolio_state=PortfolioState(initial_usdt_balance=10_000.0))
+
+        self.assertEqual(artifacts.status.recovery_state, "review_required")
+        self.assertTrue(artifacts.status.bundle_recovery_required)
+        self.assertTrue(artifacts.status.review_required)
+        self.assertFalse(artifacts.status.safe_to_trade)
+        self.assertFalse(artifacts.status.resume_eligible)
+        self.assertIn("strategy_bundle_recovery_requires_review", artifacts.status.resume_blocked_reasons)
+        self.assertEqual(artifacts.status.bundle_summaries[0].recovery_state, "review_required")
+        self.assertFalse(artifacts.status.bundle_summaries[0].recoverable)
+        self.assertIn("bundle_review_required", artifacts.status.bundle_summaries[0].reason_codes)
+        self.assertEqual(len(artifacts.status.bundle_summaries[0].legs), 2)
+        short_leg = next(
+            leg
+            for leg in artifacts.status.bundle_summaries[0].legs
+            if leg.pos_side == "short"
+        )
+        self.assertEqual(short_leg.leg_action, "open")
+        self.assertEqual(short_leg.strategy_execution_mode, "opportunistic_overlay")
 
     def test_recovery_halts_when_bundle_open_orders_missing_identity(self) -> None:
         execution_repo = InMemoryExecutionRepository()
@@ -387,6 +477,7 @@ class TestExecutionRecovery(unittest.TestCase):
         kill_switch: KillSwitch | None = None,
         bootstrap_portfolio_from_exchange: bool = False,
         reconciliation_repo: InMemoryReconciliationRepository | None = None,
+        strategy_runtime_repo: InMemoryStrategyRuntimeRepository | None = None,
         settings_override: dict | None = None,
     ) -> ExecutionRecoveryService:
         payload = {
@@ -404,6 +495,7 @@ class TestExecutionRecovery(unittest.TestCase):
             obligation_repo=obligation_repo or InMemoryExecutionObligationRepository(),
             portfolio_repo=portfolio_repo or InMemoryPortfolioRepository(),
             reconciliation_repo=reconciliation_repo or InMemoryReconciliationRepository(),
+            strategy_runtime_repo=strategy_runtime_repo,
             reconstruction_service=PortfolioReconstructionService(
                 initial_usdt_balance=settings.initial_usdt_balance,
                 snapshot_builder=PortfolioSnapshotBuilder(pnl_calculator=PortfolioPnLCalculator()),

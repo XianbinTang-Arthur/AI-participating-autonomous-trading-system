@@ -86,6 +86,7 @@ class TestDashboardUI(unittest.TestCase):
         self.assertNotIn("viewBackgroundSpecs", store_text)
         self.assertIn('["guardedLivePreflight", "/system/guarded-live-preflight"]', store_text)
         self.assertIn('["guardedLiveRunPacket", "/reports/guarded-live-run-packet"]', store_text)
+        self.assertIn('["positions", "/positions"]', store_text)
         self.assertIn('["strategyRuntime", "/strategy/runtime"]', store_text)
         self.assertIn('["strategyAttribution", "/reports/strategy-attribution?limit=200"]', store_text)
         self.assertIn("dashboardBundlePanelKeys", store_text)
@@ -135,6 +136,7 @@ class TestDashboardUI(unittest.TestCase):
         self.assertIn("strategyRuntimeSummary", strategy_text)
         self.assertIn("renderStrategyCandidateTable", strategy_text)
         self.assertIn("renderDirectionalShortConfigCard", strategy_text)
+        self.assertIn("directionalHedgeOverlayStatus", strategy_text)
         self.assertIn("renderSmartArbitrageConfigCard", strategy_text)
         self.assertIn("renderAllocatorBudgetSnapshotTable", strategy_text)
         self.assertIn("renderAllocatorConflictResolutionTable", strategy_text)
@@ -170,6 +172,501 @@ class TestDashboardUI(unittest.TestCase):
         refresh_interactivity_text = responses["refresh_interactivity_js"].text
         self.assertIn("syncRefreshDisabledButtons", refresh_interactivity_text)
         self.assertIn("当前区域正在刷新，请等待刷新完成后再操作。", refresh_interactivity_text)
+
+    def test_strategy_view_surfaces_protective_overlay_config_and_state(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { renderStrategyView } from './aats/api/static/modules/views/strategy-view.js';
+
+const html = renderStrategyView({
+  strategyRuntime: {
+    configured_parameters: {
+      directional: {
+        product_type: 'derivatives',
+        shorting_runtime_supported: true,
+        short_bias_enabled: true,
+        runtime_shorting_blockers: [],
+        short_entry_allowed_regimes: ['trend', 'uncertain'],
+        short_entry_min_signal_edge_bps: 12,
+        short_entry_alpha_min: 0.18,
+        short_entry_confidence_min: 0.58,
+        short_scale_in_min_signal_edge_bps: 10,
+        short_scale_in_alpha_min: 0.20,
+        short_scale_in_confidence_min: 0.60,
+        short_reversal_min_signal_edge_bps: 20,
+        short_reversal_alpha_min: 0.28,
+        short_reversal_confidence_min: 0.72,
+        entry_min_signal_edge_bps: 14,
+        entry_alpha_min: 0.18,
+        entry_confidence_min: 0.66,
+        hedge_overlay_enabled: true,
+        hedge_overlay_mode: 'protective',
+        hedge_overlay_runtime_supported: true,
+        hedge_overlay_effective_enabled: true,
+        hedge_open_threshold: 0.58,
+        hedge_close_threshold: 0.42,
+        hedge_max_ratio: 0.50,
+        hedge_min_hold_seconds: 300,
+        hedge_rebalance_cooldown_seconds: 120,
+      },
+    },
+    latest_snapshot: { candidates: [], automation_decisions: [] },
+    summary: {},
+    recent_sleeve_intents: [],
+    latest_bundle: {},
+    latest_allocation_decision: {},
+    latest_applied_target: {},
+    recent_execution_bundles: [],
+    recent_budget_snapshots: [],
+    recent_conflict_resolutions: [],
+    recent_netting_decisions: [],
+    family_enablement: {},
+  },
+  latestDecision: {
+    baseline_assessment: {
+      direction_bias: 'short',
+      composite_alpha_score: -0.30,
+      confidence: 0.84,
+    },
+    ai_assessment: {
+      directional_edge: -0.12,
+    },
+    position_target: {
+      position_intent: 'reduce_long',
+      target_exposure_side: 'long',
+      current_position_qty: 0.03,
+      target_position_qty: 0.02,
+      delta_position_qty: -0.01,
+      guardrail_flags: ['protective_hedge_overlay_active'],
+      hedge_overlay_decision: {
+        enabled: true,
+        runtime_supported: true,
+        configured_mode: 'protective',
+        active: true,
+        state: 'opening',
+        main_leg_signal: 'long',
+        hedge_leg_signal: 'short',
+        main_leg_current_qty: 0.05,
+        hedge_leg_current_qty: 0.0,
+        main_leg_target_qty: 0.04,
+        hedge_leg_target_qty: 0.02,
+        hedge_ratio: 0.5,
+        max_ratio: 0.5,
+        pressure_score: 0.76,
+        open_threshold: 0.58,
+        close_threshold: 0.42,
+        reason_codes: ['protective_overlay_pressure_above_open_threshold'],
+        blocked_reasons: [],
+        min_hold_remaining_seconds: 0,
+        rebalance_cooldown_remaining_seconds: 0,
+      },
+    },
+    policy_decision: { execution_allowed: true, rejection_reasons: [] },
+    risk_decision: { approved: true, rejection_reasons: [], constraints_applied: [] },
+  },
+  strategyAttribution: { summary: {}, profitability_by_strategy_sleeve: [], sleeve_inventory_summary: [] },
+  trialReviewSummary: { summary: {}, sections: {} },
+});
+
+console.log(JSON.stringify({
+  hasOverlayLabel: html.includes('保护性对冲'),
+  hasOverlayThresholds: html.includes('strategy_hedge_open_threshold / strategy_hedge_close_threshold'),
+  hasOverlayRatio: html.includes('对冲比例'),
+  hasOverlayReason: html.includes('保护性压力已经超过开仓阈值'),
+  hasOverlayRuntimeCopy: html.includes('当前是合约 hedge mode'),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertIn('"hasOverlayLabel":true', result.stdout)
+        self.assertIn('"hasOverlayThresholds":true', result.stdout)
+        self.assertIn('"hasOverlayRatio":true', result.stdout)
+        self.assertIn('"hasOverlayReason":true', result.stdout)
+        self.assertIn('"hasOverlayRuntimeCopy":true', result.stdout)
+
+    def test_strategy_view_surfaces_opportunistic_overlay_config_and_state(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { renderStrategyView } from './aats/api/static/modules/views/strategy-view.js';
+
+const html = renderStrategyView({
+  strategyRuntime: {
+    configured_parameters: {
+      directional: {
+        product_type: 'derivatives',
+        shorting_runtime_supported: true,
+        short_bias_enabled: true,
+        runtime_shorting_blockers: [],
+        short_entry_allowed_regimes: ['trend', 'uncertain'],
+        short_entry_min_signal_edge_bps: 12,
+        short_entry_alpha_min: 0.18,
+        short_entry_confidence_min: 0.58,
+        short_scale_in_min_signal_edge_bps: 10,
+        short_scale_in_alpha_min: 0.20,
+        short_scale_in_confidence_min: 0.60,
+        short_reversal_min_signal_edge_bps: 20,
+        short_reversal_alpha_min: 0.28,
+        short_reversal_confidence_min: 0.72,
+        entry_min_signal_edge_bps: 14,
+        entry_alpha_min: 0.18,
+        entry_confidence_min: 0.66,
+        hedge_overlay_enabled: true,
+        hedge_overlay_mode: 'opportunistic',
+        hedge_overlay_runtime_supported: true,
+        hedge_overlay_mode_ready: true,
+        hedge_overlay_effective_enabled: true,
+        hedge_open_threshold: 0.58,
+        hedge_close_threshold: 0.42,
+        hedge_max_ratio: 0.50,
+        hedge_min_hold_seconds: 300,
+        hedge_rebalance_cooldown_seconds: 120,
+        hedge_opportunistic_enabled: true,
+        hedge_opportunistic_open_threshold: 0.62,
+        hedge_opportunistic_close_threshold: 0.46,
+        hedge_opportunistic_max_ratio: 0.35,
+        hedge_opportunistic_min_hold_seconds: 180,
+        hedge_opportunistic_rebalance_cooldown_seconds: 90,
+        hedge_opportunistic_max_fee_drag_ratio: 0.18,
+        hedge_opportunistic_max_churn_ratio: 0.22,
+      },
+    },
+    latest_snapshot: { candidates: [], automation_decisions: [] },
+    summary: {},
+    recent_sleeve_intents: [],
+    latest_bundle: {},
+    latest_allocation_decision: {},
+    latest_applied_target: {},
+    recent_execution_bundles: [],
+    recent_budget_snapshots: [],
+    recent_conflict_resolutions: [],
+    recent_netting_decisions: [],
+    family_enablement: {},
+  },
+  latestDecision: {
+    baseline_assessment: {
+      direction_bias: 'long',
+      composite_alpha_score: 0.28,
+      confidence: 0.84,
+    },
+    ai_assessment: {
+      directional_edge: -0.25,
+    },
+    position_target: {
+      position_intent: 'hold',
+      target_exposure_side: 'long',
+      current_position_qty: 0.05,
+      target_position_qty: 0.03,
+      delta_position_qty: -0.02,
+      guardrail_flags: ['opportunistic_hedge_overlay_active'],
+      hedge_overlay_decision: {
+        enabled: true,
+        runtime_supported: true,
+        configured_mode: 'opportunistic',
+        effective_mode: 'opportunistic',
+        active: true,
+        state: 'opening',
+        main_leg_signal: 'long',
+        hedge_leg_signal: 'short',
+        main_leg_current_qty: 0.05,
+        hedge_leg_current_qty: 0.0,
+        main_leg_target_qty: 0.04,
+        hedge_leg_target_qty: 0.014,
+        hedge_ratio: 0.35,
+        max_ratio: 0.35,
+        pressure_score: 0.71,
+        open_threshold: 0.62,
+        close_threshold: 0.46,
+        reason_codes: ['opportunistic_overlay_signal_above_open_threshold'],
+        blocked_reasons: [],
+        min_hold_remaining_seconds: 0,
+        rebalance_cooldown_remaining_seconds: 0,
+      },
+    },
+    policy_decision: { execution_allowed: true, rejection_reasons: [] },
+    risk_decision: { approved: true, rejection_reasons: [], constraints_applied: [] },
+  },
+  strategyAttribution: { summary: {}, profitability_by_strategy_sleeve: [], sleeve_inventory_summary: [] },
+  trialReviewSummary: { summary: {}, sections: {} },
+});
+
+console.log(JSON.stringify({
+  hasOverlayLabel: html.includes('机会型对冲'),
+  hasOpportunisticThresholds: html.includes('strategy_hedge_opportunistic_open_threshold / strategy_hedge_opportunistic_close_threshold'),
+  hasOpportunityLeg: html.includes('机会腿'),
+  hasOpportunityReason: html.includes('机会分已经超过开仓阈值'),
+  hasModeCopy: html.includes('机会型对冲 有没有介入') || html.includes('机会型对冲 的腿级状态'),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertIn('"hasOverlayLabel":true', result.stdout)
+        self.assertIn('"hasOpportunisticThresholds":true', result.stdout)
+        self.assertIn('"hasOpportunityLeg":true', result.stdout)
+        self.assertIn('"hasOpportunityReason":true', result.stdout)
+        self.assertIn('"hasModeCopy":true', result.stdout)
+
+    def test_strategy_view_surfaces_independent_overlay_config_and_state(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { renderStrategyView } from './aats/api/static/modules/views/strategy-view.js';
+
+const html = renderStrategyView({
+  strategyRuntime: {
+    configured_parameters: {
+      directional: {
+        product_type: 'derivatives',
+        shorting_runtime_supported: true,
+        short_bias_enabled: true,
+        runtime_shorting_blockers: [],
+        short_entry_allowed_regimes: ['trend', 'uncertain'],
+        short_entry_min_signal_edge_bps: 12,
+        short_entry_alpha_min: 0.18,
+        short_entry_confidence_min: 0.58,
+        short_scale_in_min_signal_edge_bps: 10,
+        short_scale_in_alpha_min: 0.20,
+        short_scale_in_confidence_min: 0.60,
+        short_reversal_min_signal_edge_bps: 20,
+        short_reversal_alpha_min: 0.28,
+        short_reversal_confidence_min: 0.72,
+        entry_min_signal_edge_bps: 14,
+        entry_alpha_min: 0.18,
+        entry_confidence_min: 0.66,
+        hedge_overlay_enabled: true,
+        hedge_overlay_mode: 'independent',
+        hedge_overlay_runtime_supported: true,
+        hedge_overlay_mode_ready: true,
+        hedge_overlay_effective_enabled: true,
+        hedge_independent_enabled: true,
+        hedge_independent_long_entry_threshold: 0.66,
+        hedge_independent_short_entry_threshold: 0.64,
+        hedge_independent_long_scale_in_threshold: 0.70,
+        hedge_independent_short_scale_in_threshold: 0.68,
+        hedge_independent_long_min_hold_seconds: 300,
+        hedge_independent_short_min_hold_seconds: 420,
+        hedge_independent_rebalance_cooldown_seconds: 120,
+        hedge_independent_trial_guard_enabled: true,
+      },
+    },
+    latest_snapshot: { candidates: [], automation_decisions: [] },
+    summary: {},
+    recent_sleeve_intents: [],
+    latest_bundle: {},
+    latest_allocation_decision: {},
+    latest_applied_target: {},
+    recent_execution_bundles: [],
+    recent_budget_snapshots: [],
+    recent_conflict_resolutions: [],
+    recent_netting_decisions: [],
+    family_enablement: {},
+  },
+  latestDecision: {
+    baseline_assessment: {
+      direction_bias: 'long',
+      composite_alpha_score: 0.31,
+      confidence: 0.82,
+    },
+    ai_assessment: {
+      directional_edge: 0.18,
+    },
+    position_target: {
+      position_intent: 'hold',
+      target_exposure_side: 'long',
+      current_position_qty: 0.01,
+      target_position_qty: 0.01,
+      delta_position_qty: 0,
+      guardrail_flags: ['independent_books_active'],
+      strategy_execution_legs: [
+        {
+          pos_side: 'long',
+          execution_mode: 'independent_long_book',
+          overlay_mode: 'independent',
+          current_position_qty: 0.01,
+          target_position_qty: 0.03,
+        },
+        {
+          pos_side: 'short',
+          execution_mode: 'independent_short_book',
+          overlay_mode: 'independent',
+          current_position_qty: -0.02,
+          target_position_qty: -0.01,
+        },
+      ],
+      hedge_overlay_decision: {
+        enabled: true,
+        runtime_supported: true,
+        configured_mode: 'independent',
+        effective_mode: 'independent',
+        active: true,
+        state: 'holding',
+        long_leg_score: 0.74,
+        short_leg_score: 0.68,
+        long_leg_reason_codes: ['independent_long_book_signal_above_entry_threshold'],
+        short_leg_reason_codes: ['independent_short_book_hold_above_entry_threshold'],
+        long_leg_blocked_reasons: ['independent_long_book_trial_guard_active'],
+        short_leg_blocked_reasons: [],
+        reason_codes: ['independent_long_book_signal_above_entry_threshold'],
+        blocked_reasons: [],
+      },
+    },
+    policy_decision: { execution_allowed: true, rejection_reasons: [] },
+    risk_decision: { approved: true, rejection_reasons: [], constraints_applied: [] },
+  },
+  strategyAttribution: { summary: {}, profitability_by_strategy_sleeve: [], sleeve_inventory_summary: [] },
+  trialReviewSummary: { summary: {}, sections: {} },
+});
+
+console.log(JSON.stringify({
+  hasIndependentLabel: html.includes('独立双书'),
+  hasIndependentThresholds: html.includes('strategy_hedge_independent_long_entry_threshold / strategy_hedge_independent_short_entry_threshold'),
+  hasIndependentBooks: html.includes('双书分 long 0.74 / short 0.68 | 目标 +0.03 / -0.01'),
+  hasIndependentReasons: html.includes('long book 的双书分已经超过开仓阈值') && html.includes('long book 的试盘守护已经触发'),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertIn('"hasIndependentLabel":true', result.stdout)
+        self.assertIn('"hasIndependentThresholds":true', result.stdout)
+        self.assertIn('"hasIndependentBooks":true', result.stdout)
+        self.assertIn('"hasIndependentReasons":true', result.stdout)
+
+    def test_strategy_view_surfaces_overlay_rollout_stage_and_rollback_order(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { renderStrategyView } from './aats/api/static/modules/views/strategy-view.js';
+
+const html = renderStrategyView({
+  strategyRuntime: {
+    configured_parameters: {
+      directional: {
+        product_type: 'derivatives',
+        shorting_runtime_supported: true,
+        short_bias_enabled: true,
+        runtime_shorting_blockers: [],
+        entry_min_signal_edge_bps: 14,
+        entry_alpha_min: 0.18,
+        entry_confidence_min: 0.66,
+        hedge_overlay_enabled: true,
+        hedge_overlay_mode: 'independent',
+        hedge_overlay_runtime_supported: true,
+        hedge_overlay_enabled_in_mode: true,
+        hedge_overlay_mode_ready: false,
+        hedge_overlay_rollout_allowed: false,
+        hedge_overlay_effective_enabled: false,
+        hedge_opportunistic_enabled: true,
+        hedge_opportunistic_rollout_stage: 'live',
+        hedge_independent_enabled: true,
+        hedge_independent_rollout_stage: 'dry_run',
+        hedge_rollout: {
+          runtime_stage: 'live',
+          current_mode: 'independent',
+          current_mode_allowed: false,
+          current_mode_blocking_reasons: ['independent_overlay_rollout_stage_blocks_live_runtime'],
+          current_mode_summary: '独立双书当前只放开到 dry-run，这条实盘运行线不会启用。',
+          rollback_sequence: [
+            '先关闭 strategy_hedge_opportunistic_enabled',
+            '再关闭 strategy_hedge_independent_enabled',
+            '保留 protective 作为最后兜底',
+            '如需彻底回退，再把 strategy_hedge_overlay_mode 切回 protective',
+          ],
+          opportunistic: {
+            configured_rollout_stage: 'live',
+            runtime_allowed: true,
+            blocking_reasons: [],
+            summary: 'opportunistic 已放开到实盘；仍建议先看回放和 dry-run 样本再开启。',
+          },
+          independent: {
+            configured_rollout_stage: 'dry_run',
+            runtime_allowed: false,
+            blocking_reasons: ['independent_overlay_rollout_stage_blocks_live_runtime'],
+            summary: '独立双书当前只放开到 dry-run，这条实盘运行线不会启用。',
+          },
+        },
+      },
+    },
+    latest_snapshot: { candidates: [], automation_decisions: [] },
+    summary: {},
+    recent_sleeve_intents: [],
+    latest_bundle: {},
+    latest_allocation_decision: {},
+    latest_applied_target: {},
+    recent_execution_bundles: [],
+    recent_budget_snapshots: [],
+    recent_conflict_resolutions: [],
+    recent_netting_decisions: [],
+    family_enablement: {},
+  },
+  latestDecision: {
+    baseline_assessment: {
+      direction_bias: 'long',
+      composite_alpha_score: 0.31,
+      confidence: 0.82,
+    },
+    ai_assessment: {
+      directional_edge: 0.18,
+    },
+    position_target: {
+      position_intent: 'hold',
+      target_exposure_side: 'long',
+      current_position_qty: 0.01,
+      target_position_qty: 0.01,
+      delta_position_qty: 0,
+      hedge_overlay_decision: {
+        enabled: true,
+        runtime_supported: true,
+        configured_mode: 'independent',
+        effective_mode: 'independent',
+        state: 'blocked',
+        blocked_reasons: ['independent_overlay_rollout_stage_blocks_live_runtime'],
+        rollout_stage: 'dry_run',
+        runtime_rollout_stage: 'live',
+      },
+    },
+    policy_decision: { execution_allowed: true, rejection_reasons: [] },
+    risk_decision: { approved: true, rejection_reasons: [], constraints_applied: [] },
+  },
+  strategyAttribution: { summary: {}, profitability_by_strategy_sleeve: [], sleeve_inventory_summary: [] },
+  trialReviewSummary: { summary: {}, sections: {} },
+});
+
+console.log(JSON.stringify({
+  hasRolloutRow: html.includes('strategy_hedge_opportunistic_rollout_stage / strategy_hedge_independent_rollout_stage'),
+  hasCurrentStage: html.includes('当前运行线 实盘 | 独立双书 受限'),
+  hasBlockReason: html.includes('独立双书当前只放开到 dry-run，这条实盘运行线不会启用'),
+  hasRollbackOrder: html.includes('先关闭 strategy_hedge_opportunistic_enabled'),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertIn('"hasRolloutRow":true', result.stdout)
+        self.assertIn('"hasCurrentStage":true', result.stdout)
+        self.assertIn('"hasBlockReason":true', result.stdout)
+        self.assertIn('"hasRollbackOrder":true', result.stdout)
 
     def test_dashboard_redirects_to_login_when_auth_is_enabled(self) -> None:
         settings = AATSSettings.model_validate(
@@ -1633,6 +2130,265 @@ console.log(JSON.stringify({
         self.assertIn('"reviewHasInspectReconciliation":true', result.stdout)
         self.assertIn('"reviewHasRebaseline":true', result.stdout)
         self.assertIn('"reviewHasNoPause":true', result.stdout)
+
+    def test_risk_view_surfaces_leg_level_reconciliation_summary(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { renderRiskView } from './aats/api/static/modules/views/risk-view.js';
+
+const html = renderRiskView({
+  blockerControl: { blockers: [], secondary_blockers: [], next_step_summary: '' },
+  systemRecovery: {
+    recovery: {
+      safe_to_trade: false,
+      review_required: true,
+      resume_eligible: false,
+      halted: false,
+      rebaseline_available: true,
+      resume_blocked_reasons: ['operator_rebaseline_required'],
+    },
+  },
+  reconciliationLatest: {
+    reconciliation: {
+      reconciliation_id: 'recon-leg-summary',
+      severity: 'REVIEW_REQUIRED',
+      halt_required: false,
+      review_required: true,
+      observational_only: false,
+      exchange_comparison_enabled: true,
+      recommended_operator_action: 'review_and_rebaseline_if_expected',
+    },
+    mismatch_summary: {
+      mismatch_reasons: ['derivatives_leg_position_differs_from_exchange'],
+      safety_impacts: ['derivatives_leg_state_requires_review'],
+      recommended_operator_action: 'review_and_rebaseline_if_expected',
+      leg_mismatch_summary: {
+        total_count: 1,
+        missing_execution_chain_count: 0,
+        items: [
+          {
+            symbol: 'BTC-USDT-SWAP',
+            leg_side: 'short',
+            stored_qty: '-0.01',
+            exchange_qty: '-0.02',
+          },
+        ],
+      },
+    },
+  },
+  accountState: { fresh: true, last_refresh_timestamp: '2026-03-25T16:00:00Z', ready: true, blockers: [] },
+  portfolio: { portfolio: { total_equity: 200, realized_pnl: 0, unrealized_pnl: 0, margin_usage: 0, gross_exposure: 0 } },
+  replayStatus: {},
+  metrics: {},
+  health: { runtime_state: 'warning' },
+  uiHints: { recoveryReasonsText: '', controlPermissionMessage: '' },
+});
+
+console.log(JSON.stringify({
+  hasLegMismatchCard: html.includes('持仓腿异常'),
+  hasLegMismatchCount: html.includes('1 条'),
+  hasShortLegCopy: html.includes('BTC-USDT-SWAP 空头腿：本地 -0.01，交易所 -0.02'),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertIn('"hasLegMismatchCard":true', result.stdout)
+        self.assertIn('"hasLegMismatchCount":true', result.stdout)
+        self.assertIn('"hasShortLegCopy":true', result.stdout)
+
+    def test_overview_and_decision_drawer_surface_hedge_mode_details(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { renderOverviewView } from './aats/api/static/modules/views/overview-view.js';
+import { buildDecisionDrawer } from './aats/api/static/modules/detail-drawers.js';
+
+const overviewHtml = renderOverviewView({
+  mode: { default_symbol: 'BTC-USDT-SWAP' },
+  runtime: { symbols: ['BTC-USDT-SWAP'] },
+  systemRecovery: { recovery: { safe_to_trade: true, halted: false, resume_eligible: true } },
+  blockers: { blockers: [] },
+  portfolio: {
+    portfolio: {
+      total_equity: 1200,
+      realized_pnl: 15,
+      unrealized_pnl: 9,
+      gross_exposure: 2100,
+      net_exposure: 700,
+      snapshot_ts: '2026-03-27T14:00:00Z',
+      positions: [],
+    },
+  },
+  positions: {
+    local_instrument_positions: [
+      {
+        symbol: 'BTC-USDT-SWAP',
+        position_mode: 'long_short_mode',
+        margin_mode: 'cross',
+        dual_legged: true,
+        exposure_side: 'long',
+        leg_count: 2,
+        long_position_qty: '0.02',
+        short_position_qty: '0.01',
+        net_position_qty: '0.01',
+        gross_position_qty: '0.03',
+        long_position_notional: '1400',
+        short_position_notional: '700',
+        net_position_notional: '700',
+        gross_position_notional: '2100',
+        unrealized_pnl: '9',
+        target_leverage: 3,
+      },
+    ],
+  },
+  latestDecision: { decision_id: 'dec-hedge', position_target: { delta_position_qty: '0.01' }, policy_decision: { execution_allowed: true }, risk_decision: { approved: true } },
+  executionLatest: {},
+  reconciliationLatest: {},
+  metrics: {},
+  health: { runtime_state: 'healthy', overall_status: 'healthy' },
+  uiHints: {},
+});
+
+const drawer = buildDecisionDrawer({
+  decision_id: 'dec-hedge',
+  decision_context: { symbol: 'BTC-USDT-SWAP', current_position_qty: 0.01 },
+  position_target: { position_intent: 'open_long', current_position_qty: 0.01, target_position_qty: 0.03 },
+  policy_decision: { execution_allowed: true },
+  risk_decision: { approved: true },
+  hedge_mode_audit: {
+    position_mode: {
+      configured_derivatives_position_mode: 'hedge',
+      required_exchange_position_mode: 'long_short_mode',
+      exchange_position_mode: 'long_short_mode',
+      exchange_position_mode_matches_configured: true,
+      position_mode_match_required: true,
+      observed_position_modes: ['long_short_mode'],
+      observed_pos_sides: ['long', 'short'],
+      mode_change_detected: false,
+      contract_mismatch_detected: false,
+    },
+    leg_orders: {
+      total_count: 1,
+      open_count: 1,
+      reduce_count: 0,
+      close_count: 0,
+      pos_sides: ['long'],
+      symbols: ['BTC-USDT-SWAP'],
+      items: [{ symbol: 'BTC-USDT-SWAP', pos_side: 'long', action: 'open', quantity: '0.02', status: 'FILLED', fill_count: 1 }],
+    },
+    leg_reconciliation: {
+      total_count: 1,
+      missing_execution_chain_count: 1,
+      items: [{ symbol: 'BTC-USDT-SWAP', leg_side: 'short', kind: 'missing_execution_chain', stored_qty: '0', exchange_qty: '-0.01' }],
+    },
+  },
+});
+
+console.log(JSON.stringify({
+  overviewHasDualLeg: overviewHtml.includes('双腿并存'),
+  overviewHasGross: overviewHtml.includes('毛敞口'),
+  overviewHasLongShortBreakdown: overviewHtml.includes('多头 0.02 / 空头 0.01'),
+  drawerHasHedgeAudit: drawer.body.includes('对冲模式审计'),
+  drawerHasLegOrderAudit: drawer.body.includes('腿级订单审计'),
+  drawerHasLegReconciliationAudit: drawer.body.includes('腿级对账审计'),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertIn('"overviewHasDualLeg":true', result.stdout)
+        self.assertIn('"overviewHasGross":true', result.stdout)
+        self.assertIn('"overviewHasLongShortBreakdown":true', result.stdout)
+        self.assertIn('"drawerHasHedgeAudit":true', result.stdout)
+        self.assertIn('"drawerHasLegOrderAudit":true', result.stdout)
+        self.assertIn('"drawerHasLegReconciliationAudit":true', result.stdout)
+
+    def test_decision_drawer_surfaces_independent_overlay_audit_and_leg_trial_guard(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { buildDecisionDrawer } from './aats/api/static/modules/detail-drawers.js';
+
+const drawer = buildDecisionDrawer({
+  decision_id: 'dec-independent',
+  decision_context: { symbol: 'BTC-USDT-SWAP', current_position_qty: 0.01 },
+  position_target: { position_intent: 'hold', current_position_qty: 0.01, target_position_qty: 0.01 },
+  policy_decision: { execution_allowed: true },
+  risk_decision: { approved: true },
+  hedge_mode_audit: {
+    position_mode: {
+      configured_derivatives_position_mode: 'hedge',
+      required_exchange_position_mode: 'long_short_mode',
+      exchange_position_mode: 'long_short_mode',
+      exchange_position_mode_matches_configured: true,
+      position_mode_match_required: true,
+      observed_position_modes: ['long_short_mode'],
+      observed_pos_sides: ['long', 'short'],
+      mode_change_detected: false,
+      contract_mismatch_detected: false,
+    },
+    overlay: {
+      configured_mode: 'independent',
+      effective_mode: 'independent',
+      overlay_source: 'independent_books',
+      active: true,
+      state: 'holding',
+      long_leg_score: 0.74,
+      short_leg_score: 0.68,
+      long_leg_reason_codes: ['independent_long_book_signal_above_entry_threshold'],
+      short_leg_reason_codes: ['independent_short_book_hold_above_entry_threshold'],
+      long_leg_blocked_reasons: ['independent_long_book_trial_guard_active'],
+      short_leg_blocked_reasons: [],
+      items: [
+        { pos_side: 'long', action: 'open', execution_mode: 'independent_long_book', target_position_qty: '0.03', delta_position_qty: '0.02', trigger_reason_codes: ['independent_long_book_signal_above_entry_threshold'] },
+        { pos_side: 'short', action: 'reduce', execution_mode: 'independent_short_book', target_position_qty: '-0.01', delta_position_qty: '0.01', trigger_reason_codes: ['independent_short_book_hold_above_entry_threshold'] },
+      ],
+    },
+    leg_trial_guard: {
+      enabled: true,
+      mode: 'independent',
+      total_count: 2,
+      active_count: 1,
+      items: [
+        { leg: 'long', status: 'blocked', active: true, recent_closed_trade_count: 5, recent_net_realized_pnl: '-12', recent_win_rate: 0.2, guardrail_flags: ['fee_drag_elevated'], cooldowns: {}, reason_code: 'independent_long_book_trial_guard_active' },
+        { leg: 'short', status: 'clear', active: false, recent_closed_trade_count: 5, recent_net_realized_pnl: '8', recent_win_rate: 0.8, guardrail_flags: [], cooldowns: { min_hold_remaining_seconds: 30 } },
+      ],
+    },
+    leg_orders: { total_count: 0, open_count: 0, reduce_count: 0, close_count: 0, pos_sides: [], symbols: [], items: [] },
+    leg_reconciliation: { total_count: 0, missing_execution_chain_count: 0, items: [] },
+  },
+});
+
+console.log(JSON.stringify({
+  hasOverlayAudit: drawer.body.includes('Overlay 审计'),
+  hasIndependentMode: drawer.body.includes('独立双书'),
+  hasLegTrialGuard: drawer.body.includes('腿级试盘守护'),
+  hasLongTrialGuardCopy: drawer.body.includes('long book 的试盘守护已经触发'),
+  hasIndependentBookLabel: drawer.body.includes('独立多书'),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertIn('"hasOverlayAudit":true', result.stdout)
+        self.assertIn('"hasIndependentMode":true', result.stdout)
+        self.assertIn('"hasLegTrialGuard":true', result.stdout)
+        self.assertIn('"hasLongTrialGuardCopy":true', result.stdout)
+        self.assertIn('"hasIndependentBookLabel":true', result.stdout)
 
     def test_terms_prioritize_manual_review_over_only_reduce_labels(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]

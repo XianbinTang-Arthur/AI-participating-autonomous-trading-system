@@ -12,7 +12,13 @@ from aats.schemas.reconciliation import ReconciliationFinding, ReconciliationRep
 from aats.services.execution_engine.okx_bills import explain_okx_bills_for_reconciliation
 from aats.services.execution_engine.state_machine import OrderStateMachine
 from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, EPSILON_DECIMAL_9, to_decimal
+from aats.services.portfolio_service.instrument_states import (
+    instrument_position_states_from_exchange_positions,
+    instrument_position_states_from_snapshot_positions,
+)
 from aats.services.portfolio_service.position_keys import (
+    build_position_key,
+    position_key_for_fill,
     position_key_for_exchange_position,
     position_key_for_snapshot_position,
     signed_quantity_for_position_side,
@@ -363,25 +369,49 @@ class StateComparator:
             if isinstance(position_diff.get("exchange_mismatches"), dict)
             else {}
         )
-        local_execution_symbols = {
-            order.symbol for order in order_states if order.product_type == "derivatives"
-        } | {
-            fill.symbol for fill in fills if fill.product_type == "derivatives"
-        }
+        exchange_leg_mismatches = (
+            position_diff.get("exchange_leg_mismatches")
+            if isinstance(position_diff.get("exchange_leg_mismatches"), dict)
+            else {}
+        )
+        if exchange_leg_mismatches:
+            assessment.mismatch_categories.append("derivatives_leg_position_mismatch")
+            assessment.mismatch_reasons.append("derivatives_leg_position_differs_from_exchange")
+            assessment.safety_impacts.append("derivatives_leg_state_requires_review")
+        local_execution_position_keys, local_execution_symbols = StateComparator._local_execution_position_scope(
+            order_states=order_states,
+            fills=fills,
+        )
         exchange_positions = StateComparator._exchange_position_quantity_map(exchange_snapshot)
         stored_positions = position_diff.get("stored") if isinstance(position_diff.get("stored"), dict) else {}
+        reconstructed_positions = (
+            position_diff.get("reconstructed")
+            if isinstance(position_diff.get("reconstructed"), dict)
+            else {}
+        )
         missing_execution_chain_details: list[dict[str, object]] = []
         for position_key, mismatch in exchange_position_mismatches.items():
             exchange_qty = to_decimal(exchange_positions.get(position_key, Decimal("0")))
             symbol = symbol_from_position_key(position_key)
-            if abs(exchange_qty) <= EPSILON_DECIMAL_12 or symbol in local_execution_symbols:
+            leg_side = StateComparator._leg_side_from_position_key(position_key)
+            stored_qty = to_decimal(stored_positions.get(position_key, Decimal("0")))
+            reconstructed_qty = to_decimal(reconstructed_positions.get(position_key, Decimal("0")))
+            if abs(exchange_qty) <= EPSILON_DECIMAL_12:
+                continue
+            if abs(stored_qty) > EPSILON_DECIMAL_12 or abs(reconstructed_qty) > EPSILON_DECIMAL_12:
+                continue
+            if position_key in local_execution_position_keys:
+                continue
+            if leg_side is None and symbol in local_execution_symbols:
                 continue
             missing_execution_chain_details.append(
                 {
                     "kind": "exchange_position_without_local_execution_chain",
                     "position_key": position_key,
                     "symbol": symbol,
-                    "stored_qty": to_decimal(stored_positions.get(position_key, Decimal("0"))),
+                    "leg_side": leg_side or "net",
+                    "stored_qty": stored_qty,
+                    "reconstructed_qty": reconstructed_qty,
                     "exchange_qty": exchange_qty,
                     "exchange_side_breakdown": [
                         {
@@ -416,6 +446,46 @@ class StateComparator:
         configured = None if account_configuration is None else account_configuration.position_mode
         value = str(configured or exchange_snapshot.position_mode or "").strip()
         return value or None
+
+    @staticmethod
+    def _leg_side_from_position_key(position_key: str) -> str | None:
+        _, separator, tail = str(position_key).partition(":")
+        if separator != ":":
+            return None
+        side = tail.strip().lower()
+        if side in {"long", "short"}:
+            return side
+        return None
+
+    @staticmethod
+    def _position_key_for_order_state(order: OrderState) -> str:
+        return build_position_key(
+            symbol=order.symbol,
+            product_type=order.product_type,
+            margin_mode=order.margin_mode,
+            position_mode=order.position_mode,
+            pos_side=order.pos_side,
+        )
+
+    @staticmethod
+    def _local_execution_position_scope(
+        *,
+        order_states: list[OrderState],
+        fills: list[FillEvent],
+    ) -> tuple[set[str], set[str]]:
+        position_keys: set[str] = set()
+        symbols: set[str] = set()
+        for order in order_states:
+            if order.product_type != "derivatives":
+                continue
+            symbols.add(order.symbol)
+            position_keys.add(StateComparator._position_key_for_order_state(order))
+        for fill in fills:
+            if fill.product_type != "derivatives":
+                continue
+            symbols.add(fill.symbol)
+            position_keys.add(position_key_for_fill(fill))
+        return position_keys, symbols
 
     @staticmethod
     def _exchange_position_net_by_symbol(positions) -> dict[str, Decimal]:
@@ -509,9 +579,9 @@ class StateComparator:
         exchange: dict[str, object],
     ) -> dict[str, dict[str, Decimal | None]]:
         mismatches: dict[str, dict[str, Decimal | None]] = {}
-        for field in ("margin_allocated", "maintenance_margin", "margin_ratio", "liquidation_price"):
-            local_value = None if local.get(field) in {None, ""} else to_decimal(local.get(field))
-            exchange_value = None if exchange.get(field) in {None, ""} else to_decimal(exchange.get(field))
+        for field_name in ("margin_allocated", "maintenance_margin", "margin_ratio", "liquidation_price"):
+            local_value = None if local.get(field_name) in {None, ""} else to_decimal(local.get(field_name))
+            exchange_value = None if exchange.get(field_name) in {None, ""} else to_decimal(exchange.get(field_name))
             if local_value is None and exchange_value is None:
                 continue
             if (
@@ -519,7 +589,7 @@ class StateComparator:
                 or exchange_value is None
                 or abs(local_value - exchange_value) > EPSILON_DECIMAL_9
             ):
-                mismatches[field] = {"stored": local_value, "exchange": exchange_value}
+                mismatches[field_name] = {"stored": local_value, "exchange": exchange_value}
         return mismatches
 
     @staticmethod
@@ -536,6 +606,88 @@ class StateComparator:
                 continue
             quantities[position_key_for_exchange_position(position, position_mode=position_mode)] = quantity
         return quantities
+
+    @staticmethod
+    def _exchange_leg_mismatch_map(
+        *,
+        stored_positions: dict[str, Decimal],
+        reconstructed_positions: dict[str, Decimal],
+        exchange_positions: dict[str, Decimal],
+    ) -> dict[str, dict[str, object]]:
+        mismatches: dict[str, dict[str, object]] = {}
+        for position_key in sorted(set(stored_positions) | set(exchange_positions)):
+            leg_side = StateComparator._leg_side_from_position_key(position_key)
+            if leg_side is None:
+                continue
+            stored_qty = to_decimal(stored_positions.get(position_key, Decimal("0")))
+            exchange_qty = to_decimal(exchange_positions.get(position_key, Decimal("0")))
+            if abs(stored_qty - exchange_qty) <= EPSILON_DECIMAL_12:
+                continue
+            mismatches[position_key] = {
+                "position_key": position_key,
+                "symbol": symbol_from_position_key(position_key),
+                "leg_side": leg_side,
+                "stored_qty": stored_qty,
+                "reconstructed_qty": to_decimal(reconstructed_positions.get(position_key, Decimal("0"))),
+                "exchange_qty": exchange_qty,
+            }
+        return mismatches
+
+    @staticmethod
+    def _snapshot_instrument_state_map(positions) -> dict[str, dict[str, object]]:
+        return {
+            state.symbol: state.model_dump(mode="json")
+            for state in instrument_position_states_from_snapshot_positions(positions)
+        }
+
+    @staticmethod
+    def _exchange_instrument_state_map(exchange_snapshot: ExchangeAccountSnapshot) -> dict[str, dict[str, object]]:
+        position_mode = StateComparator._exchange_position_mode(exchange_snapshot)
+        return {
+            state.symbol: state.model_dump(mode="json")
+            for state in instrument_position_states_from_exchange_positions(
+                exchange_snapshot.positions,
+                position_mode=position_mode,
+            )
+        }
+
+    @staticmethod
+    def _instrument_position_mismatch_map(
+        *,
+        stored_states: dict[str, dict[str, object]],
+        exchange_states: dict[str, dict[str, object]],
+    ) -> dict[str, dict[str, object]]:
+        mismatches: dict[str, dict[str, object]] = {}
+        for symbol in sorted(set(stored_states) | set(exchange_states)):
+            stored = dict(stored_states.get(symbol) or {})
+            exchange = dict(exchange_states.get(symbol) or {})
+            leg_deltas: dict[str, dict[str, Decimal]] = {}
+            for leg_name, field_name in (
+                ("long", "long_position_qty"),
+                ("short", "short_position_qty"),
+                ("net", "net_position_qty"),
+                ("gross", "gross_position_qty"),
+            ):
+                stored_qty = to_decimal(stored.get(field_name, Decimal("0")))
+                exchange_qty = to_decimal(exchange.get(field_name, Decimal("0")))
+                if abs(stored_qty - exchange_qty) > EPSILON_DECIMAL_12:
+                    leg_deltas[leg_name] = {
+                        "stored": stored_qty,
+                        "exchange": exchange_qty,
+                    }
+            stored_dual_legged = bool(stored.get("dual_legged", False))
+            exchange_dual_legged = bool(exchange.get("dual_legged", False))
+            if not leg_deltas and stored_dual_legged == exchange_dual_legged:
+                continue
+            mismatches[symbol] = {
+                "symbol": symbol,
+                "stored": stored or None,
+                "exchange": exchange or None,
+                "legs": leg_deltas,
+                "stored_dual_legged": stored_dual_legged,
+                "exchange_dual_legged": exchange_dual_legged,
+            }
+        return mismatches
 
     @staticmethod
     def _mismatch_categories(
@@ -778,6 +930,9 @@ class StateComparator:
         stored_exchange_margin = StateComparator._snapshot_position_margin_map(
             [position for position in stored_snapshot.positions if position.product_type == "derivatives"]
         )
+        stored_exchange_instrument_states = StateComparator._snapshot_instrument_state_map(
+            [position for position in stored_snapshot.positions if position.product_type == "derivatives"]
+        )
         reconstructed_mismatches: dict[str, dict[str, Decimal]] = {}
         for symbol in sorted(set(stored_positions) | set(replayed_positions)):
             stored = to_decimal(stored_positions.get(symbol, 0))
@@ -786,12 +941,25 @@ class StateComparator:
                 reconstructed_mismatches[symbol] = {"stored": stored, "reconstructed": replayed}
 
         exchange_positions: dict[str, Decimal] = {}
+        exchange_leg_mismatches: dict[str, dict[str, object]] = {}
+        exchange_instrument_states: dict[str, dict[str, object]] = {}
+        exchange_instrument_mismatches: dict[str, dict[str, object]] = {}
         exchange_mismatches: dict[str, dict[str, Decimal]] = {}
         exchange_margin: dict[str, dict[str, object]] = {}
         exchange_margin_mismatches: dict[str, dict[str, dict[str, Decimal | None]]] = {}
         exchange_margin_mode_mismatches: dict[str, dict[str, str | None]] = {}
         if compare_exchange_portfolio and exchange_snapshot is not None and exchange_snapshot.positions:
             exchange_positions = StateComparator._exchange_position_quantity_map(exchange_snapshot)
+            exchange_leg_mismatches = StateComparator._exchange_leg_mismatch_map(
+                stored_positions=stored_exchange_positions,
+                reconstructed_positions=replayed_positions,
+                exchange_positions=exchange_positions,
+            )
+            exchange_instrument_states = StateComparator._exchange_instrument_state_map(exchange_snapshot)
+            exchange_instrument_mismatches = StateComparator._instrument_position_mismatch_map(
+                stored_states=stored_exchange_instrument_states,
+                exchange_states=exchange_instrument_states,
+            )
             exchange_margin = StateComparator._exchange_position_margin_map(exchange_snapshot)
             for symbol in sorted(set(stored_exchange_positions) | set(exchange_positions)):
                 stored = to_decimal(stored_exchange_positions.get(symbol, 0))
@@ -829,6 +997,10 @@ class StateComparator:
             "reconstructed_mismatches": reconstructed_mismatches,
             "exchange": exchange_positions,
             "exchange_mismatches": exchange_mismatches,
+            "exchange_leg_mismatches": exchange_leg_mismatches,
+            "stored_instrument_states": stored_exchange_instrument_states,
+            "exchange_instrument_states": exchange_instrument_states,
+            "exchange_instrument_mismatches": exchange_instrument_mismatches,
             "stored_margin": stored_margin,
             "exchange_margin": exchange_margin,
             "exchange_margin_mismatches": exchange_margin_mismatches,
@@ -912,6 +1084,8 @@ class StateComparator:
             reasons.append("stored_position_differs_from_replayed_position")
         if position_diff.get("exchange_mismatches"):
             reasons.append("local_position_differs_from_exchange_position")
+        if position_diff.get("exchange_leg_mismatches"):
+            reasons.append("derivatives_leg_position_differs_from_exchange")
         if position_diff.get("exchange_margin_mismatches"):
             reasons.append("local_position_margin_differs_from_exchange_position_margin")
         if position_diff.get("exchange_margin_mode_mismatches"):
@@ -1230,17 +1404,30 @@ class StateComparator:
                 blocks_resume=False,
                 details_json=dict(details or {}),
             )
+        exchange_leg_mismatches = dict(position_diff.get("exchange_leg_mismatches") or {})
         for position_key, details in dict(position_diff.get("exchange_mismatches") or {}).items():
             add_finding(
                 layer="structural",
-                finding_type="exchange_position_quantity_mismatch",
+                finding_type=(
+                    "exchange_position_leg_mismatch"
+                    if str(position_key) in exchange_leg_mismatches
+                    else "exchange_position_quantity_mismatch"
+                ),
                 severity_class="soft" if derivatives_assessment.only_reduce_required else "review",
-                reason_code="local_position_differs_from_exchange_position",
+                reason_code=(
+                    "derivatives_leg_position_differs_from_exchange"
+                    if str(position_key) in exchange_leg_mismatches
+                    else "local_position_differs_from_exchange_position"
+                ),
                 scope_kind="position",
                 scope_ref=str(position_key),
                 primary_symbol_override=symbol_from_position_key(str(position_key)),
                 blocks_resume=not derivatives_assessment.only_reduce_required,
-                details_json=dict(details or {}),
+                details_json=(
+                    dict(exchange_leg_mismatches[str(position_key)] or {})
+                    if str(position_key) in exchange_leg_mismatches
+                    else dict(details or {})
+                ),
             )
         for position_key, details in dict(position_diff.get("exchange_margin_mismatches") or {}).items():
             add_finding(

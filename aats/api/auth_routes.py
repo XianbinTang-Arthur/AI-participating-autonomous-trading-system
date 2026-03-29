@@ -175,6 +175,8 @@ def _protected_dashboard_panel_payload(
         return query.metrics()
     if panel_key == "portfolio":
         return query.portfolio_latest()
+    if panel_key == "positions":
+        return query.positions()
     if panel_key == "latestDecision":
         return query.latest_decision()
     if panel_key == "executionLatest":

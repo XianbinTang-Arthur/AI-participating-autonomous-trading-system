@@ -341,11 +341,28 @@ class RecoveryPostureEvaluator:
             order_states = self.runtime.execution_repo.order_states()
         active_obligations = getattr(self.runtime.obligation_repo, "active_obligations", None)
         obligations = active_obligations() if callable(active_obligations) else []
+        strategy_bundles = self._scoped_recent_strategy_bundles()
         return scoped_bundle_recovery_assessment(
             scope=self.state_scope,
             order_states=order_states,
             obligations=obligations,
+            strategy_bundles=strategy_bundles,
         )
+
+    def _scoped_recent_strategy_bundles(self):
+        strategy_runtime_repo = getattr(self.runtime, "strategy_runtime_repo", None)
+        if strategy_runtime_repo is None:
+            return []
+        bundles = strategy_runtime_repo.recent_execution_bundles(
+            product_type=self.state_scope.product_type,
+            margin_mode=self.state_scope.margin_mode,
+            limit=50,
+        )
+        return [
+            bundle
+            for bundle in bundles
+            if self.state_scope.symbol_allowed(bundle.selected_symbol)
+        ]
 
     def execution_blockers(
         self,

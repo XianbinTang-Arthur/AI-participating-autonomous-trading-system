@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal
 
 from aats.schemas.execution import OrderObligation, OrderState
+from aats.schemas.strategy_runtime import StrategyExecutionBundle
 from aats.schemas.system import RecoveryBundleLegStatus, RecoveryBundleSummary
 from aats.services.runtime_scope import RuntimeStateScope, order_state_matches_scope
 
@@ -27,6 +29,7 @@ def scoped_bundle_recovery_assessment(
     scope: RuntimeStateScope,
     order_states: list[OrderState],
     obligations: list[OrderObligation],
+    strategy_bundles: list[StrategyExecutionBundle] | None = None,
 ) -> BundleRecoveryAssessment:
     scoped_orders = [order for order in order_states if order_state_matches_scope(order, scope)]
     scoped_obligations = [obligation for obligation in obligations if obligation_matches_scope(obligation, scope)]
@@ -40,8 +43,8 @@ def scoped_bundle_recovery_assessment(
         for obligation in scoped_obligations
         if str(obligation.strategy_bundle_id or "").strip()
     }
-    summaries = [
-        _build_bundle_summary(
+    summaries_by_bundle_id = {
+        bundle_id: _build_bundle_summary(
             bundle_id=bundle_id,
             orders=[order for order in scoped_orders if str(order.strategy_bundle_id or "") == bundle_id],
             obligations=[
@@ -51,7 +54,37 @@ def scoped_bundle_recovery_assessment(
             ],
         )
         for bundle_id in sorted(bundle_ids)
-    ]
+    }
+    for strategy_bundle in strategy_bundles or []:
+        if not _strategy_bundle_matches_scope(strategy_bundle, scope):
+            continue
+        if not _strategy_bundle_requires_recovery(strategy_bundle):
+            continue
+        bundle_id = str(strategy_bundle.bundle_id or "").strip()
+        if not bundle_id:
+            continue
+        bundle_orders = [
+            order
+            for order in scoped_orders
+            if str(order.strategy_bundle_id or "").strip() == bundle_id
+        ]
+        bundle_obligations = [
+            obligation
+            for obligation in scoped_obligations
+            if str(obligation.strategy_bundle_id or "").strip() == bundle_id
+        ]
+        summary = summaries_by_bundle_id.get(bundle_id)
+        if summary is None:
+            summary = _build_bundle_summary(
+                bundle_id=bundle_id,
+                orders=bundle_orders,
+                obligations=bundle_obligations,
+            )
+        summaries_by_bundle_id[bundle_id] = _apply_strategy_bundle_status(
+            summary=summary,
+            strategy_bundle=strategy_bundle,
+        )
+    summaries = [summaries_by_bundle_id[bundle_id] for bundle_id in sorted(summaries_by_bundle_id)]
     unbundled_open_order_count = sum(
         1
         for order in open_orders
@@ -88,6 +121,21 @@ def obligation_matches_scope(obligation: OrderObligation, scope: RuntimeStateSco
         if obligation.margin_mode != scope.margin_mode:
             return False
     return scope.symbol_allowed(obligation.symbol)
+
+
+def _strategy_bundle_matches_scope(
+    strategy_bundle: StrategyExecutionBundle,
+    scope: RuntimeStateScope,
+) -> bool:
+    if strategy_bundle.product_type != scope.product_type:
+        return False
+    if strategy_bundle.margin_mode != scope.margin_mode:
+        return False
+    return scope.symbol_allowed(strategy_bundle.selected_symbol)
+
+
+def _strategy_bundle_requires_recovery(strategy_bundle: StrategyExecutionBundle) -> bool:
+    return str(strategy_bundle.status or "").strip() in {"partial_fill_recovery", "review_required"}
 
 
 def _build_bundle_summary(
@@ -200,10 +248,13 @@ def _build_bundle_summary(
                 product_type=order.product_type,
                 margin_mode=order.margin_mode,
                 side=_order_side(order),
+                pos_side=order.pos_side,
+                leg_action=order.leg_action,
                 status=order.status,
                 strategy_family=order.strategy_family,
                 strategy_sleeve_id=order.strategy_sleeve_id,
                 strategy_leg_role=order.strategy_leg_role,
+                strategy_execution_mode=order.strategy_execution_mode,
                 requested_qty=order.requested_qty,
                 filled_qty=order.filled_qty,
                 remaining_qty=order.remaining_qty,
@@ -212,6 +263,93 @@ def _build_bundle_summary(
             )
             for order in sorted_orders
         ],
+    )
+
+
+def _apply_strategy_bundle_status(
+    *,
+    summary: RecoveryBundleSummary,
+    strategy_bundle: StrategyExecutionBundle,
+) -> RecoveryBundleSummary:
+    status = str(strategy_bundle.status or "").strip()
+    if status not in {"partial_fill_recovery", "review_required"}:
+        return summary
+
+    reason_codes = _ordered_unique(
+        [
+            *summary.reason_codes,
+            *[str(item) for item in strategy_bundle.reason_codes if str(item or "").strip()],
+        ]
+    )
+    if status == "review_required":
+        reason_codes = _ordered_unique([*reason_codes, "bundle_review_required"])
+        recoverable = False
+        recovery_state = "review_required"
+        operator_summary = (
+            "当前 overlay bundle 已进入待人工确认状态。"
+            "系统会阻止自动 resume，直到操作员确认失败腿及剩余暴露。"
+        )
+    else:
+        reason_codes = _ordered_unique([*reason_codes, "bundle_partial_fill_recovery"])
+        recoverable = summary.recoverable
+        recovery_state = "partial_fill_recovery"
+        operator_summary = (
+            "当前 overlay bundle 仍处于部分成交恢复中。"
+            "系统会保持恢复跟踪，并在 bundle 完整恢复前阻止继续自动交易。"
+        )
+
+    legs = list(summary.legs)
+    if not legs and strategy_bundle.legs:
+        legs = [
+            RecoveryBundleLegStatus(
+                client_order_id=f"{strategy_bundle.bundle_id}:{index}",
+                exchange_order_id=None,
+                symbol=leg.symbol,
+                product_type=leg.product_type,
+                margin_mode=leg.margin_mode,
+                side=leg.side,
+                pos_side=leg.pos_side,
+                leg_action=leg.action,
+                status=status.upper(),
+                strategy_family=leg.family,
+                strategy_sleeve_id=leg.strategy_sleeve_id,
+                strategy_leg_role=leg.role,
+                strategy_execution_mode=leg.execution_mode,
+                requested_qty=abs(leg.delta_position_qty or Decimal("0")),
+                filled_qty=Decimal("0"),
+                remaining_qty=abs(leg.delta_position_qty or Decimal("0")),
+                submitted_ts=None,
+                last_update_ts=strategy_bundle.created_at,
+            )
+            for index, leg in enumerate(strategy_bundle.legs, start=1)
+        ]
+
+    return summary.model_copy(
+        update={
+            "participating_families": _ordered_unique(
+                [
+                    *summary.participating_families,
+                    *[str(item) for item in strategy_bundle.participating_families if str(item or "").strip()],
+                ]
+            ),
+            "strategy_sleeve_refs": _ordered_unique(
+                [
+                    *summary.strategy_sleeve_refs,
+                    *[str(item) for item in strategy_bundle.strategy_sleeve_refs if str(item or "").strip()],
+                ]
+            ),
+            "symbol_scope": _ordered_unique(
+                [
+                    *summary.symbol_scope,
+                    strategy_bundle.selected_symbol,
+                ]
+            ),
+            "recovery_state": recovery_state,
+            "recoverable": recoverable,
+            "reason_codes": reason_codes,
+            "operator_summary": operator_summary,
+            "legs": legs,
+        }
     )
 
 

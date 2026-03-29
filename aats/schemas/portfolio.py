@@ -64,6 +64,51 @@ class Position(SchemaBase):
     margin_source: Literal["estimated", "exchange"] = "estimated"
 
 
+class PositionLegState(SchemaBase):
+    symbol: str
+    position_key: str
+    position_qty: Decimal
+    position_notional: Decimal = Decimal("0")
+    avg_entry_price: Decimal = Decimal("0")
+    unrealized_pnl: Decimal = Decimal("0")
+    product_type: ProductType = "spot"
+    exposure_side: str = "flat"
+    target_leverage: float = 1.0
+    margin_mode: MarginModelType = "cash"
+    position_mode: PositionMode | None = None
+    pos_side: PositionSide | None = None
+    instrument_family: str | None = None
+    settle_currency: str | None = None
+    margin_allocated: Decimal = Decimal("0")
+    maintenance_margin: Decimal = Decimal("0")
+    margin_ratio: Decimal | None = None
+    liquidation_price: Decimal | None = None
+    margin_source: Literal["estimated", "exchange"] = "estimated"
+
+
+class InstrumentPositionState(SchemaBase):
+    symbol: str
+    product_type: ProductType = "spot"
+    margin_mode: MarginModelType = "cash"
+    position_mode: PositionMode | None = None
+    exposure_side: str = "flat"
+    leg_count: int = 0
+    has_long_leg: bool = False
+    has_short_leg: bool = False
+    dual_legged: bool = False
+    net_position_qty: Decimal = Decimal("0")
+    gross_position_qty: Decimal = Decimal("0")
+    long_position_qty: Decimal = Decimal("0")
+    short_position_qty: Decimal = Decimal("0")
+    net_position_notional: Decimal = Decimal("0")
+    gross_position_notional: Decimal = Decimal("0")
+    long_position_notional: Decimal = Decimal("0")
+    short_position_notional: Decimal = Decimal("0")
+    unrealized_pnl: Decimal = Decimal("0")
+    target_leverage: float = 1.0
+    legs: list[PositionLegState] = Field(default_factory=list)
+
+
 class PortfolioSnapshot(SchemaBase):
     decision_id: str | None = None
     source_intent_id: str | None = None

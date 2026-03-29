@@ -15,12 +15,20 @@ from aats.schemas.execution import (
     ExecutionParameterSuggestion,
     ExecutionAction,
     ExecutionPlan,
+    LegExecutionPlan,
+    LegOrderAction,
+    LegOrderIntent,
     OrderIntent,
     close_only_from_position_intent,
+    close_only_from_leg_action,
     default_close_only_reason,
     default_reduce_only_reason,
+    execution_action_from_leg_action,
+    order_intent_from_leg_order_intent,
     pos_side_from_position_intent,
+    position_intent_from_leg_intent,
     reduce_only_from_position_intent,
+    reduce_only_from_leg_action,
 )
 from aats.services.execution_engine.quantity_rules import minimum_internal_order_quantity, quantized_internal_quantity
 from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, to_decimal
@@ -75,6 +83,9 @@ class ExecutionPlanner:
         normalized_target_position_qty = to_decimal(target_position_qty)
         normalized_approved_target_position_qty = to_decimal(approved_target_position_qty)
         normalized_delta_qty = to_decimal(delta_qty)
+        resolved_position_mode = position_mode if position_mode in {"net_mode", "long_short_mode"} else None
+        if product_type == "derivatives" and resolved_position_mode == "long_short_mode":
+            return None
         normalized_approved_target_position_qty, normalized_delta_qty = self._normalize_delta_to_instrument_rule(
             symbol=symbol,
             current_position_qty=normalized_current_position_qty,
@@ -97,7 +108,6 @@ class ExecutionPlanner:
         )
         reduce_only = reduce_only_from_position_intent(position_intent)
         close_only = close_only_from_position_intent(position_intent)
-        resolved_position_mode = position_mode if position_mode in {"net_mode", "long_short_mode"} else None
         resolved_td_mode = td_mode or margin_mode
         exposure_side = self._exposure_side(normalized_approved_target_position_qty)
         normalized_execution_multiplier = self._normalized_multiplier(execution_aggressiveness_multiplier)
@@ -199,6 +209,7 @@ class ExecutionPlanner:
             margin_mode=margin_mode,  # type: ignore[arg-type]
             exposure_side=exposure_side,  # type: ignore[arg-type]
             execution_action=execution_action,
+            leg_action=None,
             position_intent=position_intent,  # type: ignore[arg-type]
             ai_execution_parameter_suggestion=translated_suggestion,
         )
@@ -231,6 +242,8 @@ class ExecutionPlanner:
 
     def build_intent(self, *, plan: ExecutionPlan) -> OrderIntent | None:
         if abs(plan.delta_qty) < EPSILON_DECIMAL_12:
+            return None
+        if plan.product_type == "derivatives" and plan.position_mode == "long_short_mode":
             return None
 
         quantity = abs(plan.delta_qty)
@@ -282,9 +295,260 @@ class ExecutionPlanner:
             margin_mode=plan.margin_mode,
             exposure_side=plan.exposure_side,
             execution_action=plan.execution_action,
+            leg_action=plan.leg_action,
             position_intent=plan.position_intent,
             ai_execution_parameter_suggestion=plan.ai_execution_parameter_suggestion,
         )
+
+    def build_leg_plan(
+        self,
+        *,
+        decision_id: str,
+        symbol: str,
+        side: Literal["buy", "sell"],
+        pos_side: Literal["long", "short"],
+        action: LegOrderAction,
+        quantity: Decimal | float,
+        urgency: str,
+        max_slippage_tolerance_bps: int,
+        reference_price: Decimal | float | None = None,
+        product_type: str = "derivatives",
+        target_leverage: float = 1.0,
+        margin_mode: str = "cross",
+        position_mode: str | None = "long_short_mode",
+        instrument_family: str | None = None,
+        settle_currency: str | None = None,
+        td_mode: str | None = None,
+        instrument_rule: InstrumentMetadata | None = None,
+        required_initial_margin: Decimal | float | None = None,
+        projected_margin_usage: Decimal | float | None = None,
+        projected_notional: Decimal | float | None = None,
+        risk_budget_multiplier: Decimal | float | None = None,
+        risk_budget_state: dict[str, object] | None = None,
+        execution_aggressiveness_multiplier: Decimal | float | None = None,
+        execution_aggressiveness_state: dict[str, object] | None = None,
+        only_reduce_required: bool = False,
+        risk_limit_breached: bool = False,
+        liquidation_buffer_remaining: Decimal | float | None = None,
+        strategy_family: str | None = None,
+        strategy_sleeve_id: str | None = None,
+        allocation_id: str | None = None,
+        strategy_bundle_id: str | None = None,
+        strategy_leg_role: Literal["primary", "hedge", "inventory", "accumulation"] | None = None,
+        strategy_pair_id: str | None = None,
+        strategy_opportunity_kind: str | None = None,
+        strategy_execution_mode: str | None = None,
+        strategy_state_phase: str | None = None,
+        ai_execution_parameter_suggestion: AIExecutionParameterSuggestionEnvelope | None = None,
+    ) -> LegExecutionPlan | None:
+        normalized_quantity = to_decimal(quantity)
+        if normalized_quantity <= EPSILON_DECIMAL_12:
+            return None
+        resolved_position_mode = position_mode if position_mode in {"net_mode", "long_short_mode"} else None
+        if product_type != "derivatives" or resolved_position_mode != "long_short_mode":
+            return None
+        normalized_quantity = self._normalize_leg_quantity_to_instrument_rule(
+            symbol=symbol,
+            quantity=normalized_quantity,
+            instrument_rule=instrument_rule,
+        )
+        if normalized_quantity <= EPSILON_DECIMAL_12:
+            return None
+        position_intent = position_intent_from_leg_intent(
+            side=side,
+            pos_side=pos_side,
+            action=action,
+            position_mode="long_short_mode",
+        )
+        reduce_only = reduce_only_from_leg_action(action)
+        close_only = close_only_from_leg_action(action)
+        normalized_urgency = urgency if urgency in {"low", "medium", "high"} else "medium"
+        normalized_execution_multiplier = self._normalized_multiplier(execution_aggressiveness_multiplier)
+        effective_slippage_tolerance_bps = self._effective_slippage_tolerance_bps(
+            max_slippage_tolerance_bps=max_slippage_tolerance_bps,
+            execution_aggressiveness_multiplier=normalized_execution_multiplier,
+        )
+        translated_suggestion = self._translate_ai_execution_parameter_suggestion(
+            ai_execution_parameter_suggestion,
+            side=side,
+            reference_price=reference_price,
+            max_slippage_tolerance_bps=effective_slippage_tolerance_bps,
+            execution_aggressiveness_multiplier=normalized_execution_multiplier,
+        )
+        execution_style = "taker"
+        order_type = "market"
+        limit_price = None
+        time_in_force = "IOC"
+        if (
+            translated_suggestion is not None
+            and translated_suggestion.applied_to_live_execution
+            and translated_suggestion.translation_preview is not None
+        ):
+            execution_style = translated_suggestion.translation_preview.execution_style
+            order_type = translated_suggestion.translation_preview.order_type
+            time_in_force = translated_suggestion.translation_preview.time_in_force
+            limit_price = self._bounded_live_limit_price(
+                side=side,
+                reference_price=reference_price,
+                preview=translated_suggestion.translation_preview,
+                max_slippage_tolerance_bps=effective_slippage_tolerance_bps,
+            )
+        return LegExecutionPlan(
+            plan_id=new_id("leg_plan"),
+            leg_intent_id=new_id("leg_intent"),
+            decision_id=decision_id,
+            symbol=symbol,
+            side=side,
+            pos_side=pos_side,
+            action=action,
+            quantity=normalized_quantity,
+            execution_style=execution_style,
+            order_type=order_type,  # type: ignore[arg-type]
+            limit_price=limit_price,
+            time_in_force=time_in_force,
+            urgency=normalized_urgency,
+            max_slippage_tolerance_bps=effective_slippage_tolerance_bps,
+            reference_price=reference_price,
+            reduce_only=reduce_only,
+            close_only=close_only,
+            td_mode=(td_mode or margin_mode),  # type: ignore[arg-type]
+            position_mode="long_short_mode",
+            reduce_only_reason=default_reduce_only_reason(
+                position_intent=position_intent,
+                leg_action=action,
+                reduce_only=reduce_only,
+            ),
+            close_only_reason=default_close_only_reason(
+                position_intent=position_intent,
+                leg_action=action,
+                close_only=close_only,
+            ),
+            instrument_family=instrument_family,
+            settle_currency=settle_currency,
+            required_initial_margin=(
+                None if required_initial_margin is None else to_decimal(required_initial_margin)
+            ),
+            projected_margin_usage=(
+                None if projected_margin_usage is None else to_decimal(projected_margin_usage)
+            ),
+            projected_notional=(
+                None if projected_notional is None else to_decimal(projected_notional)
+            ),
+            risk_budget_multiplier=(
+                None if risk_budget_multiplier is None else to_decimal(risk_budget_multiplier)
+            ),
+            risk_budget_state=dict(risk_budget_state or {}),
+            execution_aggressiveness_multiplier=normalized_execution_multiplier,
+            execution_aggressiveness_state=dict(execution_aggressiveness_state or {}),
+            only_reduce_required=bool(only_reduce_required),
+            risk_limit_breached=bool(risk_limit_breached),
+            liquidation_buffer_remaining=(
+                None if liquidation_buffer_remaining is None else to_decimal(liquidation_buffer_remaining)
+            ),
+            strategy_family=strategy_family,
+            strategy_sleeve_id=strategy_sleeve_id,
+            allocation_id=allocation_id,
+            strategy_bundle_id=strategy_bundle_id,
+            strategy_leg_role=strategy_leg_role,
+            strategy_pair_id=strategy_pair_id,
+            strategy_opportunity_kind=strategy_opportunity_kind,
+            strategy_execution_mode=strategy_execution_mode,
+            strategy_state_phase=strategy_state_phase,
+            product_type=product_type,  # type: ignore[arg-type]
+            target_leverage=target_leverage,
+            margin_mode=margin_mode,  # type: ignore[arg-type]
+            exposure_side=self._leg_exposure_side(pos_side=pos_side, action=action),  # type: ignore[arg-type]
+            execution_action=execution_action_from_leg_action(action),
+            position_intent=position_intent,
+            ai_execution_parameter_suggestion=translated_suggestion,
+        )
+
+    def build_leg_intent(self, *, plan: LegExecutionPlan) -> LegOrderIntent | None:
+        if plan.quantity <= EPSILON_DECIMAL_12:
+            return None
+        return LegOrderIntent(
+            leg_intent_id=plan.leg_intent_id,
+            decision_id=plan.decision_id,
+            symbol=plan.symbol,
+            side=plan.side,
+            pos_side=plan.pos_side,
+            action=plan.action,
+            quantity=plan.quantity,
+            execution_style=plan.execution_style,
+            order_type=plan.order_type,
+            limit_price=plan.limit_price,
+            reference_price=plan.reference_price,
+            urgency=plan.urgency,
+            time_in_force=plan.time_in_force,
+            max_slippage_tolerance_bps=plan.max_slippage_tolerance_bps,
+            reduce_only=plan.reduce_only,
+            close_only=plan.close_only,
+            td_mode=plan.td_mode,
+            position_mode=plan.position_mode,
+            reduce_only_reason=plan.reduce_only_reason,
+            close_only_reason=plan.close_only_reason,
+            instrument_family=plan.instrument_family,
+            settle_currency=plan.settle_currency,
+            required_initial_margin=plan.required_initial_margin,
+            projected_margin_usage=plan.projected_margin_usage,
+            projected_notional=plan.projected_notional,
+            risk_budget_multiplier=plan.risk_budget_multiplier,
+            risk_budget_state=plan.risk_budget_state,
+            execution_aggressiveness_multiplier=plan.execution_aggressiveness_multiplier,
+            execution_aggressiveness_state=plan.execution_aggressiveness_state,
+            only_reduce_required=plan.only_reduce_required,
+            risk_limit_breached=plan.risk_limit_breached,
+            liquidation_buffer_remaining=plan.liquidation_buffer_remaining,
+            idempotency_key=plan.leg_intent_id,
+            strategy_family=plan.strategy_family,
+            strategy_sleeve_id=plan.strategy_sleeve_id,
+            allocation_id=plan.allocation_id,
+            strategy_bundle_id=plan.strategy_bundle_id,
+            strategy_leg_role=plan.strategy_leg_role,
+            strategy_pair_id=plan.strategy_pair_id,
+            strategy_opportunity_kind=plan.strategy_opportunity_kind,
+            strategy_execution_mode=plan.strategy_execution_mode,
+            strategy_state_phase=plan.strategy_state_phase,
+            product_type=plan.product_type,
+            target_leverage=plan.target_leverage,
+            margin_mode=plan.margin_mode,
+            exposure_side=plan.exposure_side,
+            ai_execution_parameter_suggestion=plan.ai_execution_parameter_suggestion,
+        )
+
+    @staticmethod
+    def _normalize_leg_quantity_to_instrument_rule(
+        *,
+        symbol: str,
+        quantity: Decimal,
+        instrument_rule: InstrumentMetadata | None,
+    ) -> Decimal:
+        if instrument_rule is None:
+            return abs(quantity)
+        normalized_quantity = quantized_internal_quantity(
+            symbol=symbol,
+            quantity=abs(quantity),
+            instrument=instrument_rule,
+        )
+        minimum_delta_qty = minimum_internal_order_quantity(
+            symbol=symbol,
+            instrument=instrument_rule,
+        )
+        if normalized_quantity < EPSILON_DECIMAL_12:
+            return Decimal("0")
+        if minimum_delta_qty > EPSILON_DECIMAL_12 and normalized_quantity + EPSILON_DECIMAL_12 < minimum_delta_qty:
+            return Decimal("0")
+        return normalized_quantity
+
+    @staticmethod
+    def _leg_exposure_side(*, pos_side: Literal["long", "short"], action: LegOrderAction) -> str:
+        if action == "close":
+            return "flat"
+        return pos_side
+
+    @staticmethod
+    def order_intent_from_leg_order(*, leg_intent: LegOrderIntent) -> OrderIntent:
+        return order_intent_from_leg_order_intent(leg_intent)
 
     async def publish_plan(self, *, bus: EventBus, plan: ExecutionPlan) -> None:
         await publish_model(

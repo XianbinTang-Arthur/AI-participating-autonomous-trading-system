@@ -7,7 +7,7 @@ from decimal import Decimal
 import hashlib
 
 from aats.schemas.execution import FillEvent
-from aats.services.accounting import fill_fee_cost_in_quote
+from aats.services.accounting import fill_fee_delta_in_quote
 from aats.services.execution_engine.fill_ordering import fill_processing_sort_key
 from aats.services.portfolio_service.decimals import is_effectively_zero, to_decimal
 from aats.services.portfolio_service.position_keys import (
@@ -88,7 +88,7 @@ class LotBasedProjectionBuilder:
                 continue
             fill_price = to_decimal(fill.fill_price)
             signed_qty = fill_qty if fill.side == "buy" else -fill_qty
-            fee_quote = to_decimal(fill_fee_cost_in_quote(fill))
+            fee_quote = to_decimal(fill_fee_delta_in_quote(fill))
             total_fees_paid += fee_quote
 
             position_key = position_key_for_fill(fill)

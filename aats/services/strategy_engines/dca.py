@@ -98,10 +98,30 @@ class DcaStrategyEngine:
                     },
                 )
         recent_snapshots = engine_input.recent_market_snapshots.get(engine_input.context.symbol, [])
-        if self.settings.dca_pullback_only_enabled and recent_snapshots:
-            anchor = sum((to_decimal(item.last_price) for item in recent_snapshots), start=Decimal("0")) / Decimal(
-                len(recent_snapshots)
-            )
+        if self.settings.dca_pullback_only_enabled:
+            anchor_prices = [
+                to_decimal(item.last_price)
+                for item in recent_snapshots
+                if to_decimal(item.last_price) > EPSILON_DECIMAL_12
+            ]
+            required_anchor_snapshots = 2
+            if len(anchor_prices) < required_anchor_snapshots:
+                return StrategyCandidate(
+                    family="dca",
+                    state="inactive",
+                    enabled=True,
+                    selectable=False,
+                    execution_compatible=True,
+                    route_action="hold_current",
+                    headline="Pullback-only DCA is waiting for anchor history.",
+                    recommended_symbol=engine_input.context.symbol,
+                    reason_codes=["dca_pullback_anchor_history_insufficient"],
+                    metrics={
+                        "anchor_history_required": required_anchor_snapshots,
+                        "anchor_history_available": len(anchor_prices),
+                    },
+                )
+            anchor = sum(anchor_prices, start=Decimal("0")) / Decimal(len(anchor_prices))
             pullback_bps = Decimal(str(max(self.settings.dca_pullback_entry_bps, 0.0)))
             required_price = anchor * (Decimal("1") - (pullback_bps / Decimal("10000")))
             if price > required_price:

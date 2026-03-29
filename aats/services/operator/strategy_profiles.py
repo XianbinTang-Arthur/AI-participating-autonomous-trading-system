@@ -483,6 +483,9 @@ class StrategyProfileControlService:
         execution_health = context.get("execution_health") or {}
         live_guard = safety_state.get("live_guard") or {}
         trial_guard = safety_state.get("trial_guard") or {}
+        projected_margin_usage = live_guard.get("projected_margin_usage_fraction")
+        if projected_margin_usage is None:
+            projected_margin_usage = live_guard.get("projected_margin_usage")
         risk_budget = resolve_risk_budget_state(
             self.settings,
             execution_error_count=int(execution_health.get("recent_execution_error_count") or 0),
@@ -495,7 +498,7 @@ class StrategyProfileControlService:
             auto_halt_required=bool(safety_state.get("auto_halt_required")),
             trial_guard_breached=bool(safety_state.get("trial_guard_breached")),
             current_margin_usage_fraction=live_guard.get("current_initial_margin_usage_fraction"),
-            projected_margin_usage_fraction=live_guard.get("current_initial_margin_usage_fraction"),
+            projected_margin_usage_fraction=projected_margin_usage,
             nearest_liquidation_gap_ratio=live_guard.get("nearest_liquidation_gap_ratio"),
         )
         execution_aggressiveness = resolve_execution_aggressiveness_state(
@@ -510,7 +513,7 @@ class StrategyProfileControlService:
             auto_halt_required=bool(safety_state.get("auto_halt_required")),
             trial_guard_breached=bool(safety_state.get("trial_guard_breached")),
             current_margin_usage_fraction=live_guard.get("current_initial_margin_usage_fraction"),
-            projected_margin_usage_fraction=live_guard.get("current_initial_margin_usage_fraction"),
+            projected_margin_usage_fraction=projected_margin_usage,
             nearest_liquidation_gap_ratio=live_guard.get("nearest_liquidation_gap_ratio"),
         )
         return {

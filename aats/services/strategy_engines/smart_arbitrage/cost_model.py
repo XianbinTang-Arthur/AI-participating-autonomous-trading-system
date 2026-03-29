@@ -300,11 +300,9 @@ def _expected_funding_events(
     if funding_schedule:
         next_funding_ts = funding_schedule.get("next_funding_time")
         interval_hours = funding_schedule.get("funding_interval_hours")
-        updated_at = funding_schedule.get("updated_at")
-        schedule_reference_ts = updated_at if isinstance(updated_at, datetime) else normalized_reference_ts
         if isinstance(next_funding_ts, datetime):
             count, projection_active = _count_funding_events(
-                reference_ts=schedule_reference_ts,
+                reference_ts=normalized_reference_ts,
                 expected_hold_hours=expected_hold_hours,
                 next_funding_ts=next_funding_ts,
                 interval_hours=None if interval_hours in {None, ""} else to_decimal(interval_hours),
@@ -428,16 +426,21 @@ def _funding_cost_component(
 
     source_flags: list[str] = []
     if settings.smart_arbitrage_funding_source_mode == "account_proxy" and hedge_symbol:
-        proxy_bps = max(fee_resolver.funding_fee_bps_decimal(symbol=hedge_symbol), Decimal("0"))
-        if proxy_bps > Decimal("0"):
-            if expected_funding_events > 0:
-                source_flags.append("funding_account_proxy_per_event")
-                return proxy_bps * Decimal(expected_funding_events), source_flags
-            if funding_event_projection_active:
+        per_event_proxy_bps = fee_resolver.funding_fee_bps_per_event_decimal(symbol=hedge_symbol)
+        if per_event_proxy_bps is not None and per_event_proxy_bps > Decimal("0") and expected_funding_events > 0:
+            source_flags.append("funding_account_proxy_per_event")
+            return per_event_proxy_bps * Decimal(expected_funding_events), source_flags
+
+        total_proxy_bps = max(fee_resolver.funding_fee_bps_decimal(symbol=hedge_symbol), Decimal("0"))
+        if total_proxy_bps > Decimal("0"):
+            if funding_event_projection_active and expected_funding_events <= 0:
                 source_flags.append("funding_outside_projected_hold_window")
                 return Decimal("0"), source_flags
+            if expected_funding_events > 0 and per_event_proxy_bps is not None and per_event_proxy_bps > Decimal("0"):
+                source_flags.append("funding_account_proxy_per_event")
+                return per_event_proxy_bps * Decimal(expected_funding_events), source_flags
             source_flags.append("funding_account_proxy_total")
-            return proxy_bps, source_flags
+            return total_proxy_bps, source_flags
 
     configured_bps = max(to_decimal(settings.smart_arbitrage_estimated_funding_bps), Decimal("0"))
     if configured_bps > Decimal("0"):

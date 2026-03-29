@@ -90,6 +90,7 @@ class RecoveryQueryFacade:
                 if latest_reconciliation is not None
                 else None
             ),
+            "latest_reconciliation_summary": self.owner._reconciliation_mismatch_summary(latest_reconciliation),
             "latest_ai_degradation": self.owner.payload(latest_ai_degradation),
             "latest_ai_shadow_evaluation": self.owner.payload(latest_ai_shadow_evaluation),
             "ai_runtime": self.owner.ai_runtime(),

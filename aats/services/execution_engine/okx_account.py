@@ -28,6 +28,76 @@ from aats.services.portfolio_service.decimals import to_decimal
 from aats.services.strategy_engines.smart_arbitrage.pair_registry import load_pair_definitions
 
 
+def configured_derivatives_position_mode(*, settings: AATSSettings) -> str | None:
+    if settings.trading_product_type != "derivatives":
+        return None
+    value = str(getattr(settings, "derivatives_position_mode", "net") or "net").strip().lower()
+    if value not in {"net", "hedge"}:
+        return "net"
+    return value
+
+
+def required_exchange_position_mode(*, settings: AATSSettings) -> str | None:
+    configured = configured_derivatives_position_mode(settings=settings)
+    if configured == "hedge":
+        return "long_short_mode"
+    if configured == "net":
+        return "net_mode"
+    return None
+
+
+def exchange_position_mode_from_snapshot(snapshot: ExchangeAccountSnapshot | None) -> str | None:
+    if snapshot is None:
+        return None
+    account_configuration = snapshot.account_configuration
+    value = (
+        account_configuration.position_mode
+        if account_configuration is not None and account_configuration.position_mode not in {None, ""}
+        else snapshot.position_mode
+    )
+    if value in {None, ""}:
+        return None
+    return str(value)
+
+
+def derivatives_position_mode_contract(
+    *,
+    settings: AATSSettings,
+    snapshot: ExchangeAccountSnapshot | None,
+) -> dict[str, Any]:
+    configured_mode = configured_derivatives_position_mode(settings=settings)
+    required_mode = required_exchange_position_mode(settings=settings)
+    exchange_mode = exchange_position_mode_from_snapshot(snapshot)
+    match_required = bool(
+        settings.trading_product_type == "derivatives"
+        and settings.derivatives_require_exchange_pos_mode_match
+    )
+    matches = (
+        None
+        if required_mode in {None, ""} or exchange_mode in {None, ""}
+        else exchange_mode == required_mode
+    )
+    blocker_code = None
+    startup_error_code = None
+    if match_required and settings.trading_product_type == "derivatives":
+        if exchange_mode in {None, ""}:
+            blocker_code = "okx_position_mode_missing"
+            startup_error_code = "derivatives_exchange_runtime_requires_exchange_position_mode"
+        elif required_mode is not None and exchange_mode != required_mode:
+            blocker_code = "okx_position_mode_mismatch"
+            startup_error_code = "derivatives_exchange_runtime_position_mode_mismatch"
+    return {
+        "configured_derivatives_position_mode": configured_mode,
+        "required_exchange_position_mode": required_mode,
+        "exchange_position_mode": exchange_mode,
+        "exchange_position_mode_label": OKXAccountService._position_mode_label(exchange_mode),
+        "exchange_position_mode_matches_configured": matches,
+        "position_mode_match_required": match_required,
+        "blocker_code": blocker_code,
+        "startup_error_code": startup_error_code,
+    }
+
+
 class OKXAccountService:
     def __init__(
         self,
@@ -589,6 +659,7 @@ class OKXAccountService:
                 "absolute_total_by_currency": {},
                 "current_position_notional_usd": self._symbol_position_notional_usd(symbol),
                 "funding_fee_bps_proxy": None,
+                "funding_fee_bps_proxy_per_event": None,
             }
         latest_ts = max((self._bill_row_timestamp(row) for row in rows if self._bill_row_timestamp(row) is not None), default=None)
         net_total_by_currency: dict[str, Decimal] = {}
@@ -600,9 +671,12 @@ class OKXAccountService:
             absolute_total_by_currency[currency] = absolute_total_by_currency.get(currency, Decimal("0")) + abs(amount)
         current_position_notional_usd = self._symbol_position_notional_usd(symbol)
         funding_fee_bps_proxy = None
+        funding_fee_bps_proxy_per_event = None
         if current_position_notional_usd is not None and current_position_notional_usd > Decimal("0"):
             absolute_total = sum(absolute_total_by_currency.values(), start=Decimal("0"))
             funding_fee_bps_proxy = (absolute_total / current_position_notional_usd) * Decimal("10000")
+            if rows:
+                funding_fee_bps_proxy_per_event = funding_fee_bps_proxy / Decimal(len(rows))
         return {
             "available": True,
             "count": len(rows),
@@ -612,6 +686,7 @@ class OKXAccountService:
             "absolute_total_by_currency": {key: str(value) for key, value in absolute_total_by_currency.items()},
             "current_position_notional_usd": current_position_notional_usd,
             "funding_fee_bps_proxy": funding_fee_bps_proxy,
+            "funding_fee_bps_proxy_per_event": funding_fee_bps_proxy_per_event,
         }
 
     def latest_private_order_row(
@@ -713,6 +788,10 @@ class OKXAccountService:
         snapshot = self._latest_snapshot
         fresh = False
         blockers: list[str] = []
+        position_mode_contract = derivatives_position_mode_contract(
+            settings=self.settings,
+            snapshot=snapshot,
+        )
         if snapshot is not None:
             fresh = (utc_now() - snapshot.fetched_at).total_seconds() <= self.settings.account_state_stale_after_seconds
         if not self.settings.okx_credentials_configured:
@@ -723,6 +802,10 @@ class OKXAccountService:
             blockers.append("account_state_stale")
         elif self.settings.okx_account_config_validation_enabled:
             blockers.extend(self._account_config_blockers(snapshot))
+        else:
+            blocker_code = position_mode_contract.get("blocker_code")
+            if blocker_code not in {None, ""}:
+                blockers.append(str(blocker_code))
         if snapshot is not None and self.settings.okx_system_status_gate_enabled:
             blockers.extend(self._system_status_blockers(snapshot))
         blockers = list(dict.fromkeys(blockers))
@@ -741,6 +824,15 @@ class OKXAccountService:
             "ready": snapshot is not None and self._last_refresh_error is None and fresh and not blockers,
             "detail": "okx_account_snapshot",
             "blockers": blockers,
+            "configured_derivatives_position_mode": position_mode_contract.get("configured_derivatives_position_mode"),
+            "required_exchange_position_mode": position_mode_contract.get("required_exchange_position_mode"),
+            "exchange_position_mode": position_mode_contract.get("exchange_position_mode"),
+            "exchange_position_mode_label": position_mode_contract.get("exchange_position_mode_label"),
+            "exchange_position_mode_matches_configured": position_mode_contract.get(
+                "exchange_position_mode_matches_configured"
+            ),
+            "position_mode_match_required": position_mode_contract.get("position_mode_match_required"),
+            "position_mode_contract": position_mode_contract,
             "account_mode": None if snapshot is None else snapshot.account_mode,
             "position_mode": None if snapshot is None else snapshot.position_mode,
             "account_configuration": (
@@ -795,11 +887,18 @@ class OKXAccountService:
         maker = snapshot.fee_schedule.maker if snapshot.fee_schedule is not None else snapshot.fee_rates.get("maker")
         if maker in {None, ""}:
             return None
-        return abs(to_decimal(maker)) * Decimal("10000")
+        return to_decimal(maker) * Decimal("10000")
 
     def funding_fee_bps_proxy(self, symbol: str | None = None) -> Decimal | None:
         summary = self.recent_funding_fee_summary(symbol=symbol)
         proxy = summary.get("funding_fee_bps_proxy")
+        if proxy in {None, ""}:
+            return None
+        return to_decimal(proxy)
+
+    def funding_fee_bps_proxy_per_event(self, symbol: str | None = None) -> Decimal | None:
+        summary = self.recent_funding_fee_summary(symbol=symbol)
+        proxy = summary.get("funding_fee_bps_proxy_per_event")
         if proxy in {None, ""}:
             return None
         return to_decimal(proxy)
@@ -1626,6 +1725,13 @@ class OKXAccountService:
             blockers.append("okx_account_mode_incompatible_with_derivatives")
         if self.settings.trading_product_type == "derivatives" and position_mode in {None, ""}:
             blockers.append("okx_position_mode_missing")
+        position_mode_contract = derivatives_position_mode_contract(
+            settings=self.settings,
+            snapshot=snapshot,
+        )
+        blocker_code = position_mode_contract.get("blocker_code")
+        if blocker_code not in {None, ""}:
+            blockers.append(str(blocker_code))
         if self.settings.trading_product_type == "derivatives":
             blockers.extend(self._position_margin_blockers(snapshot))
         return blockers

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
 from decimal import Decimal
 from typing import Callable
 
@@ -27,7 +26,13 @@ from aats.services.runtime_scope import (
     order_states_for_scope,
     runtime_state_scope,
 )
-from aats.storage.base import ExecutionObligationRepository, ExecutionRepository, PortfolioRepository, ReconciliationRepository
+from aats.storage.base import (
+    ExecutionObligationRepository,
+    ExecutionRepository,
+    PortfolioRepository,
+    ReconciliationRepository,
+    StrategyRuntimeRepository,
+)
 
 
 @dataclass(slots=True)
@@ -48,6 +53,7 @@ class ExecutionRecoveryService:
         obligation_repo: ExecutionObligationRepository,
         portfolio_repo: PortfolioRepository,
         reconciliation_repo: ReconciliationRepository,
+        strategy_runtime_repo: StrategyRuntimeRepository | None,
         reconstruction_service: PortfolioReconstructionService,
         price_provider: Callable[[str], Decimal],
         kill_switch: KillSwitch,
@@ -60,6 +66,7 @@ class ExecutionRecoveryService:
         self.obligation_repo = obligation_repo
         self.portfolio_repo = portfolio_repo
         self.reconciliation_repo = reconciliation_repo
+        self.strategy_runtime_repo = strategy_runtime_repo
         self.reconstruction_service = reconstruction_service
         self.price_provider = price_provider
         self.kill_switch = kill_switch
@@ -103,6 +110,7 @@ class ExecutionRecoveryService:
             scope=self.runtime_scope,
             order_states=scoped_order_states,
             obligations=self._scoped_active_obligations(),
+            strategy_bundles=self._scoped_recent_strategy_bundles(),
         )
         if bundle_recovery.bundle_recovery_required:
             notes.append(f"bundle_recovery_required:{bundle_recovery.open_bundle_count}")
@@ -125,7 +133,7 @@ class ExecutionRecoveryService:
             portfolio_state.load_portfolio_snapshot(
                 latest_snapshot,
                 applied_fill_ids={fill.fill_id for fill in fills},
-                total_fees_paid=PortfolioState.total_fee_cost_in_quote(fills),
+                total_fees_paid=PortfolioState.total_fee_delta_in_quote(fills),
             )
             rebuilt = self._rebuild_snapshot_for_validation(
                 latest_snapshot=latest_snapshot,
@@ -167,7 +175,7 @@ class ExecutionRecoveryService:
                 portfolio_state.load_portfolio_snapshot(
                     rebuilt_snapshot,
                     applied_fill_ids={fill.fill_id for fill in fills},
-                    total_fees_paid=PortfolioState.total_fee_cost_in_quote(fills),
+                    total_fees_paid=PortfolioState.total_fee_delta_in_quote(fills),
                 )
                 self.portfolio_repo.save_snapshot(rebuilt_snapshot)
                 rebuilt_snapshot_saved = True
@@ -420,6 +428,20 @@ class ExecutionRecoveryService:
                 continue
             obligations.append(obligation)
         return obligations
+
+    def _scoped_recent_strategy_bundles(self):
+        if self.strategy_runtime_repo is None:
+            return []
+        bundles = self.strategy_runtime_repo.recent_execution_bundles(
+            product_type=self.runtime_scope.product_type,
+            margin_mode=self.runtime_scope.margin_mode,
+            limit=50,
+        )
+        return [
+            bundle
+            for bundle in bundles
+            if self.runtime_scope.symbol_allowed(bundle.selected_symbol)
+        ]
 
     def _resolved_obligation(
         self,

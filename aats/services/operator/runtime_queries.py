@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING, Any
 
 from aats.events import topics
 from aats.schemas.common import utc_now
+from aats.services.execution_engine.okx_account import derivatives_position_mode_contract
 from aats.services.runtime_scope import latest_topic_event_for_scope
 
 if TYPE_CHECKING:
@@ -337,6 +338,11 @@ class RuntimeQueryFacade:
             scope=self.owner.state_scope,
         )
         control_plane_consistency = self._control_plane_consistency()
+        account_status = self.owner.account_service_status()
+        position_mode_contract = account_status.get("position_mode_contract") or derivatives_position_mode_contract(
+            settings=self.owner.runtime.settings,
+            snapshot=account_snapshot,
+        )
         now = utc_now()
         return {
             "runtime_profile": self.owner.runtime.runtime_profile.to_dict(),
@@ -352,6 +358,7 @@ class RuntimeQueryFacade:
                 if account_snapshot is not None and account_snapshot.account_configuration is not None
                 else None
             ),
+            "account_position_mode_contract": position_mode_contract,
             "risk_snapshot": (
                 account_snapshot.risk_snapshot.model_dump(mode="json")
                 if account_snapshot is not None and account_snapshot.risk_snapshot is not None

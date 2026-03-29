@@ -361,8 +361,8 @@ class LedgerFundingFeeSyncService:
 
     @staticmethod
     def _bill_amount(row: dict[str, Any]) -> Decimal:
-        for field in ("balChg", "sz", "amount", "amt", "pnl"):
-            value = row.get(field)
+        for key in ("balChg", "sz", "amount", "amt", "pnl"):
+            value = row.get(key)
             if value not in {None, ""}:
                 return Decimal(str(value))
         return Decimal("0")

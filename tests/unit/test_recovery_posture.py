@@ -7,6 +7,7 @@ from aats.bootstrap.settings import AATSSettings
 from aats.schemas.common import utc_now
 from aats.schemas.execution import OrderState
 from aats.schemas.reconciliation import ReconciliationReport
+from aats.schemas.strategy_runtime import StrategyExecutionBundle, StrategyLegIntent
 from aats.schemas.system import RecoveryStatus
 from aats.services.governance_engine.recovery_posture import RecoveryPostureEvaluator
 
@@ -425,6 +426,89 @@ class TestRecoveryPostureEvaluator(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(cleared.resume_eligible)
         self.assertFalse(cleared.bundle_recovery_required)
         self.assertEqual(cleared.bundle_summaries, [])
+
+    async def test_finalize_status_respects_persisted_review_required_overlay_bundle(self) -> None:
+        runtime = await build_runtime(
+            AATSSettings.model_validate(
+                {
+                    "mode": "paper_live",
+                    "market_data_backend": "demo",
+                    "execution_backend": "paper",
+                    "account_backend": "disabled",
+                    "account_read_enabled": False,
+                    "trading_product_type": "derivatives",
+                    "margin_mode": "cross",
+                    "default_symbol": "BTC-USDT-SWAP",
+                    "allowed_symbols": ("BTC-USDT-SWAP",),
+                    "storage_mode": "memory",
+                    "event_persistence_mode": "strict",
+                }
+            )
+        )
+        evaluator = RecoveryPostureEvaluator(runtime)
+        await runtime.market_gateway.run_local_publisher(
+            symbol=runtime.settings.default_symbol,
+            iterations=2,
+            interval_seconds=0.0,
+        )
+        runtime.strategy_runtime_repo.save_execution_bundle(
+            StrategyExecutionBundle(
+                bundle_id="bundle_overlay_review",
+                decision_id="decision_overlay_review",
+                family="directional",
+                participating_families=["directional"],
+                strategy_sleeve_refs=["sleeve_independent_long", "sleeve_independent_short"],
+                allocation_id="alloc_overlay_review",
+                product_type="derivatives",
+                margin_mode="cross",
+                allowed_symbols=(runtime.settings.default_symbol,),
+                route_action="override_target",
+                bundle_type="hedge_protected",
+                status="review_required",
+                selected_symbol=runtime.settings.default_symbol,
+                operator_summary="overlay bundle mixed terminal outcome",
+                reason_codes=["strategy_bundle_review_required"],
+                legs=[
+                    StrategyLegIntent(
+                        symbol=runtime.settings.default_symbol,
+                        product_type="derivatives",
+                        side="buy",
+                        position_mode="long_short_mode",
+                        pos_side="long",
+                        action="open",
+                        family="directional",
+                        role="primary",
+                        strategy_sleeve_id="sleeve_independent_long",
+                        allocation_id="alloc_overlay_review",
+                        margin_mode="cross",
+                    ),
+                    StrategyLegIntent(
+                        symbol=runtime.settings.default_symbol,
+                        product_type="derivatives",
+                        side="sell",
+                        position_mode="long_short_mode",
+                        pos_side="short",
+                        action="open",
+                        family="directional",
+                        role="primary",
+                        strategy_sleeve_id="sleeve_independent_short",
+                        allocation_id="alloc_overlay_review",
+                        margin_mode="cross",
+                    ),
+                ],
+            )
+        )
+
+        final = evaluator.finalize_status()
+
+        self.assertEqual(final.recovery_state, "review_required")
+        self.assertTrue(final.review_required)
+        self.assertFalse(final.resume_eligible)
+        self.assertFalse(final.safe_to_trade)
+        self.assertTrue(final.bundle_recovery_required)
+        self.assertEqual(len(final.bundle_summaries), 1)
+        self.assertEqual(final.bundle_summaries[0].recovery_state, "review_required")
+        self.assertIn("strategy_bundle_recovery_requires_review", final.resume_blocked_reasons)
 
 
 if __name__ == "__main__":

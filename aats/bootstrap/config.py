@@ -16,6 +16,7 @@ from aats.bus.memory_bus import InMemoryEventBus
 from aats.events import topics
 from aats.events.envelopes import build_envelope, parse_payload, publish_model
 from aats.schemas.decision import DecisionOutcome, PositionTarget
+from aats.schemas.execution import LegOrderIntent, order_intent_from_leg_order_intent
 from aats.schemas.governance import PolicyDecision, RiskDecision
 from aats.services.ai_service.inference import AIInferenceService
 from aats.services.ai_service.prompt_builder import PromptBuilder
@@ -28,10 +29,17 @@ from aats.services.decision_engine.target_position import TargetPositionEngine
 from aats.services.decision_engine.trigger import DecisionCycleTrigger
 from aats.services.decision_engine.trigger_policy import DecisionTriggerPolicy
 from aats.services.execution_engine.exchange_adapter import ExchangeAdapter
-from aats.services.execution_engine.okx_account import OKXAccountService
+from aats.services.execution_engine.okx_account import (
+    OKXAccountService,
+    derivatives_position_mode_contract,
+)
 from aats.services.execution_engine.okx_adapter import OKXExecutionAdapter
 from aats.services.execution_engine.okx_private_websocket import OKXPrivateWebSocketClient
 from aats.services.execution_engine.baseline_import import AccountBaselineImportService
+from aats.services.execution_engine.bundle_status import (
+    apply_strategy_bundle_status_reason_codes,
+    derive_strategy_bundle_status,
+)
 from aats.services.execution_engine.obligations import ExecutionObligationService
 from aats.services.execution_engine.recovery import ExecutionRecoveryService
 from aats.services.execution_engine.okx_rest import OKXRESTClient
@@ -777,6 +785,20 @@ def _validate_operator_auth_settings(settings: AATSSettings, storage: StorageBac
     raise ValueError("operator_session_auth_requires_enabled_admin_user")
 
 
+def _validate_exchange_position_mode_contract(
+    *,
+    settings: AATSSettings,
+    snapshot,
+) -> None:
+    contract = derivatives_position_mode_contract(
+        settings=settings,
+        snapshot=snapshot,
+    )
+    startup_error_code = contract.get("startup_error_code")
+    if startup_error_code not in {None, ""}:
+        raise ValueError(str(startup_error_code))
+
+
 def _backfill_fill_outcomes_from_event_store(
     *,
     event_store: EventStore,
@@ -984,6 +1006,7 @@ def _build_position_target_handler(
     metrics: MetricsRegistry,
     bus: InMemoryEventBus,
     event_store: EventStore,
+    execution_repo: ExecutionRepository,
     strategy_runtime_repo: StrategyRuntimeRepository | None = None,
 ):
     def _exposure_side(quantity: Decimal) -> str:
@@ -1257,22 +1280,189 @@ def _build_position_target_handler(
             profile_control_decision=base_target.profile_control_decision,
         )
 
+    def _strategy_leg_execution_semantics(*, leg) -> dict[str, Any] | None:
+        pos_side = str(getattr(leg, "pos_side", "") or "").strip().lower()
+        action = str(getattr(leg, "action", "") or "").strip().lower()
+        if pos_side not in {"long", "short"} or action not in {"open", "reduce", "close"}:
+            return None
+        current_qty = to_decimal(getattr(leg, "current_position_qty", None) or Decimal("0"))
+        target_qty = to_decimal(
+            getattr(leg, "target_position_qty", None)
+            if getattr(leg, "target_position_qty", None) is not None
+            else current_qty
+        )
+        delta_qty = to_decimal(
+            getattr(leg, "delta_position_qty", None)
+            if getattr(leg, "delta_position_qty", None) is not None
+            else target_qty - current_qty
+        )
+        quantity = abs(delta_qty)
+        if quantity <= Decimal("1e-12"):
+            return None
+        side = str(getattr(leg, "side", "") or "").strip().lower()
+        if side not in {"buy", "sell"}:
+            opening = delta_qty > 0
+            side = "buy" if (pos_side == "long" and opening) or (pos_side == "short" and not opening) else "sell"
+        return {
+            "pos_side": pos_side,
+            "action": action,
+            "side": side,
+            "quantity": quantity,
+        }
+
+    def _plan_for_strategy_leg(
+        *,
+        base_target: PositionTarget,
+        leg,
+        leg_target: PositionTarget,
+        policy_decision: PolicyDecision,
+    ) -> dict[str, Any]:
+        account_snapshot = account_service.latest_snapshot()
+        account_configuration = None if account_snapshot is None else account_snapshot.account_configuration
+        configured_position_mode = (
+            "long_short_mode"
+            if str(getattr(leg, "product_type", "") or "") == "derivatives"
+            and str(settings.derivatives_position_mode or "").strip().lower() == "hedge"
+            else None
+        )
+        position_mode = (
+            configured_position_mode
+            if account_configuration is None
+            else (account_configuration.position_mode or configured_position_mode)
+        )
+        instrument_rule = account_service.instrument_metadata(leg.symbol)
+        reference_price = next(
+            (
+                candidate
+                for candidate in (
+                    to_decimal(getattr(leg, "reference_price", None) or Decimal("0")),
+                    _reference_price_for_target(leg_target),
+                    market_gateway.latest_price(leg.symbol),
+                )
+                if candidate is not None and candidate > Decimal("1e-12")
+            ),
+            None,
+        )
+        semantics = _strategy_leg_execution_semantics(leg=leg)
+        if (
+            semantics is not None
+            and str(getattr(leg, "product_type", "") or "") == "derivatives"
+            and position_mode == "long_short_mode"
+        ):
+            provisional_plan = execution_planner.build_leg_plan(
+                decision_id=base_target.decision_id,
+                symbol=leg.symbol,
+                side=semantics["side"],
+                pos_side=semantics["pos_side"],
+                action=semantics["action"],
+                quantity=semantics["quantity"],
+                urgency=base_target.urgency,
+                max_slippage_tolerance_bps=base_target.max_slippage_tolerance_bps,
+                reference_price=reference_price,
+                product_type=str(getattr(leg, "product_type", "derivatives") or "derivatives"),
+                target_leverage=float(getattr(leg, "target_leverage", 1.0) or 1.0),
+                margin_mode=str(getattr(leg, "margin_mode", "cross") or "cross"),
+                position_mode=position_mode,
+                instrument_rule=instrument_rule,
+                instrument_family=(
+                    None
+                    if instrument_rule is None
+                    else instrument_rule.instrument_family
+                ),
+                settle_currency=(
+                    None
+                    if instrument_rule is None
+                    else instrument_rule.settle_currency
+                ),
+                td_mode=str(getattr(leg, "margin_mode", "cross") or "cross"),
+                strategy_family=str(getattr(leg, "family", None) or base_target.strategy_family),
+                strategy_sleeve_id=getattr(leg, "strategy_sleeve_id", None) or base_target.strategy_sleeve_id,
+                allocation_id=getattr(leg, "allocation_id", None) or base_target.allocation_id,
+                strategy_bundle_id=base_target.strategy_bundle_id,
+                strategy_leg_role=getattr(leg, "role", None) or "primary",
+                strategy_pair_id=getattr(leg, "pair_id", None) or base_target.strategy_pair_id,
+                strategy_opportunity_kind=getattr(leg, "opportunity_kind", None) or base_target.strategy_opportunity_kind,
+                strategy_execution_mode=getattr(leg, "execution_mode", None) or base_target.strategy_execution_mode,
+                strategy_state_phase=getattr(leg, "state_phase", None) or base_target.strategy_state_phase,
+                ai_execution_parameter_suggestion=base_target.ai_execution_parameter_suggestion,
+            )
+            if provisional_plan is None:
+                return {
+                    "policy": policy_decision,
+                    "risk": None,
+                    "plan": None,
+                    "intent": None,
+                }
+            provisional_intent = execution_planner.build_leg_intent(plan=provisional_plan)
+            if provisional_intent is None:
+                return {
+                    "policy": policy_decision,
+                    "risk": None,
+                    "plan": provisional_plan,
+                    "intent": None,
+                }
+            risk_decision = risk_engine.evaluate_leg_order(provisional_intent)
+            final_plan = provisional_plan.model_copy(
+                update={
+                    "required_initial_margin": risk_decision.required_initial_margin,
+                    "projected_margin_usage": risk_decision.projected_margin_usage,
+                    "projected_notional": risk_decision.projected_notional,
+                    "risk_budget_multiplier": risk_decision.risk_budget_multiplier,
+                    "risk_budget_state": dict(risk_decision.risk_budget_state),
+                    "execution_aggressiveness_multiplier": risk_decision.execution_aggressiveness_multiplier,
+                    "execution_aggressiveness_state": dict(risk_decision.execution_aggressiveness_state),
+                    "only_reduce_required": risk_decision.only_reduce_required,
+                    "risk_limit_breached": risk_decision.risk_limit_breached,
+                    "liquidation_buffer_remaining": risk_decision.liquidation_buffer_remaining,
+                }
+            )
+            final_intent = execution_planner.build_leg_intent(plan=final_plan)
+            return {
+                "policy": policy_decision,
+                "risk": risk_decision,
+                "plan": final_plan,
+                "intent": final_intent,
+            }
+
+        risk_decision = risk_engine.evaluate(target=leg_target) if policy_decision.execution_allowed else None
+        plan = None if risk_decision is None else _plan_for_target(target=leg_target, risk_decision=risk_decision)
+        intent = None if plan is None else execution_planner.build_intent(plan=plan)
+        return {
+            "policy": policy_decision,
+            "risk": risk_decision,
+            "plan": plan,
+            "intent": intent,
+        }
+
     def _aggregate_policy_decision(
         *,
         target: PositionTarget,
         leg_results: list[dict[str, Any]],
+        executed_leg_results: list[dict[str, Any]] | None = None,
+        partial_execution_allowed: bool = False,
     ) -> PolicyDecision:
+        effective_leg_results = (
+            executed_leg_results
+            if partial_execution_allowed and executed_leg_results
+            else leg_results
+        )
         rejection_reasons = list(
             dict.fromkeys(
                 reason
-                for item in leg_results
+                for item in effective_leg_results
                 for reason in (item["policy"].rejection_reasons or [])
                 if reason
             )
         )
-        execution_allowed = all(item["policy"].execution_allowed for item in leg_results)
-        submission_allowed = all(item["policy"].submission_allowed for item in leg_results)
-        dry_run_only = any(item["policy"].dry_run_only for item in leg_results) and not submission_allowed
+        if partial_execution_allowed:
+            execution_allowed = bool(executed_leg_results)
+            submission_allowed = bool(executed_leg_results) and all(
+                item["policy"].submission_allowed for item in (executed_leg_results or [])
+            )
+        else:
+            execution_allowed = all(item["policy"].execution_allowed for item in leg_results)
+            submission_allowed = all(item["policy"].submission_allowed for item in leg_results)
+        dry_run_only = any(item["policy"].dry_run_only for item in effective_leg_results) and not submission_allowed
         return PolicyDecision(
             decision_id=target.decision_id,
             mode=mode_controller.mode,
@@ -1280,7 +1470,9 @@ def _build_position_target_handler(
             execution_allowed=execution_allowed,
             submission_allowed=submission_allowed,
             dry_run_only=dry_run_only,
-            requires_human_approval=any(item["policy"].requires_human_approval for item in leg_results),
+            requires_human_approval=any(
+                item["policy"].requires_human_approval for item in effective_leg_results
+            ),
             allowed_symbols=list(settings.expanded_allowed_symbols()),
             allowed_execution_styles=["market", "limit"],
             max_notional_override=settings.max_notional_per_symbol,
@@ -1288,12 +1480,142 @@ def _build_position_target_handler(
             rejection_reasons=rejection_reasons,
         )
 
+    def _independent_partial_execution_supported(
+        *,
+        target: PositionTarget,
+        leg_results: list[dict[str, Any]],
+    ) -> bool:
+        leg_execution_modes = {
+            str(getattr(item["leg"], "execution_mode", "") or "").strip().lower()
+            for item in leg_results
+        }
+        leg_overlay_modes = {
+            str(getattr(item["leg"], "overlay_mode", "") or "").strip().lower()
+            for item in leg_results
+        }
+        return len(leg_results) > 1 and (
+            str(target.strategy_execution_mode or "").strip().lower() == "independent_books"
+            or any(mode.startswith("independent_") for mode in leg_execution_modes)
+            or "independent" in leg_overlay_modes
+        )
+
+    def _leg_result_execution_allowed(item: dict[str, Any]) -> bool:
+        policy_decision = item["policy"]
+        risk_decision = item["risk"]
+        if not policy_decision.execution_allowed:
+            return False
+        if risk_decision is None or not risk_decision.approved or risk_decision.halt_required:
+            return False
+        if item.get("plan") is None:
+            return False
+        return True
+
+    def _independent_leg_priority(
+        *,
+        target: PositionTarget,
+        item: dict[str, Any],
+        original_index: int,
+    ) -> tuple[int, float, int]:
+        leg = item["leg"]
+        action = str(getattr(leg, "action", "") or "").strip().lower()
+        if action in {"close", "reduce"}:
+            return (0, 0.0, original_index)
+        overlay_decision = target.hedge_overlay_decision
+        if str(getattr(leg, "pos_side", "") or "").strip().lower() == "short":
+            score = float(getattr(overlay_decision, "short_leg_score", 0.0) or 0.0)
+        else:
+            score = float(getattr(overlay_decision, "long_leg_score", 0.0) or 0.0)
+        return (1, -score, original_index)
+
+    def _apply_bundle_risk_rejection(
+        *,
+        item: dict[str, Any],
+        rejection_reasons: list[str],
+    ) -> None:
+        unique_reasons = list(dict.fromkeys(item for item in rejection_reasons if item))
+        leg = item["leg"]
+        item["leg"] = leg.model_copy(
+            update={
+                "risk_approved": False,
+                "risk_rejection_reasons": list(
+                    dict.fromkeys(
+                        [
+                            *(leg.risk_rejection_reasons or []),
+                            *unique_reasons,
+                        ]
+                    )
+                ),
+                "risk_constraints_applied": list(
+                    dict.fromkeys(
+                        [
+                            *(leg.risk_constraints_applied or []),
+                            "bundle_leg_risk_constraints_applied",
+                            *unique_reasons,
+                        ]
+                    )
+                ),
+            }
+        )
+
+    def _select_bundle_safe_leg_subset(
+        *,
+        target: PositionTarget,
+        candidate_leg_results: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], RiskDecision | None, list[str]]:
+        accepted: list[dict[str, Any]] = []
+        accepted_bundle_risk: RiskDecision | None = None
+        blocked_reasons: list[str] = []
+        ordered_candidates = sorted(
+            enumerate(candidate_leg_results),
+            key=lambda pair: _independent_leg_priority(
+                target=target,
+                item=pair[1],
+                original_index=pair[0],
+            ),
+        )
+        for _index, item in ordered_candidates:
+            candidate_intents = [accepted_item["intent"] for accepted_item in accepted]
+            intent = item.get("intent")
+            if intent is None:
+                continue
+            candidate_intents.append(intent)
+            candidate_bundle_risk = risk_engine.evaluate_leg_order_bundle(candidate_intents)
+            if candidate_bundle_risk.approved and not candidate_bundle_risk.halt_required:
+                accepted.append(item)
+                accepted_bundle_risk = candidate_bundle_risk
+                continue
+            reasons = list(candidate_bundle_risk.rejection_reasons or ["bundle_leg_risk_constraints_applied"])
+            blocked_reasons.extend(reasons)
+            _apply_bundle_risk_rejection(item=item, rejection_reasons=reasons)
+        return accepted, accepted_bundle_risk, list(dict.fromkeys(item for item in blocked_reasons if item))
+
+    def _effective_bundle_target_qty(
+        *,
+        target: PositionTarget,
+        executed_leg_results: list[dict[str, Any]],
+    ) -> Decimal:
+        return to_decimal(target.current_position_qty) + sum(
+            (
+                to_decimal(item["leg"].delta_position_qty or Decimal("0"))
+                for item in executed_leg_results
+            ),
+            start=Decimal("0"),
+        )
+
     def _aggregate_risk_decision(
         *,
         target: PositionTarget,
         leg_results: list[dict[str, Any]],
+        executed_leg_results: list[dict[str, Any]] | None = None,
+        partial_execution_allowed: bool = False,
+        bundle_risk_decision: RiskDecision | None = None,
     ) -> RiskDecision:
-        evaluated_risks = [item["risk"] for item in leg_results if item["risk"] is not None]
+        effective_leg_results = (
+            executed_leg_results
+            if partial_execution_allowed and executed_leg_results
+            else leg_results
+        )
+        evaluated_risks = [item["risk"] for item in effective_leg_results if item["risk"] is not None]
         capped_notional = sum(
             (
                 to_decimal(risk.capped_target_notional or Decimal("0"))
@@ -1349,27 +1671,140 @@ def _build_position_target_handler(
             (to_decimal(risk.execution_aggressiveness_multiplier) for risk in evaluated_risks),
             default=Decimal("1"),
         )
+        if bundle_risk_decision is not None:
+            capped_notional = to_decimal(bundle_risk_decision.capped_target_notional or capped_notional)
+            required_initial_margin = to_decimal(bundle_risk_decision.required_initial_margin or required_initial_margin)
+            projected_notional = to_decimal(bundle_risk_decision.projected_notional or projected_notional)
+            projected_margin_usage_candidates = (
+                []
+                if bundle_risk_decision.projected_margin_usage is None
+                else [to_decimal(bundle_risk_decision.projected_margin_usage)]
+            )
+            liquidation_buffer_candidates = (
+                []
+                if bundle_risk_decision.liquidation_buffer_remaining is None
+                else [to_decimal(bundle_risk_decision.liquidation_buffer_remaining)]
+            )
+            rejection_reasons = list(
+                dict.fromkeys(
+                    [
+                        *(bundle_risk_decision.rejection_reasons or []),
+                        *rejection_reasons,
+                    ]
+                )
+            )
+            constraints_applied = list(
+                dict.fromkeys(
+                    [
+                        *(bundle_risk_decision.constraints_applied or []),
+                        *constraints_applied,
+                    ]
+                )
+            )
+            risk_budget_multiplier = min(
+                risk_budget_multiplier,
+                to_decimal(bundle_risk_decision.risk_budget_multiplier),
+            )
+            execution_aggressiveness_multiplier = min(
+                execution_aggressiveness_multiplier,
+                to_decimal(bundle_risk_decision.execution_aggressiveness_multiplier),
+            )
+        partial_leg_execution = (
+            partial_execution_allowed
+            and bool(executed_leg_results)
+            and len(executed_leg_results or []) < len(leg_results)
+        )
+        if partial_leg_execution:
+            constraints_applied = list(
+                dict.fromkeys(
+                    [
+                        *constraints_applied,
+                        "strategy_bundle_partial_leg_execution",
+                    ]
+                )
+            )
+        approved = len(evaluated_risks) == len(effective_leg_results) and bool(effective_leg_results) and all(
+            risk.approved for risk in evaluated_risks
+        )
+        if bundle_risk_decision is not None:
+            approved = approved and bundle_risk_decision.approved
         return RiskDecision(
             decision_id=target.decision_id,
-            approved=len(evaluated_risks) == len(leg_results) and all(risk.approved for risk in evaluated_risks),
-            modified=any(risk.modified for risk in evaluated_risks),
-            capped_target_position_qty=target.target_position_qty,
+            approved=approved,
+            modified=partial_leg_execution
+            or any(risk.modified for risk in evaluated_risks)
+            or (bundle_risk_decision.modified if bundle_risk_decision is not None else False),
+            capped_target_position_qty=(
+                _effective_bundle_target_qty(target=target, executed_leg_results=executed_leg_results or [])
+                if partial_execution_allowed and executed_leg_results
+                else (
+                    bundle_risk_decision.capped_target_position_qty
+                    if bundle_risk_decision is not None
+                    else target.target_position_qty
+                )
+            ),
             capped_target_notional=capped_notional,
             required_initial_margin=required_initial_margin,
             projected_margin_usage=max(projected_margin_usage_candidates, default=None),
             projected_notional=projected_notional,
-            current_open_order_count=max((risk.current_open_order_count for risk in evaluated_risks), default=0),
+            current_open_order_count=(
+                bundle_risk_decision.current_open_order_count
+                if bundle_risk_decision is not None
+                else max((risk.current_open_order_count for risk in evaluated_risks), default=0)
+            ),
             risk_budget_multiplier=risk_budget_multiplier,
             risk_budget_state={"bundle": True},
             execution_aggressiveness_multiplier=execution_aggressiveness_multiplier,
             execution_aggressiveness_state={"bundle": True},
             constraints_applied=constraints_applied,
-            risk_score=max((float(risk.risk_score) for risk in evaluated_risks), default=0.0),
-            flatten_required=any(risk.flatten_required for risk in evaluated_risks),
-            halt_required=any(risk.halt_required for risk in evaluated_risks),
-            only_reduce_required=any(risk.only_reduce_required for risk in evaluated_risks),
-            risk_limit_breached=any(risk.risk_limit_breached for risk in evaluated_risks),
+            risk_score=max(
+                [
+                    *(float(risk.risk_score) for risk in evaluated_risks),
+                    *(
+                        []
+                        if bundle_risk_decision is None
+                        else [float(bundle_risk_decision.risk_score)]
+                    ),
+                ],
+                default=0.0,
+            ),
+            flatten_required=any(risk.flatten_required for risk in evaluated_risks) or (
+                bundle_risk_decision.flatten_required if bundle_risk_decision is not None else False
+            ),
+            halt_required=any(risk.halt_required for risk in evaluated_risks) or (
+                bundle_risk_decision.halt_required if bundle_risk_decision is not None else False
+            ),
+            only_reduce_required=any(risk.only_reduce_required for risk in evaluated_risks) or (
+                bundle_risk_decision.only_reduce_required if bundle_risk_decision is not None else False
+            ),
+            leg_only_reduce_constraints=(
+                list(bundle_risk_decision.leg_only_reduce_constraints)
+                if bundle_risk_decision is not None and bundle_risk_decision.leg_only_reduce_constraints
+                else [
+                    constraint
+                    for risk in evaluated_risks
+                    for constraint in getattr(risk, "leg_only_reduce_constraints", [])
+                ]
+            ),
+            risk_limit_breached=any(risk.risk_limit_breached for risk in evaluated_risks) or (
+                bundle_risk_decision.risk_limit_breached if bundle_risk_decision is not None else False
+            ),
             liquidation_buffer_remaining=min(liquidation_buffer_candidates, default=None),
+            current_derivatives_exposure=(
+                bundle_risk_decision.current_derivatives_exposure
+                if bundle_risk_decision is not None
+                else None
+            ),
+            projected_derivatives_exposure=(
+                bundle_risk_decision.projected_derivatives_exposure
+                if bundle_risk_decision is not None
+                else None
+            ),
+            derivatives_exposure_limits=(
+                bundle_risk_decision.derivatives_exposure_limits
+                if bundle_risk_decision is not None
+                else None
+            ),
             rejection_reasons=rejection_reasons,
         )
 
@@ -1380,12 +1815,13 @@ def _build_position_target_handler(
 
         if target.strategy_execution_legs:
             leg_results: list[dict[str, Any]] = []
-            synthetic_current_by_leg_key: dict[tuple[str, str, str], Decimal] = {}
+            synthetic_current_by_leg_key: dict[tuple[str, str, str, str], Decimal] = {}
             for raw_leg in target.strategy_execution_legs:
                 leg_key = (
                     raw_leg.symbol,
                     str(raw_leg.product_type),
                     str(raw_leg.margin_mode),
+                    str(getattr(raw_leg, "pos_side", "") or "").strip().lower(),
                 )
                 current_qty = to_decimal(
                     synthetic_current_by_leg_key.get(
@@ -1408,7 +1844,13 @@ def _build_position_target_handler(
                 synthetic_current_by_leg_key[leg_key] = target_qty
                 leg_target = _strategy_leg_target(base_target=target, leg=leg)
                 policy_decision = policy_engine.evaluate(target=leg_target)
-                risk_decision = risk_engine.evaluate(target=leg_target) if policy_decision.execution_allowed else None
+                execution_preview = _plan_for_strategy_leg(
+                    base_target=target,
+                    leg=leg,
+                    leg_target=leg_target,
+                    policy_decision=policy_decision,
+                )
+                risk_decision = execution_preview["risk"]
                 leg_results.append(
                     {
                         "leg": leg.model_copy(
@@ -1423,10 +1865,60 @@ def _build_position_target_handler(
                         "target": leg_target,
                         "policy": policy_decision,
                         "risk": risk_decision,
+                        "plan": execution_preview["plan"],
+                        "intent": execution_preview["intent"],
                     }
                 )
 
-            aggregate_policy = _aggregate_policy_decision(target=target, leg_results=leg_results)
+            partial_execution_allowed = _independent_partial_execution_supported(
+                target=target,
+                leg_results=leg_results,
+            )
+            executable_leg_results = (
+                [item for item in leg_results if _leg_result_execution_allowed(item)]
+                if partial_execution_allowed
+                else []
+            )
+            bundle_risk_decision = None
+            bundle_partial_block_reasons: list[str] = []
+            if partial_execution_allowed and executable_leg_results:
+                bundle_leg_intents = []
+                for item in executable_leg_results:
+                    intent = item.get("intent")
+                    if intent is None:
+                        plan = item.get("plan")
+                        if plan is None:
+                            continue
+                        intent = (
+                            execution_planner.build_leg_intent(plan=plan)
+                            if hasattr(plan, "leg_intent_id")
+                            else execution_planner.build_intent(plan=plan)
+                        )
+                        item["intent"] = intent
+                    if intent is not None:
+                        bundle_leg_intents.append(intent)
+                bundle_risk_decision = risk_engine.evaluate_leg_order_bundle(
+                    bundle_leg_intents
+                )
+                if not bundle_risk_decision.approved or bundle_risk_decision.halt_required:
+                    (
+                        executable_leg_results,
+                        accepted_bundle_risk_decision,
+                        bundle_partial_block_reasons,
+                    ) = _select_bundle_safe_leg_subset(
+                        target=target,
+                        candidate_leg_results=executable_leg_results,
+                    )
+                    if executable_leg_results and accepted_bundle_risk_decision is not None:
+                        bundle_risk_decision = accepted_bundle_risk_decision
+                    else:
+                        executable_leg_results = []
+            aggregate_policy = _aggregate_policy_decision(
+                target=target,
+                leg_results=leg_results,
+                executed_leg_results=executable_leg_results,
+                partial_execution_allowed=partial_execution_allowed,
+            )
             await publish_model(
                 bus=bus,
                 topic=topics.POLICY_DECISIONS,
@@ -1434,7 +1926,13 @@ def _build_position_target_handler(
                 payload_model=aggregate_policy,
                 source_component="governance_engine",
             )
-            aggregate_risk = _aggregate_risk_decision(target=target, leg_results=leg_results)
+            aggregate_risk = _aggregate_risk_decision(
+                target=target,
+                leg_results=leg_results,
+                executed_leg_results=executable_leg_results,
+                partial_execution_allowed=partial_execution_allowed,
+                bundle_risk_decision=bundle_risk_decision,
+            )
             await publish_model(
                 bus=bus,
                 topic=topics.RISK_DECISIONS,
@@ -1445,6 +1943,13 @@ def _build_position_target_handler(
             extra_blocked_reasons: list[str] = []
             if kill_switch.halted:
                 extra_blocked_reasons.append("kill_switch_active")
+            if (
+                partial_execution_allowed
+                and executable_leg_results
+                and len(executable_leg_results) < len(leg_results)
+            ):
+                extra_blocked_reasons.append("strategy_bundle_partial_leg_execution")
+                extra_blocked_reasons.extend(bundle_partial_block_reasons)
             bundle_execution_allowed = (
                 aggregate_policy.execution_allowed
                 and aggregate_risk.approved
@@ -1456,11 +1961,12 @@ def _build_position_target_handler(
             order_intent_refs: list[str] = []
             bundle_status = "blocked"
             if bundle_execution_allowed:
-                for item in leg_results:
+                execution_leg_results = executable_leg_results if partial_execution_allowed else leg_results
+                for item in execution_leg_results:
                     risk_decision = item["risk"]
                     if risk_decision is None:
                         continue
-                    plan = _plan_for_target(target=item["target"], risk_decision=risk_decision)
+                    plan = item.get("plan")
                     if plan is None:
                         continue
                     plan = plan.model_copy(
@@ -1478,7 +1984,11 @@ def _build_position_target_handler(
                         source_component="execution_engine",
                     )
                     execution_plan_refs.append(plan_envelope.event_id)
-                    intent = execution_planner.build_intent(plan=plan)
+                    intent = item.get("intent")
+                    if intent is None and hasattr(plan, "leg_intent_id"):
+                        intent = execution_planner.build_leg_intent(plan=plan)
+                    elif intent is None:
+                        intent = execution_planner.build_intent(plan=plan)
                     if intent is None:
                         item["leg"] = item["leg"].model_copy(update={"execution_plan_ref": plan_envelope.event_id})
                         continue
@@ -1489,11 +1999,16 @@ def _build_position_target_handler(
                             "allocation_id": item["leg"].allocation_id or target.allocation_id,
                         }
                     )
+                    publish_intent = (
+                        order_intent_from_leg_order_intent(intent)
+                        if isinstance(intent, LegOrderIntent)
+                        else intent
+                    )
                     intent_envelope = await publish_model(
                         bus=bus,
                         topic=topics.ORDER_INTENTS,
-                        key=intent.symbol,
-                        payload_model=intent,
+                        key=publish_intent.symbol,
+                        payload_model=publish_intent,
                         source_component="execution_engine",
                     )
                     metrics.increment("order_intents_generated")
@@ -1509,6 +2024,15 @@ def _build_position_target_handler(
                     bundle_status = "partial_fill_recovery"
                 else:
                     bundle_status = "submitted"
+                bundle_order_states = [
+                    state
+                    for state in execution_repo.order_states()
+                    if str(state.strategy_bundle_id or "").strip() == str(target.strategy_bundle_id or "").strip()
+                ]
+                bundle_status = derive_strategy_bundle_status(
+                    order_states=bundle_order_states,
+                    previous_status=bundle_status,
+                )
 
             allocation_decision = (
                 None
@@ -1575,12 +2099,15 @@ def _build_position_target_handler(
                 operator_summary=target.strategy_headline,
                 reason_codes=list(
                     dict.fromkeys(
-                        [
-                            *target.strategy_reason_codes,
-                            *(aggregate_policy.rejection_reasons or []),
-                            *(aggregate_risk.rejection_reasons or []),
-                            *(extra_blocked_reasons or []),
-                        ]
+                        apply_strategy_bundle_status_reason_codes(
+                            reason_codes=[
+                                *target.strategy_reason_codes,
+                                *(aggregate_policy.rejection_reasons or []),
+                                *(aggregate_risk.rejection_reasons or []),
+                                *(extra_blocked_reasons or []),
+                            ],
+                            status=bundle_status,
+                        )
                     )
                 ),
                 gross_requested_exposure=(
@@ -2060,6 +2587,13 @@ async def build_runtime(
         shadow_execution_order_history_repo=storage.execution_order_history_repo,
         shadow_execution_fill_repo=storage.execution_fill_repo_v2,
         shadow_ledger_mirror_service=storage.phase1_ledger_mirror_service,
+        leg_risk_evaluator=(
+            risk_engine.evaluate_leg_order
+            if runtime_settings.trading_product_type == "derivatives"
+            and runtime_settings.derivatives_position_mode == "hedge"
+            else None
+        ),
+        strategy_runtime_repo=storage.strategy_runtime_repo,
         kill_switch=kill_switch,
     )
     if execution_order_service is not None and storage.execution_command_repo is not None:
@@ -2191,6 +2725,7 @@ async def build_runtime(
         obligation_repo=storage.obligation_repo,
         portfolio_repo=storage.portfolio_repo,
         reconciliation_repo=storage.reconciliation_repo,
+        strategy_runtime_repo=storage.strategy_runtime_repo,
         reconstruction_service=PortfolioReconstructionService(
             initial_usdt_balance=runtime_settings.initial_usdt_balance,
             snapshot_builder=snapshot_builder,
@@ -2228,6 +2763,7 @@ async def build_runtime(
         metrics=metrics,
         bus=bus,
         event_store=storage.event_store,
+        execution_repo=storage.execution_repo,
         strategy_runtime_repo=storage.strategy_runtime_repo,
     )
     await _subscribe_critical_handlers(
@@ -2251,6 +2787,11 @@ async def build_runtime(
 
     if runtime_layering.environment_capabilities.account_state_source_kind == "exchange":
         account_snapshot = await account_service.refresh(force=True)
+        if runtime_settings.trading_product_type == "derivatives":
+            _validate_exchange_position_mode_contract(
+                settings=runtime_settings,
+                snapshot=account_snapshot,
+            )
         recent_bills_summary_getter = getattr(account_service, "recent_bills_summary", None)
         latest_recent_bills_getter = getattr(account_service, "latest_recent_bills", None)
         exchange_bills_summary = (

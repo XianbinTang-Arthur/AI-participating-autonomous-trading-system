@@ -74,7 +74,7 @@ class StrategyQueryFacade:
             )
             realized = self.owner._to_decimal(row.get("realized_pnl_delta")) or Decimal("0")
             gross = self.owner._to_decimal(row.get("gross_realized_pnl")) or Decimal("0")
-            fees = self.owner._to_decimal(row.get("fee_amount")) or Decimal("0")
+            fees = self.owner._to_decimal(row.get("fee_quote_amount")) or Decimal("0")
             notional = self.owner._to_decimal(row.get("fill_notional")) or Decimal("0")
             slippage = self.owner._to_decimal(row.get("adverse_slippage_bps"))
             bucket["fill_count"] += 1

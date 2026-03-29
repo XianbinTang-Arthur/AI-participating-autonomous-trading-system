@@ -465,6 +465,80 @@ class TestForwardTrialGuardService(unittest.TestCase):
         self.assertTrue(any(item["code"] == "trial_guard_high_slippage_ratio" for item in snapshot["breaches"]))
         self.assertTrue(any(item["code"] == "trial_guard_slow_fill_ratio" for item in snapshot["breaches"]))
 
+    def test_manual_reset_recomputes_fee_ratio_from_fee_delta_in_quote(self) -> None:
+        now = utc_now()
+        event_store = InMemoryEventStore()
+        settings = AATSSettings.model_validate(
+            {
+                "trial_guard_enabled": True,
+                "mode": "guarded_live",
+                "trial_guard_min_closed_fills": 1,
+                "trial_guard_lookback_fills": 10,
+                "trial_guard_max_fee_to_notional_ratio": 0.01,
+                "default_symbol": "BTC-USDT",
+                "allowed_symbols": ["BTC-USDT"],
+                "trading_product_type": "spot",
+                "margin_mode": "cash",
+            }
+        )
+        service = ForwardTrialGuardService(
+            settings=settings,
+            kill_switch=KillSwitch(),
+            event_store=event_store,
+            metrics=MetricsRegistry(),
+            profitability_provider=lambda _limit: {
+                "summary": {
+                    "closed_fill_count": 1,
+                    "fee_to_notional_ratio": Decimal("0.00001"),
+                },
+                "recent_closed_fills": [
+                    {
+                        "realized_pnl_delta": Decimal("1"),
+                        "symbol": "BTC-USDT",
+                        "side": "buy",
+                        "venue": "OKX",
+                        "fee_amount": Decimal("0.001"),
+                        "fee_delta": Decimal("2"),
+                        "fee_currency": "BTC",
+                        "fill_price": Decimal("2000"),
+                        "fill_notional": Decimal("100"),
+                        "ingestion_timestamp": now - timedelta(minutes=1),
+                    },
+                ],
+            },
+            anomaly_provider=lambda _limit: {
+                "summary": {"high_slippage_count": 0, "slow_submit_to_fill_count": 0},
+                "rows": [],
+            },
+        )
+
+        event_store.append(
+            build_envelope(
+                topic=topics.OPERATOR_ACTIONS,
+                key="trial_guard",
+                payload_model=OperatorActionRecord(
+                    action="trial_guard_manual_reset",
+                    actor_role="admin",
+                    reason="test_manual_reset_fee_delta_quote_ratio",
+                    status="reset_recorded",
+                    details={
+                        "trial_review_action_type": "reset_trial_guard",
+                        "effective_after": now - timedelta(minutes=2),
+                        "product_type": "spot",
+                        "margin_mode": "cash",
+                        "allowed_symbols": ["BTC-USDT"],
+                    },
+                ),
+                source_component="test",
+            )
+        )
+
+        snapshot = service.evaluate_now()
+
+        self.assertEqual(snapshot["fill_count"], 1)
+        self.assertEqual(snapshot["fee_to_notional_ratio"], Decimal("0.02"))
+        self.assertTrue(any(item["code"] == "trial_guard_fee_drag_limit" for item in snapshot["breaches"]))
+
 
 if __name__ == "__main__":
     unittest.main()

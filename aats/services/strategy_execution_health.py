@@ -126,6 +126,12 @@ class StrategyExecutionHealthSnapshot:
         }
 
 
+def _fee_to_gross_ratio(*, fee_total: Decimal, gross_realized: Decimal) -> float:
+    if abs(gross_realized) > EPSILON_DECIMAL_12:
+        return float(fee_total / abs(gross_realized))
+    return 1.0 if fee_total > 0 else 0.0
+
+
 def compute_strategy_execution_health(
     *,
     settings: AATSSettings,
@@ -158,10 +164,10 @@ def compute_strategy_execution_health(
         if recent_outcomes
         else 0.0
     )
-    if recent_gross_realized > 0:
-        fee_drag_ratio = float(recent_fee_total / recent_gross_realized)
-    else:
-        fee_drag_ratio = 1.0 if recent_fee_total > 0 else 0.0
+    fee_drag_ratio = _fee_to_gross_ratio(
+        fee_total=recent_fee_total,
+        gross_realized=recent_gross_realized,
+    )
     churn_ratio = (
         float(sum(1 for item in recent_outcomes if item.is_small_churn) / len(recent_outcomes))
         if recent_outcomes
@@ -189,6 +195,74 @@ def compute_strategy_execution_health(
         recent_gross_realized_pnl=recent_gross_realized,
         recent_net_realized_pnl=recent_net_realized,
         recent_fee_total=recent_fee_total,
+    )
+
+
+def compute_leg_strategy_execution_health(
+    *,
+    settings: AATSSettings,
+    symbol: str,
+    fills: list[FillEvent],
+    snapshots: list[PortfolioSnapshot],
+    current_long_position_qty: Decimal,
+    current_short_position_qty: Decimal,
+) -> dict[str, StrategyExecutionHealthSnapshot]:
+    ordered_fills = sorted(
+        [fill for fill in fills if fill.symbol == symbol],
+        key=fill_processing_sort_key,
+    )
+    ordered_snapshots = sorted(snapshots, key=lambda item: item.snapshot_ts)
+    realized_delta_by_fill_id = _realized_delta_by_fill_id(ordered_snapshots)
+    return {
+        "long": _compute_leg_strategy_execution_health_snapshot(
+            settings=settings,
+            symbol=symbol,
+            fills=ordered_fills,
+            realized_delta_by_fill_id=realized_delta_by_fill_id,
+            current_position_qty=current_long_position_qty,
+            leg="long",
+        ),
+        "short": _compute_leg_strategy_execution_health_snapshot(
+            settings=settings,
+            symbol=symbol,
+            fills=ordered_fills,
+            realized_delta_by_fill_id=realized_delta_by_fill_id,
+            current_position_qty=current_short_position_qty,
+            leg="short",
+        ),
+    }
+
+
+def _compute_leg_strategy_execution_health_snapshot(
+    *,
+    settings: AATSSettings,
+    symbol: str,
+    fills: list[FillEvent],
+    realized_delta_by_fill_id: dict[str, Decimal],
+    current_position_qty: Decimal,
+    leg: str,
+) -> StrategyExecutionHealthSnapshot:
+    current_position_opened_at, last_position_closed_at, outcomes = _walk_leg_fills(
+        settings=settings,
+        fills=fills,
+        realized_delta_by_fill_id=realized_delta_by_fill_id,
+        current_position_qty=current_position_qty,
+        leg=leg,
+    )
+    return _strategy_health_snapshot_from_outcomes(
+        settings=settings,
+        symbol=symbol,
+        current_position_opened_at=current_position_opened_at,
+        last_position_closed_at=last_position_closed_at,
+        latest_fill_timestamp=next(
+            (
+                fill.ingestion_timestamp
+                for fill in reversed(fills)
+                if _fill_leg(fill) == leg
+            ),
+            None,
+        ),
+        outcomes=outcomes,
     )
 
 
@@ -264,6 +338,156 @@ def _walk_symbol_fills(
     elif is_effectively_zero(position_qty) or (position_qty > 0) != (current_position_qty > 0):
         current_position_opened_at = None
     return current_position_opened_at, last_position_closed_at, outcomes
+
+
+def _walk_leg_fills(
+    *,
+    settings: AATSSettings,
+    fills: list[FillEvent],
+    realized_delta_by_fill_id: dict[str, Decimal],
+    current_position_qty: Decimal,
+    leg: str,
+) -> tuple[datetime | None, datetime | None, list[ClosedTradeOutcome]]:
+    position_qty = Decimal("0")
+    current_position_opened_at: datetime | None = None
+    last_position_closed_at: datetime | None = None
+    outcomes: list[ClosedTradeOutcome] = []
+
+    for fill in fills:
+        if _fill_leg(fill) != leg:
+            continue
+        signed_qty = _leg_signed_fill_qty(fill=fill, leg=leg)
+        previous_qty = position_qty
+        position_qty = max(previous_qty + signed_qty, Decimal("0"))
+        close_qty = Decimal("0")
+        if previous_qty > EPSILON_DECIMAL_12 and signed_qty < -EPSILON_DECIMAL_12:
+            close_qty = min(previous_qty, abs(signed_qty))
+
+        if previous_qty <= EPSILON_DECIMAL_12 and position_qty > EPSILON_DECIMAL_12:
+            current_position_opened_at = fill.ingestion_timestamp
+        elif previous_qty > EPSILON_DECIMAL_12 and position_qty <= EPSILON_DECIMAL_12:
+            last_position_closed_at = fill.ingestion_timestamp
+            current_position_opened_at = None
+
+        if close_qty <= EPSILON_DECIMAL_12:
+            continue
+        base_currency, quote_currency = resolve_symbol_currencies(fill.symbol)
+        fee_cost_quote = to_decimal(
+            fill_fee_cost_in_quote(
+                fill=fill,
+                base_currency=base_currency,
+                quote_currency=quote_currency,
+            )
+        )
+        fill_qty = to_decimal(fill.fill_qty)
+        close_fee_quote = fee_cost_quote
+        if fill_qty > EPSILON_DECIMAL_12 and close_qty < fill_qty:
+            close_fee_quote = fee_cost_quote * (close_qty / fill_qty)
+        net_realized_pnl = to_decimal(realized_delta_by_fill_id.get(fill.fill_id, Decimal("0")))
+        gross_realized_pnl = net_realized_pnl + close_fee_quote
+        close_notional = close_qty * to_decimal(fill.fill_price)
+        net_edge_bps = (
+            (net_realized_pnl / close_notional) * _BPS_SCALE
+            if close_notional > EPSILON_DECIMAL_12
+            else Decimal("0")
+        )
+        churn_cutoff = close_fee_quote * _SMALL_PNL_CHURN_MULTIPLIER
+        outcomes.append(
+            ClosedTradeOutcome(
+                timestamp=fill.ingestion_timestamp,
+                fill_id=fill.fill_id,
+                net_realized_pnl=net_realized_pnl,
+                gross_realized_pnl=gross_realized_pnl,
+                fee_cost_quote=close_fee_quote,
+                close_notional=close_notional,
+                net_edge_bps=net_edge_bps,
+                is_win=net_realized_pnl > 0,
+                is_small_churn=(
+                    abs(net_realized_pnl) <= churn_cutoff
+                    if churn_cutoff > 0
+                    else is_effectively_zero(net_realized_pnl)
+                ),
+                is_low_edge=net_edge_bps <= Decimal(str(settings.strategy_low_edge_threshold_bps)),
+            )
+        )
+
+    if is_effectively_zero(current_position_qty):
+        current_position_opened_at = None
+    elif is_effectively_zero(position_qty) or abs(position_qty - current_position_qty) > EPSILON_DECIMAL_12:
+        current_position_opened_at = None
+    return current_position_opened_at, last_position_closed_at, outcomes
+
+
+def _strategy_health_snapshot_from_outcomes(
+    *,
+    settings: AATSSettings,
+    symbol: str,
+    current_position_opened_at: datetime | None,
+    last_position_closed_at: datetime | None,
+    latest_fill_timestamp: datetime | None,
+    outcomes: list[ClosedTradeOutcome],
+) -> StrategyExecutionHealthSnapshot:
+    lookback = max(settings.strategy_health_lookback_trades, 1)
+    recent_outcomes = outcomes[-lookback:]
+    recent_fee_total = sum((item.fee_cost_quote for item in recent_outcomes), Decimal("0"))
+    recent_net_realized = sum((item.net_realized_pnl for item in recent_outcomes), Decimal("0"))
+    recent_gross_realized = sum((item.gross_realized_pnl for item in recent_outcomes), Decimal("0"))
+    recent_win_rate = (
+        float(sum(1 for item in recent_outcomes if item.is_win) / len(recent_outcomes))
+        if recent_outcomes
+        else 0.0
+    )
+    fee_drag_ratio = _fee_to_gross_ratio(
+        fee_total=recent_fee_total,
+        gross_realized=recent_gross_realized,
+    )
+    churn_ratio = (
+        float(sum(1 for item in recent_outcomes if item.is_small_churn) / len(recent_outcomes))
+        if recent_outcomes
+        else 0.0
+    )
+    low_edge_streak = 0
+    recent_low_edge_trade_at = None
+    for item in reversed(recent_outcomes):
+        if not item.is_low_edge:
+            break
+        low_edge_streak += 1
+        recent_low_edge_trade_at = item.timestamp
+
+    return StrategyExecutionHealthSnapshot(
+        symbol=symbol,
+        current_position_opened_at=current_position_opened_at,
+        last_position_closed_at=last_position_closed_at,
+        latest_fill_timestamp=latest_fill_timestamp,
+        recent_closed_trade_count=len(recent_outcomes),
+        recent_win_rate=recent_win_rate,
+        recent_fee_drag_ratio=fee_drag_ratio,
+        recent_churn_ratio=churn_ratio,
+        recent_low_edge_trade_streak=low_edge_streak,
+        recent_low_edge_trade_at=recent_low_edge_trade_at,
+        recent_gross_realized_pnl=recent_gross_realized,
+        recent_net_realized_pnl=recent_net_realized,
+        recent_fee_total=recent_fee_total,
+    )
+
+
+def _fill_leg(fill: FillEvent) -> str | None:
+    if fill.pos_side in {"long", "short"}:
+        return str(fill.pos_side)
+    normalized_intent = str(fill.position_intent or "").strip().lower()
+    if normalized_intent.endswith("_long"):
+        return "long"
+    if normalized_intent.endswith("_short"):
+        return "short"
+    return None
+
+
+def _leg_signed_fill_qty(*, fill: FillEvent, leg: str) -> Decimal:
+    fill_qty = abs(to_decimal(fill.fill_qty))
+    normalized_leg = str(leg)
+    if normalized_leg == "long":
+        return fill_qty if fill.side == "buy" else -fill_qty
+    return fill_qty if fill.side == "sell" else -fill_qty
 
 
 def _realized_delta_by_fill_id(snapshots: list[PortfolioSnapshot]) -> dict[str, Decimal]:

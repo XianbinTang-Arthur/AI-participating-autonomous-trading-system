@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from decimal import Decimal
 from datetime import timedelta, timezone
+from typing import Callable
 
 from aats.bootstrap.settings import AATSSettings
 from aats.bootstrap.logging import correlation_fields, get_logger, log_event
@@ -10,16 +11,29 @@ from aats.bus.base import EventBus
 from aats.events import topics
 from aats.events.envelopes import parse_payload, publish_model
 from aats.schemas.common import new_id, utc_now
-from aats.schemas.execution import FillEvent, OrderIntent, OrderObligation, OrderState
+from aats.schemas.execution import (
+    FillEvent,
+    LegOrderIntent,
+    OrderIntent,
+    OrderObligation,
+    OrderState,
+    leg_intent_from_order_intent,
+    order_intent_from_leg_order_intent,
+)
 from aats.schemas.operator import ExecutionErrorSummary
 from aats.services.execution_control.order_service import ExecutionOrderService
 from aats.services.execution_control.order_state_machine import OrderStateMachine
 from aats.services.execution_control.shadow import Phase1ExecutionShadowService
+from aats.services.execution_engine.bundle_status import (
+    apply_strategy_bundle_status_reason_codes,
+    derive_strategy_bundle_status,
+)
 from aats.services.execution_engine.exchange_adapter import ExchangeAdapter
 from aats.services.execution_engine.obligations import ExecutionObligationService, ExecutionReservationError
 from aats.services.execution_engine.outbox import PostgresExecutionOutboxPublisher
 from aats.services.governance_engine.kill_switch import KillSwitch
 from aats.services.ledger.posting import Phase1LedgerMirrorService
+from aats.services.strategy_overlay_rollout import overlay_mode_from_execution_mode, overlay_rollout_status
 from aats.storage.base import ExecutionRepository
 from aats.storage.execution_fill_repo_v2 import ExecutionFillRepositoryV2
 from aats.storage.execution_order_repo import ExecutionOrderHistoryRepository, ExecutionOrderRepository
@@ -46,6 +60,8 @@ class OrderManager:
         shadow_execution_order_history_repo: ExecutionOrderHistoryRepository | None = None,
         shadow_execution_fill_repo: ExecutionFillRepositoryV2 | None = None,
         shadow_ledger_mirror_service: Phase1LedgerMirrorService | None = None,
+        leg_risk_evaluator: Callable[[LegOrderIntent], object] | None = None,
+        strategy_runtime_repo=None,
         kill_switch: KillSwitch,
     ) -> None:
         self.settings = settings
@@ -61,6 +77,8 @@ class OrderManager:
             shadow_execution_fill_repo=shadow_execution_fill_repo,
         )
         self.shadow_ledger_mirror_service = shadow_ledger_mirror_service
+        self.leg_risk_evaluator = leg_risk_evaluator
+        self.strategy_runtime_repo = strategy_runtime_repo
         self.kill_switch = kill_switch
         self.order_state_machine = OrderStateMachine()
         # Serialize reservation preview/persist so concurrent intents cannot over-reserve the same balance window.
@@ -69,6 +87,27 @@ class OrderManager:
 
     async def handle_order_intent(self, message: dict) -> None:
         intent = parse_payload(message, OrderIntent)
+        await self._handle_normalized_order_intent(
+            intent=intent,
+            leg_intent=leg_intent_from_order_intent(intent),
+        )
+
+    async def handle_leg_order_intent(self, message: dict) -> None:
+        leg_intent = parse_payload(message, LegOrderIntent)
+        await self.submit_leg_order(leg_intent=leg_intent)
+
+    async def submit_leg_order(self, *, leg_intent: LegOrderIntent) -> None:
+        await self._handle_normalized_order_intent(
+            intent=order_intent_from_leg_order_intent(leg_intent),
+            leg_intent=leg_intent,
+        )
+
+    async def _handle_normalized_order_intent(
+        self,
+        *,
+        intent: OrderIntent,
+        leg_intent: LegOrderIntent | None = None,
+    ) -> None:
         if self.kill_switch.halted:
             log_event(
                 self.logger,
@@ -130,6 +169,14 @@ class OrderManager:
                     ),
                 )
                 return
+            intent, leg_intent, blocked_state = self._apply_leg_submit_guards(
+                intent=intent,
+                client_order_id=preview_client_order_id,
+                leg_intent=leg_intent,
+            )
+            if blocked_state is not None:
+                await self._persist_order_state(order_state=blocked_state, key=intent.symbol)
+                return
             try:
                 if self.obligation_service is not None:
                     initial_obligation = await self.obligation_service.preview_reservation_for_intent(
@@ -167,7 +214,9 @@ class OrderManager:
                     margin_mode=intent.margin_mode,
                     exposure_side=intent.exposure_side,
                     execution_action=intent.execution_action,
+                    leg_action=intent.leg_action,
                     position_intent=intent.position_intent,
+                    leg_intent_id=intent.leg_intent_id,
                     strategy_family=intent.strategy_family,
                     strategy_sleeve_id=intent.strategy_sleeve_id,
                     allocation_id=intent.allocation_id,
@@ -212,7 +261,9 @@ class OrderManager:
                 margin_mode=intent.margin_mode,
                 exposure_side=intent.exposure_side,
                 execution_action=intent.execution_action,
+                leg_action=intent.leg_action,
                 position_intent=intent.position_intent,
+                leg_intent_id=intent.leg_intent_id,
                 strategy_family=intent.strategy_family,
                 strategy_sleeve_id=intent.strategy_sleeve_id,
                 allocation_id=intent.allocation_id,
@@ -276,19 +327,36 @@ class OrderManager:
                     self._finalize_obligation(order_state=failed_state)
                     raise
             return
-        await self.process_submit_command(intent=intent, client_order_id=created_state.client_order_id)
+        await self.process_submit_command(
+            intent=intent,
+            client_order_id=created_state.client_order_id,
+            leg_intent=leg_intent,
+        )
 
     async def process_submit_command(
         self,
         *,
         intent: OrderIntent,
         client_order_id: str | None = None,
+        leg_intent: LegOrderIntent | None = None,
     ) -> OrderState:
         if client_order_id is not None:
             current = self.execution_repo.get_order_state(client_order_id)
             if current is not None and current.status not in {"CREATED", "SUBMITTING"}:
                 return current
-        return await self._execute_submit_intent(intent=intent, client_order_id=client_order_id)
+        resolved_client_order_id = client_order_id or intent.idempotency_key or new_id("clord")
+        intent, leg_intent, blocked_state = self._apply_leg_submit_guards(
+            intent=intent,
+            client_order_id=resolved_client_order_id,
+            leg_intent=leg_intent,
+        )
+        if blocked_state is not None:
+            return await self._persist_order_state(order_state=blocked_state, key=intent.symbol)
+        return await self._execute_submit_intent(
+            intent=intent,
+            client_order_id=resolved_client_order_id,
+            leg_intent=leg_intent,
+        )
 
     async def process_cancel_command(self, *, client_order_id: str) -> OrderState:
         current = self.resolve_order_state_for_control(client_order_id)
@@ -303,6 +371,7 @@ class OrderManager:
         *,
         intent: OrderIntent,
         client_order_id: str | None = None,
+        leg_intent: LegOrderIntent | None = None,
     ) -> OrderState:
         resolved_client_order_id = client_order_id or intent.idempotency_key or new_id("clord")
         current = self.execution_repo.get_order_state(resolved_client_order_id)
@@ -337,7 +406,9 @@ class OrderManager:
                 margin_mode=intent.margin_mode,
                 exposure_side=intent.exposure_side,
                 execution_action=intent.execution_action,
+                leg_action=intent.leg_action,
                 position_intent=intent.position_intent,
+                leg_intent_id=intent.leg_intent_id,
                 strategy_family=intent.strategy_family,
                 strategy_sleeve_id=intent.strategy_sleeve_id,
                 allocation_id=intent.allocation_id,
@@ -354,7 +425,14 @@ class OrderManager:
         await self._persist_order_state(order_state=submitting_state, key=intent.symbol)
 
         try:
-            order_state, fills = await self.adapter.submit(intent)
+            if leg_intent is not None:
+                submit_leg_order = getattr(self.adapter, "submit_leg_order", None)
+                if callable(submit_leg_order):
+                    order_state, fills = await submit_leg_order(leg_intent)
+                else:
+                    order_state, fills = await self.adapter.submit(intent)
+            else:
+                order_state, fills = await self.adapter.submit(intent)
         except Exception as exc:
             order_state = OrderState(
                 decision_id=intent.decision_id,
@@ -386,7 +464,9 @@ class OrderManager:
                 margin_mode=intent.margin_mode,
                 exposure_side=intent.exposure_side,
                 execution_action=intent.execution_action,
+                leg_action=intent.leg_action,
                 position_intent=intent.position_intent,
+                leg_intent_id=intent.leg_intent_id,
                 strategy_family=intent.strategy_family,
                 strategy_sleeve_id=intent.strategy_sleeve_id,
                 allocation_id=intent.allocation_id,
@@ -557,6 +637,7 @@ class OrderManager:
                 ),
             )
             self._shadow_write_order_state(order_state=persisted, intent=intent)
+            self._sync_strategy_bundle_status(order_state=persisted)
             return persisted
         previous = self.execution_repo.get_order_state(order_state.client_order_id)
         persisted = self.execution_repo.save_order_state(order_state)
@@ -582,7 +663,40 @@ class OrderManager:
         )
         await self._publish_execution_error_summary(previous=previous, persisted=persisted)
         self._shadow_write_order_state(order_state=persisted, intent=intent)
+        self._sync_strategy_bundle_status(order_state=persisted)
         return persisted
+
+    def _sync_strategy_bundle_status(self, *, order_state: OrderState) -> None:
+        if self.strategy_runtime_repo is None:
+            return
+        bundle_id = str(order_state.strategy_bundle_id or "").strip()
+        if not bundle_id:
+            return
+        bundle = self.strategy_runtime_repo.get_execution_bundle(bundle_id)
+        if bundle is None:
+            return
+        bundle_order_states = [
+            state
+            for state in self.execution_repo.order_states()
+            if str(state.strategy_bundle_id or "").strip() == bundle_id
+        ]
+        derived_status = derive_strategy_bundle_status(
+            order_states=bundle_order_states,
+            previous_status=bundle.status,
+        )
+        if derived_status == bundle.status:
+            return
+        self.strategy_runtime_repo.save_execution_bundle(
+            bundle.model_copy(
+                update={
+                    "status": derived_status,
+                    "reason_codes": apply_strategy_bundle_status_reason_codes(
+                        reason_codes=list(bundle.reason_codes),
+                        status=derived_status,
+                    ),
+                }
+            )
+        )
 
     def _submit_command_persisted_transactionally(self) -> bool:
         if self.execution_outbox_publisher is None:
@@ -725,7 +839,9 @@ class OrderManager:
                 margin_mode=intent.margin_mode,
                 exposure_side=intent.exposure_side,
                 execution_action=intent.execution_action,
+                leg_action=intent.leg_action,
                 position_intent=intent.position_intent,
+                leg_intent_id=intent.leg_intent_id,
                 strategy_family=intent.strategy_family,
                 strategy_sleeve_id=intent.strategy_sleeve_id,
                 allocation_id=intent.allocation_id,
@@ -735,6 +851,177 @@ class OrderManager:
                 submission_payload={},
             )
         return None
+
+    @staticmethod
+    def _apply_leg_risk_context(
+        *,
+        intent: OrderIntent,
+        leg_intent: LegOrderIntent,
+        risk_decision: object,
+    ) -> tuple[OrderIntent, LegOrderIntent]:
+        update_payload = {
+            "required_initial_margin": getattr(risk_decision, "required_initial_margin", None),
+            "projected_margin_usage": getattr(risk_decision, "projected_margin_usage", None),
+            "projected_notional": getattr(risk_decision, "projected_notional", None),
+            "risk_budget_multiplier": getattr(risk_decision, "risk_budget_multiplier", None),
+            "risk_budget_state": dict(getattr(risk_decision, "risk_budget_state", {}) or {}),
+            "execution_aggressiveness_multiplier": getattr(
+                risk_decision,
+                "execution_aggressiveness_multiplier",
+                None,
+            ),
+            "execution_aggressiveness_state": dict(
+                getattr(risk_decision, "execution_aggressiveness_state", {}) or {}
+            ),
+            "only_reduce_required": bool(getattr(risk_decision, "only_reduce_required", False)),
+            "risk_limit_breached": bool(getattr(risk_decision, "risk_limit_breached", False)),
+            "liquidation_buffer_remaining": getattr(
+                risk_decision,
+                "liquidation_buffer_remaining",
+                None,
+            ),
+        }
+        return (
+            intent.model_copy(update=update_payload),
+            leg_intent.model_copy(update=update_payload),
+        )
+
+    @staticmethod
+    def _leg_risk_blocked_error(risk_decision: object) -> str:
+        reasons = [
+            str(item)
+            for item in (getattr(risk_decision, "rejection_reasons", []) or [])
+            if str(item).strip()
+        ]
+        if not reasons:
+            reasons = ["leg_only_reduce_mode_active"]
+        return f"leg_risk_blocked:{','.join(dict.fromkeys(reasons))}"
+
+    def _leg_overlay_rollout_blockers(self, *, leg_intent: LegOrderIntent) -> list[str]:
+        if (
+            str(leg_intent.product_type or "") != "derivatives"
+            or str(leg_intent.position_mode or "") != "long_short_mode"
+        ):
+            return []
+        overlay_mode = overlay_mode_from_execution_mode(leg_intent.strategy_execution_mode)
+        if overlay_mode is None:
+            return []
+        blockers: list[str] = []
+        if not self.settings.strategy_hedge_overlay_enabled:
+            blockers.append("strategy_hedge_overlay_disabled")
+        if overlay_mode == "opportunistic" and not self.settings.strategy_hedge_opportunistic_enabled:
+            blockers.append("strategy_hedge_opportunistic_disabled")
+        if overlay_mode == "independent" and not self.settings.strategy_hedge_independent_enabled:
+            blockers.append("strategy_hedge_independent_disabled")
+        if blockers:
+            return list(dict.fromkeys(blockers))
+        rollout = overlay_rollout_status(self.settings, mode=overlay_mode)
+        return [str(item) for item in (rollout.get("blocking_reasons") or []) if str(item).strip()]
+
+    @staticmethod
+    def _leg_overlay_rollout_blocked_error(reasons: list[str]) -> str:
+        cleaned = [str(item) for item in reasons if str(item).strip()]
+        if not cleaned:
+            cleaned = ["overlay_rollout_blocked"]
+        return f"leg_overlay_rollout_blocked:{','.join(dict.fromkeys(cleaned))}"
+
+    def _apply_leg_submit_guards(
+        self,
+        *,
+        intent: OrderIntent,
+        client_order_id: str,
+        leg_intent: LegOrderIntent | None = None,
+    ) -> tuple[OrderIntent, LegOrderIntent | None, OrderState | None]:
+        normalized_leg_intent = leg_intent or leg_intent_from_order_intent(intent)
+        if normalized_leg_intent is None:
+            return intent, None, None
+        guarded_intent = intent
+        guarded_leg_intent = normalized_leg_intent
+        if self.leg_risk_evaluator is not None:
+            risk_decision = self.leg_risk_evaluator(guarded_leg_intent)
+            guarded_intent, guarded_leg_intent = self._apply_leg_risk_context(
+                intent=guarded_intent,
+                leg_intent=guarded_leg_intent,
+                risk_decision=risk_decision,
+            )
+            if not bool(getattr(risk_decision, "approved", False)):
+                return (
+                    guarded_intent,
+                    guarded_leg_intent,
+                    self._blocked_order_state_from_intent(
+                        intent=guarded_intent,
+                        client_order_id=client_order_id,
+                        submission_mode="leg_risk_blocked",
+                        execution_error=self._leg_risk_blocked_error(risk_decision),
+                    ),
+                )
+        rollout_blockers = self._leg_overlay_rollout_blockers(leg_intent=guarded_leg_intent)
+        if rollout_blockers:
+            return (
+                guarded_intent,
+                guarded_leg_intent,
+                self._blocked_order_state_from_intent(
+                    intent=guarded_intent,
+                    client_order_id=client_order_id,
+                    submission_mode="leg_overlay_rollout_blocked",
+                    execution_error=self._leg_overlay_rollout_blocked_error(rollout_blockers),
+                ),
+            )
+        return guarded_intent, guarded_leg_intent, None
+
+    def _blocked_order_state_from_intent(
+        self,
+        *,
+        intent: OrderIntent,
+        client_order_id: str,
+        submission_mode: str,
+        execution_error: str,
+    ) -> OrderState:
+        return OrderState(
+            decision_id=intent.decision_id,
+            intent_id=intent.intent_id,
+            symbol=intent.symbol,
+            client_order_id=client_order_id,
+            venue="OKX" if self.adapter.readiness().get("backend") == "okx" else "PAPER",
+            exchange_order_id=None,
+            status="BLOCKED",
+            submission_mode=submission_mode,
+            submitted_ts=None,
+            last_update_ts=utc_now(),
+            requested_qty=intent.quantity,
+            filled_qty=Decimal("0"),
+            remaining_qty=intent.quantity,
+            average_fill_price=None,
+            fees=Decimal("0"),
+            reduce_only=intent.reduce_only,
+            close_only=intent.close_only,
+            td_mode=intent.td_mode,
+            position_mode=intent.position_mode,
+            pos_side=intent.pos_side,
+            reduce_only_reason=intent.reduce_only_reason,
+            close_only_reason=intent.close_only_reason,
+            instrument_family=intent.instrument_family,
+            settle_currency=intent.settle_currency,
+            product_type=intent.product_type,
+            target_leverage=intent.target_leverage,
+            margin_mode=intent.margin_mode,
+            exposure_side=intent.exposure_side,
+            execution_action=intent.execution_action,
+            leg_action=intent.leg_action,
+            position_intent=intent.position_intent,
+            leg_intent_id=intent.leg_intent_id,
+            strategy_family=intent.strategy_family,
+            strategy_sleeve_id=intent.strategy_sleeve_id,
+            allocation_id=intent.allocation_id,
+            strategy_bundle_id=intent.strategy_bundle_id,
+            strategy_leg_role=intent.strategy_leg_role,
+            strategy_pair_id=intent.strategy_pair_id,
+            strategy_opportunity_kind=intent.strategy_opportunity_kind,
+            strategy_execution_mode=intent.strategy_execution_mode,
+            strategy_state_phase=intent.strategy_state_phase,
+            execution_error=execution_error,
+            submission_payload={},
+        )
 
     async def _cancel_pending_submit_before_exchange_ack(self, order_state: OrderState) -> OrderState | None:
         if self.persistent_order_service is None:

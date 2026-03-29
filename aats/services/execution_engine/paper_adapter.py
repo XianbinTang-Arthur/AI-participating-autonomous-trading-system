@@ -90,7 +90,9 @@ class PaperExecutionAdapter(ExchangeAdapter):
                 margin_mode=intent.margin_mode,
                 exposure_side=intent.exposure_side,
                 execution_action=intent.execution_action,
+                leg_action=intent.leg_action,
                 position_intent=intent.position_intent,
+                leg_intent_id=intent.leg_intent_id,
                 cancel_reason="paper_limit_ioc_not_crossed",
                 submission_payload=self._submission_payload_from_intent(intent),
             )
@@ -138,7 +140,9 @@ class PaperExecutionAdapter(ExchangeAdapter):
                 margin_mode=intent.margin_mode,
                 exposure_side=intent.exposure_side,
                 execution_action=intent.execution_action,
+                leg_action=intent.leg_action,
                 position_intent=intent.position_intent,
+                leg_intent_id=intent.leg_intent_id,
                 execution_error="slippage_tolerance_exceeded",
                 submission_payload=self._submission_payload_from_intent(intent),
             )
@@ -190,7 +194,9 @@ class PaperExecutionAdapter(ExchangeAdapter):
             margin_mode=intent.margin_mode,
             exposure_side=intent.exposure_side,
             execution_action=intent.execution_action,
+            leg_action=intent.leg_action,
             position_intent=intent.position_intent,
+            leg_intent_id=intent.leg_intent_id,
             submission_payload=self._submission_payload_from_intent(intent),
         )
         fill = FillEvent(
@@ -229,7 +235,9 @@ class PaperExecutionAdapter(ExchangeAdapter):
             margin_mode=intent.margin_mode,
             exposure_side=intent.exposure_side,
             execution_action=intent.execution_action,
+            leg_action=intent.leg_action,
             position_intent=intent.position_intent,
+            leg_intent_id=intent.leg_intent_id,
             liquidity_role="taker",
             exchange_timestamp=now,
             ingestion_timestamp=now,
@@ -309,6 +317,8 @@ class PaperExecutionAdapter(ExchangeAdapter):
             "tdMode": intent.td_mode or intent.margin_mode,
             "targetLeverage": str(intent.target_leverage),
             "executionAction": intent.execution_action or "",
+            "legAction": intent.leg_action or "",
+            "legIntentId": intent.leg_intent_id or "",
             "positionIntent": intent.position_intent,
             "positionMode": intent.position_mode or "",
             "posSide": intent.pos_side or "",

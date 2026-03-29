@@ -929,11 +929,6 @@ class SmartArbitrageStrategyEngine:
             for item in selected_pairs
             if item.execution_mode not in {None, ""}
         }
-        selected_opportunity_kinds = {
-            item.opportunity_kind
-            for item in selected_pairs
-            if item.opportunity_kind not in {None, ""}
-        }
         aggregate_metrics = dict(top.metrics or {})
         overlap_detected = self._selected_pairs_have_overlapping_symbol_scope(selected_pairs)
         selected_pair_summaries = [

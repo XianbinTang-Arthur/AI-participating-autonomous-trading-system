@@ -14,7 +14,12 @@ from aats.schemas.execution import FillEvent
 from aats.schemas.exchange import ExchangeAccountSnapshot
 from aats.schemas.operator import ProcessingFailureRecord
 from aats.schemas.portfolio import FillOutcomeRecord, PortfolioBalanceDelta, PortfolioSnapshot, PortfolioSnapshotOrigin
-from aats.services.accounting import fill_fee_cost_in_quote, resolve_symbol_currencies, resolved_fee_currency
+from aats.services.accounting import (
+    fill_fee_cost_in_quote,
+    fill_fee_delta_in_quote,
+    resolve_symbol_currencies,
+    resolved_fee_currency,
+)
 from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, is_effectively_zero, to_decimal
 from aats.services.portfolio_service.outbox import PostgresPortfolioOutboxPublisher
 from aats.services.portfolio_service.position_keys import (
@@ -312,13 +317,13 @@ class PortfolioState:
         base_currency, quote_currency = resolve_symbol_currencies(fill.symbol)
         notional = fill_qty * fill_price
         fee_currency = resolved_fee_currency(fill=fill, base_currency=base_currency, quote_currency=quote_currency)
-        fee_quote_amount = fill_fee_cost_in_quote(
+        fee_quote_delta = fill_fee_delta_in_quote(
             fill=fill,
             base_currency=base_currency,
             quote_currency=quote_currency,
         )
-        fee_quote_amount = to_decimal(fee_quote_amount)
-        fee_delta = fee_quote_amount
+        fee_quote_delta = to_decimal(fee_quote_delta)
+        fee_delta = fee_quote_delta
         trading_pnl_delta = Decimal("0")
         starting_avg_entry_price = to_decimal(record.avg_entry_price)
 
@@ -366,7 +371,7 @@ class PortfolioState:
         if fee_currency is not None:
             self.balances[fee_currency] = to_decimal(self.balances.get(fee_currency, 0)) - fee_amount
 
-        realized_pnl_delta = trading_pnl_delta - fee_quote_amount
+        realized_pnl_delta = trading_pnl_delta - fee_quote_delta
         self.realized_pnl = self.realized_pnl + realized_pnl_delta
         self.total_fees_paid = self.total_fees_paid + fee_delta
         self._applied_fill_ids.add(fill.fill_id)
@@ -423,8 +428,16 @@ class PortfolioState:
         return fill_fee_cost_in_quote(fill)
 
     @classmethod
+    def fee_delta_in_quote(cls, fill: FillEvent) -> Decimal:
+        return fill_fee_delta_in_quote(fill)
+
+    @classmethod
     def total_fee_cost_in_quote(cls, fills: list[FillEvent]) -> Decimal:
         return sum((cls.fee_cost_in_quote(fill) for fill in fills), start=Decimal("0"))
+
+    @classmethod
+    def total_fee_delta_in_quote(cls, fills: list[FillEvent]) -> Decimal:
+        return sum((cls.fee_delta_in_quote(fill) for fill in fills), start=Decimal("0"))
 
     @staticmethod
     def _same_direction(left: Decimal, right: Decimal) -> bool:

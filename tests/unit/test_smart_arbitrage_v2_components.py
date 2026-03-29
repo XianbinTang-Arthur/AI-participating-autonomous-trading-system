@@ -237,7 +237,8 @@ class TestSmartArbitrageV2Components(unittest.TestCase):
                 "smart_arbitrage_fee_source_mode": "configured",
                 "smart_arbitrage_funding_cost_enabled": True,
                 "smart_arbitrage_funding_source_mode": "account_proxy",
-                "smart_arbitrage_expected_hold_hours": 8.0,
+                "smart_arbitrage_expected_hold_hours": 16.0,
+                "smart_arbitrage_expected_funding_events": 2,
                 "smart_arbitrage_funding_interval_hours": 8.0,
                 "smart_arbitrage_estimated_cost_bps": 0.0,
                 "trade_cost_spot_taker_fee_bps": 0.0,
@@ -255,6 +256,10 @@ class TestSmartArbitrageV2Components(unittest.TestCase):
         class _AccountProxy:
             @staticmethod
             def funding_fee_bps_proxy(*, symbol: str | None = None) -> Decimal:
+                return Decimal("2.5") if symbol == "BTC-USDT-SWAP" else Decimal("0")
+
+            @staticmethod
+            def funding_fee_bps_proxy_per_event(*, symbol: str | None = None) -> Decimal:
                 return Decimal("1.25") if symbol == "BTC-USDT-SWAP" else Decimal("0")
 
         frozen_now = datetime(2026, 3, 27, 8, 0, tzinfo=timezone.utc)
@@ -267,9 +272,51 @@ class TestSmartArbitrageV2Components(unittest.TestCase):
                 account_service=_AccountProxy(),
             )
 
-        self.assertEqual(cost.expected_funding_events, 1)
-        self.assertEqual(cost.funding_cost_bps, Decimal("1.25"))
+        self.assertEqual(cost.expected_funding_events, 2)
+        self.assertEqual(cost.funding_cost_bps, Decimal("2.5"))
         self.assertIn("funding_account_proxy_per_event", cost.cost_source_flags)
+
+    def test_cost_model_uses_total_proxy_without_multiplying_when_per_event_proxy_is_missing(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "smart_arbitrage_cost_model_enabled": True,
+                "smart_arbitrage_fee_source_mode": "configured",
+                "smart_arbitrage_funding_cost_enabled": True,
+                "smart_arbitrage_funding_source_mode": "account_proxy",
+                "smart_arbitrage_expected_hold_hours": 16.0,
+                "smart_arbitrage_expected_funding_events": 2,
+                "smart_arbitrage_funding_interval_hours": 8.0,
+                "smart_arbitrage_estimated_cost_bps": 0.0,
+                "trade_cost_spot_taker_fee_bps": 0.0,
+                "trade_cost_margin_taker_fee_bps": 0.0,
+                "trade_cost_derivatives_taker_fee_bps": 0.0,
+                "trade_cost_spot_spread_bps": 0.0,
+                "trade_cost_margin_spread_bps": 0.0,
+                "trade_cost_derivatives_spread_bps": 0.0,
+                "trade_cost_spot_slippage_bps": 0.0,
+                "trade_cost_margin_slippage_bps": 0.0,
+                "trade_cost_derivatives_slippage_bps": 0.0,
+            }
+        )
+
+        class _AccountProxy:
+            @staticmethod
+            def funding_fee_bps_proxy(*, symbol: str | None = None) -> Decimal:
+                return Decimal("2.5") if symbol == "BTC-USDT-SWAP" else Decimal("0")
+
+        frozen_now = datetime(2026, 3, 27, 8, 0, tzinfo=timezone.utc)
+        with patch("aats.services.strategy_engines.smart_arbitrage.cost_model.utc_now", return_value=frozen_now):
+            cost = build_cost_breakdown(
+                settings=settings,
+                basis_bps=Decimal("40"),
+                execution_mode="spot_carry",
+                hedge_symbol="BTC-USDT-SWAP",
+                account_service=_AccountProxy(),
+            )
+
+        self.assertEqual(cost.expected_funding_events, 2)
+        self.assertEqual(cost.funding_cost_bps, Decimal("2.5"))
+        self.assertIn("funding_account_proxy_total", cost.cost_source_flags)
 
     def test_cost_model_prefers_exchange_next_funding_schedule_over_config_projection(self) -> None:
         settings = AATSSettings.model_validate(
@@ -322,6 +369,57 @@ class TestSmartArbitrageV2Components(unittest.TestCase):
         self.assertEqual(cost.funding_cost_bps, Decimal("2.0"))
         self.assertIn("funding_schedule_exchange_actual", cost.cost_source_flags)
         self.assertNotIn("funding_schedule_projected_from_config", cost.cost_source_flags)
+
+    def test_cost_model_uses_current_decision_time_when_exchange_funding_schedule_snapshot_is_stale(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "smart_arbitrage_cost_model_enabled": True,
+                "smart_arbitrage_funding_cost_enabled": True,
+                "smart_arbitrage_funding_source_mode": "configured",
+                "smart_arbitrage_estimated_funding_bps": 2.0,
+                "smart_arbitrage_expected_hold_hours": 4.0,
+                "smart_arbitrage_funding_interval_hours": 8.0,
+                "smart_arbitrage_estimated_cost_bps": 0.0,
+                "trade_cost_spot_taker_fee_bps": 0.0,
+                "trade_cost_margin_taker_fee_bps": 0.0,
+                "trade_cost_derivatives_taker_fee_bps": 0.0,
+                "trade_cost_spot_spread_bps": 0.0,
+                "trade_cost_margin_spread_bps": 0.0,
+                "trade_cost_derivatives_spread_bps": 0.0,
+                "trade_cost_spot_slippage_bps": 0.0,
+                "trade_cost_margin_slippage_bps": 0.0,
+                "trade_cost_derivatives_slippage_bps": 0.0,
+            }
+        )
+
+        class _AccountSchedule:
+            def __init__(self) -> None:
+                self._updated_at = datetime(2026, 3, 27, 4, 0, tzinfo=timezone.utc)
+
+            def funding_schedule(self, *, symbol: str | None = None) -> dict[str, object]:
+                return {
+                    "available": symbol == "BTC-USDT-SWAP",
+                    "symbol": symbol,
+                    "funding_time": self._updated_at - timedelta(hours=4),
+                    "next_funding_time": datetime(2026, 3, 27, 11, 0, tzinfo=timezone.utc),
+                    "funding_interval_hours": Decimal("8"),
+                    "updated_at": self._updated_at,
+                    "source": "okx_public_funding_rate",
+                }
+
+        frozen_now = datetime(2026, 3, 27, 9, 0, tzinfo=timezone.utc)
+        with patch("aats.services.strategy_engines.smart_arbitrage.cost_model.utc_now", return_value=frozen_now):
+            cost = build_cost_breakdown(
+                settings=settings,
+                basis_bps=Decimal("40"),
+                execution_mode="spot_carry",
+                hedge_symbol="BTC-USDT-SWAP",
+                account_service=_AccountSchedule(),
+            )
+
+        self.assertEqual(cost.expected_funding_events, 1)
+        self.assertEqual(cost.funding_cost_bps, Decimal("2.0"))
+        self.assertIn("funding_schedule_exchange_actual", cost.cost_source_flags)
 
     def test_cost_model_treats_estimated_borrow_apr_as_percentage(self) -> None:
         settings = AATSSettings.model_validate(

@@ -536,6 +536,9 @@ class StrategyRuntimeRepository(Protocol):
     def save_execution_bundle(self, bundle: StrategyExecutionBundle) -> StrategyExecutionBundle:
         ...
 
+    def get_execution_bundle(self, bundle_id: str) -> StrategyExecutionBundle | None:
+        ...
+
     def recent_execution_bundles(
         self,
         *,

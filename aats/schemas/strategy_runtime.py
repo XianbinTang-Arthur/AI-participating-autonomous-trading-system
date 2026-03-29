@@ -7,6 +7,7 @@ from typing import Any, Literal
 from pydantic import Field
 
 from aats.schemas.common import SchemaBase, new_id, utc_now
+from aats.schemas.execution import LegOrderAction, PositionMode, PositionSide
 from aats.schemas.system import MarginModelType, ProductType
 
 
@@ -26,7 +27,14 @@ StrategyCandidateState = Literal[
     "recovery",
 ]
 StrategyRouteAction = Literal["override_target", "hold_current", "advisory_only", "protective_fallback"]
-StrategyExecutionBundleStatus = Literal["blocked", "planned", "submitted", "partial_fill_recovery", "recovered"]
+StrategyExecutionBundleStatus = Literal[
+    "blocked",
+    "planned",
+    "submitted",
+    "partial_fill_recovery",
+    "review_required",
+    "recovered",
+]
 StrategySleeveStatus = Literal["active", "inactive", "paused", "retired"]
 StrategyInventoryPolicy = Literal["account_net_inventory", "paired_inventory", "inventory_accumulation"]
 StrategySleeveAutomationState = Literal["active", "contracted", "paused", "protective_only", "disabled"]
@@ -230,6 +238,9 @@ class StrategyLegIntent(SchemaBase):
     symbol: str
     product_type: ProductType
     side: Literal["buy", "sell"]
+    position_mode: PositionMode | None = None
+    pos_side: PositionSide | None = None
+    action: LegOrderAction | None = None
     family: StrategyFamily | None = None
     role: Literal["primary", "hedge", "inventory", "accumulation"] = "primary"
     strategy_sleeve_id: str | None = None
@@ -252,6 +263,9 @@ class StrategyLegIntent(SchemaBase):
     opportunity_kind: str | None = None
     execution_mode: str | None = None
     state_phase: str | None = None
+    overlay_mode: Literal["protective", "opportunistic", "independent"] | None = None
+    hedge_ratio: Decimal | None = None
+    trigger_reason_codes: list[str] = Field(default_factory=list)
     note: str | None = None
 
 

@@ -90,7 +90,15 @@ class _HealthyReconciliationRepo:
         )
 
 
-def _snapshot(*, initial_margin: str, adjusted_equity: str, mark_price: str, liquidation_price: str) -> ExchangeAccountSnapshot:
+def _snapshot(
+    *,
+    initial_margin: str,
+    adjusted_equity: str,
+    mark_price: str,
+    liquidation_price: str,
+    quantity: str = "0.02",
+    side: str = "long",
+) -> ExchangeAccountSnapshot:
     return ExchangeAccountSnapshot(
         account_source="okx",
         fetched_at=utc_now(),
@@ -99,8 +107,8 @@ def _snapshot(*, initial_margin: str, adjusted_equity: str, mark_price: str, liq
             ExchangePosition(
                 instrument_id="BTC-USDT-SWAP",
                 symbol="BTC-USDT-SWAP",
-                quantity=Decimal("0.02"),
-                side="long",
+                quantity=Decimal(quantity),
+                side=side,
                 margin_mode="cross",
                 mark_price=Decimal(mark_price),
                 liquidation_price=Decimal(liquidation_price),
@@ -170,6 +178,9 @@ class TestTask72DerivativesLiveGuard(unittest.TestCase):
         self.assertIn("derivatives_margin_usage_requires_only_reduce", payload["only_reduce_reasons"])
         self.assertFalse(payload["auto_halt_required"])
         self.assertFalse(kill_switch.halted)
+        self.assertEqual(payload["current_derivatives_exposure"]["long_notional"], Decimal("1400"))
+        self.assertEqual(payload["current_derivatives_exposure"]["gross_notional"], Decimal("1400"))
+        self.assertEqual(payload["current_derivatives_exposure"]["net_notional"], Decimal("1400"))
 
     def test_live_guard_enters_grace_mode_before_only_reduce_when_risk_snapshot_temporarily_missing(self) -> None:
         settings = self._settings()
@@ -371,6 +382,35 @@ class TestTask72DerivativesLiveGuard(unittest.TestCase):
         self.assertIn("derivatives_liquidation_proximity_auto_halt", payload["auto_halt_reasons"])
         self.assertTrue(kill_switch.halted)
         self.assertEqual(kill_switch.status()["reason"], "derivatives_live_risk_auto_halt")
+
+    def test_live_guard_uses_position_side_for_short_positions_even_when_quantity_is_positive(self) -> None:
+        settings = self._settings()
+        kill_switch = KillSwitch()
+        service = DerivativesLiveGuardService(
+            settings=settings,
+            kill_switch=kill_switch,
+            account_service=_StubAccountService(
+                _snapshot(
+                    initial_margin="320",
+                    adjusted_equity="1000",
+                    mark_price="66838.5",
+                    liquidation_price="130646.40339573975",
+                    quantity="0.0018",
+                    side="short",
+                )
+            ),
+            event_store=InMemoryEventStore(),
+            metrics=MetricsRegistry(),
+        )
+
+        payload = service.evaluate_now()
+
+        self.assertEqual(payload["status"], "healthy")
+        self.assertFalse(payload["only_reduce_required"])
+        self.assertFalse(payload["auto_halt_required"])
+        self.assertFalse(kill_switch.halted)
+        self.assertGreater(payload["nearest_liquidation_gap_ratio"], Decimal("0.9"))
+        self.assertEqual(payload["closest_position"]["pos_side"], "short")
 
     def test_risk_engine_respects_runtime_guard_only_reduce_state(self) -> None:
         settings = self._settings()

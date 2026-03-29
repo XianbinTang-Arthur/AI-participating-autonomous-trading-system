@@ -16,6 +16,10 @@ TradingProductType = Literal["spot", "derivatives"]
 StartupProfile = Literal["spot", "derivatives"]
 EnvTemplateProfile = Literal["spot", "derivatives", "spot_live", "derivatives_live"]
 MarginMode = Literal["cash", "cross", "isolated"]
+DerivativesPositionMode = Literal["net", "hedge"]
+DerivativesHedgeTransitionMode = Literal["close_then_open", "overlap_then_reduce", "independent_books"]
+StrategyHedgeOverlayMode = Literal["protective", "opportunistic", "independent"]
+StrategyHedgeOverlayRolloutStage = Literal["replay_only", "dry_run", "live"]
 ConfigProfile = Literal[
     "local_demo",
     "real_market_paper",
@@ -296,6 +300,9 @@ class AATSSettings(BaseSettings):
     dca_pullback_entry_bps: float = 40.0
     trading_product_type: TradingProductType = "spot"
     margin_mode: MarginMode = "cash"
+    derivatives_position_mode: DerivativesPositionMode = "net"
+    derivatives_hedge_transition_mode: DerivativesHedgeTransitionMode = "close_then_open"
+    derivatives_require_exchange_pos_mode_match: bool = True
     max_target_leverage: float = 1.0
     default_target_leverage: float = 1.0
     strategy_short_bias_enabled: bool = False
@@ -335,6 +342,32 @@ class AATSSettings(BaseSettings):
     strategy_short_reversal_min_signal_edge_bps: float = 14.0
     strategy_short_reversal_alpha_min: float = 0.18
     strategy_short_reversal_confidence_min: float = 0.55
+    strategy_hedge_overlay_enabled: bool = False
+    strategy_hedge_overlay_mode: StrategyHedgeOverlayMode = "protective"
+    strategy_hedge_open_threshold: float = 0.58
+    strategy_hedge_close_threshold: float = 0.42
+    strategy_hedge_max_ratio: float = 0.50
+    strategy_hedge_min_hold_seconds: float = 300.0
+    strategy_hedge_rebalance_cooldown_seconds: float = 120.0
+    strategy_hedge_opportunistic_enabled: bool = False
+    strategy_hedge_opportunistic_rollout_stage: StrategyHedgeOverlayRolloutStage = "dry_run"
+    strategy_hedge_opportunistic_open_threshold: float = 0.62
+    strategy_hedge_opportunistic_close_threshold: float = 0.46
+    strategy_hedge_opportunistic_max_ratio: float = 0.35
+    strategy_hedge_opportunistic_min_hold_seconds: float = 180.0
+    strategy_hedge_opportunistic_rebalance_cooldown_seconds: float = 90.0
+    strategy_hedge_opportunistic_max_fee_drag_ratio: float = 0.18
+    strategy_hedge_opportunistic_max_churn_ratio: float = 0.22
+    strategy_hedge_independent_enabled: bool = False
+    strategy_hedge_independent_rollout_stage: StrategyHedgeOverlayRolloutStage = "dry_run"
+    strategy_hedge_independent_long_entry_threshold: float = 0.66
+    strategy_hedge_independent_short_entry_threshold: float = 0.66
+    strategy_hedge_independent_long_scale_in_threshold: float = 0.70
+    strategy_hedge_independent_short_scale_in_threshold: float = 0.70
+    strategy_hedge_independent_long_min_hold_seconds: float = 300.0
+    strategy_hedge_independent_short_min_hold_seconds: float = 300.0
+    strategy_hedge_independent_rebalance_cooldown_seconds: float = 120.0
+    strategy_hedge_independent_trial_guard_enabled: bool = True
     strategy_min_hold_seconds: float = 720.0
     strategy_post_close_cooldown_seconds: float = 300.0
     strategy_health_lookback_trades: int = 12
@@ -363,6 +396,10 @@ class AATSSettings(BaseSettings):
     max_gross_notional_per_symbol: float = 2_500.0
     max_pending_notional_per_symbol: float = 1_250.0
     max_total_open_notional: float = 5_000.0
+    risk_max_long_notional: float = 0.0
+    risk_max_short_notional: float = 0.0
+    risk_max_gross_notional: float = 0.0
+    risk_max_net_notional: float = 0.0
     max_daily_realized_loss_usdt: float = 100.0
     derivatives_only_reduce_trigger_margin_fraction: float = 0.7
     derivatives_runtime_guard_enabled: bool = True
@@ -420,6 +457,57 @@ class AATSSettings(BaseSettings):
             raise ValueError("primary_timeframe_currently_must_be_15m")
         if self.secondary_timeframe != "1h":
             raise ValueError("secondary_timeframe_currently_must_be_1h")
+        if self.trading_product_type != "derivatives" and self.derivatives_position_mode != "net":
+            raise ValueError("non_derivatives_runtime_disallows_derivatives_hedge_position_mode")
+        if self.derivatives_position_mode == "hedge":
+            if self.trading_product_type != "derivatives":
+                raise ValueError("derivatives_hedge_position_mode_requires_derivatives_product_type")
+            if self.margin_mode == "cash":
+                raise ValueError("derivatives_hedge_position_mode_requires_margin_runtime")
+        if not 0.0 <= float(self.strategy_hedge_close_threshold) <= 1.0:
+            raise ValueError("strategy_hedge_close_threshold_must_be_between_zero_and_one")
+        if not 0.0 <= float(self.strategy_hedge_open_threshold) <= 1.0:
+            raise ValueError("strategy_hedge_open_threshold_must_be_between_zero_and_one")
+        if float(self.strategy_hedge_close_threshold) - float(self.strategy_hedge_open_threshold) > 1e-9:
+            raise ValueError("strategy_hedge_close_threshold_must_not_exceed_open_threshold")
+        if not 0.0 <= float(self.strategy_hedge_max_ratio) <= 1.0:
+            raise ValueError("strategy_hedge_max_ratio_must_be_between_zero_and_one")
+        if not 0.0 <= float(self.strategy_hedge_opportunistic_close_threshold) <= 1.0:
+            raise ValueError("strategy_hedge_opportunistic_close_threshold_must_be_between_zero_and_one")
+        if not 0.0 <= float(self.strategy_hedge_opportunistic_open_threshold) <= 1.0:
+            raise ValueError("strategy_hedge_opportunistic_open_threshold_must_be_between_zero_and_one")
+        if (
+            float(self.strategy_hedge_opportunistic_close_threshold)
+            - float(self.strategy_hedge_opportunistic_open_threshold)
+            > 1e-9
+        ):
+            raise ValueError("strategy_hedge_opportunistic_close_threshold_must_not_exceed_open_threshold")
+        if not 0.0 <= float(self.strategy_hedge_opportunistic_max_ratio) <= 1.0:
+            raise ValueError("strategy_hedge_opportunistic_max_ratio_must_be_between_zero_and_one")
+        if not 0.0 <= float(self.strategy_hedge_opportunistic_max_fee_drag_ratio) <= 1.0:
+            raise ValueError("strategy_hedge_opportunistic_max_fee_drag_ratio_must_be_between_zero_and_one")
+        if not 0.0 <= float(self.strategy_hedge_opportunistic_max_churn_ratio) <= 1.0:
+            raise ValueError("strategy_hedge_opportunistic_max_churn_ratio_must_be_between_zero_and_one")
+        if not 0.0 <= float(self.strategy_hedge_independent_long_entry_threshold) <= 1.0:
+            raise ValueError("strategy_hedge_independent_long_entry_threshold_must_be_between_zero_and_one")
+        if not 0.0 <= float(self.strategy_hedge_independent_short_entry_threshold) <= 1.0:
+            raise ValueError("strategy_hedge_independent_short_entry_threshold_must_be_between_zero_and_one")
+        if not 0.0 <= float(self.strategy_hedge_independent_long_scale_in_threshold) <= 1.0:
+            raise ValueError("strategy_hedge_independent_long_scale_in_threshold_must_be_between_zero_and_one")
+        if not 0.0 <= float(self.strategy_hedge_independent_short_scale_in_threshold) <= 1.0:
+            raise ValueError("strategy_hedge_independent_short_scale_in_threshold_must_be_between_zero_and_one")
+        if (
+            float(self.strategy_hedge_independent_long_entry_threshold)
+            - float(self.strategy_hedge_independent_long_scale_in_threshold)
+            > 1e-9
+        ):
+            raise ValueError("strategy_hedge_independent_long_entry_threshold_must_not_exceed_scale_in_threshold")
+        if (
+            float(self.strategy_hedge_independent_short_entry_threshold)
+            - float(self.strategy_hedge_independent_short_scale_in_threshold)
+            > 1e-9
+        ):
+            raise ValueError("strategy_hedge_independent_short_entry_threshold_must_not_exceed_scale_in_threshold")
         if self.trading_product_type == "spot" and self.margin_mode == "cash":
             if float(self.max_target_leverage) != 1.0 or float(self.default_target_leverage) != 1.0:
                 raise ValueError("spot_cash_runtime_requires_unit_leverage")

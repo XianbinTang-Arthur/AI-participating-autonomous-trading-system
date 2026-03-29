@@ -24,7 +24,12 @@ export function renderRiskSections(data) {
   const primaryTask = blockerControl.primary_task || null;
   const reconciliation = data.reconciliationLatest?.reconciliation || null;
   const mismatchSummary = data.reconciliationLatest?.mismatch_summary || {};
+  const legMismatchSummary = mismatchSummary.leg_mismatch_summary || {};
   const billsSummary = data.reconciliationLatest?.exchange_bills_summary || {};
+  const positionsView = data.positions || {};
+  const localInstrumentPositions = Array.isArray(positionsView.local_instrument_positions)
+    ? positionsView.local_instrument_positions
+    : [];
   const recovery = data.systemRecovery?.recovery || {};
   const replay = data.replayStatus || {};
   const metrics = data.metrics || {};
@@ -35,6 +40,9 @@ export function renderRiskSections(data) {
   const marginBuffer = account.margin_buffer_overview || data.runtime?.margin_buffer_overview || {};
   const guardedLivePreflight = data.guardedLivePreflight || data.runtime?.guarded_live_preflight || {};
   const guardedLiveRunPacket = data.guardedLiveRunPacket || data.runtime?.guarded_live_run_packet_summary || {};
+  const positionModeContract = account.position_mode_contract || {};
+  const derivativesLiveGuard = account.derivatives_live_guard || {};
+  const currentDerivativesExposure = derivativesLiveGuard.current_derivatives_exposure || {};
 
   return {
     riskHero: primaryStatusPanel({
@@ -171,6 +179,72 @@ export function renderRiskSections(data) {
             ? `${textOrFallback(marginBuffer.liquidation.closest_position.symbol, "未知合约")} / ${textOrFallback(marginBuffer.liquidation.closest_position.pos_side, "未知方向")}，强平价 ${formatNumber(marginBuffer.liquidation.closest_position.liquidation_price)}`
             : "当前没有可计算强平距离的仓位",
           tone: marginBufferTone(marginBuffer.status),
+        },
+      ]),
+    }),
+    riskPositionMode: surfaceCard({
+      title: "持仓模式契约",
+      kicker: "对冲模式",
+      copy: "这里明确说明本地合约运行线要求的仓位模式，以及交易所当前真实返回的 posMode。",
+      content: summaryStrip([
+        {
+          label: "本地要求",
+          value: derivativesPositionModeLabel(positionModeContract.configured_derivatives_position_mode),
+          meta: requiredExchangeModeMeta(positionModeContract),
+          tone: positionModeContract.exchange_position_mode_matches_configured === false ? "danger" : "info",
+        },
+        {
+          label: "交易所当前模式",
+          value: exchangePositionModeLabel(positionModeContract.exchange_position_mode),
+          meta: positionModeContract.position_mode_match_required
+            ? `强匹配 ${booleanWord(positionModeContract.exchange_position_mode_matches_configured)}`
+            : "当前没有强制要求和交易所模式一致",
+          tone: positionModeContract.exchange_position_mode_matches_configured === false ? "danger" : "positive",
+        },
+        {
+          label: "本地双腿持仓",
+          value: Number(localInstrumentPositions.filter((item) => item.dual_legged).length || 0) > 0
+            ? `${formatNumber(localInstrumentPositions.filter((item) => item.dual_legged).length || 0, 0)} 个标的`
+            : "当前没有双腿并存标的",
+          meta: localInstrumentLegMeta(localInstrumentPositions),
+          tone: Number(localInstrumentPositions.filter((item) => item.dual_legged).length || 0) > 0 ? "info" : "neutral",
+        },
+        {
+          label: "恢复上下文",
+          value: recovery.safe_to_trade ? "当前没有模式阻断" : "恢复资格仍受限",
+          meta: Number(legMismatchSummary.total_count || 0) > 0 ? "恢复判断会继续结合腿级异常一起评估。" : "当前没有额外腿级异常进入恢复判断。",
+          tone: recovery.safe_to_trade ? "positive" : "warning",
+        },
+      ]),
+    }),
+    riskExposure: surfaceCard({
+      title: "合约敞口",
+      kicker: "long / short / gross / net",
+      copy: "对冲模式下不能只看净敞口，这里同时展开 long、short、gross、net 四口径。",
+      content: summaryStrip([
+        {
+          label: "多头名义价值",
+          value: formatNumber(currentDerivativesExposure.long_notional),
+          meta: `多头杠杆 ${formatNumber(currentDerivativesExposure.long_leverage, 2)}`,
+          tone: Number(currentDerivativesExposure.long_notional || 0) > 0 ? "info" : "neutral",
+        },
+        {
+          label: "空头名义价值",
+          value: formatNumber(currentDerivativesExposure.short_notional),
+          meta: `空头杠杆 ${formatNumber(currentDerivativesExposure.short_leverage, 2)}`,
+          tone: Number(currentDerivativesExposure.short_notional || 0) > 0 ? "info" : "neutral",
+        },
+        {
+          label: "毛敞口",
+          value: formatNumber(currentDerivativesExposure.gross_notional),
+          meta: `毛杠杆 ${formatNumber(currentDerivativesExposure.gross_leverage, 2)}`,
+          tone: Number(currentDerivativesExposure.gross_notional || 0) > 0 ? "warning" : "neutral",
+        },
+        {
+          label: "净敞口",
+          value: formatNumber(currentDerivativesExposure.net_notional),
+          meta: `净杠杆 ${formatNumber(currentDerivativesExposure.net_leverage, 2)}`,
+          tone: Number(currentDerivativesExposure.net_notional || 0) === 0 ? "neutral" : "info",
         },
       ]),
     }),
@@ -338,6 +412,12 @@ export function renderRiskSections(data) {
             : "顺序为：结构性 / 财务 / 观察值。",
           tone: mismatchSummary.observational_only ? "info" : mismatchSummary.mismatch_reasons?.length ? "warning" : "positive",
         },
+        {
+          label: "持仓腿异常",
+          value: Number(legMismatchSummary.total_count || 0) > 0 ? `${formatNumber(legMismatchSummary.total_count || 0, 0)} 条` : "当前没有腿级异常",
+          meta: legMismatchSummaryMeta(legMismatchSummary),
+          tone: legMismatchTone(legMismatchSummary),
+        },
         { label: "建议动作", value: mismatchSummary.recommended_operator_action ? localizeError(mismatchSummary.recommended_operator_action) : "当前没有额外建议动作", meta: listText(mismatchSummary.safety_impacts, "当前没有额外安全影响说明"), tone: mismatchSummary.recommended_operator_action ? "info" : "neutral" },
       ]),
     }),
@@ -364,9 +444,11 @@ export function renderRiskView(data) {
       <div class="span-12">${sections.riskActions}</div>
       <div class="span-12">${sections.riskEvidence}</div>
       <div class="span-3">${sections.riskAccount}</div>
+      <div class="span-3">${sections.riskPositionMode}</div>
       <div class="span-3">${sections.riskMarginBuffer}</div>
       <div class="span-3">${sections.riskReconciliation}</div>
-      <div class="span-3">${sections.riskRecovery}</div>
+      <div class="span-6">${sections.riskRecovery}</div>
+      <div class="span-6">${sections.riskExposure}</div>
       <div class="span-6">${sections.riskPreflight}</div>
       <div class="span-6">${sections.riskRunPacket}</div>
       <div class="span-12">${sections.riskShadow}</div>
@@ -690,6 +772,59 @@ function shouldShowInspectReconciliation({ reconciliation, recovery }) {
     reconciliation?.reconciliation_id
     && (reconciliationNeedsAttention(reconciliation) || recovery.review_required)
   );
+}
+
+function legMismatchTone(summary = {}) {
+  if (Number(summary.missing_execution_chain_count || 0) > 0) return "danger";
+  if (Number(summary.total_count || 0) > 0) return "warning";
+  return "neutral";
+}
+
+function legMismatchSummaryMeta(summary = {}) {
+  const items = Array.isArray(summary.items) ? summary.items : [];
+  if (!items.length) {
+    return "当前没有 long / short 两条腿之间的额外异常。";
+  }
+  const prefix = Number(summary.missing_execution_chain_count || 0) > 0
+    ? `其中有 ${formatNumber(summary.missing_execution_chain_count || 0, 0)} 条腿在交易所存在，但本地没有对应执行链。`
+    : "当前看到的是腿级数量差异，不等于整账户净仓异常。";
+  const details = items
+    .slice(0, 2)
+    .map((item) => {
+      const side = item.leg_side === "long" ? "多头腿" : item.leg_side === "short" ? "空头腿" : "净仓腿";
+      return `${textOrFallback(item.symbol, "未知合约")} ${side}：本地 ${formatNumber(item.stored_qty)}，交易所 ${formatNumber(item.exchange_qty)}`;
+    })
+    .join("；");
+  return `${prefix}${details ? ` ${details}` : ""}`;
+}
+
+function derivativesPositionModeLabel(value) {
+  if (value === "hedge") return "对冲模式";
+  if (value === "net") return "净仓模式";
+  return textOrFallback(value, "待确认");
+}
+
+function exchangePositionModeLabel(value) {
+  if (value === "long_short_mode") return "交易所对冲模式";
+  if (value === "net_mode") return "交易所净仓模式";
+  return textOrFallback(value, "交易所未返回");
+}
+
+function requiredExchangeModeMeta(positionModeContract = {}) {
+  const required = exchangePositionModeLabel(positionModeContract.required_exchange_position_mode);
+  return positionModeContract.position_mode_match_required
+    ? `要求交易所返回 ${required}`
+    : `当前没有强制交易所模式要求，期望值 ${required}`;
+}
+
+function localInstrumentLegMeta(rows = []) {
+  if (!rows.length) return "当前没有持仓。";
+  const dualLegged = rows.filter((item) => item.dual_legged);
+  if (!dualLegged.length) return "当前持仓都是单腿净仓，没有 long / short 并存。";
+  return dualLegged
+    .slice(0, 2)
+    .map((item) => `${textOrFallback(item.symbol, "未知合约")}：多头 ${formatNumber(item.long_position_qty)} / 空头 ${formatNumber(item.short_position_qty)}`)
+    .join("；");
 }
 
 function actionSuggestsRebaseline(value) {

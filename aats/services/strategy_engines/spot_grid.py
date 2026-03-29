@@ -55,7 +55,8 @@ class SpotGridStrategyEngine:
             )
         price = None if engine_input.latest_market_snapshot is None else to_decimal(engine_input.latest_market_snapshot.last_price)
         recent_snapshots = engine_input.recent_market_snapshots.get(engine_input.context.symbol, [])
-        if price is None or not recent_snapshots:
+        required_anchor_snapshots = max(int(self.settings.spot_grid_anchor_lookback_snapshots), 1)
+        if price is None or len(recent_snapshots) < required_anchor_snapshots:
             return StrategyCandidate(
                 family="spot_grid",
                 state="inactive",
@@ -66,11 +67,28 @@ class SpotGridStrategyEngine:
                 headline="Anchor history is insufficient for spot grid.",
                 recommended_symbol=engine_input.context.symbol,
                 reason_codes=["spot_grid_anchor_history_insufficient"],
+                metrics={
+                    "anchor_history_required": required_anchor_snapshots,
+                    "anchor_history_available": len(recent_snapshots),
+                },
             )
         anchor = sum((to_decimal(item.last_price) for item in recent_snapshots), start=Decimal("0")) / Decimal(
             len(recent_snapshots)
         )
-        band_bps = Decimal(str(max(self.settings.spot_grid_band_bps, 1.0)))
+        band_bps = Decimal(str(self.settings.spot_grid_band_bps))
+        if band_bps <= EPSILON_DECIMAL_12:
+            return StrategyCandidate(
+                family="spot_grid",
+                state="inactive",
+                enabled=True,
+                selectable=False,
+                execution_compatible=True,
+                route_action="hold_current",
+                headline="Spot grid band width is invalid.",
+                recommended_symbol=engine_input.context.symbol,
+                reason_codes=["spot_grid_band_invalid"],
+                metrics={"spot_grid_band_bps": band_bps},
+            )
         band_width = anchor * band_bps / Decimal("10000")
         if band_width <= EPSILON_DECIMAL_12:
             return StrategyCandidate(
@@ -87,7 +105,7 @@ class SpotGridStrategyEngine:
 
         max_position_qty = to_decimal(self.settings.max_abs_position_qty)
         floor_fraction = Decimal(str(max(min(self.settings.spot_grid_inventory_floor_fraction, 1.0), 0.0)))
-        ceiling_fraction = Decimal(str(max(min(self.settings.spot_grid_inventory_ceiling_fraction, 1.0), 0.0)))
+        ceiling_fraction = Decimal(str(max(min(self.settings.spot_grid_inventory_ceiling_fraction, 1.5), 0.0)))
         if ceiling_fraction < floor_fraction:
             ceiling_fraction = floor_fraction
         min_inventory = max_position_qty * floor_fraction

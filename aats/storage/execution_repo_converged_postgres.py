@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from aats.schemas.common import dump_payload_exact
 from aats.schemas.execution import FillEvent, OrderIntent, OrderState
+from aats.services.accounting import fill_fee_cost_in_quote
 from aats.services.execution_engine.state_machine import OrderStateMachine
 from aats.services.execution_control.shadow import Phase1ExecutionShadowService
 from aats.services.runtime_scope import RuntimeStateScope
@@ -390,7 +391,7 @@ class ConvergedPostgresExecutionRepository(ExecutionRepository):
         average_fill_price = None
         if total_filled_qty > Decimal("0"):
             average_fill_price = total_notional / total_filled_qty
-        total_fees = sum((fill.fee_amount for fill in fills), Decimal("0"))
+        total_fees = sum((fill_fee_cost_in_quote(fill) for fill in fills), Decimal("0"))
         last_fill = fills[-1]
         remaining_qty = max(requested_qty - total_filled_qty, Decimal("0"))
         status = last_fill.order_status_after_fill or ("FILLED" if remaining_qty <= Decimal("0") else "PARTIALLY_FILLED")

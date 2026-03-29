@@ -26,6 +26,7 @@ class AuditReplayQueryFacade:
         return {
             "audit": detail["audit"],
             "history_length": len(self.owner.runtime.audit_repo.history(decision_id)),
+            "hedge_mode_audit": detail.get("hedge_mode_audit"),
             "baseline_switches": self._baseline_switch_history(
                 as_of_ts=context.get("as_of_ts"),
                 limit=10,

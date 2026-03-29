@@ -51,16 +51,16 @@ class TestExecutionPlanner(unittest.TestCase):
         self.assertEqual(intent.execution_action, "scale_in")
         self.assertEqual(intent.position_intent, "open_long")
 
-    def test_build_plan_and_intent_preserve_derivatives_execution_semantics(self) -> None:
+    def test_build_leg_plan_and_intent_preserve_derivatives_execution_semantics(self) -> None:
         planner = ExecutionPlanner(settings=AATSSettings.model_validate({}))
 
-        plan = planner.build_plan(
+        plan = planner.build_leg_plan(
             decision_id="decision_derivatives_semantics",
             symbol="BTC-USDT-SWAP",
-            current_position_qty=Decimal("0.02"),
-            target_position_qty=Decimal("0"),
-            approved_target_position_qty=Decimal("0"),
-            delta_qty=Decimal("-0.02"),
+            side="sell",
+            pos_side="long",
+            action="close",
+            quantity=Decimal("0.02"),
             urgency="medium",
             max_slippage_tolerance_bps=25,
             product_type="derivatives",
@@ -73,27 +73,52 @@ class TestExecutionPlanner(unittest.TestCase):
         )
 
         self.assertIsNotNone(plan)
+        assert plan is not None
         self.assertTrue(plan.reduce_only)
         self.assertTrue(plan.close_only)
+        self.assertEqual(plan.action, "close")
         self.assertEqual(plan.position_intent, "close_long")
         self.assertEqual(plan.td_mode, "cross")
         self.assertEqual(plan.position_mode, "long_short_mode")
         self.assertEqual(plan.pos_side, "long")
-        self.assertEqual(plan.reduce_only_reason, "position_intent_close_path")
-        self.assertEqual(plan.close_only_reason, "position_intent_close_path")
+        self.assertEqual(plan.reduce_only_reason, "explicit_leg_close_path")
+        self.assertEqual(plan.close_only_reason, "explicit_leg_close_path")
         self.assertEqual(plan.instrument_family, "BTC-USDT")
         self.assertEqual(plan.settle_currency, "USDT")
 
-        intent = planner.build_intent(plan=plan)
+        intent = planner.build_leg_intent(plan=plan)
 
         self.assertIsNotNone(intent)
+        assert intent is not None
         self.assertTrue(intent.reduce_only)
         self.assertTrue(intent.close_only)
         self.assertEqual(intent.td_mode, "cross")
         self.assertEqual(intent.position_mode, "long_short_mode")
         self.assertEqual(intent.pos_side, "long")
+        self.assertEqual(intent.action, "close")
         self.assertEqual(intent.instrument_family, "BTC-USDT")
         self.assertEqual(intent.settle_currency, "USDT")
+
+    def test_build_plan_rejects_signed_derivatives_flow_in_long_short_mode(self) -> None:
+        planner = ExecutionPlanner(settings=AATSSettings.model_validate({}))
+
+        plan = planner.build_plan(
+            decision_id="decision_legacy_signed_hedge_path",
+            symbol="BTC-USDT-SWAP",
+            current_position_qty=Decimal("0.02"),
+            target_position_qty=Decimal("0"),
+            approved_target_position_qty=Decimal("0"),
+            delta_qty=Decimal("-0.02"),
+            urgency="medium",
+            max_slippage_tolerance_bps=25,
+            product_type="derivatives",
+            target_leverage=3.0,
+            margin_mode="cross",
+            td_mode="cross",
+            position_mode="long_short_mode",
+        )
+
+        self.assertIsNone(plan)
 
     def test_build_plan_and_intent_preserve_derivatives_risk_submission_context(self) -> None:
         planner = ExecutionPlanner(settings=AATSSettings.model_validate({}))
@@ -111,7 +136,7 @@ class TestExecutionPlanner(unittest.TestCase):
             target_leverage=3.0,
             margin_mode="cross",
             td_mode="cross",
-            position_mode="long_short_mode",
+            position_mode="net_mode",
             required_initial_margin=Decimal("17.5"),
             projected_margin_usage=Decimal("0.81"),
             projected_notional=Decimal("1340"),

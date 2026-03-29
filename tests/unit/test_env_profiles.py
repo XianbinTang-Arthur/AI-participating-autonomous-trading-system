@@ -18,6 +18,7 @@ from aats.bootstrap.managed_profiles import (
     load_managed_profile_values,
 )
 from aats.bootstrap.settings import AATSSettings
+from tests.support.postgres import bootstrap_postgres_test_env, postgres_example_url
 
 
 def test_resolve_profile_dotenv_path_uses_named_profile(tmp_path: Path) -> None:
@@ -82,6 +83,87 @@ def test_load_profiled_dotenv_into_process_replaces_prior_profile_managed_values
         assert "AATS_ALLOWED_SYMBOLS" not in os.environ
         assert os.environ["AATS_STARTUP_PROFILE"] == "derivatives"
         assert os.environ["AATS_ENV_TEMPLATE_PROFILE"] == "derivatives_live"
+
+
+def test_bootstrap_postgres_test_env_loads_database_url_from_explicit_profile_when_missing(tmp_path: Path) -> None:
+    expected = postgres_example_url(database_name="aats_live_derivatives")
+    dotenv_path = tmp_path / ".env.derivatives.live"
+    dotenv_path.write_text(
+        f"AATS_DATABASE_URL={expected}\n",
+        encoding="utf-8",
+    )
+    with patch.dict(os.environ, {}, clear=True):
+        loaded = bootstrap_postgres_test_env(project_root=tmp_path, profile="derivatives_live")
+
+        assert loaded == expected
+        assert os.environ["AATS_DATABASE_URL"] == loaded
+        assert os.environ["AATS_ENV_TEMPLATE_PROFILE"] == "derivatives_live"
+        assert os.environ["AATS_STARTUP_PROFILE"] == "derivatives"
+
+
+def test_bootstrap_postgres_test_env_defaults_to_local_derivatives_live_profile(tmp_path: Path) -> None:
+    expected = postgres_example_url(database_name="aats_local_derivatives_live")
+    (tmp_path / ".env.derivatives.live").write_text(
+        f"AATS_DATABASE_URL={expected}\n",
+        encoding="utf-8",
+    )
+    with patch.dict(os.environ, {}, clear=True):
+        loaded = bootstrap_postgres_test_env(project_root=tmp_path)
+
+        assert loaded == expected
+        assert os.environ["AATS_DATABASE_URL"] == loaded
+        assert os.environ["AATS_ENV_TEMPLATE_PROFILE"] == "derivatives_live"
+        assert os.environ["AATS_STARTUP_PROFILE"] == "derivatives"
+
+
+def test_bootstrap_postgres_test_env_prefers_explicit_test_database_url(tmp_path: Path) -> None:
+    expected = postgres_example_url(database_name="test_only")
+    with patch.dict(
+        os.environ,
+        {"AATS_TEST_DATABASE_URL": expected},
+        clear=True,
+    ):
+        loaded = bootstrap_postgres_test_env(project_root=tmp_path)
+
+        assert loaded == expected
+        assert os.environ["AATS_DATABASE_URL"] == loaded
+        assert "AATS_ENV_TEMPLATE_PROFILE" not in os.environ
+        assert "AATS_STARTUP_PROFILE" not in os.environ
+
+
+def test_bootstrap_postgres_test_env_loads_database_url_from_dedicated_test_dotenv(tmp_path: Path) -> None:
+    expected = postgres_example_url(database_name="aats_test_runtime")
+    (tmp_path / ".env.test.postgres").write_text(
+        f"AATS_DATABASE_URL={expected}\n",
+        encoding="utf-8",
+    )
+    with patch.dict(os.environ, {}, clear=True):
+        loaded = bootstrap_postgres_test_env(project_root=tmp_path)
+
+        assert loaded == expected
+        assert os.environ["AATS_DATABASE_URL"] == loaded
+        assert "AATS_ENV_TEMPLATE_PROFILE" not in os.environ
+        assert "AATS_STARTUP_PROFILE" not in os.environ
+
+
+def test_bootstrap_postgres_test_env_preserves_existing_database_url(tmp_path: Path) -> None:
+    profile_url = postgres_example_url(database_name="aats_live_derivatives")
+    expected = postgres_example_url(database_name="external")
+    (tmp_path / ".env.derivatives.live").write_text(
+        f"AATS_DATABASE_URL={profile_url}\n",
+        encoding="utf-8",
+    )
+    with patch.dict(
+        os.environ,
+        {"AATS_DATABASE_URL": expected},
+        clear=True,
+    ):
+        loaded = bootstrap_postgres_test_env(project_root=tmp_path)
+
+        assert loaded == expected
+        assert os.environ["AATS_DATABASE_URL"] == loaded
+        assert "AATS_ENV_TEMPLATE_PROFILE" not in os.environ
+        assert "AATS_STARTUP_PROFILE" not in os.environ
 
 
 def _load_env_file(path: Path) -> dict[str, str]:
@@ -229,6 +311,42 @@ def test_derivatives_managed_profiles_use_relaxed_directional_thresholds() -> No
         assert values["strategy_low_edge_threshold_bps"] == 4.0
         assert values["strategy_low_edge_streak_limit"] == 4
         assert values["strategy_low_edge_cooldown_seconds"] == 900.0
+        expected_overlay_mode = "independent" if profile == "derivatives_live" else "protective"
+        assert values["strategy_hedge_overlay_mode"] == expected_overlay_mode
+        expected_opportunistic_enabled = profile == "derivatives_live"
+        expected_opportunistic_rollout = "live" if profile == "derivatives_live" else "dry_run"
+        assert values["strategy_hedge_opportunistic_enabled"] is expected_opportunistic_enabled
+        assert values["strategy_hedge_opportunistic_rollout_stage"] == expected_opportunistic_rollout
+        assert values["strategy_hedge_opportunistic_open_threshold"] == 0.62
+        assert values["strategy_hedge_opportunistic_close_threshold"] == 0.46
+        assert values["strategy_hedge_opportunistic_max_ratio"] == 0.35
+        assert values["strategy_hedge_opportunistic_min_hold_seconds"] == 180.0
+        assert values["strategy_hedge_opportunistic_rebalance_cooldown_seconds"] == 90.0
+        assert values["strategy_hedge_opportunistic_max_fee_drag_ratio"] == 0.18
+        assert values["strategy_hedge_opportunistic_max_churn_ratio"] == 0.22
+        expected_independent_enabled = profile == "derivatives_live"
+        expected_independent_rollout = "live" if profile == "derivatives_live" else "dry_run"
+        assert values["strategy_hedge_independent_enabled"] is expected_independent_enabled
+        assert values["strategy_hedge_independent_rollout_stage"] == expected_independent_rollout
+        assert values["strategy_hedge_independent_long_entry_threshold"] == 0.66
+        assert values["strategy_hedge_independent_short_entry_threshold"] == 0.66
+        assert values["strategy_hedge_independent_long_scale_in_threshold"] == 0.70
+        assert values["strategy_hedge_independent_short_scale_in_threshold"] == 0.70
+        assert values["strategy_hedge_independent_long_min_hold_seconds"] == 300.0
+        assert values["strategy_hedge_independent_short_min_hold_seconds"] == 300.0
+        assert values["strategy_hedge_independent_rebalance_cooldown_seconds"] == 120.0
+        assert values["strategy_hedge_independent_trial_guard_enabled"] is True
+
+
+def test_derivatives_live_managed_profile_is_pinned_for_independent_live() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    values = load_managed_profile_values("derivatives_live", project_root=repo_root)
+
+    assert values["derivatives_position_mode"] == "hedge"
+    assert values["strategy_family_active"] == "directional"
+    assert values["strategy_family_auto_selection_enabled"] is False
+    assert values["smart_arbitrage_enabled"] is False
+    assert values["strategy_hedge_overlay_mode"] == "independent"
 
 
 def test_managed_profiles_drop_legacy_cross_runtime_strategy_tuning() -> None:

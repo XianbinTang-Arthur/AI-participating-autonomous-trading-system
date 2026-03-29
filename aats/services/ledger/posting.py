@@ -8,6 +8,8 @@ from sqlalchemy.orm import Session
 
 from aats.schemas.common import utc_now
 from aats.schemas.execution import FillEvent, OrderObligation
+from aats.services.accounting import fill_fee_delta_in_quote, resolve_symbol_currencies, resolved_fee_currency
+from aats.services.portfolio_service.decimals import to_decimal
 from aats.storage.ledger_repo import (
     LedgerAccountRepository,
     LedgerEntryRepository,
@@ -327,6 +329,11 @@ class Phase1LedgerMirrorService:
                     journal_id=journal_id,
                     posted_at=fill.ingestion_timestamp,
                 )
+        self._post_reservation_backed_spot_fee_attribution(
+            obligation=obligation,
+            fill=fill,
+            session=session,
+        )
 
     def _post_reservation_release(
         self,
@@ -366,6 +373,107 @@ class Phase1LedgerMirrorService:
                 ("available", available_account_id, "debit", amount),
                 ("reserved", reserved_account_id, "credit", amount),
             ),
+            currency=obligation.reserve_currency,
+            session=session,
+        )
+
+    def _post_reservation_backed_spot_fee_attribution(
+        self,
+        *,
+        obligation: OrderObligation,
+        fill: FillEvent,
+        session: Session | None = None,
+    ) -> None:
+        if obligation.product_type != "spot":
+            return
+        base_currency, quote_currency = resolve_symbol_currencies(fill.symbol)
+        fee_currency = resolved_fee_currency(
+            fill=fill,
+            base_currency=base_currency,
+            quote_currency=quote_currency,
+        )
+        if fee_currency is None or obligation.reserve_currency != fee_currency:
+            return
+        fee_amount = to_decimal(fill.fee_amount)
+        if abs(fee_amount) <= self._EPSILON:
+            return
+        external_account_id = self._ledger_account_id(
+            account_type="external_clearing",
+            currency=obligation.reserve_currency,
+            product_type=obligation.product_type,
+            margin_mode=obligation.margin_mode,
+            created_at=fill.created_at,
+            session=session,
+        )
+        if obligation.reserve_currency == quote_currency:
+            fee_delta_in_reserve = fill_fee_delta_in_quote(
+                fill,
+                base_currency=base_currency,
+                quote_currency=quote_currency,
+            )
+        elif obligation.reserve_currency == base_currency:
+            fee_delta_in_reserve = fee_amount
+        else:
+            return
+        if abs(fee_delta_in_reserve) <= self._EPSILON:
+            return
+        amount = abs(fee_delta_in_reserve)
+        if fee_delta_in_reserve > 0:
+            journal_type = "fill_fee_expense"
+            fee_account_type = "fee_expense"
+            entries = (
+                (
+                    "fee_expense",
+                    self._ledger_account_id(
+                        account_type=fee_account_type,
+                        currency=obligation.reserve_currency,
+                        product_type=obligation.product_type,
+                        margin_mode=obligation.margin_mode,
+                        created_at=fill.created_at,
+                        session=session,
+                    ),
+                    "debit",
+                    amount,
+                ),
+                ("external", external_account_id, "credit", amount),
+            )
+            fee_direction = "expense"
+        else:
+            journal_type = "fill_fee_income"
+            fee_account_type = "fee_income"
+            entries = (
+                ("external", external_account_id, "debit", amount),
+                (
+                    "fee_income",
+                    self._ledger_account_id(
+                        account_type=fee_account_type,
+                        currency=obligation.reserve_currency,
+                        product_type=obligation.product_type,
+                        margin_mode=obligation.margin_mode,
+                        created_at=fill.created_at,
+                        session=session,
+                    ),
+                    "credit",
+                    amount,
+                ),
+            )
+            fee_direction = "income"
+        self._post_journal(
+            journal_type=journal_type,
+            source_type="fill_fee_attribution",
+            source_id=self._stable_id("src", fill.fill_id, "fee_attribution", obligation.reserve_currency),
+            created_at=fill.ingestion_timestamp,
+            metadata={
+                "decision_id": fill.decision_id,
+                "intent_id": fill.intent_id,
+                "client_order_id": fill.client_order_id,
+                "fill_id": fill.fill_id,
+                "fee_currency": obligation.reserve_currency,
+                "resolved_fee_currency": fee_currency,
+                "fee_direction": fee_direction,
+                "fee_delta_in_reserve": format(fee_delta_in_reserve, "f"),
+            },
+            entries=entries,
             currency=obligation.reserve_currency,
             session=session,
         )

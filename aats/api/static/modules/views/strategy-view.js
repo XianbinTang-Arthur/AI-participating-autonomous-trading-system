@@ -1,7 +1,7 @@
 ﻿import { actionButton, callout, kvList, pill, responsiveTable, statGrid, summaryStrip, surfaceCard } from "../components.js";
 import { localizeList, summarizeLocalizedList } from "../copy.js";
 import { escapeHtml, formatDuration, formatMaybeTimestamp, formatNumber, formatRelativeAge, formatSigned, middleEllipsis } from "../formatters.js";
-import { readableState } from "../terms.js";
+import { localizeError, readableState } from "../terms.js";
 import { decisionTableHeaders, inferTradeScene } from "../trade-display.js";
 
 export function renderStrategySections(data) {
@@ -676,6 +676,8 @@ function renderDirectionalShortConfigCard(config = {}, latestDecision = {}, deci
   const shortingSupported = config?.shorting_runtime_supported === true;
   const shortConfigVisible = shortingSupported && (config?.product_type || decisionScene) === "derivatives";
   const shortBiasEnabled = config?.short_bias_enabled === true;
+  const hedgeOverlayDecision = target?.hedge_overlay_decision || {};
+  const overlayLabel = directionalOverlayLabel(config, hedgeOverlayDecision);
   const effectiveShortBiasEnabled = (
     config?.short_bias_enabled === true
     && !(Array.isArray(config?.runtime_shorting_blockers) && config.runtime_shorting_blockers.length)
@@ -730,18 +732,25 @@ function renderDirectionalShortConfigCard(config = {}, latestDecision = {}, deci
         ),
         meta: `允许状态 ${localizeList(config?.entry_allowed_regimes || [], "、") || "全部"}`,
         tone: "info",
-      },
+    },
+    {
+      label: overlayLabel,
+      value: directionalHedgeOverlayStatus(config, target, decisionScene),
+      meta: directionalHedgeOverlayMeta(config, target, decisionScene),
+      tone: directionalHedgeOverlayTone(config, target, decisionScene),
+    },
   ];
   return surfaceCard({
     title: "方向策略做空能力",
     kicker: "做空开关与阈值",
-    copy: "方向策略现在把 long 和 short 的开仓、加仓、反手阈值拆开配置。这里重点回答两件事：当前能不能自动做空，以及这轮为什么没有触发做空。",
+    copy: `方向策略现在把 long 和 short 的开仓、加仓、反手阈值拆开配置。在合约 hedge mode 下，还会额外显示 ${overlayLabel} 的腿级状态。这里重点回答三件事：当前能不能自动做空，这轮为什么没有触发做空，以及 ${overlayLabel} 有没有介入。`,
     classes: "strategy-compact-card",
     content: `
       ${summaryStrip(summaryItems)}
       ${kvList([
         ["当前未触发原因", directionalShortReasonText(latestDecision, config, decisionScene), directionalShortReasonMeta(target)],
         ["当前路径", directionalCurrentPathSummary(latestDecision), directionalCurrentPathMeta(latestDecision)],
+        [overlayLabel, directionalHedgeOverlayDetail(hedgeOverlayDecision, config, decisionScene, target), directionalHedgeOverlayDetailMeta(hedgeOverlayDecision, config, target)],
         [
           "阈值对比",
           directionalThresholdComparison(config),
@@ -972,6 +981,12 @@ function directionalShortConfigRows(config = {}) {
         "当前仍生效的方向反手门槛",
         "现货只按 long/共享阈值评估减仓、持有和退出。",
       ],
+      [
+        "overlay",
+        "当前运行域不支持",
+        "对冲 overlay",
+        "只有合约 hedge mode 才会启用这组 overlay；现货不会展示这些阈值。",
+      ],
     ];
   }
   return [
@@ -1019,7 +1034,339 @@ function directionalShortConfigRows(config = {}) {
       "反手做空",
       "用于 long -> short；如果这组门槛过高，系统就会长期只减多不翻空。",
     ],
+    [
+      "strategy_hedge_overlay_enabled / strategy_hedge_overlay_mode",
+      `${config?.hedge_overlay_enabled ? "true" : "false"} / ${escapeHtml(readableState(config?.hedge_overlay_mode || "protective"))}`,
+      "overlay 总开关",
+      config?.hedge_overlay_runtime_supported
+        ? (
+            config?.hedge_overlay_mode_ready === false
+              ? "当前是合约 hedge mode，但所选 overlay 模式还没有单独启用；这轮只保留配置展示。"
+              : "当前是合约 hedge mode，directional 可以在主腿之外额外挂上一条 overlay 腿。"
+          )
+        : "当前运行线不是合约 hedge mode，这组 overlay 配置不会真正生效。",
+    ],
+    [
+      "strategy_hedge_opportunistic_rollout_stage / strategy_hedge_independent_rollout_stage",
+      `${escapeHtml(readableState(config?.hedge_opportunistic_rollout_stage || "replay_only"))} / ${escapeHtml(readableState(config?.hedge_independent_rollout_stage || "replay_only"))}`,
+      "灰度阶段",
+      "机会型 overlay 按 replay_only / dry-run / live 分层放开；independent 当前阶段只允许到 dry-run，不允许直接进实盘。",
+    ],
+    [
+      "overlay rollout",
+      directionalOverlayRolloutSummary(config),
+      "当前运行线",
+      directionalOverlayRolloutMeta(config),
+    ],
+    [
+      "strategy_hedge_open_threshold / strategy_hedge_close_threshold",
+      `${formatNumber(config?.hedge_open_threshold, 2, "待确认")} / ${formatNumber(config?.hedge_close_threshold, 2, "待确认")}`,
+      "protective 打开 / 收回",
+      "压力分数超过 open 阈值才开保护腿；回落到 close 阈值下方后，系统才会考虑把保护腿收回。",
+    ],
+    [
+      "strategy_hedge_max_ratio / strategy_hedge_min_hold_seconds / strategy_hedge_rebalance_cooldown_seconds",
+      `${formatRatio(config?.hedge_max_ratio)} / ${formatDuration(config?.hedge_min_hold_seconds, "待确认")} / ${formatDuration(config?.hedge_rebalance_cooldown_seconds, "待确认")}`,
+      "protective 比例 / 最小持有 / 重平衡冷却",
+      "max ratio 控制保护腿最多覆盖主腿多少；最小持有和重平衡冷却用于避免保护腿刚开就被频繁来回改动。",
+    ],
+    [
+      "strategy_hedge_opportunistic_enabled",
+      config?.hedge_opportunistic_enabled ? "true" : "false",
+      "机会腿单独开关",
+      "只有这个开关打开，且 overlay mode 选中 opportunistic 时，系统才会真正评估机会腿。",
+    ],
+    [
+      "strategy_hedge_opportunistic_open_threshold / strategy_hedge_opportunistic_close_threshold",
+      `${formatNumber(config?.hedge_opportunistic_open_threshold, 2, "待确认")} / ${formatNumber(config?.hedge_opportunistic_close_threshold, 2, "待确认")}`,
+      "opportunistic 打开 / 收回",
+      "机会分数超过 open 阈值才开机会腿；回落到 close 阈值下方后，系统才会考虑把机会腿收回。",
+    ],
+    [
+      "strategy_hedge_opportunistic_max_ratio / strategy_hedge_opportunistic_min_hold_seconds / strategy_hedge_opportunistic_rebalance_cooldown_seconds",
+      `${formatRatio(config?.hedge_opportunistic_max_ratio)} / ${formatDuration(config?.hedge_opportunistic_min_hold_seconds, "待确认")} / ${formatDuration(config?.hedge_opportunistic_rebalance_cooldown_seconds, "待确认")}`,
+      "机会腿比例 / 最小持有 / 重平衡冷却",
+      `机会腿仍受独立比例、最小持有和冷却约束；同时还会额外受费耗上限 ${formatRatio(config?.hedge_opportunistic_max_fee_drag_ratio)} / churn 上限 ${formatRatio(config?.hedge_opportunistic_max_churn_ratio)} 约束。`,
+    ],
+    [
+      "strategy_hedge_independent_enabled",
+      config?.hedge_independent_enabled ? "true" : "false",
+      "独立双书总开关",
+      "只有这个开关打开，且 overlay mode 选中 independent 时，long book / short book 才会按各自状态机独立运行。",
+    ],
+    [
+      "strategy_hedge_independent_long_entry_threshold / strategy_hedge_independent_short_entry_threshold",
+      `${formatNumber(config?.hedge_independent_long_entry_threshold, 2, "待确认")} / ${formatNumber(config?.hedge_independent_short_entry_threshold, 2, "待确认")}`,
+      "双书开仓阈值",
+      "这组阈值分别决定 long book / short book 什么时候允许独立开仓。",
+    ],
+    [
+      "strategy_hedge_independent_long_scale_in_threshold / strategy_hedge_independent_short_scale_in_threshold",
+      `${formatNumber(config?.hedge_independent_long_scale_in_threshold, 2, "待确认")} / ${formatNumber(config?.hedge_independent_short_scale_in_threshold, 2, "待确认")}`,
+      "双书加仓阈值",
+      "只有当某一边自己的双书分继续抬高时，系统才会独立放大该腿。",
+    ],
+    [
+      "strategy_hedge_independent_long_min_hold_seconds / strategy_hedge_independent_short_min_hold_seconds / strategy_hedge_independent_rebalance_cooldown_seconds",
+      `${formatDuration(config?.hedge_independent_long_min_hold_seconds, "待确认")} / ${formatDuration(config?.hedge_independent_short_min_hold_seconds, "待确认")} / ${formatDuration(config?.hedge_independent_rebalance_cooldown_seconds, "待确认")}`,
+      "双书最小持有 / 重平衡冷却",
+      `long / short 会分别遵守自己的最小持有；此外两边共用 ${formatDuration(config?.hedge_independent_rebalance_cooldown_seconds, "待确认")} 的重平衡冷却。`,
+    ],
+    [
+      "strategy_hedge_independent_trial_guard_enabled",
+      config?.hedge_independent_trial_guard_enabled ? "true" : "false",
+      "腿级试盘守护",
+      "独立双书会按 long / short 两条腿分别评估样本、胜率和近期净收益，不再把一条腿的坏表现直接扩散到另一条腿。",
+    ],
   ];
+}
+
+function directionalHedgeOverlayStatus(config = {}, target = {}, decisionScene = "spot") {
+  const overlay = target?.hedge_overlay_decision || {};
+  const mode = directionalOverlayMode(config, overlay);
+  const legLabel = directionalOverlayLegLabel(config, overlay);
+  const enabledInMode = directionalOverlayEnabledInMode(config, overlay);
+  const modeReady = directionalOverlayModeReady(config, overlay);
+  if (config?.hedge_overlay_enabled !== true) return "未启用";
+  if ((config?.product_type || decisionScene) !== "derivatives" || config?.hedge_overlay_runtime_supported !== true) {
+    return "当前运行域不支持";
+  }
+  if (!enabledInMode) return "当前模式未单独打开";
+  if (config?.hedge_overlay_rollout_allowed === false) return "当前阶段未放开";
+  if (!modeReady) return "当前模式未放开";
+  if (overlay?.active === true) {
+    if (mode === "independent") return `独立双书${readableState(overlay?.state || "active")}`;
+    return `${legLabel}${readableState(overlay?.state || "active")}`;
+  }
+  if (overlay?.blocked_reasons?.length) {
+    return mode === "independent" ? "独立双书已启用，但这轮被拦住" : "已启用，但这轮被拦住";
+  }
+  if (overlay?.state === "inactive") return "已启用，当前未介入";
+  return `已启用（${escapeHtml(readableState(config?.hedge_overlay_mode || "protective"))}）`;
+}
+
+function directionalHedgeOverlayMeta(config = {}, target = {}, decisionScene = "spot") {
+  const overlay = target?.hedge_overlay_decision || {};
+  const overlayLabel = directionalOverlayLabel(config, overlay);
+  const mode = directionalOverlayMode(config, overlay);
+  const enabledInMode = directionalOverlayEnabledInMode(config, overlay);
+  if (config?.hedge_overlay_enabled !== true) {
+    return "当前不会在主腿外额外生成 overlay 腿。";
+  }
+  if ((config?.product_type || decisionScene) !== "derivatives" || config?.hedge_overlay_runtime_supported !== true) {
+    return "只有合约 hedge mode 才会真正启用这组 overlay。";
+  }
+  if (!enabledInMode) {
+    return `当前总开关已打开，但 ${overlayLabel} 这一路还没有单独启用。`;
+  }
+  if (config?.hedge_overlay_rollout_allowed === false) {
+    return directionalOverlayRolloutMeta(config);
+  }
+  if (Array.isArray(overlay?.blocked_reasons) && overlay.blocked_reasons.length) {
+    return summarizeLocalizedList(overlay.blocked_reasons, { limit: 3, suffix: "等阻断原因" });
+  }
+  if (Array.isArray(overlay?.reason_codes) && overlay.reason_codes.length) {
+    return summarizeLocalizedList(overlay.reason_codes, { limit: 3, suffix: "等状态说明" });
+  }
+  if (mode === "independent") {
+    return `long entry ${formatNumber(config?.hedge_independent_long_entry_threshold, 2, "待确认")} / short entry ${formatNumber(config?.hedge_independent_short_entry_threshold, 2, "待确认")} / rebalance ${formatDuration(config?.hedge_independent_rebalance_cooldown_seconds, "待确认")}`;
+  }
+  return `open ${formatNumber(config?.hedge_open_threshold, 2, "待确认")} / close ${formatNumber(config?.hedge_close_threshold, 2, "待确认")} / max ${formatRatio(config?.hedge_max_ratio)}`;
+}
+
+function directionalHedgeOverlayTone(config = {}, target = {}, decisionScene = "spot") {
+  const overlay = target?.hedge_overlay_decision || {};
+  const enabledInMode = directionalOverlayEnabledInMode(config, overlay);
+  const modeReady = directionalOverlayModeReady(config, overlay);
+  if (config?.hedge_overlay_enabled !== true) return "info";
+  if ((config?.product_type || decisionScene) !== "derivatives" || config?.hedge_overlay_runtime_supported !== true) {
+    return "warning";
+  }
+  if (!enabledInMode) return "warning";
+  if (config?.hedge_overlay_rollout_allowed === false) return "warning";
+  if (!modeReady) return "warning";
+  if (overlay?.active === true) return "warning";
+  if (Array.isArray(overlay?.blocked_reasons) && overlay.blocked_reasons.length) return "warning";
+  return "info";
+}
+
+function directionalHedgeOverlayDetail(overlay = {}, config = {}, decisionScene = "spot", target = {}) {
+  const overlayLabel = directionalOverlayLabel(config, overlay);
+  const overlayLegLabel = directionalOverlayLegLabel(config, overlay);
+  const mode = directionalOverlayMode(config, overlay);
+  const enabledInMode = directionalOverlayEnabledInMode(config, overlay);
+  if (config?.hedge_overlay_enabled !== true) {
+    return "当前没有开启 overlay；方向策略只会按主腿目标执行。";
+  }
+  if ((config?.product_type || decisionScene) !== "derivatives" || config?.hedge_overlay_runtime_supported !== true) {
+    return "当前运行线不是合约 hedge mode，这组 overlay 配置只保留展示，不会真的开额外腿。";
+  }
+  if (!enabledInMode) {
+    return `当前 overlay 总开关已开，但 ${overlayLabel} 这一路还没有单独启用。`;
+  }
+  if (config?.hedge_overlay_rollout_allowed === false) {
+    const rollout = directionalOverlayCurrentRollout(config, overlay);
+    return [
+      `当前运行线 ${escapeHtml(readableState(config?.hedge_rollout?.runtime_stage || "dry_run"))}`,
+      `${overlayLabel} 只放开到 ${escapeHtml(readableState(rollout?.configured_rollout_stage || "replay_only"))}`,
+      localizeList(rollout?.blocking_reasons || [], "、") || "当前阶段未放开",
+    ].join(" | ");
+  }
+  if (!overlay || Object.keys(overlay).length === 0) {
+    return `当前还没有 ${overlayLabel} 决策快照。`;
+  }
+  if (mode === "independent") {
+    const books = directionalIndependentOverlayBooks(target, overlay);
+    return [
+      `long book ${formatSigned(books.long?.current_position_qty, 4, "0")}/${formatSigned(books.long?.target_position_qty, 4, "0")}`,
+      `short book ${formatSigned(books.short?.current_position_qty, 4, "0")}/${formatSigned(books.short?.target_position_qty, 4, "0")}`,
+      `状态 ${escapeHtml(readableState(overlay?.state || "disabled"))}`,
+    ].join(" | ");
+  }
+  return [
+    `主腿 ${readableState(overlay?.main_leg_signal || "flat")} ${formatSigned(overlay?.main_leg_current_qty)}/${formatSigned(overlay?.main_leg_target_qty)}`,
+    `${overlayLegLabel} ${readableState(overlay?.hedge_leg_signal || "flat")} ${formatSigned(overlay?.hedge_leg_current_qty)}/${formatSigned(overlay?.hedge_leg_target_qty)}`,
+    `对冲比例 ${formatRatio(overlay?.hedge_ratio)} / 上限 ${formatRatio(overlay?.max_ratio)}`,
+  ].join(" | ");
+}
+
+function directionalHedgeOverlayDetailMeta(overlay = {}, config = {}, target = {}) {
+  const mode = directionalOverlayMode(config, overlay);
+  const scoreLabel = directionalOverlayScoreLabel(config, overlay);
+  if (config?.hedge_overlay_enabled === true && config?.hedge_overlay_rollout_allowed === false) {
+    const rollout = directionalOverlayCurrentRollout(config, overlay);
+    return [
+      rollout?.summary || "当前阶段未放开",
+      `回滚顺序 ${(config?.hedge_rollout?.rollback_sequence || []).join(" -> ") || "先关各模式开关，再切回 protective"}`,
+    ].join(" | ");
+  }
+  if (!overlay || Object.keys(overlay).length === 0) {
+    return "等本轮方向目标进入 hedge mode 路径后，这里会展示 overlay 腿的状态与阻断原因。";
+  }
+  const timing = [];
+  if (Number(overlay?.min_hold_remaining_seconds) > 0) {
+    timing.push(`最小持有剩余 ${formatDuration(overlay.min_hold_remaining_seconds)}`);
+  }
+  if (Number(overlay?.rebalance_cooldown_remaining_seconds) > 0) {
+    timing.push(`重平衡冷却剩余 ${formatDuration(overlay.rebalance_cooldown_remaining_seconds)}`);
+  }
+  const reasons = [];
+  if (Array.isArray(overlay?.reason_codes) && overlay.reason_codes.length) {
+    reasons.push(`状态 ${localizeList(overlay.reason_codes)}`);
+  }
+  if (Array.isArray(overlay?.blocked_reasons) && overlay.blocked_reasons.length) {
+    reasons.push(`阻断 ${localizeList(overlay.blocked_reasons)}`);
+  }
+  if (mode === "independent") {
+    const books = directionalIndependentOverlayBooks(target, overlay);
+    if (Array.isArray(overlay?.long_leg_reason_codes) && overlay.long_leg_reason_codes.length) {
+      reasons.push(`long ${overlay.long_leg_reason_codes.map(localizeError).join(" / ")}`);
+    }
+    if (Array.isArray(overlay?.short_leg_reason_codes) && overlay.short_leg_reason_codes.length) {
+      reasons.push(`short ${overlay.short_leg_reason_codes.map(localizeError).join(" / ")}`);
+    }
+    if (Array.isArray(overlay?.long_leg_blocked_reasons) && overlay.long_leg_blocked_reasons.length) {
+      reasons.push(`long 阻断 ${overlay.long_leg_blocked_reasons.map(localizeError).join(" / ")}`);
+    }
+    if (Array.isArray(overlay?.short_leg_blocked_reasons) && overlay.short_leg_blocked_reasons.length) {
+      reasons.push(`short 阻断 ${overlay.short_leg_blocked_reasons.map(localizeError).join(" / ")}`);
+    }
+    reasons.push(
+      `双书分 long ${formatNumber(overlay?.long_leg_score, 2, "0.00")} / short ${formatNumber(overlay?.short_leg_score, 2, "0.00")} | 目标 ${formatSigned(books.long?.target_position_qty, 4, "0")} / ${formatSigned(books.short?.target_position_qty, 4, "0")}`
+    );
+  } else if (overlay?.pressure_score !== undefined && overlay?.pressure_score !== null) {
+    reasons.push(`${scoreLabel} ${formatNumber(overlay.pressure_score, 2, "0.00")} | open ${formatNumber(overlay.open_threshold, 2, "0.00")} / close ${formatNumber(overlay.close_threshold, 2, "0.00")}`);
+  }
+  return [...timing, ...reasons].join(" | ") || "当前没有额外的 overlay 状态说明。";
+}
+
+function directionalOverlayMode(config = {}, overlay = {}) {
+  return overlay?.effective_mode || overlay?.configured_mode || config?.hedge_overlay_mode || "protective";
+}
+
+function directionalOverlayEnabledInMode(config = {}, overlay = {}) {
+  if (config?.hedge_overlay_enabled_in_mode === true) return true;
+  if (config?.hedge_overlay_enabled_in_mode === false) return false;
+  return directionalOverlayMode(config, overlay) === "protective";
+}
+
+function directionalOverlayModeReady(config = {}, overlay = {}) {
+  if (config?.hedge_overlay_mode_ready === true) return true;
+  if (config?.hedge_overlay_mode_ready === false) return false;
+  return directionalOverlayEnabledInMode(config, overlay);
+}
+
+function directionalOverlayLabel(config = {}, overlay = {}) {
+  const mode = directionalOverlayMode(config, overlay);
+  if (mode === "opportunistic") return "机会型对冲";
+  if (mode === "independent") return "独立双书";
+  return "保护性对冲";
+}
+
+function directionalOverlayLegLabel(config = {}, overlay = {}) {
+  const mode = directionalOverlayMode(config, overlay);
+  if (mode === "opportunistic") return "机会腿";
+  if (mode === "independent") return "双书腿";
+  return "保护腿";
+}
+
+function directionalOverlayScoreLabel(config = {}, overlay = {}) {
+  const mode = directionalOverlayMode(config, overlay);
+  if (mode === "opportunistic") return "机会分";
+  if (mode === "independent") return "双书分";
+  return "压力";
+}
+
+function directionalOverlayCurrentRollout(config = {}, overlay = {}) {
+  const rollout = config?.hedge_rollout || {};
+  const mode = directionalOverlayMode(config, overlay);
+  if (mode === "opportunistic") return rollout?.opportunistic || {};
+  if (mode === "independent") return rollout?.independent || {};
+  return {
+    configured_rollout_stage: "live",
+    runtime_allowed: true,
+    blocking_reasons: [],
+    summary: "保护性对冲不受本轮灰度阶段限制。",
+  };
+}
+
+function directionalOverlayRolloutSummary(config = {}) {
+  const rollout = config?.hedge_rollout || {};
+  const currentMode = config?.hedge_overlay_mode || "protective";
+  const currentAllowed = rollout?.current_mode_allowed !== false;
+  return [
+    `当前运行线 ${readableState(rollout?.runtime_stage || "dry_run")}`,
+    `${directionalOverlayLabel({ hedge_overlay_mode: currentMode }, { effective_mode: currentMode })} ${currentAllowed ? "可用" : "受限"}`,
+  ].join(" | ");
+}
+
+function directionalOverlayRolloutMeta(config = {}) {
+  const rollout = config?.hedge_rollout || {};
+  const currentMode = config?.hedge_overlay_mode || "protective";
+  const current = directionalOverlayCurrentRollout(config, { effective_mode: currentMode });
+  const blockers = Array.isArray(current?.blocking_reasons) ? current.blocking_reasons : [];
+  return [
+    current?.summary || "当前没有额外的 rollout 说明。",
+    blockers.length ? `阻断 ${blockers.map(localizeError).join(" / ")}` : "当前模式没有额外灰度阻断。",
+    `回滚顺序 ${(rollout?.rollback_sequence || []).join(" -> ") || "先关各模式开关，再切回 protective"}`,
+  ].join(" | ");
+}
+
+function directionalIndependentOverlayBooks(target = {}, overlay = {}) {
+  const items = Array.isArray(target?.strategy_execution_legs) ? target.strategy_execution_legs : [];
+  const filtered = items.filter((item) => {
+    const executionMode = String(item?.execution_mode || "");
+    return item?.overlay_mode === "independent" || executionMode.startsWith("independent_");
+  });
+  const long = filtered.find((item) => item?.pos_side === "long") || {
+    current_position_qty: overlay?.main_leg_signal === "long" ? overlay?.main_leg_current_qty : 0,
+    target_position_qty: overlay?.main_leg_signal === "long" ? overlay?.main_leg_target_qty : 0,
+  };
+  const short = filtered.find((item) => item?.pos_side === "short") || {
+    current_position_qty: overlay?.hedge_leg_signal === "short" ? -Number(overlay?.hedge_leg_current_qty || 0) : 0,
+    target_position_qty: overlay?.hedge_leg_signal === "short" ? -Number(overlay?.hedge_leg_target_qty || 0) : 0,
+  };
+  return { long, short };
 }
 
 function renderSmartArbitrageCostCard(summary = {}) {

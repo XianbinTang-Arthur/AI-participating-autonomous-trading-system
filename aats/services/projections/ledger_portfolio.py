@@ -12,7 +12,7 @@ from aats.events.envelopes import parse_payload, publish_model
 from aats.schemas.common import utc_now
 from aats.schemas.execution import FillEvent
 from aats.schemas.operator import ProcessingFailureRecord
-from aats.schemas.portfolio import FillOutcomeRecord, PortfolioBalanceDelta, PortfolioSnapshotOrigin
+from aats.schemas.portfolio import FillOutcomeRecord, PortfolioSnapshotOrigin
 from aats.services.accounting import resolve_symbol_currencies
 from aats.services.ledger.lot_projection import LotBasedProjectionBuilder
 from aats.services.ledger.persistent_lot_book import PersistentLotBookService

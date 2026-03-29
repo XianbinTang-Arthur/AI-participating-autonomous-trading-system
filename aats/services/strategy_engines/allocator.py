@@ -518,6 +518,27 @@ class PortfolioAllocatorV2Phase2:
     ) -> list[StrategyLegIntent]:
         legs: list[StrategyLegIntent] = []
         for intent in approved:
+            explicit_leg_intent = any(
+                str(getattr(leg, "pos_side", "") or "").lower() in {"long", "short"}
+                and str(getattr(leg, "action", "") or "").lower() in {"open", "reduce", "close"}
+                for leg in intent.legs
+            )
+            if explicit_leg_intent:
+                for leg in intent.legs:
+                    delta_qty = to_decimal(leg.delta_position_qty or Decimal("0"))
+                    if abs(delta_qty) <= EPSILON_DECIMAL_12:
+                        continue
+                    legs.append(
+                        leg.model_copy(
+                            deep=True,
+                            update={
+                                "family": intent.family,
+                                "strategy_sleeve_id": leg.strategy_sleeve_id or intent.strategy_sleeve_id,
+                                "allocation_id": intent.allocation_id,
+                            },
+                        )
+                    )
+                continue
             if intent.family == "smart_arbitrage":
                 for leg in intent.legs:
                     delta_qty = to_decimal(leg.delta_position_qty or Decimal("0"))
@@ -685,6 +706,10 @@ class PortfolioAllocatorV2Phase2:
         if intent.target_notional is not None and abs(to_decimal(intent.target_notional)) > EPSILON_DECIMAL_12:
             return abs(to_decimal(intent.target_notional))
         if intent.legs:
+            if intent.family == "smart_arbitrage":
+                grouped_total = self._smart_arbitrage_requested_notional(intent=intent, base_target=base_target)
+                if grouped_total > EPSILON_DECIMAL_12:
+                    return grouped_total
             total = Decimal("0")
             for leg in intent.legs:
                 delta_qty = abs(to_decimal(leg.delta_position_qty or Decimal("0")))
@@ -697,6 +722,30 @@ class PortfolioAllocatorV2Phase2:
         if reference_price <= EPSILON_DECIMAL_12 and assignment is not None and assignment.effective_max_symbol_notional is not None:
             return abs(to_decimal(assignment.effective_max_symbol_notional))
         return abs(to_decimal(intent.delta_position_qty)) * reference_price
+
+    def _smart_arbitrage_requested_notional(
+        self,
+        *,
+        intent: StrategySleeveIntent,
+        base_target: PositionTarget,
+    ) -> Decimal:
+        fallback_reference_price = self._reference_price(intent) or self._base_target_reference_price(base_target)
+        pair_notionals: dict[str, Decimal] = {}
+        unscoped_total = Decimal("0")
+        for leg in intent.legs:
+            delta_qty = abs(to_decimal(leg.delta_position_qty or Decimal("0")))
+            if delta_qty <= EPSILON_DECIMAL_12:
+                continue
+            reference_price = abs(to_decimal(leg.reference_price or Decimal("0")))
+            if reference_price <= EPSILON_DECIMAL_12:
+                reference_price = fallback_reference_price
+            leg_notional = delta_qty * reference_price
+            pair_id = str(leg.pair_id or "").strip()
+            if pair_id:
+                pair_notionals[pair_id] = max(pair_notionals.get(pair_id, Decimal("0")), leg_notional)
+            else:
+                unscoped_total += leg_notional
+        return sum(pair_notionals.values(), start=Decimal("0")) + unscoped_total
 
     @staticmethod
     def _role_for_family(family: StrategyFamily) -> str:

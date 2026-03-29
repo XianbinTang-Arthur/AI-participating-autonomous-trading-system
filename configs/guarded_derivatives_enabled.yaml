@@ -22,6 +22,15 @@ trading_product_type: derivatives
 # 指定默认保证金模式为 cross。
 margin_mode: cross
 
+# 指定当前合约运行域采用净仓模式。
+derivatives_position_mode: net
+
+# 指定未来切到 hedge 时的迁移过渡语义。
+derivatives_hedge_transition_mode: close_then_open
+
+# 指定启动时必须校验交易所仓位模式与本地配置一致。
+derivatives_require_exchange_pos_mode_match: true
+
 # 指定启用 OKX 模拟交易环境。
 okx_simulated_trading: true
 

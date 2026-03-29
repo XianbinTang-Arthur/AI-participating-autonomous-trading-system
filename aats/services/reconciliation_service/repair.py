@@ -10,7 +10,7 @@ from aats.bootstrap.settings import AATSSettings
 from aats.bus.base import EventBus
 from aats.events import topics
 from aats.events.envelopes import parse_envelope, publish_model
-from aats.schemas.execution import FillEvent, OrderState
+from aats.schemas.execution import FillEvent
 from aats.schemas.exchange import AccountBaselineSnapshot, ExchangeAccountSnapshot
 from aats.schemas.operator import ProcessingFailureRecord
 from aats.schemas.portfolio import PortfolioSnapshot, is_baseline_snapshot

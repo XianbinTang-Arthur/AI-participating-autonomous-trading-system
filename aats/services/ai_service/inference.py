@@ -8,7 +8,7 @@ from aats.bootstrap.logging import correlation_fields, get_logger, log_event
 from aats.bootstrap.settings import AATSSettings
 from aats.bus.base import EventBus
 from aats.events import topics
-from aats.events.envelopes import build_envelope, publish_model
+from aats.events.envelopes import build_envelope
 from aats.schemas.ai_brief import AIDecisionBrief
 from aats.schemas.ai_reports import AIPerformanceReport, AIPerformanceWindowReport
 from aats.schemas.ai_shadow import AIDegradationEvent, AIShadowEvaluation
@@ -1051,7 +1051,7 @@ class AIInferenceService:
                     execution_price=fill.fill_price,
                 )
                 decision_realized += realized_delta
-                decision_fee_total += PortfolioState.fee_cost_in_quote(fill)
+                decision_fee_total += PortfolioState.fee_delta_in_quote(fill)
             realized_gross_pnl += decision_realized
             fee_total += decision_fee_total
             if abs(decision_realized) <= decision_fee_total * Decimal("1.25"):
@@ -1115,7 +1115,7 @@ class AIInferenceService:
             if decision_fills:
                 priced_qty = sum((max(fill.fill_qty, Decimal("0")) for fill in decision_fills), start=Decimal("0"))
                 notional = sum((max(fill.fill_qty, Decimal("0")) * fill.fill_price for fill in decision_fills), start=Decimal("0"))
-                actual_fee_total = sum((PortfolioState.fee_cost_in_quote(fill) for fill in decision_fills), start=Decimal("0"))
+                actual_fee_total = sum((PortfolioState.fee_delta_in_quote(fill) for fill in decision_fills), start=Decimal("0"))
                 if priced_qty > EPSILON_DECIMAL_12 and notional > EPSILON_DECIMAL_12:
                     execution_price = notional / priced_qty
                     last_price = execution_price

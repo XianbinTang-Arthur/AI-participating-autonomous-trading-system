@@ -9,8 +9,9 @@ from aats.schemas.execution import FillEvent, OrderIntent, OrderObligation, Orde
 from aats.schemas.exchange import ExchangeAccountSnapshot
 from aats.services.accounting import (
     derivatives_initial_margin_requirement,
-    fill_fee_cost_in_quote,
+    fill_fee_delta_in_quote,
     remaining_obligation_amount,
+    resolved_fee_currency,
     resolve_symbol_currencies,
     spot_buy_quote_requirement,
 )
@@ -236,13 +237,23 @@ class ExecutionObligationService:
         base_currency, quote_currency = resolve_symbol_currencies(fill.symbol)
         if obligation.product_type == "spot":
             if obligation.reserve_currency == quote_currency:
-                return (fill.fill_qty * fill.fill_price) + fill_fee_cost_in_quote(
-                    fill,
+                return max(
+                    (fill.fill_qty * fill.fill_price)
+                    + fill_fee_delta_in_quote(
+                        fill,
+                        base_currency=base_currency,
+                        quote_currency=quote_currency,
+                    ),
+                    Decimal("0"),
+                )
+            if obligation.reserve_currency == base_currency:
+                fee_currency = resolved_fee_currency(
+                    fill=fill,
                     base_currency=base_currency,
                     quote_currency=quote_currency,
                 )
-            if obligation.reserve_currency == base_currency:
-                return fill.fill_qty
+                fee_in_reserve = to_decimal(fill.fee_amount) if fee_currency == base_currency else Decimal("0")
+                return max(fill.fill_qty + fee_in_reserve, Decimal("0"))
             return Decimal("0")
         leverage = max(to_decimal(fill.target_leverage), Decimal("1"))
         return (abs(fill.fill_qty) * fill.fill_price) / to_decimal(leverage)

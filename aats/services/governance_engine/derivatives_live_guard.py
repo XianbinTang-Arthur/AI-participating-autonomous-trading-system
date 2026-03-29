@@ -108,6 +108,7 @@ class DerivativesLiveGuardService:
         liquidation_summary = self._liquidation_summary(snapshot)
         nearest_gap = liquidation_summary["nearest_liquidation_gap_ratio"]
         current_margin_usage = self._current_initial_margin_usage(snapshot)
+        current_exposure = self._current_derivatives_exposure(snapshot)
         only_reduce_threshold = Decimal(str(self.settings.derivatives_only_reduce_trigger_margin_fraction))
         auto_halt_margin_threshold = Decimal(str(self.settings.derivatives_auto_halt_margin_usage_fraction))
         only_reduce_gap_threshold = Decimal(str(self.settings.liquidation_buffer_fraction))
@@ -208,6 +209,7 @@ class DerivativesLiveGuardService:
                     self.settings.derivatives_risk_snapshot_auto_halt_after_seconds
                 ),
             },
+            current_derivatives_exposure=current_exposure,
         )
         if auto_halt_required:
             payload["halted"] = True
@@ -247,6 +249,7 @@ class DerivativesLiveGuardService:
         auto_halt_reasons: list[str] | None = None,
         warnings: list[str] | None = None,
         thresholds: dict[str, Any] | None = None,
+        current_derivatives_exposure: dict[str, Any] | None = None,
         risk_snapshot_available: bool = True,
         risk_snapshot_stage: str = "healthy",
         risk_snapshot_missing_seconds: float | None = None,
@@ -270,6 +273,7 @@ class DerivativesLiveGuardService:
             "auto_halt_required": auto_halt_required,
             "auto_halt_reasons": auto_halt_reasons or [],
             "warnings": warnings or [],
+            "current_derivatives_exposure": current_derivatives_exposure or {},
             "risk_snapshot_available": risk_snapshot_available,
             "risk_snapshot_stage": risk_snapshot_stage,
             "risk_snapshot_missing_seconds": risk_snapshot_missing_seconds,
@@ -342,10 +346,11 @@ class DerivativesLiveGuardService:
                 or abs(qty) <= self._EPSILON
             ):
                 continue
-            if qty > 0:
-                gap = (mark_price - liquidation_price) / mark_price
-            else:
+            side = str(getattr(position, "side", None) or getattr(position, "pos_side", None) or "").strip().lower()
+            if side == "short" or (side not in {"long", "short"} and qty < -self._EPSILON):
                 gap = (liquidation_price - mark_price) / mark_price
+            else:
+                gap = (mark_price - liquidation_price) / mark_price
             if closest_gap is None or gap < closest_gap:
                 closest_gap = gap
                 closest_position = {
@@ -429,6 +434,81 @@ class DerivativesLiveGuardService:
             "derivatives_risk_snapshot_missing_grace_active": "合约风险快照短时缺失，系统先进入平滑降级观察期",
         }
         return messages.get(code, code)
+
+    def _current_derivatives_exposure(self, snapshot: Any) -> dict[str, Any]:
+        positions = list(getattr(snapshot, "positions", []) or [])
+        if not positions:
+            return {
+                "long_notional": Decimal("0"),
+                "short_notional": Decimal("0"),
+                "gross_notional": Decimal("0"),
+                "net_notional": Decimal("0"),
+                "gross_leverage": Decimal("0"),
+                "net_leverage": Decimal("0"),
+            }
+        long_notional = Decimal("0")
+        short_notional = Decimal("0")
+        for position in positions:
+            notional = _to_decimal(getattr(position, "notional_usd", None))
+            if notional is None or abs(notional) <= self._EPSILON:
+                quantity = abs(_to_decimal(getattr(position, "quantity", None)) or Decimal("0"))
+                reference_price = (
+                    _to_decimal(getattr(position, "mark_price", None))
+                    or _to_decimal(getattr(position, "average_entry_price", None))
+                    or Decimal("0")
+                )
+                notional = quantity * reference_price
+            side = str(getattr(position, "side", "") or "").strip().lower()
+            quantity = _to_decimal(getattr(position, "quantity", None)) or Decimal("0")
+            if side == "short" or quantity < -self._EPSILON:
+                short_notional += abs(notional)
+            else:
+                long_notional += abs(notional)
+        gross_notional = long_notional + short_notional
+        net_notional = abs(long_notional - short_notional)
+        equity_base = self._equity_base_for_snapshot(snapshot)
+        gross_leverage = (
+            gross_notional / equity_base
+            if equity_base is not None and equity_base > self._EPSILON
+            else Decimal("0")
+        )
+        net_leverage = (
+            net_notional / equity_base
+            if equity_base is not None and equity_base > self._EPSILON
+            else Decimal("0")
+        )
+        return {
+            "long_notional": long_notional,
+            "short_notional": short_notional,
+            "gross_notional": gross_notional,
+            "net_notional": net_notional,
+            "gross_leverage": gross_leverage,
+            "net_leverage": net_leverage,
+        }
+
+    def _equity_base_for_snapshot(self, snapshot: Any) -> Decimal | None:
+        risk_snapshot = getattr(snapshot, "risk_snapshot", None)
+        if risk_snapshot is not None:
+            for candidate in (
+                getattr(risk_snapshot, "adjusted_equity", None),
+                getattr(risk_snapshot, "total_equity", None),
+                getattr(risk_snapshot, "available_equity", None),
+            ):
+                resolved = _to_decimal(candidate)
+                if resolved is not None and resolved > self._EPSILON:
+                    return resolved
+        balances = [
+            resolved
+            for resolved in (
+                _to_decimal(getattr(balance, "total", None))
+                for balance in getattr(snapshot, "balances", [])
+                if str(getattr(balance, "currency", "")).upper() == "USDT"
+            )
+            if resolved is not None and resolved > self._EPSILON
+        ]
+        if balances:
+            return sum(balances, Decimal("0"))
+        return None
 
 
 def text_or_none(value: Any) -> str | None:

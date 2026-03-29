@@ -22,7 +22,6 @@ class PostgresExecutionFillRepositoryV2:
         source: str,
         raw_payload: dict,
     ) -> bool:
-        venue_fill_id = raw_payload.get("venue_fill_id")
         with self.session_factory() as session:
             saved = self.save_fill_in_session(
                 session,

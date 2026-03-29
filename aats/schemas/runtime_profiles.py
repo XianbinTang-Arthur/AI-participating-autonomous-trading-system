@@ -28,6 +28,9 @@ RUNTIME_PROFILE_BASE_FIELDS: tuple[str, ...] = (
 RUNTIME_PROFILE_DERIVATIVES_ONLY_FIELDS: tuple[str, ...] = (
     "max_target_leverage",
     "default_target_leverage",
+    "derivatives_position_mode",
+    "derivatives_hedge_transition_mode",
+    "derivatives_require_exchange_pos_mode_match",
     "strategy_short_bias_enabled",
     "strategy_dynamic_leverage_enabled",
 )
@@ -58,6 +61,9 @@ def summarize_runtime_profile_payload(payload: dict[str, Any]) -> dict[str, Any]
             {
                 "max_target_leverage": payload.get("max_target_leverage"),
                 "default_target_leverage": payload.get("default_target_leverage"),
+                "derivatives_position_mode": payload.get("derivatives_position_mode"),
+                "derivatives_hedge_transition_mode": payload.get("derivatives_hedge_transition_mode"),
+                "derivatives_require_exchange_pos_mode_match": payload.get("derivatives_require_exchange_pos_mode_match"),
                 "strategy_short_bias_enabled": payload.get("strategy_short_bias_enabled"),
                 "strategy_dynamic_leverage_enabled": payload.get("strategy_dynamic_leverage_enabled"),
             }

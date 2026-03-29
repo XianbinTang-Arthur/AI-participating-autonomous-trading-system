@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from aats.schemas.common import utc_now
 from aats.schemas.execution import FillEvent
+from aats.services.accounting import resolved_fee_currency
 from aats.storage.ledger_repo import LedgerAccountRepository, LedgerEntryRepository, LedgerJournalRepository
 from aats.storage.reservation_repo import ReservationRepositoryV2
 
@@ -113,7 +114,12 @@ class LedgerSettlementPostingService:
         margin_mode = fill.margin_mode
         base_currency = projection.base_currency
         quote_currency = projection.quote_currency
-        fee_currency = str(fill.fee_currency or quote_currency or "")
+        resolved_fee = resolved_fee_currency(
+            fill=fill,
+            base_currency=base_currency,
+            quote_currency=quote_currency,
+        )
+        fee_currency = str(resolved_fee or "")
         fill_qty = Decimal(str(fill.fill_qty))
         fill_price = Decimal(str(fill.fill_price))
         fee_amount = Decimal(str(fill.fee_amount))
@@ -356,22 +362,20 @@ class LedgerSettlementPostingService:
                     session=session,
                 )
 
+        reservation_fee_currency = quote_currency if fill.side == "buy" else base_currency
         fee_covered_by_reservation = (
             reservation_row is not None
             and product_type == "spot"
-            and fill.side == "buy"
-            and fee_currency == quote_currency
+            and reservation_fee_currency is not None
+            and fee_currency == reservation_fee_currency
         )
-        if fee_amount > self._EPSILON and fee_currency and not fee_covered_by_reservation:
+        if abs(fee_amount) > self._EPSILON and fee_currency and not fee_covered_by_reservation:
             fee_source_id = self._stable_id("fill_fee", fill.fill_id, fee_currency)
             if self.ledger_journal_repo.get_by_source_in_session(session, "fill_fee", fee_source_id) is None:
-                self._post_journal(
-                    journal_type="fill_fee",
-                    source_type="fill_fee",
-                    source_id=fee_source_id,
-                    created_at=fill.ingestion_timestamp,
-                    metadata=self._fill_metadata(fill),
-                    entries=(
+                posted_fee_amount = abs(fee_amount)
+                if fee_amount > 0:
+                    journal_type = "fill_fee"
+                    entries = (
                         (
                             "fee_expense",
                             self._account_id(
@@ -382,7 +386,7 @@ class LedgerSettlementPostingService:
                                 session=session,
                             ),
                             "debit",
-                            fee_amount,
+                            posted_fee_amount,
                             fee_currency,
                         ),
                         (
@@ -395,10 +399,47 @@ class LedgerSettlementPostingService:
                                 session=session,
                             ),
                             "credit",
-                            fee_amount,
+                            posted_fee_amount,
                             fee_currency,
                         ),
-                    ),
+                    )
+                else:
+                    journal_type = "fill_fee_rebate"
+                    entries = (
+                        (
+                            "available_fee_currency",
+                            self._account_id(
+                                account_type="cash_available",
+                                currency=fee_currency,
+                                product_type=product_type,
+                                margin_mode=margin_mode,
+                                session=session,
+                            ),
+                            "debit",
+                            posted_fee_amount,
+                            fee_currency,
+                        ),
+                        (
+                            "fee_income",
+                            self._account_id(
+                                account_type="fee_income",
+                                currency=fee_currency,
+                                product_type=product_type,
+                                margin_mode=margin_mode,
+                                session=session,
+                            ),
+                            "credit",
+                            posted_fee_amount,
+                            fee_currency,
+                        ),
+                    )
+                self._post_journal(
+                    journal_type=journal_type,
+                    source_type="fill_fee",
+                    source_id=fee_source_id,
+                    created_at=fill.ingestion_timestamp,
+                    metadata=self._fill_metadata(fill),
+                    entries=entries,
                     session=session,
                 )
 

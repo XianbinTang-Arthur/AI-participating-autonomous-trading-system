@@ -1,18 +1,24 @@
 from __future__ import annotations
 
 import argparse
+import importlib
+import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from dotenv import dotenv_values
 
 ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
-from aats.bootstrap.managed_profiles import (
-    MANAGED_PROFILE_DEFINITIONS,
-    MANAGED_PROFILE_DERIVED_ENV_KEYS,
-    ManagedEnvProfile,
-)
+if TYPE_CHECKING:
+    from aats.bootstrap.managed_profiles import ManagedEnvProfile
+
+_managed_profiles = importlib.import_module("aats.bootstrap.managed_profiles")
+MANAGED_PROFILE_DEFINITIONS = _managed_profiles.MANAGED_PROFILE_DEFINITIONS
+MANAGED_PROFILE_DERIVED_ENV_KEYS = _managed_profiles.MANAGED_PROFILE_DERIVED_ENV_KEYS
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,7 +167,7 @@ COMMON_RUNTIME_FIELDS: tuple[EnvSectionSpec, ...] = (
 )
 
 
-PROFILE_SPECIFIC_FIELDS: dict[ManagedEnvProfile, tuple[EnvSectionSpec, ...]] = {
+PROFILE_SPECIFIC_FIELDS: dict["ManagedEnvProfile", tuple[EnvSectionSpec, ...]] = {
     "spot": (
         EnvSectionSpec(
             title="现货仓位与下单上限",
@@ -372,7 +378,7 @@ def _read_existing_env(path: Path) -> dict[str, str]:
     }
 
 
-def _render_env(profile: ManagedEnvProfile, values: dict[str, str]) -> str:
+def _render_env(profile: "ManagedEnvProfile", values: dict[str, str]) -> str:
     definition = MANAGED_PROFILE_DEFINITIONS[profile]
     lines: list[str] = [
         f"# AATS {profile} 最小 override 模板",
@@ -402,7 +408,7 @@ def _write_env_file(path: Path, content: str) -> None:
     path.write_text(content.rstrip() + "\n", encoding="utf-8")
 
 
-def _example_values_for_profile(profile: ManagedEnvProfile) -> dict[str, str]:
+def _example_values_for_profile(profile: "ManagedEnvProfile") -> dict[str, str]:
     examples: dict[str, str] = {}
     if profile == "spot":
         examples.update(
@@ -743,7 +749,7 @@ def _render_configs_readme() -> str:
 
 
 def _sync_local_env_files() -> None:
-    profile_to_filename: dict[ManagedEnvProfile, str] = {
+    profile_to_filename: dict["ManagedEnvProfile", str] = {
         "spot": ".env.spot",
         "spot_live": ".env.spot.live",
         "derivatives": ".env.derivatives",

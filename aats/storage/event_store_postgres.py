@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from aats.schemas.common import EventEnvelope
 from aats.schemas.reconciliation import ReplayProjectionOffset
-from aats.services.runtime_scope import RuntimeStateScope, event_matches_scope
+from aats.services.runtime_scope import RuntimeStateScope
 from aats.storage.scope_metadata import envelope_scope_metadata
 from aats.storage.sqlalchemy_models import EventEnvelopeArchiveModel, EventEnvelopeModel, ReplayProjectionOffsetModel
 

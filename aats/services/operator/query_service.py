@@ -3,6 +3,7 @@
 import asyncio
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 from aats.bootstrap.logging import get_logger
@@ -28,6 +29,8 @@ from aats.schemas.operator import (
 )
 from aats.services.blocker_control import BlockerControlService
 from aats.services.blocker_control.actions import BlockerActionService
+from aats.services.accounting import fill_fee_cost_in_quote, fill_fee_delta_in_quote
+from aats.services.execution_engine.okx_account import derivatives_position_mode_contract
 from aats.services.execution_engine.fill_ordering import fill_processing_sort_key
 from aats.services.governance_engine.recovery_posture import RecoveryPostureEvaluator
 from aats.services.operator.account_queries import AccountQueryFacade
@@ -48,7 +51,17 @@ from aats.services.operator.strategy_profile_queries import StrategyProfileQuery
 from aats.services.operator.strategy_queries import StrategyQueryFacade
 from aats.services.operator.strategy_profiles import StrategyProfileControlService
 from aats.services.ledger.lot_projection import LotBasedProjectionBuilder
-from aats.services.portfolio_service.position_keys import build_position_key, position_key_for_snapshot_position
+from aats.services.portfolio_service.instrument_states import (
+    instrument_position_state_for_symbol,
+    instrument_position_states_from_exchange_positions,
+    instrument_position_states_from_snapshot_positions,
+)
+from aats.services.portfolio_service.position_keys import build_position_key
+from aats.services.strategy_overlay_rollout import (
+    overlay_global_rollback_sequence,
+    overlay_rollout_status,
+    overlay_runtime_stage,
+)
 from aats.services.runtime_scope import (
     fill_outcomes_for_scope,
     fills_for_scope,
@@ -328,16 +341,16 @@ class OperatorQueryService:
         snapshot = self._latest_scoped_snapshot()
         if snapshot is None:
             return Decimal("0")
-        quantity = sum(
-            (
-                Decimal(str(position.position_qty))
+        state = instrument_position_state_for_symbol(
+            instrument_position_states_from_snapshot_positions(
+                position
                 for position in snapshot.positions
                 if position.symbol == symbol
             ),
-            start=Decimal("0"),
+            symbol,
         )
-        if abs(quantity) > self._DECIMAL_EPSILON:
-            return quantity
+        if state is not None and abs(state.net_position_qty) > self._DECIMAL_EPSILON:
+            return state.net_position_qty
         if snapshot.product_type == "spot" and "-" in symbol:
             base_currency, _quote_currency = symbol.split("-", 1)
             return snapshot.balances.get(base_currency, Decimal("0"))
@@ -347,47 +360,21 @@ class OperatorQueryService:
     def _aggregate_local_positions(snapshot) -> list[dict[str, Any]]:
         if snapshot is None:
             return []
-        aggregated: dict[str, dict[str, Any]] = {}
+        aggregated: dict[str, dict[str, Any]] = {
+            state.symbol: state.model_dump(mode="json")
+            for state in instrument_position_states_from_snapshot_positions(snapshot.positions)
+        }
         for position in snapshot.positions:
-            entry = aggregated.setdefault(
-                position.symbol,
-                {
-                    "symbol": position.symbol,
-                    "position_qty": Decimal("0"),
-                    "position_notional": Decimal("0"),
-                    "avg_entry_price": Decimal("0"),
-                    "unrealized_pnl": Decimal("0"),
-                    "product_type": position.product_type,
-                    "margin_mode": position.margin_mode,
-                    "position_mode": position.position_mode,
-                    "target_leverage": position.target_leverage,
-                    "legs": [],
-                },
-            )
-            entry["position_qty"] = Decimal(str(entry["position_qty"])) + Decimal(str(position.position_qty))
-            entry["position_notional"] = Decimal(str(entry["position_notional"])) + Decimal(str(position.position_notional))
-            entry["unrealized_pnl"] = Decimal(str(entry["unrealized_pnl"])) + Decimal(str(position.unrealized_pnl))
-            entry["target_leverage"] = max(float(entry["target_leverage"]), float(position.target_leverage))
-            entry["legs"].append(
-                {
-                    "position_key": position_key_for_snapshot_position(position),
-                    "pos_side": position.pos_side,
-                    "position_qty": position.position_qty,
-                    "avg_entry_price": position.avg_entry_price,
-                    "unrealized_pnl": position.unrealized_pnl,
-                    "settle_currency": position.settle_currency,
-                    "margin_mode": position.margin_mode,
-                    "margin_allocated": position.margin_allocated,
-                    "maintenance_margin": position.maintenance_margin,
-                    "margin_ratio": position.margin_ratio,
-                    "liquidation_price": position.liquidation_price,
-                    "margin_source": position.margin_source,
-                }
-            )
+            entry = aggregated.get(position.symbol)
+            if entry is None:
+                continue
+            entry.setdefault("target_leverage", float(position.target_leverage))
         rows: list[dict[str, Any]] = []
         for item in aggregated.values():
-            total_qty = Decimal(str(item["position_qty"]))
-            total_notional = Decimal(str(item["position_notional"]))
+            total_qty = Decimal(str(item["net_position_qty"]))
+            total_notional = Decimal(str(item["net_position_notional"]))
+            item["position_qty"] = item["net_position_qty"]
+            item["position_notional"] = item["net_position_notional"]
             item["avg_entry_price"] = (
                 total_notional / total_qty
                 if abs(total_qty) > Decimal("1e-12")
@@ -401,35 +388,20 @@ class OperatorQueryService:
     def _aggregate_exchange_positions(exchange) -> list[dict[str, Any]]:
         if exchange is None:
             return []
-        aggregated: dict[str, dict[str, Any]] = {}
-        for position in exchange.positions:
-            quantity = Decimal(str(position.quantity))
-            if str(getattr(position, "side", "net") or "net").lower() == "short" and quantity > 0:
-                quantity = -quantity
-            entry = aggregated.setdefault(
-                position.symbol,
-                {
-                    "symbol": position.symbol,
-                    "position_qty": Decimal("0"),
-                    "legs": [],
-                },
+        snapshot_position_mode = (
+            exchange.account_configuration.position_mode
+            if getattr(exchange, "account_configuration", None) is not None
+            else getattr(exchange, "position_mode", None)
+        )
+        rows = [
+            state.model_dump(mode="json")
+            for state in instrument_position_states_from_exchange_positions(
+                exchange.positions,
+                position_mode=snapshot_position_mode,
             )
-            entry["position_qty"] = Decimal(str(entry["position_qty"])) + quantity
-            entry["legs"].append(
-                {
-                    "side": getattr(position, "side", "net"),
-                    "position_qty": quantity,
-                    "avg_entry_price": position.average_entry_price,
-                    "notional_usd": position.notional_usd,
-                    "margin_mode": getattr(position, "margin_mode", None),
-                    "margin_allocated": getattr(position, "margin_allocated", None),
-                    "maintenance_margin": getattr(position, "maintenance_margin", None),
-                    "margin_ratio": getattr(position, "margin_ratio", None),
-                    "liquidation_price": getattr(position, "liquidation_price", None),
-                    "settle_currency": getattr(position, "settle_currency", None),
-                }
-            )
-        rows = list(aggregated.values())
+        ]
+        for item in rows:
+            item["position_qty"] = item["net_position_qty"]
         rows.sort(key=lambda item: str(item["symbol"]))
         return rows
 
@@ -1338,6 +1310,73 @@ class OperatorQueryService:
         return None
 
     @staticmethod
+    def _record_value(record: Any, field: str) -> Any:
+        if isinstance(record, dict):
+            return record.get(field)
+        return getattr(record, field, None)
+
+    def _fee_cost_in_quote(self, record: Any) -> Decimal | None:
+        fee_quote_amount = self._to_decimal(self._record_value(record, "fee_quote_amount"))
+        if fee_quote_amount is not None:
+            return abs(fee_quote_amount)
+        fee_delta = self._to_decimal(self._record_value(record, "fee_delta"))
+        if fee_delta is not None:
+            return abs(fee_delta)
+        fee_amount = self._to_decimal(self._record_value(record, "fee_amount"))
+        if fee_amount is None:
+            return None
+        symbol = self._record_value(record, "symbol")
+        side = self._record_value(record, "side")
+        fill_price = self._record_value(record, "fill_price")
+        if symbol in {None, ""} or side in {None, ""} or fill_price in {None, ""}:
+            return abs(fee_amount)
+        return abs(
+            self._to_decimal(
+                fill_fee_cost_in_quote(
+                    SimpleNamespace(
+                        symbol=symbol,
+                        fee_amount=fee_amount,
+                        fee_currency=self._record_value(record, "fee_currency"),
+                        venue=self._record_value(record, "venue") or "OKX",
+                        side=side,
+                        fill_price=fill_price,
+                    )
+                )
+            )
+            or Decimal("0")
+        )
+
+    def _signed_fee_delta_in_quote(self, record: Any) -> Decimal | None:
+        fee_amount = self._to_decimal(self._record_value(record, "fee_amount"))
+        symbol = self._record_value(record, "symbol")
+        side = self._record_value(record, "side")
+        fill_price = self._record_value(record, "fill_price")
+        if fee_amount is not None:
+            if symbol in {None, ""} or side in {None, ""} or fill_price in {None, ""}:
+                return fee_amount
+            return self._to_decimal(
+                fill_fee_delta_in_quote(
+                    SimpleNamespace(
+                        symbol=symbol,
+                        fee_amount=fee_amount,
+                        fee_currency=self._record_value(record, "fee_currency"),
+                        venue=self._record_value(record, "venue") or "OKX",
+                        side=side,
+                        fill_price=fill_price,
+                    )
+                )
+            )
+        fee_delta = self._to_decimal(self._record_value(record, "fee_delta"))
+        fee_quote_amount = self._to_decimal(self._record_value(record, "fee_quote_amount"))
+        if fee_delta is not None:
+            if fee_delta < 0 and fee_quote_amount is not None:
+                # Legacy rows sometimes stored expense as negative fee_delta while keeping
+                # fee_quote_amount as the positive quote cost.
+                return fee_quote_amount
+            return fee_delta
+        return fee_quote_amount
+
+    @staticmethod
     def _latency_ms(start: Any, end: Any) -> float | None:
         if not isinstance(start, datetime) or not isinstance(end, datetime):
             return None
@@ -1452,7 +1491,8 @@ class OperatorQueryService:
                 fill_notional = qty * price
 
         fee_amount = self._to_decimal(fill_payload.get("fee_amount"))
-        fee_delta = self._to_decimal(fill_payload.get("fee_delta"))
+        fee_quote_amount = self._fee_cost_in_quote(fill_payload)
+        fee_delta = self._signed_fee_delta_in_quote(fill_payload)
         adverse_slippage_bps = self._adverse_slippage_bps(
             side=fill_payload.get("side"),
             fill_price=fill_payload.get("fill_price"),
@@ -1541,11 +1581,12 @@ class OperatorQueryService:
             "fill_qty": fill_payload.get("fill_qty"),
             "fill_notional": fill_notional,
             "fee_amount": fee_amount,
+            "fee_quote_amount": fee_quote_amount,
             "fee_delta": fee_delta,
             "fee_ratio": (
                 None
-                if fee_amount is None or fill_notional is None or abs(fill_notional) <= self._DECIMAL_EPSILON
-                else fee_amount / fill_notional
+                if fee_quote_amount is None or fill_notional is None or abs(fill_notional) <= self._DECIMAL_EPSILON
+                else fee_quote_amount / fill_notional
             ),
             "realized_pnl_delta": self._to_decimal(fill_payload.get("realized_pnl_delta")),
             "gross_realized_pnl": self._to_decimal(fill_payload.get("gross_realized_pnl")),
@@ -1906,6 +1947,8 @@ class OperatorQueryService:
                 "strategy_route_action": target_payload.get("strategy_route_action", "override_target"),
                 "strategy_reason_codes": list(target_payload.get("strategy_reason_codes") or []),
                 "strategy_headline": target_payload.get("strategy_headline"),
+                "strategy_execution_legs": list(target_payload.get("strategy_execution_legs") or []),
+                "hedge_overlay_decision": target_payload.get("hedge_overlay_decision"),
                 "event_timestamp": latest_target_event.event_timestamp,
             }
         sleeve_records = []
@@ -2180,6 +2223,34 @@ class OperatorQueryService:
             )
             else []
         )
+        overlay_mode = self.runtime.settings.strategy_hedge_overlay_mode
+        rollout_opportunistic = overlay_rollout_status(self.runtime.settings, mode="opportunistic")
+        rollout_independent = overlay_rollout_status(self.runtime.settings, mode="independent")
+        current_rollout = (
+            rollout_opportunistic
+            if overlay_mode == "opportunistic"
+            else rollout_independent
+            if overlay_mode == "independent"
+            else {
+                "runtime_stage": overlay_runtime_stage(self.runtime.settings),
+                "configured_rollout_stage": "live",
+                "runtime_allowed": True,
+                "blocking_reasons": [],
+                "summary": "保护性对冲不受本轮灰度阶段限制，可继续作为最终兜底路径。",
+            }
+        )
+        overlay_mode_enabled = (
+            overlay_mode == "protective"
+            or (
+                overlay_mode == "opportunistic"
+                and self.runtime.settings.strategy_hedge_opportunistic_enabled
+            )
+            or (
+                overlay_mode == "independent"
+                and self.runtime.settings.strategy_hedge_independent_enabled
+            )
+        )
+        overlay_mode_ready = overlay_mode_enabled and bool(current_rollout.get("runtime_allowed", True))
         configured_parameters: dict[str, Any] = {
             "product_type": self.runtime.settings.trading_product_type,
             "shorting_runtime_supported": self.runtime.settings.trading_product_type == "derivatives",
@@ -2201,6 +2272,57 @@ class OperatorQueryService:
             "reversal_min_signal_edge_bps": self.runtime.settings.strategy_reversal_min_signal_edge_bps,
             "reversal_alpha_min": self.runtime.settings.strategy_reversal_alpha_min,
             "reversal_confidence_min": self.runtime.settings.strategy_reversal_confidence_min,
+            "hedge_overlay_enabled": self.runtime.settings.strategy_hedge_overlay_enabled,
+            "hedge_overlay_mode": overlay_mode,
+            "hedge_overlay_runtime_supported": (
+                self.runtime.settings.trading_product_type == "derivatives"
+                and self.runtime.settings.derivatives_position_mode == "hedge"
+            ),
+            "hedge_overlay_enabled_in_mode": overlay_mode_enabled,
+            "hedge_overlay_mode_ready": overlay_mode_ready,
+            "hedge_overlay_rollout_allowed": bool(current_rollout.get("runtime_allowed", True)),
+            "hedge_overlay_effective_enabled": (
+                self.runtime.settings.strategy_hedge_overlay_enabled
+                and self.runtime.settings.trading_product_type == "derivatives"
+                and self.runtime.settings.derivatives_position_mode == "hedge"
+                and overlay_mode_ready
+            ),
+            "hedge_open_threshold": self.runtime.settings.strategy_hedge_open_threshold,
+            "hedge_close_threshold": self.runtime.settings.strategy_hedge_close_threshold,
+            "hedge_max_ratio": self.runtime.settings.strategy_hedge_max_ratio,
+            "hedge_min_hold_seconds": self.runtime.settings.strategy_hedge_min_hold_seconds,
+            "hedge_rebalance_cooldown_seconds": self.runtime.settings.strategy_hedge_rebalance_cooldown_seconds,
+            "hedge_opportunistic_enabled": self.runtime.settings.strategy_hedge_opportunistic_enabled,
+            "hedge_opportunistic_rollout_stage": self.runtime.settings.strategy_hedge_opportunistic_rollout_stage,
+            "hedge_opportunistic_open_threshold": self.runtime.settings.strategy_hedge_opportunistic_open_threshold,
+            "hedge_opportunistic_close_threshold": self.runtime.settings.strategy_hedge_opportunistic_close_threshold,
+            "hedge_opportunistic_max_ratio": self.runtime.settings.strategy_hedge_opportunistic_max_ratio,
+            "hedge_opportunistic_min_hold_seconds": self.runtime.settings.strategy_hedge_opportunistic_min_hold_seconds,
+            "hedge_opportunistic_rebalance_cooldown_seconds": self.runtime.settings.strategy_hedge_opportunistic_rebalance_cooldown_seconds,
+            "hedge_opportunistic_max_fee_drag_ratio": self.runtime.settings.strategy_hedge_opportunistic_max_fee_drag_ratio,
+            "hedge_opportunistic_max_churn_ratio": self.runtime.settings.strategy_hedge_opportunistic_max_churn_ratio,
+            "hedge_independent_enabled": self.runtime.settings.strategy_hedge_independent_enabled,
+            "hedge_independent_rollout_stage": self.runtime.settings.strategy_hedge_independent_rollout_stage,
+            "hedge_independent_long_entry_threshold": self.runtime.settings.strategy_hedge_independent_long_entry_threshold,
+            "hedge_independent_short_entry_threshold": self.runtime.settings.strategy_hedge_independent_short_entry_threshold,
+            "hedge_independent_long_scale_in_threshold": self.runtime.settings.strategy_hedge_independent_long_scale_in_threshold,
+            "hedge_independent_short_scale_in_threshold": self.runtime.settings.strategy_hedge_independent_short_scale_in_threshold,
+            "hedge_independent_long_min_hold_seconds": self.runtime.settings.strategy_hedge_independent_long_min_hold_seconds,
+            "hedge_independent_short_min_hold_seconds": self.runtime.settings.strategy_hedge_independent_short_min_hold_seconds,
+            "hedge_independent_rebalance_cooldown_seconds": self.runtime.settings.strategy_hedge_independent_rebalance_cooldown_seconds,
+            "hedge_independent_trial_guard_enabled": self.runtime.settings.strategy_hedge_independent_trial_guard_enabled,
+            "hedge_rollout": {
+                "runtime_stage": overlay_runtime_stage(self.runtime.settings),
+                "current_mode": overlay_mode,
+                "current_mode_allowed": bool(current_rollout.get("runtime_allowed", True)),
+                "current_mode_blocking_reasons": list(current_rollout.get("blocking_reasons", [])),
+                "current_mode_summary": current_rollout.get("summary"),
+                "rollback_sequence": overlay_global_rollback_sequence(),
+                "runbook_path": "docs/derivatives_overlay_rollout_runbook.md",
+                "sample_report_template_path": "docs/derivatives_overlay_sample_report_template.md",
+                "opportunistic": rollout_opportunistic,
+                "independent": rollout_independent,
+            },
         }
         if self.runtime.settings.trading_product_type == "derivatives":
             configured_parameters.update(
@@ -2294,11 +2416,7 @@ class OperatorQueryService:
         )
         realized_fee_amount = sum(
             (
-                abs(
-                    self._to_decimal(getattr(item, "fee_amount", None))
-                    or self._to_decimal(getattr(item, "fee_delta", None))
-                    or Decimal("0")
-                )
+                self._fee_cost_in_quote(item) or Decimal("0")
                 for item in fill_rows
             ),
             start=Decimal("0"),
@@ -3384,8 +3502,9 @@ class OperatorQueryService:
                     payload["fill_notional"] = outcome_payload.get("fill_notional")
                     payload["realized_pnl"] = outcome_payload.get("realized_pnl_delta")
                     payload["realized_pnl_delta"] = outcome_payload.get("realized_pnl_delta")
-                    payload["gross_realized_pnl"] = outcome.realized_pnl_delta + outcome.fee_delta
-                    payload["fee_delta"] = outcome_payload.get("fee_delta")
+                    normalized_fee_delta = self._signed_fee_delta_in_quote(outcome) or Decimal("0")
+                    payload["gross_realized_pnl"] = outcome.realized_pnl_delta + normalized_fee_delta
+                    payload["fee_delta"] = normalized_fee_delta
                     payload["starting_position_qty"] = outcome_payload.get("starting_position_qty")
                     payload["starting_avg_entry_price"] = outcome_payload.get("starting_avg_entry_price")
                     payload["ending_position_qty"] = outcome_payload.get("ending_position_qty")
@@ -3409,10 +3528,9 @@ class OperatorQueryService:
                 payload["fill_notional"] = outcome_payload.get("fill_notional")
                 payload["realized_pnl"] = outcome_payload.get("realized_pnl_delta")
                 payload["realized_pnl_delta"] = outcome_payload.get("realized_pnl_delta")
-                payload["gross_realized_pnl"] = (
-                    outcome.realized_pnl_delta + outcome.fee_delta
-                )
-                payload["fee_delta"] = outcome_payload.get("fee_delta")
+                normalized_fee_delta = self._signed_fee_delta_in_quote(outcome) or Decimal("0")
+                payload["gross_realized_pnl"] = outcome.realized_pnl_delta + normalized_fee_delta
+                payload["fee_delta"] = normalized_fee_delta
                 payload["starting_position_qty"] = outcome_payload.get("starting_position_qty")
                 payload["starting_avg_entry_price"] = outcome_payload.get("starting_avg_entry_price")
                 payload["ending_position_qty"] = outcome_payload.get("ending_position_qty")
@@ -3432,6 +3550,365 @@ class OperatorQueryService:
             position_intent=payload.get("position_intent"),
         )
         return payload
+
+    def _hedge_mode_audit_payload(
+        self,
+        *,
+        decision_context: dict[str, Any] | None,
+        position_target: dict[str, Any] | None,
+        order_intents: list[dict[str, Any]],
+        order_updates: list[dict[str, Any]],
+        fills: list[dict[str, Any]],
+        reconciliations: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        position_mode_contract = derivatives_position_mode_contract(
+            settings=self.runtime.settings,
+            snapshot=self.latest_exchange_snapshot(),
+        )
+        return {
+            "position_mode": self._position_mode_audit_summary(
+                position_mode_contract=position_mode_contract,
+                order_intents=order_intents,
+                order_updates=order_updates,
+                fills=fills,
+                reconciliations=reconciliations,
+            ),
+            "leg_orders": self._leg_order_audit_summary(
+                order_intents=order_intents,
+                order_updates=order_updates,
+                fills=fills,
+            ),
+            "overlay": self._overlay_audit_summary(position_target=position_target),
+            "leg_trial_guard": self._leg_trial_guard_audit_summary(
+                decision_context=decision_context,
+                position_target=position_target,
+            ),
+            "leg_reconciliation": self._leg_reconciliation_audit_summary(reconciliations),
+        }
+
+    @staticmethod
+    def _overlay_mode_from_execution_mode(execution_mode: str | None) -> str | None:
+        normalized = str(execution_mode or "").strip().lower()
+        if not normalized:
+            return None
+        if normalized.startswith("protective"):
+            return "protective"
+        if normalized.startswith("opportunistic"):
+            return "opportunistic"
+        if normalized.startswith("independent"):
+            return "independent"
+        return None
+
+    @staticmethod
+    def _normalize_leg_action(value: Any) -> str | None:
+        raw = str(value or "").strip().lower()
+        if not raw:
+            return None
+        if raw in {"open", "reduce", "close"}:
+            return raw
+        for prefix in ("open", "reduce", "close"):
+            if raw.startswith(prefix):
+                return prefix
+        return raw
+
+    @staticmethod
+    def _position_mode_audit_summary(
+        *,
+        position_mode_contract: dict[str, Any] | None,
+        order_intents: list[dict[str, Any]],
+        order_updates: list[dict[str, Any]],
+        fills: list[dict[str, Any]],
+        reconciliations: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        observed_position_modes: set[str] = set()
+        observed_pos_sides: set[str] = set()
+        observed_exchange_modes: set[str] = set()
+        mismatch_detected = False
+
+        for row in [*order_intents, *order_updates, *fills]:
+            position_mode = str(row.get("position_mode") or "").strip()
+            if position_mode:
+                observed_position_modes.add(position_mode)
+            pos_side = str(row.get("pos_side") or "").strip()
+            if pos_side:
+                observed_pos_sides.add(pos_side)
+
+        for report in reconciliations:
+            unknown_state_details = OperatorQueryService._report_field(report, "unknown_state_details", [])
+            for item in unknown_state_details if isinstance(unknown_state_details, list) else []:
+                exchange_mode = str(item.get("exchange_position_mode") or "").strip()
+                if exchange_mode:
+                    observed_exchange_modes.add(exchange_mode)
+                local_mode = str(item.get("local_position_mode") or "").strip()
+                if local_mode:
+                    observed_position_modes.add(local_mode)
+                if str(item.get("kind") or "").strip() == "position_mode_mismatch":
+                    mismatch_detected = True
+            mismatch_reasons = OperatorQueryService._report_field(report, "mismatch_reasons", [])
+            if "derivatives_local_position_mode_differs_from_exchange_account_configuration" in mismatch_reasons:
+                mismatch_detected = True
+
+        observed_position_modes_sorted = sorted(observed_position_modes)
+        observed_pos_sides_sorted = sorted(observed_pos_sides)
+        observed_exchange_modes_sorted = sorted(observed_exchange_modes)
+        configured_mode = None if position_mode_contract is None else position_mode_contract.get(
+            "configured_derivatives_position_mode"
+        )
+        exchange_mode = None if position_mode_contract is None else position_mode_contract.get("exchange_position_mode")
+        contract_matches = None if position_mode_contract is None else position_mode_contract.get(
+            "exchange_position_mode_matches_configured"
+        )
+        return {
+            "configured_derivatives_position_mode": configured_mode,
+            "required_exchange_position_mode": None if position_mode_contract is None else position_mode_contract.get(
+                "required_exchange_position_mode"
+            ),
+            "exchange_position_mode": exchange_mode,
+            "exchange_position_mode_matches_configured": contract_matches,
+            "position_mode_match_required": None if position_mode_contract is None else position_mode_contract.get(
+                "position_mode_match_required"
+            ),
+            "hedge_mode_active": bool(
+                configured_mode == "hedge"
+                or exchange_mode == "long_short_mode"
+                or "long_short_mode" in observed_position_modes_sorted
+            ),
+            "observed_position_modes": observed_position_modes_sorted,
+            "observed_exchange_position_modes": observed_exchange_modes_sorted,
+            "observed_pos_sides": observed_pos_sides_sorted,
+            "mode_change_detected": bool(
+                len(observed_position_modes_sorted) > 1
+                or len(observed_exchange_modes_sorted) > 1
+                or contract_matches is False
+                or mismatch_detected
+            ),
+            "contract_mismatch_detected": contract_matches is False,
+            "mismatch_detected": mismatch_detected,
+        }
+
+    @staticmethod
+    def _leg_order_audit_summary(
+        *,
+        order_intents: list[dict[str, Any]],
+        order_updates: list[dict[str, Any]],
+        fills: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        update_index: dict[str, dict[str, Any]] = {}
+        fill_count_index: dict[str, int] = {}
+        for row in order_updates:
+            key = str(row.get("leg_intent_id") or row.get("intent_id") or row.get("client_order_id") or "").strip()
+            if key:
+                update_index[key] = row
+        for row in fills:
+            key = str(row.get("leg_intent_id") or row.get("intent_id") or row.get("client_order_id") or "").strip()
+            if key:
+                fill_count_index[key] = fill_count_index.get(key, 0) + 1
+
+        source_rows = order_intents if order_intents else order_updates
+        items: list[dict[str, Any]] = []
+        for row in source_rows:
+            pos_side = str(row.get("pos_side") or "").strip().lower()
+            position_mode = str(row.get("position_mode") or "").strip()
+            leg_action = OperatorQueryService._normalize_leg_action(
+                row.get("leg_action") or row.get("position_intent") or row.get("execution_action")
+            )
+            if pos_side not in {"long", "short"} and position_mode != "long_short_mode" and leg_action is None:
+                continue
+            key = str(row.get("leg_intent_id") or row.get("intent_id") or row.get("client_order_id") or "").strip()
+            latest_update = update_index.get(key, {})
+            quantity = row.get("quantity", row.get("requested_qty"))
+            item = {
+                "symbol": row.get("symbol"),
+                "position_mode": position_mode or latest_update.get("position_mode"),
+                "pos_side": pos_side or str(latest_update.get("pos_side") or "").strip().lower() or None,
+                "action": leg_action,
+                "execution_mode": row.get("strategy_execution_mode") or latest_update.get("strategy_execution_mode"),
+                "overlay_mode": (
+                    OperatorQueryService._overlay_mode_from_execution_mode(
+                        row.get("strategy_execution_mode") or latest_update.get("strategy_execution_mode")
+                    )
+                ),
+                "strategy_leg_role": row.get("strategy_leg_role") or latest_update.get("strategy_leg_role"),
+                "quantity": None if quantity in {None, ""} else str(quantity),
+                "client_order_id": row.get("client_order_id") or latest_update.get("client_order_id"),
+                "intent_id": row.get("intent_id") or latest_update.get("intent_id"),
+                "leg_intent_id": row.get("leg_intent_id") or latest_update.get("leg_intent_id"),
+                "status": latest_update.get("status"),
+                "fill_count": fill_count_index.get(key, 0),
+            }
+            items.append(item)
+        items.sort(
+            key=lambda item: (
+                str(item.get("symbol") or ""),
+                str(item.get("pos_side") or ""),
+                str(item.get("action") or ""),
+                str(item.get("client_order_id") or ""),
+            )
+        )
+        return {
+            "total_count": len(items),
+            "open_count": sum(1 for item in items if item.get("action") == "open"),
+            "reduce_count": sum(1 for item in items if item.get("action") == "reduce"),
+            "close_count": sum(1 for item in items if item.get("action") == "close"),
+            "symbols": sorted({str(item.get("symbol") or "") for item in items if item.get("symbol")}),
+            "pos_sides": sorted({str(item.get("pos_side") or "") for item in items if item.get("pos_side")}),
+            "execution_modes": sorted(
+                {str(item.get("execution_mode") or "") for item in items if item.get("execution_mode")}
+            ),
+            "items": items,
+        }
+
+    @staticmethod
+    def _leg_reconciliation_audit_summary(reconciliations: list[dict[str, Any]]) -> dict[str, Any]:
+        items: list[dict[str, Any]] = []
+        for report in reconciliations:
+            reconciliation_id = OperatorQueryService._report_field(report, "reconciliation_id")
+            summary = OperatorQueryService._position_leg_mismatch_summary(report)
+            for item in summary.get("items", []):
+                normalized = dict(item)
+                normalized["reconciliation_id"] = reconciliation_id
+                items.append(normalized)
+        items.sort(
+            key=lambda item: (
+                str(item.get("reconciliation_id") or ""),
+                str(item.get("symbol") or ""),
+                str(item.get("leg_side") or ""),
+            )
+        )
+        return {
+            "total_count": len(items),
+            "missing_execution_chain_count": sum(
+                1 for item in items if item.get("kind") == "missing_execution_chain"
+            ),
+            "items": items,
+        }
+
+    def _overlay_audit_summary(self, *, position_target: dict[str, Any] | None) -> dict[str, Any]:
+        if not isinstance(position_target, dict):
+            return {}
+        overlay = position_target.get("hedge_overlay_decision")
+        legs = position_target.get("strategy_execution_legs")
+        if not isinstance(overlay, dict) and not isinstance(legs, list):
+            return {}
+        overlay_payload = dict(overlay) if isinstance(overlay, dict) else {}
+        leg_items: list[dict[str, Any]] = []
+        for row in legs if isinstance(legs, list) else []:
+            if not isinstance(row, dict):
+                continue
+            execution_mode = str(row.get("execution_mode") or "").strip() or None
+            overlay_mode = (
+                str(row.get("overlay_mode") or "").strip()
+                or self._overlay_mode_from_execution_mode(execution_mode)
+                or overlay_payload.get("effective_mode")
+                or overlay_payload.get("configured_mode")
+            )
+            leg_items.append(
+                {
+                    "symbol": row.get("symbol"),
+                    "pos_side": row.get("pos_side"),
+                    "action": row.get("action"),
+                    "role": row.get("role"),
+                    "execution_mode": execution_mode,
+                    "overlay_mode": overlay_mode,
+                    "current_position_qty": row.get("current_position_qty"),
+                    "target_position_qty": row.get("target_position_qty"),
+                    "delta_position_qty": row.get("delta_position_qty"),
+                    "trigger_reason_codes": list(row.get("trigger_reason_codes") or []),
+                }
+            )
+        return {
+            "configured_mode": overlay_payload.get("configured_mode"),
+            "effective_mode": overlay_payload.get("effective_mode"),
+            "overlay_source": overlay_payload.get("overlay_source"),
+            "state": overlay_payload.get("state"),
+            "active": bool(overlay_payload.get("active")),
+            "main_leg_signal": overlay_payload.get("main_leg_signal"),
+            "hedge_leg_signal": overlay_payload.get("hedge_leg_signal"),
+            "reason_codes": list(overlay_payload.get("reason_codes") or []),
+            "blocked_reasons": list(overlay_payload.get("blocked_reasons") or []),
+            "long_leg_score": overlay_payload.get("long_leg_score"),
+            "short_leg_score": overlay_payload.get("short_leg_score"),
+            "long_leg_reason_codes": list(overlay_payload.get("long_leg_reason_codes") or []),
+            "short_leg_reason_codes": list(overlay_payload.get("short_leg_reason_codes") or []),
+            "long_leg_blocked_reasons": list(overlay_payload.get("long_leg_blocked_reasons") or []),
+            "short_leg_blocked_reasons": list(overlay_payload.get("short_leg_blocked_reasons") or []),
+            "items": leg_items,
+            "execution_modes": sorted(
+                {str(item.get("execution_mode") or "") for item in leg_items if item.get("execution_mode")}
+            ),
+        }
+
+    def _leg_trial_guard_audit_summary(
+        self,
+        *,
+        decision_context: dict[str, Any] | None,
+        position_target: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        if not isinstance(decision_context, dict):
+            return {}
+        leg_health = decision_context.get("leg_strategy_health")
+        if not isinstance(leg_health, dict):
+            return {}
+        overlay = self._overlay_audit_summary(position_target=position_target)
+        mode = (
+            overlay.get("effective_mode")
+            or overlay.get("configured_mode")
+            or self.runtime.settings.strategy_hedge_overlay_mode
+        )
+        enabled = bool(
+            mode == "independent"
+            and self.runtime.settings.strategy_hedge_independent_trial_guard_enabled
+        )
+        min_closed_trades = int(self.runtime.settings.strategy_performance_guard_min_closed_trades)
+        items: list[dict[str, Any]] = []
+        for leg in ("long", "short"):
+            payload = leg_health.get(leg)
+            if not isinstance(payload, dict):
+                continue
+            closed_trade_count = int(payload.get("recent_closed_trade_count") or 0)
+            recent_win_rate = float(payload.get("recent_win_rate") or 0.0)
+            recent_net_realized_pnl = self._to_decimal(payload.get("recent_net_realized_pnl")) or Decimal("0")
+            sample_ready = closed_trade_count >= min_closed_trades
+            active = bool(
+                enabled
+                and sample_ready
+                and recent_net_realized_pnl < -self._DECIMAL_EPSILON
+                and recent_win_rate < 0.5
+            )
+            status = (
+                "disabled"
+                if not enabled
+                else "warming_up"
+                if not sample_ready
+                else "blocked"
+                if active
+                else "clear"
+            )
+            items.append(
+                {
+                    "leg": leg,
+                    "enabled": enabled,
+                    "status": status,
+                    "active": active,
+                    "sample_ready": sample_ready,
+                    "recent_closed_trade_count": closed_trade_count,
+                    "recent_win_rate": recent_win_rate,
+                    "recent_net_realized_pnl": recent_net_realized_pnl,
+                    "recent_fee_drag_ratio": float(payload.get("recent_fee_drag_ratio") or 0.0),
+                    "recent_churn_ratio": float(payload.get("recent_churn_ratio") or 0.0),
+                    "recent_low_edge_trade_streak": int(payload.get("recent_low_edge_trade_streak") or 0),
+                    "guardrail_flags": list(payload.get("guardrail_flags") or []),
+                    "cooldowns": dict(payload.get("cooldowns") or {}),
+                    "reason_code": f"independent_{leg}_book_trial_guard_active" if active else None,
+                }
+            )
+        return {
+            "enabled": enabled,
+            "mode": mode,
+            "total_count": len(items),
+            "active_count": sum(1 for item in items if item.get("active")),
+            "items": items,
+        }
 
     def _baseline_reference_payload(
         self,
@@ -3790,6 +4267,14 @@ class OperatorQueryService:
         strategy_execution_health = self.strategy_execution_health(
             decision_context.get("symbol") if decision_context is not None else None
         )
+        hedge_mode_audit = self._hedge_mode_audit_payload(
+            decision_context=decision_context,
+            position_target=position_target,
+            order_intents=order_intents,
+            order_updates=order_updates,
+            fills=fills,
+            reconciliations=reconciliations,
+        )
         return {
             "decision_id": decision_id,
             "health_snapshot": health_snapshot,
@@ -3833,6 +4318,7 @@ class OperatorQueryService:
             "portfolio_snapshot": self.payload_by_ref(audit.portfolio_delta_ref),
             "reconciliations": reconciliations,
             "strategy_execution_health": strategy_execution_health,
+            "hedge_mode_audit": hedge_mode_audit,
             "ai_decision_audit": self._ai_decision_audit(
                 audit=audit,
                 decision_context=decision_context,
@@ -4488,6 +4974,11 @@ class OperatorQueryService:
                 "avg_exchange_fill_to_ingestion_latency_ms": None,
                 "avg_adverse_slippage_bps": None,
                 "avg_fee_ratio": None,
+                "fee_to_notional_ratio": None,
+                "high_slippage_count": 0,
+                "high_slippage_ratio": None,
+                "slow_submit_to_fill_count": 0,
+                "slow_submit_to_fill_ratio": None,
             }
 
         def _avg_float(key: str) -> float | None:
@@ -4503,6 +4994,21 @@ class OperatorQueryService:
                 return None
             return sum(clean, start=Decimal("0")) / Decimal(len(clean))
 
+        total_fees = sum((self._fee_cost_in_quote(item) or Decimal("0")) for item in rows)
+        total_notional = sum((self._to_decimal(item.get("fill_notional")) or Decimal("0")) for item in rows)
+        high_slippage_count = sum(
+            1
+            for item in rows
+            if (self._to_decimal(item.get("adverse_slippage_bps")) or Decimal("0"))
+            > Decimal(str(max(self.runtime.settings.max_slippage_tolerance_bps * 0.5, 2)))
+        )
+        slow_submit_to_fill_count = sum(
+            1
+            for item in rows
+            if isinstance(item.get("submit_to_exchange_fill_latency_ms"), (int, float))
+            and item.get("submit_to_exchange_fill_latency_ms") > 10_000
+        )
+
         return {
             "fill_count": len(rows),
             "avg_decision_to_submit_latency_ms": _avg_float("decision_to_submit_latency_ms"),
@@ -4510,6 +5016,13 @@ class OperatorQueryService:
             "avg_exchange_fill_to_ingestion_latency_ms": _avg_float("exchange_fill_to_ingestion_latency_ms"),
             "avg_adverse_slippage_bps": _avg_decimal("adverse_slippage_bps"),
             "avg_fee_ratio": _avg_decimal("fee_ratio"),
+            "fee_to_notional_ratio": (
+                None if abs(total_notional) <= self._DECIMAL_EPSILON else total_fees / total_notional
+            ),
+            "high_slippage_count": high_slippage_count,
+            "high_slippage_ratio": None if not rows else round(high_slippage_count / len(rows), 6),
+            "slow_submit_to_fill_count": slow_submit_to_fill_count,
+            "slow_submit_to_fill_ratio": None if not rows else round(slow_submit_to_fill_count / len(rows), 6),
         }
 
     @staticmethod
@@ -4593,11 +5106,7 @@ class OperatorQueryService:
             fill_price = self._to_decimal(getattr(outcome, "fill_price", None)) or Decimal("0")
             fill_notional = fill_qty * fill_price
         fill_notional = abs(fill_notional)
-        fee_amount = self._to_decimal(getattr(outcome, "fee_amount", None))
-        if fee_amount is None:
-            fee_amount = abs(self._to_decimal(getattr(outcome, "fee_delta", None)) or Decimal("0"))
-        else:
-            fee_amount = abs(fee_amount)
+        fee_amount = self._fee_cost_in_quote(outcome) or Decimal("0")
 
         start_flat = abs(starting_qty) <= self._DECIMAL_EPSILON
         end_flat = abs(ending_qty) <= self._DECIMAL_EPSILON
@@ -4886,7 +5395,7 @@ class OperatorQueryService:
         closed_fill_count = len(rows)
         net_realized = sum((self._to_decimal(item.get("realized_pnl_delta")) or Decimal("0")) for item in rows)
         gross_realized = sum((self._to_decimal(item.get("gross_realized_pnl")) or Decimal("0")) for item in rows)
-        total_fees = sum((self._to_decimal(item.get("fee_amount")) or Decimal("0")) for item in rows)
+        total_fees = sum((self._fee_cost_in_quote(item) or Decimal("0")) for item in rows)
         total_notional = sum((self._to_decimal(item.get("fill_notional")) or Decimal("0")) for item in rows)
         funding_fee_net_pnl = sum((self._to_decimal(item.get("funding_fee_delta")) or Decimal("0")) for item in funding_rows)
         combined_net_realized_pnl = net_realized + funding_fee_net_pnl
@@ -6553,27 +7062,112 @@ class OperatorQueryService:
     def _reconciliation_mismatch_summary(report) -> dict[str, Any] | None:
         if report is None:
             return None
+        leg_mismatch_summary = OperatorQueryService._position_leg_mismatch_summary(report)
+        findings = OperatorQueryService._report_field(report, "findings", [])
         return {
-            "reconciliation_id": report.reconciliation_id,
-            "severity": report.severity,
-            "recovery_classification": report.recovery_classification,
-            "review_required": report.review_required,
-            "halt_required": report.halt_required,
-            "only_reduce_required": report.only_reduce_required,
-            "only_reduce_reasons": report.only_reduce_reasons,
-            "structural_review_required": report.structural_review_required,
-            "financial_review_required": report.financial_review_required,
-            "observational_only": report.observational_only,
-            "finding_summary": report.finding_summary,
-            "findings": [item.model_dump(mode="json") for item in report.findings],
-            "baseline_generation_id": report.baseline_generation_id,
-            "exchange_ack_watermark_id": report.exchange_ack_watermark_id,
-            "unknown_state_details": report.unknown_state_details,
-            "mismatch_categories": report.mismatch_categories,
-            "mismatch_reasons": report.mismatch_reasons,
-            "safety_impacts": report.safety_impacts,
-            "recommended_operator_action": report.recommended_operator_action,
-            "exchange_comparison_enabled": report.exchange_comparison_enabled,
+            "reconciliation_id": OperatorQueryService._report_field(report, "reconciliation_id"),
+            "severity": OperatorQueryService._report_field(report, "severity"),
+            "recovery_classification": OperatorQueryService._report_field(report, "recovery_classification"),
+            "review_required": bool(OperatorQueryService._report_field(report, "review_required", False)),
+            "halt_required": bool(OperatorQueryService._report_field(report, "halt_required", False)),
+            "only_reduce_required": bool(OperatorQueryService._report_field(report, "only_reduce_required", False)),
+            "only_reduce_reasons": OperatorQueryService._report_field(report, "only_reduce_reasons", []),
+            "structural_review_required": bool(
+                OperatorQueryService._report_field(report, "structural_review_required", False)
+            ),
+            "financial_review_required": bool(
+                OperatorQueryService._report_field(report, "financial_review_required", False)
+            ),
+            "observational_only": bool(OperatorQueryService._report_field(report, "observational_only", False)),
+            "finding_summary": OperatorQueryService._report_field(report, "finding_summary", {}),
+            "findings": [
+                item.model_dump(mode="json") if hasattr(item, "model_dump") else dict(item)
+                for item in findings
+            ],
+            "baseline_generation_id": OperatorQueryService._report_field(report, "baseline_generation_id"),
+            "exchange_ack_watermark_id": OperatorQueryService._report_field(report, "exchange_ack_watermark_id"),
+            "unknown_state_details": OperatorQueryService._report_field(report, "unknown_state_details", []),
+            "mismatch_categories": OperatorQueryService._report_field(report, "mismatch_categories", []),
+            "mismatch_reasons": OperatorQueryService._report_field(report, "mismatch_reasons", []),
+            "safety_impacts": OperatorQueryService._report_field(report, "safety_impacts", []),
+            "recommended_operator_action": OperatorQueryService._report_field(report, "recommended_operator_action"),
+            "exchange_comparison_enabled": bool(
+                OperatorQueryService._report_field(report, "exchange_comparison_enabled", False)
+            ),
+            "leg_mismatch_summary": leg_mismatch_summary,
+        }
+
+    @staticmethod
+    def _report_field(report, field_name: str, default: Any = None) -> Any:
+        if report is None:
+            return default
+        if isinstance(report, dict):
+            return report.get(field_name, default)
+        return getattr(report, field_name, default)
+
+    @staticmethod
+    def _position_leg_mismatch_summary(report) -> dict[str, Any]:
+        position_diff = OperatorQueryService._report_field(report, "position_diff", {})
+        position_diff = position_diff if isinstance(position_diff, dict) else {}
+        exchange_leg_mismatches = (
+            position_diff.get("exchange_leg_mismatches")
+            if isinstance(position_diff.get("exchange_leg_mismatches"), dict)
+            else {}
+        )
+        exchange_instrument_mismatches = (
+            position_diff.get("exchange_instrument_mismatches")
+            if isinstance(position_diff.get("exchange_instrument_mismatches"), dict)
+            else {}
+        )
+        unknown_state_details = OperatorQueryService._report_field(report, "unknown_state_details", [])
+        missing_execution_chain_keys = {
+            str(item.get("position_key"))
+            for item in (unknown_state_details if isinstance(unknown_state_details, list) else [])
+            if str(item.get("kind") or "") == "exchange_position_without_local_execution_chain"
+        }
+        items: list[dict[str, Any]] = []
+        for position_key, details in exchange_leg_mismatches.items():
+            row = dict(details or {})
+            row["position_key"] = position_key
+            row["kind"] = (
+                "missing_execution_chain"
+                if position_key in missing_execution_chain_keys
+                else "leg_quantity_mismatch"
+            )
+            for field_name in ("stored_qty", "reconstructed_qty", "exchange_qty"):
+                if field_name in row:
+                    row[field_name] = str(row[field_name])
+            items.append(row)
+        items.sort(key=lambda item: (str(item.get("symbol") or ""), str(item.get("leg_side") or "")))
+
+        instrument_items: list[dict[str, Any]] = []
+        for symbol, details in exchange_instrument_mismatches.items():
+            legs = details.get("legs") if isinstance(details.get("legs"), dict) else {}
+            normalized_legs = {
+                str(leg_name): {
+                    "stored": str(values.get("stored")),
+                    "exchange": str(values.get("exchange")),
+                }
+                for leg_name, values in legs.items()
+                if isinstance(values, dict)
+            }
+            instrument_items.append(
+                {
+                    "symbol": symbol,
+                    "legs": normalized_legs,
+                    "stored_dual_legged": bool(details.get("stored_dual_legged", False)),
+                    "exchange_dual_legged": bool(details.get("exchange_dual_legged", False)),
+                }
+            )
+        instrument_items.sort(key=lambda item: str(item.get("symbol") or ""))
+        return {
+            "total_count": len(items),
+            "missing_execution_chain_count": sum(
+                1 for item in items if item.get("kind") == "missing_execution_chain"
+            ),
+            "instrument_count": len(instrument_items),
+            "items": items,
+            "instrument_items": instrument_items,
         }
 
     def _exchange_bills_summary(self) -> dict[str, Any] | None:

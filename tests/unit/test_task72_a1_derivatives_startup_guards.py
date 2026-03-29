@@ -1,9 +1,44 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from aats.bootstrap.config import build_runtime
 from aats.bootstrap.settings import AATSSettings
+from aats.schemas.common import utc_now
+from aats.schemas.exchange import ExchangeAccountConfiguration, ExchangeAccountSnapshot
+from tests.support.postgres import temporary_postgres_url
+
+
+class _FakePositionModeAccountService:
+    SNAPSHOT: ExchangeAccountSnapshot | None = None
+
+    def __init__(self, *, settings, client, private_ws_client=None) -> None:
+        _ = client
+        _ = private_ws_client
+        self.settings = settings
+        self._snapshot = type(self).SNAPSHOT
+
+    async def refresh(self, *, force: bool = False):
+        _ = force
+        return self._snapshot
+
+    def latest_snapshot(self):
+        return self._snapshot
+
+    def status(self):
+        return {
+            "backend": "okx",
+            "enabled": True,
+            "credentials_configured": True,
+            "connected": self._snapshot is not None,
+            "fresh": self._snapshot is not None,
+            "last_update_ts": None if self._snapshot is None else self._snapshot.fetched_at,
+            "last_error": None,
+            "ready": self._snapshot is not None,
+            "detail": "fake_position_mode_account",
+            "blockers": [] if self._snapshot is not None else ["account_snapshot_missing"],
+        }
 
 
 class TestTask72A1DerivativesStartupGuards(unittest.IsolatedAsyncioTestCase):
@@ -148,6 +183,90 @@ class TestTask72A1DerivativesStartupGuards(unittest.IsolatedAsyncioTestCase):
                     }
                 )
             )
+
+    async def test_derivatives_exchange_runtime_fails_fast_when_exchange_position_mode_mismatches_configured_mode(self) -> None:
+        _FakePositionModeAccountService.SNAPSHOT = ExchangeAccountSnapshot(
+            account_source="okx",
+            fetched_at=utc_now(),
+            account_mode="4",
+            position_mode="net_mode",
+            account_configuration=ExchangeAccountConfiguration(
+                account_level_code="4",
+                account_level_label="portfolio_margin",
+                position_mode="net_mode",
+                position_mode_label="net",
+            ),
+        )
+        try:
+            with temporary_postgres_url() as (database_url, _admin_engine, _schema_name):
+                settings = AATSSettings.model_validate(
+                    {
+                        "startup_profile": "derivatives",
+                        "config_profile": "guarded_derivatives_enabled",
+                        "mode": "guarded_live",
+                        "market_data_backend": "okx",
+                        "execution_backend": "okx",
+                        "account_backend": "okx",
+                        "account_read_enabled": True,
+                        "okx_simulated_trading": True,
+                        "trading_product_type": "derivatives",
+                        "margin_mode": "cross",
+                        "storage_mode": "postgres",
+                        "database_url": database_url,
+                        "okx_api_key": "key",
+                        "okx_api_secret": "secret",
+                        "okx_api_passphrase": "passphrase",
+                        "operator_auth_enabled": True,
+                        "derivatives_position_mode": "hedge",
+                    }
+                )
+                with patch("aats.bootstrap.config.OKXAccountService", _FakePositionModeAccountService):
+                    with self.assertRaisesRegex(ValueError, "derivatives_exchange_runtime_position_mode_mismatch"):
+                        await build_runtime(settings)
+        finally:
+            _FakePositionModeAccountService.SNAPSHOT = None
+
+    async def test_derivatives_exchange_runtime_fails_fast_when_exchange_position_mode_is_missing(self) -> None:
+        _FakePositionModeAccountService.SNAPSHOT = ExchangeAccountSnapshot(
+            account_source="okx",
+            fetched_at=utc_now(),
+            account_mode="4",
+            position_mode=None,
+            account_configuration=ExchangeAccountConfiguration(
+                account_level_code="4",
+                account_level_label="portfolio_margin",
+                position_mode=None,
+                position_mode_label=None,
+            ),
+        )
+        try:
+            with temporary_postgres_url() as (database_url, _admin_engine, _schema_name):
+                settings = AATSSettings.model_validate(
+                    {
+                        "startup_profile": "derivatives",
+                        "config_profile": "guarded_derivatives_enabled",
+                        "mode": "guarded_live",
+                        "market_data_backend": "okx",
+                        "execution_backend": "okx",
+                        "account_backend": "okx",
+                        "account_read_enabled": True,
+                        "okx_simulated_trading": True,
+                        "trading_product_type": "derivatives",
+                        "margin_mode": "cross",
+                        "storage_mode": "postgres",
+                        "database_url": database_url,
+                        "okx_api_key": "key",
+                        "okx_api_secret": "secret",
+                        "okx_api_passphrase": "passphrase",
+                        "operator_auth_enabled": True,
+                        "derivatives_position_mode": "net",
+                    }
+                )
+                with patch("aats.bootstrap.config.OKXAccountService", _FakePositionModeAccountService):
+                    with self.assertRaisesRegex(ValueError, "derivatives_exchange_runtime_requires_exchange_position_mode"):
+                        await build_runtime(settings)
+        finally:
+            _FakePositionModeAccountService.SNAPSHOT = None
 
     async def test_derivatives_exchange_runtime_rejects_placeholder_credentials(self) -> None:
         with self.assertRaisesRegex(ValueError, "derivatives_exchange_runtime_requires_okx_credentials"):

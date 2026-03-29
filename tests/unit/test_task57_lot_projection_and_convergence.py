@@ -84,6 +84,33 @@ class TestTask57LotProjectionAndConvergence(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state.realized_pnl, Decimal("15"))
         self.assertEqual(state.total_fees_paid, Decimal("0"))
 
+    def test_lot_projection_and_reconstruction_preserve_negative_fee_rebate(self) -> None:
+        builder = LotBasedProjectionBuilder()
+        fills = [
+            _fill(fill_id="fill_buy_rebate_open", side="buy", qty="1", price="100", fee="0"),
+            _fill(fill_id="fill_sell_rebate_close", side="sell", qty="1", price="110", fee="-1"),
+        ]
+
+        state = builder.rebuild_portfolio_state(
+            fills=fills,
+            balances={"USDT": Decimal("0")},
+            default_product_type="spot",
+            default_margin_mode="cash",
+        )
+        reconstructed = PortfolioReconstructionService(
+            initial_usdt_balance=Decimal("0"),
+            snapshot_builder=PortfolioSnapshotBuilder(pnl_calculator=PortfolioPnLCalculator()),
+        ).rebuild_snapshot(
+            fills=fills,
+            price_provider=lambda _symbol: Decimal("110"),
+        )
+
+        self.assertEqual(state.positions, {})
+        self.assertEqual(state.total_fees_paid, Decimal("-1"))
+        self.assertEqual(state.realized_pnl, Decimal("11"))
+        self.assertEqual(reconstructed.realized_pnl, Decimal("11"))
+        self.assertEqual(reconstructed.balances["USDT"], Decimal("11"))
+
     def test_lot_projection_keeps_long_short_mode_legs_separate(self) -> None:
         builder = LotBasedProjectionBuilder()
         fills = [

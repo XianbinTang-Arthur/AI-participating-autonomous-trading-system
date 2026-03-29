@@ -10,14 +10,20 @@ from aats.bootstrap.settings import AATSSettings
 from aats.schemas.common import new_id, utc_now
 from aats.schemas.execution import (
     FillEvent,
+    LegOrderIntent,
     OrderIntent,
     OrderState,
     close_only_from_position_intent,
+    close_only_from_leg_action,
     default_close_only_reason,
     default_reduce_only_reason,
+    execution_action_from_leg_action,
     execution_action_from_position_intent,
+    order_intent_from_leg_order_intent,
     pos_side_from_position_intent,
+    position_intent_from_leg_intent,
     reduce_only_from_position_intent,
+    reduce_only_from_leg_action,
 )
 from aats.schemas.exchange import ExchangeAccountSnapshot, ExchangeFill, ExchangePosition, InstrumentMetadata
 from aats.services.execution_engine.exchange_adapter import ExchangeAdapter
@@ -180,6 +186,9 @@ class OKXExecutionAdapter(ExchangeAdapter):
 
     def preview_client_order_id(self, intent: OrderIntent) -> str | None:
         return self.payload_builder._client_order_id(intent)
+
+    async def submit_leg_order(self, leg_intent: LegOrderIntent) -> tuple[OrderState, list[FillEvent]]:
+        return await self.submit(order_intent_from_leg_order_intent(leg_intent))
 
     async def submit(self, intent: OrderIntent) -> tuple[OrderState, list[FillEvent]]:
         snapshot = await self.account_service.refresh()
@@ -608,8 +617,16 @@ class OKXExecutionAdapter(ExchangeAdapter):
                 position_mode=position_mode,
             )
         td_mode = intent.td_mode or ("cash" if intent.product_type == "spot" else intent.margin_mode)
-        reduce_only = bool(intent.reduce_only or reduce_only_from_position_intent(intent.position_intent))
-        close_only = bool(intent.close_only or close_only_from_position_intent(intent.position_intent))
+        reduce_only = bool(
+            intent.reduce_only
+            or reduce_only_from_leg_action(intent.leg_action)
+            or reduce_only_from_position_intent(intent.position_intent)
+        )
+        close_only = bool(
+            intent.close_only
+            or close_only_from_leg_action(intent.leg_action)
+            or close_only_from_position_intent(intent.position_intent)
+        )
         if intent.only_reduce_required and position_mode in {"net_mode", "long_short_mode"}:
             reducible_qty = self._reducible_position_quantity(
                 snapshot=snapshot,
@@ -631,6 +648,7 @@ class OKXExecutionAdapter(ExchangeAdapter):
                     intent.reduce_only_reason
                     or default_reduce_only_reason(
                         position_intent=intent.position_intent,
+                        leg_action=intent.leg_action,
                         reduce_only=reduce_only,
                     )
                     or ("risk_only_reduce_required" if intent.only_reduce_required and reduce_only else None)
@@ -639,6 +657,7 @@ class OKXExecutionAdapter(ExchangeAdapter):
                     intent.close_only_reason
                     or default_close_only_reason(
                         position_intent=intent.position_intent,
+                        leg_action=intent.leg_action,
                         close_only=close_only,
                     )
                 ),
@@ -669,14 +688,23 @@ class OKXExecutionAdapter(ExchangeAdapter):
 
         pos_side = None if intent.pos_side in {None, ""} else str(intent.pos_side)
         if account_position_mode == "long_short_mode":
+            if intent.leg_action is None:
+                return "okx_hedge_mode_requires_explicit_leg_order"
             if pos_side not in {"long", "short"}:
                 return "okx_pos_side_missing_for_long_short_mode"
-            expected_pos_side = pos_side_from_position_intent(
-                position_intent=intent.position_intent,
-                position_mode="long_short_mode",
-            )
-            if expected_pos_side in {"long", "short"} and pos_side != expected_pos_side:
-                return "okx_pos_side_mismatch_with_position_intent"
+            try:
+                expected_position_intent = position_intent_from_leg_intent(
+                    side=intent.side,
+                    pos_side=pos_side,  # type: ignore[arg-type]
+                    action=intent.leg_action,
+                    position_mode="long_short_mode",
+                )
+            except ValueError as exc:
+                return str(exc)
+            if intent.position_intent != expected_position_intent:
+                return "okx_leg_action_mismatch_with_position_intent"
+        elif intent.leg_action is not None:
+            return "okx_explicit_leg_order_requires_long_short_mode"
         elif pos_side not in {None, "net"}:
             return "okx_pos_side_disallowed_for_net_mode"
 
@@ -705,11 +733,13 @@ class OKXExecutionAdapter(ExchangeAdapter):
         reduce_path = bool(
             intent.reduce_only
             or intent.only_reduce_required
+            or reduce_only_from_leg_action(intent.leg_action)
             or reduce_only_from_position_intent(intent.position_intent)
             or intent.execution_action in {"reduce", "exit"}
         )
         close_path = bool(
             intent.close_only
+            or close_only_from_leg_action(intent.leg_action)
             or close_only_from_position_intent(intent.position_intent)
         )
         if close_path and not reduce_path:
@@ -750,10 +780,15 @@ class OKXExecutionAdapter(ExchangeAdapter):
         reduce_path = bool(
             intent.reduce_only
             or intent.only_reduce_required
+            or reduce_only_from_leg_action(intent.leg_action)
             or reduce_only_from_position_intent(intent.position_intent)
             or intent.execution_action in {"reduce", "exit"}
         )
-        close_path = bool(intent.close_only or close_only_from_position_intent(intent.position_intent))
+        close_path = bool(
+            intent.close_only
+            or close_only_from_leg_action(intent.leg_action)
+            or close_only_from_position_intent(intent.position_intent)
+        )
         reducible_qty = self._reducible_position_quantity(
             snapshot=snapshot,
             symbol=intent.symbol,
@@ -989,7 +1024,9 @@ class OKXExecutionAdapter(ExchangeAdapter):
             margin_mode=intent.margin_mode,
             exposure_side=intent.exposure_side,
             execution_action=intent.execution_action,
+            leg_action=intent.leg_action,
             position_intent=intent.position_intent,
+            leg_intent_id=intent.leg_intent_id,
             strategy_family=intent.strategy_family,
             strategy_sleeve_id=intent.strategy_sleeve_id,
             allocation_id=intent.allocation_id,
@@ -1046,7 +1083,9 @@ class OKXExecutionAdapter(ExchangeAdapter):
             margin_mode=intent.margin_mode,
             exposure_side=intent.exposure_side,
             execution_action=intent.execution_action,
+            leg_action=intent.leg_action,
             position_intent=intent.position_intent,
+            leg_intent_id=intent.leg_intent_id,
             strategy_family=intent.strategy_family,
             strategy_sleeve_id=intent.strategy_sleeve_id,
             allocation_id=intent.allocation_id,
@@ -1102,7 +1141,9 @@ class OKXExecutionAdapter(ExchangeAdapter):
             margin_mode=intent.margin_mode,
             exposure_side=intent.exposure_side,
             execution_action=intent.execution_action,
+            leg_action=intent.leg_action,
             position_intent=intent.position_intent,
+            leg_intent_id=intent.leg_intent_id,
             strategy_family=intent.strategy_family,
             strategy_sleeve_id=intent.strategy_sleeve_id,
             allocation_id=intent.allocation_id,
@@ -1158,7 +1199,9 @@ class OKXExecutionAdapter(ExchangeAdapter):
             margin_mode=intent.margin_mode,
             exposure_side=intent.exposure_side,
             execution_action=intent.execution_action,
+            leg_action=intent.leg_action,
             position_intent=intent.position_intent,
+            leg_intent_id=intent.leg_intent_id,
             strategy_family=intent.strategy_family,
             strategy_sleeve_id=intent.strategy_sleeve_id,
             allocation_id=intent.allocation_id,
@@ -1308,7 +1351,9 @@ class OKXExecutionAdapter(ExchangeAdapter):
             margin_mode=intent.margin_mode,
             exposure_side=intent.exposure_side,
             execution_action=intent.execution_action,
+            leg_action=intent.leg_action,
             position_intent=intent.position_intent,
+            leg_intent_id=intent.leg_intent_id,
             strategy_family=intent.strategy_family,
             strategy_sleeve_id=intent.strategy_sleeve_id,
             allocation_id=intent.allocation_id,
@@ -1368,7 +1413,9 @@ class OKXExecutionAdapter(ExchangeAdapter):
                     margin_mode=intent.margin_mode,
                     exposure_side=intent.exposure_side,
                     execution_action=intent.execution_action,
+                    leg_action=intent.leg_action,
                     position_intent=intent.position_intent,
+                    leg_intent_id=intent.leg_intent_id,
                     strategy_family=intent.strategy_family,
                     strategy_sleeve_id=intent.strategy_sleeve_id,
                     allocation_id=intent.allocation_id,
@@ -1399,6 +1446,8 @@ class OKXExecutionAdapter(ExchangeAdapter):
         state_payload.setdefault("targetLeverage", str(intent.target_leverage))
         if intent.execution_action is not None:
             state_payload.setdefault("executionAction", intent.execution_action)
+        state_payload.setdefault("legAction", intent.leg_action or "")
+        state_payload.setdefault("legIntentId", intent.leg_intent_id or "")
         state_payload.setdefault("positionIntent", intent.position_intent)
         state_payload.setdefault("positionMode", intent.position_mode or "")
         state_payload.setdefault("posSide", intent.pos_side or "")
@@ -1563,6 +1612,11 @@ class OKXExecutionAdapter(ExchangeAdapter):
         limit_price = to_decimal(payload["px"]) if "px" in payload and payload["px"] not in {"", None} else None
         reduce_only = str(payload.get("reduceOnly", "false")).lower() == "true" or state.reduce_only
         close_only = str(payload.get("closeOnly", "false")).lower() == "true" or state.close_only
+        leg_action = (
+            str(payload.get("legAction"))
+            if payload.get("legAction") not in {"", None}
+            else state.leg_action
+        )
         position_mode = (
             str(payload.get("positionMode"))
             if payload.get("positionMode") not in {"", None}
@@ -1611,6 +1665,7 @@ class OKXExecutionAdapter(ExchangeAdapter):
                 else state.reduce_only_reason
                 or default_reduce_only_reason(
                     position_intent=state.position_intent,
+                    leg_action=leg_action,  # type: ignore[arg-type]
                     reduce_only=reduce_only,
                 )
             ),
@@ -1620,6 +1675,7 @@ class OKXExecutionAdapter(ExchangeAdapter):
                 else state.close_only_reason
                 or default_close_only_reason(
                     position_intent=state.position_intent,
+                    leg_action=leg_action,  # type: ignore[arg-type]
                     close_only=close_only,
                 )
             ),
@@ -1663,9 +1719,16 @@ class OKXExecutionAdapter(ExchangeAdapter):
             execution_action=(
                 state.execution_action
                 or (str(payload.get("executionAction")) if payload.get("executionAction") not in {"", None} else None)
+                or execution_action_from_leg_action(leg_action)  # type: ignore[arg-type]
                 or execution_action_from_position_intent(state.position_intent)
             ),
+            leg_action=leg_action,  # type: ignore[arg-type]
             position_intent=state.position_intent,
+            leg_intent_id=(
+                str(payload.get("legIntentId"))
+                if payload.get("legIntentId") not in {"", None}
+                else state.leg_intent_id
+            ),
             strategy_family=(
                 str(payload.get("strategyFamily"))
                 if payload.get("strategyFamily") not in {"", None}

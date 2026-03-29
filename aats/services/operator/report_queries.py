@@ -17,6 +17,8 @@ class ReportQueryFacade:
         outcomes = list(self.owner._scoped_fill_outcomes())
         outcomes.sort(key=lambda item: item.ingestion_timestamp or item.created_at, reverse=True)
         closed_rows = [self.owner._execution_quality_row(item) for item in outcomes[:normalized_limit]]
+        execution_quality = self.execution_quality_report(limit=normalized_limit, offset=0)
+        execution_quality_summary = dict(execution_quality.get("summary") or {})
 
         funding_records = list(self.owner._scoped_funding_fee_records())
         funding_records.sort(
@@ -66,10 +68,16 @@ class ReportQueryFacade:
                 "funding_fee_expense_count": int(funding_fee_summary.get("expense_count") or 0),
                 "funding_fee_net_pnl": funding_fee_net_pnl,
                 "combined_net_realized_pnl": net_realized_pnl + funding_fee_net_pnl,
+                "fee_to_notional_ratio": execution_quality_summary.get("fee_to_notional_ratio"),
+                "avg_fee_ratio": execution_quality_summary.get("avg_fee_ratio"),
+                "high_slippage_count": execution_quality_summary.get("high_slippage_count"),
+                "high_slippage_ratio": execution_quality_summary.get("high_slippage_ratio"),
+                "slow_submit_to_fill_count": execution_quality_summary.get("slow_submit_to_fill_count"),
+                "slow_submit_to_fill_ratio": execution_quality_summary.get("slow_submit_to_fill_ratio"),
             },
             "recent_closed_fills": closed_rows,
             "recent_realized_events": realized_events,
-            "execution_quality": self.execution_quality_report(limit=normalized_limit, offset=0),
+            "execution_quality": execution_quality,
             "funding_fee_summary": funding_fee_summary,
             "truth_source": "fill_outcomes_plus_funding_fee_records",
         }

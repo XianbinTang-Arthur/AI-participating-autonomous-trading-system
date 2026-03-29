@@ -349,6 +349,11 @@ class PostgresStrategyRuntimeRepository:
             session.commit()
         return bundle
 
+    def get_execution_bundle(self, bundle_id: str) -> StrategyExecutionBundle | None:
+        with self.session_factory() as session:
+            row = session.get(StrategyExecutionBundleModel, bundle_id)
+        return None if row is None else StrategyExecutionBundle.model_validate(row.payload)
+
     def recent_execution_bundles(
         self,
         *,
