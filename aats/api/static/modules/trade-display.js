@@ -63,7 +63,7 @@ export function orderRowMeta(order = {}) {
 
 export function fillRowTitle(fill = {}) {
   return inferTradeScene(fill) === "derivatives"
-    ? readableState(fill.execution_action || fill.position_intent, "成交方向待确认")
+    ? readableState(preferredDerivativesPositionAction(fill), "成交方向待确认")
     : readableState(fill.side, "成交方向待确认");
 }
 
@@ -104,7 +104,7 @@ export function fillDrawerRows(fill = {}) {
   if (inferTradeScene(fill) === "derivatives") {
     return [
       ["合约标的", fill.symbol || "标的待确认", `${readableState(fill.margin_mode, "保证金模式待确认")} | ${readableState(fill.exposure_side, "方向待确认")}`],
-      ["仓位动作", readableState(fill.execution_action || fill.position_intent, "仓位动作待确认"), `${readableState(fill.side, "买卖方向待确认")} | ${readableState(fill.liquidity_role, "流动性角色待确认")}`],
+      ["仓位动作", readableState(preferredDerivativesPositionAction(fill), "仓位动作待确认"), `${readableState(fill.side, "买卖方向待确认")} | ${readableState(fill.liquidity_role, "流动性角色待确认")}`],
       ["成交仓位", formatNumber(fill.fill_qty), `成交均价 ${formatQuotePrice(fill.symbol, fill.fill_price)}`],
       ["成交名义价值", formatQuoteNotional(fill.symbol, fill.fill_qty, fill.fill_price), `交易所时间 ${fill.exchange_timestamp || "待同步"}`],
       ["仓位前后", `${formatSigned(fill.starting_position_qty)} -> ${formatSigned(fill.ending_position_qty)}`, `均价 ${formatNumber(fill.starting_avg_entry_price, 4, "待同步")} -> ${formatNumber(fill.ending_avg_entry_price, 4, "待同步")}`],
@@ -159,7 +159,15 @@ function spotOrderAction(order = {}) {
 }
 
 function derivativesOrderAction(order = {}) {
-  return readableState(order.execution_action || order.position_intent || order.exposure_side, "仓位动作待确认");
+  return readableState(preferredDerivativesPositionAction(order) || order.exposure_side, "仓位动作待确认");
+}
+
+function preferredDerivativesPositionAction(record = {}) {
+  const positionIntent = String(record.position_intent || "").toLowerCase();
+  if (positionIntent === "reverse_to_long" || positionIntent === "reverse_to_short") {
+    return positionIntent;
+  }
+  return record.execution_action || record.position_intent;
 }
 
 function formatAssetAmount(symbol, value, signed = false) {

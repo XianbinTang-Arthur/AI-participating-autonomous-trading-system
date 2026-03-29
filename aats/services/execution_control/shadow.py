@@ -199,7 +199,12 @@ class Phase1ExecutionShadowService:
             leg_intent_id=order_state.leg_intent_id,
             decision_id=order_state.decision_id,
             symbol=order_state.symbol,
-            side="buy" if order_state.position_intent not in {"open_short", "scale_in_short", "reduce_short", "close_short"} else "sell",
+            side=(
+                "buy"
+                if order_state.position_intent
+                not in {"open_short", "scale_in_short", "reduce_short", "close_short", "reverse_to_short"}
+                else "sell"
+            ),
             quantity=order_state.requested_qty,
             execution_style=order_state.submission_mode or "shadow",
             order_type="market",

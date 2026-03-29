@@ -125,6 +125,25 @@ class TestConvergedExecutionIntentCompatibility(unittest.TestCase):
         self.assertEqual(intent.side, "sell")
         self.assertEqual(intent.position_intent, "scale_in_short")
 
+    def test_converged_repo_side_inference_supports_reverse_to_short(self) -> None:
+        order_state = _order_state(client_order_id="cl_task58_reverse_to_short").model_copy(
+            update={
+                "position_intent": "reverse_to_short",
+                "execution_action": "reverse",
+                "pos_side": "short",
+                "exposure_side": "short",
+                "reduce_only": False,
+                "close_only": False,
+                "reduce_only_reason": None,
+                "close_only_reason": None,
+            }
+        )
+
+        intent = ConvergedPostgresExecutionRepository._intent_from_order_state(order_state)
+
+        self.assertEqual(intent.side, "sell")
+        self.assertEqual(intent.position_intent, "reverse_to_short")
+
 
 @unittest.skipUnless(os.getenv("AATS_DATABASE_URL"), "AATS_DATABASE_URL is required for PostgreSQL-backed tests")
 class TestTask58ConvergedExecutionTruth(unittest.IsolatedAsyncioTestCase):

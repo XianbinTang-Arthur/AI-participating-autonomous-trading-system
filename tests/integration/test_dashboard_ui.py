@@ -2542,6 +2542,66 @@ console.log(JSON.stringify({
         self.assertIn('"scaleInLong":"加多"', stdout)
         self.assertIn('"scaleInShort":"加空"', stdout)
 
+    def test_trade_display_preserves_reverse_to_direction_specific_labels(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { fillDrawerRows, fillRowTitle, orderDrawerRows, orderRowTitle } from './aats/api/static/modules/trade-display.js';
+
+const reverseLongOrder = {
+  product_type: 'derivatives',
+  symbol: 'BTC-USDT-SWAP',
+  execution_action: 'reverse',
+  position_intent: 'reverse_to_long',
+  margin_mode: 'cross',
+  exposure_side: 'long',
+  target_leverage: 5,
+  status: 'SUBMITTED',
+  requested_qty: 0.01,
+  remaining_qty: 0.01,
+  filled_qty: 0,
+};
+
+const reverseShortFill = {
+  product_type: 'derivatives',
+  symbol: 'BTC-USDT-SWAP',
+  execution_action: 'reverse',
+  position_intent: 'reverse_to_short',
+  margin_mode: 'cross',
+  exposure_side: 'short',
+  side: 'sell',
+  liquidity_role: 'taker',
+  fill_qty: 0.01,
+  fill_price: 66500,
+  starting_position_qty: 0.01,
+  ending_position_qty: -0.01,
+  fee_amount: 0,
+};
+
+const orderRows = orderDrawerRows(reverseLongOrder);
+const fillRows = fillDrawerRows(reverseShortFill);
+
+console.log(JSON.stringify({
+  orderTitleIsDirectional: orderRowTitle(reverseLongOrder) === '反手做多',
+  fillTitleIsDirectional: fillRowTitle(reverseShortFill) === '反手做空',
+  orderDrawerIsDirectional: orderRows[1][1] === '反手做多',
+  fillDrawerIsDirectional: fillRows[1][1] === '反手做空',
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        stdout = result.stdout or ""
+        self.assertIn('"orderTitleIsDirectional":true', stdout)
+        self.assertIn('"fillTitleIsDirectional":true', stdout)
+        self.assertIn('"orderDrawerIsDirectional":true', stdout)
+        self.assertIn('"fillDrawerIsDirectional":true', stdout)
+
     def test_decision_drawer_surfaces_independent_overlay_audit_and_leg_trial_guard(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
         script = """

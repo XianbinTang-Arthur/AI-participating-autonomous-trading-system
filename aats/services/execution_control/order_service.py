@@ -184,7 +184,13 @@ class ExecutionOrderService:
     @staticmethod
     def _intent_from_order_state(order_state: OrderState) -> OrderIntent:
         side = "buy"
-        if order_state.position_intent in {"open_short", "scale_in_short", "reduce_short", "close_short"}:
+        if order_state.position_intent in {
+            "open_short",
+            "scale_in_short",
+            "reduce_short",
+            "close_short",
+            "reverse_to_short",
+        }:
             side = "sell"
         return OrderIntent(
             intent_id=order_state.intent_id,
