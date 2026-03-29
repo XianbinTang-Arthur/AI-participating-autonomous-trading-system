@@ -2,14 +2,18 @@ from __future__ import annotations
 
 import os
 import unittest
-from pathlib import Path
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 
 from aats.bootstrap.config import build_runtime
 from aats.bootstrap.settings import AATSSettings
-from aats.storage.session import create_database_runtime, validate_runtime_schema
+from aats.storage.session import (
+    applied_migrations,
+    apply_current_migrations,
+    create_database_runtime,
+    validate_runtime_schema,
+)
 
 
 @unittest.skipUnless(os.getenv("AATS_DATABASE_URL"), "AATS_DATABASE_URL is required for Postgres integration tests")
@@ -117,6 +121,22 @@ class TestLegacyPostgresUpgradePath(unittest.IsolatedAsyncioTestCase):
             runtime.dispose()
             self._drop_schema(admin_engine, schema_name)
 
+    async def test_current_migrations_are_versioned_and_not_reapplied(self) -> None:
+        runtime, admin_engine, schema_name = self._schema_runtime()
+        try:
+            self._apply_legacy_schema(runtime)
+
+            first_applied = self._apply_current_migrations(runtime)
+            second_applied = self._apply_current_migrations(runtime)
+            versions = applied_migrations(runtime)
+
+            self.assertEqual(first_applied, ["0001_postgres_latest_schema.sql", "0002_postgres_legacy_upgrade.sql"])
+            self.assertEqual(second_applied, [])
+            self.assertEqual(versions, ["0001_postgres_latest_schema.sql", "0002_postgres_legacy_upgrade.sql"])
+        finally:
+            runtime.dispose()
+            self._drop_schema(admin_engine, schema_name)
+
     async def test_runtime_builds_against_upgraded_legacy_schema(self) -> None:
         runtime, admin_engine, schema_name = self._schema_runtime()
         app_runtime = None
@@ -149,6 +169,49 @@ class TestLegacyPostgresUpgradePath(unittest.IsolatedAsyncioTestCase):
             runtime.dispose()
             self._drop_schema(admin_engine, schema_name)
 
+    async def test_runtime_build_auto_applies_current_migrations_to_legacy_schema(self) -> None:
+        runtime, admin_engine, schema_name = self._schema_runtime()
+        app_runtime = None
+        try:
+            self._apply_legacy_schema(runtime)
+            app_runtime = await build_runtime(
+                AATSSettings.model_validate(
+                    {
+                        "config_profile": "local_demo",
+                        "mode": "paper_live",
+                        "market_data_backend": "demo",
+                        "execution_backend": "paper",
+                        "account_backend": "disabled",
+                        "account_read_enabled": False,
+                        "storage_mode": "postgres",
+                        "database_url": runtime.engine.url.render_as_string(hide_password=False),
+                        "database_auto_create_schema": False,
+                        "database_single_runtime_guard_enabled": False,
+                        "event_persistence_mode": "strict",
+                    }
+                )
+            )
+            self.assertIsNotNone(app_runtime.execution_repo)
+            with runtime.engine.begin() as connection:
+                columns = connection.execute(
+                    text(
+                        """
+                        SELECT column_name
+                        FROM information_schema.columns
+                        WHERE table_schema = current_schema()
+                          AND table_name = 'fill_events'
+                          AND column_name IN ('strategy_family', 'strategy_sleeve_id', 'allocation_id')
+                        ORDER BY column_name
+                        """
+                    )
+                ).scalars().all()
+            self.assertEqual(columns, ["allocation_id", "strategy_family", "strategy_sleeve_id"])
+        finally:
+            if app_runtime is not None and app_runtime.database_runtime is not None:
+                app_runtime.database_runtime.dispose()
+            runtime.dispose()
+            self._drop_schema(admin_engine, schema_name)
+
     @staticmethod
     def _schema_runtime():
         base_url = make_url(os.environ["AATS_DATABASE_URL"])
@@ -165,13 +228,8 @@ class TestLegacyPostgresUpgradePath(unittest.IsolatedAsyncioTestCase):
         return runtime, admin_engine, schema_name
 
     @staticmethod
-    def _apply_current_migrations(runtime) -> None:
-        migrations_dir = Path(__file__).resolve().parents[2] / "migrations"
-        with runtime.engine.begin() as connection:
-            raw_connection = connection.connection
-            with raw_connection.cursor() as cursor:
-                for migration_path in sorted(migrations_dir.glob("*.sql")):
-                    cursor.execute(migration_path.read_text(encoding="utf-8"))
+    def _apply_current_migrations(runtime) -> list[str]:
+        return apply_current_migrations(runtime)
 
     @staticmethod
     def _apply_legacy_schema(runtime) -> None:

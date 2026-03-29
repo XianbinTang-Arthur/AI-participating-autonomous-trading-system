@@ -93,6 +93,22 @@ class PostgresLedgerAccountRepository:
         product_type: str | None = None,
         margin_mode: str | None = None,
     ) -> list[dict]:
+        with self.session_factory() as session:
+            return self.list_accounts_in_session(
+                session,
+                account_type=account_type,
+                product_type=product_type,
+                margin_mode=margin_mode,
+            )
+
+    def list_accounts_in_session(
+        self,
+        session: Session,
+        *,
+        account_type: str | None = None,
+        product_type: str | None = None,
+        margin_mode: str | None = None,
+    ) -> list[dict]:
         query = select(LedgerAccountModel)
         if account_type is not None:
             query = query.where(LedgerAccountModel.account_type == account_type)
@@ -105,8 +121,7 @@ class PostgresLedgerAccountRepository:
             asc(LedgerAccountModel.account_type),
             asc(LedgerAccountModel.account_id),
         )
-        with self.session_factory() as session:
-            rows = session.scalars(query).all()
+        rows = session.scalars(query).all()
         return [_ledger_account_row_to_dict(row) for row in rows]
 
 
@@ -239,7 +254,10 @@ class PostgresLedgerEntryRepository:
 
     def balance_by_account(self, account_id: str) -> Decimal:
         with self.session_factory() as session:
-            rows = session.scalars(select(LedgerEntryModel).where(LedgerEntryModel.account_id == account_id)).all()
+            return self.balance_by_account_in_session(session, account_id)
+
+    def balance_by_account_in_session(self, session: Session, account_id: str) -> Decimal:
+        rows = session.scalars(select(LedgerEntryModel).where(LedgerEntryModel.account_id == account_id)).all()
         balance = Decimal("0")
         for row in rows:
             balance += row.amount if row.direction == "debit" else -row.amount

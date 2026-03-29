@@ -5,7 +5,7 @@ from typing import Any
 
 from aats.bootstrap.settings import AATSSettings
 from aats.schemas.execution import FillEvent, OrderState
-from aats.schemas.portfolio import FillOutcomeRecord, FundingFeeRecord, PortfolioSnapshot
+from aats.schemas.portfolio import FillOutcomeRecord, FundingFeeRecord, PortfolioSnapshot, SleevePnLRecord
 from aats.schemas.reconciliation import ReconciliationReport
 from aats.schemas.system import MarginModelType, ProductType
 
@@ -16,6 +16,7 @@ class RuntimeStateScope:
     margin_mode: MarginModelType
     allowed_symbols: tuple[str, ...]
     default_symbol: str
+    smart_arbitrage_spot_margin_modes: tuple[MarginModelType, ...] = ("cash",)
 
     def symbol_allowed(self, symbol: str | None) -> bool:
         if not symbol:
@@ -26,11 +27,19 @@ class RuntimeStateScope:
 
 
 def runtime_state_scope(settings: AATSSettings) -> RuntimeStateScope:
+    smart_arbitrage_spot_margin_modes: tuple[MarginModelType, ...] = ("cash",)
+    configured_margin_mode = getattr(settings, "smart_arbitrage_margin_short_spot_margin_mode", "cross")
+    if (
+        settings.smart_arbitrage_margin_short_enabled
+        or settings.smart_arbitrage_negative_basis_mode == "margin_backed"
+    ) and configured_margin_mode in {"cross", "isolated"}:
+        smart_arbitrage_spot_margin_modes = ("cash", configured_margin_mode)
     return RuntimeStateScope(
         product_type=settings.trading_product_type,
         margin_mode=settings.margin_mode,
-        allowed_symbols=tuple(settings.allowed_symbols),
+        allowed_symbols=settings.expanded_allowed_symbols(),
         default_symbol=settings.default_symbol,
+        smart_arbitrage_spot_margin_modes=smart_arbitrage_spot_margin_modes,
     )
 
 
@@ -152,9 +161,15 @@ def order_state_matches_scope(
 ) -> bool:
     if not scope.symbol_allowed(order.symbol):
         return False
-    if inferred_order_state_product_type(order) != scope.product_type:
+    order_product_type = inferred_order_state_product_type(order)
+    order_margin_mode = inferred_order_state_margin_mode(order)
+    if scope.product_type == "derivatives" and getattr(order, "strategy_family", None) == "smart_arbitrage":
+        if order_product_type == "spot":
+            return order_margin_mode in scope.smart_arbitrage_spot_margin_modes
+        return order_margin_mode == scope.margin_mode
+    if order_product_type != scope.product_type:
         return False
-    return inferred_order_state_margin_mode(order) == scope.margin_mode
+    return order_margin_mode == scope.margin_mode
 
 
 def order_states_for_scope(
@@ -188,6 +203,10 @@ def fill_event_matches_scope(
 ) -> bool:
     if not scope.symbol_allowed(fill.symbol):
         return False
+    if scope.product_type == "derivatives" and getattr(fill, "strategy_family", None) == "smart_arbitrage":
+        if fill.product_type == "spot":
+            return fill.margin_mode in scope.smart_arbitrage_spot_margin_modes
+        return fill.margin_mode == scope.margin_mode
     if fill.product_type != scope.product_type:
         return False
     return fill.margin_mode == scope.margin_mode
@@ -215,6 +234,10 @@ def fill_outcome_matches_scope(
 ) -> bool:
     if not scope.symbol_allowed(outcome.symbol):
         return False
+    if scope.product_type == "derivatives" and getattr(outcome, "strategy_family", None) == "smart_arbitrage":
+        if outcome.product_type == "spot":
+            return outcome.margin_mode in scope.smart_arbitrage_spot_margin_modes
+        return outcome.margin_mode == scope.margin_mode
     if outcome.product_type != scope.product_type:
         return False
     return outcome.margin_mode == scope.margin_mode
@@ -264,6 +287,44 @@ def funding_fee_records_for_scope(
     if since is not None:
         rows = [record for record in rows if record.created_at >= since]
     rows = filter_funding_fee_records(rows, scope)
+    if limit is not None:
+        rows = rows[-limit:]
+    return rows
+
+
+def sleeve_pnl_record_matches_scope(
+    record: SleevePnLRecord,
+    scope: RuntimeStateScope,
+) -> bool:
+    if record.product_type != scope.product_type:
+        return False
+    if record.margin_mode != scope.margin_mode:
+        return False
+    if record.symbol in {None, ""}:
+        return True
+    return scope.symbol_allowed(record.symbol)
+
+
+def filter_sleeve_pnl_records(
+    records: list[SleevePnLRecord],
+    scope: RuntimeStateScope,
+) -> list[SleevePnLRecord]:
+    return [record for record in records if sleeve_pnl_record_matches_scope(record, scope)]
+
+
+def sleeve_pnl_records_for_scope(
+    repo,
+    scope: RuntimeStateScope,
+    *,
+    since=None,
+    limit: int | None = None,
+) -> list[SleevePnLRecord]:
+    if hasattr(repo, "records_for_scope"):
+        return repo.records_for_scope(scope=scope, since=since, limit=limit)
+    rows = repo.records()
+    if since is not None:
+        rows = [record for record in rows if record.created_at >= since]
+    rows = filter_sleeve_pnl_records(rows, scope)
     if limit is not None:
         rows = rows[-limit:]
     return rows
@@ -353,22 +414,38 @@ def latest_topic_event_for_scope(event_store, topic: str, scope: RuntimeStateSco
     return rows[-1] if rows else None
 
 
+def event_matches_scope(event: Any, scope: RuntimeStateScope) -> bool:
+    return _event_matches_scope(event, scope)
+
+
 def _event_matches_scope(event: Any, scope: RuntimeStateScope) -> bool:
     payload = getattr(event, "payload", None)
     if not isinstance(payload, dict):
         return False
-    symbol = payload.get("symbol")
-    allowed_symbols = payload.get("allowed_symbols")
-    product_type = payload.get("product_type")
-    margin_mode = payload.get("margin_mode")
+    details = payload.get("details") if isinstance(payload.get("details"), dict) else {}
+    symbol = payload.get("symbol") or details.get("symbol")
+    allowed_symbols = payload.get("allowed_symbols") or details.get("allowed_symbols")
+    product_type = payload.get("product_type") or details.get("product_type")
+    margin_mode = payload.get("margin_mode") or details.get("margin_mode")
+    strategy_family = payload.get("strategy_family")
     if product_type is None and isinstance(symbol, str):
         product_type = infer_product_type_from_symbol(symbol)
     if margin_mode is None and product_type == "spot":
         margin_mode = "cash"
-    if product_type is not None and product_type != scope.product_type:
-        return False
-    if margin_mode is not None and margin_mode != scope.margin_mode:
-        return False
+    if scope.product_type == "derivatives" and strategy_family == "smart_arbitrage":
+        if product_type == "spot":
+            if margin_mode not in scope.smart_arbitrage_spot_margin_modes:
+                return False
+        else:
+            if product_type is not None and product_type != scope.product_type:
+                return False
+            if margin_mode is not None and margin_mode != scope.margin_mode:
+                return False
+    else:
+        if product_type is not None and product_type != scope.product_type:
+            return False
+        if margin_mode is not None and margin_mode != scope.margin_mode:
+            return False
     if isinstance(symbol, str):
         return scope.symbol_allowed(symbol)
     if isinstance(allowed_symbols, list) and allowed_symbols:

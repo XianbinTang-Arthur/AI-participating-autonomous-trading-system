@@ -186,6 +186,60 @@ class TestRuntimeScope(unittest.TestCase):
         ))
         self.assertFalse(fill_event_matches_scope(fill, scope))
 
+    def test_smart_arbitrage_margin_backed_spot_fill_stays_in_derivatives_scope(self) -> None:
+        scope = runtime_state_scope(
+            AATSSettings.model_validate(
+                {
+                    "trading_product_type": "derivatives",
+                    "margin_mode": "cross",
+                    "allowed_symbols": ("BTC-USDT-SWAP",),
+                    "default_symbol": "BTC-USDT-SWAP",
+                    "smart_arbitrage_enabled": True,
+                    "smart_arbitrage_negative_basis_mode": "margin_backed",
+                    "smart_arbitrage_margin_short_enabled": True,
+                    "smart_arbitrage_margin_short_spot_margin_mode": "cross",
+                }
+            )
+        )
+        order = OrderState(
+            decision_id="decision_margin_scope",
+            intent_id="intent_margin_scope",
+            symbol="BTC-USDT",
+            client_order_id="clord_margin_scope",
+            venue="OKX",
+            exchange_order_id="ord_margin_scope",
+            status="FILLED",
+            requested_qty=0.01,
+            filled_qty=0.01,
+            remaining_qty=0.0,
+            strategy_family="smart_arbitrage",
+            product_type="spot",
+            margin_mode="cross",
+            submission_payload={"tdMode": "cross", "productType": "spot"},
+        )
+        fill = FillEvent(
+            fill_id="fill_margin_scope",
+            decision_id="decision_margin_scope",
+            intent_id="intent_margin_scope",
+            client_order_id="clord_margin_scope",
+            exchange_order_id="ord_margin_scope",
+            symbol="BTC-USDT",
+            venue="OKX",
+            side="sell",
+            fill_qty=0.01,
+            fill_price=100.0,
+            fee_amount=0.1,
+            product_type="spot",
+            margin_mode="cross",
+            strategy_family="smart_arbitrage",
+            liquidity_role="taker",
+            exchange_timestamp=utc_now(),
+            ingestion_timestamp=utc_now(),
+        )
+
+        self.assertTrue(order_state_matches_scope(order, scope))
+        self.assertTrue(fill_event_matches_scope(fill, scope))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -11,12 +11,6 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from aats.bootstrap.config import build_runtime, build_storage_backends, load_settings
-from aats.services.portfolio_service.pnl import PortfolioPnLCalculator
-from aats.services.portfolio_service.reconstruction import PortfolioReconstructionService
-from aats.services.portfolio_service.snapshots import PortfolioSnapshotBuilder
-from aats.services.reconciliation_service.replay import ReplayEngine
-
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Replay AATS events deterministically.")
@@ -56,6 +50,12 @@ def parse_optional_datetime(value: str | None) -> datetime | None:
 
 
 async def main(args: argparse.Namespace) -> dict:
+    from aats.bootstrap.config import build_runtime, build_storage_backends, load_settings
+    from aats.services.portfolio_service.pnl import PortfolioPnLCalculator
+    from aats.services.portfolio_service.reconstruction import PortfolioReconstructionService
+    from aats.services.portfolio_service.snapshots import PortfolioSnapshotBuilder
+    from aats.services.reconciliation_service.replay import ReplayEngine
+
     settings = load_settings()
     start_at = parse_optional_datetime(args.start_at)
     end_at = parse_optional_datetime(args.end_at)

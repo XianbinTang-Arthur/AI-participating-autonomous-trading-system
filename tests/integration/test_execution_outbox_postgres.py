@@ -12,8 +12,13 @@ from sqlalchemy.engine import make_url
 from aats.bus.memory_bus import InMemoryEventBus
 from aats.events import topics
 from aats.schemas.common import utc_now
-from aats.schemas.execution import FillEvent, OrderObligation, OrderState
+from aats.schemas.execution import FillEvent, OrderIntent, OrderObligation, OrderState
 from aats.services.execution_engine.outbox import PostgresExecutionOutboxPublisher
+from aats.storage.execution_command_repo_postgres import PostgresExecutionCommandRepository
+from aats.storage.execution_order_repo_postgres import (
+    PostgresExecutionOrderHistoryRepository,
+    PostgresExecutionOrderRepository,
+)
 from aats.storage.event_store_postgres import PostgresEventStore
 from aats.storage.execution_repo_postgres import PostgresExecutionRepository
 from aats.storage.obligation_repo_postgres import PostgresExecutionObligationRepository
@@ -122,21 +127,130 @@ class TestExecutionOutboxPostgres(unittest.IsolatedAsyncioTestCase):
                 outbox_repo=outbox_repo,
                 bus=bus,
             )
+            original_attempts = PostgresExecutionOutboxPublisher._MAX_PUBLISH_ATTEMPTS
+            PostgresExecutionOutboxPublisher._MAX_PUBLISH_ATTEMPTS = 4
+            try:
+                await publisher.persist_order_state(
+                    order_state=self._order_state(client_order_id="clord_outbox_poison", status="SUBMITTED"),
+                    key="BTC-USDT",
+                )
+                await publisher.flush_pending()
+                await publisher.persist_order_state(
+                    order_state=self._order_state(client_order_id="clord_outbox_ok_waiting", status="SUBMITTED"),
+                    key="BTC-USDT",
+                )
 
-            await publisher.persist_order_state(
-                order_state=self._order_state(client_order_id="clord_outbox_poison", status="SUBMITTED"),
-                key="BTC-USDT",
+                self.assertEqual(outbox_repo.counts(), {"pending": 2, "published": 0, "failed": 0})
+                self.assertEqual(received, [])
+
+                await publisher.flush_pending()
+
+                await publisher.persist_order_state(
+                    order_state=self._order_state(client_order_id="clord_outbox_ok_after_poison", status="SUBMITTED"),
+                    key="BTC-USDT",
+                )
+
+                self.assertEqual(outbox_repo.counts(), {"pending": 0, "published": 2, "failed": 1})
+                self.assertEqual(received, ["clord_outbox_ok_waiting", "clord_outbox_ok_after_poison"])
+            finally:
+                PostgresExecutionOutboxPublisher._MAX_PUBLISH_ATTEMPTS = original_attempts
+        finally:
+            runtime.dispose()
+            self._drop_schema(admin_engine, schema_name)
+
+    async def test_persist_order_state_and_command_seeds_execution_order_with_submit_intent_fields(self) -> None:
+        runtime, admin_engine, schema_name = self._schema_runtime()
+        try:
+            event_store = PostgresEventStore(runtime.session_factory)
+            execution_repo = PostgresExecutionRepository(runtime.session_factory)
+            obligation_repo = PostgresExecutionObligationRepository(runtime.session_factory)
+            outbox_repo = PostgresOutboxRepository(runtime.session_factory)
+            command_repo = PostgresExecutionCommandRepository(runtime.session_factory)
+            order_repo = PostgresExecutionOrderRepository(runtime.session_factory)
+            order_history_repo = PostgresExecutionOrderHistoryRepository(runtime.session_factory)
+            bus = InMemoryEventBus()
+            publisher = PostgresExecutionOutboxPublisher(
+                session_factory=runtime.session_factory,
+                event_store=event_store,
+                execution_repo=execution_repo,
+                obligation_repo=obligation_repo,
+                outbox_repo=outbox_repo,
+                bus=bus,
+                execution_command_repo=command_repo,
+                execution_order_repo=order_repo,
+                execution_order_history_repo=order_history_repo,
             )
-            await publisher.flush_pending()
-            await publisher.flush_pending()
-
-            await publisher.persist_order_state(
-                order_state=self._order_state(client_order_id="clord_outbox_ok_after_poison", status="SUBMITTED"),
-                key="BTC-USDT",
+            intent = OrderIntent(
+                intent_id="intent_outbox_limit_seed",
+                decision_id="decision_outbox_limit_seed",
+                symbol="BTC-USDT-SWAP",
+                side="sell",
+                quantity=Decimal("0.002"),
+                execution_style="maker",
+                order_type="limit",
+                limit_price=Decimal("70010.5"),
+                reference_price=Decimal("70000"),
+                urgency="low",
+                time_in_force="GTC",
+                max_slippage_tolerance_bps=15,
+                reduce_only=False,
+                close_only=False,
+                td_mode="cross",
+                position_mode="long_short_mode",
+                pos_side="short",
+                idempotency_key="outbox_limit_seed",
+                product_type="derivatives",
+                target_leverage=3.0,
+                margin_mode="cross",
+                exposure_side="short",
+                position_intent="open_short",
+            )
+            state = OrderState(
+                decision_id=intent.decision_id,
+                intent_id=intent.intent_id,
+                symbol=intent.symbol,
+                client_order_id="clord_outbox_limit_seed",
+                venue="OKX",
+                exchange_order_id=None,
+                status="CREATED",
+                submission_mode="phase2_command_flow",
+                requested_qty=intent.quantity,
+                filled_qty=Decimal("0"),
+                remaining_qty=intent.quantity,
+                average_fill_price=None,
+                fees=Decimal("0"),
+                td_mode=intent.td_mode,
+                position_mode=intent.position_mode,
+                pos_side=intent.pos_side,
+                product_type=intent.product_type,
+                margin_mode=intent.margin_mode,
+                target_leverage=intent.target_leverage,
+                exposure_side=intent.exposure_side,
+                position_intent=intent.position_intent,
+                submission_payload={},
             )
 
-            self.assertEqual(outbox_repo.counts(), {"pending": 0, "published": 1, "failed": 1})
-            self.assertEqual(received, ["clord_outbox_ok_after_poison"])
+            await publisher.persist_order_state_and_command(
+                order_state=state,
+                key=state.symbol,
+                command_id="cmd_outbox_limit_seed",
+                command_type="submit",
+                command_idempotency_key="submit:intent_outbox_limit_seed",
+                command_payload={"intent": intent.model_dump(mode="python"), "client_order_id": state.client_order_id},
+                command_created_at=utc_now(),
+            )
+
+            stored_order = order_repo.get_order(state.client_order_id)
+            self.assertIsNotNone(stored_order)
+            self.assertEqual(stored_order["order_type"], "limit")
+            self.assertEqual(stored_order["time_in_force"], "GTC")
+            self.assertEqual(Decimal(str(stored_order["limit_price"])), Decimal("70010.5"))
+            self.assertEqual(stored_order["side"], "sell")
+            raw_payload = dict(stored_order.get("raw_payload") or {})
+            self.assertIn("intent", raw_payload)
+            self.assertEqual(raw_payload["intent"]["order_type"], "limit")
+            self.assertEqual(raw_payload["intent"]["time_in_force"], "GTC")
+            self.assertEqual(Decimal(str(raw_payload["intent"]["limit_price"])), Decimal("70010.5"))
         finally:
             runtime.dispose()
             self._drop_schema(admin_engine, schema_name)

@@ -81,6 +81,10 @@ class ReplayValidationSummary(SchemaBase):
     baseline_switch_count: int = 0
     baseline_switch_issues: list[str] = Field(default_factory=list)
     baseline_switch_issue_count: int = 0
+    incremental_window_start_at: datetime | None = None
+    baseline_generation_id: str | None = None
+    exchange_ack_watermark_id: str | None = None
+    replay_offset_id: str | None = None
     divergence_density: float = 0.0
     chain_health_score: float = 0.0
     healthy: bool
@@ -108,6 +112,9 @@ class OperatorUserRecord(SchemaBase):
     session_version: int = 1
     updated_at: datetime = Field(default_factory=utc_now)
     last_login_at: datetime | None = None
+    last_failed_login_at: datetime | None = None
+    failed_login_attempts: int = 0
+    locked_until: datetime | None = None
 
 
 class OperatorActionRecord(SchemaBase):
@@ -138,17 +145,19 @@ class OperatorActionRecord(SchemaBase):
         "strategy_profile_reject",
         "strategy_profile_activate_pending",
         "strategy_profile_manual_activate",
+        "strategy_profile_pause_auto",
         "strategy_profile_restore_auto",
         "strategy_profile_rollback",
         "strategy_profile_activation_policy",
         "ai_shadow_evaluate",
-        "ai_manual_mode_override",
-        "ai_manual_mode_restore_auto",
+        "ai_operating_mode_select",
         "ai_review_restore",
         "ai_review_degrade_to_baseline",
         "phase1_shadow_review",
+        "refresh_exchange_state",
         "capital_scale_review",
         "trial_review_snapshot",
+        "trial_guard_manual_reset",
     ]
     actor_role: OperatorRole
     actor_identity: str | None = None

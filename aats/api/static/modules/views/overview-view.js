@@ -25,6 +25,7 @@ export function renderOverviewView(data) {
   const latestOrder = data.executionLatest?.latest_order || null;
   const latestFill = data.executionLatest?.latest_fill || null;
   const reconciliation = data.reconciliationLatest?.reconciliation || null;
+  const positionsView = data.positions || {};
   const metrics = data.metrics || {};
   const uiHints = data.uiHints || {};
   const currentPosition = trackedPosition(portfolio, runtime.symbols?.[0] || mode.default_symbol);
@@ -97,6 +98,7 @@ export function renderOverviewView(data) {
           copy: "这里按表格展示最新组合快照中的全部持仓，多条持仓时也能直接横向比较。",
           content: renderCurrentPositionsTable({
             portfolio,
+            positionsView,
             fallbackSymbol: trackedSymbol(runtime, mode),
           }),
         })}
@@ -214,7 +216,45 @@ function activityOrderMeta({ currentOpenOrderCount, positionCount }) {
   return "当前没有活动委托";
 }
 
-function renderCurrentPositionsTable({ portfolio, fallbackSymbol }) {
+function renderCurrentPositionsTable({ portfolio, positionsView = {}, fallbackSymbol }) {
+  const instrumentPositions = Array.isArray(positionsView.local_instrument_positions)
+    ? [...positionsView.local_instrument_positions]
+    : [];
+  const useInstrumentState = instrumentPositions.some((item) => Number(item.leg_count || 0) > 1 || item.position_mode === "long_short_mode");
+  if (useInstrumentState) {
+    const rows = instrumentPositions.sort(
+      (left, right) => Math.abs(Number(right?.gross_position_notional || 0)) - Math.abs(Number(left?.gross_position_notional || 0))
+    );
+    return responsiveTable(
+      ["标的", "仓位模式 / 双腿", "净敞口", "毛敞口", "浮盈亏 / 快照"],
+      rows.map((position) => [
+        `<div><strong>${position.symbol || fallbackSymbol}</strong><div class="table-meta">${positionModeLabel(position.position_mode)} | ${readableState(position.margin_mode, "保证金模式待确认")}</div></div>`,
+        `<div><strong>${position.dual_legged ? "双腿并存" : readableState(position.exposure_side || "flat")}</strong><div class="table-meta">多头 ${formatNumber(position.long_position_qty)} / 空头 ${formatNumber(position.short_position_qty)}</div></div>`,
+        `<div><strong>${formatSigned(position.net_position_notional)}</strong><div class="table-meta">净数量 ${formatSigned(position.net_position_qty)}</div></div>`,
+        `<div><strong>${formatNumber(position.gross_position_notional)}</strong><div class="table-meta">毛数量 ${formatNumber(position.gross_position_qty)} | 杠杆 ${formatNumber(position.target_leverage, 2)}</div></div>`,
+        `<div><strong>${formatSigned(position.unrealized_pnl)}</strong><div class="table-meta">${formatInstrumentLegMeta(position, portfolio.snapshot_ts)}</div></div>`,
+      ]),
+      "当前没有持仓。",
+      rows.map((position) => ({
+        kicker: "实时持仓",
+        title: position.symbol || fallbackSymbol,
+        meta: portfolio.snapshot_ts ? `快照 ${formatMaybeTimestamp(portfolio.snapshot_ts)}` : "快照时间待同步",
+        tone: Number(position.unrealized_pnl || 0) >= 0 ? "positive" : "warning",
+        badge: pill(position.dual_legged ? "双腿模式" : readableState(position.exposure_side || "flat"), "info"),
+        fields: [
+          { label: "持仓模式", value: positionModeLabel(position.position_mode), meta: readableState(position.margin_mode, "保证金模式待确认") },
+          { label: "净敞口", value: formatSigned(position.net_position_notional), meta: `净数量 ${formatSigned(position.net_position_qty)}` },
+          { label: "毛敞口", value: formatNumber(position.gross_position_notional), meta: `多头 ${formatNumber(position.long_position_notional)} / 空头 ${formatNumber(position.short_position_notional)}` },
+        ],
+        details: [
+          { label: "多头腿", value: formatLegValue(position, "long") },
+          { label: "空头腿", value: formatLegValue(position, "short") },
+          { label: "浮盈亏", value: formatSigned(position.unrealized_pnl) },
+        ],
+        detailLabel: "展开持仓详情",
+      }))
+    );
+  }
   const positions = [...(portfolio.positions || [])].sort(
     (left, right) => Math.abs(Number(right?.position_notional || 0)) - Math.abs(Number(left?.position_notional || 0))
   );
@@ -247,6 +287,25 @@ function renderCurrentPositionsTable({ portfolio, fallbackSymbol }) {
       detailLabel: "展开持仓详情",
     }))
   );
+}
+
+function positionModeLabel(value) {
+  if (value === "long_short_mode") return "对冲模式";
+  if (value === "net_mode") return "净仓模式";
+  return readableState(value, "持仓模式待确认");
+}
+
+function formatInstrumentLegMeta(position = {}, snapshotTs = null) {
+  const legText = `多头 ${formatNumber(position.long_position_qty)} / 空头 ${formatNumber(position.short_position_qty)}`;
+  if (!snapshotTs) return legText;
+  return `${legText} | ${formatMaybeTimestamp(snapshotTs)}`;
+}
+
+function formatLegValue(position = {}, side) {
+  const prefix = side === "short" ? "short" : "long";
+  const qty = formatNumber(position[`${prefix}_position_qty`]);
+  const notional = formatNumber(position[`${prefix}_position_notional`]);
+  return `${qty} / ${notional}`;
 }
 
 function buildTimeline({ latestDecision, latestOrder, latestFill, reconciliation }) {

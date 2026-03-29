@@ -68,15 +68,16 @@ def derivatives_initial_margin_requirement(
     target_leverage: Decimal | float | int | str,
     max_slippage_tolerance_bps: int | None,
 ) -> Decimal | None:
+    resolved_quantity = to_decimal(quantity)
     worst_case_price = worst_case_reference_price(
         reference_price=reference_price,
-        side="buy" if quantity >= 0 else "sell",
+        side="buy" if resolved_quantity >= 0 else "sell",
         max_slippage_tolerance_bps=max_slippage_tolerance_bps,
     )
     if worst_case_price is None or worst_case_price <= Decimal("0"):
         return None
     leverage = max(to_decimal(target_leverage), Decimal("1"))
-    return abs(to_decimal(quantity)) * worst_case_price / to_decimal(leverage)
+    return abs(resolved_quantity) * worst_case_price / to_decimal(leverage)
 
 
 def remaining_obligation_amount(obligation: OrderObligation) -> Decimal:
@@ -105,12 +106,27 @@ def fill_fee_cost_in_quote(
     base_currency: str | None = None,
     quote_currency: str | None = None,
 ) -> Decimal:
+    return abs(
+        fill_fee_delta_in_quote(
+            fill,
+            base_currency=base_currency,
+            quote_currency=quote_currency,
+        )
+    )
+
+
+def fill_fee_delta_in_quote(
+    fill: FillEvent,
+    *,
+    base_currency: str | None = None,
+    quote_currency: str | None = None,
+) -> Decimal:
     resolved_base = base_currency
     resolved_quote = quote_currency
     if resolved_base is None and resolved_quote is None:
         resolved_base, resolved_quote = resolve_symbol_currencies(fill.symbol)
     fee_amount = to_decimal(fill.fee_amount)
-    if fee_amount <= 0:
+    if fee_amount == 0:
         return Decimal("0")
     fee_currency = resolved_fee_currency(
         fill=fill,

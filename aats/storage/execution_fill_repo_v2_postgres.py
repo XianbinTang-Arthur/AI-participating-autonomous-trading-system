@@ -22,7 +22,6 @@ class PostgresExecutionFillRepositoryV2:
         source: str,
         raw_payload: dict,
     ) -> bool:
-        venue_fill_id = raw_payload.get("venue_fill_id")
         with self.session_factory() as session:
             saved = self.save_fill_in_session(
                 session,
@@ -79,6 +78,11 @@ class PostgresExecutionFillRepositoryV2:
                 close_only_reason=fill.close_only_reason,
                 instrument_family=fill.instrument_family,
                 settle_currency=fill.settle_currency,
+                strategy_family=fill.strategy_family,
+                strategy_sleeve_id=fill.strategy_sleeve_id,
+                allocation_id=fill.allocation_id,
+                strategy_bundle_id=fill.strategy_bundle_id,
+                strategy_leg_role=fill.strategy_leg_role,
                 liquidity_role=fill.liquidity_role,
                 exchange_ts=fill.exchange_timestamp,
                 ingestion_ts=fill.ingestion_timestamp,
@@ -111,7 +115,11 @@ class PostgresExecutionFillRepositoryV2:
             rows = session.scalars(
                 select(ExecutionFillModelV2)
                 .where(ExecutionFillModelV2.order_id == order_id)
-                .order_by(asc(ExecutionFillModelV2.ingestion_ts), asc(ExecutionFillModelV2.fill_id))
+                .order_by(
+                    asc(ExecutionFillModelV2.exchange_ts),
+                    asc(ExecutionFillModelV2.ingestion_ts),
+                    asc(ExecutionFillModelV2.fill_id),
+                )
             ).all()
         return [_fill_row_to_dict(row) for row in rows]
 
@@ -122,7 +130,9 @@ class PostgresExecutionFillRepositoryV2:
         limit: int | None = None,
     ) -> list[dict]:
         query = select(ExecutionFillModelV2).order_by(
-            asc(ExecutionFillModelV2.ingestion_ts), asc(ExecutionFillModelV2.fill_id)
+            asc(ExecutionFillModelV2.exchange_ts),
+            asc(ExecutionFillModelV2.ingestion_ts),
+            asc(ExecutionFillModelV2.fill_id),
         )
         if since is not None:
             query = query.where(ExecutionFillModelV2.ingestion_ts >= since)
@@ -161,6 +171,11 @@ def _fill_row_to_dict(row: ExecutionFillModelV2) -> dict:
         "close_only_reason": row.close_only_reason,
         "instrument_family": row.instrument_family,
         "settle_currency": row.settle_currency,
+        "strategy_family": row.strategy_family,
+        "strategy_sleeve_id": row.strategy_sleeve_id,
+        "allocation_id": row.allocation_id,
+        "strategy_bundle_id": row.strategy_bundle_id,
+        "strategy_leg_role": row.strategy_leg_role,
         "liquidity_role": row.liquidity_role,
         "exchange_ts": row.exchange_ts,
         "ingestion_ts": row.ingestion_ts,

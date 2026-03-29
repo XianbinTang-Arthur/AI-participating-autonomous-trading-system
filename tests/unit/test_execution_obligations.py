@@ -10,6 +10,7 @@ from aats.bootstrap.settings import AATSSettings
 from aats.schemas.common import utc_now
 from aats.schemas.execution import FillEvent, OrderIntent, OrderState
 from aats.schemas.exchange import ExchangeAccountSnapshot, ExchangeBalance
+from aats.services.accounting import derivatives_initial_margin_requirement
 from aats.services.execution_engine.obligations import ExecutionObligationService
 from aats.services.execution_engine.order_manager import OrderManager
 from aats.services.execution_engine.paper_adapter import PaperExecutionAdapter
@@ -170,6 +171,16 @@ class _RecordingOutboxPublisher:
         return True
 
 
+class _ExplodingOutboxPublisher:
+    async def persist_order_state(self, *, order_state: OrderState, key: str, obligation=None) -> OrderState:
+        _ = (order_state, key, obligation)
+        raise RuntimeError("persist_order_state_boom")
+
+    async def persist_fill(self, *, fill: FillEvent, obligation=None) -> bool:
+        _ = (fill, obligation)
+        return True
+
+
 class TestExecutionObligations(unittest.IsolatedAsyncioTestCase):
     async def test_second_spot_buy_is_blocked_by_local_reserved_quote_balance(self) -> None:
         snapshot = ExchangeAccountSnapshot(
@@ -228,7 +239,7 @@ class TestExecutionObligations(unittest.IsolatedAsyncioTestCase):
         obligation = obligation_repo.get_obligation("clclient_failed")
         self.assertIsNotNone(obligation)
         self.assertEqual(obligation.status, "FAILED")
-        self.assertEqual(obligation.released_amount, Decimal("60.03"))
+        self.assertEqual(obligation.released_amount, Decimal("60.06"))
         self.assertEqual(ExecutionObligationService.remaining_amount(obligation), Decimal("0"))
 
     async def test_filled_order_consumes_reserved_amount(self) -> None:
@@ -259,7 +270,7 @@ class TestExecutionObligations(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(obligation)
         self.assertEqual(obligation.status, "RELEASED")
         self.assertEqual(obligation.consumed_amount, Decimal("60.0"))
-        self.assertEqual(obligation.released_amount, Decimal("0.03"))
+        self.assertEqual(obligation.released_amount, Decimal("0.06"))
 
     async def test_spot_buy_reservation_prefers_dynamic_fee_resolver(self) -> None:
         snapshot = ExchangeAccountSnapshot(
@@ -284,6 +295,48 @@ class TestExecutionObligations(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNotNone(obligation)
         self.assertEqual(obligation.reserved_amount, Decimal("60.06"))
+
+    async def test_margin_backed_smart_arbitrage_spot_short_open_skips_base_inventory_reservation(self) -> None:
+        snapshot = ExchangeAccountSnapshot(
+            account_source="okx",
+            fetched_at=utc_now(),
+            balances=[ExchangeBalance(currency="USDT", total=1000.0, available=1000.0, frozen=0.0)],
+        )
+        service = ExecutionObligationService(
+            settings=AATSSettings.model_validate(
+                {
+                    "account_backend": "okx",
+                    "account_read_enabled": True,
+                    "smart_arbitrage_margin_short_enabled": True,
+                }
+            ),
+            obligation_repo=InMemoryExecutionObligationRepository(),
+            account_snapshot_loader=lambda: _return_snapshot(snapshot),
+            price_provider=lambda _symbol: Decimal("100"),
+        )
+
+        obligation = await service.preview_reservation_for_intent(
+            intent=OrderIntent(
+                intent_id="intent_margin_short_open",
+                decision_id="decision_margin_short_open",
+                symbol="BTC-USDT",
+                side="sell",
+                quantity=Decimal("0.1"),
+                execution_style="exchange",
+                order_type="market",
+                urgency="medium",
+                time_in_force="IOC",
+                idempotency_key="margin_short_open",
+                product_type="spot",
+                margin_mode="cross",
+                strategy_family="smart_arbitrage",
+                strategy_execution_mode="margin_reverse_carry",
+                position_intent="open_short",
+            ),
+            client_order_id="cl_margin_short_open",
+        )
+
+        self.assertIsNone(obligation)
 
     async def test_missing_exchange_account_snapshot_blocks_reservation(self) -> None:
         service = ExecutionObligationService(
@@ -370,7 +423,7 @@ class TestExecutionObligations(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(outbox.fill_obligations[0].released_amount, Decimal("0"))
         self.assertEqual(obligation.status, "RELEASED")
         self.assertEqual(obligation.consumed_amount, Decimal("60.0"))
-        self.assertEqual(obligation.released_amount, Decimal("0.03"))
+        self.assertEqual(obligation.released_amount, Decimal("0.06"))
 
     async def test_outbox_path_finalizes_failed_zero_fill_obligation_with_terminal_state(self) -> None:
         snapshot = ExchangeAccountSnapshot(
@@ -405,9 +458,52 @@ class TestExecutionObligations(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(outbox.order_state_obligations[1], None)
         self.assertIsNotNone(outbox.order_state_obligations[2])
         self.assertEqual(outbox.order_state_obligations[2].status, "FAILED")
-        self.assertEqual(outbox.order_state_obligations[2].released_amount, Decimal("60.03"))
+        self.assertEqual(outbox.order_state_obligations[2].released_amount, Decimal("60.06"))
         self.assertEqual(obligation.status, "FAILED")
-        self.assertEqual(obligation.released_amount, Decimal("60.03"))
+        self.assertEqual(obligation.released_amount, Decimal("60.06"))
+
+    async def test_outbox_path_does_not_leave_orphan_obligation_when_order_state_persist_fails(self) -> None:
+        snapshot = ExchangeAccountSnapshot(
+            account_source="okx",
+            fetched_at=utc_now(),
+            balances=[ExchangeBalance(currency="USDT", total=100.0, available=100.0, frozen=0.0)],
+        )
+        obligation_repo = InMemoryExecutionObligationRepository()
+        settings = AATSSettings.model_validate({"account_backend": "okx", "account_read_enabled": True})
+        manager = OrderManager(
+            settings=settings,
+            bus=InMemoryEventBus(event_store=InMemoryEventStore(), persistence_mode="strict"),
+            adapter=_SubmittedAdapter(),
+            execution_repo=InMemoryExecutionRepository(),
+            obligation_service=ExecutionObligationService(
+                settings=settings,
+                obligation_repo=obligation_repo,
+                account_snapshot_loader=lambda: _return_snapshot(snapshot),
+                price_provider=lambda _symbol: 60_000.0,
+            ),
+            execution_outbox_publisher=_ExplodingOutboxPublisher(),
+            kill_switch=KillSwitch(),
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "persist_order_state_boom"):
+            await manager.handle_order_intent(
+                _intent_message(_intent("intent_outbox_boom", "decision_outbox_boom", "client_outbox_boom"))
+            )
+
+        self.assertIsNone(obligation_repo.get_obligation("clclient_outbox_boom"))
+
+
+class TestAccountingHelpers(unittest.TestCase):
+    def test_derivatives_initial_margin_requirement_accepts_string_quantity(self) -> None:
+        self.assertEqual(
+            derivatives_initial_margin_requirement(
+                quantity="0.1",
+                reference_price="100",
+                target_leverage="5",
+                max_slippage_tolerance_bps=10,
+            ),
+            Decimal("2.002"),
+        )
 
 
 async def _return_snapshot(snapshot: ExchangeAccountSnapshot) -> ExchangeAccountSnapshot:

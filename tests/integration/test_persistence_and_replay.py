@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-import os
 import unittest
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from pathlib import Path
+from unittest.mock import patch
 
 from aats.bootstrap.config import build_runtime, build_storage_backends
 from aats.bootstrap.settings import AATSSettings
@@ -12,19 +11,23 @@ from aats.events import topics
 from aats.events.envelopes import build_envelope, publish_model
 from aats.schemas.audit import DecisionAuditRecord
 from aats.schemas.common import utc_now
-from aats.schemas.decision import BaselineAssessment, DecisionContext, PositionTarget
+from aats.schemas.decision import BaselineAssessment, DecisionContext, HedgeOverlayDecision, PositionTarget
 from aats.schemas.exchange import AccountBaselineSnapshot
 from aats.schemas.execution import ExecutionPlan, FillEvent, OrderIntent, OrderState
+from aats.schemas.features import FeatureSnapshot
 from aats.schemas.governance import PolicyDecision, RiskDecision
 from aats.schemas.market import MarketSnapshot
 from aats.schemas.operator import OperatorActionRecord
+from aats.schemas.portfolio import FillOutcomeRecord, FundingFeeRecord, PortfolioSnapshot
 from aats.schemas.reconciliation import ReconciliationReport
+from aats.schemas.strategy_runtime import StrategyLegIntent, StrategySleeveRecord
 from aats.schemas.system import HealthSnapshot
 from aats.services.portfolio_service.pnl import PortfolioPnLCalculator
 from aats.services.portfolio_service.positions import PortfolioState
 from aats.services.portfolio_service.reconstruction import PortfolioReconstructionService
 from aats.services.portfolio_service.snapshots import PortfolioSnapshotBuilder
 from aats.services.reconciliation_service.replay import ReplayEngine
+from aats.services.runtime_scope import runtime_state_scope
 from aats.storage.audit_repo import InMemoryAuditRepository
 from aats.storage.event_store import InMemoryEventStore
 from tests.support.postgres import temporary_postgres_url
@@ -99,6 +102,692 @@ class TestPersistenceAndReplay(unittest.IsolatedAsyncioTestCase):
                 if storage is not None and storage.database_runtime is not None:
                     storage.database_runtime.dispose()
 
+    async def test_postgres_event_store_archive_and_incremental_replay_persist_offset(self) -> None:
+        with temporary_postgres_url() as (database_url, _admin_engine, _schema_name):
+            settings = self._postgres_settings(database_url)
+            runtime = await build_runtime(settings)
+            storage = None
+            try:
+                await runtime.market_gateway.run_local_publisher(
+                    symbol=settings.default_symbol,
+                    iterations=4,
+                    interval_seconds=0.0,
+                )
+
+                storage = build_storage_backends(settings)
+                scope = runtime_state_scope(settings)
+                replay_engine = ReplayEngine(
+                    event_store=storage.event_store,
+                    reconstruction_service=PortfolioReconstructionService(
+                        initial_usdt_balance=settings.initial_usdt_balance,
+                        snapshot_builder=PortfolioSnapshotBuilder(pnl_calculator=PortfolioPnLCalculator()),
+                    ),
+                    audit_repo=storage.audit_repo,
+                    portfolio_repo=storage.portfolio_repo,
+                    reconciliation_repo=storage.reconciliation_repo,
+                    scope=scope,
+                )
+                first = replay_engine.replay()
+                first_offset = storage.event_store.latest_replay_offset(
+                    projection_key="portfolio_replay",
+                    scope=scope,
+                )
+                self.assertIsNotNone(first_offset)
+                self.assertEqual(first.replay_offset_id, first_offset.offset_id)
+
+                latest_market_event = storage.event_store.latest_by_topic_scoped(
+                    topic=topics.MARKET_SNAPSHOTS,
+                    scope=scope,
+                )
+                self.assertIsNotNone(latest_market_event)
+                archived = storage.event_store.archive_before(before_ts=latest_market_event.event_timestamp)
+                archive_summary = storage.event_store.archive_summary()
+                self.assertGreater(archived["archived_event_count"], 0)
+                self.assertGreater(archive_summary["archive_event_count"], 0)
+                self.assertGreater(archive_summary["replay_offset_count"], 0)
+
+                second = replay_engine.replay()
+                second_offset = storage.event_store.latest_replay_offset(
+                    projection_key="portfolio_replay",
+                    scope=scope,
+                )
+                self.assertEqual(second.divergence_count, 0)
+                self.assertIsNotNone(second.incremental_window_start_at)
+                self.assertIsNotNone(second_offset)
+                self.assertEqual(second.replay_offset_id, second_offset.offset_id)
+                self.assertEqual(second_offset.last_event_id, first_offset.last_event_id)
+            finally:
+                if runtime.database_runtime is not None:
+                    runtime.database_runtime.dispose()
+                if storage is not None and storage.database_runtime is not None:
+                    storage.database_runtime.dispose()
+
+    async def test_smart_arbitrage_postgres_replay_keeps_bundle_and_dual_leg_chain_consistent(self) -> None:
+        with temporary_postgres_url() as (database_url, _admin_engine, _schema_name):
+            settings = self._postgres_settings(
+                database_url,
+                trading_product_type="derivatives",
+                margin_mode="cross",
+                default_symbol="BTC-USDT-SWAP",
+                allowed_symbols=("BTC-USDT-SWAP",),
+                smart_arbitrage_enabled=True,
+                smart_arbitrage_basis_entry_bps=0.0,
+                smart_arbitrage_estimated_cost_bps=0.0,
+                smart_arbitrage_quote_budget_per_trade=100.0,
+                smart_arbitrage_max_pair_notional=100.0,
+                account_backend="disabled",
+                account_read_enabled=False,
+                execution_backend="paper",
+                market_data_backend="demo",
+            )
+            runtime = await build_runtime(settings)
+            storage = None
+            try:
+                await runtime.market_gateway.run_local_publisher(
+                    symbol="BTC-USDT",
+                    iterations=1,
+                    interval_seconds=0.0,
+                )
+                await runtime.market_gateway.run_local_publisher(
+                    symbol=settings.default_symbol,
+                    iterations=3,
+                    interval_seconds=0.0,
+                )
+
+                target = await runtime.decision_engine.run_cycle(settings.default_symbol, settings.primary_timeframe)
+                self.assertEqual(target.strategy_family, "smart_arbitrage")
+                self.assertIsNotNone(target.strategy_sleeve_id)
+                self.assertIsNotNone(target.allocation_id)
+                self.assertIsNotNone(target.strategy_bundle_id)
+                self.assertEqual(len(target.strategy_execution_legs), 2)
+
+                storage = build_storage_backends(settings)
+                bundle_record = next(
+                    record
+                    for record in storage.audit_repo.all()
+                    if record.decision_id == target.decision_id
+                    and record.strategy_execution_bundle_ref is not None
+                    and len(record.execution_plan_refs) >= 2
+                )
+                replay = ReplayEngine(
+                    event_store=storage.event_store,
+                    reconstruction_service=PortfolioReconstructionService(
+                        initial_usdt_balance=settings.initial_usdt_balance,
+                        snapshot_builder=PortfolioSnapshotBuilder(pnl_calculator=PortfolioPnLCalculator()),
+                    ),
+                    audit_repo=storage.audit_repo,
+                    portfolio_repo=storage.portfolio_repo,
+                ).replay(decision_id=bundle_record.decision_id)
+
+                self.assertEqual(replay.divergence_count, 0)
+                self.assertEqual(replay.portfolio_issues, [])
+                self.assertEqual(replay.decision_chain_issues, [])
+                self.assertEqual(replay.execution_chain_issues, [])
+                self.assertEqual(replay.audit_issues, [])
+                self.assertEqual(bundle_record.selected_strategy_sleeve_id, target.strategy_sleeve_id)
+                self.assertEqual(bundle_record.allocation_id, target.allocation_id)
+                self.assertGreaterEqual(len(bundle_record.execution_plan_refs), 2)
+                self.assertGreaterEqual(len(bundle_record.order_intent_refs), 2)
+                self.assertGreaterEqual(len(bundle_record.fill_event_refs), 2)
+                self.assertIsNotNone(storage.event_store.get(bundle_record.strategy_execution_bundle_ref))
+                self.assertTrue(
+                    any(
+                        sleeve.sleeve_id == target.strategy_sleeve_id
+                        for sleeve in storage.strategy_sleeve_repo.list_sleeves()
+                    )
+                )
+                runtime_bundles = storage.strategy_runtime_repo.recent_execution_bundles(
+                    product_type="derivatives",
+                    margin_mode="cross",
+                    symbol="BTC-USDT-SWAP",
+                    limit=5,
+                )
+                self.assertTrue(runtime_bundles)
+                self.assertEqual(runtime_bundles[0].allocation_id, target.allocation_id)
+                self.assertEqual(runtime_bundles[0].bundle_type, "hedge_protected")
+                self.assertIsNotNone(runtime_bundles[0].allocation_snapshot_ref)
+                runtime_allocation = storage.strategy_runtime_repo.latest_allocation_decision(
+                    product_type="derivatives",
+                    margin_mode="cross",
+                    symbol="BTC-USDT-SWAP",
+                )
+                self.assertIsNotNone(runtime_allocation)
+                self.assertEqual(runtime_allocation.allocation_id, target.allocation_id)
+                self.assertEqual(runtime_allocation.allocator_version, "task74_allocator_v2_phase2")
+                self.assertEqual(
+                    runtime_bundles[0].gross_requested_exposure,
+                    runtime_allocation.portfolio_requested_notional,
+                )
+                self.assertEqual(
+                    runtime_bundles[0].net_approved_exposure,
+                    runtime_allocation.portfolio_approved_notional,
+                )
+                self.assertEqual(
+                    set(runtime_bundles[0].budget_snapshot_ids),
+                    set(runtime_allocation.budget_snapshot_ids),
+                )
+                runtime_intents = storage.strategy_runtime_repo.list_sleeve_intents(
+                    product_type="derivatives",
+                    margin_mode="cross",
+                    limit=10,
+                )
+                self.assertGreaterEqual(len(runtime_intents), 4)
+                self.assertIsNotNone(storage.position_lot_repo)
+                if storage.position_lot_repo is not None:
+                    spot_lots = storage.position_lot_repo.lots_for_scope(
+                        symbol="BTC-USDT",
+                        product_type="spot",
+                        margin_mode="cash",
+                    )
+                    derivatives_lots = storage.position_lot_repo.lots_for_scope(
+                        symbol="BTC-USDT-SWAP",
+                        product_type="derivatives",
+                        margin_mode="cross",
+                    )
+                    self.assertTrue(spot_lots)
+                    self.assertTrue(derivatives_lots)
+                    self.assertTrue(
+                        any(lot["strategy_sleeve_id"] == target.strategy_sleeve_id for lot in spot_lots)
+                    )
+                    self.assertTrue(
+                        any(lot["strategy_sleeve_id"] == target.strategy_sleeve_id for lot in derivatives_lots)
+                    )
+            finally:
+                if runtime.database_runtime is not None:
+                    runtime.database_runtime.dispose()
+                if storage is not None and storage.database_runtime is not None:
+                    storage.database_runtime.dispose()
+
+    async def test_high_frequency_fill_projection_keeps_snapshot_lots_sleeve_pnl_and_replay_aligned(self) -> None:
+        with temporary_postgres_url() as (database_url, _admin_engine, _schema_name):
+            settings = self._postgres_settings(database_url)
+            runtime = await build_runtime(settings)
+            storage = None
+            try:
+                scope = runtime_state_scope(settings)
+                base_ts = utc_now()
+                shared_ingestion = base_ts + timedelta(seconds=5)
+                fills = [
+                    FillEvent(
+                        fill_id="z_highfreq_buy_100",
+                        decision_id="decision_highfreq_fill",
+                        intent_id="intent_highfreq_fill",
+                        client_order_id="clord_highfreq_fill",
+                        exchange_order_id="ord_highfreq_fill",
+                        symbol=settings.default_symbol,
+                        venue="PAPER",
+                        side="buy",
+                        fill_qty=Decimal("1"),
+                        fill_price=Decimal("100"),
+                        fee_amount=Decimal("0"),
+                        fee_currency="USDT",
+                        liquidity_role="taker",
+                        exchange_timestamp=base_ts,
+                        ingestion_timestamp=shared_ingestion,
+                        order_status_after_fill="FILLED",
+                        strategy_family="directional",
+                        strategy_sleeve_id="sleeve_highfreq",
+                        allocation_id="alloc_highfreq",
+                    ),
+                    FillEvent(
+                        fill_id="y_highfreq_buy_120",
+                        decision_id="decision_highfreq_fill",
+                        intent_id="intent_highfreq_fill",
+                        client_order_id="clord_highfreq_fill",
+                        exchange_order_id="ord_highfreq_fill",
+                        symbol=settings.default_symbol,
+                        venue="PAPER",
+                        side="buy",
+                        fill_qty=Decimal("1"),
+                        fill_price=Decimal("120"),
+                        fee_amount=Decimal("0"),
+                        fee_currency="USDT",
+                        liquidity_role="taker",
+                        exchange_timestamp=base_ts + timedelta(milliseconds=1),
+                        ingestion_timestamp=shared_ingestion,
+                        order_status_after_fill="FILLED",
+                        strategy_family="directional",
+                        strategy_sleeve_id="sleeve_highfreq",
+                        allocation_id="alloc_highfreq",
+                    ),
+                    FillEvent(
+                        fill_id="x_highfreq_sell_110",
+                        decision_id="decision_highfreq_fill",
+                        intent_id="intent_highfreq_fill",
+                        client_order_id="clord_highfreq_fill",
+                        exchange_order_id="ord_highfreq_fill",
+                        symbol=settings.default_symbol,
+                        venue="PAPER",
+                        side="sell",
+                        fill_qty=Decimal("1"),
+                        fill_price=Decimal("110"),
+                        fee_amount=Decimal("0"),
+                        fee_currency="USDT",
+                        liquidity_role="taker",
+                        exchange_timestamp=base_ts + timedelta(milliseconds=2),
+                        ingestion_timestamp=shared_ingestion,
+                        order_status_after_fill="FILLED",
+                        strategy_family="directional",
+                        strategy_sleeve_id="sleeve_highfreq",
+                        allocation_id="alloc_highfreq",
+                    ),
+                ]
+
+                for fill in fills:
+                    self.assertTrue(runtime.execution_repo.save_fill(fill))
+                    await runtime.portfolio_service.handle_fill_event(
+                        {
+                            "topic": topics.FILL_EVENTS,
+                            "key": fill.symbol,
+                            "payload": build_envelope(
+                                topic=topics.FILL_EVENTS,
+                                key=fill.symbol,
+                                payload_model=fill,
+                                source_component="test",
+                            ).model_dump(mode="json"),
+                        }
+                    )
+
+                latest_snapshot = runtime.portfolio_repo.latest()
+                self.assertIsNotNone(latest_snapshot)
+                assert latest_snapshot is not None
+                self.assertEqual(latest_snapshot.positions[0].position_qty, Decimal("1"))
+                self.assertEqual(latest_snapshot.positions[0].avg_entry_price, Decimal("110"))
+                self.assertEqual(latest_snapshot.realized_pnl, Decimal("0"))
+
+                storage = build_storage_backends(settings)
+                self.assertIsNotNone(storage.position_lot_repo)
+                assert storage.position_lot_repo is not None
+                open_lots = storage.position_lot_repo.lots_for_scope(
+                    symbol=settings.default_symbol,
+                    product_type="spot",
+                    margin_mode="cash",
+                    open_only=True,
+                )
+                self.assertEqual(len(open_lots), 1)
+                self.assertEqual(open_lots[0]["signed_quantity_open"], Decimal("1"))
+                self.assertEqual(open_lots[0]["entry_price"], Decimal("120"))
+                self.assertEqual(open_lots[0]["strategy_sleeve_id"], "sleeve_highfreq")
+                close_events = storage.lot_event_repo.events_for_fill("x_highfreq_sell_110")
+                self.assertEqual(len(close_events), 1)
+                self.assertEqual(close_events[0]["realized_pnl_delta"], Decimal("10"))
+
+                outcomes = storage.fill_outcome_repo.outcomes_for_scope(scope=scope)
+                self.assertEqual(len(outcomes), 3)
+                sell_outcome = next(item for item in outcomes if item.fill_id == "x_highfreq_sell_110")
+                self.assertEqual(sell_outcome.realized_pnl_delta, Decimal("0"))
+
+                sleeve_records = storage.sleeve_pnl_repo.records_for_scope(scope=scope)
+                self.assertEqual(len(sleeve_records), 3)
+                self.assertEqual(
+                    sum((Decimal(str(item.realized_pnl)) for item in sleeve_records), start=Decimal("0")),
+                    Decimal("0"),
+                )
+
+                replay = ReplayEngine(
+                    event_store=runtime.event_store,
+                    reconstruction_service=PortfolioReconstructionService(
+                        initial_usdt_balance=settings.initial_usdt_balance,
+                        snapshot_builder=PortfolioSnapshotBuilder(pnl_calculator=PortfolioPnLCalculator()),
+                    ),
+                    audit_repo=storage.audit_repo,
+                    portfolio_repo=storage.portfolio_repo,
+                    fill_outcome_repo=storage.fill_outcome_repo,
+                    funding_fee_repo=storage.funding_fee_repo,
+                    sleeve_pnl_repo=storage.sleeve_pnl_repo,
+                    scope=scope,
+                )
+                reconstructed = replay._rebuild_snapshot(
+                    fills=fills,
+                    baseline_snapshot=None,
+                    price_provider=lambda _symbol: Decimal("0"),
+                )
+
+                self.assertEqual(reconstructed.balances, latest_snapshot.balances)
+                self.assertEqual(
+                    {position.symbol: position.position_qty for position in reconstructed.positions},
+                    {position.symbol: position.position_qty for position in latest_snapshot.positions},
+                )
+                self.assertEqual(reconstructed.cost_basis, latest_snapshot.cost_basis)
+                self.assertEqual(reconstructed.realized_pnl, latest_snapshot.realized_pnl)
+            finally:
+                if runtime.database_runtime is not None:
+                    runtime.database_runtime.dispose()
+                if storage is not None and storage.database_runtime is not None:
+                    storage.database_runtime.dispose()
+
+    async def test_allocator_postgres_replay_keeps_multi_sleeve_spot_bundle_consistent(self) -> None:
+        with temporary_postgres_url() as (database_url, _admin_engine, _schema_name):
+            settings = self._postgres_settings(
+                database_url,
+                trading_product_type="spot",
+                margin_mode="cash",
+                default_symbol="BTC-USDT",
+                allowed_symbols=("BTC-USDT",),
+                spot_grid_enabled=True,
+                spot_grid_breakout_guard_enabled=False,
+                spot_grid_anchor_lookback_snapshots=4,
+                spot_grid_band_bps=500.0,
+                spot_grid_inventory_floor_fraction=0.0,
+                spot_grid_inventory_ceiling_fraction=1.0,
+                spot_grid_rebalance_min_fraction_of_max_qty=0.05,
+                dca_enabled=True,
+                dca_interval_seconds=0.0,
+                dca_quote_budget_per_cycle=100.0,
+                max_abs_position_qty=2.0,
+            )
+            runtime = await build_runtime(settings)
+            storage = None
+            try:
+                await runtime.market_gateway.run_local_publisher(
+                    symbol=settings.default_symbol,
+                    iterations=4,
+                    interval_seconds=0.0,
+                )
+
+                target = await runtime.decision_engine.run_cycle(settings.default_symbol, settings.primary_timeframe)
+                self.assertEqual(target.strategy_family, "spot_grid")
+                self.assertEqual(len(target.strategy_execution_legs), 2)
+
+                storage = build_storage_backends(settings)
+                bundle_record = next(
+                    record
+                    for record in storage.audit_repo.all()
+                    if record.decision_id == target.decision_id
+                    and record.strategy_execution_bundle_ref is not None
+                    and len(record.order_intent_refs) >= 2
+                )
+                replay = ReplayEngine(
+                    event_store=storage.event_store,
+                    reconstruction_service=PortfolioReconstructionService(
+                        initial_usdt_balance=settings.initial_usdt_balance,
+                        snapshot_builder=PortfolioSnapshotBuilder(pnl_calculator=PortfolioPnLCalculator()),
+                    ),
+                    audit_repo=storage.audit_repo,
+                    portfolio_repo=storage.portfolio_repo,
+                ).replay(decision_id=bundle_record.decision_id)
+
+                self.assertEqual(replay.divergence_count, 0)
+                self.assertEqual(replay.portfolio_issues, [])
+                self.assertEqual(replay.decision_chain_issues, [])
+                self.assertEqual(replay.execution_chain_issues, [])
+                self.assertEqual(replay.audit_issues, [])
+                self.assertIsNotNone(bundle_record.strategy_coordinator_snapshot_ref)
+                self.assertIsNotNone(bundle_record.portfolio_allocation_decision_ref)
+                self.assertGreaterEqual(len(bundle_record.strategy_sleeve_intent_refs), 4)
+                runtime_allocation = storage.strategy_runtime_repo.latest_allocation_decision(
+                    product_type="spot",
+                    margin_mode="cash",
+                    symbol="BTC-USDT",
+                )
+                self.assertIsNotNone(runtime_allocation)
+                self.assertEqual(runtime_allocation.allocator_version, "task74_allocator_v2_phase2")
+                runtime_bundles = storage.strategy_runtime_repo.recent_execution_bundles(
+                    product_type="spot",
+                    margin_mode="cash",
+                    symbol="BTC-USDT",
+                    limit=5,
+                )
+                self.assertTrue(runtime_bundles)
+                self.assertEqual(runtime_bundles[0].bundle_type, "multi_sleeve")
+                self.assertIsNotNone(runtime_bundles[0].allocation_snapshot_ref)
+                self.assertEqual(
+                    runtime_bundles[0].gross_requested_exposure,
+                    runtime_allocation.portfolio_requested_notional,
+                )
+                self.assertEqual(
+                    runtime_bundles[0].net_approved_exposure,
+                    runtime_allocation.portfolio_approved_notional,
+                )
+                self.assertEqual(
+                    set(runtime_bundles[0].budget_snapshot_ids),
+                    set(runtime_allocation.budget_snapshot_ids),
+                )
+                runtime_intents = storage.strategy_runtime_repo.list_sleeve_intents(
+                    product_type="spot",
+                    margin_mode="cash",
+                    limit=10,
+                )
+                self.assertGreaterEqual(len(runtime_intents), 4)
+            finally:
+                if runtime.database_runtime is not None:
+                    runtime.database_runtime.dispose()
+                if storage is not None and storage.database_runtime is not None:
+                    storage.database_runtime.dispose()
+
+    async def test_postgres_replay_keeps_independent_overlay_bundle_consistent(self) -> None:
+        with temporary_postgres_url() as (database_url, _admin_engine, _schema_name):
+            settings = self._postgres_settings(
+                database_url,
+                mode="guarded_live",
+                market_data_backend="demo",
+                execution_backend="paper",
+                account_backend="disabled",
+                account_read_enabled=False,
+                live_submit_enabled=True,
+                guarded_execution_dry_run=False,
+                trading_product_type="derivatives",
+                margin_mode="cross",
+                default_symbol="BTC-USDT-SWAP",
+                allowed_symbols=("BTC-USDT-SWAP",),
+                derivatives_position_mode="hedge",
+                strategy_short_bias_enabled=True,
+                strategy_hedge_overlay_enabled=True,
+                strategy_hedge_overlay_mode="independent",
+                strategy_hedge_independent_enabled=True,
+                strategy_hedge_independent_rollout_stage="live",
+                strategy_cost_guard_enabled=False,
+                strategy_entry_min_signal_edge_bps=0.0,
+                strategy_entry_alpha_min=0.0,
+                strategy_entry_confidence_min=0.0,
+                strategy_short_entry_min_signal_edge_bps=0.0,
+                strategy_short_entry_alpha_min=0.0,
+                strategy_short_entry_confidence_min=0.0,
+                initial_usdt_balance=75_000.0,
+                max_abs_position_qty=1.0,
+                max_notional_per_symbol=100_000.0,
+                max_target_leverage=3.0,
+                max_pending_notional_per_symbol=100_000.0,
+                max_total_open_notional=200_000.0,
+                risk_max_long_notional=100_000.0,
+                risk_max_short_notional=100_000.0,
+                risk_max_gross_notional=200_000.0,
+                risk_max_net_notional=100_000.0,
+            )
+            runtime = await build_runtime(settings)
+            storage = None
+            try:
+                self._seed_overlay_cycle_inputs(
+                    runtime,
+                    snapshot=self._overlay_portfolio_snapshot(symbol=settings.default_symbol),
+                )
+                with patch.object(
+                    runtime.decision_engine.target_engine,
+                    "build",
+                    side_effect=lambda context, *_args, **_kwargs: self._independent_overlay_target(context),
+                ):
+                    target = await runtime.decision_engine.run_cycle(
+                        settings.default_symbol,
+                        settings.primary_timeframe,
+                    )
+
+                storage = build_storage_backends(settings)
+                replay = ReplayEngine(
+                    event_store=storage.event_store,
+                    reconstruction_service=PortfolioReconstructionService(
+                        initial_usdt_balance=settings.initial_usdt_balance,
+                        snapshot_builder=PortfolioSnapshotBuilder(pnl_calculator=PortfolioPnLCalculator()),
+                    ),
+                    audit_repo=storage.audit_repo,
+                    portfolio_repo=storage.portfolio_repo,
+                    reconciliation_repo=storage.reconciliation_repo,
+                ).replay(decision_id=target.decision_id)
+
+                self.assertEqual(replay.divergence_count, 0)
+                self.assertEqual(replay.portfolio_issues, [])
+                self.assertEqual(replay.decision_chain_issues, [])
+                self.assertEqual(replay.execution_chain_issues, [])
+                self.assertEqual(replay.audit_issues, [])
+                latest_bundle = storage.strategy_runtime_repo.recent_execution_bundles(
+                    product_type="derivatives",
+                    margin_mode="cross",
+                    symbol=settings.default_symbol,
+                    limit=1,
+                )[0]
+                self.assertEqual(latest_bundle.decision_id, target.decision_id)
+                self.assertEqual(latest_bundle.status, "submitted")
+                self.assertEqual(
+                    {str(leg.execution_mode) for leg in latest_bundle.legs},
+                    {"independent_long_book", "independent_short_book"},
+                )
+            finally:
+                if runtime.database_runtime is not None:
+                    runtime.database_runtime.dispose()
+                if storage is not None and storage.database_runtime is not None:
+                    storage.database_runtime.dispose()
+
+    async def test_postgres_replay_validates_sleeve_pnl_projection_against_fill_and_funding_truth(self) -> None:
+        with temporary_postgres_url() as (database_url, _admin_engine, _schema_name):
+            settings = self._postgres_settings(
+                database_url,
+                trading_product_type="derivatives",
+                margin_mode="cross",
+                default_symbol="BTC-USDT-SWAP",
+                allowed_symbols=("BTC-USDT-SWAP",),
+                account_backend="disabled",
+                account_read_enabled=False,
+                execution_backend="paper",
+                market_data_backend="demo",
+            )
+            runtime = await build_runtime(settings)
+            storage = None
+            try:
+                now = utc_now()
+                scope = runtime_state_scope(settings)
+                runtime.strategy_sleeve_repo.save_sleeve(
+                    StrategySleeveRecord(
+                        sleeve_id="directional_btc_core",
+                        family="directional",
+                        name="directional_btc_core",
+                        product_scope="derivatives",
+                        margin_scope="cross",
+                        symbol_scope=("BTC-USDT-SWAP",),
+                    )
+                )
+                runtime.execution_repo.save_fill(
+                    FillEvent(
+                        fill_id="fill_sleeve_truth",
+                        decision_id="decision_sleeve_truth",
+                        intent_id="intent_sleeve_truth",
+                        client_order_id="order_sleeve_truth",
+                        exchange_order_id="venue_sleeve_truth",
+                        symbol="BTC-USDT-SWAP",
+                        venue="OKX",
+                        side="buy",
+                        fill_qty=Decimal("1"),
+                        fill_price=Decimal("100"),
+                        fee_amount=Decimal("0.10"),
+                        fee_currency="USDT",
+                        liquidity_role="taker",
+                        exchange_timestamp=now - timedelta(minutes=8),
+                        ingestion_timestamp=now - timedelta(minutes=8),
+                        order_status_after_fill="FILLED",
+                        strategy_family="directional",
+                        strategy_sleeve_id="directional_btc_core",
+                        allocation_id="alloc_directional_btc",
+                        strategy_bundle_id="bundle_directional_btc",
+                        strategy_leg_role="primary",
+                        target_leverage=3.0,
+                        exposure_side="long",
+                        execution_action="enter",
+                        position_intent="open_long",
+                        product_type="derivatives",
+                        margin_mode="cross",
+                    )
+                )
+                runtime.fill_outcome_repo.save_outcome(
+                    FillOutcomeRecord(
+                        fill_id="fill_sleeve_truth",
+                        decision_id="decision_sleeve_truth",
+                        intent_id="intent_sleeve_truth",
+                        order_id="order_sleeve_truth",
+                        symbol="BTC-USDT-SWAP",
+                        venue="OKX",
+                        side="buy",
+                        fill_qty=Decimal("1"),
+                        fill_price=Decimal("100"),
+                        fill_notional=Decimal("100"),
+                        fee_amount=Decimal("0.10"),
+                        fee_currency="USDT",
+                        liquidity_role="taker",
+                        exchange_timestamp=now - timedelta(minutes=8),
+                        ingestion_timestamp=now - timedelta(minutes=8),
+                        order_status_after_fill="FILLED",
+                        strategy_family="directional",
+                        strategy_sleeve_id="directional_btc_core",
+                        allocation_id="alloc_directional_btc",
+                        strategy_bundle_id="bundle_directional_btc",
+                        strategy_leg_role="primary",
+                        target_leverage=3.0,
+                        exposure_side="long",
+                        execution_action="open_long",
+                        position_intent="open_long",
+                        starting_position_qty=Decimal("0"),
+                        ending_position_qty=Decimal("1"),
+                        realized_pnl_delta=Decimal("0"),
+                        fee_delta=Decimal("-0.10"),
+                        product_type="derivatives",
+                        margin_mode="cross",
+                        created_at=now - timedelta(minutes=8),
+                    )
+                )
+                runtime.funding_fee_repo.save_record(
+                    FundingFeeRecord(
+                        bill_id="bill_sleeve_truth",
+                        symbol="BTC-USDT-SWAP",
+                        currency="USDT",
+                        amount=Decimal("-1.25"),
+                        bill_type="8",
+                        sub_type="173",
+                        type_label="funding_fee",
+                        sub_type_label="funding_fee_expense",
+                        funding_direction="expense",
+                        bill_ts=now - timedelta(minutes=2),
+                        ledger_posting_state="POSTED",
+                        product_type="derivatives",
+                        margin_mode="cross",
+                    )
+                )
+
+                runtime.sleeve_pnl_projection_service.rebuild_scope(scope=scope)
+                storage = build_storage_backends(settings)
+                records = storage.sleeve_pnl_repo.records_for_scope(scope=scope)
+                self.assertEqual(len(records), 2)
+                self.assertTrue(any(record.fill_id == "fill_sleeve_truth" for record in records))
+                self.assertTrue(any(record.funding_fee_id == "bill_sleeve_truth" for record in records))
+
+                replay = ReplayEngine(
+                    event_store=storage.event_store,
+                    reconstruction_service=PortfolioReconstructionService(
+                        initial_usdt_balance=settings.initial_usdt_balance,
+                        snapshot_builder=PortfolioSnapshotBuilder(pnl_calculator=PortfolioPnLCalculator()),
+                    ),
+                    audit_repo=storage.audit_repo,
+                    portfolio_repo=storage.portfolio_repo,
+                    fill_outcome_repo=storage.fill_outcome_repo,
+                    funding_fee_repo=storage.funding_fee_repo,
+                    sleeve_pnl_repo=storage.sleeve_pnl_repo,
+                    scope=scope,
+                ).replay()
+
+                self.assertEqual(replay.execution_chain_issues, [])
+                self.assertEqual(replay.divergence_count, 0)
+            finally:
+                if runtime.database_runtime is not None:
+                    runtime.database_runtime.dispose()
+                if storage is not None and storage.database_runtime is not None:
+                    storage.database_runtime.dispose()
+
     async def test_audit_records_reference_persisted_events(self) -> None:
         with temporary_postgres_url() as (database_url, _admin_engine, _schema_name):
             settings = self._postgres_settings(database_url)
@@ -132,6 +821,16 @@ class TestPersistenceAndReplay(unittest.IsolatedAsyncioTestCase):
                         self.assertIsNotNone(event_store.get(record.ai_market_assessment_ref))
                     if record.position_target_ref is not None:
                         self.assertIsNotNone(event_store.get(record.position_target_ref))
+                    if record.strategy_coordinator_snapshot_ref is not None:
+                        snapshot_event = event_store.get(record.strategy_coordinator_snapshot_ref)
+                        self.assertIsNotNone(snapshot_event)
+                        if snapshot_event is not None:
+                            self.assertEqual(snapshot_event.topic, topics.STRATEGY_COORDINATOR_SNAPSHOTS)
+                    if record.portfolio_allocation_decision_ref is not None:
+                        allocation_event = event_store.get(record.portfolio_allocation_decision_ref)
+                        self.assertIsNotNone(allocation_event)
+                        if allocation_event is not None:
+                            self.assertEqual(allocation_event.topic, topics.PORTFOLIO_ALLOCATION_DECISIONS)
                     if record.decision_outcome_ref is not None:
                         outcome_event = event_store.get(record.decision_outcome_ref)
                         self.assertIsNotNone(outcome_event)
@@ -147,6 +846,16 @@ class TestPersistenceAndReplay(unittest.IsolatedAsyncioTestCase):
                         self.assertIsNotNone(execution_plan_event)
                         if execution_plan_event is not None:
                             self.assertEqual(execution_plan_event.topic, topics.EXECUTION_PLANS)
+                    for ref in record.execution_plan_refs:
+                        execution_plan_event = event_store.get(ref)
+                        self.assertIsNotNone(execution_plan_event)
+                        if execution_plan_event is not None:
+                            self.assertEqual(execution_plan_event.topic, topics.EXECUTION_PLANS)
+                    if record.strategy_execution_bundle_ref is not None:
+                        bundle_event = event_store.get(record.strategy_execution_bundle_ref)
+                        self.assertIsNotNone(bundle_event)
+                        if bundle_event is not None:
+                            self.assertEqual(bundle_event.topic, topics.STRATEGY_EXECUTION_BUNDLES)
                     if record.portfolio_delta_ref is not None:
                         snapshot_event = event_store.get(record.portfolio_delta_ref)
                         self.assertIsNotNone(snapshot_event)
@@ -154,6 +863,7 @@ class TestPersistenceAndReplay(unittest.IsolatedAsyncioTestCase):
                     for ref in (
                         record.ai_shadow_decision_refs
                         + record.ai_shadow_evaluation_refs
+                        + record.strategy_sleeve_intent_refs
                         + record.order_intent_refs
                         + record.order_state_refs
                         + record.fill_event_refs
@@ -1229,7 +1939,7 @@ class TestPersistenceAndReplay(unittest.IsolatedAsyncioTestCase):
         )
 
     @staticmethod
-    def _postgres_settings(database_url: str) -> AATSSettings:
+    def _postgres_settings(database_url: str, **overrides) -> AATSSettings:
         return AATSSettings.model_validate(
             {
                 "storage_mode": "postgres",
@@ -1238,6 +1948,7 @@ class TestPersistenceAndReplay(unittest.IsolatedAsyncioTestCase):
                 "database_single_runtime_guard_enabled": False,
                 "local_publish_iterations": 4,
                 "local_publish_interval_seconds": 0.0,
+                **overrides,
             }
         )
 
@@ -1255,6 +1966,177 @@ class TestPersistenceAndReplay(unittest.IsolatedAsyncioTestCase):
                 "event_persistence_mode": "strict",
                 "enabled_decision_timeframes": ("15m",),
             }
+        )
+
+    @staticmethod
+    def _seed_overlay_cycle_inputs(runtime, *, snapshot: PortfolioSnapshot) -> None:
+        runtime.portfolio_repo.save_snapshot(snapshot)
+        runtime.portfolio_service.state.load_portfolio_snapshot(snapshot)
+        market_snapshot = MarketSnapshot(
+            symbol=runtime.settings.default_symbol,
+            exchange="OKX",
+            snapshot_ts=datetime.now(timezone.utc),
+            best_bid=80_000.0,
+            best_ask=80_001.0,
+            last_price=80_000.5,
+            bid_size=1.0,
+            ask_size=1.0,
+            volume_24h=10_000_000.0,
+            kline_15m={"open": 79_900.0, "high": 80_100.0, "low": 79_800.0, "close": 80_000.5},
+            kline_1h={"open": 79_700.0, "high": 80_200.0, "low": 79_600.0, "close": 80_000.5},
+        )
+        runtime.market_gateway._latest_snapshots[runtime.settings.default_symbol] = market_snapshot
+        runtime.event_store.append(
+            build_envelope(
+                topic=topics.MARKET_SNAPSHOTS,
+                key=runtime.settings.default_symbol,
+                payload_model=market_snapshot,
+                source_component="test",
+            )
+        )
+        runtime.event_store.append(
+            build_envelope(
+                topic=topics.FEATURE_SNAPSHOTS,
+                key=runtime.settings.default_symbol,
+                payload_model=FeatureSnapshot(
+                    symbol=runtime.settings.default_symbol,
+                    snapshot_ts=datetime.now(timezone.utc),
+                    market_snapshot_ref="evt_market_overlay_replay",
+                    trend_strength=0.7,
+                    volatility_state="medium",
+                    volatility_value=0.18,
+                    momentum_score=10.0,
+                    liquidity_score=0.9,
+                    regime_indicator="trend",
+                    regime_confidence=0.8,
+                    multi_timeframe_alignment=0.72,
+                    composite_alpha_score=0.34,
+                    suggested_position_scale=1.0,
+                    volatility_target_scale=1.0,
+                    feature_version="test",
+                ),
+                source_component="test",
+            )
+        )
+
+    @staticmethod
+    def _overlay_portfolio_snapshot(*, symbol: str) -> PortfolioSnapshot:
+        return PortfolioSnapshot(
+            snapshot_ts=datetime.now(timezone.utc),
+            balances={"USDT": Decimal("75000")},
+            positions=[],
+            cost_basis={},
+            realized_pnl=Decimal("0"),
+            unrealized_pnl=Decimal("0"),
+            total_equity=Decimal("75000"),
+            gross_exposure=Decimal("0"),
+            net_exposure=Decimal("0"),
+            risk_budget_usage={},
+            product_type="derivatives",
+            margin_mode="cross",
+        )
+
+    @staticmethod
+    def _independent_overlay_target(context) -> PositionTarget:
+        symbol = context.symbol
+        decision_id = context.decision_id
+        return PositionTarget(
+            decision_id=decision_id,
+            symbol=symbol,
+            current_position_qty=Decimal("0"),
+            target_position_qty=Decimal("0.01"),
+            delta_position_qty=Decimal("0.01"),
+            current_notional=Decimal("0"),
+            target_notional=Decimal("800"),
+            rebalance_reason="independent_overlay_replay_test",
+            urgency="medium",
+            max_slippage_tolerance_bps=5_000,
+            source_mix={"directional": 1.0},
+            decision_expiry_ts=datetime.now(timezone.utc) + timedelta(minutes=5),
+            product_type="derivatives",
+            current_exposure_side="flat",
+            target_exposure_side="long",
+            position_intent="open_long",
+            target_leverage=2.0,
+            margin_mode="cross",
+            strategy_family="directional",
+            strategy_sleeve_id="sleeve_directional_primary",
+            strategy_route_action="override_target",
+            strategy_execution_mode="independent_books",
+            strategy_state_phase="active",
+            strategy_reason_codes=["independent_books_active"],
+            strategy_headline="独立双书回放测试。",
+            allocation_id=f"alloc_{decision_id}",
+            strategy_bundle_id=f"bundle_{decision_id}",
+            strategy_execution_legs=[
+                StrategyLegIntent(
+                    symbol=symbol,
+                    product_type="derivatives",
+                    side="buy",
+                    position_mode="long_short_mode",
+                    pos_side="long",
+                    action="open",
+                    family="directional",
+                    role="primary",
+                    strategy_sleeve_id="sleeve_independent_long",
+                    allocation_id=f"alloc_{decision_id}",
+                    margin_mode="cross",
+                    target_leverage=2.0,
+                    current_position_qty=Decimal("0"),
+                    target_position_qty=Decimal("0.02"),
+                    delta_position_qty=Decimal("0.02"),
+                    reference_price=Decimal("80000"),
+                    execution_compatible=True,
+                    execution_mode="independent_long_book",
+                    state_phase="active",
+                    overlay_mode="independent",
+                    trigger_reason_codes=["independent_long_book_signal_above_entry_threshold"],
+                ),
+                StrategyLegIntent(
+                    symbol=symbol,
+                    product_type="derivatives",
+                    side="sell",
+                    position_mode="long_short_mode",
+                    pos_side="short",
+                    action="open",
+                    family="directional",
+                    role="primary",
+                    strategy_sleeve_id="sleeve_independent_short",
+                    allocation_id=f"alloc_{decision_id}",
+                    margin_mode="cross",
+                    target_leverage=2.0,
+                    current_position_qty=Decimal("0"),
+                    target_position_qty=Decimal("-0.01"),
+                    delta_position_qty=Decimal("-0.01"),
+                    reference_price=Decimal("80000"),
+                    execution_compatible=True,
+                    execution_mode="independent_short_book",
+                    state_phase="active",
+                    overlay_mode="independent",
+                    trigger_reason_codes=["independent_short_book_signal_above_entry_threshold"],
+                ),
+            ],
+            hedge_overlay_decision=HedgeOverlayDecision(
+                enabled=True,
+                runtime_supported=True,
+                configured_mode="independent",
+                effective_mode="independent",
+                overlay_source="independent_books",
+                active=True,
+                state="opening",
+                main_leg_signal="long",
+                hedge_leg_signal="short",
+                long_leg_score=0.76,
+                short_leg_score=0.69,
+                long_leg_reason_codes=["independent_long_book_signal_above_entry_threshold"],
+                short_leg_reason_codes=["independent_short_book_signal_above_entry_threshold"],
+                reason_codes=[
+                    "independent_long_book_signal_above_entry_threshold",
+                    "independent_short_book_signal_above_entry_threshold",
+                ],
+                rollout_stage="live",
+                runtime_rollout_stage="live",
+            ),
         )
 
     @staticmethod

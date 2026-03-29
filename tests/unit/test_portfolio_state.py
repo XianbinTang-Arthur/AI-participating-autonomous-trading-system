@@ -171,6 +171,26 @@ class TestPortfolioState(unittest.TestCase):
 
         self.assertEqual(state.positions["BTC-USDT"].quantity, Decimal("0.001"))
 
+    def test_spot_cash_and_cross_positions_use_distinct_position_keys(self) -> None:
+        state = PortfolioState(initial_usdt_balance=10_000.0)
+
+        state.apply_fill(build_fill(fill_id="fill_cash_buy", side="buy", qty=1.0, price=100.0, fee=0.0))
+        state.apply_fill(
+            build_fill(
+                fill_id="fill_cross_sell",
+                side="sell",
+                qty=0.2,
+                price=101.0,
+                fee=0.0,
+                margin_mode="cross",
+            )
+        )
+
+        self.assertIn("BTC-USDT", state.positions)
+        self.assertIn("BTC-USDT:spot:cross", state.positions)
+        self.assertEqual(state.positions["BTC-USDT"].quantity, Decimal("1.0"))
+        self.assertEqual(state.positions["BTC-USDT:spot:cross"].quantity, Decimal("-0.2"))
+
     def test_derivatives_fill_updates_position_without_spot_notional_balance_transfer(self) -> None:
         state = PortfolioState(initial_usdt_balance=10_000.0, default_product_type="derivatives", default_margin_mode="cross")
 
@@ -228,6 +248,43 @@ class TestPortfolioState(unittest.TestCase):
         self.assertEqual(state.positions, {})
         self.assertEqual(state.balances["USDT"], Decimal("10009.6"))
         self.assertEqual(state.realized_pnl, Decimal("9.6"))
+
+    def test_derivatives_fee_rebate_is_preserved_as_negative_fee_delta(self) -> None:
+        state = PortfolioState(initial_usdt_balance=10_000.0, default_product_type="derivatives", default_margin_mode="cross")
+        state.apply_fill(
+            build_fill(
+                fill_id="fill_swap_open_long_zero_fee",
+                side="buy",
+                qty=0.01,
+                price=70_000.0,
+                fee=0.0,
+                fee_currency="USDT",
+                venue="OKX",
+                symbol="BTC-USDT-SWAP",
+                product_type="derivatives",
+                margin_mode="cross",
+            )
+        )
+        closing = state.apply_fill(
+            build_fill(
+                fill_id="fill_swap_close_long_rebate",
+                side="sell",
+                qty=0.01,
+                price=71_000.0,
+                fee=-0.2,
+                fee_currency="USDT",
+                venue="OKX",
+                symbol="BTC-USDT-SWAP",
+                product_type="derivatives",
+                margin_mode="cross",
+            )
+        )
+
+        self.assertEqual(state.positions, {})
+        self.assertEqual(closing.fee_delta, Decimal("-0.2"))
+        self.assertEqual(state.total_fees_paid, Decimal("-0.2"))
+        self.assertEqual(state.balances["USDT"], Decimal("10010.2"))
+        self.assertEqual(state.realized_pnl, Decimal("10.2"))
 
     def test_derivatives_long_short_mode_tracks_each_leg_by_position_key(self) -> None:
         state = PortfolioState(

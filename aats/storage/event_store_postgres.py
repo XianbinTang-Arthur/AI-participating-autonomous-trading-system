@@ -1,14 +1,16 @@
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime
 
-from sqlalchemy import Select, desc, func, select
+from sqlalchemy import Select, and_, desc, func, or_, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from aats.schemas.common import EventEnvelope
+from aats.schemas.reconciliation import ReplayProjectionOffset
 from aats.services.runtime_scope import RuntimeStateScope
 from aats.storage.scope_metadata import envelope_scope_metadata
-from aats.storage.sqlalchemy_models import EventEnvelopeModel
+from aats.storage.sqlalchemy_models import EventEnvelopeArchiveModel, EventEnvelopeModel, ReplayProjectionOffsetModel
 
 
 class PostgresEventStore:
@@ -48,22 +50,31 @@ class PostgresEventStore:
 
     def all(self) -> list[EventEnvelope]:
         with self.session_factory() as session:
-            rows = session.scalars(select(EventEnvelopeModel).order_by(EventEnvelopeModel.sequence_id)).all()
-        return [self._to_schema(row) for row in rows]
+            hot_rows = session.scalars(select(EventEnvelopeModel).order_by(EventEnvelopeModel.sequence_id)).all()
+            archive_rows = session.scalars(
+                select(EventEnvelopeArchiveModel).order_by(EventEnvelopeArchiveModel.source_sequence_id)
+            ).all()
+        return [self._to_schema(row) for row in [*archive_rows, *hot_rows]]
 
     def count(self, *, topic: str | None = None, decision_id: str | None = None) -> int:
         query = select(func.count()).select_from(EventEnvelopeModel)
+        archive_query = select(func.count()).select_from(EventEnvelopeArchiveModel)
         if topic is not None:
             query = query.where(EventEnvelopeModel.topic == topic)
+            archive_query = archive_query.where(EventEnvelopeArchiveModel.topic == topic)
         if decision_id is not None:
             query = query.where(EventEnvelopeModel.decision_id == decision_id)
+            archive_query = archive_query.where(EventEnvelopeArchiveModel.decision_id == decision_id)
         with self.session_factory() as session:
             count = session.scalar(query)
-        return int(count or 0)
+            archive_count = session.scalar(archive_query)
+        return int((count or 0) + (archive_count or 0))
 
     def get(self, event_id: str) -> EventEnvelope | None:
         with self.session_factory() as session:
             row = session.scalar(select(EventEnvelopeModel).where(EventEnvelopeModel.event_id == event_id))
+            if row is None:
+                row = session.scalar(select(EventEnvelopeArchiveModel).where(EventEnvelopeArchiveModel.event_id == event_id))
         return self._to_schema(row) if row is not None else None
 
     def latest(self, topic: str, key: str | None = None) -> EventEnvelope | None:
@@ -73,26 +84,49 @@ class PostgresEventStore:
         query = query.order_by(desc(EventEnvelopeModel.sequence_id)).limit(1)
         with self.session_factory() as session:
             row = session.scalar(query)
+            if row is None:
+                archive_query: Select[tuple[EventEnvelopeArchiveModel]] = (
+                    select(EventEnvelopeArchiveModel).where(EventEnvelopeArchiveModel.topic == topic)
+                )
+                if key is not None:
+                    archive_query = archive_query.where(EventEnvelopeArchiveModel.event_key == key)
+                archive_query = archive_query.order_by(desc(EventEnvelopeArchiveModel.source_sequence_id)).limit(1)
+                row = session.scalar(archive_query)
         return self._to_schema(row) if row is not None else None
 
     def by_topic(self, topic: str) -> list[EventEnvelope]:
         with self.session_factory() as session:
-            rows = session.scalars(
+            hot_rows = session.scalars(
                 select(EventEnvelopeModel)
                 .where(EventEnvelopeModel.topic == topic)
                 .order_by(EventEnvelopeModel.sequence_id)
             ).all()
-        return [self._to_schema(row) for row in rows]
+            archive_rows = session.scalars(
+                select(EventEnvelopeArchiveModel)
+                .where(EventEnvelopeArchiveModel.topic == topic)
+                .order_by(EventEnvelopeArchiveModel.source_sequence_id)
+            ).all()
+        return [self._to_schema(row) for row in [*archive_rows, *hot_rows]]
 
     def recent_by_topic(self, topic: str, *, limit: int) -> list[EventEnvelope]:
+        if limit <= 0:
+            return []
         with self.session_factory() as session:
-            rows = session.scalars(
+            hot_rows = session.scalars(
                 select(EventEnvelopeModel)
                 .where(EventEnvelopeModel.topic == topic)
                 .order_by(desc(EventEnvelopeModel.sequence_id))
                 .limit(limit)
             ).all()
-        return [self._to_schema(row) for row in reversed(rows)]
+            archive_rows = session.scalars(
+                select(EventEnvelopeArchiveModel)
+                .where(EventEnvelopeArchiveModel.topic == topic)
+                .order_by(desc(EventEnvelopeArchiveModel.source_sequence_id))
+                .limit(limit)
+            ).all()
+        rows = [*archive_rows, *hot_rows]
+        rows.sort(key=lambda row: getattr(row, "source_sequence_id", getattr(row, "sequence_id")))
+        return [self._to_schema(row) for row in rows[-limit:]]
 
     def by_topic_scoped(
         self,
@@ -101,13 +135,23 @@ class PostgresEventStore:
         scope: RuntimeStateScope,
         limit: int | None = None,
     ) -> list[EventEnvelope]:
-        query = self._scope_query(select(EventEnvelopeModel).where(EventEnvelopeModel.topic == topic), scope)
-        query = query.order_by(EventEnvelopeModel.sequence_id)
-        if limit is not None:
-            query = query.limit(limit)
+        query = (
+            select(EventEnvelopeModel)
+            .where(EventEnvelopeModel.topic == topic)
+            .order_by(EventEnvelopeModel.sequence_id)
+        )
+        query = self._scope_query(query, scope, EventEnvelopeModel)
         with self.session_factory() as session:
-            rows = session.scalars(query).all()
-        return [self._to_schema(row) for row in rows]
+            hot_rows = session.scalars(query).all()
+            archive_query = (
+                select(EventEnvelopeArchiveModel)
+                .where(EventEnvelopeArchiveModel.topic == topic)
+                .order_by(EventEnvelopeArchiveModel.source_sequence_id)
+            )
+            archive_query = self._scope_query(archive_query, scope, EventEnvelopeArchiveModel)
+            archive_rows = session.scalars(archive_query).all()
+        rows = [self._to_schema(row) for row in [*archive_rows, *hot_rows]]
+        return rows if limit is None else rows[-limit:]
 
     def latest_by_topic_scoped(
         self,
@@ -119,19 +163,32 @@ class PostgresEventStore:
         query = select(EventEnvelopeModel).where(EventEnvelopeModel.topic == topic)
         if key is not None:
             query = query.where(EventEnvelopeModel.event_key == key)
-        query = self._scope_query(query, scope).order_by(desc(EventEnvelopeModel.sequence_id)).limit(1)
+        query = self._scope_query(query, scope, EventEnvelopeModel).order_by(desc(EventEnvelopeModel.sequence_id)).limit(1)
         with self.session_factory() as session:
             row = session.scalar(query)
+            if row is None:
+                archive_query = select(EventEnvelopeArchiveModel).where(EventEnvelopeArchiveModel.topic == topic)
+                if key is not None:
+                    archive_query = archive_query.where(EventEnvelopeArchiveModel.event_key == key)
+                archive_query = self._scope_query(archive_query, scope, EventEnvelopeArchiveModel).order_by(
+                    desc(EventEnvelopeArchiveModel.source_sequence_id)
+                ).limit(1)
+                row = session.scalar(archive_query)
         return self._to_schema(row) if row is not None else None
 
     def by_decision(self, decision_id: str) -> list[EventEnvelope]:
         with self.session_factory() as session:
-            rows = session.scalars(
+            hot_rows = session.scalars(
                 select(EventEnvelopeModel)
                 .where(EventEnvelopeModel.decision_id == decision_id)
                 .order_by(EventEnvelopeModel.sequence_id)
             ).all()
-        return [self._to_schema(row) for row in rows]
+            archive_rows = session.scalars(
+                select(EventEnvelopeArchiveModel)
+                .where(EventEnvelopeArchiveModel.decision_id == decision_id)
+                .order_by(EventEnvelopeArchiveModel.source_sequence_id)
+            ).all()
+        return [self._to_schema(row) for row in [*archive_rows, *hot_rows]]
 
     def between(
         self,
@@ -142,31 +199,193 @@ class PostgresEventStore:
         decision_id: str | None = None,
     ) -> list[EventEnvelope]:
         query: Select[tuple[EventEnvelopeModel]] = select(EventEnvelopeModel)
+        archive_query: Select[tuple[EventEnvelopeArchiveModel]] = select(EventEnvelopeArchiveModel)
         if start_at is not None:
             query = query.where(EventEnvelopeModel.event_timestamp >= start_at)
+            archive_query = archive_query.where(EventEnvelopeArchiveModel.event_timestamp >= start_at)
         if end_at is not None:
             query = query.where(EventEnvelopeModel.event_timestamp <= end_at)
+            archive_query = archive_query.where(EventEnvelopeArchiveModel.event_timestamp <= end_at)
         if topic is not None:
             query = query.where(EventEnvelopeModel.topic == topic)
+            archive_query = archive_query.where(EventEnvelopeArchiveModel.topic == topic)
         if decision_id is not None:
             query = query.where(EventEnvelopeModel.decision_id == decision_id)
+            archive_query = archive_query.where(EventEnvelopeArchiveModel.decision_id == decision_id)
         query = query.order_by(EventEnvelopeModel.sequence_id)
+        archive_query = archive_query.order_by(EventEnvelopeArchiveModel.source_sequence_id)
         with self.session_factory() as session:
-            rows = session.scalars(query).all()
-        return [self._to_schema(row) for row in rows]
+            hot_rows = session.scalars(query).all()
+            archive_rows = session.scalars(archive_query).all()
+        return [self._to_schema(row) for row in [*archive_rows, *hot_rows]]
+
+    def archive_before(self, *, before_ts: datetime) -> dict[str, int]:
+        with self.session_factory() as session:
+            rows = session.scalars(
+                select(EventEnvelopeModel)
+                .where(EventEnvelopeModel.event_timestamp < before_ts)
+                .order_by(EventEnvelopeModel.sequence_id)
+            ).all()
+            archived_count = 0
+            for row in rows:
+                existing = session.scalar(
+                    select(EventEnvelopeArchiveModel.archive_sequence_id).where(
+                        EventEnvelopeArchiveModel.event_id == row.event_id
+                    )
+                )
+                if existing is None:
+                    session.add(
+                        EventEnvelopeArchiveModel(
+                            source_sequence_id=row.sequence_id,
+                            event_id=row.event_id,
+                            schema_version=row.schema_version,
+                            created_at=row.created_at,
+                            event_type=row.event_type,
+                            event_timestamp=row.event_timestamp,
+                            source_component=row.source_component,
+                            topic=row.topic,
+                            event_key=row.event_key,
+                            decision_id=row.decision_id,
+                            symbol=row.symbol,
+                            timeframe=row.timeframe,
+                            product_type=row.product_type,
+                            margin_mode=row.margin_mode,
+                            payload=row.payload,
+                        )
+                    )
+                    archived_count += 1
+                session.delete(row)
+            session.commit()
+            hot_event_count = int(session.scalar(select(func.count()).select_from(EventEnvelopeModel)) or 0)
+            archive_event_count = int(session.scalar(select(func.count()).select_from(EventEnvelopeArchiveModel)) or 0)
+        return {
+            "archived_event_count": archived_count,
+            "hot_event_count": hot_event_count,
+            "archive_event_count": archive_event_count,
+        }
+
+    def archive_summary(self) -> dict[str, object]:
+        with self.session_factory() as session:
+            hot_event_count = int(session.scalar(select(func.count()).select_from(EventEnvelopeModel)) or 0)
+            archive_event_count = int(session.scalar(select(func.count()).select_from(EventEnvelopeArchiveModel)) or 0)
+            hot_window = session.execute(
+                select(func.min(EventEnvelopeModel.event_timestamp), func.max(EventEnvelopeModel.event_timestamp))
+            ).one()
+            archive_window = session.execute(
+                select(
+                    func.min(EventEnvelopeArchiveModel.event_timestamp),
+                    func.max(EventEnvelopeArchiveModel.event_timestamp),
+                )
+            ).one()
+            replay_offset_count = int(session.scalar(select(func.count()).select_from(ReplayProjectionOffsetModel)) or 0)
+        return {
+            "hot_event_count": hot_event_count,
+            "archive_event_count": archive_event_count,
+            "total_event_count": hot_event_count + archive_event_count,
+            "hot_window": {
+                "start_at": hot_window[0],
+                "end_at": hot_window[1],
+            },
+            "archive_window": {
+                "start_at": archive_window[0],
+                "end_at": archive_window[1],
+            },
+            "replay_offset_count": replay_offset_count,
+        }
+
+    def save_replay_offset(self, offset: ReplayProjectionOffset) -> ReplayProjectionOffset:
+        with self.session_factory() as session:
+            row = session.get(ReplayProjectionOffsetModel, offset.offset_id)
+            scope_hash = self._scope_hash(tuple(offset.allowed_symbols))
+            if row is None:
+                row = session.scalar(
+                    select(ReplayProjectionOffsetModel).where(
+                        ReplayProjectionOffsetModel.projection_key == offset.projection_key,
+                        ReplayProjectionOffsetModel.product_type == offset.product_type,
+                        ReplayProjectionOffsetModel.margin_mode == offset.margin_mode,
+                        ReplayProjectionOffsetModel.allowed_symbols_hash == scope_hash,
+                    )
+                )
+            if row is None:
+                row = ReplayProjectionOffsetModel(
+                    offset_id=offset.offset_id,
+                    projection_key=offset.projection_key,
+                    product_type=offset.product_type,
+                    margin_mode=offset.margin_mode,
+                    allowed_symbols_hash=scope_hash,
+                    allowed_symbols_json=list(offset.allowed_symbols),
+                    last_event_id=offset.last_event_id,
+                    last_event_timestamp=offset.last_event_timestamp,
+                    baseline_generation_id=offset.baseline_generation_id,
+                    exchange_ack_watermark_id=offset.exchange_ack_watermark_id,
+                    updated_at=offset.updated_at,
+                    payload=offset.model_dump(mode="json"),
+                )
+                session.add(row)
+            else:
+                row.offset_id = offset.offset_id
+                row.projection_key = offset.projection_key
+                row.product_type = offset.product_type
+                row.margin_mode = offset.margin_mode
+                row.allowed_symbols_hash = scope_hash
+                row.allowed_symbols_json = list(offset.allowed_symbols)
+                row.last_event_id = offset.last_event_id
+                row.last_event_timestamp = offset.last_event_timestamp
+                row.baseline_generation_id = offset.baseline_generation_id
+                row.exchange_ack_watermark_id = offset.exchange_ack_watermark_id
+                row.updated_at = offset.updated_at
+                row.payload = offset.model_dump(mode="json")
+            session.commit()
+        return offset
+
+    def latest_replay_offset(
+        self,
+        *,
+        projection_key: str,
+        scope: RuntimeStateScope,
+    ) -> ReplayProjectionOffset | None:
+        with self.session_factory() as session:
+            row = session.scalar(
+                select(ReplayProjectionOffsetModel)
+                .where(
+                    ReplayProjectionOffsetModel.projection_key == projection_key,
+                    ReplayProjectionOffsetModel.product_type == scope.product_type,
+                    ReplayProjectionOffsetModel.margin_mode == scope.margin_mode,
+                    ReplayProjectionOffsetModel.allowed_symbols_hash == self._scope_hash(scope.allowed_symbols),
+                )
+                .order_by(desc(ReplayProjectionOffsetModel.updated_at))
+                .limit(1)
+            )
+        return None if row is None else ReplayProjectionOffset.model_validate(row.payload)
 
     @staticmethod
-    def _scope_query(query: Select[tuple[EventEnvelopeModel]], scope: RuntimeStateScope) -> Select[tuple[EventEnvelopeModel]]:
-        query = query.where(
-            (EventEnvelopeModel.product_type.is_(None)) | (EventEnvelopeModel.product_type == scope.product_type)
-        ).where(
-            (EventEnvelopeModel.margin_mode.is_(None)) | (EventEnvelopeModel.margin_mode == scope.margin_mode)
+    def _scope_query(query, scope: RuntimeStateScope, model):
+        allowed_symbols = tuple(scope.allowed_symbols) if scope.allowed_symbols else (scope.default_symbol,)
+        symbol_clause = or_(
+            model.symbol.is_(None),
+            model.symbol.in_(allowed_symbols),
         )
-        if scope.allowed_symbols:
-            query = query.where(
-                EventEnvelopeModel.symbol.is_(None) | EventEnvelopeModel.symbol.in_(tuple(scope.allowed_symbols))
-            )
-        return query
+        strategy_family = model.payload["strategy_family"].as_string()
+        regular_clause = and_(
+            symbol_clause,
+            or_(model.product_type.is_(None), model.product_type == scope.product_type),
+            or_(model.margin_mode.is_(None), model.margin_mode == scope.margin_mode),
+            or_(strategy_family.is_(None), strategy_family != "smart_arbitrage"),
+        )
+        if scope.product_type != "derivatives":
+            return query.where(regular_clause)
+        smart_arbitrage_clause = and_(
+            symbol_clause,
+            strategy_family == "smart_arbitrage",
+            or_(
+                and_(
+                    model.product_type == "spot",
+                    model.margin_mode.in_(tuple(scope.smart_arbitrage_spot_margin_modes)),
+                ),
+                and_(model.product_type == scope.product_type, model.margin_mode == scope.margin_mode),
+            ),
+        )
+        return query.where(or_(regular_clause, smart_arbitrage_clause))
 
     @staticmethod
     def _decision_id(envelope: EventEnvelope) -> str | None:
@@ -186,3 +405,8 @@ class PostgresEventStore:
             key=row.event_key,
             payload=row.payload,
         )
+
+    @staticmethod
+    def _scope_hash(allowed_symbols: tuple[str, ...]) -> str:
+        normalized = ",".join(sorted(allowed_symbols))
+        return hashlib.sha256(normalized.encode("utf-8")).hexdigest()

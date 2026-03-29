@@ -34,15 +34,15 @@ export function renderExecutionSections(data) {
       tone: executionTone({ latestOrder, errors }),
       actions: latestOrder?.client_order_id ? actionButton("查看最新委托", "inspect-order", latestOrder.client_order_id) : "",
       pills: [
-        pill(`最新委托 ${readableState(latestOrder?.status || "unknown")}`, executionTone({ latestOrder, errors })),
+        pill(`最新委托 ${latestOrderStatusLabel(latestOrder)}`, executionTone({ latestOrder, errors })),
         pill(`活动委托 ${formatNumber(metrics.current_open_order_count, 0)}`, metrics.current_open_order_count > 0 ? "warning" : "outline"),
         pill(`最近异常 ${formatNumber(errors.length, 0)}`, errors.length > 0 ? "danger" : "positive"),
       ],
       metrics: [
-        { label: "最新委托", value: readableState(latestOrder?.status || "unknown"), meta: middleEllipsis(latestOrder?.client_order_id, 10, 6, "暂未生成委托"), tone: toneForOrderStatus(latestOrder?.status) },
-        { label: "最近委托量", value: latestOrder?.requested_qty !== undefined ? formatSigned(latestOrder.requested_qty) : "待确认", meta: latestOrder ? `${readableState(latestOrder.order_type, "委托类型待确认")} | ${latestOrder.symbol || "标的待确认"}` : "当前暂无最新委托" , tone: latestOrder ? "info" : "neutral" },
+        { label: "最新委托", value: latestOrderStatusLabel(latestOrder), meta: middleEllipsis(latestOrder?.client_order_id, 10, 6, "暂未生成委托"), tone: toneForOrderStatus(latestOrder?.status) },
+        { label: "最近委托量", value: latestOrder?.requested_qty !== undefined ? formatSigned(latestOrder.requested_qty) : "暂无委托", meta: latestOrder ? `${readableState(latestOrder.order_type, "当前没有委托类型信息")} | ${latestOrder.symbol || "当前没有标的信息"}` : "当前没有最新委托" , tone: latestOrder ? "info" : "neutral" },
         { label: "最新成交", value: latestFill ? formatNumber(latestFill.fill_qty) : "暂未成交", meta: latestFill ? `价格 ${formatNumber(latestFill.fill_price)} | ${middleEllipsis(latestFill.fill_id)}` : "当前暂无成交编号", tone: latestFill ? "positive" : "neutral" },
-        { label: "最新对账", value: readableState(latestReconciliation?.severity || "unknown"), meta: middleEllipsis(latestReconciliation?.reconciliation_id, 10, 6, "暂时没有最新对账"), tone: latestReconciliation?.halt_required ? "danger" : latestReconciliation?.severity ? "warning" : "neutral" },
+        { label: "最新对账", value: latestReconciliation ? readableState(latestReconciliation.severity || "unknown") : "暂无对账", meta: middleEllipsis(latestReconciliation?.reconciliation_id, 10, 6, "暂时没有最新对账"), tone: latestReconciliation?.halt_required ? "danger" : latestReconciliation?.severity ? "warning" : "neutral" },
       ],
     }),
     executionExceptions: surfaceCard({
@@ -63,7 +63,7 @@ export function renderExecutionSections(data) {
           )
         : summaryStrip([
             { label: "异常数", value: "0", meta: "当前暂无新的执行异常", tone: "positive" },
-            { label: "最新委托状态", value: readableState(latestOrder?.status || "unknown"), meta: middleEllipsis(latestOrder?.client_order_id, 10, 6, "当前没有委托编号") , tone: toneForOrderStatus(latestOrder?.status) },
+            { label: "最新委托状态", value: latestOrderStatusLabel(latestOrder), meta: middleEllipsis(latestOrder?.client_order_id, 10, 6, "当前没有委托编号"), tone: toneForOrderStatus(latestOrder?.status) },
             { label: "最新成交状态", value: latestFill ? "已落库" : "暂无", meta: middleEllipsis(latestFill?.fill_id, 10, 6, "当前没有成交编号"), tone: latestFill ? "positive" : "neutral" },
           ]),
     }),
@@ -244,6 +244,11 @@ function executionTone({ latestOrder, errors }) {
   if (errors.length > 0) return "danger";
   if (["created", "submitting", "partially_filled", "cancel_pending"].includes(String(latestOrder?.status || "").toLowerCase())) return "warning";
   return "positive";
+}
+
+function latestOrderStatusLabel(order = null) {
+  if (!order) return "暂无委托";
+  return readableState(order.status || "unknown");
 }
 
 function stuckButton(order) {

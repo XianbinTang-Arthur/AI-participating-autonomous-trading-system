@@ -9,8 +9,9 @@ from aats.schemas.execution import FillEvent, OrderIntent, OrderObligation, Orde
 from aats.schemas.exchange import ExchangeAccountSnapshot
 from aats.services.accounting import (
     derivatives_initial_margin_requirement,
-    fill_fee_cost_in_quote,
+    fill_fee_delta_in_quote,
     remaining_obligation_amount,
+    resolved_fee_currency,
     resolve_symbol_currencies,
     spot_buy_quote_requirement,
 )
@@ -50,6 +51,11 @@ class ExecutionObligationService:
             intent=intent,
             client_order_id=client_order_id,
         )
+        if obligation is None:
+            return None
+        return self.obligation_repo.save_obligation(obligation)
+
+    def persist_previewed_obligation(self, obligation: OrderObligation | None) -> OrderObligation | None:
         if obligation is None:
             return None
         return self.obligation_repo.save_obligation(obligation)
@@ -101,6 +107,15 @@ class ExecutionObligationService:
             status="ACTIVE",
             product_type=intent.product_type,
             margin_mode=intent.margin_mode,
+            strategy_family=intent.strategy_family,
+            strategy_sleeve_id=intent.strategy_sleeve_id,
+            allocation_id=intent.allocation_id,
+            strategy_bundle_id=intent.strategy_bundle_id,
+            strategy_leg_role=intent.strategy_leg_role,
+            strategy_pair_id=intent.strategy_pair_id,
+            strategy_opportunity_kind=intent.strategy_opportunity_kind,
+            strategy_execution_mode=intent.strategy_execution_mode,
+            strategy_state_phase=intent.strategy_state_phase,
             reference_price=reference_price,
             last_update_ts=utc_now(),
         )
@@ -186,6 +201,8 @@ class ExecutionObligationService:
                 if quote_currency is None or reserved_amount is None or reserved_amount <= Decimal("0"):
                     return None, Decimal("0"), reference_price
                 return quote_currency, reserved_amount, reference_price
+            if self._is_margin_backed_smart_arbitrage_spot_short(intent=intent):
+                return None, Decimal("0"), reference_price
             if base_currency is None:
                 return None, Decimal("0"), reference_price
             return base_currency, intent.quantity, reference_price
@@ -199,6 +216,18 @@ class ExecutionObligationService:
             return None, Decimal("0"), reference_price
         return quote_currency, reserved_amount, reference_price
 
+    @staticmethod
+    def _is_margin_backed_smart_arbitrage_spot_short(*, intent: OrderIntent) -> bool:
+        if intent.product_type != "spot" or intent.side != "sell":
+            return False
+        if intent.margin_mode not in {"cross", "isolated"}:
+            return False
+        if intent.strategy_family != "smart_arbitrage":
+            return False
+        if intent.strategy_execution_mode is None:
+            return True
+        return intent.strategy_execution_mode == "margin_reverse_carry"
+
     def _fill_consumption_amount(
         self,
         *,
@@ -208,13 +237,23 @@ class ExecutionObligationService:
         base_currency, quote_currency = resolve_symbol_currencies(fill.symbol)
         if obligation.product_type == "spot":
             if obligation.reserve_currency == quote_currency:
-                return (fill.fill_qty * fill.fill_price) + fill_fee_cost_in_quote(
-                    fill,
+                return max(
+                    (fill.fill_qty * fill.fill_price)
+                    + fill_fee_delta_in_quote(
+                        fill,
+                        base_currency=base_currency,
+                        quote_currency=quote_currency,
+                    ),
+                    Decimal("0"),
+                )
+            if obligation.reserve_currency == base_currency:
+                fee_currency = resolved_fee_currency(
+                    fill=fill,
                     base_currency=base_currency,
                     quote_currency=quote_currency,
                 )
-            if obligation.reserve_currency == base_currency:
-                return fill.fill_qty
+                fee_in_reserve = to_decimal(fill.fee_amount) if fee_currency == base_currency else Decimal("0")
+                return max(fill.fill_qty + fee_in_reserve, Decimal("0"))
             return Decimal("0")
         leverage = max(to_decimal(fill.target_leverage), Decimal("1"))
         return (abs(fill.fill_qty) * fill.fill_price) / to_decimal(leverage)

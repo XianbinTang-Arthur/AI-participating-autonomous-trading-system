@@ -196,6 +196,7 @@ class Phase1ExecutionShadowService:
     def intent_from_order_state(order_state: OrderState) -> OrderIntent:
         return OrderIntent(
             intent_id=order_state.intent_id,
+            leg_intent_id=order_state.leg_intent_id,
             decision_id=order_state.decision_id,
             symbol=order_state.symbol,
             side="buy" if order_state.position_intent not in {"open_short", "reduce_short", "close_short"} else "sell",
@@ -219,6 +220,7 @@ class Phase1ExecutionShadowService:
             margin_mode=order_state.margin_mode,
             exposure_side=order_state.exposure_side,
             execution_action=order_state.execution_action,
+            leg_action=order_state.leg_action,
             position_intent=order_state.position_intent,
         )
 
@@ -226,6 +228,7 @@ class Phase1ExecutionShadowService:
     def intent_from_fill(fill: FillEvent) -> OrderIntent:
         return OrderIntent(
             intent_id=fill.intent_id,
+            leg_intent_id=fill.leg_intent_id,
             decision_id=fill.decision_id,
             symbol=fill.symbol,
             side=fill.side,
@@ -249,5 +252,6 @@ class Phase1ExecutionShadowService:
             margin_mode=fill.margin_mode,
             exposure_side=fill.exposure_side,
             execution_action=fill.execution_action,
+            leg_action=fill.leg_action,
             position_intent=fill.position_intent,
         )

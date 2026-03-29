@@ -34,15 +34,11 @@ class ExecutionOrderService:
 
     def enqueue_submit(self, *, intent: OrderIntent, client_order_id: str) -> EnqueuedExecutionCommand:
         self._ensure_order_row(intent=intent, client_order_id=client_order_id, initial_state="CREATED")
-        payload = {
-            "intent": intent.model_dump(mode="python"),
-            "client_order_id": client_order_id,
-            "symbol": intent.symbol,
-        }
+        payload = self.submit_command_payload(intent=intent, client_order_id=client_order_id)
         command = self._enqueue_command(
             order_id=client_order_id,
             command_type="submit",
-            idempotency_key=f"submit:{intent.intent_id}",
+            idempotency_key=self.submit_command_idempotency_key(intent.intent_id),
             payload=payload,
         )
         log_event(
@@ -65,15 +61,11 @@ class ExecutionOrderService:
             initial_state=order_state.status,
             order_state=order_state,
         )
-        payload = {
-            "client_order_id": order_state.client_order_id,
-            "symbol": order_state.symbol,
-            "reason": reason,
-        }
+        payload = self.cancel_command_payload(order_state=order_state, reason=reason)
         command = self._enqueue_command(
             order_id=order_state.client_order_id,
             command_type="cancel",
-            idempotency_key=f"cancel:{order_state.client_order_id}",
+            idempotency_key=self.cancel_command_idempotency_key(order_state.client_order_id),
             payload=payload,
         )
         log_event(
@@ -88,6 +80,30 @@ class ExecutionOrderService:
             ),
         )
         return command
+
+    @staticmethod
+    def submit_command_idempotency_key(intent_id: str) -> str:
+        return f"submit:{intent_id}"
+
+    @staticmethod
+    def cancel_command_idempotency_key(client_order_id: str) -> str:
+        return f"cancel:{client_order_id}"
+
+    @staticmethod
+    def submit_command_payload(*, intent: OrderIntent, client_order_id: str) -> dict[str, Any]:
+        return {
+            "intent": intent.model_dump(mode="python"),
+            "client_order_id": client_order_id,
+            "symbol": intent.symbol,
+        }
+
+    @staticmethod
+    def cancel_command_payload(*, order_state: OrderState, reason: str | None) -> dict[str, Any]:
+        return {
+            "client_order_id": order_state.client_order_id,
+            "symbol": order_state.symbol,
+            "reason": reason,
+        }
 
     def _enqueue_command(
         self,
@@ -172,6 +188,7 @@ class ExecutionOrderService:
             side = "sell"
         return OrderIntent(
             intent_id=order_state.intent_id,
+            leg_intent_id=order_state.leg_intent_id,
             decision_id=order_state.decision_id,
             symbol=order_state.symbol,
             side=side,
@@ -195,5 +212,6 @@ class ExecutionOrderService:
             margin_mode=order_state.margin_mode,
             exposure_side=order_state.exposure_side,
             execution_action=order_state.execution_action,
+            leg_action=order_state.leg_action,
             position_intent=order_state.position_intent,
         )

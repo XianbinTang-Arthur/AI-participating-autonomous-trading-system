@@ -27,12 +27,16 @@ class ReconciliationSystemQueryFacade:
     def reconciliation_latest(self) -> dict[str, Any]:
         report = self.owner._latest_scoped_reconciliation()
         latest_validation = self.owner.runtime.event_store.latest(topics.RECONCILIATION_VALIDATIONS)
+        recovery = self.owner.recovery_view()
         return {
             "reconciliation": report.model_dump(mode="json") if report is not None else None,
             "mismatch_summary": self.owner._reconciliation_mismatch_summary(report),
             "exchange_bills_summary": self.owner._exchange_bills_summary(),
             "latest_validation": latest_validation.payload if latest_validation is not None else None,
-            "recovery": self.owner.recovery_view(),
+            "baseline_generation": recovery.get("latest_baseline_generation"),
+            "exchange_ack_watermark": recovery.get("latest_exchange_ack_watermark"),
+            "reconciliation_state_snapshot": recovery.get("latest_state_snapshot"),
+            "recovery": recovery,
         }
 
     def reconciliation_recent(self, *, limit: int = 20, offset: int = 0) -> dict[str, Any]:
@@ -76,6 +80,7 @@ class ReconciliationSystemQueryFacade:
             "mismatch_summary": self.owner._reconciliation_mismatch_summary(report),
             "exchange_bills_summary": self.owner._exchange_bills_summary(),
             "exchange_bills_explanations": report.exchange_bills_explanations,
+            "recovery_state_snapshot": self.owner.recovery_view().get("latest_state_snapshot"),
         }
 
     async def validate_reconciliation(
@@ -298,7 +303,11 @@ class ReconciliationSystemQueryFacade:
             key="system",
             payload_model=action_record,
         )
-        baseline_importer = AccountBaselineImportService(event_store=self.owner.runtime.event_store)
+        baseline_importer = AccountBaselineImportService(
+            event_store=self.owner.runtime.event_store,
+            reconciliation_repo=self.owner.runtime.reconciliation_repo,
+        )
+        recent_bills_summary_getter = getattr(self.owner.runtime.account_service, "recent_bills_summary", None)
         imported = baseline_importer.rebaseline_snapshot(
             exchange_snapshot=exchange_snapshot,
             portfolio_state=self.owner.runtime.portfolio_service.state,
@@ -308,9 +317,18 @@ class ReconciliationSystemQueryFacade:
             previous_baseline_ref=previous_baseline_ref,
             operator_action_ref=action_envelope.event_id,
             trigger_reason=reason,
+            exchange_bills_summary=(
+                recent_bills_summary_getter()
+                if callable(recent_bills_summary_getter)
+                else {}
+            ),
         )
         await self.owner.runtime.portfolio_service.bootstrap_snapshot(snapshot_origin="operator_rebaseline")
         report = await self.owner.runtime.reconciliation_service.validate_now(reason="operator_rebaseline")
+        live_guard_service = getattr(self.owner.runtime, "derivatives_live_guard_service", None)
+        if live_guard_service is not None:
+            live_guard_service.reset_transient_risk_snapshot_state(reason="operator_rebaseline")
+            live_guard_service.evaluate_now()
 
         recovery_state = (
             "resume_blocked"
@@ -380,14 +398,25 @@ class ReconciliationSystemQueryFacade:
             mode_snapshot=self.owner.system_mode(),
             blockers=self.owner.blockers(),
         )
+        auto_resume: dict[str, Any] | None = None
+        if recovery_state != "resume_blocked":
+            auto_resume = await self.resume(
+                reason="auto_resume_after_rebaseline",
+                actor_role=actor_role,
+                actor_identity=actor_identity,
+                auth_source=auth_source,
+            )
+        effective_recovery = self.owner.recovery_view()
         return {
-            "status": recovery_state,
-            "halted": True,
+            "status": effective_recovery["recovery_state"],
+            "rebaseline_status": recovery_state,
+            "halted": self.owner.runtime.kill_switch.halted,
             "reason": reason,
             "baseline": imported.snapshot.model_dump(mode="json"),
             "baseline_event_ref": imported.event_id,
             "reconciliation": report.model_dump(mode="json"),
-            "recovery": self.owner.recovery_view(),
+            "recovery": effective_recovery,
+            "auto_resume": auto_resume,
         }
 
     def halt(
@@ -448,50 +477,85 @@ class ReconciliationSystemQueryFacade:
     ) -> dict[str, Any]:
         was_halted = self.owner.runtime.kill_switch.halted
         recovery_before = self.owner.recovery_view()["recovery_state"]
+        report = None
+        refresh_error: Exception | None = None
         if self.owner.runtime.settings.account_backend == "okx" and self.owner.runtime.settings.account_read_enabled:
-            await self.owner.runtime.account_service.refresh(force=True)
-        report = await self.owner.runtime.reconciliation_service.validate_now(reason=f"resume_check:{reason}")
-        self.owner._update_recovery_status_for_report(report)
-        resume_check = self.owner.recovery_posture.resume_check(include_kill_switch=False, latest_reconciliation=report)
-        runnable = resume_check.runnable
-        if runnable:
-            self.owner.runtime.kill_switch.resume()
-            status = "already_resumed" if not was_halted else "resumed"
-            recovery_after = "normal_operation"
-            updated_status = self.owner.runtime.recovery_status.model_copy(
-                update={
-                    "recovery_state": recovery_after,
-                    "recovery_action": "operator_resume_completed",
-                    "last_resume_status": status,
-                    "last_resume_reason": reason,
-                    "resume_blocked_reasons": [],
-                }
-            )
-            self.owner.runtime.recovery_status = self.owner.recovery_posture.finalize_status(
-                base_status=updated_status,
-                latest_reconciliation=report,
-            )
-        else:
+            try:
+                await self.owner._refresh_account_state_for_operator_resolution()
+            except Exception as exc:
+                refresh_error = exc
+                log_event(
+                    self.owner.logger,
+                    "operator_resume_account_refresh_failed",
+                    level="warning",
+                    reason=reason,
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
+        if refresh_error is not None:
             self.owner.runtime.kill_switch.halt(reason="resume_blocked")
             status = "resume_blocked"
-            recovery_after = (
-                "review_required"
-                if "operator_rebaseline_required" in resume_check.blockers
-                else "resume_blocked"
-            )
+            runnable = False
+            recovery_after = "resume_blocked"
+            report = self.owner._latest_scoped_reconciliation()
             updated_status = self.owner.runtime.recovery_status.model_copy(
                 update={
                     "recovery_state": recovery_after,
                     "recovery_action": "operator_resume_blocked",
                     "last_resume_status": status,
                     "last_resume_reason": reason,
-                    "resume_blocked_reasons": list(resume_check.blockers),
+                    "resume_blocked_reasons": ["account_snapshot_refresh_failed"],
                 }
             )
             self.owner.runtime.recovery_status = self.owner.recovery_posture.finalize_status(
                 base_status=updated_status,
                 latest_reconciliation=report,
             )
+            resume_check_blockers = tuple(self.owner.runtime.recovery_status.resume_blocked_reasons)
+        else:
+            report = await self.owner.runtime.reconciliation_service.validate_now(reason=f"resume_check:{reason}")
+            self.owner._update_recovery_status_for_report(report)
+            resume_check = self.owner.recovery_posture.resume_check(include_kill_switch=False, latest_reconciliation=report)
+            runnable = resume_check.runnable
+            resume_check_blockers = tuple(resume_check.blockers)
+            if runnable:
+                self.owner.runtime.kill_switch.resume()
+                status = "already_resumed" if not was_halted else "resumed"
+                recovery_after = "normal_operation"
+                updated_status = self.owner.runtime.recovery_status.model_copy(
+                    update={
+                        "recovery_state": recovery_after,
+                        "recovery_action": "operator_resume_completed",
+                        "last_resume_status": status,
+                        "last_resume_reason": reason,
+                        "resume_blocked_reasons": [],
+                    }
+                )
+                self.owner.runtime.recovery_status = self.owner.recovery_posture.finalize_status(
+                    base_status=updated_status,
+                    latest_reconciliation=report,
+                )
+            else:
+                self.owner.runtime.kill_switch.halt(reason="resume_blocked")
+                status = "resume_blocked"
+                recovery_after = (
+                    "review_required"
+                    if "operator_rebaseline_required" in resume_check.blockers
+                    else "resume_blocked"
+                )
+                updated_status = self.owner.runtime.recovery_status.model_copy(
+                    update={
+                        "recovery_state": recovery_after,
+                        "recovery_action": "operator_resume_blocked",
+                        "last_resume_status": status,
+                        "last_resume_reason": reason,
+                        "resume_blocked_reasons": list(resume_check.blockers),
+                    }
+                )
+                self.owner.runtime.recovery_status = self.owner.recovery_posture.finalize_status(
+                    base_status=updated_status,
+                    latest_reconciliation=report,
+                )
         self.owner._invalidate_cache()
         mode_state = self.owner.system_mode()
         blockers = self.owner.blockers()
@@ -516,8 +580,12 @@ class ReconciliationSystemQueryFacade:
                 status=status,
                 recovery_state_before=recovery_before,
                 recovery_state_after=recovery_after,
-                reconciliation_id=report.reconciliation_id,
-                details={"runnable": runnable, "blockers": list(resume_check.blockers)},
+                reconciliation_id=None if report is None else report.reconciliation_id,
+                details={
+                    "runnable": runnable,
+                    "blockers": list(resume_check_blockers),
+                    "account_refresh_error": None if refresh_error is None else str(refresh_error),
+                },
             ),
         )
         self.owner.runtime.recovery_status = self.owner.runtime.recovery_status.model_copy(
@@ -536,5 +604,5 @@ class ReconciliationSystemQueryFacade:
             "runnable": runnable,
             "blockers": blockers,
             "recovery": self.owner.recovery_view(),
-            "reconciliation": report.model_dump(mode="json"),
+            "reconciliation": None if report is None else report.model_dump(mode="json"),
         }

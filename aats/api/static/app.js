@@ -1,5 +1,7 @@
 ﻿import { fetchPanels, requestJson } from "./modules/api-client.js";
 import { notice, pill, primaryStatusPanel } from "./modules/components.js";
+import { fetchDashboardBundle } from "./modules/api-client.js";
+import { syncRefreshDisabledButtons } from "./modules/refresh-interactivity.js";
 import {
   emptyState,
   formatMaybeTimestamp,
@@ -15,7 +17,7 @@ import {
   buildReconciliationDrawer,
 } from "./modules/detail-drawers.js";
 import { buildPhase1ShadowDrawer } from "./modules/shadow-drawer.js";
-import { AUTO_REFRESH_MS, CORE_SPECS, DEFAULT_PAGE_LIMITS, PAGE_LOAD_STEP, createState, viewBackgroundSpecs, viewSpecs } from "./modules/store.js";
+import { AUTO_REFRESH_MS, CORE_SPECS, DEFAULT_PAGE_LIMITS, PAGE_LOAD_STEP, createState, viewSpecs } from "./modules/store.js";
 import {
   localizeError,
   operationalStatusCopy,
@@ -26,6 +28,7 @@ import {
   toneForRuntimeState,
   tradingStatusLabel,
 } from "./modules/terms.js";
+import { buildDashboardBundlePath } from "./modules/store.js";
 import { renderAIAnalysisView } from "./modules/views/ai-analysis-view.js";
 import { renderAIConfigView } from "./modules/views/ai-config-view.js";
 import { renderAdminView } from "./modules/views/admin-view.js";
@@ -92,8 +95,8 @@ const VIEW_META = {
   aiConfig: {
     docTitle: "AATS 自动交易监控台 | AI 配置",
     eyebrow: "AI 配置",
-    heading: "这里管理 AI 模式、策略档位和自动切换规则",
-    copy: "这里是控制面，只放配置、切换入口和生效规则，不再混入长周期分析卡片。",
+    heading: "这里管理 AI 决策模式与策略换档方式",
+    copy: "左侧决定 AI 在交易里扮演什么角色，右侧决定 6 个策略档位是自动切换还是手动固定。",
     hidePageHead: false,
   },
   admin: {
@@ -103,6 +106,17 @@ const VIEW_META = {
     copy: "这里专门处理登录、角色、账号启停和控制台访问权限。",
     hidePageHead: false,
   },
+};
+
+const VIEW_LABELS = {
+  home: "主页",
+  overview: "交易总览",
+  strategy: "策略判断",
+  execution: "委托与成交",
+  risk: "风险与恢复",
+  aiAnalysis: "AI 分析",
+  aiConfig: "AI 配置",
+  admin: "账户与权限",
 };
 
 const state = createState();
@@ -124,8 +138,6 @@ const nodes = {
   authStateChip: document.getElementById("authStateChip"),
   logoutButton: document.getElementById("logoutButton"),
   refreshButton: document.getElementById("refreshButton"),
-  reconcileButton: document.getElementById("reconcileButton"),
-  rebaselineButton: document.getElementById("rebaselineButton"),
   resumeButton: document.getElementById("resumeButton"),
   haltButton: document.getElementById("haltButton"),
   autoRefreshToggle: document.getElementById("autoRefreshToggle"),
@@ -175,6 +187,7 @@ function bindEvents() {
     if (!event.persisted) return;
     setActiveView(resolveViewFromLocation(), { refresh: true });
   });
+  document.addEventListener("visibilitychange", handleVisibilityChange);
 
   nodes.refreshButton?.addEventListener("click", () => void refreshDashboard({ manual: true }));
   nodes.resumeButton?.addEventListener("click", () => void triggerResume(nodes.resumeButton));
@@ -210,27 +223,29 @@ function bindEvents() {
 }
 
 async function refreshDashboard({ manual = false } = {}) {
+  if (!manual && document.visibilityState !== "visible") {
+    cancelScheduledRefresh();
+    return;
+  }
   if (state.actionInFlight && !manual) {
     state.pendingRefresh = true;
     return;
   }
   if (state.refreshing) {
     state.pendingRefresh = true;
+    if (manual) {
+      state.flash = { tone: "info", message: "当前正在刷新，已排队一次新的刷新请求。" };
+      renderBanners();
+    }
     return;
   }
   const refreshingView = state.activeView;
-  const backgroundGeneration = (state.backgroundGenerations[refreshingView] || 0) + 1;
-  state.backgroundGenerations[refreshingView] = backgroundGeneration;
   cancelScheduledRefresh();
   state.refreshing = true;
   renderShell();
   try {
-    const specs = dedupeSpecs([...CORE_SPECS, ...viewSpecs(refreshingView, state)]);
-    const results = await fetchPanels(specs);
-    for (const [key, result] of Object.entries(results)) {
-      state.data[key] = result.data;
-      state.errors[key] = result.error;
-    }
+    const results = await fetchDashboardBundle(buildDashboardBundlePath(refreshingView, state));
+    applyPanelResults(results);
     state.readyViews[refreshingView] = true;
     if (shouldRedirectToLogin()) {
       window.location.replace("/login");
@@ -240,7 +255,6 @@ async function refreshDashboard({ manual = false } = {}) {
     if (manual) {
       state.flash = { tone: "info", message: "页面数据已刷新。" };
     }
-    void refreshBackgroundPanels(refreshingView, backgroundGeneration);
   } finally {
     state.refreshing = false;
     if (state.loadingView === refreshingView) {
@@ -256,17 +270,11 @@ async function refreshDashboard({ manual = false } = {}) {
   }
 }
 
-async function refreshBackgroundPanels(view, generation) {
-  const specs = dedupeSpecs(viewBackgroundSpecs(view, state));
-  if (!specs.length) return;
-  const results = await fetchPanels(specs);
-  if (state.activeView !== view) return;
-  if ((state.backgroundGenerations[view] || 0) !== generation) return;
-  for (const [key, result] of Object.entries(results)) {
+function applyPanelResults(results) {
+  for (const [key, result] of Object.entries(results || {})) {
     state.data[key] = result.data;
     state.errors[key] = result.error;
   }
-  renderShell();
 }
 
 function renderShell() {
@@ -280,6 +288,7 @@ function renderShell() {
   renderRefreshIndicators();
   updateActionAccess();
   updateRefreshLabel();
+  syncRefreshInteractivity();
 }
 
 function renderPageChrome() {
@@ -583,6 +592,20 @@ function updateRefreshLabel() {
   patchText(nodes.lastRefreshLabel, `最近刷新：${formatMaybeTimestamp(state.lastRefreshAt)}（${formatRelativeAge(state.lastRefreshAt)}）`);
 }
 
+function syncRefreshInteractivity() {
+  syncRefreshDisabledButtons({
+    roots: currentRefreshInteractivityRoots(),
+    refreshing: state.refreshing,
+    reason: "当前区域正在刷新，请等待刷新完成后再操作。",
+  });
+}
+
+function currentRefreshInteractivityRoots() {
+  const activeSection = viewSections.find((section) => section.dataset.view === state.activeView) || null;
+  const openDrawer = nodes.detailDrawer?.classList.contains("is-open") ? nodes.detailDrawer : null;
+  return [activeSection, openDrawer].filter(Boolean);
+}
+
 function setActiveView(view, { pushHistory = false, refresh = true } = {}) {
   const nextView = VIEW_ROUTES[view] ? view : "home";
   const changed = state.activeView !== nextView;
@@ -626,8 +649,8 @@ async function runAction(path, body, successMessage, { target = null, pendingLab
   if (state.actionInFlight) return;
   const finishAction = beginAction(target, pendingLabel);
   try {
-    await requestJson(path, { method: "POST", body });
-    state.flash = { tone: "info", message: successMessage };
+    const result = await requestJson(path, { method: "POST", body });
+    state.flash = { tone: "info", message: result?.message || successMessage };
     await refreshDashboard({ manual: true });
   } catch (error) {
     state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
@@ -737,6 +760,63 @@ async function recordTrialReview(target = null) {
   );
 }
 
+async function recordTrialReviewAction(actionType, target = null) {
+  if (!actionType) return;
+  const payloadMap = {
+    review_snapshot: {
+      reason: "ui_trial_review_snapshot",
+      successMessage: "已记录本次试盘复盘摘要。",
+      pendingLabel: "正在记录复盘摘要…",
+      confirmMessage: "",
+    },
+    reset_trial_guard: {
+      reason: "ui_trial_guard_manual_reset",
+      successMessage: "已重置试盘守护，新的试盘样本窗口会从本次操作后重新开始。",
+      pendingLabel: "正在重置试盘守护…",
+      confirmMessage: "确认人工重置试盘守护吗？这会清空当前试盘守护的历史观察窗口，但系统仍会保持暂停，后续还需要你手动恢复自动运行。",
+    },
+    continue_small_capital: {
+      reason: "ui_trial_review_continue_small_capital",
+      successMessage: "已记录继续小资金试盘的处理结论。",
+      pendingLabel: "正在记录处理结论…",
+      confirmMessage: "",
+    },
+    shrink_trial: {
+      reason: "ui_trial_review_shrink_trial",
+      successMessage: "已记录缩小试盘规模的处理结论。",
+      pendingLabel: "正在记录缩容结论…",
+      confirmMessage: "确认记录“缩小试盘规模”处理结论吗？",
+    },
+    pause_trial: {
+      reason: "ui_trial_review_pause_trial",
+      successMessage: "已记录暂停试盘并复盘的处理结论。",
+      pendingLabel: "正在记录暂停结论…",
+      confirmMessage: "确认记录“暂停试盘并复盘”处理结论吗？",
+    },
+    approve_scale_up: {
+      reason: "ui_trial_review_approve_scale_up",
+      successMessage: "已记录进入下一档资金评审的处理结论。",
+      pendingLabel: "正在记录放量评审…",
+      confirmMessage: "确认记录“进入下一档资金评审”处理结论吗？",
+    },
+  };
+  const payload = payloadMap[actionType];
+  if (!payload) return;
+  if (payload.confirmMessage && !window.confirm(payload.confirmMessage)) return;
+  await runAction(
+    "/system/trial-review/action",
+    {
+      action_type: actionType,
+      reason: payload.reason,
+    },
+    payload.successMessage,
+    {
+      target,
+      pendingLabel: payload.pendingLabel,
+    }
+  );
+}
+
 async function logoutOperator() {
   try {
     await requestJson("/auth/logout", { method: "POST" });
@@ -749,7 +829,16 @@ async function logoutOperator() {
 
 async function dispatchAction(action, value, target = null) {
   if (action === "refresh-dashboard") return refreshDashboard({ manual: true });
-  if (action === "navigate-view") return setActiveView(value || "home", { pushHistory: true });
+  if (action === "navigate-view") {
+    const nextView = VIEW_ROUTES[value] ? value : "home";
+    if (state.activeView === nextView) {
+      state.flash = { tone: "info", message: `当前已在${VIEW_LABELS[nextView] || "当前页面"}，已刷新当前状态。` };
+      renderBanners();
+      window.scrollTo({ top: 0, behavior: "smooth" });
+      return refreshDashboard({ manual: true });
+    }
+    return setActiveView(nextView, { pushHistory: true });
+  }
   if (action === "inspect-decision") return inspectDecision(value);
   if (action === "inspect-order") return inspectOrder(value);
   if (action === "inspect-fill") return inspectFill(value);
@@ -761,14 +850,14 @@ async function dispatchAction(action, value, target = null) {
   if (action === "trigger-halt") return triggerHalt(target);
   if (action === "record-scaling-review") return recordScalingReview(value, target);
   if (action === "record-trial-review") return recordTrialReview(target);
+  if (action === "record-trial-review-action") return recordTrialReviewAction(value, target);
   if (action === "trigger-blocker-action") return triggerBlockerAction(value, target);
   if (action === "resolve-stuck-order") return resolveStuckOrder(value);
-  if (action === "manual-set-ai-operating-mode") return setAIManualOperatingMode(value, target);
-  if (action === "restore-ai-operating-mode-auto") return restoreAIAutomaticOperatingMode(target);
+  if (action === "select-ai-operating-mode") return selectAIOperatingMode(value, target);
   if (action === "manual-activate-strategy-profile") return activateStrategyProfile(value, target);
   if (action === "restore-strategy-profile-auto") return restoreStrategyProfileAutomaticControl(target);
-  if (action === "set-ai-mode-editing") return setAIConfigModeEditing(value);
-  if (action === "set-profile-editing") return setAIConfigProfileEditing(value);
+  if (action === "pause-strategy-profile-auto") return pauseStrategyProfileAutomaticControl(target);
+  if (action === "set-profile-control-mode") return setStrategyProfileControlMode(value, target);
   if (action === "load-more-orders") return adjustPageLimit("recentOrders", PAGE_LOAD_STEP);
   if (action === "collapse-orders") return resetPageLimit("recentOrders");
   if (action === "load-more-fills") return adjustPageLimit("recentFills", PAGE_LOAD_STEP);
@@ -939,7 +1028,6 @@ async function activateStrategyProfile(profileId, target = null) {
       tone: "info",
       message: `当前策略档位已手动切换为 ${readableProfileName(result?.active_revision?.profile_label || result?.active_revision?.profile_id)}。`,
     };
-    state.ui.aiConfig.profileManualEditing = true;
     await refreshDashboard({ manual: true });
   } catch (error) {
     state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
@@ -952,7 +1040,7 @@ async function activateStrategyProfile(profileId, target = null) {
 async function restoreStrategyProfileAutomaticControl(target = null) {
   const clearPending = setActionPending(target, "正在恢复自动切档…");
   try {
-    if (!window.confirm("确认提前结束当前策略档位的人工冻结，并恢复自动切档逻辑吗？")) return;
+    if (!window.confirm("确认开启自动切档吗？开启后下面 6 个档位按钮会锁定，由系统自动决定是否换档。")) return;
     const result = await requestJson("/strategy-profiles/restore-auto", {
       method: "POST",
       body: { reason: "ui_restore_auto_strategy_profile_control" },
@@ -964,7 +1052,6 @@ async function restoreStrategyProfileAutomaticControl(target = null) {
         ? `策略档位已恢复自动切档逻辑，当前仍保持 ${readableProfileName(result?.active_revision?.profile_label || activation.active_profile_id)}。`
         : "策略档位已恢复自动切档逻辑。",
     };
-    state.ui.aiConfig.profileManualEditing = false;
     await refreshDashboard({ manual: true });
   } catch (error) {
     state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
@@ -974,44 +1061,45 @@ async function restoreStrategyProfileAutomaticControl(target = null) {
   }
 }
 
-async function setAIManualOperatingMode(mode, target = null) {
+async function pauseStrategyProfileAutomaticControl(target = null) {
+  const clearPending = setActionPending(target, "正在切到手动切档…");
+  try {
+    if (!window.confirm("确认关闭自动切档吗？关闭后下面 6 个档位按钮会解锁，由你手动切换。")) return;
+    const result = await requestJson("/strategy-profiles/pause-auto", {
+      method: "POST",
+      body: { reason: "ui_pause_auto_strategy_profile_control" },
+    });
+    const activation = result?.activation || {};
+    state.flash = {
+      tone: "info",
+      message: activation?.active_profile_id
+        ? `当前已切到手动切档，系统会保持 ${readableProfileName(result?.active_revision?.profile_label || activation.active_profile_id)}。`
+        : "当前已切到手动切档。",
+    };
+    await refreshDashboard({ manual: true });
+  } catch (error) {
+    state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
+    renderBanners();
+  } finally {
+    clearPending();
+  }
+}
+
+async function selectAIOperatingMode(mode, target = null) {
   if (!mode) return;
   const modeLabel = target instanceof HTMLElement ? (target.textContent || "").trim() : mode;
   const clearPending = setActionPending(target, "正在切换运行模式…");
   try {
-    if (!window.confirm(`确认立即把 AI 当前运行模式切换为“${modeLabel}”吗？系统会在冻结时间结束后恢复自动模式逻辑。`)) return;
-    const result = await requestJson("/ai/operating-mode/override", {
+    if (!window.confirm(`确认立即把 AI 当前运行模式切换为“${modeLabel}”吗？`)) return;
+    const result = await requestJson("/ai/operating-mode/select", {
       method: "POST",
-      body: { mode, reason: "ui_manual_override_ai_operating_mode" },
+      body: { mode, reason: "ui_select_ai_operating_mode" },
     });
     const runtime = result?.ai_runtime || {};
     state.flash = {
       tone: "info",
-      message: `AI 当前运行模式已手动切换为 ${readableState(runtime.manual_override_mode || mode, "目标模式")}，冻结到 ${runtime.manual_override_freeze_until || "待确认"}。`,
+      message: `AI 当前运行模式已切换为 ${readableState(runtime.effective_operating_mode || mode, "目标模式")}。`,
     };
-    state.ui.aiConfig.modeManualEditing = true;
-    await refreshDashboard({ manual: true });
-  } catch (error) {
-    state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
-    renderBanners();
-  } finally {
-    clearPending();
-  }
-}
-
-async function restoreAIAutomaticOperatingMode(target = null) {
-  const clearPending = setActionPending(target, "正在恢复自动模式…");
-  try {
-    if (!window.confirm("确认提前结束人工覆盖，并恢复 AI 自动运行模式逻辑吗？")) return;
-    await requestJson("/ai/operating-mode/restore-auto", {
-      method: "POST",
-      body: { reason: "ui_restore_auto_ai_operating_mode" },
-    });
-    state.flash = {
-      tone: "info",
-      message: "AI 当前运行模式已恢复为自动逻辑控制。",
-    };
-    state.ui.aiConfig.modeManualEditing = false;
     await refreshDashboard({ manual: true });
   } catch (error) {
     state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
@@ -1026,26 +1114,14 @@ function readableProfileName(value, fallback = "未知档位") {
   return readableState(String(value), fallback);
 }
 
-function setAIConfigModeEditing(value) {
-  const nextManual = value === "manual";
-  const runtime = state.data.aiRuntime || {};
-  if (!nextManual && runtime.manual_override_active) {
-    void restoreAIAutomaticOperatingMode();
+function setStrategyProfileControlMode(value, target = null) {
+  if (value === "auto") {
+    void restoreStrategyProfileAutomaticControl(target);
     return;
   }
-  state.ui.aiConfig.modeManualEditing = nextManual;
-  renderShell();
-}
-
-function setAIConfigProfileEditing(value) {
-  const nextManual = value === "manual";
-  const runtime = state.data.aiRuntime || {};
-  if (!nextManual && runtime.strategy_profile_auto_control_reason === "manually_paused_by_admin") {
-    void restoreStrategyProfileAutomaticControl();
-    return;
+  if (value === "manual") {
+    void pauseStrategyProfileAutomaticControl(target);
   }
-  state.ui.aiConfig.profileManualEditing = nextManual;
-  renderShell();
 }
 
 async function createOperatorUser() {
@@ -1415,7 +1491,21 @@ function scheduleRefresh() {
   cancelScheduledRefresh();
   if (state.actionInFlight) return;
   if (nodes.autoRefreshToggle && !nodes.autoRefreshToggle.checked) return;
+  if (document.visibilityState !== "visible") return;
   state.refreshTimer = window.setTimeout(() => void refreshDashboard(), AUTO_REFRESH_MS);
+}
+
+function handleVisibilityChange() {
+  if (document.visibilityState !== "visible") {
+    cancelScheduledRefresh();
+    return;
+  }
+  if (nodes.autoRefreshToggle && !nodes.autoRefreshToggle.checked) return;
+  if (state.refreshing) {
+    state.pendingRefresh = true;
+    return;
+  }
+  void refreshDashboard();
 }
 
 function defaultBlockerActionReason(actionId) {
@@ -1424,6 +1514,7 @@ function defaultBlockerActionReason(actionId) {
     "accept-rebaseline": "operator_rebaseline_from_blocker_panel",
     "resume-system": "operator_resume_from_blocker_panel",
     "halt-system": "operator_keep_halted_from_blocker_panel",
+    "refresh-exchange-state": "operator_refresh_exchange_state_from_blocker_panel",
     "acknowledge-phase1-shadow": "operator_review_phase1_shadow_from_blocker_panel",
     "ai-review-restore": "operator_restore_ai_from_blocker_panel",
     "ai-review-degrade-to-baseline": "operator_degrade_to_baseline_from_blocker_panel",
@@ -1437,6 +1528,7 @@ function blockerActionPendingLabel(actionId) {
     "accept-rebaseline": "正在确认新基线…",
     "resume-system": "正在恢复自动运行…",
     "halt-system": "正在保持暂停状态…",
+    "refresh-exchange-state": "正在刷新交易所状态…",
     "acknowledge-phase1-shadow": "正在记录影子核查结果…",
     "ai-review-restore": "正在恢复 AI 决策…",
     "ai-review-degrade-to-baseline": "正在切到仅基础策略运行…",
@@ -1450,6 +1542,7 @@ function blockerActionSuccessMessage(actionId) {
     "accept-rebaseline": "新基线已确认。",
     "resume-system": "恢复自动运行请求已提交。",
     "halt-system": "系统会继续保持暂停状态。",
+    "refresh-exchange-state": "交易所状态已刷新。",
     "acknowledge-phase1-shadow": "已记录影子兼容层人工核查结果。",
     "ai-review-restore": "AI 复核已处理，已恢复 AI 决策资格。",
     "ai-review-degrade-to-baseline": "AI 复核已处理，系统将以仅基础策略继续运行。",
@@ -1490,15 +1583,6 @@ function closeDrawer() {
   nodes.detailDrawer.classList.remove("is-open");
   nodes.detailDrawer.setAttribute("aria-hidden", "true");
   nodes.drawerBackdrop.hidden = true;
-}
-
-function dedupeSpecs(specs) {
-  const seen = new Set();
-  return specs.filter(([key]) => {
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
 }
 
 function patchRenderedSections(sections, containerGetter, fallbackRenderer) {

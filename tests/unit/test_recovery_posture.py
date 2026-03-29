@@ -5,7 +5,9 @@ import unittest
 from aats.bootstrap.config import build_runtime
 from aats.bootstrap.settings import AATSSettings
 from aats.schemas.common import utc_now
+from aats.schemas.execution import OrderState
 from aats.schemas.reconciliation import ReconciliationReport
+from aats.schemas.strategy_runtime import StrategyExecutionBundle, StrategyLegIntent
 from aats.schemas.system import RecoveryStatus
 from aats.services.governance_engine.recovery_posture import RecoveryPostureEvaluator
 
@@ -123,7 +125,41 @@ class TestRecoveryPostureEvaluator(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(final.safe_to_trade)
         self.assertEqual(final.resume_blocked_reasons, [])
 
-    async def test_derivatives_only_reduce_recovery_keeps_runtime_runnable(self) -> None:
+    async def test_trial_guard_breach_blocks_resume_and_is_not_treated_as_manual_pause(self) -> None:
+        runtime = await build_runtime(
+            AATSSettings.model_validate(
+                {
+                    "mode": "paper_live",
+                    "market_data_backend": "demo",
+                    "execution_backend": "paper",
+                    "account_backend": "disabled",
+                    "account_read_enabled": False,
+                    "storage_mode": "memory",
+                    "event_persistence_mode": "strict",
+                }
+            )
+        )
+        await runtime.market_gateway.run_local_publisher(
+            symbol=runtime.settings.default_symbol,
+            iterations=2,
+            interval_seconds=0.0,
+        )
+        runtime.kill_switch.halt(reason="trial_guard_threshold_breached")
+        runtime.trial_guard_service.last_snapshot = {
+            "enabled": True,
+            "status": "breached",
+            "summary": "试盘守护已触发自动停机。",
+        }
+        evaluator = RecoveryPostureEvaluator(runtime)
+
+        final = evaluator.finalize_status()
+
+        self.assertEqual(final.recovery_state, "resume_blocked")
+        self.assertFalse(final.resume_eligible)
+        self.assertFalse(final.safe_to_trade)
+        self.assertIn("trial_guard_threshold_breached", final.resume_blocked_reasons)
+
+    async def test_unknown_derivatives_position_requires_manual_review_even_when_only_reduce_is_active(self) -> None:
         runtime = await build_runtime(
             AATSSettings.model_validate(
                 {
@@ -166,9 +202,66 @@ class TestRecoveryPostureEvaluator(unittest.IsolatedAsyncioTestCase):
             mismatch_categories=["derivatives_exchange_position_without_local_execution_chain"],
             mismatch_reasons=["derivatives_exchange_position_not_replayed_locally"],
             safety_impacts=["derivatives_only_reduce_until_position_reconciled"],
-            severity="SOFT_MISMATCH",
+            severity="REVIEW_REQUIRED",
+            review_required=True,
+            resume_blocking=True,
             only_reduce_required=True,
             only_reduce_reasons=["derivatives_exchange_position_without_local_execution_chain"],
+            recovery_classification="manual_review_required",
+            recommended_operator_action="go_close_position_on_exchange",
+        )
+        base_status = RecoveryStatus(status="recovered", recovery_state="normal_operation")
+
+        final = evaluator.finalize_status(base_status=base_status, latest_reconciliation=report)
+
+        self.assertEqual(final.recovery_state, "review_required")
+        self.assertFalse(final.resume_eligible)
+        self.assertFalse(final.safe_to_trade)
+        self.assertTrue(final.review_required)
+        self.assertTrue(final.only_reduce_required)
+        self.assertIn("derivatives_exchange_position_without_local_execution_chain", final.only_reduce_reasons)
+        self.assertIn("operator_rebaseline_required", final.resume_blocked_reasons)
+
+    async def test_derivatives_only_reduce_recovery_blocks_resume_even_without_manual_review(self) -> None:
+        runtime = await build_runtime(
+            AATSSettings.model_validate(
+                {
+                    "mode": "paper_live",
+                    "market_data_backend": "demo",
+                    "execution_backend": "paper",
+                    "account_backend": "disabled",
+                    "account_read_enabled": False,
+                    "trading_product_type": "derivatives",
+                    "margin_mode": "cross",
+                    "default_symbol": "BTC-USDT-SWAP",
+                    "allowed_symbols": ("BTC-USDT-SWAP",),
+                    "storage_mode": "memory",
+                    "event_persistence_mode": "strict",
+                }
+            )
+        )
+        evaluator = RecoveryPostureEvaluator(runtime)
+        await runtime.market_gateway.run_local_publisher(
+            symbol=runtime.settings.default_symbol,
+            iterations=2,
+            interval_seconds=0.0,
+        )
+        report = ReconciliationReport(
+            reconciliation_id="recon_margin_only_reduce",
+            as_of_ts=utc_now(),
+            product_type="derivatives",
+            margin_mode="cross",
+            exchange_comparison_enabled=True,
+            order_diff={"reconstructed": {}, "exchange": {}},
+            fill_diff={"replayed": {}, "exchange": {}},
+            balance_diff={"reconstructed": {}, "exchange": {}},
+            position_diff={"stored": {}, "reconstructed": {}, "reconstructed_mismatches": {}, "exchange": {}, "exchange_mismatches": {}},
+            mismatch_categories=["derivatives_runtime_margin_guard"],
+            mismatch_reasons=["derivatives_margin_usage_requires_only_reduce"],
+            safety_impacts=["derivatives_only_reduce_until_position_reconciled"],
+            severity="SOFT_MISMATCH",
+            only_reduce_required=True,
+            only_reduce_reasons=["derivatives_margin_usage_requires_only_reduce"],
             recovery_classification="derivatives_only_reduce",
             recommended_operator_action="go_close_position_on_exchange",
         )
@@ -177,11 +270,245 @@ class TestRecoveryPostureEvaluator(unittest.IsolatedAsyncioTestCase):
         final = evaluator.finalize_status(base_status=base_status, latest_reconciliation=report)
 
         self.assertEqual(final.recovery_state, "only_reduce")
-        self.assertTrue(final.resume_eligible)
-        self.assertTrue(final.safe_to_trade)
+        self.assertFalse(final.resume_eligible)
+        self.assertFalse(final.safe_to_trade)
         self.assertFalse(final.review_required)
         self.assertTrue(final.only_reduce_required)
-        self.assertIn("derivatives_exchange_position_without_local_execution_chain", final.only_reduce_reasons)
+        self.assertIn("derivatives_margin_usage_requires_only_reduce", final.resume_blocked_reasons)
+
+    async def test_clean_reconciliation_clears_lingering_review_and_only_reduce_flags(self) -> None:
+        runtime = await build_runtime(
+            AATSSettings.model_validate(
+                {
+                    "mode": "paper_live",
+                    "market_data_backend": "demo",
+                    "execution_backend": "paper",
+                    "account_backend": "disabled",
+                    "account_read_enabled": False,
+                    "storage_mode": "memory",
+                    "event_persistence_mode": "strict",
+                }
+            )
+        )
+        evaluator = RecoveryPostureEvaluator(runtime)
+        await runtime.market_gateway.run_local_publisher(
+            symbol=runtime.settings.default_symbol,
+            iterations=2,
+            interval_seconds=0.0,
+        )
+        report = ReconciliationReport(
+            reconciliation_id="recon_clean_after_review",
+            as_of_ts=utc_now(),
+            exchange_comparison_enabled=True,
+            order_diff={},
+            fill_diff={},
+            balance_diff={},
+            position_diff={},
+            mismatch_categories=[],
+            mismatch_reasons=[],
+            safety_impacts=[],
+            severity="CLEAN",
+            review_required=False,
+            halt_required=False,
+            only_reduce_required=False,
+            only_reduce_reasons=[],
+            recovery_classification="clean",
+            recommended_operator_action="none",
+        )
+        base_status = RecoveryStatus(
+            status="review",
+            recovery_state="review_required",
+            review_required=True,
+            only_reduce_required=True,
+            only_reduce_reasons=["stale_only_reduce"],
+            resume_blocked_reasons=["operator_rebaseline_required"],
+        )
+
+        final = evaluator.finalize_status(base_status=base_status, latest_reconciliation=report)
+
+        self.assertEqual(final.recovery_state, "normal_operation")
+        self.assertTrue(final.safe_to_trade)
+        self.assertTrue(final.resume_eligible)
+        self.assertFalse(final.review_required)
+        self.assertFalse(final.only_reduce_required)
+        self.assertEqual(final.only_reduce_reasons, [])
+        self.assertEqual(final.resume_blocked_reasons, [])
+
+    async def test_finalize_status_tracks_dynamic_bundle_recovery_and_clears_after_orders_close(self) -> None:
+        runtime = await build_runtime(
+            AATSSettings.model_validate(
+                {
+                    "mode": "paper_live",
+                    "market_data_backend": "demo",
+                    "execution_backend": "paper",
+                    "account_backend": "disabled",
+                    "account_read_enabled": False,
+                    "storage_mode": "memory",
+                    "event_persistence_mode": "strict",
+                }
+            )
+        )
+        evaluator = RecoveryPostureEvaluator(runtime)
+        await runtime.market_gateway.run_local_publisher(
+            symbol=runtime.settings.default_symbol,
+            iterations=2,
+            interval_seconds=0.0,
+        )
+        now = utc_now()
+        runtime.execution_repo.save_order_state(
+            OrderState(
+                decision_id="decision_bundle_runtime_1",
+                intent_id="intent_bundle_runtime_1",
+                symbol=runtime.settings.default_symbol,
+                client_order_id="cl_bundle_runtime_1",
+                venue="OKX",
+                exchange_order_id="ord_bundle_runtime_1",
+                status="SUBMITTED",
+                submission_mode="guarded_live_submit",
+                submitted_ts=now,
+                last_update_ts=now,
+                requested_qty=0.001,
+                filled_qty=0.0,
+                remaining_qty=0.001,
+                average_fill_price=None,
+                fees=0.0,
+                product_type="spot",
+                margin_mode="cash",
+                strategy_family="spot_grid",
+                strategy_sleeve_id="sleeve_runtime_grid",
+                allocation_id="alloc_runtime_bundle",
+                strategy_bundle_id="bundle_runtime_recovery",
+                strategy_leg_role="inventory",
+                submission_payload={},
+            )
+        )
+
+        pending = evaluator.finalize_status()
+
+        self.assertEqual(pending.recovery_state, "bundle_recovery")
+        self.assertFalse(pending.safe_to_trade)
+        self.assertFalse(pending.resume_eligible)
+        self.assertTrue(pending.bundle_recovery_required)
+        self.assertIn("strategy_bundle_recovery_in_progress", pending.resume_blocked_reasons)
+
+        runtime.execution_repo.save_order_state(
+            OrderState(
+                decision_id="decision_bundle_runtime_1",
+                intent_id="intent_bundle_runtime_1",
+                symbol=runtime.settings.default_symbol,
+                client_order_id="cl_bundle_runtime_1",
+                venue="OKX",
+                exchange_order_id="ord_bundle_runtime_1",
+                status="FILLED",
+                submission_mode="guarded_live_submit",
+                submitted_ts=now,
+                last_update_ts=utc_now(),
+                requested_qty=0.001,
+                filled_qty=0.001,
+                remaining_qty=0.0,
+                average_fill_price=60_000.0,
+                fees=0.0,
+                product_type="spot",
+                margin_mode="cash",
+                strategy_family="spot_grid",
+                strategy_sleeve_id="sleeve_runtime_grid",
+                allocation_id="alloc_runtime_bundle",
+                strategy_bundle_id="bundle_runtime_recovery",
+                strategy_leg_role="inventory",
+                submission_payload={},
+            )
+        )
+
+        cleared = evaluator.finalize_status()
+
+        self.assertEqual(cleared.recovery_state, "normal_operation")
+        self.assertTrue(cleared.safe_to_trade)
+        self.assertTrue(cleared.resume_eligible)
+        self.assertFalse(cleared.bundle_recovery_required)
+        self.assertEqual(cleared.bundle_summaries, [])
+
+    async def test_finalize_status_respects_persisted_review_required_overlay_bundle(self) -> None:
+        runtime = await build_runtime(
+            AATSSettings.model_validate(
+                {
+                    "mode": "paper_live",
+                    "market_data_backend": "demo",
+                    "execution_backend": "paper",
+                    "account_backend": "disabled",
+                    "account_read_enabled": False,
+                    "trading_product_type": "derivatives",
+                    "margin_mode": "cross",
+                    "default_symbol": "BTC-USDT-SWAP",
+                    "allowed_symbols": ("BTC-USDT-SWAP",),
+                    "storage_mode": "memory",
+                    "event_persistence_mode": "strict",
+                }
+            )
+        )
+        evaluator = RecoveryPostureEvaluator(runtime)
+        await runtime.market_gateway.run_local_publisher(
+            symbol=runtime.settings.default_symbol,
+            iterations=2,
+            interval_seconds=0.0,
+        )
+        runtime.strategy_runtime_repo.save_execution_bundle(
+            StrategyExecutionBundle(
+                bundle_id="bundle_overlay_review",
+                decision_id="decision_overlay_review",
+                family="directional",
+                participating_families=["directional"],
+                strategy_sleeve_refs=["sleeve_independent_long", "sleeve_independent_short"],
+                allocation_id="alloc_overlay_review",
+                product_type="derivatives",
+                margin_mode="cross",
+                allowed_symbols=(runtime.settings.default_symbol,),
+                route_action="override_target",
+                bundle_type="hedge_protected",
+                status="review_required",
+                selected_symbol=runtime.settings.default_symbol,
+                operator_summary="overlay bundle mixed terminal outcome",
+                reason_codes=["strategy_bundle_review_required"],
+                legs=[
+                    StrategyLegIntent(
+                        symbol=runtime.settings.default_symbol,
+                        product_type="derivatives",
+                        side="buy",
+                        position_mode="long_short_mode",
+                        pos_side="long",
+                        action="open",
+                        family="directional",
+                        role="primary",
+                        strategy_sleeve_id="sleeve_independent_long",
+                        allocation_id="alloc_overlay_review",
+                        margin_mode="cross",
+                    ),
+                    StrategyLegIntent(
+                        symbol=runtime.settings.default_symbol,
+                        product_type="derivatives",
+                        side="sell",
+                        position_mode="long_short_mode",
+                        pos_side="short",
+                        action="open",
+                        family="directional",
+                        role="primary",
+                        strategy_sleeve_id="sleeve_independent_short",
+                        allocation_id="alloc_overlay_review",
+                        margin_mode="cross",
+                    ),
+                ],
+            )
+        )
+
+        final = evaluator.finalize_status()
+
+        self.assertEqual(final.recovery_state, "review_required")
+        self.assertTrue(final.review_required)
+        self.assertFalse(final.resume_eligible)
+        self.assertFalse(final.safe_to_trade)
+        self.assertTrue(final.bundle_recovery_required)
+        self.assertEqual(len(final.bundle_summaries), 1)
+        self.assertEqual(final.bundle_summaries[0].recovery_state, "review_required")
+        self.assertIn("strategy_bundle_recovery_requires_review", final.resume_blocked_reasons)
 
 
 if __name__ == "__main__":

@@ -52,7 +52,7 @@ class Task69ProfileControlTests(IsolatedAsyncioTestCase):
         self.assertEqual(report["recommended_profile_id"], "trend_normal")
 
     async def test_activation_gate_blocks_non_safety_switch_during_cold_start(self) -> None:
-        result = await self.control.evaluate_now(allow_auto_activation=False)
+        await self.control.evaluate_now(allow_auto_activation=False)
         report = self.control._latest_optimization_report()
         self.assertIsNotNone(report)
         recommendation = StrategyProfileRecommendation(
@@ -170,4 +170,12 @@ class Task69ProfileControlTests(IsolatedAsyncioTestCase):
         self.assertGreater(
             by_profile["range_defensive"].payload.strategy_low_edge_cooldown_seconds,
             by_profile["trend_normal"].payload.strategy_low_edge_cooldown_seconds,
+        )
+        self.assertLess(
+            by_profile["trend_aggressive"].payload.strategy_short_reversal_min_signal_edge_bps,
+            by_profile["trend_normal"].payload.strategy_short_reversal_min_signal_edge_bps,
+        )
+        self.assertGreater(
+            by_profile["execution_degraded_safe"].payload.strategy_short_entry_confidence_min,
+            by_profile["trend_normal"].payload.strategy_short_entry_confidence_min,
         )

@@ -140,13 +140,14 @@ def resolved_activation_policy(
     if stored is not None:
         return stored
     settings = service.settings
+    activation_state = service._activation_state()
     return StrategyProfileActivationPolicyConfig(
         product_type=settings.trading_product_type,
         margin_mode=settings.margin_mode,
         allowed_symbols=tuple(settings.allowed_symbols),
         policy_status="settings_fallback",
         effective=True,
-        enabled=bool(settings.strategy_profile_activation_policy_enabled),
+        enabled=bool(activation_state.auto_switch_enabled),
         min_composite_score=float(settings.strategy_profile_auto_activation_min_composite_score),
         min_offline_replay_score=float(settings.strategy_profile_auto_activation_min_offline_replay_score),
         min_recommendation_strength=float(settings.strategy_profile_auto_activation_min_recommendation_strength),

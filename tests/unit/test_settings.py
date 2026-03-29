@@ -79,10 +79,10 @@ class TestAATSSettings(unittest.TestCase):
                 settings = load_settings()
 
         self.assertEqual(settings.config_profile, "guarded_simulated_submit_enabled")
-        self.assertEqual(settings.decision_min_interval_seconds_15m, 30.0)
-        self.assertEqual(settings.decision_min_interval_seconds_1h, 120.0)
+        self.assertEqual(settings.decision_min_interval_seconds_15m, 60.0)
+        self.assertEqual(settings.decision_min_interval_seconds_1h, 240.0)
         self.assertEqual(settings.decision_min_price_move_bps, 4.0)
-        self.assertEqual(settings.decision_min_momentum_delta, 0.0005)
+        self.assertEqual(settings.decision_min_momentum_delta, 0.0003)
 
     def test_load_settings_allows_explicit_env_override_on_top_of_yaml_profile(self) -> None:
         with patch.object(AATSSettings, "model_config", {**AATSSettings.model_config, "env_file": None}):
@@ -98,7 +98,7 @@ class TestAATSSettings(unittest.TestCase):
                 settings = load_settings()
 
         self.assertEqual(settings.decision_min_interval_seconds_15m, 5.0)
-        self.assertEqual(settings.decision_min_interval_seconds_1h, 120.0)
+        self.assertEqual(settings.decision_min_interval_seconds_1h, 240.0)
 
     def test_load_settings_reads_dedicated_derivatives_profile_and_startup_marker(self) -> None:
         with patch.object(AATSSettings, "model_config", {**AATSSettings.model_config, "env_file": None}):
@@ -127,6 +127,173 @@ class TestAATSSettings(unittest.TestCase):
         self.assertEqual(settings.max_total_open_notional, 5000.0)
         self.assertEqual(settings.max_daily_realized_loss_usdt, 100.0)
         self.assertEqual(settings.derivatives_only_reduce_trigger_margin_fraction, 0.7)
+
+    def test_load_settings_reads_managed_profile_runtime_defaults_and_strategy_tuning(self) -> None:
+        with patch.object(AATSSettings, "model_config", {**AATSSettings.model_config, "env_file": None}):
+            with patch.dict(
+                os.environ,
+                {
+                    **_non_aats_environment(),
+                    "AATS_ENV_TEMPLATE_PROFILE": "spot_live",
+                },
+                clear=True,
+            ):
+                settings = load_settings()
+
+        self.assertEqual(settings.env_template_profile, "spot_live")
+        self.assertEqual(settings.config_profile, "guarded_spot_enabled")
+        self.assertEqual(settings.startup_profile, "spot")
+        self.assertEqual(settings.mode, "guarded_live")
+        self.assertEqual(settings.market_data_backend, "okx")
+        self.assertEqual(settings.execution_backend, "okx")
+        self.assertEqual(settings.account_backend, "okx")
+        self.assertEqual(settings.ai_execution_suggestion_mode, "diagnostic_only")
+        self.assertFalse(settings.strategy_profile_auto_control_enabled)
+        self.assertEqual(settings.decision_min_interval_seconds_15m, 60.0)
+        self.assertEqual(settings.strategy_min_hold_seconds, 720.0)
+
+    def test_load_settings_bootstraps_managed_derivatives_profile_before_runtime_validation(self) -> None:
+        with patch.object(AATSSettings, "model_config", {**AATSSettings.model_config, "env_file": None}):
+            with patch.dict(
+                os.environ,
+                {
+                    **_non_aats_environment(),
+                    "AATS_ENV_TEMPLATE_PROFILE": "derivatives_live",
+                    "AATS_DEFAULT_ORDER_QTY": "0.01",
+                    "AATS_MAX_ABS_POSITION_QTY": "0.02",
+                    "AATS_MAX_NOTIONAL_PER_SYMBOL": "1000",
+                    "AATS_MAX_TARGET_LEVERAGE": "10",
+                    "AATS_DEFAULT_TARGET_LEVERAGE": "10",
+                },
+                clear=True,
+            ):
+                settings = load_settings()
+
+        self.assertEqual(settings.env_template_profile, "derivatives_live")
+        self.assertEqual(settings.trading_product_type, "derivatives")
+        self.assertEqual(settings.margin_mode, "cross")
+        self.assertEqual(settings.max_target_leverage, 10.0)
+        self.assertEqual(settings.default_target_leverage, 10.0)
+        self.assertEqual(settings.derivatives_position_mode, "hedge")
+        self.assertEqual(settings.derivatives_hedge_transition_mode, "close_then_open")
+        self.assertTrue(settings.derivatives_require_exchange_pos_mode_match)
+
+    def test_load_settings_ignores_deprecated_runtime_derivations_from_managed_env(self) -> None:
+        with patch.object(AATSSettings, "model_config", {**AATSSettings.model_config, "env_file": None}):
+            with patch.dict(
+                os.environ,
+                {
+                    **_non_aats_environment(),
+                    "AATS_ENV_TEMPLATE_PROFILE": "derivatives_live",
+                    "AATS_MODE": "paper_live",
+                    "AATS_TRADING_PRODUCT_TYPE": "spot",
+                    "AATS_MARGIN_MODE": "cash",
+                    "AATS_MARKET_DATA_BACKEND": "demo",
+                    "AATS_DEFAULT_SYMBOL": "ETH-USDT-SWAP",
+                },
+                clear=True,
+            ):
+                settings = load_settings()
+
+        self.assertEqual(settings.env_template_profile, "derivatives_live")
+        self.assertEqual(settings.mode, "guarded_live")
+        self.assertEqual(settings.trading_product_type, "derivatives")
+        self.assertEqual(settings.margin_mode, "cross")
+        self.assertEqual(settings.market_data_backend, "okx")
+        self.assertEqual(settings.default_symbol, "ETH-USDT-SWAP")
+
+    def test_spot_cash_runtime_rejects_non_unit_leverage(self) -> None:
+        with self.assertRaisesRegex(ValueError, "spot_cash_runtime_requires_unit_leverage"):
+            AATSSettings.model_validate(
+                {
+                    "trading_product_type": "spot",
+                    "margin_mode": "cash",
+                    "max_target_leverage": 3,
+                    "default_target_leverage": 1,
+                }
+            )
+
+    def test_spot_runtime_disallows_derivatives_hedge_mode(self) -> None:
+        with self.assertRaisesRegex(ValueError, "non_derivatives_runtime_disallows_derivatives_hedge_position_mode"):
+            AATSSettings.model_validate(
+                {
+                    "trading_product_type": "spot",
+                    "margin_mode": "cash",
+                    "derivatives_position_mode": "hedge",
+                }
+            )
+
+    def test_derivatives_hedge_mode_requires_margin_runtime(self) -> None:
+        with self.assertRaisesRegex(ValueError, "derivatives_hedge_position_mode_requires_margin_runtime"):
+            AATSSettings.model_validate(
+                {
+                    "trading_product_type": "derivatives",
+                    "margin_mode": "cash",
+                    "derivatives_position_mode": "hedge",
+                }
+            )
+
+    def test_current_runtime_rejects_non_implemented_timeframe_overrides(self) -> None:
+        with self.assertRaisesRegex(ValueError, "primary_timeframe_currently_must_be_15m"):
+            AATSSettings.model_validate({"primary_timeframe": "1h"})
+        with self.assertRaisesRegex(ValueError, "secondary_timeframe_currently_must_be_1h"):
+            AATSSettings.model_validate({"secondary_timeframe": "15m"})
+
+    def test_allowed_regime_lists_ignore_blank_entries(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "strategy_entry_allowed_regimes": ["trend", None, " breakout ", ""],
+                "strategy_short_entry_allowed_regimes": ["trend", "", None, "breakout"],
+            }
+        )
+
+        self.assertEqual(settings.strategy_entry_allowed_regimes, ("trend", "breakout"))
+        self.assertEqual(settings.strategy_short_entry_allowed_regimes, ("trend", "breakout"))
+
+    def test_opportunistic_overlay_thresholds_reject_inverted_range(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "strategy_hedge_opportunistic_close_threshold_must_not_exceed_open_threshold",
+        ):
+            AATSSettings.model_validate(
+                {
+                    "strategy_hedge_opportunistic_open_threshold": 0.40,
+                    "strategy_hedge_opportunistic_close_threshold": 0.50,
+                }
+            )
+
+    def test_independent_overlay_thresholds_reject_entry_above_scale_in(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "strategy_hedge_independent_long_entry_threshold_must_not_exceed_scale_in_threshold",
+        ):
+            AATSSettings.model_validate(
+                {
+                    "trading_product_type": "derivatives",
+                    "margin_mode": "cross",
+                    "derivatives_position_mode": "hedge",
+                    "strategy_hedge_overlay_mode": "independent",
+                    "strategy_hedge_independent_long_entry_threshold": 0.72,
+                    "strategy_hedge_independent_long_scale_in_threshold": 0.70,
+                }
+            )
+
+    def test_independent_overlay_rollout_can_be_set_to_live_after_task106_enablement(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "derivatives_position_mode": "hedge",
+                "strategy_hedge_independent_rollout_stage": "live",
+            }
+        )
+
+        self.assertEqual(settings.strategy_hedge_independent_rollout_stage, "live")
+
+    def test_protective_overlay_independent_switch_defaults_to_true(self) -> None:
+        settings = AATSSettings.model_validate({})
+
+        self.assertTrue(settings.strategy_hedge_protective_enabled)
 
 
 if __name__ == "__main__":

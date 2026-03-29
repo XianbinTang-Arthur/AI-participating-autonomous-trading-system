@@ -10,6 +10,9 @@ from aats.schemas.strategy_profiles import (
     strategy_profile_axes_from_payload,
     summarize_strategy_profile_payload,
 )
+from aats.services.accounting import fill_fee_cost_in_quote
+from aats.services.governance_engine.recovery_posture import RecoveryPostureEvaluator
+from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12
 from aats.services.runtime_scope import fills_for_scope, latest_reconciliation_for_scope, runtime_state_scope, snapshots_for_scope
 
 if TYPE_CHECKING:
@@ -75,8 +78,14 @@ class StrategyProfileContextFacade:
                     "risk_level": item.risk_level,
                     "market_intent": item.market_intent,
                     "status": item.status,
-                    "axes": strategy_profile_axes_from_payload(item.payload).model_dump(mode="json"),
-                    "payload_summary": summarize_strategy_profile_payload(item.payload),
+                    "axes": strategy_profile_axes_from_payload(
+                        item.payload,
+                        product_type=item.product_type,
+                    ).model_dump(mode="json"),
+                    "payload_summary": summarize_strategy_profile_payload(
+                        item.payload,
+                        product_type=item.product_type,
+                    ),
                     "expected_behavior": list(item.expected_behavior),
                     "description": item.description,
                 }
@@ -113,7 +122,7 @@ class StrategyProfileContextFacade:
             self.owner.runtime_state_scope,
             limit=self.owner.evaluation_window_limit,
         )
-        fee_total = sum(Decimal(str(item.fee_amount)) for item in fills)
+        fee_total = sum((fill_fee_cost_in_quote(item) for item in fills), start=Decimal("0"))
         latest_snapshot = snapshots[-1] if snapshots else None
         earliest_snapshot = snapshots[0] if len(snapshots) > 1 else None
         latest_realized = latest_snapshot.realized_pnl if latest_snapshot is not None else Decimal("0")
@@ -130,7 +139,11 @@ class StrategyProfileContextFacade:
         material_moves = [delta for delta in pnl_deltas if abs(delta) > Decimal("0")]
         small_pnl_cutoff = avg_fee * Decimal("1.25")
         small_moves = [delta for delta in material_moves if abs(delta) <= small_pnl_cutoff] if material_moves else []
-        fee_ratio = fee_total / gross_realized if gross_realized > 0 else (Decimal("1") if fee_total > 0 else Decimal("0"))
+        fee_ratio = (
+            fee_total / abs(gross_realized)
+            if abs(gross_realized) > EPSILON_DECIMAL_12
+            else (Decimal("1") if fee_total > 0 else Decimal("0"))
+        )
         win_rate = (
             Decimal(sum(1 for delta in material_moves if delta > 0)) / Decimal(len(material_moves))
             if material_moves
@@ -155,10 +168,13 @@ class StrategyProfileContextFacade:
 
     def safety_state(self) -> dict[str, Any]:
         scope = runtime_state_scope(self.owner.settings)
-        recovery = self.owner.runtime.recovery_status
         market_status = self.owner.runtime.market_gateway.status()
         account_status = self.owner.runtime.account_service.status()
         latest_reconciliation = latest_reconciliation_for_scope(self.owner.runtime.reconciliation_repo, scope)
+        recovery = RecoveryPostureEvaluator(self.owner.runtime).finalize_status(
+            base_status=self.owner.runtime.recovery_status,
+            latest_reconciliation=latest_reconciliation,
+        )
         activation = self.owner._activation_state()
         live_guard_service = getattr(self.owner.runtime, "derivatives_live_guard_service", None)
         trial_guard_service = getattr(self.owner.runtime, "trial_guard_service", None)

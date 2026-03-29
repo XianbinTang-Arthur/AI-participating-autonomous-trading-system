@@ -34,6 +34,7 @@ export function buildDecisionDrawer(detail) {
   const aiDecisionAudit = detail.ai_decision_audit || null;
   const aiExecutionSuggestion = detail.ai_execution_suggestion || null;
   const decisionOutcome = detail.decision_outcome || null;
+  const hedgeModeAudit = detail.hedge_mode_audit || null;
 
   return {
     eyebrow: "决策链详情",
@@ -64,6 +65,36 @@ export function buildDecisionDrawer(detail) {
         ? surfaceCard({
             title: "AI 受限执行建议",
             content: kvList(decisionExecutionRows(aiExecutionSuggestion)),
+          })
+        : "",
+      hedgeModeAudit && shouldRenderHedgeModeAudit(hedgeModeAudit)
+        ? surfaceCard({
+            title: "对冲模式审计",
+            content: kvList(decisionHedgeModeRows(hedgeModeAudit)),
+          })
+        : "",
+      hedgeModeAudit?.overlay && Object.keys(hedgeModeAudit.overlay).length
+        ? surfaceCard({
+            title: "Overlay 审计",
+            content: kvList(decisionOverlayAuditRows(hedgeModeAudit.overlay)),
+          })
+        : "",
+      hedgeModeAudit?.leg_orders?.total_count
+        ? surfaceCard({
+            title: "腿级订单审计",
+            content: kvList(decisionLegOrderRows(hedgeModeAudit.leg_orders)),
+          })
+        : "",
+      hedgeModeAudit?.leg_trial_guard?.total_count
+        ? surfaceCard({
+            title: "腿级试盘守护",
+            content: kvList(decisionLegTrialGuardRows(hedgeModeAudit.leg_trial_guard)),
+          })
+        : "",
+      hedgeModeAudit?.leg_reconciliation?.total_count
+        ? surfaceCard({
+            title: "腿级对账审计",
+            content: kvList(decisionLegReconciliationRows(hedgeModeAudit.leg_reconciliation)),
           })
         : "",
       surfaceCard({
@@ -212,6 +243,154 @@ function decisionExecutionRows(aiExecutionSuggestion) {
   ];
 }
 
+function shouldRenderHedgeModeAudit(hedgeModeAudit) {
+  if (!hedgeModeAudit) return false;
+  const positionMode = hedgeModeAudit.position_mode || {};
+  return Boolean(
+    positionMode.configured_derivatives_position_mode
+    || positionMode.exchange_position_mode
+    || (positionMode.observed_position_modes || []).length
+  );
+}
+
+function decisionHedgeModeRows(hedgeModeAudit) {
+  const positionMode = hedgeModeAudit.position_mode || {};
+  return [
+    [
+      "本地运行模式",
+      hedgeModeLabel(positionMode.configured_derivatives_position_mode),
+      `要求交易所模式 ${exchangePositionModeLabel(positionMode.required_exchange_position_mode)}`,
+    ],
+    [
+      "交易所当前模式",
+      exchangePositionModeLabel(positionMode.exchange_position_mode),
+      positionMode.position_mode_match_required
+        ? `强匹配 ${booleanWord(positionMode.exchange_position_mode_matches_configured)}`
+        : "当前没有强制匹配要求",
+    ],
+    [
+      "链路里实际看到的模式",
+      drawerListText(positionMode.observed_position_modes, "当前没有腿级执行记录"),
+      drawerListText(positionMode.observed_pos_sides, "当前没有 long / short 方向记录"),
+    ],
+    [
+      "模式风险",
+      positionMode.mode_change_detected ? "当前存在模式变更或不一致信号" : "当前没有模式切换或不一致信号",
+      positionMode.contract_mismatch_detected ? "交易所模式和本地配置不一致" : "当前没有 contract mismatch",
+    ],
+  ];
+}
+
+function decisionOverlayAuditRows(overlay) {
+  const items = Array.isArray(overlay?.items) ? overlay.items : [];
+  return [
+    [
+      "当前 overlay 模式",
+      drawerText(readableState(overlay?.effective_mode || overlay?.configured_mode), "待确认"),
+      drawerText(localizeError(overlay?.overlay_source), "当前没有来源归因"),
+    ],
+    [
+      "当前状态",
+      `${booleanWord(overlay?.active)} / ${drawerText(readableState(overlay?.state), "待确认")}`,
+      drawerListText((overlay?.reason_codes || []).map(localizeError), "当前没有额外状态说明"),
+    ],
+    [
+      "阻断与双书分",
+      drawerListText((overlay?.blocked_reasons || []).map(localizeError), "当前没有额外阻断原因"),
+      `long ${formatNumber(overlay?.long_leg_score ?? 0, 2)} / short ${formatNumber(overlay?.short_leg_score ?? 0, 2)}`,
+    ],
+    [
+      "腿来源与动作",
+      items.length
+        ? items
+          .slice(0, 3)
+          .map((item) => `${drawerText(item.pos_side)} ${drawerText(localizeError(item.execution_mode), drawerText(item.execution_mode))} ${drawerText(item.action)}`)
+          .join(" / ")
+        : "当前没有 overlay 腿明细",
+      items.length
+        ? items
+          .slice(0, 2)
+          .map((item) => `目标 ${drawerText(item.target_position_qty, "0")} / Δ ${drawerText(item.delta_position_qty, "0")} / 原因 ${drawerListText((item.trigger_reason_codes || []).map(localizeError), "当前没有触发原因")}`)
+          .join(" / ")
+        : "当前没有额外腿级触发说明",
+    ],
+  ];
+}
+
+function decisionLegOrderRows(legOrders) {
+  const items = Array.isArray(legOrders?.items) ? legOrders.items : [];
+  return [
+    [
+      "腿级订单数量",
+      `${formatNumber(legOrders?.total_count || 0, 0)} 条`,
+      `open ${formatNumber(legOrders?.open_count || 0, 0)} / reduce ${formatNumber(legOrders?.reduce_count || 0, 0)} / close ${formatNumber(legOrders?.close_count || 0, 0)}`,
+    ],
+    [
+      "涉及方向",
+      drawerListText(legOrders?.pos_sides, "当前没有 long / short 方向"),
+      drawerListText(legOrders?.symbols, "当前没有腿级标的"),
+    ],
+      [
+        "最近腿级订单",
+        items.length
+          ? items.slice(0, 2).map((item) => `${drawerText(item.symbol)} ${drawerText(item.pos_side)} ${drawerText(item.action)} / ${drawerText(localizeError(item.execution_mode), drawerText(item.execution_mode, "待确认"))}`).join(" / ")
+          : "当前没有腿级订单",
+        items.length
+          ? items.slice(0, 2).map((item) => `数量 ${drawerText(item.quantity, "待确认")} / 角色 ${drawerText(item.strategy_leg_role, "待确认")} / 状态 ${drawerText(item.status, "待同步")} / 成交 ${formatNumber(item.fill_count || 0, 0)} 笔`).join(" / ")
+          : "当前没有额外腿级订单明细",
+      ],
+    ];
+}
+
+function decisionLegTrialGuardRows(legTrialGuard) {
+  const items = Array.isArray(legTrialGuard?.items) ? legTrialGuard.items : [];
+  return [
+    [
+      "腿级守护状态",
+      `${booleanWord(legTrialGuard?.enabled)} / ${drawerText(readableState(legTrialGuard?.mode), "待确认")}`,
+      `激活 ${formatNumber(legTrialGuard?.active_count || 0, 0)} / 总计 ${formatNumber(legTrialGuard?.total_count || 0, 0)}`,
+    ],
+    [
+      "long / short 结果",
+      items.length
+        ? items.map((item) => `${drawerText(item.leg)} ${drawerText(readableState(item.status), "待确认")}`).join(" / ")
+        : "当前没有腿级试盘守护结果",
+      items.length
+        ? items.map((item) => `样本 ${formatNumber(item.recent_closed_trade_count || 0, 0)} / 净收益 ${drawerText(item.recent_net_realized_pnl, "0")} / 胜率 ${formatNumber(item.recent_win_rate || 0, 2)}`).join(" / ")
+        : "当前没有额外腿级样本说明",
+    ],
+    [
+      "触发与冷却",
+      items.length
+        ? items.map((item) => `${drawerText(item.leg)} ${drawerText(localizeError(item.reason_code), item.active ? "已触发腿级试盘守护" : "当前未触发")}`).join(" / ")
+        : "当前没有额外腿级试盘守护原因",
+      items.length
+        ? items.map((item) => `${drawerText(item.leg)} guardrail ${drawerListText((item.guardrail_flags || []).map(localizeError), "当前没有额外 guardrail")} / cooldown ${drawerText(Object.keys(item.cooldowns || {}).length ? JSON.stringify(item.cooldowns) : "当前没有额外冷却")}`).join(" / ")
+        : "当前没有额外 guardrail / cooldown 摘要",
+    ],
+  ];
+}
+
+function decisionLegReconciliationRows(legReconciliation) {
+  const items = Array.isArray(legReconciliation?.items) ? legReconciliation.items : [];
+  return [
+    [
+      "腿级异常数量",
+      `${formatNumber(legReconciliation?.total_count || 0, 0)} 条`,
+      `缺执行链 ${formatNumber(legReconciliation?.missing_execution_chain_count || 0, 0)} 条`,
+    ],
+    [
+      "最近腿级异常",
+      items.length
+        ? items.slice(0, 2).map((item) => `${drawerText(item.symbol)} ${drawerText(item.leg_side)} ${drawerText(item.kind)}`).join(" / ")
+        : "当前没有腿级对账异常",
+      items.length
+        ? items.slice(0, 2).map((item) => `本地 ${drawerText(item.stored_qty, "0")} / 交易所 ${drawerText(item.exchange_qty, "0")}`).join(" / ")
+        : "当前没有额外腿级对账明细",
+    ],
+  ];
+}
+
 function decisionSourceLabel(value) {
   const source = String(value || "baseline").toLowerCase();
   if (source === "ai") return "本轮最终采用 AI 结论";
@@ -226,6 +405,18 @@ function decisionAuthorityLabel(value) {
   if (authority === "final_decision") return "当前模式允许 AI 直接给最终结论";
   if (authority === "advisory") return "当前模式只把 AI 当辅助建议";
   return "当前模式只把 AI 当参考";
+}
+
+function hedgeModeLabel(value) {
+  if (value === "hedge") return "对冲模式";
+  if (value === "net") return "净仓模式";
+  return drawerText(value, "待确认");
+}
+
+function exchangePositionModeLabel(value) {
+  if (value === "long_short_mode") return "交易所对冲模式";
+  if (value === "net_mode") return "交易所净仓模式";
+  return drawerText(value, "交易所未返回");
 }
 
 function decisionSourceNarrative(decisionOutcome = null) {

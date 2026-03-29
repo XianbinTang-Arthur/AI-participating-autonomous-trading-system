@@ -10,9 +10,6 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from aats.bootstrap.env_profiles import load_profiled_dotenv_into_process
-from apps.decision_engine.main import main
-
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the local in-memory AATS paper loop.")
@@ -33,6 +30,9 @@ def parse_args() -> argparse.Namespace:
 
 
 if __name__ == "__main__":
+    from aats.bootstrap.env_profiles import load_profiled_dotenv_into_process
+    from apps.decision_engine.main import main
+
     args = parse_args()
     load_profiled_dotenv_into_process(ROOT, args.profile)
     summary = asyncio.run(

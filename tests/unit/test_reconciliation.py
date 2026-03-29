@@ -241,6 +241,294 @@ class TestReconciliationComparator(unittest.TestCase):
         self.assertEqual(report.severity, "CLEAN")
         self.assertFalse(report.position_diff["exchange_mismatches"])
 
+    def test_compare_classifies_long_short_leg_qty_drift_as_leg_mismatch_not_unknown_chain(self) -> None:
+        comparator = StateComparator()
+        now = utc_now()
+        report = comparator.compare(
+            decision_id="decision_derivatives_leg_mismatch",
+            portfolio_snapshot_ref="evt_portfolio_derivatives_leg_mismatch",
+            product_type="derivatives",
+            margin_mode="cross",
+            allowed_symbols=["BTC-USDT-SWAP"],
+            order_states=[],
+            fills=[],
+            stored_snapshot=PortfolioSnapshot(
+                snapshot_ts=now,
+                balances={"USDT": 10_000.0},
+                positions=[
+                    Position(
+                        symbol="BTC-USDT-SWAP",
+                        position_key="BTC-USDT-SWAP:long",
+                        position_qty=0.02,
+                        position_notional=1420.0,
+                        avg_entry_price=70_000.0,
+                        unrealized_pnl=20.0,
+                        product_type="derivatives",
+                        margin_mode="cross",
+                        position_mode="long_short_mode",
+                        pos_side="long",
+                    ),
+                    Position(
+                        symbol="BTC-USDT-SWAP",
+                        position_key="BTC-USDT-SWAP:short",
+                        position_qty=-0.01,
+                        position_notional=-710.0,
+                        avg_entry_price=71_000.0,
+                        unrealized_pnl=5.0,
+                        product_type="derivatives",
+                        margin_mode="cross",
+                        position_mode="long_short_mode",
+                        pos_side="short",
+                    ),
+                ],
+                cost_basis={"BTC-USDT-SWAP:long": 70_000.0, "BTC-USDT-SWAP:short": 71_000.0},
+                realized_pnl=0.0,
+                unrealized_pnl=25.0,
+                total_equity=10_025.0,
+                gross_exposure=2130.0,
+                net_exposure=710.0,
+                risk_budget_usage={},
+                product_type="derivatives",
+                margin_mode="cross",
+            ),
+            reconstructed_snapshot=PortfolioSnapshot(
+                snapshot_ts=now,
+                balances={"USDT": 10_000.0},
+                positions=[
+                    Position(
+                        symbol="BTC-USDT-SWAP",
+                        position_key="BTC-USDT-SWAP:long",
+                        position_qty=0.02,
+                        position_notional=1420.0,
+                        avg_entry_price=70_000.0,
+                        unrealized_pnl=20.0,
+                        product_type="derivatives",
+                        margin_mode="cross",
+                        position_mode="long_short_mode",
+                        pos_side="long",
+                    ),
+                    Position(
+                        symbol="BTC-USDT-SWAP",
+                        position_key="BTC-USDT-SWAP:short",
+                        position_qty=-0.01,
+                        position_notional=-710.0,
+                        avg_entry_price=71_000.0,
+                        unrealized_pnl=5.0,
+                        product_type="derivatives",
+                        margin_mode="cross",
+                        position_mode="long_short_mode",
+                        pos_side="short",
+                    ),
+                ],
+                cost_basis={"BTC-USDT-SWAP:long": 70_000.0, "BTC-USDT-SWAP:short": 71_000.0},
+                realized_pnl=0.0,
+                unrealized_pnl=25.0,
+                total_equity=10_025.0,
+                gross_exposure=2130.0,
+                net_exposure=710.0,
+                risk_budget_usage={},
+                product_type="derivatives",
+                margin_mode="cross",
+            ),
+            exchange_snapshot=ExchangeAccountSnapshot(
+                account_source="okx",
+                fetched_at=now,
+                balances=[ExchangeBalance(currency="USDT", total=10_000.0, available=10_000.0, frozen=0.0)],
+                positions=[
+                    ExchangePosition(
+                        instrument_id="BTC-USDT-SWAP",
+                        symbol="BTC-USDT-SWAP",
+                        quantity=0.02,
+                        average_entry_price=70_000.0,
+                        mark_price=71_000.0,
+                        side="long",
+                    ),
+                    ExchangePosition(
+                        instrument_id="BTC-USDT-SWAP",
+                        symbol="BTC-USDT-SWAP",
+                        quantity=0.02,
+                        average_entry_price=71_000.0,
+                        mark_price=70_500.0,
+                        side="short",
+                    ),
+                ],
+                open_orders=[],
+                fills=[],
+                instruments=[],
+                account_mode="futures",
+                position_mode="long_short_mode",
+                account_configuration=ExchangeAccountConfiguration(position_mode="long_short_mode"),
+            ),
+            exchange_comparison_enabled=True,
+            compare_exchange_portfolio=True,
+            trusted_exchange_portfolio_baseline=True,
+        )
+
+        self.assertEqual(report.severity, "REVIEW_REQUIRED")
+        self.assertTrue(report.review_required)
+        self.assertFalse(report.only_reduce_required)
+        self.assertIn("derivatives_leg_position_mismatch", report.mismatch_categories)
+        self.assertIn("derivatives_leg_position_differs_from_exchange", report.mismatch_reasons)
+        self.assertIn("BTC-USDT-SWAP:short", report.position_diff["exchange_leg_mismatches"])
+        self.assertTrue(
+            all(
+                detail.get("kind") != "exchange_position_without_local_execution_chain"
+                for detail in report.unknown_state_details
+            )
+        )
+
+    def test_compare_marks_missing_short_leg_without_local_execution_chain_by_position_key(self) -> None:
+        comparator = StateComparator()
+        now = utc_now()
+        report = comparator.compare(
+            decision_id="decision_derivatives_missing_short_leg",
+            portfolio_snapshot_ref="evt_portfolio_derivatives_missing_short_leg",
+            product_type="derivatives",
+            margin_mode="cross",
+            allowed_symbols=["BTC-USDT-SWAP"],
+            order_states=[
+                OrderState(
+                    decision_id="decision_derivatives_missing_short_leg",
+                    intent_id="intent_derivatives_missing_short_leg_long",
+                    symbol="BTC-USDT-SWAP",
+                    client_order_id="clord_derivatives_missing_short_leg_long",
+                    venue="OKX",
+                    exchange_order_id="ord_derivatives_missing_short_leg_long",
+                    status="FILLED",
+                    exchange_status="filled",
+                    submitted_ts=now,
+                    last_update_ts=now,
+                    last_exchange_update_ts=now,
+                    requested_qty=0.02,
+                    filled_qty=0.02,
+                    remaining_qty=0.0,
+                    average_fill_price=70_000.0,
+                    fees=0.0,
+                    product_type="derivatives",
+                    margin_mode="cross",
+                    position_mode="long_short_mode",
+                    pos_side="long",
+                    submission_payload={},
+                )
+            ],
+            fills=[
+                FillEvent(
+                    fill_id="fill_derivatives_missing_short_leg_long",
+                    decision_id="decision_derivatives_missing_short_leg",
+                    intent_id="intent_derivatives_missing_short_leg_long",
+                    client_order_id="clord_derivatives_missing_short_leg_long",
+                    exchange_order_id="ord_derivatives_missing_short_leg_long",
+                    symbol="BTC-USDT-SWAP",
+                    venue="OKX",
+                    side="buy",
+                    fill_qty=0.02,
+                    fill_price=70_000.0,
+                    fee_amount=0.0,
+                    exchange_timestamp=now,
+                    ingestion_timestamp=now,
+                    product_type="derivatives",
+                    margin_mode="cross",
+                    position_mode="long_short_mode",
+                    pos_side="long",
+                    liquidity_role="taker",
+                )
+            ],
+            stored_snapshot=PortfolioSnapshot(
+                snapshot_ts=now,
+                balances={"USDT": 10_000.0},
+                positions=[
+                    Position(
+                        symbol="BTC-USDT-SWAP",
+                        position_key="BTC-USDT-SWAP:long",
+                        position_qty=0.02,
+                        position_notional=1420.0,
+                        avg_entry_price=70_000.0,
+                        unrealized_pnl=20.0,
+                        product_type="derivatives",
+                        margin_mode="cross",
+                        position_mode="long_short_mode",
+                        pos_side="long",
+                    )
+                ],
+                cost_basis={"BTC-USDT-SWAP:long": 70_000.0},
+                realized_pnl=0.0,
+                unrealized_pnl=20.0,
+                total_equity=10_020.0,
+                gross_exposure=1420.0,
+                net_exposure=1420.0,
+                risk_budget_usage={},
+                product_type="derivatives",
+                margin_mode="cross",
+            ),
+            reconstructed_snapshot=PortfolioSnapshot(
+                snapshot_ts=now,
+                balances={"USDT": 10_000.0},
+                positions=[
+                    Position(
+                        symbol="BTC-USDT-SWAP",
+                        position_key="BTC-USDT-SWAP:long",
+                        position_qty=0.02,
+                        position_notional=1420.0,
+                        avg_entry_price=70_000.0,
+                        unrealized_pnl=20.0,
+                        product_type="derivatives",
+                        margin_mode="cross",
+                        position_mode="long_short_mode",
+                        pos_side="long",
+                    )
+                ],
+                cost_basis={"BTC-USDT-SWAP:long": 70_000.0},
+                realized_pnl=0.0,
+                unrealized_pnl=20.0,
+                total_equity=10_020.0,
+                gross_exposure=1420.0,
+                net_exposure=1420.0,
+                risk_budget_usage={},
+                product_type="derivatives",
+                margin_mode="cross",
+            ),
+            exchange_snapshot=ExchangeAccountSnapshot(
+                account_source="okx",
+                fetched_at=now,
+                balances=[ExchangeBalance(currency="USDT", total=10_000.0, available=10_000.0, frozen=0.0)],
+                positions=[
+                    ExchangePosition(
+                        instrument_id="BTC-USDT-SWAP",
+                        symbol="BTC-USDT-SWAP",
+                        quantity=0.02,
+                        average_entry_price=70_000.0,
+                        mark_price=71_000.0,
+                        side="long",
+                    ),
+                    ExchangePosition(
+                        instrument_id="BTC-USDT-SWAP",
+                        symbol="BTC-USDT-SWAP",
+                        quantity=0.01,
+                        average_entry_price=71_000.0,
+                        mark_price=70_500.0,
+                        side="short",
+                    ),
+                ],
+                open_orders=[],
+                fills=[],
+                instruments=[],
+                account_mode="futures",
+                position_mode="long_short_mode",
+                account_configuration=ExchangeAccountConfiguration(position_mode="long_short_mode"),
+            ),
+            exchange_comparison_enabled=True,
+            compare_exchange_portfolio=True,
+            trusted_exchange_portfolio_baseline=True,
+        )
+
+        self.assertEqual(report.severity, "REVIEW_REQUIRED")
+        self.assertTrue(report.review_required)
+        self.assertTrue(report.only_reduce_required)
+        self.assertIn("derivatives_exchange_position_without_local_execution_chain", report.mismatch_categories)
+        self.assertIn("BTC-USDT-SWAP:short", report.position_diff["exchange_leg_mismatches"])
+        self.assertEqual(report.unknown_state_details[0]["position_key"], "BTC-USDT-SWAP:short")
+        self.assertEqual(report.unknown_state_details[0]["leg_side"], "short")
+
     def test_compare_detects_exchange_position_margin_metric_mismatch_for_exchange_sourced_snapshot(self) -> None:
         comparator = StateComparator()
         now = utc_now()
@@ -336,7 +624,8 @@ class TestReconciliationComparator(unittest.TestCase):
             trusted_exchange_portfolio_baseline=True,
         )
 
-        self.assertEqual(report.severity, "REVIEW_REQUIRED")
+        self.assertEqual(report.severity, "SOFT_MISMATCH")
+        self.assertFalse(report.review_required)
         self.assertIn("local_position_margin_divergence", report.mismatch_categories)
         self.assertIn(
             "local_position_margin_differs_from_exchange_position_margin",
@@ -1839,6 +2128,193 @@ class TestReconciliationComparator(unittest.TestCase):
         self.assertEqual(report.severity, "CLEAN")
         self.assertEqual(report.fill_diff["exchange"], {})
 
+    def test_service_filters_exchange_bills_acknowledged_by_operator_rebaseline(self) -> None:
+        now = utc_now()
+        stored_snapshot = PortfolioSnapshot(
+            snapshot_ts=now,
+            balances={"USDT": 10_000.0},
+            positions=[
+                Position(
+                    symbol="BTC-USDT-SWAP",
+                    position_key="BTC-USDT-SWAP:long",
+                    position_qty=0.0036,
+                    position_notional=250.0,
+                    avg_entry_price=69_298.8,
+                    unrealized_pnl=0.0,
+                    product_type="derivatives",
+                    margin_mode="cross",
+                    position_mode="long_short_mode",
+                    pos_side="long",
+                    margin_allocated=25.057692,
+                    maintenance_margin=1.00230768,
+                    margin_ratio=88.987015892055,
+                    liquidation_price=41_920.72782242313,
+                    margin_source="exchange",
+                )
+            ],
+            cost_basis={"BTC-USDT-SWAP:long": 69_298.8},
+            realized_pnl=0.0,
+            unrealized_pnl=0.0,
+            total_equity=10_000.0,
+            gross_exposure=250.0,
+            net_exposure=250.0,
+            risk_budget_usage={},
+            product_type="derivatives",
+            margin_mode="cross",
+        )
+        baseline_imported_at = now
+        historical_bill_ts = now - timedelta(hours=1)
+        exchange_snapshot = ExchangeAccountSnapshot(
+            account_source="okx",
+            fetched_at=now,
+            balances=[ExchangeBalance(currency="USDT", total=10_000.0, available=10_000.0, frozen=0.0)],
+            positions=[
+                ExchangePosition(
+                    instrument_id="BTC-USDT-SWAP",
+                    symbol="BTC-USDT-SWAP",
+                    quantity=0.0036,
+                    average_entry_price=69_298.8,
+                    mark_price=69_500.0,
+                    side="long",
+                    margin_mode="cross",
+                    margin_allocated=25.031772,
+                    maintenance_margin=1.00127088,
+                    margin_ratio=88.84905296445741,
+                    liquidation_price=41_920.72782242313,
+                )
+            ],
+            open_orders=[],
+            fills=[],
+            instruments=[],
+            account_mode="futures",
+            position_mode="long_short_mode",
+            account_configuration=ExchangeAccountConfiguration(position_mode="long_short_mode"),
+        )
+
+        class _PortfolioRepo:
+            def latest(self):
+                return stored_snapshot
+
+            def history(self):
+                return [stored_snapshot]
+
+        class _ExecutionRepo:
+            def order_states(self):
+                return []
+
+            def fills(self):
+                return []
+
+        class _EventStore:
+            def latest(self, topic: str):
+                if topic != topics.ACCOUNT_BASELINES:
+                    return None
+                return build_envelope(
+                    topic=topics.ACCOUNT_BASELINES,
+                    key="okx",
+                    payload_model=AccountBaselineSnapshot(
+                        account_source="okx",
+                        exchange_snapshot_ts=baseline_imported_at,
+                        imported_at=baseline_imported_at,
+                        product_type="derivatives",
+                        margin_mode="cross",
+                        baseline_status="rebaseline_completed",
+                        baseline_kind="operator_rebaseline",
+                    ),
+                    source_component="test",
+                )
+
+            def by_topic(self, topic: str):
+                latest = self.latest(topic)
+                return [latest] if latest is not None else []
+
+        class _AccountService:
+            def latest_snapshot(self):
+                return exchange_snapshot
+
+            def latest_recent_bills(self):
+                return [
+                    {
+                        "billId": "bill_hist_1",
+                        "type": "2",
+                        "subType": "5",
+                        "ccy": "USDT",
+                        "ts": str(int(historical_bill_ts.timestamp() * 1000)),
+                    }
+                ]
+
+            def recent_bills_summary(self):
+                return {
+                    "available": True,
+                    "count": 1,
+                    "latest_bill_id": "bill_hist_1",
+                    "latest_bill_ts": historical_bill_ts,
+                    "currencies": ["USDT"],
+                    "top_categories": [{"type": "2", "sub_type": "5", "currency": "USDT", "count": 1}],
+                    "funding_fee_summary": {
+                        "available": False,
+                        "count": 0,
+                        "latest_bill_ts": None,
+                        "currencies": [],
+                        "net_total_by_currency": {},
+                        "absolute_total_by_currency": {},
+                        "current_position_notional_usd": None,
+                        "funding_fee_bps_proxy": None,
+                    },
+                    "last_error": None,
+                }
+
+            def recent_bills_summary_since(self, *, since_ts=None):
+                _ = since_ts
+                return {
+                    "available": False,
+                    "count": 0,
+                    "latest_bill_id": None,
+                    "latest_bill_ts": None,
+                    "currencies": [],
+                    "top_categories": [],
+                    "funding_fee_summary": {
+                        "available": False,
+                        "count": 0,
+                        "latest_bill_ts": None,
+                        "currencies": [],
+                        "net_total_by_currency": {},
+                        "absolute_total_by_currency": {},
+                        "current_position_notional_usd": None,
+                        "funding_fee_bps_proxy": None,
+                    },
+                    "last_error": None,
+                }
+
+        service = ReconciliationService(
+            settings=AATSSettings.model_validate({"trading_product_type": "derivatives", "margin_mode": "cross"}),
+            bus=InMemoryEventBus(),
+            fetcher=ExchangeStateFetcher(account_service=_AccountService()),
+            comparator=StateComparator(),
+            repair_service=ReconciliationRepairService(),
+            reconciliation_repo=InMemoryReconciliationRepository(),
+            execution_repo=_ExecutionRepo(),  # type: ignore[arg-type]
+            portfolio_repo=_PortfolioRepo(),  # type: ignore[arg-type]
+            event_store=_EventStore(),  # type: ignore[arg-type]
+            reconstruction_service=PortfolioReconstructionService(
+                initial_usdt_balance=10_000.0,
+                snapshot_builder=PortfolioSnapshotBuilder(pnl_calculator=PortfolioPnLCalculator()),
+            ),
+            price_provider=lambda _symbol: 0.0,
+            bootstrap_portfolio_from_exchange=True,
+        )
+
+        report = service._build_report(
+            decision_id="decision_rebaseline_bills",
+            portfolio_snapshot_ref="evt_portfolio_rebaseline_bills",
+            stored_snapshot=stored_snapshot,
+        )
+
+        self.assertEqual(report.exchange_bills_summary["count"], 0)
+        self.assertNotIn("exchange_bills_activity_available", report.mismatch_categories)
+        self.assertEqual(report.severity, "SOFT_MISMATCH")
+        self.assertFalse(report.review_required)
+
     def test_service_ignores_local_exchange_fills_older_than_visible_exchange_window(self) -> None:
         now = utc_now()
         old_fill_ts = now - timedelta(hours=2)
@@ -2003,7 +2479,7 @@ class TestReconciliationComparator(unittest.TestCase):
         self.assertEqual(report.severity, "CLEAN")
         self.assertEqual(report.fill_diff["exchange"], {})
 
-    def test_compare_marks_derivatives_exchange_position_without_local_execution_chain_as_only_reduce(self) -> None:
+    def test_compare_marks_derivatives_exchange_position_without_local_execution_chain_as_review_required(self) -> None:
         comparator = StateComparator()
         now = utc_now()
         report = comparator.compare(
@@ -2067,10 +2543,11 @@ class TestReconciliationComparator(unittest.TestCase):
             compare_exchange_portfolio=True,
         )
 
-        self.assertEqual(report.severity, "SOFT_MISMATCH")
-        self.assertFalse(report.review_required)
+        self.assertEqual(report.severity, "REVIEW_REQUIRED")
+        self.assertTrue(report.review_required)
         self.assertFalse(report.halt_required)
         self.assertTrue(report.only_reduce_required)
+        self.assertTrue(report.structural_review_required)
         self.assertIn("derivatives_exchange_position_without_local_execution_chain", report.mismatch_categories)
         self.assertIn("derivatives_exchange_position_not_replayed_locally", report.mismatch_reasons)
         self.assertEqual(report.recommended_operator_action, "go_close_position_on_exchange")

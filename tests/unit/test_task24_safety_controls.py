@@ -17,6 +17,7 @@ from aats.services.portfolio_service.pnl import PortfolioPnLCalculator
 from aats.services.portfolio_service.positions import PortfolioService, PortfolioState
 from aats.services.portfolio_service.snapshots import PortfolioSnapshotBuilder
 from aats.storage.event_store import InMemoryEventStore
+from aats.storage.fill_outcome_repo import InMemoryFillOutcomeRepository
 from aats.storage.obligation_repo import InMemoryExecutionObligationRepository
 
 
@@ -53,6 +54,7 @@ class TestTask24SafetyControls(unittest.IsolatedAsyncioTestCase):
             state=state,
             snapshot_builder=PortfolioSnapshotBuilder(pnl_calculator=PortfolioPnLCalculator()),
             portfolio_repo=_FailingPortfolioRepository(),
+            fill_outcome_repo=InMemoryFillOutcomeRepository(),
             price_provider=lambda _symbol: 100.0,
         )
         fill = FillEvent(
@@ -127,7 +129,7 @@ class TestTask24SafetyControls(unittest.IsolatedAsyncioTestCase):
         )
         obligation = await service.reserve_for_intent(intent=intent, client_order_id="clord_obligation_idempotent")
         self.assertIsNotNone(obligation)
-        self.assertEqual(obligation.reserved_amount, Decimal("101.0505"))
+        self.assertEqual(obligation.reserved_amount, Decimal("101.1010000"))
 
         fill = FillEvent(
             fill_id="fill_duplicate_once",

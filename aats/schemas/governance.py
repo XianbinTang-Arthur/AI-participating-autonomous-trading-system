@@ -22,6 +22,36 @@ class PolicyDecision(SchemaBase):
     rejection_reasons: list[str] = Field(default_factory=list)
 
 
+class DerivativesExposureMetrics(SchemaBase):
+    long_position_qty: Decimal = Decimal("0")
+    short_position_qty: Decimal = Decimal("0")
+    net_position_qty: Decimal = Decimal("0")
+    gross_position_qty: Decimal = Decimal("0")
+    long_notional: Decimal = Decimal("0")
+    short_notional: Decimal = Decimal("0")
+    net_notional: Decimal = Decimal("0")
+    gross_notional: Decimal = Decimal("0")
+    net_exposure_side: str = "flat"
+    long_initial_margin: Decimal | None = None
+    short_initial_margin: Decimal | None = None
+    total_initial_margin: Decimal | None = None
+    gross_leverage: Decimal | None = None
+    net_leverage: Decimal | None = None
+
+
+class DerivativesExposureLimits(SchemaBase):
+    risk_max_long_notional: Decimal = Decimal("0")
+    risk_max_short_notional: Decimal = Decimal("0")
+    risk_max_gross_notional: Decimal = Decimal("0")
+    risk_max_net_notional: Decimal = Decimal("0")
+
+
+class LegRiskConstraint(SchemaBase):
+    leg: str
+    only_reduce_required: bool = False
+    reasons: list[str] = Field(default_factory=list)
+
+
 class RiskDecision(SchemaBase):
     decision_id: str
     approved: bool
@@ -41,6 +71,10 @@ class RiskDecision(SchemaBase):
     flatten_required: bool = False
     halt_required: bool = False
     only_reduce_required: bool = False
+    leg_only_reduce_constraints: list[LegRiskConstraint] = Field(default_factory=list)
     risk_limit_breached: bool = False
     liquidation_buffer_remaining: Decimal | None = None
+    current_derivatives_exposure: DerivativesExposureMetrics | None = None
+    projected_derivatives_exposure: DerivativesExposureMetrics | None = None
+    derivatives_exposure_limits: DerivativesExposureLimits | None = None
     rejection_reasons: list[str] = Field(default_factory=list)

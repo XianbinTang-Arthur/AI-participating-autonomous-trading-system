@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
 from decimal import Decimal
 from typing import Callable
 
@@ -13,6 +12,8 @@ from aats.schemas.execution import FillEvent, OrderObligation, OrderState
 from aats.schemas.reconciliation import ReconciliationReport
 from aats.schemas.system import RecoveryStatus
 from aats.services.accounting import remaining_obligation_amount
+from aats.services.execution_engine.bundle_recovery import obligation_matches_scope, scoped_bundle_recovery_assessment
+from aats.services.execution_engine.fill_ordering import fill_processing_sort_key
 from aats.services.governance_engine.kill_switch import KillSwitch
 from aats.services.governance_engine.runtime_layers import RecoveryPolicy
 from aats.services.portfolio_service.position_keys import position_key_for_snapshot_position
@@ -25,7 +26,13 @@ from aats.services.runtime_scope import (
     order_states_for_scope,
     runtime_state_scope,
 )
-from aats.storage.base import ExecutionObligationRepository, ExecutionRepository, PortfolioRepository, ReconciliationRepository
+from aats.storage.base import (
+    ExecutionObligationRepository,
+    ExecutionRepository,
+    PortfolioRepository,
+    ReconciliationRepository,
+    StrategyRuntimeRepository,
+)
 
 
 @dataclass(slots=True)
@@ -46,6 +53,7 @@ class ExecutionRecoveryService:
         obligation_repo: ExecutionObligationRepository,
         portfolio_repo: PortfolioRepository,
         reconciliation_repo: ReconciliationRepository,
+        strategy_runtime_repo: StrategyRuntimeRepository | None,
         reconstruction_service: PortfolioReconstructionService,
         price_provider: Callable[[str], Decimal],
         kill_switch: KillSwitch,
@@ -58,6 +66,7 @@ class ExecutionRecoveryService:
         self.obligation_repo = obligation_repo
         self.portfolio_repo = portfolio_repo
         self.reconciliation_repo = reconciliation_repo
+        self.strategy_runtime_repo = strategy_runtime_repo
         self.reconstruction_service = reconstruction_service
         self.price_provider = price_provider
         self.kill_switch = kill_switch
@@ -86,7 +95,8 @@ class ExecutionRecoveryService:
         fills = fills_for_scope(self.execution_repo, self.runtime_scope)
         latest_snapshot = latest_snapshot_for_scope(self.portfolio_repo, self.runtime_scope)
         latest_reconciliation = latest_reconciliation_for_scope(self.reconciliation_repo, self.runtime_scope)
-        open_orders = order_states_for_scope(self.execution_repo, self.runtime_scope, open_only=True)
+        scoped_order_states = order_states_for_scope(self.execution_repo, self.runtime_scope)
+        open_orders = [order for order in scoped_order_states if str(order.status).upper() not in {"FILLED", "CANCELED", "REJECTED", "FAILED", "BLOCKED", "DRY_RUN", "EXPIRED"}]
         notes: list[str] = []
         rebuilt_snapshot_saved = False
         rebuilt_snapshot_for_event: PortfolioSnapshot | None = None
@@ -96,6 +106,16 @@ class ExecutionRecoveryService:
         released_orphan_obligation_count = self._cleanup_orphan_obligations()
         if released_orphan_obligation_count:
             notes.append(f"released_orphan_obligations:{released_orphan_obligation_count}")
+        bundle_recovery = scoped_bundle_recovery_assessment(
+            scope=self.runtime_scope,
+            order_states=scoped_order_states,
+            obligations=self._scoped_active_obligations(),
+            strategy_bundles=self._scoped_recent_strategy_bundles(),
+        )
+        if bundle_recovery.bundle_recovery_required:
+            notes.append(f"bundle_recovery_required:{bundle_recovery.open_bundle_count}")
+            if bundle_recovery.unbundled_open_order_count:
+                notes.append(f"unbundled_open_orders:{bundle_recovery.unbundled_open_order_count}")
 
         if account_baseline is not None:
             notes.append(account_baseline.baseline_status)
@@ -113,7 +133,7 @@ class ExecutionRecoveryService:
             portfolio_state.load_portfolio_snapshot(
                 latest_snapshot,
                 applied_fill_ids={fill.fill_id for fill in fills},
-                total_fees_paid=PortfolioState.total_fee_cost_in_quote(fills),
+                total_fees_paid=PortfolioState.total_fee_delta_in_quote(fills),
             )
             rebuilt = self._rebuild_snapshot_for_validation(
                 latest_snapshot=latest_snapshot,
@@ -155,7 +175,7 @@ class ExecutionRecoveryService:
                 portfolio_state.load_portfolio_snapshot(
                     rebuilt_snapshot,
                     applied_fill_ids={fill.fill_id for fill in fills},
-                    total_fees_paid=PortfolioState.total_fee_cost_in_quote(fills),
+                    total_fees_paid=PortfolioState.total_fee_delta_in_quote(fills),
                 )
                 self.portfolio_repo.save_snapshot(rebuilt_snapshot)
                 rebuilt_snapshot_saved = True
@@ -178,14 +198,43 @@ class ExecutionRecoveryService:
             notes.extend(latest_reconciliation.only_reduce_reasons)
 
         if open_orders:
-            self._halt_for_recovery(
-                reason="recovery_open_orders_present",
-                action="halted_open_orders_require_review",
-                notes=notes,
+            if bundle_recovery.bundle_recovery_required and not bundle_recovery.recovery_blocking:
+                notes.append("structured_strategy_bundle_open_orders_detected")
+                recovery_action = recovery_action or "tracking_strategy_bundle_recovery"
+            else:
+                self._halt_for_recovery(
+                    reason="recovery_open_orders_present",
+                    action="halted_open_orders_require_review",
+                    notes=notes,
+                )
+                recovery_action = recovery_action or "halted_open_orders_require_review"
+                safe_startup = False
+                notes.append("open_orders_restored_require_operator_review")
+
+        only_reduce_reasons = (
+            list(latest_reconciliation.only_reduce_reasons)
+            if latest_reconciliation is not None
+            else []
+        )
+        reconciliation_only_reduce_required = bool(
+            latest_reconciliation is not None and latest_reconciliation.only_reduce_required
+        )
+        reconciliation_review_required = bool(
+            latest_reconciliation is not None and latest_reconciliation.review_required
+        )
+        resume_blocked_reasons: list[str] = []
+        if reconciliation_review_required:
+            resume_blocked_reasons.append("operator_rebaseline_required")
+        if reconciliation_only_reduce_required:
+            resume_blocked_reasons.extend(only_reduce_reasons or ["only_reduce_required"])
+        if bundle_recovery.bundle_recovery_required:
+            only_reduce_reasons.append("strategy_bundle_recovery_in_progress")
+            resume_blocked_reasons.append(
+                "strategy_bundle_recovery_requires_review"
+                if bundle_recovery.recovery_blocking
+                else "strategy_bundle_recovery_in_progress"
             )
-            recovery_action = recovery_action or "halted_open_orders_require_review"
-            safe_startup = False
-            notes.append("open_orders_restored_require_operator_review")
+        only_reduce_reasons = self._dedupe_notes(only_reduce_reasons)
 
         status = RecoveryStatus(
             status=(
@@ -202,8 +251,10 @@ class ExecutionRecoveryService:
                 account_baseline=account_baseline,
                 halted=self.kill_switch.halted,
                 latest_reconciliation=latest_reconciliation,
+                bundle_recovery_required=bundle_recovery.bundle_recovery_required,
+                bundle_recovery_blocking=bundle_recovery.recovery_blocking,
             ),
-            recovered_order_count=len(order_states_for_scope(self.execution_repo, self.runtime_scope)),
+            recovered_order_count=len(scoped_order_states),
             recovered_fill_count=len(fills),
             recovered_snapshot_available=latest_snapshot_for_scope(self.portfolio_repo, self.runtime_scope) is not None,
             rebuilt_snapshot_saved=rebuilt_snapshot_saved,
@@ -216,18 +267,30 @@ class ExecutionRecoveryService:
             open_order_count=len(open_orders),
             divergence_count=divergence_count,
             safe_startup=safe_startup and not self.kill_switch.halted,
-            safe_to_trade=safe_startup and not self.kill_switch.halted,
-            resume_eligible=safe_startup and not self.kill_switch.halted,
+            safe_to_trade=(
+                safe_startup
+                and not self.kill_switch.halted
+                and not bundle_recovery.bundle_recovery_required
+                and not reconciliation_only_reduce_required
+                and not reconciliation_review_required
+            ),
+            resume_eligible=(
+                safe_startup
+                and not self.kill_switch.halted
+                and not bundle_recovery.bundle_recovery_required
+                and not reconciliation_only_reduce_required
+                and not reconciliation_review_required
+            ),
             review_required=bool(
                 (account_baseline is not None and account_baseline.requires_operator_review)
-                or (latest_reconciliation is not None and latest_reconciliation.review_required)
+                or reconciliation_review_required
+                or bundle_recovery.recovery_blocking
             ),
-            only_reduce_required=bool(latest_reconciliation is not None and latest_reconciliation.only_reduce_required),
-            only_reduce_reasons=(
-                list(latest_reconciliation.only_reduce_reasons)
-                if latest_reconciliation is not None
-                else []
+            only_reduce_required=bool(
+                reconciliation_only_reduce_required
+                or bundle_recovery.bundle_recovery_required
             ),
+            only_reduce_reasons=only_reduce_reasons,
             unknown_state_details=(
                 list(latest_reconciliation.unknown_state_details)
                 if latest_reconciliation is not None
@@ -237,9 +300,15 @@ class ExecutionRecoveryService:
                 (account_baseline is not None and account_baseline.requires_operator_review)
                 or (latest_reconciliation is not None and latest_reconciliation.review_required)
                 or self.kill_switch.halted
+                or bundle_recovery.recovery_blocking
             ),
             halted=self.kill_switch.halted,
             recovery_action=recovery_action,
+            bundle_recovery_required=bundle_recovery.bundle_recovery_required,
+            bundle_recovery_count=bundle_recovery.open_bundle_count,
+            recoverable_bundle_count=bundle_recovery.recoverable_bundle_count,
+            unbundled_open_order_count=bundle_recovery.unbundled_open_order_count,
+            bundle_summaries=list(bundle_recovery.bundle_summaries),
             baseline_imported=account_baseline is not None,
             baseline_status=account_baseline.baseline_status if account_baseline is not None else None,
             baseline_imported_at=account_baseline.imported_at if account_baseline is not None else None,
@@ -265,6 +334,7 @@ class ExecutionRecoveryService:
                 if account_baseline is not None and account_baseline.baseline_kind == "operator_rebaseline"
                 else None
             ),
+            resume_blocked_reasons=self._dedupe_notes(resume_blocked_reasons),
             notes=self._dedupe_notes(notes),
         )
         return RecoveryArtifacts(
@@ -311,7 +381,7 @@ class ExecutionRecoveryService:
         )
         state.load_portfolio_snapshot(baseline_snapshot)
         baseline_ts = baseline_snapshot.snapshot_ts
-        for fill in sorted(fills, key=lambda item: (item.ingestion_timestamp, item.fill_id)):
+        for fill in sorted(fills, key=fill_processing_sort_key):
             if fill.ingestion_timestamp >= baseline_ts:
                 state.apply_fill(fill)
         return self.reconstruction_service.snapshot_builder.build(
@@ -354,14 +424,24 @@ class ExecutionRecoveryService:
     def _scoped_active_obligations(self) -> list[OrderObligation]:
         obligations: list[OrderObligation] = []
         for obligation in self.obligation_repo.active_obligations():
-            if obligation.product_type != self.runtime_scope.product_type:
-                continue
-            if obligation.margin_mode != self.runtime_scope.margin_mode:
-                continue
-            if self.runtime_scope.allowed_symbols and obligation.symbol not in self.runtime_scope.allowed_symbols:
+            if not obligation_matches_scope(obligation, self.runtime_scope):
                 continue
             obligations.append(obligation)
         return obligations
+
+    def _scoped_recent_strategy_bundles(self):
+        if self.strategy_runtime_repo is None:
+            return []
+        bundles = self.strategy_runtime_repo.recent_execution_bundles(
+            product_type=self.runtime_scope.product_type,
+            margin_mode=self.runtime_scope.margin_mode,
+            limit=50,
+        )
+        return [
+            bundle
+            for bundle in bundles
+            if self.runtime_scope.symbol_allowed(bundle.selected_symbol)
+        ]
 
     def _resolved_obligation(
         self,
@@ -399,6 +479,8 @@ class ExecutionRecoveryService:
         account_baseline: AccountBaselineSnapshot | None,
         halted: bool,
         latest_reconciliation: ReconciliationReport | None,
+        bundle_recovery_required: bool = False,
+        bundle_recovery_blocking: bool = False,
     ) -> str:
         if account_baseline is not None and account_baseline.baseline_kind == "operator_rebaseline":
             return "rebaseline_completed" if not halted else "resume_blocked"
@@ -409,6 +491,11 @@ class ExecutionRecoveryService:
                 return "resume_blocked"
             if latest_reconciliation.review_required:
                 return "review_required"
+        if bundle_recovery_blocking:
+            return "review_required"
+        if bundle_recovery_required:
+            return "bundle_recovery"
+        if latest_reconciliation is not None:
             if latest_reconciliation.only_reduce_required:
                 return "only_reduce"
         if halted:

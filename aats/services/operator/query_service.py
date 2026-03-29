@@ -1,7 +1,9 @@
 ﻿from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 from aats.bootstrap.logging import get_logger
@@ -11,6 +13,13 @@ from aats.schemas.common import EventEnvelope, utc_now
 from aats.schemas.blocker_control import BlockerControlSnapshot
 from aats.schemas.decision import AIDecisionIntent, BaselineReference, DecisionOutcome, normalize_ai_operating_mode
 from aats.schemas.execution import FillEvent, OrderState, execution_action_from_position_intent
+from aats.schemas.portfolio import SleevePnLRecord
+from aats.schemas.strategy_runtime import (
+    PortfolioAllocationDecision,
+    StrategyCoordinatorSnapshot,
+    StrategyExecutionBundle,
+    StrategySleeveIntent,
+)
 from aats.schemas.operator import (
     AuthSource,
     BlockerSnapshotRecord,
@@ -20,34 +29,52 @@ from aats.schemas.operator import (
 )
 from aats.services.blocker_control import BlockerControlService
 from aats.services.blocker_control.actions import BlockerActionService
+from aats.services.accounting import fill_fee_cost_in_quote, fill_fee_delta_in_quote
+from aats.services.execution_engine.okx_account import derivatives_position_mode_contract
+from aats.services.execution_engine.fill_ordering import fill_processing_sort_key
 from aats.services.governance_engine.recovery_posture import RecoveryPostureEvaluator
+from aats.services.operator.account_queries import AccountQueryFacade
 from aats.services.operator.audit_replay_queries import AuditReplayQueryFacade
+from aats.services.operator.blocker_queries import BlockerQueryFacade
 from aats.services.operator.accounts import (
     create_operator_user as create_managed_operator_user,
     delete_operator_user as delete_managed_operator_user,
     enabled_admin_count,
     update_operator_user as update_managed_operator_user,
 )
-from aats.services.operator.runtime_profiles import (
-    readonly_runtime_profile_snapshot,
-    runtime_profile_action_payload,
-)
+from aats.services.operator.report_queries import ReportQueryFacade
+from aats.services.operator.recovery_queries import RecoveryQueryFacade
+from aats.services.operator.runtime_profiles import readonly_runtime_profile_snapshot
 from aats.services.operator.runtime_queries import RuntimeQueryFacade
 from aats.services.operator.reconciliation_system_queries import ReconciliationSystemQueryFacade
 from aats.services.operator.strategy_profile_queries import StrategyProfileQueryFacade
+from aats.services.operator.strategy_queries import StrategyQueryFacade
 from aats.services.operator.strategy_profiles import StrategyProfileControlService
-from aats.services.portfolio_service.position_keys import build_position_key, position_key_for_snapshot_position
+from aats.services.ledger.lot_projection import LotBasedProjectionBuilder
+from aats.services.portfolio_service.instrument_states import (
+    instrument_position_state_for_symbol,
+    instrument_position_states_from_exchange_positions,
+    instrument_position_states_from_snapshot_positions,
+)
+from aats.services.portfolio_service.position_keys import build_position_key
+from aats.services.strategy_overlay_rollout import (
+    overlay_global_rollback_sequence,
+    overlay_rollout_status,
+    overlay_runtime_stage,
+)
 from aats.services.runtime_scope import (
     fill_outcomes_for_scope,
     fills_for_scope,
     funding_fee_records_for_scope,
     latest_reconciliation_for_scope,
     latest_snapshot_for_scope,
+    sleeve_pnl_records_for_scope,
     order_states_for_scope,
     snapshots_for_scope,
     runtime_state_scope,
     latest_topic_event_for_scope,
 )
+from aats.services.strategy_engines.smart_arbitrage.pair_registry import load_pair_definitions
 from aats.services.strategy_execution_health import compute_strategy_execution_health
 
 if TYPE_CHECKING:
@@ -69,9 +96,14 @@ class OperatorQueryService:
         self.blocker_control_service = BlockerControlService(self)
         self.blocker_action_service = BlockerActionService(self)
         self.runtime_queries = RuntimeQueryFacade(self)
+        self.recovery_queries = RecoveryQueryFacade(self)
         self.reconciliation_system_queries = ReconciliationSystemQueryFacade(self)
         self.strategy_profile_queries = StrategyProfileQueryFacade(self)
         self.audit_replay_queries = AuditReplayQueryFacade(self)
+        self.account_queries = AccountQueryFacade(self)
+        self.strategy_queries = StrategyQueryFacade(self)
+        self.report_queries = ReportQueryFacade(self)
+        self.blocker_queries = BlockerQueryFacade(self)
 
     def _cached(self, key: str, loader):
         if key not in self._cache:
@@ -124,6 +156,17 @@ class OperatorQueryService:
             lambda: fill_outcomes_for_scope(self.runtime.fill_outcome_repo, self.state_scope),
         )
 
+    def _refresh_sleeve_pnl_projection(self) -> list[SleevePnLRecord]:
+        service = getattr(self.runtime, "sleeve_pnl_projection_service", None)
+        if service is None:
+            return []
+        cache_key = f"refresh_sleeve_pnl_projection:{self._scope_cache_fragment()}"
+        return self._cached_ttl(
+            cache_key,
+            5,
+            lambda: service.rebuild_scope(scope=self.state_scope),
+        )
+
     def _scoped_funding_fee_records(self):
         return self._cached(
             "scoped_funding_fee_records",
@@ -132,6 +175,16 @@ class OperatorQueryService:
                 if getattr(self.runtime, "funding_fee_repo", None) is not None
                 else []
             ),
+        )
+
+    def _scoped_sleeve_pnl_records(self):
+        self._refresh_sleeve_pnl_projection()
+        repo = getattr(self.runtime, "sleeve_pnl_repo", None)
+        if repo is None:
+            return []
+        return self._cached(
+            "scoped_sleeve_pnl_records",
+            lambda: sleeve_pnl_records_for_scope(repo, self.state_scope),
         )
 
     def _fill_outcome_map(self) -> dict[str, Any]:
@@ -288,16 +341,16 @@ class OperatorQueryService:
         snapshot = self._latest_scoped_snapshot()
         if snapshot is None:
             return Decimal("0")
-        quantity = sum(
-            (
-                Decimal(str(position.position_qty))
+        state = instrument_position_state_for_symbol(
+            instrument_position_states_from_snapshot_positions(
+                position
                 for position in snapshot.positions
                 if position.symbol == symbol
             ),
-            start=Decimal("0"),
+            symbol,
         )
-        if abs(quantity) > self._DECIMAL_EPSILON:
-            return quantity
+        if state is not None and abs(state.net_position_qty) > self._DECIMAL_EPSILON:
+            return state.net_position_qty
         if snapshot.product_type == "spot" and "-" in symbol:
             base_currency, _quote_currency = symbol.split("-", 1)
             return snapshot.balances.get(base_currency, Decimal("0"))
@@ -307,47 +360,21 @@ class OperatorQueryService:
     def _aggregate_local_positions(snapshot) -> list[dict[str, Any]]:
         if snapshot is None:
             return []
-        aggregated: dict[str, dict[str, Any]] = {}
+        aggregated: dict[str, dict[str, Any]] = {
+            state.symbol: state.model_dump(mode="json")
+            for state in instrument_position_states_from_snapshot_positions(snapshot.positions)
+        }
         for position in snapshot.positions:
-            entry = aggregated.setdefault(
-                position.symbol,
-                {
-                    "symbol": position.symbol,
-                    "position_qty": Decimal("0"),
-                    "position_notional": Decimal("0"),
-                    "avg_entry_price": Decimal("0"),
-                    "unrealized_pnl": Decimal("0"),
-                    "product_type": position.product_type,
-                    "margin_mode": position.margin_mode,
-                    "position_mode": position.position_mode,
-                    "target_leverage": position.target_leverage,
-                    "legs": [],
-                },
-            )
-            entry["position_qty"] = Decimal(str(entry["position_qty"])) + Decimal(str(position.position_qty))
-            entry["position_notional"] = Decimal(str(entry["position_notional"])) + Decimal(str(position.position_notional))
-            entry["unrealized_pnl"] = Decimal(str(entry["unrealized_pnl"])) + Decimal(str(position.unrealized_pnl))
-            entry["target_leverage"] = max(float(entry["target_leverage"]), float(position.target_leverage))
-            entry["legs"].append(
-                {
-                    "position_key": position_key_for_snapshot_position(position),
-                    "pos_side": position.pos_side,
-                    "position_qty": position.position_qty,
-                    "avg_entry_price": position.avg_entry_price,
-                    "unrealized_pnl": position.unrealized_pnl,
-                    "settle_currency": position.settle_currency,
-                    "margin_mode": position.margin_mode,
-                    "margin_allocated": position.margin_allocated,
-                    "maintenance_margin": position.maintenance_margin,
-                    "margin_ratio": position.margin_ratio,
-                    "liquidation_price": position.liquidation_price,
-                    "margin_source": position.margin_source,
-                }
-            )
+            entry = aggregated.get(position.symbol)
+            if entry is None:
+                continue
+            entry.setdefault("target_leverage", float(position.target_leverage))
         rows: list[dict[str, Any]] = []
         for item in aggregated.values():
-            total_qty = Decimal(str(item["position_qty"]))
-            total_notional = Decimal(str(item["position_notional"]))
+            total_qty = Decimal(str(item["net_position_qty"]))
+            total_notional = Decimal(str(item["net_position_notional"]))
+            item["position_qty"] = item["net_position_qty"]
+            item["position_notional"] = item["net_position_notional"]
             item["avg_entry_price"] = (
                 total_notional / total_qty
                 if abs(total_qty) > Decimal("1e-12")
@@ -361,35 +388,20 @@ class OperatorQueryService:
     def _aggregate_exchange_positions(exchange) -> list[dict[str, Any]]:
         if exchange is None:
             return []
-        aggregated: dict[str, dict[str, Any]] = {}
-        for position in exchange.positions:
-            quantity = Decimal(str(position.quantity))
-            if str(getattr(position, "side", "net") or "net").lower() == "short" and quantity > 0:
-                quantity = -quantity
-            entry = aggregated.setdefault(
-                position.symbol,
-                {
-                    "symbol": position.symbol,
-                    "position_qty": Decimal("0"),
-                    "legs": [],
-                },
+        snapshot_position_mode = (
+            exchange.account_configuration.position_mode
+            if getattr(exchange, "account_configuration", None) is not None
+            else getattr(exchange, "position_mode", None)
+        )
+        rows = [
+            state.model_dump(mode="json")
+            for state in instrument_position_states_from_exchange_positions(
+                exchange.positions,
+                position_mode=snapshot_position_mode,
             )
-            entry["position_qty"] = Decimal(str(entry["position_qty"])) + quantity
-            entry["legs"].append(
-                {
-                    "side": getattr(position, "side", "net"),
-                    "position_qty": quantity,
-                    "avg_entry_price": position.average_entry_price,
-                    "notional_usd": position.notional_usd,
-                    "margin_mode": getattr(position, "margin_mode", None),
-                    "margin_allocated": getattr(position, "margin_allocated", None),
-                    "maintenance_margin": getattr(position, "maintenance_margin", None),
-                    "margin_ratio": getattr(position, "margin_ratio", None),
-                    "liquidation_price": getattr(position, "liquidation_price", None),
-                    "settle_currency": getattr(position, "settle_currency", None),
-                }
-            )
-        rows = list(aggregated.values())
+        ]
+        for item in rows:
+            item["position_qty"] = item["net_position_qty"]
         rows.sort(key=lambda item: str(item["symbol"]))
         return rows
 
@@ -409,7 +421,6 @@ class OperatorQueryService:
     def _local_position_margin_summary(self, snapshot) -> dict[str, Any]:
         if snapshot is None:
             return self._empty_position_margin_summary()
-        summary = self._empty_position_margin_summary()
         margin_mode_counts: dict[str, int] = {}
         margin_source_counts: dict[str, int] = {}
         settle_currencies: set[str] = set()
@@ -441,7 +452,6 @@ class OperatorQueryService:
     def _exchange_position_margin_summary(self, exchange) -> dict[str, Any]:
         if exchange is None:
             return self._empty_position_margin_summary()
-        summary = self._empty_position_margin_summary()
         margin_mode_counts: dict[str, int] = {}
         settle_currencies: set[str] = set()
         margin_allocated_total = Decimal("0")
@@ -645,7 +655,6 @@ class OperatorQueryService:
         )
         liquidation_summary = self._exchange_liquidation_risk_summary(snapshot)
         nearest_gap = self._to_decimal(liquidation_summary.get("nearest_liquidation_gap_ratio"))
-        projected_margin_usage = None if projected_context is None else self._to_decimal(projected_context.get("projected_margin_usage"))
         status = "healthy"
         if (
             (nearest_gap is not None and nearest_gap <= Decimal("0"))
@@ -1161,6 +1170,7 @@ class OperatorQueryService:
             "runtime_contract": {
                 "config_profile": self.runtime.settings.config_profile,
                 "startup_profile": self.runtime.settings.startup_profile,
+                "env_template_profile": self.runtime.settings.env_template_profile,
                 "execution_route": self.runtime.environment_capabilities.exchange_submission_target,
                 "storage_mode": self.runtime.settings.storage_mode,
             },
@@ -1211,12 +1221,31 @@ class OperatorQueryService:
 
     def strategy_execution_health(self, symbol: str | None = None) -> dict[str, Any]:
         target_symbol = symbol or self.runtime.settings.default_symbol
+        snapshot = self._latest_scoped_snapshot()
+        position_state = (
+            None
+            if snapshot is None
+            else instrument_position_state_for_symbol(
+                instrument_position_states_from_snapshot_positions(
+                    position
+                    for position in snapshot.positions
+                    if position.symbol == target_symbol
+                ),
+                target_symbol,
+            )
+        )
         snapshot = compute_strategy_execution_health(
             settings=self.runtime.settings,
             symbol=target_symbol,
             fills=self._scoped_fills(),
             snapshots=snapshots_for_scope(self.runtime.portfolio_repo, self.state_scope),
             current_position_qty=self._current_symbol_position_qty(target_symbol),
+            current_long_position_qty=(
+                Decimal("0") if position_state is None else position_state.long_position_qty
+            ),
+            current_short_position_qty=(
+                Decimal("0") if position_state is None else position_state.short_position_qty
+            ),
         )
         return snapshot.as_payload(
             settings=self.runtime.settings,
@@ -1300,6 +1329,73 @@ class OperatorQueryService:
         return None
 
     @staticmethod
+    def _record_value(record: Any, field: str) -> Any:
+        if isinstance(record, dict):
+            return record.get(field)
+        return getattr(record, field, None)
+
+    def _fee_cost_in_quote(self, record: Any) -> Decimal | None:
+        fee_quote_amount = self._to_decimal(self._record_value(record, "fee_quote_amount"))
+        if fee_quote_amount is not None:
+            return abs(fee_quote_amount)
+        fee_delta = self._to_decimal(self._record_value(record, "fee_delta"))
+        if fee_delta is not None:
+            return abs(fee_delta)
+        fee_amount = self._to_decimal(self._record_value(record, "fee_amount"))
+        if fee_amount is None:
+            return None
+        symbol = self._record_value(record, "symbol")
+        side = self._record_value(record, "side")
+        fill_price = self._record_value(record, "fill_price")
+        if symbol in {None, ""} or side in {None, ""} or fill_price in {None, ""}:
+            return abs(fee_amount)
+        return abs(
+            self._to_decimal(
+                fill_fee_cost_in_quote(
+                    SimpleNamespace(
+                        symbol=symbol,
+                        fee_amount=fee_amount,
+                        fee_currency=self._record_value(record, "fee_currency"),
+                        venue=self._record_value(record, "venue") or "OKX",
+                        side=side,
+                        fill_price=fill_price,
+                    )
+                )
+            )
+            or Decimal("0")
+        )
+
+    def _signed_fee_delta_in_quote(self, record: Any) -> Decimal | None:
+        fee_amount = self._to_decimal(self._record_value(record, "fee_amount"))
+        symbol = self._record_value(record, "symbol")
+        side = self._record_value(record, "side")
+        fill_price = self._record_value(record, "fill_price")
+        if fee_amount is not None:
+            if symbol in {None, ""} or side in {None, ""} or fill_price in {None, ""}:
+                return fee_amount
+            return self._to_decimal(
+                fill_fee_delta_in_quote(
+                    SimpleNamespace(
+                        symbol=symbol,
+                        fee_amount=fee_amount,
+                        fee_currency=self._record_value(record, "fee_currency"),
+                        venue=self._record_value(record, "venue") or "OKX",
+                        side=side,
+                        fill_price=fill_price,
+                    )
+                )
+            )
+        fee_delta = self._to_decimal(self._record_value(record, "fee_delta"))
+        fee_quote_amount = self._to_decimal(self._record_value(record, "fee_quote_amount"))
+        if fee_delta is not None:
+            if fee_delta < 0 and fee_quote_amount is not None:
+                # Legacy rows sometimes stored expense as negative fee_delta while keeping
+                # fee_quote_amount as the positive quote cost.
+                return fee_quote_amount
+            return fee_delta
+        return fee_quote_amount
+
+    @staticmethod
     def _latency_ms(start: Any, end: Any) -> float | None:
         if not isinstance(start, datetime) or not isinstance(end, datetime):
             return None
@@ -1324,8 +1420,15 @@ class OperatorQueryService:
             return {
                 "audit": None,
                 "decision_context": None,
+                "strategy_coordinator_snapshot": None,
+                "strategy_sleeve_intents": [],
+                "portfolio_allocation_decision": None,
+                "baseline_assessment": None,
                 "position_target": None,
+                "risk_decision": None,
                 "execution_plan": None,
+                "execution_plans": [],
+                "strategy_execution_bundle": None,
                 "decision_outcome": None,
             }
         audit = self.runtime.audit_repo.get(decision_id)
@@ -1333,22 +1436,53 @@ class OperatorQueryService:
             return {
                 "audit": None,
                 "decision_context": None,
+                "strategy_coordinator_snapshot": None,
+                "strategy_sleeve_intents": [],
+                "portfolio_allocation_decision": None,
+                "baseline_assessment": None,
                 "position_target": None,
+                "risk_decision": None,
                 "execution_plan": None,
                 "decision_outcome": None,
             }
+        position_target = self.payload_by_ref(audit.position_target_ref)
+        decision_outcome = self.payload_by_ref(audit.decision_outcome_ref)
+        if decision_outcome is None and isinstance(position_target, dict):
+            native_outcome = position_target.get("decision_outcome")
+            decision_outcome = native_outcome if isinstance(native_outcome, dict) else None
         return {
             "audit": audit,
             "decision_context": self.payload_by_ref(audit.decision_context_ref),
-            "position_target": self.payload_by_ref(audit.position_target_ref),
+            "strategy_coordinator_snapshot": self.payload_by_ref(audit.strategy_coordinator_snapshot_ref),
+            "strategy_sleeve_intents": [
+                payload
+                for payload in (self.payload_by_ref(ref) for ref in audit.strategy_sleeve_intent_refs)
+                if payload is not None
+            ],
+            "portfolio_allocation_decision": self.payload_by_ref(audit.portfolio_allocation_decision_ref),
+            "baseline_assessment": self.payload_by_ref(audit.baseline_assessment_ref),
+            "position_target": position_target,
+            "risk_decision": self._risk_decision_payload(self.payload_by_ref(audit.risk_decision_ref)),
             "execution_plan": self._execution_plan_payload(self.payload_by_ref(audit.execution_plan_ref)),
-            "decision_outcome": self.payload_by_ref(audit.decision_outcome_ref),
+            "execution_plans": [
+                payload
+                for payload in (
+                    self._execution_plan_payload(self.payload_by_ref(ref))
+                    for ref in audit.execution_plan_refs
+                )
+                if payload is not None
+            ],
+            "strategy_execution_bundle": self.payload_by_ref(audit.strategy_execution_bundle_ref),
+            "decision_outcome": decision_outcome,
         }
 
     def _execution_quality_row(self, fill_record: Any) -> dict[str, Any]:
         fill_payload = self._execution_record_payload(fill_record)
         decision_support = self._decision_support_payload(fill_payload.get("decision_id"))
         decision_context = decision_support["decision_context"]
+        baseline_assessment = decision_support["baseline_assessment"]
+        position_target = decision_support["position_target"]
+        risk_decision = decision_support["risk_decision"]
         execution_plan = decision_support["execution_plan"]
         decision_outcome = decision_support["decision_outcome"]
         order_state = self._control_plane_order_state(str(fill_payload.get("client_order_id") or ""))
@@ -1376,11 +1510,64 @@ class OperatorQueryService:
                 fill_notional = qty * price
 
         fee_amount = self._to_decimal(fill_payload.get("fee_amount"))
-        fee_delta = self._to_decimal(fill_payload.get("fee_delta"))
+        fee_quote_amount = self._fee_cost_in_quote(fill_payload)
+        fee_delta = self._signed_fee_delta_in_quote(fill_payload)
         adverse_slippage_bps = self._adverse_slippage_bps(
             side=fill_payload.get("side"),
             fill_price=fill_payload.get("fill_price"),
             reference_price=reference_price,
+        )
+        market_regime = None if baseline_assessment is None else baseline_assessment.get("regime")
+        volatility_state = None if baseline_assessment is None else baseline_assessment.get("volatility_state")
+        baseline_reason_codes = [] if baseline_assessment is None else list(baseline_assessment.get("reason_codes") or [])
+        position_management_reason_codes = (
+            []
+            if decision_outcome is None
+            else list(decision_outcome.get("position_management_reason_codes") or [])
+        )
+        exit_attribution = None if decision_outcome is None else decision_outcome.get("exit_attribution")
+        risk_constraints_applied = [] if risk_decision is None else list(risk_decision.get("constraints_applied") or [])
+        risk_rejection_reasons = [] if risk_decision is None else list(risk_decision.get("rejection_reasons") or [])
+        risk_budget_multiplier = None if risk_decision is None else self._to_decimal(risk_decision.get("risk_budget_multiplier"))
+        execution_aggressiveness_multiplier = (
+            None if risk_decision is None else self._to_decimal(risk_decision.get("execution_aggressiveness_multiplier"))
+        )
+        strategy_family = (
+            None
+            if decision_outcome is None
+            else decision_outcome.get("selected_strategy_family")
+        )
+        if strategy_family is None and position_target is not None:
+            strategy_family = position_target.get("strategy_family")
+        strategy_route_action = (
+            None
+            if decision_outcome is None
+            else decision_outcome.get("selected_strategy_route_action")
+        )
+        if strategy_route_action is None and position_target is not None:
+            strategy_route_action = position_target.get("strategy_route_action")
+        strategy_selection_reason_codes = (
+            []
+            if decision_outcome is None
+            else list(decision_outcome.get("strategy_selection_reason_codes") or [])
+        )
+        if not strategy_selection_reason_codes and position_target is not None:
+            strategy_selection_reason_codes = list(position_target.get("strategy_reason_codes") or [])
+        strategy_headline = None if decision_outcome is None else decision_outcome.get("strategy_selection_headline")
+        if strategy_headline is None and position_target is not None:
+            strategy_headline = position_target.get("strategy_headline")
+        risk_protection_active = bool(
+            risk_decision is not None
+            and (
+                bool(risk_decision.get("only_reduce_required"))
+                or "risk_budget_multiplier_applied" in risk_constraints_applied
+                or "execution_aggressiveness_contracted" in risk_constraints_applied
+                or (risk_budget_multiplier is not None and risk_budget_multiplier < Decimal("0.999999"))
+                or (
+                    execution_aggressiveness_multiplier is not None
+                    and execution_aggressiveness_multiplier < Decimal("0.999999")
+                )
+            )
         )
 
         return {
@@ -1413,18 +1600,38 @@ class OperatorQueryService:
             "fill_qty": fill_payload.get("fill_qty"),
             "fill_notional": fill_notional,
             "fee_amount": fee_amount,
+            "fee_quote_amount": fee_quote_amount,
             "fee_delta": fee_delta,
             "fee_ratio": (
                 None
-                if fee_amount is None or fill_notional is None or abs(fill_notional) <= self._DECIMAL_EPSILON
-                else fee_amount / fill_notional
+                if fee_quote_amount is None or fill_notional is None or abs(fill_notional) <= self._DECIMAL_EPSILON
+                else fee_quote_amount / fill_notional
             ),
             "realized_pnl_delta": self._to_decimal(fill_payload.get("realized_pnl_delta")),
             "gross_realized_pnl": self._to_decimal(fill_payload.get("gross_realized_pnl")),
             "expected_net_edge_bps": None if decision_outcome is None else decision_outcome.get("expected_net_edge_bps"),
+            "market_regime": market_regime,
+            "volatility_state": volatility_state,
+            "baseline_reason_codes": baseline_reason_codes,
+            "active_profile_id": None if decision_outcome is None else decision_outcome.get("active_profile_id"),
+            "profile_control_source": None if decision_outcome is None else decision_outcome.get("profile_control_source"),
+            "strategy_family": strategy_family or "directional",
+            "strategy_route_action": strategy_route_action or "override_target",
+            "strategy_selection_reason_codes": strategy_selection_reason_codes,
+            "strategy_headline": strategy_headline,
+            "position_management_reason_codes": position_management_reason_codes,
+            "exit_attribution": exit_attribution,
+            "guardrail_flags": [] if position_target is None else list(position_target.get("guardrail_flags") or []),
+            "risk_constraints_applied": risk_constraints_applied,
+            "risk_rejection_reasons": risk_rejection_reasons,
+            "risk_budget_multiplier": risk_budget_multiplier,
+            "execution_aggressiveness_multiplier": execution_aggressiveness_multiplier,
+            "risk_protection_active": risk_protection_active,
+            "risk_protection": "active" if risk_protection_active else "inactive",
             "decision_context": {
                 "timeframe": None if decision_context is None else decision_context.get("timeframe"),
-                "market_regime": None if decision_context is None else decision_context.get("market_regime"),
+                "market_regime": market_regime,
+                "volatility_state": volatility_state,
             },
         }
 
@@ -1572,10 +1779,782 @@ class OperatorQueryService:
         )
         return latest.payload if latest is not None else None
 
+    def account_service_status(self) -> dict[str, Any]:
+        return self._cached("account_service_status", self.runtime.account_service.status)
+
+    def latest_exchange_snapshot(self):
+        return self._cached("latest_exchange_snapshot", self.runtime.account_service.latest_snapshot)
+
+    def _latest_strategy_snapshot_event(self):
+        return self._cached(
+            "latest_strategy_snapshot_event",
+            lambda: latest_topic_event_for_scope(
+                self.runtime.event_store,
+                topics.STRATEGY_COORDINATOR_SNAPSHOTS,
+                self.state_scope,
+            ),
+        )
+
+    @staticmethod
+    def _strategy_snapshot_payload(event: Any | None) -> dict[str, Any] | None:
+        if event is None:
+            return None
+        snapshot = StrategyCoordinatorSnapshot.model_validate(event.payload)
+        payload = snapshot.model_dump(mode="json")
+        payload["_event_id"] = event.event_id
+        payload["_event_timestamp"] = event.event_timestamp
+        return payload
+
+    @staticmethod
+    def _strategy_bundle_payload(event: Any | None) -> dict[str, Any] | None:
+        if event is None:
+            return None
+        bundle = StrategyExecutionBundle.model_validate(event.payload)
+        payload = bundle.model_dump(mode="json")
+        payload["_event_id"] = event.event_id
+        payload["_event_timestamp"] = event.event_timestamp
+        return payload
+
+    @staticmethod
+    def _strategy_sleeve_intent_payload(event: Any | None) -> dict[str, Any] | None:
+        if event is None:
+            return None
+        intent = StrategySleeveIntent.model_validate(event.payload)
+        payload = intent.model_dump(mode="json")
+        payload["_event_id"] = event.event_id
+        payload["_event_timestamp"] = event.event_timestamp
+        return payload
+
+    @staticmethod
+    def _portfolio_allocation_payload(event: Any | None) -> dict[str, Any] | None:
+        if event is None:
+            return None
+        decision = PortfolioAllocationDecision.model_validate(event.payload)
+        payload = decision.model_dump(mode="json")
+        payload["_event_id"] = event.event_id
+        payload["_event_timestamp"] = event.event_timestamp
+        return payload
+
+    def strategy_runtime(self, *, limit: int = 10) -> dict[str, Any]:
+        return self.strategy_queries.strategy_runtime(limit=limit)
+
+    def _build_strategy_runtime(self, *, limit: int) -> dict[str, Any]:
+        latest_event = self._latest_strategy_snapshot_event()
+        latest_snapshot = self._strategy_snapshot_payload(latest_event)
+        if latest_snapshot is not None:
+            selected_family = latest_snapshot.get("selected_family")
+        recent_events = list(
+            reversed(
+                self.runtime.event_store.by_topic_scoped(
+                    topics.STRATEGY_COORDINATOR_SNAPSHOTS,
+                    scope=self.state_scope,
+                    limit=limit,
+                )
+            )
+        )
+        recent_snapshots = [self._strategy_snapshot_payload(event) for event in recent_events]
+        strategy_runtime_repo = getattr(self.runtime, "strategy_runtime_repo", None)
+        if strategy_runtime_repo is not None:
+            recent_sleeve_intents = [
+                item.model_dump(mode="json")
+                for item in strategy_runtime_repo.list_sleeve_intents(
+                    product_type=self.state_scope.product_type,
+                    margin_mode=self.state_scope.margin_mode,
+                    limit=limit * 4,
+                )
+            ]
+            latest_allocation = strategy_runtime_repo.latest_allocation_decision(
+                product_type=self.state_scope.product_type,
+                margin_mode=self.state_scope.margin_mode,
+            )
+            latest_allocation_decision = None if latest_allocation is None else latest_allocation.model_dump(mode="json")
+            recent_budget_profiles = [
+                item.model_dump(mode="json")
+                for item in strategy_runtime_repo.list_budget_profiles(
+                    product_type=self.state_scope.product_type,
+                    margin_mode=self.state_scope.margin_mode,
+                )[:limit]
+            ]
+            recent_budget_assignments = [
+                item.model_dump(mode="json")
+                for item in strategy_runtime_repo.list_budget_assignments(
+                    product_type=self.state_scope.product_type,
+                    margin_mode=self.state_scope.margin_mode,
+                )[: limit * 4]
+            ]
+            if latest_allocation is not None:
+                recent_budget_snapshots = [
+                    item.model_dump(mode="json")
+                    for item in strategy_runtime_repo.list_budget_snapshots(
+                        allocation_id=latest_allocation.allocation_id,
+                    )
+                ]
+                recent_conflict_resolutions = [
+                    item.model_dump(mode="json")
+                    for item in strategy_runtime_repo.list_conflict_resolutions(
+                        allocation_id=latest_allocation.allocation_id,
+                    )
+                ]
+                recent_netting_decisions = [
+                    item.model_dump(mode="json")
+                    for item in strategy_runtime_repo.list_netting_decisions(
+                        allocation_id=latest_allocation.allocation_id,
+                    )
+                ]
+            else:
+                recent_budget_snapshots = []
+                recent_conflict_resolutions = []
+                recent_netting_decisions = []
+            recent_bundles = [
+                item.model_dump(mode="json")
+                for item in strategy_runtime_repo.recent_execution_bundles(
+                    product_type=self.state_scope.product_type,
+                    margin_mode=self.state_scope.margin_mode,
+                    limit=limit,
+                )
+            ]
+        else:
+            recent_intent_events = list(
+                reversed(
+                    self.runtime.event_store.by_topic_scoped(
+                        topics.STRATEGY_SLEEVE_INTENTS,
+                        scope=self.state_scope,
+                        limit=limit * 4,
+                    )
+                )
+            )
+            recent_sleeve_intents = [self._strategy_sleeve_intent_payload(event) for event in recent_intent_events]
+            latest_allocation_event = latest_topic_event_for_scope(
+                self.runtime.event_store,
+                topics.PORTFOLIO_ALLOCATION_DECISIONS,
+                self.state_scope,
+            )
+            latest_allocation_decision = self._portfolio_allocation_payload(latest_allocation_event)
+            recent_budget_profiles = []
+            recent_budget_assignments = []
+            recent_budget_snapshots = []
+            recent_conflict_resolutions = []
+            recent_netting_decisions = []
+            recent_bundle_events = list(
+                reversed(
+                    self.runtime.event_store.by_topic_scoped(
+                        topics.STRATEGY_EXECUTION_BUNDLES,
+                        scope=self.state_scope,
+                        limit=limit,
+                    )
+                )
+            )
+            recent_bundles = [self._strategy_bundle_payload(event) for event in recent_bundle_events]
+        latest_bundle = recent_bundles[0] if recent_bundles else None
+        latest_target_event = latest_topic_event_for_scope(
+            self.runtime.event_store,
+            topics.POSITION_TARGETS,
+            self.state_scope,
+        )
+        latest_target_payload = None
+        if latest_target_event is not None:
+            target_payload = dict(latest_target_event.payload)
+            latest_target_payload = {
+                "decision_id": target_payload.get("decision_id"),
+                "symbol": target_payload.get("symbol"),
+                "target_position_qty": target_payload.get("target_position_qty"),
+                "delta_position_qty": target_payload.get("delta_position_qty"),
+                "position_intent": target_payload.get("position_intent"),
+                "strategy_family": target_payload.get("strategy_family", "directional"),
+                "strategy_sleeve_id": target_payload.get("strategy_sleeve_id"),
+                "allocation_id": target_payload.get("allocation_id"),
+                "strategy_route_action": target_payload.get("strategy_route_action", "override_target"),
+                "strategy_reason_codes": list(target_payload.get("strategy_reason_codes") or []),
+                "strategy_headline": target_payload.get("strategy_headline"),
+                "strategy_execution_legs": list(target_payload.get("strategy_execution_legs") or []),
+                "hedge_overlay_decision": target_payload.get("hedge_overlay_decision"),
+                "event_timestamp": latest_target_event.event_timestamp,
+            }
+        sleeve_records = []
+        sleeve_repo = getattr(self.runtime, "strategy_sleeve_repo", None)
+        if sleeve_repo is not None and hasattr(sleeve_repo, "list_sleeves"):
+            sleeve_records = [
+                sleeve.model_dump(mode="json")
+                for sleeve in sleeve_repo.list_sleeves()
+            ]
+        configured_family = self.runtime.settings.strategy_family_active
+        family_enablement = {
+            "directional": {
+                "enabled": True,
+                "runtime_supported": True,
+                "execution_compatible": True,
+            },
+            "smart_arbitrage": {
+                "enabled": bool(self.runtime.settings.smart_arbitrage_enabled),
+                "runtime_supported": self.runtime.settings.trading_product_type == "derivatives",
+                "execution_compatible": self.runtime.settings.trading_product_type == "derivatives",
+            },
+            "spot_grid": {
+                "enabled": bool(self.runtime.settings.spot_grid_enabled),
+                "runtime_supported": self.runtime.settings.trading_product_type == "spot",
+                "execution_compatible": self.runtime.settings.trading_product_type == "spot",
+            },
+            "dca": {
+                "enabled": bool(self.runtime.settings.dca_enabled),
+                "runtime_supported": self.runtime.settings.trading_product_type == "spot",
+                "execution_compatible": self.runtime.settings.trading_product_type == "spot",
+            },
+        }
+        automation_decisions = [] if latest_snapshot is None else list(latest_snapshot.get("automation_decisions") or [])
+        selected_candidate_payload = None
+        if latest_snapshot is not None:
+            selected_family = latest_snapshot.get("selected_family")
+            for item in latest_snapshot.get("candidates") or []:
+                if item.get("family") == selected_family:
+                    selected_candidate_payload = item
+                    break
+        active_automation = [item for item in automation_decisions if item.get("automation_state") == "active"]
+        contracted_automation = [
+            item for item in automation_decisions if item.get("automation_state") in {"contracted", "protective_only"}
+        ]
+        paused_automation = [item for item in automation_decisions if item.get("automation_state") == "paused"]
+        summary = {
+            "configured_active_family": configured_family,
+            "automatic_selection_enabled": bool(self.runtime.settings.strategy_family_auto_selection_enabled),
+            "auto_parallel_enabled": bool(self.runtime.settings.strategy_sleeve_auto_parallel_enabled),
+            "env_template_profile": self.runtime.settings.env_template_profile,
+            "latest_selected_family": None if latest_snapshot is None else latest_snapshot.get("selected_family"),
+            "latest_selected_strategy_sleeve_id": (
+                None if latest_target_payload is None else latest_target_payload.get("strategy_sleeve_id")
+            ),
+            "latest_allocation_id": None if latest_target_payload is None else latest_target_payload.get("allocation_id"),
+            "latest_selected_state": None if latest_snapshot is None else latest_snapshot.get("selected_state"),
+            "latest_selected_route_action": None if latest_snapshot is None else latest_snapshot.get("selected_route_action"),
+            "latest_selected_pair_id": (
+                None if selected_candidate_payload is None else selected_candidate_payload.get("pair_id")
+            ),
+            "latest_selected_opportunity_kind": (
+                None if selected_candidate_payload is None else selected_candidate_payload.get("opportunity_kind")
+            ),
+            "latest_selected_execution_mode": (
+                None if selected_candidate_payload is None else selected_candidate_payload.get("execution_mode")
+            ),
+            "latest_selected_state_phase": (
+                None if selected_candidate_payload is None else selected_candidate_payload.get("state_phase")
+            ),
+            "latest_bundle_status": None if latest_bundle is None else latest_bundle.get("status"),
+            "latest_bundle_id": None if latest_bundle is None else latest_bundle.get("bundle_id"),
+            "latest_bundle_type": None if latest_bundle is None else latest_bundle.get("bundle_type"),
+            "latest_bundle_priority": None if latest_bundle is None else latest_bundle.get("bundle_priority"),
+            "latest_bundle_gross_requested_exposure": (
+                None if latest_bundle is None else latest_bundle.get("gross_requested_exposure")
+            ),
+            "latest_bundle_net_approved_exposure": (
+                None if latest_bundle is None else latest_bundle.get("net_approved_exposure")
+            ),
+            "latest_allocator_version": (
+                None if latest_allocation_decision is None else latest_allocation_decision.get("allocator_version")
+            ),
+            "latest_approved_families": (
+                [] if latest_allocation_decision is None else list(latest_allocation_decision.get("approved_families") or [])
+            ),
+            "latest_active_families": (
+                [] if latest_allocation_decision is None else list(latest_allocation_decision.get("active_families") or [])
+            ),
+            "latest_approved_sleeve_weights": (
+                {} if latest_allocation_decision is None else dict(latest_allocation_decision.get("approved_sleeve_weights") or {})
+            ),
+            "latest_budget_profile_count": len(recent_budget_profiles),
+            "latest_budget_assignment_count": len(recent_budget_assignments),
+            "latest_budget_snapshot_count": len(recent_budget_snapshots),
+            "latest_conflict_resolution_count": len(recent_conflict_resolutions),
+            "latest_netting_decision_count": len(recent_netting_decisions),
+            "latest_portfolio_risk_budget_state": (
+                None if latest_allocation_decision is None else latest_allocation_decision.get("portfolio_risk_budget_state")
+            ),
+            "latest_portfolio_requested_notional": (
+                None if latest_allocation_decision is None else latest_allocation_decision.get("portfolio_requested_notional")
+            ),
+            "latest_portfolio_approved_notional": (
+                None if latest_allocation_decision is None else latest_allocation_decision.get("portfolio_approved_notional")
+            ),
+            "latest_portfolio_budget_cut_notional": (
+                None if latest_allocation_decision is None else latest_allocation_decision.get("portfolio_budget_cut_notional")
+            ),
+            "latest_expected_edge_bps": (
+                None if latest_allocation_decision is None else latest_allocation_decision.get("expected_edge_bps")
+            ),
+            "latest_expected_cost_bps": (
+                None if latest_allocation_decision is None else latest_allocation_decision.get("expected_cost_bps")
+            ),
+            "latest_hedge_protected_notional": (
+                None if latest_allocation_decision is None else latest_allocation_decision.get("hedge_protected_notional")
+            ),
+            "latest_directional_reduced_notional": (
+                None if latest_allocation_decision is None else latest_allocation_decision.get("directional_reduced_notional")
+            ),
+            "latest_selection_reason_codes": []
+            if latest_snapshot is None
+            else list(latest_snapshot.get("selection_reason_codes") or []),
+            "protective_fallback_active": bool(
+                latest_snapshot is not None and latest_snapshot.get("selected_route_action") == "protective_fallback"
+            ),
+            "automation_active_count": len(active_automation),
+            "automation_contracted_count": len(contracted_automation),
+            "automation_paused_count": len(paused_automation),
+            "latest_automation_states": {
+                item.get("family"): item.get("automation_state")
+                for item in automation_decisions
+            },
+            "operator_summary": (
+                "当前还没有产生多策略协调快照。"
+                if latest_snapshot is None
+                else "当前多策略协调结果已经生成。"
+            ),
+        }
+        route_action = summary["latest_selected_route_action"]
+        if latest_snapshot is not None:
+            if route_action == "override_target":
+                summary["operator_summary"] = "当前选中的策略家族正在直接接管本轮目标仓位。"
+            elif route_action == "protective_fallback":
+                summary["operator_summary"] = "当前选中的策略家族没有直接接管仓位，系统保留了方向策略的保护性减仓或退出。"
+            elif route_action == "advisory_only":
+                summary["operator_summary"] = "当前选中的策略家族只提供参考，不会直接接管实盘执行。"
+            else:
+                summary["operator_summary"] = "当前选中的策略家族没有生成可执行目标，系统继续保持当前仓位。"
+        smart_arbitrage_pairs = load_pair_definitions(
+            settings=self.runtime.settings,
+            primary_symbol=self.runtime.settings.default_symbol,
+        )
+        smart_arbitrage_pair_registry_warning_codes = list(
+            dict.fromkeys(
+                code
+                for pair in smart_arbitrage_pairs
+                for code in pair.metadata.get("configuration_warning_codes", [])
+                if str(code).strip()
+            )
+        )
+        smart_arbitrage_pair_registry_error_codes = list(
+            dict.fromkeys(
+                code
+                for pair in smart_arbitrage_pairs
+                for code in pair.metadata.get("configuration_error_codes", [])
+                if str(code).strip()
+            )
+        )
+        smart_arbitrage_cost_summary = self._smart_arbitrage_cost_summary(latest_snapshot=latest_snapshot)
+        return {
+            "generated_at": utc_now(),
+            "summary": summary,
+            "family_enablement": family_enablement,
+            "configured_parameters": self._configured_strategy_runtime_parameters(
+                configured_family=configured_family,
+                smart_arbitrage_pairs=smart_arbitrage_pairs,
+                smart_arbitrage_pair_registry_warning_codes=smart_arbitrage_pair_registry_warning_codes,
+                smart_arbitrage_pair_registry_error_codes=smart_arbitrage_pair_registry_error_codes,
+            ),
+            "latest_snapshot": latest_snapshot,
+            "latest_allocation_decision": latest_allocation_decision,
+            "latest_bundle": latest_bundle,
+            "latest_applied_target": latest_target_payload,
+            "strategy_sleeves": sleeve_records,
+            "recent_sleeve_intents": recent_sleeve_intents,
+            "recent_budget_profiles": recent_budget_profiles,
+            "recent_budget_assignments": recent_budget_assignments,
+            "recent_budget_snapshots": recent_budget_snapshots,
+            "recent_conflict_resolutions": recent_conflict_resolutions,
+            "recent_netting_decisions": recent_netting_decisions,
+            "recent_snapshots": recent_snapshots,
+            "recent_execution_bundles": recent_bundles,
+            "smart_arbitrage_cost_summary": smart_arbitrage_cost_summary,
+            "truth_source": "strategy_runtime_repo_plus_event_store" if strategy_runtime_repo is not None else "strategy_coordinator_snapshots",
+        }
+
+    def _configured_strategy_runtime_parameters(
+        self,
+        *,
+        configured_family: str,
+        smart_arbitrage_pairs: list[Any],
+        smart_arbitrage_pair_registry_warning_codes: list[str],
+        smart_arbitrage_pair_registry_error_codes: list[str],
+    ) -> dict[str, Any]:
+        configured_parameters: dict[str, Any] = {
+            "strategy_family_active": configured_family,
+            "strategy_family_auto_selection_enabled": self.runtime.settings.strategy_family_auto_selection_enabled,
+            "strategy_sleeve_auto_parallel_enabled": self.runtime.settings.strategy_sleeve_auto_parallel_enabled,
+            "strategy_sleeve_auto_min_budget_multiplier": self.runtime.settings.strategy_sleeve_auto_min_budget_multiplier,
+            "strategy_sleeve_auto_reconciliation_contraction_multiplier": self.runtime.settings.strategy_sleeve_auto_reconciliation_contraction_multiplier,
+            "strategy_sleeve_auto_soft_loss_usdt": self.runtime.settings.strategy_sleeve_auto_soft_loss_usdt,
+            "strategy_sleeve_auto_hard_loss_usdt": self.runtime.settings.strategy_sleeve_auto_hard_loss_usdt,
+            "strategy_sleeve_auto_volatility_cap_enabled": self.runtime.settings.strategy_sleeve_auto_volatility_cap_enabled,
+            "env_template_profile": self.runtime.settings.env_template_profile,
+            "trade_costs": self._trade_cost_configured_parameters(),
+            "directional": self._directional_configured_parameters(),
+        }
+        if self.runtime.settings.trading_product_type == "derivatives":
+            configured_parameters["smart_arbitrage"] = self._smart_arbitrage_configured_parameters(
+                smart_arbitrage_pairs=smart_arbitrage_pairs,
+                smart_arbitrage_pair_registry_warning_codes=smart_arbitrage_pair_registry_warning_codes,
+                smart_arbitrage_pair_registry_error_codes=smart_arbitrage_pair_registry_error_codes,
+            )
+        if self.runtime.settings.trading_product_type == "spot":
+            configured_parameters["spot_grid"] = {
+                "enabled": self.runtime.settings.spot_grid_enabled,
+                "anchor_lookback_snapshots": self.runtime.settings.spot_grid_anchor_lookback_snapshots,
+                "band_bps": self.runtime.settings.spot_grid_band_bps,
+                "inventory_floor_fraction": self.runtime.settings.spot_grid_inventory_floor_fraction,
+                "inventory_ceiling_fraction": self.runtime.settings.spot_grid_inventory_ceiling_fraction,
+                "rebalance_min_fraction_of_max_qty": self.runtime.settings.spot_grid_rebalance_min_fraction_of_max_qty,
+                "breakout_guard_enabled": self.runtime.settings.spot_grid_breakout_guard_enabled,
+            }
+            configured_parameters["dca"] = {
+                "enabled": self.runtime.settings.dca_enabled,
+                "interval_seconds": self.runtime.settings.dca_interval_seconds,
+                "quote_budget_per_cycle": self.runtime.settings.dca_quote_budget_per_cycle,
+                "max_position_fraction_of_limit": self.runtime.settings.dca_max_position_fraction_of_limit,
+                "pullback_only_enabled": self.runtime.settings.dca_pullback_only_enabled,
+                "pullback_entry_bps": self.runtime.settings.dca_pullback_entry_bps,
+            }
+        return configured_parameters
+
+    def _trade_cost_configured_parameters(self) -> dict[str, Any]:
+        return {
+            "rate_unit": "bps",
+            "rate_semantics": "percentage_basis_points",
+            "rate_example": "8 = 0.08%",
+            "live_fee_resolution": "account_schedule_fallback_to_configured",
+            "spot_maker_fee_bps": self.runtime.settings.trade_cost_spot_maker_fee_bps,
+            "spot_taker_fee_bps": self.runtime.settings.trade_cost_spot_taker_fee_bps,
+            "margin_maker_fee_bps": self.runtime.settings.trade_cost_margin_maker_fee_bps,
+            "margin_taker_fee_bps": self.runtime.settings.trade_cost_margin_taker_fee_bps,
+            "derivatives_maker_fee_bps": self.runtime.settings.trade_cost_derivatives_maker_fee_bps,
+            "derivatives_taker_fee_bps": self.runtime.settings.trade_cost_derivatives_taker_fee_bps,
+            "delivery_settlement_fee_bps": self.runtime.settings.trade_cost_delivery_settlement_fee_bps,
+            "spot_spread_bps": self.runtime.settings.trade_cost_spot_spread_bps,
+            "spot_slippage_bps": self.runtime.settings.trade_cost_spot_slippage_bps,
+            "margin_spread_bps": self.runtime.settings.trade_cost_margin_spread_bps,
+            "margin_slippage_bps": self.runtime.settings.trade_cost_margin_slippage_bps,
+            "derivatives_spread_bps": self.runtime.settings.trade_cost_derivatives_spread_bps,
+            "derivatives_slippage_bps": self.runtime.settings.trade_cost_derivatives_slippage_bps,
+        }
+
+    def _directional_configured_parameters(self) -> dict[str, Any]:
+        runtime_shorting_blockers = (
+            ["kill_switch_active"]
+            if (
+                self.runtime.settings.trading_product_type == "derivatives"
+                and self.runtime.kill_switch.halted
+            )
+            else []
+        )
+        overlay_mode = self.runtime.settings.strategy_hedge_overlay_mode
+        rollout_opportunistic = overlay_rollout_status(self.runtime.settings, mode="opportunistic")
+        rollout_independent = overlay_rollout_status(self.runtime.settings, mode="independent")
+        current_rollout = (
+            rollout_opportunistic
+            if overlay_mode == "opportunistic"
+            else rollout_independent
+            if overlay_mode == "independent"
+            else {
+                "runtime_stage": overlay_runtime_stage(self.runtime.settings),
+                "configured_rollout_stage": "live",
+                "runtime_allowed": True,
+                "blocking_reasons": [],
+                "summary": "保护性对冲不受本轮灰度阶段限制，可继续作为最终兜底路径。",
+            }
+        )
+        overlay_mode_enabled = (
+            (
+                overlay_mode == "protective"
+                and self.runtime.settings.strategy_hedge_protective_enabled
+            )
+            or (
+                overlay_mode == "opportunistic"
+                and self.runtime.settings.strategy_hedge_opportunistic_enabled
+            )
+            or (
+                overlay_mode == "independent"
+                and self.runtime.settings.strategy_hedge_independent_enabled
+            )
+        )
+        overlay_mode_ready = overlay_mode_enabled and bool(current_rollout.get("runtime_allowed", True))
+        configured_parameters: dict[str, Any] = {
+            "product_type": self.runtime.settings.trading_product_type,
+            "shorting_runtime_supported": self.runtime.settings.trading_product_type == "derivatives",
+            "shorting_config_enabled": self.runtime.settings.strategy_short_bias_enabled,
+            "short_bias_enabled": self.runtime.settings.strategy_short_bias_enabled,
+            "effective_short_bias_enabled": (
+                self.runtime.settings.trading_product_type == "derivatives"
+                and self.runtime.settings.strategy_short_bias_enabled
+                and not self.runtime.kill_switch.halted
+            ),
+            "runtime_shorting_blockers": runtime_shorting_blockers,
+            "entry_allowed_regimes": list(self.runtime.settings.strategy_entry_allowed_regimes),
+            "entry_min_signal_edge_bps": self.runtime.settings.strategy_entry_min_signal_edge_bps,
+            "entry_alpha_min": self.runtime.settings.strategy_entry_alpha_min,
+            "entry_confidence_min": self.runtime.settings.strategy_entry_confidence_min,
+            "scale_in_min_signal_edge_bps": self.runtime.settings.strategy_scale_in_min_signal_edge_bps,
+            "scale_in_alpha_min": self.runtime.settings.strategy_scale_in_alpha_min,
+            "scale_in_confidence_min": self.runtime.settings.strategy_scale_in_confidence_min,
+            "reversal_min_signal_edge_bps": self.runtime.settings.strategy_reversal_min_signal_edge_bps,
+            "reversal_alpha_min": self.runtime.settings.strategy_reversal_alpha_min,
+            "reversal_confidence_min": self.runtime.settings.strategy_reversal_confidence_min,
+            "hedge_overlay_enabled": self.runtime.settings.strategy_hedge_overlay_enabled,
+            "hedge_overlay_mode": overlay_mode,
+            "hedge_overlay_runtime_supported": (
+                self.runtime.settings.trading_product_type == "derivatives"
+                and self.runtime.settings.derivatives_position_mode == "hedge"
+            ),
+            "hedge_overlay_enabled_in_mode": overlay_mode_enabled,
+            "hedge_overlay_mode_ready": overlay_mode_ready,
+            "hedge_overlay_rollout_allowed": bool(current_rollout.get("runtime_allowed", True)),
+            "hedge_overlay_effective_enabled": (
+                self.runtime.settings.strategy_hedge_overlay_enabled
+                and self.runtime.settings.trading_product_type == "derivatives"
+                and self.runtime.settings.derivatives_position_mode == "hedge"
+                and overlay_mode_ready
+            ),
+            "hedge_protective_enabled": self.runtime.settings.strategy_hedge_protective_enabled,
+            "hedge_open_threshold": self.runtime.settings.strategy_hedge_open_threshold,
+            "hedge_close_threshold": self.runtime.settings.strategy_hedge_close_threshold,
+            "hedge_max_ratio": self.runtime.settings.strategy_hedge_max_ratio,
+            "hedge_min_hold_seconds": self.runtime.settings.strategy_hedge_min_hold_seconds,
+            "hedge_rebalance_cooldown_seconds": self.runtime.settings.strategy_hedge_rebalance_cooldown_seconds,
+            "hedge_opportunistic_enabled": self.runtime.settings.strategy_hedge_opportunistic_enabled,
+            "hedge_opportunistic_rollout_stage": self.runtime.settings.strategy_hedge_opportunistic_rollout_stage,
+            "hedge_opportunistic_open_threshold": self.runtime.settings.strategy_hedge_opportunistic_open_threshold,
+            "hedge_opportunistic_close_threshold": self.runtime.settings.strategy_hedge_opportunistic_close_threshold,
+            "hedge_opportunistic_max_ratio": self.runtime.settings.strategy_hedge_opportunistic_max_ratio,
+            "hedge_opportunistic_min_hold_seconds": self.runtime.settings.strategy_hedge_opportunistic_min_hold_seconds,
+            "hedge_opportunistic_rebalance_cooldown_seconds": self.runtime.settings.strategy_hedge_opportunistic_rebalance_cooldown_seconds,
+            "hedge_opportunistic_max_fee_drag_ratio": self.runtime.settings.strategy_hedge_opportunistic_max_fee_drag_ratio,
+            "hedge_opportunistic_max_churn_ratio": self.runtime.settings.strategy_hedge_opportunistic_max_churn_ratio,
+            "hedge_independent_enabled": self.runtime.settings.strategy_hedge_independent_enabled,
+            "hedge_independent_rollout_stage": self.runtime.settings.strategy_hedge_independent_rollout_stage,
+            "hedge_independent_long_entry_threshold": self.runtime.settings.strategy_hedge_independent_long_entry_threshold,
+            "hedge_independent_short_entry_threshold": self.runtime.settings.strategy_hedge_independent_short_entry_threshold,
+            "hedge_independent_long_scale_in_threshold": self.runtime.settings.strategy_hedge_independent_long_scale_in_threshold,
+            "hedge_independent_short_scale_in_threshold": self.runtime.settings.strategy_hedge_independent_short_scale_in_threshold,
+            "hedge_independent_long_min_hold_seconds": self.runtime.settings.strategy_hedge_independent_long_min_hold_seconds,
+            "hedge_independent_short_min_hold_seconds": self.runtime.settings.strategy_hedge_independent_short_min_hold_seconds,
+            "hedge_independent_rebalance_cooldown_seconds": self.runtime.settings.strategy_hedge_independent_rebalance_cooldown_seconds,
+            "hedge_independent_trial_guard_enabled": self.runtime.settings.strategy_hedge_independent_trial_guard_enabled,
+            "hedge_rollout": {
+                "runtime_stage": overlay_runtime_stage(self.runtime.settings),
+                "current_mode": overlay_mode,
+                "current_mode_allowed": bool(current_rollout.get("runtime_allowed", True)),
+                "current_mode_blocking_reasons": list(current_rollout.get("blocking_reasons", [])),
+                "current_mode_summary": current_rollout.get("summary"),
+                "rollback_sequence": overlay_global_rollback_sequence(),
+                "runbook_path": "docs/derivatives_overlay_rollout_runbook.md",
+                "sample_report_template_path": "docs/derivatives_overlay_sample_report_template.md",
+                "opportunistic": rollout_opportunistic,
+                "independent": rollout_independent,
+            },
+        }
+        if self.runtime.settings.trading_product_type == "derivatives":
+            configured_parameters.update(
+                {
+                    "short_entry_allowed_regimes": list(self.runtime.settings.strategy_short_entry_allowed_regimes),
+                    "short_entry_min_signal_edge_bps": self.runtime.settings.strategy_short_entry_min_signal_edge_bps,
+                    "short_entry_alpha_min": self.runtime.settings.strategy_short_entry_alpha_min,
+                    "short_entry_confidence_min": self.runtime.settings.strategy_short_entry_confidence_min,
+                    "short_scale_in_min_signal_edge_bps": self.runtime.settings.strategy_short_scale_in_min_signal_edge_bps,
+                    "short_scale_in_alpha_min": self.runtime.settings.strategy_short_scale_in_alpha_min,
+                    "short_scale_in_confidence_min": self.runtime.settings.strategy_short_scale_in_confidence_min,
+                    "short_reversal_min_signal_edge_bps": self.runtime.settings.strategy_short_reversal_min_signal_edge_bps,
+                    "short_reversal_alpha_min": self.runtime.settings.strategy_short_reversal_alpha_min,
+                    "short_reversal_confidence_min": self.runtime.settings.strategy_short_reversal_confidence_min,
+                }
+            )
+        return configured_parameters
+
+    def _smart_arbitrage_configured_parameters(
+        self,
+        *,
+        smart_arbitrage_pairs: list[Any],
+        smart_arbitrage_pair_registry_warning_codes: list[str],
+        smart_arbitrage_pair_registry_error_codes: list[str],
+    ) -> dict[str, Any]:
+        return {
+            "enabled": self.runtime.settings.smart_arbitrage_enabled,
+            "pair_definitions": [
+                pair.model_dump(mode="json")
+                for pair in smart_arbitrage_pairs
+            ],
+            "pair_registry_warning_codes": smart_arbitrage_pair_registry_warning_codes,
+            "pair_registry_error_codes": smart_arbitrage_pair_registry_error_codes,
+            "basis_entry_bps": self.runtime.settings.smart_arbitrage_basis_entry_bps,
+            "basis_exit_bps": self.runtime.settings.smart_arbitrage_basis_exit_bps,
+            "estimated_cost_bps": self.runtime.settings.smart_arbitrage_estimated_cost_bps,
+            "uses_global_trade_costs": True,
+            "quote_budget_per_trade": self.runtime.settings.smart_arbitrage_quote_budget_per_trade,
+            "max_pair_notional": self.runtime.settings.smart_arbitrage_max_pair_notional,
+            "cost_model_enabled": self.runtime.settings.smart_arbitrage_cost_model_enabled,
+            "funding_cost_enabled": self.runtime.settings.smart_arbitrage_funding_cost_enabled,
+            "borrow_cost_enabled": self.runtime.settings.smart_arbitrage_borrow_cost_enabled,
+            "negative_basis_mode": self.runtime.settings.smart_arbitrage_negative_basis_mode,
+            "inventory_reservation_enabled": self.runtime.settings.smart_arbitrage_inventory_reservation_enabled,
+            "margin_short_enabled": self.runtime.settings.smart_arbitrage_margin_short_enabled,
+            "margin_short_execution_ready": self.runtime.settings.smart_arbitrage_margin_short_execution_ready,
+            "margin_short_spot_margin_mode": self.runtime.settings.smart_arbitrage_margin_short_spot_margin_mode,
+            "margin_short_auto_repay_enabled": self.runtime.settings.smart_arbitrage_margin_short_auto_repay_enabled,
+            "max_concurrent_pairs": self.runtime.settings.smart_arbitrage_max_concurrent_pairs,
+            "pair_priority_mode": self.runtime.settings.smart_arbitrage_pair_priority_mode,
+            "min_inventory_backed_ratio": self.runtime.settings.smart_arbitrage_min_inventory_backed_ratio,
+            "fee_source_mode": self.runtime.settings.smart_arbitrage_fee_source_mode,
+            "funding_source_mode": self.runtime.settings.smart_arbitrage_funding_source_mode,
+            "borrow_source_mode": self.runtime.settings.smart_arbitrage_borrow_source_mode,
+            "expected_hold_hours": self.runtime.settings.smart_arbitrage_expected_hold_hours,
+            "funding_interval_hours": self.runtime.settings.smart_arbitrage_funding_interval_hours,
+            "expected_funding_events": self.runtime.settings.smart_arbitrage_expected_funding_events,
+            "hedge_target_leverage": self.runtime.settings.smart_arbitrage_hedge_target_leverage,
+            "estimated_execution_mismatch_bps": self.runtime.settings.smart_arbitrage_estimated_execution_mismatch_bps,
+            "estimated_transfer_cost_bps": self.runtime.settings.smart_arbitrage_estimated_transfer_cost_bps,
+            "time_decay_bps_per_hour": self.runtime.settings.smart_arbitrage_time_decay_bps_per_hour,
+            "estimated_borrow_apr": self.runtime.settings.smart_arbitrage_estimated_borrow_apr,
+            "borrow_interest_free_ratio": self.runtime.settings.smart_arbitrage_borrow_interest_free_ratio,
+            "estimated_funding_bps": self.runtime.settings.smart_arbitrage_estimated_funding_bps,
+            "estimated_borrow_bps": self.runtime.settings.smart_arbitrage_estimated_borrow_bps,
+        }
+
+    def _smart_arbitrage_cost_summary(self, *, latest_snapshot: dict[str, Any] | None) -> dict[str, Any]:
+        smart_candidate = None
+        if latest_snapshot is not None:
+            smart_candidate = next(
+                (
+                    candidate
+                    for candidate in (latest_snapshot.get("candidates") or [])
+                    if candidate.get("family") == "smart_arbitrage"
+                ),
+                None,
+            )
+        metrics = {} if smart_candidate is None else dict(smart_candidate.get("metrics") or {})
+        fill_rows = [
+            item
+            for item in self._scoped_fill_outcomes()
+            if str(getattr(item, "strategy_family", "") or "") == "smart_arbitrage"
+        ]
+        fill_notional = sum(
+            (
+                abs(self._to_decimal(getattr(item, "fill_notional", None)) or Decimal("0"))
+                for item in fill_rows
+            ),
+            start=Decimal("0"),
+        )
+        realized_fee_amount = sum(
+            (
+                self._fee_cost_in_quote(item) or Decimal("0")
+                for item in fill_rows
+            ),
+            start=Decimal("0"),
+        )
+        funding_rows = list(self._scoped_funding_fee_records())
+        smart_symbols = {
+            str(metrics.get("spot_symbol") or "").upper(),
+            str(metrics.get("derivatives_symbol") or "").upper(),
+            *(
+                str(item.get("spot_symbol") or "").upper()
+                for item in (metrics.get("selected_pair_summaries") or [])
+                if isinstance(item, dict)
+            ),
+            *(
+                str(item.get("derivatives_symbol") or "").upper()
+                for item in (metrics.get("selected_pair_summaries") or [])
+                if isinstance(item, dict)
+            ),
+        }
+        smart_symbols.discard("")
+        funding_cost_amount = sum(
+            (
+                abs(self._to_decimal(getattr(item, "amount", None)) or Decimal("0"))
+                for item in funding_rows
+                if (
+                    str(getattr(item, "funding_direction", "") or "").lower() == "expense"
+                    and (
+                        not smart_symbols
+                        or str(getattr(item, "symbol", "") or "").upper() in smart_symbols
+                    )
+                )
+            ),
+            start=Decimal("0"),
+        )
+        realized_fee_bps = (
+            None
+            if fill_notional <= self._DECIMAL_EPSILON
+            else (realized_fee_amount / fill_notional) * Decimal("10000")
+        )
+        realized_funding_bps = (
+            None
+            if fill_notional <= self._DECIMAL_EPSILON
+            else (funding_cost_amount / fill_notional) * Decimal("10000")
+        )
+        realized_total_drag_bps = None
+        if realized_fee_bps is not None or realized_funding_bps is not None:
+            realized_total_drag_bps = (realized_fee_bps or Decimal("0")) + (realized_funding_bps or Decimal("0"))
+        predicted_drag = self._to_decimal(metrics.get("executable_cost_bps"))
+        return {
+            "available": smart_candidate is not None,
+            "pair_label": None if smart_candidate is None else (
+                f"{metrics.get('spot_symbol') or '现货腿'} <-> {metrics.get('derivatives_symbol') or '合约腿'}"
+                if not metrics.get("aggregate_candidate")
+                else f"{len(metrics.get('selected_pair_summaries') or [])} 组套利对聚合"
+            ),
+            "predicted": {
+                "basis_bps": metrics.get("basis_bps"),
+                "ideal_cost_bps": metrics.get("ideal_cost_bps"),
+                "executable_cost_bps": metrics.get("executable_cost_bps"),
+                "ideal_edge_bps": metrics.get("ideal_edge_bps"),
+                "executable_edge_bps": metrics.get("executable_edge_bps"),
+                "breakeven_basis_bps": metrics.get("breakeven_basis_bps"),
+                "ideal_total_fee_bps": metrics.get("ideal_total_fee_bps"),
+                "executable_spread_bps": metrics.get("executable_spread_bps"),
+                "executable_slippage_bps": metrics.get("executable_slippage_bps"),
+                "execution_mismatch_bps": metrics.get("execution_mismatch_bps"),
+                "funding_cost_bps": metrics.get("funding_cost_bps"),
+                "borrow_cost_bps": metrics.get("borrow_cost_bps"),
+                "transfer_cost_bps": metrics.get("transfer_cost_bps"),
+                "time_decay_cost_bps": metrics.get("time_decay_cost_bps"),
+                "expected_hold_hours": metrics.get("expected_hold_hours"),
+                "expected_funding_events": metrics.get("expected_funding_events"),
+                "borrow_hour_windows": metrics.get("borrow_hour_windows"),
+                "cost_confidence": metrics.get("cost_confidence"),
+                "cost_source_flags": list(metrics.get("cost_source_flags") or metrics.get("aggregate_cost_source_flags") or []),
+            },
+            "realized": {
+                "fill_count": len(fill_rows),
+                "fill_notional": fill_notional,
+                "realized_fee_amount": realized_fee_amount,
+                "realized_fee_bps": realized_fee_bps,
+                "funding_fee_event_count": sum(
+                    1
+                    for item in funding_rows
+                    if (
+                        str(getattr(item, "funding_direction", "") or "").lower() == "expense"
+                        and (
+                            not smart_symbols
+                            or str(getattr(item, "symbol", "") or "").upper() in smart_symbols
+                        )
+                    )
+                ),
+                "realized_funding_cost_amount": funding_cost_amount,
+                "realized_funding_bps": realized_funding_bps,
+                "realized_borrow_bps": None,
+                "realized_total_drag_bps": realized_total_drag_bps,
+            },
+            "calibration": {
+                "predicted_vs_realized_total_drag_error_bps": (
+                    None
+                    if predicted_drag is None or realized_total_drag_bps is None
+                    else predicted_drag - realized_total_drag_bps
+                ),
+                "realized_source_flags": [
+                    "fill_outcomes_fee_bps",
+                    "funding_fee_records_expense_only",
+                    "borrow_realized_unavailable",
+                ],
+            },
+        }
+
     def recent_fills(self, *, limit: int = 50):
         return sorted(
             self._scoped_fills(),
-            key=lambda item: (item.ingestion_timestamp, item.fill_id),
+            key=fill_processing_sort_key,
             reverse=True,
         )[:limit]
 
@@ -1584,7 +2563,7 @@ class OperatorQueryService:
         return latest.decision_id if latest is not None else None
 
     def ai_runtime(self) -> dict[str, Any]:
-        return self.runtime_queries.ai_runtime()
+        return self._cached("ai_runtime", self.runtime_queries.ai_runtime)
 
     def _recent_ai_shadow_evaluation_events(self, *, limit: int | None = None):
         if not self._ai_history_visible():
@@ -1863,7 +2842,7 @@ class OperatorQueryService:
         }
 
     def ai_overview(self) -> dict[str, Any]:
-        return self.runtime_queries.ai_overview()
+        return self._cached("ai_overview", self.runtime_queries.ai_overview)
 
     def ai_config_summary(self) -> dict[str, Any]:
         runtime = self.ai_runtime()
@@ -1890,7 +2869,7 @@ class OperatorQueryService:
         return self.runtime.settings.canonical_ai_operating_mode != "baseline_only"
 
     def ai_latest(self) -> dict[str, Any]:
-        return self.runtime_queries.ai_latest()
+        return self._cached("ai_latest", self.runtime_queries.ai_latest)
 
     def ai_recent(self, *, limit: int, offset: int) -> dict[str, Any]:
         normalized_limit = max(int(limit), 1)
@@ -1906,7 +2885,7 @@ class OperatorQueryService:
         )
 
     def ai_shadow_latest(self) -> dict[str, Any]:
-        return self.runtime_queries.ai_shadow_latest()
+        return self._cached("ai_shadow_latest", self.runtime_queries.ai_shadow_latest)
 
     def ai_shadow_recent(self, *, limit: int, offset: int) -> dict[str, Any]:
         normalized_limit = max(int(limit), 1)
@@ -1991,6 +2970,30 @@ class OperatorQueryService:
             ),
         )
 
+    def record_operator_login_failure(
+        self,
+        *,
+        actor_identity: str | None,
+        auth_source: AuthSource = "session",
+        failure_code: str = "operator_login_failed",
+    ) -> None:
+        self._append_event(
+            topic=topics.OPERATOR_ACTIONS,
+            key="auth",
+            payload_model=OperatorActionRecord(
+                action="login",
+                actor_role="anonymous",
+                actor_identity=actor_identity,
+                auth_source=auth_source,
+                reason="operator_login",
+                status="login_failed",
+                details={
+                    "database_backed": self.runtime.database_runtime is not None,
+                    "failure_code": failure_code,
+                },
+            ),
+        )
+
     def operator_users(self, *, actor_identity: str | None = None) -> dict[str, Any]:
         users = self.runtime.operator_repo.all_users()
         protected_last_admin = enabled_admin_count(self.runtime.operator_repo) <= 1
@@ -2069,33 +3072,6 @@ class OperatorQueryService:
             "current_runtime_payload": snapshot.get("current_runtime_payload"),
         }
 
-    def record_runtime_profile_action(
-        self,
-        *,
-        action: str,
-        actor_role: OperatorRole,
-        actor_identity: str | None = None,
-        auth_source: AuthSource = "anonymous",
-        status: str,
-        previous_revision_id: str | None = None,
-        new_revision_id: str | None = None,
-        details: dict[str, Any] | None = None,
-    ) -> None:
-        self._append_event(
-            topic=topics.OPERATOR_ACTIONS,
-            key="runtime_profile",
-            payload_model=runtime_profile_action_payload(
-                action=action,
-                actor_role=actor_role,
-                actor_identity=actor_identity,
-                auth_source=auth_source,
-                status=status,
-                previous_revision_id=previous_revision_id,
-                new_revision_id=new_revision_id,
-                details=details,
-            ),
-        )
-
     def strategy_profile_snapshot(self) -> dict[str, Any]:
         return self.strategy_profile_queries.snapshot()
 
@@ -2158,9 +3134,22 @@ class OperatorQueryService:
         actor_identity: str | None,
         auth_source: AuthSource,
     ) -> dict[str, Any]:
-        if not self.ai_runtime().get("strategy_profile_auto_control_configured", False):
-            raise ValueError("strategy_profile_auto_control_not_enabled")
         return self.strategy_profile_queries.restore_auto(
+            reason=reason,
+            actor_role=actor_role,
+            actor_identity=actor_identity,
+            auth_source=auth_source,
+        )
+
+    def pause_strategy_profile_auto(
+        self,
+        *,
+        reason: str,
+        actor_role: OperatorRole,
+        actor_identity: str | None,
+        auth_source: AuthSource,
+    ) -> dict[str, Any]:
+        return self.strategy_profile_queries.pause_auto(
             reason=reason,
             actor_role=actor_role,
             actor_identity=actor_identity,
@@ -2276,55 +3265,28 @@ class OperatorQueryService:
         return {"status": "deleted", "user": self._operator_user_view(user, actor_identity=actor_identity)}
 
     def recovery_view(self) -> dict[str, Any]:
-        return self.runtime_queries.recovery_view()
+        return self.recovery_queries.recovery_view()
 
     def _build_recovery_view(self) -> dict[str, Any]:
-        latest_reconciliation = self._latest_scoped_reconciliation()
-        latest_baseline = self.latest_account_baseline()
-        latest_rebaseline_action = self.latest_operator_action("rebaseline")
-        latest_resume_action = self.latest_operator_action("resume")
-        latest_ai_degradation = latest_topic_event_for_scope(
-            self.runtime.event_store,
-            topics.AI_DEGRADATION_EVENTS,
-            self.state_scope,
-        )
-        latest_ai_shadow_evaluation = latest_topic_event_for_scope(
-            self.runtime.event_store,
-            topics.AI_SHADOW_EVALUATIONS,
-            self.state_scope,
-        )
-        base = self.recovery_posture.finalize_status(latest_reconciliation=latest_reconciliation)
-        if not self._ai_history_visible():
-            latest_ai_degradation = None
-            latest_ai_shadow_evaluation = None
-        return {
-            **base.model_dump(mode="json"),
-            "last_rebaseline_action": latest_rebaseline_action,
-            "last_resume_action": latest_resume_action,
-            "latest_account_baseline": latest_baseline,
-            "latest_reconciliation": latest_reconciliation.model_dump(mode="json") if latest_reconciliation is not None else None,
-            "latest_ai_degradation": self.payload(latest_ai_degradation),
-            "latest_ai_shadow_evaluation": self.payload(latest_ai_shadow_evaluation),
-            "ai_runtime": self.ai_runtime(),
-        }
+        return self.recovery_queries.build_recovery_view()
 
     def system_recovery(self) -> dict[str, Any]:
-        return self.runtime_queries.system_recovery()
+        return self.recovery_queries.system_recovery()
 
     def system_mode(self) -> dict[str, Any]:
-        return self.runtime_queries.system_mode()
+        return self.recovery_queries.system_mode()
 
     def system_health(self) -> dict[str, Any]:
-        return self.runtime_queries.system_health()
+        return self._cached("system_health", self.runtime_queries.system_health)
 
     def system_runtime(self) -> dict[str, Any]:
-        return self.runtime_queries.system_runtime()
+        return self._cached("system_runtime", self.runtime_queries.system_runtime)
 
     def blockers(self) -> list[dict[str, Any]]:
-        return self.runtime_queries.blockers()
+        return self.blocker_queries.blockers()
 
     def blocker_control(self) -> dict[str, Any]:
-        return self.runtime_queries.blocker_control()
+        return self.blocker_queries.blocker_control()
 
     async def perform_blocker_action(
         self,
@@ -2350,7 +3312,7 @@ class OperatorQueryService:
         ).model_dump(mode="json")
 
     def blocker_history(self, *, limit: int = 20, offset: int = 0) -> dict[str, Any]:
-        return self.runtime_queries.blocker_history(limit=limit, offset=offset)
+        return self.blocker_queries.blocker_history(limit=limit, offset=offset)
 
     def metrics(self) -> dict[str, Any]:
         cache_key = f"metrics:{self._scope_cache_fragment()}"
@@ -2368,47 +3330,29 @@ class OperatorQueryService:
         if service is None:
             return {
                 "enabled": False,
+                "enabled_for_runtime": False,
+                "trial_observation_active": False,
+                "trial_observation_label": None,
                 "status": "not_configured",
                 "summary": "试盘守护未配置。",
+                "hard_stop": {
+                    "active": False,
+                    "halt_required": False,
+                    "resume_blocked": False,
+                    "breach_count": 0,
+                    "summary": "试盘守护未配置。",
+                    "operator_guidance": "如果这条线是小资金试盘场景，先确认是否应该启用试盘守护。",
+                },
+                "recovery_requirements": {
+                    "resume_allowed": True,
+                    "items": [],
+                },
             }
         cache_key = f"trial_guard:{self._scope_cache_fragment()}"
         return self._cached_ttl(cache_key, 15, service.snapshot)
 
     def _build_system_mode(self) -> dict[str, Any]:
-        snapshot = dict(self.runtime.mode_controller.snapshot())
-        readiness = self.runtime.execution_adapter.readiness()
-        recovery = self.recovery_view()
-        submit_blocked_reasons = list(
-            dict.fromkeys(
-                list(snapshot.get("submit_blocked_reasons", []))
-                + list(readiness.get("submit_blocked_reasons", []))
-            )
-        )
-        health_blockers = list(dict.fromkeys(self.runtime.health_service.execution_blockers()))
-        recovery_blockers = list(dict.fromkeys(recovery["resume_blocked_reasons"]))
-        exchange_submit_allowed = bool(
-            readiness.get("exchange_submit_allowed", snapshot.get("exchange_submit_allowed", False))
-        )
-        execution_blockers = self.recovery_posture.execution_blockers(
-            health_blockers=health_blockers,
-            recovery_blockers=recovery_blockers,
-            submit_blocked_reasons=submit_blocked_reasons,
-        )
-
-        snapshot["exchange_submit_allowed"] = exchange_submit_allowed
-        snapshot["submit_blocked"] = bool(submit_blocked_reasons) or not exchange_submit_allowed
-        snapshot["submit_blocked_reasons"] = submit_blocked_reasons
-        snapshot["execution_blocked"] = bool(execution_blockers)
-        snapshot["blocked_reason"] = execution_blockers[0] if execution_blockers else None
-        snapshot["recovery_state"] = recovery["recovery_state"]
-        snapshot["review_required"] = recovery["review_required"]
-        snapshot["rebaseline_available"] = recovery["rebaseline_available"]
-        snapshot["profile_source"] = self.runtime.runtime_profile_resolution.profile_source
-        snapshot["active_profile_revision_id"] = self.runtime.runtime_profile_resolution.activation_state.active_revision_id
-        snapshot["pending_profile_revision_id"] = self.runtime.runtime_profile_resolution.activation_state.pending_revision_id
-        snapshot["restart_required"] = self.runtime.runtime_profile_resolution.activation_state.restart_required
-        snapshot["trial_guard"] = self.trial_guard()
-        return snapshot
+        return self.recovery_queries.build_system_mode()
 
     def _effective_taker_fee_bps(self, *, symbol: str | None = None) -> float:
         resolver = getattr(self.runtime, "fee_resolver", None)
@@ -2581,8 +3525,9 @@ class OperatorQueryService:
                     payload["fill_notional"] = outcome_payload.get("fill_notional")
                     payload["realized_pnl"] = outcome_payload.get("realized_pnl_delta")
                     payload["realized_pnl_delta"] = outcome_payload.get("realized_pnl_delta")
-                    payload["gross_realized_pnl"] = outcome.realized_pnl_delta + outcome.fee_delta
-                    payload["fee_delta"] = outcome_payload.get("fee_delta")
+                    normalized_fee_delta = self._signed_fee_delta_in_quote(outcome) or Decimal("0")
+                    payload["gross_realized_pnl"] = outcome.realized_pnl_delta + normalized_fee_delta
+                    payload["fee_delta"] = normalized_fee_delta
                     payload["starting_position_qty"] = outcome_payload.get("starting_position_qty")
                     payload["starting_avg_entry_price"] = outcome_payload.get("starting_avg_entry_price")
                     payload["ending_position_qty"] = outcome_payload.get("ending_position_qty")
@@ -2606,10 +3551,9 @@ class OperatorQueryService:
                 payload["fill_notional"] = outcome_payload.get("fill_notional")
                 payload["realized_pnl"] = outcome_payload.get("realized_pnl_delta")
                 payload["realized_pnl_delta"] = outcome_payload.get("realized_pnl_delta")
-                payload["gross_realized_pnl"] = (
-                    outcome.realized_pnl_delta + outcome.fee_delta
-                )
-                payload["fee_delta"] = outcome_payload.get("fee_delta")
+                normalized_fee_delta = self._signed_fee_delta_in_quote(outcome) or Decimal("0")
+                payload["gross_realized_pnl"] = outcome.realized_pnl_delta + normalized_fee_delta
+                payload["fee_delta"] = normalized_fee_delta
                 payload["starting_position_qty"] = outcome_payload.get("starting_position_qty")
                 payload["starting_avg_entry_price"] = outcome_payload.get("starting_avg_entry_price")
                 payload["ending_position_qty"] = outcome_payload.get("ending_position_qty")
@@ -2629,6 +3573,365 @@ class OperatorQueryService:
             position_intent=payload.get("position_intent"),
         )
         return payload
+
+    def _hedge_mode_audit_payload(
+        self,
+        *,
+        decision_context: dict[str, Any] | None,
+        position_target: dict[str, Any] | None,
+        order_intents: list[dict[str, Any]],
+        order_updates: list[dict[str, Any]],
+        fills: list[dict[str, Any]],
+        reconciliations: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        position_mode_contract = derivatives_position_mode_contract(
+            settings=self.runtime.settings,
+            snapshot=self.latest_exchange_snapshot(),
+        )
+        return {
+            "position_mode": self._position_mode_audit_summary(
+                position_mode_contract=position_mode_contract,
+                order_intents=order_intents,
+                order_updates=order_updates,
+                fills=fills,
+                reconciliations=reconciliations,
+            ),
+            "leg_orders": self._leg_order_audit_summary(
+                order_intents=order_intents,
+                order_updates=order_updates,
+                fills=fills,
+            ),
+            "overlay": self._overlay_audit_summary(position_target=position_target),
+            "leg_trial_guard": self._leg_trial_guard_audit_summary(
+                decision_context=decision_context,
+                position_target=position_target,
+            ),
+            "leg_reconciliation": self._leg_reconciliation_audit_summary(reconciliations),
+        }
+
+    @staticmethod
+    def _overlay_mode_from_execution_mode(execution_mode: str | None) -> str | None:
+        normalized = str(execution_mode or "").strip().lower()
+        if not normalized:
+            return None
+        if normalized.startswith("protective"):
+            return "protective"
+        if normalized.startswith("opportunistic"):
+            return "opportunistic"
+        if normalized.startswith("independent"):
+            return "independent"
+        return None
+
+    @staticmethod
+    def _normalize_leg_action(value: Any) -> str | None:
+        raw = str(value or "").strip().lower()
+        if not raw:
+            return None
+        if raw in {"open", "reduce", "close"}:
+            return raw
+        for prefix in ("open", "reduce", "close"):
+            if raw.startswith(prefix):
+                return prefix
+        return raw
+
+    @staticmethod
+    def _position_mode_audit_summary(
+        *,
+        position_mode_contract: dict[str, Any] | None,
+        order_intents: list[dict[str, Any]],
+        order_updates: list[dict[str, Any]],
+        fills: list[dict[str, Any]],
+        reconciliations: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        observed_position_modes: set[str] = set()
+        observed_pos_sides: set[str] = set()
+        observed_exchange_modes: set[str] = set()
+        mismatch_detected = False
+
+        for row in [*order_intents, *order_updates, *fills]:
+            position_mode = str(row.get("position_mode") or "").strip()
+            if position_mode:
+                observed_position_modes.add(position_mode)
+            pos_side = str(row.get("pos_side") or "").strip()
+            if pos_side:
+                observed_pos_sides.add(pos_side)
+
+        for report in reconciliations:
+            unknown_state_details = OperatorQueryService._report_field(report, "unknown_state_details", [])
+            for item in unknown_state_details if isinstance(unknown_state_details, list) else []:
+                exchange_mode = str(item.get("exchange_position_mode") or "").strip()
+                if exchange_mode:
+                    observed_exchange_modes.add(exchange_mode)
+                local_mode = str(item.get("local_position_mode") or "").strip()
+                if local_mode:
+                    observed_position_modes.add(local_mode)
+                if str(item.get("kind") or "").strip() == "position_mode_mismatch":
+                    mismatch_detected = True
+            mismatch_reasons = OperatorQueryService._report_field(report, "mismatch_reasons", [])
+            if "derivatives_local_position_mode_differs_from_exchange_account_configuration" in mismatch_reasons:
+                mismatch_detected = True
+
+        observed_position_modes_sorted = sorted(observed_position_modes)
+        observed_pos_sides_sorted = sorted(observed_pos_sides)
+        observed_exchange_modes_sorted = sorted(observed_exchange_modes)
+        configured_mode = None if position_mode_contract is None else position_mode_contract.get(
+            "configured_derivatives_position_mode"
+        )
+        exchange_mode = None if position_mode_contract is None else position_mode_contract.get("exchange_position_mode")
+        contract_matches = None if position_mode_contract is None else position_mode_contract.get(
+            "exchange_position_mode_matches_configured"
+        )
+        return {
+            "configured_derivatives_position_mode": configured_mode,
+            "required_exchange_position_mode": None if position_mode_contract is None else position_mode_contract.get(
+                "required_exchange_position_mode"
+            ),
+            "exchange_position_mode": exchange_mode,
+            "exchange_position_mode_matches_configured": contract_matches,
+            "position_mode_match_required": None if position_mode_contract is None else position_mode_contract.get(
+                "position_mode_match_required"
+            ),
+            "hedge_mode_active": bool(
+                configured_mode == "hedge"
+                or exchange_mode == "long_short_mode"
+                or "long_short_mode" in observed_position_modes_sorted
+            ),
+            "observed_position_modes": observed_position_modes_sorted,
+            "observed_exchange_position_modes": observed_exchange_modes_sorted,
+            "observed_pos_sides": observed_pos_sides_sorted,
+            "mode_change_detected": bool(
+                len(observed_position_modes_sorted) > 1
+                or len(observed_exchange_modes_sorted) > 1
+                or contract_matches is False
+                or mismatch_detected
+            ),
+            "contract_mismatch_detected": contract_matches is False,
+            "mismatch_detected": mismatch_detected,
+        }
+
+    @staticmethod
+    def _leg_order_audit_summary(
+        *,
+        order_intents: list[dict[str, Any]],
+        order_updates: list[dict[str, Any]],
+        fills: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        update_index: dict[str, dict[str, Any]] = {}
+        fill_count_index: dict[str, int] = {}
+        for row in order_updates:
+            key = str(row.get("leg_intent_id") or row.get("intent_id") or row.get("client_order_id") or "").strip()
+            if key:
+                update_index[key] = row
+        for row in fills:
+            key = str(row.get("leg_intent_id") or row.get("intent_id") or row.get("client_order_id") or "").strip()
+            if key:
+                fill_count_index[key] = fill_count_index.get(key, 0) + 1
+
+        source_rows = order_intents if order_intents else order_updates
+        items: list[dict[str, Any]] = []
+        for row in source_rows:
+            pos_side = str(row.get("pos_side") or "").strip().lower()
+            position_mode = str(row.get("position_mode") or "").strip()
+            leg_action = OperatorQueryService._normalize_leg_action(
+                row.get("leg_action") or row.get("position_intent") or row.get("execution_action")
+            )
+            if pos_side not in {"long", "short"} and position_mode != "long_short_mode" and leg_action is None:
+                continue
+            key = str(row.get("leg_intent_id") or row.get("intent_id") or row.get("client_order_id") or "").strip()
+            latest_update = update_index.get(key, {})
+            quantity = row.get("quantity", row.get("requested_qty"))
+            item = {
+                "symbol": row.get("symbol"),
+                "position_mode": position_mode or latest_update.get("position_mode"),
+                "pos_side": pos_side or str(latest_update.get("pos_side") or "").strip().lower() or None,
+                "action": leg_action,
+                "execution_mode": row.get("strategy_execution_mode") or latest_update.get("strategy_execution_mode"),
+                "overlay_mode": (
+                    OperatorQueryService._overlay_mode_from_execution_mode(
+                        row.get("strategy_execution_mode") or latest_update.get("strategy_execution_mode")
+                    )
+                ),
+                "strategy_leg_role": row.get("strategy_leg_role") or latest_update.get("strategy_leg_role"),
+                "quantity": None if quantity in {None, ""} else str(quantity),
+                "client_order_id": row.get("client_order_id") or latest_update.get("client_order_id"),
+                "intent_id": row.get("intent_id") or latest_update.get("intent_id"),
+                "leg_intent_id": row.get("leg_intent_id") or latest_update.get("leg_intent_id"),
+                "status": latest_update.get("status"),
+                "fill_count": fill_count_index.get(key, 0),
+            }
+            items.append(item)
+        items.sort(
+            key=lambda item: (
+                str(item.get("symbol") or ""),
+                str(item.get("pos_side") or ""),
+                str(item.get("action") or ""),
+                str(item.get("client_order_id") or ""),
+            )
+        )
+        return {
+            "total_count": len(items),
+            "open_count": sum(1 for item in items if item.get("action") == "open"),
+            "reduce_count": sum(1 for item in items if item.get("action") == "reduce"),
+            "close_count": sum(1 for item in items if item.get("action") == "close"),
+            "symbols": sorted({str(item.get("symbol") or "") for item in items if item.get("symbol")}),
+            "pos_sides": sorted({str(item.get("pos_side") or "") for item in items if item.get("pos_side")}),
+            "execution_modes": sorted(
+                {str(item.get("execution_mode") or "") for item in items if item.get("execution_mode")}
+            ),
+            "items": items,
+        }
+
+    @staticmethod
+    def _leg_reconciliation_audit_summary(reconciliations: list[dict[str, Any]]) -> dict[str, Any]:
+        items: list[dict[str, Any]] = []
+        for report in reconciliations:
+            reconciliation_id = OperatorQueryService._report_field(report, "reconciliation_id")
+            summary = OperatorQueryService._position_leg_mismatch_summary(report)
+            for item in summary.get("items", []):
+                normalized = dict(item)
+                normalized["reconciliation_id"] = reconciliation_id
+                items.append(normalized)
+        items.sort(
+            key=lambda item: (
+                str(item.get("reconciliation_id") or ""),
+                str(item.get("symbol") or ""),
+                str(item.get("leg_side") or ""),
+            )
+        )
+        return {
+            "total_count": len(items),
+            "missing_execution_chain_count": sum(
+                1 for item in items if item.get("kind") == "missing_execution_chain"
+            ),
+            "items": items,
+        }
+
+    def _overlay_audit_summary(self, *, position_target: dict[str, Any] | None) -> dict[str, Any]:
+        if not isinstance(position_target, dict):
+            return {}
+        overlay = position_target.get("hedge_overlay_decision")
+        legs = position_target.get("strategy_execution_legs")
+        if not isinstance(overlay, dict) and not isinstance(legs, list):
+            return {}
+        overlay_payload = dict(overlay) if isinstance(overlay, dict) else {}
+        leg_items: list[dict[str, Any]] = []
+        for row in legs if isinstance(legs, list) else []:
+            if not isinstance(row, dict):
+                continue
+            execution_mode = str(row.get("execution_mode") or "").strip() or None
+            overlay_mode = (
+                str(row.get("overlay_mode") or "").strip()
+                or self._overlay_mode_from_execution_mode(execution_mode)
+                or overlay_payload.get("effective_mode")
+                or overlay_payload.get("configured_mode")
+            )
+            leg_items.append(
+                {
+                    "symbol": row.get("symbol"),
+                    "pos_side": row.get("pos_side"),
+                    "action": row.get("action"),
+                    "role": row.get("role"),
+                    "execution_mode": execution_mode,
+                    "overlay_mode": overlay_mode,
+                    "current_position_qty": row.get("current_position_qty"),
+                    "target_position_qty": row.get("target_position_qty"),
+                    "delta_position_qty": row.get("delta_position_qty"),
+                    "trigger_reason_codes": list(row.get("trigger_reason_codes") or []),
+                }
+            )
+        return {
+            "configured_mode": overlay_payload.get("configured_mode"),
+            "effective_mode": overlay_payload.get("effective_mode"),
+            "overlay_source": overlay_payload.get("overlay_source"),
+            "state": overlay_payload.get("state"),
+            "active": bool(overlay_payload.get("active")),
+            "main_leg_signal": overlay_payload.get("main_leg_signal"),
+            "hedge_leg_signal": overlay_payload.get("hedge_leg_signal"),
+            "reason_codes": list(overlay_payload.get("reason_codes") or []),
+            "blocked_reasons": list(overlay_payload.get("blocked_reasons") or []),
+            "long_leg_score": overlay_payload.get("long_leg_score"),
+            "short_leg_score": overlay_payload.get("short_leg_score"),
+            "long_leg_reason_codes": list(overlay_payload.get("long_leg_reason_codes") or []),
+            "short_leg_reason_codes": list(overlay_payload.get("short_leg_reason_codes") or []),
+            "long_leg_blocked_reasons": list(overlay_payload.get("long_leg_blocked_reasons") or []),
+            "short_leg_blocked_reasons": list(overlay_payload.get("short_leg_blocked_reasons") or []),
+            "items": leg_items,
+            "execution_modes": sorted(
+                {str(item.get("execution_mode") or "") for item in leg_items if item.get("execution_mode")}
+            ),
+        }
+
+    def _leg_trial_guard_audit_summary(
+        self,
+        *,
+        decision_context: dict[str, Any] | None,
+        position_target: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        if not isinstance(decision_context, dict):
+            return {}
+        leg_health = decision_context.get("leg_strategy_health")
+        if not isinstance(leg_health, dict):
+            return {}
+        overlay = self._overlay_audit_summary(position_target=position_target)
+        mode = (
+            overlay.get("effective_mode")
+            or overlay.get("configured_mode")
+            or self.runtime.settings.strategy_hedge_overlay_mode
+        )
+        enabled = bool(
+            mode == "independent"
+            and self.runtime.settings.strategy_hedge_independent_trial_guard_enabled
+        )
+        min_closed_trades = int(self.runtime.settings.strategy_performance_guard_min_closed_trades)
+        items: list[dict[str, Any]] = []
+        for leg in ("long", "short"):
+            payload = leg_health.get(leg)
+            if not isinstance(payload, dict):
+                continue
+            closed_trade_count = int(payload.get("recent_closed_trade_count") or 0)
+            recent_win_rate = float(payload.get("recent_win_rate") or 0.0)
+            recent_net_realized_pnl = self._to_decimal(payload.get("recent_net_realized_pnl")) or Decimal("0")
+            sample_ready = closed_trade_count >= min_closed_trades
+            active = bool(
+                enabled
+                and sample_ready
+                and recent_net_realized_pnl < -self._DECIMAL_EPSILON
+                and recent_win_rate < 0.5
+            )
+            status = (
+                "disabled"
+                if not enabled
+                else "warming_up"
+                if not sample_ready
+                else "blocked"
+                if active
+                else "clear"
+            )
+            items.append(
+                {
+                    "leg": leg,
+                    "enabled": enabled,
+                    "status": status,
+                    "active": active,
+                    "sample_ready": sample_ready,
+                    "recent_closed_trade_count": closed_trade_count,
+                    "recent_win_rate": recent_win_rate,
+                    "recent_net_realized_pnl": recent_net_realized_pnl,
+                    "recent_fee_drag_ratio": float(payload.get("recent_fee_drag_ratio") or 0.0),
+                    "recent_churn_ratio": float(payload.get("recent_churn_ratio") or 0.0),
+                    "recent_low_edge_trade_streak": int(payload.get("recent_low_edge_trade_streak") or 0),
+                    "guardrail_flags": list(payload.get("guardrail_flags") or []),
+                    "cooldowns": dict(payload.get("cooldowns") or {}),
+                    "reason_code": f"independent_{leg}_book_trial_guard_active" if active else None,
+                }
+            )
+        return {
+            "enabled": enabled,
+            "mode": mode,
+            "total_count": len(items),
+            "active_count": sum(1 for item in items if item.get("active")),
+            "items": items,
+        }
 
     def _baseline_reference_payload(
         self,
@@ -2759,6 +4062,17 @@ class OperatorQueryService:
                     )
                 else:
                     payload["profile_control_source"] = "system" if activation.get("active_profile_id") else "env_default"
+            if payload.get("position_management_reason_codes") is None:
+                payload["position_management_reason_codes"] = [
+                    code
+                    for code in ("alpha_decay_exit", "alpha_decay_reduce", "risk_contraction_exit", "emergency_protective_exit")
+                    if code in list(payload.get("guardrail_flags") or [])
+                ]
+            if payload.get("exit_attribution") is None:
+                for code in ("emergency_protective_exit", "alpha_decay_exit", "alpha_decay_reduce", "risk_contraction_exit"):
+                    if code in list(payload.get("position_management_reason_codes") or []):
+                        payload["exit_attribution"] = code
+                        break
             return payload
         mode_value = (
             None if ai_assessment is None else ai_assessment.get("operating_mode")
@@ -2797,6 +4111,16 @@ class OperatorQueryService:
         blocked_reasons.extend(list((position_target or {}).get("guardrail_flags") or []))
         blocked_reasons.extend(list((policy_decision or {}).get("rejection_reasons") or []))
         blocked_reasons.extend(list((risk_decision or {}).get("rejection_reasons") or []))
+        position_management_reason_codes = [
+            code
+            for code in ("alpha_decay_exit", "alpha_decay_reduce", "risk_contraction_exit", "emergency_protective_exit")
+            if code in list((position_target or {}).get("guardrail_flags") or [])
+        ]
+        exit_attribution = None
+        for code in ("emergency_protective_exit", "alpha_decay_exit", "alpha_decay_reduce", "risk_contraction_exit"):
+            if code in position_management_reason_codes:
+                exit_attribution = code
+                break
         profile_snapshot = self.strategy_profile_snapshot()
         activation = profile_snapshot.get("activation", {})
         outcome = DecisionOutcome(
@@ -2840,6 +4164,12 @@ class OperatorQueryService:
             risk_capped_reasons=list((risk_decision or {}).get("rejection_reasons") or [])
             + list((risk_decision or {}).get("constraints_applied") or []),
             risk_capped_target_qty=None if risk_decision is None or risk_decision.get("capped_target_position_qty") is None else Decimal(str(risk_decision.get("capped_target_position_qty"))),
+            position_management_reason_codes=position_management_reason_codes,
+            exit_attribution=exit_attribution,
+            selected_strategy_family=str((position_target or {}).get("strategy_family") or "directional"),
+            selected_strategy_route_action=str((position_target or {}).get("strategy_route_action") or "override_target"),
+            strategy_selection_reason_codes=list((position_target or {}).get("strategy_reason_codes") or []),
+            strategy_selection_headline=(position_target or {}).get("strategy_headline"),
             active_profile_id=activation.get("active_profile_id"),
             profile_control_source="system" if activation.get("active_profile_id") else "env_default",
             ai_fallback_used=bool((ai_assessment or {}).get("fallback_used")),
@@ -2931,242 +4261,10 @@ class OperatorQueryService:
         }
 
     def _build_system_health(self) -> dict[str, Any]:
-        snapshot = self.runtime.health_service.snapshot()
-        mode_snapshot = self.system_mode()
-        recovery = self.recovery_view()
-        market = self.runtime.market_gateway.status()
-        account = self.runtime.account_service.status()
-        execution = self.runtime.execution_adapter.readiness()
-        phase1_shadow = self.phase1_shadow()
-        derivatives_live_guard = self.derivatives_live_guard()
-        latest_reconciliation = self._latest_scoped_reconciliation()
-        latest_portfolio = self._latest_scoped_snapshot()
-        blockers = self.blockers()
-        account_baseline = self.latest_account_baseline()
-        reconciliation_component = next(
-            (component for component in snapshot.components if component.component == "reconciliation"),
-            None,
-        )
-        warnings = [
-            {
-                "component": component.component,
-                "detail": component.detail,
-                "blockers": component.blockers,
-            }
-            for component in snapshot.components
-            if component.status == "warn"
-        ]
-        if phase1_shadow["status"] in {"degraded", "lagging"}:
-            warnings.append(
-                {
-                    "component": "phase1_shadow",
-                    "detail": phase1_shadow["summary"],
-                    "blockers": [],
-                }
-            )
-        if self.runtime.kill_switch.halted:
-            runtime_state = "halted"
-        elif any(item["affects_execution"] for item in blockers):
-            runtime_state = "blocked"
-        elif warnings:
-            runtime_state = "degraded"
-        else:
-            runtime_state = "healthy"
-        self._persist_blocker_snapshot(
-            source="system_health",
-            runtime_state=runtime_state,
-            mode_snapshot=mode_snapshot,
-            blockers=blockers,
-        )
-        return {
-            "overall_status": snapshot.status,
-            "runtime_state": runtime_state,
-            "operating_state": snapshot.operating_state,
-            "mode": snapshot.mode,
-            "runtime_profile": self.runtime.runtime_profile.to_dict(),
-            "environment_capabilities": self.runtime.environment_capabilities.to_dict(),
-            "policy_profile": self.runtime.policy_profile.to_dict(),
-            "recovery_policy": self.runtime.recovery_policy.to_dict(),
-            "profile_control": self.runtime_profile_snapshot(),
-            "halted": self.runtime.kill_switch.halted,
-            "blockers": blockers,
-            "warnings": warnings,
-            "execution_blocked": mode_snapshot["execution_blocked"],
-            "submit_blocked": mode_snapshot["submit_blocked"],
-            "submit_blocked_reasons": mode_snapshot["submit_blocked_reasons"],
-            "subsystems": {
-                "market_data": market,
-                "account_state": account,
-                "execution_adapter": execution,
-                "reconciliation": {
-                    "ready": reconciliation_component.status == "ok" if reconciliation_component is not None else False,
-                    "fresh": reconciliation_component.fresh if reconciliation_component is not None else False,
-                    "last_update_ts": (
-                        reconciliation_component.last_update_ts
-                        if reconciliation_component is not None
-                        else (latest_reconciliation.as_of_ts if latest_reconciliation else None)
-                    ),
-                    "severity": latest_reconciliation.severity if latest_reconciliation else None,
-                    "halt_required": latest_reconciliation.halt_required if latest_reconciliation else False,
-                    "blockers": (
-                        list(reconciliation_component.blockers)
-                        if reconciliation_component is not None
-                        else []
-                    ),
-                },
-                "storage": {
-                    "ready": True,
-                    "fresh": True,
-                    "detail": self.runtime.settings.storage_mode,
-                },
-                "phase1_shadow": phase1_shadow,
-                "derivatives_live_guard": derivatives_live_guard,
-                "audit_replay": {
-                    "ready": True,
-                    "fresh": bool(self.runtime.replay_validation_history),
-                    "audit_record_count": self.runtime.audit_repo.count(),
-                    "last_replay_validation": (
-                        self.runtime.replay_validation_history[-1]
-                        if self.runtime.replay_validation_history
-                        else None
-                    ),
-                },
-            },
-            "freshness": {
-                "market_fresh": market.get("fresh", False),
-                "account_fresh": account.get("fresh", False),
-                "reconciliation_fresh": (
-                    reconciliation_component.fresh if reconciliation_component is not None else False
-                ),
-            },
-            "last_success_timestamps": {
-                "market": market.get("last_update_ts"),
-                "account": account.get("last_update_ts"),
-                "portfolio": latest_portfolio.snapshot_ts if latest_portfolio else None,
-                "reconciliation": latest_reconciliation.as_of_ts if latest_reconciliation else None,
-            },
-            "recovery": recovery,
-            "recovery_state": recovery["recovery_state"],
-            "review_required": recovery["review_required"],
-            "rebaseline_available": recovery["rebaseline_available"],
-            "account_baseline": account_baseline,
-            "mode_contract": mode_snapshot,
-        }
+        return self.runtime_queries.build_system_health()
 
     def _build_system_runtime(self) -> dict[str, Any]:
-        latest_decision = self.runtime.event_store.latest(topics.DECISION_CONTEXTS)
-        latest_fill = self.latest_fill()
-        latest_reconciliation = self._latest_scoped_reconciliation()
-        account_baseline = self.latest_account_baseline()
-        account_snapshot = self.runtime.account_service.latest_snapshot()
-        recovery = self.recovery_view()
-        guarded_live_preflight = self.guarded_live_preflight()
-        guarded_live_run_packet = self.guarded_live_run_packet()
-        now = utc_now()
-        return {
-            "runtime_profile": self.runtime.runtime_profile.to_dict(),
-            "environment_capabilities": self.runtime.environment_capabilities.to_dict(),
-            "policy_profile": self.runtime.policy_profile.to_dict(),
-            "recovery_policy": self.runtime.recovery_policy.to_dict(),
-            "profile_source": self.runtime.runtime_profile_resolution.profile_source,
-            "startup_profile": self.runtime.settings.startup_profile,
-            "config_profile": self.runtime.settings.config_profile,
-            "account_configuration": (
-                account_snapshot.account_configuration.model_dump(mode="json")
-                if account_snapshot is not None and account_snapshot.account_configuration is not None
-                else None
-            ),
-            "risk_snapshot": (
-                account_snapshot.risk_snapshot.model_dump(mode="json")
-                if account_snapshot is not None and account_snapshot.risk_snapshot is not None
-                else None
-            ),
-            "primary_instrument_rule": (
-                next(
-                    (
-                        item.model_dump(mode="json")
-                        for item in account_snapshot.instruments
-                        if item.symbol == self.runtime.settings.default_symbol
-                    ),
-                    None,
-                )
-                if account_snapshot is not None
-                else None
-            ),
-            "runtime_profile_control": self.runtime_profile_snapshot(),
-            "symbols": [self.runtime.settings.default_symbol],
-            "enabled_timeframes": list(self.runtime.settings.enabled_decision_timeframes),
-            "decision_cadence": {
-                "decision_min_interval_seconds_15m": self.runtime.settings.decision_min_interval_seconds_15m,
-                "decision_min_interval_seconds_1h": self.runtime.settings.decision_min_interval_seconds_1h,
-                "decision_min_price_move_bps": self.runtime.settings.decision_min_price_move_bps,
-                "decision_min_momentum_delta": self.runtime.settings.decision_min_momentum_delta,
-                "max_decisions_per_minute": self.runtime.settings.max_decisions_per_minute,
-            },
-            "storage_mode": self.runtime.settings.storage_mode,
-            "operator_auth_enabled": self.runtime.settings.operator_auth_enabled,
-            "operator_auth": {
-                "auth_enabled": self.runtime.settings.operator_auth_enabled,
-                "session_enabled": self.runtime.settings.operator_session_configured,
-                "database_backed": self.runtime.database_runtime is not None,
-                "stored_user_count": self.runtime.operator_repo.count() if hasattr(self.runtime, "operator_repo") else 0,
-                "api_key_compatibility_enabled": bool(
-                    self.runtime.settings.operator_read_api_key or self.runtime.settings.operator_write_api_key
-                ),
-                "unsafe_write_without_auth": self.runtime.settings.operator_unsafe_write_without_auth,
-                "phase5_hardened": self.runtime.settings.operator_control_plane_execution_ledger_enabled,
-            },
-            "startup_timestamp": self.runtime.started_at,
-            "uptime_seconds": max((now - self.runtime.started_at).total_seconds(), 0.0),
-            "last_decision_timestamp": latest_decision.event_timestamp if latest_decision else None,
-            "last_fill_timestamp": (
-                latest_fill.get("ingestion_timestamp") if isinstance(latest_fill, dict) else latest_fill.ingestion_timestamp
-            ) if latest_fill else None,
-            "last_reconciliation_timestamp": latest_reconciliation.as_of_ts if latest_reconciliation else None,
-            "recovery": {
-                "recovery_state": recovery["recovery_state"],
-                "review_required": recovery["review_required"],
-                "rebaseline_available": recovery["rebaseline_available"],
-                "resume_eligible": recovery["resume_eligible"],
-                "safe_to_trade": recovery["safe_to_trade"],
-            },
-            "baseline_takeover": {
-                "status": self.runtime.recovery_status.baseline_status,
-                "baseline_imported": self.runtime.recovery_status.baseline_imported,
-                "baseline_imported_at": self.runtime.recovery_status.baseline_imported_at,
-                "baseline_source": self.runtime.recovery_status.baseline_source,
-                "baseline_kind": account_baseline.get("baseline_kind") if account_baseline is not None else None,
-                "requires_operator_review": self.runtime.recovery_status.baseline_requires_operator_review,
-                "safe_for_automatic_continuation": self.runtime.recovery_status.baseline_safe_for_automatic_continuation,
-                "balance_count": self.runtime.recovery_status.baseline_balance_count,
-                "position_count": self.runtime.recovery_status.baseline_position_count,
-                "open_order_count": self.runtime.recovery_status.baseline_open_order_count,
-                "fill_count": self.runtime.recovery_status.baseline_fill_count,
-                "event_ref": self.runtime.recovery_status.baseline_event_ref,
-                "last_rebaseline_event_ref": self.runtime.recovery_status.last_rebaseline_event_ref,
-                "last_rebaseline_at": self.runtime.recovery_status.last_rebaseline_at,
-                "snapshot": account_baseline,
-            },
-            "control_plane": {
-                "phase5_enabled": self._phase5_control_plane_enabled(),
-                "order_truth_source": "execution_order_repo" if self._phase5_control_plane_enabled() else "execution_repo",
-                "fill_truth_source": "execution_fill_repo_v2" if self._phase5_control_plane_enabled() else "execution_repo",
-                "balance_truth_source": "ledger_accounts" if self._phase5_control_plane_enabled() else "portfolio_snapshot",
-                "legacy_layer_authoritative": not self._phase5_control_plane_enabled(),
-                "auth_hardened": self.runtime.settings.operator_control_plane_execution_ledger_enabled,
-                "financial_convergence_mode_enabled": self.runtime.settings.financial_convergence_mode_enabled,
-            },
-            "trial_guard": self.trial_guard(),
-            "margin_buffer_overview": self.margin_buffer_risk(),
-            "derivatives_live_guard": self.derivatives_live_guard(),
-            "guarded_live_preflight": guarded_live_preflight,
-            "guarded_live_run_packet_summary": {
-                "status": guarded_live_run_packet.get("status"),
-                "summary": guarded_live_run_packet.get("summary"),
-                "summary_metrics": guarded_live_run_packet.get("summary_metrics"),
-                "operator_actions": guarded_live_run_packet.get("operator_actions"),
-            },
-        }
+        return self.runtime_queries.build_system_runtime()
 
     def decision_view(self, decision_id: str) -> dict[str, Any]:
         audit = self.runtime.audit_repo.get(decision_id)
@@ -3191,6 +4289,14 @@ class OperatorQueryService:
         execution_plan = self._execution_plan_payload(self.payload_by_ref(audit.execution_plan_ref))
         strategy_execution_health = self.strategy_execution_health(
             decision_context.get("symbol") if decision_context is not None else None
+        )
+        hedge_mode_audit = self._hedge_mode_audit_payload(
+            decision_context=decision_context,
+            position_target=position_target,
+            order_intents=order_intents,
+            order_updates=order_updates,
+            fills=fills,
+            reconciliations=reconciliations,
         )
         return {
             "decision_id": decision_id,
@@ -3235,6 +4341,7 @@ class OperatorQueryService:
             "portfolio_snapshot": self.payload_by_ref(audit.portfolio_delta_ref),
             "reconciliations": reconciliations,
             "strategy_execution_health": strategy_execution_health,
+            "hedge_mode_audit": hedge_mode_audit,
             "ai_decision_audit": self._ai_decision_audit(
                 audit=audit,
                 decision_context=decision_context,
@@ -3301,6 +4408,17 @@ class OperatorQueryService:
                     "target_position_qty": target.get("target_position_qty") if target else None,
                     "delta_position_qty": target.get("delta_position_qty") if target else None,
                     "target_delta_qty": target.get("delta_position_qty") if target else None,
+                    "strategy_family": (
+                        target.get("strategy_family")
+                        if target
+                        else None
+                    ),
+                    "strategy_route_action": (
+                        target.get("strategy_route_action")
+                        if target
+                        else None
+                    ),
+                    "strategy_reason_codes": [] if target is None else list(target.get("strategy_reason_codes") or []),
                     "guardrail_flags": target.get("guardrail_flags") if target else [],
                     "expected_net_edge_bps": target.get("expected_net_edge_bps") if target else None,
                     "policy_result": policy.get("execution_allowed") if policy else None,
@@ -3381,6 +4499,8 @@ class OperatorQueryService:
             "derivatives_margin_usage_requires_only_reduce": "预估保证金占用已经进入高风险区域，系统只允许减仓或平仓。",
             "derivatives_liquidation_gap_requires_only_reduce": "当前最近仓位已经进入强平缓冲区，系统只允许继续减仓或平仓。",
             "derivatives_risk_snapshot_missing_requires_only_reduce": "当前拿不到合约风险快照，系统只允许继续减仓或平仓。",
+            "derivatives_risk_snapshot_missing_grace_active": "当前合约风险快照短时缺失，系统先降档、缩预算并降低执行侵略性。",
+            "derivatives_risk_snapshot_missing_auto_halt": "合约风险快照持续缺失过久，系统已升级到自动停机。",
             "derivatives_margin_buffer_auto_halt": "当前保证金占用已经进入自动停机阈值，系统必须保持暂停。",
             "derivatives_liquidation_proximity_auto_halt": "当前最近仓位距离强平过近，系统已经触发自动停机。",
             "max_gross_notional_per_symbol_exceeded": "单标的总名义敞口超过上限，系统禁止继续扩大该标的仓位。",
@@ -3389,6 +4509,10 @@ class OperatorQueryService:
             "max_daily_realized_loss_usdt_exceeded": "当日已实现亏损超过上限，系统只允许继续减仓或平仓。",
             "risk_budget_multiplier_applied": "当前风险预算已经自动收缩，目标仓位和名义金额上限会同步变小。",
             "execution_aggressiveness_contracted": "当前执行侵略性已经自动收缩，实际滑点和执行参数上限会同步变严。",
+            "alpha_decay_exit": "原有持仓的优势已经明显衰减，系统将直接退出该仓位。",
+            "alpha_decay_reduce": "原有持仓的优势开始衰减，系统先自动减仓。",
+            "risk_contraction_exit": "当前波动率或市场状态不利于继续满仓持有，系统自动收缩现有仓位。",
+            "emergency_protective_exit": "当前 adverse 信号过强，系统触发紧急保护退出。",
         }
         return messages.get(code, f"风控命中了限制：{code}")
 
@@ -3748,191 +4872,34 @@ class OperatorQueryService:
         return "Phase 1 shadow compatibility layer is configured but has not processed shadow traffic yet."
 
     def portfolio_latest(self) -> dict[str, Any]:
-        cache_key = f"portfolio_latest:{self._scope_cache_fragment()}"
-        return self._cached_ttl(cache_key, 10, self._build_portfolio_latest)
+        return self.account_queries.portfolio_latest()
 
     def _build_portfolio_latest(self) -> dict[str, Any]:
-        snapshot = self._latest_scoped_snapshot()
-        return {
-            "portfolio": snapshot.model_dump(mode="json") if snapshot is not None else None,
-            "latest_update_timestamp": snapshot.snapshot_ts if snapshot is not None else None,
-            "truth_source": "ledger_backed_snapshot" if self._phase5_control_plane_enabled() else "legacy_portfolio_snapshot",
-        }
+        return self.account_queries.build_portfolio_latest()
 
     def portfolio_history(self, *, limit: int = 20) -> dict[str, Any]:
-        history = snapshots_for_scope(self.runtime.portfolio_repo, self.state_scope, limit=limit)
-        return {
-            "snapshots": [snapshot.model_dump(mode="json") for snapshot in history],
-            "total_available": len(snapshots_for_scope(self.runtime.portfolio_repo, self.state_scope)),
-        }
+        return self.account_queries.portfolio_history(limit=limit)
 
     def balances(self) -> dict[str, Any]:
-        snapshot = self._latest_scoped_snapshot()
-        exchange = self.runtime.account_service.latest_snapshot()
-        return {
-            "local_balances": self._phase5_balance_view(),
-            "exchange_balances": [item.model_dump(mode="json") for item in exchange.balances] if exchange is not None else [],
-            "truth_source": "ledger_accounts" if self._phase5_control_plane_enabled() else "legacy_portfolio_snapshot",
-            "snapshot_balances": snapshot.balances if snapshot is not None else {},
-        }
+        return self.account_queries.balances()
 
     def positions(self) -> dict[str, Any]:
-        snapshot = self._latest_scoped_snapshot()
-        exchange = self.runtime.account_service.latest_snapshot()
-        reconciliation = self._latest_scoped_reconciliation()
-        return {
-            "local_positions": [item.model_dump(mode="json") for item in snapshot.positions] if snapshot is not None else [],
-            "local_net_positions": self._aggregate_local_positions(snapshot),
-            "local_margin_summary": self._local_position_margin_summary(snapshot),
-            "exchange_positions": [item.model_dump(mode="json") for item in exchange.positions] if exchange is not None else [],
-            "exchange_net_positions": self._aggregate_exchange_positions(exchange),
-            "exchange_margin_summary": self._exchange_position_margin_summary(exchange),
-            "margin_reconciliation": self._margin_reconciliation_summary(reconciliation),
-            "margin_buffer_overview": self.margin_buffer_risk(),
-            "truth_source": "ledger_backed_snapshot" if self._phase5_control_plane_enabled() else "legacy_portfolio_snapshot",
-        }
+        return self.account_queries.positions()
 
     def account_state(self) -> dict[str, Any]:
-        cache_key = f"account_state:{self._scope_cache_fragment()}"
-        return self._cached_ttl(cache_key, 10, self._build_account_state)
+        return self.account_queries.account_state()
 
     def _build_account_state(self) -> dict[str, Any]:
-        status = self.runtime.account_service.status()
-        snapshot = self.runtime.account_service.latest_snapshot()
-        local_snapshot = self._latest_scoped_snapshot()
-        recovery = self.recovery_view()
-        reconciliation = self._latest_scoped_reconciliation()
-        tracked_symbols = set(self.runtime.settings.allowed_symbols) | {self.runtime.settings.default_symbol}
-        exchange_funding_fee_summary = (
-            self.runtime.account_service.recent_funding_fee_summary(symbol=self.runtime.settings.default_symbol)
-            if hasattr(self.runtime.account_service, "recent_funding_fee_summary")
-            else None
-        )
-        derivatives_live_guard = self.derivatives_live_guard()
-        return {
-            "backend": self.runtime.settings.account_backend,
-            "read_enabled": self.runtime.settings.account_read_enabled,
-            "last_refresh_timestamp": status.get("last_update_ts"),
-            "fresh": status.get("fresh", False),
-            "connected": status.get("connected", False),
-            "ready": status.get("ready", False),
-            "last_error": status.get("last_error"),
-            "private_ws_connected": status.get("private_ws_connected", False),
-            "private_ws_last_message_ts": status.get("private_ws_last_message_ts"),
-            "private_ws_last_error": status.get("private_ws_last_error"),
-            "private_ws_fresh": status.get("private_ws_fresh", False),
-            "maker_fee_rate": status.get("maker_fee_rate"),
-            "taker_fee_rate": status.get("taker_fee_rate"),
-            "fee_rates_source": status.get("fee_rates_source"),
-            "account_configuration": (
-                snapshot.account_configuration.model_dump(mode="json")
-                if snapshot is not None and snapshot.account_configuration is not None
-                else status.get("account_configuration")
-            ),
-            "fee_schedule": (
-                snapshot.fee_schedule.model_dump(mode="json")
-                if snapshot is not None and snapshot.fee_schedule is not None
-                else status.get("fee_schedule")
-            ),
-            "risk_snapshot": (
-                snapshot.risk_snapshot.model_dump(mode="json")
-                if snapshot is not None and snapshot.risk_snapshot is not None
-                else status.get("risk_snapshot")
-            ),
-            "system_status_items": (
-                [item.model_dump(mode="json") for item in snapshot.system_status_items]
-                if snapshot is not None
-                else status.get("system_status_items", [])
-            ),
-            "tracked_instrument_rules": (
-                [
-                    item.model_dump(mode="json")
-                    for item in snapshot.instruments
-                    if item.symbol in tracked_symbols
-                ]
-                if snapshot is not None
-                else []
-            ),
-            "recent_bills_count": status.get("recent_bills_count", 0),
-            "last_bills_error": status.get("last_bills_error"),
-            "exchange_funding_fee_summary": exchange_funding_fee_summary,
-            "persisted_funding_fee_summary": self._recent_persisted_funding_fee_summary(limit=200),
-            "local_position_margin_summary": self._local_position_margin_summary(local_snapshot),
-            "exchange_position_margin_summary": self._exchange_position_margin_summary(snapshot),
-            "margin_reconciliation": self._margin_reconciliation_summary(reconciliation),
-            "margin_buffer_overview": self.margin_buffer_risk(),
-            "derivatives_live_guard": derivatives_live_guard,
-            "blockers": status.get("blockers", []),
-            "current_blocking_reason": next(iter(status.get("blockers", [])), None),
-            "detail": status.get("detail"),
-            "recovery": {
-                "recovery_state": recovery["recovery_state"],
-                "review_required": recovery["review_required"],
-                "rebaseline_available": recovery["rebaseline_available"],
-                "resume_eligible": recovery["resume_eligible"],
-                "safe_to_trade": recovery["safe_to_trade"],
-            },
-            "baseline_takeover": {
-                "status": self.runtime.recovery_status.baseline_status,
-                "baseline_imported": self.runtime.recovery_status.baseline_imported,
-                "baseline_imported_at": self.runtime.recovery_status.baseline_imported_at,
-                "baseline_source": self.runtime.recovery_status.baseline_source,
-                "requires_operator_review": self.runtime.recovery_status.baseline_requires_operator_review,
-                "safe_for_automatic_continuation": self.runtime.recovery_status.baseline_safe_for_automatic_continuation,
-                "balance_count": self.runtime.recovery_status.baseline_balance_count,
-                "position_count": self.runtime.recovery_status.baseline_position_count,
-                "open_order_count": self.runtime.recovery_status.baseline_open_order_count,
-                "fill_count": self.runtime.recovery_status.baseline_fill_count,
-                "event_ref": self.runtime.recovery_status.baseline_event_ref,
-            },
-            "control_plane": {
-                "phase5_enabled": self._phase5_control_plane_enabled(),
-                "order_truth_source": "execution_order_repo" if self._phase5_control_plane_enabled() else "execution_repo",
-                "fill_truth_source": "execution_fill_repo_v2" if self._phase5_control_plane_enabled() else "execution_repo",
-                "balance_truth_source": "ledger_accounts" if self._phase5_control_plane_enabled() else "portfolio_snapshot",
-                "legacy_execution_views_authoritative": not self._phase5_control_plane_enabled(),
-            },
-        }
+        return self.account_queries.build_account_state()
 
     async def account_recent_bills(self, *, limit: int = 50) -> dict[str, Any]:
-        rows = await self.runtime.account_service.recent_bills(
-            symbol=self.runtime.settings.default_symbol,
-            limit=limit,
-        )
-        return {
-            "bills": rows[:limit],
-            "total_available": len(rows),
-            "limit": limit,
-            "latest_bill": rows[0] if rows else None,
-        }
+        return await self.account_queries.account_recent_bills(limit=limit)
 
     def account_recent_funding_fees(self, *, limit: int = 50) -> dict[str, Any]:
-        normalized_limit = max(int(limit), 1)
-        cache_key = f"account_recent_funding_fees:{self._scope_cache_fragment()}:{normalized_limit}"
-        return self._cached_ttl(
-            cache_key,
-            10,
-            lambda: self._build_account_recent_funding_fees(limit=normalized_limit),
-        )
+        return self.account_queries.account_recent_funding_fees(limit=limit)
 
     def _build_account_recent_funding_fees(self, *, limit: int) -> dict[str, Any]:
-        rows = funding_fee_records_for_scope(
-            getattr(self.runtime, "funding_fee_repo", None),
-            self.state_scope,
-            limit=limit,
-        ) if getattr(self.runtime, "funding_fee_repo", None) is not None else []
-        return {
-            "funding_fees": [row.model_dump(mode="json") for row in rows],
-            "total_available": len(
-                funding_fee_records_for_scope(
-                    getattr(self.runtime, "funding_fee_repo", None),
-                    self.state_scope,
-                )
-            ) if getattr(self.runtime, "funding_fee_repo", None) is not None else 0,
-            "limit": limit,
-            "latest_funding_fee": rows[-1].model_dump(mode="json") if rows else None,
-            "summary": self._recent_persisted_funding_fee_summary(limit=max(limit, 200)),
-        }
+        return self.account_queries.build_account_recent_funding_fees(limit=limit)
 
     def _recent_persisted_funding_fee_summary(self, *, limit: int = 200) -> dict[str, Any]:
         repo = getattr(self.runtime, "funding_fee_repo", None)
@@ -3986,210 +4953,40 @@ class OperatorQueryService:
         }
 
     def account_open_orders(self) -> dict[str, Any]:
-        exchange = self.runtime.account_service.latest_snapshot()
-        local_open_orders = (
-            [self._execution_record_payload(order) for order in self.runtime.execution_order_repo.open_orders()]
-            if self._phase5_control_plane_enabled()
-            else [order.model_dump(mode="json") for order in self._scoped_open_order_states()]
-        )
-        return {
-            "local_open_orders": local_open_orders,
-            "exchange_open_orders": [order.model_dump(mode="json") for order in exchange.open_orders] if exchange is not None else [],
-        }
+        return self.account_queries.account_open_orders()
 
     def account_recent_fills(self) -> dict[str, Any]:
-        exchange = self.runtime.account_service.latest_snapshot()
-        local_fills = (
-            [self._execution_record_payload(fill) for fill in self._phase5_fill_rows(limit=50)]
-            if self._phase5_control_plane_enabled()
-            else [fill.model_dump(mode="json") for fill in self.recent_fills(limit=50)]
-        )
-        return {
-            "local_fills": local_fills,
-            "exchange_fills": [fill.model_dump(mode="json") for fill in exchange.fills[:50]] if exchange is not None else [],
-        }
+        return self.account_queries.account_recent_fills()
 
     def orders_open(self) -> dict[str, Any]:
-        return self.account_open_orders()
+        return self.account_queries.orders_open()
 
     def orders_recent(self, *, limit: int = 50, offset: int = 0) -> dict[str, Any]:
-        normalized_limit = max(int(limit), 1)
-        normalized_offset = max(int(offset), 0)
-        cache_key = (
-            f"orders_recent:{self._scope_cache_fragment()}:"
-            f"{normalized_limit}:{normalized_offset}"
-        )
-        return self._cached_ttl(
-            cache_key,
-            10,
-            lambda: self._build_orders_recent(limit=normalized_limit, offset=normalized_offset),
-        )
+        return self.account_queries.orders_recent(limit=limit, offset=offset)
 
     def _build_orders_recent(self, *, limit: int, offset: int) -> dict[str, Any]:
-        if self._phase5_control_plane_enabled():
-            all_orders = self._phase5_order_rows()
-            orders = all_orders[offset : offset + limit]
-            return {
-                "orders": [self._execution_record_payload(order) for order in orders],
-                "limit": limit,
-                "offset": offset,
-                "total_available": len(all_orders),
-                "has_more": offset + len(orders) < len(all_orders),
-                "truth_source": "execution_order_repo",
-            }
-        all_orders = sorted(
-            order_states_for_scope(self.runtime.execution_repo, self.state_scope),
-            key=lambda item: (item.last_update_ts or item.created_at, item.client_order_id),
-            reverse=True,
-        )
-        orders = all_orders[offset : offset + limit]
-        return {
-            "orders": [self._execution_record_payload(order) for order in orders],
-            "limit": limit,
-            "offset": offset,
-            "total_available": len(all_orders),
-            "has_more": offset + len(orders) < len(all_orders),
-            "truth_source": "execution_repo",
-        }
+        return self.account_queries.build_orders_recent(limit=limit, offset=offset)
 
     def order_detail(self, client_order_id: str) -> dict[str, Any]:
-        if self._phase5_control_plane_enabled():
-            order = self.runtime.execution_order_repo.get_order_by_client_order_id(client_order_id)
-            if order is None:
-                raise KeyError(f"order_not_found:{client_order_id}")
-            fills = self.runtime.execution_fill_repo_v2.fills_for_order(client_order_id)
-            control_order = self._control_plane_order_state(client_order_id)
-            return {
-                "order": self._execution_record_payload(order),
-                "fills": [self._execution_record_payload(fill) for fill in fills],
-                "stuck_submission_resolution": (
-                    self._stuck_submission_resolution(
-                        order=control_order,
-                        fills=self._control_plane_fills_for_order(client_order_id),
-                        exchange_snapshot=self.runtime.account_service.latest_snapshot(),
-                    )
-                    if control_order is not None
-                    else {
-                        "eligible": False,
-                        "summary": "当前订单缺少可操作的本地执行状态，暂时不能执行卡单恢复。",
-                        "reason_code": "phase5_order_state_unavailable",
-                    }
-                ),
-                "truth_source": "execution_order_repo",
-            }
-        order = next(
-            (item for item in self._scoped_order_states() if item.client_order_id == client_order_id),
-            None,
-        )
-        if order is None:
-            raise KeyError(f"order_not_found:{client_order_id}")
-        fills = self._scoped_fills_for_order(client_order_id)
-        return {
-            "order": self._execution_record_payload(order),
-            "fills": [self._execution_record_payload(fill) for fill in fills],
-            "stuck_submission_resolution": self._stuck_submission_resolution(
-                order=order,
-                fills=fills,
-                exchange_snapshot=self.runtime.account_service.latest_snapshot(),
-            ),
-            "truth_source": "execution_repo",
-        }
+        return self.account_queries.order_detail(client_order_id)
 
     def fills_recent(self, *, limit: int = 50, offset: int = 0) -> dict[str, Any]:
-        normalized_limit = max(int(limit), 1)
-        normalized_offset = max(int(offset), 0)
-        cache_key = (
-            f"fills_recent:{self._scope_cache_fragment()}:"
-            f"{normalized_limit}:{normalized_offset}"
-        )
-        return self._cached_ttl(
-            cache_key,
-            10,
-            lambda: self._build_fills_recent(limit=normalized_limit, offset=normalized_offset),
-        )
+        return self.account_queries.fills_recent(limit=limit, offset=offset)
 
     def _build_fills_recent(self, *, limit: int, offset: int) -> dict[str, Any]:
-        if self._phase5_control_plane_enabled():
-            all_fills = self._phase5_fill_rows()
-            fills = all_fills[offset : offset + limit]
-            return {
-                "fills": [self._execution_record_payload(fill) for fill in fills],
-                "limit": limit,
-                "offset": offset,
-                "total_available": len(all_fills),
-                "has_more": offset + len(fills) < len(all_fills),
-                "truth_source": "execution_fill_repo_v2",
-            }
-        all_fills = self.recent_fills(limit=limit + offset)
-        fills = all_fills[offset : offset + limit]
-        total_available = len(self._scoped_fills())
-        return {
-            "fills": [self._execution_record_payload(fill) for fill in fills],
-            "limit": limit,
-            "offset": offset,
-            "total_available": total_available,
-            "has_more": offset + len(fills) < total_available,
-            "truth_source": "execution_repo",
-        }
+        return self.account_queries.build_fills_recent(limit=limit, offset=offset)
 
     def fill_detail(self, fill_id: str) -> dict[str, Any]:
-        if self._phase5_control_plane_enabled():
-            fill = self.runtime.execution_fill_repo_v2.get_fill(fill_id)
-            if fill is None:
-                raise KeyError(f"fill_not_found:{fill_id}")
-            outcome = self._fill_outcome_map().get(fill_id)
-            return {
-                "fill": self._execution_record_payload(fill),
-                "fill_outcome": None if outcome is None else outcome.model_dump(mode="json"),
-                "truth_source": "execution_fill_repo_v2",
-            }
-        fill = next((item for item in self._scoped_fills() if item.fill_id == fill_id), None)
-        if fill is None:
-            raise KeyError(f"fill_not_found:{fill_id}")
-        outcome = self._fill_outcome_map().get(fill_id)
-        return {
-            "fill": self._execution_record_payload(fill),
-            "fill_outcome": None if outcome is None else outcome.model_dump(mode="json"),
-            "truth_source": "execution_repo",
-        }
+        return self.account_queries.fill_detail(fill_id)
 
     def execution_latest(self) -> dict[str, Any]:
-        cache_key = f"execution_latest:{self._scope_cache_fragment()}"
-        return self._cached_ttl(cache_key, 10, self._build_execution_latest)
+        return self.account_queries.execution_latest()
 
     def _build_execution_latest(self) -> dict[str, Any]:
-        latest_order = self.latest_order()
-        latest_fill = self.latest_fill()
-        latest_reconciliation = self._latest_scoped_reconciliation()
-        recovery = self.recovery_view()
-        return {
-            "mode": self.system_mode(),
-            "execution": self.runtime.execution_adapter.readiness(),
-            "latest_order": self._execution_record_payload(latest_order) if latest_order is not None else None,
-            "latest_fill": self._execution_record_payload(latest_fill) if latest_fill is not None else None,
-            "latest_reconciliation": latest_reconciliation.model_dump(mode="json") if latest_reconciliation is not None else None,
-            "recent_failures": self.execution_errors()["errors"],
-            "recovery": recovery,
-            "truth_source": {
-                "orders": "execution_order_repo" if self._phase5_control_plane_enabled() else "execution_repo",
-                "fills": "execution_fill_repo_v2" if self._phase5_control_plane_enabled() else "execution_repo",
-                "balances": "ledger_accounts" if self._phase5_control_plane_enabled() else "portfolio_snapshot",
-            },
-        }
+        return self.account_queries.build_execution_latest()
 
     def execution_quality_report(self, *, limit: int = 50, offset: int = 0) -> dict[str, Any]:
-        source_rows = self._phase5_fill_rows(limit=None) if self._phase5_control_plane_enabled() else list(reversed(self._scoped_fills()))
-        rows = [self._execution_quality_row(fill) for fill in source_rows]
-        paged = rows[offset : offset + limit]
-        return {
-            "rows": paged,
-            "limit": limit,
-            "offset": offset,
-            "total_available": len(rows),
-            "has_more": offset + len(paged) < len(rows),
-            "truth_source": "execution_fill_repo_v2" if self._phase5_control_plane_enabled() else "execution_repo",
-            "summary": self._execution_quality_summary(rows),
-        }
+        return self.report_queries.execution_quality_report(limit=limit, offset=offset)
 
     def _execution_quality_summary(self, rows: list[dict[str, Any]]) -> dict[str, Any]:
         if not rows:
@@ -4200,6 +4997,11 @@ class OperatorQueryService:
                 "avg_exchange_fill_to_ingestion_latency_ms": None,
                 "avg_adverse_slippage_bps": None,
                 "avg_fee_ratio": None,
+                "fee_to_notional_ratio": None,
+                "high_slippage_count": 0,
+                "high_slippage_ratio": None,
+                "slow_submit_to_fill_count": 0,
+                "slow_submit_to_fill_ratio": None,
             }
 
         def _avg_float(key: str) -> float | None:
@@ -4215,6 +5017,21 @@ class OperatorQueryService:
                 return None
             return sum(clean, start=Decimal("0")) / Decimal(len(clean))
 
+        total_fees = sum((self._fee_cost_in_quote(item) or Decimal("0")) for item in rows)
+        total_notional = sum((self._to_decimal(item.get("fill_notional")) or Decimal("0")) for item in rows)
+        high_slippage_count = sum(
+            1
+            for item in rows
+            if (self._to_decimal(item.get("adverse_slippage_bps")) or Decimal("0"))
+            > Decimal(str(max(self.runtime.settings.max_slippage_tolerance_bps * 0.5, 2)))
+        )
+        slow_submit_to_fill_count = sum(
+            1
+            for item in rows
+            if isinstance(item.get("submit_to_exchange_fill_latency_ms"), (int, float))
+            and item.get("submit_to_exchange_fill_latency_ms") > 10_000
+        )
+
         return {
             "fill_count": len(rows),
             "avg_decision_to_submit_latency_ms": _avg_float("decision_to_submit_latency_ms"),
@@ -4222,6 +5039,13 @@ class OperatorQueryService:
             "avg_exchange_fill_to_ingestion_latency_ms": _avg_float("exchange_fill_to_ingestion_latency_ms"),
             "avg_adverse_slippage_bps": _avg_decimal("adverse_slippage_bps"),
             "avg_fee_ratio": _avg_decimal("fee_ratio"),
+            "fee_to_notional_ratio": (
+                None if abs(total_notional) <= self._DECIMAL_EPSILON else total_fees / total_notional
+            ),
+            "high_slippage_count": high_slippage_count,
+            "high_slippage_ratio": None if not rows else round(high_slippage_count / len(rows), 6),
+            "slow_submit_to_fill_count": slow_submit_to_fill_count,
+            "slow_submit_to_fill_ratio": None if not rows else round(slow_submit_to_fill_count / len(rows), 6),
         }
 
     @staticmethod
@@ -4305,11 +5129,7 @@ class OperatorQueryService:
             fill_price = self._to_decimal(getattr(outcome, "fill_price", None)) or Decimal("0")
             fill_notional = fill_qty * fill_price
         fill_notional = abs(fill_notional)
-        fee_amount = self._to_decimal(getattr(outcome, "fee_amount", None))
-        if fee_amount is None:
-            fee_amount = abs(self._to_decimal(getattr(outcome, "fee_delta", None)) or Decimal("0"))
-        else:
-            fee_amount = abs(fee_amount)
+        fee_amount = self._fee_cost_in_quote(outcome) or Decimal("0")
 
         start_flat = abs(starting_qty) <= self._DECIMAL_EPSILON
         end_flat = abs(ending_qty) <= self._DECIMAL_EPSILON
@@ -4529,98 +5349,10 @@ class OperatorQueryService:
         }
 
     def profitability_overview(self, *, limit: int = 100) -> dict[str, Any]:
-        normalized_limit = max(int(limit), 1)
-        outcomes = list(self._scoped_fill_outcomes())
-        outcomes.sort(key=lambda item: item.ingestion_timestamp or item.created_at, reverse=True)
-        rows = [self._profitability_fill_row(item) for item in outcomes[:normalized_limit]]
-        funding_records = list(self._scoped_funding_fee_records())
-        funding_records.sort(key=lambda item: self._funding_fee_event_timestamp(item) or datetime.min, reverse=True)
-        funding_rows = [self._funding_fee_profitability_row(item) for item in funding_records[:normalized_limit]]
-        net_realized = sum(
-            (self._to_decimal(item.get("realized_pnl_delta")) or Decimal("0"))
-            for item in rows
-        )
-        gross_realized = sum(
-            (self._to_decimal(item.get("gross_realized_pnl")) or Decimal("0"))
-            for item in rows
-        )
-        total_fees = sum(
-            (self._to_decimal(item.get("fee_amount")) or Decimal("0"))
-            for item in rows
-        )
-        total_notional = sum(
-            (self._to_decimal(item.get("fill_notional")) or Decimal("0"))
-            for item in rows
-        )
-        funding_fee_net = sum(
-            (self._to_decimal(item.get("funding_fee_delta")) or Decimal("0"))
-            for item in funding_rows
-        )
-        combined_net_realized = net_realized + funding_fee_net
-        winning = 0
-        losing = 0
-        for item in rows:
-            pnl = self._to_decimal(item.get("realized_pnl_delta")) or Decimal("0")
-            if pnl > self._DECIMAL_EPSILON:
-                winning += 1
-            elif pnl < -self._DECIMAL_EPSILON:
-                losing += 1
-        recent_realized_events = sorted(
-            rows + funding_rows,
-            key=self._profitability_event_sort_key,
-            reverse=True,
-        )[:normalized_limit]
-        funding_summary = self._profitability_funding_fee_summary(funding_records[:normalized_limit])
-        return {
-            "summary": {
-                "closed_fill_count": len(rows),
-                "trading_fill_count": len(rows),
-                "winning_fill_count": winning,
-                "losing_fill_count": losing,
-                "win_rate": None if not rows else round(winning / len(rows), 6),
-                "gross_realized_pnl": gross_realized,
-                "net_realized_pnl": net_realized,
-                "trading_gross_realized_pnl": gross_realized,
-                "trading_net_realized_pnl": net_realized,
-                "total_fees": total_fees,
-                "trading_total_fees": total_fees,
-                "total_notional": total_notional,
-                "fee_to_notional_ratio": (
-                    None if abs(total_notional) <= self._DECIMAL_EPSILON else total_fees / total_notional
-                ),
-                "avg_realized_pnl_per_fill": (
-                    None if not rows else net_realized / Decimal(len(rows))
-                ),
-                "funding_fee_count": funding_summary["count"],
-                "funding_fee_income_count": funding_summary["income_count"],
-                "funding_fee_expense_count": funding_summary["expense_count"],
-                "funding_fee_net_pnl": funding_summary["net_total"],
-                "funding_fee_absolute_total": funding_summary["absolute_total"],
-                "combined_net_realized_pnl": combined_net_realized,
-                "realized_event_count": len(recent_realized_events),
-            },
-            "execution_quality": self._execution_quality_summary(rows),
-            "funding_fee_summary": funding_summary,
-            "recent_closed_fills": rows,
-            "recent_realized_events": recent_realized_events,
-            "truth_source": "fill_outcomes_plus_funding_fee_records",
-        }
+        return self.report_queries.profitability_overview(limit=limit)
 
     def forward_validation_report(self, *, window_days: int = 7, period_count: int = 4) -> dict[str, Any]:
-        normalized_window_days = max(int(window_days), 1)
-        normalized_period_count = max(int(period_count), 1)
-        cache_key = (
-            f"forward_validation:{self._scope_cache_fragment()}:"
-            f"{normalized_window_days}:{normalized_period_count}"
-        )
-        return self._cached_ttl(
-            cache_key,
-            30,
-            lambda: self._build_forward_validation_report(
-                window_days=normalized_window_days,
-                period_count=normalized_period_count,
-            ),
-        )
+        return self.report_queries.forward_validation_report(window_days=window_days, period_count=period_count)
 
     def _build_forward_validation_report(self, *, window_days: int, period_count: int) -> dict[str, Any]:
         normalized_window_days = max(int(window_days), 1)
@@ -4686,7 +5418,7 @@ class OperatorQueryService:
         closed_fill_count = len(rows)
         net_realized = sum((self._to_decimal(item.get("realized_pnl_delta")) or Decimal("0")) for item in rows)
         gross_realized = sum((self._to_decimal(item.get("gross_realized_pnl")) or Decimal("0")) for item in rows)
-        total_fees = sum((self._to_decimal(item.get("fee_amount")) or Decimal("0")) for item in rows)
+        total_fees = sum((self._fee_cost_in_quote(item) or Decimal("0")) for item in rows)
         total_notional = sum((self._to_decimal(item.get("fill_notional")) or Decimal("0")) for item in rows)
         funding_fee_net_pnl = sum((self._to_decimal(item.get("funding_fee_delta")) or Decimal("0")) for item in funding_rows)
         combined_net_realized_pnl = net_realized + funding_fee_net_pnl
@@ -4798,6 +5530,61 @@ class OperatorQueryService:
             "reasons": reasons,
         }
 
+    @staticmethod
+    def _trial_guard_hard_stop_payload(trial_guard: dict[str, Any]) -> dict[str, Any]:
+        hard_stop = dict(trial_guard.get("hard_stop") or {})
+        breaches = list(trial_guard.get("breaches") or [])
+        recovery_requirements = dict(trial_guard.get("recovery_requirements") or {})
+        active = bool(hard_stop.get("active")) or str(trial_guard.get("status") or "") == "breached"
+        return {
+            "active": active,
+            "status": trial_guard.get("status"),
+            "summary": hard_stop.get("summary") or trial_guard.get("summary"),
+            "operator_guidance": hard_stop.get("operator_guidance") or trial_guard.get("recommended_action"),
+            "breaches": breaches,
+            "recovery_requirements": recovery_requirements,
+            "resume_blocked": bool(hard_stop.get("resume_blocked")) or active,
+        }
+
+    def _trial_runtime_constraints(
+        self,
+        *,
+        recovery: dict[str, Any],
+        active_blockers: list[dict[str, Any]],
+        trial_guard: dict[str, Any],
+    ) -> dict[str, Any]:
+        hard_stop = self._trial_guard_hard_stop_payload(trial_guard)
+        reasons: list[str] = []
+        if hard_stop.get("active"):
+            reasons.append("trial_guard_hard_stop_active")
+        if recovery.get("halted"):
+            reasons.append("runtime_halted")
+        if not recovery.get("safe_to_trade", False):
+            reasons.append("recovery_not_safe_to_trade")
+        if recovery.get("review_required"):
+            reasons.append("manual_review_required")
+        if active_blockers:
+            reasons.append("active_execution_blockers_present")
+        return {
+            "hard_stop_active": bool(hard_stop.get("active")),
+            "safe_to_trade": bool(recovery.get("safe_to_trade")),
+            "review_required": bool(recovery.get("review_required")),
+            "active_blocker_count": len(active_blockers),
+            "can_continue_runtime": (
+                not hard_stop.get("active")
+                and bool(recovery.get("safe_to_trade"))
+                and not bool(recovery.get("review_required"))
+                and not active_blockers
+            ),
+            "can_scale_up": (
+                not hard_stop.get("active")
+                and bool(recovery.get("safe_to_trade"))
+                and not bool(recovery.get("review_required"))
+                and not active_blockers
+            ),
+            "reasons": list(dict.fromkeys(reasons)),
+        }
+
     def scaling_readiness_report(
         self,
         *,
@@ -4805,26 +5592,10 @@ class OperatorQueryService:
         period_count: int = 4,
         forward_validation: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        normalized_window_days = max(int(window_days), 1)
-        normalized_period_count = max(int(period_count), 1)
-        if forward_validation is not None:
-            return self._build_scaling_readiness_report(
-                window_days=normalized_window_days,
-                period_count=normalized_period_count,
-                forward_validation=forward_validation,
-            )
-        cache_key = (
-            f"scaling_readiness:{self._scope_cache_fragment()}:"
-            f"{normalized_window_days}:{normalized_period_count}"
-        )
-        return self._cached_ttl(
-            cache_key,
-            30,
-            lambda: self._build_scaling_readiness_report(
-                window_days=normalized_window_days,
-                period_count=normalized_period_count,
-                forward_validation=None,
-            ),
+        return self.report_queries.scaling_readiness_report(
+            window_days=window_days,
+            period_count=period_count,
+            forward_validation=forward_validation,
         )
 
     def _build_scaling_readiness_report(
@@ -4843,7 +5614,13 @@ class OperatorQueryService:
         forward_summary = dict(forward_validation.get("summary") or {})
         recovery = self.recovery_view()
         trial_guard = self.trial_guard()
+        hard_stop = self._trial_guard_hard_stop_payload(trial_guard)
         active_blockers = [item for item in self.blockers() if not item.get("submit_only")]
+        runtime_constraints = self._trial_runtime_constraints(
+            recovery=recovery,
+            active_blockers=active_blockers,
+            trial_guard=trial_guard,
+        )
         latest_review = self.latest_operator_action("capital_scale_review")
 
         consecutive_healthy_periods = 0
@@ -4861,36 +5638,20 @@ class OperatorQueryService:
         reasons: list[str] = []
         if not trial_guard.get("enabled"):
             reasons.append("trial_guard_not_enabled")
-        if not trial_guard.get("profile_active"):
-            reasons.append("trial_profile_not_active")
-        if recovery.get("halted"):
-            verdict = "pause_trial"
-            reasons.append("runtime_halted")
-        if not recovery.get("safe_to_trade", False):
-            verdict = "pause_trial"
-            reasons.append("recovery_not_safe_to_trade")
-        if recovery.get("review_required"):
-            verdict = "pause_trial"
-            reasons.append("manual_review_required")
-        if active_blockers:
-            verdict = "pause_trial"
-            reasons.append("active_execution_blockers_present")
-        if trial_guard.get("status") == "breached":
-            verdict = "pause_trial"
-            reasons.append("trial_guard_breached")
+        elif not trial_guard.get("trial_observation_active"):
+            reasons.append("trial_observation_flow_inactive")
 
         forward_verdict = str(forward_summary.get("verdict") or "")
-        if verdict != "pause_trial":
-            if forward_verdict == "pause":
-                verdict = "pause_trial"
-                reasons.append("forward_validation_pause")
-            elif forward_verdict == "shrink":
-                verdict = "shrink_trial"
-                reasons.append("forward_validation_shrink")
-            elif forward_verdict in {"observe", "insufficient_data"}:
-                reasons.append("forward_validation_still_observing")
-            elif forward_verdict == "continue":
-                reasons.append("forward_validation_stable")
+        if forward_verdict == "pause":
+            verdict = "pause_trial"
+            reasons.append("forward_validation_pause")
+        elif forward_verdict == "shrink":
+            verdict = "shrink_trial"
+            reasons.append("forward_validation_shrink")
+        elif forward_verdict in {"observe", "insufficient_data"}:
+            reasons.append("forward_validation_still_observing")
+        elif forward_verdict == "continue":
+            reasons.append("forward_validation_stable")
 
         healthy_period_requirement_met = consecutive_healthy_periods >= 2
         latest_period_has_sample = (
@@ -4905,28 +5666,33 @@ class OperatorQueryService:
         if (
             verdict == "continue_small_capital"
             and trial_guard.get("status") == "monitoring"
+            and trial_guard.get("enabled_for_runtime")
             and healthy_period_requirement_met
             and latest_period_has_sample
             and forward_verdict == "continue"
-            and recovery.get("safe_to_trade", False)
-            and not recovery.get("review_required")
-            and not active_blockers
+            and runtime_constraints.get("can_scale_up")
         ):
             verdict = "approve_scale_up"
             reasons.append("scale_up_requirements_met")
 
         summary_map = {
-            "approve_scale_up": "最近多个试盘周期表现稳定，且当前恢复与风控状态正常，可以进入人工放量评审。",
+            "approve_scale_up": "最近多个试盘周期表现稳定，可以进入人工放量评审。",
             "continue_small_capital": "当前仍应保持小资金试盘，继续积累样本，不建议直接放量。",
-            "shrink_trial": "当前边际转弱，建议先缩小试盘规模，再继续观察收益与执行质量。",
-            "pause_trial": "当前不满足继续试盘或放量条件，建议暂停并复盘策略、执行和恢复状态。",
+            "shrink_trial": "最近试盘边际转弱，建议先缩小试盘规模，再继续观察收益与执行质量。",
+            "pause_trial": "最近观察周期已经不满足继续试盘的建议条件，先暂停试盘并复盘收益与执行质量。",
         }
+        if not trial_guard.get("enabled"):
+            summary = "试盘守护当前未启用，这份试盘建议只能作为观察参考，不应直接拿来做放量判断。"
+        elif not trial_guard.get("trial_observation_active"):
+            summary = "当前运行线不在试盘观察流程里，这份试盘建议仅供参考，不应用来直接决定放量或恢复。"
+        else:
+            summary = summary_map[verdict]
         return {
             "window_days": int(forward_validation.get("window_days") or window_days),
             "period_count": int(forward_validation.get("period_count") or period_count),
             "generated_at": utc_now(),
             "readiness": verdict,
-            "summary": summary_map[verdict],
+            "summary": summary,
             "reasons": list(dict.fromkeys(reasons)),
             "requirements": {
                 "required_healthy_periods": 2,
@@ -4934,7 +5700,12 @@ class OperatorQueryService:
                 "consecutive_healthy_periods": consecutive_healthy_periods,
                 "healthy_period_requirement_met": healthy_period_requirement_met,
                 "latest_period_has_sample": latest_period_has_sample,
+                "trial_guard_enabled": bool(trial_guard.get("enabled")),
+                "trial_guard_enabled_for_runtime": bool(trial_guard.get("enabled_for_runtime")),
+                "trial_observation_flow_active": bool(trial_guard.get("trial_observation_active")),
+                "trial_observation_label": trial_guard.get("trial_observation_label"),
                 "trial_guard_status": trial_guard.get("status"),
+                "trial_guard_hard_stop_active": bool(hard_stop.get("active")),
                 "trial_guard_profile_active": bool(trial_guard.get("profile_active")),
                 "safe_to_trade": bool(recovery.get("safe_to_trade")),
                 "review_required": bool(recovery.get("review_required")),
@@ -4943,6 +5714,8 @@ class OperatorQueryService:
             "latest_forward_validation": latest_period,
             "forward_validation_summary": forward_summary,
             "trial_guard": trial_guard,
+            "trial_guard_hard_stop": hard_stop,
+            "runtime_constraints": runtime_constraints,
             "recovery": recovery,
             "active_blockers": active_blockers,
             "latest_review": latest_review,
@@ -4959,26 +5732,12 @@ class OperatorQueryService:
         window_days: int = 7,
         period_count: int = 4,
     ) -> dict[str, Any]:
-        normalized_profitability_limit = max(int(profitability_limit), 1)
-        normalized_anomaly_limit = max(int(anomaly_limit), 1)
-        normalized_segment_limit = max(int(segment_limit), 1)
-        normalized_window_days = max(int(window_days), 1)
-        normalized_period_count = max(int(period_count), 1)
-        cache_key = (
-            f"trial_review_packet:{self._scope_cache_fragment()}:"
-            f"{normalized_profitability_limit}:{normalized_anomaly_limit}:"
-            f"{normalized_segment_limit}:{normalized_window_days}:{normalized_period_count}"
-        )
-        return self._cached_ttl(
-            cache_key,
-            45,
-            lambda: self._build_trial_review_packet(
-                profitability_limit=normalized_profitability_limit,
-                anomaly_limit=normalized_anomaly_limit,
-                segment_limit=normalized_segment_limit,
-                window_days=normalized_window_days,
-                period_count=normalized_period_count,
-            ),
+        return self.report_queries.trial_review_packet(
+            profitability_limit=profitability_limit,
+            anomaly_limit=anomaly_limit,
+            segment_limit=segment_limit,
+            window_days=window_days,
+            period_count=period_count,
         )
 
     def trial_review_summary(
@@ -4988,21 +5747,10 @@ class OperatorQueryService:
         window_days: int = 7,
         period_count: int = 4,
     ) -> dict[str, Any]:
-        normalized_segment_limit = max(int(segment_limit), 1)
-        normalized_window_days = max(int(window_days), 1)
-        normalized_period_count = max(int(period_count), 1)
-        cache_key = (
-            f"trial_review_summary:{self._scope_cache_fragment()}:"
-            f"{normalized_segment_limit}:{normalized_window_days}:{normalized_period_count}"
-        )
-        return self._cached_ttl(
-            cache_key,
-            30,
-            lambda: self._build_trial_review_summary(
-                segment_limit=normalized_segment_limit,
-                window_days=normalized_window_days,
-                period_count=normalized_period_count,
-            ),
+        return self.report_queries.trial_review_summary(
+            segment_limit=segment_limit,
+            window_days=window_days,
+            period_count=period_count,
         )
 
     def trial_review_details(
@@ -5014,26 +5762,12 @@ class OperatorQueryService:
         window_days: int = 7,
         period_count: int = 4,
     ) -> dict[str, Any]:
-        normalized_profitability_limit = max(int(profitability_limit), 1)
-        normalized_anomaly_limit = max(int(anomaly_limit), 1)
-        normalized_segment_limit = max(int(segment_limit), 1)
-        normalized_window_days = max(int(window_days), 1)
-        normalized_period_count = max(int(period_count), 1)
-        cache_key = (
-            f"trial_review_details:{self._scope_cache_fragment()}:"
-            f"{normalized_profitability_limit}:{normalized_anomaly_limit}:"
-            f"{normalized_segment_limit}:{normalized_window_days}:{normalized_period_count}"
-        )
-        return self._cached_ttl(
-            cache_key,
-            45,
-            lambda: self._build_trial_review_details(
-                profitability_limit=normalized_profitability_limit,
-                anomaly_limit=normalized_anomaly_limit,
-                segment_limit=normalized_segment_limit,
-                window_days=normalized_window_days,
-                period_count=normalized_period_count,
-            ),
+        return self.report_queries.trial_review_details(
+            profitability_limit=profitability_limit,
+            anomaly_limit=anomaly_limit,
+            segment_limit=segment_limit,
+            window_days=window_days,
+            period_count=period_count,
         )
 
     def _trial_review_action_items(
@@ -5042,10 +5776,15 @@ class OperatorQueryService:
         scaling_readiness: str,
         high_slippage_count: int,
         slow_submit_to_fill_count: int,
+        trial_guard: dict[str, Any],
         recovery: dict[str, Any],
         blocker_rows: list[dict[str, Any]],
     ) -> list[str]:
         action_items: list[str] = []
+        hard_stop = self._trial_guard_hard_stop_payload(trial_guard)
+        if hard_stop.get("active"):
+            action_items.append("当前已触发试盘守护硬停机，先确认触发阈值为什么命中，再决定是否恢复自动运行。")
+            action_items.append("如果确认要重新开始采样，应先人工重置试盘守护，再手动恢复自动运行。")
         if scaling_readiness == "approve_scale_up":
             action_items.append("最近多个验证周期表现稳定，可以发起下一档资金量的人工评审，但仍要保持 guarded_live 约束。")
         elif scaling_readiness == "continue_small_capital":
@@ -5063,6 +5802,191 @@ class OperatorQueryService:
         if blocker_rows:
             action_items.append("当前仍有执行阻断项，先处理阻断项再讨论继续试盘或放量。")
         return list(dict.fromkeys(action_items))
+
+    @staticmethod
+    def _trial_review_action_catalog(
+        *,
+        hard_stop_active: bool,
+        scaling_readiness: str,
+        runtime_constraints: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        actions: list[dict[str, Any]] = [
+            {
+                "label": "查看风险与恢复",
+                "client_action": "navigate-view",
+                "value": "risk",
+                "tone": "ghost",
+                "category": "navigate",
+            }
+        ]
+        if hard_stop_active:
+            actions.extend(
+                [
+                    {
+                        "label": "查看委托与成交",
+                        "client_action": "navigate-view",
+                        "value": "execution",
+                        "tone": "ghost",
+                        "category": "navigate",
+                    },
+                    {
+                        "label": "人工重置试盘守护",
+                        "client_action": "record-trial-review-action",
+                        "value": "reset_trial_guard",
+                        "tone": "warning",
+                        "category": "record",
+                    },
+                    {
+                        "label": "记录本次复盘",
+                        "client_action": "record-trial-review-action",
+                        "value": "review_snapshot",
+                        "tone": "secondary",
+                        "category": "record",
+                    },
+                    {
+                        "label": "刷新当前状态",
+                        "client_action": "refresh-dashboard",
+                        "value": "",
+                        "tone": "warning",
+                        "category": "refresh",
+                    },
+                ]
+            )
+            return actions
+
+        verdict_to_button = {
+            "approve_scale_up": ("提交放量评审", "approve_scale_up", "warning"),
+            "continue_small_capital": ("记为继续小资金试盘", "continue_small_capital", "secondary"),
+            "shrink_trial": ("记为缩小试盘规模", "shrink_trial", "warning"),
+            "pause_trial": ("记为暂停试盘并复盘", "pause_trial", "warning"),
+        }
+        verdict_button = verdict_to_button.get(str(scaling_readiness or ""))
+        if verdict_button is not None:
+            label, value, tone = verdict_button
+            actions.append(
+                {
+                    "label": label,
+                    "client_action": "record-trial-review-action",
+                    "value": value,
+                    "tone": tone,
+                    "category": "record",
+                }
+            )
+        actions.append(
+            {
+                "label": "记录本次复盘",
+                "client_action": "record-trial-review-action",
+                "value": "review_snapshot",
+                "tone": "ghost",
+                "category": "record",
+            }
+        )
+        if not runtime_constraints.get("can_continue_runtime", False):
+            actions.append(
+                {
+                    "label": "刷新当前状态",
+                    "client_action": "refresh-dashboard",
+                    "value": "",
+                    "tone": "warning",
+                    "category": "refresh",
+                }
+            )
+        return actions
+
+    @staticmethod
+    def _normalize_trial_review_action_payload(payload: dict[str, Any]) -> dict[str, Any]:
+        action = str(payload.get("action") or "")
+        details = dict(payload.get("details") or {})
+        selected_action = str(
+            details.get("trial_review_action_type")
+            or details.get("selected_verdict")
+            or ("review_snapshot" if action == "trial_review_snapshot" else "")
+        )
+        label_map = {
+            "review_snapshot": "记录本次复盘",
+            "reset_trial_guard": "人工重置试盘守护",
+            "continue_small_capital": "继续小资金试盘",
+            "shrink_trial": "缩小试盘规模",
+            "pause_trial": "暂停试盘并复盘",
+            "approve_scale_up": "提交放量评审",
+        }
+        return {
+            "action_id": payload.get("action_id"),
+            "action": action,
+            "selected_action": selected_action,
+            "label": label_map.get(selected_action, selected_action or action),
+            "status": payload.get("status"),
+            "reason": payload.get("reason"),
+            "actor_role": payload.get("actor_role"),
+            "actor_identity": payload.get("actor_identity"),
+            "auth_source": payload.get("auth_source"),
+            "created_at": payload.get("created_at"),
+            "recovery_state_before": payload.get("recovery_state_before"),
+            "recovery_state_after": payload.get("recovery_state_after"),
+            "details": details,
+        }
+
+    def _latest_trial_review_action(self) -> dict[str, Any] | None:
+        actions = self._cached(
+            "operator_action_events",
+            lambda: self.runtime.event_store.by_topic(topics.OPERATOR_ACTIONS),
+        )
+        for item in reversed(actions):
+            action = str(item.payload.get("action") or "")
+            if action not in {"trial_review_snapshot", "capital_scale_review", "trial_guard_manual_reset"}:
+                continue
+            payload = self.payload(item)
+            if payload is None:
+                continue
+            return self._normalize_trial_review_action_payload(payload)
+        return None
+
+    def _trial_review_history_payload(self, *, limit: int = 20, offset: int = 0) -> dict[str, Any]:
+        actions = self._cached(
+            "operator_action_events",
+            lambda: self.runtime.event_store.by_topic(topics.OPERATOR_ACTIONS),
+        )
+        rows: list[dict[str, Any]] = []
+        for item in reversed(actions):
+            action = str(item.payload.get("action") or "")
+            if action not in {"trial_review_snapshot", "capital_scale_review", "trial_guard_manual_reset"}:
+                continue
+            payload = self.payload(item)
+            if payload is None:
+                continue
+            rows.append(self._normalize_trial_review_action_payload(payload))
+        return self._paginate_rows(rows, limit=limit, offset=offset, key="actions")
+
+    def _trial_review_workbench_payload(
+        self,
+        *,
+        scaling_readiness: str,
+        scaling: dict[str, Any],
+        trial_guard: dict[str, Any],
+        hard_stop: dict[str, Any],
+        runtime_constraints: dict[str, Any],
+        action_items: list[str],
+    ) -> dict[str, Any]:
+        latest_action = self._latest_trial_review_action()
+        history_preview = self._trial_review_history_payload(limit=5, offset=0)
+        return {
+            "hard_stop": hard_stop,
+            "advisory_recommendation": {
+                "verdict": scaling_readiness,
+                "headline": scaling.get("summary"),
+                "reasons": list(scaling.get("reasons") or []),
+            },
+            "runtime_constraints": runtime_constraints,
+            "action_items": action_items,
+            "available_actions": self._trial_review_action_catalog(
+                hard_stop_active=bool(hard_stop.get("active")),
+                scaling_readiness=scaling_readiness,
+                runtime_constraints=runtime_constraints,
+            ),
+            "latest_action": latest_action,
+            "recent_actions": list(history_preview.get("actions") or []),
+            "trial_guard_status": trial_guard.get("status"),
+        }
 
     def _build_trial_review_summary(
         self,
@@ -5083,7 +6007,7 @@ class OperatorQueryService:
         segments = self.strategy_segment_report(limit=segment_limit)
         recovery = self.recovery_view()
         blocker_rows = [item for item in self.blockers() if not item.get("submit_only")]
-        latest_review = self.latest_operator_action("trial_review_snapshot")
+        latest_review = self._latest_trial_review_action()
         latest_period = (forward_validation.get("periods") or [None])[0] or {}
         segment_rows = list(segments.get("segments") or [])
         strongest_segment = max(
@@ -5099,6 +6023,17 @@ class OperatorQueryService:
         scaling_readiness = str(scaling.get("readiness") or "continue_small_capital")
         high_slippage_count = int(latest_period.get("high_slippage_count") or 0)
         slow_submit_to_fill_count = int(latest_period.get("slow_submit_to_fill_count") or 0)
+        trial_guard = scaling.get("trial_guard") or self.trial_guard()
+        hard_stop = scaling.get("trial_guard_hard_stop") or self._trial_guard_hard_stop_payload(trial_guard)
+        runtime_constraints = scaling.get("runtime_constraints") or {}
+        action_items = self._trial_review_action_items(
+            scaling_readiness=scaling_readiness,
+            high_slippage_count=high_slippage_count,
+            slow_submit_to_fill_count=slow_submit_to_fill_count,
+            trial_guard=trial_guard,
+            recovery=recovery,
+            blocker_rows=blocker_rows,
+        )
         return {
             "generated_at": utc_now(),
             "summary": {
@@ -5116,13 +6051,7 @@ class OperatorQueryService:
             "recommendation": {
                 "readiness": scaling_readiness,
                 "reasons": scaling.get("reasons", []),
-                "action_items": self._trial_review_action_items(
-                    scaling_readiness=scaling_readiness,
-                    high_slippage_count=high_slippage_count,
-                    slow_submit_to_fill_count=slow_submit_to_fill_count,
-                    recovery=recovery,
-                    blocker_rows=blocker_rows,
-                ),
+                "action_items": action_items,
             },
             "sections": {
                 "forward_validation": {
@@ -5130,6 +6059,16 @@ class OperatorQueryService:
                     "periods": forward_validation.get("periods"),
                 },
                 "scaling_readiness": scaling,
+                "trial_guard_hard_stop": hard_stop,
+                "runtime_constraints": runtime_constraints,
+                "workbench": self._trial_review_workbench_payload(
+                    scaling_readiness=scaling_readiness,
+                    scaling=scaling,
+                    trial_guard=trial_guard,
+                    hard_stop=hard_stop,
+                    runtime_constraints=runtime_constraints,
+                    action_items=action_items,
+                ),
                 "guarded_live_run_packet": {
                     "status": self.guarded_live_run_packet().get("status"),
                     "summary": self.guarded_live_run_packet().get("summary"),
@@ -5170,17 +6109,39 @@ class OperatorQueryService:
         trial_guard = self.trial_guard()
         recovery = self.recovery_view()
         blocker_rows = [item for item in self.blockers() if not item.get("submit_only")]
-        latest_review = self.latest_operator_action("trial_review_snapshot")
+        latest_review = self._latest_trial_review_action()
+        scaling_readiness = str(scaling.get("readiness") or "continue_small_capital")
+        hard_stop = scaling.get("trial_guard_hard_stop") or self._trial_guard_hard_stop_payload(trial_guard)
+        runtime_constraints = scaling.get("runtime_constraints") or {}
+        action_items = self._trial_review_action_items(
+            scaling_readiness=scaling_readiness,
+            high_slippage_count=int(((forward_validation.get("periods") or [None])[0] or {}).get("high_slippage_count") or 0),
+            slow_submit_to_fill_count=int(((forward_validation.get("periods") or [None])[0] or {}).get("slow_submit_to_fill_count") or 0),
+            trial_guard=trial_guard,
+            recovery=recovery,
+            blocker_rows=blocker_rows,
+        )
         return {
             "generated_at": utc_now(),
             "sections": {
                 "profitability": profitability,
                 "position_lifecycle_profitability": lifecycle_profitability,
+                "strategy_attribution": self.strategy_attribution_report(limit=profitability_limit),
                 "execution_anomalies": anomalies,
                 "strategy_segments": segments,
                 "forward_validation": forward_validation,
                 "scaling_readiness": scaling,
                 "trial_guard": trial_guard,
+                "trial_guard_hard_stop": hard_stop,
+                "runtime_constraints": runtime_constraints,
+                "workbench": self._trial_review_workbench_payload(
+                    scaling_readiness=scaling_readiness,
+                    scaling=scaling,
+                    trial_guard=trial_guard,
+                    hard_stop=hard_stop,
+                    runtime_constraints=runtime_constraints,
+                    action_items=action_items,
+                ),
                 "margin_buffer_overview": self.margin_buffer_risk(),
                 "guarded_live_preflight": self.guarded_live_preflight(),
                 "guarded_live_run_packet": self.guarded_live_run_packet(),
@@ -5229,12 +6190,118 @@ class OperatorQueryService:
         }
 
     def trial_review_history(self, *, limit: int = 20, offset: int = 0) -> dict[str, Any]:
-        return self.recent_operator_actions(
-            action="trial_review_snapshot",
-            key="trial_review",
-            limit=limit,
-            offset=offset,
+        return self.report_queries.trial_review_history(limit=limit, offset=offset)
+
+    def record_trial_review_action(
+        self,
+        *,
+        action_type: str,
+        reason: str,
+        actor_role: OperatorRole,
+        actor_identity: str | None = None,
+        auth_source: AuthSource = "anonymous",
+        profitability_limit: int = 100,
+        anomaly_limit: int = 100,
+        segment_limit: int = 100,
+        window_days: int = 7,
+        period_count: int = 4,
+    ) -> dict[str, Any]:
+        if action_type == "review_snapshot":
+            return self.record_trial_review_snapshot(
+                reason=reason,
+                actor_role=actor_role,
+                actor_identity=actor_identity,
+                auth_source=auth_source,
+                profitability_limit=profitability_limit,
+                anomaly_limit=anomaly_limit,
+                segment_limit=segment_limit,
+                window_days=window_days,
+                period_count=period_count,
+            )
+        if action_type == "reset_trial_guard":
+            return self.record_trial_guard_manual_reset(
+                reason=reason,
+                actor_role=actor_role,
+                actor_identity=actor_identity,
+                auth_source=auth_source,
+            )
+        return self.record_capital_scale_review(
+            verdict=action_type,
+            reason=reason,
+            actor_role=actor_role,
+            actor_identity=actor_identity,
+            auth_source=auth_source,
+            window_days=window_days,
+            period_count=period_count,
         )
+
+    def record_trial_guard_manual_reset(
+        self,
+        *,
+        reason: str,
+        actor_role: OperatorRole,
+        actor_identity: str | None = None,
+        auth_source: AuthSource = "anonymous",
+    ) -> dict[str, Any]:
+        service = getattr(self.runtime, "trial_guard_service", None)
+        if service is None or not hasattr(service, "manual_reset") or not hasattr(service, "snapshot"):
+            raise ValueError("trial_guard_not_configured")
+        before = service.snapshot()
+        if str(before.get("status") or "").lower() != "breached":
+            raise ValueError("trial_guard_reset_not_required")
+        recovery_before = self.recovery_view()["recovery_state"]
+        effective_after = utc_now()
+        preview_reset = getattr(service, "preview_manual_reset", None)
+        after_preview = (
+            preview_reset(effective_after=effective_after)
+            if callable(preview_reset)
+            else {
+                "status": "warming_up",
+                "hard_stop": {"active": False},
+                "breaches": [],
+            }
+        )
+        action = OperatorActionRecord(
+            action="trial_guard_manual_reset",
+            actor_role=actor_role,
+            actor_identity=actor_identity,
+            auth_source=auth_source,
+            reason=reason,
+            status="reset_recorded",
+            recovery_state_before=recovery_before,
+            recovery_state_after=None,
+            details={
+                "trial_review_action_type": "reset_trial_guard",
+                "summary": "人工重置试盘守护，新的试盘样本窗口会从本次操作后重新开始。",
+                "effective_after": effective_after,
+                "product_type": self.state_scope.product_type,
+                "margin_mode": self.state_scope.margin_mode,
+                "allowed_symbols": list(self.state_scope.allowed_symbols),
+                "trial_guard_status_before": before.get("status"),
+                "trial_guard_status_after": after_preview.get("status"),
+                "trial_guard_hard_stop_before": before.get("hard_stop"),
+                "trial_guard_hard_stop_after": after_preview.get("hard_stop"),
+                "breaches_before": list(before.get("breaches") or []),
+                "breaches_after": list(after_preview.get("breaches") or []),
+                "recorded_at": utc_now(),
+            },
+        )
+        envelope = self._append_event(
+            topic=topics.OPERATOR_ACTIONS,
+            key="trial_guard",
+            payload_model=action,
+        )
+        after = service.manual_reset(effective_after=effective_after)
+        self._invalidate_cache()
+        recovery_after = self.recovery_view()["recovery_state"]
+        payload = action.model_dump(mode="json")
+        payload["recovery_state_after"] = recovery_after
+        payload["details"]["trial_guard_status_after"] = after.get("status")
+        payload["details"]["trial_guard_hard_stop_after"] = after.get("hard_stop")
+        payload["details"]["breaches_after"] = list(after.get("breaches") or [])
+        payload["_event_id"] = envelope.event_id
+        payload["_topic"] = envelope.topic
+        return payload
 
     def record_capital_scale_review(
         self,
@@ -5266,6 +6333,7 @@ class OperatorQueryService:
             recovery_state_before=report.get("recovery", {}).get("recovery_state"),
             recovery_state_after=report.get("recovery", {}).get("recovery_state"),
             details={
+                "trial_review_action_type": verdict,
                 "selected_verdict": verdict,
                 "recommended_readiness": report.get("readiness"),
                 "summary": report.get("summary"),
@@ -5273,6 +6341,8 @@ class OperatorQueryService:
                 "requirements": report.get("requirements", {}),
                 "latest_forward_validation": report.get("latest_forward_validation"),
                 "trial_guard_status": report.get("trial_guard", {}).get("status"),
+                "trial_guard_hard_stop": report.get("trial_guard_hard_stop"),
+                "runtime_constraints": report.get("runtime_constraints"),
                 "recorded_at": utc_now(),
             },
         )
@@ -5316,10 +6386,13 @@ class OperatorQueryService:
             recovery_state_before=packet.get("sections", {}).get("recovery", {}).get("recovery_state"),
             recovery_state_after=packet.get("sections", {}).get("recovery", {}).get("recovery_state"),
             details={
+                "trial_review_action_type": "review_snapshot",
                 "summary": packet.get("summary"),
                 "recommendation": packet.get("recommendation"),
                 "latest_forward_validation": packet.get("sections", {}).get("forward_validation", {}).get("summary"),
                 "scaling_readiness": packet.get("sections", {}).get("scaling_readiness", {}).get("readiness"),
+                "trial_guard_hard_stop": packet.get("sections", {}).get("trial_guard_hard_stop"),
+                "runtime_constraints": packet.get("sections", {}).get("runtime_constraints"),
                 "recorded_at": utc_now(),
             },
         )
@@ -5339,134 +6412,181 @@ class OperatorQueryService:
         limit: int = 200,
         group_by: tuple[str, ...] = ("symbol", "market_regime", "side", "execution_action"),
     ) -> dict[str, Any]:
-        allowed_dimensions = {"symbol", "market_regime", "timeframe", "side", "execution_action", "position_intent"}
-        normalized_group_by = tuple(item for item in group_by if item in allowed_dimensions) or ("symbol",)
-        outcomes = list(self._scoped_fill_outcomes())
-        outcomes.sort(key=lambda item: item.ingestion_timestamp or item.created_at, reverse=True)
-        rows = [self._execution_quality_row(item) for item in outcomes[:limit]]
-        grouped: dict[tuple[Any, ...], dict[str, Any]] = {}
-        for row in rows:
-            segment_payload = {
-                "symbol": row.get("symbol"),
-                "market_regime": (row.get("decision_context") or {}).get("market_regime"),
-                "timeframe": (row.get("decision_context") or {}).get("timeframe"),
-                "side": row.get("side"),
-                "execution_action": row.get("execution_action"),
-                "position_intent": row.get("position_intent"),
-            }
-            group_key = tuple(segment_payload.get(key) for key in normalized_group_by)
+        return self.strategy_queries.strategy_segment_report(limit=limit, group_by=group_by)
+
+    def _open_strategy_lot_rows(self) -> list[dict[str, Any]]:
+        cache_key = f"open_strategy_lot_rows:{self._scope_cache_fragment()}"
+        return self._cached(
+            cache_key,
+            self._build_open_strategy_lot_rows,
+        )
+
+    def _build_open_strategy_lot_rows(self) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]]
+        if getattr(self.runtime, "position_lot_repo", None) is not None:
+            rows = list(
+                self.runtime.position_lot_repo.lots_for_scope(
+                    symbol=None,
+                    product_type=self.state_scope.product_type,
+                    margin_mode=self.state_scope.margin_mode,
+                    open_only=True,
+                )
+            )
+        else:
+            snapshot = LotBasedProjectionBuilder().rebuild_lot_book(fills=self._scoped_fills())
+            rows = [dict(item) for item in snapshot.lots if str(item.get("status") or "") == "OPEN"]
+        return [
+            row
+            for row in rows
+            if row.get("symbol") in {None, ""} or self.state_scope.symbol_allowed(str(row.get("symbol")))
+        ]
+
+    def _strategy_sleeve_inventory_summary(self) -> list[dict[str, Any]]:
+        family_by_sleeve = {
+            item.get("sleeve_id"): item.get("family")
+            for item in (
+                sleeve.model_dump(mode="json")
+                for sleeve in getattr(self.runtime, "strategy_sleeve_repo", None).list_sleeves()
+            )
+        } if getattr(self.runtime, "strategy_sleeve_repo", None) is not None and hasattr(self.runtime.strategy_sleeve_repo, "list_sleeves") else {}
+        grouped: dict[str, dict[str, Any]] = {}
+        for row in self._open_strategy_lot_rows():
+            sleeve_id = str(row.get("strategy_sleeve_id") or "unassigned")
             bucket = grouped.setdefault(
-                group_key,
+                sleeve_id,
                 {
-                    "segment": {key: segment_payload.get(key) for key in normalized_group_by},
-                    "fill_count": 0,
-                    "winning_fill_count": 0,
-                    "losing_fill_count": 0,
-                    "gross_realized_pnl": Decimal("0"),
-                    "net_realized_pnl": Decimal("0"),
-                    "total_fees": Decimal("0"),
-                    "total_notional": Decimal("0"),
-                    "total_adverse_slippage_bps": Decimal("0"),
-                    "slippage_observation_count": 0,
+                    "strategy_sleeve_id": None if sleeve_id == "unassigned" else sleeve_id,
+                    "strategy_family": family_by_sleeve.get(sleeve_id),
+                    "open_lot_count": 0,
+                    "net_inventory_qty": Decimal("0"),
+                    "gross_inventory_qty": Decimal("0"),
+                    "inventory_notional": Decimal("0"),
+                    "symbols": set(),
+                    "allocation_ids": set(),
                 },
             )
-            bucket["fill_count"] += 1
-            realized = self._to_decimal(row.get("realized_pnl_delta")) or Decimal("0")
-            gross = self._to_decimal(row.get("gross_realized_pnl")) or Decimal("0")
-            fees = self._to_decimal(row.get("fee_amount")) or Decimal("0")
-            notional = self._to_decimal(row.get("fill_notional")) or Decimal("0")
-            slippage = self._to_decimal(row.get("adverse_slippage_bps"))
-            bucket["gross_realized_pnl"] += gross
-            bucket["net_realized_pnl"] += realized
-            bucket["total_fees"] += fees
-            bucket["total_notional"] += notional
-            if realized > self._DECIMAL_EPSILON:
-                bucket["winning_fill_count"] += 1
-            elif realized < -self._DECIMAL_EPSILON:
-                bucket["losing_fill_count"] += 1
-            if slippage is not None:
-                bucket["total_adverse_slippage_bps"] += slippage
-                bucket["slippage_observation_count"] += 1
-
-        segments: list[dict[str, Any]] = []
+            qty = self._to_decimal(row.get("signed_quantity_open")) or Decimal("0")
+            entry_price = self._to_decimal(row.get("entry_price")) or Decimal("0")
+            bucket["open_lot_count"] += 1
+            bucket["net_inventory_qty"] += qty
+            bucket["gross_inventory_qty"] += abs(qty)
+            bucket["inventory_notional"] += abs(qty * entry_price)
+            symbol = str(row.get("symbol") or "").strip()
+            if symbol:
+                bucket["symbols"].add(symbol)
+            allocation_id = str(row.get("allocation_id") or "").strip()
+            if allocation_id:
+                bucket["allocation_ids"].add(allocation_id)
+        payload = []
         for bucket in grouped.values():
-            fill_count = int(bucket["fill_count"])
-            total_notional = bucket["total_notional"]
-            slippage_observation_count = int(bucket["slippage_observation_count"])
-            segments.append(
+            payload.append(
                 {
-                    "segment": bucket["segment"],
-                    "fill_count": fill_count,
-                    "winning_fill_count": int(bucket["winning_fill_count"]),
-                    "losing_fill_count": int(bucket["losing_fill_count"]),
-                    "win_rate": None if fill_count == 0 else round(int(bucket["winning_fill_count"]) / fill_count, 6),
-                    "gross_realized_pnl": bucket["gross_realized_pnl"],
-                    "net_realized_pnl": bucket["net_realized_pnl"],
-                    "total_fees": bucket["total_fees"],
-                    "total_notional": total_notional,
-                    "fee_to_notional_ratio": (
-                        None if abs(total_notional) <= self._DECIMAL_EPSILON else bucket["total_fees"] / total_notional
-                    ),
-                    "avg_adverse_slippage_bps": (
-                        None
-                        if slippage_observation_count == 0
-                        else bucket["total_adverse_slippage_bps"] / Decimal(slippage_observation_count)
-                    ),
+                    "strategy_sleeve_id": bucket["strategy_sleeve_id"],
+                    "strategy_family": bucket["strategy_family"],
+                    "open_lot_count": bucket["open_lot_count"],
+                    "net_inventory_qty": bucket["net_inventory_qty"],
+                    "gross_inventory_qty": bucket["gross_inventory_qty"],
+                    "inventory_notional": bucket["inventory_notional"],
+                    "symbols": sorted(bucket["symbols"]),
+                    "allocation_ids": sorted(bucket["allocation_ids"]),
                 }
             )
-
-        segments.sort(
+        payload.sort(
             key=lambda item: (
-                self._to_decimal(item.get("net_realized_pnl")) or Decimal("0"),
-                item.get("fill_count") or 0,
+                self._to_decimal(item.get("inventory_notional")) or Decimal("0"),
+                self._to_decimal(item.get("gross_inventory_qty")) or Decimal("0"),
+                str(item.get("strategy_sleeve_id") or ""),
             ),
             reverse=True,
         )
-        return {
-            "group_by": list(normalized_group_by),
-            "segments": segments,
-            "total_available": len(segments),
-            "source_fill_count": len(rows),
-            "truth_source": "fill_outcomes",
-        }
+        return payload
+
+    def _strategy_pnl_bucket_rows(
+        self,
+        *,
+        records: list[SleevePnLRecord],
+        key_name: str,
+        fallback: str,
+    ) -> list[dict[str, Any]]:
+        buckets: dict[str, dict[str, Any]] = {}
+        for record in records:
+            if key_name == "strategy_sleeve_id":
+                bucket_key = str(record.strategy_sleeve_id or fallback)
+            elif key_name == "allocation_id":
+                bucket_key = str(record.allocation_id or fallback)
+            elif key_name == "strategy_bundle_id":
+                bucket_key = str(record.strategy_bundle_id or fallback)
+            elif key_name == "attribution_type":
+                bucket_key = str(record.attribution_type or fallback)
+            elif key_name == "strategy_family":
+                bucket_key = str(record.strategy_family or fallback)
+            else:
+                bucket_key = str(getattr(record, key_name, None) or fallback)
+            bucket = buckets.setdefault(
+                bucket_key,
+                {
+                    key_name: bucket_key,
+                    "record_count": 0,
+                    "fill_event_count": 0,
+                    "funding_fee_event_count": 0,
+                    "realized_pnl": Decimal("0"),
+                    "fee_amount": Decimal("0"),
+                    "funding_fee_amount": Decimal("0"),
+                    "combined_net_realized_pnl": Decimal("0"),
+                    "inventory_move_qty": Decimal("0"),
+                    "symbols": set(),
+                    "families": set(),
+                },
+            )
+            bucket["record_count"] += 1
+            if record.event_type == "fill_realization":
+                bucket["fill_event_count"] += 1
+            elif record.event_type == "funding_fee":
+                bucket["funding_fee_event_count"] += 1
+            bucket["realized_pnl"] += self._to_decimal(record.realized_pnl) or Decimal("0")
+            bucket["fee_amount"] += self._to_decimal(record.fee_amount) or Decimal("0")
+            bucket["funding_fee_amount"] += self._to_decimal(record.funding_fee_amount) or Decimal("0")
+            bucket["combined_net_realized_pnl"] += (
+                (self._to_decimal(record.realized_pnl) or Decimal("0"))
+                + (self._to_decimal(record.funding_fee_amount) or Decimal("0"))
+            )
+            bucket["inventory_move_qty"] += self._to_decimal(record.inventory_move_qty) or Decimal("0")
+            if record.symbol:
+                bucket["symbols"].add(record.symbol)
+            if record.strategy_family:
+                bucket["families"].add(record.strategy_family)
+        payload = []
+        for bucket in buckets.values():
+            payload.append(
+                {
+                    **{key_name: bucket[key_name]},
+                    "record_count": bucket["record_count"],
+                    "fill_event_count": bucket["fill_event_count"],
+                    "funding_fee_event_count": bucket["funding_fee_event_count"],
+                    "realized_pnl": bucket["realized_pnl"],
+                    "fee_amount": bucket["fee_amount"],
+                    "funding_fee_amount": bucket["funding_fee_amount"],
+                    "combined_net_realized_pnl": bucket["combined_net_realized_pnl"],
+                    "inventory_move_qty": bucket["inventory_move_qty"],
+                    "symbols": sorted(bucket["symbols"]),
+                    "families": sorted(bucket["families"]),
+                }
+            )
+        payload.sort(
+            key=lambda item: (
+                self._to_decimal(item.get("combined_net_realized_pnl")) or Decimal("0"),
+                item.get("record_count") or 0,
+                str(item.get(key_name) or ""),
+            ),
+            reverse=True,
+        )
+        return payload
+
+    def strategy_attribution_report(self, *, limit: int = 200) -> dict[str, Any]:
+        return self.strategy_queries.strategy_attribution_report(limit=limit)
 
     def execution_anomaly_report(self, *, limit: int = 100) -> dict[str, Any]:
-        rows = self.execution_quality_report(limit=limit, offset=0)["rows"]
-        flagged_rows: list[dict[str, Any]] = []
-        summary = {
-            "high_slippage_count": 0,
-            "high_fee_ratio_count": 0,
-            "slow_decision_to_submit_count": 0,
-            "slow_submit_to_fill_count": 0,
-        }
-        for row in rows:
-            flags: list[str] = []
-            slippage = self._to_decimal(row.get("adverse_slippage_bps"))
-            fee_ratio = self._to_decimal(row.get("fee_ratio"))
-            decision_to_submit_latency_ms = row.get("decision_to_submit_latency_ms")
-            submit_to_exchange_fill_latency_ms = row.get("submit_to_exchange_fill_latency_ms")
-
-            if slippage is not None and slippage > Decimal(str(max(self.runtime.settings.max_slippage_tolerance_bps * 0.5, 2))):
-                flags.append("high_adverse_slippage")
-                summary["high_slippage_count"] += 1
-            if fee_ratio is not None and fee_ratio > Decimal("0.001"):
-                flags.append("high_fee_ratio")
-                summary["high_fee_ratio_count"] += 1
-            if isinstance(decision_to_submit_latency_ms, (int, float)) and decision_to_submit_latency_ms > 10_000:
-                flags.append("slow_decision_to_submit")
-                summary["slow_decision_to_submit_count"] += 1
-            if isinstance(submit_to_exchange_fill_latency_ms, (int, float)) and submit_to_exchange_fill_latency_ms > 10_000:
-                flags.append("slow_submit_to_fill")
-                summary["slow_submit_to_fill_count"] += 1
-            if flags:
-                flagged_rows.append({**row, "anomaly_flags": flags})
-
-        return {
-            "summary": summary,
-            "rows": flagged_rows,
-            "evaluated_fill_count": len(rows),
-            "truth_source": "fill_outcomes",
-        }
+        return self.report_queries.execution_anomaly_report(limit=limit)
 
     def execution_errors(self) -> dict[str, Any]:
         persisted = [
@@ -5635,6 +6755,159 @@ class OperatorQueryService:
             auth_source=auth_source,
         )
 
+    async def refresh_exchange_state(
+        self,
+        *,
+        blocker: str | None,
+        reason: str,
+        actor_role: OperatorRole,
+        actor_identity: str | None = None,
+        auth_source: AuthSource = "anonymous",
+    ) -> dict[str, Any]:
+        recovery_before = self.recovery_view()["recovery_state"]
+        blockers_before = self.blockers()
+        market_before = self.runtime.market_gateway.status()
+        account_before = self.runtime.account_service.status()
+        max_attempts = max(int(self.runtime.settings.operator_exchange_refresh_max_attempts), 1)
+        retry_delay_seconds = max(float(self.runtime.settings.operator_exchange_refresh_retry_delay_seconds), 0.0)
+        errors: list[dict[str, Any]] = []
+        market_refresh_completed = False
+        account_refresh_completed = False
+        attempts_executed = 0
+
+        for attempt in range(1, max_attempts + 1):
+            attempts_executed = attempt
+            try:
+                await self._refresh_market_snapshot_for_operator_resolution()
+                market_refresh_completed = True
+            except Exception as exc:
+                errors.append(
+                    {
+                        "attempt": attempt,
+                        "scope": "market_data",
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                    }
+                )
+            try:
+                await self._refresh_account_state_for_operator_resolution()
+                account_refresh_completed = True
+            except Exception as exc:
+                errors.append(
+                    {
+                        "attempt": attempt,
+                        "scope": "account_state",
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                    }
+                )
+            self._invalidate_cache()
+            if blocker and not self.blocker_control_service.has_active_blocker(blocker):
+                break
+            if attempt >= max_attempts:
+                break
+            if retry_delay_seconds > 0:
+                await asyncio.sleep(retry_delay_seconds)
+
+        if not market_refresh_completed and not account_refresh_completed and errors:
+            raise ValueError("exchange_state_refresh_failed")
+
+        self._invalidate_cache()
+        recovery_after = self.recovery_view()["recovery_state"]
+        blockers_after = self.blockers()
+        market_after = self.runtime.market_gateway.status()
+        account_after = self.runtime.account_service.status()
+        blocker_cleared = False if blocker is None else not self.blocker_control_service.has_active_blocker(blocker)
+        auto_resume: dict[str, Any] | None = None
+        if (
+            blocker == "derivatives_risk_snapshot_missing_auto_halt"
+            and blocker_cleared
+            and self.runtime.kill_switch.halted
+            and self.runtime.kill_switch.status().get("reason") == "derivatives_live_risk_auto_halt"
+        ):
+            auto_resume = await self.reconciliation_system_queries.resume(
+                reason="operator_refresh_exchange_state_for_risk_snapshot_recovered",
+                actor_role=actor_role,
+                actor_identity=actor_identity,
+                auth_source=auth_source,
+            )
+            self._invalidate_cache()
+            recovery_after = self.recovery_view()["recovery_state"]
+            blockers_after = self.blockers()
+            market_after = self.runtime.market_gateway.status()
+            account_after = self.runtime.account_service.status()
+            blocker_cleared = not self.blocker_control_service.has_active_blocker(blocker)
+        if blocker and blocker_cleared:
+            if auto_resume is not None and auto_resume.get("status") in {"resumed", "already_resumed"}:
+                message = "已刷新交易所状态，风险快照阻断已解除，系统已恢复自动运行。"
+            elif auto_resume is not None and auto_resume.get("status") == "resume_blocked":
+                message = "已刷新交易所状态，风险快照阻断已解除，但恢复仍受其他条件限制。"
+            else:
+                message = "已刷新交易所状态，当前阻断已解除。"
+        elif blocker:
+            message = "已刷新交易所状态，但当前阻断仍然存在。"
+        else:
+            message = "已刷新交易所状态。"
+
+        self._append_event(
+            topic=topics.OPERATOR_ACTIONS,
+            key="system",
+            payload_model=OperatorActionRecord(
+                action="refresh_exchange_state",
+                actor_role=actor_role,
+                actor_identity=actor_identity,
+                auth_source=auth_source,
+                reason=reason,
+                status="completed",
+                recovery_state_before=recovery_before,
+                recovery_state_after=recovery_after,
+                details={
+                    "target_blocker": blocker,
+                    "attempts_executed": attempts_executed,
+                    "max_attempts": max_attempts,
+                    "retry_delay_seconds": retry_delay_seconds,
+                    "market_refresh_completed": market_refresh_completed,
+                    "account_refresh_completed": account_refresh_completed,
+                    "blocker_cleared": blocker_cleared,
+                    "errors": errors,
+                    "market_before": market_before,
+                    "market_after": market_after,
+                    "account_before": account_before,
+                    "account_after": account_after,
+                    "blockers_before": blockers_before,
+                    "blockers_after": blockers_after,
+                    "auto_resume": auto_resume,
+                },
+            ),
+        )
+        self._persist_blocker_snapshot(
+            source="refresh_exchange_state",
+            runtime_state=self.system_health()["runtime_state"],
+            mode_snapshot=self.system_mode(),
+            blockers=self.blockers(),
+        )
+        return {
+            "status": "completed",
+            "message": message,
+            "recovery": self.recovery_view(),
+            "blockers": blockers_after,
+            "details": {
+                "target_blocker": blocker,
+                "attempts_executed": attempts_executed,
+                "max_attempts": max_attempts,
+                "retry_delay_seconds": retry_delay_seconds,
+                "market_refresh_completed": market_refresh_completed,
+                "account_refresh_completed": account_refresh_completed,
+                "blocker_cleared": blocker_cleared,
+                "errors": errors,
+                "market_before": market_before,
+                "market_after": market_after,
+                "account_before": account_before,
+                "account_after": account_after,
+                "auto_resume": auto_resume,
+            },
+        }
+
     def ai_review_restore(
         self,
         *,
@@ -5680,7 +6953,7 @@ class OperatorQueryService:
             "ai_runtime": self.ai_runtime(),
         }
 
-    def set_ai_operating_mode_override(
+    def set_ai_operating_mode(
         self,
         *,
         mode: str,
@@ -5691,7 +6964,25 @@ class OperatorQueryService:
     ) -> dict[str, Any]:
         recovery_before = self.recovery_view()["recovery_state"]
         ai_before = dict(self.runtime.ai_service.status())
-        ai_after = self.runtime.ai_service.set_manual_operating_mode_override(mode=mode)
+        configured_mode = normalize_ai_operating_mode(self.runtime.settings.ai_operating_mode)
+        requested_mode = normalize_ai_operating_mode(mode)
+        configured_display_mode = (
+            "ai_decision_maker"
+            if configured_mode == "ai_decision_maker_with_profile_control"
+            else configured_mode
+        )
+        requested_display_mode = (
+            "ai_decision_maker"
+            if requested_mode == "ai_decision_maker_with_profile_control"
+            else requested_mode
+        )
+        if requested_display_mode == configured_display_mode:
+            ai_after = self.runtime.ai_service.clear_manual_operating_mode_override()
+        else:
+            ai_after = self.runtime.ai_service.set_manual_operating_mode_override(
+                mode=requested_mode,
+                freeze_seconds=0.0,
+            )
         self._invalidate_cache()
         self.runtime.recovery_status = self.recovery_posture.finalize_status()
         self._invalidate_cache()
@@ -5700,7 +6991,7 @@ class OperatorQueryService:
             topic=topics.OPERATOR_ACTIONS,
             key="system",
             payload_model=OperatorActionRecord(
-                action="ai_manual_mode_override",
+                action="ai_operating_mode_select",
                 actor_role=actor_role,
                 actor_identity=actor_identity,
                 auth_source=auth_source,
@@ -5711,58 +7002,16 @@ class OperatorQueryService:
                 details={
                     "ai_before": ai_before,
                     "ai_after": ai_after,
-                    "target_mode": ai_after.get("manual_override_mode"),
-                    "freeze_until": ai_after.get("manual_override_freeze_until"),
+                    "configured_mode": configured_mode,
+                    "requested_mode": requested_mode,
+                    "configured_display_mode": configured_display_mode,
+                    "requested_display_mode": requested_display_mode,
+                    "effective_mode": ai_after.get("effective_operating_mode"),
                 },
             ),
         )
         self._persist_blocker_snapshot(
-            source="ai_manual_mode_override",
-            runtime_state=self.system_health()["runtime_state"],
-            mode_snapshot=self.system_mode(),
-            blockers=self.blockers(),
-        )
-        return {
-            "status": "completed",
-            "recovery": self.recovery_view(),
-            "ai_runtime": self.ai_runtime(),
-        }
-
-    def clear_ai_operating_mode_override(
-        self,
-        *,
-        reason: str,
-        actor_role: OperatorRole,
-        actor_identity: str | None = None,
-        auth_source: AuthSource = "anonymous",
-    ) -> dict[str, Any]:
-        recovery_before = self.recovery_view()["recovery_state"]
-        ai_before = dict(self.runtime.ai_service.status())
-        ai_after = self.runtime.ai_service.clear_manual_operating_mode_override()
-        self._invalidate_cache()
-        self.runtime.recovery_status = self.recovery_posture.finalize_status()
-        self._invalidate_cache()
-        recovery_after = self.recovery_view()["recovery_state"]
-        self._append_event(
-            topic=topics.OPERATOR_ACTIONS,
-            key="system",
-            payload_model=OperatorActionRecord(
-                action="ai_manual_mode_restore_auto",
-                actor_role=actor_role,
-                actor_identity=actor_identity,
-                auth_source=auth_source,
-                reason=reason,
-                status="completed",
-                recovery_state_before=recovery_before,
-                recovery_state_after=recovery_after,
-                details={
-                    "ai_before": ai_before,
-                    "ai_after": ai_after,
-                },
-            ),
-        )
-        self._persist_blocker_snapshot(
-            source="ai_manual_mode_restore_auto",
+            source="ai_operating_mode_select",
             runtime_state=self.system_health()["runtime_state"],
             mode_snapshot=self.system_mode(),
             blockers=self.blockers(),
@@ -5836,20 +7085,112 @@ class OperatorQueryService:
     def _reconciliation_mismatch_summary(report) -> dict[str, Any] | None:
         if report is None:
             return None
+        leg_mismatch_summary = OperatorQueryService._position_leg_mismatch_summary(report)
+        findings = OperatorQueryService._report_field(report, "findings", [])
         return {
-            "reconciliation_id": report.reconciliation_id,
-            "severity": report.severity,
-            "recovery_classification": report.recovery_classification,
-            "review_required": report.review_required,
-            "halt_required": report.halt_required,
-            "only_reduce_required": report.only_reduce_required,
-            "only_reduce_reasons": report.only_reduce_reasons,
-            "unknown_state_details": report.unknown_state_details,
-            "mismatch_categories": report.mismatch_categories,
-            "mismatch_reasons": report.mismatch_reasons,
-            "safety_impacts": report.safety_impacts,
-            "recommended_operator_action": report.recommended_operator_action,
-            "exchange_comparison_enabled": report.exchange_comparison_enabled,
+            "reconciliation_id": OperatorQueryService._report_field(report, "reconciliation_id"),
+            "severity": OperatorQueryService._report_field(report, "severity"),
+            "recovery_classification": OperatorQueryService._report_field(report, "recovery_classification"),
+            "review_required": bool(OperatorQueryService._report_field(report, "review_required", False)),
+            "halt_required": bool(OperatorQueryService._report_field(report, "halt_required", False)),
+            "only_reduce_required": bool(OperatorQueryService._report_field(report, "only_reduce_required", False)),
+            "only_reduce_reasons": OperatorQueryService._report_field(report, "only_reduce_reasons", []),
+            "structural_review_required": bool(
+                OperatorQueryService._report_field(report, "structural_review_required", False)
+            ),
+            "financial_review_required": bool(
+                OperatorQueryService._report_field(report, "financial_review_required", False)
+            ),
+            "observational_only": bool(OperatorQueryService._report_field(report, "observational_only", False)),
+            "finding_summary": OperatorQueryService._report_field(report, "finding_summary", {}),
+            "findings": [
+                item.model_dump(mode="json") if hasattr(item, "model_dump") else dict(item)
+                for item in findings
+            ],
+            "baseline_generation_id": OperatorQueryService._report_field(report, "baseline_generation_id"),
+            "exchange_ack_watermark_id": OperatorQueryService._report_field(report, "exchange_ack_watermark_id"),
+            "unknown_state_details": OperatorQueryService._report_field(report, "unknown_state_details", []),
+            "mismatch_categories": OperatorQueryService._report_field(report, "mismatch_categories", []),
+            "mismatch_reasons": OperatorQueryService._report_field(report, "mismatch_reasons", []),
+            "safety_impacts": OperatorQueryService._report_field(report, "safety_impacts", []),
+            "recommended_operator_action": OperatorQueryService._report_field(report, "recommended_operator_action"),
+            "exchange_comparison_enabled": bool(
+                OperatorQueryService._report_field(report, "exchange_comparison_enabled", False)
+            ),
+            "leg_mismatch_summary": leg_mismatch_summary,
+        }
+
+    @staticmethod
+    def _report_field(report, field_name: str, default: Any = None) -> Any:
+        if report is None:
+            return default
+        if isinstance(report, dict):
+            return report.get(field_name, default)
+        return getattr(report, field_name, default)
+
+    @staticmethod
+    def _position_leg_mismatch_summary(report) -> dict[str, Any]:
+        position_diff = OperatorQueryService._report_field(report, "position_diff", {})
+        position_diff = position_diff if isinstance(position_diff, dict) else {}
+        exchange_leg_mismatches = (
+            position_diff.get("exchange_leg_mismatches")
+            if isinstance(position_diff.get("exchange_leg_mismatches"), dict)
+            else {}
+        )
+        exchange_instrument_mismatches = (
+            position_diff.get("exchange_instrument_mismatches")
+            if isinstance(position_diff.get("exchange_instrument_mismatches"), dict)
+            else {}
+        )
+        unknown_state_details = OperatorQueryService._report_field(report, "unknown_state_details", [])
+        missing_execution_chain_keys = {
+            str(item.get("position_key"))
+            for item in (unknown_state_details if isinstance(unknown_state_details, list) else [])
+            if str(item.get("kind") or "") == "exchange_position_without_local_execution_chain"
+        }
+        items: list[dict[str, Any]] = []
+        for position_key, details in exchange_leg_mismatches.items():
+            row = dict(details or {})
+            row["position_key"] = position_key
+            row["kind"] = (
+                "missing_execution_chain"
+                if position_key in missing_execution_chain_keys
+                else "leg_quantity_mismatch"
+            )
+            for field_name in ("stored_qty", "reconstructed_qty", "exchange_qty"):
+                if field_name in row:
+                    row[field_name] = str(row[field_name])
+            items.append(row)
+        items.sort(key=lambda item: (str(item.get("symbol") or ""), str(item.get("leg_side") or "")))
+
+        instrument_items: list[dict[str, Any]] = []
+        for symbol, details in exchange_instrument_mismatches.items():
+            legs = details.get("legs") if isinstance(details.get("legs"), dict) else {}
+            normalized_legs = {
+                str(leg_name): {
+                    "stored": str(values.get("stored")),
+                    "exchange": str(values.get("exchange")),
+                }
+                for leg_name, values in legs.items()
+                if isinstance(values, dict)
+            }
+            instrument_items.append(
+                {
+                    "symbol": symbol,
+                    "legs": normalized_legs,
+                    "stored_dual_legged": bool(details.get("stored_dual_legged", False)),
+                    "exchange_dual_legged": bool(details.get("exchange_dual_legged", False)),
+                }
+            )
+        instrument_items.sort(key=lambda item: str(item.get("symbol") or ""))
+        return {
+            "total_count": len(items),
+            "missing_execution_chain_count": sum(
+                1 for item in items if item.get("kind") == "missing_execution_chain"
+            ),
+            "instrument_count": len(instrument_items),
+            "items": items,
+            "instrument_items": instrument_items,
         }
 
     def _exchange_bills_summary(self) -> dict[str, Any] | None:
@@ -5885,6 +7226,27 @@ class OperatorQueryService:
         if self.runtime.settings.account_backend != "okx" or not self.runtime.settings.account_read_enabled:
             return None
         return await self.runtime.account_service.refresh(force=True)
+
+    async def _refresh_market_snapshot_for_operator_resolution(self):
+        refresh = getattr(self.runtime.market_gateway, "refresh_snapshot", None)
+        if not callable(refresh):
+            return None
+        return await refresh()
+
+    async def _refresh_account_state_for_operator_resolution(self):
+        refresh = getattr(self.runtime.account_service, "refresh", None)
+        if not callable(refresh):
+            return None
+        try:
+            snapshot = await refresh(force=True)
+        finally:
+            sync_funding = getattr(self.runtime, "_sync_funding_fees_after_refresh", None)
+            if callable(sync_funding):
+                await sync_funding()
+            evaluate_guard = getattr(self.runtime, "_evaluate_derivatives_live_guard_after_refresh", None)
+            if callable(evaluate_guard):
+                evaluate_guard()
+        return snapshot
 
     def _stuck_submission_resolution(
         self,

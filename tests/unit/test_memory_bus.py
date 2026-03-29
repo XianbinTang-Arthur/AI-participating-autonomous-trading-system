@@ -213,6 +213,48 @@ class TestInMemoryEventBus(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(received, ["critical"])
         self.assertTrue(any("noncritical_subscription_failed" in line for line in captured.output))
 
+    async def test_publish_runs_later_subscribers_even_if_earlier_one_fails(self) -> None:
+        event_store = InMemoryEventStore()
+        bus = InMemoryEventBus(event_store=event_store)
+        received: list[str] = []
+
+        async def exploding_handler(message: dict) -> None:
+            _ = message
+            received.append("exploding")
+            raise RuntimeError("boom")
+
+        async def trailing_handler(message: dict) -> None:
+            _ = message
+            received.append("trailing")
+
+        await bus.subscribe("market.snapshots", exploding_handler)
+        await bus.subscribe("market.snapshots", trailing_handler)
+        snapshot = MarketSnapshot(
+            symbol="BTC-USDT",
+            exchange="PAPER",
+            snapshot_ts=utc_now(),
+            best_bid=1.0,
+            best_ask=1.1,
+            last_price=1.05,
+            bid_size=1.0,
+            ask_size=1.0,
+            volume_24h=10.0,
+            kline_15m={"open": 1.0, "high": 1.1, "low": 0.9, "close": 1.05},
+            kline_1h={"open": 1.0, "high": 1.1, "low": 0.9, "close": 1.05},
+        )
+
+        with self.assertRaises(RuntimeError):
+            await publish_model(
+                bus=bus,
+                topic="market.snapshots",
+                key="BTC-USDT",
+                payload_model=snapshot,
+                source_component="test",
+            )
+
+        self.assertEqual(received, ["exploding", "trailing"])
+        self.assertEqual(event_store.count(), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

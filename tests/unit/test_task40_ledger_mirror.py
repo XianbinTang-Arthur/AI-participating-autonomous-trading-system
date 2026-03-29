@@ -160,9 +160,9 @@ class TestTask40LedgerMirror(unittest.IsolatedAsyncioTestCase):
             reservation_repo = PostgresReservationRepository(runtime.session_factory)
             reservation = reservation_repo.get_by_order_id("cltask40_fill")
             self.assertIsNotNone(reservation)
-            self.assertEqual(Decimal(str(reservation["reserved_amount"])), Decimal("0.100050000000000000"))
+            self.assertEqual(Decimal(str(reservation["reserved_amount"])), Decimal("0.100100000000000000"))
             self.assertEqual(Decimal(str(reservation["consumed_amount"])), Decimal("0.100050000000000000"))
-            self.assertEqual(Decimal(str(reservation["released_amount"])), Decimal("0"))
+            self.assertEqual(Decimal(str(reservation["released_amount"])), Decimal("0.000050000000000000"))
             self.assertEqual(reservation["state"], "RELEASED")
 
             settlement_repo = PostgresSettlementRepository(runtime.session_factory)
@@ -187,6 +187,14 @@ class TestTask40LedgerMirror(unittest.IsolatedAsyncioTestCase):
                 symbol=None,
                 created_at=utc_now(),
             )
+            fee_expense_account_id = ledger_account_repo.get_or_create_account(
+                account_type="fee_expense",
+                currency="USDT",
+                product_type="spot",
+                margin_mode="cash",
+                symbol=None,
+                created_at=utc_now(),
+            )
             self.assertEqual(ledger_entry_repo.balance_by_account(str(reservation["reserve_account_id"])), Decimal("0"))
             self.assertEqual(
                 ledger_entry_repo.balance_by_account(available_account_id),
@@ -194,13 +202,17 @@ class TestTask40LedgerMirror(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(
                 ledger_entry_repo.balance_by_account(external_account_id),
-                Decimal("0.100050000000000000"),
+                Decimal("0.100000000000000000"),
+            )
+            self.assertEqual(
+                ledger_entry_repo.balance_by_account(fee_expense_account_id),
+                Decimal("0.000050000000000000"),
             )
 
             with runtime.session_factory() as session:
                 journal_count = session.scalar(select(func.count()).select_from(LedgerJournalModel))
                 settlement_count = session.scalar(select(func.count()).select_from(SettlementModel))
-            self.assertEqual(journal_count, 2)
+            self.assertEqual(journal_count, 4)
             self.assertEqual(settlement_count, 1)
 
     async def test_failed_terminal_order_releases_shadow_reservation_back_to_available(self) -> None:
@@ -267,7 +279,7 @@ class TestTask40LedgerMirror(unittest.IsolatedAsyncioTestCase):
             reservation = PostgresReservationRepository(runtime.session_factory).get_by_order_id("cltask40_release")
             self.assertIsNotNone(reservation)
             self.assertEqual(Decimal(str(reservation["consumed_amount"])), Decimal("0"))
-            self.assertEqual(Decimal(str(reservation["released_amount"])), Decimal("0.100050000000000000"))
+            self.assertEqual(Decimal(str(reservation["released_amount"])), Decimal("0.100100000000000000"))
             self.assertEqual(reservation["state"], "FAILED")
 
             available_account_id = ledger_account_repo.get_or_create_account(

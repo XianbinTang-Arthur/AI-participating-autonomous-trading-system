@@ -64,6 +64,51 @@ class Position(SchemaBase):
     margin_source: Literal["estimated", "exchange"] = "estimated"
 
 
+class PositionLegState(SchemaBase):
+    symbol: str
+    position_key: str
+    position_qty: Decimal
+    position_notional: Decimal = Decimal("0")
+    avg_entry_price: Decimal = Decimal("0")
+    unrealized_pnl: Decimal = Decimal("0")
+    product_type: ProductType = "spot"
+    exposure_side: str = "flat"
+    target_leverage: float = 1.0
+    margin_mode: MarginModelType = "cash"
+    position_mode: PositionMode | None = None
+    pos_side: PositionSide | None = None
+    instrument_family: str | None = None
+    settle_currency: str | None = None
+    margin_allocated: Decimal = Decimal("0")
+    maintenance_margin: Decimal = Decimal("0")
+    margin_ratio: Decimal | None = None
+    liquidation_price: Decimal | None = None
+    margin_source: Literal["estimated", "exchange"] = "estimated"
+
+
+class InstrumentPositionState(SchemaBase):
+    symbol: str
+    product_type: ProductType = "spot"
+    margin_mode: MarginModelType = "cash"
+    position_mode: PositionMode | None = None
+    exposure_side: str = "flat"
+    leg_count: int = 0
+    has_long_leg: bool = False
+    has_short_leg: bool = False
+    dual_legged: bool = False
+    net_position_qty: Decimal = Decimal("0")
+    gross_position_qty: Decimal = Decimal("0")
+    long_position_qty: Decimal = Decimal("0")
+    short_position_qty: Decimal = Decimal("0")
+    net_position_notional: Decimal = Decimal("0")
+    gross_position_notional: Decimal = Decimal("0")
+    long_position_notional: Decimal = Decimal("0")
+    short_position_notional: Decimal = Decimal("0")
+    unrealized_pnl: Decimal = Decimal("0")
+    target_leverage: float = 1.0
+    legs: list[PositionLegState] = Field(default_factory=list)
+
+
 class PortfolioSnapshot(SchemaBase):
     decision_id: str | None = None
     source_intent_id: str | None = None
@@ -124,6 +169,11 @@ class FillOutcomeRecord(SchemaBase):
     exchange_timestamp: datetime | None = None
     ingestion_timestamp: datetime | None = None
     order_status_after_fill: str | None = None
+    strategy_family: str | None = None
+    strategy_sleeve_id: str | None = None
+    allocation_id: str | None = None
+    strategy_bundle_id: str | None = None
+    strategy_leg_role: Literal["primary", "hedge", "inventory", "accumulation"] | None = None
     target_leverage: float | None = None
     exposure_side: str | None = None
     execution_action: str | None = None
@@ -160,13 +210,9 @@ class FillOutcomeRecord(SchemaBase):
         ending_position_qty: Decimal | None = None,
         ending_avg_entry_price: Decimal | None = None,
     ) -> "FillOutcomeRecord":
-        position_key = fill.symbol
-        if (
-            fill.product_type == "derivatives"
-            and fill.position_mode == "long_short_mode"
-            and fill.pos_side in {"long", "short"}
-        ):
-            position_key = f"{fill.symbol}:{fill.pos_side}"
+        from aats.services.portfolio_service.position_keys import position_key_for_fill
+
+        position_key = position_key_for_fill(fill)
         return cls.model_validate(
             {
                 **balance_delta.model_dump(mode="python"),
@@ -182,6 +228,11 @@ class FillOutcomeRecord(SchemaBase):
                 "exchange_timestamp": fill.exchange_timestamp,
                 "ingestion_timestamp": fill.ingestion_timestamp,
                 "order_status_after_fill": fill.order_status_after_fill,
+                "strategy_family": fill.strategy_family,
+                "strategy_sleeve_id": fill.strategy_sleeve_id,
+                "allocation_id": fill.allocation_id,
+                "strategy_bundle_id": fill.strategy_bundle_id,
+                "strategy_leg_role": fill.strategy_leg_role,
                 "target_leverage": fill.target_leverage,
                 "exposure_side": fill.exposure_side,
                 "execution_action": fill.execution_action,
@@ -216,4 +267,28 @@ class FundingFeeRecord(SchemaBase):
     ledger_posted_at: datetime | None = None
     product_type: ProductType = "spot"
     margin_mode: MarginModelType = "cash"
+    raw_payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class SleevePnLRecord(SchemaBase):
+    record_id: str
+    strategy_sleeve_id: str | None = None
+    strategy_family: str | None = None
+    allocation_id: str | None = None
+    strategy_bundle_id: str | None = None
+    strategy_leg_role: Literal["primary", "hedge", "inventory", "accumulation"] | None = None
+    symbol: str | None = None
+    event_type: Literal["fill_realization", "funding_fee"]
+    fill_id: str | None = None
+    funding_fee_id: str | None = None
+    fee_currency: str | None = None
+    realized_pnl: Decimal = Decimal("0")
+    fee_amount: Decimal = Decimal("0")
+    funding_fee_amount: Decimal = Decimal("0")
+    inventory_move_qty: Decimal = Decimal("0")
+    attribution_type: str = "direct"
+    product_type: ProductType = "spot"
+    margin_mode: MarginModelType = "cash"
+    event_timestamp: datetime | None = None
+    created_at: datetime = Field(default_factory=utc_now)
     raw_payload: dict[str, Any] = Field(default_factory=dict)

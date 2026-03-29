@@ -61,6 +61,18 @@ class TrialReviewRecordRequest(BaseModel):
     reason: str = "ui_trial_review_snapshot"
 
 
+class TrialReviewActionRequest(BaseModel):
+    action_type: Literal[
+        "review_snapshot",
+        "reset_trial_guard",
+        "continue_small_capital",
+        "shrink_trial",
+        "pause_trial",
+        "approve_scale_up",
+    ]
+    reason: str = "ui_trial_review_action"
+
+
 def _runtime(request: Request) -> ApplicationRuntime:
     return cast(ApplicationRuntime, request.app.state.runtime)
 
@@ -272,6 +284,7 @@ async def system_blocker_action(
         "accept-rebaseline": "blocker_accept_rebaseline",
         "resume-system": "blocker_resume_system",
         "halt-system": "blocker_keep_halted",
+        "refresh-exchange-state": "blocker_refresh_exchange_state",
         "acknowledge-phase1-shadow": "blocker_phase1_shadow_review",
         "ai-review-restore": "blocker_ai_review_restore",
         "ai-review-degrade-to-baseline": "blocker_ai_review_degrade_to_baseline",
@@ -295,6 +308,11 @@ async def system_blocker_action(
 @router.get("/decision/latest")
 async def latest_decision(request: Request) -> dict[str, Any]:
     return _query(request).latest_decision()
+
+
+@router.get("/strategy/runtime")
+async def strategy_runtime(request: Request) -> dict[str, Any]:
+    return _query(request).strategy_runtime()
 
 
 @router.get("/decision/recent")
@@ -725,6 +743,14 @@ async def guarded_live_run_packet(request: Request) -> dict[str, Any]:
     return _query(request).guarded_live_run_packet()
 
 
+@router.get("/reports/strategy-attribution")
+async def strategy_attribution_report(
+    request: Request,
+    limit: int = Query(default=200, ge=1, le=1000),
+) -> dict[str, Any]:
+    return _query(request).strategy_attribution_report(limit=limit)
+
+
 @router.get("/reports/trial-review-history")
 async def trial_review_history(
     request: Request,
@@ -769,6 +795,24 @@ async def system_trial_review_record(
         actor_identity=principal.identity,
         auth_source=principal.auth_source,
     )
+
+
+@router.post("/system/trial-review/action")
+async def system_trial_review_action(
+    request: Request,
+    payload: TrialReviewActionRequest,
+    principal: OperatorPrincipal = Depends(require_admin_access),
+) -> dict[str, Any]:
+    try:
+        return _query(request).record_trial_review_action(
+            action_type=payload.action_type,
+            reason=payload.reason,
+            actor_role=principal.role,
+            actor_identity=principal.identity,
+            auth_source=principal.auth_source,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/reconciliation/latest")

@@ -118,6 +118,33 @@ class StrategyProfileQueryFacade:
         self.owner._invalidate_cache()
         return result
 
+    def pause_auto(
+        self,
+        *,
+        reason: str,
+        actor_role: OperatorRole,
+        actor_identity: str | None,
+        auth_source: AuthSource,
+    ) -> dict[str, Any]:
+        result = self.strategy_profiles.pause_auto(
+            reason=reason,
+            actor_role=actor_role,
+            actor_identity=actor_identity,
+            auth_source=auth_source,
+        )
+        self._append_action(
+            action="strategy_profile_pause_auto",
+            actor_role=actor_role,
+            actor_identity=actor_identity,
+            auth_source=auth_source,
+            status="profile_auto_switch_paused",
+            details={
+                "active_profile_id": result["activation"].get("active_profile_id"),
+            },
+        )
+        self.owner._invalidate_cache()
+        return result
+
     def _append_action(
         self,
         *,

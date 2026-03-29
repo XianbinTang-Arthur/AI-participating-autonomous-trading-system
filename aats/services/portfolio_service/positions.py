@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Callable
+from typing import Any, Callable
 
 from aats.bootstrap.logging import correlation_fields, get_logger, log_event
 from aats.bootstrap.metrics import MetricsRegistry
@@ -14,8 +14,14 @@ from aats.schemas.execution import FillEvent
 from aats.schemas.exchange import ExchangeAccountSnapshot
 from aats.schemas.operator import ProcessingFailureRecord
 from aats.schemas.portfolio import FillOutcomeRecord, PortfolioBalanceDelta, PortfolioSnapshot, PortfolioSnapshotOrigin
-from aats.services.accounting import fill_fee_cost_in_quote, resolve_symbol_currencies, resolved_fee_currency
+from aats.services.accounting import (
+    fill_fee_cost_in_quote,
+    fill_fee_delta_in_quote,
+    resolve_symbol_currencies,
+    resolved_fee_currency,
+)
 from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, is_effectively_zero, to_decimal
+from aats.services.portfolio_service.outbox import PostgresPortfolioOutboxPublisher
 from aats.services.portfolio_service.position_keys import (
     build_position_key,
     exposure_side_from_quantity,
@@ -25,6 +31,7 @@ from aats.services.portfolio_service.position_keys import (
     position_key_for_snapshot_position,
     signed_quantity_for_position_side,
 )
+from aats.services.runtime_scope import RuntimeStateScope, infer_product_type_from_symbol
 from aats.storage.base import FillOutcomeRepository, PortfolioRepository
 from aats.services.portfolio_service.snapshots import PortfolioSnapshotBuilder
 
@@ -166,6 +173,10 @@ class PortfolioState:
             else snapshot.position_mode
         )
         for position in snapshot.positions:
+            position_product_type = getattr(position, "product_type", None) or infer_product_type_from_symbol(position.symbol)
+            position_margin_mode = getattr(position, "margin_mode", None) or (
+                "cash" if position_product_type == "spot" else self.default_margin_mode
+            )
             signed_quantity = signed_quantity_for_position_side(
                 position.quantity,
                 pos_side=getattr(position, "side", None),
@@ -175,7 +186,8 @@ class PortfolioState:
                 continue
             position_key = build_position_key(
                 symbol=position.symbol,
-                product_type=self.default_product_type,
+                product_type=position_product_type,
+                margin_mode=position_margin_mode,
                 position_mode=snapshot_position_mode,
                 pos_side=getattr(position, "side", None),
             )
@@ -184,9 +196,9 @@ class PortfolioState:
                 position_key=position_key,
                 quantity=signed_quantity,
                 avg_entry_price=to_decimal(position.average_entry_price),
-                product_type=getattr(position, "product_type", self.default_product_type),
+                product_type=position_product_type,
                 target_leverage=float(getattr(position, "leverage", None) or 1.0),
-                margin_mode=getattr(position, "margin_mode", None) or self.default_margin_mode,
+                margin_mode=position_margin_mode,
                 position_mode=normalize_position_mode(snapshot_position_mode),
                 pos_side=normalize_position_side(getattr(position, "side", None), position_mode=snapshot_position_mode),
                 instrument_family=getattr(position, "instrument_family", None),
@@ -305,13 +317,13 @@ class PortfolioState:
         base_currency, quote_currency = resolve_symbol_currencies(fill.symbol)
         notional = fill_qty * fill_price
         fee_currency = resolved_fee_currency(fill=fill, base_currency=base_currency, quote_currency=quote_currency)
-        fee_quote_amount = fill_fee_cost_in_quote(
+        fee_quote_delta = fill_fee_delta_in_quote(
             fill=fill,
             base_currency=base_currency,
             quote_currency=quote_currency,
         )
-        fee_quote_amount = to_decimal(fee_quote_amount)
-        fee_delta = fee_quote_amount
+        fee_quote_delta = to_decimal(fee_quote_delta)
+        fee_delta = fee_quote_delta
         trading_pnl_delta = Decimal("0")
         starting_avg_entry_price = to_decimal(record.avg_entry_price)
 
@@ -359,7 +371,7 @@ class PortfolioState:
         if fee_currency is not None:
             self.balances[fee_currency] = to_decimal(self.balances.get(fee_currency, 0)) - fee_amount
 
-        realized_pnl_delta = trading_pnl_delta - fee_quote_amount
+        realized_pnl_delta = trading_pnl_delta - fee_quote_delta
         self.realized_pnl = self.realized_pnl + realized_pnl_delta
         self.total_fees_paid = self.total_fees_paid + fee_delta
         self._applied_fill_ids.add(fill.fill_id)
@@ -403,7 +415,7 @@ class PortfolioState:
         for instrument in snapshot.instruments:
             if instrument.quote_currency != "USDT":
                 continue
-            if instrument.symbol in self.positions:
+            if any(record.symbol == instrument.symbol for record in self.positions.values()):
                 continue
             quantity = self.balances.get(instrument.base_currency, Decimal("0"))
             if is_effectively_zero(quantity):
@@ -416,8 +428,16 @@ class PortfolioState:
         return fill_fee_cost_in_quote(fill)
 
     @classmethod
+    def fee_delta_in_quote(cls, fill: FillEvent) -> Decimal:
+        return fill_fee_delta_in_quote(fill)
+
+    @classmethod
     def total_fee_cost_in_quote(cls, fills: list[FillEvent]) -> Decimal:
         return sum((cls.fee_cost_in_quote(fill) for fill in fills), start=Decimal("0"))
+
+    @classmethod
+    def total_fee_delta_in_quote(cls, fills: list[FillEvent]) -> Decimal:
+        return sum((cls.fee_delta_in_quote(fill) for fill in fills), start=Decimal("0"))
 
     @staticmethod
     def _same_direction(left: Decimal, right: Decimal) -> bool:
@@ -436,6 +456,11 @@ class PortfolioService:
         portfolio_repo: PortfolioRepository,
         fill_outcome_repo: FillOutcomeRepository,
         price_provider: Callable[[str], Decimal],
+        execution_repo: Any | None = None,
+        persistent_lot_book_service: Any | None = None,
+        sleeve_pnl_projection_service: Any | None = None,
+        portfolio_outbox_publisher: PostgresPortfolioOutboxPublisher | None = None,
+        state_scope: RuntimeStateScope | None = None,
         metrics: MetricsRegistry | None = None,
     ) -> None:
         self.bus = bus
@@ -444,6 +469,11 @@ class PortfolioService:
         self.portfolio_repo = portfolio_repo
         self.fill_outcome_repo = fill_outcome_repo
         self.price_provider = price_provider
+        self.execution_repo = execution_repo
+        self.persistent_lot_book_service = persistent_lot_book_service
+        self.sleeve_pnl_projection_service = sleeve_pnl_projection_service
+        self.portfolio_outbox_publisher = portfolio_outbox_publisher
+        self.state_scope = state_scope
         self.metrics = metrics
         self.logger = get_logger("aats.portfolio_service")
 
@@ -453,6 +483,12 @@ class PortfolioService:
             price_provider=self.price_provider,
             snapshot_origin=snapshot_origin,
         )
+        if self.portfolio_outbox_publisher is not None:
+            await self.portfolio_outbox_publisher.persist_bootstrap_snapshot(
+                snapshot=snapshot,
+                source_component="portfolio_service",
+            )
+            return
         self.portfolio_repo.save_snapshot(snapshot)
         await publish_model(
             bus=self.bus,
@@ -478,7 +514,8 @@ class PortfolioService:
                 source_fill_id=fill.fill_id,
                 snapshot_origin="fill_derived",
             )
-            self.portfolio_repo.save_snapshot(snapshot)
+            if self.portfolio_outbox_publisher is None:
+                self.portfolio_repo.save_snapshot(snapshot)
         except Exception as exc:
             self.state.restore(checkpoint)
             await self._emit_processing_failure(
@@ -496,17 +533,44 @@ class PortfolioService:
             fee_delta=result.fee_delta,
         )
         try:
-            self.fill_outcome_repo.save_outcome(
-                FillOutcomeRecord.from_fill_and_balance_delta(
-                    fill=fill,
-                    balance_delta=balance_delta,
-                    starting_position_qty=result.starting_quantity,
-                    starting_avg_entry_price=result.starting_avg_entry_price,
-                    ending_position_qty=result.ending_quantity,
-                    ending_avg_entry_price=result.ending_avg_entry_price,
-                )
+            outcome = FillOutcomeRecord.from_fill_and_balance_delta(
+                fill=fill,
+                balance_delta=balance_delta,
+                starting_position_qty=result.starting_quantity,
+                starting_avg_entry_price=result.starting_avg_entry_price,
+                ending_position_qty=result.ending_quantity,
+                ending_avg_entry_price=result.ending_avg_entry_price,
             )
+            if self.portfolio_outbox_publisher is not None:
+                pre_commit_actions: list[Callable[[Any], None]] = []
+                if self.persistent_lot_book_service is not None and self.execution_repo is not None:
+                    projection_fills = self._fills_for_projection(fill=fill)
+                    pre_commit_actions.append(
+                        lambda session, fills=projection_fills: self.persistent_lot_book_service.rebuild_from_fills_in_session(
+                            session,
+                            fills=fills,
+                            product_type=self.state.default_product_type,
+                            margin_mode=self.state.default_margin_mode,
+                        )
+                    )
+                if self.sleeve_pnl_projection_service is not None:
+                    pre_commit_actions.append(
+                        lambda session, outcome=outcome: self.sleeve_pnl_projection_service.save_fill_outcome_in_session(
+                            session,
+                            outcome=outcome,
+                        )
+                    )
+                await self.portfolio_outbox_publisher.persist_fill_projection(
+                    snapshot=snapshot,
+                    balance_delta=balance_delta,
+                    outcome=outcome,
+                    source_component="portfolio_service",
+                    pre_commit_actions=tuple(pre_commit_actions),
+                )
+            else:
+                self.fill_outcome_repo.save_outcome(outcome)
         except Exception as exc:
+            self.state.restore(checkpoint)
             log_event(
                 self.logger,
                 "fill_outcome_persist_failed",
@@ -526,6 +590,32 @@ class PortfolioService:
                 fill=fill,
                 retriable=True,
             )
+            raise
+        if self.portfolio_outbox_publisher is None:
+            try:
+                self._sync_persistent_lots(fill=fill)
+                if self.sleeve_pnl_projection_service is not None and self.state_scope is not None:
+                    self.sleeve_pnl_projection_service.rebuild_scope(scope=self.state_scope)
+            except Exception as exc:
+                log_event(
+                    self.logger,
+                    "portfolio_projection_rebuild_failed",
+                    level="warning",
+                    **correlation_fields(
+                        decision_id=fill.decision_id,
+                        intent_id=fill.intent_id,
+                        order_id=fill.client_order_id,
+                        fill_id=fill.fill_id,
+                        symbol=fill.symbol,
+                        error=str(exc),
+                    ),
+                )
+                await self._emit_processing_failure(
+                    stage="portfolio_projection_rebuild",
+                    message=str(exc),
+                    fill=fill,
+                    retriable=True,
+                )
         if self.metrics is not None:
             self.metrics.increment("fills_processed")
         log_event(
@@ -542,19 +632,50 @@ class PortfolioService:
                 fee_delta=result.fee_delta,
             ),
         )
-        await publish_model(
-            bus=self.bus,
-            topic=topics.PORTFOLIO_BALANCE_DELTAS,
-            key=fill.symbol,
-            payload_model=balance_delta,
-            source_component="portfolio_service",
-        )
-        await publish_model(
-            bus=self.bus,
-            topic=topics.PORTFOLIO_SNAPSHOTS,
-            key="portfolio",
-            payload_model=snapshot,
-            source_component="portfolio_service",
+        if self.portfolio_outbox_publisher is None:
+            await publish_model(
+                bus=self.bus,
+                topic=topics.PORTFOLIO_BALANCE_DELTAS,
+                key=fill.symbol,
+                payload_model=balance_delta,
+                source_component="portfolio_service",
+            )
+            await publish_model(
+                bus=self.bus,
+                topic=topics.PORTFOLIO_SNAPSHOTS,
+                key="portfolio",
+                payload_model=snapshot,
+                source_component="portfolio_service",
+            )
+
+    def _fills_for_projection(self, *, fill: FillEvent) -> list[FillEvent]:
+        if self.execution_repo is None:
+            return []
+        fills_for_scope = getattr(self.execution_repo, "fills_for_scope", None)
+        if callable(fills_for_scope):
+            return fills_for_scope(
+                scope=RuntimeStateScope(
+                    product_type=fill.product_type,
+                    margin_mode=fill.margin_mode,
+                    allowed_symbols=(fill.symbol,),
+                    default_symbol=fill.symbol,
+                )
+            )
+        return [
+            item
+            for item in self.execution_repo.fills()
+            if item.symbol == fill.symbol
+            and str(item.product_type or self.state.default_product_type) == str(fill.product_type or self.state.default_product_type)
+            and str(item.margin_mode or self.state.default_margin_mode) == str(fill.margin_mode or self.state.default_margin_mode)
+        ]
+
+    def _sync_persistent_lots(self, *, fill: FillEvent) -> None:
+        if self.persistent_lot_book_service is None or self.execution_repo is None:
+            return
+        self.persistent_lot_book_service.rebuild_from_fills(
+            fills=self._fills_for_projection(fill=fill),
+            product_type=self.state.default_product_type,
+            margin_mode=self.state.default_margin_mode,
         )
 
     async def _emit_processing_failure(

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable
 from decimal import Decimal
 from typing import Any
 
@@ -102,6 +101,54 @@ class MarketDataGateway:
     async def seed_demo_snapshot(self, symbol: str | None = None) -> MarketSnapshot:
         return await self.publish_local_snapshot(symbol=symbol)
 
+    async def refresh_snapshot(self, *, symbol: str | None = None) -> MarketSnapshot:
+        if symbol is None:
+            snapshots = await self.refresh_snapshots()
+            return snapshots.get(self.settings.default_symbol) or next(iter(snapshots.values()))
+        trading_symbol = symbol or self.settings.default_symbol
+        self._rest_fallback_last_attempt_ts = utc_now()
+        try:
+            if self.settings.market_data_backend == "okx":
+                snapshot = await self._fetch_okx_rest_snapshot(symbol=trading_symbol)
+                await self._publish_snapshot(snapshot)
+            else:
+                snapshot = await self.publish_local_snapshot(symbol=trading_symbol)
+        except Exception as exc:
+            self._last_error = str(exc)
+            self._rest_fallback_last_error = str(exc)
+            raise
+        self._rest_fallback_last_success_ts = utc_now()
+        self._rest_fallback_last_error = None
+        self._rest_fallback_active = False
+        self._last_error = None
+        return snapshot
+
+    async def refresh_snapshots(self, *, symbols: tuple[str, ...] | list[str] | None = None) -> dict[str, MarketSnapshot]:
+        tracked_symbols = tuple(dict.fromkeys(symbols or self._tracked_symbols()))
+        if not tracked_symbols:
+            tracked_symbols = (self.settings.default_symbol,)
+        self._rest_fallback_last_attempt_ts = utc_now()
+        snapshots: dict[str, MarketSnapshot] = {}
+        try:
+            if self.settings.market_data_backend == "okx":
+                for trading_symbol in tracked_symbols:
+                    snapshot = await self._fetch_okx_rest_snapshot(symbol=trading_symbol)
+                    await self._publish_snapshot(snapshot)
+                    snapshots[trading_symbol] = snapshot
+            else:
+                for trading_symbol in tracked_symbols:
+                    snapshot = await self.publish_local_snapshot(symbol=trading_symbol)
+                    snapshots[trading_symbol] = snapshot
+        except Exception as exc:
+            self._last_error = str(exc)
+            self._rest_fallback_last_error = str(exc)
+            raise
+        self._rest_fallback_last_success_ts = utc_now()
+        self._rest_fallback_last_error = None
+        self._rest_fallback_active = False
+        self._last_error = None
+        return snapshots
+
     async def run_local_publisher(
         self,
         *,
@@ -143,6 +190,8 @@ class MarketDataGateway:
     def status(self) -> dict[str, Any]:
         default_snapshot = self._latest_snapshots.get(self.settings.default_symbol)
         last_received_ts = self._latest_received_at.get(self.settings.default_symbol)
+        tracked_symbols = self._tracked_symbols()
+        stale_symbols = [symbol for symbol in tracked_symbols if not self.is_fresh(symbol)]
         connected = True
         last_update_ts = last_received_ts or (default_snapshot.snapshot_ts if default_snapshot is not None else None)
         detail = "demo_market_data"
@@ -191,6 +240,10 @@ class MarketDataGateway:
             "detail": detail,
             "blockers": blockers,
             "ready": fresh,
+            "tracked_symbols": list(tracked_symbols),
+            "tracked_symbol_count": len(tracked_symbols),
+            "stale_tracked_symbols": stale_symbols,
+            "tracked_symbols_fresh": len(stale_symbols) == 0,
         }
 
     async def _run_okx_stream(self) -> None:
@@ -224,21 +277,24 @@ class MarketDataGateway:
         ):
             self._rest_fallback_active = False
             return False
-        symbol = self.settings.default_symbol
-        if self.is_fresh(symbol):
+        stale_symbols = [symbol for symbol in self._tracked_symbols() if not self.is_fresh(symbol)]
+        if not stale_symbols:
             self._rest_fallback_active = False
             return False
         self._rest_fallback_last_attempt_ts = utc_now()
-        snapshot = await self._fetch_okx_rest_snapshot(symbol=symbol)
-        await self._publish_snapshot(snapshot)
+        refreshed: dict[str, MarketSnapshot] = {}
+        for symbol in stale_symbols:
+            snapshot = await self._fetch_okx_rest_snapshot(symbol=symbol)
+            await self._publish_snapshot(snapshot)
+            refreshed[symbol] = snapshot
         self._rest_fallback_last_success_ts = utc_now()
         self._rest_fallback_last_error = None
         self._rest_fallback_active = True
         log_event(
             self.logger,
             "okx_market_rest_fallback_published",
-            symbol=symbol,
-            snapshot_ts=snapshot.snapshot_ts.isoformat(),
+            symbols=stale_symbols,
+            snapshot_ts_map={symbol: snapshot.snapshot_ts.isoformat() for symbol, snapshot in refreshed.items()},
         )
         return True
 
@@ -289,6 +345,10 @@ class MarketDataGateway:
         self._latest_received_at[snapshot.symbol] = received_at
         self._last_publish_ts = received_at
         await self.publisher.publish(snapshot)
+
+    def _tracked_symbols(self) -> tuple[str, ...]:
+        symbols = tuple(dict.fromkeys(symbol for symbol in self.settings.expanded_allowed_symbols() if symbol))
+        return symbols or (self.settings.default_symbol,)
 
     def _build_local_payload(self, symbol: str) -> dict[str, Any]:
         tick = self._tick_by_symbol.get(symbol, 0)

@@ -3,12 +3,10 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from decimal import Decimal
 from hashlib import sha256
 from typing import TYPE_CHECKING, Any
 
-from aats.bootstrap.logging import get_logger, log_event
-from aats.bootstrap.settings import AATSSettings
+from aats.bootstrap.logging import get_logger
 from aats.events import topics
 from aats.events.envelopes import build_envelope
 from aats.schemas.common import utc_now
@@ -22,8 +20,6 @@ from aats.schemas.strategy_profiles import (
     StrategyProfileActivationRecord,
     StrategyProfileActivationState,
     StrategyProfileEvaluationRecord,
-    StrategyProfileAxes,
-    StrategyProfilePayload,
     StrategyProfileRecommendation,
     StrategyProfileRejectionRecord,
     StrategyProfileRevision,
@@ -67,7 +63,7 @@ from aats.services.operator.strategy_profile_policies import (
     update_activation_policy as update_activation_policy_helper,
     update_auto_rollback_policy as update_auto_rollback_policy_helper,
 )
-from aats.services.operator.strategy_profile_seed import _seed_revisions, seed_strategy_profiles
+from aats.services.operator.strategy_profile_seed import seed_strategy_profiles
 from aats.services.operator.strategy_profile_snapshot import (
     build_strategy_profile_ai_config_snapshot,
     build_strategy_profile_snapshot,
@@ -80,10 +76,7 @@ from aats.services.governance_engine.adaptive_controls import (
     resolve_execution_aggressiveness_state,
     resolve_risk_budget_state,
 )
-from aats.services.runtime_scope import (
-    runtime_state_scope,
-)
-from aats.storage.base import EventStore, StrategyProfileRepository
+from aats.storage.base import EventStore
 
 if TYPE_CHECKING:
     from aats.bootstrap.config import ApplicationRuntime
@@ -343,6 +336,21 @@ class StrategyProfileControlService:
             reason=reason,
         )
 
+    def pause_auto(
+        self,
+        *,
+        actor_role: OperatorRole,
+        actor_identity: str | None,
+        auth_source: AuthSource,
+        reason: str,
+    ) -> dict[str, Any]:
+        return self.activation.pause_auto(
+            actor_role=actor_role,
+            actor_identity=actor_identity,
+            auth_source=auth_source,
+            reason=reason,
+        )
+
     def rollback(
         self,
         *,
@@ -475,6 +483,9 @@ class StrategyProfileControlService:
         execution_health = context.get("execution_health") or {}
         live_guard = safety_state.get("live_guard") or {}
         trial_guard = safety_state.get("trial_guard") or {}
+        projected_margin_usage = live_guard.get("projected_margin_usage_fraction")
+        if projected_margin_usage is None:
+            projected_margin_usage = live_guard.get("projected_margin_usage")
         risk_budget = resolve_risk_budget_state(
             self.settings,
             execution_error_count=int(execution_health.get("recent_execution_error_count") or 0),
@@ -487,7 +498,7 @@ class StrategyProfileControlService:
             auto_halt_required=bool(safety_state.get("auto_halt_required")),
             trial_guard_breached=bool(safety_state.get("trial_guard_breached")),
             current_margin_usage_fraction=live_guard.get("current_initial_margin_usage_fraction"),
-            projected_margin_usage_fraction=live_guard.get("current_initial_margin_usage_fraction"),
+            projected_margin_usage_fraction=projected_margin_usage,
             nearest_liquidation_gap_ratio=live_guard.get("nearest_liquidation_gap_ratio"),
         )
         execution_aggressiveness = resolve_execution_aggressiveness_state(
@@ -502,7 +513,7 @@ class StrategyProfileControlService:
             auto_halt_required=bool(safety_state.get("auto_halt_required")),
             trial_guard_breached=bool(safety_state.get("trial_guard_breached")),
             current_margin_usage_fraction=live_guard.get("current_initial_margin_usage_fraction"),
-            projected_margin_usage_fraction=live_guard.get("current_initial_margin_usage_fraction"),
+            projected_margin_usage_fraction=projected_margin_usage,
             nearest_liquidation_gap_ratio=live_guard.get("nearest_liquidation_gap_ratio"),
         )
         return {
@@ -678,8 +689,14 @@ class StrategyProfileControlService:
             if active_revision is not None
             else strategy_profile_payload_from_settings(self.settings)
         )
-        active_axes = strategy_profile_axes_from_payload(active_payload)
-        candidate_axes = strategy_profile_axes_from_payload(revision.payload)
+        active_axes = strategy_profile_axes_from_payload(
+            active_payload,
+            product_type=active_revision.product_type if active_revision is not None else self.settings.trading_product_type,
+        )
+        candidate_axes = strategy_profile_axes_from_payload(
+            revision.payload,
+            product_type=revision.product_type,
+        )
         frequency_delta = self._axis_rank(candidate_axes.frequency) - self._axis_rank(active_axes.frequency)
         entry_delta = self._axis_rank(candidate_axes.entry_threshold) - self._axis_rank(active_axes.entry_threshold)
         reversal_delta = self._axis_rank(candidate_axes.reversal_threshold) - self._axis_rank(active_axes.reversal_threshold)
@@ -937,11 +954,18 @@ class StrategyProfileControlService:
             return None
         return {
             **revision.model_dump(mode="json"),
-            "axes": strategy_profile_axes_from_payload(revision.payload).model_dump(mode="json"),
-            "payload_summary": summarize_strategy_profile_payload(revision.payload),
+            "axes": strategy_profile_axes_from_payload(
+                revision.payload,
+                product_type=revision.product_type,
+            ).model_dump(mode="json"),
+            "payload_summary": summarize_strategy_profile_payload(
+                revision.payload,
+                product_type=revision.product_type,
+            ),
             "summary": diff_strategy_profile_payload(
                 strategy_profile_payload_from_settings(self.settings),
                 revision.payload,
+                product_type=revision.product_type,
             ),
         }
 
@@ -965,8 +989,14 @@ class StrategyProfileControlService:
                     "risk_level": item.risk_level,
                     "market_intent": item.market_intent,
                     "status": item.status,
-                    "axes": strategy_profile_axes_from_payload(item.payload).model_dump(mode="json"),
-                    "payload_summary": summarize_strategy_profile_payload(item.payload),
+                    "axes": strategy_profile_axes_from_payload(
+                        item.payload,
+                        product_type=item.product_type,
+                    ).model_dump(mode="json"),
+                    "payload_summary": summarize_strategy_profile_payload(
+                        item.payload,
+                        product_type=item.product_type,
+                    ),
                     "expected_behavior": list(item.expected_behavior),
                     "description": item.description,
                 }

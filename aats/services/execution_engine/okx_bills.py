@@ -220,7 +220,6 @@ def suggested_operator_bill_handling(
 ) -> tuple[str, str]:
     category_set = set(mismatch_categories)
     reason_set = set(mismatch_reasons)
-    explain_set = set(likely_explains)
 
     if (
         "local_open_orders_diverge_from_exchange_open_orders" in reason_set

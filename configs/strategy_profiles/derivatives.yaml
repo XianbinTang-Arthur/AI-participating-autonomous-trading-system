@@ -1,0 +1,322 @@
+# 合约（模拟盘 / 非实盘）策略调参
+# 这里只放策略、AI、自动换档、多策略与试盘守护相关参数。
+# 数据库、端口、日志、交易所凭证、仓位上限等运行时 override 请改根目录 `.env.derivatives`。
+
+# AI 与自动降级
+# [常用可调] ai_operating_mode：AI 运行模式。可选值：baseline_only / ai_assisted / ai_decision_maker / ai_decision_maker_with_profile_control；推荐值：baseline_only。
+ai_operating_mode: baseline_only
+# [常用可调] ai_provider：AI 提供方。可选值：disabled / openai；推荐值：openai。
+ai_provider: openai
+# [常用可调] ai_model_name：AI 模型名。可选值：可用的 OpenAI 模型名；推荐值：gpt-4.1-mini。
+ai_model_name: gpt-4.1-mini
+# [常用可调] ai_timeout_seconds：AI 请求超时秒数。可选值：1.0 ~ 60.0；推荐值：10.0。
+ai_timeout_seconds: 10.0
+# [常用可调] ai_degrade_after_failures：连续失败多少次后自动降级。可选值：1 ~ 10；推荐值：4。
+ai_degrade_after_failures: 4
+# [常用可调] ai_recovery_probe_interval_seconds：降级后多久做一次恢复探测。可选值：30 ~ 3600；推荐值：180.0。
+ai_recovery_probe_interval_seconds: 180.0
+# [常用可调] ai_decision_min_confidence：AI 决策最低置信度。可选值：0.0 ~ 1.0；推荐值：0.72。
+ai_decision_min_confidence: 0.72
+# [常用可调] ai_decision_max_uncertainty：AI 决策允许的最大不确定度。可选值：0.0 ~ 1.0；推荐值：0.38。
+ai_decision_max_uncertainty: 0.38
+# [常用可调] ai_decision_min_directional_edge：AI 方向信号最低边际。可选值：0.0 ~ 1.0；推荐值：0.16。
+ai_decision_min_directional_edge: 0.16
+# [常用可调] ai_shadow_mode_enabled：是否启用 AI shadow 观察。可选值：true / false；推荐值：true。
+ai_shadow_mode_enabled: true
+# [常用可调] ai_shadow_evaluation_window：shadow 评估窗口长度。可选值：5 ~ 200；推荐值：30。
+ai_shadow_evaluation_window: 30
+# [常用可调] ai_outcome_review_bad_window_threshold：坏窗口数量达到多少后要求复核。可选值：1 ~ 20；推荐值：3。
+ai_outcome_review_bad_window_threshold: 3
+# [常用可调] ai_outcome_max_fee_ratio_delta：AI 相对 baseline 可多承担的费率漂移。可选值：0.0 ~ 1.0；推荐值：0.08。
+ai_outcome_max_fee_ratio_delta: 0.08
+# [常用可调] ai_outcome_max_churn_ratio_delta：AI 相对 baseline 可多承担的 churn 漂移。可选值：0.0 ~ 1.0；推荐值：0.12。
+ai_outcome_max_churn_ratio_delta: 0.12
+# [常用可调] ai_execution_suggestion_mode：AI 执行建议输出模式。可选值：disabled / diagnostic_only / shadow_translation / enabled_live；推荐值：enabled_live。
+ai_execution_suggestion_mode: enabled_live
+
+# 策略家族与自动换档
+# [常用可调] strategy_family_active：默认主策略家族。可选值：directional / smart_arbitrage / spot_grid / dca；推荐值：directional。
+strategy_family_active: directional
+# [常用可调] strategy_family_auto_selection_enabled：是否允许系统自动选择策略家族。可选值：true / false；推荐值：true。
+strategy_family_auto_selection_enabled: true
+# [常用可调] strategy_profile_auto_control_enabled：是否启用策略档位自动换档。这是唯一主开关；true 时系统会自动评估并默认启用自动激活规则，false 时只允许手动切档。可选值：true / false；推荐值：true。
+strategy_profile_auto_control_enabled: true
+# [常用可调] strategy_profile_auto_rollback_enabled：自动换档后是否允许自动回滚。可选值：true / false；推荐值：true。
+strategy_profile_auto_rollback_enabled: true
+# [常用可调] strategy_profile_emergency_safety_fast_track_enabled：风险事件时是否允许快速切到安全档。可选值：true / false；推荐值：true。
+strategy_profile_emergency_safety_fast_track_enabled: true
+# [常用可调] strategy_profile_emergency_safety_confidence_min：快速切档最低置信度。可选值：0.0 ~ 1.0；推荐值：0.68。
+strategy_profile_emergency_safety_confidence_min: 0.68
+
+# 多策略 sleeve 自动控制
+# [常用可调] strategy_sleeve_auto_parallel_enabled：是否启用多策略 sleeve 自动并行控制。可选值：true / false；推荐值：true。
+strategy_sleeve_auto_parallel_enabled: true
+# [常用可调] strategy_sleeve_auto_min_budget_multiplier：自动收缩后的最小预算倍率。可选值：0.1 ~ 1.0；推荐值：0.35。
+strategy_sleeve_auto_min_budget_multiplier: 0.35
+# [常用可调] strategy_sleeve_auto_reconciliation_contraction_multiplier：对账压力下的预算收缩倍率。可选值：0.1 ~ 1.0；推荐值：0.50。
+strategy_sleeve_auto_reconciliation_contraction_multiplier: 0.50
+# [常用可调] strategy_sleeve_auto_soft_loss_usdt：进入软收缩的最近净亏损阈值。可选值：正数；推荐值：10.0。
+strategy_sleeve_auto_soft_loss_usdt: 10.0
+# [常用可调] strategy_sleeve_auto_hard_loss_usdt：在无库存时自动暂停的净亏损阈值。可选值：正数；推荐值：25.0。
+strategy_sleeve_auto_hard_loss_usdt: 25.0
+# [常用可调] strategy_sleeve_auto_volatility_cap_enabled：是否按波动率目标自动收缩预算。可选值：true / false；推荐值：true。
+strategy_sleeve_auto_volatility_cap_enabled: true
+
+# 统一交易成本
+# [说明] 统一交易成本全部按 bps 填写，是百分比费率的万分之一，不是固定 USDT；8.0 = 0.08%，5.0 = 0.05%。实盘优先读取账户费率，拿不到时再回落到这里的兜底值。
+trade_cost_spot_maker_fee_bps: 8.0
+trade_cost_spot_taker_fee_bps: 10.0
+trade_cost_margin_maker_fee_bps: 8.0
+trade_cost_margin_taker_fee_bps: 10.0
+trade_cost_derivatives_maker_fee_bps: 2.0
+trade_cost_derivatives_taker_fee_bps: 5.0
+trade_cost_delivery_settlement_fee_bps: 1.0
+trade_cost_spot_spread_bps: 1.0
+trade_cost_spot_slippage_bps: 1.5
+trade_cost_margin_spread_bps: 1.0
+trade_cost_margin_slippage_bps: 1.5
+trade_cost_derivatives_spread_bps: 0.5
+trade_cost_derivatives_slippage_bps: 1.0
+
+# 多策略启停
+# [常用可调] smart_arbitrage_enabled：是否启用智能套利策略。可选值：true / false；推荐值：true。
+smart_arbitrage_enabled: true
+# [常用可调] smart_arbitrage_basis_entry_bps：基差入场阈值。可选值：0.0 ~ 200.0；推荐值：18.0。
+smart_arbitrage_basis_entry_bps: 40.0
+# [常用可调] smart_arbitrage_basis_exit_bps：基差退出阈值。可选值：0.0 ~ 200.0；推荐值：6.0。
+smart_arbitrage_basis_exit_bps: 6.0
+# [常用可调] smart_arbitrage_estimated_cost_bps：套利预估综合成本。可选值：0.0 ~ 100.0；推荐值：10.0。
+smart_arbitrage_estimated_cost_bps: 34.0
+# [常用可调] smart_arbitrage_quote_budget_per_trade：每次套利分配的 quote 预算。可选值：正数；推荐值：200.0。
+smart_arbitrage_quote_budget_per_trade: 200.0
+# [常用可调] smart_arbitrage_max_pair_notional：单组套利最大名义金额。可选值：正数；推荐值：2000.0。
+smart_arbitrage_max_pair_notional: 2000.0
+# [进阶可调] smart_arbitrage_hedge_target_leverage：智能套利合约对冲腿目标杠杆。只作用于套利对冲腿，不再复用 directional 的 default_target_leverage。可选值：1.0 ~ max_target_leverage；推荐值：3.0。
+smart_arbitrage_hedge_target_leverage: 3.0
+# [进阶可调] smart_arbitrage_pair_definitions：智能套利配对定义。默认先显式定义主套利对，后续多 pair 直接在这里扩展。
+smart_arbitrage_pair_definitions:
+  - pair_id: btc_usdt_swap
+    spot_symbol: BTC-USDT
+    hedge_symbol: BTC-USDT-SWAP
+    execution_modes:
+      - spot_carry
+      - margin_reverse_carry
+# [进阶可调] smart_arbitrage_negative_basis_mode：负基差执行模式。可选值：disabled / advisory_only / inventory_backed / margin_backed；推荐值：margin_backed。
+smart_arbitrage_negative_basis_mode: margin_backed
+# [进阶可调] smart_arbitrage_inventory_reservation_enabled：是否允许使用现货库存做库存反套。可选值：true / false；推荐值：false。
+smart_arbitrage_inventory_reservation_enabled: false
+# [进阶可调] smart_arbitrage_margin_short_enabled：是否启用保证金融券反套能力声明。可选值：true / false；推荐值：true。
+smart_arbitrage_margin_short_enabled: true
+# [进阶可调] smart_arbitrage_margin_short_execution_ready：执行适配层是否已经接通保证金融券反套。可选值：true / false；推荐值：true。
+smart_arbitrage_margin_short_execution_ready: true
+# [进阶可调] smart_arbitrage_margin_short_spot_margin_mode：保证金融券现货腿的保证金模式。可选值：cross / isolated；推荐值：cross。
+smart_arbitrage_margin_short_spot_margin_mode: cross
+# [进阶可调] smart_arbitrage_margin_short_auto_repay_enabled：保证金反套平仓后是否自动还币。可选值：true / false；推荐值：false。
+smart_arbitrage_margin_short_auto_repay_enabled: false
+# [进阶可调] smart_arbitrage_cost_model_enabled：是否启用细分成本模型。可选值：true / false；推荐值：true。
+smart_arbitrage_cost_model_enabled: true
+# [进阶可调] smart_arbitrage_funding_cost_enabled：是否把资金费计入细分成本。可选值：true / false；推荐值：true。
+smart_arbitrage_funding_cost_enabled: true
+# [进阶可调] smart_arbitrage_borrow_cost_enabled：是否把借币费计入细分成本。可选值：true / false；推荐值：true。
+smart_arbitrage_borrow_cost_enabled: true
+# [进阶可调] smart_arbitrage_max_concurrent_pairs：最多同时主控多少组不重叠套利对。可选值：正整数；推荐值：1。
+smart_arbitrage_max_concurrent_pairs: 1
+# [进阶可调] smart_arbitrage_pair_priority_mode：多 pair 排序方式。可选值：net_edge / basis_abs；推荐值：net_edge。
+smart_arbitrage_pair_priority_mode: net_edge
+# [进阶可调] smart_arbitrage_min_inventory_backed_ratio：库存反套最小覆盖率。可选值：0.0 以上；推荐值：1.0。
+smart_arbitrage_min_inventory_backed_ratio: 1.0
+# [进阶可调] smart_arbitrage_fee_source_mode：手续费来源。可选值：configured / account_schedule；推荐值：account_schedule。
+smart_arbitrage_fee_source_mode: account_schedule
+# [进阶可调] smart_arbitrage_funding_source_mode：资金费来源。可选值：configured / account_proxy；推荐值：account_proxy。
+smart_arbitrage_funding_source_mode: account_proxy
+# [进阶可调] smart_arbitrage_borrow_source_mode：借币费来源。可选值：configured / apr_window_model；推荐值：apr_window_model。
+smart_arbitrage_borrow_source_mode: apr_window_model
+# [进阶可调] smart_arbitrage_expected_hold_hours：预计持有小时数。可选值：0.0 以上；推荐值：8.0。
+smart_arbitrage_expected_hold_hours: 8.0
+# [进阶可调] smart_arbitrage_funding_interval_hours：资金费结算间隔小时数。可选值：1.0 以上；推荐值：8.0。
+smart_arbitrage_funding_interval_hours: 8.0
+# [进阶可调] smart_arbitrage_expected_funding_events：预计 funding 事件数。0 代表按持有窗口自动推导；推荐值：0。
+smart_arbitrage_expected_funding_events: 0
+# [进阶可调] smart_arbitrage_estimated_execution_mismatch_bps：双腿不同步磨损估算。可选值：0.0 以上；推荐值：0.0。
+smart_arbitrage_estimated_execution_mismatch_bps: 0.0
+# [进阶可调] smart_arbitrage_estimated_transfer_cost_bps：固定转移/搬移成本估算。可选值：0.0 以上；推荐值：0.0。
+smart_arbitrage_estimated_transfer_cost_bps: 0.0
+# [进阶可调] smart_arbitrage_time_decay_bps_per_hour：每小时时间磨损估算。可选值：0.0 以上；推荐值：0.0。
+smart_arbitrage_time_decay_bps_per_hour: 0.0
+# [进阶可调] smart_arbitrage_estimated_borrow_apr：借币 APR 百分比估算。按百分比填写，18 代表 18% APR。可选值：0.0 以上；推荐值：18.0。
+smart_arbitrage_estimated_borrow_apr: 18.0
+# [进阶可调] smart_arbitrage_borrow_interest_free_ratio：借币免息比例估算。可选值：0.0 ~ 1.0；推荐值：0.0。
+smart_arbitrage_borrow_interest_free_ratio: 0.0
+# [进阶可调] smart_arbitrage_estimated_funding_bps：细分资金费预估。可选值：0.0 以上；推荐值：0.0。
+smart_arbitrage_estimated_funding_bps: 0.0
+# [进阶可调] smart_arbitrage_estimated_borrow_bps：细分借币费预估。可选值：0.0 以上；推荐值：0.0。
+smart_arbitrage_estimated_borrow_bps: 0.0
+# 现货专属的 spot_grid / dca 参数统一维护在 spot*.yaml；合约 profile 不再重复保留这些历史遗留项。
+
+# 决策节奏
+# [常用可调] max_decisions_per_minute：每分钟最多允许多少次决策。可选值：1 ~ 20；推荐值：3。
+max_decisions_per_minute: 3
+# [常用可调] decision_min_interval_seconds_15m：15m 周期最小决策间隔。可选值：0.0 ~ 600.0；推荐值：60.0。
+decision_min_interval_seconds_15m: 60.0
+# [常用可调] decision_min_interval_seconds_1h：1h 周期最小决策间隔。可选值：0.0 ~ 1800.0；推荐值：240.0。
+decision_min_interval_seconds_1h: 240.0
+# [常用可调] decision_min_price_move_bps：触发新决策前要求的最小价格变动。可选值：0.0 ~ 50.0；推荐值：4.0。
+decision_min_price_move_bps: 4.0
+# [常用可调] decision_min_momentum_delta：触发新决策前要求的最小动量变化。可选值：0.0 ~ 0.01；推荐值：0.0003。
+decision_min_momentum_delta: 0.0003
+
+# directional 细分阈值
+# [常用可调] strategy_short_bias_enabled：是否允许空头偏置。合约建议开启。可选值：true / false；推荐值：true。
+strategy_short_bias_enabled: true
+# [常用可调] strategy_dynamic_leverage_enabled：是否允许动态杠杆。可选值：true / false；推荐值：true。
+strategy_dynamic_leverage_enabled: true
+# [常用可调] strategy_flat_signal_hold_enabled：flat 信号时是否优先持有而不是立刻退出。可选值：true / false；推荐值：true。
+strategy_flat_signal_hold_enabled: true
+# [常用可调] strategy_flat_exit_microstructure_threshold：flat 退出的微观结构阈值。可选值：0.0 ~ 1.0；推荐值：0.16。
+strategy_flat_exit_microstructure_threshold: 0.16
+# [常用可调] strategy_flat_exit_factor_threshold：flat 退出的因子阈值。可选值：0.0 ~ 1.0；推荐值：0.24。
+strategy_flat_exit_factor_threshold: 0.24
+# [常用可调] strategy_flat_exit_ai_edge_threshold：flat 退出的 AI edge 阈值。可选值：0.0 ~ 1.0；推荐值：0.28。
+strategy_flat_exit_ai_edge_threshold: 0.28
+# [常用可调] strategy_expected_slippage_bps_fraction：预估滑点占保护阈值的比例。可选值：0.0 ~ 1.0；推荐值：0.35。
+strategy_expected_slippage_bps_fraction: 0.28
+# [常用可调] strategy_edge_noise_buffer_bps：边际噪音缓冲。可选值：0.0 ~ 50.0；推荐值：6.0。
+strategy_edge_noise_buffer_bps: 4.5
+# [常用可调] strategy_min_net_edge_bps：最小净边际。可选值：0.0 ~ 50.0；推荐值：6.0。
+strategy_min_net_edge_bps: 5.0
+# [常用可调] strategy_entry_allowed_regimes：允许新开仓的市场状态。可选值：trend / breakout / range / uncertain / high_volatility；推荐值：trend, breakout, uncertain。
+strategy_entry_allowed_regimes:
+  - trend
+  - breakout
+  - uncertain
+# [进阶可调] strategy_short_entry_allowed_regimes：允许新开空的市场状态。当前只在合约运行域生效。可选值：trend / breakout / range / uncertain / high_volatility；推荐值：trend, breakout, uncertain。
+strategy_short_entry_allowed_regimes:
+  - trend
+  - breakout
+  - uncertain
+# [常用可调] strategy_entry_min_signal_edge_bps：开仓最低信号边际。可选值：0.0 ~ 100.0；推荐值：14.0。
+strategy_entry_min_signal_edge_bps: 14.0
+# [常用可调] strategy_entry_alpha_min：开仓最低 alpha。可选值：0.0 ~ 1.0；推荐值：0.18。
+strategy_entry_alpha_min: 0.18
+# [常用可调] strategy_entry_confidence_min：开仓最低置信度。可选值：0.0 ~ 1.0；推荐值：0.64。
+strategy_entry_confidence_min: 0.66
+# [进阶可调] strategy_short_entry_min_signal_edge_bps：新开空最低信号边际。当前只在合约运行域生效；推荐值低于做多开仓，避免长期只减多不翻空。可选值：0.0 ~ 100.0；推荐值：12.0。
+strategy_short_entry_min_signal_edge_bps: 12.0
+# [进阶可调] strategy_short_entry_alpha_min：新开空最低 alpha。当前只在合约运行域生效。可选值：0.0 ~ 1.0；推荐值：0.15。
+strategy_short_entry_alpha_min: 0.15
+# [进阶可调] strategy_short_entry_confidence_min：新开空最低置信度。当前只在合约运行域生效。可选值：0.0 ~ 1.0；推荐值：0.55。
+strategy_short_entry_confidence_min: 0.55
+# [常用可调] strategy_scale_in_min_signal_edge_bps：加仓最低信号边际。可选值：0.0 ~ 100.0；推荐值：16.0。
+strategy_scale_in_min_signal_edge_bps: 16.0
+# [常用可调] strategy_scale_in_alpha_min：加仓最低 alpha。可选值：0.0 ~ 1.0；推荐值：0.22。
+strategy_scale_in_alpha_min: 0.22
+# [常用可调] strategy_scale_in_confidence_min：加仓最低置信度。可选值：0.0 ~ 1.0；推荐值：0.68。
+strategy_scale_in_confidence_min: 0.68
+# [进阶可调] strategy_short_scale_in_min_signal_edge_bps：继续加空最低信号边际。当前只在合约运行域生效。可选值：0.0 ~ 100.0；推荐值：16.0。
+strategy_short_scale_in_min_signal_edge_bps: 16.0
+# [进阶可调] strategy_short_scale_in_alpha_min：继续加空最低 alpha。当前只在合约运行域生效。可选值：0.0 ~ 1.0；推荐值：0.20。
+strategy_short_scale_in_alpha_min: 0.20
+# [进阶可调] strategy_short_scale_in_confidence_min：继续加空最低置信度。当前只在合约运行域生效。可选值：0.0 ~ 1.0；推荐值：0.64。
+strategy_short_scale_in_confidence_min: 0.64
+# [常用可调] strategy_reversal_min_signal_edge_bps：反手最低信号边际。可选值：0.0 ~ 100.0；推荐值：20.0。
+strategy_reversal_min_signal_edge_bps: 20.0
+# [常用可调] strategy_reversal_alpha_min：反手最低 alpha。可选值：0.0 ~ 1.0；推荐值：0.28。
+strategy_reversal_alpha_min: 0.28
+# [常用可调] strategy_reversal_confidence_min：反手最低置信度。可选值：0.0 ~ 1.0；推荐值：0.72。
+strategy_reversal_confidence_min: 0.72
+# [进阶可调] strategy_short_reversal_min_signal_edge_bps：反手做空最低信号边际。当前只在合约运行域生效；推荐值低于做多反手，避免明显偏空时系统只减多。可选值：0.0 ~ 100.0；推荐值：14.0。
+strategy_short_reversal_min_signal_edge_bps: 14.0
+# [进阶可调] strategy_short_reversal_alpha_min：反手做空最低 alpha。当前只在合约运行域生效。可选值：0.0 ~ 1.0；推荐值：0.18。
+strategy_short_reversal_alpha_min: 0.18
+# [进阶可调] strategy_short_reversal_confidence_min：反手做空最低置信度。当前只在合约运行域生效。可选值：0.0 ~ 1.0；推荐值：0.55。
+strategy_short_reversal_confidence_min: 0.55
+# [进阶可调] strategy_hedge_overlay_enabled：overlay 总开关。当前只在合约 hedge 运行域生效；关闭后 protective / opportunistic / independent 都不会运行。可选值：true / false；推荐值：true。
+strategy_hedge_overlay_enabled: true
+# [进阶可调] strategy_hedge_protective_enabled：是否开启 protective 的独立开关。可选值：true / false；推荐值：true。
+strategy_hedge_protective_enabled: true
+# [进阶可调] strategy_hedge_overlay_mode：directional 对冲 overlay 模式。当前已开放 protective / opportunistic / independent；推荐值：protective。
+strategy_hedge_overlay_mode: protective
+# [进阶可调] strategy_hedge_open_threshold：保护性对冲开启阈值。可选值：0.0 ~ 1.0；推荐值：0.58。
+strategy_hedge_open_threshold: 0.58
+# [进阶可调] strategy_hedge_close_threshold：保护性对冲关闭阈值。可选值：0.0 ~ 1.0；推荐值：0.42。
+strategy_hedge_close_threshold: 0.42
+# [进阶可调] strategy_hedge_max_ratio：保护腿相对主腿的最大覆盖比例。可选值：0.0 ~ 1.0；推荐值：0.50。
+strategy_hedge_max_ratio: 0.50
+# [进阶可调] strategy_hedge_min_hold_seconds：保护腿最小持有秒数。可选值：0 ~ 86400；推荐值：300.0。
+strategy_hedge_min_hold_seconds: 300.0
+# [进阶可调] strategy_hedge_rebalance_cooldown_seconds：保护腿再平衡冷却秒数。可选值：0 ~ 86400；推荐值：120.0。
+strategy_hedge_rebalance_cooldown_seconds: 120.0
+# [进阶可调] strategy_hedge_opportunistic_enabled：是否开启机会型 overlay 的独立开关。建议先在 dry-run 或回放里验证后再打开。可选值：true / false；推荐值：false。
+strategy_hedge_opportunistic_enabled: false
+# [进阶可调] strategy_hedge_opportunistic_rollout_stage：机会型 overlay 的灰度阶段。可选值：replay_only / dry_run / live；推荐值：dry_run。
+strategy_hedge_opportunistic_rollout_stage: dry_run
+# [进阶可调] strategy_hedge_opportunistic_open_threshold：机会腿开启阈值。可选值：0.0 ~ 1.0；推荐值：0.62。
+strategy_hedge_opportunistic_open_threshold: 0.62
+# [进阶可调] strategy_hedge_opportunistic_close_threshold：机会腿关闭阈值。可选值：0.0 ~ 1.0；推荐值：0.46。
+strategy_hedge_opportunistic_close_threshold: 0.46
+# [进阶可调] strategy_hedge_opportunistic_max_ratio：机会腿相对主腿的最大比例。可选值：0.0 ~ 1.0；推荐值：0.35。
+strategy_hedge_opportunistic_max_ratio: 0.35
+# [进阶可调] strategy_hedge_opportunistic_min_hold_seconds：机会腿最小持有秒数。可选值：0 ~ 86400；推荐值：180.0。
+strategy_hedge_opportunistic_min_hold_seconds: 180.0
+# [进阶可调] strategy_hedge_opportunistic_rebalance_cooldown_seconds：机会腿再平衡冷却秒数。可选值：0 ~ 86400；推荐值：90.0。
+strategy_hedge_opportunistic_rebalance_cooldown_seconds: 90.0
+# [进阶可调] strategy_hedge_opportunistic_max_fee_drag_ratio：机会腿允许的最大费耗比例。可选值：0.0 ~ 1.0；推荐值：0.18。
+strategy_hedge_opportunistic_max_fee_drag_ratio: 0.18
+# [进阶可调] strategy_hedge_opportunistic_max_churn_ratio：机会腿允许的最大 churn 比例。可选值：0.0 ~ 1.0；推荐值：0.22。
+strategy_hedge_opportunistic_max_churn_ratio: 0.22
+# [进阶可调] strategy_hedge_independent_enabled：是否开启独立双书模式。建议先从 dry-run 或回放开始验证。可选值：true / false；推荐值：false。
+strategy_hedge_independent_enabled: false
+# [进阶可调] strategy_hedge_independent_rollout_stage：独立双书的灰度阶段。当前阶段只建议 replay_only / dry_run；推荐值：dry_run。
+strategy_hedge_independent_rollout_stage: dry_run
+# [进阶可调] strategy_hedge_independent_long_entry_threshold：独立 long book 的开仓阈值。可选值：0.0 ~ 1.0；推荐值：0.66。
+strategy_hedge_independent_long_entry_threshold: 0.66
+# [进阶可调] strategy_hedge_independent_short_entry_threshold：独立 short book 的开仓阈值。可选值：0.0 ~ 1.0；推荐值：0.66。
+strategy_hedge_independent_short_entry_threshold: 0.66
+# [进阶可调] strategy_hedge_independent_long_scale_in_threshold：独立 long book 的加仓阈值。可选值：0.0 ~ 1.0；推荐值：0.70。
+strategy_hedge_independent_long_scale_in_threshold: 0.70
+# [进阶可调] strategy_hedge_independent_short_scale_in_threshold：独立 short book 的加仓阈值。可选值：0.0 ~ 1.0；推荐值：0.70。
+strategy_hedge_independent_short_scale_in_threshold: 0.70
+# [进阶可调] strategy_hedge_independent_long_min_hold_seconds：独立 long book 最小持有秒数。可选值：0 ~ 86400；推荐值：300.0。
+strategy_hedge_independent_long_min_hold_seconds: 300.0
+# [进阶可调] strategy_hedge_independent_short_min_hold_seconds：独立 short book 最小持有秒数。可选值：0 ~ 86400；推荐值：300.0。
+strategy_hedge_independent_short_min_hold_seconds: 300.0
+# [进阶可调] strategy_hedge_independent_rebalance_cooldown_seconds：独立双书的再平衡冷却秒数。可选值：0 ~ 86400；推荐值：120.0。
+strategy_hedge_independent_rebalance_cooldown_seconds: 120.0
+# [进阶可调] strategy_hedge_independent_trial_guard_enabled：是否启用按腿试盘守护。可选值：true / false；推荐值：true。
+strategy_hedge_independent_trial_guard_enabled: true
+# [常用可调] strategy_min_hold_seconds：最短持仓秒数。可选值：0 ~ 86400；推荐值：1800.0。
+strategy_min_hold_seconds: 720.0
+# [常用可调] strategy_post_close_cooldown_seconds：平仓后冷却秒数。可选值：0 ~ 86400；推荐值：1200.0。
+strategy_post_close_cooldown_seconds: 300.0
+# [常用可调] strategy_max_fee_drag_ratio：允许的最大费耗比例。可选值：0.0 ~ 1.0；推荐值：0.48。
+strategy_max_fee_drag_ratio: 0.48
+# [常用可调] strategy_max_churn_ratio：允许的最大 churn 比例。可选值：0.0 ~ 1.0；推荐值：0.42。
+strategy_max_churn_ratio: 0.42
+# [常用可调] strategy_low_edge_threshold_bps：低边际识别阈值。可选值：0.0 ~ 50.0；推荐值：4.0。
+strategy_low_edge_threshold_bps: 4.0
+# [常用可调] strategy_low_edge_streak_limit：低边际连续触发次数上限。可选值：1 ~ 20；推荐值：4。
+strategy_low_edge_streak_limit: 4
+# [常用可调] strategy_low_edge_cooldown_seconds：低边际触发后的冷却秒数。可选值：0 ~ 86400；推荐值：900.0。
+strategy_low_edge_cooldown_seconds: 900.0
+# [常用可调] strategy_transient_close_retry_cooldown_seconds：瞬时平仓失败后的重试冷却。可选值：0 ~ 3600；推荐值：90.0。
+strategy_transient_close_retry_cooldown_seconds: 90.0
+
+# 试盘守护
+# [常用可调] trial_guard_enabled：是否启用试盘守护。可选值：true / false；推荐值：true。
+trial_guard_enabled: true
+# [常用可调] trial_guard_poll_interval_seconds：试盘守护轮询间隔。可选值：1.0 ~ 300.0；推荐值：15.0。
+trial_guard_poll_interval_seconds: 15.0
+# [常用可调] trial_guard_lookback_fills：回看成交数量。可选值：1 ~ 500；推荐值：30。
+trial_guard_lookback_fills: 30
+# [常用可调] trial_guard_min_closed_fills：开始评估前要求的最少已平仓成交数。可选值：1 ~ 100；推荐值：5。
+trial_guard_min_closed_fills: 5
+# [常用可调] trial_guard_max_daily_loss_usdt：当日最大亏损阈值。可选值：正数；推荐值：25.0。
+trial_guard_max_daily_loss_usdt: 25.0
+# [常用可调] trial_guard_max_consecutive_losses：最大连续亏损次数。可选值：1 ~ 20；推荐值：4。
+trial_guard_max_consecutive_losses: 6
+# [常用可调] trial_guard_max_fee_to_notional_ratio：最大费耗/名义金额比。可选值：0.0 ~ 1.0；推荐值：0.0012。
+trial_guard_max_fee_to_notional_ratio: 0.0012
+# [常用可调] trial_guard_max_high_slippage_ratio：高滑点成交占比上限。可选值：0.0 ~ 1.0；推荐值：0.35。
+trial_guard_max_high_slippage_ratio: 0.35
+# [常用可调] trial_guard_max_slow_submit_to_fill_ratio：慢提交到成交占比上限。可选值：0.0 ~ 1.0；推荐值：0.35。
+trial_guard_max_slow_submit_to_fill_ratio: 0.35

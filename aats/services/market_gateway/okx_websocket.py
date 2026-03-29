@@ -50,11 +50,7 @@ class OKXPublicWebSocketClient:
     async def run_forever(self, *, on_message: RawMessageHandler) -> None:
         if connect is None:
             raise RuntimeError("websockets_dependency_missing")
-        public_args = [{"channel": "tickers", "instId": self.settings.default_symbol}]
-        business_args = [
-            {"channel": "candle15m", "instId": self.settings.default_symbol},
-            {"channel": "candle1H", "instId": self.settings.default_symbol},
-        ]
+        public_args, business_args = self._subscription_args()
         await asyncio.gather(
             self._consume(
                 connection_name="public",
@@ -86,7 +82,24 @@ class OKXPublicWebSocketClient:
             "connected": all(self._connected.values()),
             "last_message_ts": freshest,
             "last_error": self._last_error,
+            "subscribed_symbols": list(self._subscribed_symbols()),
         }
+
+    def _subscription_args(self) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+        public_args = [{"channel": "tickers", "instId": symbol} for symbol in self._subscribed_symbols()]
+        business_args: list[dict[str, str]] = []
+        for symbol in self._subscribed_symbols():
+            business_args.extend(
+                (
+                    {"channel": "candle15m", "instId": symbol},
+                    {"channel": "candle1H", "instId": symbol},
+                )
+            )
+        return public_args, business_args
+
+    def _subscribed_symbols(self) -> tuple[str, ...]:
+        symbols = tuple(dict.fromkeys(symbol for symbol in self.settings.expanded_allowed_symbols() if symbol))
+        return symbols or (self.settings.default_symbol,)
 
     async def _consume(
         self,

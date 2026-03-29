@@ -33,7 +33,8 @@ class PolicyEngine:
     def evaluate(self, target: PositionTarget) -> PolicyDecision:
         mode = self.mode_controller.mode
         rejection_reasons: list[str] = []
-        if target.symbol not in self.settings.allowed_symbols:
+        allowed_symbols = self.settings.expanded_allowed_symbols()
+        if target.symbol not in allowed_symbols:
             rejection_reasons.append("symbol_not_allowed")
         if target.target_exposure_side == "short" and not self.policy_profile.shorting_allowed:
             rejection_reasons.append("shorting_not_supported")
@@ -74,7 +75,7 @@ class PolicyEngine:
             submission_allowed=submission_allowed,
             dry_run_only=dry_run_only,
             requires_human_approval=requires_human_approval,
-            allowed_symbols=list(self.settings.allowed_symbols),
+            allowed_symbols=list(allowed_symbols),
             allowed_execution_styles=["market", "limit"],
             max_notional_override=self.settings.max_notional_per_symbol,
             forced_degrade_mode="paper_live" if dry_run_only and self.environment_capabilities.exchange_coupled else None,

@@ -9,6 +9,8 @@ from pydantic import BaseModel
 
 from aats.schemas.common import SchemaBase
 from aats.schemas.execution import AIExecutionParameterSuggestionEnvelope
+from aats.schemas.portfolio import InstrumentPositionState, PositionLegState
+from aats.schemas.strategy_runtime import StrategyFamily, StrategyLegIntent, StrategyRouteAction
 from aats.schemas.system import MarginModelType, ProductType
 
 
@@ -64,6 +66,22 @@ class DecisionContext(SchemaBase):
     policy_flags: list[str] = Field(default_factory=list)
     risk_budget_state: dict[str, Decimal] = Field(default_factory=dict)
     current_position_qty: Decimal
+    current_position_state: InstrumentPositionState | None = None
+    current_position_legs: list[PositionLegState] = Field(default_factory=list)
+    current_net_position_qty: Decimal = Decimal("0")
+    current_gross_position_qty: Decimal = Decimal("0")
+    current_long_position_qty: Decimal = Decimal("0")
+    current_short_position_qty: Decimal = Decimal("0")
+    current_net_position_notional: Decimal = Decimal("0")
+    current_gross_position_notional: Decimal = Decimal("0")
+    current_long_position_notional: Decimal = Decimal("0")
+    current_short_position_notional: Decimal = Decimal("0")
+    current_long_leg_opened_at: datetime | None = None
+    current_short_leg_opened_at: datetime | None = None
+    last_long_leg_closed_at: datetime | None = None
+    last_short_leg_closed_at: datetime | None = None
+    latest_long_leg_fill_timestamp: datetime | None = None
+    latest_short_leg_fill_timestamp: datetime | None = None
     current_open_orders: list[str] = Field(default_factory=list)
     product_type: ProductType = "spot"
     current_exposure_side: Literal["long", "short", "flat"] = "flat"
@@ -77,6 +95,7 @@ class DecisionContext(SchemaBase):
     recent_churn_ratio: float = 0.0
     recent_low_edge_trade_streak: int = 0
     recent_low_edge_trade_at: datetime | None = None
+    leg_strategy_health: dict[str, dict[str, object]] = Field(default_factory=dict)
     strategy_guardrail_flags: list[str] = Field(default_factory=list)
     strategy_cooldowns: dict[str, float] = Field(default_factory=dict)
 
@@ -259,10 +278,59 @@ class DecisionOutcome(SchemaBase):
     risk_capped: bool = False
     risk_capped_reasons: list[str] = Field(default_factory=list)
     risk_capped_target_qty: Decimal | None = None
+    position_management_reason_codes: list[str] = Field(default_factory=list)
+    exit_attribution: str | None = None
+    selected_strategy_family: StrategyFamily = "directional"
+    selected_strategy_sleeve_id: str | None = None
+    selected_strategy_route_action: StrategyRouteAction = "override_target"
+    allocation_id: str | None = None
+    strategy_selection_reason_codes: list[str] = Field(default_factory=list)
+    strategy_selection_headline: str | None = None
     active_profile_id: str | None = None
     profile_control_source: ProfileControlSource | None = None
     ai_fallback_used: bool = False
     ai_degraded: bool = False
+
+
+HedgeOverlayMode = Literal["protective", "opportunistic", "independent"]
+HedgeOverlayState = Literal["disabled", "inactive", "opening", "holding", "closing", "blocked"]
+
+
+class HedgeOverlayDecision(SchemaBase):
+    enabled: bool = False
+    runtime_supported: bool = False
+    configured_mode: HedgeOverlayMode = "protective"
+    effective_mode: HedgeOverlayMode | None = None
+    overlay_source: str | None = None
+    active: bool = False
+    state: HedgeOverlayState = "disabled"
+    main_leg_signal: Literal["long", "short", "flat"] = "flat"
+    hedge_leg_signal: Literal["long", "short", "flat"] = "flat"
+    main_leg_current_qty: Decimal = Decimal("0")
+    hedge_leg_current_qty: Decimal = Decimal("0")
+    main_leg_target_qty: Decimal = Decimal("0")
+    hedge_leg_target_qty: Decimal = Decimal("0")
+    hedge_ratio: Decimal = Decimal("0")
+    max_ratio: Decimal = Decimal("0")
+    pressure_score: float = 0.0
+    open_threshold: float = 0.0
+    close_threshold: float = 0.0
+    open_condition: str | None = None
+    close_condition: str | None = None
+    fee_drag_ratio: float = 0.0
+    churn_ratio: float = 0.0
+    long_leg_score: float = 0.0
+    short_leg_score: float = 0.0
+    long_leg_reason_codes: list[str] = Field(default_factory=list)
+    short_leg_reason_codes: list[str] = Field(default_factory=list)
+    long_leg_blocked_reasons: list[str] = Field(default_factory=list)
+    short_leg_blocked_reasons: list[str] = Field(default_factory=list)
+    reason_codes: list[str] = Field(default_factory=list)
+    blocked_reasons: list[str] = Field(default_factory=list)
+    min_hold_remaining_seconds: float = 0.0
+    rebalance_cooldown_remaining_seconds: float = 0.0
+    rollout_stage: Literal["replay_only", "dry_run", "live"] | None = None
+    runtime_rollout_stage: Literal["replay_only", "dry_run", "live"] | None = None
 
 
 class PositionTarget(SchemaBase):
@@ -298,6 +366,20 @@ class PositionTarget(SchemaBase):
     expected_signal_edge_bps: float = 0.0
     expected_cost_bps: float = 0.0
     expected_net_edge_bps: float = 0.0
+    strategy_family: StrategyFamily = "directional"
+    strategy_sleeve_id: str | None = None
+    strategy_route_action: StrategyRouteAction = "override_target"
+    strategy_pair_id: str | None = None
+    strategy_opportunity_kind: str | None = None
+    strategy_execution_mode: str | None = None
+    strategy_state_phase: str | None = None
+    strategy_reason_codes: list[str] = Field(default_factory=list)
+    strategy_blocking_reasons: list[str] = Field(default_factory=list)
+    strategy_headline: str | None = None
+    allocation_id: str | None = None
+    strategy_bundle_id: str | None = None
+    strategy_execution_legs: list[StrategyLegIntent] = Field(default_factory=list)
+    hedge_overlay_decision: HedgeOverlayDecision | None = None
     guardrail_flags: list[str] = Field(default_factory=list)
     ai_execution_parameter_suggestion: AIExecutionParameterSuggestionEnvelope | None = None
     ai_decision_intent: AIDecisionIntent | None = None

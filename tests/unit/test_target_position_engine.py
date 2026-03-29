@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 from datetime import timedelta
 from decimal import Decimal
+from unittest.mock import patch
 
 from aats.bootstrap.settings import AATSSettings
 from aats.schemas.common import utc_now
@@ -55,6 +56,22 @@ class TestTargetPositionEngine(unittest.TestCase):
 
         self.assertGreater(abs(aggressive_target.target_position_qty), abs(conservative_target.target_position_qty))
         self.assertGreater(conservative_target.target_position_qty, 0.0)
+
+    def test_baseline_target_qty_does_not_reapply_volatility_scale(self) -> None:
+        engine = TargetPositionEngine(settings=AATSSettings.model_validate({"default_order_qty": 0.001}))
+
+        low_vol_target = engine.build(
+            self._context(),
+            self._baseline(volatility_target_scale=0.6, suggested_position_scale=0.35),
+            self._ai_assessment(),
+        )
+        high_vol_target = engine.build(
+            self._context(),
+            self._baseline(volatility_target_scale=1.0, suggested_position_scale=0.35),
+            self._ai_assessment(),
+        )
+
+        self.assertEqual(low_vol_target.target_position_qty, high_vol_target.target_position_qty)
 
     def test_rebalance_band_keeps_existing_position_when_delta_is_tiny(self) -> None:
         engine = TargetPositionEngine(settings=AATSSettings.model_validate({"default_order_qty": 0.001}))
@@ -150,6 +167,145 @@ class TestTargetPositionEngine(unittest.TestCase):
         self.assertEqual(target.product_type, "derivatives")
         self.assertGreaterEqual(target.target_leverage, 1.0)
         self.assertLessEqual(target.target_leverage, 3.0)
+
+    def test_derivatives_short_bias_setting_disables_short_targets(self) -> None:
+        engine = TargetPositionEngine(
+            settings=AATSSettings.model_validate(
+                {
+                    "default_order_qty": 0.01,
+                    "trading_product_type": "derivatives",
+                    "strategy_short_bias_enabled": False,
+                }
+            )
+        )
+        context = self._context(product_type="derivatives", current_exposure_side="flat")
+        baseline = self._baseline(
+            volatility_target_scale=1.0,
+            suggested_position_scale=1.0,
+            direction_bias="short",
+            confidence=0.92,
+        )
+
+        target = engine.build(context, baseline, self._ai_assessment(direction=-0.55, confidence=0.9))
+
+        self.assertEqual(target.target_position_qty, Decimal("0"))
+        self.assertEqual(target.position_intent, "hold")
+        self.assertIn("short_bias_disabled", target.guardrail_flags)
+
+    def test_derivatives_short_entry_uses_independent_short_thresholds(self) -> None:
+        engine = TargetPositionEngine(
+            settings=AATSSettings.model_validate(
+                {
+                    "default_order_qty": 0.01,
+                    "trading_product_type": "derivatives",
+                    "strategy_short_bias_enabled": True,
+                    "strategy_cost_guard_enabled": False,
+                    "strategy_entry_min_signal_edge_bps": 30.0,
+                    "strategy_entry_alpha_min": 0.30,
+                    "strategy_entry_confidence_min": 0.80,
+                    "strategy_short_entry_min_signal_edge_bps": 12.0,
+                    "strategy_short_entry_alpha_min": 0.18,
+                    "strategy_short_entry_confidence_min": 0.58,
+                }
+            )
+        )
+        context = self._context(product_type="derivatives", current_exposure_side="flat")
+        baseline = self._baseline(
+            volatility_target_scale=1.0,
+            suggested_position_scale=1.0,
+            direction_bias="short",
+            confidence=0.60,
+        ).model_copy(update={"composite_alpha_score": -0.22})
+
+        target = engine.build(context, baseline, self._ai_assessment(direction=-0.22, confidence=0.60))
+
+        self.assertEqual(target.target_position_qty, Decimal("-0.01"))
+        self.assertEqual(target.position_intent, "open_short")
+        self.assertNotIn("short_entry_alpha_below_threshold", target.guardrail_flags)
+
+    def test_derivatives_short_reversal_uses_independent_short_thresholds(self) -> None:
+        engine = TargetPositionEngine(
+            settings=AATSSettings.model_validate(
+                {
+                    "default_order_qty": 0.10,
+                    "trading_product_type": "derivatives",
+                    "strategy_short_bias_enabled": True,
+                    "strategy_cost_guard_enabled": False,
+                    "strategy_reversal_min_signal_edge_bps": 30.0,
+                    "strategy_reversal_alpha_min": 0.30,
+                    "strategy_reversal_confidence_min": 0.80,
+                    "strategy_short_reversal_min_signal_edge_bps": 18.0,
+                    "strategy_short_reversal_alpha_min": 0.20,
+                    "strategy_short_reversal_confidence_min": 0.60,
+                    "strategy_edge_noise_buffer_bps": 0.0,
+                }
+            )
+        )
+        context = self._context(current_position_qty=0.05, product_type="derivatives", current_exposure_side="long")
+        baseline = self._baseline(
+            volatility_target_scale=1.0,
+            suggested_position_scale=1.0,
+            direction_bias="short",
+            confidence=0.61,
+        ).model_copy(update={"composite_alpha_score": -0.24})
+
+        target = engine.build(context, baseline, self._ai_assessment(direction=-0.24, confidence=0.61))
+
+        self.assertLess(target.target_position_qty, Decimal("0"))
+        self.assertEqual(target.position_intent, "reverse_to_short")
+        self.assertNotIn("short_reversal_alpha_below_threshold", target.guardrail_flags)
+
+    def test_derivatives_bearish_signal_reports_short_reversal_blocker_when_below_short_threshold(self) -> None:
+        engine = TargetPositionEngine(
+            settings=AATSSettings.model_validate(
+                {
+                    "default_order_qty": 0.10,
+                    "trading_product_type": "derivatives",
+                    "strategy_short_bias_enabled": True,
+                    "strategy_cost_guard_enabled": False,
+                    "strategy_short_reversal_min_signal_edge_bps": 18.0,
+                    "strategy_short_reversal_alpha_min": 0.20,
+                    "strategy_short_reversal_confidence_min": 0.66,
+                    "strategy_edge_noise_buffer_bps": 0.0,
+                }
+            )
+        )
+        context = self._context(current_position_qty=0.05, product_type="derivatives", current_exposure_side="long")
+        baseline = self._baseline(
+            volatility_target_scale=1.0,
+            suggested_position_scale=1.0,
+            direction_bias="short",
+            confidence=0.60,
+        ).model_copy(update={"composite_alpha_score": -0.24})
+
+        target = engine.build(context, baseline, self._ai_assessment(direction=-0.24, confidence=0.60))
+
+        self.assertGreater(target.target_position_qty, Decimal("0"))
+        self.assertEqual(target.position_intent, "hold")
+        self.assertIn("short_reversal_confidence_below_threshold", target.guardrail_flags)
+
+    def test_derivatives_flat_entry_is_raised_to_min_actionable_qty(self) -> None:
+        engine = TargetPositionEngine(
+            settings=AATSSettings.model_validate(
+                {
+                    "default_order_qty": 0.01,
+                    "trading_product_type": "derivatives",
+                    "strategy_short_bias_enabled": True,
+                }
+            )
+        )
+        context = self._context(product_type="derivatives", current_exposure_side="flat")
+        baseline = self._baseline(
+            volatility_target_scale=1.0,
+            suggested_position_scale=0.2,
+            direction_bias="short",
+            confidence=0.92,
+        )
+
+        target = engine.build(context, baseline, self._ai_assessment(direction=-0.55, confidence=0.9))
+
+        self.assertEqual(target.target_position_qty, Decimal("-0.01"))
+        self.assertEqual(target.position_intent, "open_short")
 
     def test_spot_context_stays_long_only_even_if_settings_default_to_derivatives(self) -> None:
         engine = TargetPositionEngine(
@@ -250,15 +406,124 @@ class TestTargetPositionEngine(unittest.TestCase):
             factor_scores={
                 "momentum_alpha": -0.21,
                 "trend_alpha": -0.19,
-                "microstructure_alpha": -0.16,
+                "microstructure_alpha": -0.04,
                 "liquidity_scale": 0.9,
             },
-        )
+        ).model_copy(update={"composite_alpha_score": 0.04})
 
-        target = engine.build(context, baseline, self._ai_assessment(direction=-0.26, confidence=0.72))
+        target = engine.build(context, baseline, self._ai_assessment(direction=-0.10, confidence=0.72))
 
         self.assertEqual(target.target_position_qty, 0.0)
         self.assertEqual(target.position_intent, "close_long")
+        self.assertEqual(target.decision_outcome.exit_attribution, "alpha_decay_exit")
+
+    def test_derivatives_alpha_decay_reduce_scales_down_existing_position_when_signal_fades(self) -> None:
+        engine = TargetPositionEngine(
+            settings=AATSSettings.model_validate(
+                {
+                    "default_order_qty": 0.1,
+                    "trading_product_type": "derivatives",
+                    "strategy_short_bias_enabled": True,
+                }
+            )
+        )
+        context = self._context(current_position_qty=0.05, product_type="derivatives", current_exposure_side="long")
+        baseline = self._baseline(
+            direction_bias="long",
+            confidence=0.42,
+            suggested_position_scale=1.0,
+            volatility_target_scale=1.0,
+            factor_scores={"momentum_alpha": 0.05, "trend_alpha": 0.04, "microstructure_alpha": 0.03, "liquidity_scale": 0.9},
+        ).model_copy(update={"composite_alpha_score": 0.08})
+
+        target = engine.build(context, baseline, self._ai_assessment(direction=0.06, confidence=0.45))
+
+        self.assertGreater(target.target_position_qty, Decimal("0"))
+        self.assertLess(target.target_position_qty, context.current_position_qty)
+        self.assertEqual(target.position_intent, "reduce_long")
+        self.assertIn("alpha_decay_reduce", target.guardrail_flags)
+        self.assertEqual(target.decision_outcome.exit_attribution, "alpha_decay_reduce")
+
+    def test_derivatives_risk_contraction_reduces_existing_position_in_high_volatility(self) -> None:
+        engine = TargetPositionEngine(
+            settings=AATSSettings.model_validate(
+                {
+                    "default_order_qty": 0.1,
+                    "trading_product_type": "derivatives",
+                    "strategy_short_bias_enabled": True,
+                }
+            )
+        )
+        context = self._context(current_position_qty=0.05, product_type="derivatives", current_exposure_side="long")
+        baseline = self._baseline(
+            direction_bias="long",
+            confidence=0.82,
+            suggested_position_scale=1.0,
+            volatility_target_scale=0.62,
+            volatility_state="high",
+            factor_scores={"momentum_alpha": 0.32, "trend_alpha": 0.28, "microstructure_alpha": 0.14, "liquidity_scale": 0.8},
+        ).model_copy(update={"composite_alpha_score": 0.36})
+
+        target = engine.build(context, baseline, self._ai_assessment(direction=0.3, confidence=0.84))
+
+        self.assertGreater(target.target_position_qty, Decimal("0"))
+        self.assertLess(target.target_position_qty, context.current_position_qty)
+        self.assertIn("risk_contraction_exit", target.guardrail_flags)
+        self.assertEqual(target.decision_outcome.exit_attribution, "risk_contraction_exit")
+
+    def test_derivatives_emergency_protective_exit_flattens_on_severe_adverse_pressure(self) -> None:
+        engine = TargetPositionEngine(
+            settings=AATSSettings.model_validate(
+                {
+                    "default_order_qty": 0.01,
+                    "trading_product_type": "derivatives",
+                    "strategy_short_bias_enabled": True,
+                }
+            )
+        )
+        context = self._context(current_position_qty=0.05, product_type="derivatives", current_exposure_side="long")
+        baseline = self._baseline(
+            direction_bias="short",
+            confidence=0.9,
+            suggested_position_scale=1.0,
+            volatility_target_scale=1.0,
+            volatility_state="high",
+            factor_scores={"momentum_alpha": -0.34, "trend_alpha": -0.31, "microstructure_alpha": -0.24, "liquidity_scale": 0.75},
+        ).model_copy(update={"composite_alpha_score": -0.42, "regime": "breakout"})
+
+        target = engine.build(context, baseline, self._ai_assessment(direction=-0.4, confidence=0.92))
+
+        self.assertEqual(target.target_position_qty, Decimal("0"))
+        self.assertEqual(target.position_intent, "close_long")
+        self.assertIn("emergency_protective_exit", target.guardrail_flags)
+        self.assertEqual(target.decision_outcome.exit_attribution, "emergency_protective_exit")
+
+    def test_derivatives_strong_reversal_is_not_forced_flat_by_only_two_adverse_factors(self) -> None:
+        engine = TargetPositionEngine(
+            settings=AATSSettings.model_validate(
+                {
+                    "default_order_qty": 0.01,
+                    "trading_product_type": "derivatives",
+                    "strategy_short_bias_enabled": True,
+                    "strategy_min_hold_seconds": 0,
+                }
+            )
+        )
+        context = self._context(current_position_qty=0.01, product_type="derivatives", current_exposure_side="long")
+        baseline = self._baseline(
+            direction_bias="short",
+            confidence=0.92,
+            suggested_position_scale=1.0,
+            volatility_target_scale=1.0,
+            volatility_state="medium",
+            factor_scores={"momentum_alpha": -0.22, "trend_alpha": -0.2, "microstructure_alpha": -0.04, "liquidity_scale": 0.9},
+        ).model_copy(update={"composite_alpha_score": -0.42, "regime": "trend"})
+
+        target = engine.build(context, baseline, self._ai_assessment(direction=-0.12, confidence=0.9))
+
+        self.assertLess(target.target_position_qty, Decimal("0"))
+        self.assertEqual(target.position_intent, "reverse_to_short")
+        self.assertNotIn("emergency_protective_exit", target.guardrail_flags)
 
     def test_cost_guard_blocks_weak_derivatives_entry(self) -> None:
         engine = TargetPositionEngine(
@@ -379,6 +644,8 @@ class TestTargetPositionEngine(unittest.TestCase):
                     "strategy_short_bias_enabled": True,
                     "strategy_reversal_alpha_min": 0.3,
                     "strategy_reversal_confidence_min": 0.75,
+                    "strategy_short_reversal_alpha_min": 0.3,
+                    "strategy_short_reversal_confidence_min": 0.75,
                 }
             )
         )
@@ -515,6 +782,881 @@ class TestTargetPositionEngine(unittest.TestCase):
 
         self.assertEqual(target.target_position_qty, Decimal("0"))
         self.assertIn("expected_edge_below_cost_buffer", target.guardrail_flags)
+
+    def test_derivatives_hedge_mode_generates_explicit_primary_leg_for_directional_entry(self) -> None:
+        engine = TargetPositionEngine(
+            settings=AATSSettings.model_validate(
+                {
+                    "default_order_qty": 0.01,
+                    "trading_product_type": "derivatives",
+                    "margin_mode": "cross",
+                    "derivatives_position_mode": "hedge",
+                    "strategy_short_bias_enabled": True,
+                    "strategy_hedge_overlay_enabled": True,
+                    "strategy_cost_guard_enabled": False,
+                    "strategy_entry_min_signal_edge_bps": 0.0,
+                    "strategy_entry_alpha_min": 0.0,
+                    "strategy_entry_confidence_min": 0.0,
+                }
+            )
+        )
+        context = self._context(product_type="derivatives", current_exposure_side="flat")
+        baseline = self._baseline(
+            direction_bias="long",
+            confidence=0.82,
+            suggested_position_scale=1.0,
+            volatility_target_scale=1.0,
+        ).model_copy(update={"composite_alpha_score": 0.36})
+
+        target = engine.build(context, baseline, self._ai_assessment(direction=0.24, confidence=0.84))
+
+        self.assertGreater(target.target_position_qty, Decimal("0"))
+        self.assertEqual(len(target.strategy_execution_legs), 1)
+        leg = target.strategy_execution_legs[0]
+        self.assertEqual(leg.role, "primary")
+        self.assertEqual(leg.position_mode, "long_short_mode")
+        self.assertEqual(leg.pos_side, "long")
+        self.assertEqual(leg.action, "open")
+        self.assertEqual(leg.execution_mode, "directional_main_leg")
+        self.assertIsNotNone(target.hedge_overlay_decision)
+        assert target.hedge_overlay_decision is not None
+        self.assertTrue(target.hedge_overlay_decision.enabled)
+        self.assertEqual(target.hedge_overlay_decision.state, "inactive")
+        self.assertIn("protective_overlay_no_existing_inventory", target.hedge_overlay_decision.reason_codes)
+
+    def test_derivatives_protective_overlay_opens_short_hedge_leg_against_existing_long(self) -> None:
+        engine = TargetPositionEngine(
+            settings=AATSSettings.model_validate(
+                {
+                    "default_order_qty": 0.01,
+                    "trading_product_type": "derivatives",
+                    "margin_mode": "cross",
+                    "derivatives_position_mode": "hedge",
+                    "strategy_short_bias_enabled": True,
+                    "strategy_hedge_overlay_enabled": True,
+                    "strategy_cost_guard_enabled": False,
+                    "strategy_entry_min_signal_edge_bps": 0.0,
+                    "strategy_entry_alpha_min": 0.0,
+                    "strategy_entry_confidence_min": 0.0,
+                    "strategy_reversal_min_signal_edge_bps": 50.0,
+                    "strategy_reversal_alpha_min": 0.60,
+                    "strategy_reversal_confidence_min": 0.95,
+                    "strategy_short_reversal_min_signal_edge_bps": 50.0,
+                    "strategy_short_reversal_alpha_min": 0.60,
+                    "strategy_short_reversal_confidence_min": 0.95,
+                    "strategy_edge_noise_buffer_bps": 0.0,
+                }
+            )
+        )
+        context = self._context(
+            current_position_qty=0.05,
+            current_long_position_qty=0.05,
+            product_type="derivatives",
+            current_exposure_side="long",
+        )
+        baseline = self._baseline(
+            direction_bias="short",
+            confidence=0.85,
+            suggested_position_scale=1.0,
+            volatility_target_scale=1.0,
+            volatility_state="high",
+            factor_scores={
+                "momentum_alpha": -0.22,
+                "trend_alpha": 0.03,
+                "microstructure_alpha": -0.21,
+                "liquidity_scale": 0.9,
+            },
+        ).model_copy(update={"regime": "range", "composite_alpha_score": -0.40})
+
+        target = engine.build(context, baseline, self._ai_assessment(direction=-0.12, confidence=0.83))
+
+        self.assertIsNotNone(target.hedge_overlay_decision)
+        assert target.hedge_overlay_decision is not None
+        self.assertTrue(target.hedge_overlay_decision.active)
+        self.assertEqual(target.hedge_overlay_decision.state, "opening")
+        hedge_leg = next((item for item in target.strategy_execution_legs if item.role == "hedge"), None)
+        self.assertIsNotNone(hedge_leg)
+        assert hedge_leg is not None
+        self.assertEqual(hedge_leg.pos_side, "short")
+        self.assertEqual(hedge_leg.action, "open")
+        self.assertEqual(hedge_leg.position_mode, "long_short_mode")
+        self.assertIn("protective_hedge_overlay_active", target.guardrail_flags)
+
+    def test_derivatives_protective_overlay_respects_min_hold_before_closing_hedge(self) -> None:
+        engine = TargetPositionEngine(
+            settings=AATSSettings.model_validate(
+                {
+                    "default_order_qty": 0.01,
+                    "trading_product_type": "derivatives",
+                    "margin_mode": "cross",
+                    "derivatives_position_mode": "hedge",
+                    "strategy_short_bias_enabled": True,
+                    "strategy_hedge_overlay_enabled": True,
+                    "strategy_hedge_min_hold_seconds": 300.0,
+                }
+            )
+        )
+        context = self._context(
+            current_position_qty=0.03,
+            current_long_position_qty=0.05,
+            current_short_position_qty=0.02,
+            product_type="derivatives",
+            current_exposure_side="long",
+            current_short_leg_opened_seconds_ago=60,
+            latest_short_leg_fill_seconds_ago=60,
+        )
+        baseline = self._baseline(
+            direction_bias="long",
+            confidence=0.62,
+            suggested_position_scale=1.0,
+            volatility_target_scale=1.0,
+            factor_scores={
+                "momentum_alpha": 0.12,
+                "trend_alpha": 0.10,
+                "microstructure_alpha": 0.04,
+                "liquidity_scale": 0.92,
+            },
+        ).model_copy(update={"composite_alpha_score": 0.18})
+
+        target = engine.build(context, baseline, self._ai_assessment(direction=0.08, confidence=0.64))
+
+        self.assertIsNotNone(target.hedge_overlay_decision)
+        assert target.hedge_overlay_decision is not None
+        self.assertIn("protective_overlay_min_hold_active", target.hedge_overlay_decision.blocked_reasons)
+        self.assertGreater(target.hedge_overlay_decision.min_hold_remaining_seconds, 0.0)
+        self.assertEqual(target.hedge_overlay_decision.hedge_leg_target_qty, Decimal("0.02"))
+        self.assertIsNone(next((item for item in target.strategy_execution_legs if item.role == "hedge"), None))
+
+    def test_derivatives_protective_overlay_respects_dedicated_enabled_switch(self) -> None:
+        engine = TargetPositionEngine(
+            settings=AATSSettings.model_validate(
+                {
+                    "default_order_qty": 0.01,
+                    "trading_product_type": "derivatives",
+                    "margin_mode": "cross",
+                    "derivatives_position_mode": "hedge",
+                    "strategy_short_bias_enabled": True,
+                    "strategy_hedge_overlay_enabled": True,
+                    "strategy_hedge_protective_enabled": False,
+                    "strategy_hedge_overlay_mode": "protective",
+                    "strategy_cost_guard_enabled": False,
+                    "strategy_entry_min_signal_edge_bps": 0.0,
+                    "strategy_entry_alpha_min": 0.0,
+                    "strategy_entry_confidence_min": 0.0,
+                    "strategy_reversal_min_signal_edge_bps": 50.0,
+                    "strategy_reversal_alpha_min": 0.60,
+                    "strategy_reversal_confidence_min": 0.95,
+                    "strategy_short_reversal_min_signal_edge_bps": 50.0,
+                    "strategy_short_reversal_alpha_min": 0.60,
+                    "strategy_short_reversal_confidence_min": 0.95,
+                    "strategy_edge_noise_buffer_bps": 0.0,
+                }
+            )
+        )
+        context = self._context(
+            current_position_qty=0.05,
+            current_long_position_qty=0.05,
+            product_type="derivatives",
+            current_exposure_side="long",
+        )
+        baseline = self._baseline(
+            direction_bias="short",
+            confidence=0.85,
+            suggested_position_scale=1.0,
+            volatility_target_scale=1.0,
+            volatility_state="high",
+            factor_scores={
+                "momentum_alpha": -0.22,
+                "trend_alpha": 0.03,
+                "microstructure_alpha": -0.21,
+                "liquidity_scale": 0.9,
+            },
+        ).model_copy(update={"regime": "range", "composite_alpha_score": -0.40})
+
+        target = engine.build(context, baseline, self._ai_assessment(direction=-0.12, confidence=0.83))
+
+        self.assertIsNotNone(target.hedge_overlay_decision)
+        assert target.hedge_overlay_decision is not None
+        self.assertEqual(target.hedge_overlay_decision.state, "blocked")
+        self.assertIn("protective_overlay_not_enabled", target.hedge_overlay_decision.blocked_reasons)
+        self.assertIsNone(next((item for item in target.strategy_execution_legs if item.role == "hedge"), None))
+
+    def test_derivatives_protective_overlay_respects_rebalance_cooldown_before_reopening(self) -> None:
+        engine = TargetPositionEngine(
+            settings=AATSSettings.model_validate(
+                {
+                    "default_order_qty": 0.01,
+                    "trading_product_type": "derivatives",
+                    "margin_mode": "cross",
+                    "derivatives_position_mode": "hedge",
+                    "strategy_short_bias_enabled": True,
+                    "strategy_hedge_overlay_enabled": True,
+                    "strategy_cost_guard_enabled": False,
+                    "strategy_entry_min_signal_edge_bps": 0.0,
+                    "strategy_entry_alpha_min": 0.0,
+                    "strategy_entry_confidence_min": 0.0,
+                    "strategy_reversal_min_signal_edge_bps": 50.0,
+                    "strategy_reversal_alpha_min": 0.60,
+                    "strategy_reversal_confidence_min": 0.95,
+                    "strategy_short_reversal_min_signal_edge_bps": 50.0,
+                    "strategy_short_reversal_alpha_min": 0.60,
+                    "strategy_short_reversal_confidence_min": 0.95,
+                    "strategy_edge_noise_buffer_bps": 0.0,
+                    "strategy_hedge_rebalance_cooldown_seconds": 120.0,
+                }
+            )
+        )
+        context = self._context(
+            current_position_qty=0.05,
+            current_long_position_qty=0.05,
+            product_type="derivatives",
+            current_exposure_side="long",
+            last_short_leg_closed_seconds_ago=30,
+        )
+        baseline = self._baseline(
+            direction_bias="short",
+            confidence=0.85,
+            suggested_position_scale=1.0,
+            volatility_target_scale=1.0,
+            volatility_state="high",
+            factor_scores={
+                "momentum_alpha": -0.22,
+                "trend_alpha": 0.03,
+                "microstructure_alpha": -0.21,
+                "liquidity_scale": 0.9,
+            },
+        ).model_copy(update={"regime": "range", "composite_alpha_score": -0.40})
+
+        target = engine.build(context, baseline, self._ai_assessment(direction=-0.12, confidence=0.83))
+
+        self.assertIsNotNone(target.hedge_overlay_decision)
+        assert target.hedge_overlay_decision is not None
+        self.assertIn("protective_overlay_rebalance_cooldown_active", target.hedge_overlay_decision.blocked_reasons)
+        self.assertGreater(target.hedge_overlay_decision.rebalance_cooldown_remaining_seconds, 0.0)
+        self.assertFalse(target.hedge_overlay_decision.active)
+        self.assertIsNone(next((item for item in target.strategy_execution_legs if item.role == "hedge"), None))
+
+    def test_derivatives_opportunistic_overlay_opens_short_opportunity_leg_against_existing_long(self) -> None:
+        engine = TargetPositionEngine(
+            settings=AATSSettings.model_validate(
+                {
+                    "default_order_qty": 0.01,
+                    "trading_product_type": "derivatives",
+                    "margin_mode": "cross",
+                    "derivatives_position_mode": "hedge",
+                    "strategy_short_bias_enabled": True,
+                    "strategy_hedge_overlay_enabled": True,
+                    "strategy_hedge_overlay_mode": "opportunistic",
+                    "strategy_hedge_opportunistic_enabled": True,
+                    "strategy_hedge_opportunistic_open_threshold": 0.62,
+                    "strategy_hedge_opportunistic_close_threshold": 0.46,
+                    "strategy_cost_guard_enabled": False,
+                    "strategy_entry_min_signal_edge_bps": 0.0,
+                    "strategy_entry_alpha_min": 0.0,
+                    "strategy_entry_confidence_min": 0.0,
+                    "strategy_reversal_min_signal_edge_bps": 50.0,
+                    "strategy_reversal_alpha_min": 0.60,
+                    "strategy_reversal_confidence_min": 0.95,
+                    "strategy_short_reversal_min_signal_edge_bps": 50.0,
+                    "strategy_short_reversal_alpha_min": 0.60,
+                    "strategy_short_reversal_confidence_min": 0.95,
+                    "strategy_edge_noise_buffer_bps": 0.0,
+                }
+            )
+        )
+        context = self._context(
+            current_position_qty=0.05,
+            current_long_position_qty=0.05,
+            product_type="derivatives",
+            current_exposure_side="long",
+        )
+        baseline = self._baseline(
+            direction_bias="long",
+            confidence=0.84,
+            suggested_position_scale=1.0,
+            volatility_target_scale=1.0,
+            volatility_state="high",
+            factor_scores={
+                "momentum_alpha": -0.75,
+                "trend_alpha": 0.05,
+                "microstructure_alpha": -0.95,
+                "liquidity_scale": 0.88,
+            },
+        ).model_copy(update={"regime": "uncertain", "composite_alpha_score": 0.28})
+
+        with (
+            patch.object(engine, "_emergency_protective_exit_required", return_value=False),
+            patch.object(engine, "_opportunistic_overlay_score", return_value=0.82),
+        ):
+            target = engine.build(context, baseline, self._ai_assessment(direction=-0.25, confidence=0.80))
+
+        self.assertIsNotNone(target.hedge_overlay_decision)
+        assert target.hedge_overlay_decision is not None
+        self.assertEqual(target.hedge_overlay_decision.effective_mode, "opportunistic")
+        self.assertTrue(target.hedge_overlay_decision.active)
+        self.assertEqual(target.hedge_overlay_decision.state, "opening")
+        hedge_leg = next((item for item in target.strategy_execution_legs if item.role == "hedge"), None)
+        self.assertIsNotNone(hedge_leg)
+        assert hedge_leg is not None
+        self.assertEqual(hedge_leg.pos_side, "short")
+        self.assertEqual(hedge_leg.action, "open")
+        self.assertEqual(hedge_leg.execution_mode, "opportunistic_overlay")
+        self.assertEqual(hedge_leg.overlay_mode, "opportunistic")
+        self.assertIn("opportunistic_hedge_overlay_active", target.guardrail_flags)
+
+    def test_derivatives_opportunistic_overlay_blocks_new_leg_when_fee_drag_is_too_high(self) -> None:
+        engine = TargetPositionEngine(
+            settings=AATSSettings.model_validate(
+                {
+                    "default_order_qty": 0.01,
+                    "trading_product_type": "derivatives",
+                    "margin_mode": "cross",
+                    "derivatives_position_mode": "hedge",
+                    "strategy_short_bias_enabled": True,
+                    "strategy_hedge_overlay_enabled": True,
+                    "strategy_hedge_overlay_mode": "opportunistic",
+                    "strategy_hedge_opportunistic_enabled": True,
+                    "strategy_hedge_opportunistic_max_fee_drag_ratio": 0.18,
+                    "strategy_performance_guard_min_closed_trades": 4,
+                    "strategy_cost_guard_enabled": False,
+                    "strategy_entry_min_signal_edge_bps": 0.0,
+                    "strategy_entry_alpha_min": 0.0,
+                    "strategy_entry_confidence_min": 0.0,
+                    "strategy_reversal_min_signal_edge_bps": 50.0,
+                    "strategy_reversal_alpha_min": 0.60,
+                    "strategy_reversal_confidence_min": 0.95,
+                    "strategy_short_reversal_min_signal_edge_bps": 50.0,
+                    "strategy_short_reversal_alpha_min": 0.60,
+                    "strategy_short_reversal_confidence_min": 0.95,
+                    "strategy_edge_noise_buffer_bps": 0.0,
+                }
+            )
+        )
+        context = self._context(
+            current_position_qty=0.05,
+            current_long_position_qty=0.05,
+            product_type="derivatives",
+            current_exposure_side="long",
+            recent_closed_trade_count=6,
+            recent_fee_drag_ratio=0.30,
+        )
+        baseline = self._baseline(
+            direction_bias="long",
+            confidence=0.84,
+            suggested_position_scale=1.0,
+            volatility_target_scale=1.0,
+            volatility_state="high",
+            factor_scores={
+                "momentum_alpha": -0.75,
+                "trend_alpha": 0.05,
+                "microstructure_alpha": -0.95,
+                "liquidity_scale": 0.88,
+            },
+        ).model_copy(update={"regime": "uncertain", "composite_alpha_score": 0.28})
+
+        with (
+            patch.object(engine, "_emergency_protective_exit_required", return_value=False),
+            patch.object(engine, "_opportunistic_overlay_score", return_value=0.82),
+        ):
+            target = engine.build(context, baseline, self._ai_assessment(direction=-0.25, confidence=0.80))
+
+        self.assertIsNotNone(target.hedge_overlay_decision)
+        assert target.hedge_overlay_decision is not None
+        self.assertEqual(target.hedge_overlay_decision.effective_mode, "opportunistic")
+        self.assertIn("opportunistic_overlay_fee_drag_guard_active", target.hedge_overlay_decision.blocked_reasons)
+        self.assertEqual(target.hedge_overlay_decision.hedge_leg_target_qty, Decimal("0"))
+        self.assertFalse(target.hedge_overlay_decision.active)
+        self.assertIsNone(next((item for item in target.strategy_execution_legs if item.role == "hedge"), None))
+
+    def test_derivatives_opportunistic_overlay_respects_min_hold_before_closing_leg(self) -> None:
+        engine = TargetPositionEngine(
+            settings=AATSSettings.model_validate(
+                {
+                    "default_order_qty": 0.01,
+                    "trading_product_type": "derivatives",
+                    "margin_mode": "cross",
+                    "derivatives_position_mode": "hedge",
+                    "strategy_short_bias_enabled": True,
+                    "strategy_hedge_overlay_enabled": True,
+                    "strategy_hedge_overlay_mode": "opportunistic",
+                    "strategy_hedge_opportunistic_enabled": True,
+                    "strategy_hedge_opportunistic_min_hold_seconds": 180.0,
+                }
+            )
+        )
+        context = self._context(
+            current_position_qty=0.03,
+            current_long_position_qty=0.05,
+            current_short_position_qty=0.02,
+            product_type="derivatives",
+            current_exposure_side="long",
+            current_short_leg_opened_seconds_ago=60,
+            latest_short_leg_fill_seconds_ago=60,
+        )
+        baseline = self._baseline(
+            direction_bias="long",
+            confidence=0.72,
+            suggested_position_scale=1.0,
+            volatility_target_scale=1.0,
+            factor_scores={
+                "momentum_alpha": 0.16,
+                "trend_alpha": 0.12,
+                "microstructure_alpha": 0.18,
+                "liquidity_scale": 0.92,
+            },
+        ).model_copy(update={"regime": "trend", "composite_alpha_score": 0.24})
+
+        target = engine.build(context, baseline, self._ai_assessment(direction=0.12, confidence=0.70))
+
+        self.assertIsNotNone(target.hedge_overlay_decision)
+        assert target.hedge_overlay_decision is not None
+        self.assertEqual(target.hedge_overlay_decision.effective_mode, "opportunistic")
+        self.assertIn("opportunistic_overlay_min_hold_active", target.hedge_overlay_decision.blocked_reasons)
+        self.assertGreater(target.hedge_overlay_decision.min_hold_remaining_seconds, 0.0)
+        self.assertEqual(target.hedge_overlay_decision.hedge_leg_target_qty, Decimal("0.02"))
+        self.assertIsNone(next((item for item in target.strategy_execution_legs if item.role == "hedge"), None))
+
+    def test_derivatives_opportunistic_overlay_respects_rebalance_cooldown_before_reopening(self) -> None:
+        engine = TargetPositionEngine(
+            settings=AATSSettings.model_validate(
+                {
+                    "default_order_qty": 0.01,
+                    "trading_product_type": "derivatives",
+                    "margin_mode": "cross",
+                    "derivatives_position_mode": "hedge",
+                    "strategy_short_bias_enabled": True,
+                    "strategy_hedge_overlay_enabled": True,
+                    "strategy_hedge_overlay_mode": "opportunistic",
+                    "strategy_hedge_opportunistic_enabled": True,
+                    "strategy_hedge_opportunistic_rebalance_cooldown_seconds": 90.0,
+                    "strategy_cost_guard_enabled": False,
+                    "strategy_entry_min_signal_edge_bps": 0.0,
+                    "strategy_entry_alpha_min": 0.0,
+                    "strategy_entry_confidence_min": 0.0,
+                    "strategy_reversal_min_signal_edge_bps": 50.0,
+                    "strategy_reversal_alpha_min": 0.60,
+                    "strategy_reversal_confidence_min": 0.95,
+                    "strategy_short_reversal_min_signal_edge_bps": 50.0,
+                    "strategy_short_reversal_alpha_min": 0.60,
+                    "strategy_short_reversal_confidence_min": 0.95,
+                    "strategy_edge_noise_buffer_bps": 0.0,
+                }
+            )
+        )
+        context = self._context(
+            current_position_qty=0.05,
+            current_long_position_qty=0.05,
+            product_type="derivatives",
+            current_exposure_side="long",
+            last_short_leg_closed_seconds_ago=30,
+        )
+        baseline = self._baseline(
+            direction_bias="long",
+            confidence=0.84,
+            suggested_position_scale=1.0,
+            volatility_target_scale=1.0,
+            volatility_state="high",
+            factor_scores={
+                "momentum_alpha": -0.75,
+                "trend_alpha": 0.05,
+                "microstructure_alpha": -0.95,
+                "liquidity_scale": 0.88,
+            },
+        ).model_copy(update={"regime": "uncertain", "composite_alpha_score": 0.28})
+
+        with (
+            patch.object(engine, "_emergency_protective_exit_required", return_value=False),
+            patch.object(engine, "_opportunistic_overlay_score", return_value=0.82),
+        ):
+            target = engine.build(context, baseline, self._ai_assessment(direction=-0.25, confidence=0.80))
+
+        self.assertIsNotNone(target.hedge_overlay_decision)
+        assert target.hedge_overlay_decision is not None
+        self.assertEqual(target.hedge_overlay_decision.effective_mode, "opportunistic")
+        self.assertIn("opportunistic_overlay_rebalance_cooldown_active", target.hedge_overlay_decision.blocked_reasons)
+        self.assertGreater(target.hedge_overlay_decision.rebalance_cooldown_remaining_seconds, 0.0)
+        self.assertFalse(target.hedge_overlay_decision.active)
+        self.assertIsNone(next((item for item in target.strategy_execution_legs if item.role == "hedge"), None))
+
+    def test_derivatives_opportunistic_overlay_does_not_retag_old_main_leg_during_reversal_handover(self) -> None:
+        engine = TargetPositionEngine(
+            settings=AATSSettings.model_validate(
+                {
+                    "default_order_qty": 0.01,
+                    "trading_product_type": "derivatives",
+                    "margin_mode": "cross",
+                    "derivatives_position_mode": "hedge",
+                    "strategy_short_bias_enabled": True,
+                    "strategy_hedge_overlay_enabled": True,
+                    "strategy_hedge_overlay_mode": "opportunistic",
+                    "strategy_hedge_opportunistic_enabled": True,
+                    "strategy_cost_guard_enabled": False,
+                    "strategy_entry_min_signal_edge_bps": 0.0,
+                    "strategy_entry_alpha_min": 0.0,
+                    "strategy_entry_confidence_min": 0.0,
+                    "strategy_reversal_min_signal_edge_bps": 0.0,
+                    "strategy_reversal_alpha_min": 0.0,
+                    "strategy_reversal_confidence_min": 0.0,
+                    "strategy_short_reversal_min_signal_edge_bps": 0.0,
+                    "strategy_short_reversal_alpha_min": 0.0,
+                    "strategy_short_reversal_confidence_min": 0.0,
+                    "strategy_edge_noise_buffer_bps": 0.0,
+                }
+            )
+        )
+        context = self._context(
+            current_position_qty=-0.05,
+            current_short_position_qty=0.05,
+            product_type="derivatives",
+            current_exposure_side="short",
+        )
+        baseline = self._baseline(
+            direction_bias="long",
+            confidence=0.90,
+            suggested_position_scale=1.0,
+            volatility_target_scale=1.0,
+            volatility_state="high",
+            factor_scores={
+                "momentum_alpha": -0.75,
+                "trend_alpha": 0.05,
+                "microstructure_alpha": -0.95,
+                "liquidity_scale": 0.88,
+            },
+        ).model_copy(update={"regime": "uncertain", "composite_alpha_score": 0.28})
+
+        with (
+            patch.object(engine, "_emergency_protective_exit_required", return_value=False),
+            patch.object(engine, "_target_quantity", return_value=Decimal("0.05")),
+            patch.object(engine, "_opportunistic_overlay_score", return_value=0.20),
+        ):
+            target = engine.build(context, baseline, self._ai_assessment(direction=0.25, confidence=0.80))
+
+        self.assertEqual(target.target_position_qty, Decimal("0.05"))
+        self.assertIsNotNone(target.hedge_overlay_decision)
+        assert target.hedge_overlay_decision is not None
+        self.assertEqual(target.hedge_overlay_decision.effective_mode, "opportunistic")
+        self.assertEqual(target.hedge_overlay_decision.state, "inactive")
+        self.assertFalse(target.hedge_overlay_decision.active)
+        self.assertEqual(target.hedge_overlay_decision.hedge_leg_current_qty, Decimal("0"))
+        self.assertEqual(
+            target.hedge_overlay_decision.reason_codes,
+            ["opportunistic_overlay_no_existing_inventory"],
+        )
+        self.assertEqual(len(target.strategy_execution_legs), 2)
+        long_leg = next(item for item in target.strategy_execution_legs if item.pos_side == "long")
+        short_leg = next(item for item in target.strategy_execution_legs if item.pos_side == "short")
+        self.assertEqual(long_leg.role, "primary")
+        self.assertEqual(long_leg.execution_mode, "directional_main_leg")
+        self.assertEqual(short_leg.role, "primary")
+        self.assertEqual(short_leg.execution_mode, "directional_main_leg")
+        self.assertIsNone(short_leg.overlay_mode)
+
+    def test_derivatives_opportunistic_overlay_blocks_live_runtime_before_rollout_stage_is_live(self) -> None:
+        engine = TargetPositionEngine(
+            settings=AATSSettings.model_validate(
+                {
+                    "default_order_qty": 0.01,
+                    "trading_product_type": "derivatives",
+                    "margin_mode": "cross",
+                    "derivatives_position_mode": "hedge",
+                    "strategy_short_bias_enabled": True,
+                    "strategy_hedge_overlay_enabled": True,
+                    "strategy_hedge_overlay_mode": "opportunistic",
+                    "strategy_hedge_opportunistic_enabled": True,
+                    "strategy_hedge_opportunistic_rollout_stage": "dry_run",
+                    "guarded_execution_dry_run": False,
+                    "live_submit_enabled": True,
+                    "okx_simulated_trading": False,
+                    "strategy_cost_guard_enabled": False,
+                    "strategy_entry_min_signal_edge_bps": 0.0,
+                    "strategy_entry_alpha_min": 0.0,
+                    "strategy_entry_confidence_min": 0.0,
+                    "strategy_reversal_min_signal_edge_bps": 50.0,
+                    "strategy_reversal_alpha_min": 0.60,
+                    "strategy_reversal_confidence_min": 0.95,
+                    "strategy_short_reversal_min_signal_edge_bps": 50.0,
+                    "strategy_short_reversal_alpha_min": 0.60,
+                    "strategy_short_reversal_confidence_min": 0.95,
+                    "strategy_edge_noise_buffer_bps": 0.0,
+                }
+            )
+        )
+        context = self._context(
+            current_position_qty=0.05,
+            current_long_position_qty=0.05,
+            product_type="derivatives",
+            current_exposure_side="long",
+        )
+        baseline = self._baseline(
+            direction_bias="long",
+            confidence=0.84,
+            suggested_position_scale=1.0,
+            volatility_target_scale=1.0,
+            volatility_state="high",
+            factor_scores={
+                "momentum_alpha": -0.75,
+                "trend_alpha": 0.05,
+                "microstructure_alpha": -0.95,
+                "liquidity_scale": 0.88,
+            },
+        ).model_copy(update={"regime": "uncertain", "composite_alpha_score": 0.28})
+
+        with (
+            patch.object(engine, "_emergency_protective_exit_required", return_value=False),
+            patch.object(engine, "_opportunistic_overlay_score", return_value=0.82),
+        ):
+            target = engine.build(context, baseline, self._ai_assessment(direction=-0.25, confidence=0.80))
+
+        self.assertIsNotNone(target.hedge_overlay_decision)
+        assert target.hedge_overlay_decision is not None
+        self.assertEqual(target.hedge_overlay_decision.effective_mode, "opportunistic")
+        self.assertEqual(target.hedge_overlay_decision.rollout_stage, "dry_run")
+        self.assertEqual(target.hedge_overlay_decision.runtime_rollout_stage, "live")
+        self.assertIn(
+            "opportunistic_overlay_rollout_stage_blocks_live_runtime",
+            target.hedge_overlay_decision.blocked_reasons,
+        )
+        self.assertFalse(target.hedge_overlay_decision.active)
+        self.assertIsNone(next((item for item in target.strategy_execution_legs if item.role == "hedge"), None))
+
+    def test_derivatives_independent_books_allow_long_reentry_while_short_book_is_still_cooling_down(self) -> None:
+        engine = TargetPositionEngine(
+            settings=AATSSettings.model_validate(
+                {
+                    "default_order_qty": 0.01,
+                    "trading_product_type": "derivatives",
+                    "margin_mode": "cross",
+                    "derivatives_position_mode": "hedge",
+                    "strategy_short_bias_enabled": True,
+                    "strategy_hedge_overlay_enabled": True,
+                    "strategy_hedge_overlay_mode": "independent",
+                    "strategy_hedge_independent_enabled": True,
+                    "strategy_hedge_independent_rebalance_cooldown_seconds": 120.0,
+                    "strategy_post_close_cooldown_seconds": 300.0,
+                    "strategy_cost_guard_enabled": False,
+                    "strategy_entry_min_signal_edge_bps": 0.0,
+                    "strategy_entry_alpha_min": 0.0,
+                    "strategy_entry_confidence_min": 0.0,
+                }
+            )
+        )
+        context = self._context(
+            product_type="derivatives",
+            current_exposure_side="flat",
+            last_short_leg_closed_seconds_ago=30,
+        )
+        baseline = self._baseline(
+            direction_bias="long",
+            confidence=0.84,
+            suggested_position_scale=1.0,
+            volatility_target_scale=1.0,
+            factor_scores={
+                "momentum_alpha": 0.48,
+                "trend_alpha": 0.42,
+                "microstructure_alpha": 0.18,
+                "liquidity_scale": 0.95,
+            },
+        ).model_copy(update={"regime": "trend", "composite_alpha_score": 0.32})
+
+        with patch.object(
+            engine,
+            "_independent_book_score",
+            side_effect=lambda *, leg, baseline, ai_assessment: 0.78 if leg == "long" else 0.75,
+        ):
+            target = engine.build(context, baseline, self._ai_assessment(direction=0.25, confidence=0.82))
+
+        self.assertIsNotNone(target.hedge_overlay_decision)
+        assert target.hedge_overlay_decision is not None
+        self.assertEqual(target.hedge_overlay_decision.effective_mode, "independent")
+        self.assertIn(
+            "independent_short_book_post_close_cooldown_active",
+            target.hedge_overlay_decision.short_leg_blocked_reasons,
+        )
+        long_leg = next((item for item in target.strategy_execution_legs if item.pos_side == "long"), None)
+        short_leg = next((item for item in target.strategy_execution_legs if item.pos_side == "short"), None)
+        self.assertIsNotNone(long_leg)
+        assert long_leg is not None
+        self.assertEqual(long_leg.action, "open")
+        self.assertEqual(long_leg.execution_mode, "independent_long_book")
+        self.assertIsNone(short_leg)
+
+    def test_derivatives_independent_books_keep_short_book_when_long_book_trial_guard_is_bad(self) -> None:
+        engine = TargetPositionEngine(
+            settings=AATSSettings.model_validate(
+                {
+                    "default_order_qty": 0.01,
+                    "trading_product_type": "derivatives",
+                    "margin_mode": "cross",
+                    "derivatives_position_mode": "hedge",
+                    "strategy_short_bias_enabled": True,
+                    "strategy_hedge_overlay_enabled": True,
+                    "strategy_hedge_overlay_mode": "independent",
+                    "strategy_hedge_independent_enabled": True,
+                    "strategy_hedge_independent_trial_guard_enabled": True,
+                    "strategy_performance_guard_min_closed_trades": 4,
+                }
+            )
+        )
+        context = self._context(
+            current_position_qty=-0.02,
+            current_short_position_qty=0.02,
+            product_type="derivatives",
+            current_exposure_side="short",
+            current_short_leg_opened_seconds_ago=900,
+            leg_strategy_health={
+                "long": {
+                    "recent_closed_trade_count": 5,
+                    "recent_win_rate": 0.20,
+                    "recent_fee_drag_ratio": 0.04,
+                    "recent_churn_ratio": 0.08,
+                    "recent_low_edge_trade_streak": 0,
+                    "recent_low_edge_trade_at": None,
+                    "recent_net_realized_pnl": Decimal("-18"),
+                },
+                "short": {
+                    "recent_closed_trade_count": 5,
+                    "recent_win_rate": 0.80,
+                    "recent_fee_drag_ratio": 0.03,
+                    "recent_churn_ratio": 0.05,
+                    "recent_low_edge_trade_streak": 0,
+                    "recent_low_edge_trade_at": None,
+                    "recent_net_realized_pnl": Decimal("12"),
+                },
+            },
+        )
+        baseline = self._baseline(
+            direction_bias="short",
+            confidence=0.82,
+            suggested_position_scale=1.0,
+            volatility_target_scale=1.0,
+            factor_scores={
+                "momentum_alpha": -0.42,
+                "trend_alpha": -0.38,
+                "microstructure_alpha": -0.16,
+                "liquidity_scale": 0.92,
+            },
+        ).model_copy(update={"regime": "uncertain", "composite_alpha_score": -0.28})
+
+        with patch.object(
+            engine,
+            "_independent_book_score",
+            side_effect=lambda *, leg, baseline, ai_assessment: 0.76 if leg == "long" else 0.72,
+        ):
+            target = engine.build(context, baseline, self._ai_assessment(direction=-0.22, confidence=0.80))
+
+        self.assertIsNotNone(target.hedge_overlay_decision)
+        assert target.hedge_overlay_decision is not None
+        self.assertEqual(target.hedge_overlay_decision.effective_mode, "independent")
+        self.assertIn(
+            "independent_long_book_trial_guard_active",
+            target.hedge_overlay_decision.long_leg_blocked_reasons,
+        )
+        self.assertIn(
+            "independent_short_book_hold_above_entry_threshold",
+            target.hedge_overlay_decision.short_leg_reason_codes,
+        )
+
+    def test_derivatives_independent_books_block_live_runtime_before_rollout_stage_is_live(self) -> None:
+        engine = TargetPositionEngine(
+            settings=AATSSettings.model_validate(
+                {
+                    "default_order_qty": 0.01,
+                    "trading_product_type": "derivatives",
+                    "margin_mode": "cross",
+                    "derivatives_position_mode": "hedge",
+                    "strategy_short_bias_enabled": True,
+                    "strategy_hedge_overlay_enabled": True,
+                    "strategy_hedge_overlay_mode": "independent",
+                    "strategy_hedge_independent_enabled": True,
+                    "strategy_hedge_independent_rollout_stage": "dry_run",
+                    "guarded_execution_dry_run": False,
+                    "live_submit_enabled": True,
+                    "okx_simulated_trading": False,
+                }
+            )
+        )
+        context = self._context(
+            current_position_qty=0.0,
+            current_long_position_qty=0.0,
+            product_type="derivatives",
+            current_exposure_side="flat",
+        )
+        baseline = self._baseline(
+            direction_bias="long",
+            confidence=0.82,
+            suggested_position_scale=1.0,
+            volatility_target_scale=1.0,
+            factor_scores={
+                "momentum_alpha": 0.42,
+                "trend_alpha": 0.38,
+                "microstructure_alpha": 0.16,
+                "liquidity_scale": 0.92,
+            },
+        ).model_copy(update={"regime": "trend", "composite_alpha_score": 0.28})
+
+        target = engine.build(context, baseline, self._ai_assessment(direction=0.22, confidence=0.80))
+
+        self.assertIsNotNone(target.hedge_overlay_decision)
+        assert target.hedge_overlay_decision is not None
+        self.assertEqual(target.hedge_overlay_decision.effective_mode, "independent")
+        self.assertEqual(target.hedge_overlay_decision.rollout_stage, "dry_run")
+        self.assertEqual(target.hedge_overlay_decision.runtime_rollout_stage, "live")
+        self.assertIn(
+            "independent_overlay_rollout_stage_blocks_live_runtime",
+            target.hedge_overlay_decision.blocked_reasons,
+        )
+        self.assertFalse(target.strategy_execution_legs)
+        self.assertEqual(target.target_position_qty, Decimal("0.01"))
+        self.assertEqual(target.current_position_qty, Decimal("0"))
+        self.assertIsNone(next((item for item in target.strategy_execution_legs if item.pos_side == "long"), None))
+
+    def test_derivatives_independent_books_disabled_falls_back_to_directional_target(self) -> None:
+        engine = TargetPositionEngine(
+            settings=AATSSettings.model_validate(
+                {
+                    "default_order_qty": 0.01,
+                    "trading_product_type": "derivatives",
+                    "margin_mode": "cross",
+                    "derivatives_position_mode": "hedge",
+                    "strategy_short_bias_enabled": True,
+                    "strategy_hedge_overlay_enabled": True,
+                    "strategy_hedge_overlay_mode": "independent",
+                    "strategy_hedge_independent_enabled": False,
+                    "strategy_cost_guard_enabled": False,
+                    "strategy_entry_min_signal_edge_bps": 0.0,
+                    "strategy_entry_alpha_min": 0.0,
+                    "strategy_entry_confidence_min": 0.0,
+                }
+            )
+        )
+        context = self._context(
+            current_position_qty=0.0,
+            current_long_position_qty=0.0,
+            product_type="derivatives",
+            current_exposure_side="flat",
+        )
+        baseline = self._baseline(
+            direction_bias="long",
+            confidence=0.82,
+            suggested_position_scale=1.0,
+            volatility_target_scale=1.0,
+            factor_scores={
+                "momentum_alpha": 0.42,
+                "trend_alpha": 0.38,
+                "microstructure_alpha": 0.16,
+                "liquidity_scale": 0.92,
+            },
+        ).model_copy(update={"regime": "trend", "composite_alpha_score": 0.28})
+
+        target = engine.build(context, baseline, self._ai_assessment(direction=0.22, confidence=0.80))
+
+        self.assertIsNotNone(target.hedge_overlay_decision)
+        assert target.hedge_overlay_decision is not None
+        self.assertEqual(target.hedge_overlay_decision.state, "blocked")
+        self.assertIn("independent_books_not_enabled", target.hedge_overlay_decision.blocked_reasons)
+        self.assertFalse(target.strategy_execution_legs)
+        self.assertEqual(target.target_position_qty, Decimal("0.01"))
+        self.assertEqual(target.position_intent, "open_long")
 
     def test_expected_cost_uses_injected_dynamic_fee_resolver(self) -> None:
         engine = TargetPositionEngine(
@@ -875,14 +2017,56 @@ class TestTargetPositionEngine(unittest.TestCase):
     def _context(
         *,
         current_position_qty: float = 0.0,
+        current_long_position_qty: float | None = None,
+        current_short_position_qty: float | None = None,
         product_type: str = "spot",
         current_exposure_side: str = "flat",
         current_position_opened_seconds_ago: int | None = None,
         last_position_closed_seconds_ago: int | None = None,
+        current_long_leg_opened_seconds_ago: int | None = None,
+        current_short_leg_opened_seconds_ago: int | None = None,
+        last_long_leg_closed_seconds_ago: int | None = None,
+        last_short_leg_closed_seconds_ago: int | None = None,
+        latest_long_leg_fill_seconds_ago: int | None = None,
+        latest_short_leg_fill_seconds_ago: int | None = None,
         recent_low_edge_trade_streak: int = 0,
         recent_low_edge_trade_seconds_ago: int | None = None,
+        recent_closed_trade_count: int = 0,
+        recent_fee_drag_ratio: float = 0.0,
+        recent_churn_ratio: float = 0.0,
+        leg_strategy_health: dict[str, dict[str, object]] | None = None,
     ) -> DecisionContext:
         now = utc_now()
+        derived_long_qty = (
+            current_position_qty
+            if current_long_position_qty is None and current_position_qty > 0
+            else (0.0 if current_long_position_qty is None else current_long_position_qty)
+        )
+        derived_short_qty = (
+            abs(current_position_qty)
+            if current_short_position_qty is None and current_position_qty < 0
+            else (0.0 if current_short_position_qty is None else current_short_position_qty)
+        )
+        health_payload = leg_strategy_health or {
+            "long": {
+                "recent_closed_trade_count": 0,
+                "recent_win_rate": 0.0,
+                "recent_fee_drag_ratio": 0.0,
+                "recent_churn_ratio": 0.0,
+                "recent_low_edge_trade_streak": 0,
+                "recent_low_edge_trade_at": None,
+                "recent_net_realized_pnl": Decimal("0"),
+            },
+            "short": {
+                "recent_closed_trade_count": 0,
+                "recent_win_rate": 0.0,
+                "recent_fee_drag_ratio": 0.0,
+                "recent_churn_ratio": 0.0,
+                "recent_low_edge_trade_streak": 0,
+                "recent_low_edge_trade_at": None,
+                "recent_net_realized_pnl": Decimal("0"),
+            },
+        }
         return DecisionContext(
             decision_id="decision_target_test",
             symbol="BTC-USDT",
@@ -894,6 +2078,9 @@ class TestTargetPositionEngine(unittest.TestCase):
             health_snapshot_ref="evt_health",
             mode="paper_live",
             current_position_qty=Decimal(str(current_position_qty)),
+            current_net_position_qty=Decimal(str(current_position_qty)),
+            current_long_position_qty=Decimal(str(derived_long_qty)),
+            current_short_position_qty=Decimal(str(derived_short_qty)),
             product_type=product_type,  # type: ignore[arg-type]
             current_exposure_side=current_exposure_side,  # type: ignore[arg-type]
             current_target_leverage=1.0,
@@ -907,12 +2094,46 @@ class TestTargetPositionEngine(unittest.TestCase):
                 if last_position_closed_seconds_ago is not None
                 else None
             ),
+            current_long_leg_opened_at=(
+                now - timedelta(seconds=current_long_leg_opened_seconds_ago)
+                if current_long_leg_opened_seconds_ago is not None
+                else None
+            ),
+            current_short_leg_opened_at=(
+                now - timedelta(seconds=current_short_leg_opened_seconds_ago)
+                if current_short_leg_opened_seconds_ago is not None
+                else None
+            ),
+            last_long_leg_closed_at=(
+                now - timedelta(seconds=last_long_leg_closed_seconds_ago)
+                if last_long_leg_closed_seconds_ago is not None
+                else None
+            ),
+            last_short_leg_closed_at=(
+                now - timedelta(seconds=last_short_leg_closed_seconds_ago)
+                if last_short_leg_closed_seconds_ago is not None
+                else None
+            ),
+            latest_long_leg_fill_timestamp=(
+                now - timedelta(seconds=latest_long_leg_fill_seconds_ago)
+                if latest_long_leg_fill_seconds_ago is not None
+                else None
+            ),
+            latest_short_leg_fill_timestamp=(
+                now - timedelta(seconds=latest_short_leg_fill_seconds_ago)
+                if latest_short_leg_fill_seconds_ago is not None
+                else None
+            ),
             recent_low_edge_trade_streak=recent_low_edge_trade_streak,
             recent_low_edge_trade_at=(
                 now - timedelta(seconds=recent_low_edge_trade_seconds_ago)
                 if recent_low_edge_trade_seconds_ago is not None
                 else None
             ),
+            recent_closed_trade_count=recent_closed_trade_count,
+            recent_fee_drag_ratio=recent_fee_drag_ratio,
+            recent_churn_ratio=recent_churn_ratio,
+            leg_strategy_health=health_payload,
             strategy_guardrail_flags=[
                 *(
                     ["min_hold_active"]

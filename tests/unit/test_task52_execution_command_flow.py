@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from collections import OrderedDict
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime
 from decimal import Decimal
 
 from aats.bootstrap.settings import AATSSettings
@@ -11,7 +11,13 @@ from aats.bus.memory_bus import InMemoryEventBus
 from aats.events import topics
 from aats.events.envelopes import build_envelope
 from aats.schemas.common import utc_now
-from aats.schemas.execution import FillEvent, OrderIntent, OrderState
+from aats.schemas.execution import (
+    LegOrderIntent,
+    OrderIntent,
+    OrderState,
+    order_intent_from_leg_order_intent,
+)
+from aats.schemas.governance import RiskDecision
 from aats.services.execution_control.command_service import ExecutionCommandProcessor
 from aats.services.execution_control.order_service import ExecutionOrderService
 from aats.services.execution_engine.order_manager import OrderManager
@@ -61,9 +67,36 @@ class _InMemoryExecutionCommandRepository:
                 return deepcopy(row)
         return None
 
-    def pending_commands(self, *, limit: int) -> list[dict]:
-        claimable = [row for row in self.rows.values() if row["state"] in {"PENDING", "SENT"}]
+    def pending_commands(self, *, limit: int, sent_stale_before: datetime | None = None) -> list[dict]:
+        claimable = []
+        for row in self.rows.values():
+            if row["state"] == "PENDING":
+                claimable.append(row)
+                continue
+            if row["state"] != "SENT":
+                continue
+            if sent_stale_before is None or row["updated_at"] <= sent_stale_before:
+                claimable.append(row)
         return [deepcopy(row) for row in claimable[:limit]]
+
+    def claim_command(
+        self,
+        *,
+        command_id: str,
+        expected_state: str,
+        expected_updated_at: datetime,
+        updated_at: datetime,
+    ) -> bool:
+        row = self.rows.get(command_id)
+        if row is None:
+            return False
+        if row["state"] != expected_state or row["updated_at"] != expected_updated_at:
+            return False
+        row["state"] = "SENT"
+        row["attempt_count"] += 1
+        row["updated_at"] = updated_at
+        row["last_error"] = None
+        return True
 
     def mark_sent(self, command_id: str, updated_at: datetime) -> None:
         row = self.rows[command_id]
@@ -208,6 +241,35 @@ def _intent(*, suffix: str) -> OrderIntent:
     )
 
 
+def _independent_intent(*, suffix: str, pos_side: str = "long") -> OrderIntent:
+    leg_intent = LegOrderIntent(
+        leg_intent_id=f"leg_{suffix}",
+        decision_id=f"decision_{suffix}",
+        symbol="BTC-USDT-SWAP",
+        side="buy" if pos_side == "long" else "sell",
+        pos_side=pos_side,  # type: ignore[arg-type]
+        action="open",
+        quantity=Decimal("0.001"),
+        execution_style="exchange",
+        order_type="market",
+        urgency="medium",
+        time_in_force="IOC",
+        idempotency_key=suffix,
+        product_type="derivatives",
+        margin_mode="cross",
+        td_mode="cross",
+        position_mode="long_short_mode",
+        target_leverage=2.0,
+        exposure_side="long" if pos_side == "long" else "short",
+        strategy_execution_mode=(
+            "independent_long_book"
+            if pos_side == "long"
+            else "independent_short_book"
+        ),
+    )
+    return order_intent_from_leg_order_intent(leg_intent)
+
+
 def _intent_message(intent: OrderIntent) -> dict:
     envelope = build_envelope(
         topic=topics.ORDER_INTENTS,
@@ -274,7 +336,130 @@ class TestTask52ExecutionCommandFlow(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state.status, "FILLED")
         self.assertEqual(len(manager.execution_repo.fills()), 1)
 
-    async def test_phase2_sent_submit_command_is_idempotently_acked_when_order_already_terminal(self) -> None:
+    async def test_phase2_command_processor_reapplies_leg_risk_for_independent_submit(self) -> None:
+        command_repo = _InMemoryExecutionCommandRepository()
+        adapter = _QueueOnlyAdapter()
+        block_submit = False
+
+        def _leg_risk(_leg_intent):
+            if not block_submit:
+                return RiskDecision(
+                    decision_id="decision_phase2_independent_leg_risk",
+                    approved=True,
+                    modified=False,
+                    capped_target_position_qty=0.001,
+                    capped_target_notional=100.0,
+                    projected_notional=100.0,
+                    risk_score=0.1,
+                )
+            return RiskDecision(
+                decision_id="decision_phase2_independent_leg_risk",
+                approved=False,
+                modified=True,
+                capped_target_position_qty=0.0,
+                capped_target_notional=0.0,
+                projected_notional=0.0,
+                risk_score=1.0,
+                only_reduce_required=True,
+                risk_limit_breached=True,
+                rejection_reasons=["risk_max_long_notional_exceeded"],
+            )
+
+        manager = OrderManager(
+            settings=AATSSettings.model_validate(
+                {
+                    "execution_command_flow_enabled": True,
+                    "trading_product_type": "derivatives",
+                    "margin_mode": "cross",
+                    "live_submit_enabled": True,
+                    "guarded_execution_dry_run": False,
+                    "okx_simulated_trading": False,
+                    "strategy_hedge_overlay_enabled": True,
+                    "strategy_hedge_independent_enabled": True,
+                    "strategy_hedge_independent_rollout_stage": "live",
+                }
+            ),
+            bus=InMemoryEventBus(event_store=InMemoryEventStore(), persistence_mode="strict"),
+            adapter=adapter,
+            execution_repo=InMemoryExecutionRepository(),
+            persistent_order_service=ExecutionOrderService(execution_command_repo=command_repo),
+            leg_risk_evaluator=_leg_risk,
+            kill_switch=KillSwitch(),
+        )
+        processor = ExecutionCommandProcessor(
+            execution_command_repo=command_repo,
+            submit_executor=lambda next_intent, client_order_id=None: manager.process_submit_command(
+                intent=next_intent,
+                client_order_id=client_order_id,
+            ),
+            cancel_executor=lambda client_order_id: manager.process_cancel_command(client_order_id=client_order_id),
+        )
+        intent = _independent_intent(suffix="phase2_independent_leg_risk")
+
+        await manager.handle_order_intent(_intent_message(intent))
+        block_submit = True
+        processed = await processor.process_pending()
+
+        self.assertEqual(processed, 1)
+        self.assertEqual(adapter.submit_count, 0)
+        command = command_repo.first()
+        self.assertEqual(command["state"], "ACKED")
+        state = manager.execution_repo.get_order_state("clphase2_independent_leg_risk")
+        self.assertIsNotNone(state)
+        self.assertEqual(state.status, "BLOCKED")
+        self.assertEqual(state.submission_mode, "leg_risk_blocked")
+        self.assertIn("risk_max_long_notional_exceeded", state.execution_error)
+
+    async def test_phase2_command_processor_reapplies_rollout_blockers_for_independent_submit(self) -> None:
+        command_repo = _InMemoryExecutionCommandRepository()
+        adapter = _QueueOnlyAdapter()
+        manager = OrderManager(
+            settings=AATSSettings.model_validate(
+                {
+                    "execution_command_flow_enabled": True,
+                    "trading_product_type": "derivatives",
+                    "margin_mode": "cross",
+                    "live_submit_enabled": True,
+                    "guarded_execution_dry_run": False,
+                    "okx_simulated_trading": False,
+                    "strategy_hedge_overlay_enabled": True,
+                    "strategy_hedge_independent_enabled": True,
+                    "strategy_hedge_independent_rollout_stage": "live",
+                }
+            ),
+            bus=InMemoryEventBus(event_store=InMemoryEventStore(), persistence_mode="strict"),
+            adapter=adapter,
+            execution_repo=InMemoryExecutionRepository(),
+            persistent_order_service=ExecutionOrderService(execution_command_repo=command_repo),
+            kill_switch=KillSwitch(),
+        )
+        processor = ExecutionCommandProcessor(
+            execution_command_repo=command_repo,
+            submit_executor=lambda next_intent, client_order_id=None: manager.process_submit_command(
+                intent=next_intent,
+                client_order_id=client_order_id,
+            ),
+            cancel_executor=lambda client_order_id: manager.process_cancel_command(client_order_id=client_order_id),
+        )
+        intent = _independent_intent(suffix="phase2_independent_rollout")
+
+        await manager.handle_order_intent(_intent_message(intent))
+        manager.settings = manager.settings.model_copy(
+            update={"strategy_hedge_independent_rollout_stage": "dry_run"}
+        )
+        processed = await processor.process_pending()
+
+        self.assertEqual(processed, 1)
+        self.assertEqual(adapter.submit_count, 0)
+        command = command_repo.first()
+        self.assertEqual(command["state"], "ACKED")
+        state = manager.execution_repo.get_order_state("clphase2_independent_rollout")
+        self.assertIsNotNone(state)
+        self.assertEqual(state.status, "BLOCKED")
+        self.assertEqual(state.submission_mode, "leg_overlay_rollout_blocked")
+        self.assertIn("independent_overlay_rollout_stage_blocks_live_runtime", state.execution_error)
+
+    async def test_phase2_sent_submit_command_is_not_replayed_after_claim_ambiguity(self) -> None:
         command_repo = _InMemoryExecutionCommandRepository()
         intent = _intent(suffix="phase2_replay")
         command_repo.enqueue_command(
@@ -332,9 +517,45 @@ class TestTask52ExecutionCommandFlow(unittest.IsolatedAsyncioTestCase):
 
         processed = await processor.process_pending()
 
-        self.assertEqual(processed, 1)
+        self.assertEqual(processed, 0)
         self.assertEqual(adapter.submit_count, 0)
-        self.assertEqual(command_repo.get_command("cmd_phase2_replay")["state"], "ACKED")
+        self.assertEqual(command_repo.get_command("cmd_phase2_replay")["state"], "SENT")
+
+    async def test_phase2_sent_cancel_command_can_be_retried(self) -> None:
+        command_repo = _InMemoryExecutionCommandRepository()
+        adapter = _SubmittedThenCanceledAdapter()
+        manager = OrderManager(
+            settings=AATSSettings.model_validate({"execution_command_flow_enabled": True}),
+            bus=InMemoryEventBus(event_store=InMemoryEventStore(), persistence_mode="strict"),
+            adapter=adapter,
+            execution_repo=InMemoryExecutionRepository(),
+            persistent_order_service=ExecutionOrderService(execution_command_repo=command_repo),
+            kill_switch=KillSwitch(),
+        )
+        processor = ExecutionCommandProcessor(
+            execution_command_repo=command_repo,
+            submit_executor=lambda next_intent, client_order_id=None: manager.process_submit_command(
+                intent=next_intent,
+                client_order_id=client_order_id,
+            ),
+            cancel_executor=lambda client_order_id: manager.process_cancel_command(client_order_id=client_order_id),
+        )
+        intent = _intent(suffix="phase2_sent_cancel")
+
+        await manager.handle_order_intent(_intent_message(intent))
+        await processor.process_pending()
+        await manager.cancel_order("clphase2_sent_cancel")
+
+        cancel_command = command_repo.get_by_idempotency_key("cancel:clphase2_sent_cancel")
+        self.assertIsNotNone(cancel_command)
+        assert cancel_command is not None
+        command_repo.mark_sent(str(cancel_command["command_id"]), updated_at=utc_now())
+
+        processed = await processor.process_pending()
+
+        self.assertEqual(processed, 1)
+        self.assertEqual(adapter.cancel_count, 1)
+        self.assertEqual(command_repo.get_by_idempotency_key("cancel:clphase2_sent_cancel")["state"], "ACKED")
 
     async def test_phase2_cancel_command_is_enqueued_then_applied_by_command_processor(self) -> None:
         command_repo = _InMemoryExecutionCommandRepository()

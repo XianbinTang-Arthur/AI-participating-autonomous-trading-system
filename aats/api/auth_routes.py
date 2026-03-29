@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from time import perf_counter
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -8,8 +9,8 @@ from pydantic import BaseModel
 
 from aats.api.auth import (
     OperatorPrincipal,
+    _write_api_key_compatibility_enabled,
     authenticate_operator_user,
-    configured_local_principal,
     configured_operator_roles,
     require_admin_access,
     require_read_access,
@@ -19,6 +20,7 @@ from aats.api.auth import (
 from aats.api.session_auth import issue_session_token
 from aats.bootstrap.config import ApplicationRuntime
 from aats.schemas.common import utc_now
+from aats.schemas.system import RuntimeModeState
 from aats.services.operator.query_service import OperatorQueryService
 
 
@@ -43,20 +45,6 @@ class UpdateOperatorUserRequest(BaseModel):
     enabled: bool | None = None
 
 
-class CreateRuntimeProfileDraftRequest(BaseModel):
-    profile_label: str
-
-
-class UpdateRuntimeProfileRequest(BaseModel):
-    profile_label: str | None = None
-    activation_note: str | None = None
-    payload: dict[str, Any]
-
-
-class StageRuntimeProfileRequest(BaseModel):
-    activation_note: str | None = None
-
-
 class StrategyProfileManualActivateRequest(BaseModel):
     reason: str = "manual_activate_strategy_profile"
 
@@ -65,13 +53,13 @@ class StrategyProfileManualRestoreRequest(BaseModel):
     reason: str = "manual_restore_auto_strategy_profile_control"
 
 
-class AIManualOperatingModeOverrideRequest(BaseModel):
+class StrategyProfileManualPauseRequest(BaseModel):
+    reason: str = "manual_pause_auto_strategy_profile_control"
+
+
+class AISelectOperatingModeRequest(BaseModel):
     mode: str
-    reason: str = "manual_override_ai_operating_mode"
-
-
-class AIManualOperatingModeRestoreRequest(BaseModel):
-    reason: str = "manual_restore_auto_ai_operating_mode"
+    reason: str = "manual_select_ai_operating_mode"
 
 
 def _runtime(request: Request) -> ApplicationRuntime:
@@ -86,12 +74,10 @@ def _session_payload(request: Request) -> dict[str, Any]:
     runtime = _runtime(request)
     settings = runtime.settings
     principal = session_principal(request)
-    if principal is None and not settings.operator_auth_enabled:
-        principal = configured_local_principal(runtime)
     return {
         "auth_enabled": settings.operator_auth_enabled,
         "session_enabled": settings.operator_session_configured,
-        "api_key_compatibility_enabled": bool(settings.operator_read_api_key or settings.operator_write_api_key),
+        "api_key_compatibility_enabled": bool(settings.operator_read_api_key or _write_api_key_compatibility_enabled(runtime)),
         "database_backed": runtime.database_runtime is not None,
         "stored_user_count": stored_operator_user_count(runtime),
         "authenticated": principal is not None and principal.auth_enabled,
@@ -101,25 +87,149 @@ def _session_payload(request: Request) -> dict[str, Any]:
     }
 
 
-def _runtime_profile_control_disabled(
-    request: Request,
+def _auth_providers_payload(request: Request) -> dict[str, Any]:
+    runtime = _runtime(request)
+    settings = runtime.settings
+    return {
+        "auth_enabled": settings.operator_auth_enabled,
+        "session_enabled": settings.operator_session_configured,
+        "database_backed": runtime.database_runtime is not None,
+        "configured_roles": configured_operator_roles(runtime),
+        "stored_user_count": stored_operator_user_count(runtime),
+        "runtime_profile_control_enabled": False,
+        "api_key_compatibility_enabled": bool(settings.operator_read_api_key or _write_api_key_compatibility_enabled(runtime)),
+    }
+
+
+def _system_health_payload(request: Request, query: OperatorQueryService) -> dict[str, Any]:
+    health = query.system_health()
+    operator_metrics = query.metrics()
+    runtime = _runtime(request)
+    health["execution_summary"] = {
+        "order_count": len(query._scoped_order_states()),
+        "fill_count": len(query._scoped_fills()),
+        "open_order_count": len(query._scoped_open_order_states()),
+        "order_intents_generated": runtime.metrics.snapshot().get("order_intents_generated", 0),
+        "fills_processed": runtime.metrics.snapshot().get("fills_processed", 0),
+        "processing_failures": operator_metrics.get("processing_failure_count", 0),
+        "portfolio_snapshot_repairs": operator_metrics.get("portfolio_snapshot_repair_count", 0),
+        "fills_without_snapshot": operator_metrics.get("fill_without_snapshot_count", 0),
+        "snapshots_without_reconciliation": operator_metrics.get("snapshot_without_reconciliation_count", 0),
+        "phase1_shadow_status": operator_metrics.get("phase1_shadow", {}).get("status"),
+        "phase1_shadow_failure_count": operator_metrics.get("phase1_shadow_failure_count", 0),
+        "phase1_shadow_alert_count": operator_metrics.get("phase1_shadow_alert_count", 0),
+        "phase1_shadow_recovery_count": operator_metrics.get("phase1_shadow_recovery_count", 0),
+        "phase1_shadow_order_backlog": operator_metrics.get("phase1_shadow_order_backlog"),
+        "phase1_shadow_fill_backlog": operator_metrics.get("phase1_shadow_fill_backlog"),
+        "phase1_shadow_obligation_backlog": operator_metrics.get("phase1_shadow_obligation_backlog"),
+    }
+    return health
+
+
+def _dashboard_panel_error(exc: Exception) -> str:
+    if isinstance(exc, HTTPException):
+        detail = exc.detail
+        if isinstance(detail, str):
+            return detail
+        return str(detail)
+    return str(exc)
+
+
+def _normalize_dashboard_panel_keys(panel_keys: list[str]) -> tuple[str, ...]:
+    normalized = [str(panel_key or "").strip() for panel_key in panel_keys]
+    filtered = [panel_key for panel_key in normalized if panel_key]
+    return tuple(dict.fromkeys(filtered))
+
+
+def _protected_dashboard_panel_payload(
     *,
-    principal: OperatorPrincipal,
-    action: str,
-    details: dict[str, Any] | None = None,
-) -> None:
-    _query(request).record_runtime_profile_action(
-        action=action,
-        actor_role=principal.role,
-        actor_identity=principal.identity,
-        auth_source=principal.auth_source,
-        status="control_disabled",
-        details={
-            "control_plane_status": "deprecated_readonly",
-            **(details or {}),
-        },
-    )
-    raise _runtime_profile_http_error("runtime_profile_control_disabled")
+    request: Request,
+    query: OperatorQueryService,
+    panel_key: str,
+    recent_decisions_limit: int,
+    recent_orders_limit: int,
+    recent_fills_limit: int,
+    recent_ai_assessments_limit: int,
+    recent_ai_shadow_decisions_limit: int,
+    recent_ai_shadow_evaluations_limit: int,
+) -> dict[str, Any]:
+    if panel_key == "health":
+        return _system_health_payload(request, query)
+    if panel_key == "mode":
+        return RuntimeModeState(**query.system_mode()).model_dump(mode="json")
+    if panel_key == "runtime":
+        return query.system_runtime()
+    if panel_key == "systemRecovery":
+        return query.system_recovery()
+    if panel_key == "blockerControl":
+        return query.blocker_control()
+    if panel_key == "blockers":
+        blockers = query.blockers()
+        return {
+            "blocked": bool(blockers),
+            "halted": _runtime(request).kill_switch.halted,
+            "blockers": blockers,
+            "recent_history": query.blocker_history(limit=20, offset=0)["history"],
+        }
+    if panel_key == "metrics":
+        return query.metrics()
+    if panel_key == "portfolio":
+        return query.portfolio_latest()
+    if panel_key == "positions":
+        return query.positions()
+    if panel_key == "latestDecision":
+        return query.latest_decision()
+    if panel_key == "executionLatest":
+        return query.execution_latest()
+    if panel_key == "reconciliationLatest":
+        return query.reconciliation_latest()
+    if panel_key == "accountState":
+        return query.account_state()
+    if panel_key == "strategyRuntime":
+        return query.strategy_runtime()
+    if panel_key == "strategyAttribution":
+        return query.strategy_attribution_report(limit=200)
+    if panel_key == "recentDecisions":
+        return query.recent_decisions(limit=recent_decisions_limit, offset=0)
+    if panel_key == "trialReviewSummary":
+        return query.trial_review_summary(segment_limit=100, window_days=7, period_count=4)
+    if panel_key == "trialReviewHistory":
+        return query.trial_review_history(limit=5, offset=0)
+    if panel_key == "recentOrders":
+        return query.orders_recent(limit=recent_orders_limit, offset=0)
+    if panel_key == "recentFills":
+        return query.fills_recent(limit=recent_fills_limit, offset=0)
+    if panel_key == "executionErrors":
+        return query.execution_errors()
+    if panel_key == "phase1Shadow":
+        return query.phase1_shadow()
+    if panel_key == "trialGuard":
+        return query.trial_guard()
+    if panel_key == "guardedLivePreflight":
+        return query.guarded_live_preflight()
+    if panel_key == "guardedLiveRunPacket":
+        return query.guarded_live_run_packet()
+    if panel_key == "replayStatus":
+        return query.replay_status()
+    if panel_key == "aiOverview":
+        return query.ai_overview()
+    if panel_key == "aiRuntime":
+        return query.ai_runtime()
+    if panel_key == "aiLatest":
+        return query.ai_latest()
+    if panel_key == "aiShadowLatest":
+        return query.ai_shadow_latest()
+    if panel_key == "profileControlSummary":
+        return query.profile_control_summary_report()
+    if panel_key == "aiConfigModel":
+        return query.ai_config_summary()
+    if panel_key == "aiRecent":
+        return query.ai_recent(limit=recent_ai_assessments_limit, offset=0)
+    if panel_key == "aiShadowRecent":
+        return query.ai_shadow_recent(limit=recent_ai_shadow_decisions_limit, offset=0)
+    if panel_key == "aiShadowEvaluations":
+        return query.ai_shadow_evaluations(limit=recent_ai_shadow_evaluations_limit, offset=0)
+    raise KeyError(f"dashboard_bundle_panel_not_found:{panel_key}")
 
 
 @auth_router.get("/auth/session")
@@ -135,9 +245,17 @@ async def auth_login(request: Request, payload: LoginRequest, response: Response
         raise HTTPException(status_code=400, detail="operator_auth_disabled")
     if not settings.operator_session_configured:
         raise HTTPException(status_code=503, detail="operator_session_auth_not_configured")
-    principal = authenticate_operator_user(runtime, username=payload.username, password=payload.password)
+    login_result = authenticate_operator_user(runtime, username=payload.username, password=payload.password)
+    principal = login_result.principal
     if principal is None:
-        raise HTTPException(status_code=401, detail="operator_login_failed")
+        _query(request).record_operator_login_failure(
+            actor_identity=payload.username,
+            auth_source="session",
+            failure_code=login_result.failure_code or "operator_login_failed",
+        )
+        if login_result.failure_code == "operator_login_locked":
+            raise HTTPException(status_code=429, detail="operator_login_locked")
+        raise HTTPException(status_code=401, detail=login_result.failure_code or "operator_login_failed")
     user = runtime.operator_repo.get_by_username(payload.username)
     if user is None:
         raise HTTPException(status_code=401, detail="operator_login_failed")
@@ -197,16 +315,74 @@ async def auth_whoami(
 
 @auth_router.get("/auth/providers")
 async def auth_providers(request: Request) -> dict[str, Any]:
-    runtime = _runtime(request)
-    settings = runtime.settings
+    return _auth_providers_payload(request)
+
+
+@auth_router.get("/dashboard/bundle")
+async def dashboard_bundle(
+    request: Request,
+    panel: list[str] = Query(default=[]),
+    view: str | None = Query(default=None),
+    recent_decisions: int = Query(default=8, alias="recentDecisions", ge=1, le=100),
+    recent_orders: int = Query(default=8, alias="recentOrders", ge=1, le=200),
+    recent_fills: int = Query(default=8, alias="recentFills", ge=1, le=200),
+    recent_ai_assessments: int = Query(default=8, alias="recentAIAssessments", ge=1, le=100),
+    recent_ai_shadow_decisions: int = Query(default=8, alias="recentAIShadowDecisions", ge=1, le=100),
+    recent_ai_shadow_evaluations: int = Query(default=8, alias="recentAIShadowEvaluations", ge=1, le=100),
+) -> dict[str, Any]:
+    request_started_at = perf_counter()
+    query = _query(request)
+    api_key = request.headers.get("X-AATS-API-Key")
+    panel_keys = _normalize_dashboard_panel_keys(panel)
+    if not panel_keys:
+        raise HTTPException(status_code=400, detail="dashboard_bundle_panel_required")
+    try:
+        require_read_access(request, api_key)
+        read_error: HTTPException | None = None
+    except HTTPException as exc:
+        read_error = exc
+
+    panels: dict[str, dict[str, Any]] = {}
+    panel_timings: dict[str, dict[str, float]] = {}
+    for panel_key in panel_keys:
+        panel_started_at = perf_counter()
+        try:
+            if panel_key == "session":
+                payload = _session_payload(request)
+            elif panel_key == "authProviders":
+                payload = _auth_providers_payload(request)
+            elif panel_key == "operatorUsers":
+                principal = require_admin_access(request, api_key)
+                payload = query.operator_users(actor_identity=principal.identity)
+            else:
+                if read_error is not None:
+                    raise read_error
+                payload = _protected_dashboard_panel_payload(
+                    request=request,
+                    query=query,
+                    panel_key=panel_key,
+                    recent_decisions_limit=recent_decisions,
+                    recent_orders_limit=recent_orders,
+                    recent_fills_limit=recent_fills,
+                    recent_ai_assessments_limit=recent_ai_assessments,
+                    recent_ai_shadow_decisions_limit=recent_ai_shadow_decisions,
+                    recent_ai_shadow_evaluations_limit=recent_ai_shadow_evaluations,
+                )
+            panels[panel_key] = {"data": payload, "error": None}
+        except Exception as exc:
+            panels[panel_key] = {"data": None, "error": _dashboard_panel_error(exc)}
+        finally:
+            panel_timings[panel_key] = {
+                "duration_ms": round((perf_counter() - panel_started_at) * 1000.0, 3),
+            }
+
     return {
-        "auth_enabled": settings.operator_auth_enabled,
-        "session_enabled": settings.operator_session_configured,
-        "database_backed": runtime.database_runtime is not None,
-        "configured_roles": configured_operator_roles(runtime),
-        "stored_user_count": stored_operator_user_count(runtime),
-        "runtime_profile_control_enabled": False,
-        "api_key_compatibility_enabled": bool(settings.operator_read_api_key or settings.operator_write_api_key),
+        "view": view,
+        "panels": panels,
+        "timing": {
+            "total_ms": round((perf_counter() - request_started_at) * 1000.0, 3),
+            "panels": panel_timings,
+        },
     }
 
 
@@ -216,100 +392,6 @@ async def auth_users(
     principal: OperatorPrincipal = Depends(require_admin_access),
 ) -> dict[str, Any]:
     return _query(request).operator_users(actor_identity=principal.identity)
-
-
-@auth_router.get("/runtime-profiles")
-async def runtime_profiles(
-    request: Request,
-    principal: OperatorPrincipal = Depends(require_admin_access),
-) -> dict[str, Any]:
-    _ = principal
-    return _query(request).runtime_profile_snapshot()
-
-
-@auth_router.get("/runtime-profiles/summary")
-async def runtime_profiles_summary(
-    request: Request,
-    principal: OperatorPrincipal = Depends(require_admin_access),
-) -> dict[str, Any]:
-    _ = principal
-    return _query(request).runtime_profile_ai_config_snapshot()
-
-
-@auth_router.post("/runtime-profiles/drafts")
-async def create_runtime_profile_draft(
-    request: Request,
-    payload: CreateRuntimeProfileDraftRequest,
-    principal: OperatorPrincipal = Depends(require_admin_access),
-) -> dict[str, Any]:
-    _runtime_profile_control_disabled(
-        request,
-        principal=principal,
-        action="runtime_profile_create",
-        details={"profile_label": payload.profile_label},
-    )
-
-
-@auth_router.patch("/runtime-profiles/revisions/{revision_id}")
-async def update_runtime_profile(
-    request: Request,
-    revision_id: str,
-    payload: UpdateRuntimeProfileRequest,
-    principal: OperatorPrincipal = Depends(require_admin_access),
-) -> dict[str, Any]:
-    _runtime_profile_control_disabled(
-        request,
-        principal=principal,
-        action="runtime_profile_update",
-        details={
-            "revision_id": revision_id,
-            "profile_label": payload.profile_label,
-            "payload_keys": sorted(payload.payload.keys()),
-            "activation_note_present": payload.activation_note is not None,
-        },
-    )
-
-
-@auth_router.post("/runtime-profiles/revisions/{revision_id}/stage")
-async def stage_runtime_profile(
-    request: Request,
-    revision_id: str,
-    payload: StageRuntimeProfileRequest | None = None,
-    principal: OperatorPrincipal = Depends(require_admin_access),
-) -> dict[str, Any]:
-    _runtime_profile_control_disabled(
-        request,
-        principal=principal,
-        action="runtime_profile_stage",
-        details={
-            "revision_id": revision_id,
-            "activation_note_present": payload is not None and payload.activation_note is not None,
-        },
-    )
-
-
-@auth_router.post("/runtime-profiles/pending/cancel")
-async def cancel_pending_runtime_profile(
-    request: Request,
-    principal: OperatorPrincipal = Depends(require_admin_access),
-) -> dict[str, Any]:
-    _runtime_profile_control_disabled(
-        request,
-        principal=principal,
-        action="runtime_profile_cancel_pending",
-    )
-
-
-@auth_router.post("/runtime-profiles/restart")
-async def request_runtime_profile_restart(
-    request: Request,
-    principal: OperatorPrincipal = Depends(require_admin_access),
-) -> dict[str, Any]:
-    _runtime_profile_control_disabled(
-        request,
-        principal=principal,
-        action="runtime_profile_restart_request",
-    )
 
 
 @auth_router.get("/strategy-profiles")
@@ -402,14 +484,31 @@ async def restore_strategy_profile_auto(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@auth_router.post("/ai/operating-mode/override")
-async def override_ai_operating_mode(
+@auth_router.post("/strategy-profiles/pause-auto")
+async def pause_strategy_profile_auto(
     request: Request,
-    payload: AIManualOperatingModeOverrideRequest,
+    payload: StrategyProfileManualPauseRequest | None = None,
     principal: OperatorPrincipal = Depends(require_admin_access),
 ) -> dict[str, Any]:
     try:
-        return _query(request).set_ai_operating_mode_override(
+        return _query(request).pause_strategy_profile_auto(
+            reason=payload.reason if payload is not None else "manual_pause_auto_strategy_profile_control",
+            actor_role=principal.role,
+            actor_identity=principal.identity,
+            auth_source=principal.auth_source,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@auth_router.post("/ai/operating-mode/select")
+async def select_ai_operating_mode(
+    request: Request,
+    payload: AISelectOperatingModeRequest,
+    principal: OperatorPrincipal = Depends(require_admin_access),
+) -> dict[str, Any]:
+    try:
+        return _query(request).set_ai_operating_mode(
             mode=payload.mode,
             reason=payload.reason,
             actor_role=principal.role,
@@ -418,20 +517,6 @@ async def override_ai_operating_mode(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@auth_router.post("/ai/operating-mode/restore-auto")
-async def restore_ai_operating_mode_auto(
-    request: Request,
-    payload: AIManualOperatingModeRestoreRequest | None = None,
-    principal: OperatorPrincipal = Depends(require_admin_access),
-) -> dict[str, Any]:
-    return _query(request).clear_ai_operating_mode_override(
-        reason=payload.reason if payload is not None else "manual_restore_auto_ai_operating_mode",
-        actor_role=principal.role,
-        actor_identity=principal.identity,
-        auth_source=principal.auth_source,
-    )
 
 
 @auth_router.post("/auth/users")
@@ -504,27 +589,5 @@ def _operator_user_http_error(code: str) -> HTTPException:
     if code == "operator_username_conflict":
         return HTTPException(status_code=409, detail=code)
     if code in {"operator_last_admin_required", "operator_self_delete_forbidden", "operator_self_disable_forbidden"}:
-        return HTTPException(status_code=409, detail=code)
-    return HTTPException(status_code=400, detail=code)
-
-
-def _runtime_profile_http_error(code: str) -> HTTPException:
-    if code == "runtime_profile_control_disabled":
-        return HTTPException(status_code=409, detail=code)
-    if code == "runtime_profile_revision_not_found":
-        return HTTPException(status_code=404, detail=code)
-    if code in {
-        "runtime_profile_label_required",
-        "runtime_profile_revision_locked",
-        "runtime_profile_payload_invalid",
-        "runtime_profile_fields_unsupported",
-        "runtime_profile_already_active",
-    }:
-        return HTTPException(status_code=400, detail=code)
-    if code == "runtime_profile_pending_activation_exists":
-        return HTTPException(status_code=409, detail=code)
-    if code.startswith("runtime_profile_fields_unsupported:") or code.startswith("runtime_profile_payload_invalid:"):
-        return HTTPException(status_code=400, detail=code)
-    if code.startswith("runtime_profile_preflight_blocked:"):
         return HTTPException(status_code=409, detail=code)
     return HTTPException(status_code=400, detail=code)

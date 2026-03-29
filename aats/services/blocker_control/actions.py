@@ -30,6 +30,7 @@ class BlockerActionService:
         if blocker and all(item.blocker != blocker for item in snapshot.blockers):
             raise ValueError(f"blocker_not_active:{blocker}")
 
+        status = "completed"
         if action_id == "reconcile-now":
             await self.owner.validate_reconciliation(
                 reason=reason,
@@ -86,12 +87,22 @@ class BlockerActionService:
                 auth_source=auth_source,
             )
             message = "已将系统切到仅基础策略继续运行。"
+        elif action_id == "refresh-exchange-state":
+            result = await self.owner.refresh_exchange_state(
+                blocker=blocker,
+                reason=reason,
+                actor_role=actor_role,
+                actor_identity=actor_identity,
+                auth_source=auth_source,
+            )
+            status = str(result.get("status") or "completed")
+            message = str(result.get("message") or "已刷新交易所状态。")
         else:
             raise ValueError(f"unsupported_blocker_action:{action_id}")
 
         return BlockerActionExecutionResult(
             action_id=action_id,
-            status="completed",
+            status=status,
             message=message,
             blocker_control=self.owner._build_blocker_control(),
         )

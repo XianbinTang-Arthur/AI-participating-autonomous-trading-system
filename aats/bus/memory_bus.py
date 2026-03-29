@@ -42,8 +42,15 @@ class InMemoryEventBus(EventBus):
                     raise
 
         message = {"topic": envelope.topic, "key": envelope.key, "payload": envelope.model_dump(mode="json")}
+        first_error: Exception | None = None
         for handler in tuple(self._subs[envelope.topic]):
-            await handler(message)
+            try:
+                await handler(message)
+            except Exception as exc:
+                if first_error is None:
+                    first_error = exc
+        if first_error is not None:
+            raise first_error
 
     async def subscribe(self, topic: str, handler: MessageHandler) -> None:
         self._subs[topic].append(handler)

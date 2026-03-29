@@ -134,6 +134,11 @@ class TestPhase5ControlPlaneRuntime(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(runtime_payload["control_plane"]["phase5_enabled"])
                 self.assertTrue(runtime_payload["control_plane"]["auth_hardened"])
                 self.assertFalse(runtime_payload["control_plane"]["legacy_layer_authoritative"])
+                self.assertEqual(runtime_payload["control_plane"]["truth_consistency_status"], "transitional")
+                self.assertIn(
+                    "phase5_control_plane_running_without_financial_convergence",
+                    runtime_payload["control_plane"]["consistency_warning_codes"],
+                )
             finally:
                 if runtime.database_runtime is not None:
                     runtime.database_runtime.dispose()

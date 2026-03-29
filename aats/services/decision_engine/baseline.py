@@ -148,7 +148,11 @@ class BaselineStrategy:
         return reason_codes
 
     @staticmethod
-    def _microstructure_reason_codes(*, direction_bias: str, microstructure_alpha: float) -> list[str]:
+    def _microstructure_reason_codes(
+        *,
+        direction_bias: str,
+        microstructure_alpha: float,
+    ) -> list[str]:
         if abs(microstructure_alpha) < 0.08:
             return ["microstructure_neutral"]
         if direction_bias == "long" and microstructure_alpha > 0.0:

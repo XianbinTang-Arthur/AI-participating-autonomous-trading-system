@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from fastapi import Header, HTTPException, Request
 from pydantic import BaseModel
 
@@ -21,29 +23,42 @@ class OperatorPrincipal(BaseModel):
         return self.role in {"operator", "admin"}
 
 
+@dataclass(frozen=True, slots=True)
+class OperatorLoginResult:
+    principal: OperatorPrincipal | None
+    failure_code: str | None = None
+
+
 def _runtime(request: Request) -> ApplicationRuntime:
     return request.app.state.runtime
 
-
-def configured_local_principal(runtime: ApplicationRuntime) -> OperatorPrincipal | None:
-    _ = runtime
-    return None
-
-
-def authenticate_operator_user(runtime: ApplicationRuntime, *, username: str, password: str) -> OperatorPrincipal | None:
+def authenticate_operator_user(runtime: ApplicationRuntime, *, username: str, password: str) -> OperatorLoginResult:
     if not hasattr(runtime, "operator_repo"):
-        return None
+        return OperatorLoginResult(principal=None, failure_code="operator_login_failed")
     user = runtime.operator_repo.get_by_username(username)
     if user is None or not user.enabled:
-        return None
+        return OperatorLoginResult(principal=None, failure_code="operator_login_failed")
+    now = utc_now()
+    if user.locked_until is not None and user.locked_until > now:
+        return OperatorLoginResult(principal=None, failure_code="operator_login_locked")
     if not verify_password(password, user.password_hash):
-        return None
-    runtime.operator_repo.record_login(username, utc_now())
-    return OperatorPrincipal(
-        identity=user.username,
-        role=user.role,
-        auth_enabled=True,
-        auth_source="session",
+        record_failure = getattr(runtime.operator_repo, "record_login_failure", None)
+        if callable(record_failure):
+            record_failure(
+                username,
+                now,
+                max_failed_attempts=runtime.settings.operator_login_max_failed_attempts,
+                lockout_seconds=runtime.settings.operator_login_lockout_seconds,
+            )
+        return OperatorLoginResult(principal=None, failure_code="operator_login_failed")
+    runtime.operator_repo.record_login(username, now)
+    return OperatorLoginResult(
+        principal=OperatorPrincipal(
+            identity=user.username,
+            role=user.role,
+            auth_enabled=True,
+            auth_source="session",
+        )
     )
 
 
@@ -116,17 +131,13 @@ def require_read_access(
     runtime = _runtime(request)
     settings = runtime.settings
     if not settings.operator_auth_enabled:
-        return configured_local_principal(runtime) or OperatorPrincipal(
-            role="anonymous",
-            auth_enabled=False,
-            auth_source="anonymous",
-        )
+        return OperatorPrincipal(role="anonymous", auth_enabled=False, auth_source="anonymous")
 
     session_user = session_principal(request)
     if session_user is not None:
         return session_user
 
-    if settings.operator_write_api_key and x_aats_api_key == settings.operator_write_api_key:
+    if _write_api_key_compatibility_enabled(runtime) and settings.operator_write_api_key and x_aats_api_key == settings.operator_write_api_key:
         return OperatorPrincipal(
             identity="api_key_write",
             role="admin",
@@ -183,3 +194,11 @@ def require_admin_access(
     if principal.role != "admin":
         raise HTTPException(status_code=403, detail="operator_admin_access_required")
     return principal
+
+
+def _write_api_key_compatibility_enabled(runtime: ApplicationRuntime) -> bool:
+    if not runtime.settings.operator_write_api_key:
+        return False
+    if runtime.settings.environment == "prod" and runtime.environment_capabilities.exchange_coupled:
+        return False
+    return True

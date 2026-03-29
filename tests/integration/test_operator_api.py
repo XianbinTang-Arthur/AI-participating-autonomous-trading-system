@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import tempfile
 import unittest
 from pathlib import Path
 from datetime import timedelta
 from decimal import Decimal
+from urllib.parse import urlencode
 from unittest.mock import AsyncMock, Mock, patch
 
 from fastapi import FastAPI
@@ -13,13 +13,21 @@ from fastapi.testclient import TestClient
 from aats.api.auth_routes import auth_router
 from aats.api.routes import router
 from aats.bootstrap.config import build_runtime
+from aats.bootstrap.managed_profiles import load_managed_profile_values
 from aats.bootstrap.settings import AATSSettings
 from aats.events.envelopes import build_envelope
 from aats.schemas.audit import DecisionAuditRecord
 from aats.schemas.ai_brief import AIDecisionBrief
-from aats.schemas.ai_shadow import AIDegradationEvent
 from aats.schemas.common import utc_now
-from aats.schemas.decision import AIMarketAssessment, ProfileControlDecision
+from aats.schemas.decision import (
+    AIMarketAssessment,
+    BaselineAssessment,
+    DecisionContext,
+    DecisionOutcome,
+    HedgeOverlayDecision,
+    PositionTarget,
+    ProfileControlDecision,
+)
 from aats.schemas.execution import FillEvent, OrderIntent, OrderState
 from aats.schemas.exchange import (
     AccountBaselineSnapshot,
@@ -37,11 +45,18 @@ from aats.schemas.governance import PolicyDecision, RiskDecision
 from aats.events import topics
 from aats.schemas.operator import ExecutionErrorSummary, ReplayValidationSummary
 from aats.schemas.operator import OperatorUserRecord
-from aats.schemas.portfolio import FillOutcomeRecord, FundingFeeRecord
-from aats.schemas.strategy_profiles import StrategyProfileMarketRegimeAssessment, StrategyProfileRecommendation
+from aats.schemas.portfolio import FillOutcomeRecord, FundingFeeRecord, PortfolioSnapshot, Position
+from aats.schemas.reconciliation import ReconciliationReport
+from aats.schemas.strategy_profiles import (
+    StrategyProfileMarketRegimeAssessment,
+    StrategyProfileRecommendation,
+    StrategyProfileRevision,
+)
+from aats.schemas.strategy_runtime import StrategyLegIntent
 from aats.services.ai_service.provider import AIProviderResponse
+from aats.services.operator.query_service import OperatorQueryService
 from aats.services.operator.strategy_profiles import StrategyProfileControlService
-from aats.services.operator.strategy_profiles import _seed_revisions, seed_strategy_profiles
+from aats.services.operator.strategy_profile_seed import _seed_revisions, seed_strategy_profiles
 from aats.services.operator.passwords import hash_password
 from aats.schemas.strategy_profiles import strategy_profile_payload_from_settings
 from tests.support.postgres import temporary_postgres_url
@@ -238,6 +253,110 @@ class FakeLaggingPhase1ShadowMonitor:
         }
 
 
+def _exchange_snapshot_for_refresh_test(*, with_risk_snapshot: bool) -> ExchangeAccountSnapshot:
+    return ExchangeAccountSnapshot(
+        account_source="okx",
+        fetched_at=utc_now(),
+        balances=[ExchangeBalance(currency="USDT", total=Decimal("1000"), available=Decimal("900"), frozen=Decimal("100"))],
+        positions=[
+            ExchangePosition(
+                instrument_id="BTC-USDT-SWAP",
+                symbol="BTC-USDT-SWAP",
+                quantity=Decimal("0.01"),
+                average_entry_price=Decimal("68000"),
+                mark_price=Decimal("70000"),
+                notional_usd=Decimal("700"),
+                side="long",
+                margin_mode="cross",
+                liquidation_price=Decimal("42000"),
+            )
+        ],
+        open_orders=[],
+        fills=[],
+        instruments=[],
+        account_mode="cross",
+        risk_snapshot=(
+            ExchangeAccountRiskSnapshot(
+                adjusted_equity=Decimal("2500"),
+                total_equity=Decimal("2550"),
+                available_equity=Decimal("2100"),
+                initial_margin_requirement=Decimal("320"),
+                maintenance_margin_requirement=Decimal("140"),
+                margin_ratio=Decimal("5.2"),
+                notional_usd=Decimal("12500"),
+                raw={"adjEq": "2500", "mgnRatio": "5.2"},
+            )
+            if with_risk_snapshot
+            else None
+        ),
+    )
+
+
+class RefreshTestAccountService:
+    def __init__(self, *, initial_snapshot: ExchangeAccountSnapshot, refreshed_snapshot: ExchangeAccountSnapshot) -> None:
+        self._snapshot = initial_snapshot
+        self._refreshed_snapshot = refreshed_snapshot
+        self.refresh_calls = 0
+
+    async def refresh(self, *, force: bool = False):
+        _ = force
+        self.refresh_calls += 1
+        if self.refresh_calls >= 2:
+            self._snapshot = self._refreshed_snapshot
+        return self._snapshot
+
+    def latest_snapshot(self):
+        return self._snapshot
+
+    def latest_recent_bills(self):
+        return []
+
+    def status(self):
+        return {
+            "backend": "okx",
+            "enabled": True,
+            "credentials_configured": True,
+            "connected": True,
+            "fresh": True,
+            "last_update_ts": self._snapshot.fetched_at,
+            "last_error": None,
+            "ready": True,
+            "detail": "refresh_test_account",
+            "blockers": [],
+            "risk_snapshot": (
+                None
+                if self._snapshot.risk_snapshot is None
+                else self._snapshot.risk_snapshot.model_dump(mode="json")
+            ),
+        }
+
+
+class RefreshTestRuntimeGuard:
+    def __init__(self, account_service: RefreshTestAccountService) -> None:
+        self.account_service = account_service
+        self._status: dict[str, object] = {}
+        self.evaluate_now()
+
+    def evaluate_now(self) -> dict[str, object]:
+        snapshot = self.account_service.latest_snapshot()
+        missing_risk_snapshot = bool(snapshot.positions) and snapshot.risk_snapshot is None
+        self._status = {
+            "connected": True,
+            "fresh": True,
+            "ready": not missing_risk_snapshot,
+            "detail": "refresh_test_runtime_guard",
+            "summary": "refresh_test_runtime_guard",
+            "blockers": ["derivatives_risk_snapshot_missing_auto_halt"] if missing_risk_snapshot else [],
+        }
+        return dict(self._status)
+
+    def status(self) -> dict[str, object]:
+        return dict(self._status)
+
+    def snapshot(self) -> dict[str, object]:
+        return dict(self._status)
+
+
 class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
     async def test_system_status_and_mode_endpoints_are_operator_readable(self) -> None:
         runtime = await self._runtime()
@@ -321,6 +440,227 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertIn("has_more", blocker_history_payload)
         self.assertIn(health_payload["runtime_state"], {"healthy", "degraded", "blocked", "halted"})
 
+    async def test_dashboard_bundle_aggregates_core_and_home_panels(self) -> None:
+        runtime = await self._runtime()
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            response = client.get(
+                self._dashboard_bundle_url(
+                    view="home",
+                    panels=[
+                        "session",
+                        "authProviders",
+                        "health",
+                        "mode",
+                        "runtime",
+                        "systemRecovery",
+                        "blockerControl",
+                        "blockers",
+                        "metrics",
+                        "portfolio",
+                        "latestDecision",
+                        "executionLatest",
+                        "reconciliationLatest",
+                        "accountState",
+                    ],
+                )
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["view"], "home")
+        panel_keys = set(payload["panels"].keys())
+        self.assertTrue(
+            {
+                "session",
+                "authProviders",
+                "health",
+                "mode",
+                "runtime",
+                "systemRecovery",
+                "blockerControl",
+                "blockers",
+                "metrics",
+                "portfolio",
+                "latestDecision",
+                "executionLatest",
+                "reconciliationLatest",
+                "accountState",
+            }.issubset(panel_keys)
+        )
+        self.assertIsNone(payload["panels"]["session"]["error"])
+        self.assertIsNone(payload["panels"]["health"]["error"])
+        self.assertIn("runtime_state", payload["panels"]["health"]["data"])
+        self.assertIn("recovery", payload["panels"]["systemRecovery"]["data"])
+        self.assertIn("portfolio", payload["panels"]["portfolio"]["data"])
+        self.assertIn("timing", payload)
+        self.assertGreaterEqual(payload["timing"]["total_ms"], 0.0)
+        self.assertEqual(set(payload["timing"]["panels"].keys()), panel_keys)
+        self.assertGreaterEqual(payload["timing"]["panels"]["health"]["duration_ms"], 0.0)
+
+    async def test_dashboard_bundle_keeps_session_context_when_read_access_is_denied(self) -> None:
+        runtime = await self._runtime(
+            operator_users=[("admin", "secret-pass")],
+            operator_auth_enabled=True,
+            operator_session_secret="session-secret",
+        )
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            response = client.get(
+                self._dashboard_bundle_url(
+                    view="home",
+                    panels=["session", "authProviders", "health"],
+                )
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertFalse(payload["panels"]["session"]["data"]["authenticated"])
+        self.assertTrue(payload["panels"]["authProviders"]["data"]["auth_enabled"])
+        self.assertEqual(payload["panels"]["health"]["error"], "operator_auth_required")
+        self.assertIsNone(payload["panels"]["session"]["error"])
+        self.assertIsNone(payload["panels"]["authProviders"]["error"])
+
+    async def test_dashboard_bundle_preserves_admin_panel_permissions(self) -> None:
+        runtime = await self._runtime(
+            operator_users=[("operator", "secret-pass")],
+            operator_auth_enabled=True,
+            operator_session_secret="session-secret",
+        )
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            login = client.post("/auth/login", json={"username": "operator", "password": "secret-pass"})
+            response = client.get(
+                self._dashboard_bundle_url(
+                    view="admin",
+                    panels=[
+                        "session",
+                        "authProviders",
+                        "health",
+                        "mode",
+                        "runtime",
+                        "systemRecovery",
+                        "blockerControl",
+                        "operatorUsers",
+                    ],
+                )
+            )
+
+        self.assertEqual(login.status_code, 200)
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertIsNone(payload["panels"]["health"]["error"])
+        self.assertEqual(payload["panels"]["operatorUsers"]["error"], "operator_admin_access_required")
+
+    async def test_dashboard_bundle_requires_explicit_panels(self) -> None:
+        runtime = await self._runtime()
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            response = client.get("/dashboard/bundle?view=home")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["detail"], "dashboard_bundle_panel_required")
+
+    async def test_dashboard_bundle_uses_requested_panel_list_without_duplicates(self) -> None:
+        runtime = await self._runtime()
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            response = client.get(
+                self._dashboard_bundle_url(
+                    view="risk",
+                    panels=["session", "health", "session", "metrics"],
+                )
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(list(payload["panels"].keys()), ["session", "health", "metrics"])
+        self.assertNotIn("runtime", payload["panels"])
+
+    async def test_dashboard_bundle_supports_positions_panel(self) -> None:
+        runtime = await self._runtime(
+            trading_product_type="derivatives",
+            margin_mode="cross",
+            default_symbol="BTC-USDT-SWAP",
+            allowed_symbols=("BTC-USDT-SWAP",),
+        )
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            response = client.get(
+                self._dashboard_bundle_url(
+                    view="overview",
+                    panels=["session", "positions", "accountState"],
+                )
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertIn("positions", payload["panels"])
+        self.assertIn("local_instrument_positions", payload["panels"]["positions"]["data"])
+        self.assertIn("exchange_instrument_positions", payload["panels"]["positions"]["data"])
+
+    async def test_dashboard_bundle_supports_ai_analysis_recent_panels(self) -> None:
+        runtime = await self._runtime()
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            response = client.get(
+                self._dashboard_bundle_url(
+                    view="aiAnalysis",
+                    panels=[
+                        "session",
+                        "authProviders",
+                        "health",
+                        "mode",
+                        "runtime",
+                        "systemRecovery",
+                        "blockerControl",
+                        "aiOverview",
+                        "aiRuntime",
+                        "aiLatest",
+                        "aiShadowLatest",
+                        "profileControlSummary",
+                        "aiRecent",
+                        "aiShadowRecent",
+                        "aiShadowEvaluations",
+                    ],
+                    recent_ai_assessments=5,
+                    recent_ai_shadow_decisions=6,
+                    recent_ai_shadow_evaluations=7,
+                )
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertIsNone(payload["panels"]["aiRecent"]["error"])
+        self.assertIsNone(payload["panels"]["aiShadowRecent"]["error"])
+        self.assertIsNone(payload["panels"]["aiShadowEvaluations"]["error"])
+        self.assertIn("assessments", payload["panels"]["aiRecent"]["data"])
+        self.assertIn("shadow_decisions", payload["panels"]["aiShadowRecent"]["data"])
+        self.assertIn("evaluations", payload["panels"]["aiShadowEvaluations"]["data"])
+
+    async def test_query_service_caches_account_status_and_snapshot_helpers(self) -> None:
+        runtime = await self._runtime()
+        query = OperatorQueryService(runtime)
+
+        with patch.object(runtime.account_service, "status", wraps=runtime.account_service.status) as status_spy:
+            with patch.object(runtime.account_service, "latest_snapshot", wraps=runtime.account_service.latest_snapshot) as snapshot_spy:
+                first_status = query.account_service_status()
+                second_status = query.account_service_status()
+                first_snapshot = query.latest_exchange_snapshot()
+                second_snapshot = query.latest_exchange_snapshot()
+
+        self.assertEqual(first_status, second_status)
+        self.assertIs(first_snapshot, second_snapshot)
+        self.assertEqual(status_spy.call_count, 1)
+        self.assertEqual(snapshot_spy.call_count, 1)
+
     async def test_derivatives_account_state_and_runtime_expose_structured_exchange_snapshots(self) -> None:
         settings = AATSSettings.model_validate(
             {
@@ -333,6 +673,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
                 "account_read_enabled": True,
                 "trading_product_type": "derivatives",
                 "margin_mode": "cross",
+                "derivatives_position_mode": "hedge",
                 "default_symbol": "BTC-USDT-SWAP",
                 "allowed_symbols": ("BTC-USDT-SWAP", "ETH-USDT-SWAP"),
                 "storage_mode": "memory",
@@ -490,6 +831,11 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(account_state_payload["backend"], "okx")
             self.assertEqual(account_state_payload["account_configuration"]["account_level_code"], "4")
             self.assertEqual(account_state_payload["account_configuration"]["position_mode_label"], "long_short")
+            self.assertEqual(account_state_payload["configured_derivatives_position_mode"], "hedge")
+            self.assertEqual(account_state_payload["required_exchange_position_mode"], "long_short_mode")
+            self.assertEqual(account_state_payload["exchange_position_mode"], "long_short_mode")
+            self.assertTrue(account_state_payload["exchange_position_mode_matches_configured"])
+            self.assertTrue(account_state_payload["position_mode_match_required"])
             self.assertEqual(account_state_payload["fee_schedule"]["taker"], "0.0005")
             self.assertEqual(account_state_payload["risk_snapshot"]["margin_ratio"], "5.2")
             self.assertEqual(account_state_payload["system_status_items"][0]["title"], "All Systems Operational")
@@ -525,6 +871,21 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(margin_buffer_payload["liquidation"]["closest_position"]["symbol"], "BTC-USDT-SWAP")
             self.assertEqual(account_state_payload["margin_buffer_overview"]["status"], "healthy")
             self.assertEqual(runtime_payload["startup_profile"], "derivatives")
+            self.assertEqual(
+                runtime_payload["runtime_profile_control"]["current_runtime_payload"]["derivatives_position_mode"],
+                "hedge",
+            )
+            self.assertEqual(
+                runtime_payload["runtime_profile_control"]["current_runtime_summary"]["derivatives_position_mode"],
+                "hedge",
+            )
+            self.assertEqual(
+                runtime_payload["account_position_mode_contract"]["required_exchange_position_mode"],
+                "long_short_mode",
+            )
+            self.assertTrue(
+                runtime_payload["account_position_mode_contract"]["exchange_position_mode_matches_configured"]
+            )
             self.assertEqual(runtime_payload["account_configuration"]["account_level_label"], "portfolio_margin")
             self.assertEqual(runtime_payload["risk_snapshot"]["initial_margin_requirement"], "320")
             self.assertEqual(runtime_payload["primary_instrument_rule"]["symbol"], "BTC-USDT-SWAP")
@@ -536,28 +897,338 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             FakeOperatorAccountService.PRIVATE_ORDER_ROW = None
             FakeOperatorAccountService.PRIVATE_ORDER_FILLS = None
 
-    async def test_guarded_live_preflight_and_run_packet_surface_structural_and_margin_failures(self) -> None:
-        settings = AATSSettings.model_validate(
-            {
-                "config_profile": "local_demo",
-                "mode": "guarded_live",
-                "market_data_backend": "okx",
-                "execution_backend": "okx",
-                "account_backend": "okx",
-                "account_read_enabled": True,
-                "trading_product_type": "derivatives",
-                "margin_mode": "cross",
-                "default_symbol": "BTC-USDT-SWAP",
-                "allowed_symbols": ("BTC-USDT-SWAP",),
-                "storage_mode": "memory",
-                "event_persistence_mode": "strict",
-                "live_submit_enabled": True,
-                "guarded_execution_dry_run": False,
-                "okx_simulated_trading": False,
-                "operator_auth_enabled": False,
-                "operator_unsafe_write_without_auth": True,
-            }
+    async def test_audit_detail_exposes_hedge_mode_order_and_leg_mismatch_summary(self) -> None:
+        runtime = await self._runtime(
+            trading_product_type="derivatives",
+            margin_mode="cross",
+            default_symbol="BTC-USDT-SWAP",
+            allowed_symbols=("BTC-USDT-SWAP",),
+            derivatives_position_mode="hedge",
         )
+        decision_id = "decision_hedge_audit"
+        now = utc_now()
+        decision_context = DecisionContext(
+            decision_id=decision_id,
+            symbol="BTC-USDT-SWAP",
+            timeframe="15m",
+            as_of_ts=now,
+            market_snapshot_ref="evt_market_snapshot_hedge_audit",
+            feature_snapshot_ref="evt_feature_snapshot_hedge_audit",
+            portfolio_snapshot_ref="evt_portfolio_snapshot_hedge_audit",
+            health_snapshot_ref="evt_health_snapshot_hedge_audit",
+            mode="paper_live",
+            market_regime="uncertain",
+            current_position_qty=Decimal("0.01"),
+            current_exposure_side="long",
+            product_type="derivatives",
+            margin_mode="cross",
+        )
+        context_event = build_envelope(
+            topic=topics.DECISION_CONTEXTS,
+            key="BTC-USDT-SWAP",
+            payload_model=decision_context,
+            source_component="test",
+        )
+        order_intent = OrderIntent(
+            intent_id="intent_hedge_audit_long",
+            leg_intent_id="leg_hedge_audit_long",
+            decision_id=decision_id,
+            symbol="BTC-USDT-SWAP",
+            side="buy",
+            quantity=Decimal("0.02"),
+            execution_style="taker",
+            order_type="market",
+            urgency="high",
+            time_in_force="IOC",
+            position_mode="long_short_mode",
+            pos_side="long",
+            idempotency_key="hedge-audit-long",
+            product_type="derivatives",
+            margin_mode="cross",
+            exposure_side="long",
+            leg_action="open",
+            position_intent="open_long",
+        )
+        order_event = build_envelope(
+            topic=topics.ORDER_INTENTS,
+            key="BTC-USDT-SWAP",
+            payload_model=order_intent,
+            source_component="test",
+        )
+        reconciliation = ReconciliationReport(
+            reconciliation_id="recon_hedge_audit",
+            decision_id=decision_id,
+            as_of_ts=now,
+            exchange_snapshot_ts=now,
+            product_type="derivatives",
+            margin_mode="cross",
+            allowed_symbols=["BTC-USDT-SWAP"],
+            exchange_comparison_enabled=True,
+            order_diff={},
+            fill_diff={},
+            balance_diff={},
+            position_diff={
+                "exchange_leg_mismatches": {
+                    "BTC-USDT-SWAP:short": {
+                        "symbol": "BTC-USDT-SWAP",
+                        "leg_side": "short",
+                        "stored_qty": Decimal("0"),
+                        "exchange_qty": Decimal("-0.01"),
+                    }
+                },
+                "exchange_instrument_mismatches": {},
+            },
+            findings=[],
+            finding_summary={},
+            mismatch_categories=["derivatives_leg_position_mismatch"],
+            mismatch_reasons=["derivatives_leg_position_differs_from_exchange"],
+            safety_impacts=["derivatives_leg_state_requires_review"],
+            severity="hard_mismatch",
+            review_required=True,
+            unknown_state_details=[
+                {
+                    "kind": "exchange_position_without_local_execution_chain",
+                    "position_key": "BTC-USDT-SWAP:short",
+                    "symbol": "BTC-USDT-SWAP",
+                    "leg_side": "short",
+                    "stored_qty": "0",
+                    "exchange_qty": "-0.01",
+                }
+            ],
+            recommended_operator_action="operator_rebaseline_required",
+        )
+        reconciliation_event = build_envelope(
+            topic=topics.RECONCILIATION_REPORTS,
+            key="BTC-USDT-SWAP",
+            payload_model=reconciliation,
+            source_component="test",
+        )
+        runtime.event_store.append(context_event)
+        runtime.event_store.append(order_event)
+        runtime.event_store.append(reconciliation_event)
+        runtime.audit_repo.upsert(
+            DecisionAuditRecord(
+                decision_id=decision_id,
+                decision_context_ref=context_event.event_id,
+                order_intent_refs=[order_event.event_id],
+                reconciliation_refs=[reconciliation_event.event_id],
+            )
+        )
+
+        app = self._app(runtime)
+        with TestClient(app) as client:
+            payload = client.get(f"/audit/{decision_id}").json()
+
+        self.assertEqual(payload["audit"]["decision_id"], decision_id)
+        self.assertEqual(
+            payload["hedge_mode_audit"]["position_mode"]["configured_derivatives_position_mode"],
+            "hedge",
+        )
+        self.assertEqual(
+            payload["hedge_mode_audit"]["position_mode"]["observed_position_modes"],
+            ["long_short_mode"],
+        )
+        self.assertEqual(payload["hedge_mode_audit"]["leg_orders"]["total_count"], 1)
+        self.assertEqual(payload["hedge_mode_audit"]["leg_orders"]["items"][0]["action"], "open")
+        self.assertEqual(payload["hedge_mode_audit"]["leg_reconciliation"]["total_count"], 1)
+        self.assertEqual(
+            payload["hedge_mode_audit"]["leg_reconciliation"]["items"][0]["kind"],
+            "missing_execution_chain",
+        )
+
+    async def test_audit_detail_exposes_independent_overlay_sources_and_leg_trial_guard(self) -> None:
+        runtime = await self._runtime(
+            trading_product_type="derivatives",
+            margin_mode="cross",
+            default_symbol="BTC-USDT-SWAP",
+            allowed_symbols=("BTC-USDT-SWAP",),
+            derivatives_position_mode="hedge",
+            strategy_hedge_overlay_enabled=True,
+            strategy_hedge_overlay_mode="independent",
+            strategy_hedge_independent_enabled=True,
+            strategy_hedge_independent_trial_guard_enabled=True,
+            strategy_performance_guard_min_closed_trades=4,
+        )
+        decision_id = "decision_independent_overlay_audit"
+        now = utc_now()
+        decision_context = DecisionContext(
+            decision_id=decision_id,
+            symbol="BTC-USDT-SWAP",
+            timeframe="15m",
+            as_of_ts=now,
+            market_snapshot_ref="evt_market_snapshot_independent_overlay",
+            feature_snapshot_ref="evt_feature_snapshot_independent_overlay",
+            portfolio_snapshot_ref="evt_portfolio_snapshot_independent_overlay",
+            health_snapshot_ref="evt_health_snapshot_independent_overlay",
+            mode="paper_live",
+            market_regime="uncertain",
+            current_position_qty=Decimal("0.01"),
+            current_long_position_qty=Decimal("0.03"),
+            current_short_position_qty=Decimal("0.02"),
+            current_exposure_side="long",
+            product_type="derivatives",
+            margin_mode="cross",
+            leg_strategy_health={
+                "long": {
+                    "recent_closed_trade_count": 5,
+                    "recent_win_rate": 0.20,
+                    "recent_fee_drag_ratio": 0.04,
+                    "recent_churn_ratio": 0.08,
+                    "recent_low_edge_trade_streak": 1,
+                    "recent_net_realized_pnl": -12.0,
+                    "guardrail_flags": ["fee_drag_elevated"],
+                    "cooldowns": {},
+                },
+                "short": {
+                    "recent_closed_trade_count": 5,
+                    "recent_win_rate": 0.80,
+                    "recent_fee_drag_ratio": 0.02,
+                    "recent_churn_ratio": 0.04,
+                    "recent_low_edge_trade_streak": 0,
+                    "recent_net_realized_pnl": 8.0,
+                    "guardrail_flags": [],
+                    "cooldowns": {"min_hold_remaining_seconds": 30.0},
+                },
+            },
+        )
+        context_event = build_envelope(
+            topic=topics.DECISION_CONTEXTS,
+            key="BTC-USDT-SWAP",
+            payload_model=decision_context,
+            source_component="test",
+        )
+        position_target = PositionTarget(
+            decision_id=decision_id,
+            symbol="BTC-USDT-SWAP",
+            current_position_qty=Decimal("0.01"),
+            target_position_qty=Decimal("0.01"),
+            delta_position_qty=Decimal("0"),
+            current_notional=Decimal("700"),
+            target_notional=Decimal("700"),
+            rebalance_reason="independent_overlay_audit_test",
+            urgency="medium",
+            max_slippage_tolerance_bps=20,
+            source_mix={"baseline": 1.0},
+            decision_expiry_ts=now + timedelta(minutes=5),
+            product_type="derivatives",
+            current_exposure_side="long",
+            target_exposure_side="long",
+            position_intent="hold",
+            target_leverage=1.0,
+            margin_mode="cross",
+            strategy_family="directional",
+            strategy_execution_mode="independent_books",
+            strategy_reason_codes=["independent_books_active"],
+            strategy_execution_legs=[
+                StrategyLegIntent(
+                    symbol="BTC-USDT-SWAP",
+                    product_type="derivatives",
+                    side="buy",
+                    position_mode="long_short_mode",
+                    pos_side="long",
+                    action="open",
+                    family="directional",
+                    role="primary",
+                    margin_mode="cross",
+                    target_leverage=1.0,
+                    current_position_qty=Decimal("0.01"),
+                    target_position_qty=Decimal("0.03"),
+                    delta_position_qty=Decimal("0.02"),
+                    reference_price=Decimal("70000.5"),
+                    execution_compatible=True,
+                    execution_mode="independent_long_book",
+                    overlay_mode="independent",
+                    trigger_reason_codes=["independent_long_book_signal_above_entry_threshold"],
+                    note="Independent long book 决策腿。",
+                ),
+                StrategyLegIntent(
+                    symbol="BTC-USDT-SWAP",
+                    product_type="derivatives",
+                    side="buy",
+                    position_mode="long_short_mode",
+                    pos_side="short",
+                    action="reduce",
+                    family="directional",
+                    role="primary",
+                    margin_mode="cross",
+                    target_leverage=1.0,
+                    current_position_qty=Decimal("-0.02"),
+                    target_position_qty=Decimal("-0.01"),
+                    delta_position_qty=Decimal("0.01"),
+                    reference_price=Decimal("70000.5"),
+                    execution_compatible=True,
+                    execution_mode="independent_short_book",
+                    overlay_mode="independent",
+                    trigger_reason_codes=["independent_short_book_hold_above_entry_threshold"],
+                    note="Independent short book 决策腿。",
+                ),
+            ],
+            hedge_overlay_decision=HedgeOverlayDecision(
+                enabled=True,
+                runtime_supported=True,
+                configured_mode="independent",
+                effective_mode="independent",
+                overlay_source="independent_books",
+                active=True,
+                state="holding",
+                main_leg_signal="long",
+                hedge_leg_signal="short",
+                main_leg_current_qty=Decimal("0.03"),
+                hedge_leg_current_qty=Decimal("0.02"),
+                main_leg_target_qty=Decimal("0.03"),
+                hedge_leg_target_qty=Decimal("0.01"),
+                hedge_ratio=Decimal("0.3333"),
+                max_ratio=Decimal("1"),
+                pressure_score=0.74,
+                open_threshold=0.66,
+                close_threshold=0.64,
+                fee_drag_ratio=0.04,
+                churn_ratio=0.08,
+                long_leg_score=0.74,
+                short_leg_score=0.68,
+                long_leg_reason_codes=["independent_long_book_signal_above_entry_threshold"],
+                short_leg_reason_codes=["independent_short_book_hold_above_entry_threshold"],
+                long_leg_blocked_reasons=["independent_long_book_trial_guard_active"],
+                short_leg_blocked_reasons=[],
+                reason_codes=[
+                    "independent_long_book_signal_above_entry_threshold",
+                    "independent_short_book_hold_above_entry_threshold",
+                ],
+            ),
+        )
+        target_event = build_envelope(
+            topic=topics.POSITION_TARGETS,
+            key="BTC-USDT-SWAP",
+            payload_model=position_target,
+            source_component="test",
+        )
+        runtime.event_store.append(context_event)
+        runtime.event_store.append(target_event)
+        runtime.audit_repo.upsert(
+            DecisionAuditRecord(
+                decision_id=decision_id,
+                decision_context_ref=context_event.event_id,
+                position_target_ref=target_event.event_id,
+            )
+        )
+
+        app = self._app(runtime)
+        with TestClient(app) as client:
+            payload = client.get(f"/audit/{decision_id}").json()
+
+        self.assertEqual(payload["hedge_mode_audit"]["overlay"]["effective_mode"], "independent")
+        self.assertEqual(payload["hedge_mode_audit"]["overlay"]["overlay_source"], "independent_books")
+        self.assertEqual(payload["hedge_mode_audit"]["overlay"]["items"][0]["execution_mode"], "independent_long_book")
+        self.assertEqual(payload["hedge_mode_audit"]["overlay"]["items"][1]["overlay_mode"], "independent")
+        self.assertTrue(payload["hedge_mode_audit"]["leg_trial_guard"]["enabled"])
+        self.assertEqual(payload["hedge_mode_audit"]["leg_trial_guard"]["active_count"], 1)
+        long_guard = next(item for item in payload["hedge_mode_audit"]["leg_trial_guard"]["items"] if item["leg"] == "long")
+        short_guard = next(item for item in payload["hedge_mode_audit"]["leg_trial_guard"]["items"] if item["leg"] == "short")
+        self.assertTrue(long_guard["active"])
+        self.assertEqual(long_guard["reason_code"], "independent_long_book_trial_guard_active")
+        self.assertEqual(short_guard["status"], "clear")
+
+    async def test_guarded_live_preflight_and_run_packet_surface_structural_and_margin_failures(self) -> None:
         FakeOperatorAccountService.SNAPSHOT = ExchangeAccountSnapshot(
             account_source="okx",
             fetched_at=utc_now(),
@@ -627,39 +1298,65 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             ),
         )
         try:
-            with patch("aats.bootstrap.config.OKXAccountService", FakeOperatorAccountService):
-                runtime = await build_runtime(settings)
-            runtime.portfolio_service.state.load_exchange_snapshot(FakeOperatorAccountService.SNAPSHOT)
-            await runtime.portfolio_service.bootstrap_snapshot(snapshot_origin="operator_rebaseline")
-            app = self._app(runtime)
+            with temporary_postgres_url() as (database_url, _admin_engine, _schema_name):
+                settings = AATSSettings.model_validate(
+                    {
+                        "config_profile": "local_demo",
+                        "mode": "guarded_live",
+                        "market_data_backend": "okx",
+                        "execution_backend": "okx",
+                        "account_backend": "okx",
+                        "account_read_enabled": True,
+                        "trading_product_type": "derivatives",
+                        "margin_mode": "cross",
+                        "default_symbol": "BTC-USDT-SWAP",
+                        "allowed_symbols": ("BTC-USDT-SWAP",),
+                        "storage_mode": "postgres",
+                        "database_url": database_url,
+                        "database_auto_create_schema": True,
+                        "event_persistence_mode": "strict",
+                        "live_submit_enabled": True,
+                        "guarded_execution_dry_run": False,
+                        "okx_simulated_trading": False,
+                        "operator_auth_enabled": False,
+                        "operator_unsafe_write_without_auth": True,
+                    }
+                )
+                with patch("aats.bootstrap.config.OKXAccountService", FakeOperatorAccountService):
+                    runtime = await build_runtime(settings)
+                runtime.portfolio_service.state.load_exchange_snapshot(FakeOperatorAccountService.SNAPSHOT)
+                await runtime.portfolio_service.bootstrap_snapshot(snapshot_origin="operator_rebaseline")
+                app = self._app(runtime)
 
-            with TestClient(app) as client:
-                preflight = client.get("/system/guarded-live-preflight")
-                run_packet = client.get("/reports/guarded-live-run-packet")
-                health = client.get("/system/health")
-                runtime_response = client.get("/system/runtime")
+                with TestClient(app) as client:
+                    preflight = client.get("/system/guarded-live-preflight")
+                    run_packet = client.get("/reports/guarded-live-run-packet")
+                    health = client.get("/system/health")
+                    runtime_response = client.get("/system/runtime")
 
-            self.assertEqual(preflight.status_code, 200)
-            self.assertEqual(run_packet.status_code, 200)
-            self.assertEqual(health.status_code, 200)
-            self.assertEqual(runtime_response.status_code, 200)
+                self.assertEqual(preflight.status_code, 200)
+                self.assertEqual(run_packet.status_code, 200)
+                self.assertEqual(health.status_code, 200)
+                self.assertEqual(runtime_response.status_code, 200)
 
-            preflight_payload = preflight.json()
-            run_packet_payload = run_packet.json()
-            health_payload = health.json()
-            runtime_payload = runtime_response.json()
+                preflight_payload = preflight.json()
+                run_packet_payload = run_packet.json()
+                health_payload = health.json()
+                runtime_payload = runtime_response.json()
 
-            self.assertEqual(preflight_payload["status"], "fail")
-            self.assertFalse(preflight_payload["launch_ready"])
-            self.assertTrue(any(item["check_id"] == "real_money_route_ready" and item["status"] == "fail" for item in preflight_payload["checks"]))
-            self.assertTrue(any(item["check_id"] == "margin_buffer_safe" and item["status"] == "fail" for item in preflight_payload["checks"]))
-            self.assertEqual(run_packet_payload["status"], "critical")
-            self.assertTrue(run_packet_payload["derivatives_live_guard"]["auto_halt_required"])
-            self.assertIn("derivatives_liquidation_proximity_auto_halt", run_packet_payload["derivatives_live_guard"]["auto_halt_reasons"])
-            self.assertIn("derivatives_liquidation_proximity_auto_halt", [item["blocker"] for item in health_payload["blockers"]])
-            self.assertEqual(health_payload["subsystems"]["derivatives_live_guard"]["status"], "critical")
-            self.assertEqual(runtime_payload["guarded_live_preflight"]["status"], "fail")
-            self.assertEqual(runtime_payload["guarded_live_run_packet_summary"]["status"], "critical")
+                self.assertEqual(preflight_payload["status"], "fail")
+                self.assertFalse(preflight_payload["launch_ready"])
+                self.assertTrue(any(item["check_id"] == "real_money_route_ready" and item["status"] == "pass" for item in preflight_payload["checks"]))
+                self.assertTrue(any(item["check_id"] == "margin_buffer_safe" and item["status"] == "fail" for item in preflight_payload["checks"]))
+                self.assertEqual(run_packet_payload["status"], "critical")
+                self.assertTrue(run_packet_payload["derivatives_live_guard"]["auto_halt_required"])
+                self.assertIn("derivatives_liquidation_proximity_auto_halt", run_packet_payload["derivatives_live_guard"]["auto_halt_reasons"])
+                self.assertIn("derivatives_liquidation_proximity_auto_halt", [item["blocker"] for item in health_payload["blockers"]])
+                self.assertEqual(health_payload["subsystems"]["derivatives_live_guard"]["status"], "critical")
+                self.assertEqual(runtime_payload["guarded_live_preflight"]["status"], "fail")
+                self.assertEqual(runtime_payload["guarded_live_run_packet_summary"]["status"], "critical")
+                if runtime.database_runtime is not None:
+                    runtime.database_runtime.dispose()
         finally:
             FakeOperatorAccountService.SNAPSHOT = None
             FakeOperatorAccountService.PRIVATE_ORDER_ROW = None
@@ -780,12 +1477,15 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         with TestClient(app) as client:
             response = client.get("/reports/profitability-overview?limit=20")
 
-        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.status_code, 200, response.text)
         payload = response.json()
         summary = payload["summary"]
         self.assertEqual(summary["funding_fee_count"], 2)
         self.assertEqual(summary["funding_fee_income_count"], 1)
         self.assertEqual(summary["funding_fee_expense_count"], 1)
+        self.assertIn("fee_to_notional_ratio", summary)
+        self.assertIn("high_slippage_ratio", summary)
+        self.assertIn("slow_submit_to_fill_ratio", summary)
         self.assertEqual(Decimal(str(summary["funding_fee_net_pnl"])), Decimal("-1.25"))
         self.assertEqual(
             Decimal(str(summary["combined_net_realized_pnl"])),
@@ -796,6 +1496,356 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["funding_fee_summary"]["net_total_by_currency"]["USDT"], "-1.25")
         self.assertTrue(any(item["event_kind"] == "funding_fee" for item in payload["recent_realized_events"]))
         self.assertEqual(payload["truth_source"], "fill_outcomes_plus_funding_fee_records")
+
+    async def test_profitability_overview_normalizes_legacy_negative_fee_delta_for_gross_pnl(self) -> None:
+        runtime = await self._runtime(
+            trading_product_type="derivatives",
+            margin_mode="cross",
+            default_symbol="BTC-USDT-SWAP",
+            allowed_symbols=("BTC-USDT-SWAP",),
+        )
+        now = utc_now()
+        runtime.fill_outcome_repo.save_outcome(
+            FillOutcomeRecord(
+                fill_id="fill_legacy_fee_sign",
+                order_id="order_legacy_fee_sign",
+                symbol="BTC-USDT-SWAP",
+                position_key="BTC-USDT-SWAP",
+                venue="OKX",
+                side="sell",
+                fill_qty=Decimal("1"),
+                fill_price=Decimal("100"),
+                fill_notional=Decimal("100"),
+                fee_amount=Decimal("0.50"),
+                fee_currency="USDT",
+                liquidity_role="taker",
+                exchange_timestamp=now,
+                ingestion_timestamp=now,
+                order_status_after_fill="FILLED",
+                target_leverage=2.0,
+                exposure_side="flat",
+                execution_action="close_long",
+                position_intent="close_long",
+                position_mode="net_mode",
+                pos_side="net",
+                instrument_family="BTC-USDT",
+                settle_currency="USDT",
+                starting_position_qty=Decimal("1"),
+                starting_avg_entry_price=Decimal("95"),
+                ending_position_qty=Decimal("0"),
+                ending_avg_entry_price=Decimal("0"),
+                realized_pnl_delta=Decimal("4.5"),
+                fee_delta=Decimal("-0.50"),
+                product_type="derivatives",
+                margin_mode="cross",
+                created_at=now,
+            )
+        )
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            response = client.get("/reports/profitability-overview?limit=1")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        row = next(item for item in payload["recent_closed_fills"] if item["fill_id"] == "fill_legacy_fee_sign")
+        self.assertEqual(Decimal(str(row["fee_delta"])), Decimal("0.50"))
+        self.assertEqual(Decimal(str(row["gross_realized_pnl"])), Decimal("5.0"))
+        self.assertEqual(Decimal(str(payload["summary"]["gross_realized_pnl"])), Decimal("5.0"))
+        self.assertEqual(Decimal(str(payload["summary"]["net_realized_pnl"])), Decimal("4.5"))
+
+    async def test_strategy_attribution_report_groups_regime_profile_exit_and_risk_protection(self) -> None:
+        runtime = await self._runtime(
+            trading_product_type="derivatives",
+            margin_mode="cross",
+            default_symbol="BTC-USDT-SWAP",
+            allowed_symbols=("BTC-USDT-SWAP",),
+        )
+        now = utc_now()
+
+        def seed_decision(
+            *,
+            decision_id: str,
+            regime: str,
+            volatility_state: str,
+            profile_id: str,
+            strategy_family: str,
+            strategy_sleeve_id: str,
+            allocation_id: str,
+            strategy_bundle_id: str,
+            strategy_route_action: str,
+            exit_attribution: str,
+            risk_constraints: list[str],
+            realized_pnl: Decimal,
+        ) -> None:
+            decision_context = DecisionContext(
+                decision_id=decision_id,
+                symbol="BTC-USDT-SWAP",
+                timeframe="15m",
+                as_of_ts=now,
+                market_snapshot_ref="evt_market_seed",
+                feature_snapshot_ref="evt_feature_seed",
+                portfolio_snapshot_ref="evt_portfolio_seed",
+                health_snapshot_ref="evt_health_seed",
+                mode="guarded_live",
+                current_position_qty=Decimal("0.02"),
+                product_type="derivatives",
+                current_exposure_side="long",
+                current_target_leverage=3.0,
+            )
+            baseline = BaselineAssessment(
+                decision_id=decision_id,
+                symbol="BTC-USDT-SWAP",
+                regime=regime,
+                direction_bias="long",
+                trend_strength=0.72,
+                volatility_state=volatility_state,
+                confidence=0.81,
+                composite_alpha_score=0.26,
+                suggested_position_scale=0.8,
+                volatility_target_scale=0.84,
+                factor_scores={"momentum_alpha": 0.18, "microstructure_alpha": 0.08},
+                holding_horizon="15m",
+                invalidation_conditions=[],
+                reason_codes=[f"regime_{regime}"],
+                engine_version="test",
+            )
+            decision_outcome = DecisionOutcome(
+                decision_id=decision_id,
+                symbol="BTC-USDT-SWAP",
+                decision_source="baseline",
+                decision_authority="reference_only",
+                final_direction="long",
+                final_action="reduce",
+                final_target_qty=Decimal("0.01"),
+                baseline_reference={"regime": regime, "volatility_state": volatility_state},
+                active_profile_id=profile_id,
+                profile_control_source="system",
+                position_management_reason_codes=[exit_attribution],
+                exit_attribution=exit_attribution,
+                selected_strategy_family=strategy_family,
+                selected_strategy_route_action=strategy_route_action,
+                strategy_selection_reason_codes=[f"active_strategy_family_{strategy_family}"],
+            )
+            position_target = PositionTarget(
+                decision_id=decision_id,
+                symbol="BTC-USDT-SWAP",
+                current_position_qty=Decimal("0.02"),
+                target_position_qty=Decimal("0.01"),
+                delta_position_qty=Decimal("-0.01"),
+                current_notional=Decimal("1400"),
+                target_notional=Decimal("700"),
+                rebalance_reason="test",
+                urgency="medium",
+                max_slippage_tolerance_bps=20,
+                source_mix={"baseline": 1.0},
+                decision_expiry_ts=now + timedelta(minutes=15),
+                product_type="derivatives",
+                current_exposure_side="long",
+                target_exposure_side="long",
+                position_intent="reduce_long",
+                target_leverage=3.0,
+                margin_mode="cross",
+                strategy_family=strategy_family,
+                strategy_route_action=strategy_route_action,
+                strategy_reason_codes=[f"active_strategy_family_{strategy_family}"],
+                guardrail_flags=[exit_attribution],
+                decision_outcome=decision_outcome,
+            )
+            risk_decision = RiskDecision(
+                decision_id=decision_id,
+                approved=True,
+                modified=bool(risk_constraints),
+                capped_target_position_qty=Decimal("0.01"),
+                capped_target_notional=Decimal("700"),
+                current_open_order_count=0,
+                risk_budget_multiplier=Decimal("0.72") if risk_constraints else Decimal("1"),
+                risk_budget_state={},
+                execution_aggressiveness_multiplier=Decimal("0.65") if risk_constraints else Decimal("1"),
+                execution_aggressiveness_state={},
+                constraints_applied=risk_constraints,
+                risk_score=0.42,
+                rejection_reasons=[],
+            )
+            decision_event = build_envelope(
+                topic=topics.DECISION_CONTEXTS,
+                key="BTC-USDT-SWAP",
+                payload_model=decision_context,
+                source_component="test",
+            )
+            baseline_event = build_envelope(
+                topic=topics.BASELINE_ASSESSMENTS,
+                key="BTC-USDT-SWAP",
+                payload_model=baseline,
+                source_component="test",
+            )
+            target_event = build_envelope(
+                topic=topics.POSITION_TARGETS,
+                key="BTC-USDT-SWAP",
+                payload_model=position_target,
+                source_component="test",
+            )
+            risk_event = build_envelope(
+                topic=topics.RISK_DECISIONS,
+                key="BTC-USDT-SWAP",
+                payload_model=risk_decision,
+                source_component="test",
+            )
+            runtime.event_store.append(decision_event)
+            runtime.event_store.append(baseline_event)
+            runtime.event_store.append(target_event)
+            runtime.event_store.append(risk_event)
+            runtime.audit_repo.upsert(
+                DecisionAuditRecord(
+                    decision_id=decision_id,
+                    decision_context_ref=decision_event.event_id,
+                    baseline_assessment_ref=baseline_event.event_id,
+                    position_target_ref=target_event.event_id,
+                    risk_decision_ref=risk_event.event_id,
+                )
+            )
+            runtime.fill_outcome_repo.save_outcome(
+                FillOutcomeRecord(
+                    fill_id=f"fill_{decision_id}",
+                    decision_id=decision_id,
+                    order_id=f"order_{decision_id}",
+                    symbol="BTC-USDT-SWAP",
+                    position_key="BTC-USDT-SWAP:long",
+                    venue="OKX",
+                    side="sell",
+                    fill_qty=Decimal("0.01"),
+                    fill_price=Decimal("70000"),
+                    fill_notional=Decimal("700"),
+                    fee_amount=Decimal("0.50"),
+                    fee_currency="USDT",
+                    liquidity_role="taker",
+                    exchange_timestamp=now,
+                    ingestion_timestamp=now,
+                    order_status_after_fill="FILLED",
+                    strategy_family=strategy_family,
+                    strategy_sleeve_id=strategy_sleeve_id,
+                    allocation_id=allocation_id,
+                    strategy_bundle_id=strategy_bundle_id,
+                    strategy_leg_role="primary",
+                    target_leverage=3.0,
+                    exposure_side="long",
+                    execution_action="reduce_long",
+                    position_intent="reduce_long",
+                    position_mode="net_mode",
+                    instrument_family="BTC-USDT",
+                    settle_currency="USDT",
+                    starting_position_qty=Decimal("0.02"),
+                    starting_avg_entry_price=Decimal("69000"),
+                    ending_position_qty=Decimal("0.01"),
+                    ending_avg_entry_price=Decimal("69000"),
+                    realized_pnl_delta=realized_pnl,
+                    fee_delta=Decimal("-0.50"),
+                    product_type="derivatives",
+                    margin_mode="cross",
+                    created_at=now,
+                )
+            )
+            runtime.execution_repo.save_fill(
+                FillEvent(
+                    fill_id=f"fill_{decision_id}",
+                    decision_id=decision_id,
+                    intent_id=f"intent_{decision_id}",
+                    client_order_id=f"order_{decision_id}",
+                    exchange_order_id=f"venue_{decision_id}",
+                    symbol="BTC-USDT-SWAP",
+                    venue="OKX",
+                    side="sell",
+                    fill_qty=Decimal("0.01"),
+                    fill_price=Decimal("70000"),
+                    fee_amount=Decimal("0.50"),
+                    fee_currency="USDT",
+                    liquidity_role="taker",
+                    exchange_timestamp=now,
+                    ingestion_timestamp=now,
+                    order_status_after_fill="FILLED",
+                    strategy_family=strategy_family,
+                    strategy_sleeve_id=strategy_sleeve_id,
+                    allocation_id=allocation_id,
+                    strategy_bundle_id=strategy_bundle_id,
+                    strategy_leg_role="primary",
+                    target_leverage=3.0,
+                    exposure_side="long",
+                    execution_action="reduce",
+                    position_intent="reduce_long",
+                    position_mode="net_mode",
+                    instrument_family="BTC-USDT",
+                    settle_currency="USDT",
+                    product_type="derivatives",
+                    margin_mode="cross",
+                )
+            )
+
+        seed_decision(
+            decision_id="decision_attr_trend",
+            regime="trend",
+            volatility_state="medium",
+            profile_id="trend_normal",
+            strategy_family="directional",
+            strategy_sleeve_id="directional_btc_core",
+            allocation_id="alloc_directional_btc",
+            strategy_bundle_id="bundle_directional_btc",
+            strategy_route_action="override_target",
+            exit_attribution="alpha_decay_reduce",
+            risk_constraints=["risk_budget_multiplier_applied", "execution_aggressiveness_contracted"],
+            realized_pnl=Decimal("12"),
+        )
+        seed_decision(
+            decision_id="decision_attr_range",
+            regime="range",
+            volatility_state="high",
+            profile_id="execution_degraded_safe",
+            strategy_family="smart_arbitrage",
+            strategy_sleeve_id="smart_arbitrage_btc_pair",
+            allocation_id="alloc_smart_arb_btc",
+            strategy_bundle_id="bundle_smart_arb_btc",
+            strategy_route_action="protective_fallback",
+            exit_attribution="emergency_protective_exit",
+            risk_constraints=[],
+            realized_pnl=Decimal("-3"),
+        )
+
+        app = self._app(runtime)
+        with TestClient(app) as client:
+            response = client.get("/reports/strategy-attribution?limit=10")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertGreaterEqual(payload["summary"]["fill_count"], 2)
+        self.assertGreaterEqual(payload["summary"]["sleeve_pnl_record_count"], 2)
+        self.assertGreaterEqual(payload["summary"]["protected_fill_count"], 1)
+        self.assertGreaterEqual(payload["summary"]["unprotected_fill_count"], 1)
+        self.assertEqual(payload["truth_source"], "sleeve_pnl_records_plus_fill_outcomes_plus_decision_audit")
+        self.assertTrue(any(item["strategy_sleeve_id"] == "directional_btc_core" for item in payload["profitability_by_strategy_sleeve"]))
+        self.assertTrue(any(item["allocation_id"] == "alloc_directional_btc" for item in payload["profitability_by_allocation"]))
+        self.assertTrue(any(item["strategy_bundle_id"] == "bundle_directional_btc" for item in payload["profitability_by_strategy_bundle"]))
+        self.assertTrue(any(item["attribution_type"] == "direct_fill" for item in payload["profitability_by_attribution_type"]))
+        self.assertTrue(any(item["strategy_sleeve_id"] == "directional_btc_core" for item in payload["sleeve_inventory_summary"]))
+        self.assertTrue(any(item["market_regime"] == "trend" for item in payload["profitability_by_regime"]))
+        self.assertTrue(any(item["active_profile_id"] == "trend_normal" for item in payload["profitability_by_profile"]))
+        self.assertTrue(any(item["strategy_family"] == "directional" for item in payload["profitability_by_strategy_family"]))
+        self.assertTrue(
+            any(item["strategy_family"] == "smart_arbitrage" for item in payload["profitability_by_strategy_family"])
+        )
+        self.assertTrue(
+            any(
+                item["strategy_route_action"] == "protective_fallback"
+                for item in payload["profitability_by_strategy_route_action"]
+            )
+        )
+        self.assertTrue(
+            any(item["exit_attribution"] == "emergency_protective_exit" for item in payload["profitability_by_exit_attribution"])
+        )
+        self.assertTrue(
+            any(
+                item["code"] == "execution_aggressiveness_contracted"
+                for item in payload["risk_protection_summary"]["top_constraint_codes"]
+            )
+        )
 
     async def test_position_lifecycle_profitability_tracks_closed_lifecycle_and_unassigned_funding(self) -> None:
         settings = AATSSettings.model_validate(
@@ -1063,6 +2113,101 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(Decimal(str(summary_payload["funding_fee_net_pnl"])), Decimal("-40"))
         self.assertEqual(Decimal(str(summary_payload["combined_net_realized_pnl"])), Decimal("-32"))
 
+    async def test_trial_guard_distinguishes_disabled_from_outside_trial_observation_flow(self) -> None:
+        inactive_runtime = await self._runtime(
+            trial_guard_enabled=True,
+            mode="paper_live",
+            config_profile="local_demo",
+        )
+        inactive_app = self._app(inactive_runtime)
+        with TestClient(inactive_app) as client:
+            inactive_guard = client.get("/system/trial-guard").json()
+            inactive_scaling = client.get("/reports/scaling-readiness?window_days=7&period_count=4").json()
+
+        self.assertEqual(inactive_guard["status"], "inactive_for_runtime")
+        self.assertTrue(inactive_guard["enabled"])
+        self.assertFalse(inactive_guard["enabled_for_runtime"])
+        self.assertFalse(inactive_guard["trial_observation_active"])
+        self.assertIn("trial_observation_flow_inactive", inactive_scaling["reasons"])
+        self.assertNotIn("trial_profile_not_active", inactive_scaling["reasons"])
+        self.assertFalse(inactive_scaling["requirements"]["trial_observation_flow_active"])
+
+        disabled_runtime = await self._runtime(
+            trial_guard_enabled=False,
+            mode="guarded_live",
+            config_profile="guarded_live_enabled",
+        )
+        disabled_app = self._app(disabled_runtime)
+        with TestClient(disabled_app) as client:
+            disabled_guard = client.get("/system/trial-guard").json()
+            disabled_scaling = client.get("/reports/scaling-readiness?window_days=7&period_count=4").json()
+
+        self.assertEqual(disabled_guard["status"], "disabled")
+        self.assertFalse(disabled_guard["enabled"])
+        self.assertFalse(disabled_guard["enabled_for_runtime"])
+        self.assertFalse(disabled_guard["trial_observation_active"])
+        self.assertIn("trial_guard_not_enabled", disabled_scaling["reasons"])
+
+    async def test_advisory_pause_does_not_block_resume(self) -> None:
+        runtime = await self._runtime(
+            trading_product_type="derivatives",
+            margin_mode="cross",
+            default_symbol="BTC-USDT-SWAP",
+            allowed_symbols=("BTC-USDT-SWAP",),
+            trial_guard_enabled=False,
+            trial_guard_min_closed_fills=1,
+            trial_guard_max_daily_loss_usdt=20.0,
+        )
+        now = utc_now()
+        runtime.fill_outcome_repo.save_outcome(
+            FillOutcomeRecord(
+                fill_id="btc_forward_pause_fill",
+                order_id="btc_forward_pause_order",
+                symbol="BTC-USDT-SWAP",
+                position_key="BTC-USDT-SWAP",
+                venue="PAPER",
+                side="sell",
+                fill_qty=Decimal("1"),
+                fill_price=Decimal("90"),
+                fill_notional=Decimal("90"),
+                fee_amount=Decimal("0.10"),
+                fee_currency="USDT",
+                liquidity_role="taker",
+                exchange_timestamp=now - timedelta(minutes=20),
+                ingestion_timestamp=now - timedelta(minutes=20),
+                order_status_after_fill="FILLED",
+                target_leverage=2.0,
+                exposure_side="flat",
+                execution_action="close_long",
+                position_intent="close_long",
+                position_mode="net_mode",
+                pos_side="net",
+                instrument_family="BTC-USDT",
+                settle_currency="USDT",
+                starting_position_qty=Decimal("1"),
+                starting_avg_entry_price=Decimal("120"),
+                ending_position_qty=Decimal("0"),
+                ending_avg_entry_price=Decimal("0"),
+                realized_pnl_delta=Decimal("-30"),
+                fee_delta=Decimal("-0.10"),
+                product_type="derivatives",
+                margin_mode="cross",
+                created_at=now - timedelta(minutes=20),
+            )
+        )
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            scaling = client.get("/reports/scaling-readiness?window_days=1&period_count=2").json()
+            halted = client.post("/system/halt", json={"reason": "operator_test_halt"}).json()
+            resumed = client.post("/system/resume", json={"reason": "operator_test_resume"}).json()
+
+        self.assertEqual(scaling["readiness"], "pause_trial")
+        self.assertIn("forward_validation_pause", scaling["reasons"])
+        self.assertEqual(halted["status"], "halted")
+        self.assertIn(resumed["status"], {"resumed", "already_resumed"})
+        self.assertFalse(resumed["halted"])
+
     async def test_operator_visibility_endpoints_cover_decision_execution_reconciliation_and_audit(self) -> None:
         runtime = await self._runtime()
         app = self._app(runtime)
@@ -1262,7 +2407,13 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertIn("chain_health_score", replay_validation)
         self.assertIn("execution_chain_issue_count", replay_validation)
         self.assertEqual(replay_validation["product_type"], runtime.settings.trading_product_type)
+        self.assertIn("incremental_window_start_at", replay_validation)
+        self.assertIn("baseline_generation_id", replay_validation)
+        self.assertIn("exchange_ack_watermark_id", replay_validation)
+        self.assertIn("replay_offset_id", replay_validation)
         self.assertTrue(replay_status_after["recent_validations"])
+        self.assertIn("event_store_archive", replay_status_after)
+        self.assertIn("latest_replay_offset", replay_status_after)
         self.assertTrue(replay_recent["validations"])
         self.assertIn("total_available", replay_recent)
         self.assertIn("has_more", replay_recent)
@@ -1309,6 +2460,81 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(packet["latest_review"])
         self.assertEqual(packet["latest_review"]["action"], "trial_review_snapshot")
         self.assertTrue(history["actions"])
+
+    async def test_operator_can_record_trial_review_action_and_workbench_history(self) -> None:
+        runtime = await self._runtime()
+        app = self._app(runtime)
+        with TestClient(app) as client:
+            response = client.post(
+                "/system/trial-review/action",
+                json={
+                    "action_type": "shrink_trial",
+                    "reason": "test_trial_review_shrink",
+                },
+            )
+            summary = client.get(
+                "/reports/trial-review-summary?segment_limit=100&window_days=7&period_count=4"
+            ).json()
+            history = client.get("/reports/trial-review-history?limit=5").json()
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["action"], "capital_scale_review")
+        self.assertEqual(payload["details"]["trial_review_action_type"], "shrink_trial")
+        self.assertIn("workbench", summary["sections"])
+        self.assertTrue(summary["sections"]["workbench"]["recent_actions"])
+        self.assertEqual(summary["sections"]["workbench"]["latest_action"]["selected_action"], "shrink_trial")
+        self.assertTrue(any(item["selected_action"] == "shrink_trial" for item in history["actions"]))
+
+    async def test_trial_review_workbench_exposes_hard_stop_specific_actions(self) -> None:
+        runtime = await self._runtime()
+        runtime.trial_guard_service.last_snapshot = {
+            "enabled": True,
+            "enabled_for_runtime": True,
+            "trial_observation_active": True,
+            "trial_observation_label": "guarded_live_small_capital",
+            "status": "breached",
+            "summary": "试盘守护已触发自动停机。",
+            "breaches": [
+                {
+                    "code": "trial_guard_consecutive_losses",
+                    "title": "连续亏损笔数达到试盘守护上限",
+                    "summary": "最近连续亏损已经达到试盘守护硬停机阈值。",
+                }
+            ],
+            "hard_stop": {
+                "active": True,
+                "halt_required": True,
+                "resume_blocked": True,
+                "summary": "连续亏损笔数达到试盘守护上限",
+                "operator_guidance": "先查看试盘审查和最近成交。",
+            },
+            "recovery_requirements": {
+                "resume_allowed": False,
+                "items": [
+                    {
+                        "code": "trial_guard_consecutive_losses",
+                        "title": "连续亏损笔数达到试盘守护上限",
+                        "requirement": "连续亏损序列需要被新的非亏损闭合成交打断。",
+                    }
+                ],
+            },
+        }
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            summary = client.get(
+                "/reports/trial-review-summary?segment_limit=100&window_days=7&period_count=4"
+            ).json()
+
+        actions = summary["sections"]["workbench"]["available_actions"]
+        labels = [item["label"] for item in actions]
+        self.assertIn("查看风险与恢复", labels)
+        self.assertIn("查看委托与成交", labels)
+        self.assertIn("人工重置试盘守护", labels)
+        self.assertIn("记录本次复盘", labels)
+        self.assertIn("刷新当前状态", labels)
+        self.assertNotIn("记为继续小资金试盘", labels)
 
     async def test_metrics_order_intent_count_uses_persisted_events_not_runtime_counter(self) -> None:
         runtime = await self._runtime(
@@ -1541,6 +2767,34 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(decision_detail.json()["decision_outcome"]["finalized"])
 
+    async def test_ai_overview_and_ai_latest_share_cached_latest_payload(self) -> None:
+        runtime = await self._runtime(
+            ai_operating_mode="ai_decision_maker_with_profile_control",
+            strategy_profile_auto_control_enabled=True,
+            ai_provider="openai",
+            openai_api_key="test-key",
+            trading_product_type="derivatives",
+            margin_mode="cross",
+            strategy_short_bias_enabled=True,
+            default_symbol="BTC-USDT-SWAP",
+            allowed_symbols=("BTC-USDT-SWAP",),
+        )
+        runtime.ai_service.provider = FakeShadowProvider()
+        await runtime.decision_engine.run_cycle(runtime.settings.default_symbol, runtime.settings.primary_timeframe)
+
+        query = OperatorQueryService(runtime)
+        with patch.object(query.runtime_queries, "ai_latest", wraps=query.runtime_queries.ai_latest) as ai_latest_spy:
+            with patch.object(query, "decision_view", wraps=query.decision_view) as decision_view_spy:
+                overview = query.ai_overview()
+                latest = query.ai_latest()
+
+        self.assertEqual(ai_latest_spy.call_count, 1)
+        self.assertEqual(decision_view_spy.call_count, 1)
+        self.assertEqual(overview["latest_brief"], latest["brief"])
+        self.assertEqual(overview["latest_assessment"], latest["assessment"])
+        self.assertEqual(overview["latest_decision_outcome"], latest["decision_outcome"])
+        self.assertEqual(overview["latest_execution_suggestion"], latest["execution_suggestion"])
+
     async def test_shadow_evaluation_failure_does_not_block_position_target_publication(self) -> None:
         runtime = await self._runtime(
             ai_operating_mode="ai_decision_maker",
@@ -1612,8 +2866,9 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIsNotNone(runtime.decision_engine.strategy_profile_service)
         runtime.ai_service.should_attempt_assessment = Mock(return_value=True)
+        effective_modes = iter(["ai_decision_maker_with_profile_control", "baseline_only"])
         runtime.ai_service.effective_operating_mode = Mock(
-            side_effect=["ai_decision_maker_with_profile_control", "baseline_only"]
+            side_effect=lambda: next(effective_modes, "baseline_only")
         )
         runtime.ai_service.canonical_effective_operating_mode = Mock(return_value="baseline_only")
         runtime.ai_service.assess = AsyncMock(
@@ -2080,6 +3335,8 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         payload = response.json()
         self.assertEqual(payload["primary_blocker"]["blocker"], "ai_degraded_requires_manual_review")
         self.assertTrue(payload["primary_blocker"]["root_cause"])
+        self.assertEqual(payload["primary_task"]["kind"], "resolve_blocker")
+        self.assertEqual(payload["primary_task"]["source_blocker"], "ai_degraded_requires_manual_review")
         self.assertIn("确认恢复 AI 决策", [item["label"] for item in payload["primary_blocker"]["actions"]])
         self.assertIn("改为仅基础策略继续运行", [item["label"] for item in payload["primary_blocker"]["actions"]])
         self.assertTrue(any(item["blocker"] == "kill_switch_active" for item in payload["secondary_blockers"]))
@@ -2251,6 +3508,134 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.json()["detail"], "blocker_control_state_changed")
 
+    async def test_refresh_exchange_state_action_retries_until_derivatives_risk_snapshot_blocker_clears(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "config_profile": "local_demo",
+                "mode": "paper_live",
+                "market_data_backend": "demo",
+                "execution_backend": "paper",
+                "account_backend": "disabled",
+                "account_read_enabled": False,
+                "storage_mode": "memory",
+                "event_persistence_mode": "strict",
+                "enabled_decision_timeframes": ("15m",),
+                "operator_unsafe_write_without_auth": True,
+            }
+        )
+        runtime = await build_runtime(settings)
+        runtime.settings.operator_exchange_refresh_max_attempts = 3
+        runtime.settings.operator_exchange_refresh_retry_delay_seconds = 0.0
+
+        initial_snapshot = _exchange_snapshot_for_refresh_test(with_risk_snapshot=False)
+        refreshed_snapshot = _exchange_snapshot_for_refresh_test(with_risk_snapshot=True)
+        account_service = RefreshTestAccountService(
+            initial_snapshot=initial_snapshot,
+            refreshed_snapshot=refreshed_snapshot,
+        )
+        runtime_guard = RefreshTestRuntimeGuard(account_service)
+        runtime.account_service = account_service
+        runtime.health_service.account_provider = account_service
+        runtime.derivatives_live_guard_service = runtime_guard
+        runtime.health_service.runtime_guard_provider = runtime_guard
+        runtime.health_service.market_provider = Mock(
+            status=Mock(
+                return_value={
+                    "connected": True,
+                    "fresh": True,
+                    "ready": True,
+                    "blockers": [],
+                    "detail": "refresh_test_market",
+                    "last_update_ts": utc_now(),
+                }
+            )
+        )
+        runtime.health_service.execution_provider = Mock(
+            readiness=Mock(
+                return_value={
+                    "connected": True,
+                    "fresh": True,
+                    "ready": True,
+                    "blockers": [],
+                    "submit_blocked_reasons": [],
+                    "exchange_submit_allowed": True,
+                    "detail": "refresh_test_execution",
+                }
+            )
+        )
+        mode_snapshot = dict(runtime.mode_controller.snapshot())
+        runtime.mode_controller.snapshot = Mock(
+            return_value={
+                **mode_snapshot,
+                "exchange_submit_allowed": True,
+                "submit_blocked_reasons": [],
+                "execution_blocked": False,
+                "blocked_reason": None,
+            }
+        )
+        runtime.execution_adapter = Mock(
+            readiness=Mock(
+                return_value={
+                    "connected": True,
+                    "fresh": True,
+                    "ready": True,
+                    "blockers": [],
+                    "submit_blocked_reasons": [],
+                    "exchange_submit_allowed": True,
+                    "detail": "refresh_test_execution",
+                }
+            )
+        )
+        runtime.kill_switch.halt(reason="derivatives_live_risk_auto_halt")
+        runtime_guard.evaluate_now()
+
+        runtime.market_gateway.refresh_snapshot = AsyncMock(
+            side_effect=[RuntimeError("market_refresh_temporary"), object()]
+        )
+
+        app = self._app(runtime)
+        with TestClient(app) as client:
+            before = client.get("/system/blocker-control").json()
+            response = client.post(
+                "/system/blocker-actions/refresh-exchange-state",
+                json={
+                    "panel_version": before["panel_version"],
+                    "blocker": "derivatives_risk_snapshot_missing_auto_halt",
+                    "reason": "operator_refresh_exchange_state_for_risk_snapshot",
+                },
+            )
+            after = client.get("/system/blocker-control").json()
+
+        self.assertEqual(before["primary_blocker"]["blocker"], "derivatives_risk_snapshot_missing_auto_halt")
+        self.assertIn(
+            "refresh-exchange-state",
+            [item["action_id"] for item in before["primary_blocker"]["actions"]],
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["action_id"], "refresh-exchange-state")
+        self.assertEqual(response.json()["status"], "completed")
+        self.assertEqual(
+            response.json()["message"],
+            "已刷新交易所状态，风险快照阻断已解除，系统已恢复自动运行。",
+        )
+        self.assertNotIn(
+            "derivatives_risk_snapshot_missing_auto_halt",
+            [item["blocker"] for item in after["blockers"]],
+        )
+        self.assertEqual(runtime.market_gateway.refresh_snapshot.await_count, 2)
+        self.assertFalse(after["halted"])
+        self.assertEqual(account_service.refresh_calls, 2)
+
+        actions = [item.payload for item in runtime.event_store.by_topic(topics.OPERATOR_ACTIONS)]
+        refresh_action = next(item for item in reversed(actions) if item["action"] == "refresh_exchange_state")
+        self.assertEqual(refresh_action["details"]["attempts_executed"], 2)
+        self.assertTrue(refresh_action["details"]["market_refresh_completed"])
+        self.assertTrue(refresh_action["details"]["account_refresh_completed"])
+        self.assertTrue(refresh_action["details"]["blocker_cleared"])
+        self.assertEqual(refresh_action["details"]["auto_resume"]["status"], "resumed")
+        self.assertEqual(len(refresh_action["details"]["errors"]), 1)
+        self.assertEqual(refresh_action["details"]["errors"][0]["scope"], "market_data")
+
     async def test_provider_degraded_blocker_does_not_offer_manual_review_resolution_buttons(self) -> None:
         runtime = await self._runtime(
             ai_operating_mode="ai_primary",
@@ -2324,6 +3709,85 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(resumed.status_code, 200)
         self.assertFalse(resumed.json()["halted"])
         self.assertIn(resumed.json()["status"], {"resumed", "already_resumed"})
+
+    async def test_resume_is_blocked_when_trial_guard_is_breached(self) -> None:
+        runtime = await self._runtime()
+        runtime.kill_switch.halt(reason="trial_guard_threshold_breached")
+        runtime.trial_guard_service.last_snapshot = {
+            "enabled": True,
+            "status": "breached",
+            "summary": "试盘守护已触发自动停机。",
+        }
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            resumed = client.post("/system/resume", json={"reason": "operator_test_resume"})
+            blocker_control = client.get("/system/blocker-control")
+
+        self.assertEqual(resumed.status_code, 200)
+        self.assertEqual(resumed.json()["status"], "resume_blocked")
+        self.assertTrue(resumed.json()["halted"])
+        self.assertIn("trial_guard_threshold_breached", resumed.json()["recovery"]["resume_blocked_reasons"])
+        self.assertEqual(blocker_control.status_code, 200)
+        self.assertEqual(blocker_control.json()["primary_blocker"]["blocker"], "trial_guard_threshold_breached")
+        action_ids = [item["action_id"] for item in blocker_control.json()["primary_blocker"]["actions"]]
+        self.assertIn("open-strategy-view", action_ids)
+        self.assertIn("open-execution-view", action_ids)
+        self.assertIn("reset-trial-guard", action_ids)
+
+    async def test_operator_can_reset_trial_guard_and_then_resume(self) -> None:
+        runtime = await self._runtime(
+            trial_guard_enabled=True,
+            mode="guarded_live",
+            trial_guard_min_closed_fills=1,
+            trial_guard_lookback_fills=10,
+            trial_guard_max_consecutive_losses=1,
+        )
+        now = utc_now()
+        runtime.trial_guard_service.profitability_provider = lambda _limit: {
+            "summary": {
+                "closed_fill_count": 1,
+                "fee_to_notional_ratio": Decimal("0.0005"),
+            },
+            "recent_closed_fills": [
+                {"realized_pnl_delta": Decimal("-5"), "ingestion_timestamp": now - timedelta(minutes=5)},
+            ],
+        }
+        runtime.trial_guard_service.anomaly_provider = lambda _limit: {
+            "summary": {
+                "high_slippage_count": 0,
+                "slow_submit_to_fill_count": 0,
+            }
+        }
+        breached = runtime.trial_guard_service.evaluate_now()
+        self.assertEqual(breached["status"], "breached")
+        self.assertTrue(runtime.kill_switch.halted)
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            reset = client.post(
+                "/system/trial-review/action",
+                json={"action_type": "reset_trial_guard", "reason": "test_trial_guard_manual_reset"},
+            )
+            resumed = client.post("/system/resume", json={"reason": "operator_resume_after_trial_guard_reset"})
+            trial_guard = client.get("/system/trial-guard")
+            history = client.get("/reports/trial-review-history?limit=5").json()
+
+        self.assertEqual(reset.status_code, 200)
+        reset_payload = reset.json()
+        self.assertEqual(reset_payload["action"], "trial_guard_manual_reset")
+        self.assertEqual(reset_payload["details"]["trial_review_action_type"], "reset_trial_guard")
+        self.assertEqual(reset_payload["details"]["trial_guard_status_before"], "breached")
+        self.assertEqual(reset_payload["details"]["trial_guard_status_after"], "warming_up")
+        self.assertEqual(resumed.status_code, 200)
+        self.assertIn(resumed.json()["status"], {"resumed", "already_resumed"})
+        self.assertFalse(resumed.json()["halted"])
+        self.assertEqual(trial_guard.status_code, 200)
+        trial_guard_payload = trial_guard.json()
+        self.assertEqual(trial_guard_payload["status"], "warming_up")
+        self.assertTrue(trial_guard_payload["manual_reset_active"])
+        self.assertFalse(trial_guard_payload["hard_stop"]["active"])
+        self.assertTrue(any(item["selected_action"] == "reset_trial_guard" for item in history["actions"]))
 
     async def test_system_health_reports_reconciliation_staleness_consistently(self) -> None:
         runtime = await self._runtime()
@@ -2472,6 +3936,36 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(failed.status_code, 401)
         self.assertEqual(failed.json()["detail"], "operator_login_failed")
 
+    async def test_session_login_lockout_kicks_in_after_repeated_failures_and_records_audit(self) -> None:
+        runtime = await self._runtime(
+            operator_auth_enabled=True,
+            operator_session_secret="session-secret",
+            operator_users=[("admin", "correct-pass")],
+            operator_login_max_failed_attempts=2,
+            operator_login_lockout_seconds=300,
+        )
+        app = self._app(runtime)
+        with TestClient(app) as client:
+            first = client.post("/auth/login", json={"username": "admin", "password": "wrong-pass"})
+            second = client.post("/auth/login", json={"username": "admin", "password": "wrong-pass"})
+            locked = client.post("/auth/login", json={"username": "admin", "password": "correct-pass"})
+
+        self.assertEqual(first.status_code, 401)
+        self.assertEqual(second.status_code, 401)
+        self.assertEqual(locked.status_code, 429)
+        self.assertEqual(locked.json()["detail"], "operator_login_locked")
+
+        stored_admin = runtime.operator_repo.get_by_username("admin")
+        self.assertIsNotNone(stored_admin)
+        assert stored_admin is not None
+        self.assertEqual(stored_admin.failed_login_attempts, 2)
+        self.assertIsNotNone(stored_admin.locked_until)
+
+        actions = [item.payload for item in runtime.event_store.by_topic(topics.OPERATOR_ACTIONS)]
+        failed_actions = [item for item in actions if item["action"] == "login" and item["status"] == "login_failed"]
+        self.assertGreaterEqual(len(failed_actions), 3)
+        self.assertEqual(failed_actions[-1]["details"]["failure_code"], "operator_login_locked")
+
     async def test_disabled_database_operator_account_cannot_log_in(self) -> None:
         runtime = await self._runtime(
             operator_auth_enabled=True,
@@ -2541,61 +4035,6 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(update_action["details"]["target_username"], "viewer2")
         self.assertEqual(delete_action["details"]["target_username"], "viewer2")
 
-    async def test_runtime_profile_routes_report_env_switch_mode(self) -> None:
-        runtime = await self._runtime(
-            operator_auth_enabled=True,
-            operator_session_secret="session-secret",
-            operator_users=[("admin", "admin-pass")],
-        )
-        app = self._app(runtime)
-
-        with TestClient(app) as client:
-            login = client.post("/auth/login", json={"username": "admin", "password": "admin-pass"})
-            listing = client.get("/runtime-profiles")
-            summary = client.get("/runtime-profiles/summary")
-            created = client.post("/runtime-profiles/drafts", json={"profile_label": "derivatives primary"})
-
-        self.assertEqual(login.status_code, 200)
-        self.assertEqual(listing.status_code, 200)
-        self.assertEqual(summary.status_code, 200)
-        self.assertEqual(listing.json()["profile_source"], "env_fallback")
-        self.assertFalse(listing.json()["management_enabled"])
-        self.assertEqual(
-            set(summary.json().keys()),
-            {"profile_source", "control_plane_status", "current_runtime_payload"},
-        )
-        self.assertEqual(created.status_code, 409)
-        self.assertEqual(created.json()["detail"], "runtime_profile_control_disabled")
-
-    async def test_runtime_profile_stage_routes_are_disabled_in_env_switch_mode(self) -> None:
-        runtime = await self._runtime(
-            operator_auth_enabled=True,
-            operator_session_secret="session-secret",
-            operator_users=[("admin", "admin-pass")],
-        )
-        runtime.execution_repo.save_order_state(
-            OrderState(
-                decision_id="decision_runtime_profile",
-                intent_id="intent_runtime_profile",
-                symbol="BTC-USDT",
-                client_order_id="order_runtime_profile",
-                status="SUBMITTED",
-                requested_qty=0.001,
-                remaining_qty=0.001,
-            )
-        )
-        app = self._app(runtime)
-
-        with TestClient(app) as client:
-            client.post("/auth/login", json={"username": "admin", "password": "admin-pass"})
-            canceled = client.post("/runtime-profiles/pending/cancel")
-            restart = client.post("/runtime-profiles/restart")
-
-        self.assertEqual(canceled.status_code, 409)
-        self.assertEqual(canceled.json()["detail"], "runtime_profile_control_disabled")
-        self.assertEqual(restart.status_code, 409)
-        self.assertEqual(restart.json()["detail"], "runtime_profile_control_disabled")
-
     async def test_strategy_profile_routes_seed_snapshot_and_generate_recommendation(self) -> None:
         runtime = await self._runtime(
             operator_auth_enabled=True,
@@ -2649,6 +4088,207 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertIn("history", activation_history.json())
         return
 
+    async def test_derivatives_strategy_profile_snapshot_reflects_relaxed_directional_baseline(self) -> None:
+        runtime = await self._runtime(
+            operator_users=[("admin", "admin-pass")],
+            operator_auth_enabled=True,
+            operator_session_secret="session-secret",
+            trading_product_type="derivatives",
+            margin_mode="cross",
+            default_symbol="BTC-USDT-SWAP",
+            allowed_symbols=("BTC-USDT-SWAP",),
+            strategy_short_bias_enabled=True,
+            strategy_dynamic_leverage_enabled=True,
+            strategy_entry_allowed_regimes=("trend", "breakout", "uncertain"),
+            strategy_short_entry_allowed_regimes=("trend", "breakout", "uncertain"),
+            strategy_scale_in_min_signal_edge_bps=16.0,
+            strategy_scale_in_alpha_min=0.22,
+            strategy_scale_in_confidence_min=0.68,
+            strategy_reversal_min_signal_edge_bps=20.0,
+            strategy_reversal_alpha_min=0.28,
+            strategy_reversal_confidence_min=0.72,
+            strategy_max_fee_drag_ratio=0.48,
+            strategy_max_churn_ratio=0.42,
+            strategy_low_edge_threshold_bps=4.0,
+            strategy_low_edge_streak_limit=4,
+            strategy_low_edge_cooldown_seconds=900.0,
+        )
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            login = client.post("/auth/login", json={"username": "admin", "password": "admin-pass"})
+            snapshot = client.get("/strategy-profiles")
+
+        self.assertEqual(login.status_code, 200)
+        self.assertEqual(snapshot.status_code, 200)
+        payload = snapshot.json()
+        self.assertEqual(payload["active_revision"]["profile_id"], "trend_normal")
+        summary = payload["active_revision"]["payload_summary"]
+        self.assertEqual(summary["strategy_entry_allowed_regimes"], ["trend", "breakout", "uncertain"])
+        self.assertEqual(summary["strategy_short_entry_allowed_regimes"], ["trend", "breakout", "uncertain"])
+        self.assertEqual(summary["strategy_scale_in_min_signal_edge_bps"], 16.0)
+        self.assertEqual(summary["strategy_scale_in_alpha_min"], 0.22)
+        self.assertEqual(summary["strategy_scale_in_confidence_min"], 0.68)
+        self.assertEqual(summary["strategy_reversal_min_signal_edge_bps"], 20.0)
+        self.assertEqual(summary["strategy_reversal_alpha_min"], 0.28)
+        self.assertEqual(summary["strategy_reversal_confidence_min"], 0.72)
+        self.assertEqual(summary["strategy_max_fee_drag_ratio"], 0.48)
+        self.assertEqual(summary["strategy_max_churn_ratio"], 0.42)
+        self.assertEqual(summary["strategy_low_edge_threshold_bps"], 4.0)
+        self.assertEqual(summary["strategy_low_edge_streak_limit"], 4)
+        self.assertEqual(summary["strategy_low_edge_cooldown_seconds"], 900.0)
+
+    async def test_managed_derivatives_profile_snapshot_reflects_relaxed_directional_baseline(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        managed_values = load_managed_profile_values("derivatives", project_root=repo_root)
+        managed_values.update(
+            {
+                "mode": "paper_live",
+                "market_data_backend": "demo",
+                "execution_backend": "paper",
+                "account_backend": "disabled",
+                "account_read_enabled": False,
+                "storage_mode": "memory",
+                "event_persistence_mode": "strict",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+            }
+        )
+        runtime = await self._runtime(
+            operator_users=[("admin", "admin-pass")],
+            operator_session_secret="session-secret",
+            **managed_values,
+        )
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            login = client.post("/auth/login", json={"username": "admin", "password": "admin-pass"})
+            snapshot = client.get("/strategy-profiles")
+
+        self.assertEqual(login.status_code, 200)
+        self.assertEqual(snapshot.status_code, 200)
+        payload = snapshot.json()
+        self.assertEqual(payload["active_revision"]["profile_id"], "trend_normal")
+        summary = payload["active_revision"]["payload_summary"]
+        self.assertEqual(summary["strategy_entry_allowed_regimes"], ["trend", "breakout", "uncertain"])
+        self.assertEqual(summary["strategy_short_entry_allowed_regimes"], ["trend", "breakout", "uncertain"])
+        self.assertEqual(summary["strategy_scale_in_min_signal_edge_bps"], 16.0)
+        self.assertEqual(summary["strategy_scale_in_alpha_min"], 0.22)
+        self.assertEqual(summary["strategy_scale_in_confidence_min"], 0.68)
+        self.assertEqual(summary["strategy_reversal_min_signal_edge_bps"], 20.0)
+        self.assertEqual(summary["strategy_reversal_alpha_min"], 0.28)
+        self.assertEqual(summary["strategy_reversal_confidence_min"], 0.72)
+        self.assertEqual(summary["strategy_max_fee_drag_ratio"], 0.48)
+        self.assertEqual(summary["strategy_max_churn_ratio"], 0.42)
+        self.assertEqual(summary["strategy_low_edge_threshold_bps"], 4.0)
+        self.assertEqual(summary["strategy_low_edge_streak_limit"], 4)
+        self.assertEqual(summary["strategy_low_edge_cooldown_seconds"], 900.0)
+
+    async def test_spot_operator_snapshots_hide_derivatives_only_runtime_and_profile_fields(self) -> None:
+        runtime = await self._runtime(
+            operator_users=[("admin", "admin-pass")],
+            operator_auth_enabled=True,
+            operator_session_secret="session-secret",
+            trading_product_type="spot",
+            margin_mode="cash",
+            default_symbol="BTC-USDT",
+            allowed_symbols=("BTC-USDT",),
+            strategy_entry_allowed_regimes=("trend", "breakout"),
+            strategy_entry_min_signal_edge_bps=14.0,
+            strategy_entry_alpha_min=0.18,
+            strategy_entry_confidence_min=0.63,
+            strategy_scale_in_min_signal_edge_bps=18.0,
+            strategy_scale_in_alpha_min=0.24,
+            strategy_scale_in_confidence_min=0.71,
+            strategy_reversal_min_signal_edge_bps=24.0,
+            strategy_reversal_alpha_min=0.34,
+            strategy_reversal_confidence_min=0.79,
+            strategy_short_entry_allowed_regimes=("uncertain",),
+            strategy_short_entry_min_signal_edge_bps=11.0,
+            strategy_short_entry_alpha_min=0.15,
+            strategy_short_entry_confidence_min=0.55,
+            strategy_short_scale_in_min_signal_edge_bps=16.0,
+            strategy_short_scale_in_alpha_min=0.20,
+            strategy_short_scale_in_confidence_min=0.64,
+            strategy_short_reversal_min_signal_edge_bps=14.0,
+            strategy_short_reversal_alpha_min=0.18,
+            strategy_short_reversal_confidence_min=0.55,
+        )
+        legacy_revision = runtime.strategy_profile_repo.list_revisions(
+            product_type=runtime.settings.trading_product_type,
+            margin_mode=runtime.settings.margin_mode,
+        )[0]
+        legacy_payload = legacy_revision.payload.model_copy(
+            update={
+                "strategy_entry_alpha_min": 0.16,
+                "strategy_short_entry_alpha_min": 0.32,
+                "strategy_scale_in_alpha_min": 0.20,
+                "strategy_short_scale_in_alpha_min": 0.36,
+                "strategy_reversal_alpha_min": 0.26,
+                "strategy_short_reversal_alpha_min": 0.42,
+            }
+        )
+        runtime.strategy_profile_repo.save_revision(
+            StrategyProfileRevision.model_validate(
+                {
+                    **legacy_revision.model_dump(mode="python"),
+                    "revision_id": "strp_rev_legacy_spot_uncoupled",
+                    "profile_id": "legacy_spot_uncoupled",
+                    "profile_label": "Legacy Spot Uncoupled",
+                    "status": "draft",
+                    "payload": legacy_payload,
+                    "description": "legacy spot profile with stale short-side thresholds",
+                    "created_reason": "test",
+                    "updated_at": utc_now(),
+                }
+            )
+        )
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            login = client.post("/auth/login", json={"username": "admin", "password": "admin-pass"})
+            strategy_snapshot = client.get("/strategy-profiles")
+            ai_config_summary = client.get("/ai-config/summary")
+
+        self.assertEqual(login.status_code, 200)
+        self.assertEqual(strategy_snapshot.status_code, 200)
+        self.assertEqual(ai_config_summary.status_code, 200)
+
+        strategy_payload = strategy_snapshot.json()
+        summary = strategy_payload["active_revision"]["payload_summary"]
+        self.assertEqual(strategy_payload["active_revision"]["profile_id"], "trend_normal")
+        self.assertEqual(summary["strategy_entry_allowed_regimes"], ["trend", "breakout"])
+        self.assertEqual(summary["strategy_entry_min_signal_edge_bps"], 14.0)
+        self.assertEqual(summary["strategy_scale_in_min_signal_edge_bps"], 18.0)
+        self.assertEqual(summary["strategy_reversal_confidence_min"], 0.79)
+        self.assertNotIn("strategy_short_entry_allowed_regimes", summary)
+        self.assertNotIn("strategy_short_entry_min_signal_edge_bps", summary)
+        self.assertNotIn("strategy_short_reversal_confidence_min", summary)
+        legacy_profile = next(
+            item
+            for item in strategy_payload["profile_space"]["registered_profiles"]
+            if item["profile_id"] == "legacy_spot_uncoupled"
+        )
+        self.assertEqual(legacy_profile["axes"]["entry_threshold"], "relaxed")
+        self.assertEqual(legacy_profile["axes"]["scale_in_threshold"], "relaxed")
+        self.assertEqual(legacy_profile["axes"]["reversal_threshold"], "relaxed")
+        comparison_row = next(
+            item
+            for item in strategy_payload["comparison_report"]["rows"]
+            if item["profile_id"] == "legacy_spot_uncoupled"
+        )
+        self.assertEqual(comparison_row["axes"]["entry_threshold"], "relaxed")
+        self.assertEqual(comparison_row["axes"]["scale_in_threshold"], "relaxed")
+        self.assertEqual(comparison_row["axes"]["reversal_threshold"], "relaxed")
+
+        runtime_payload = ai_config_summary.json()["runtime_profile"]["current_runtime_payload"]
+        self.assertEqual(runtime_payload["trading_product_type"], "spot")
+        self.assertEqual(runtime_payload["margin_mode"], "cash")
+        self.assertNotIn("strategy_short_bias_enabled", runtime_payload)
+        self.assertNotIn("strategy_dynamic_leverage_enabled", runtime_payload)
+        self.assertNotIn("max_target_leverage", runtime_payload)
+        self.assertNotIn("default_target_leverage", runtime_payload)
+
     async def test_ai_config_summary_route_returns_only_ai_config_page_fields(self) -> None:
         runtime = await self._runtime(
             operator_auth_enabled=True,
@@ -2694,7 +4334,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         )
         return
 
-    async def test_admin_can_manually_override_ai_operating_mode_with_freeze_and_restore_auto(self) -> None:
+    async def test_admin_can_select_ai_operating_mode_and_switch_back_to_configured_mode(self) -> None:
         runtime = await self._runtime(
             operator_auth_enabled=True,
             operator_session_secret="session-secret",
@@ -2705,35 +4345,35 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
 
         with TestClient(app) as client:
             login = client.post("/auth/login", json={"username": "admin", "password": "admin-pass"})
-            override = client.post(
-                "/ai/operating-mode/override",
-                json={"mode": "baseline_only", "reason": "test_manual_override_ai_operating_mode"},
+            select_manual = client.post(
+                "/ai/operating-mode/select",
+                json={"mode": "baseline_only", "reason": "test_manual_select_ai_operating_mode"},
             )
-            runtime_after_override = client.get("/ai/runtime")
-            restore = client.post(
-                "/ai/operating-mode/restore-auto",
-                json={"reason": "test_restore_auto_ai_operating_mode"},
+            runtime_after_manual = client.get("/ai/runtime")
+            select_configured = client.post(
+                "/ai/operating-mode/select",
+                json={"mode": "ai_decision_maker", "reason": "test_select_configured_ai_operating_mode"},
             )
-            runtime_after_restore = client.get("/ai/runtime")
+            runtime_after_configured = client.get("/ai/runtime")
 
         self.assertEqual(login.status_code, 200)
-        self.assertEqual(override.status_code, 200)
-        self.assertEqual(runtime_after_override.status_code, 200)
-        override_payload = override.json()
-        runtime_payload = runtime_after_override.json()
-        self.assertEqual(override_payload["status"], "completed")
+        self.assertEqual(select_manual.status_code, 200)
+        self.assertEqual(runtime_after_manual.status_code, 200)
+        select_manual_payload = select_manual.json()
+        runtime_payload = runtime_after_manual.json()
+        self.assertEqual(select_manual_payload["status"], "completed")
         self.assertEqual(runtime_payload["manual_override_mode"], "baseline_only")
         self.assertTrue(runtime_payload["manual_override_active"])
-        self.assertIsNotNone(runtime_payload["manual_override_freeze_until"])
         self.assertEqual(runtime_payload["effective_operating_mode"], "baseline_only")
+        self.assertEqual(runtime_payload["operating_mode_source"], "manual_selection")
 
-        self.assertEqual(restore.status_code, 200)
-        self.assertEqual(runtime_after_restore.status_code, 200)
-        restored_payload = runtime_after_restore.json()
+        self.assertEqual(select_configured.status_code, 200)
+        self.assertEqual(runtime_after_configured.status_code, 200)
+        restored_payload = runtime_after_configured.json()
         self.assertFalse(restored_payload["manual_override_active"])
         self.assertIsNone(restored_payload["manual_override_mode"])
-        self.assertIsNone(restored_payload["manual_override_freeze_until"])
         self.assertEqual(restored_payload["configured_operating_mode"], "ai_decision_maker_with_profile_control")
+        self.assertEqual(restored_payload["operating_mode_source"], "configured")
         self.assertIn(
             restored_payload["effective_operating_mode"],
             {"ai_decision_maker_with_profile_control", "baseline_only"},
@@ -3229,7 +4869,6 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
                 },
             )
             fetched = client.get("/strategy-profiles/auto-rollback-policy")
-            snapshot = client.get("/strategy-profiles")
 
         self.assertEqual(updated.status_code, 200)
         self.assertEqual(fetched.status_code, 200)
@@ -3290,7 +4929,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             operator_auth_enabled=True,
             operator_session_secret="session-secret",
             operator_users=[("admin", "admin-pass")],
-            strategy_profile_activation_policy_enabled=False,
+            strategy_profile_auto_control_enabled=False,
         )
         app = self._app(runtime)
 
@@ -3312,7 +4951,6 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
                 },
             )
             fetched = client.get("/strategy-profiles/activation-policy")
-            snapshot = client.get("/strategy-profiles")
 
         self.assertEqual(updated.status_code, 200)
         self.assertEqual(fetched.status_code, 200)
@@ -3353,7 +4991,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             operator_auth_enabled=True,
             operator_session_secret="session-secret",
             operator_users=[("admin", "admin-pass")],
-            strategy_profile_activation_policy_enabled=True,
+            strategy_profile_auto_control_enabled=True,
         )
         conservative = runtime.strategy_profile_repo.list_revisions(
             product_type=runtime.settings.trading_product_type,
@@ -3417,7 +5055,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             operator_auth_enabled=True,
             operator_session_secret="session-secret",
             operator_users=[("admin", "admin-pass")],
-            strategy_profile_activation_policy_enabled=True,
+            strategy_profile_auto_control_enabled=True,
         )
         conservative = runtime.strategy_profile_repo.list_revisions(
             product_type=runtime.settings.trading_product_type,
@@ -4074,7 +5712,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(restore_action["details"]["active_profile_id"], "trend_strict")
         self.assertFalse(restore_action["details"]["frozen_by_admin_override"])
 
-    async def test_restore_strategy_profile_auto_is_rejected_when_auto_control_is_disabled(self) -> None:
+    async def test_restore_strategy_profile_auto_can_enable_auto_even_when_config_default_is_manual(self) -> None:
         runtime = await self._runtime(
             operator_auth_enabled=True,
             operator_session_secret="session-secret",
@@ -4090,9 +5728,12 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
                 "/strategy-profiles/restore-auto",
                 json={"reason": "manual_restore_auto_strategy_profile_control"},
             )
+            snapshot = client.get("/strategy-profiles")
 
-        self.assertEqual(restored.status_code, 409)
-        self.assertEqual(restored.json()["detail"], "strategy_profile_auto_control_not_enabled")
+        self.assertEqual(restored.status_code, 200)
+        self.assertEqual(restored.json()["status"], "auto_restored")
+        self.assertEqual(snapshot.status_code, 200)
+        self.assertTrue(snapshot.json()["activation"]["auto_switch_enabled"])
 
     async def test_strategy_profile_activation_is_blocked_when_open_orders_exist(self) -> None:
         runtime = await self._runtime(
@@ -4900,9 +6541,13 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             recovery_after = client.get("/system/recovery").json()
 
         self.assertIn("recovery_state", recovery_before["recovery"])
-        self.assertEqual(rebaseline["status"], "rebaseline_completed")
-        self.assertEqual(recovery_after["recovery"]["recovery_state"], "rebaseline_completed")
+        self.assertEqual(rebaseline["status"], "normal_operation")
+        self.assertEqual(rebaseline["rebaseline_status"], "rebaseline_completed")
+        self.assertIn("auto_resume", rebaseline)
+        self.assertIsNotNone(rebaseline["auto_resume"])
+        self.assertEqual(recovery_after["recovery"]["recovery_state"], "normal_operation")
         self.assertTrue(recovery_after["recovery"]["resume_eligible"])
+        self.assertTrue(recovery_after["recovery"]["safe_to_trade"])
         self.assertIsNotNone(recovery_after["recovery"]["last_rebaseline_action"])
 
     async def test_recovery_view_uses_latest_account_baseline_for_current_scope(self) -> None:
@@ -5040,6 +6685,101 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["detail"], "rebaseline_not_supported_for_runtime_profile")
+
+    async def test_positions_endpoint_exposes_dual_leg_instrument_state_for_derivatives_snapshot(self) -> None:
+        runtime = await self._runtime(
+            trading_product_type="derivatives",
+            margin_mode="cross",
+            default_symbol="BTC-USDT-SWAP",
+            allowed_symbols=("BTC-USDT-SWAP",),
+        )
+        runtime.portfolio_repo.save_snapshot(
+            PortfolioSnapshot(
+                snapshot_ts=utc_now(),
+                balances={"USDT": 75_000.0},
+                positions=[
+                    Position(
+                        symbol="BTC-USDT-SWAP",
+                        position_key="BTC-USDT-SWAP:long",
+                        position_qty=Decimal("0.02"),
+                        position_notional=Decimal("1400"),
+                        avg_entry_price=Decimal("70000"),
+                        unrealized_pnl=Decimal("15"),
+                        product_type="derivatives",
+                        margin_mode="cross",
+                        position_mode="long_short_mode",
+                        pos_side="long",
+                    ),
+                    Position(
+                        symbol="BTC-USDT-SWAP",
+                        position_key="BTC-USDT-SWAP:short",
+                        position_qty=Decimal("-0.01"),
+                        position_notional=Decimal("-700"),
+                        avg_entry_price=Decimal("70500"),
+                        unrealized_pnl=Decimal("-3"),
+                        product_type="derivatives",
+                        margin_mode="cross",
+                        position_mode="long_short_mode",
+                        pos_side="short",
+                    ),
+                ],
+                cost_basis={},
+                realized_pnl=0.0,
+                unrealized_pnl=12.0,
+                total_equity=75_012.0,
+                gross_exposure=2100.0,
+                net_exposure=700.0,
+                risk_budget_usage={},
+                product_type="derivatives",
+                margin_mode="cross",
+            )
+        )
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            response = client.get("/positions")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertIn("local_instrument_positions", payload)
+        self.assertIn("exchange_instrument_positions", payload)
+        self.assertEqual(payload["local_instrument_positions"], payload["local_net_positions"])
+        row = payload["local_instrument_positions"][0]
+        self.assertTrue(row["dual_legged"])
+        self.assertEqual(Decimal(str(row["net_position_qty"])), Decimal("0.01"))
+        self.assertEqual(Decimal(str(row["gross_position_qty"])), Decimal("0.03"))
+        self.assertEqual(Decimal(str(row["long_position_qty"])), Decimal("0.02"))
+        self.assertEqual(Decimal(str(row["short_position_qty"])), Decimal("0.01"))
+        self.assertEqual(Decimal(str(row["net_position_notional"])), Decimal("700"))
+        self.assertEqual(Decimal(str(row["gross_position_notional"])), Decimal("2100"))
+        self.assertEqual(len(row["legs"]), 2)
+
+    @staticmethod
+    def _dashboard_bundle_url(
+        *,
+        view: str,
+        panels: list[str],
+        recent_decisions: int = 8,
+        recent_orders: int = 8,
+        recent_fills: int = 8,
+        recent_ai_assessments: int = 8,
+        recent_ai_shadow_decisions: int = 8,
+        recent_ai_shadow_evaluations: int = 8,
+    ) -> str:
+        query = urlencode(
+            [
+                ("view", view),
+                ("recentDecisions", str(recent_decisions)),
+                ("recentOrders", str(recent_orders)),
+                ("recentFills", str(recent_fills)),
+                ("recentAIAssessments", str(recent_ai_assessments)),
+                ("recentAIShadowDecisions", str(recent_ai_shadow_decisions)),
+                ("recentAIShadowEvaluations", str(recent_ai_shadow_evaluations)),
+                *[("panel", panel) for panel in panels],
+            ],
+            doseq=True,
+        )
+        return f"/dashboard/bundle?{query}"
 
     async def _runtime(self, operator_users: list[tuple[str, str]] | None = None, **overrides):
         settings = AATSSettings.model_validate(

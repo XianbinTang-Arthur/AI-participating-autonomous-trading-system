@@ -21,9 +21,15 @@ export function renderRiskSections(data) {
   const blockers = blockerControl.blockers || data.blockers?.blockers || [];
   const primaryBlocker = blockerControl.primary_blocker || blockers[0] || null;
   const secondaryBlockers = blockerControl.secondary_blockers || [];
+  const primaryTask = blockerControl.primary_task || null;
   const reconciliation = data.reconciliationLatest?.reconciliation || null;
   const mismatchSummary = data.reconciliationLatest?.mismatch_summary || {};
+  const legMismatchSummary = mismatchSummary.leg_mismatch_summary || {};
   const billsSummary = data.reconciliationLatest?.exchange_bills_summary || {};
+  const positionsView = data.positions || {};
+  const localInstrumentPositions = Array.isArray(positionsView.local_instrument_positions)
+    ? positionsView.local_instrument_positions
+    : [];
   const recovery = data.systemRecovery?.recovery || {};
   const replay = data.replayStatus || {};
   const metrics = data.metrics || {};
@@ -34,6 +40,9 @@ export function renderRiskSections(data) {
   const marginBuffer = account.margin_buffer_overview || data.runtime?.margin_buffer_overview || {};
   const guardedLivePreflight = data.guardedLivePreflight || data.runtime?.guarded_live_preflight || {};
   const guardedLiveRunPacket = data.guardedLiveRunPacket || data.runtime?.guarded_live_run_packet_summary || {};
+  const positionModeContract = account.position_mode_contract || {};
+  const derivativesLiveGuard = account.derivatives_live_guard || {};
+  const currentDerivativesExposure = derivativesLiveGuard.current_derivatives_exposure || {};
 
   return {
     riskHero: primaryStatusPanel({
@@ -44,11 +53,13 @@ export function renderRiskSections(data) {
         recovery,
         blockers: primaryBlocker ? [primaryBlocker] : blockers,
         reconciliation,
-        recoveryReasonText: blockerControl.next_step_summary || uiHints.recoveryReasonsText,
+        recoveryReasonText: primaryTask?.summary || blockerControl.next_step_summary || uiHints.recoveryReasonsText,
         readyCopy: "当前没有硬阻断，可继续关注账户、对账和恢复状态。",
       }),
       tone: riskTone({ primaryBlocker, blockers, reconciliation, recovery, health }),
-      actions: reconciliation?.reconciliation_id ? actionButton("查看最新对账", "inspect-reconciliation", reconciliation.reconciliation_id) : "",
+      actions: shouldShowInspectReconciliation({ reconciliation, recovery })
+        ? actionButton("查看最新对账", "inspect-reconciliation", reconciliation.reconciliation_id, "ghost")
+        : "",
       pills: [
         pill(`运行状态 ${readableState(health.runtime_state || health.overall_status || "unknown")}`, toneForRuntimeState(health.runtime_state || health.overall_status)),
         pill(`自动交易 ${tradingStatusLabel(recovery)}`, recovery.safe_to_trade ? "positive" : recovery.resume_eligible ? "warning" : "danger"),
@@ -58,7 +69,9 @@ export function renderRiskSections(data) {
         {
           label: "当前阻断数",
           value: formatNumber(blockers.length, 0),
-          meta: primaryBlocker ? textOrFallback(primaryBlocker.title, localizeError(primaryBlocker.blocker)) : "当前没有阻断项",
+          meta: primaryTask
+            ? textOrFallback(primaryTask.title, "当前没有额外主任务")
+            : noPrimaryBlockerSummary({ recovery, reconciliation }).meta,
           tone: blockers.length > 0 ? "danger" : "positive",
         },
         {
@@ -72,7 +85,7 @@ export function renderRiskSections(data) {
           value: recoveryStatusLabel(recovery),
           meta: recovery.halted && recovery.resume_eligible
             ? "系统已手动暂停，确认无误后可直接恢复自动运行。"
-            : blockerControl.next_step_summary || uiHints.recoveryReasonsText || listText(recovery.resume_blocked_reasons, "当前没有额外恢复说明"),
+            : primaryTask?.summary || blockerControl.next_step_summary || uiHints.recoveryReasonsText || listText(recovery.resume_blocked_reasons, "当前没有额外恢复说明"),
           tone: recovery.safe_to_trade ? "positive" : recovery.resume_eligible ? "warning" : recovery.review_required ? "warning" : "danger",
         },
         {
@@ -84,10 +97,10 @@ export function renderRiskSections(data) {
       ],
     }),
     riskActions: surfaceCard({
-      title: "第一优先级阻断处置",
-      kicker: "阻断控制面板",
-      copy: blockerControl.next_step_summary || reconciliationActionCopy({ reconciliation, recovery }),
-      content: renderPrimaryBlockerActionPanel({ primaryBlocker, secondaryBlockers, recovery, uiHints }),
+      title: "你现在先做什么",
+      kicker: "当前主任务",
+      copy: primaryTask?.summary || blockerControl.next_step_summary || reconciliationActionCopy({ reconciliation, recovery }),
+      content: renderPrimaryTaskPanel({ primaryTask, recovery, reconciliation, uiHints }),
     }),
     riskEvidence: surfaceCard({
       title: "状态依据",
@@ -95,10 +108,10 @@ export function renderRiskSections(data) {
       copy: "把最影响自动交易资格的三条证据放在同一处，减少来回跳读。",
       content: summaryStrip([
         {
-          label: "首要阻断",
-          value: primaryBlocker ? textOrFallback(primaryBlocker.title, localizeError(primaryBlocker.blocker)) : "当前没有阻断项",
-          meta: primaryBlocker ? textOrFallback(primaryBlocker.recommended_next_step, localizeError(primaryBlocker.blocker)) : "当前暂无需要立刻处理的阻断项",
-          tone: primaryBlocker ? "danger" : "positive",
+          label: "当前主任务",
+          value: primaryTask ? textOrFallback(primaryTask.title, "当前没有额外主任务") : "当前没有额外主任务",
+          meta: primaryTask ? textOrFallback(primaryTask.summary, "当前没有额外处理建议") : "当前暂无需要立刻处理的动作",
+          tone: primaryTask && primaryTask.kind === "resolve_blocker" ? "danger" : primaryTask ? "warning" : "positive",
         },
         {
           label: "最新对账",
@@ -166,6 +179,72 @@ export function renderRiskSections(data) {
             ? `${textOrFallback(marginBuffer.liquidation.closest_position.symbol, "未知合约")} / ${textOrFallback(marginBuffer.liquidation.closest_position.pos_side, "未知方向")}，强平价 ${formatNumber(marginBuffer.liquidation.closest_position.liquidation_price)}`
             : "当前没有可计算强平距离的仓位",
           tone: marginBufferTone(marginBuffer.status),
+        },
+      ]),
+    }),
+    riskPositionMode: surfaceCard({
+      title: "持仓模式契约",
+      kicker: "对冲模式",
+      copy: "这里明确说明本地合约运行线要求的仓位模式，以及交易所当前真实返回的 posMode。",
+      content: summaryStrip([
+        {
+          label: "本地要求",
+          value: derivativesPositionModeLabel(positionModeContract.configured_derivatives_position_mode),
+          meta: requiredExchangeModeMeta(positionModeContract),
+          tone: positionModeContract.exchange_position_mode_matches_configured === false ? "danger" : "info",
+        },
+        {
+          label: "交易所当前模式",
+          value: exchangePositionModeLabel(positionModeContract.exchange_position_mode),
+          meta: positionModeContract.position_mode_match_required
+            ? `强匹配 ${booleanWord(positionModeContract.exchange_position_mode_matches_configured)}`
+            : "当前没有强制要求和交易所模式一致",
+          tone: positionModeContract.exchange_position_mode_matches_configured === false ? "danger" : "positive",
+        },
+        {
+          label: "本地双腿持仓",
+          value: Number(localInstrumentPositions.filter((item) => item.dual_legged).length || 0) > 0
+            ? `${formatNumber(localInstrumentPositions.filter((item) => item.dual_legged).length || 0, 0)} 个标的`
+            : "当前没有双腿并存标的",
+          meta: localInstrumentLegMeta(localInstrumentPositions),
+          tone: Number(localInstrumentPositions.filter((item) => item.dual_legged).length || 0) > 0 ? "info" : "neutral",
+        },
+        {
+          label: "恢复上下文",
+          value: recovery.safe_to_trade ? "当前没有模式阻断" : "恢复资格仍受限",
+          meta: Number(legMismatchSummary.total_count || 0) > 0 ? "恢复判断会继续结合腿级异常一起评估。" : "当前没有额外腿级异常进入恢复判断。",
+          tone: recovery.safe_to_trade ? "positive" : "warning",
+        },
+      ]),
+    }),
+    riskExposure: surfaceCard({
+      title: "合约敞口",
+      kicker: "long / short / gross / net",
+      copy: "对冲模式下不能只看净敞口，这里同时展开 long、short、gross、net 四口径。",
+      content: summaryStrip([
+        {
+          label: "多头名义价值",
+          value: formatNumber(currentDerivativesExposure.long_notional),
+          meta: `多头杠杆 ${formatNumber(currentDerivativesExposure.long_leverage, 2)}`,
+          tone: Number(currentDerivativesExposure.long_notional || 0) > 0 ? "info" : "neutral",
+        },
+        {
+          label: "空头名义价值",
+          value: formatNumber(currentDerivativesExposure.short_notional),
+          meta: `空头杠杆 ${formatNumber(currentDerivativesExposure.short_leverage, 2)}`,
+          tone: Number(currentDerivativesExposure.short_notional || 0) > 0 ? "info" : "neutral",
+        },
+        {
+          label: "毛敞口",
+          value: formatNumber(currentDerivativesExposure.gross_notional),
+          meta: `毛杠杆 ${formatNumber(currentDerivativesExposure.gross_leverage, 2)}`,
+          tone: Number(currentDerivativesExposure.gross_notional || 0) > 0 ? "warning" : "neutral",
+        },
+        {
+          label: "净敞口",
+          value: formatNumber(currentDerivativesExposure.net_notional),
+          meta: `净杠杆 ${formatNumber(currentDerivativesExposure.net_leverage, 2)}`,
+          tone: Number(currentDerivativesExposure.net_notional || 0) === 0 ? "neutral" : "info",
         },
       ]),
     }),
@@ -323,7 +402,22 @@ export function renderRiskSections(data) {
       content: summaryStrip([
         { label: "对账级别", value: readableState(reconciliation?.severity || "unknown"), meta: middleEllipsis(reconciliation?.reconciliation_id, 10, 6, "当前暂无对账编号"), tone: reconciliation?.halt_required ? "danger" : toneForReconciliationSeverity(reconciliation?.severity) },
         { label: "是否要求停机", value: booleanWord(reconciliation?.halt_required), meta: reconciliation?.exchange_comparison_enabled ? "已比对交易所" : "仅校验本地记录", tone: reconciliation?.halt_required ? "danger" : "positive" },
-        { label: "差异原因", value: listText(mismatchSummary.mismatch_reasons, "当前没有额外差异原因"), meta: listText(mismatchSummary.mismatch_categories, "当前没有额外差异分类"), tone: mismatchSummary.mismatch_reasons?.length ? "warning" : "positive" },
+        {
+          label: "差异分层",
+          value: mismatchSummary.finding_summary
+            ? `${formatNumber(mismatchSummary.finding_summary.structural_count || 0, 0)} / ${formatNumber(mismatchSummary.finding_summary.financial_count || 0, 0)} / ${formatNumber(mismatchSummary.finding_summary.observational_count || 0, 0)}`
+            : "当前没有差异条目",
+          meta: mismatchSummary.observational_only
+            ? "当前只有动态观察值漂移，不需要立即人工确认。"
+            : "顺序为：结构性 / 财务 / 观察值。",
+          tone: mismatchSummary.observational_only ? "info" : mismatchSummary.mismatch_reasons?.length ? "warning" : "positive",
+        },
+        {
+          label: "持仓腿异常",
+          value: Number(legMismatchSummary.total_count || 0) > 0 ? `${formatNumber(legMismatchSummary.total_count || 0, 0)} 条` : "当前没有腿级异常",
+          meta: legMismatchSummaryMeta(legMismatchSummary),
+          tone: legMismatchTone(legMismatchSummary),
+        },
         { label: "建议动作", value: mismatchSummary.recommended_operator_action ? localizeError(mismatchSummary.recommended_operator_action) : "当前没有额外建议动作", meta: listText(mismatchSummary.safety_impacts, "当前没有额外安全影响说明"), tone: mismatchSummary.recommended_operator_action ? "info" : "neutral" },
       ]),
     }),
@@ -350,9 +444,11 @@ export function renderRiskView(data) {
       <div class="span-12">${sections.riskActions}</div>
       <div class="span-12">${sections.riskEvidence}</div>
       <div class="span-3">${sections.riskAccount}</div>
+      <div class="span-3">${sections.riskPositionMode}</div>
       <div class="span-3">${sections.riskMarginBuffer}</div>
       <div class="span-3">${sections.riskReconciliation}</div>
-      <div class="span-3">${sections.riskRecovery}</div>
+      <div class="span-6">${sections.riskRecovery}</div>
+      <div class="span-6">${sections.riskExposure}</div>
       <div class="span-6">${sections.riskPreflight}</div>
       <div class="span-6">${sections.riskRunPacket}</div>
       <div class="span-12">${sections.riskShadow}</div>
@@ -366,16 +462,20 @@ export function renderRiskView(data) {
 
 function trialGuardStatusLabel(status) {
   if (status === "disabled" || status === "not_configured") return "未启用";
+  if (status === "inactive_for_runtime") return "当前运行线未启用";
   if (status === "warming_up") return "预热中";
   if (status === "breached") return "已触发暂停";
   if (status === "monitoring") return "监控中";
+  if (status === "recovered") return "已恢复";
   return textOrFallback(status, "未知状态");
 }
 
 function trialGuardTone(status) {
   if (status === "breached") return "danger";
+  if (status === "inactive_for_runtime") return "neutral";
   if (status === "warming_up") return "warning";
   if (status === "monitoring") return "positive";
+  if (status === "recovered") return "positive";
   return "neutral";
 }
 
@@ -418,12 +518,12 @@ export function renderReconciliationControls({
   const permissionMessage = textOrFallback(uiHints.controlPermissionMessage, "");
   const canWrite = !permissionMessage;
   const buttons = [];
-  if (includeInspect && reconciliation?.reconciliation_id) {
+  if (includeInspect && shouldShowInspectReconciliation({ reconciliation, recovery })) {
     buttons.push(actionButton("查看对账", "inspect-reconciliation", reconciliation.reconciliation_id, "ghost"));
   }
   if (shouldShowValidateAction({ reconciliation, recovery })) {
     buttons.push(
-      actionButton("重新对账", "trigger-reconciliation-validate", "", "secondary", {
+      actionButton("重新对账（刷新交易所状态）", "trigger-reconciliation-validate", "", "secondary", {
         disabled: !canWrite,
         title: permissionMessage,
       })
@@ -431,7 +531,7 @@ export function renderReconciliationControls({
   }
   if (shouldShowRebaselineAction({ reconciliation, recovery })) {
     buttons.push(
-      actionButton("确认为新基线", "trigger-rebaseline", "", "warning", {
+      actionButton("接受当前状态为新基线", "trigger-rebaseline", "", "warning", {
         disabled: !canWrite,
         title: permissionMessage,
       })
@@ -445,12 +545,6 @@ export function renderReconciliationControls({
       })
     );
   }
-  buttons.push(
-    actionButton("暂停自动运行", "trigger-halt", "", "danger", {
-      disabled: !canWrite,
-      title: permissionMessage,
-    })
-  );
   if (!buttons.length) return `<p class="meta-copy">${reconciliationActionCopy({ reconciliation, recovery })}</p>`;
   return `<div class="stack-actions ${compact ? "table-actions--compact" : ""}">${buttons.join("")}</div>`;
 }
@@ -462,6 +556,9 @@ export function reconciliationActionCopy({ reconciliation = null, recovery = {},
   if (reconciliation?.halt_required) {
     return "当前需先完成对账。请先核对差异原因；确认交易所当前状态才是正确状态后，再接受为新基线。";
   }
+  if (reconciliation?.observational_only && !recovery.review_required) {
+    return "当前只有轻度动态漂移，例如保证金或浮盈随行情波动。系统可继续运行，建议持续观察，不需要立即重设基线。";
+  }
   if (reconciliation?.review_required || shouldShowRebaselineAction({ reconciliation, recovery })) {
     return "当前处于待人工确认状态。请先重新对账或核对交易所账单，确认状态符合预期后再接受为新基线。";
   }
@@ -471,49 +568,51 @@ export function reconciliationActionCopy({ reconciliation = null, recovery = {},
   if (!recovery.safe_to_trade) {
     return operationalStatusCopy({ recovery });
   }
-  return "当前状态稳定。如果想再次确认状态，可以手动重新对账。";
+  return "当前状态稳定。如果想再次确认状态，可以手动重新对账（刷新交易所状态）。";
 }
 
-function renderPrimaryBlockerActionPanel({ primaryBlocker = null, secondaryBlockers = [], recovery = {}, uiHints = {} } = {}) {
-  if (!primaryBlocker) {
+function renderPrimaryTaskPanel({ primaryTask = null, recovery = {}, reconciliation = null, uiHints = {} } = {}) {
+  if (!primaryTask) {
+    const summary = noPrimaryBlockerSummary({ recovery, reconciliation });
     return `
       ${summaryStrip([
         {
           label: "当前状态",
-          value: recovery.safe_to_trade ? "当前可继续自动运行" : "当前没有新的主阻断",
-          meta: recovery.safe_to_trade ? "系统当前没有硬阻断。" : "当前没有新的主阻断，但仍建议持续观察恢复状态。",
-          tone: recovery.safe_to_trade ? "positive" : "info",
+          value: summary.value,
+          meta: summary.meta,
+          tone: summary.tone,
         },
       ])}
-      <p class="meta-copy">当前没有新的第一优先级阻断。若仍需确认状态，可继续查看最新对账和账户快照。</p>
+      <p class="meta-copy">${escapeHtml(summary.copy)}</p>
+      ${renderReconciliationControls({ reconciliation, recovery, uiHints, includeInspect: true })}
     `;
   }
   return `
     ${summaryStrip([
       {
-        label: "当前第一优先级",
-        value: textOrFallback(primaryBlocker.title, localizeError(primaryBlocker.blocker)),
-        meta: primaryBlocker.root_cause ? "当前应先处理这一条根因阻断。" : "当前应先处理这一条阻断。",
-        tone: primaryBlocker.submit_only ? "warning" : "danger",
+        label: "当前主任务",
+        value: textOrFallback(primaryTask.title, "当前没有额外主任务"),
+        meta: primaryTask.kind === "resolve_blocker" ? "请先完成这一项，再看是否还剩其他阻断。" : "按这一步处理后，系统会重新评估恢复资格。",
+        tone: primaryTask.kind === "resolve_blocker" ? "danger" : primaryTask.kind === "observe" || primaryTask.kind === "healthy" ? "info" : "warning",
       },
       {
-        label: "影响范围",
-        value: textOrFallback(primaryBlocker.impact, "当前阻断会影响自动交易资格。"),
-        meta: primaryBlocker.submit_only ? "当前主要影响真实报单。" : "当前会直接阻止系统继续自动运行。",
-        tone: primaryBlocker.submit_only ? "warning" : "danger",
+        label: "为什么先做这一步",
+        value: textOrFallback(primaryTask.reason, "当前没有额外原因说明。"),
+        meta: primaryTask.kind === "observe" ? "当前以观察为主，不需要立即做高风险人工操作。" : "这一步是当前最直接影响系统状态的处理动作。",
+        tone: primaryTask.kind === "observe" || primaryTask.kind === "healthy" ? "info" : "warning",
       },
       {
-        label: "处理完成后",
-        value: textOrFallback(primaryBlocker.recommended_next_step, "处理完成后系统会重新评估剩余阻断。"),
-        meta: secondaryBlockers.length ? `后面还剩 ${formatNumber(secondaryBlockers.length, 0)} 条次级阻断。` : "处理完成后即可重新评估是否恢复自动运行。",
+        label: "做完后会怎样",
+        value: textOrFallback(primaryTask.completion_outcome, "处理完成后系统会重新评估当前状态。"),
+        meta: primaryTask.secondary_blocker_count > 0 ? `后面还剩 ${formatNumber(primaryTask.secondary_blocker_count, 0)} 条次级阻断。` : "处理完成后即可重新评估是否恢复自动运行。",
         tone: "info",
       },
     ])}
     ${kvList([
-      ["真实原因", textOrFallback(primaryBlocker.description, localizeError(primaryBlocker.blocker)), `来源：${readableState(primaryBlocker.subsystem || "system")}`],
-      ["下一步动作", textOrFallback(primaryBlocker.recommended_next_step, "请先处理这条阻断。"), secondaryBlockers.length ? `处理完后系统会继续检查剩余 ${formatNumber(secondaryBlockers.length, 0)} 条阻断。` : "处理完后可重新判断是否恢复自动运行。"],
+      ["先做什么", textOrFallback(primaryTask.summary, "当前没有额外处理建议。"), primaryTask.kind === "observe" ? "这一栏说的是“现在最推荐做的动作”，不是系统内部状态描述。" : "优先按这一步处理，不要先去点无关按钮。"] ,
+      ["来源", primaryTask.source_blocker ? localizeError(primaryTask.source_blocker) : "当前没有单独的上游阻断代码", primaryTask.source_blocker ? `阻断代码：${primaryTask.source_blocker}` : "这是系统按当前恢复状态综合给出的主任务。"] ,
     ])}
-    ${renderBlockerActions(primaryBlocker.actions || [], primaryBlocker.blocker, uiHints)}
+    ${renderBlockerActions(primaryTask.actions || [], primaryTask.source_blocker || "", uiHints)}
   `;
 }
 
@@ -547,12 +646,15 @@ function renderBlockerControlList({ blockers = [], primaryBlocker = null, uiHint
 function renderBlockerActions(actions = [], blocker = "", uiHints = {}) {
   if (!actions.length) return "";
   const permissionMessage = textOrFallback(uiHints.controlPermissionMessage, "");
-  const rendered = actions.map((action) => {
+  const rendered = actions.flatMap((action) => {
+    if (action.kind === "client" && action.client_action === "navigate-view" && action.value === "risk") {
+      return [];
+    }
     const isApi = action.kind !== "client";
     const disabledReason = isApi ? permissionMessage || action.disabled_reason : action.disabled_reason;
     const disabled = Boolean((isApi && permissionMessage) || action.enabled === false);
     if (action.kind === "client") {
-      return actionButton(
+      return [actionButton(
         action.label,
         textOrFallback(action.client_action, "refresh-dashboard"),
         textOrFallback(action.value, ""),
@@ -561,9 +663,9 @@ function renderBlockerActions(actions = [], blocker = "", uiHints = {}) {
           disabled,
           title: disabledReason || action.expected_effect || "",
         },
-      );
+      )];
     }
-    return actionButton(
+    return [actionButton(
       action.label,
       "trigger-blocker-action",
       `${action.action_id}::${blocker}`,
@@ -572,8 +674,9 @@ function renderBlockerActions(actions = [], blocker = "", uiHints = {}) {
         disabled,
         title: disabledReason || action.expected_effect || "",
       },
-    );
+    )];
   });
+  if (!rendered.length) return "";
   return `<div class="stack-actions">${rendered.join("")}</div>`;
 }
 
@@ -584,6 +687,47 @@ function renderBillCategories(rows) {
     .map((item) => `${item.type}/${item.sub_type}/${item.currency} x${formatNumber(item.count, 0)}`)
     .join(" | ");
 }
+
+function noPrimaryBlockerSummary({ recovery = {}, reconciliation = null } = {}) {
+  if (recovery.safe_to_trade && reconciliation?.observational_only) {
+    return {
+      value: "轻度差异，建议观察",
+      meta: "当前没有新的主阻断。最新对账只有保证金、浮盈或仓位观察值的动态漂移。",
+      tone: "info",
+      copy: "当前没有新的第一优先级阻断。最新对账只有轻度动态漂移，系统可继续运行，建议持续观察，不需要立即重设基线。",
+    };
+  }
+  if (recovery.review_required) {
+    return {
+      value: "仍需人工确认",
+      meta: "当前没有新的主阻断，但恢复状态仍要求人工确认。这通常表示最近有未完全收敛的对账或恢复事件。",
+      tone: "warning",
+      copy: "当前没有新的第一优先级阻断，但系统仍处于人工确认流程。请优先查看最新对账、恢复状态和交易所账单，确认是否还有未收敛的复核条件。",
+    };
+  }
+  if (recovery.halted && recovery.resume_eligible) {
+    return {
+      value: "手动暂停，待恢复",
+      meta: "当前没有新的主阻断。系统处于手动暂停状态，确认无误后可以恢复自动运行。",
+      tone: "warning",
+      copy: "当前没有新的第一优先级阻断。系统处于手动暂停状态，确认最新对账和账户快照无误后即可恢复自动运行。",
+    };
+  }
+  if (!recovery.safe_to_trade) {
+    return {
+      value: "仍未满足恢复条件",
+      meta: "当前没有新的主阻断，但系统仍未恢复到可自动运行状态。请继续查看恢复状态和恢复受限原因。",
+      tone: "warning",
+      copy: "当前没有新的第一优先级阻断，但系统仍未满足恢复条件。请先查看恢复状态中的限制原因，再判断是否可以继续运行。",
+    };
+  }
+  return {
+      value: "当前可继续自动运行",
+      meta: "系统当前没有硬阻断。",
+      tone: "positive",
+      copy: "当前没有新的第一优先级阻断。若仍需再次确认状态，可手动重新对账（刷新交易所状态）。",
+    };
+  }
 
 function riskHeadline({ primaryBlocker, blockers, reconciliation, recovery }) {
   return operationalStatusHeadline({
@@ -598,12 +742,17 @@ function riskTone({ primaryBlocker, blockers, reconciliation, recovery, health }
   const activeBlockers = primaryBlocker ? [primaryBlocker] : blockers;
   if (isPausedAwaitingResume({ blockers, recovery })) return "warning";
   if (health?.halted || activeBlockers.length > 0 || reconciliation?.halt_required) return "danger";
+  if (reconciliation?.observational_only && recovery.safe_to_trade) return "info";
   if (!recovery.safe_to_trade || recovery.review_required) return "warning";
   return "positive";
 }
 
 function shouldShowValidateAction({ reconciliation, recovery }) {
-  return Boolean(reconciliation?.reconciliation_id || !recovery.safe_to_trade || recovery.review_required);
+  return Boolean(
+    reconciliationNeedsAttention(reconciliation)
+    || reconciliation?.observational_only
+    || recovery.review_required
+  );
 }
 
 function shouldShowRebaselineAction({ reconciliation, recovery }) {
@@ -615,11 +764,80 @@ function shouldShowRebaselineAction({ reconciliation, recovery }) {
 }
 
 function shouldShowResumeAction({ recovery }) {
-  return Boolean(!recovery.safe_to_trade || recovery.resume_eligible);
+  return Boolean(recovery.halted || recovery.resume_eligible);
+}
+
+function shouldShowInspectReconciliation({ reconciliation, recovery }) {
+  return Boolean(
+    reconciliation?.reconciliation_id
+    && (reconciliationNeedsAttention(reconciliation) || recovery.review_required)
+  );
+}
+
+function legMismatchTone(summary = {}) {
+  if (Number(summary.missing_execution_chain_count || 0) > 0) return "danger";
+  if (Number(summary.total_count || 0) > 0) return "warning";
+  return "neutral";
+}
+
+function legMismatchSummaryMeta(summary = {}) {
+  const items = Array.isArray(summary.items) ? summary.items : [];
+  if (!items.length) {
+    return "当前没有 long / short 两条腿之间的额外异常。";
+  }
+  const prefix = Number(summary.missing_execution_chain_count || 0) > 0
+    ? `其中有 ${formatNumber(summary.missing_execution_chain_count || 0, 0)} 条腿在交易所存在，但本地没有对应执行链。`
+    : "当前看到的是腿级数量差异，不等于整账户净仓异常。";
+  const details = items
+    .slice(0, 2)
+    .map((item) => {
+      const side = item.leg_side === "long" ? "多头腿" : item.leg_side === "short" ? "空头腿" : "净仓腿";
+      return `${textOrFallback(item.symbol, "未知合约")} ${side}：本地 ${formatNumber(item.stored_qty)}，交易所 ${formatNumber(item.exchange_qty)}`;
+    })
+    .join("；");
+  return `${prefix}${details ? ` ${details}` : ""}`;
+}
+
+function derivativesPositionModeLabel(value) {
+  if (value === "hedge") return "对冲模式";
+  if (value === "net") return "净仓模式";
+  return textOrFallback(value, "待确认");
+}
+
+function exchangePositionModeLabel(value) {
+  if (value === "long_short_mode") return "交易所对冲模式";
+  if (value === "net_mode") return "交易所净仓模式";
+  return textOrFallback(value, "交易所未返回");
+}
+
+function requiredExchangeModeMeta(positionModeContract = {}) {
+  const required = exchangePositionModeLabel(positionModeContract.required_exchange_position_mode);
+  return positionModeContract.position_mode_match_required
+    ? `要求交易所返回 ${required}`
+    : `当前没有强制交易所模式要求，期望值 ${required}`;
+}
+
+function localInstrumentLegMeta(rows = []) {
+  if (!rows.length) return "当前没有持仓。";
+  const dualLegged = rows.filter((item) => item.dual_legged);
+  if (!dualLegged.length) return "当前持仓都是单腿净仓，没有 long / short 并存。";
+  return dualLegged
+    .slice(0, 2)
+    .map((item) => `${textOrFallback(item.symbol, "未知合约")}：多头 ${formatNumber(item.long_position_qty)} / 空头 ${formatNumber(item.short_position_qty)}`)
+    .join("；");
 }
 
 function actionSuggestsRebaseline(value) {
   return String(value || "").toLowerCase().includes("rebaseline");
+}
+
+function reconciliationNeedsAttention(reconciliation) {
+  const severity = String(reconciliation?.severity || "").toUpperCase();
+  return Boolean(
+    reconciliation?.halt_required
+    || reconciliation?.review_required
+    || (severity && severity !== "CLEAN")
+  );
 }
 
 function resumeActionHint({ recovery, uiHints }) {

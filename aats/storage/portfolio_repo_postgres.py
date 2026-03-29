@@ -15,22 +15,25 @@ class PostgresPortfolioRepository:
         self.session_factory = session_factory
 
     def save_snapshot(self, snapshot: PortfolioSnapshot) -> None:
-        scope = portfolio_scope_metadata(snapshot)
         with self.session_factory() as session:
-            session.add(
-                PortfolioSnapshotModel(
-                    snapshot_ts=snapshot.snapshot_ts,
-                    created_at=snapshot.created_at,
-                    total_equity=snapshot.total_equity,
-                    realized_pnl=snapshot.realized_pnl,
-                    unrealized_pnl=snapshot.unrealized_pnl,
-                    product_type=scope["product_type"] or snapshot.product_type,
-                    margin_mode=scope["margin_mode"] or snapshot.margin_mode,
-                    primary_symbol=scope["primary_symbol"],
-                    payload=dump_payload_exact(snapshot),
-                )
-            )
+            self.save_snapshot_in_session(session, snapshot)
             session.commit()
+
+    def save_snapshot_in_session(self, session: Session, snapshot: PortfolioSnapshot) -> None:
+        scope = portfolio_scope_metadata(snapshot)
+        session.add(
+            PortfolioSnapshotModel(
+                snapshot_ts=snapshot.snapshot_ts,
+                created_at=snapshot.created_at,
+                total_equity=snapshot.total_equity,
+                realized_pnl=snapshot.realized_pnl,
+                unrealized_pnl=snapshot.unrealized_pnl,
+                product_type=scope["product_type"] or snapshot.product_type,
+                margin_mode=scope["margin_mode"] or snapshot.margin_mode,
+                primary_symbol=scope["primary_symbol"],
+                payload=dump_payload_exact(snapshot),
+            )
+        )
 
     def latest(self) -> PortfolioSnapshot | None:
         with self.session_factory() as session:

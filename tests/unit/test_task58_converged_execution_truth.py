@@ -294,6 +294,70 @@ class TestTask58ConvergedExecutionTruth(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(state.status, "SUBMITTED")
                 self.assertTrue(saved_fill)
 
+    def test_converged_repo_fill_backfill_aggregates_fill_truth_into_order_state(self) -> None:
+        with temporary_postgres_runtime() as (runtime, _admin_engine, _schema_name):
+                repo = ConvergedPostgresExecutionRepository(
+                    runtime.session_factory,
+                    execution_order_repo=PostgresExecutionOrderRepository(runtime.session_factory),
+                    execution_order_history_repo=PostgresExecutionOrderHistoryRepository(runtime.session_factory),
+                    execution_fill_repo=PostgresExecutionFillRepositoryV2(runtime.session_factory),
+                )
+
+                first_fill = _fill(client_order_id="cl_task58_fill_first", fill_id="fill_task58_fill_first_1").model_copy(
+                    update={
+                        "fill_qty": Decimal("0.004000000000000000"),
+                        "order_status_after_fill": "PARTIALLY_FILLED",
+                    }
+                )
+                second_fill = _fill(client_order_id="cl_task58_fill_first", fill_id="fill_task58_fill_first_2").model_copy(
+                    update={
+                        "fill_qty": Decimal("0.006000000000000000"),
+                        "order_status_after_fill": "FILLED",
+                    }
+                )
+
+                self.assertTrue(repo.save_fill(first_fill))
+                self.assertTrue(repo.save_fill(second_fill))
+
+                hydrated_state = repo.get_order_state("cl_task58_fill_first")
+                self.assertIsNotNone(hydrated_state)
+                assert hydrated_state is not None
+                self.assertEqual(hydrated_state.status, "FILLED")
+                self.assertEqual(hydrated_state.filled_qty, Decimal("0.010000000000000000"))
+                self.assertEqual(hydrated_state.remaining_qty, Decimal("0"))
+                self.assertEqual(hydrated_state.average_fill_price, Decimal("100.000000000000000000"))
+                self.assertEqual(hydrated_state.fees, Decimal("0"))
+
+    def test_converged_repo_fill_backfill_converts_base_fee_into_quote_cost_for_order_state(self) -> None:
+        with temporary_postgres_runtime() as (runtime, _admin_engine, _schema_name):
+                repo = ConvergedPostgresExecutionRepository(
+                    runtime.session_factory,
+                    execution_order_repo=PostgresExecutionOrderRepository(runtime.session_factory),
+                    execution_order_history_repo=PostgresExecutionOrderHistoryRepository(runtime.session_factory),
+                    execution_fill_repo=PostgresExecutionFillRepositoryV2(runtime.session_factory),
+                )
+
+                fill = _fill(client_order_id="cl_task58_quote_fee", fill_id="fill_task58_quote_fee").model_copy(
+                    update={
+                        "symbol": "BTC-USDT",
+                        "side": "buy",
+                        "fill_qty": Decimal("1"),
+                        "fill_price": Decimal("100"),
+                        "fee_amount": Decimal("0.001"),
+                        "fee_currency": "BTC",
+                        "product_type": "spot",
+                        "margin_mode": "cash",
+                        "settle_currency": None,
+                    }
+                )
+
+                self.assertTrue(repo.save_fill(fill))
+
+                hydrated_state = repo.get_order_state("cl_task58_quote_fee")
+                self.assertIsNotNone(hydrated_state)
+                assert hydrated_state is not None
+                self.assertEqual(hydrated_state.fees, Decimal("0.100"))
+
     async def test_outbox_publisher_failure_injection_keeps_new_truth_and_leaves_pending_outbox(self) -> None:
         with temporary_postgres_runtime() as (runtime, _admin_engine, _schema_name):
                 execution_repo = ConvergedPostgresExecutionRepository(

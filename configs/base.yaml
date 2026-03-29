@@ -13,9 +13,9 @@ mode: paper_live
 
 # [运行必改] default_symbol：默认交易标的。可选值：交易所支持的符号；基线推荐：BTC-USDT。
 default_symbol: BTC-USDT
-# [常用可调] primary_timeframe：主决策周期。可选值：15m / 1h；推荐值：15m。
+# [常用可调] primary_timeframe：主决策周期。当前实现固定为 15m；若改成 1h，启动时会直接拒绝。
 primary_timeframe: 15m
-# [常用可调] secondary_timeframe：辅助决策周期。可选值：15m / 1h；推荐值：1h。
+# [常用可调] secondary_timeframe：辅助决策周期。当前实现固定为 1h；保留该键仅为兼容旧模板。
 secondary_timeframe: 1h
 # [常用可调] enabled_decision_timeframes：启用的决策周期列表。可选值：仅 15m 或同时启用 15m/1h；推荐值：["15m"]。
 enabled_decision_timeframes:
@@ -73,13 +73,13 @@ local_publish_iterations: 6
 local_publish_interval_seconds: 0.0
 
 # [常用可调] decision_min_interval_seconds_15m：15m 周期最小决策间隔秒数。可选值：0.0~300.0；基线推荐：0.0。
-decision_min_interval_seconds_15m: 0.0
+decision_min_interval_seconds_15m: 60.0
 # [常用可调] decision_min_interval_seconds_1h：1h 周期最小决策间隔秒数。可选值：0.0~900.0；基线推荐：0.0。
-decision_min_interval_seconds_1h: 0.0
+decision_min_interval_seconds_1h: 240.0
 # [常用可调] decision_min_price_move_bps：触发新决策前要求的最小价格变动。可选值：0.0~20.0；基线推荐：0.0。
-decision_min_price_move_bps: 0.0
+decision_min_price_move_bps: 4.0
 # [常用可调] decision_min_momentum_delta：触发新决策前要求的最小动量变化。可选值：0.0~0.01；基线推荐：0.0。
-decision_min_momentum_delta: 0.0
+decision_min_momentum_delta: 0.0003
 
 # [常用可调] paper_taker_fee_bps：paper 执行 taker 手续费估计。可选值：0.0~100.0；推荐值：5.0。
 paper_taker_fee_bps: 5.0
@@ -108,6 +108,18 @@ strategy_profile_emergency_safety_confidence_min: 0.68
 strategy_risk_budget_multiplier_floor: 0.35
 # [常用可调] strategy_execution_aggressiveness_multiplier_floor：执行侵略性自动收缩的最小乘数。可选值：0.1~1.0；推荐值：0.30。
 strategy_execution_aggressiveness_multiplier_floor: 0.30
+# [常用可调] strategy_sleeve_auto_parallel_enabled：是否启用多策略 sleeve 自动并行控制。可选值：true / false；推荐值：true。
+strategy_sleeve_auto_parallel_enabled: true
+# [常用可调] strategy_sleeve_auto_min_budget_multiplier：自动并行下的最小预算倍率。可选值：0.1~1.0；推荐值：0.35。
+strategy_sleeve_auto_min_budget_multiplier: 0.35
+# [常用可调] strategy_sleeve_auto_reconciliation_contraction_multiplier：对账压力下的预算收缩倍率。可选值：0.1~1.0；推荐值：0.50。
+strategy_sleeve_auto_reconciliation_contraction_multiplier: 0.50
+# [常用可调] strategy_sleeve_auto_soft_loss_usdt：单个 sleeve 进入软收缩的最近净亏损阈值。可选值：正数；推荐值：10.0。
+strategy_sleeve_auto_soft_loss_usdt: 10.0
+# [常用可调] strategy_sleeve_auto_hard_loss_usdt：单个 sleeve 在无库存时自动暂停的最近净亏损阈值。可选值：正数；推荐值：25.0。
+strategy_sleeve_auto_hard_loss_usdt: 25.0
+# [常用可调] strategy_sleeve_auto_volatility_cap_enabled：是否按 baseline 波动率目标自动收缩 sleeve 预算。可选值：true / false；推荐值：true。
+strategy_sleeve_auto_volatility_cap_enabled: true
 # [运行必改] ai_provider：AI 提供方。可选值：disabled / openai；基线推荐：disabled。
 ai_provider: disabled
 # [常用可调] ai_model_name：AI 模型名。可选值：可用模型名；推荐值：gpt-4o-mini。

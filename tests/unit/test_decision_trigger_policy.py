@@ -15,9 +15,9 @@ from aats.services.decision_engine.trigger import DecisionCycleTrigger
 from aats.services.decision_engine.trigger_policy import DecisionTriggerPolicy
 
 
-def _feature(*, snapshot_ts, momentum: float, regime: str) -> FeatureSnapshot:
+def _feature(*, snapshot_ts, momentum: float, regime: str, symbol: str = "BTC-USDT") -> FeatureSnapshot:
     return FeatureSnapshot(
-        symbol="BTC-USDT",
+        symbol=symbol,
         snapshot_ts=snapshot_ts,
         trend_strength=0.6,
         volatility_state="medium",
@@ -29,9 +29,9 @@ def _feature(*, snapshot_ts, momentum: float, regime: str) -> FeatureSnapshot:
     )
 
 
-def _market(*, snapshot_ts, last_price: Decimal | float) -> MarketSnapshot:
+def _market(*, snapshot_ts, last_price: Decimal | float, symbol: str = "BTC-USDT") -> MarketSnapshot:
     return MarketSnapshot(
-        symbol="BTC-USDT",
+        symbol=symbol,
         exchange="OKX",
         snapshot_ts=snapshot_ts,
         best_bid=last_price - 1.0,
@@ -139,6 +139,27 @@ class TestDecisionTriggerPolicy(unittest.TestCase):
         self.assertFalse(third_allowed)
         self.assertEqual(third_reason, "max_decision_frequency_reached")
 
+    def test_decision_cycle_symbols_exclude_smart_arbitrage_companion_symbols(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "smart_arbitrage_enabled": True,
+                "smart_arbitrage_pair_definitions": (
+                    {
+                        "pair_id": "btc_usdt_swap",
+                        "spot_symbol": "BTC-USDT",
+                        "hedge_symbol": "BTC-USDT-SWAP",
+                    },
+                ),
+            }
+        )
+
+        self.assertEqual(settings.decision_cycle_symbols(), ("BTC-USDT-SWAP",))
+        self.assertEqual(settings.expanded_allowed_symbols(), ("BTC-USDT-SWAP", "BTC-USDT"))
+        self.assertFalse(settings.symbol_allowed_for_decision_cycle("BTC-USDT"))
+        self.assertTrue(settings.symbol_allowed_for_decision_cycle("BTC-USDT-SWAP"))
+
 
 class TestDecisionCycleTrigger(unittest.IsolatedAsyncioTestCase):
     async def test_concurrent_same_snapshot_only_runs_one_cycle(self) -> None:
@@ -216,6 +237,66 @@ class TestDecisionCycleTrigger(unittest.IsolatedAsyncioTestCase):
             market_gateway=_FakeMarketGateway(),
             policy=policy,
             can_trigger=lambda *, symbol: (False, "kill_switch_active"),
+        )
+        envelope = build_envelope(
+            topic=topics.FEATURE_SNAPSHOTS,
+            key=feature.symbol,
+            payload_model=feature,
+            source_component="test",
+        )
+        message = {"topic": topics.FEATURE_SNAPSHOTS, "key": feature.symbol, "payload": envelope.model_dump(mode="json")}
+
+        await trigger.handle_feature_snapshot(message)
+
+        self.assertEqual(orchestrator.calls, [])
+
+    async def test_companion_spot_symbol_is_filtered_out_of_derivatives_decision_cycle(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "enabled_decision_timeframes": ["15m"],
+                "decision_min_interval_seconds_15m": 0.0,
+                "smart_arbitrage_enabled": True,
+                "smart_arbitrage_pair_definitions": (
+                    {
+                        "pair_id": "btc_usdt_swap",
+                        "spot_symbol": "BTC-USDT",
+                        "hedge_symbol": "BTC-USDT-SWAP",
+                    },
+                ),
+            }
+        )
+        policy = DecisionTriggerPolicy(settings=settings)
+        base_ts = utc_now()
+        market = _market(snapshot_ts=base_ts, last_price=67_000.0, symbol="BTC-USDT")
+        feature = _feature(snapshot_ts=base_ts, momentum=0.1, regime="trend", symbol="BTC-USDT")
+
+        class _FakeOrchestrator:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, str]] = []
+
+            async def run_cycle(self, *, symbol: str, timeframe: str):
+                self.calls.append((symbol, timeframe))
+
+        class _FakeMarketGateway:
+            def latest_snapshot(self, symbol: str):
+                return market if symbol == "BTC-USDT" else None
+
+        orchestrator = _FakeOrchestrator()
+        trigger = DecisionCycleTrigger(
+            orchestrator=orchestrator,
+            market_gateway=_FakeMarketGateway(),
+            policy=policy,
+            can_trigger=lambda *, symbol: (
+                True,
+                "ready",
+            )
+            if settings.symbol_allowed_for_decision_cycle(symbol)
+            else (
+                False,
+                "symbol_not_enabled_for_decision_cycle",
+            ),
         )
         envelope = build_envelope(
             topic=topics.FEATURE_SNAPSHOTS,

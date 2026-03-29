@@ -7,7 +7,8 @@ from aats.bus.memory_bus import InMemoryEventBus
 from aats.events import topics
 from aats.events.envelopes import build_envelope
 from aats.schemas.common import utc_now
-from aats.schemas.execution import FillEvent, OrderIntent, OrderState
+from aats.schemas.execution import FillEvent, LegOrderIntent, OrderIntent, OrderState, order_intent_from_leg_order_intent
+from aats.schemas.governance import RiskDecision
 from aats.services.execution_engine.order_manager import OrderManager
 from aats.services.governance_engine.kill_switch import KillSwitch
 from aats.storage.event_store import InMemoryEventStore
@@ -135,6 +136,41 @@ class _BusyFailingAdapter(_PreviewingFailingAdapter):
             target_leverage=intent.target_leverage,
             margin_mode=intent.margin_mode,
             exposure_side=intent.exposure_side,
+        )
+        return state, []
+
+
+class _CountingAdapter(_FailingAdapter):
+    def __init__(self) -> None:
+        self.submit_calls = 0
+
+    def preview_client_order_id(self, intent: OrderIntent) -> str | None:
+        return f"cl{intent.idempotency_key}"
+
+    async def submit(self, intent: OrderIntent):
+        self.submit_calls += 1
+        return await super().submit(intent)
+
+    async def submit_leg_order(self, leg_intent: LegOrderIntent):
+        self.submit_calls += 1
+        state = OrderState(
+            decision_id=leg_intent.decision_id,
+            intent_id=leg_intent.leg_intent_id,
+            symbol=leg_intent.symbol,
+            client_order_id=f"cl{leg_intent.idempotency_key}",
+            venue="OKX",
+            exchange_order_id=None,
+            status="FAILED",
+            submission_mode="guarded_simulated_submit",
+            submitted_ts=leg_intent.created_at,
+            last_update_ts=leg_intent.created_at,
+            requested_qty=leg_intent.quantity,
+            filled_qty=0.0,
+            remaining_qty=leg_intent.quantity,
+            average_fill_price=None,
+            fees=0.0,
+            execution_error="unexpected_submit_leg_order",
+            submission_payload={},
         )
         return state, []
 
@@ -393,6 +429,344 @@ class TestOrderManagerExecutionErrorHistory(unittest.IsolatedAsyncioTestCase):
         second = repo.get_order_state("clclose_high_2")
         self.assertIsNotNone(second)
         self.assertEqual(second.status, "FAILED")
+
+    async def test_leg_risk_blocked_order_never_reaches_adapter_submit(self) -> None:
+        repo = InMemoryExecutionRepository()
+        adapter = _CountingAdapter()
+        manager = OrderManager(
+            settings=AATSSettings.model_validate({}),
+            bus=InMemoryEventBus(event_store=InMemoryEventStore(), persistence_mode="strict"),
+            adapter=adapter,
+            execution_repo=repo,
+            leg_risk_evaluator=lambda _leg_intent: RiskDecision(
+                decision_id="leg_risk_blocked",
+                approved=False,
+                modified=True,
+                capped_target_position_qty=0.0,
+                capped_target_notional=0.0,
+                projected_notional=0.0,
+                risk_score=1.0,
+                only_reduce_required=True,
+                risk_limit_breached=True,
+                rejection_reasons=["risk_max_long_notional_exceeded", "leg_only_reduce_mode_active"],
+            ),
+            kill_switch=KillSwitch(),
+        )
+
+        await manager.submit_leg_order(
+            leg_intent=LegOrderIntent(
+                leg_intent_id="leg_blocked_1",
+                decision_id="decision_leg_blocked_1",
+                symbol="BTC-USDT-SWAP",
+                side="buy",
+                pos_side="long",
+                action="open",
+                quantity=0.001,
+                execution_style="exchange",
+                order_type="market",
+                urgency="medium",
+                time_in_force="IOC",
+                idempotency_key="leg_blocked_1",
+                product_type="derivatives",
+                margin_mode="cross",
+                td_mode="cross",
+                target_leverage=2.0,
+                exposure_side="long",
+            )
+        )
+
+        persisted = repo.get_order_state("clleg_blocked_1")
+        self.assertIsNotNone(persisted)
+        self.assertEqual(persisted.status, "BLOCKED")
+        self.assertEqual(persisted.submission_mode, "leg_risk_blocked")
+        self.assertIn("leg_risk_blocked", persisted.execution_error)
+        self.assertEqual(adapter.submit_calls, 0)
+
+    async def test_leg_overlay_rollout_blocked_order_never_reaches_adapter_submit(self) -> None:
+        repo = InMemoryExecutionRepository()
+        adapter = _CountingAdapter()
+        manager = OrderManager(
+            settings=AATSSettings.model_validate(
+                {
+                    "trading_product_type": "derivatives",
+                    "margin_mode": "cross",
+                    "live_submit_enabled": True,
+                    "guarded_execution_dry_run": False,
+                    "okx_simulated_trading": False,
+                    "strategy_hedge_overlay_enabled": True,
+                    "strategy_hedge_independent_enabled": True,
+                    "strategy_hedge_independent_rollout_stage": "dry_run",
+                }
+            ),
+            bus=InMemoryEventBus(event_store=InMemoryEventStore(), persistence_mode="strict"),
+            adapter=adapter,
+            execution_repo=repo,
+            kill_switch=KillSwitch(),
+        )
+
+        await manager.submit_leg_order(
+            leg_intent=LegOrderIntent(
+                leg_intent_id="leg_overlay_blocked_1",
+                decision_id="decision_leg_overlay_blocked_1",
+                symbol="BTC-USDT-SWAP",
+                side="buy",
+                pos_side="long",
+                action="open",
+                quantity=0.001,
+                execution_style="exchange",
+                order_type="market",
+                urgency="medium",
+                time_in_force="IOC",
+                idempotency_key="leg_overlay_blocked_1",
+                product_type="derivatives",
+                margin_mode="cross",
+                td_mode="cross",
+                position_mode="long_short_mode",
+                target_leverage=2.0,
+                exposure_side="long",
+                strategy_execution_mode="independent_long_book",
+            )
+        )
+
+        persisted = repo.get_order_state("clleg_overlay_blocked_1")
+        self.assertIsNotNone(persisted)
+        self.assertEqual(persisted.status, "BLOCKED")
+        self.assertEqual(persisted.submission_mode, "leg_overlay_rollout_blocked")
+        self.assertIn("independent_overlay_rollout_stage_blocks_live_runtime", persisted.execution_error)
+        self.assertEqual(adapter.submit_calls, 0)
+
+    async def test_leg_overlay_live_rollout_allows_direct_submit(self) -> None:
+        repo = InMemoryExecutionRepository()
+        adapter = _CountingAdapter()
+        manager = OrderManager(
+            settings=AATSSettings.model_validate(
+                {
+                    "trading_product_type": "derivatives",
+                    "margin_mode": "cross",
+                    "live_submit_enabled": True,
+                    "guarded_execution_dry_run": False,
+                    "okx_simulated_trading": False,
+                    "strategy_hedge_overlay_enabled": True,
+                    "strategy_hedge_opportunistic_enabled": True,
+                    "strategy_hedge_opportunistic_rollout_stage": "live",
+                }
+            ),
+            bus=InMemoryEventBus(event_store=InMemoryEventStore(), persistence_mode="strict"),
+            adapter=adapter,
+            execution_repo=repo,
+            kill_switch=KillSwitch(),
+        )
+
+        await manager.submit_leg_order(
+            leg_intent=LegOrderIntent(
+                leg_intent_id="leg_overlay_allowed_1",
+                decision_id="decision_leg_overlay_allowed_1",
+                symbol="BTC-USDT-SWAP",
+                side="sell",
+                pos_side="short",
+                action="open",
+                quantity=0.001,
+                execution_style="exchange",
+                order_type="market",
+                urgency="medium",
+                time_in_force="IOC",
+                idempotency_key="leg_overlay_allowed_1",
+                product_type="derivatives",
+                margin_mode="cross",
+                td_mode="cross",
+                position_mode="long_short_mode",
+                target_leverage=2.0,
+                exposure_side="short",
+                strategy_execution_mode="opportunistic_overlay",
+            )
+        )
+
+        persisted = repo.get_order_state("clleg_overlay_allowed_1")
+        self.assertIsNotNone(persisted)
+        self.assertEqual(persisted.status, "FAILED")
+        self.assertEqual(persisted.submission_mode, "guarded_simulated_submit")
+        self.assertEqual(adapter.submit_calls, 1)
+
+    async def test_leg_overlay_direct_submit_blocks_when_protective_mode_is_disabled(self) -> None:
+        repo = InMemoryExecutionRepository()
+        adapter = _CountingAdapter()
+        manager = OrderManager(
+            settings=AATSSettings.model_validate(
+                {
+                    "trading_product_type": "derivatives",
+                    "margin_mode": "cross",
+                    "live_submit_enabled": True,
+                    "guarded_execution_dry_run": False,
+                    "okx_simulated_trading": False,
+                    "strategy_hedge_overlay_enabled": True,
+                    "strategy_hedge_protective_enabled": False,
+                }
+            ),
+            bus=InMemoryEventBus(event_store=InMemoryEventStore(), persistence_mode="strict"),
+            adapter=adapter,
+            execution_repo=repo,
+            kill_switch=KillSwitch(),
+        )
+
+        await manager.submit_leg_order(
+            leg_intent=LegOrderIntent(
+                leg_intent_id="leg_protective_disabled_1",
+                decision_id="decision_leg_protective_disabled_1",
+                symbol="BTC-USDT-SWAP",
+                side="sell",
+                pos_side="short",
+                action="open",
+                quantity=0.001,
+                execution_style="exchange",
+                order_type="market",
+                urgency="medium",
+                time_in_force="IOC",
+                idempotency_key="leg_protective_disabled_1",
+                product_type="derivatives",
+                margin_mode="cross",
+                td_mode="cross",
+                position_mode="long_short_mode",
+                target_leverage=2.0,
+                exposure_side="short",
+                strategy_execution_mode="protective_overlay",
+            )
+        )
+
+        persisted = repo.get_order_state("clleg_protective_disabled_1")
+        self.assertIsNotNone(persisted)
+        self.assertEqual(persisted.status, "BLOCKED")
+        self.assertEqual(persisted.submission_mode, "leg_overlay_rollout_blocked")
+        self.assertIn("strategy_hedge_protective_disabled", persisted.execution_error)
+        self.assertEqual(adapter.submit_calls, 0)
+
+    async def test_normalized_leg_order_intent_still_applies_leg_risk_blockers(self) -> None:
+        repo = InMemoryExecutionRepository()
+        adapter = _CountingAdapter()
+        manager = OrderManager(
+            settings=AATSSettings.model_validate({}),
+            bus=InMemoryEventBus(event_store=InMemoryEventStore(), persistence_mode="strict"),
+            adapter=adapter,
+            execution_repo=repo,
+            leg_risk_evaluator=lambda _leg_intent: RiskDecision(
+                decision_id="normalized_leg_risk_blocked",
+                approved=False,
+                modified=True,
+                capped_target_position_qty=0.0,
+                capped_target_notional=0.0,
+                projected_notional=0.0,
+                risk_score=1.0,
+                only_reduce_required=True,
+                risk_limit_breached=True,
+                rejection_reasons=["risk_max_short_notional_exceeded", "leg_only_reduce_mode_active"],
+            ),
+            kill_switch=KillSwitch(),
+        )
+        leg_intent = LegOrderIntent(
+            leg_intent_id="normalized_leg_blocked_1",
+            decision_id="decision_normalized_leg_blocked_1",
+            symbol="BTC-USDT-SWAP",
+            side="sell",
+            pos_side="short",
+            action="open",
+            quantity=0.001,
+            execution_style="exchange",
+            order_type="market",
+            urgency="medium",
+            time_in_force="IOC",
+            idempotency_key="normalized_leg_blocked_1",
+            product_type="derivatives",
+            margin_mode="cross",
+            td_mode="cross",
+            position_mode="long_short_mode",
+            target_leverage=2.0,
+            exposure_side="short",
+            strategy_execution_mode="independent_short_book",
+        )
+        intent = order_intent_from_leg_order_intent(leg_intent)
+
+        await manager.handle_order_intent(
+            {
+                "topic": topics.ORDER_INTENTS,
+                "key": intent.symbol,
+                "payload": build_envelope(
+                    topic=topics.ORDER_INTENTS,
+                    key=intent.symbol,
+                    payload_model=intent,
+                    source_component="test",
+                ).model_dump(mode="json"),
+            }
+        )
+
+        persisted = repo.get_order_state("clnormalized_leg_blocked_1")
+        self.assertIsNotNone(persisted)
+        self.assertEqual(persisted.status, "BLOCKED")
+        self.assertEqual(persisted.submission_mode, "leg_risk_blocked")
+        self.assertIn("leg_risk_blocked", persisted.execution_error)
+        self.assertEqual(adapter.submit_calls, 0)
+
+    async def test_normalized_leg_order_intent_still_applies_rollout_blockers(self) -> None:
+        repo = InMemoryExecutionRepository()
+        adapter = _CountingAdapter()
+        manager = OrderManager(
+            settings=AATSSettings.model_validate(
+                {
+                    "trading_product_type": "derivatives",
+                    "margin_mode": "cross",
+                    "live_submit_enabled": True,
+                    "guarded_execution_dry_run": False,
+                    "okx_simulated_trading": False,
+                    "strategy_hedge_overlay_enabled": True,
+                    "strategy_hedge_independent_enabled": True,
+                    "strategy_hedge_independent_rollout_stage": "dry_run",
+                }
+            ),
+            bus=InMemoryEventBus(event_store=InMemoryEventStore(), persistence_mode="strict"),
+            adapter=adapter,
+            execution_repo=repo,
+            kill_switch=KillSwitch(),
+        )
+        leg_intent = LegOrderIntent(
+            leg_intent_id="normalized_rollout_blocked_1",
+            decision_id="decision_normalized_rollout_blocked_1",
+            symbol="BTC-USDT-SWAP",
+            side="buy",
+            pos_side="long",
+            action="open",
+            quantity=0.001,
+            execution_style="exchange",
+            order_type="market",
+            urgency="medium",
+            time_in_force="IOC",
+            idempotency_key="normalized_rollout_blocked_1",
+            product_type="derivatives",
+            margin_mode="cross",
+            td_mode="cross",
+            position_mode="long_short_mode",
+            target_leverage=2.0,
+            exposure_side="long",
+            strategy_execution_mode="independent_long_book",
+        )
+        intent = order_intent_from_leg_order_intent(leg_intent)
+
+        await manager.handle_order_intent(
+            {
+                "topic": topics.ORDER_INTENTS,
+                "key": intent.symbol,
+                "payload": build_envelope(
+                    topic=topics.ORDER_INTENTS,
+                    key=intent.symbol,
+                    payload_model=intent,
+                    source_component="test",
+                ).model_dump(mode="json"),
+            }
+        )
+
+        persisted = repo.get_order_state("clnormalized_rollout_blocked_1")
+        self.assertIsNotNone(persisted)
+        self.assertEqual(persisted.status, "BLOCKED")
+        self.assertEqual(persisted.submission_mode, "leg_overlay_rollout_blocked")
+        self.assertIn("independent_overlay_rollout_stage_blocks_live_runtime", persisted.execution_error)
+        self.assertEqual(adapter.submit_calls, 0)
 
 
 if __name__ == "__main__":

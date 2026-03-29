@@ -15,7 +15,23 @@ except ModuleNotFoundError:  # pragma: no cover - exercised implicitly in enviro
     orjson = None
 
 from aats.bootstrap.settings import AATSSettings
+from aats.services.runtime_scope import infer_product_type_from_symbol
 from aats.schemas.common import utc_now
+
+
+OKX_DERIVATIVES_INST_TYPES = ("SWAP", "FUTURES")
+
+
+def infer_okx_derivatives_inst_type(symbol: str | None) -> str | None:
+    normalized = str(symbol or "").strip().upper()
+    if not normalized:
+        return None
+    if normalized.endswith("-SWAP"):
+        return "SWAP"
+    tail = normalized.rsplit("-", 1)[-1]
+    if tail.isdigit():
+        return "FUTURES"
+    return None
 
 
 class OKXRequestError(RuntimeError):
@@ -58,6 +74,58 @@ class OKXRESTClient:
 
     def _inst_type(self) -> str:
         return "SWAP" if self.settings.trading_product_type == "derivatives" else "SPOT"
+
+    def _inst_types(self, *, symbol: str | None = None) -> tuple[str, ...]:
+        if symbol is not None:
+            inferred_product_type = infer_product_type_from_symbol(symbol)
+            if inferred_product_type == "spot":
+                return ("SPOT",)
+        inferred = infer_okx_derivatives_inst_type(symbol)
+        if inferred is not None:
+            return (inferred,)
+        if self.settings.trading_product_type != "derivatives":
+            return ("SPOT",)
+        return OKX_DERIVATIVES_INST_TYPES
+
+    def _position_inst_types(self) -> tuple[str, ...]:
+        if self.settings.trading_product_type != "derivatives":
+            return ("SPOT",)
+        if (
+            self.settings.smart_arbitrage_margin_short_enabled
+            or self.settings.smart_arbitrage_negative_basis_mode == "margin_backed"
+        ):
+            return (*OKX_DERIVATIVES_INST_TYPES, "MARGIN")
+        return OKX_DERIVATIVES_INST_TYPES
+
+    @staticmethod
+    def _merge_payloads(payloads: list[dict[str, Any]]) -> dict[str, Any]:
+        merged_rows: list[Any] = []
+        for payload in payloads:
+            rows = payload.get("data", [])
+            if isinstance(rows, list):
+                merged_rows.extend(rows)
+        return {"code": "0", "data": merged_rows}
+
+    async def _request_across_inst_types(
+        self,
+        *,
+        method: str,
+        path: str,
+        inst_types: tuple[str, ...],
+        build_params,
+        require_auth: bool,
+    ) -> dict[str, Any]:
+        payloads: list[dict[str, Any]] = []
+        for inst_type in inst_types:
+            payloads.append(
+                await self.request(
+                    method=method,
+                    path=path,
+                    params=build_params(inst_type),
+                    require_auth=require_auth,
+                )
+            )
+        return self._merge_payloads(payloads)
 
     async def request(
         self,
@@ -132,29 +200,70 @@ class OKXRESTClient:
         return await self.request(method="GET", path="/api/v5/account/balance", require_auth=True)
 
     async def get_positions(self) -> dict[str, Any]:
-        return await self.request(
+        inst_types = self._position_inst_types()
+        if len(inst_types) == 1:
+            return await self.request(
+                method="GET",
+                path="/api/v5/account/positions",
+                params={"instType": inst_types[0]},
+                require_auth=True,
+            )
+        return await self._request_across_inst_types(
             method="GET",
             path="/api/v5/account/positions",
-            params={"instType": self._inst_type()},
+            inst_types=inst_types,
+            build_params=lambda inst_type: {"instType": inst_type},
             require_auth=True,
         )
 
     async def get_open_orders(self, *, symbol: str | None = None) -> dict[str, Any]:
-        params: dict[str, Any] = {"instType": self._inst_type()}
-        if symbol is not None:
-            params["instId"] = symbol
-        return await self.request(
+        inst_types = self._inst_types(symbol=symbol)
+        if len(inst_types) == 1:
+            params: dict[str, Any] = {"instType": inst_types[0]}
+            if symbol is not None:
+                params["instId"] = symbol
+            return await self.request(
+                method="GET",
+                path="/api/v5/trade/orders-pending",
+                params=params,
+                require_auth=True,
+            )
+        return await self._request_across_inst_types(
             method="GET",
             path="/api/v5/trade/orders-pending",
-            params=params,
+            inst_types=inst_types,
+            build_params=lambda inst_type: {"instType": inst_type, "instId": symbol},
             require_auth=True,
         )
 
-    async def get_instruments(self) -> dict[str, Any]:
-        return await self.request(
+    async def get_instruments(self, *, symbols: tuple[str, ...] | None = None) -> dict[str, Any]:
+        inst_types = list(
+            tuple(
+                dict.fromkeys(
+                    inst_type
+                    for symbol in (symbols or ())
+                    for inst_type in self._inst_types(symbol=symbol)
+                )
+            )
+            or self._inst_types()
+        )
+        if self.settings.trading_product_type == "derivatives":
+            for inst_type in OKX_DERIVATIVES_INST_TYPES:
+                if inst_type not in inst_types:
+                    inst_types.append(inst_type)
+        inst_types = tuple(inst_types)
+        if len(inst_types) == 1:
+            return await self.request(
+                method="GET",
+                path="/api/v5/account/instruments",
+                params={"instType": inst_types[0]},
+                require_auth=True,
+            )
+        return await self._request_across_inst_types(
             method="GET",
             path="/api/v5/account/instruments",
-            params={"instType": self._inst_type()},
+            inst_types=inst_types,
+            build_params=lambda inst_type: {"instType": inst_type},
             require_auth=True,
         )
 
@@ -165,6 +274,14 @@ class OKXRESTClient:
             require_auth=True,
         )
 
+    async def get_funding_rate(self, *, symbol: str) -> dict[str, Any]:
+        return await self.request(
+            method="GET",
+            path="/api/v5/public/funding-rate",
+            params={"instId": symbol},
+            require_auth=False,
+        )
+
     async def get_trade_fee(
         self,
         *,
@@ -172,21 +289,40 @@ class OKXRESTClient:
         underlying: str | None = None,
         instrument_family: str | None = None,
     ) -> dict[str, Any]:
-        params: dict[str, Any] = {"instType": self._inst_type()}
-        if self._inst_type() == "SPOT":
+        inst_types = self._inst_types(symbol=symbol)
+        if inst_types == ("SPOT",):
+            params: dict[str, Any] = {"instType": "SPOT"}
             if symbol is not None:
                 params["instId"] = symbol
-        else:
+            return await self.request(
+                method="GET",
+                path="/api/v5/account/trade-fee",
+                params=params,
+                require_auth=True,
+            )
+
+        def _params_for_inst_type(inst_type: str) -> dict[str, Any]:
+            params: dict[str, Any] = {"instType": inst_type}
             if underlying:
                 params["uly"] = underlying
             elif instrument_family:
                 params["instFamily"] = instrument_family
             elif symbol is not None:
                 params["uly"] = self._derive_underlying(symbol)
-        return await self.request(
+            return params
+
+        if len(inst_types) == 1:
+            return await self.request(
+                method="GET",
+                path="/api/v5/account/trade-fee",
+                params=_params_for_inst_type(inst_types[0]),
+                require_auth=True,
+            )
+        return await self._request_across_inst_types(
             method="GET",
             path="/api/v5/account/trade-fee",
-            params=params,
+            inst_types=inst_types,
+            build_params=_params_for_inst_type,
             require_auth=True,
         )
 
@@ -268,11 +404,26 @@ class OKXRESTClient:
         begin: int | None = None,
         end: int | None = None,
     ) -> dict[str, Any]:
-        return await self.request(
+        inst_types = self._inst_types(symbol=symbol)
+        if len(inst_types) == 1:
+            return await self.request(
+                method="GET",
+                path="/api/v5/account/bills",
+                params={
+                    "instType": inst_types[0],
+                    "instId": symbol,
+                    "limit": limit,
+                    "begin": begin,
+                    "end": end,
+                },
+                require_auth=True,
+            )
+        return await self._request_across_inst_types(
             method="GET",
             path="/api/v5/account/bills",
-            params={
-                "instType": self._inst_type(),
+            inst_types=inst_types,
+            build_params=lambda inst_type: {
+                "instType": inst_type,
                 "instId": symbol,
                 "limit": limit,
                 "begin": begin,
@@ -324,11 +475,25 @@ class OKXRESTClient:
         order_id: str | None = None,
         limit: int | None = None,
     ) -> dict[str, Any]:
-        return await self.request(
+        inst_types = self._inst_types(symbol=symbol)
+        if len(inst_types) == 1:
+            return await self.request(
+                method="GET",
+                path="/api/v5/trade/fills",
+                params={
+                    "instType": inst_types[0],
+                    "instId": symbol,
+                    "ordId": order_id,
+                    "limit": limit,
+                },
+                require_auth=True,
+            )
+        return await self._request_across_inst_types(
             method="GET",
             path="/api/v5/trade/fills",
-            params={
-                "instType": self._inst_type(),
+            inst_types=inst_types,
+            build_params=lambda inst_type: {
+                "instType": inst_type,
                 "instId": symbol,
                 "ordId": order_id,
                 "limit": limit,

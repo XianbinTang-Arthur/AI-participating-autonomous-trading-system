@@ -45,6 +45,16 @@ class LedgerAccountRepository(Protocol):
     ) -> list[dict]:
         ...
 
+    def list_accounts_in_session(
+        self,
+        session: Session,
+        *,
+        account_type: str | None = None,
+        product_type: str | None = None,
+        margin_mode: str | None = None,
+    ) -> list[dict]:
+        ...
+
 
 class LedgerJournalRepository(Protocol):
     def create_journal(
@@ -98,6 +108,9 @@ class LedgerEntryRepository(Protocol):
         ...
 
     def balance_by_account(self, account_id: str) -> Decimal:
+        ...
+
+    def balance_by_account_in_session(self, session: Session, account_id: str) -> Decimal:
         ...
 
 

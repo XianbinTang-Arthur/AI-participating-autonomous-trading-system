@@ -157,6 +157,8 @@ BaselineImportStatus = Literal[
 
 class AccountBaselineSnapshot(SchemaBase):
     baseline_id: str = Field(default_factory=lambda: new_id("baseline"))
+    baseline_generation_id: str | None = None
+    exchange_ack_watermark_id: str | None = None
     account_source: str
     exchange_snapshot_ts: datetime
     imported_at: datetime

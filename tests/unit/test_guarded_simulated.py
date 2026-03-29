@@ -5,7 +5,7 @@ from decimal import Decimal
 
 from aats.bootstrap.settings import AATSSettings
 from aats.schemas.common import utc_now
-from aats.schemas.execution import FillEvent, OrderIntent, OrderObligation, OrderState
+from aats.schemas.execution import LegOrderIntent, OrderIntent, OrderObligation, OrderState
 from aats.schemas.exchange import (
     ExchangeAccountConfiguration,
     ExchangeAccountSnapshot,
@@ -678,6 +678,99 @@ class TestGuardedSimulatedExecution(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("_", payload["clOrdId"])
         self.assertNotEqual(payload["clOrdId"], f"cl{intent.idempotency_key}".replace("_", "")[:32])
 
+    def test_okx_client_order_id_is_stable_for_non_ascii_idempotency_keys(self) -> None:
+        intent = make_intent().model_copy(update={"idempotency_key": "套利-测试-01"})
+        builder = OKXOrderPayloadBuilder()
+
+        first = builder.build(
+            intent=intent,
+            instrument=InstrumentMetadata(
+                instrument_id="BTC-USDT",
+                symbol="BTC-USDT",
+                base_currency="BTC",
+                quote_currency="USDT",
+                lot_size=0.0001,
+                tick_size=0.1,
+                min_size=0.0001,
+                state="live",
+            ),
+        )["clOrdId"]
+        second = builder.build(
+            intent=intent,
+            instrument=InstrumentMetadata(
+                instrument_id="BTC-USDT",
+                symbol="BTC-USDT",
+                base_currency="BTC",
+                quote_currency="USDT",
+                lot_size=0.0001,
+                tick_size=0.1,
+                min_size=0.0001,
+                state="live",
+            ),
+        )["clOrdId"]
+
+        self.assertEqual(first, second)
+        self.assertTrue(first.isalnum())
+        self.assertLessEqual(len(first), 32)
+
+    def test_okx_client_order_id_does_not_alias_distinct_sanitized_keys(self) -> None:
+        builder = OKXOrderPayloadBuilder()
+        instrument = InstrumentMetadata(
+            instrument_id="BTC-USDT",
+            symbol="BTC-USDT",
+            base_currency="BTC",
+            quote_currency="USDT",
+            lot_size=0.0001,
+            tick_size=0.1,
+            min_size=0.0001,
+            state="live",
+        )
+
+        payload_a = builder.build(intent=make_intent().model_copy(update={"idempotency_key": "ab"}), instrument=instrument)
+        payload_b = builder.build(intent=make_intent().model_copy(update={"idempotency_key": "a-b"}), instrument=instrument)
+
+        self.assertNotEqual(payload_a["clOrdId"], payload_b["clOrdId"])
+
+    def test_spot_margin_close_payload_includes_reduce_only(self) -> None:
+        intent = OrderIntent(
+            intent_id="intent_spot_margin_close",
+            decision_id="decision_spot_margin_close",
+            symbol="BTC-USDT",
+            side="buy",
+            quantity=0.1,
+            execution_style="taker",
+            order_type="market",
+            urgency="medium",
+            time_in_force="IOC",
+            idempotency_key="intent_spot_margin_close",
+            product_type="spot",
+            margin_mode="cross",
+            td_mode="cross",
+            reduce_only=True,
+            close_only=True,
+            strategy_family="smart_arbitrage",
+            strategy_execution_mode="margin_reverse_carry",
+            position_intent="close_short",
+        )
+
+        payload = OKXOrderPayloadBuilder().build(
+            intent=intent,
+            instrument=InstrumentMetadata(
+                instrument_id="BTC-USDT",
+                symbol="BTC-USDT",
+                base_currency="BTC",
+                quote_currency="USDT",
+                lot_size=0.0001,
+                tick_size=0.1,
+                min_size=0.0001,
+                state="live",
+            ),
+        )
+
+        self.assertEqual(payload["tdMode"], "cross")
+        self.assertEqual(payload["reduceOnly"], "true")
+        self.assertEqual(payload["tgtCcy"], "base_ccy")
+
     def test_limit_ioc_payload_uses_ioc_order_type_and_price_cap(self) -> None:
         intent = OrderIntent(
             intent_id="intent_limit_ioc",
@@ -797,7 +890,7 @@ class TestGuardedSimulatedExecution(unittest.IsolatedAsyncioTestCase):
 
         self.assertNotIn("posSide", client.place_order_calls[0])
 
-    async def test_submit_uses_explicit_pos_side_for_long_short_close_orders(self) -> None:
+    async def test_submit_leg_order_uses_explicit_pos_side_for_long_short_close_orders(self) -> None:
         settings = make_settings(
             {
                 "live_submit_enabled": True,
@@ -857,17 +950,112 @@ class TestGuardedSimulatedExecution(unittest.IsolatedAsyncioTestCase):
             health_service=FakeHealthService(),
             price_provider=lambda _symbol: 68_000.0,
         )
-        intent = OrderIntent(
-            intent_id="intent_derivatives_close_long",
+        leg_intent = LegOrderIntent(
+            leg_intent_id="leg_intent_derivatives_close_long",
             decision_id="decision_derivatives_close_long",
             symbol="BTC-USDT-SWAP",
             side="sell",
+            pos_side="long",
+            action="close",
             quantity=0.03,
             execution_style="taker",
             order_type="market",
             urgency="medium",
             time_in_force="IOC",
             idempotency_key="intent_derivatives_close_long",
+            product_type="derivatives",
+            target_leverage=2.5,
+            margin_mode="cross",
+            td_mode="cross",
+            position_mode="long_short_mode",
+            reduce_only=True,
+            close_only=True,
+            reduce_only_reason="explicit_leg_close_path",
+            close_only_reason="explicit_leg_close_path",
+            instrument_family="BTC-USDT",
+            settle_currency="USDT",
+            exposure_side="flat",
+        )
+
+        state, fills = await adapter.submit_leg_order(leg_intent)
+
+        self.assertEqual(state.status, "FILLED")
+        self.assertEqual(fills[0].leg_action, "close")
+        self.assertEqual(client.place_order_calls[0]["posSide"], "long")
+        self.assertEqual(client.place_order_calls[0]["tdMode"], "cross")
+        self.assertEqual(client.place_order_calls[0]["reduceOnly"], "true")
+
+    async def test_submit_blocks_legacy_signed_intent_in_long_short_mode(self) -> None:
+        settings = make_settings(
+            {
+                "live_submit_enabled": True,
+                "guarded_execution_dry_run": False,
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "max_notional_per_symbol": 10_000.0,
+            }
+        )
+        mode_controller = RuntimeModeController(settings=settings, kill_switch=KillSwitch())
+        account_service = FakeAccountService()
+        account_service._snapshot = account_service._snapshot.model_copy(
+            update={
+                "positions": [
+                    ExchangePosition(
+                        instrument_id="BTC-USDT-SWAP",
+                        symbol="BTC-USDT-SWAP",
+                        quantity=Decimal("0.03"),
+                        average_entry_price=Decimal("67000"),
+                        mark_price=Decimal("68000"),
+                        notional_usd=Decimal("2040"),
+                        side="long",
+                    )
+                ],
+                "instruments": [
+                    InstrumentMetadata(
+                        instrument_id="BTC-USDT-SWAP",
+                        symbol="BTC-USDT-SWAP",
+                        base_currency="BTC",
+                        quote_currency="USDT",
+                        lot_size=0.01,
+                        tick_size=0.1,
+                        min_size=0.01,
+                        contract_value=0.01,
+                        state="live",
+                    )
+                ],
+                "account_mode": "2",
+                "account_configuration": ExchangeAccountConfiguration(
+                    account_level_code="2",
+                    account_level_label="single_currency_margin",
+                    position_mode="long_short_mode",
+                    position_mode_label="long_short",
+                    raw={"posMode": "long_short_mode"},
+                ),
+            }
+        )
+        account_service.instrument_metadata = lambda symbol: account_service._snapshot.instruments[0] if symbol == "BTC-USDT-SWAP" else None
+        client = FakeOKXClient()
+        adapter = OKXExecutionAdapter(
+            settings=settings,
+            client=client,  # type: ignore[arg-type]
+            account_service=account_service,  # type: ignore[arg-type]
+            mode_controller=mode_controller,
+            health_service=FakeHealthService(),
+            price_provider=lambda _symbol: Decimal("68000"),
+        )
+        intent = OrderIntent(
+            intent_id="intent_legacy_close_long",
+            decision_id="decision_legacy_close_long",
+            symbol="BTC-USDT-SWAP",
+            side="sell",
+            quantity=Decimal("0.03"),
+            execution_style="taker",
+            order_type="market",
+            urgency="medium",
+            time_in_force="IOC",
+            idempotency_key="intent_legacy_close_long",
             product_type="derivatives",
             target_leverage=2.5,
             margin_mode="cross",
@@ -884,11 +1072,12 @@ class TestGuardedSimulatedExecution(unittest.IsolatedAsyncioTestCase):
             position_intent="close_long",
         )
 
-        await adapter.submit(intent)
+        state, fills = await adapter.submit(intent)
 
-        self.assertEqual(client.place_order_calls[0]["posSide"], "long")
-        self.assertEqual(client.place_order_calls[0]["tdMode"], "cross")
-        self.assertEqual(client.place_order_calls[0]["reduceOnly"], "true")
+        self.assertEqual(state.status, "BLOCKED")
+        self.assertEqual(state.execution_error, "okx_hedge_mode_requires_explicit_leg_order")
+        self.assertEqual(fills, [])
+        self.assertEqual(client.place_order_calls, [])
 
     async def test_submit_blocks_when_derivatives_td_mode_mismatches_margin_mode(self) -> None:
         settings = make_settings(

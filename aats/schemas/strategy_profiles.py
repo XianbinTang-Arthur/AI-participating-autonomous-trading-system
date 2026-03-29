@@ -4,7 +4,7 @@ from datetime import datetime
 from hashlib import sha256
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from aats.bootstrap.settings import AATSSettings
 from aats.schemas.common import SchemaBase, new_id, utc_now
@@ -42,19 +42,70 @@ STRATEGY_PROFILE_MANAGED_FIELDS: tuple[str, ...] = (
     "strategy_expected_slippage_bps_fraction",
     "strategy_min_net_edge_bps",
     "strategy_entry_allowed_regimes",
+    "strategy_entry_min_signal_edge_bps",
     "strategy_entry_alpha_min",
     "strategy_entry_confidence_min",
+    "strategy_short_entry_allowed_regimes",
+    "strategy_short_entry_min_signal_edge_bps",
+    "strategy_short_entry_alpha_min",
+    "strategy_short_entry_confidence_min",
+    "strategy_scale_in_min_signal_edge_bps",
     "strategy_scale_in_alpha_min",
     "strategy_scale_in_confidence_min",
+    "strategy_short_scale_in_min_signal_edge_bps",
+    "strategy_short_scale_in_alpha_min",
+    "strategy_short_scale_in_confidence_min",
+    "strategy_reversal_min_signal_edge_bps",
     "strategy_reversal_alpha_min",
     "strategy_reversal_confidence_min",
+    "strategy_short_reversal_min_signal_edge_bps",
+    "strategy_short_reversal_alpha_min",
+    "strategy_short_reversal_confidence_min",
     "strategy_min_hold_seconds",
     "strategy_post_close_cooldown_seconds",
+    "strategy_max_fee_drag_ratio",
+    "strategy_max_churn_ratio",
     "strategy_low_edge_threshold_bps",
     "strategy_low_edge_streak_limit",
     "strategy_low_edge_cooldown_seconds",
     "strategy_transient_close_retry_cooldown_seconds",
 )
+
+STRATEGY_PROFILE_SHORT_FIELD_PAIRS: tuple[tuple[str, str], ...] = (
+    ("strategy_short_entry_allowed_regimes", "strategy_entry_allowed_regimes"),
+    ("strategy_short_entry_min_signal_edge_bps", "strategy_entry_min_signal_edge_bps"),
+    ("strategy_short_entry_alpha_min", "strategy_entry_alpha_min"),
+    ("strategy_short_entry_confidence_min", "strategy_entry_confidence_min"),
+    ("strategy_short_scale_in_min_signal_edge_bps", "strategy_scale_in_min_signal_edge_bps"),
+    ("strategy_short_scale_in_alpha_min", "strategy_scale_in_alpha_min"),
+    ("strategy_short_scale_in_confidence_min", "strategy_scale_in_confidence_min"),
+    ("strategy_short_reversal_min_signal_edge_bps", "strategy_reversal_min_signal_edge_bps"),
+    ("strategy_short_reversal_alpha_min", "strategy_reversal_alpha_min"),
+    ("strategy_short_reversal_confidence_min", "strategy_reversal_confidence_min"),
+)
+
+STRATEGY_PROFILE_SHORT_FIELDS: tuple[str, ...] = tuple(
+    short_field for short_field, _legacy_field in STRATEGY_PROFILE_SHORT_FIELD_PAIRS
+)
+
+
+def normalize_strategy_profile_payload_for_product_type(
+    payload: "StrategyProfilePayload | dict[str, Any]",
+    *,
+    product_type: str,
+) -> "StrategyProfilePayload":
+    raw = payload.model_dump(mode="python") if isinstance(payload, StrategyProfilePayload) else dict(payload)
+    normalized = dict(raw)
+    if product_type == "spot":
+        for short_field, shared_field in STRATEGY_PROFILE_SHORT_FIELD_PAIRS:
+            normalized[short_field] = normalized.get(shared_field)
+    return StrategyProfilePayload.model_validate(normalized)
+
+
+def _strategy_profile_summary_fields(*, product_type: str | None) -> tuple[str, ...]:
+    if product_type == "spot":
+        return tuple(field for field in STRATEGY_PROFILE_MANAGED_FIELDS if field not in STRATEGY_PROFILE_SHORT_FIELDS)
+    return STRATEGY_PROFILE_MANAGED_FIELDS
 
 
 class StrategyProfilePayload(SchemaBase):
@@ -72,18 +123,57 @@ class StrategyProfilePayload(SchemaBase):
     strategy_expected_slippage_bps_fraction: float
     strategy_min_net_edge_bps: float
     strategy_entry_allowed_regimes: tuple[str, ...]
+    strategy_entry_min_signal_edge_bps: float
     strategy_entry_alpha_min: float
     strategy_entry_confidence_min: float
+    strategy_short_entry_allowed_regimes: tuple[str, ...]
+    strategy_short_entry_min_signal_edge_bps: float
+    strategy_short_entry_alpha_min: float
+    strategy_short_entry_confidence_min: float
+    strategy_scale_in_min_signal_edge_bps: float
     strategy_scale_in_alpha_min: float
     strategy_scale_in_confidence_min: float
+    strategy_short_scale_in_min_signal_edge_bps: float
+    strategy_short_scale_in_alpha_min: float
+    strategy_short_scale_in_confidence_min: float
+    strategy_reversal_min_signal_edge_bps: float
     strategy_reversal_alpha_min: float
     strategy_reversal_confidence_min: float
+    strategy_short_reversal_min_signal_edge_bps: float
+    strategy_short_reversal_alpha_min: float
+    strategy_short_reversal_confidence_min: float
     strategy_min_hold_seconds: float
     strategy_post_close_cooldown_seconds: float
+    strategy_max_fee_drag_ratio: float
+    strategy_max_churn_ratio: float
     strategy_low_edge_threshold_bps: float
     strategy_low_edge_streak_limit: int
     strategy_low_edge_cooldown_seconds: float
     strategy_transient_close_retry_cooldown_seconds: float
+
+    @model_validator(mode="before")
+    @classmethod
+    def backfill_legacy_short_thresholds(cls, raw: Any) -> Any:
+        if not isinstance(raw, dict):
+            return raw
+        payload = dict(raw)
+        fallback_pairs = (
+            ("strategy_short_entry_allowed_regimes", "strategy_entry_allowed_regimes"),
+            ("strategy_short_entry_min_signal_edge_bps", "strategy_entry_min_signal_edge_bps"),
+            ("strategy_short_entry_alpha_min", "strategy_entry_alpha_min"),
+            ("strategy_short_entry_confidence_min", "strategy_entry_confidence_min"),
+            ("strategy_short_scale_in_min_signal_edge_bps", "strategy_scale_in_min_signal_edge_bps"),
+            ("strategy_short_scale_in_alpha_min", "strategy_scale_in_alpha_min"),
+            ("strategy_short_scale_in_confidence_min", "strategy_scale_in_confidence_min"),
+            ("strategy_short_reversal_min_signal_edge_bps", "strategy_reversal_min_signal_edge_bps"),
+            ("strategy_short_reversal_alpha_min", "strategy_reversal_alpha_min"),
+            ("strategy_short_reversal_confidence_min", "strategy_reversal_confidence_min"),
+        )
+        for short_field, legacy_field in fallback_pairs:
+            value = payload.get(short_field)
+            if value is None and legacy_field in payload:
+                payload[short_field] = payload.get(legacy_field)
+        return payload
 
 
 class StrategyProfileAxes(SchemaBase):
@@ -325,39 +415,81 @@ class StrategyProfileEvaluationRecord(SchemaBase):
 def strategy_profile_payload_from_settings(settings: AATSSettings) -> StrategyProfilePayload:
     payload = settings.model_dump(mode="python")
     selected = {field: payload[field] for field in STRATEGY_PROFILE_MANAGED_FIELDS}
-    return StrategyProfilePayload.model_validate(selected)
+    return normalize_strategy_profile_payload_for_product_type(
+        selected,
+        product_type=settings.trading_product_type,
+    )
 
 
 def apply_strategy_profile_payload(settings: AATSSettings, payload: StrategyProfilePayload | dict[str, Any]) -> None:
-    raw = payload.model_dump(mode="python") if isinstance(payload, StrategyProfilePayload) else dict(payload)
+    raw = normalize_strategy_profile_payload_for_product_type(
+        payload,
+        product_type=settings.trading_product_type,
+    ).model_dump(mode="python")
     for field in STRATEGY_PROFILE_MANAGED_FIELDS:
         if field in raw:
             setattr(settings, field, raw[field])
 
 
-def summarize_strategy_profile_payload(payload: StrategyProfilePayload | dict[str, Any]) -> dict[str, Any]:
-    raw = payload.model_dump(mode="python") if isinstance(payload, StrategyProfilePayload) else dict(payload)
-    return {
-        "axes": strategy_profile_axes_from_payload(raw).model_dump(mode="json"),
+def summarize_strategy_profile_payload(
+    payload: StrategyProfilePayload | dict[str, Any],
+    *,
+    product_type: str | None = None,
+) -> dict[str, Any]:
+    raw = normalize_strategy_profile_payload_for_product_type(
+        payload,
+        product_type=product_type or "derivatives",
+    ).model_dump(mode="python")
+    summary = {
+        "axes": strategy_profile_axes_from_payload(raw, product_type=product_type).model_dump(mode="json"),
         "decision_min_interval_seconds_15m": raw.get("decision_min_interval_seconds_15m"),
         "max_decisions_per_minute": raw.get("max_decisions_per_minute"),
         "decision_min_price_move_bps": raw.get("decision_min_price_move_bps"),
         "decision_min_momentum_delta": raw.get("decision_min_momentum_delta"),
         "strategy_min_net_edge_bps": raw.get("strategy_min_net_edge_bps"),
         "strategy_entry_allowed_regimes": raw.get("strategy_entry_allowed_regimes"),
+        "strategy_entry_min_signal_edge_bps": raw.get("strategy_entry_min_signal_edge_bps"),
         "strategy_entry_alpha_min": raw.get("strategy_entry_alpha_min"),
+        "strategy_entry_confidence_min": raw.get("strategy_entry_confidence_min"),
+        "strategy_short_entry_allowed_regimes": raw.get("strategy_short_entry_allowed_regimes"),
+        "strategy_short_entry_min_signal_edge_bps": raw.get("strategy_short_entry_min_signal_edge_bps"),
+        "strategy_short_entry_alpha_min": raw.get("strategy_short_entry_alpha_min"),
+        "strategy_short_entry_confidence_min": raw.get("strategy_short_entry_confidence_min"),
+        "strategy_scale_in_min_signal_edge_bps": raw.get("strategy_scale_in_min_signal_edge_bps"),
         "strategy_scale_in_alpha_min": raw.get("strategy_scale_in_alpha_min"),
+        "strategy_scale_in_confidence_min": raw.get("strategy_scale_in_confidence_min"),
+        "strategy_short_scale_in_min_signal_edge_bps": raw.get("strategy_short_scale_in_min_signal_edge_bps"),
+        "strategy_short_scale_in_alpha_min": raw.get("strategy_short_scale_in_alpha_min"),
+        "strategy_short_scale_in_confidence_min": raw.get("strategy_short_scale_in_confidence_min"),
+        "strategy_reversal_min_signal_edge_bps": raw.get("strategy_reversal_min_signal_edge_bps"),
         "strategy_reversal_alpha_min": raw.get("strategy_reversal_alpha_min"),
+        "strategy_reversal_confidence_min": raw.get("strategy_reversal_confidence_min"),
+        "strategy_short_reversal_min_signal_edge_bps": raw.get("strategy_short_reversal_min_signal_edge_bps"),
+        "strategy_short_reversal_alpha_min": raw.get("strategy_short_reversal_alpha_min"),
+        "strategy_short_reversal_confidence_min": raw.get("strategy_short_reversal_confidence_min"),
         "strategy_min_hold_seconds": raw.get("strategy_min_hold_seconds"),
         "strategy_post_close_cooldown_seconds": raw.get("strategy_post_close_cooldown_seconds"),
+        "strategy_max_fee_drag_ratio": raw.get("strategy_max_fee_drag_ratio"),
+        "strategy_max_churn_ratio": raw.get("strategy_max_churn_ratio"),
         "strategy_low_edge_threshold_bps": raw.get("strategy_low_edge_threshold_bps"),
         "strategy_low_edge_streak_limit": raw.get("strategy_low_edge_streak_limit"),
         "strategy_low_edge_cooldown_seconds": raw.get("strategy_low_edge_cooldown_seconds"),
     }
+    if product_type == "spot":
+        for field in STRATEGY_PROFILE_SHORT_FIELDS:
+            summary.pop(field, None)
+    return summary
 
 
-def strategy_profile_axes_from_payload(payload: StrategyProfilePayload | dict[str, Any]) -> StrategyProfileAxes:
-    raw = payload.model_dump(mode="python") if isinstance(payload, StrategyProfilePayload) else dict(payload)
+def strategy_profile_axes_from_payload(
+    payload: StrategyProfilePayload | dict[str, Any],
+    *,
+    product_type: str | None = None,
+) -> StrategyProfileAxes:
+    raw = normalize_strategy_profile_payload_for_product_type(
+        payload,
+        product_type=product_type or "derivatives",
+    ).model_dump(mode="python")
 
     def level(
         value: float,
@@ -393,11 +525,23 @@ def strategy_profile_axes_from_payload(payload: StrategyProfilePayload | dict[st
         (float(raw.get("strategy_min_hold_seconds", 0.0) or 0.0) / 8.0),
         float(raw.get("strategy_low_edge_cooldown_seconds", 0.0) or 0.0) / 12.0,
     )
+    entry_alpha_signal = max(
+        float(raw.get("strategy_entry_alpha_min", 0.0) or 0.0),
+        float(raw.get("strategy_short_entry_alpha_min", 0.0) or 0.0),
+    )
+    scale_in_alpha_signal = max(
+        float(raw.get("strategy_scale_in_alpha_min", 0.0) or 0.0),
+        float(raw.get("strategy_short_scale_in_alpha_min", 0.0) or 0.0),
+    )
+    reversal_alpha_signal = max(
+        float(raw.get("strategy_reversal_alpha_min", 0.0) or 0.0),
+        float(raw.get("strategy_short_reversal_alpha_min", 0.0) or 0.0),
+    )
     return StrategyProfileAxes(
         frequency=level(frequency_signal, low=1.5, medium=2.5, high=4.0),
-        entry_threshold=level(float(raw.get("strategy_entry_alpha_min", 0.0) or 0.0), low=0.16, medium=0.22, high=0.28),
-        scale_in_threshold=level(float(raw.get("strategy_scale_in_alpha_min", 0.0) or 0.0), low=0.2, medium=0.28, high=0.34),
-        reversal_threshold=level(float(raw.get("strategy_reversal_alpha_min", 0.0) or 0.0), low=0.26, medium=0.34, high=0.4),
+        entry_threshold=level(entry_alpha_signal, low=0.16, medium=0.22, high=0.28),
+        scale_in_threshold=level(scale_in_alpha_signal, low=0.2, medium=0.28, high=0.34),
+        reversal_threshold=level(reversal_alpha_signal, low=0.26, medium=0.34, high=0.4),
         cost_protection=level(cost_signal, low=5.0, medium=8.0, high=12.0),
         cooldown_fuse=level(cooldown_signal, low=90.0, medium=180.0, high=300.0),
     )
@@ -406,16 +550,21 @@ def strategy_profile_axes_from_payload(payload: StrategyProfilePayload | dict[st
 def diff_strategy_profile_payload(
     previous: StrategyProfilePayload | dict[str, Any],
     next_payload: StrategyProfilePayload | dict[str, Any],
+    *,
+    product_type: str | None = None,
 ) -> dict[str, Any]:
-    previous_raw = previous.model_dump(mode="python") if isinstance(previous, StrategyProfilePayload) else dict(previous)
-    next_raw = (
-        next_payload.model_dump(mode="python")
-        if isinstance(next_payload, StrategyProfilePayload)
-        else dict(next_payload)
-    )
+    normalized_product_type = product_type or "derivatives"
+    previous_raw = normalize_strategy_profile_payload_for_product_type(
+        previous,
+        product_type=normalized_product_type,
+    ).model_dump(mode="python")
+    next_raw = normalize_strategy_profile_payload_for_product_type(
+        next_payload,
+        product_type=normalized_product_type,
+    ).model_dump(mode="python")
     changed_fields = [
         field
-        for field in STRATEGY_PROFILE_MANAGED_FIELDS
+        for field in _strategy_profile_summary_fields(product_type=product_type)
         if previous_raw.get(field) != next_raw.get(field)
     ]
     return {

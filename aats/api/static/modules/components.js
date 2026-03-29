@@ -4,14 +4,27 @@ export function pill(label, tone = "neutral") {
   return `<span class="signal-pill tone-${escapeHtml(tone)}">${escapeHtml(label)}</span>`;
 }
 
+const ACTOR_LABELS = {
+  system: "系统自动决定",
+  ai: "AI 给建议/决策",
+  admin: "管理员手动覆盖",
+  config: "配置默认",
+  risk_control: "风控系统",
+  operator: "操作员手动处理",
+  viewer: "只读会话",
+  session: "登录会话",
+  api_key_read: "只读 API Key",
+  api_key_write: "写入 API Key",
+};
+
+function actorFallbackLabel(key) {
+  if (!key) return "来源待确认";
+  return `来源：${key.replace(/[_-]+/g, " ")}`;
+}
+
 export function actorTag(actor) {
   const key = String(actor || "").trim().toLowerCase();
-  const labelMap = {
-    system: "系统自动决定",
-    ai: "AI 给建议/决策",
-    admin: "管理员手动覆盖",
-  };
-  const label = labelMap[key] || "主体待确认";
+  const label = ACTOR_LABELS[key] || actorFallbackLabel(key);
   return `<span class="actor-tag actor-tag--${escapeHtml(key || "unknown")}">${escapeHtml(label)}</span>`;
 }
 

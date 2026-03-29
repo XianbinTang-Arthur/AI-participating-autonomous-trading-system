@@ -10,12 +10,6 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from aats.bootstrap.config import load_settings
-from aats.bootstrap.env_profiles import EnvTemplateProfile, load_profiled_dotenv_into_process
-from aats.services.operator.accounts import create_operator_user
-from aats.storage.operator_repo_postgres import PostgresOperatorUserRepository
-from aats.storage.session import create_database_runtime, create_schema, validate_runtime_schema
-
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Seed the first operator admin user into the configured Postgres database.")
@@ -50,9 +44,14 @@ def _read_password(explicit_password: str | None) -> str:
 
 
 def main() -> None:
+    from aats.bootstrap.config import load_settings
+    from aats.bootstrap.env_profiles import load_profiled_dotenv_into_process
+    from aats.services.operator.accounts import create_operator_user
+    from aats.storage.operator_repo_postgres import PostgresOperatorUserRepository
+    from aats.storage.session import create_database_runtime, create_schema, validate_runtime_schema
+
     args = parse_args()
-    profile: EnvTemplateProfile = args.profile
-    load_profiled_dotenv_into_process(ROOT, profile)
+    load_profiled_dotenv_into_process(ROOT, args.profile)
     os.chdir(ROOT)
     settings = load_settings()
 

@@ -5,26 +5,38 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 
+from pydantic import ValidationError
+
 from aats.events import topics
 from aats.schemas.audit import DecisionAuditRecord
-from aats.schemas.common import EventEnvelope
+from aats.schemas.common import EventEnvelope, utc_now
 from aats.schemas.decision import DecisionContext, DecisionOutcome, PositionTarget
-from aats.schemas.execution import ExecutionPlan, FillEvent, OrderIntent, OrderState
+from aats.schemas.execution import ExecutionPlan, FillEvent, LegExecutionPlan, OrderIntent, OrderState
 from aats.schemas.exchange import AccountBaselineSnapshot
 from aats.schemas.governance import PolicyDecision, RiskDecision
 from aats.schemas.market import MarketSnapshot
 from aats.schemas.portfolio import PortfolioSnapshot, is_baseline_snapshot
-from aats.schemas.reconciliation import ReconciliationReport
+from aats.schemas.reconciliation import ReplayProjectionOffset, ReconciliationReport
+from aats.schemas.strategy_runtime import (
+    PortfolioAllocationDecision,
+    StrategyExecutionBundle,
+    StrategySleeveIntent,
+)
 from aats.schemas.system import HealthSnapshot
+from aats.services.execution_engine.fill_ordering import fill_processing_sort_key
 from aats.services.execution_engine.state_machine import OrderStateMachine
-from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, EPSILON_DECIMAL_9, is_effectively_zero, quantize_decimal, to_decimal
+from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, is_effectively_zero, quantize_decimal, to_decimal
 from aats.services.portfolio_service.position_keys import position_key_for_snapshot_position
 from aats.services.portfolio_service.positions import PortfolioState
-from aats.storage.base import AuditRepository, EventStore, PortfolioRepository
+from aats.storage.base import AuditRepository, EventStore, PortfolioRepository, ReconciliationRepository
 from aats.services.portfolio_service.reconstruction import PortfolioReconstructionService
 from aats.services.runtime_scope import (
     RuntimeStateScope,
+    fill_outcomes_for_scope,
+    funding_fee_records_for_scope,
     latest_snapshot_for_scope,
+    snapshots_for_scope,
+    sleeve_pnl_records_for_scope,
     topic_events_for_scope,
 )
 
@@ -47,6 +59,10 @@ class ReplayResult:
     final_reconstructed_snapshot: PortfolioSnapshot | None = None
     final_stored_snapshot: PortfolioSnapshot | None = None
     decision_chains: dict[str, DecisionAuditRecord] = field(default_factory=dict)
+    incremental_window_start_at: datetime | None = None
+    baseline_generation_id: str | None = None
+    exchange_ack_watermark_id: str | None = None
+    replay_offset_id: str | None = None
 
 
 class ReplayEngine:
@@ -64,17 +80,47 @@ class ReplayEngine:
         topics.AI_SHADOW_DECISIONS,
         topics.AI_SHADOW_EVALUATIONS,
         topics.AI_DEGRADATION_EVENTS,
+        topics.STRATEGY_COORDINATOR_SNAPSHOTS,
+        topics.STRATEGY_SLEEVE_INTENTS,
+        topics.PORTFOLIO_ALLOCATION_DECISIONS,
         topics.POSITION_TARGETS,
         topics.DECISION_OUTCOMES,
         topics.POLICY_DECISIONS,
         topics.RISK_DECISIONS,
         topics.EXECUTION_PLANS,
+        topics.STRATEGY_EXECUTION_BUNDLES,
         topics.ORDER_INTENTS,
         topics.ORDER_UPDATES,
         topics.FILL_EVENTS,
         topics.PORTFOLIO_SNAPSHOTS,
         topics.RECONCILIATION_REPORTS,
         topics.AUDIT_RECORDS,
+    )
+    _DECISION_VALIDATION_TOPICS: frozenset[str] = frozenset(
+        {
+            topics.HEALTH_SNAPSHOTS,
+            topics.DECISION_CONTEXTS,
+            topics.BASELINE_ASSESSMENTS,
+            topics.AI_DECISION_BRIEFS,
+            topics.AI_ASSESSMENTS,
+            topics.AI_SHADOW_DECISIONS,
+            topics.AI_SHADOW_EVALUATIONS,
+            topics.AI_DEGRADATION_EVENTS,
+            topics.STRATEGY_COORDINATOR_SNAPSHOTS,
+            topics.STRATEGY_SLEEVE_INTENTS,
+            topics.PORTFOLIO_ALLOCATION_DECISIONS,
+            topics.POSITION_TARGETS,
+            topics.DECISION_OUTCOMES,
+            topics.POLICY_DECISIONS,
+            topics.RISK_DECISIONS,
+            topics.EXECUTION_PLANS,
+            topics.STRATEGY_EXECUTION_BUNDLES,
+            topics.ORDER_INTENTS,
+            topics.ORDER_UPDATES,
+            topics.FILL_EVENTS,
+            topics.RECONCILIATION_REPORTS,
+            topics.AUDIT_RECORDS,
+        }
     )
 
     def __init__(
@@ -84,12 +130,20 @@ class ReplayEngine:
         reconstruction_service: PortfolioReconstructionService,
         audit_repo: AuditRepository | None = None,
         portfolio_repo: PortfolioRepository | None = None,
+        reconciliation_repo: ReconciliationRepository | None = None,
+        fill_outcome_repo=None,
+        funding_fee_repo=None,
+        sleeve_pnl_repo=None,
         scope: RuntimeStateScope | None = None,
     ) -> None:
         self.event_store = event_store
         self.reconstruction_service = reconstruction_service
         self.audit_repo = audit_repo
         self.portfolio_repo = portfolio_repo
+        self.reconciliation_repo = reconciliation_repo
+        self.fill_outcome_repo = fill_outcome_repo
+        self.funding_fee_repo = funding_fee_repo
+        self.sleeve_pnl_repo = sleeve_pnl_repo
         self.scope = scope
 
     def replay(
@@ -112,8 +166,22 @@ class ReplayEngine:
         baseline_switches: list[AccountBaselineSnapshot] = []
         stored_snapshot_count = 0
         final_stored_snapshot: PortfolioSnapshot | None = None
-        baseline_snapshot: PortfolioSnapshot | None = None
-        events = self._select_events(decision_id=decision_id, start_at=start_at, end_at=end_at)
+        incremental_window_start_at, baseline_generation_id, exchange_ack_watermark_id = self._incremental_window_start_at(
+            decision_id=decision_id,
+            explicit_start_at=start_at,
+        )
+        effective_start_at = start_at if start_at is not None else incremental_window_start_at
+        baseline_snapshot: PortfolioSnapshot | None = self._baseline_seed_snapshot(
+            decision_id=decision_id,
+            start_at=effective_start_at,
+        )
+        selected_decision_baseline_seeded = False
+        events = self._select_events(
+            decision_id=decision_id,
+            start_at=effective_start_at,
+            end_at=end_at,
+            baseline_generation_id=baseline_generation_id,
+        )
         events_by_id = {event.event_id: event for event in events}
         events_by_decision: dict[str, list[EventEnvelope]] = defaultdict(list)
         order_intents_by_intent_id: dict[str, OrderIntent] = {}
@@ -125,7 +193,7 @@ class ReplayEngine:
 
         for envelope in events:
             envelope_decision_id = envelope.payload.get("decision_id")
-            if isinstance(envelope_decision_id, str):
+            if isinstance(envelope_decision_id, str) and envelope.topic in self._DECISION_VALIDATION_TOPICS:
                 decision_ids.add(envelope_decision_id)
                 events_by_decision[envelope_decision_id].append(envelope)
 
@@ -170,6 +238,14 @@ class ReplayEngine:
                 if is_baseline_snapshot(stored_snapshot):
                     baseline_snapshot = stored_snapshot
                     continue
+                if (
+                    selected_decision_id is not None
+                    and not selected_decision_baseline_seeded
+                    and stored_snapshot.decision_id != selected_decision_id
+                ):
+                    baseline_snapshot = stored_snapshot
+                    selected_decision_baseline_seeded = True
+                    continue
 
                 reconstructed_snapshot = self._rebuild_snapshot(
                     fills=processed_fills,
@@ -213,9 +289,10 @@ class ReplayEngine:
                 order_state_updates_by_client_order_id=order_state_updates_by_client_order_id,
             )
         )
+        validated_decision_ids = {selected_decision_id} if selected_decision_id is not None else decision_ids
         decision_chain_issues.extend(
             self._validate_decision_chains(
-                decision_ids=decision_ids,
+                decision_ids=validated_decision_ids,
                 decision_chains=decision_chains,
                 events_by_id=events_by_id,
                 events_by_decision=events_by_decision,
@@ -237,11 +314,23 @@ class ReplayEngine:
         )
 
         if self.portfolio_repo is not None and final_stored_snapshot is not None:
-            repo_latest = (
-                latest_snapshot_for_scope(self.portfolio_repo, self.scope)
-                if self.scope is not None
-                else self.portfolio_repo.latest()
-            )
+            repo_latest = None
+            if selected_decision_id is not None:
+                scoped_history = (
+                    snapshots_for_scope(self.portfolio_repo, self.scope)
+                    if self.scope is not None
+                    else self.portfolio_repo.history()
+                )
+                for snapshot in reversed(scoped_history):
+                    if snapshot.decision_id == selected_decision_id:
+                        repo_latest = snapshot
+                        break
+            if repo_latest is None:
+                repo_latest = (
+                    latest_snapshot_for_scope(self.portfolio_repo, self.scope)
+                    if self.scope is not None
+                    else self.portfolio_repo.latest()
+                )
             if repo_latest is None:
                 portfolio_issues.append("portfolio_repository_missing_latest_snapshot")
             elif self._snapshot_mismatch(
@@ -260,6 +349,8 @@ class ReplayEngine:
                 )
             )
 
+        execution_chain_issues.extend(self._validate_sleeve_pnl_projection())
+
         divergences = [
             *portfolio_issues,
             *decision_chain_issues,
@@ -267,6 +358,12 @@ class ReplayEngine:
             *audit_issues,
             *baseline_switch_issues,
         ]
+        replay_offset = self._persist_replay_offset(
+            decision_id=decision_id,
+            baseline_generation_id=baseline_generation_id,
+            exchange_ack_watermark_id=exchange_ack_watermark_id,
+            events=events,
+        )
         return ReplayResult(
             selected_decision_id=selected_decision_id,
             start_at=start_at,
@@ -284,7 +381,81 @@ class ReplayEngine:
             final_reconstructed_snapshot=final_reconstructed_snapshot,
             final_stored_snapshot=final_stored_snapshot,
             decision_chains=decision_chains,
+            incremental_window_start_at=incremental_window_start_at,
+            baseline_generation_id=baseline_generation_id,
+            exchange_ack_watermark_id=exchange_ack_watermark_id,
+            replay_offset_id=None if replay_offset is None else replay_offset.offset_id,
         )
+
+    def _validate_sleeve_pnl_projection(self) -> list[str]:
+        if self.fill_outcome_repo is None or self.sleeve_pnl_repo is None:
+            return []
+        if self.scope is not None:
+            outcomes = fill_outcomes_for_scope(self.fill_outcome_repo, self.scope)
+            sleeve_records = sleeve_pnl_records_for_scope(self.sleeve_pnl_repo, self.scope)
+            funding_records = (
+                funding_fee_records_for_scope(self.funding_fee_repo, self.scope)
+                if self.funding_fee_repo is not None
+                else []
+            )
+        else:
+            outcomes = self.fill_outcome_repo.outcomes()
+            sleeve_records = self.sleeve_pnl_repo.records()
+            funding_records = [] if self.funding_fee_repo is None else self.funding_fee_repo.records()
+
+        issues: list[str] = []
+        fill_records_by_fill_id: dict[str, list] = defaultdict(list)
+        funding_records_by_bill_id: dict[str, list] = defaultdict(list)
+        for record in sleeve_records:
+            if getattr(record, "fill_id", None):
+                fill_records_by_fill_id[str(record.fill_id)].append(record)
+            if getattr(record, "funding_fee_id", None):
+                funding_records_by_bill_id[str(record.funding_fee_id)].append(record)
+
+        for outcome in outcomes:
+            linked = fill_records_by_fill_id.get(outcome.fill_id, [])
+            if not linked:
+                issues.append(f"sleeve_pnl_missing_fill_record fill_id={outcome.fill_id}")
+                continue
+            realized_total = sum((to_decimal(item.realized_pnl) for item in linked), start=Decimal("0"))
+            fee_total = sum((to_decimal(item.fee_amount) for item in linked), start=Decimal("0"))
+            if abs(realized_total - to_decimal(outcome.realized_pnl_delta)) > EPSILON_DECIMAL_12:
+                issues.append(
+                    "sleeve_pnl_fill_realized_mismatch "
+                    f"fill_id={outcome.fill_id} left={realized_total} right={outcome.realized_pnl_delta}"
+                )
+            if abs(fee_total - to_decimal(outcome.fee_delta)) > EPSILON_DECIMAL_12:
+                issues.append(
+                    "sleeve_pnl_fill_fee_mismatch "
+                    f"fill_id={outcome.fill_id} left={fee_total} right={outcome.fee_delta}"
+                )
+            if outcome.strategy_sleeve_id is not None:
+                sleeve_ids = {str(item.strategy_sleeve_id or "") for item in linked}
+                if sleeve_ids != {str(outcome.strategy_sleeve_id)}:
+                    issues.append(
+                        "sleeve_pnl_fill_sleeve_mismatch "
+                        f"fill_id={outcome.fill_id} left={sorted(sleeve_ids)} right={outcome.strategy_sleeve_id}"
+                    )
+            if outcome.allocation_id is not None:
+                allocation_ids = {str(item.allocation_id or "") for item in linked}
+                if allocation_ids != {str(outcome.allocation_id)}:
+                    issues.append(
+                        "sleeve_pnl_fill_allocation_mismatch "
+                        f"fill_id={outcome.fill_id} left={sorted(allocation_ids)} right={outcome.allocation_id}"
+                    )
+
+        for funding_record in funding_records:
+            linked = funding_records_by_bill_id.get(funding_record.bill_id, [])
+            if not linked:
+                issues.append(f"sleeve_pnl_missing_funding_record bill_id={funding_record.bill_id}")
+                continue
+            funding_total = sum((to_decimal(item.funding_fee_amount) for item in linked), start=Decimal("0"))
+            if abs(funding_total - to_decimal(funding_record.amount)) > EPSILON_DECIMAL_12:
+                issues.append(
+                    "sleeve_pnl_funding_amount_mismatch "
+                    f"bill_id={funding_record.bill_id} left={funding_total} right={funding_record.amount}"
+                )
+        return issues
 
     def _rebuild_snapshot(
         self,
@@ -302,7 +473,7 @@ class ReplayEngine:
         state = PortfolioState(initial_usdt_balance=self.reconstruction_service.initial_usdt_balance)
         state.load_portfolio_snapshot(baseline_snapshot)
         baseline_ts = baseline_snapshot.snapshot_ts
-        for fill in sorted(fills, key=lambda item: (item.ingestion_timestamp, item.fill_id)):
+        for fill in sorted(fills, key=fill_processing_sort_key):
             if fill.ingestion_timestamp >= baseline_ts:
                 state.apply_fill(fill)
         return self.reconstruction_service.snapshot_builder.build(
@@ -363,6 +534,7 @@ class ReplayEngine:
         decision_id: str | None,
         start_at: datetime | None,
         end_at: datetime | None,
+        baseline_generation_id: str | None = None,
     ) -> list[EventEnvelope]:
         if decision_id is not None:
             events = self.event_store.by_decision(decision_id)
@@ -393,6 +565,8 @@ class ReplayEngine:
                             record.policy_decision_ref,
                             record.risk_decision_ref,
                             record.execution_plan_ref,
+                            record.strategy_execution_bundle_ref,
+                            *record.execution_plan_refs,
                             record.portfolio_delta_ref,
                             *record.order_intent_refs,
                             *record.order_state_refs,
@@ -430,6 +604,13 @@ class ReplayEngine:
                 if (start_at is None or event.event_timestamp >= start_at)
                 and (end_at is None or event.event_timestamp <= end_at)
             ]
+            if baseline_generation_id is not None and self.reconciliation_repo is not None:
+                generation = self.reconciliation_repo.latest_baseline_generation_for_scope(scope=self.scope)
+                if generation is not None and generation.generation_id == baseline_generation_id:
+                    baseline_event = self.event_store.get(generation.baseline_event_ref)
+                    if baseline_event is not None and all(item.event_id != baseline_event.event_id for item in events):
+                        events.append(baseline_event)
+            events = self._append_referenced_events(events)
             return sorted(
                 events,
                 key=lambda item: (item.event_timestamp, item.created_at, item.event_id),
@@ -437,6 +618,154 @@ class ReplayEngine:
         if start_at is not None or end_at is not None:
             return self.event_store.between(start_at=start_at, end_at=end_at)
         return self.event_store.all()
+
+    def _incremental_window_start_at(
+        self,
+        *,
+        decision_id: str | None,
+        explicit_start_at: datetime | None,
+    ) -> tuple[datetime | None, str | None, str | None]:
+        if explicit_start_at is not None or decision_id is not None or self.scope is None or self.reconciliation_repo is None:
+            return explicit_start_at, None, None
+        baseline_generation = self.reconciliation_repo.latest_baseline_generation_for_scope(scope=self.scope)
+        exchange_ack = self.reconciliation_repo.latest_exchange_ack_watermark_for_scope(scope=self.scope)
+        replay_offset = self.event_store.latest_replay_offset(
+            projection_key="portfolio_replay",
+            scope=self.scope,
+        )
+        candidates = [
+            candidate
+            for candidate in (
+                None if baseline_generation is None else baseline_generation.imported_at,
+                None if exchange_ack is None else exchange_ack.acknowledged_at,
+                None if replay_offset is None else replay_offset.last_event_timestamp,
+            )
+            if candidate is not None
+        ]
+        return (
+            max(candidates) if candidates else None,
+            None if baseline_generation is None else baseline_generation.generation_id,
+            None if exchange_ack is None else exchange_ack.watermark_id,
+        )
+
+    def _persist_replay_offset(
+        self,
+        *,
+        decision_id: str | None,
+        baseline_generation_id: str | None,
+        exchange_ack_watermark_id: str | None,
+        events: list[EventEnvelope],
+    ) -> ReplayProjectionOffset | None:
+        if decision_id is not None or self.scope is None or not events:
+            return None
+        latest_event = max(events, key=lambda item: (item.event_timestamp, item.created_at, item.event_id))
+        offset = ReplayProjectionOffset(
+            projection_key="portfolio_replay",
+            product_type=self.scope.product_type,
+            margin_mode=self.scope.margin_mode,
+            allowed_symbols=list(self.scope.allowed_symbols),
+            last_event_id=latest_event.event_id,
+            last_event_timestamp=latest_event.event_timestamp,
+            baseline_generation_id=baseline_generation_id,
+            exchange_ack_watermark_id=exchange_ack_watermark_id,
+            updated_at=utc_now(),
+        )
+        return self.event_store.save_replay_offset(offset)
+
+    def _append_referenced_events(self, events: list[EventEnvelope]) -> list[EventEnvelope]:
+        appended = list(events)
+        existing_ids = {event.event_id for event in appended}
+
+        decision_ids = {
+            decision_id
+            for event in appended
+            for decision_id in [event.payload.get("decision_id")]
+            if isinstance(decision_id, str)
+        }
+        for decision_id in sorted(decision_ids):
+            for related in self.event_store.by_decision(decision_id):
+                if related.event_id in existing_ids:
+                    continue
+                appended.append(related)
+                existing_ids.add(related.event_id)
+
+        pending = list(self._referenced_event_ids_for_events(appended))
+        while pending:
+            ref = pending.pop()
+            if ref in existing_ids:
+                continue
+            referenced = self.event_store.get(ref)
+            if referenced is None:
+                continue
+            appended.append(referenced)
+            existing_ids.add(referenced.event_id)
+            nested_refs = self._referenced_event_ids_for_events([referenced])
+            pending.extend(nested for nested in nested_refs if nested not in existing_ids)
+        return appended
+
+    def _referenced_event_ids_for_events(self, events: list[EventEnvelope]) -> set[str]:
+        referenced_event_ids: set[str] = set()
+        for event in events:
+            if event.topic == topics.DECISION_CONTEXTS:
+                context = DecisionContext.model_validate(event.payload)
+                referenced_event_ids.update(
+                    {
+                        context.market_snapshot_ref,
+                        context.feature_snapshot_ref,
+                        context.portfolio_snapshot_ref,
+                        context.health_snapshot_ref,
+                    }
+                )
+                continue
+            if event.topic == topics.AUDIT_RECORDS:
+                record = DecisionAuditRecord.model_validate(event.payload)
+                referenced_event_ids.update(
+                    ref
+                    for ref in (
+                        record.decision_context_ref,
+                        record.baseline_assessment_ref,
+                        record.ai_decision_brief_ref,
+                        record.ai_market_assessment_ref,
+                        record.position_target_ref,
+                        record.decision_outcome_ref,
+                        record.policy_decision_ref,
+                        record.risk_decision_ref,
+                        record.execution_plan_ref,
+                        record.strategy_execution_bundle_ref,
+                        *record.execution_plan_refs,
+                        record.portfolio_delta_ref,
+                        *record.order_intent_refs,
+                        *record.order_state_refs,
+                        *record.fill_event_refs,
+                        *record.ai_shadow_decision_refs,
+                        *record.ai_shadow_evaluation_refs,
+                        *record.reconciliation_refs,
+                        record.strategy_coordinator_snapshot_ref,
+                        record.portfolio_allocation_decision_ref,
+                        *record.strategy_sleeve_intent_refs,
+                    )
+                    if ref is not None
+                )
+                continue
+            if event.topic == topics.ACCOUNT_BASELINES:
+                baseline = AccountBaselineSnapshot.model_validate(event.payload)
+                if baseline.previous_baseline_ref is not None:
+                    referenced_event_ids.add(baseline.previous_baseline_ref)
+                if baseline.operator_action_ref is not None:
+                    referenced_event_ids.add(baseline.operator_action_ref)
+        return referenced_event_ids
+
+    def _baseline_seed_snapshot(
+        self,
+        *,
+        decision_id: str | None,
+        start_at: datetime | None,
+    ) -> PortfolioSnapshot | None:
+        if decision_id is not None or start_at is None or self.scope is None or self.portfolio_repo is None:
+            return None
+        snapshots = snapshots_for_scope(self.portfolio_repo, self.scope)
+        candidates = [snapshot for snapshot in snapshots if snapshot.snapshot_ts < start_at]
+        return candidates[-1] if candidates else None
 
     def _validate_execution_chain(
         self,
@@ -477,7 +806,7 @@ class ReplayEngine:
             )
             fill_events = sorted(
                 fills_by_intent_id.get(intent_id, []),
-                key=lambda item: (item.ingestion_timestamp, item.fill_id),
+                key=fill_processing_sort_key,
             )
             cumulative_fill_qty = sum((fill.fill_qty for fill in fill_events), start=Decimal("0"))
             if cumulative_fill_qty - order_state.requested_qty > EPSILON_DECIMAL_12:
@@ -593,6 +922,9 @@ class ReplayEngine:
             "position_intent",
             "margin_mode",
             "product_type",
+            "strategy_family",
+            "strategy_bundle_id",
+            "strategy_leg_role",
         )
         for field_name in fields:
             left_value = ReplayEngine._normalized_semantic_value(getattr(left, field_name, None))
@@ -644,6 +976,15 @@ class ReplayEngine:
                     context_event=context,
                     events_by_id=events_by_id,
                 )
+            )
+            self._validate_ref(
+                issues=issues,
+                decision_id=decision_id,
+                events_by_id=events_by_id,
+                ref=record.strategy_coordinator_snapshot_ref,
+                ref_name="strategy_coordinator_snapshot_ref",
+                expected_topic=topics.STRATEGY_COORDINATOR_SNAPSHOTS,
+                required=False,
             )
             self._validate_ref(
                 issues=issues,
@@ -711,6 +1052,16 @@ class ReplayEngine:
                     expected_topic=topics.AI_SHADOW_EVALUATIONS,
                     required=True,
                 )
+            for ref in record.strategy_sleeve_intent_refs:
+                self._validate_ref(
+                    issues=issues,
+                    decision_id=decision_id,
+                    events_by_id=events_by_id,
+                    ref=ref,
+                    ref_name="strategy_sleeve_intent_refs",
+                    expected_topic=topics.STRATEGY_SLEEVE_INTENTS,
+                    required=True,
+                )
 
             target_event = self._validate_ref(
                 issues=issues,
@@ -748,6 +1099,56 @@ class ReplayEngine:
                 expected_topic=topics.EXECUTION_PLANS,
                 required=bool(record.order_intent_refs),
             )
+            execution_plan_events = [
+                event
+                for ref in record.execution_plan_refs
+                for event in [
+                    self._validate_ref(
+                        issues=issues,
+                        decision_id=decision_id,
+                        events_by_id=events_by_id,
+                        ref=ref,
+                        ref_name="execution_plan_refs",
+                        expected_topic=topics.EXECUTION_PLANS,
+                        required=True,
+                    )
+                ]
+                if event is not None
+            ]
+            bundle_event = self._validate_ref(
+                issues=issues,
+                decision_id=decision_id,
+                events_by_id=events_by_id,
+                ref=record.strategy_execution_bundle_ref,
+                ref_name="strategy_execution_bundle_ref",
+                expected_topic=topics.STRATEGY_EXECUTION_BUNDLES,
+                required=False,
+            )
+            allocation_event = self._validate_ref(
+                issues=issues,
+                decision_id=decision_id,
+                events_by_id=events_by_id,
+                ref=record.portfolio_allocation_decision_ref,
+                ref_name="portfolio_allocation_decision_ref",
+                expected_topic=topics.PORTFOLIO_ALLOCATION_DECISIONS,
+                required=False,
+            )
+            sleeve_intents = [
+                StrategySleeveIntent.model_validate(event.payload)
+                for ref in record.strategy_sleeve_intent_refs
+                for event in [
+                    self._validate_ref(
+                        issues=issues,
+                        decision_id=decision_id,
+                        events_by_id=events_by_id,
+                        ref=ref,
+                        ref_name="strategy_sleeve_intent_refs",
+                        expected_topic=topics.STRATEGY_SLEEVE_INTENTS,
+                        required=True,
+                    )
+                ]
+                if event is not None
+            ]
 
             target = (
                 PositionTarget.model_validate(target_event.payload)
@@ -775,8 +1176,22 @@ class ReplayEngine:
             )
             risk = RiskDecision.model_validate(risk_event.payload) if risk_event is not None else None
             execution_plan = (
-                ExecutionPlan.model_validate(execution_plan_event.payload)
+                self._parse_execution_plan_payload(execution_plan_event.payload)
                 if execution_plan_event is not None
+                else None
+            )
+            execution_plans = [
+                self._parse_execution_plan_payload(event.payload)
+                for event in execution_plan_events
+            ]
+            strategy_bundle = (
+                StrategyExecutionBundle.model_validate(bundle_event.payload)
+                if bundle_event is not None
+                else None
+            )
+            allocation_decision = (
+                PortfolioAllocationDecision.model_validate(allocation_event.payload)
+                if allocation_event is not None
                 else None
             )
 
@@ -875,6 +1290,7 @@ class ReplayEngine:
                     f"decision_chain_missing_reconciliation_ref decision_id={decision_id}"
                 )
 
+            decision_reconciliation_reports: list[ReconciliationReport] = []
             for ref in record.reconciliation_refs:
                 event = self._validate_ref(
                     issues=issues,
@@ -888,17 +1304,34 @@ class ReplayEngine:
                 if event is None:
                     continue
                 report = ReconciliationReport.model_validate(event.payload)
+                decision_reconciliation_reports.append(report)
                 if report.decision_id != decision_id:
                     issues.append(
                         "decision_chain_reconciliation_decision_mismatch "
                         f"decision_id={decision_id} reconciliation_decision_id={report.decision_id}"
                     )
-                if report.portfolio_snapshot_ref != record.portfolio_delta_ref:
+                valid_snapshot_refs = {
+                    record.portfolio_delta_ref,
+                    *record.portfolio_delta_refs,
+                    *(
+                        item.event_id
+                        for item in events_by_id.values()
+                        if item.topic == topics.PORTFOLIO_SNAPSHOTS
+                        and item.payload.get("decision_id") == decision_id
+                    ),
+                }
+                valid_snapshot_refs.discard(None)
+                if report.portfolio_snapshot_ref not in valid_snapshot_refs:
                     issues.append(
                         "decision_chain_reconciliation_snapshot_mismatch "
                         f"decision_id={decision_id} reconciliation_id={report.reconciliation_id} "
                         f"portfolio_snapshot_ref={report.portfolio_snapshot_ref} "
                         f"audit_portfolio_snapshot_ref={record.portfolio_delta_ref}"
+                    )
+                if report.mismatch_categories and not report.findings:
+                    issues.append(
+                        "decision_chain_reconciliation_missing_findings "
+                        f"decision_id={decision_id} reconciliation_id={report.reconciliation_id}"
                     )
 
             if policy is not None and not policy.allowed and record.order_intent_refs:
@@ -923,27 +1356,185 @@ class ReplayEngine:
                 )
             if record.order_intent_refs and not record.fill_event_refs:
                 issues.append(f"decision_chain_missing_fill_ref decision_id={decision_id}")
+            if allocation_decision is not None:
+                if set(allocation_decision.approved_families) and target is not None:
+                    source_mix_families = {str(key) for key in (target.source_mix or {}).keys()}
+                    if source_mix_families and not source_mix_families.issubset(set(allocation_decision.approved_families)):
+                        issues.append(
+                            "decision_chain_allocation_source_mix_mismatch "
+                            f"decision_id={decision_id}"
+                        )
+                if sleeve_intents:
+                    intent_families = {intent.family for intent in sleeve_intents}
+                    if not set(allocation_decision.active_families).issubset(intent_families):
+                        issues.append(
+                            "decision_chain_allocation_active_family_missing_intent "
+                            f"decision_id={decision_id}"
+                        )
+            if strategy_bundle is not None and allocation_decision is not None:
+                if (
+                    strategy_bundle.allocation_id is not None
+                    and str(strategy_bundle.allocation_id) != str(allocation_decision.allocation_id)
+                ):
+                    issues.append(
+                        "decision_chain_bundle_allocation_id_mismatch "
+                        f"decision_id={decision_id}"
+                    )
+                if (
+                    strategy_bundle.allocation_snapshot_ref is not None
+                    and allocation_event is not None
+                    and str(strategy_bundle.allocation_snapshot_ref) != str(allocation_event.event_id)
+                ):
+                    issues.append(
+                        "decision_chain_bundle_allocation_snapshot_ref_mismatch "
+                        f"decision_id={decision_id}"
+                    )
+                if set(strategy_bundle.budget_snapshot_ids or []) != set(allocation_decision.budget_snapshot_ids or []):
+                    issues.append(
+                        "decision_chain_bundle_budget_snapshot_ids_mismatch "
+                        f"decision_id={decision_id}"
+                    )
+                if (
+                    abs(
+                        to_decimal(strategy_bundle.gross_requested_exposure)
+                        - to_decimal(allocation_decision.portfolio_requested_notional)
+                    )
+                    > EPSILON_DECIMAL_12
+                ):
+                    issues.append(
+                        "decision_chain_bundle_requested_exposure_mismatch "
+                        f"decision_id={decision_id}"
+                    )
+                if (
+                    abs(
+                        to_decimal(strategy_bundle.net_approved_exposure)
+                        - to_decimal(allocation_decision.portfolio_approved_notional)
+                    )
+                    > EPSILON_DECIMAL_12
+                ):
+                    issues.append(
+                        "decision_chain_bundle_approved_exposure_mismatch "
+                        f"decision_id={decision_id}"
+                    )
+                if (
+                    strategy_bundle.portfolio_risk_budget_state is not None
+                    and strategy_bundle.portfolio_risk_budget_state != allocation_decision.portfolio_risk_budget_state
+                ):
+                    issues.append(
+                        "decision_chain_bundle_budget_state_mismatch "
+                        f"decision_id={decision_id}"
+                    )
+                if strategy_bundle.expected_edge_bps != allocation_decision.expected_edge_bps:
+                    issues.append(
+                        "decision_chain_bundle_expected_edge_bps_mismatch "
+                        f"decision_id={decision_id}"
+                    )
+                if strategy_bundle.expected_cost_bps != allocation_decision.expected_cost_bps:
+                    issues.append(
+                        "decision_chain_bundle_expected_cost_bps_mismatch "
+                        f"decision_id={decision_id}"
+                    )
+                if (
+                    abs(
+                        to_decimal(strategy_bundle.hedge_protected_notional)
+                        - to_decimal(allocation_decision.hedge_protected_notional)
+                    )
+                    > EPSILON_DECIMAL_12
+                ):
+                    issues.append(
+                        "decision_chain_bundle_hedge_protected_notional_mismatch "
+                        f"decision_id={decision_id}"
+                    )
+                if (
+                    abs(
+                        to_decimal(strategy_bundle.directional_reduced_notional)
+                        - to_decimal(allocation_decision.directional_reduced_notional)
+                    )
+                    > EPSILON_DECIMAL_12
+                ):
+                    issues.append(
+                        "decision_chain_bundle_directional_reduced_notional_mismatch "
+                        f"decision_id={decision_id}"
+                    )
+            if decision_reconciliation_reports:
+                allowed_sleeves = {
+                    str(intent.strategy_sleeve_id)
+                    for intent in sleeve_intents
+                    if intent.strategy_sleeve_id is not None
+                }
+                allocation_id = None if allocation_decision is None else allocation_decision.allocation_id
+                strategy_bundle_id = None if strategy_bundle is None else strategy_bundle.bundle_id
+                for report in decision_reconciliation_reports:
+                    for finding in report.findings:
+                        if (
+                            finding.strategy_sleeve_id is not None
+                            and allowed_sleeves
+                            and str(finding.strategy_sleeve_id) not in allowed_sleeves
+                        ):
+                            issues.append(
+                                "decision_chain_reconciliation_sleeve_scope_mismatch "
+                                f"decision_id={decision_id} reconciliation_id={report.reconciliation_id} "
+                                f"strategy_sleeve_id={finding.strategy_sleeve_id}"
+                            )
+                        if (
+                            finding.allocation_id is not None
+                            and allocation_id is not None
+                            and str(finding.allocation_id) != str(allocation_id)
+                        ):
+                            issues.append(
+                                "decision_chain_reconciliation_allocation_scope_mismatch "
+                                f"decision_id={decision_id} reconciliation_id={report.reconciliation_id} "
+                                f"allocation_id={finding.allocation_id}"
+                            )
+                        if (
+                            finding.strategy_bundle_id is not None
+                            and strategy_bundle_id is not None
+                            and str(finding.strategy_bundle_id) != str(strategy_bundle_id)
+                        ):
+                            issues.append(
+                                "decision_chain_reconciliation_bundle_scope_mismatch "
+                                f"decision_id={decision_id} reconciliation_id={report.reconciliation_id} "
+                                f"strategy_bundle_id={finding.strategy_bundle_id}"
+                            )
             if record.order_intent_refs:
-                if execution_plan is None:
+                if not execution_plans and execution_plan is not None:
+                    execution_plans = [execution_plan]
+                if not execution_plans:
                     issues.append(f"decision_chain_missing_execution_plan decision_id={decision_id}")
                 else:
-                    if parsed_context is not None and execution_plan.symbol != parsed_context.symbol:
-                        issues.append(
-                            "decision_chain_execution_plan_symbol_mismatch "
-                            f"decision_id={decision_id} execution_plan_symbol={execution_plan.symbol} "
-                            f"context_symbol={parsed_context.symbol}"
-                        )
-                    if (
-                        risk is not None
-                        and abs(
-                            execution_plan.approved_target_position_qty - to_decimal(risk.capped_target_position_qty)
-                        ) > EPSILON_DECIMAL_12
-                    ):
-                        issues.append(
-                            "decision_chain_execution_plan_risk_mismatch "
-                            f"decision_id={decision_id} approved_target_position_qty={execution_plan.approved_target_position_qty} "
-                            f"risk_capped_target_position_qty={risk.capped_target_position_qty}"
-                        )
+                    if bundle_event is None:
+                        for plan in execution_plans:
+                            if parsed_context is not None and plan.symbol != parsed_context.symbol:
+                                issues.append(
+                                    "decision_chain_execution_plan_symbol_mismatch "
+                                    f"decision_id={decision_id} execution_plan_symbol={plan.symbol} "
+                                    f"context_symbol={parsed_context.symbol}"
+                                )
+                            if (
+                                risk is not None
+                                and hasattr(plan, "approved_target_position_qty")
+                                and abs(
+                                    plan.approved_target_position_qty - to_decimal(risk.capped_target_position_qty)
+                                ) > EPSILON_DECIMAL_12
+                            ):
+                                issues.append(
+                                    "decision_chain_execution_plan_risk_mismatch "
+                                    f"decision_id={decision_id} approved_target_position_qty={plan.approved_target_position_qty} "
+                                    f"risk_capped_target_position_qty={risk.capped_target_position_qty}"
+                                )
+                    else:
+                        bundle_plan_refs = set(strategy_bundle.execution_plan_refs if strategy_bundle is not None else [])
+                        if bundle_plan_refs and bundle_plan_refs != set(record.execution_plan_refs):
+                            issues.append(
+                                "decision_chain_bundle_execution_plan_refs_mismatch "
+                                f"decision_id={decision_id}"
+                            )
+                        bundle_order_refs = set(strategy_bundle.order_intent_refs if strategy_bundle is not None else [])
+                        if bundle_order_refs and bundle_order_refs != set(record.order_intent_refs):
+                            issues.append(
+                                "decision_chain_bundle_order_intent_refs_mismatch "
+                                f"decision_id={decision_id}"
+                            )
                 if not record.order_state_refs:
                     issues.append(f"decision_chain_missing_order_state_ref decision_id={decision_id}")
                 elif not order_state_intent_ids.issuperset(intent_ids):
@@ -952,6 +1543,13 @@ class ReplayEngine:
                     )
 
         return issues
+
+    @staticmethod
+    def _parse_execution_plan_payload(payload: dict[str, object]) -> ExecutionPlan | LegExecutionPlan:
+        try:
+            return ExecutionPlan.model_validate(payload)
+        except ValidationError:
+            return LegExecutionPlan.model_validate(payload)
 
     def _validate_context_health_link(
         self,
@@ -1002,6 +1600,8 @@ class ReplayEngine:
 
             for ref_name, ref_value in (
                 ("decision_context_ref", record.decision_context_ref),
+                ("strategy_coordinator_snapshot_ref", record.strategy_coordinator_snapshot_ref),
+                ("portfolio_allocation_decision_ref", record.portfolio_allocation_decision_ref),
                 ("baseline_assessment_ref", record.baseline_assessment_ref),
                 ("ai_decision_brief_ref", record.ai_decision_brief_ref),
                 ("ai_market_assessment_ref", record.ai_market_assessment_ref),
@@ -1009,6 +1609,7 @@ class ReplayEngine:
                 ("policy_decision_ref", record.policy_decision_ref),
                 ("risk_decision_ref", record.risk_decision_ref),
                 ("execution_plan_ref", record.execution_plan_ref),
+                ("strategy_execution_bundle_ref", record.strategy_execution_bundle_ref),
                 ("portfolio_delta_ref", record.portfolio_delta_ref),
             ):
                 if ref_value is not None and ref_value not in events_by_id:
@@ -1019,6 +1620,8 @@ class ReplayEngine:
                 ("order_intent_refs", record.order_intent_refs),
                 ("order_state_refs", record.order_state_refs),
                 ("fill_event_refs", record.fill_event_refs),
+                ("execution_plan_refs", record.execution_plan_refs),
+                ("strategy_sleeve_intent_refs", record.strategy_sleeve_intent_refs),
                 ("ai_shadow_decision_refs", record.ai_shadow_decision_refs),
                 ("ai_shadow_evaluation_refs", record.ai_shadow_evaluation_refs),
                 ("reconciliation_refs", record.reconciliation_refs),
@@ -1128,7 +1731,7 @@ class ReplayEngine:
         if not ReplayEngine._decimal_map_matches(
             stored_snapshot.balances,
             reconstructed_snapshot.balances,
-            tolerance=EPSILON_DECIMAL_9,
+            tolerance=ReplayEngine._SNAPSHOT_DERIVED_FIELD_TOLERANCE,
         ):
             mismatch["balances"] = {
                 "stored": stored_snapshot.balances,
@@ -1137,7 +1740,7 @@ class ReplayEngine:
         if not ReplayEngine._decimal_map_matches(
             stored_snapshot.cost_basis,
             reconstructed_snapshot.cost_basis,
-            tolerance=EPSILON_DECIMAL_9,
+            tolerance=ReplayEngine._SNAPSHOT_DERIVED_FIELD_TOLERANCE,
         ):
             mismatch["cost_basis"] = {
                 "stored": stored_snapshot.cost_basis,
@@ -1149,7 +1752,7 @@ class ReplayEngine:
         if not ReplayEngine._decimal_map_matches(
             stored_positions,
             replayed_positions,
-            tolerance=EPSILON_DECIMAL_9,
+            tolerance=ReplayEngine._SNAPSHOT_DERIVED_FIELD_TOLERANCE,
         ):
             mismatch["positions"] = {
                 "stored": stored_positions,

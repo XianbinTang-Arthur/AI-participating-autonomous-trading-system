@@ -911,6 +911,22 @@ h3 {
   gap: 14px;
 }
 
+.strategy-page-grid {
+  align-items: start;
+}
+
+.strategy-compact-card {
+  gap: 12px;
+}
+
+.strategy-compact-card .panel-head {
+  align-items: flex-start;
+}
+
+.strategy-compact-card .meta-copy {
+  max-width: 68ch;
+}
+
 .surface-card.is-muted {
   background: rgba(11, 20, 31, 0.72);
 }
@@ -1399,6 +1415,60 @@ h3 {
   background: rgba(255, 255, 255, 0.02);
 }
 
+.strategy-details {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: rgba(255, 255, 255, 0.02);
+  overflow: hidden;
+}
+
+.strategy-details + .strategy-details {
+  margin-top: 2px;
+}
+
+.strategy-details summary {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  cursor: pointer;
+  list-style: none;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.strategy-details summary::-webkit-details-marker {
+  display: none;
+}
+
+.strategy-details summary::after {
+  content: "展开";
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.strategy-details[open] summary::after {
+  content: "收起";
+}
+
+.strategy-details__meta {
+  color: var(--text-dim);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.strategy-details__body {
+  padding: 0 14px 14px;
+  display: grid;
+  gap: 12px;
+  border-top: 1px solid var(--line);
+}
+
 .section-nav {
   display: flex;
   flex-wrap: wrap;
@@ -1424,6 +1494,41 @@ h3 {
 
 .workspace-section {
   scroll-margin-top: 24px;
+}
+
+.strategy-workspace {
+  gap: 22px;
+}
+
+.strategy-section-nav {
+  position: sticky;
+  top: 12px;
+  z-index: 2;
+  padding: 10px 0 2px;
+  background: linear-gradient(180deg, rgba(5, 12, 19, 0.96), rgba(5, 12, 19, 0.72), transparent);
+}
+
+.strategy-workspace-section {
+  display: grid;
+  gap: 14px;
+}
+
+.strategy-workspace-section__head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 16px;
+}
+
+.strategy-workspace-section__copy {
+  display: grid;
+  gap: 6px;
+  max-width: 78ch;
+}
+
+.strategy-workspace-section__copy h2 {
+  font-size: clamp(24px, 2.4vw, 34px);
+  line-height: 1.02;
 }
 
 .admin-side-panel,
@@ -1974,6 +2079,16 @@ input::placeholder {
     display: grid;
     grid-template-columns: 1fr;
     gap: 8px;
+  }
+
+  .strategy-section-nav {
+    position: static;
+    padding: 0;
+    background: transparent;
+  }
+
+  .strategy-workspace-section__head {
+    align-items: flex-start;
   }
 
   .section-nav__link {

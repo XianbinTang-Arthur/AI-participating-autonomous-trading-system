@@ -26,6 +26,7 @@ class AuditReplayQueryFacade:
         return {
             "audit": detail["audit"],
             "history_length": len(self.owner.runtime.audit_repo.history(decision_id)),
+            "hedge_mode_audit": detail.get("hedge_mode_audit"),
             "baseline_switches": self._baseline_switch_history(
                 as_of_ts=context.get("as_of_ts"),
                 limit=10,
@@ -55,12 +56,18 @@ class AuditReplayQueryFacade:
             self.owner.runtime.replay_validation_history[-1] if self.owner.runtime.replay_validation_history else None
         )
         recent = [item.payload for item in persisted] if persisted else list(self.owner.runtime.replay_validation_history[-10:])
+        latest_offset = self.owner.runtime.event_store.latest_replay_offset(
+            projection_key="portfolio_replay",
+            scope=self.owner.state_scope,
+        )
         return {
             "supported": True,
             "healthy": latest is None or latest["divergence_count"] == 0,
             "last_validation": latest,
             "recent_validations": recent,
             "baseline_switches": self._baseline_switch_history(limit=10),
+            "event_store_archive": self.owner.runtime.event_store.archive_summary(),
+            "latest_replay_offset": None if latest_offset is None else latest_offset.model_dump(mode="json"),
         }
 
     def replay_validate(self, *, decision_id: str) -> dict[str, Any]:
@@ -72,6 +79,10 @@ class AuditReplayQueryFacade:
             ),
             audit_repo=self.owner.runtime.audit_repo,
             portfolio_repo=self.owner.runtime.portfolio_repo,
+            reconciliation_repo=self.owner.runtime.reconciliation_repo,
+            fill_outcome_repo=self.owner.runtime.fill_outcome_repo,
+            funding_fee_repo=getattr(self.owner.runtime, "funding_fee_repo", None),
+            sleeve_pnl_repo=getattr(self.owner.runtime, "sleeve_pnl_repo", None),
             scope=self.owner.state_scope,
         )
         result = engine.replay(decision_id=decision_id)
@@ -146,6 +157,10 @@ class AuditReplayQueryFacade:
             "baseline_switch_count": result.baseline_switch_count,
             "baseline_switch_issues": result.baseline_switch_issues,
             "baseline_switch_issue_count": baseline_switch_issue_count,
+            "incremental_window_start_at": result.incremental_window_start_at,
+            "baseline_generation_id": result.baseline_generation_id,
+            "exchange_ack_watermark_id": result.exchange_ack_watermark_id,
+            "replay_offset_id": result.replay_offset_id,
             "divergence_density": round(result.divergence_count / replayed_event_count, 6),
             "chain_health_score": round(max(0.0, 1.0 - (total_issues / replayed_event_count)), 6),
             "healthy": result.divergence_count == 0,

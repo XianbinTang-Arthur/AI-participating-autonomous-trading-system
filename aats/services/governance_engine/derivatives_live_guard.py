@@ -30,6 +30,9 @@ class DerivativesLiveGuardService:
     metrics: MetricsRegistry
     last_snapshot: dict[str, Any] = field(default_factory=dict)
     last_auto_halt_at: Any = None
+    last_risk_snapshot_seen_at: Any = None
+    risk_snapshot_missing_started_at: Any = None
+    risk_snapshot_missing_count: int = 0
 
     _EPSILON: Decimal = field(default=Decimal("1e-12"), init=False, repr=False)
 
@@ -40,6 +43,45 @@ class DerivativesLiveGuardService:
 
     def status(self) -> dict[str, Any]:
         return self.snapshot()
+
+    def reset_transient_risk_snapshot_state(self, *, reason: str) -> None:
+        self.risk_snapshot_missing_started_at = None
+        self.risk_snapshot_missing_count = 0
+        self.last_auto_halt_at = None
+        if self.last_snapshot:
+            self.last_snapshot = {
+                **self.last_snapshot,
+                "risk_snapshot_stage": "reset",
+                "risk_snapshot_missing_seconds": None,
+                "risk_snapshot_missing_count": 0,
+                "warnings": list(
+                    dict.fromkeys(
+                        [
+                            *(
+                                item
+                                for item in self.last_snapshot.get("warnings", [])
+                                if item != "derivatives_risk_snapshot_missing_grace_active"
+                            ),
+                            f"risk_snapshot_missing_timer_reset:{reason}",
+                        ]
+                    )
+                ),
+                "auto_halt_required": False,
+                "auto_halt_reasons": [
+                    item
+                    for item in self.last_snapshot.get("auto_halt_reasons", [])
+                    if item != "derivatives_risk_snapshot_missing_auto_halt"
+                ],
+                "blockers": [
+                    item
+                    for item in self.last_snapshot.get("blockers", [])
+                    if item != "derivatives_risk_snapshot_missing_auto_halt"
+                ],
+                "halted": (
+                    self.kill_switch.halted
+                    and self.kill_switch.status().get("reason") == "derivatives_live_risk_auto_halt"
+                ),
+            }
 
     def evaluate_now(self) -> dict[str, Any]:
         if not self._applicable():
@@ -66,20 +108,44 @@ class DerivativesLiveGuardService:
         liquidation_summary = self._liquidation_summary(snapshot)
         nearest_gap = liquidation_summary["nearest_liquidation_gap_ratio"]
         current_margin_usage = self._current_initial_margin_usage(snapshot)
+        current_exposure = self._current_derivatives_exposure(snapshot)
         only_reduce_threshold = Decimal(str(self.settings.derivatives_only_reduce_trigger_margin_fraction))
         auto_halt_margin_threshold = Decimal(str(self.settings.derivatives_auto_halt_margin_usage_fraction))
         only_reduce_gap_threshold = Decimal(str(self.settings.liquidation_buffer_fraction))
         auto_halt_gap_threshold = Decimal(str(self.settings.derivatives_auto_halt_liquidation_gap_fraction))
+        risk_snapshot_available = current_margin_usage is not None
+        risk_snapshot_stage = "healthy"
+        risk_snapshot_missing_seconds: float | None = None
 
         only_reduce_reasons: list[str] = []
         auto_halt_reasons: list[str] = []
         warnings: list[str] = []
 
-        if current_margin_usage is None:
+        if not risk_snapshot_available:
             if snapshot.positions:
-                only_reduce_reasons.append("derivatives_risk_snapshot_missing_requires_only_reduce")
-                warnings.append("当前拿不到合约风险快照，只允许继续减仓或平仓。")
+                self.risk_snapshot_missing_count += 1
+                if self.risk_snapshot_missing_started_at is None:
+                    self.risk_snapshot_missing_started_at = utc_now()
+                risk_snapshot_missing_seconds = max(
+                    (utc_now() - self.risk_snapshot_missing_started_at).total_seconds(),
+                    0.0,
+                )
+                if risk_snapshot_missing_seconds < float(self.settings.derivatives_risk_snapshot_grace_seconds):
+                    risk_snapshot_stage = "grace"
+                    warnings.append("derivatives_risk_snapshot_missing_grace_active")
+                elif risk_snapshot_missing_seconds < float(self.settings.derivatives_risk_snapshot_auto_halt_after_seconds):
+                    risk_snapshot_stage = "only_reduce"
+                    only_reduce_reasons.append("derivatives_risk_snapshot_missing_requires_only_reduce")
+                else:
+                    risk_snapshot_stage = "auto_halt"
+                    auto_halt_reasons.append("derivatives_risk_snapshot_missing_auto_halt")
+            else:
+                self.risk_snapshot_missing_started_at = None
+                self.risk_snapshot_missing_count = 0
         else:
+            self.last_risk_snapshot_seen_at = getattr(snapshot, "fetched_at", None) or utc_now()
+            self.risk_snapshot_missing_started_at = None
+            self.risk_snapshot_missing_count = 0
             if current_margin_usage >= only_reduce_threshold - self._EPSILON:
                 only_reduce_reasons.append("derivatives_margin_usage_requires_only_reduce")
             if current_margin_usage >= auto_halt_margin_threshold - self._EPSILON:
@@ -97,15 +163,19 @@ class DerivativesLiveGuardService:
 
         if auto_halt_required:
             status = "critical"
-            summary = "当前保证金缓冲或强平距离已经进入自动停机区间，系统必须保持暂停。"
+            summary = "当前保证金缓冲、强平距离或风险快照状态已经进入自动停机区间，系统必须保持暂停。"
             detail = " / ".join(self._reason_copy(code) for code in auto_halt_reasons)
         elif only_reduce_required:
             status = "warning"
-            summary = "当前保证金缓冲偏紧，系统只允许继续减仓或平仓。"
+            summary = "当前保证金缓冲偏紧，或合约风险快照持续缺失，系统只允许继续减仓或平仓。"
             detail = " / ".join(self._reason_copy(code) for code in only_reduce_reasons)
+        elif risk_snapshot_stage == "grace":
+            status = "degraded"
+            summary = "当前合约风险快照短时缺失，系统先自动收缩风险预算并降低执行侵略性。"
+            detail = "如果风险快照持续缺失，系统会升级到只减仓，再升级到自动停机。"
         else:
             status = "healthy"
-            summary = "当前合约保证金缓冲和强平距离都还在自动保护阈值之外。"
+            summary = "当前合约保证金缓冲、风险快照和强平距离都仍在自动保护阈值之外。"
             detail = warnings[0] if warnings else "derivatives_runtime_guard_healthy"
 
         payload = self._base_snapshot(
@@ -124,18 +194,31 @@ class DerivativesLiveGuardService:
             auto_halt_required=auto_halt_required,
             auto_halt_reasons=list(dict.fromkeys(auto_halt_reasons)),
             warnings=warnings,
+            risk_snapshot_available=risk_snapshot_available,
+            risk_snapshot_stage=risk_snapshot_stage,
+            risk_snapshot_missing_seconds=risk_snapshot_missing_seconds,
+            risk_snapshot_missing_count=self.risk_snapshot_missing_count,
+            last_risk_snapshot_seen_at=self.last_risk_snapshot_seen_at,
             thresholds={
                 "only_reduce_margin_usage_fraction": only_reduce_threshold,
                 "auto_halt_margin_usage_fraction": auto_halt_margin_threshold,
                 "only_reduce_liquidation_gap_fraction": only_reduce_gap_threshold,
                 "auto_halt_liquidation_gap_fraction": auto_halt_gap_threshold,
+                "risk_snapshot_grace_seconds": float(self.settings.derivatives_risk_snapshot_grace_seconds),
+                "risk_snapshot_auto_halt_after_seconds": float(
+                    self.settings.derivatives_risk_snapshot_auto_halt_after_seconds
+                ),
             },
+            current_derivatives_exposure=current_exposure,
         )
         if auto_halt_required:
             payload["halted"] = True
             self._trigger_halt(payload)
         else:
-            payload["halted"] = self.kill_switch.halted and self.kill_switch.status().get("reason") == "derivatives_live_risk_auto_halt"
+            payload["halted"] = (
+                self.kill_switch.halted
+                and self.kill_switch.status().get("reason") == "derivatives_live_risk_auto_halt"
+            )
         self.last_snapshot = payload
         return dict(payload)
 
@@ -166,6 +249,12 @@ class DerivativesLiveGuardService:
         auto_halt_reasons: list[str] | None = None,
         warnings: list[str] | None = None,
         thresholds: dict[str, Any] | None = None,
+        current_derivatives_exposure: dict[str, Any] | None = None,
+        risk_snapshot_available: bool = True,
+        risk_snapshot_stage: str = "healthy",
+        risk_snapshot_missing_seconds: float | None = None,
+        risk_snapshot_missing_count: int = 0,
+        last_risk_snapshot_seen_at: Any = None,
     ) -> dict[str, Any]:
         return {
             "enabled": bool(self.settings.derivatives_runtime_guard_enabled),
@@ -184,6 +273,12 @@ class DerivativesLiveGuardService:
             "auto_halt_required": auto_halt_required,
             "auto_halt_reasons": auto_halt_reasons or [],
             "warnings": warnings or [],
+            "current_derivatives_exposure": current_derivatives_exposure or {},
+            "risk_snapshot_available": risk_snapshot_available,
+            "risk_snapshot_stage": risk_snapshot_stage,
+            "risk_snapshot_missing_seconds": risk_snapshot_missing_seconds,
+            "risk_snapshot_missing_count": risk_snapshot_missing_count,
+            "last_risk_snapshot_seen_at": last_risk_snapshot_seen_at,
             "thresholds": thresholds or {},
             "halted": self.kill_switch.halted,
             "kill_switch_reason": self.kill_switch.status().get("reason"),
@@ -193,19 +288,44 @@ class DerivativesLiveGuardService:
 
     def _current_initial_margin_usage(self, snapshot: Any) -> Decimal | None:
         risk_snapshot = getattr(snapshot, "risk_snapshot", None)
-        if risk_snapshot is None or getattr(risk_snapshot, "initial_margin_requirement", None) is None:
-            return None
-        initial_margin = _to_decimal(risk_snapshot.initial_margin_requirement)
+        initial_margin = None
+        if risk_snapshot is not None:
+            initial_margin = _to_decimal(getattr(risk_snapshot, "initial_margin_requirement", None))
+        if risk_snapshot is not None and initial_margin is None:
+            position_margins = [
+                resolved
+                for resolved in (
+                    _to_decimal(getattr(position, "margin_allocated", None))
+                    for position in getattr(snapshot, "positions", [])
+                )
+                if resolved is not None and resolved > self._EPSILON
+            ]
+            if position_margins:
+                initial_margin = sum(position_margins, Decimal("0"))
+
         equity_base = None
-        for candidate in (
-            getattr(risk_snapshot, "adjusted_equity", None),
-            getattr(risk_snapshot, "total_equity", None),
-            getattr(risk_snapshot, "available_equity", None),
-        ):
-            resolved = _to_decimal(candidate)
-            if resolved is not None and resolved > self._EPSILON:
-                equity_base = resolved
-                break
+        if risk_snapshot is not None:
+            for candidate in (
+                getattr(risk_snapshot, "adjusted_equity", None),
+                getattr(risk_snapshot, "total_equity", None),
+                getattr(risk_snapshot, "available_equity", None),
+            ):
+                resolved = _to_decimal(candidate)
+                if resolved is not None and resolved > self._EPSILON:
+                    equity_base = resolved
+                    break
+        if risk_snapshot is not None and equity_base is None:
+            usdt_balances = [
+                resolved
+                for resolved in (
+                    _to_decimal(getattr(balance, "total", None))
+                    for balance in getattr(snapshot, "balances", [])
+                    if str(getattr(balance, "currency", "")).upper() == "USDT"
+                )
+                if resolved is not None and resolved > self._EPSILON
+            ]
+            if usdt_balances:
+                equity_base = sum(usdt_balances, Decimal("0"))
         if initial_margin is None or equity_base is None or equity_base <= self._EPSILON:
             return None
         return initial_margin / equity_base
@@ -226,10 +346,11 @@ class DerivativesLiveGuardService:
                 or abs(qty) <= self._EPSILON
             ):
                 continue
-            if qty > 0:
-                gap = (mark_price - liquidation_price) / mark_price
-            else:
+            side = str(getattr(position, "side", None) or getattr(position, "pos_side", None) or "").strip().lower()
+            if side == "short" or (side not in {"long", "short"} and qty < -self._EPSILON):
                 gap = (liquidation_price - mark_price) / mark_price
+            else:
+                gap = (mark_price - liquidation_price) / mark_price
             if closest_gap is None or gap < closest_gap:
                 closest_gap = gap
                 closest_position = {
@@ -293,6 +414,8 @@ class DerivativesLiveGuardService:
                             else str(snapshot["nearest_liquidation_gap_ratio"])
                         ),
                         "closest_position": snapshot.get("closest_position"),
+                        "risk_snapshot_stage": snapshot.get("risk_snapshot_stage"),
+                        "risk_snapshot_missing_seconds": snapshot.get("risk_snapshot_missing_seconds"),
                     },
                 ),
                 source_component="derivatives_live_guard",
@@ -304,11 +427,88 @@ class DerivativesLiveGuardService:
         messages = {
             "derivatives_margin_usage_requires_only_reduce": "当前保证金占用已经进入 only-reduce 区间",
             "derivatives_liquidation_gap_requires_only_reduce": "当前最近仓位已经进入强平缓冲区",
-            "derivatives_risk_snapshot_missing_requires_only_reduce": "当前缺少合约风险快照，只允许继续减仓",
+            "derivatives_risk_snapshot_missing_requires_only_reduce": "当前缺少合约风险快照，系统只允许继续减仓",
+            "derivatives_risk_snapshot_missing_auto_halt": "合约风险快照持续缺失时间过长，系统已经升级为自动停机",
             "derivatives_margin_buffer_auto_halt": "当前保证金占用已经进入自动停机阈值",
-            "derivatives_liquidation_proximity_auto_halt": "当前最近仓位距离强平过近，已进入自动停机阈值",
+            "derivatives_liquidation_proximity_auto_halt": "当前最近仓位距离强平过近，已经进入自动停机阈值",
+            "derivatives_risk_snapshot_missing_grace_active": "合约风险快照短时缺失，系统先进入平滑降级观察期",
         }
         return messages.get(code, code)
+
+    def _current_derivatives_exposure(self, snapshot: Any) -> dict[str, Any]:
+        positions = list(getattr(snapshot, "positions", []) or [])
+        if not positions:
+            return {
+                "long_notional": Decimal("0"),
+                "short_notional": Decimal("0"),
+                "gross_notional": Decimal("0"),
+                "net_notional": Decimal("0"),
+                "gross_leverage": Decimal("0"),
+                "net_leverage": Decimal("0"),
+            }
+        long_notional = Decimal("0")
+        short_notional = Decimal("0")
+        for position in positions:
+            notional = _to_decimal(getattr(position, "notional_usd", None))
+            if notional is None or abs(notional) <= self._EPSILON:
+                quantity = abs(_to_decimal(getattr(position, "quantity", None)) or Decimal("0"))
+                reference_price = (
+                    _to_decimal(getattr(position, "mark_price", None))
+                    or _to_decimal(getattr(position, "average_entry_price", None))
+                    or Decimal("0")
+                )
+                notional = quantity * reference_price
+            side = str(getattr(position, "side", "") or "").strip().lower()
+            quantity = _to_decimal(getattr(position, "quantity", None)) or Decimal("0")
+            if side == "short" or quantity < -self._EPSILON:
+                short_notional += abs(notional)
+            else:
+                long_notional += abs(notional)
+        gross_notional = long_notional + short_notional
+        net_notional = abs(long_notional - short_notional)
+        equity_base = self._equity_base_for_snapshot(snapshot)
+        gross_leverage = (
+            gross_notional / equity_base
+            if equity_base is not None and equity_base > self._EPSILON
+            else Decimal("0")
+        )
+        net_leverage = (
+            net_notional / equity_base
+            if equity_base is not None and equity_base > self._EPSILON
+            else Decimal("0")
+        )
+        return {
+            "long_notional": long_notional,
+            "short_notional": short_notional,
+            "gross_notional": gross_notional,
+            "net_notional": net_notional,
+            "gross_leverage": gross_leverage,
+            "net_leverage": net_leverage,
+        }
+
+    def _equity_base_for_snapshot(self, snapshot: Any) -> Decimal | None:
+        risk_snapshot = getattr(snapshot, "risk_snapshot", None)
+        if risk_snapshot is not None:
+            for candidate in (
+                getattr(risk_snapshot, "adjusted_equity", None),
+                getattr(risk_snapshot, "total_equity", None),
+                getattr(risk_snapshot, "available_equity", None),
+            ):
+                resolved = _to_decimal(candidate)
+                if resolved is not None and resolved > self._EPSILON:
+                    return resolved
+        balances = [
+            resolved
+            for resolved in (
+                _to_decimal(getattr(balance, "total", None))
+                for balance in getattr(snapshot, "balances", [])
+                if str(getattr(balance, "currency", "")).upper() == "USDT"
+            )
+            if resolved is not None and resolved > self._EPSILON
+        ]
+        if balances:
+            return sum(balances, Decimal("0"))
+        return None
 
 
 def text_or_none(value: Any) -> str | None:

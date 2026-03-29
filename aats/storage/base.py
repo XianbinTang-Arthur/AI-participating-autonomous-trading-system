@@ -6,10 +6,27 @@ from typing import Protocol
 from aats.schemas.common import EventEnvelope
 from aats.schemas.audit import DecisionAuditRecord
 from aats.schemas.execution import FillEvent, OrderObligation, OrderState
-from aats.schemas.portfolio import FillOutcomeRecord, FundingFeeRecord, PortfolioSnapshot
-from aats.schemas.reconciliation import ReconciliationReport
+from aats.schemas.portfolio import FillOutcomeRecord, FundingFeeRecord, PortfolioSnapshot, SleevePnLRecord
+from aats.schemas.reconciliation import (
+    BaselineGenerationRecord,
+    ExchangeAckWatermark,
+    ReplayProjectionOffset,
+    ReconciliationFinding,
+    ReconciliationReport,
+    ReconciliationStateSnapshot,
+)
 from aats.schemas.operator import OperatorUserRecord
-from aats.schemas.runtime_profiles import RuntimeProfileActivationState, RuntimeProfileRevision
+from aats.schemas.strategy_runtime import (
+    AllocatorBudgetSnapshot,
+    AllocatorConflictResolution,
+    AllocatorNettingDecision,
+    PortfolioAllocationDecision,
+    SleeveBudgetAssignment,
+    SleeveBudgetProfile,
+    StrategyExecutionBundle,
+    StrategySleeveIntent,
+    StrategySleeveRecord,
+)
 from aats.schemas.strategy_profiles import (
     StrategyProfileActivationRecord,
     StrategyProfileActivationState,
@@ -72,6 +89,23 @@ class EventStore(Protocol):
         topic: str | None = None,
         decision_id: str | None = None,
     ) -> list[EventEnvelope]:
+        ...
+
+    def archive_before(self, *, before_ts: datetime) -> dict[str, int]:
+        ...
+
+    def archive_summary(self) -> dict[str, object]:
+        ...
+
+    def save_replay_offset(self, offset: ReplayProjectionOffset) -> ReplayProjectionOffset:
+        ...
+
+    def latest_replay_offset(
+        self,
+        *,
+        projection_key: str,
+        scope: RuntimeStateScope,
+    ) -> ReplayProjectionOffset | None:
         ...
 
 
@@ -215,8 +249,72 @@ class FundingFeeRepository(Protocol):
         ...
 
 
+class SleevePnLRepository(Protocol):
+    def save_record(self, record: SleevePnLRecord) -> SleevePnLRecord:
+        ...
+
+    def get_record(self, record_id: str) -> SleevePnLRecord | None:
+        ...
+
+    def records(self) -> list[SleevePnLRecord]:
+        ...
+
+    def records_for_scope(
+        self,
+        *,
+        scope: RuntimeStateScope,
+        since: datetime | None = None,
+        limit: int | None = None,
+    ) -> list[SleevePnLRecord]:
+        ...
+
+    def replace_scope(
+        self,
+        *,
+        scope: RuntimeStateScope,
+        records: list[SleevePnLRecord],
+    ) -> None:
+        ...
+
+
 class ReconciliationRepository(Protocol):
     def save_report(self, report: ReconciliationReport) -> None:
+        ...
+
+    def save_findings(self, findings: list[ReconciliationFinding]) -> None:
+        ...
+
+    def findings_for_reconciliation(self, *, reconciliation_id: str) -> list[ReconciliationFinding]:
+        ...
+
+    def save_state_snapshot(self, snapshot: ReconciliationStateSnapshot) -> None:
+        ...
+
+    def latest_state_snapshot_for_scope(
+        self,
+        *,
+        scope: RuntimeStateScope,
+    ) -> ReconciliationStateSnapshot | None:
+        ...
+
+    def save_baseline_generation(self, generation: BaselineGenerationRecord) -> None:
+        ...
+
+    def latest_baseline_generation_for_scope(
+        self,
+        *,
+        scope: RuntimeStateScope,
+    ) -> BaselineGenerationRecord | None:
+        ...
+
+    def save_exchange_ack_watermark(self, watermark: ExchangeAckWatermark) -> None:
+        ...
+
+    def latest_exchange_ack_watermark_for_scope(
+        self,
+        *,
+        scope: RuntimeStateScope,
+    ) -> ExchangeAckWatermark | None:
         ...
 
     def latest(self) -> ReconciliationReport | None:
@@ -283,23 +381,6 @@ class OperatorUserRepository(Protocol):
         ...
 
 
-class RuntimeProfileRepository(Protocol):
-    def save_revision(self, revision: RuntimeProfileRevision) -> RuntimeProfileRevision:
-        ...
-
-    def get_revision(self, revision_id: str) -> RuntimeProfileRevision | None:
-        ...
-
-    def list_revisions(self) -> list[RuntimeProfileRevision]:
-        ...
-
-    def activation_state(self) -> RuntimeProfileActivationState:
-        ...
-
-    def save_activation_state(self, state: RuntimeProfileActivationState) -> RuntimeProfileActivationState:
-        ...
-
-
 class StrategyProfileRepository(Protocol):
     def save_revision(self, revision: StrategyProfileRevision) -> StrategyProfileRevision:
         ...
@@ -327,6 +408,17 @@ class StrategyProfileRepository(Protocol):
         ...
 
     def save_activation_state(self, state: StrategyProfileActivationState) -> StrategyProfileActivationState:
+        ...
+
+
+class StrategySleeveRepository(Protocol):
+    def save_sleeve(self, sleeve: StrategySleeveRecord) -> StrategySleeveRecord:
+        ...
+
+    def get_sleeve(self, sleeve_id: str) -> StrategySleeveRecord | None:
+        ...
+
+    def list_sleeves(self) -> list[StrategySleeveRecord]:
         ...
 
     def save_recommendation(self, recommendation: StrategyProfileRecommendation) -> StrategyProfileRecommendation:
@@ -384,4 +476,99 @@ class StrategyProfileRepository(Protocol):
         product_type: str | None = None,
         margin_mode: str | None = None,
     ) -> list[StrategyProfileEvaluationRecord]:
+        ...
+
+
+class StrategyRuntimeRepository(Protocol):
+    def save_budget_profile(self, profile: SleeveBudgetProfile) -> SleeveBudgetProfile:
+        ...
+
+    def list_budget_profiles(
+        self,
+        *,
+        product_type: str | None = None,
+        margin_mode: str | None = None,
+        family: str | None = None,
+    ) -> list[SleeveBudgetProfile]:
+        ...
+
+    def save_budget_assignment(self, assignment: SleeveBudgetAssignment) -> SleeveBudgetAssignment:
+        ...
+
+    def list_budget_assignments(
+        self,
+        *,
+        product_type: str | None = None,
+        margin_mode: str | None = None,
+        symbol: str | None = None,
+        strategy_sleeve_id: str | None = None,
+    ) -> list[SleeveBudgetAssignment]:
+        ...
+
+    def save_sleeve_intent(self, intent: StrategySleeveIntent) -> StrategySleeveIntent:
+        ...
+
+    def list_sleeve_intents(
+        self,
+        *,
+        product_type: str | None = None,
+        margin_mode: str | None = None,
+        symbol: str | None = None,
+        limit: int | None = None,
+    ) -> list[StrategySleeveIntent]:
+        ...
+
+    def save_allocation_decision(self, decision: PortfolioAllocationDecision) -> PortfolioAllocationDecision:
+        ...
+
+    def latest_allocation_decision(
+        self,
+        *,
+        product_type: str | None = None,
+        margin_mode: str | None = None,
+        symbol: str | None = None,
+    ) -> PortfolioAllocationDecision | None:
+        ...
+
+    def get_allocation_decision(self, allocation_id: str) -> PortfolioAllocationDecision | None:
+        ...
+
+    def save_execution_bundle(self, bundle: StrategyExecutionBundle) -> StrategyExecutionBundle:
+        ...
+
+    def get_execution_bundle(self, bundle_id: str) -> StrategyExecutionBundle | None:
+        ...
+
+    def recent_execution_bundles(
+        self,
+        *,
+        product_type: str | None = None,
+        margin_mode: str | None = None,
+        symbol: str | None = None,
+        limit: int | None = None,
+    ) -> list[StrategyExecutionBundle]:
+        ...
+
+    def list_budget_snapshots(
+        self,
+        *,
+        allocation_id: str | None = None,
+        strategy_sleeve_id: str | None = None,
+    ) -> list[AllocatorBudgetSnapshot]:
+        ...
+
+    def list_conflict_resolutions(
+        self,
+        *,
+        allocation_id: str | None = None,
+        symbol: str | None = None,
+    ) -> list[AllocatorConflictResolution]:
+        ...
+
+    def list_netting_decisions(
+        self,
+        *,
+        allocation_id: str | None = None,
+        symbol: str | None = None,
+    ) -> list[AllocatorNettingDecision]:
         ...

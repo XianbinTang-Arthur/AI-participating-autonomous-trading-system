@@ -41,10 +41,14 @@ def build_position_key(
     *,
     symbol: str,
     product_type: str,
+    margin_mode: object | None = None,
     position_mode: object | None = None,
     pos_side: object | None = None,
 ) -> str:
+    normalized_margin_mode = None if margin_mode is None else str(margin_mode).strip().lower()
     if product_type != "derivatives":
+        if normalized_margin_mode in {"cross", "isolated"}:
+            return f"{symbol}:spot:{normalized_margin_mode}"
         return symbol
     normalized_mode = normalize_position_mode(position_mode)
     normalized_side = normalize_position_side(pos_side, position_mode=normalized_mode)
@@ -57,6 +61,7 @@ def position_key_for_fill(fill: "FillEvent") -> str:
     return build_position_key(
         symbol=fill.symbol,
         product_type=fill.product_type,
+        margin_mode=getattr(fill, "margin_mode", None),
         position_mode=fill.position_mode,
         pos_side=fill.pos_side,
     )
@@ -68,6 +73,7 @@ def position_key_for_snapshot_position(position: "Position") -> str:
     return build_position_key(
         symbol=position.symbol,
         product_type=position.product_type,
+        margin_mode=getattr(position, "margin_mode", None),
         position_mode=getattr(position, "position_mode", None),
         pos_side=getattr(position, "pos_side", None),
     )
@@ -82,6 +88,7 @@ def position_key_for_exchange_position(
     return build_position_key(
         symbol=position.symbol,
         product_type=product_type,
+        margin_mode=getattr(position, "margin_mode", None),
         position_mode=position_mode,
         pos_side=getattr(position, "side", None),
     )

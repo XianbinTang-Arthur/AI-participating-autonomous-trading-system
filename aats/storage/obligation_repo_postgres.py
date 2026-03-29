@@ -32,6 +32,11 @@ class PostgresExecutionObligationRepository:
                 reserved_amount=obligation.reserved_amount,
                 consumed_amount=obligation.consumed_amount,
                 released_amount=obligation.released_amount,
+                strategy_family=obligation.strategy_family,
+                strategy_sleeve_id=obligation.strategy_sleeve_id,
+                allocation_id=obligation.allocation_id,
+                strategy_bundle_id=obligation.strategy_bundle_id,
+                strategy_leg_role=obligation.strategy_leg_role,
                 product_type=obligation.product_type,
                 margin_mode=obligation.margin_mode,
                 last_update_ts=obligation.last_update_ts,
@@ -49,6 +54,11 @@ class PostgresExecutionObligationRepository:
             row.reserved_amount = obligation.reserved_amount
             row.consumed_amount = obligation.consumed_amount
             row.released_amount = obligation.released_amount
+            row.strategy_family = obligation.strategy_family
+            row.strategy_sleeve_id = obligation.strategy_sleeve_id
+            row.allocation_id = obligation.allocation_id
+            row.strategy_bundle_id = obligation.strategy_bundle_id
+            row.strategy_leg_role = obligation.strategy_leg_role
             row.product_type = obligation.product_type
             row.margin_mode = obligation.margin_mode
             row.last_update_ts = obligation.last_update_ts

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import desc, select
+from sqlalchemy import and_, desc, or_, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from aats.bootstrap.logging import get_logger, log_event
@@ -81,6 +81,11 @@ class PostgresExecutionRepository:
                 close_only_reason=merged.close_only_reason,
                 instrument_family=merged.instrument_family,
                 settle_currency=merged.settle_currency,
+                strategy_family=merged.strategy_family,
+                strategy_sleeve_id=merged.strategy_sleeve_id,
+                allocation_id=merged.allocation_id,
+                strategy_bundle_id=merged.strategy_bundle_id,
+                strategy_leg_role=merged.strategy_leg_role,
                 product_type=scope["product_type"],
                 margin_mode=scope["margin_mode"],
                 position_intent=scope["position_intent"],
@@ -115,6 +120,11 @@ class PostgresExecutionRepository:
             row.close_only_reason = merged.close_only_reason
             row.instrument_family = merged.instrument_family
             row.settle_currency = merged.settle_currency
+            row.strategy_family = merged.strategy_family
+            row.strategy_sleeve_id = merged.strategy_sleeve_id
+            row.allocation_id = merged.allocation_id
+            row.strategy_bundle_id = merged.strategy_bundle_id
+            row.strategy_leg_role = merged.strategy_leg_role
             row.product_type = scope["product_type"]
             row.margin_mode = scope["margin_mode"]
             row.position_intent = scope["position_intent"]
@@ -164,6 +174,11 @@ class PostgresExecutionRepository:
                 close_only_reason=fill.close_only_reason,
                 instrument_family=fill.instrument_family,
                 settle_currency=fill.settle_currency,
+                strategy_family=fill.strategy_family,
+                strategy_sleeve_id=fill.strategy_sleeve_id,
+                allocation_id=fill.allocation_id,
+                strategy_bundle_id=fill.strategy_bundle_id,
+                strategy_leg_role=fill.strategy_leg_role,
                 product_type=resolved_scope["product_type"],
                 margin_mode=resolved_scope["margin_mode"],
                 position_intent=resolved_scope["position_intent"],
@@ -215,7 +230,11 @@ class PostgresExecutionRepository:
     def fills(self) -> list[FillEvent]:
         with self.session_factory() as session:
             rows = session.scalars(
-                select(FillEventModel).order_by(FillEventModel.ingestion_timestamp, FillEventModel.fill_id)
+                select(FillEventModel).order_by(
+                    FillEventModel.exchange_timestamp,
+                    FillEventModel.ingestion_timestamp,
+                    FillEventModel.fill_id,
+                )
             ).all()
         return [self._to_fill_event(row) for row in rows]
 
@@ -224,7 +243,11 @@ class PostgresExecutionRepository:
             rows = session.scalars(
                 select(FillEventModel)
                 .where(FillEventModel.client_order_id == client_order_id)
-                .order_by(FillEventModel.ingestion_timestamp, FillEventModel.fill_id)
+                .order_by(
+                    FillEventModel.exchange_timestamp,
+                    FillEventModel.ingestion_timestamp,
+                    FillEventModel.fill_id,
+                )
             ).all()
         return [self._to_fill_event(row) for row in rows]
 
@@ -237,7 +260,11 @@ class PostgresExecutionRepository:
         query = select(FillEventModel)
         if since is not None:
             query = query.where(FillEventModel.ingestion_timestamp >= since)
-        query = query.order_by(FillEventModel.ingestion_timestamp, FillEventModel.fill_id)
+        query = query.order_by(
+            FillEventModel.exchange_timestamp,
+            FillEventModel.ingestion_timestamp,
+            FillEventModel.fill_id,
+        )
         if limit is not None:
             query = query.limit(limit)
         with self.session_factory() as session:
@@ -252,19 +279,13 @@ class PostgresExecutionRepository:
         limit: int | None = None,
         open_only: bool = False,
     ) -> list[OrderState]:
-        query = (
-            select(OrderStateModel)
-            .where(OrderStateModel.product_type == scope.product_type)
-            .where(OrderStateModel.margin_mode == scope.margin_mode)
-        )
-        if scope.allowed_symbols:
-            query = query.where(OrderStateModel.symbol.in_(tuple(scope.allowed_symbols)))
+        query = select(OrderStateModel)
         if open_only:
             final_statuses = ("FILLED", "CANCELED", "REJECTED", "BLOCKED", "DRY_RUN", "FAILED", "EXPIRED")
             query = query.where(~OrderStateModel.status.in_(final_statuses))
         if statuses is not None:
             query = query.where(OrderStateModel.status.in_(tuple(statuses)))
-        query = query.order_by(OrderStateModel.created_at, OrderStateModel.client_order_id)
+        query = self._scope_order_query(query, scope).order_by(OrderStateModel.created_at, OrderStateModel.client_order_id)
         if limit is not None:
             query = query.limit(limit)
         with self.session_factory() as session:
@@ -278,21 +299,88 @@ class PostgresExecutionRepository:
         since: datetime | None = None,
         limit: int | None = None,
     ) -> list[FillEvent]:
-        query = (
-            select(FillEventModel)
-            .where(FillEventModel.product_type == scope.product_type)
-            .where(FillEventModel.margin_mode == scope.margin_mode)
-        )
-        if scope.allowed_symbols:
-            query = query.where(FillEventModel.symbol.in_(tuple(scope.allowed_symbols)))
+        query = select(FillEventModel)
         if since is not None:
             query = query.where(FillEventModel.ingestion_timestamp >= since)
-        query = query.order_by(FillEventModel.ingestion_timestamp, FillEventModel.fill_id)
+        query = self._scope_fill_query(query, scope).order_by(
+            FillEventModel.exchange_timestamp,
+            FillEventModel.ingestion_timestamp,
+            FillEventModel.fill_id,
+        )
         if limit is not None:
             query = query.limit(limit)
         with self.session_factory() as session:
             rows = session.scalars(query).all()
         return [self._to_fill_event(row) for row in rows]
+
+    @staticmethod
+    def _symbol_clause(model, scope: RuntimeStateScope):
+        allowed_symbols = tuple(scope.allowed_symbols) if scope.allowed_symbols else (scope.default_symbol,)
+        return model.symbol.in_(allowed_symbols)
+
+    @classmethod
+    def _scope_order_query(cls, query, scope: RuntimeStateScope):
+        symbol_clause = cls._symbol_clause(OrderStateModel, scope)
+        regular_clause = and_(
+            symbol_clause,
+            OrderStateModel.product_type == scope.product_type,
+            OrderStateModel.margin_mode == scope.margin_mode,
+            or_(OrderStateModel.strategy_family.is_(None), OrderStateModel.strategy_family != "smart_arbitrage"),
+        )
+        if scope.product_type == "spot":
+            smart_clause = and_(
+                symbol_clause,
+                OrderStateModel.strategy_family == "smart_arbitrage",
+                OrderStateModel.product_type == "spot",
+                OrderStateModel.margin_mode.in_(tuple(scope.smart_arbitrage_spot_margin_modes)),
+            )
+            return query.where(or_(regular_clause, smart_clause))
+        if scope.product_type != "derivatives":
+            return query.where(regular_clause)
+        smart_clause = and_(
+            symbol_clause,
+            OrderStateModel.strategy_family == "smart_arbitrage",
+            or_(
+                and_(
+                    OrderStateModel.product_type == "spot",
+                    OrderStateModel.margin_mode.in_(tuple(scope.smart_arbitrage_spot_margin_modes)),
+                ),
+                and_(OrderStateModel.product_type == scope.product_type, OrderStateModel.margin_mode == scope.margin_mode),
+            ),
+        )
+        return query.where(or_(regular_clause, smart_clause))
+
+    @classmethod
+    def _scope_fill_query(cls, query, scope: RuntimeStateScope):
+        symbol_clause = cls._symbol_clause(FillEventModel, scope)
+        regular_clause = and_(
+            symbol_clause,
+            FillEventModel.product_type == scope.product_type,
+            FillEventModel.margin_mode == scope.margin_mode,
+            or_(FillEventModel.strategy_family.is_(None), FillEventModel.strategy_family != "smart_arbitrage"),
+        )
+        if scope.product_type == "spot":
+            smart_clause = and_(
+                symbol_clause,
+                FillEventModel.strategy_family == "smart_arbitrage",
+                FillEventModel.product_type == "spot",
+                FillEventModel.margin_mode.in_(tuple(scope.smart_arbitrage_spot_margin_modes)),
+            )
+            return query.where(or_(regular_clause, smart_clause))
+        if scope.product_type != "derivatives":
+            return query.where(regular_clause)
+        smart_clause = and_(
+            symbol_clause,
+            FillEventModel.strategy_family == "smart_arbitrage",
+            or_(
+                and_(
+                    FillEventModel.product_type == "spot",
+                    FillEventModel.margin_mode.in_(tuple(scope.smart_arbitrage_spot_margin_modes)),
+                ),
+                and_(FillEventModel.product_type == scope.product_type, FillEventModel.margin_mode == scope.margin_mode),
+            ),
+        )
+        return query.where(or_(regular_clause, smart_clause))
 
     @staticmethod
     def _to_order_state(row: OrderStateModel) -> OrderState:
@@ -310,8 +398,8 @@ class PostgresExecutionRepository:
         payload.setdefault("remaining_qty", row.remaining_qty)
         payload.setdefault("average_fill_price", row.average_fill_price)
         payload.setdefault("fees", row.fees)
-        payload.setdefault("reduce_only", row.reduce_only)
-        payload.setdefault("close_only", row.close_only)
+        payload.setdefault("reduce_only", False if row.reduce_only is None else row.reduce_only)
+        payload.setdefault("close_only", False if row.close_only is None else row.close_only)
         payload.setdefault("td_mode", row.td_mode)
         payload.setdefault("position_mode", row.position_mode)
         payload.setdefault("pos_side", row.pos_side)
@@ -319,6 +407,11 @@ class PostgresExecutionRepository:
         payload.setdefault("close_only_reason", row.close_only_reason)
         payload.setdefault("instrument_family", row.instrument_family)
         payload.setdefault("settle_currency", row.settle_currency)
+        payload.setdefault("strategy_family", row.strategy_family)
+        payload.setdefault("strategy_sleeve_id", row.strategy_sleeve_id)
+        payload.setdefault("allocation_id", row.allocation_id)
+        payload.setdefault("strategy_bundle_id", row.strategy_bundle_id)
+        payload.setdefault("strategy_leg_role", row.strategy_leg_role)
         payload.setdefault("product_type", row.product_type)
         payload.setdefault("margin_mode", row.margin_mode)
         payload.setdefault("position_intent", row.position_intent)
@@ -337,8 +430,8 @@ class PostgresExecutionRepository:
         payload.setdefault("fill_qty", row.fill_qty)
         payload.setdefault("fill_price", row.fill_price)
         payload.setdefault("fee_amount", row.fee_amount)
-        payload.setdefault("reduce_only", row.reduce_only)
-        payload.setdefault("close_only", row.close_only)
+        payload.setdefault("reduce_only", False if row.reduce_only is None else row.reduce_only)
+        payload.setdefault("close_only", False if row.close_only is None else row.close_only)
         payload.setdefault("td_mode", row.td_mode)
         payload.setdefault("position_mode", row.position_mode)
         payload.setdefault("pos_side", row.pos_side)
@@ -346,6 +439,11 @@ class PostgresExecutionRepository:
         payload.setdefault("close_only_reason", row.close_only_reason)
         payload.setdefault("instrument_family", row.instrument_family)
         payload.setdefault("settle_currency", row.settle_currency)
+        payload.setdefault("strategy_family", row.strategy_family)
+        payload.setdefault("strategy_sleeve_id", row.strategy_sleeve_id)
+        payload.setdefault("allocation_id", row.allocation_id)
+        payload.setdefault("strategy_bundle_id", row.strategy_bundle_id)
+        payload.setdefault("strategy_leg_role", row.strategy_leg_role)
         payload.setdefault("product_type", row.product_type)
         payload.setdefault("margin_mode", row.margin_mode)
         payload.setdefault("position_intent", row.position_intent)
