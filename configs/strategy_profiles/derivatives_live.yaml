@@ -281,11 +281,11 @@ strategy_hedge_independent_rollout_stage: live
 # [进阶可调] strategy_hedge_independent_long_entry_threshold：独立 long book 的开仓阈值。可选值：0.0 ~ 1.0；当前实盘推荐值：0.24。
 strategy_hedge_independent_long_entry_threshold: 0.30
 # [进阶可调] strategy_hedge_independent_short_entry_threshold：独立 short book 的开仓阈值。可选值：0.0 ~ 1.0；当前实盘推荐值：0.24。
-strategy_hedge_independent_short_entry_threshold: 0.32
+strategy_hedge_independent_short_entry_threshold: 0.30
 # [进阶可调] strategy_hedge_independent_long_scale_in_threshold：独立 long book 的加仓阈值。可选值：0.0 ~ 1.0；当前实盘推荐值：0.32。
 strategy_hedge_independent_long_scale_in_threshold: 0.40
 # [进阶可调] strategy_hedge_independent_short_scale_in_threshold：独立 short book 的加仓阈值。可选值：0.0 ~ 1.0；当前实盘推荐值：0.32。
-strategy_hedge_independent_short_scale_in_threshold: 0.42
+strategy_hedge_independent_short_scale_in_threshold: 0.40
 # [进阶可调] strategy_hedge_independent_long_min_hold_seconds：独立 long book 最小持有秒数。可选值：0 ~ 86400；推荐值：300.0。
 strategy_hedge_independent_long_min_hold_seconds: 300.0
 # [进阶可调] strategy_hedge_independent_short_min_hold_seconds：独立 short book 最小持有秒数。可选值：0 ~ 86400；推荐值：300.0。
