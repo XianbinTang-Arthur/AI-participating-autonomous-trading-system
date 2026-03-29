@@ -1059,6 +1059,12 @@ function directionalShortConfigRows(config = {}) {
       directionalOverlayRolloutMeta(config),
     ],
     [
+      "strategy_hedge_protective_enabled",
+      config?.hedge_protective_enabled ? "true" : "false",
+      "protective 单独开关",
+      "只有这个开关打开，且 overlay mode 选中 protective 时，系统才会真正评估保护腿。",
+    ],
+    [
       "strategy_hedge_open_threshold / strategy_hedge_close_threshold",
       `${formatNumber(config?.hedge_open_threshold, 2, "待确认")} / ${formatNumber(config?.hedge_close_threshold, 2, "待确认")}`,
       "protective 打开 / 收回",

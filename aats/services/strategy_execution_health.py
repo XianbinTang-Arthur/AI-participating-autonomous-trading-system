@@ -139,6 +139,8 @@ def compute_strategy_execution_health(
     fills: list[FillEvent],
     snapshots: list[PortfolioSnapshot],
     current_position_qty: Decimal,
+    current_long_position_qty: Decimal | None = None,
+    current_short_position_qty: Decimal | None = None,
 ) -> StrategyExecutionHealthSnapshot:
     ordered_fills = sorted(
         [fill for fill in fills if fill.symbol == symbol],
@@ -146,6 +148,22 @@ def compute_strategy_execution_health(
     )
     ordered_snapshots = sorted(snapshots, key=lambda item: item.snapshot_ts)
     realized_delta_by_fill_id = _realized_delta_by_fill_id(ordered_snapshots)
+    resolved_current_long_qty = to_decimal(current_long_position_qty or Decimal("0"))
+    resolved_current_short_qty = to_decimal(current_short_position_qty or Decimal("0"))
+
+    if _symbol_health_should_use_leg_lifecycle(
+        fills=ordered_fills,
+        current_long_position_qty=resolved_current_long_qty,
+        current_short_position_qty=resolved_current_short_qty,
+    ):
+        return _compute_hedge_mode_strategy_execution_health(
+            settings=settings,
+            symbol=symbol,
+            fills=ordered_fills,
+            realized_delta_by_fill_id=realized_delta_by_fill_id,
+            current_long_position_qty=resolved_current_long_qty,
+            current_short_position_qty=resolved_current_short_qty,
+        )
 
     current_position_opened_at, last_position_closed_at, outcomes = _walk_symbol_fills(
         settings=settings,
@@ -195,6 +213,76 @@ def compute_strategy_execution_health(
         recent_gross_realized_pnl=recent_gross_realized,
         recent_net_realized_pnl=recent_net_realized,
         recent_fee_total=recent_fee_total,
+    )
+
+
+def _symbol_health_should_use_leg_lifecycle(
+    *,
+    fills: list[FillEvent],
+    current_long_position_qty: Decimal,
+    current_short_position_qty: Decimal,
+) -> bool:
+    if current_long_position_qty > EPSILON_DECIMAL_12 or current_short_position_qty > EPSILON_DECIMAL_12:
+        return True
+    return any(_fill_leg(fill) in {"long", "short"} for fill in fills)
+
+
+def _compute_hedge_mode_strategy_execution_health(
+    *,
+    settings: AATSSettings,
+    symbol: str,
+    fills: list[FillEvent],
+    realized_delta_by_fill_id: dict[str, Decimal],
+    current_long_position_qty: Decimal,
+    current_short_position_qty: Decimal,
+) -> StrategyExecutionHealthSnapshot:
+    long_opened_at, long_last_closed_at, long_outcomes = _walk_leg_fills(
+        settings=settings,
+        fills=fills,
+        realized_delta_by_fill_id=realized_delta_by_fill_id,
+        current_position_qty=current_long_position_qty,
+        leg="long",
+    )
+    short_opened_at, short_last_closed_at, short_outcomes = _walk_leg_fills(
+        settings=settings,
+        fills=fills,
+        realized_delta_by_fill_id=realized_delta_by_fill_id,
+        current_position_qty=current_short_position_qty,
+        leg="short",
+    )
+    open_anchors = [
+        anchor
+        for current_qty, anchor in (
+            (current_long_position_qty, long_opened_at),
+            (current_short_position_qty, short_opened_at),
+        )
+        if current_qty > EPSILON_DECIMAL_12 and anchor is not None
+    ]
+    current_position_opened_at = min(open_anchors) if open_anchors else None
+    if current_long_position_qty > EPSILON_DECIMAL_12 or current_short_position_qty > EPSILON_DECIMAL_12:
+        last_position_closed_at = None
+    else:
+        close_anchors = [anchor for anchor in (long_last_closed_at, short_last_closed_at) if anchor is not None]
+        last_position_closed_at = max(close_anchors) if close_anchors else None
+    latest_fill_timestamp = next(
+        (
+            fill.ingestion_timestamp
+            for fill in reversed(fills)
+            if _fill_leg(fill) in {"long", "short"}
+        ),
+        None,
+    )
+    outcomes = sorted(
+        [*long_outcomes, *short_outcomes],
+        key=lambda item: (item.timestamp, item.fill_id),
+    )
+    return _strategy_health_snapshot_from_outcomes(
+        settings=settings,
+        symbol=symbol,
+        current_position_opened_at=current_position_opened_at,
+        last_position_closed_at=last_position_closed_at,
+        latest_fill_timestamp=latest_fill_timestamp,
+        outcomes=outcomes,
     )
 
 

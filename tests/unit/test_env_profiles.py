@@ -242,6 +242,9 @@ def test_managed_profile_local_env_templates_are_minimal_utf8_overrides() -> Non
             "AATS_LIQUIDATION_BUFFER_FRACTION",
         },
     }
+    allowed_profile_derived_overrides = {
+        ".env.derivatives.live": {"AATS_DERIVATIVES_POSITION_MODE"},
+    }
     spot_only_forbidden = {
         "AATS_MAX_TARGET_LEVERAGE",
         "AATS_DEFAULT_TARGET_LEVERAGE",
@@ -255,6 +258,8 @@ def test_managed_profile_local_env_templates_are_minimal_utf8_overrides() -> Non
         for key in common_required_keys | specific_keys:
             assert key in values, key
         for key in MANAGED_PROFILE_DERIVED_ENV_KEYS:
+            if key in allowed_profile_derived_overrides.get(env_name, set()):
+                continue
             assert key not in values, key
         for key in deprecated_strategy_keys:
             assert key not in values, key
@@ -313,7 +318,8 @@ def test_derivatives_managed_profiles_use_relaxed_directional_thresholds() -> No
         assert values["strategy_low_edge_cooldown_seconds"] == 900.0
         expected_overlay_mode = "independent" if profile == "derivatives_live" else "protective"
         assert values["strategy_hedge_overlay_mode"] == expected_overlay_mode
-        expected_opportunistic_enabled = profile == "derivatives_live"
+        assert values["strategy_hedge_protective_enabled"] is True
+        expected_opportunistic_enabled = False
         expected_opportunistic_rollout = "live" if profile == "derivatives_live" else "dry_run"
         assert values["strategy_hedge_opportunistic_enabled"] is expected_opportunistic_enabled
         assert values["strategy_hedge_opportunistic_rollout_stage"] == expected_opportunistic_rollout
@@ -328,10 +334,12 @@ def test_derivatives_managed_profiles_use_relaxed_directional_thresholds() -> No
         expected_independent_rollout = "live" if profile == "derivatives_live" else "dry_run"
         assert values["strategy_hedge_independent_enabled"] is expected_independent_enabled
         assert values["strategy_hedge_independent_rollout_stage"] == expected_independent_rollout
-        assert values["strategy_hedge_independent_long_entry_threshold"] == 0.66
-        assert values["strategy_hedge_independent_short_entry_threshold"] == 0.66
-        assert values["strategy_hedge_independent_long_scale_in_threshold"] == 0.70
-        assert values["strategy_hedge_independent_short_scale_in_threshold"] == 0.70
+        expected_independent_entry = 0.24 if profile == "derivatives_live" else 0.66
+        expected_independent_scale_in = 0.32 if profile == "derivatives_live" else 0.70
+        assert values["strategy_hedge_independent_long_entry_threshold"] == expected_independent_entry
+        assert values["strategy_hedge_independent_short_entry_threshold"] == expected_independent_entry
+        assert values["strategy_hedge_independent_long_scale_in_threshold"] == expected_independent_scale_in
+        assert values["strategy_hedge_independent_short_scale_in_threshold"] == expected_independent_scale_in
         assert values["strategy_hedge_independent_long_min_hold_seconds"] == 300.0
         assert values["strategy_hedge_independent_short_min_hold_seconds"] == 300.0
         assert values["strategy_hedge_independent_rebalance_cooldown_seconds"] == 120.0

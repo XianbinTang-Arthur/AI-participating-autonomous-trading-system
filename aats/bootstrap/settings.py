@@ -343,6 +343,7 @@ class AATSSettings(BaseSettings):
     strategy_short_reversal_alpha_min: float = 0.18
     strategy_short_reversal_confidence_min: float = 0.55
     strategy_hedge_overlay_enabled: bool = False
+    strategy_hedge_protective_enabled: bool = True
     strategy_hedge_overlay_mode: StrategyHedgeOverlayMode = "protective"
     strategy_hedge_open_threshold: float = 0.58
     strategy_hedge_close_threshold: float = 0.42

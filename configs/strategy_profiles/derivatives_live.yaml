@@ -52,7 +52,7 @@ strategy_profile_emergency_safety_confidence_min: 0.67
 
 # 多策略 sleeve 自动控制
 # [常用可调] strategy_sleeve_auto_parallel_enabled：是否启用多策略 sleeve 自动并行控制。可选值：true / false；推荐值：true。
-strategy_sleeve_auto_parallel_enabled: true
+strategy_sleeve_auto_parallel_enabled: false
 # [常用可调] strategy_sleeve_auto_min_budget_multiplier：自动收缩后的最小预算倍率。可选值：0.1 ~ 1.0；推荐值：0.35。
 strategy_sleeve_auto_min_budget_multiplier: 0.35
 # [常用可调] strategy_sleeve_auto_reconciliation_contraction_multiplier：对账压力下的预算收缩倍率。可选值：0.1 ~ 1.0；推荐值：0.50。
@@ -237,22 +237,26 @@ strategy_short_reversal_alpha_min: 0.18
 # [进阶可调] strategy_short_reversal_confidence_min：反手做空最低置信度。当前只在合约运行域生效。可选值：0.0 ~ 1.0；推荐值：0.55。
 strategy_short_reversal_confidence_min: 0.55
 
-# [进阶可调] strategy_hedge_overlay_enabled：是否启用 directional 的保护性对冲 overlay。当前只在合约 hedge 运行域生效。可选值：true / false；推荐值：true。
+# [进阶可调] strategy_hedge_overlay_enabled：overlay 总开关。当前只在合约 hedge 运行域生效；关闭后 protective / opportunistic / independent 都不会运行。可选值：true / false；推荐值：true。
 strategy_hedge_overlay_enabled: true
+# [进阶可调] strategy_hedge_protective_enabled：是否开启 protective 的独立开关。可选值：true / false；推荐值：true。
+strategy_hedge_protective_enabled: true
 # [进阶可调] strategy_hedge_overlay_mode：directional 对冲 overlay 模式。当前已开放 protective / opportunistic / independent；当前主模式按独立双书运行，推荐值：independent。
 strategy_hedge_overlay_mode: independent
+
 # [进阶可调] strategy_hedge_open_threshold：保护性对冲开启阈值。可选值：0.0 ~ 1.0；推荐值：0.58。
 strategy_hedge_open_threshold: 0.58
 # [进阶可调] strategy_hedge_close_threshold：保护性对冲关闭阈值。可选值：0.0 ~ 1.0；推荐值：0.42。
 strategy_hedge_close_threshold: 0.42
 # [进阶可调] strategy_hedge_max_ratio：保护腿相对主腿的最大覆盖比例。可选值：0.0 ~ 1.0；推荐值：0.50。
-strategy_hedge_max_ratio: 0.80
+strategy_hedge_max_ratio: 0.50
 # [进阶可调] strategy_hedge_min_hold_seconds：保护腿最小持有秒数。可选值：0 ~ 86400；推荐值：300.0。
 strategy_hedge_min_hold_seconds: 300.0
 # [进阶可调] strategy_hedge_rebalance_cooldown_seconds：保护腿再平衡冷却秒数。可选值：0 ~ 86400；推荐值：120.0。
 strategy_hedge_rebalance_cooldown_seconds: 120.0
+
 # [进阶可调] strategy_hedge_opportunistic_enabled：是否开启机会型 overlay 的独立开关。可选值：true / false；推荐值：true。
-strategy_hedge_opportunistic_enabled: true
+strategy_hedge_opportunistic_enabled: false
 # [进阶可调] strategy_hedge_opportunistic_rollout_stage：机会型 overlay 的灰度阶段。可选值：replay_only / dry_run / live；推荐值：live。
 strategy_hedge_opportunistic_rollout_stage: live
 # [进阶可调] strategy_hedge_opportunistic_open_threshold：机会腿开启阈值。可选值：0.0 ~ 1.0；推荐值：0.62。
@@ -269,24 +273,26 @@ strategy_hedge_opportunistic_rebalance_cooldown_seconds: 90.0
 strategy_hedge_opportunistic_max_fee_drag_ratio: 0.18
 # [进阶可调] strategy_hedge_opportunistic_max_churn_ratio：机会腿允许的最大 churn 比例。可选值：0.0 ~ 1.0；推荐值：0.22。
 strategy_hedge_opportunistic_max_churn_ratio: 0.22
+
 # [进阶可调] strategy_hedge_independent_enabled：是否开启独立双书模式。可选值：true / false；推荐值：true。
 strategy_hedge_independent_enabled: true
 # [进阶可调] strategy_hedge_independent_rollout_stage：独立双书的灰度阶段。推荐值：live。
 strategy_hedge_independent_rollout_stage: live
-# [进阶可调] strategy_hedge_independent_long_entry_threshold：独立 long book 的开仓阈值。可选值：0.0 ~ 1.0；推荐值：0.66。
-strategy_hedge_independent_long_entry_threshold: 0.66
-# [进阶可调] strategy_hedge_independent_short_entry_threshold：独立 short book 的开仓阈值。可选值：0.0 ~ 1.0；推荐值：0.66。
-strategy_hedge_independent_short_entry_threshold: 0.66
-# [进阶可调] strategy_hedge_independent_long_scale_in_threshold：独立 long book 的加仓阈值。可选值：0.0 ~ 1.0；推荐值：0.70。
-strategy_hedge_independent_long_scale_in_threshold: 0.66
-# [进阶可调] strategy_hedge_independent_short_scale_in_threshold：独立 short book 的加仓阈值。可选值：0.0 ~ 1.0；推荐值：0.70。
-strategy_hedge_independent_short_scale_in_threshold: 0.66
+# [进阶可调] strategy_hedge_independent_long_entry_threshold：独立 long book 的开仓阈值。可选值：0.0 ~ 1.0；当前实盘推荐值：0.24。
+strategy_hedge_independent_long_entry_threshold: 0.24
+# [进阶可调] strategy_hedge_independent_short_entry_threshold：独立 short book 的开仓阈值。可选值：0.0 ~ 1.0；当前实盘推荐值：0.24。
+strategy_hedge_independent_short_entry_threshold: 0.24
+# [进阶可调] strategy_hedge_independent_long_scale_in_threshold：独立 long book 的加仓阈值。可选值：0.0 ~ 1.0；当前实盘推荐值：0.32。
+strategy_hedge_independent_long_scale_in_threshold: 0.32
+# [进阶可调] strategy_hedge_independent_short_scale_in_threshold：独立 short book 的加仓阈值。可选值：0.0 ~ 1.0；当前实盘推荐值：0.32。
+strategy_hedge_independent_short_scale_in_threshold: 0.32
 # [进阶可调] strategy_hedge_independent_long_min_hold_seconds：独立 long book 最小持有秒数。可选值：0 ~ 86400；推荐值：300.0。
 strategy_hedge_independent_long_min_hold_seconds: 300.0
 # [进阶可调] strategy_hedge_independent_short_min_hold_seconds：独立 short book 最小持有秒数。可选值：0 ~ 86400；推荐值：300.0。
 strategy_hedge_independent_short_min_hold_seconds: 300.0
 # [进阶可调] strategy_hedge_independent_rebalance_cooldown_seconds：独立双书的再平衡冷却秒数。可选值：0 ~ 86400；推荐值：120.0。
 strategy_hedge_independent_rebalance_cooldown_seconds: 120.0
+
 # [进阶可调] strategy_hedge_independent_trial_guard_enabled：是否启用按腿试盘守护。可选值：true / false；推荐值：true。
 strategy_hedge_independent_trial_guard_enabled: true
 # [常用可调] strategy_min_hold_seconds：最短持仓秒数。可选值：0 ~ 86400；推荐值：900.0。

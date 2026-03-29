@@ -174,7 +174,7 @@ class TestAATSSettings(unittest.TestCase):
         self.assertEqual(settings.margin_mode, "cross")
         self.assertEqual(settings.max_target_leverage, 10.0)
         self.assertEqual(settings.default_target_leverage, 10.0)
-        self.assertEqual(settings.derivatives_position_mode, "net")
+        self.assertEqual(settings.derivatives_position_mode, "hedge")
         self.assertEqual(settings.derivatives_hedge_transition_mode, "close_then_open")
         self.assertTrue(settings.derivatives_require_exchange_pos_mode_match)
 
@@ -289,6 +289,11 @@ class TestAATSSettings(unittest.TestCase):
         )
 
         self.assertEqual(settings.strategy_hedge_independent_rollout_stage, "live")
+
+    def test_protective_overlay_independent_switch_defaults_to_true(self) -> None:
+        settings = AATSSettings.model_validate({})
+
+        self.assertTrue(settings.strategy_hedge_protective_enabled)
 
 
 if __name__ == "__main__":

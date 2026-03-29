@@ -974,15 +974,21 @@ class SmartArbitrageStrategyEngine:
                 "reverse_pair_qty": self._sum_metric(selected_pairs, "reverse_pair_qty"),
                 "inventory_reverse_pair_qty": self._sum_metric(selected_pairs, "inventory_reverse_pair_qty"),
                 "margin_reverse_pair_qty": self._sum_metric(selected_pairs, "margin_reverse_pair_qty"),
+                "aggregate_requested_notional": sum(
+                    (self._candidate_requested_notional(item) for item in selected_pairs),
+                    start=Decimal("0"),
+                ),
                 "parallel_scope_overlap_detected": overlap_detected,
-                "ideal_cost_bps": self._average_metric(selected_pairs, "ideal_cost_bps"),
-                "executable_cost_bps": self._average_metric(selected_pairs, "executable_cost_bps"),
-                "ideal_edge_bps": self._average_metric(selected_pairs, "ideal_edge_bps"),
-                "executable_edge_bps": self._average_metric(selected_pairs, "executable_edge_bps"),
-                "breakeven_basis_bps": self._average_metric(selected_pairs, "breakeven_basis_bps"),
-                "entry_threshold_bps": self._average_metric(selected_pairs, "entry_threshold_bps"),
-                "exit_threshold_bps": self._average_metric(selected_pairs, "exit_threshold_bps"),
-                "cost_confidence": self._average_metric(selected_pairs, "cost_confidence"),
+                "basis_bps": self._weighted_average_metric(selected_pairs, "basis_bps"),
+                "net_basis_bps": self._weighted_average_metric(selected_pairs, "net_basis_bps"),
+                "ideal_cost_bps": self._weighted_average_metric(selected_pairs, "ideal_cost_bps"),
+                "executable_cost_bps": self._weighted_average_metric(selected_pairs, "executable_cost_bps"),
+                "ideal_edge_bps": self._weighted_average_metric(selected_pairs, "ideal_edge_bps"),
+                "executable_edge_bps": self._weighted_average_metric(selected_pairs, "executable_edge_bps"),
+                "breakeven_basis_bps": self._weighted_average_metric(selected_pairs, "breakeven_basis_bps"),
+                "entry_threshold_bps": self._weighted_average_metric(selected_pairs, "entry_threshold_bps"),
+                "exit_threshold_bps": self._weighted_average_metric(selected_pairs, "exit_threshold_bps"),
+                "cost_confidence": self._weighted_average_metric(selected_pairs, "cost_confidence"),
                 "aggregate_cost_source_flags": sorted(
                     {
                         str(flag)
@@ -1090,6 +1096,51 @@ class SmartArbitrageStrategyEngine:
         if not values:
             return None
         return sum(values, start=Decimal("0")) / Decimal(len(values))
+
+    @staticmethod
+    def _candidate_requested_notional(candidate: StrategyCandidate) -> Decimal:
+        pair_notionals: dict[str, Decimal] = {}
+        unscoped_total = Decimal("0")
+        for leg in candidate.legs:
+            delta_qty = abs(to_decimal(leg.delta_position_qty or Decimal("0")))
+            reference_price = abs(to_decimal(leg.reference_price or Decimal("0")))
+            if delta_qty <= EPSILON_DECIMAL_12 or reference_price <= EPSILON_DECIMAL_12:
+                continue
+            leg_notional = delta_qty * reference_price
+            pair_id = str(leg.pair_id or candidate.pair_id or "").strip()
+            if pair_id:
+                pair_notionals[pair_id] = max(pair_notionals.get(pair_id, Decimal("0")), leg_notional)
+            else:
+                unscoped_total += leg_notional
+        total = sum(pair_notionals.values(), start=Decimal("0")) + unscoped_total
+        if total > EPSILON_DECIMAL_12:
+            return total
+        target_pair_qty = to_decimal((candidate.metrics or {}).get("target_pair_qty") or Decimal("0"))
+        if target_pair_qty <= EPSILON_DECIMAL_12:
+            return Decimal("0")
+        spot_price = abs(to_decimal((candidate.metrics or {}).get("spot_price") or Decimal("0")))
+        hedge_price = abs(to_decimal((candidate.metrics or {}).get("derivatives_price") or Decimal("0")))
+        reference_price = max(spot_price, hedge_price)
+        if reference_price <= EPSILON_DECIMAL_12:
+            return Decimal("0")
+        return target_pair_qty * reference_price
+
+    @classmethod
+    def _weighted_average_metric(cls, candidates: list[StrategyCandidate], key: str) -> Decimal | None:
+        weighted_sum = Decimal("0")
+        total_weight = Decimal("0")
+        for item in candidates:
+            value = (item.metrics or {}).get(key)
+            if value is None:
+                continue
+            weight = cls._candidate_requested_notional(item)
+            if weight <= EPSILON_DECIMAL_12:
+                continue
+            weighted_sum += weight * to_decimal(value)
+            total_weight += weight
+        if total_weight <= EPSILON_DECIMAL_12:
+            return cls._average_metric(candidates, key)
+        return weighted_sum / total_weight
 
     @staticmethod
     def _highest_urgency(candidates: list[StrategyCandidate]) -> str:

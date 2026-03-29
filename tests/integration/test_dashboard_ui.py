@@ -200,6 +200,7 @@ const html = renderStrategyView({
         entry_alpha_min: 0.18,
         entry_confidence_min: 0.66,
         hedge_overlay_enabled: true,
+        hedge_protective_enabled: true,
         hedge_overlay_mode: 'protective',
         hedge_overlay_runtime_supported: true,
         hedge_overlay_effective_enabled: true,
@@ -270,6 +271,7 @@ const html = renderStrategyView({
 
 console.log(JSON.stringify({
   hasOverlayLabel: html.includes('保护性对冲'),
+  hasProtectiveSwitch: html.includes('strategy_hedge_protective_enabled'),
   hasOverlayThresholds: html.includes('strategy_hedge_open_threshold / strategy_hedge_close_threshold'),
   hasOverlayRatio: html.includes('对冲比例'),
   hasOverlayReason: html.includes('保护性压力已经超过开仓阈值'),
@@ -285,6 +287,7 @@ console.log(JSON.stringify({
         )
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         self.assertIn('"hasOverlayLabel":true', result.stdout)
+        self.assertIn('"hasProtectiveSwitch":true', result.stdout)
         self.assertIn('"hasOverlayThresholds":true', result.stdout)
         self.assertIn('"hasOverlayRatio":true', result.stdout)
         self.assertIn('"hasOverlayReason":true', result.stdout)

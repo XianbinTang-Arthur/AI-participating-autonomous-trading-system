@@ -1592,6 +1592,14 @@ class TargetPositionEngine:
                 state="blocked",
                 blocked_reasons=["hedge_overlay_runtime_not_supported"],
             )
+        if configured_mode == "protective" and not self.settings.strategy_hedge_protective_enabled:
+            return HedgeOverlayDecision(
+                enabled=True,
+                runtime_supported=True,
+                configured_mode=configured_mode,
+                state="blocked",
+                blocked_reasons=["protective_overlay_not_enabled"],
+            )
         if configured_mode == "protective":
             return self._protective_overlay_decision(
                 context=context,

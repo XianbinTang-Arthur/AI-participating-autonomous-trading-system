@@ -781,6 +781,12 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(settings.derivatives_position_mode, "hedge")
         self.assertFalse(settings.strategy_family_auto_selection_enabled)
         self.assertFalse(settings.smart_arbitrage_enabled)
+        self.assertEqual(settings.strategy_hedge_overlay_mode, "independent")
+        self.assertTrue(settings.strategy_hedge_protective_enabled)
+        self.assertEqual(settings.strategy_hedge_independent_long_entry_threshold, 0.24)
+        self.assertEqual(settings.strategy_hedge_independent_short_entry_threshold, 0.24)
+        self.assertEqual(settings.strategy_hedge_independent_long_scale_in_threshold, 0.32)
+        self.assertEqual(settings.strategy_hedge_independent_short_scale_in_threshold, 0.32)
         self.assertEqual(target.strategy_family, "directional")
 
     async def test_derivatives_independent_overlay_runtime_exposes_leg_scoped_thresholds_and_books(self) -> None:
@@ -918,6 +924,7 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
         payload = strategy_runtime.json()
         directional = payload["configured_parameters"]["directional"]
         self.assertEqual(directional["hedge_overlay_mode"], "independent")
+        self.assertTrue(directional["hedge_protective_enabled"])
         self.assertTrue(directional["hedge_independent_enabled"])
         self.assertTrue(directional["hedge_overlay_mode_ready"])
         self.assertTrue(directional["hedge_overlay_effective_enabled"])

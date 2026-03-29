@@ -1221,12 +1221,31 @@ class OperatorQueryService:
 
     def strategy_execution_health(self, symbol: str | None = None) -> dict[str, Any]:
         target_symbol = symbol or self.runtime.settings.default_symbol
+        snapshot = self._latest_scoped_snapshot()
+        position_state = (
+            None
+            if snapshot is None
+            else instrument_position_state_for_symbol(
+                instrument_position_states_from_snapshot_positions(
+                    position
+                    for position in snapshot.positions
+                    if position.symbol == target_symbol
+                ),
+                target_symbol,
+            )
+        )
         snapshot = compute_strategy_execution_health(
             settings=self.runtime.settings,
             symbol=target_symbol,
             fills=self._scoped_fills(),
             snapshots=snapshots_for_scope(self.runtime.portfolio_repo, self.state_scope),
             current_position_qty=self._current_symbol_position_qty(target_symbol),
+            current_long_position_qty=(
+                Decimal("0") if position_state is None else position_state.long_position_qty
+            ),
+            current_short_position_qty=(
+                Decimal("0") if position_state is None else position_state.short_position_qty
+            ),
         )
         return snapshot.as_payload(
             settings=self.runtime.settings,
@@ -2240,7 +2259,10 @@ class OperatorQueryService:
             }
         )
         overlay_mode_enabled = (
-            overlay_mode == "protective"
+            (
+                overlay_mode == "protective"
+                and self.runtime.settings.strategy_hedge_protective_enabled
+            )
             or (
                 overlay_mode == "opportunistic"
                 and self.runtime.settings.strategy_hedge_opportunistic_enabled
@@ -2287,6 +2309,7 @@ class OperatorQueryService:
                 and self.runtime.settings.derivatives_position_mode == "hedge"
                 and overlay_mode_ready
             ),
+            "hedge_protective_enabled": self.runtime.settings.strategy_hedge_protective_enabled,
             "hedge_open_threshold": self.runtime.settings.strategy_hedge_open_threshold,
             "hedge_close_threshold": self.runtime.settings.strategy_hedge_close_threshold,
             "hedge_max_ratio": self.runtime.settings.strategy_hedge_max_ratio,

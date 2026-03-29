@@ -112,6 +112,12 @@ class DecisionContextBuilder:
             fills=self.execution_repo.fills_for_scope(scope=self.state_scope),
             snapshots=portfolio_snapshots,
             current_position_qty=current_position_qty,
+            current_long_position_qty=(
+                Decimal("0") if current_position_state is None else current_position_state.long_position_qty
+            ),
+            current_short_position_qty=(
+                Decimal("0") if current_position_state is None else current_position_state.short_position_qty
+            ),
         )
         leg_strategy_health = compute_leg_strategy_execution_health(
             settings=self.settings,

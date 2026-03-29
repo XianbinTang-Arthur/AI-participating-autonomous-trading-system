@@ -227,6 +227,7 @@ class DcaStrategyEngine:
     @staticmethod
     def _last_dca_target_at(engine_input: StrategyEngineInput, *, sleeve_id: str | None) -> datetime | None:
         history = engine_input.recent_targets_by_family.get("dca") or []
+        latest_created_at: datetime | None = None
         for item in history:
             target = item.target
             matched_leg = None
@@ -250,5 +251,6 @@ class DcaStrategyEngine:
                     continue
             created_at = item.created_at
             if isinstance(created_at, datetime):
-                return created_at
-        return None
+                if latest_created_at is None or created_at > latest_created_at:
+                    latest_created_at = created_at
+        return latest_created_at
