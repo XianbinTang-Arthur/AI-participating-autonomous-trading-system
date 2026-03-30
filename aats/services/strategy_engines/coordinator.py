@@ -302,7 +302,7 @@ class StrategyCoordinatorService:
             symbol=context.symbol,
             timeframe=context.timeframe,
             product_type=context.product_type,
-            margin_mode=self.settings.margin_mode,
+            margin_mode=directional_target.margin_mode,
             allowed_symbols=self.settings.expanded_allowed_symbols(),
             active_family=self.settings.strategy_family_active,
             selected_family=primary_family,
@@ -415,6 +415,12 @@ class StrategyCoordinatorService:
             family_action=selected_family_action,
             route_action=applied_route_action,
             strategy_execution_legs=strategy_execution_legs,
+            selected_candidate=selected,
+        )
+        book_expectancy_summary = (
+            None
+            if family_execution_summary is None or family_execution_summary.book_expectancy_summary is None
+            else family_execution_summary.book_expectancy_summary.model_copy(deep=True)
         )
         decision_outcome = base_target.decision_outcome
         overlay_candidate = self._configured_overlay_candidate(snapshot=snapshot)
@@ -451,6 +457,7 @@ class StrategyCoordinatorService:
                     "strategy_selection_reason_codes": list(dict.fromkeys(reason_codes)),
                     "strategy_selection_headline": snapshot.selected_headline,
                     "family_execution_summary": family_execution_summary,
+                    "book_expectancy_summary": book_expectancy_summary,
                     "final_action": final_action,
                     "final_direction": final_direction,
                     "final_target_qty": target_qty,
@@ -481,6 +488,7 @@ class StrategyCoordinatorService:
             "target_exposure_side": target_exposure_side,
             "position_intent": position_intent,
             "family_execution_summary": family_execution_summary,
+            "book_expectancy_summary": book_expectancy_summary,
             "urgency": urgency,
             "rebalance_reason": rebalance_reason,
             "source_mix": source_mix,
@@ -1206,6 +1214,7 @@ class StrategyCoordinatorService:
         family_action: StrategyFamilyAction,
         route_action: StrategyRouteAction,
         strategy_execution_legs: list[StrategyLegIntent],
+        selected_candidate: StrategyCandidate | None = None,
     ) -> StrategyExecutionSummary | None:
         actionable_legs = [
             leg
@@ -1246,6 +1255,11 @@ class StrategyCoordinatorService:
             directions=directions,
             leg_actions=leg_actions,
             execution_modes=execution_modes,
+            book_expectancy_summary=(
+                None
+                if selected_candidate is None or selected_candidate.book_expectancy_summary is None
+                else selected_candidate.book_expectancy_summary.model_copy(deep=True)
+            ),
         )
 
     def _is_protective_target(self, *, current_qty: Decimal, target_qty: Decimal) -> bool:

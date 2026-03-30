@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 from aats.bootstrap.logging import get_logger
 from aats.events import topics
 from aats.events.envelopes import build_envelope
-from aats.schemas.common import EventEnvelope, utc_now
+from aats.schemas.common import EventEnvelope, dump_payload_exact, utc_now
 from aats.schemas.blocker_control import BlockerControlSnapshot
 from aats.schemas.decision import AIDecisionIntent, BaselineReference, DecisionOutcome, normalize_ai_operating_mode
 from aats.schemas.execution import FillEvent, OrderState, execution_action_from_position_intent
@@ -1445,7 +1445,7 @@ class OperatorQueryService:
                 "execution_plan": None,
                 "decision_outcome": None,
             }
-        position_target = self.payload_by_ref(audit.position_target_ref)
+        position_target = self._position_target_payload(self.payload_by_ref(audit.position_target_ref))
         decision_outcome = self.payload_by_ref(audit.decision_outcome_ref)
         if decision_outcome is None and isinstance(position_target, dict):
             native_outcome = position_target.get("decision_outcome")
@@ -3546,6 +3546,29 @@ class OperatorQueryService:
             return None
         return execution_action_from_position_intent(str(position_intent)) or "hold"
 
+    @staticmethod
+    def _book_expectancy_summary_from_payload(payload: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not isinstance(payload, dict):
+            return None
+        direct = payload.get("book_expectancy_summary")
+        if isinstance(direct, dict):
+            return dict(direct)
+        family_summary = payload.get("family_execution_summary")
+        if not isinstance(family_summary, dict):
+            return None
+        nested = family_summary.get("book_expectancy_summary")
+        if isinstance(nested, dict):
+            return dict(nested)
+        return None
+
+    def _position_target_payload(self, payload: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not isinstance(payload, dict):
+            return payload
+        normalized = dict(payload)
+        if normalized.get("book_expectancy_summary") is None:
+            normalized["book_expectancy_summary"] = self._book_expectancy_summary_from_payload(normalized)
+        return normalized
+
     def _action_from_execution_fields(self, *, execution_action: Any, position_intent: Any) -> str | None:
         directional_action = self._directional_action_from_position_intent(position_intent)
         if directional_action is not None:
@@ -4084,8 +4107,11 @@ class OperatorQueryService:
             return None
         if isinstance(finalized_decision_outcome, dict):
             payload = dict(finalized_decision_outcome)
+            payload["finalized"] = bool(payload.get("finalized", True))
             if payload.get("family_execution_summary") is None and isinstance(position_target, dict):
                 payload["family_execution_summary"] = position_target.get("family_execution_summary")
+            if payload.get("book_expectancy_summary") is None:
+                payload["book_expectancy_summary"] = self._book_expectancy_summary_from_payload(payload) or self._book_expectancy_summary_from_payload(position_target)
             return payload
         native_outcome = None if position_target is None else position_target.get("decision_outcome")
         native_profile_control = None if position_target is None else position_target.get("profile_control_decision")
@@ -4116,7 +4142,7 @@ class OperatorQueryService:
                 payload.get("active_profile_id")
                 or activation.get("active_profile_id")
             )
-            payload["finalized"] = bool(payload.get("finalized", False))
+            payload["finalized"] = bool(payload.get("finalized", True))
             if payload.get("profile_control_source") is None:
                 if isinstance(native_profile_control, dict):
                     payload["profile_control_source"] = (
@@ -4139,6 +4165,8 @@ class OperatorQueryService:
                         break
             if payload.get("family_execution_summary") is None:
                 payload["family_execution_summary"] = None if position_target is None else position_target.get("family_execution_summary")
+            if payload.get("book_expectancy_summary") is None:
+                payload["book_expectancy_summary"] = self._book_expectancy_summary_from_payload(payload) or self._book_expectancy_summary_from_payload(position_target)
             return payload
         mode_value = (
             None if ai_assessment is None else ai_assessment.get("operating_mode")
@@ -4189,6 +4217,9 @@ class OperatorQueryService:
                 break
         profile_snapshot = self.strategy_profile_snapshot()
         activation = profile_snapshot.get("activation", {})
+        native_outcome = finalized_decision_outcome
+        if not isinstance(native_outcome, dict):
+            native_outcome = None if position_target is None else position_target.get("decision_outcome")
         outcome = DecisionOutcome(
             decision_id=str(
                 (position_target or {}).get("decision_id")
@@ -4203,15 +4234,27 @@ class OperatorQueryService:
                 or ""
             ),
             ai_operating_mode=canonical_mode,
-            finalized=False,
+            finalized=(
+                True
+                if native_outcome is None
+                else bool(native_outcome.get("finalized", True))
+            ),
             decision_source=decision_source,
             decision_authority=decision_authority_map[canonical_mode],
             final_direction=(
+                None
+                if native_outcome is None
+                else native_outcome.get("final_direction")
+            ) or (
                 None if position_target is None else position_target.get("target_exposure_side")
             ) or ai_direction or (
                 None if baseline_assessment is None else baseline_assessment.get("direction_bias")
             ),
-            final_action=self._abstract_action_from_position_intent(
+            final_action=(
+                None
+                if native_outcome is None
+                else native_outcome.get("final_action")
+            ) or self._abstract_action_from_position_intent(
                 None if position_target is None else position_target.get("position_intent")
             ),
             final_target_qty=None if final_target_qty is None else Decimal(str(final_target_qty)),
@@ -4238,13 +4281,20 @@ class OperatorQueryService:
             selected_strategy_route_action=str((position_target or {}).get("strategy_route_action") or "override_target"),
             strategy_selection_reason_codes=list((position_target or {}).get("strategy_reason_codes") or []),
             strategy_selection_headline=(position_target or {}).get("strategy_headline"),
-            family_execution_summary=None if position_target is None else position_target.get("family_execution_summary"),
+            family_execution_summary=(
+                None
+                if native_outcome is None
+                else native_outcome.get("family_execution_summary")
+            ) or (
+                None if position_target is None else position_target.get("family_execution_summary")
+            ),
+            book_expectancy_summary=self._book_expectancy_summary_from_payload(native_outcome) or self._book_expectancy_summary_from_payload(position_target),
             active_profile_id=activation.get("active_profile_id"),
             profile_control_source="system" if activation.get("active_profile_id") else "env_default",
             ai_fallback_used=bool((ai_assessment or {}).get("fallback_used")),
             ai_degraded=bool((ai_assessment or {}).get("degraded")),
         )
-        return outcome.model_dump(mode="json")
+        return dump_payload_exact(outcome.model_dump(mode="python"))
 
     @staticmethod
     def _profile_control_decision_payload(*, position_target: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -4275,6 +4325,7 @@ class OperatorQueryService:
         )
         if family_execution_summary is None and position_target is not None:
             family_execution_summary = position_target.get("family_execution_summary")
+        book_expectancy_summary = self._book_expectancy_summary_from_payload(native_outcome) or self._book_expectancy_summary_from_payload(position_target)
         return {
             "configured_mode": self.runtime.settings.ai_operating_mode,
             "assessment_operating_mode": None if ai_assessment is None else ai_assessment.get("operating_mode"),
@@ -4282,6 +4333,7 @@ class OperatorQueryService:
             "provider_request_id": None if ai_assessment is None else ai_assessment.get("provider_request_id"),
             "fallback_used": None if ai_assessment is None else ai_assessment.get("fallback_used"),
             "degraded": None if ai_assessment is None else ai_assessment.get("degraded"),
+            "finalized": True if native_outcome is None else bool(native_outcome.get("finalized", True)),
             "baseline_direction": None if baseline_assessment is None else baseline_assessment.get("direction_bias"),
             "ai_direction": self._direction_from_edge(None if ai_assessment is None else ai_assessment.get("directional_edge")),
             "final_direction": (
@@ -4297,6 +4349,7 @@ class OperatorQueryService:
                 None if position_target is None else position_target.get("position_intent")
             ),
             "family_execution_summary": family_execution_summary,
+            "book_expectancy_summary": book_expectancy_summary,
             "decision_source": None if not isinstance(native_outcome, dict) else native_outcome.get("decision_source"),
             "decision_authority": None if not isinstance(native_outcome, dict) else native_outcome.get("decision_authority"),
             "profile_control_source": None if not isinstance(native_outcome, dict) else native_outcome.get("profile_control_source"),
@@ -4370,7 +4423,7 @@ class OperatorQueryService:
         ai_decision_brief = self.payload_by_ref(audit.ai_decision_brief_ref) if ai_visible else None
         ai_assessment = self.payload_by_ref(audit.ai_market_assessment_ref) if ai_visible else None
         baseline_assessment = self.payload_by_ref(audit.baseline_assessment_ref)
-        position_target = self.payload_by_ref(audit.position_target_ref)
+        position_target = self._position_target_payload(self.payload_by_ref(audit.position_target_ref))
         policy_decision = self.payload_by_ref(audit.policy_decision_ref)
         risk_decision = self._risk_decision_payload(self.payload_by_ref(audit.risk_decision_ref))
         finalized_decision_outcome = self.payload_by_ref(audit.decision_outcome_ref)
@@ -4472,7 +4525,7 @@ class OperatorQueryService:
         payloads: list[dict[str, Any]] = []
         for record in paged_rows:
             context = self.payload_by_ref(record.decision_context_ref)
-            target = self.payload_by_ref(record.position_target_ref)
+            target = self._position_target_payload(self.payload_by_ref(record.position_target_ref))
             policy = self.payload_by_ref(record.policy_decision_ref)
             risk = self.payload_by_ref(record.risk_decision_ref)
             payloads.append(
@@ -4507,6 +4560,7 @@ class OperatorQueryService:
                         else None
                     ),
                     "family_execution_summary": target.get("family_execution_summary") if target else None,
+                    "book_expectancy_summary": target.get("book_expectancy_summary") if target else None,
                     "strategy_reason_codes": [] if target is None else list(target.get("strategy_reason_codes") or []),
                     "guardrail_flags": target.get("guardrail_flags") if target else [],
                     "expected_net_edge_bps": target.get("expected_net_edge_bps") if target else None,

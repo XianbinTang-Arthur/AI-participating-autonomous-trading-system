@@ -900,6 +900,27 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
                         "directions": ["long", "short"],
                         "leg_actions": ["open", "close"],
                         "execution_modes": ["independent_long_book", "independent_short_book"],
+                        "book_expectancy_summary": {
+                            "source": "independent_book",
+                            "books": [
+                                {
+                                    "leg": "long",
+                                    "expected_gross_edge_bps": 18.0,
+                                    "expected_signal_edge_bps": 18.0,
+                                    "expected_slippage_bps": 1.5,
+                                    "expected_cost_bps": 6.0,
+                                    "expected_net_edge_bps": 12.0,
+                                },
+                                {
+                                    "leg": "short",
+                                    "expected_gross_edge_bps": 4.0,
+                                    "expected_signal_edge_bps": 4.0,
+                                    "expected_slippage_bps": 1.5,
+                                    "expected_cost_bps": 6.0,
+                                    "expected_net_edge_bps": -2.0,
+                                },
+                            ],
+                        },
                     },
                     hedge_overlay_decision=HedgeOverlayDecision(
                         enabled=True,
@@ -981,6 +1002,18 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             applied_target["family_execution_summary"]["directions"],
             ["long", "short"],
+        )
+        self.assertEqual(
+            applied_target["family_execution_summary"]["book_expectancy_summary"]["source"],
+            "independent_book",
+        )
+        self.assertEqual(
+            applied_target["family_execution_summary"]["book_expectancy_summary"]["books"][0]["expected_net_edge_bps"],
+            12.0,
+        )
+        self.assertEqual(
+            applied_target["family_execution_summary"]["book_expectancy_summary"]["books"][1]["expected_net_edge_bps"],
+            -2.0,
         )
 
     async def test_derivatives_overlay_runtime_exposes_rollout_stage_blockers_for_live_runtime(self) -> None:
@@ -1402,6 +1435,11 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("strategy_family_independent_disabled", candidate["reason_codes"])
         self.assertNotIn("strategy_family_independent_placeholder_not_migrated", candidate["reason_codes"])
         self.assertFalse(bool(candidate["metrics"].get("skeleton_mode")))
+        self.assertEqual(candidate["book_expectancy_summary"]["source"], "independent_book")
+        self.assertEqual(
+            [item["leg"] for item in candidate["book_expectancy_summary"]["books"]],
+            ["long", "short"],
+        )
 
     @staticmethod
     def _settings(**overrides) -> AATSSettings:

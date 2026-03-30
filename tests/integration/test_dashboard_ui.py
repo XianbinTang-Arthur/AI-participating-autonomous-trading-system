@@ -2927,6 +2927,154 @@ console.log(JSON.stringify({
         self.assertIn('"overviewUsesFamilySummary":true', stdout)
         self.assertIn('"drawerUsesFamilySummary":true', stdout)
 
+    def test_independent_expectancy_summary_surfaces_in_runtime_and_decision_ui(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { renderStrategyView } from './aats/api/static/modules/views/strategy-view.js';
+import { buildDecisionDrawer } from './aats/api/static/modules/detail-drawers.js';
+
+const bookExpectancySummary = {
+  source: 'independent_book',
+  books: [
+    {
+      leg: 'long',
+      expected_gross_edge_bps: 18.0,
+      expected_signal_edge_bps: 18.0,
+      expected_slippage_bps: 1.5,
+      expected_cost_bps: 6.0,
+      expected_net_edge_bps: 12.0,
+    },
+    {
+      leg: 'short',
+      expected_gross_edge_bps: 4.0,
+      expected_signal_edge_bps: 4.0,
+      expected_slippage_bps: 1.5,
+      expected_cost_bps: 6.0,
+      expected_net_edge_bps: -2.0,
+    },
+  ],
+};
+
+const familyExecutionSummary = {
+  summary_mode: 'multi_leg',
+  family: 'independent',
+  route_action: 'override_target',
+  family_action: 'open_independent_book',
+  leg_count: 2,
+  position_intents: ['open_long', 'open_short'],
+  directions: ['long', 'short'],
+  leg_actions: ['open'],
+  execution_modes: ['independent_long_book', 'independent_short_book'],
+  book_expectancy_summary: bookExpectancySummary,
+};
+
+const latestDecision = {
+  decision_id: 'dec-independent-expectancy',
+  decision_time: '2026-03-30T12:00:00Z',
+  decision_context: { as_of_ts: '2026-03-30T12:00:00Z', symbol: 'BTC-USDT-SWAP' },
+  baseline_assessment: { direction_bias: 'long', confidence: 0.84, composite_alpha_score: 0.32 },
+  ai_assessment: { directional_edge: 0.2 },
+  position_target: {
+    position_intent: 'hold',
+    target_exposure_side: 'flat',
+    current_position_qty: 0,
+    target_position_qty: 0,
+    delta_position_qty: 0,
+    family_execution_summary: familyExecutionSummary,
+  },
+  policy_decision: { execution_allowed: true, blocker_reasons: [], allow_reasons: [] },
+  risk_decision: { approved: true, rejection_reasons: [], approval_reasons: [] },
+};
+
+const strategyHtml = renderStrategyView({
+  strategyRuntime: {
+    summary: {},
+    latest_snapshot: {
+      candidates: [
+        {
+          family: 'independent',
+          state: 'opening',
+          route_action: 'override_target',
+          family_action: 'open_independent_book',
+          urgency: 'medium',
+          target_position_qty: 0,
+          delta_position_qty: 0,
+          headline: 'Independent family candidate',
+          reason_codes: ['independent_long_book_signal_above_entry_threshold'],
+          metrics: {},
+          book_expectancy_summary: bookExpectancySummary,
+          legs: [
+            { symbol: 'BTC-USDT-SWAP', product_type: 'derivatives', side: 'buy', execution_mode: 'independent_long_book' },
+            { symbol: 'BTC-USDT-SWAP', product_type: 'derivatives', side: 'sell', execution_mode: 'independent_short_book' },
+          ],
+        },
+      ],
+      automation_decisions: [],
+    },
+    configured_parameters: { directional: {} },
+    latest_applied_target: latestDecision.position_target,
+    latest_bundle: {},
+    latest_allocation_decision: {},
+    recent_sleeve_intents: [],
+    recent_execution_bundles: [],
+    recent_budget_snapshots: [],
+    recent_conflict_resolutions: [],
+    recent_netting_decisions: [],
+    family_enablement: {},
+  },
+  latestDecision,
+});
+
+const drawer = buildDecisionDrawer({
+  decision_id: latestDecision.decision_id,
+  decision_context: { symbol: 'BTC-USDT-SWAP', current_position_qty: 0 },
+  position_target: latestDecision.position_target,
+  decision_outcome: {
+    final_action: 'enter',
+    final_direction: 'flat',
+    family_execution_summary: familyExecutionSummary,
+  },
+  ai_decision_audit: {
+    configured_mode: 'baseline_only',
+    assessment_operating_mode: 'baseline_only',
+    final_action: 'enter',
+    final_direction: 'flat',
+    family_execution_summary: familyExecutionSummary,
+    market_snapshot_fresh: true,
+    account_snapshot_fresh: true,
+    safe_to_trade: true,
+    recent_fee_drag_ratio: 0.03,
+    recent_churn_ratio: 0.02,
+    recent_low_edge_trade_streak: 1,
+    current_open_order_count: 0,
+  },
+  policy_decision: { execution_allowed: true },
+  risk_decision: { approved: true },
+});
+
+console.log(JSON.stringify({
+  strategyShowsCandidateExpectancy:
+    strategyHtml.includes('多书 毛/成本/净 18.00/6.00/12.00 基点')
+    && strategyHtml.includes('空书 毛/成本/净 4.00/6.00/-2.00 基点'),
+  drawerShowsExpectancy:
+    drawer.body.includes('每条书预期边际')
+    && drawer.body.includes('多书 毛/成本/净 18.00/6.00/12.00 基点')
+    && drawer.body.includes('空书 毛/成本/净 4.00/6.00/-2.00 基点'),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        stdout = result.stdout or ""
+        self.assertIn('"strategyShowsCandidateExpectancy":true', stdout)
+        self.assertIn('"drawerShowsExpectancy":true', stdout)
+
     def test_decision_drawer_surfaces_independent_overlay_audit_and_leg_trial_guard(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
         script = """

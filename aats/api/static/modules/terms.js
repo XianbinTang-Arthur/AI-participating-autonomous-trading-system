@@ -666,6 +666,33 @@ function normalizedSummaryList(value) {
     : [];
 }
 
+function normalizedBookExpectancySummary(source = {}) {
+  if (!source || typeof source !== "object") return {};
+  if (Array.isArray(source.books)) {
+    return source;
+  }
+  const direct = source.book_expectancy_summary || source.bookExpectancySummary;
+  if (direct && typeof direct === "object") {
+    return direct;
+  }
+  const familySummary = normalizedFamilyExecutionSummary(source);
+  if (!familySummary || typeof familySummary !== "object") {
+    return {};
+  }
+  const nested = familySummary.book_expectancy_summary || familySummary.bookExpectancySummary;
+  return nested && typeof nested === "object" ? nested : {};
+}
+
+function readableBookLabel(leg) {
+  return leg === "short" ? "空书" : "多书";
+}
+
+function readableExpectancyBps(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "0.00";
+  return number.toFixed(2);
+}
+
 export function hasFamilyExecutionSummary(source = {}) {
   const summary = normalizedFamilyExecutionSummary(source);
   return normalizedSummaryList(summary.position_intents).length > 0;
@@ -714,6 +741,18 @@ export function readableFamilyExecutionMeta(source = {}, fallback = "当前没�
     return `${legCount} 条腿执行`;
   }
   return fallback;
+}
+
+export function readableBookExpectancySummary(source = {}, fallback = "当前没有每条书的边际拆解") {
+  const summary = normalizedBookExpectancySummary(source);
+  const books = Array.isArray(summary.books) ? summary.books : [];
+  if (!books.length) return fallback;
+  return books
+    .map((book) => {
+      const leg = readableBookLabel(String(book?.leg || "").trim().toLowerCase());
+      return `${leg} 毛/成本/净 ${readableExpectancyBps(book?.expected_gross_edge_bps)}/${readableExpectancyBps(book?.expected_cost_bps)}/${readableExpectancyBps(book?.expected_net_edge_bps)} 基点`;
+    })
+    .join(" | ");
 }
 
 export function localizeError(value, fallback = "当前没有额外说明") {

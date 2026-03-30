@@ -4,6 +4,7 @@ import { escapeHtml, formatDuration, formatMaybeTimestamp, formatNumber, formatR
 import {
   hasFamilyExecutionSummary,
   localizeError,
+  readableBookExpectancySummary,
   readableFamilyExecutionDirection,
   readableFamilyExecutionMeta,
   readableFamilyExecutionSummary,
@@ -219,7 +220,7 @@ export function renderStrategySections(data) {
           [
             "最近 Bundle / 已应用目标",
             `${readableState(latestBundle.status || strategyRuntimeSummary.latest_bundle_status || "unknown")} / ${formatSigned(strategyAppliedTarget.target_position_qty)}`,
-            `${formatNumber(recentBundles[0]?.legs?.length ?? latestBundle.legs?.length ?? 0, 0, "0")} 条腿 | ${readableFamilyExecutionSummary(strategyAppliedTarget, "保持当前仓位")}`,
+            `${formatNumber(recentBundles[0]?.legs?.length ?? latestBundle.legs?.length ?? 0, 0, "0")} 条腿 | ${readableFamilyExecutionSummary(strategyAppliedTarget, "保持当前仓位")}${independentExpectancySuffix(strategyAppliedTarget)}`,
           ],
         ])}
         ${renderStrategyCandidateTable(displayedStrategyCandidates, smartArbitrageConfig, { policy, risk })}
@@ -2713,6 +2714,7 @@ function strategySleeveIntentTargetMeta(item, context = {}) {
 
 function strategyLegSummary(candidate, smartArbitrageConfig = {}) {
   const legs = candidate?.legs;
+  const expectancySummary = readableBookExpectancySummary(candidate, "");
   if (!Array.isArray(legs) || !legs.length) {
     if (candidate?.family === "smart_arbitrage") {
       if (smartArbitrageBelowEntryThreshold(candidate)) {
@@ -2723,7 +2725,7 @@ function strategyLegSummary(candidate, smartArbitrageConfig = {}) {
       const compact = smartArbitrageCostCompact(candidate);
       return compact ? `${marketAvailability} | ${compact}` : marketAvailability;
     }
-    return "当前没有附带腿说明";
+    return expectancySummary ? `当前没有附带腿说明。 | ${expectancySummary}` : "当前没有附带腿说明";
   }
   const legSummary = legs
     .map((item) => {
@@ -2731,9 +2733,17 @@ function strategyLegSummary(candidate, smartArbitrageConfig = {}) {
       return `${readableState(item.product_type)} ${readableState(item.side)} ${item.symbol || "标的待确认"}${mode}`;
     })
     .join(" | ");
+  if (candidate?.family === "independent") {
+    return expectancySummary ? `${legSummary} | ${expectancySummary}` : legSummary;
+  }
   if (candidate?.family !== "smart_arbitrage") return legSummary;
   const compact = smartArbitrageCostCompact(candidate);
   return compact ? `${legSummary} | ${compact}` : legSummary;
+}
+
+function independentExpectancySuffix(source = {}) {
+  const summary = readableBookExpectancySummary(source, "");
+  return summary ? ` | ${summary}` : "";
 }
 
 function smartArbitrageMarketAvailability(candidate, smartArbitrageConfig = {}) {

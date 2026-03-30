@@ -13,6 +13,7 @@ from aats.schemas.portfolio import InstrumentPositionState, PositionLegState
 from aats.schemas.strategy_runtime import (
     StrategyFamily,
     StrategyFamilyAction,
+    StrategyBookExpectancySummary,
     StrategyLegIntent,
     StrategyRouteAction,
 )
@@ -293,6 +294,7 @@ class DecisionOutcome(SchemaBase):
     strategy_selection_reason_codes: list[str] = Field(default_factory=list)
     strategy_selection_headline: str | None = None
     family_execution_summary: StrategyExecutionSummary | None = None
+    book_expectancy_summary: StrategyBookExpectancySummary | None = None
     active_profile_id: str | None = None
     profile_control_source: ProfileControlSource | None = None
     ai_fallback_used: bool = False
@@ -314,6 +316,7 @@ class StrategyExecutionSummary(SchemaBase):
     directions: list[str] = Field(default_factory=list)
     leg_actions: list[str] = Field(default_factory=list)
     execution_modes: list[str] = Field(default_factory=list)
+    book_expectancy_summary: StrategyBookExpectancySummary | None = None
 
 
 class HedgeOverlayDecision(SchemaBase):
@@ -403,6 +406,7 @@ class PositionTarget(SchemaBase):
     strategy_bundle_id: str | None = None
     strategy_execution_legs: list[StrategyLegIntent] = Field(default_factory=list)
     family_execution_summary: StrategyExecutionSummary | None = None
+    book_expectancy_summary: StrategyBookExpectancySummary | None = None
     hedge_overlay_decision: HedgeOverlayDecision | None = None
     guardrail_flags: list[str] = Field(default_factory=list)
     ai_execution_parameter_suggestion: AIExecutionParameterSuggestionEnvelope | None = None

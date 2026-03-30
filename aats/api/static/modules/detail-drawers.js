@@ -12,6 +12,7 @@ import {
 } from "./formatters.js";
 import {
   localizeError,
+  readableBookExpectancySummary,
   readableFamilyExecutionDirection,
   readableFamilyExecutionSummary,
   readableState,
@@ -231,6 +232,7 @@ function decisionAuditRows(aiDecisionAudit, decisionOutcome) {
   return [
     ["当前运行模式与评估方式", `${readableState(aiDecisionAudit.configured_mode || "unknown")} / ${readableState(aiDecisionAudit.assessment_operating_mode || "unknown")}`, drawerText(aiDecisionAudit.provider_name, "当前没有模型服务说明")],
     ["方向判断对比", `基础策略 ${readableState(aiDecisionAudit.baseline_direction || "unknown")} / AI ${readableState(aiDecisionAudit.ai_direction || "unknown")}`, `最终结论 ${readableFamilyExecutionDirection(executionSummary, readableState(aiDecisionAudit.final_direction || "unknown"))} / ${readableFamilyExecutionSummary(executionSummary, "当前没有额外执行摘要")}`],
+    ["每条书预期边际", readableBookExpectancySummary(executionSummary, "当前没有每条书的边际拆解"), drawerText(executionSummary?.book_expectancy_summary?.source || executionSummary?.bookExpectancySummary?.source, "当前没有额外来源说明")],
     ["这轮最终采用谁的结论", decisionSourceLabel(aiDecisionAudit.decision_source), `${decisionSourceNarrative(decisionOutcome)} / ${decisionAuthorityLabel(aiDecisionAudit.decision_authority)}`],
     ["为什么没有直接采用 AI", drawerListText((decisionOutcome?.decision_blocked_reasons || []).map(localizeError), "当前没有额外决策链路阻断项"), drawerListText(aiDecisionAudit.guardrail_flags, "当前没有额外保护规则")],
     ["行情和账户状态", `行情快照 ${booleanWord(aiDecisionAudit.market_snapshot_fresh)} / 账户快照 ${booleanWord(aiDecisionAudit.account_snapshot_fresh)}`, `允许交易 ${booleanWord(aiDecisionAudit.safe_to_trade)} / ${drawerText(aiDecisionAudit.execution_condition, "当前没有额外执行条件")}`],

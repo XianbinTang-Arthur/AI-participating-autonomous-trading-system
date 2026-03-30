@@ -1457,6 +1457,37 @@ class TestStrategyCoordinator(unittest.TestCase):
         self.assertNotIn("smart_arbitrage_inventory_backed_ready", candidate.reason_codes)
         self.assertEqual(candidate.legs[0].margin_mode, "cross")
 
+    def test_snapshot_margin_mode_prefers_directional_target_runtime_value(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+            }
+        )
+        coordinator = StrategyCoordinatorService(
+            settings=settings,
+            event_store=InMemoryEventStore(),
+            market_gateway=_FakeMarketGateway({"BTC-USDT-SWAP": _market_snapshot("BTC-USDT-SWAP", "66000")}),
+            portfolio_repo=InMemoryPortfolioRepository(),
+            strategy_sleeve_repo=InMemoryStrategySleeveRepository(),
+        )
+
+        snapshot = coordinator.evaluate(
+            context=_decision_context(symbol="BTC-USDT-SWAP", product_type="derivatives", current_position_qty="0"),
+            baseline=_baseline(symbol="BTC-USDT-SWAP"),
+            directional_target=_position_target(
+                symbol="BTC-USDT-SWAP",
+                product_type="derivatives",
+                margin_mode="isolated",
+                current_qty="0",
+                target_qty="0",
+            ),
+        )
+
+        self.assertEqual(snapshot.margin_mode, "isolated")
+
     def test_smart_arbitrage_negative_basis_inventory_backed_does_not_fall_back_to_margin_mode(self) -> None:
         settings = AATSSettings.model_validate(
             {
@@ -3139,12 +3170,19 @@ class TestStrategyCoordinator(unittest.TestCase):
         self.assertEqual(applied.family_execution_summary.summary_mode, "single_leg")
         self.assertEqual(applied.family_execution_summary.position_intents, ["open_long"])
         self.assertEqual(applied.family_execution_summary.directions, ["long"])
+        self.assertIsNotNone(applied.family_execution_summary.book_expectancy_summary)
+        self.assertEqual(applied.family_execution_summary.book_expectancy_summary.source, "independent_book")
+        self.assertIsNotNone(applied.book_expectancy_summary)
+        self.assertEqual(applied.book_expectancy_summary.source, "independent_book")
         assert applied.decision_outcome is not None
         self.assertEqual(applied.decision_outcome.selected_strategy_family, "independent")
         self.assertEqual(applied.decision_outcome.selected_strategy_family_action, "open_independent_book")
         self.assertEqual(applied.decision_outcome.final_action, "enter")
         self.assertIsNotNone(applied.decision_outcome.family_execution_summary)
         self.assertEqual(applied.decision_outcome.family_execution_summary.position_intents, ["open_long"])
+        self.assertIsNotNone(applied.decision_outcome.family_execution_summary.book_expectancy_summary)
+        self.assertIsNotNone(applied.decision_outcome.book_expectancy_summary)
+        self.assertEqual(applied.decision_outcome.book_expectancy_summary.source, "independent_book")
 
     def test_family_execution_summary_preserves_multi_leg_cutover_without_forcing_single_intent(self) -> None:
         summary = StrategyCoordinatorService._family_execution_summary(

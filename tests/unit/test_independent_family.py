@@ -4,8 +4,32 @@ from datetime import datetime, timezone
 from decimal import Decimal
 import unittest
 
-from aats.services.strategy_engines.families.independent_family import evaluate_independent_books
+from aats.schemas.decision import PositionTarget
+from aats.services.strategy_engines.base import StrategyEvaluationContext, StrategyFamilyRuntimeControl
+from aats.services.strategy_engines.families.independent_family import (
+    IndependentBookExpectancy,
+    evaluate_independent_books,
+    independent_candidate_from_directional_target,
+)
 from tests.support.strategy_family import make_ai_assessment, make_baseline, make_context, make_derivatives_hedge_settings
+
+
+def _expectancy_resolver(*, leg: str, **_: object) -> IndependentBookExpectancy:
+    if leg == "long":
+        return IndependentBookExpectancy(
+            leg="long",
+            expected_signal_edge_bps=18.0,
+            expected_slippage_bps=1.5,
+            expected_cost_bps=6.0,
+            expected_net_edge_bps=12.0,
+        )
+    return IndependentBookExpectancy(
+        leg="short",
+        expected_signal_edge_bps=4.0,
+        expected_slippage_bps=1.5,
+        expected_cost_bps=6.0,
+        expected_net_edge_bps=-2.0,
+    )
 
 
 class TestIndependentFamily(unittest.TestCase):
@@ -46,6 +70,7 @@ class TestIndependentFamily(unittest.TestCase):
             expected_net_edge_bps=8.0,
             execution_leg_family="independent",
             scorer=lambda *, leg, baseline, ai_assessment: 0.78 if leg == "long" else 0.75,
+            expectancy_resolver=_expectancy_resolver,
         )
 
         self.assertIn(
@@ -96,6 +121,7 @@ class TestIndependentFamily(unittest.TestCase):
             expected_net_edge_bps=8.0,
             execution_leg_family="independent",
             scorer=lambda *, leg, baseline, ai_assessment: 0.78 if leg == "long" else 0.75,
+            expectancy_resolver=_expectancy_resolver,
         )
 
         self.assertIn(
@@ -144,6 +170,7 @@ class TestIndependentFamily(unittest.TestCase):
             expected_net_edge_bps=8.0,
             execution_leg_family="independent",
             scorer=lambda *, leg, baseline, ai_assessment: 0.55 if leg == "long" else 0.10,
+            expectancy_resolver=_expectancy_resolver,
         )
 
         self.assertIn(
@@ -192,6 +219,13 @@ class TestIndependentFamily(unittest.TestCase):
             expected_net_edge_bps=3.0,
             execution_leg_family="independent",
             scorer=lambda *, leg, baseline, ai_assessment: 0.78 if leg == "long" else 0.08,
+            expectancy_resolver=lambda *, leg, **kwargs: IndependentBookExpectancy(
+                leg=leg,
+                expected_signal_edge_bps=10.0,
+                expected_slippage_bps=1.0,
+                expected_cost_bps=7.0,
+                expected_net_edge_bps=3.0 if leg == "long" else 1.0,
+            ),
         )
 
         self.assertIn(
@@ -242,6 +276,13 @@ class TestIndependentFamily(unittest.TestCase):
             expected_net_edge_bps=4.0,
             execution_leg_family="independent",
             scorer=lambda *, leg, baseline, ai_assessment: 0.78 if leg == "long" else 0.08,
+            expectancy_resolver=lambda *, leg, **kwargs: IndependentBookExpectancy(
+                leg=leg,
+                expected_signal_edge_bps=10.0,
+                expected_slippage_bps=1.5,
+                expected_cost_bps=7.5,
+                expected_net_edge_bps=4.0 if leg == "long" else 1.0,
+            ),
         )
 
         self.assertIn(
@@ -296,6 +337,13 @@ class TestIndependentFamily(unittest.TestCase):
             expected_net_edge_bps=10.0,
             execution_leg_family="independent",
             scorer=lambda *, leg, baseline, ai_assessment: 0.78 if leg == "long" else 0.08,
+            expectancy_resolver=lambda *, leg, **kwargs: IndependentBookExpectancy(
+                leg=leg,
+                expected_signal_edge_bps=18.0,
+                expected_slippage_bps=1.0,
+                expected_cost_bps=7.0,
+                expected_net_edge_bps=10.0 if leg == "long" else 1.0,
+            ),
         )
 
         self.assertIn(
@@ -364,6 +412,7 @@ class TestIndependentFamily(unittest.TestCase):
             expected_net_edge_bps=8.0,
             execution_leg_family="independent",
             scorer=lambda *, leg, baseline, ai_assessment: 0.76 if leg == "long" else 0.72,
+            expectancy_resolver=_expectancy_resolver,
         )
 
         self.assertIn(
@@ -468,6 +517,128 @@ class TestIndependentFamily(unittest.TestCase):
         self.assertIn("independent_books_not_enabled", result.overlay_decision.blocked_reasons)
         self.assertFalse(result.legs)
         self.assertEqual(result.final_target_qty, Decimal("0.01"))
+
+    def test_evaluate_independent_books_uses_book_scoped_expectancy_for_open_gates(self) -> None:
+        settings = make_derivatives_hedge_settings(
+            strategy_hedge_overlay_mode="independent",
+            strategy_hedge_independent_enabled=True,
+            strategy_hedge_independent_min_safe_net_edge_bps=3.0,
+        )
+        context = make_context(product_type="derivatives", current_exposure_side="flat")
+        baseline = make_baseline(
+            direction_bias="long",
+            confidence=0.9,
+            suggested_position_scale=1.0,
+            volatility_target_scale=1.0,
+            factor_scores={"momentum_alpha": 0.5, "trend_alpha": 0.5, "microstructure_alpha": 0.2},
+        ).model_copy(update={"regime": "trend", "composite_alpha_score": 0.35})
+
+        result = evaluate_independent_books(
+            settings=settings,
+            context=context,
+            baseline=baseline,
+            ai_assessment=make_ai_assessment(direction=0.3, confidence=0.85),
+            directional_target_qty=Decimal("0.01"),
+            target_leverage=1.0,
+            signal_edge_bps=18.0,
+            expected_cost_bps=4.0,
+            expected_net_edge_bps=14.0,
+            execution_leg_family="independent",
+            scorer=lambda *, leg, baseline, ai_assessment: 0.78 if leg == "long" else 0.74,
+            expectancy_resolver=_expectancy_resolver,
+        )
+
+        self.assertEqual({leg.pos_side for leg in result.legs}, {"long"})
+        self.assertEqual(result.long_book.expectancy.expected_net_edge_bps, 12.0)
+        self.assertEqual(result.short_book.expectancy.expected_net_edge_bps, -2.0)
+        self.assertIn(
+            "independent_short_book_expected_net_edge_below_safe_threshold",
+            result.short_book.blocked_reasons,
+        )
+
+    def test_independent_candidate_metrics_publish_book_scoped_expectancy(self) -> None:
+        settings = make_derivatives_hedge_settings(
+            strategy_hedge_overlay_mode="independent",
+            strategy_hedge_independent_enabled=True,
+            strategy_family_independent_enabled=True,
+        )
+        context = make_context(product_type="derivatives", current_exposure_side="flat")
+        baseline = make_baseline(
+            direction_bias="long",
+            confidence=0.9,
+            suggested_position_scale=1.0,
+            volatility_target_scale=1.0,
+            factor_scores={"momentum_alpha": 0.5, "trend_alpha": 0.5, "microstructure_alpha": 0.2},
+        ).model_copy(update={"regime": "trend", "composite_alpha_score": 0.35})
+        directional_target = PositionTarget(
+            decision_id="decision_target_test",
+            symbol="BTC-USDT",
+            current_position_qty=Decimal("0"),
+            target_position_qty=Decimal("0.01"),
+            delta_position_qty=Decimal("0.01"),
+            current_notional=Decimal("0"),
+            target_notional=Decimal("0"),
+            rebalance_reason="test",
+            urgency="medium",
+            max_slippage_tolerance_bps=20,
+            source_mix={"baseline": 1.0},
+            decision_expiry_ts=datetime.now(timezone.utc),
+            product_type="derivatives",
+            current_exposure_side="flat",
+            target_exposure_side="long",
+            position_intent="open_long",
+            target_leverage=1.0,
+            margin_mode="cross",
+            expected_signal_edge_bps=22.0,
+            expected_cost_bps=5.0,
+            expected_net_edge_bps=17.0,
+        )
+        evaluation_context = StrategyEvaluationContext(
+            context=context,
+            baseline=baseline,
+            directional_target=directional_target,
+            latest_snapshot=None,
+            latest_account_snapshot=None,
+            latest_market_snapshot=None,
+            recent_market_snapshots={},
+            recent_targets_by_family={},
+            ai_assessment=make_ai_assessment(direction=0.3, confidence=0.85),
+            family_runtime_controls={
+                "independent": StrategyFamilyRuntimeControl(
+                    enabled=True,
+                    shadow_mode_enabled=False,
+                    live_execution_enabled=False,
+                )
+            },
+        )
+
+        candidate = independent_candidate_from_directional_target(
+            settings=settings,
+            evaluation_context=evaluation_context,
+        )
+
+        self.assertEqual(candidate.metrics["expectancy_source"], "independent_book")
+        self.assertIn("long_expected_signal_edge_bps", candidate.metrics)
+        self.assertIn("short_expected_signal_edge_bps", candidate.metrics)
+        self.assertNotEqual(
+            candidate.metrics["long_expected_net_edge_bps"],
+            candidate.metrics["short_expected_net_edge_bps"],
+        )
+        assert candidate.book_expectancy_summary is not None
+        self.assertEqual(candidate.book_expectancy_summary.source, "independent_book")
+        self.assertEqual([item.leg for item in candidate.book_expectancy_summary.books], ["long", "short"])
+        self.assertEqual(
+            candidate.book_expectancy_summary.books[0].expected_gross_edge_bps,
+            candidate.metrics["long_expected_signal_edge_bps"],
+        )
+        self.assertEqual(
+            candidate.book_expectancy_summary.books[0].expected_cost_bps,
+            candidate.metrics["long_expected_cost_bps"],
+        )
+        self.assertEqual(
+            candidate.book_expectancy_summary.books[1].expected_net_edge_bps,
+            candidate.metrics["short_expected_net_edge_bps"],
+        )
 
 
 if __name__ == "__main__":

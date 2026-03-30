@@ -61,6 +61,19 @@ class TestOperatorPositionStates(unittest.TestCase):
                     "directions": ["short"],
                     "leg_actions": ["open"],
                     "execution_modes": ["protective_overlay"],
+                    "book_expectancy_summary": {
+                        "source": "independent_book",
+                        "books": [
+                            {
+                                "leg": "long",
+                                "expected_gross_edge_bps": 18.0,
+                                "expected_signal_edge_bps": 18.0,
+                                "expected_slippage_bps": 1.5,
+                                "expected_cost_bps": 6.0,
+                                "expected_net_edge_bps": 12.0,
+                            }
+                        ],
+                    },
                 },
             },
             policy_decision=None,
@@ -68,9 +81,16 @@ class TestOperatorPositionStates(unittest.TestCase):
         )
 
         assert payload is not None
+        self.assertTrue(payload["finalized"])
         self.assertEqual(payload["final_action"], "enter")
         self.assertEqual(payload["final_direction"], "short")
         self.assertEqual(payload["family_execution_summary"]["position_intents"], ["open_short"])
+        self.assertEqual(payload["book_expectancy_summary"]["source"], "independent_book")
+        self.assertEqual(
+            payload["family_execution_summary"]["book_expectancy_summary"]["books"][0]["expected_net_edge_bps"],
+            12.0,
+        )
+        self.assertEqual(payload["book_expectancy_summary"]["books"][0]["expected_net_edge_bps"], 12.0)
 
     def test_ai_decision_audit_prefers_native_outcome_over_target_fields(self) -> None:
         query = OperatorQueryService.__new__(OperatorQueryService)
@@ -102,6 +122,27 @@ class TestOperatorPositionStates(unittest.TestCase):
                     "directions": ["long", "short"],
                     "leg_actions": ["open"],
                     "execution_modes": ["independent_long_book", "independent_short_book"],
+                    "book_expectancy_summary": {
+                        "source": "independent_book",
+                        "books": [
+                            {
+                                "leg": "long",
+                                "expected_gross_edge_bps": 18.0,
+                                "expected_signal_edge_bps": 18.0,
+                                "expected_slippage_bps": 1.5,
+                                "expected_cost_bps": 6.0,
+                                "expected_net_edge_bps": 12.0,
+                            },
+                            {
+                                "leg": "short",
+                                "expected_gross_edge_bps": 4.0,
+                                "expected_signal_edge_bps": 4.0,
+                                "expected_slippage_bps": 1.5,
+                                "expected_cost_bps": 6.0,
+                                "expected_net_edge_bps": -2.0,
+                            },
+                        ],
+                    },
                 },
             },
             finalized_decision_outcome={
@@ -120,15 +161,73 @@ class TestOperatorPositionStates(unittest.TestCase):
                     "directions": ["long", "short"],
                     "leg_actions": ["open"],
                     "execution_modes": ["independent_long_book", "independent_short_book"],
+                    "book_expectancy_summary": {
+                        "source": "independent_book",
+                        "books": [
+                            {
+                                "leg": "long",
+                                "expected_gross_edge_bps": 18.0,
+                                "expected_signal_edge_bps": 18.0,
+                                "expected_slippage_bps": 1.5,
+                                "expected_cost_bps": 6.0,
+                                "expected_net_edge_bps": 12.0,
+                            },
+                            {
+                                "leg": "short",
+                                "expected_gross_edge_bps": 4.0,
+                                "expected_signal_edge_bps": 4.0,
+                                "expected_slippage_bps": 1.5,
+                                "expected_cost_bps": 6.0,
+                                "expected_net_edge_bps": -2.0,
+                            },
+                        ],
+                    },
                 },
             },
             strategy_execution_health=None,
         )
 
         assert audit is not None
+        self.assertTrue(audit["finalized"])
         self.assertEqual(audit["final_action"], "enter")
         self.assertEqual(audit["final_direction"], "flat")
         self.assertEqual(audit["family_execution_summary"]["position_intents"], ["open_long", "open_short"])
+        self.assertEqual(audit["book_expectancy_summary"]["source"], "independent_book")
+        self.assertEqual(
+            audit["family_execution_summary"]["book_expectancy_summary"]["books"][1]["expected_net_edge_bps"],
+            -2.0,
+        )
+        self.assertEqual(audit["book_expectancy_summary"]["books"][1]["expected_net_edge_bps"], -2.0)
+
+    def test_position_target_payload_backfills_top_level_book_expectancy_summary(self) -> None:
+        query = OperatorQueryService.__new__(OperatorQueryService)
+
+        payload = query._position_target_payload(
+            {
+                "position_intent": "hold",
+                "family_execution_summary": {
+                    "summary_mode": "multi_leg",
+                    "family": "independent",
+                    "book_expectancy_summary": {
+                        "source": "independent_book",
+                        "books": [
+                            {
+                                "leg": "long",
+                                "expected_gross_edge_bps": 18.0,
+                                "expected_signal_edge_bps": 18.0,
+                                "expected_slippage_bps": 1.5,
+                                "expected_cost_bps": 6.0,
+                                "expected_net_edge_bps": 12.0,
+                            }
+                        ],
+                    },
+                },
+            }
+        )
+
+        assert payload is not None
+        self.assertEqual(payload["book_expectancy_summary"]["source"], "independent_book")
+        self.assertEqual(payload["book_expectancy_summary"]["books"][0]["expected_net_edge_bps"], 12.0)
 
     def test_aggregate_local_positions_exposes_dual_leg_state(self) -> None:
         snapshot = PortfolioSnapshot(

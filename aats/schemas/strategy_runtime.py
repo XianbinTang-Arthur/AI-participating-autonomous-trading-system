@@ -294,6 +294,20 @@ class StrategyLegIntent(SchemaBase):
     execution_preference_reason_codes: list[str] = Field(default_factory=list)
 
 
+class StrategyBookExpectancyEntry(SchemaBase):
+    leg: Literal["long", "short"]
+    expected_gross_edge_bps: float = 0.0
+    expected_signal_edge_bps: float = 0.0
+    expected_slippage_bps: float = 0.0
+    expected_cost_bps: float = 0.0
+    expected_net_edge_bps: float = 0.0
+
+
+class StrategyBookExpectancySummary(SchemaBase):
+    source: str = "independent_book"
+    books: list[StrategyBookExpectancyEntry] = Field(default_factory=list)
+
+
 class StrategyCandidate(SchemaBase):
     family: StrategyFamily
     state: StrategyCandidateState
@@ -321,6 +335,7 @@ class StrategyCandidate(SchemaBase):
     state_phase: str | None = None
     blocking_reasons: list[str] = Field(default_factory=list)
     metrics: dict[str, Any] = Field(default_factory=dict)
+    book_expectancy_summary: StrategyBookExpectancySummary | None = None
     legs: list[StrategyLegIntent] = Field(default_factory=list)
 
 

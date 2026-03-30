@@ -1211,6 +1211,7 @@ class TestTargetPositionEngine(unittest.TestCase):
         self.assertIsNotNone(target.ai_decision_intent)
         self.assertEqual(target.decision_outcome.ai_operating_mode, "ai_decision_maker")
         self.assertEqual(target.decision_outcome.decision_authority, "final_decision")
+        self.assertTrue(target.decision_outcome.finalized)
         self.assertEqual(target.decision_outcome.final_target_qty, target.target_position_qty)
         self.assertEqual(target.ai_decision_intent.direction, "short")
         self.assertEqual(target.ai_decision_intent.action, "enter")

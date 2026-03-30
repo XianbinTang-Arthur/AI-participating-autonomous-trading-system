@@ -1584,7 +1584,7 @@ class TargetPositionEngine:
             decision_id=context.decision_id,
             symbol=context.symbol,
             ai_operating_mode=canonical_mode,
-            finalized=False,
+            finalized=True,
             decision_source=decision_source,
             decision_authority=authority_map[canonical_mode],
             final_direction=target_exposure_side,

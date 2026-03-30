@@ -9,6 +9,8 @@ from aats.bootstrap.settings import AATSSettings
 from aats.schemas.decision import AIMarketAssessment, BaselineAssessment, DecisionContext, HedgeOverlayDecision
 from aats.schemas.strategy_runtime import (
     StrategyCandidate,
+    StrategyBookExpectancyEntry,
+    StrategyBookExpectancySummary,
     StrategyFamily,
     StrategyFamilyAction,
     StrategyLegIntent,
@@ -21,14 +23,26 @@ from aats.services.strategy_engines.families.protective_family import (
     protective_runtime_supported,
 )
 from aats.services.strategy_overlay_rollout import overlay_rollout_status
+from aats.services.trade_costs import TradeCostService
 
 IndependentLeg = Literal["long", "short"]
 IndependentBookScorer = Callable[..., float]
+IndependentBookExpectancyResolver = Callable[..., "IndependentBookExpectancy"]
+
+
+@dataclass(frozen=True, slots=True)
+class IndependentBookExpectancy:
+    leg: IndependentLeg
+    expected_signal_edge_bps: float
+    expected_slippage_bps: float
+    expected_cost_bps: float
+    expected_net_edge_bps: float
 
 
 @dataclass(frozen=True, slots=True)
 class IndependentBookEvaluation:
     leg: IndependentLeg
+    expectancy: IndependentBookExpectancy
     score: float
     current_qty: Decimal
     target_qty: Decimal
@@ -54,12 +68,14 @@ class IndependentFamilyEngine:
 
     def __init__(self, *, settings: AATSSettings) -> None:
         self.settings = settings
+        self.trade_cost_service = TradeCostService(settings=settings)
 
     def evaluate(self, context: StrategyEvaluationContext) -> list[StrategyCandidate]:
         return [
             independent_candidate_from_directional_target(
                 settings=self.settings,
                 evaluation_context=context,
+                trade_cost_service=self.trade_cost_service,
             )
         ]
 
@@ -68,6 +84,7 @@ def independent_candidate_from_directional_target(
     *,
     settings: AATSSettings,
     evaluation_context: StrategyEvaluationContext,
+    trade_cost_service: TradeCostService | None = None,
 ) -> StrategyCandidate:
     family: StrategyFamily = "independent"
     control = evaluation_context.family_runtime_controls.get(family, StrategyFamilyRuntimeControl())
@@ -94,9 +111,6 @@ def independent_candidate_from_directional_target(
         "execution_owner": family,
         "weak_edge_execution_mode": settings.strategy_hedge_independent_weak_edge_execution_mode,
         "passive_first_enabled": settings.strategy_hedge_independent_passive_first_enabled,
-        "expected_signal_edge_bps": directional_target.expected_signal_edge_bps,
-        "expected_cost_bps": directional_target.expected_cost_bps,
-        "expected_net_edge_bps": directional_target.expected_net_edge_bps,
         "min_safe_net_edge_bps": settings.strategy_hedge_independent_min_safe_net_edge_bps,
         "expected_slippage_buffer_bps": settings.strategy_hedge_independent_expected_slippage_buffer_bps,
         "expected_execution_buffer_bps": settings.strategy_hedge_independent_expected_execution_buffer_bps,
@@ -162,8 +176,10 @@ def independent_candidate_from_directional_target(
         expected_cost_bps=float(directional_target.expected_cost_bps),
         expected_net_edge_bps=float(directional_target.expected_net_edge_bps),
         execution_leg_family="independent",
+        trade_cost_service=trade_cost_service,
     )
     overlay_decision = result.overlay_decision
+    book_expectancy_summary = _independent_book_expectancy_summary(result)
     reason_codes = list(
         dict.fromkeys(
             [
@@ -208,6 +224,7 @@ def independent_candidate_from_directional_target(
         execution_mode="independent_books",
         state_phase=overlay_decision.state,
         blocking_reasons=list(overlay_decision.blocked_reasons),
+        book_expectancy_summary=book_expectancy_summary,
         metrics={
             **metrics,
             "configured_mode": configured_mode,
@@ -237,6 +254,27 @@ def independent_candidate_from_directional_target(
             "rebalance_cooldown_remaining_seconds": overlay_decision.rebalance_cooldown_remaining_seconds,
             "rollout_stage": overlay_decision.rollout_stage,
             "runtime_rollout_stage": overlay_decision.runtime_rollout_stage,
+            "expectancy_source": "independent_book",
+            "long_expected_signal_edge_bps": result.long_book.expectancy.expected_signal_edge_bps,
+            "long_expected_slippage_bps": result.long_book.expectancy.expected_slippage_bps,
+            "long_expected_cost_bps": result.long_book.expectancy.expected_cost_bps,
+            "long_expected_net_edge_bps": result.long_book.expectancy.expected_net_edge_bps,
+            "short_expected_signal_edge_bps": result.short_book.expectancy.expected_signal_edge_bps,
+            "short_expected_slippage_bps": result.short_book.expectancy.expected_slippage_bps,
+            "short_expected_cost_bps": result.short_book.expectancy.expected_cost_bps,
+            "short_expected_net_edge_bps": result.short_book.expectancy.expected_net_edge_bps,
+            "expected_signal_edge_bps": max(
+                result.long_book.expectancy.expected_signal_edge_bps,
+                result.short_book.expectancy.expected_signal_edge_bps,
+            ),
+            "expected_cost_bps": max(
+                result.long_book.expectancy.expected_cost_bps,
+                result.short_book.expectancy.expected_cost_bps,
+            ),
+            "expected_net_edge_bps": max(
+                result.long_book.expectancy.expected_net_edge_bps,
+                result.short_book.expectancy.expected_net_edge_bps,
+            ),
         },
         legs=list(result.legs),
     )
@@ -246,6 +284,25 @@ def _independent_active_books_present(result: IndependentFamilyEvaluation) -> bo
     return any(
         book.current_qty > EPSILON_DECIMAL_12 or book.target_qty > EPSILON_DECIMAL_12
         for book in (result.long_book, result.short_book)
+    )
+
+
+def _independent_book_expectancy_summary(
+    result: IndependentFamilyEvaluation,
+) -> StrategyBookExpectancySummary:
+    return StrategyBookExpectancySummary(
+        source="independent_book",
+        books=[
+            StrategyBookExpectancyEntry(
+                leg=book.leg,
+                expected_gross_edge_bps=book.expectancy.expected_signal_edge_bps,
+                expected_signal_edge_bps=book.expectancy.expected_signal_edge_bps,
+                expected_slippage_bps=book.expectancy.expected_slippage_bps,
+                expected_cost_bps=book.expectancy.expected_cost_bps,
+                expected_net_edge_bps=book.expectancy.expected_net_edge_bps,
+            )
+            for book in (result.long_book, result.short_book)
+        ],
     )
 
 
@@ -298,6 +355,8 @@ def evaluate_independent_books(
     expected_net_edge_bps: float,
     execution_leg_family: StrategyFamily,
     scorer: IndependentBookScorer | None = None,
+    trade_cost_service: TradeCostService | None = None,
+    expectancy_resolver: IndependentBookExpectancyResolver | None = None,
 ) -> IndependentFamilyEvaluation:
     configured_mode = settings.strategy_hedge_overlay_mode
     if not settings.strategy_hedge_independent_enabled:
@@ -343,15 +402,39 @@ def evaluate_independent_books(
 
     directional_long_target_qty = max(to_decimal(directional_target_qty), Decimal("0"))
     directional_short_target_qty = max(-to_decimal(directional_target_qty), Decimal("0"))
+    cost_service = trade_cost_service or TradeCostService(settings=settings)
+    long_expectancy = _resolve_independent_book_expectancy(
+        settings=settings,
+        context=context,
+        baseline=baseline,
+        ai_assessment=ai_assessment,
+        leg="long",
+        trade_cost_service=cost_service,
+        fallback_signal_edge_bps=signal_edge_bps,
+        fallback_expected_cost_bps=expected_cost_bps,
+        fallback_expected_net_edge_bps=expected_net_edge_bps,
+        expectancy_resolver=expectancy_resolver,
+    )
+    short_expectancy = _resolve_independent_book_expectancy(
+        settings=settings,
+        context=context,
+        baseline=baseline,
+        ai_assessment=ai_assessment,
+        leg="short",
+        trade_cost_service=cost_service,
+        fallback_signal_edge_bps=signal_edge_bps,
+        fallback_expected_cost_bps=expected_cost_bps,
+        fallback_expected_net_edge_bps=expected_net_edge_bps,
+        expectancy_resolver=expectancy_resolver,
+    )
     long_book = _evaluate_independent_book(
         settings=settings,
         context=context,
         baseline=baseline,
         ai_assessment=ai_assessment,
         leg="long",
+        expectancy=long_expectancy,
         directional_leg_target_qty=directional_long_target_qty,
-        expected_cost_bps=expected_cost_bps,
-        expected_net_edge_bps=expected_net_edge_bps,
         scorer=scorer,
     )
     short_book = _evaluate_independent_book(
@@ -360,9 +443,8 @@ def evaluate_independent_books(
         baseline=baseline,
         ai_assessment=ai_assessment,
         leg="short",
+        expectancy=short_expectancy,
         directional_leg_target_qty=directional_short_target_qty,
-        expected_cost_bps=expected_cost_bps,
-        expected_net_edge_bps=expected_net_edge_bps,
         scorer=scorer,
     )
     long_target_qty = long_book.target_qty
@@ -615,9 +697,8 @@ def _evaluate_independent_book(
     baseline: BaselineAssessment,
     ai_assessment: AIMarketAssessment | None,
     leg: IndependentLeg,
+    expectancy: IndependentBookExpectancy,
     directional_leg_target_qty: Decimal,
-    expected_cost_bps: float,
-    expected_net_edge_bps: float,
     scorer: IndependentBookScorer | None,
 ) -> IndependentBookEvaluation:
     current_qty = (
@@ -666,8 +747,8 @@ def _evaluate_independent_book(
                 settings=settings,
                 context=context,
                 leg=leg,
-                expected_cost_bps=expected_cost_bps,
-                expected_net_edge_bps=expected_net_edge_bps,
+                expected_cost_bps=expectancy.expected_cost_bps,
+                expected_net_edge_bps=expectancy.expected_net_edge_bps,
             )
             blocked_reasons.extend(open_gate["blocked_reasons"])
             weak_edge_report_only = bool(open_gate["weak_edge_report_only"])
@@ -699,8 +780,8 @@ def _evaluate_independent_book(
                 settings=settings,
                 context=context,
                 leg=leg,
-                expected_cost_bps=expected_cost_bps,
-                expected_net_edge_bps=expected_net_edge_bps,
+                expected_cost_bps=expectancy.expected_cost_bps,
+                expected_net_edge_bps=expectancy.expected_net_edge_bps,
             )
             blocked_reasons.extend(open_gate["blocked_reasons"])
             weak_edge_report_only = bool(open_gate["weak_edge_report_only"])
@@ -754,6 +835,7 @@ def _evaluate_independent_book(
 
     return IndependentBookEvaluation(
         leg=leg,
+        expectancy=expectancy,
         score=score,
         current_qty=current_qty,
         target_qty=target_qty,
@@ -763,6 +845,117 @@ def _evaluate_independent_book(
         min_hold_remaining_seconds=min_hold_remaining_seconds,
         rebalance_cooldown_remaining_seconds=rebalance_cooldown_remaining_seconds,
         weak_edge_report_only=weak_edge_report_only,
+    )
+
+
+def _resolve_independent_book_expectancy(
+    *,
+    settings: AATSSettings,
+    context: DecisionContext,
+    baseline: BaselineAssessment,
+    ai_assessment: AIMarketAssessment | None,
+    leg: IndependentLeg,
+    trade_cost_service: TradeCostService,
+    fallback_signal_edge_bps: float,
+    fallback_expected_cost_bps: float,
+    fallback_expected_net_edge_bps: float,
+    expectancy_resolver: IndependentBookExpectancyResolver | None,
+) -> IndependentBookExpectancy:
+    if expectancy_resolver is not None:
+        return expectancy_resolver(
+            settings=settings,
+            context=context,
+            baseline=baseline,
+            ai_assessment=ai_assessment,
+            leg=leg,
+            trade_cost_service=trade_cost_service,
+        )
+    try:
+        return _compute_independent_book_expectancy(
+            settings=settings,
+            context=context,
+            baseline=baseline,
+            ai_assessment=ai_assessment,
+            leg=leg,
+            trade_cost_service=trade_cost_service,
+        )
+    except Exception:
+        return IndependentBookExpectancy(
+            leg=leg,
+            expected_signal_edge_bps=max(float(fallback_signal_edge_bps), 0.0),
+            expected_slippage_bps=_independent_expected_slippage_bps(settings=settings),
+            expected_cost_bps=max(float(fallback_expected_cost_bps), 0.0),
+            expected_net_edge_bps=float(fallback_expected_net_edge_bps),
+        )
+
+
+def _compute_independent_book_expectancy(
+    *,
+    settings: AATSSettings,
+    context: DecisionContext,
+    baseline: BaselineAssessment,
+    ai_assessment: AIMarketAssessment | None,
+    leg: IndependentLeg,
+    trade_cost_service: TradeCostService,
+) -> IndependentBookExpectancy:
+    expected_signal_edge_bps = _independent_signal_edge_bps(
+        settings=settings,
+        baseline=baseline,
+        ai_assessment=ai_assessment,
+        leg=leg,
+    )
+    expected_slippage_bps = _independent_expected_slippage_bps(settings=settings)
+    estimate = trade_cost_service.estimate_single_leg_entry(
+        model_name=f"independent_{leg}_book",
+        symbol=context.symbol,
+        product_type=context.product_type,
+        margin_mode=settings.margin_mode,
+        execution_style="taker",
+        order_type="market",
+        expected_slippage_bps=expected_slippage_bps,
+        include_spread=False,
+        include_funding=context.product_type == "derivatives",
+    )
+    expected_cost_bps = float(estimate.executable_total_drag_bps)
+    expected_net_edge_bps = (
+        expected_signal_edge_bps
+        - expected_cost_bps
+        - max(float(settings.strategy_edge_noise_buffer_bps), 0.0)
+    )
+    return IndependentBookExpectancy(
+        leg=leg,
+        expected_signal_edge_bps=expected_signal_edge_bps,
+        expected_slippage_bps=expected_slippage_bps,
+        expected_cost_bps=expected_cost_bps,
+        expected_net_edge_bps=expected_net_edge_bps,
+    )
+
+
+def _independent_signal_edge_bps(
+    *,
+    settings: AATSSettings,
+    baseline: BaselineAssessment,
+    ai_assessment: AIMarketAssessment | None,
+    leg: IndependentLeg,
+) -> float:
+    side_sign = 1.0 if leg == "long" else -1.0
+    directional_alpha = max(0.0, side_sign * float(baseline.composite_alpha_score))
+    directional_microstructure = max(0.0, side_sign * float(baseline.factor_scores.get("microstructure_alpha", 0.0)))
+    directional_momentum = max(0.0, side_sign * float(baseline.factor_scores.get("momentum_alpha", 0.0)))
+    directional_trend = max(0.0, side_sign * float(baseline.factor_scores.get("trend_alpha", 0.0)))
+    directional_ai = max(0.0, side_sign * _ai_directional_edge(ai_assessment))
+    alpha_edge = directional_alpha * max(float(settings.strategy_alpha_edge_bps_scale), 0.0)
+    microstructure_bonus = max(directional_microstructure - 0.08, 0.0) * 25.0
+    momentum_bonus = max(directional_momentum - 0.08, 0.0) * 15.0
+    trend_bonus = max(directional_trend - 0.08, 0.0) * 12.0
+    ai_bonus = max(directional_ai - 0.1, 0.0) * 20.0
+    return alpha_edge + microstructure_bonus + momentum_bonus + trend_bonus + ai_bonus
+
+
+def _independent_expected_slippage_bps(*, settings: AATSSettings) -> float:
+    return max(float(settings.max_slippage_tolerance_bps), 0.0) * max(
+        float(settings.strategy_expected_slippage_bps_fraction),
+        0.0,
     )
 
 
@@ -1002,6 +1195,13 @@ def _first_reason(reasons: list[str]) -> str:
 def _inactive_book(leg: IndependentLeg) -> IndependentBookEvaluation:
     return IndependentBookEvaluation(
         leg=leg,
+        expectancy=IndependentBookExpectancy(
+            leg=leg,
+            expected_signal_edge_bps=0.0,
+            expected_slippage_bps=0.0,
+            expected_cost_bps=0.0,
+            expected_net_edge_bps=0.0,
+        ),
         score=0.0,
         current_qty=Decimal("0"),
         target_qty=Decimal("0"),
