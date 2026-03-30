@@ -60,7 +60,7 @@ def protective_candidate_from_directional_target(
         "shadow_mode_enabled": control.shadow_mode_enabled,
         "live_execution_enabled": control.live_execution_enabled,
         "skeleton_mode": False,
-        "legacy_execution_owner": "directional",
+        "execution_owner": family,
     }
     if not settings.strategy_hedge_overlay_enabled:
         return StrategyCandidate(
@@ -165,7 +165,7 @@ def protective_candidate_from_directional_target(
         control_summary=(
             "Protective 家族已独立评估，并可直接进入 allocator / apply 主路径。"
             if control.live_execution_enabled
-            else "Protective 家族已独立评估；当前执行仍由 directional 主链承接。"
+            else "Protective 家族已独立评估；当前仅参与候选评估，不接管执行主路径。"
         ),
         execution_mode="protective_overlay",
         state_phase=overlay_decision.state,

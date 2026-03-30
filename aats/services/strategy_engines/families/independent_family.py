@@ -91,7 +91,7 @@ def independent_candidate_from_directional_target(
         "shadow_mode_enabled": control.shadow_mode_enabled,
         "live_execution_enabled": control.live_execution_enabled,
         "skeleton_mode": False,
-        "legacy_execution_owner": "directional",
+        "execution_owner": family,
         "weak_edge_execution_mode": settings.strategy_hedge_independent_weak_edge_execution_mode,
         "passive_first_enabled": settings.strategy_hedge_independent_passive_first_enabled,
         "expected_signal_edge_bps": directional_target.expected_signal_edge_bps,
@@ -200,7 +200,11 @@ def independent_candidate_from_directional_target(
         ),
         urgency=_candidate_urgency(overlay_decision=overlay_decision),
         reason_codes=reason_codes,
-        control_summary="Independent 家族已独立评估；当前执行仍由 directional 主链承接。",
+        control_summary=(
+            "Independent 家族已独立评估，并可直接进入 allocator / apply 主路径。"
+            if control.live_execution_enabled
+            else "Independent 家族已独立评估；当前仅参与候选评估，不接管执行主路径。"
+        ),
         execution_mode="independent_books",
         state_phase=overlay_decision.state,
         blocking_reasons=list(overlay_decision.blocked_reasons),

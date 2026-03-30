@@ -28,6 +28,7 @@ from aats.schemas.strategy_runtime import (
     StrategySleeveIntent,
     StrategySleeveRecord,
 )
+from aats.schemas.execution import position_intent_from_leg_intent
 from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, quantize_decimal, to_decimal
 from aats.services.runtime_scope import latest_snapshot_for_scope, runtime_state_scope
 from aats.services.strategy_engines.allocator import PortfolioAllocatorV2Phase1
@@ -402,9 +403,11 @@ class StrategyCoordinatorService:
                 source_mix = {selected.family: 1.0}
 
         target_exposure_side = self._exposure_side(target_qty)
-        position_intent = self._position_intent(
+        position_intent = self._position_intent_for_applied_target(
+            selected_family=snapshot.selected_family,
             current_position_qty=base_target.current_position_qty,
             target_position_qty=target_qty,
+            strategy_execution_legs=strategy_execution_legs,
         )
         decision_outcome = base_target.decision_outcome
         overlay_candidate = self._configured_overlay_candidate(snapshot=snapshot)
@@ -1125,6 +1128,58 @@ class StrategyCoordinatorService:
         if target_qty < -EPSILON_DECIMAL_12:
             return "open_short"
         return "hold"
+
+    def _position_intent_for_applied_target(
+        self,
+        *,
+        selected_family: StrategyFamily,
+        current_position_qty: Decimal,
+        target_position_qty: Decimal,
+        strategy_execution_legs: list[StrategyLegIntent],
+    ) -> str:
+        if selected_family != "directional":
+            leg_intent = self._position_intent_from_legs(strategy_execution_legs)
+            if leg_intent is not None:
+                return leg_intent
+        return self._position_intent(
+            current_position_qty=current_position_qty,
+            target_position_qty=target_position_qty,
+        )
+
+    @staticmethod
+    def _position_intent_from_legs(
+        strategy_execution_legs: list[StrategyLegIntent],
+    ) -> str | None:
+        actionable_legs = [
+            leg
+            for leg in strategy_execution_legs
+            if abs(to_decimal(leg.delta_position_qty or Decimal("0"))) > EPSILON_DECIMAL_12
+        ]
+        if not actionable_legs:
+            return None
+        derived: list[str] = []
+        for leg in actionable_legs:
+            side = str(getattr(leg, "side", "") or "").strip().lower()
+            pos_side = getattr(leg, "pos_side", None)
+            action = getattr(leg, "action", None)
+            position_mode = getattr(leg, "position_mode", None)
+            if side not in {"buy", "sell"} or pos_side not in {"long", "short"} or action not in {"open", "reduce", "close"}:
+                return None
+            intent = position_intent_from_leg_intent(
+                side=side,  # type: ignore[arg-type]
+                pos_side=pos_side,
+                action=action,
+                position_mode=position_mode,
+            )
+            if action == "open" and abs(to_decimal(leg.current_position_qty or Decimal("0"))) > EPSILON_DECIMAL_12:
+                intent = intent.replace("open_", "scale_in_", 1)
+            derived.append(intent)
+        unique = list(dict.fromkeys(derived))
+        if len(unique) == 1:
+            return unique[0]
+        if len(derived) == 1:
+            return derived[0]
+        return None
 
     def _is_protective_target(self, *, current_qty: Decimal, target_qty: Decimal) -> bool:
         current_side = self._exposure_side(to_decimal(current_qty))
