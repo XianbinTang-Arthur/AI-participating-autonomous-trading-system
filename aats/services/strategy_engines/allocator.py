@@ -20,7 +20,15 @@ from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, quantiz
 
 
 class PortfolioAllocatorV2Phase2:
-    _FAMILY_PRIORITY: tuple[StrategyFamily, ...] = ("smart_arbitrage", "spot_grid", "dca", "directional")
+    _FAMILY_PRIORITY: tuple[StrategyFamily, ...] = (
+        "smart_arbitrage",
+        "independent",
+        "protective",
+        "opportunistic",
+        "spot_grid",
+        "dca",
+        "directional",
+    )
     _HEDGE_PRIORITY_RANK: dict[str, int] = {
         "critical_hedge": 0,
         "hedge": 1,
@@ -53,28 +61,100 @@ class PortfolioAllocatorV2Phase2:
 
         if base_target.product_type == "derivatives":
             smart_arbitrage_intent = intents_by_family.get("smart_arbitrage")
+            independent_intent = intents_by_family.get("independent")
+            protective_intent = intents_by_family.get("protective")
+            opportunistic_intent = intents_by_family.get("opportunistic")
             directional_intent = intents_by_family.get("directional")
             smart_arbitrage_active = smart_arbitrage_intent is not None and self._intent_is_actionable(
                 smart_arbitrage_intent,
                 include_active_inventory=True,
             )
+            independent_active = independent_intent is not None and self._intent_is_actionable(
+                independent_intent,
+                include_active_inventory=True,
+            )
+            protective_active = protective_intent is not None and self._intent_is_actionable(
+                protective_intent,
+                include_active_inventory=True,
+            )
+            opportunistic_active = opportunistic_intent is not None and self._intent_is_actionable(
+                opportunistic_intent,
+                include_active_inventory=True,
+            )
             directional_active = directional_intent is not None and self._intent_has_delta(directional_intent)
+            overlay_cutover_intent = self._derivatives_overlay_cutover_intent(
+                independent_intent=independent_intent if independent_active else None,
+                protective_intent=protective_intent if protective_active else None,
+                opportunistic_intent=opportunistic_intent if opportunistic_active else None,
+            )
             if smart_arbitrage_active and smart_arbitrage_intent is not None:
                 approved.append(smart_arbitrage_intent)
+                blocked_inputs: list[StrategySleeveIntent] = []
+                blocked_reason_codes_for_conflict: list[str] = []
                 if directional_active and directional_intent is not None:
                     blocked_reason_codes.append("allocator_directional_blocked_by_active_smart_arbitrage")
+                    blocked_inputs.append(directional_intent)
+                    blocked_reason_codes_for_conflict.append("allocator_directional_blocked_by_active_smart_arbitrage")
+                if independent_active and independent_intent is not None:
+                    blocked_reason_codes.append("allocator_independent_blocked_by_active_smart_arbitrage")
+                    blocked_inputs.append(independent_intent)
+                    blocked_reason_codes_for_conflict.append("allocator_independent_blocked_by_active_smart_arbitrage")
+                if protective_active and protective_intent is not None:
+                    blocked_reason_codes.append("allocator_protective_blocked_by_active_smart_arbitrage")
+                    blocked_inputs.append(protective_intent)
+                    blocked_reason_codes_for_conflict.append("allocator_protective_blocked_by_active_smart_arbitrage")
+                if opportunistic_active and opportunistic_intent is not None:
+                    blocked_reason_codes.append("allocator_opportunistic_blocked_by_active_smart_arbitrage")
+                    blocked_inputs.append(opportunistic_intent)
+                    blocked_reason_codes_for_conflict.append("allocator_opportunistic_blocked_by_active_smart_arbitrage")
+                if blocked_inputs:
                     conflict_resolutions.append(
                         self._conflict_resolution(
                             allocation_id=allocation_id,
                             base_target=base_target,
                             conflict_type="hedge_priority",
-                            resolution_action="directional_reduced_to_protect_hedge",
-                            input_intents=[smart_arbitrage_intent, directional_intent],
+                            resolution_action="non_hedge_families_reduced_to_protect_smart_arbitrage",
+                            input_intents=[smart_arbitrage_intent, *blocked_inputs],
                             approved_intents=[smart_arbitrage_intent],
                             protected_notional=self._requested_notional(
                                 intent=smart_arbitrage_intent,
                                 base_target=base_target,
                                 assignment=assignments_by_sleeve.get(smart_arbitrage_intent.strategy_sleeve_id),
+                            ),
+                            reduced_notional=sum(
+                                (
+                                    self._requested_notional(
+                                        intent=item,
+                                        base_target=base_target,
+                                        assignment=assignments_by_sleeve.get(item.strategy_sleeve_id),
+                                    )
+                                    for item in blocked_inputs
+                                ),
+                                start=Decimal("0"),
+                            ),
+                            reason_codes=[
+                                "allocator_v2_hedge_priority",
+                                *blocked_reason_codes_for_conflict,
+                            ],
+                        )
+                    )
+            elif overlay_cutover_intent is not None:
+                approved.append(overlay_cutover_intent)
+                if directional_active and directional_intent is not None:
+                    shadow_reason = f"allocator_directional_shadowed_by_{overlay_cutover_intent.family}_family_cutover"
+                    blocked_reason_codes.append(shadow_reason)
+                    conflict_resolutions.append(
+                        self._conflict_resolution(
+                            allocation_id=allocation_id,
+                            base_target=base_target,
+                            conflict_type="family_cutover",
+                            resolution_action=f"directional_shadowed_by_{overlay_cutover_intent.family}_family",
+                            input_intents=[overlay_cutover_intent, directional_intent],
+                            approved_intents=[overlay_cutover_intent],
+                            protected_notional=self._requested_notional(
+                                intent=overlay_cutover_intent,
+                                base_target=base_target,
+                                assignment=assignments_by_sleeve.get(overlay_cutover_intent.strategy_sleeve_id),
                             ),
                             reduced_notional=self._requested_notional(
                                 intent=directional_intent,
@@ -82,8 +162,8 @@ class PortfolioAllocatorV2Phase2:
                                 assignment=assignments_by_sleeve.get(directional_intent.strategy_sleeve_id),
                             ),
                             reason_codes=[
-                                "allocator_v2_hedge_priority",
-                                "allocator_directional_blocked_by_active_smart_arbitrage",
+                                f"allocator_{overlay_cutover_intent.family}_family_cutover",
+                                shadow_reason,
                             ],
                         )
                     )
@@ -453,6 +533,27 @@ class PortfolioAllocatorV2Phase2:
             }
         )
 
+    def _derivatives_overlay_cutover_intent(
+        self,
+        *,
+        independent_intent: StrategySleeveIntent | None,
+        protective_intent: StrategySleeveIntent | None,
+        opportunistic_intent: StrategySleeveIntent | None,
+    ) -> StrategySleeveIntent | None:
+        configured_mode = str(getattr(self.settings, "strategy_hedge_overlay_mode", "") or "").strip().lower()
+        by_family = {
+            "independent": independent_intent,
+            "protective": protective_intent,
+            "opportunistic": opportunistic_intent,
+        }
+        preferred = by_family.get(configured_mode)
+        if preferred is not None:
+            return preferred
+        for family in ("independent", "protective", "opportunistic"):
+            if by_family[family] is not None:
+                return by_family[family]
+        return None
+
     def _primary_intent(
         self,
         *,
@@ -499,7 +600,11 @@ class PortfolioAllocatorV2Phase2:
     ) -> bool:
         if not intent.execution_compatible:
             return False
+        if intent.route_action == "advisory_only":
+            return False
         if intent.route_action == "override_target" and intent.selectable:
+            return True
+        if self._intent_has_explicit_leg_inventory(intent, include_active_inventory=include_active_inventory):
             return True
         if intent.family == "smart_arbitrage":
             if any(abs(to_decimal(leg.target_position_qty or Decimal("0"))) > EPSILON_DECIMAL_12 for leg in intent.legs):
@@ -509,6 +614,31 @@ class PortfolioAllocatorV2Phase2:
         if include_active_inventory and abs(to_decimal(intent.current_position_qty)) > EPSILON_DECIMAL_12:
             return True
         return intent.route_action == "hold_current" and abs(to_decimal(intent.target_position_qty)) > EPSILON_DECIMAL_12
+
+    @staticmethod
+    def _intent_has_explicit_leg_inventory(
+        intent: StrategySleeveIntent,
+        *,
+        include_active_inventory: bool,
+    ) -> bool:
+        explicit_legs = [
+            leg
+            for leg in intent.legs
+            if str(getattr(leg, "pos_side", "") or "").lower() in {"long", "short"}
+            and str(getattr(leg, "action", "") or "").lower() in {"open", "reduce", "close"}
+        ]
+        if not explicit_legs:
+            return False
+        if any(abs(to_decimal(leg.delta_position_qty or Decimal("0"))) > EPSILON_DECIMAL_12 for leg in explicit_legs):
+            return True
+        if any(abs(to_decimal(leg.target_position_qty or Decimal("0"))) > EPSILON_DECIMAL_12 for leg in explicit_legs):
+            return True
+        if include_active_inventory and any(
+            abs(to_decimal(leg.current_position_qty or Decimal("0"))) > EPSILON_DECIMAL_12
+            for leg in explicit_legs
+        ):
+            return True
+        return False
 
     def _execution_legs(
         self,

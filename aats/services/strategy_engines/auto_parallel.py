@@ -56,6 +56,8 @@ class StrategySleeveAutoController:
             controlled_candidates[intent.family] = controlled_candidate
             controlled_intents.append(controlled_intent)
             decisions.append(decision)
+        for family, candidate in candidates_by_family.items():
+            controlled_candidates.setdefault(family, candidate)
         return controlled_candidates, controlled_intents, decisions
 
     def _build_decision(
@@ -270,7 +272,9 @@ class StrategySleeveAutoController:
             decision.runtime_supported and (decision.automatic_enabled or protective_intent or active_inventory)
         )
         if not decision.runtime_supported or not decision.automatic_enabled:
-            if route_action == "advisory_only":
+            if candidate.state in {"disabled", "incompatible"}:
+                candidate_state = candidate.state
+            elif route_action == "advisory_only":
                 candidate_state = "advisory_only"
             elif route_action == "hold_current":
                 candidate_state = "inactive"

@@ -6,7 +6,13 @@ import hashlib
 from aats.bootstrap.settings import AATSSettings
 from aats.events import topics
 from aats.schemas.common import new_id
-from aats.schemas.decision import BaselineAssessment, DecisionContext, PositionTarget
+from aats.schemas.decision import (
+    AIMarketAssessment,
+    BaselineAssessment,
+    DecisionContext,
+    HedgeOverlayDecision,
+    PositionTarget,
+)
 from aats.schemas.exchange import ExchangeAccountSnapshot
 from aats.schemas.market import MarketSnapshot
 from aats.schemas.strategy_runtime import (
@@ -16,6 +22,7 @@ from aats.schemas.strategy_runtime import (
     StrategyCandidate,
     StrategyCoordinatorSnapshot,
     StrategyFamily,
+    StrategyFamilyAction,
     StrategyLegIntent,
     StrategyRouteAction,
     StrategySleeveIntent,
@@ -25,8 +32,21 @@ from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, quantiz
 from aats.services.runtime_scope import latest_snapshot_for_scope, runtime_state_scope
 from aats.services.strategy_engines.allocator import PortfolioAllocatorV2Phase1
 from aats.services.strategy_engines.auto_parallel import StrategySleeveAutoController
-from aats.services.strategy_engines.base import StrategyEngineInput, StrategyTargetHistory
+from aats.services.strategy_engines.base import (
+    StrategyEngineInput,
+    StrategyEvaluationContext,
+    StrategyFamilyRuntimeControl,
+    StrategyTargetHistory,
+)
 from aats.services.strategy_engines.dca import DcaStrategyEngine
+from aats.services.strategy_engines.families import (
+    DirectionalFamilyAdapter,
+    ExistingCandidateFamilyAdapter,
+    IndependentFamilyEngine,
+    OpportunisticFamilyEngine,
+    ProtectiveFamilyEngine,
+    StrategyFamilyRegistry,
+)
 from aats.services.strategy_engines.smart_arbitrage import (
     SmartArbitrageStrategyEngine,
     _derived_derivatives_symbol,
@@ -45,6 +65,24 @@ from aats.services.strategy_engines.sleeve_inventory import StrategySleeveInvent
 
 class StrategyCoordinatorService:
     _RECENT_TARGET_LOOKBACK = 200
+    _ALLOCATABLE_FAMILIES: tuple[StrategyFamily, ...] = (
+        "directional",
+        "smart_arbitrage",
+        "spot_grid",
+        "dca",
+        "protective",
+        "opportunistic",
+        "independent",
+    )
+    _SELECTION_PRIORITY_ORDER: tuple[StrategyFamily, ...] = (
+        "smart_arbitrage",
+        "spot_grid",
+        "dca",
+        "directional",
+        "protective",
+        "opportunistic",
+        "independent",
+    )
 
     def __init__(
         self,
@@ -100,6 +138,73 @@ class StrategyCoordinatorService:
             reconciliation_repo=reconciliation_repo,
             sleeve_pnl_repo=sleeve_pnl_repo,
         )
+        self.family_registry = StrategyFamilyRegistry()
+        self._register_family_engines()
+
+    def _register_family_engines(self) -> None:
+        self.family_registry.register(
+            DirectionalFamilyAdapter(candidate_loader=self._directional_candidate)
+        )
+        self.family_registry.register(
+            ExistingCandidateFamilyAdapter(
+                family_name="smart_arbitrage",
+                evaluator=self.smart_arbitrage_engine.evaluate,
+            )
+        )
+        self.family_registry.register(
+            ExistingCandidateFamilyAdapter(
+                family_name="spot_grid",
+                evaluator=self.spot_grid_engine.evaluate,
+            )
+        )
+        self.family_registry.register(
+            ExistingCandidateFamilyAdapter(
+                family_name="dca",
+                evaluator=self.dca_engine.evaluate,
+            )
+        )
+        self.family_registry.register(ProtectiveFamilyEngine(settings=self.settings))
+        self.family_registry.register(OpportunisticFamilyEngine(settings=self.settings))
+        self.family_registry.register(IndependentFamilyEngine(settings=self.settings))
+
+    def _family_runtime_controls(self) -> dict[StrategyFamily, StrategyFamilyRuntimeControl]:
+        return {
+            "directional": StrategyFamilyRuntimeControl(
+                enabled=True,
+                shadow_mode_enabled=False,
+                live_execution_enabled=True,
+            ),
+            "smart_arbitrage": StrategyFamilyRuntimeControl(
+                enabled=bool(self.settings.smart_arbitrage_enabled),
+                shadow_mode_enabled=False,
+                live_execution_enabled=True,
+            ),
+            "spot_grid": StrategyFamilyRuntimeControl(
+                enabled=bool(self.settings.spot_grid_enabled),
+                shadow_mode_enabled=False,
+                live_execution_enabled=True,
+            ),
+            "dca": StrategyFamilyRuntimeControl(
+                enabled=bool(self.settings.dca_enabled),
+                shadow_mode_enabled=False,
+                live_execution_enabled=True,
+            ),
+            "protective": StrategyFamilyRuntimeControl(
+                enabled=bool(self.settings.strategy_family_protective_enabled),
+                shadow_mode_enabled=bool(self.settings.strategy_family_protective_shadow_mode_enabled),
+                live_execution_enabled=bool(self.settings.strategy_family_protective_live_execution_enabled),
+            ),
+            "opportunistic": StrategyFamilyRuntimeControl(
+                enabled=bool(self.settings.strategy_family_opportunistic_enabled),
+                shadow_mode_enabled=bool(self.settings.strategy_family_opportunistic_shadow_mode_enabled),
+                live_execution_enabled=bool(self.settings.strategy_family_opportunistic_live_execution_enabled),
+            ),
+            "independent": StrategyFamilyRuntimeControl(
+                enabled=bool(self.settings.strategy_family_independent_enabled),
+                shadow_mode_enabled=bool(self.settings.strategy_family_independent_shadow_mode_enabled),
+                live_execution_enabled=bool(self.settings.strategy_family_independent_live_execution_enabled),
+            ),
+        }
 
     def evaluate(
         self,
@@ -107,6 +212,7 @@ class StrategyCoordinatorService:
         context: DecisionContext,
         baseline: BaselineAssessment,
         directional_target: PositionTarget,
+        ai_assessment: AIMarketAssessment | None = None,
     ) -> StrategyCoordinatorSnapshot:
         self.sleeve_inventory_service.reset()
         engine_input = StrategyEngineInput(
@@ -120,13 +226,14 @@ class StrategyCoordinatorService:
                 symbols=self._recent_market_symbols(context.symbol),
             ),
             recent_targets_by_family=self._recent_targets_by_family(symbol=context.symbol),
+            ai_assessment=ai_assessment,
         )
-        candidates_by_family: dict[StrategyFamily, StrategyCandidate] = {
-            "directional": self._directional_candidate(directional_target),
-            "smart_arbitrage": self.smart_arbitrage_engine.evaluate(engine_input),
-            "spot_grid": self.spot_grid_engine.evaluate(engine_input),
-            "dca": self.dca_engine.evaluate(engine_input),
-        }
+        evaluation_context = StrategyEvaluationContext.from_engine_input(
+            engine_input,
+            family_runtime_controls=self._family_runtime_controls(),
+        )
+        candidate_lists_by_family = self.family_registry.evaluate_all(evaluation_context)
+        candidates_by_family = StrategyFamilyRegistry.primary_candidate_map(candidate_lists_by_family)
         sleeve_intents = self._build_sleeve_intents(
             base_target=directional_target,
             candidates_by_family=candidates_by_family,
@@ -162,6 +269,15 @@ class StrategyCoordinatorService:
             self.strategy_runtime_repo.save_allocation_decision(allocation_decision)
         primary_family = allocation_decision.primary_family
         selected_candidate = controlled_candidates.get(primary_family, selected_candidate)
+        selected_intent = next(
+            (intent for intent in controlled_intents if intent.family == primary_family),
+            None,
+        )
+        selected_family_action = (
+            selected_candidate.family_action
+            if selected_intent is None
+            else selected_intent.family_action
+        )
         for intent in controlled_intents:
             self._register_sleeve(
                 build_strategy_sleeve_record(
@@ -176,8 +292,8 @@ class StrategyCoordinatorService:
 
         candidate_order = [primary_family] + [
             family
-            for family in ("smart_arbitrage", "spot_grid", "dca", "directional")
-            if family != primary_family
+            for family in self.family_registry.families()
+            if family != primary_family and family in controlled_candidates
         ]
         return StrategyCoordinatorSnapshot(
             decision_id=context.decision_id,
@@ -190,6 +306,7 @@ class StrategyCoordinatorService:
             selected_family=primary_family,
             selected_state=selected_candidate.state,
             selected_route_action=allocation_decision.route_action,
+            selected_family_action=selected_family_action,
             selected_headline=allocation_decision.operator_summary or selected_candidate.headline,
             selection_reason_codes=allocation_decision.reason_codes,
             active_families=allocation_decision.active_families,
@@ -211,12 +328,21 @@ class StrategyCoordinatorService:
             (candidate for candidate in snapshot.candidates if candidate.family == snapshot.selected_family),
             self._directional_candidate(base_target),
         )
+        selected_intent = next(
+            (intent for intent in snapshot.sleeve_intents if intent.family == snapshot.selected_family),
+            None,
+        )
         allocation = snapshot.allocation_decision
         applied_route_action: StrategyRouteAction = snapshot.selected_route_action
         reason_codes = list(dict.fromkeys(snapshot.selection_reason_codes + list(selected.reason_codes)))
         target_qty = to_decimal(base_target.target_position_qty)
         urgency = base_target.urgency
         source_mix = dict(base_target.source_mix)
+        selected_family_action = (
+            selected.family_action
+            if selected_intent is None
+            else selected_intent.family_action
+        )
         strategy_sleeve_id = None if allocation is None else allocation.primary_strategy_sleeve_id
         if strategy_sleeve_id is None:
             symbol_scope = self._symbol_scope(base_target=base_target, selected=selected)
@@ -281,15 +407,42 @@ class StrategyCoordinatorService:
             target_position_qty=target_qty,
         )
         decision_outcome = base_target.decision_outcome
+        overlay_candidate = self._configured_overlay_candidate(snapshot=snapshot)
+        hedge_overlay_decision = self._selected_overlay_decision(
+            base_target=base_target,
+            selected=selected,
+            selected_family=snapshot.selected_family,
+            applied_route_action=applied_route_action,
+            strategy_execution_legs=strategy_execution_legs,
+            overlay_candidate=overlay_candidate,
+        )
         if decision_outcome is not None:
+            final_action = decision_outcome.final_action
+            final_direction = decision_outcome.final_direction
+            if snapshot.selected_family != "directional":
+                final_action = self._final_action_for_selected_family(
+                    family_action=selected_family_action,
+                    route_action=applied_route_action,
+                    strategy_execution_legs=strategy_execution_legs,
+                )
+                final_direction = self._final_direction_for_selected_family(
+                    selected=selected,
+                    strategy_execution_legs=strategy_execution_legs,
+                    target_exposure_side=target_exposure_side,
+                    fallback_direction=decision_outcome.final_direction,
+                )
             decision_outcome = decision_outcome.model_copy(
                 update={
                     "selected_strategy_family": snapshot.selected_family,
                     "selected_strategy_sleeve_id": strategy_sleeve_id,
                     "selected_strategy_route_action": applied_route_action,
+                    "selected_strategy_family_action": selected_family_action,
                     "allocation_id": allocation_id,
                     "strategy_selection_reason_codes": list(dict.fromkeys(reason_codes)),
                     "strategy_selection_headline": snapshot.selected_headline,
+                    "final_action": final_action,
+                    "final_direction": final_direction,
+                    "final_target_qty": target_qty,
                 }
             )
         rebalance_reason = base_target.rebalance_reason
@@ -320,6 +473,7 @@ class StrategyCoordinatorService:
             "rebalance_reason": rebalance_reason,
             "source_mix": source_mix,
             "strategy_family": snapshot.selected_family,
+            "strategy_family_action": selected_family_action,
             "strategy_sleeve_id": strategy_sleeve_id,
             "strategy_route_action": applied_route_action,
             "strategy_pair_id": selected.pair_id,
@@ -332,6 +486,7 @@ class StrategyCoordinatorService:
             "allocation_id": allocation_id,
             "strategy_bundle_id": strategy_bundle_id,
             "strategy_execution_legs": strategy_execution_legs,
+            "hedge_overlay_decision": hedge_overlay_decision,
             "decision_outcome": decision_outcome,
         }
         if snapshot_ref is not None:
@@ -347,7 +502,9 @@ class StrategyCoordinatorService:
         candidates_by_family: dict[StrategyFamily, StrategyCandidate],
     ) -> list[StrategySleeveIntent]:
         intents: list[StrategySleeveIntent] = []
-        for family in ("directional", "smart_arbitrage", "spot_grid", "dca"):
+        overlay_cutover_candidate = self._overlay_cutover_candidate(candidates_by_family)
+        overlay_cutover_family = None if overlay_cutover_candidate is None else overlay_cutover_candidate.family
+        for family in self._ALLOCATABLE_FAMILIES:
             candidate = candidates_by_family[family]
             symbol_scope = self._symbol_scope(base_target=base_target, selected=candidate)
             strategy_sleeve_id = build_strategy_sleeve_id(
@@ -358,6 +515,47 @@ class StrategyCoordinatorService:
                 symbol_scope=symbol_scope,
             )
             if family == "directional":
+                directional_route_action = (
+                    "hold_current"
+                    if abs(to_decimal(base_target.delta_position_qty)) <= EPSILON_DECIMAL_12
+                    else candidate.route_action
+                )
+                directional_target_qty = to_decimal(base_target.target_position_qty)
+                directional_delta_qty = to_decimal(base_target.delta_position_qty)
+                directional_target_notional = to_decimal(base_target.target_notional)
+                directional_legs = [
+                    leg.model_copy(
+                        deep=True,
+                        update={
+                            "family": family,
+                            "strategy_sleeve_id": leg.strategy_sleeve_id or strategy_sleeve_id,
+                        },
+                    )
+                    for leg in (base_target.strategy_execution_legs or [])
+                ]
+                directional_reason_codes = list(candidate.reason_codes)
+                directional_execution_compatible = candidate.execution_compatible
+                directional_selectable = candidate.selectable
+                if overlay_cutover_family is not None:
+                    directional_route_action = "hold_current"
+                    directional_target_qty = to_decimal(base_target.current_position_qty)
+                    directional_delta_qty = Decimal("0")
+                    directional_target_notional = self._target_notional(
+                        base_target=base_target,
+                        target_qty=directional_target_qty,
+                        selected=candidate,
+                    )
+                    directional_legs = []
+                    directional_execution_compatible = False
+                    directional_selectable = False
+                    directional_reason_codes = list(
+                        dict.fromkeys(
+                            [
+                                *directional_reason_codes,
+                                f"directional_shadowed_by_{overlay_cutover_family}_family_cutover",
+                            ]
+                        )
+                    )
                 intent = StrategySleeveIntent(
                     decision_id=base_target.decision_id,
                     family=family,
@@ -367,36 +565,26 @@ class StrategyCoordinatorService:
                     product_type=base_target.product_type,
                     margin_mode=base_target.margin_mode,
                     inventory_policy="account_net_inventory",
-                    route_action="hold_current"
-                    if abs(to_decimal(base_target.delta_position_qty)) <= EPSILON_DECIMAL_12
-                    else candidate.route_action,
+                    route_action=directional_route_action,
+                    family_action="hold_family",
                     headline=candidate.headline,
-                    selectable=candidate.selectable,
-                    execution_compatible=candidate.execution_compatible,
+                    selectable=directional_selectable,
+                    execution_compatible=directional_execution_compatible,
                     current_position_qty=to_decimal(base_target.current_position_qty),
-                    target_position_qty=to_decimal(base_target.target_position_qty),
-                    delta_position_qty=to_decimal(base_target.delta_position_qty),
+                    target_position_qty=directional_target_qty,
+                    delta_position_qty=directional_delta_qty,
                     account_current_position_qty=to_decimal(base_target.current_position_qty),
-                    account_target_position_qty=to_decimal(base_target.target_position_qty),
-                    target_notional=to_decimal(base_target.target_notional),
+                    account_target_position_qty=directional_target_qty,
+                    target_notional=directional_target_notional,
                     priority_score=candidate.score,
-                    reason_codes=list(candidate.reason_codes),
+                    reason_codes=directional_reason_codes,
                     pair_id=candidate.pair_id,
                     opportunity_kind=candidate.opportunity_kind,
                     execution_mode=candidate.execution_mode,
                     state_phase=candidate.state_phase,
                     blocking_reasons=list(candidate.blocking_reasons),
                     metrics=dict(candidate.metrics or {}),
-                    legs=[
-                        leg.model_copy(
-                            deep=True,
-                            update={
-                                "family": family,
-                                "strategy_sleeve_id": leg.strategy_sleeve_id or strategy_sleeve_id,
-                            },
-                        )
-                        for leg in (base_target.strategy_execution_legs or [])
-                    ],
+                    legs=directional_legs,
                 )
             else:
                 metrics = dict(candidate.metrics or {})
@@ -413,6 +601,18 @@ class StrategyCoordinatorService:
                 account_target_qty = self._metric_decimal(metrics, "target_account_position_qty")
                 if account_target_qty is None and family == "smart_arbitrage":
                     account_target_qty = self._metric_decimal(metrics, "target_account_derivatives_qty")
+                if family in {"protective", "opportunistic", "independent"}:
+                    candidate_target_qty = to_decimal(candidate.target_position_qty or Decimal("0"))
+                    candidate_delta_qty = to_decimal(candidate.delta_position_qty or Decimal("0"))
+                    candidate_current_qty = candidate_target_qty - candidate_delta_qty
+                    if current_sleeve_qty is None:
+                        current_sleeve_qty = candidate_current_qty
+                    if target_sleeve_qty is None:
+                        target_sleeve_qty = candidate_target_qty
+                    if account_current_qty is None:
+                        account_current_qty = candidate_current_qty
+                    if account_target_qty is None:
+                        account_target_qty = candidate_target_qty
                 leg_current_qty = Decimal("0")
                 leg_target_qty = Decimal("0")
                 leg_delta_qty = Decimal("0")
@@ -437,6 +637,7 @@ class StrategyCoordinatorService:
                     margin_mode=base_target.margin_mode,
                     inventory_policy=inventory_policy_for_family(family),
                     route_action=candidate.route_action,
+                    family_action=candidate.family_action,
                     headline=candidate.headline,
                     selectable=candidate.selectable,
                     execution_compatible=candidate.execution_compatible,
@@ -572,6 +773,9 @@ class StrategyCoordinatorService:
             "smart_arbitrage": [],
             "spot_grid": [],
             "dca": [],
+            "protective": [],
+            "opportunistic": [],
+            "independent": [],
         }
         for event in reversed(
             self.event_store.recent_by_topic(
@@ -603,7 +807,18 @@ class StrategyCoordinatorService:
     ) -> tuple[StrategyFamily, StrategyCandidate, list[str]]:
         configured_family = self.settings.strategy_family_active
         directional = candidates_by_family["directional"]
+        overlay_cutover_candidate = self._overlay_cutover_candidate(candidates_by_family)
         if not self.settings.strategy_family_auto_selection_enabled:
+            if configured_family == "directional" and overlay_cutover_candidate is not None:
+                return (
+                    overlay_cutover_candidate.family,
+                    overlay_cutover_candidate,
+                    [
+                        f"strategy_family_{overlay_cutover_candidate.family}_live_cutover",
+                        f"legacy_configured_strategy_directional_shadowed_by_{overlay_cutover_candidate.family}_family",
+                        *overlay_cutover_candidate.reason_codes,
+                    ],
+                )
             selected_family = (
                 configured_family
                 if configured_family in candidates_by_family
@@ -630,8 +845,12 @@ class StrategyCoordinatorService:
                 ),
             )
 
-        priority_order: tuple[StrategyFamily, ...] = ("smart_arbitrage", "spot_grid", "dca", "directional")
-        for family in priority_order:
+        selection_priority_order = list(self._SELECTION_PRIORITY_ORDER)
+        if overlay_cutover_candidate is not None and overlay_cutover_candidate.family in selection_priority_order:
+            selection_priority_order.remove(overlay_cutover_candidate.family)
+            directional_index = selection_priority_order.index("directional")
+            selection_priority_order.insert(directional_index, overlay_cutover_candidate.family)
+        for family in selection_priority_order:
             candidate = candidates_by_family.get(family)
             if candidate is None:
                 continue
@@ -643,7 +862,7 @@ class StrategyCoordinatorService:
                     candidate,
                     [f"automatic_strategy_family_{family}", "automatic_strategy_override_target_ready"],
                 )
-        for family in priority_order:
+        for family in selection_priority_order:
             candidate = candidates_by_family.get(family)
             if candidate is None:
                 continue
@@ -661,6 +880,218 @@ class StrategyCoordinatorService:
             directional,
             ["automatic_strategy_family_directional", "automatic_strategy_directional_fallback"],
         )
+
+    def _overlay_cutover_candidate(
+        self,
+        candidates_by_family: dict[StrategyFamily, StrategyCandidate],
+    ) -> StrategyCandidate | None:
+        overlay_mode = str(self.settings.strategy_hedge_overlay_mode or "").strip()
+        if overlay_mode not in {"protective", "opportunistic", "independent"}:
+            return None
+        candidate = candidates_by_family.get(overlay_mode)
+        if candidate is None:
+            return None
+        if not candidate.enabled or not candidate.selectable or not candidate.execution_compatible:
+            return None
+        if candidate.route_action not in {"override_target", "hold_current"}:
+            return None
+        return candidate
+
+    def _selected_overlay_decision(
+        self,
+        *,
+        base_target: PositionTarget,
+        selected: StrategyCandidate,
+        selected_family: StrategyFamily,
+        applied_route_action: StrategyRouteAction,
+        strategy_execution_legs: list[StrategyLegIntent],
+        overlay_candidate: StrategyCandidate | None,
+    ) -> HedgeOverlayDecision | None:
+        if overlay_candidate is None:
+            return base_target.hedge_overlay_decision
+        if base_target.hedge_overlay_decision is not None:
+            return base_target.hedge_overlay_decision
+        metrics = dict(overlay_candidate.metrics or {})
+        effective_mode = str(overlay_candidate.family)
+        overlay_legs = (
+            strategy_execution_legs
+            if selected_family == overlay_candidate.family
+            else [
+                leg.model_copy(deep=True)
+                for leg in overlay_candidate.legs
+            ]
+        )
+        overlay_source = {
+            "protective": "protective",
+            "opportunistic": "opportunistic",
+            "independent": "independent_books",
+        }[effective_mode]
+        active = applied_route_action in {"override_target", "hold_current"} and (
+            bool(overlay_legs) or self._overlay_candidate_has_inventory_or_target(overlay_candidate)
+        )
+        return HedgeOverlayDecision(
+            enabled=True,
+            runtime_supported=True,
+            configured_mode=effective_mode,
+            effective_mode=effective_mode,
+            overlay_source=overlay_source,
+            active=active if selected_family == overlay_candidate.family else self._overlay_candidate_has_inventory_or_target(overlay_candidate),
+            state=self._overlay_state_from_selected_candidate(selected=overlay_candidate, active=active),
+            main_leg_signal=self._overlay_leg_signal(metrics.get("main_leg_signal")),
+            hedge_leg_signal=self._overlay_leg_signal(
+                metrics.get("hedge_leg_signal"),
+                strategy_execution_legs=overlay_legs,
+            ),
+            main_leg_current_qty=to_decimal(metrics.get("main_leg_current_qty") or Decimal("0")),
+            hedge_leg_current_qty=to_decimal(metrics.get("hedge_leg_current_qty") or Decimal("0")),
+            main_leg_target_qty=to_decimal(metrics.get("main_leg_target_qty") or Decimal("0")),
+            hedge_leg_target_qty=to_decimal(metrics.get("hedge_leg_target_qty") or Decimal("0")),
+            hedge_ratio=to_decimal(metrics.get("hedge_ratio") or Decimal("0")),
+            max_ratio=to_decimal(metrics.get("max_ratio") or Decimal("0")),
+            pressure_score=float(metrics.get("pressure_score") or overlay_candidate.score or 0.0),
+            open_threshold=float(metrics.get("open_threshold") or 0.0),
+            close_threshold=float(metrics.get("close_threshold") or 0.0),
+            open_condition=self._optional_text(metrics.get("open_condition")),
+            close_condition=self._optional_text(metrics.get("close_condition")),
+            fee_drag_ratio=float(metrics.get("fee_drag_ratio") or 0.0),
+            churn_ratio=float(metrics.get("churn_ratio") or 0.0),
+            long_leg_score=float(metrics.get("long_leg_score") or 0.0),
+            short_leg_score=float(metrics.get("short_leg_score") or 0.0),
+            long_leg_reason_codes=list(metrics.get("long_leg_reason_codes") or []),
+            short_leg_reason_codes=list(metrics.get("short_leg_reason_codes") or []),
+            long_leg_blocked_reasons=list(metrics.get("long_leg_blocked_reasons") or []),
+            short_leg_blocked_reasons=list(metrics.get("short_leg_blocked_reasons") or []),
+            reason_codes=list(overlay_candidate.reason_codes or []),
+            blocked_reasons=list(overlay_candidate.blocking_reasons or []),
+            min_hold_remaining_seconds=float(metrics.get("min_hold_remaining_seconds") or 0.0),
+            rebalance_cooldown_remaining_seconds=float(metrics.get("rebalance_cooldown_remaining_seconds") or 0.0),
+            rollout_stage=metrics.get("rollout_stage"),
+            runtime_rollout_stage=metrics.get("runtime_rollout_stage"),
+        )
+
+    def _configured_overlay_candidate(self, *, snapshot: StrategyCoordinatorSnapshot) -> StrategyCandidate | None:
+        overlay_mode = str(self.settings.strategy_hedge_overlay_mode or "").strip()
+        if overlay_mode not in {"protective", "opportunistic", "independent"}:
+            return None
+        return next((candidate for candidate in snapshot.candidates if candidate.family == overlay_mode), None)
+
+    @staticmethod
+    def _overlay_candidate_has_inventory_or_target(selected: StrategyCandidate) -> bool:
+        metrics = dict(selected.metrics or {})
+        return any(
+            abs(to_decimal(value or Decimal("0"))) > EPSILON_DECIMAL_12
+            for value in (
+                metrics.get("main_leg_current_qty"),
+                metrics.get("hedge_leg_current_qty"),
+                metrics.get("main_leg_target_qty"),
+                metrics.get("hedge_leg_target_qty"),
+                selected.target_position_qty,
+                selected.delta_position_qty,
+            )
+        )
+
+    @staticmethod
+    def _overlay_state_from_selected_candidate(*, selected: StrategyCandidate, active: bool) -> str:
+        candidate_state = str(selected.state_phase or selected.state or "").strip().lower()
+        if candidate_state in {"disabled", "inactive", "opening", "holding", "closing", "blocked"}:
+            return candidate_state
+        if list(selected.blocking_reasons or []):
+            return "blocked"
+        if active:
+            return "holding" if not selected.legs else "opening"
+        return "inactive"
+
+    @staticmethod
+    def _overlay_leg_signal(
+        value: object | None,
+        *,
+        strategy_execution_legs: list[StrategyLegIntent] | None = None,
+    ) -> str:
+        normalized = str(value or "").strip().lower()
+        if normalized in {"long", "short", "flat"}:
+            return normalized
+        for leg in strategy_execution_legs or []:
+            pos_side = str(getattr(leg, "pos_side", "") or "").strip().lower()
+            if pos_side in {"long", "short"}:
+                return pos_side
+        return "flat"
+
+    @staticmethod
+    def _optional_text(value: object | None) -> str | None:
+        text = str(value or "").strip()
+        return text or None
+
+    @staticmethod
+    def _final_action_for_selected_family(
+        *,
+        family_action: StrategyFamilyAction,
+        route_action: StrategyRouteAction,
+        strategy_execution_legs: list[StrategyLegIntent],
+    ) -> str:
+        if route_action == "advisory_only":
+            return "hold"
+        leg_action = StrategyCoordinatorService._final_action_from_legs(strategy_execution_legs)
+        if leg_action is not None:
+            return leg_action
+        action_map = {
+            "hold_family": "hold",
+            "blocked": "hold",
+            "protect": "enter",
+            "rebalance_protection": "scale_in",
+            "open_opportunity_leg": "enter",
+            "close_opportunity_leg": "exit",
+            "open_independent_book": "enter",
+            "scale_independent_book": "scale_in",
+            "close_independent_book": "exit",
+        }
+        return action_map.get(family_action, "hold")
+
+    @staticmethod
+    def _final_action_from_legs(strategy_execution_legs: list[StrategyLegIntent]) -> str | None:
+        actionable_legs = [
+            leg
+            for leg in strategy_execution_legs
+            if abs(to_decimal(leg.delta_position_qty or Decimal("0"))) > EPSILON_DECIMAL_12
+        ]
+        if not actionable_legs:
+            return None
+        opening_legs = [leg for leg in actionable_legs if str(leg.action or "").lower() == "open"]
+        if opening_legs:
+            if any(abs(to_decimal(leg.current_position_qty or Decimal("0"))) > EPSILON_DECIMAL_12 for leg in opening_legs):
+                return "scale_in"
+            return "enter"
+        if any(str(leg.action or "").lower() == "reduce" for leg in actionable_legs):
+            return "reduce"
+        if any(str(leg.action or "").lower() == "close" for leg in actionable_legs):
+            return "exit"
+        return None
+
+    @staticmethod
+    def _final_direction_for_selected_family(
+        *,
+        selected: StrategyCandidate,
+        strategy_execution_legs: list[StrategyLegIntent],
+        target_exposure_side: str,
+        fallback_direction: str | None,
+    ) -> str | None:
+        executing_pos_sides = {
+            str(getattr(leg, "pos_side", "") or "").strip().lower()
+            for leg in strategy_execution_legs
+            if abs(to_decimal(leg.delta_position_qty or Decimal("0"))) > EPSILON_DECIMAL_12
+            and str(getattr(leg, "pos_side", "") or "").strip().lower() in {"long", "short"}
+        }
+        if len(executing_pos_sides) == 1:
+            return next(iter(executing_pos_sides))
+        for leg in strategy_execution_legs:
+            leg_pos_side = str(getattr(leg, "pos_side", "") or "").strip().lower()
+            if leg_pos_side in {"long", "short"}:
+                return leg_pos_side
+        main_leg_signal = str((selected.metrics or {}).get("main_leg_signal") or "").strip().lower()
+        if main_leg_signal in {"long", "short", "flat"}:
+            return main_leg_signal
+        if str(target_exposure_side or "").strip():
+            return target_exposure_side
+        return fallback_direction
 
     @staticmethod
     def _exposure_side(quantity: Decimal) -> str:

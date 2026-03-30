@@ -1386,6 +1386,10 @@ def _build_position_target_handler(
                 strategy_execution_mode=getattr(leg, "execution_mode", None) or base_target.strategy_execution_mode,
                 strategy_state_phase=getattr(leg, "state_phase", None) or base_target.strategy_state_phase,
                 position_intent=semantics["position_intent"],
+                execution_style_preference=getattr(leg, "execution_style_preference", None),
+                order_type_preference=getattr(leg, "order_type_preference", None),
+                time_in_force_preference=getattr(leg, "time_in_force_preference", None),
+                limit_offset_bps_preference=getattr(leg, "limit_offset_bps_preference", None),
                 ai_execution_parameter_suggestion=base_target.ai_execution_parameter_suggestion,
             )
             if provisional_plan is None:

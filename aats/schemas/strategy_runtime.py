@@ -11,7 +11,26 @@ from aats.schemas.execution import LegOrderAction, PositionMode, PositionSide
 from aats.schemas.system import MarginModelType, ProductType
 
 
-StrategyFamily = Literal["directional", "smart_arbitrage", "spot_grid", "dca"]
+StrategyFamily = Literal[
+    "directional",
+    "smart_arbitrage",
+    "spot_grid",
+    "dca",
+    "protective",
+    "opportunistic",
+    "independent",
+]
+StrategyFamilyAction = Literal[
+    "hold_family",
+    "blocked",
+    "protect",
+    "rebalance_protection",
+    "open_opportunity_leg",
+    "close_opportunity_leg",
+    "open_independent_book",
+    "scale_independent_book",
+    "close_independent_book",
+]
 StrategyCandidateState = Literal[
     "ready",
     "inactive",
@@ -105,6 +124,7 @@ class StrategySleeveIntent(SchemaBase):
     margin_mode: MarginModelType
     inventory_policy: StrategyInventoryPolicy
     route_action: StrategyRouteAction = "hold_current"
+    family_action: StrategyFamilyAction = "hold_family"
     headline: str | None = None
     selectable: bool = False
     execution_compatible: bool = False
@@ -267,6 +287,11 @@ class StrategyLegIntent(SchemaBase):
     hedge_ratio: Decimal | None = None
     trigger_reason_codes: list[str] = Field(default_factory=list)
     note: str | None = None
+    execution_style_preference: str | None = None
+    order_type_preference: Literal["market", "limit"] | None = None
+    time_in_force_preference: str | None = None
+    limit_offset_bps_preference: Decimal | None = None
+    execution_preference_reason_codes: list[str] = Field(default_factory=list)
 
 
 class StrategyCandidate(SchemaBase):
@@ -276,6 +301,7 @@ class StrategyCandidate(SchemaBase):
     selectable: bool = False
     execution_compatible: bool = False
     route_action: StrategyRouteAction = "hold_current"
+    family_action: StrategyFamilyAction = "hold_family"
     headline: str
     recommended_symbol: str | None = None
     target_position_qty: Decimal | None = None
@@ -310,6 +336,7 @@ class StrategyCoordinatorSnapshot(SchemaBase):
     selected_family: StrategyFamily = "directional"
     selected_state: StrategyCandidateState = "ready"
     selected_route_action: StrategyRouteAction = "override_target"
+    selected_family_action: StrategyFamilyAction = "hold_family"
     selected_headline: str | None = None
     selection_reason_codes: list[str] = Field(default_factory=list)
     active_families: list[StrategyFamily] = Field(default_factory=list)

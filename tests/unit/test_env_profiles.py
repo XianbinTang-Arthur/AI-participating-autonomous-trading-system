@@ -318,7 +318,8 @@ def test_derivatives_managed_profiles_use_relaxed_directional_thresholds() -> No
         assert values["strategy_low_edge_cooldown_seconds"] == 900.0
         expected_overlay_mode = "independent" if profile == "derivatives_live" else "protective"
         assert values["strategy_hedge_overlay_mode"] == expected_overlay_mode
-        assert values["strategy_hedge_protective_enabled"] is True
+        expected_protective_enabled = profile != "derivatives_live"
+        assert values["strategy_hedge_protective_enabled"] is expected_protective_enabled
         expected_opportunistic_enabled = False
         expected_opportunistic_rollout = "live" if profile == "derivatives_live" else "dry_run"
         assert values["strategy_hedge_opportunistic_enabled"] is expected_opportunistic_enabled
@@ -332,10 +333,17 @@ def test_derivatives_managed_profiles_use_relaxed_directional_thresholds() -> No
         assert values["strategy_hedge_opportunistic_max_churn_ratio"] == 0.22
         expected_independent_enabled = profile == "derivatives_live"
         expected_independent_rollout = "live" if profile == "derivatives_live" else "dry_run"
+        expected_independent_family_enabled = profile == "derivatives_live"
+        assert values["strategy_family_protective_enabled"] is False
+        assert values["strategy_family_protective_live_execution_enabled"] is False
+        assert values["strategy_family_opportunistic_enabled"] is False
+        assert values["strategy_family_opportunistic_live_execution_enabled"] is False
         assert values["strategy_hedge_independent_enabled"] is expected_independent_enabled
         assert values["strategy_hedge_independent_rollout_stage"] == expected_independent_rollout
-        expected_independent_entry = 0.24 if profile == "derivatives_live" else 0.66
-        expected_independent_scale_in = 0.32 if profile == "derivatives_live" else 0.70
+        assert values["strategy_family_independent_enabled"] is expected_independent_family_enabled
+        assert values["strategy_family_independent_live_execution_enabled"] is expected_independent_family_enabled
+        expected_independent_entry = 0.30 if profile == "derivatives_live" else 0.66
+        expected_independent_scale_in = 0.40 if profile == "derivatives_live" else 0.70
         assert values["strategy_hedge_independent_long_entry_threshold"] == expected_independent_entry
         assert values["strategy_hedge_independent_short_entry_threshold"] == expected_independent_entry
         assert values["strategy_hedge_independent_long_scale_in_threshold"] == expected_independent_scale_in
@@ -353,6 +361,12 @@ def test_derivatives_live_managed_profile_is_pinned_for_independent_live() -> No
     assert values["derivatives_position_mode"] == "hedge"
     assert values["strategy_family_active"] == "directional"
     assert values["strategy_family_auto_selection_enabled"] is False
+    assert values["strategy_family_independent_enabled"] is True
+    assert values["strategy_family_independent_live_execution_enabled"] is True
+    assert values["strategy_family_protective_enabled"] is False
+    assert values["strategy_family_protective_live_execution_enabled"] is False
+    assert values["strategy_family_opportunistic_enabled"] is False
+    assert values["strategy_family_opportunistic_live_execution_enabled"] is False
     assert values["smart_arbitrage_enabled"] is False
     assert values["strategy_hedge_overlay_mode"] == "independent"
 

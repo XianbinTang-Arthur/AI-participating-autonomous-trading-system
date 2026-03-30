@@ -20,6 +20,7 @@ DerivativesPositionMode = Literal["net", "hedge"]
 DerivativesHedgeTransitionMode = Literal["close_then_open", "overlap_then_reduce", "independent_books"]
 StrategyHedgeOverlayMode = Literal["protective", "opportunistic", "independent"]
 StrategyHedgeOverlayRolloutStage = Literal["replay_only", "dry_run", "live"]
+IndependentWeakEdgeExecutionMode = Literal["block", "report_only"]
 ConfigProfile = Literal[
     "local_demo",
     "real_market_paper",
@@ -39,7 +40,15 @@ MarketDataBackend = Literal["demo", "okx"]
 ExecutionBackend = Literal["paper", "okx"]
 AccountBackend = Literal["disabled", "okx"]
 AIExecutionSuggestionMode = Literal["disabled", "diagnostic_only", "shadow_translation", "enabled_live"]
-StrategyFamily = Literal["directional", "smart_arbitrage", "spot_grid", "dca"]
+StrategyFamily = Literal[
+    "directional",
+    "smart_arbitrage",
+    "spot_grid",
+    "dca",
+    "protective",
+    "opportunistic",
+    "independent",
+]
 SmartArbitrageNegativeBasisMode = Literal["disabled", "advisory_only", "inventory_backed", "margin_backed"]
 SmartArbitragePairPriorityMode = Literal["net_edge", "executable_edge", "ideal_edge", "basis_abs"]
 SmartArbitrageSpotMarginMode = Literal["cross", "isolated"]
@@ -246,6 +255,15 @@ class AATSSettings(BaseSettings):
     strategy_profile_score_divergence_other_penalty: float = -1.0
     strategy_family_active: StrategyFamily = "directional"
     strategy_family_auto_selection_enabled: bool = True
+    strategy_family_protective_enabled: bool = False
+    strategy_family_opportunistic_enabled: bool = False
+    strategy_family_independent_enabled: bool = False
+    strategy_family_protective_shadow_mode_enabled: bool = False
+    strategy_family_opportunistic_shadow_mode_enabled: bool = False
+    strategy_family_independent_shadow_mode_enabled: bool = False
+    strategy_family_protective_live_execution_enabled: bool = False
+    strategy_family_opportunistic_live_execution_enabled: bool = False
+    strategy_family_independent_live_execution_enabled: bool = False
     strategy_sleeve_auto_parallel_enabled: bool = True
     strategy_sleeve_auto_min_budget_multiplier: float = 0.35
     strategy_sleeve_auto_reconciliation_contraction_multiplier: float = 0.50
@@ -363,12 +381,20 @@ class AATSSettings(BaseSettings):
     strategy_hedge_independent_rollout_stage: StrategyHedgeOverlayRolloutStage = "dry_run"
     strategy_hedge_independent_long_entry_threshold: float = 0.66
     strategy_hedge_independent_short_entry_threshold: float = 0.66
+    strategy_hedge_independent_long_close_threshold: float = 0.66
+    strategy_hedge_independent_short_close_threshold: float = 0.66
     strategy_hedge_independent_long_scale_in_threshold: float = 0.70
     strategy_hedge_independent_short_scale_in_threshold: float = 0.70
     strategy_hedge_independent_long_min_hold_seconds: float = 300.0
     strategy_hedge_independent_short_min_hold_seconds: float = 300.0
     strategy_hedge_independent_rebalance_cooldown_seconds: float = 120.0
     strategy_hedge_independent_trial_guard_enabled: bool = True
+    strategy_hedge_independent_min_safe_net_edge_bps: float = 0.0
+    strategy_hedge_independent_expected_slippage_buffer_bps: float = 0.0
+    strategy_hedge_independent_expected_execution_buffer_bps: float = 0.0
+    strategy_hedge_independent_weak_edge_execution_mode: IndependentWeakEdgeExecutionMode = "block"
+    strategy_hedge_independent_max_acceptable_cost_bps: float = 0.0
+    strategy_hedge_independent_passive_first_enabled: bool = False
     strategy_min_hold_seconds: float = 720.0
     strategy_post_close_cooldown_seconds: float = 300.0
     strategy_health_lookback_trades: int = 12
@@ -454,6 +480,14 @@ class AATSSettings(BaseSettings):
         # The current market/feature pipeline is still built around fixed
         # 15m + 1h snapshots. Exposing broader timeframe configurability in
         # env/YAML without enforcing this creates misleading configs.
+        if "strategy_hedge_independent_long_close_threshold" not in self.model_fields_set:
+            self.strategy_hedge_independent_long_close_threshold = float(
+                self.strategy_hedge_independent_long_entry_threshold
+            )
+        if "strategy_hedge_independent_short_close_threshold" not in self.model_fields_set:
+            self.strategy_hedge_independent_short_close_threshold = float(
+                self.strategy_hedge_independent_short_entry_threshold
+            )
         if self.primary_timeframe != "15m":
             raise ValueError("primary_timeframe_currently_must_be_15m")
         if self.secondary_timeframe != "1h":
@@ -493,10 +527,26 @@ class AATSSettings(BaseSettings):
             raise ValueError("strategy_hedge_independent_long_entry_threshold_must_be_between_zero_and_one")
         if not 0.0 <= float(self.strategy_hedge_independent_short_entry_threshold) <= 1.0:
             raise ValueError("strategy_hedge_independent_short_entry_threshold_must_be_between_zero_and_one")
+        if not 0.0 <= float(self.strategy_hedge_independent_long_close_threshold) <= 1.0:
+            raise ValueError("strategy_hedge_independent_long_close_threshold_must_be_between_zero_and_one")
+        if not 0.0 <= float(self.strategy_hedge_independent_short_close_threshold) <= 1.0:
+            raise ValueError("strategy_hedge_independent_short_close_threshold_must_be_between_zero_and_one")
         if not 0.0 <= float(self.strategy_hedge_independent_long_scale_in_threshold) <= 1.0:
             raise ValueError("strategy_hedge_independent_long_scale_in_threshold_must_be_between_zero_and_one")
         if not 0.0 <= float(self.strategy_hedge_independent_short_scale_in_threshold) <= 1.0:
             raise ValueError("strategy_hedge_independent_short_scale_in_threshold_must_be_between_zero_and_one")
+        if (
+            float(self.strategy_hedge_independent_long_close_threshold)
+            - float(self.strategy_hedge_independent_long_entry_threshold)
+            > 1e-9
+        ):
+            raise ValueError("strategy_hedge_independent_long_close_threshold_must_not_exceed_entry_threshold")
+        if (
+            float(self.strategy_hedge_independent_short_close_threshold)
+            - float(self.strategy_hedge_independent_short_entry_threshold)
+            > 1e-9
+        ):
+            raise ValueError("strategy_hedge_independent_short_close_threshold_must_not_exceed_entry_threshold")
         if (
             float(self.strategy_hedge_independent_long_entry_threshold)
             - float(self.strategy_hedge_independent_long_scale_in_threshold)
@@ -509,6 +559,14 @@ class AATSSettings(BaseSettings):
             > 1e-9
         ):
             raise ValueError("strategy_hedge_independent_short_entry_threshold_must_not_exceed_scale_in_threshold")
+        if float(self.strategy_hedge_independent_min_safe_net_edge_bps) < 0.0:
+            raise ValueError("strategy_hedge_independent_min_safe_net_edge_bps_must_be_non_negative")
+        if float(self.strategy_hedge_independent_expected_slippage_buffer_bps) < 0.0:
+            raise ValueError("strategy_hedge_independent_expected_slippage_buffer_bps_must_be_non_negative")
+        if float(self.strategy_hedge_independent_expected_execution_buffer_bps) < 0.0:
+            raise ValueError("strategy_hedge_independent_expected_execution_buffer_bps_must_be_non_negative")
+        if float(self.strategy_hedge_independent_max_acceptable_cost_bps) < 0.0:
+            raise ValueError("strategy_hedge_independent_max_acceptable_cost_bps_must_be_non_negative")
         if self.trading_product_type == "spot" and self.margin_mode == "cash":
             if float(self.max_target_leverage) != 1.0 or float(self.default_target_leverage) != 1.0:
                 raise ValueError("spot_cash_runtime_requires_unit_leverage")

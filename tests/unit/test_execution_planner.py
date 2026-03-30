@@ -144,6 +144,48 @@ class TestExecutionPlanner(unittest.TestCase):
         self.assertEqual(order_intent.execution_action, "enter")
         self.assertEqual(order_intent.side, "buy")
 
+    def test_build_leg_plan_applies_explicit_passive_first_preferences(self) -> None:
+        planner = ExecutionPlanner(settings=AATSSettings.model_validate({}))
+
+        plan = planner.build_leg_plan(
+            decision_id="decision_passive_first",
+            symbol="BTC-USDT-SWAP",
+            side="buy",
+            pos_side="long",
+            action="open",
+            quantity=Decimal("0.01"),
+            urgency="low",
+            max_slippage_tolerance_bps=20,
+            reference_price=Decimal("100"),
+            product_type="derivatives",
+            target_leverage=3.0,
+            margin_mode="cross",
+            td_mode="cross",
+            position_mode="long_short_mode",
+            instrument_family="BTC-USDT",
+            settle_currency="USDT",
+            execution_style_preference="bounded_limit_ioc",
+            order_type_preference="limit",
+            time_in_force_preference="IOC",
+            limit_offset_bps_preference=Decimal("1.5"),
+        )
+
+        self.assertIsNotNone(plan)
+        assert plan is not None
+        self.assertEqual(plan.execution_style, "bounded_limit_ioc")
+        self.assertEqual(plan.order_type, "limit")
+        self.assertEqual(plan.time_in_force, "IOC")
+        self.assertEqual(plan.limit_price, Decimal("100.0150"))
+
+        leg_intent = planner.build_leg_intent(plan=plan)
+
+        self.assertIsNotNone(leg_intent)
+        assert leg_intent is not None
+        self.assertEqual(leg_intent.execution_style, "bounded_limit_ioc")
+        self.assertEqual(leg_intent.order_type, "limit")
+        self.assertEqual(leg_intent.time_in_force, "IOC")
+        self.assertEqual(leg_intent.limit_price, Decimal("100.0150"))
+
     def test_build_plan_rejects_signed_derivatives_flow_in_long_short_mode(self) -> None:
         planner = ExecutionPlanner(settings=AATSSettings.model_validate({}))
 

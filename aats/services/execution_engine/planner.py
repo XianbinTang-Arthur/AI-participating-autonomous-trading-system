@@ -340,6 +340,10 @@ class ExecutionPlanner:
         strategy_execution_mode: str | None = None,
         strategy_state_phase: str | None = None,
         position_intent: str | None = None,
+        execution_style_preference: str | None = None,
+        order_type_preference: Literal["market", "limit"] | None = None,
+        time_in_force_preference: str | None = None,
+        limit_offset_bps_preference: Decimal | float | None = None,
         ai_execution_parameter_suggestion: AIExecutionParameterSuggestionEnvelope | None = None,
     ) -> LegExecutionPlan | None:
         normalized_quantity = to_decimal(quantity)
@@ -394,6 +398,19 @@ class ExecutionPlanner:
                 preview=translated_suggestion.translation_preview,
                 max_slippage_tolerance_bps=effective_slippage_tolerance_bps,
             )
+        execution_style, order_type, time_in_force, limit_price = self._apply_explicit_leg_execution_preference(
+            side=side,
+            reference_price=reference_price,
+            max_slippage_tolerance_bps=effective_slippage_tolerance_bps,
+            execution_style=execution_style,
+            order_type=order_type,
+            time_in_force=time_in_force,
+            limit_price=limit_price,
+            execution_style_preference=execution_style_preference,
+            order_type_preference=order_type_preference,
+            time_in_force_preference=time_in_force_preference,
+            limit_offset_bps_preference=limit_offset_bps_preference,
+        )
         return LegExecutionPlan(
             plan_id=new_id("leg_plan"),
             leg_intent_id=new_id("leg_intent"),
@@ -462,6 +479,48 @@ class ExecutionPlanner:
             execution_action=execution_action_from_leg_action(action),
             position_intent=resolved_position_intent,
             ai_execution_parameter_suggestion=translated_suggestion,
+        )
+
+    def _apply_explicit_leg_execution_preference(
+        self,
+        *,
+        side: str,
+        reference_price: Decimal | float | None,
+        max_slippage_tolerance_bps: int,
+        execution_style: str,
+        order_type: Literal["market", "limit"],
+        time_in_force: str,
+        limit_price: Decimal | None,
+        execution_style_preference: str | None,
+        order_type_preference: Literal["market", "limit"] | None,
+        time_in_force_preference: str | None,
+        limit_offset_bps_preference: Decimal | float | None,
+    ) -> tuple[str, Literal["market", "limit"], str, Decimal | None]:
+        preferred_order_type = None if order_type_preference is None else str(order_type_preference).strip().lower()
+        if preferred_order_type != "limit":
+            return execution_style, order_type, time_in_force, limit_price
+        limit_offset_bps = to_decimal(limit_offset_bps_preference or Decimal("0"))
+        if reference_price is None or to_decimal(reference_price) <= Decimal("0") or limit_offset_bps <= Decimal("0"):
+            return execution_style, order_type, time_in_force, limit_price
+        preview = ExecutionParameterTranslationPreview(
+            execution_style=execution_style_preference or "bounded_limit_ioc",
+            order_type="limit",
+            time_in_force=time_in_force_preference or "IOC",
+            limit_offset_bps=limit_offset_bps,
+        )
+        bounded_limit_price = self._bounded_live_limit_price(
+            side=side,
+            reference_price=reference_price,
+            preview=preview,
+            max_slippage_tolerance_bps=max_slippage_tolerance_bps,
+        )
+        if bounded_limit_price is None:
+            return execution_style, order_type, time_in_force, limit_price
+        return (
+            preview.execution_style,
+            "limit",
+            preview.time_in_force,
+            bounded_limit_price,
         )
 
     def build_leg_intent(self, *, plan: LegExecutionPlan) -> LegOrderIntent | None:

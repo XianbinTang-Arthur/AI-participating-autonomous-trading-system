@@ -278,6 +278,33 @@ class TestAATSSettings(unittest.TestCase):
                 }
             )
 
+    def test_independent_overlay_thresholds_reject_close_above_entry(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "strategy_hedge_independent_long_close_threshold_must_not_exceed_entry_threshold",
+        ):
+            AATSSettings.model_validate(
+                {
+                    "trading_product_type": "derivatives",
+                    "margin_mode": "cross",
+                    "derivatives_position_mode": "hedge",
+                    "strategy_hedge_overlay_mode": "independent",
+                    "strategy_hedge_independent_long_entry_threshold": 0.60,
+                    "strategy_hedge_independent_long_close_threshold": 0.62,
+                }
+            )
+
+    def test_independent_overlay_expected_edge_buffers_must_be_non_negative(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "strategy_hedge_independent_expected_execution_buffer_bps_must_be_non_negative",
+        ):
+            AATSSettings.model_validate(
+                {
+                    "strategy_hedge_independent_expected_execution_buffer_bps": -0.5,
+                }
+            )
+
     def test_independent_overlay_rollout_can_be_set_to_live_after_task106_enablement(self) -> None:
         settings = AATSSettings.model_validate(
             {

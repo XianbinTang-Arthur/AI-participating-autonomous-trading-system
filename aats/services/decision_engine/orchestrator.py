@@ -116,6 +116,7 @@ class DecisionOrchestrator:
                 context=context,
                 baseline=baseline,
                 directional_target=target,
+                ai_assessment=ai_assessment,
             )
             strategy_envelope = await publish_model(
                 bus=self.bus,

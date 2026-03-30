@@ -1999,6 +1999,45 @@ class OperatorQueryService:
                 "runtime_supported": self.runtime.settings.trading_product_type == "spot",
                 "execution_compatible": self.runtime.settings.trading_product_type == "spot",
             },
+            "protective": {
+                "enabled": bool(self.runtime.settings.strategy_family_protective_enabled),
+                "runtime_supported": (
+                    self.runtime.settings.trading_product_type == "derivatives"
+                    and self.runtime.settings.margin_mode != "cash"
+                    and self.runtime.settings.derivatives_position_mode == "hedge"
+                ),
+                "execution_compatible": (
+                    self.runtime.settings.trading_product_type == "derivatives"
+                    and self.runtime.settings.margin_mode != "cash"
+                    and self.runtime.settings.derivatives_position_mode == "hedge"
+                ),
+            },
+            "opportunistic": {
+                "enabled": bool(self.runtime.settings.strategy_family_opportunistic_enabled),
+                "runtime_supported": (
+                    self.runtime.settings.trading_product_type == "derivatives"
+                    and self.runtime.settings.margin_mode != "cash"
+                    and self.runtime.settings.derivatives_position_mode == "hedge"
+                ),
+                "execution_compatible": (
+                    self.runtime.settings.trading_product_type == "derivatives"
+                    and self.runtime.settings.margin_mode != "cash"
+                    and self.runtime.settings.derivatives_position_mode == "hedge"
+                ),
+            },
+            "independent": {
+                "enabled": bool(self.runtime.settings.strategy_family_independent_enabled),
+                "runtime_supported": (
+                    self.runtime.settings.trading_product_type == "derivatives"
+                    and self.runtime.settings.margin_mode != "cash"
+                    and self.runtime.settings.derivatives_position_mode == "hedge"
+                ),
+                "execution_compatible": (
+                    self.runtime.settings.trading_product_type == "derivatives"
+                    and self.runtime.settings.margin_mode != "cash"
+                    and self.runtime.settings.derivatives_position_mode == "hedge"
+                ),
+            },
         }
         automation_decisions = [] if latest_snapshot is None else list(latest_snapshot.get("automation_decisions") or [])
         selected_candidate_payload = None
@@ -2025,6 +2064,9 @@ class OperatorQueryService:
             "latest_allocation_id": None if latest_target_payload is None else latest_target_payload.get("allocation_id"),
             "latest_selected_state": None if latest_snapshot is None else latest_snapshot.get("selected_state"),
             "latest_selected_route_action": None if latest_snapshot is None else latest_snapshot.get("selected_route_action"),
+            "latest_selected_family_action": (
+                None if latest_snapshot is None else latest_snapshot.get("selected_family_action")
+            ),
             "latest_selected_pair_id": (
                 None if selected_candidate_payload is None else selected_candidate_payload.get("pair_id")
             ),
@@ -2328,12 +2370,20 @@ class OperatorQueryService:
             "hedge_independent_rollout_stage": self.runtime.settings.strategy_hedge_independent_rollout_stage,
             "hedge_independent_long_entry_threshold": self.runtime.settings.strategy_hedge_independent_long_entry_threshold,
             "hedge_independent_short_entry_threshold": self.runtime.settings.strategy_hedge_independent_short_entry_threshold,
+            "hedge_independent_long_close_threshold": self.runtime.settings.strategy_hedge_independent_long_close_threshold,
+            "hedge_independent_short_close_threshold": self.runtime.settings.strategy_hedge_independent_short_close_threshold,
             "hedge_independent_long_scale_in_threshold": self.runtime.settings.strategy_hedge_independent_long_scale_in_threshold,
             "hedge_independent_short_scale_in_threshold": self.runtime.settings.strategy_hedge_independent_short_scale_in_threshold,
             "hedge_independent_long_min_hold_seconds": self.runtime.settings.strategy_hedge_independent_long_min_hold_seconds,
             "hedge_independent_short_min_hold_seconds": self.runtime.settings.strategy_hedge_independent_short_min_hold_seconds,
             "hedge_independent_rebalance_cooldown_seconds": self.runtime.settings.strategy_hedge_independent_rebalance_cooldown_seconds,
             "hedge_independent_trial_guard_enabled": self.runtime.settings.strategy_hedge_independent_trial_guard_enabled,
+            "hedge_independent_min_safe_net_edge_bps": self.runtime.settings.strategy_hedge_independent_min_safe_net_edge_bps,
+            "hedge_independent_expected_slippage_buffer_bps": self.runtime.settings.strategy_hedge_independent_expected_slippage_buffer_bps,
+            "hedge_independent_expected_execution_buffer_bps": self.runtime.settings.strategy_hedge_independent_expected_execution_buffer_bps,
+            "hedge_independent_weak_edge_execution_mode": self.runtime.settings.strategy_hedge_independent_weak_edge_execution_mode,
+            "hedge_independent_max_acceptable_cost_bps": self.runtime.settings.strategy_hedge_independent_max_acceptable_cost_bps,
+            "hedge_independent_passive_first_enabled": self.runtime.settings.strategy_hedge_independent_passive_first_enabled,
             "hedge_rollout": {
                 "runtime_stage": overlay_runtime_stage(self.runtime.settings),
                 "current_mode": overlay_mode,

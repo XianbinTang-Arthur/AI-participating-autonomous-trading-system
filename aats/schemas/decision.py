@@ -10,7 +10,12 @@ from pydantic import BaseModel
 from aats.schemas.common import SchemaBase
 from aats.schemas.execution import AIExecutionParameterSuggestionEnvelope
 from aats.schemas.portfolio import InstrumentPositionState, PositionLegState
-from aats.schemas.strategy_runtime import StrategyFamily, StrategyLegIntent, StrategyRouteAction
+from aats.schemas.strategy_runtime import (
+    StrategyFamily,
+    StrategyFamilyAction,
+    StrategyLegIntent,
+    StrategyRouteAction,
+)
 from aats.schemas.system import MarginModelType, ProductType
 
 
@@ -283,6 +288,7 @@ class DecisionOutcome(SchemaBase):
     selected_strategy_family: StrategyFamily = "directional"
     selected_strategy_sleeve_id: str | None = None
     selected_strategy_route_action: StrategyRouteAction = "override_target"
+    selected_strategy_family_action: StrategyFamilyAction | None = None
     allocation_id: str | None = None
     strategy_selection_reason_codes: list[str] = Field(default_factory=list)
     strategy_selection_headline: str | None = None
@@ -369,6 +375,7 @@ class PositionTarget(SchemaBase):
     expected_cost_bps: float = 0.0
     expected_net_edge_bps: float = 0.0
     strategy_family: StrategyFamily = "directional"
+    strategy_family_action: StrategyFamilyAction | None = None
     strategy_sleeve_id: str | None = None
     strategy_route_action: StrategyRouteAction = "override_target"
     strategy_pair_id: str | None = None
