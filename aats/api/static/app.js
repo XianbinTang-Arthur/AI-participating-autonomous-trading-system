@@ -19,6 +19,7 @@ import {
 import { buildPhase1ShadowDrawer } from "./modules/shadow-drawer.js";
 import { AUTO_REFRESH_MS, CORE_SPECS, DEFAULT_PAGE_LIMITS, PAGE_LOAD_STEP, createState, viewSpecs } from "./modules/store.js";
 import {
+  readableFamilyExecutionSummary,
   localizeError,
   operationalStatusCopy,
   operationalStatusHeadline,
@@ -349,7 +350,7 @@ function renderStatusRibbon() {
         pill(`人工复核 ${reviewStatusLabel(recovery.review_required)}`, recovery.review_required ? "warning" : "outline"),
       ],
       metrics: [
-        { label: "最近决策", value: latestDecision.decision_id ? readableState(latestDecision.position_target?.position_intent || "hold") : "暂无", meta: formatMaybeTimestamp(latestDecision.decision_time || latestDecision.decision_context?.as_of_ts), tone: latestDecision.decision_id ? "info" : "neutral" },
+        { label: "最近决策", value: latestDecision.decision_id ? readableFamilyExecutionSummary(latestDecision.position_target || {}, "保持当前仓位") : "暂无", meta: formatMaybeTimestamp(latestDecision.decision_time || latestDecision.decision_context?.as_of_ts), tone: latestDecision.decision_id ? "info" : "neutral" },
         { label: "最新委托", value: readableState(latestOrder?.status || "unknown"), meta: middleEllipsis(latestOrder?.client_order_id, 10, 6, "暂未生成委托"), tone: toneForOrderStatus(latestOrder?.status) },
         { label: "恢复限制", value: isPausedAwaitingResume(recovery) ? "当前可手动恢复" : primaryBlocker ? (primaryBlocker.title || localizeError(primaryBlocker.blocker)) : recovery.safe_to_trade ? "当前无硬阻断" : localizedRecoveryReasons(), meta: middleEllipsis(reconciliation?.reconciliation_id, 10, 6, "恢复与对账共同决定交易资格"), tone: isPausedAwaitingResume(recovery) ? "warning" : blockers.length > 0 || reconciliation?.halt_required ? "danger" : recovery.safe_to_trade ? "positive" : "warning" },
         { label: "账户权益", value: formatNumber(portfolio.total_equity), meta: `活动委托 ${formatNumber(metrics.current_open_order_count)}`, tone: "info" },

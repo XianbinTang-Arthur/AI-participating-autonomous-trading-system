@@ -890,6 +890,17 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
                             note="Independent short book 决策腿。",
                         ),
                     ],
+                    family_execution_summary={
+                        "summary_mode": "multi_leg",
+                        "family": "independent",
+                        "route_action": "override_target",
+                        "family_action": "open_independent_book",
+                        "leg_count": 2,
+                        "position_intents": ["open_long", "close_short"],
+                        "directions": ["long", "short"],
+                        "leg_actions": ["open", "close"],
+                        "execution_modes": ["independent_long_book", "independent_short_book"],
+                    },
                     hedge_overlay_decision=HedgeOverlayDecision(
                         enabled=True,
                         runtime_supported=True,
@@ -961,6 +972,16 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(applied_target["strategy_execution_legs"][0]["overlay_mode"], "independent")
         self.assertEqual(applied_target["strategy_execution_legs"][1]["execution_mode"], "independent_short_book")
         self.assertEqual(applied_target["strategy_execution_legs"][1]["overlay_mode"], "independent")
+        self.assertIsNotNone(applied_target["family_execution_summary"])
+        self.assertEqual(applied_target["family_execution_summary"]["summary_mode"], "multi_leg")
+        self.assertEqual(
+            applied_target["family_execution_summary"]["position_intents"],
+            ["open_long", "close_short"],
+        )
+        self.assertEqual(
+            applied_target["family_execution_summary"]["directions"],
+            ["long", "short"],
+        )
 
     async def test_derivatives_overlay_runtime_exposes_rollout_stage_blockers_for_live_runtime(self) -> None:
         settings = self._settings(

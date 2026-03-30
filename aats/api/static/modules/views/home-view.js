@@ -5,6 +5,7 @@ import {
   localizeError,
   operationalStatusCopy,
   permissionStatusLabel,
+  readableFamilyExecutionSummary,
   readableState,
   reconciliationStatusLabel,
   reviewStatusLabel,
@@ -123,10 +124,10 @@ function latestActionNarrative({ latestDecision, latestOrder, latestFill, reconc
     return "系统最近没有形成新的策略决策，当前更适合先确认账户同步、对账状态和风控条件。";
   }
   const symbol = latestDecision.decision_context?.symbol || "当前标的";
-  const decisionText = readableState(latestDecision.position_target?.position_intent || "hold");
+  const decisionText = readableFamilyExecutionSummary(latestDecision.position_target || {}, "保持当前仓位");
   return `${formatRelativeAge(latestDecision.decision_time || latestDecision.decision_context?.as_of_ts)}，系统针对 ${symbol} 形成了 ${decisionText} 的判断。`
-    + `${latestOrder ? ` 最近一笔委托状态为 ${readableState(latestOrder.status)}。` : " 本轮暂未生成新委托。"}`
-    + `${latestFill ? ` 最新一笔成交已落库，数量 ${formatNumber(latestFill.fill_qty)}。` : " 当前暂无新的成交落库。"}`
+    + `${latestOrder ? ` 最近一笔委托状态为 ${readableState(latestOrder.status)}。` : " 本轮暂未生成新委托。"}` 
+    + `${latestFill ? ` 最新一笔成交已落库，数量 ${formatNumber(latestFill.fill_qty)}。` : " 当前暂无新的成交落库。"}` 
     + `${reconciliation ? ` 最近对账结论为 ${readableState(reconciliation.severity)}。` : " 当前暂无新的对账结论。"}`;
 }
 

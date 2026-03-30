@@ -649,6 +649,73 @@ export function readableState(value, fallback = "待确认") {
   return TERM_MAP[String(value).toLowerCase()] || String(value);
 }
 
+function normalizedFamilyExecutionSummary(source = {}) {
+  if (!source || typeof source !== "object") return {};
+  if (Array.isArray(source.position_intents) || Array.isArray(source.directions)) {
+    return source;
+  }
+  const nested = source.family_execution_summary || source.familyExecutionSummary;
+  return nested && typeof nested === "object" ? nested : {};
+}
+
+function normalizedSummaryList(value) {
+  return Array.isArray(value)
+    ? value
+      .map((item) => String(item || "").trim().toLowerCase())
+      .filter(Boolean)
+    : [];
+}
+
+export function hasFamilyExecutionSummary(source = {}) {
+  const summary = normalizedFamilyExecutionSummary(source);
+  return normalizedSummaryList(summary.position_intents).length > 0;
+}
+
+export function readableFamilyExecutionSummary(source = {}, fallback = "保持当前仓位") {
+  const summary = normalizedFamilyExecutionSummary(source);
+  const intents = normalizedSummaryList(summary.position_intents);
+  if (intents.length === 1) {
+    return readableState(intents[0], fallback);
+  }
+  if (intents.length > 1) {
+    const legCount = Number(summary.leg_count || intents.length || 0);
+    return `${legCount > 0 ? `${legCount} 条腿联动：` : "多腿联动："}${intents.map((item) => readableState(item, item)).join(" / ")}`;
+  }
+  if (source && typeof source === "object") {
+    return readableState(source.position_intent || "hold", fallback);
+  }
+  return fallback;
+}
+
+export function readableFamilyExecutionDirection(source = {}, fallback = "方向待确认") {
+  const summary = normalizedFamilyExecutionSummary(source);
+  const directions = normalizedSummaryList(summary.directions);
+  if (directions.length === 1) {
+    return readableState(directions[0], fallback);
+  }
+  if (directions.length > 1) {
+    return "双向";
+  }
+  if (source && typeof source === "object") {
+    return readableState(source.target_exposure_side || source.position_intent, fallback);
+  }
+  return fallback;
+}
+
+export function readableFamilyExecutionMeta(source = {}, fallback = "当前没有额外执行摘要") {
+  const summary = normalizedFamilyExecutionSummary(source);
+  const intents = normalizedSummaryList(summary.position_intents);
+  if (intents.length > 1) {
+    const legCount = Number(summary.leg_count || intents.length || 0);
+    return `${legCount > 0 ? legCount : intents.length} 条腿联动`;
+  }
+  if (intents.length === 1) {
+    const legCount = Number(summary.leg_count || 1);
+    return `${legCount} 条腿执行`;
+  }
+  return fallback;
+}
+
 export function localizeError(value, fallback = "当前没有额外说明") {
   if (!value) return fallback;
   const normalized = String(value).trim();

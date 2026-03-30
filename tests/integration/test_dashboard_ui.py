@@ -61,6 +61,7 @@ class TestDashboardUI(unittest.TestCase):
         self.assertIn("renderAIAnalysisView", js_text)
         self.assertIn('aiAnalysis: "/ui/ai-analysis"', js_text)
         self.assertIn("fetchDashboardBundle", js_text)
+        self.assertIn("readableFamilyExecutionSummary", js_text)
         self.assertIn("buildDashboardBundlePath", js_text)
         self.assertIn("syncRefreshDisabledButtons", js_text)
         self.assertIn("currentRefreshInteractivityRoots", js_text)
@@ -2801,6 +2802,130 @@ console.log(JSON.stringify({
         self.assertIn('"scaleInLongFillDrawer":"加多"', stdout)
         self.assertIn('"scaleInShortFillTitle":"加空"', stdout)
         self.assertIn('"scaleInShortFillDrawer":"加空"', stdout)
+
+    def test_family_cutover_ui_prefers_family_execution_summary_over_net_position_fields(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { renderStrategyView } from './aats/api/static/modules/views/strategy-view.js';
+import { renderHomeView } from './aats/api/static/modules/views/home-view.js';
+import { renderOverviewView } from './aats/api/static/modules/views/overview-view.js';
+import { buildDecisionDrawer } from './aats/api/static/modules/detail-drawers.js';
+
+const familyExecutionSummary = {
+  summary_mode: 'multi_leg',
+  family: 'independent',
+  route_action: 'override_target',
+  family_action: 'open_independent_book',
+  leg_count: 2,
+  position_intents: ['open_long', 'open_short'],
+  directions: ['long', 'short'],
+  leg_actions: ['open'],
+  execution_modes: ['independent_long_book', 'independent_short_book'],
+};
+
+const latestDecision = {
+  decision_id: 'dec-cutover',
+  decision_time: '2026-03-30T12:00:00Z',
+  decision_context: { as_of_ts: '2026-03-30T12:00:00Z', symbol: 'BTC-USDT-SWAP' },
+  position_target: {
+    position_intent: 'hold',
+    target_exposure_side: 'flat',
+    current_position_qty: 0,
+    target_position_qty: 0,
+    delta_position_qty: 0,
+    family_execution_summary: familyExecutionSummary,
+  },
+  policy_decision: { execution_allowed: true },
+  risk_decision: { approved: true },
+};
+
+const strategyHtml = renderStrategyView({
+  strategyRuntime: {
+    summary: {},
+    latest_snapshot: { candidates: [], automation_decisions: [] },
+    configured_parameters: { directional: {} },
+    latest_applied_target: latestDecision.position_target,
+    latest_bundle: {},
+    latest_allocation_decision: {},
+    recent_sleeve_intents: [],
+    recent_execution_bundles: [],
+    recent_budget_snapshots: [],
+    recent_conflict_resolutions: [],
+    recent_netting_decisions: [],
+    family_enablement: {},
+  },
+  latestDecision,
+});
+
+const homeHtml = renderHomeView({
+  latestDecision,
+  executionLatest: {},
+  reconciliationLatest: {},
+  health: { halted: false },
+  mode: { execution_route: 'derivatives_live' },
+  runtime: { environment_capabilities: { exchange_submission_target: 'derivatives_live' } },
+  systemRecovery: { recovery: { safe_to_trade: true, halted: false, resume_eligible: true } },
+  blockers: { blockers: [] },
+  portfolio: { portfolio: { total_equity: 1200, unrealized_pnl: 0, gross_exposure: 0, net_exposure: 0 } },
+  accountState: { connected: true, fresh: true, ready: true, blockers: [] },
+  metrics: { current_open_order_count: 0 },
+  uiHints: {},
+});
+
+const overviewHtml = renderOverviewView({
+  latestDecision,
+  executionLatest: {},
+  reconciliationLatest: {},
+  health: { runtime_state: 'healthy', overall_status: 'healthy' },
+  mode: { default_symbol: 'BTC-USDT-SWAP' },
+  runtime: { symbols: ['BTC-USDT-SWAP'] },
+  systemRecovery: { recovery: { safe_to_trade: true, halted: false, resume_eligible: true } },
+  blockers: { blockers: [] },
+  portfolio: { portfolio: { total_equity: 1200, realized_pnl: 0, unrealized_pnl: 0, gross_exposure: 0, net_exposure: 0, positions: [] } },
+  positions: { local_instrument_positions: [] },
+  metrics: {},
+  uiHints: {},
+});
+
+const drawer = buildDecisionDrawer({
+  decision_id: 'dec-cutover',
+  decision_context: { symbol: 'BTC-USDT-SWAP', current_position_qty: 0 },
+  position_target: latestDecision.position_target,
+  decision_outcome: {
+    final_action: 'enter',
+    final_direction: 'flat',
+    family_execution_summary: familyExecutionSummary,
+  },
+  ai_decision_audit: {
+    final_action: 'enter',
+    final_direction: 'flat',
+    family_execution_summary: familyExecutionSummary,
+  },
+  policy_decision: { execution_allowed: true },
+  risk_decision: { approved: true },
+});
+
+console.log(JSON.stringify({
+  strategyUsesFamilySummary: strategyHtml.includes('2 条腿联动') && strategyHtml.includes('开多') && strategyHtml.includes('开空'),
+  homeUsesFamilySummary: homeHtml.includes('2 条腿联动') && homeHtml.includes('开多') && homeHtml.includes('开空'),
+  overviewUsesFamilySummary: overviewHtml.includes('2 条腿联动') && overviewHtml.includes('开多') && overviewHtml.includes('开空'),
+  drawerUsesFamilySummary: drawer.body.includes('2 条腿联动') && drawer.body.includes('开多') && drawer.body.includes('开空') && drawer.body.includes('双向'),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        stdout = result.stdout or ""
+        self.assertIn('"strategyUsesFamilySummary":true', stdout)
+        self.assertIn('"homeUsesFamilySummary":true', stdout)
+        self.assertIn('"overviewUsesFamilySummary":true', stdout)
+        self.assertIn('"drawerUsesFamilySummary":true', stdout)
 
     def test_decision_drawer_surfaces_independent_overlay_audit_and_leg_trial_guard(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]

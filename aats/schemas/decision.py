@@ -292,6 +292,7 @@ class DecisionOutcome(SchemaBase):
     allocation_id: str | None = None
     strategy_selection_reason_codes: list[str] = Field(default_factory=list)
     strategy_selection_headline: str | None = None
+    family_execution_summary: StrategyExecutionSummary | None = None
     active_profile_id: str | None = None
     profile_control_source: ProfileControlSource | None = None
     ai_fallback_used: bool = False
@@ -300,6 +301,19 @@ class DecisionOutcome(SchemaBase):
 
 HedgeOverlayMode = Literal["protective", "opportunistic", "independent"]
 HedgeOverlayState = Literal["disabled", "inactive", "opening", "holding", "closing", "blocked"]
+StrategyExecutionSummaryMode = Literal["none", "single_leg", "multi_leg"]
+
+
+class StrategyExecutionSummary(SchemaBase):
+    summary_mode: StrategyExecutionSummaryMode = "none"
+    family: StrategyFamily = "directional"
+    route_action: StrategyRouteAction = "override_target"
+    family_action: StrategyFamilyAction | None = None
+    leg_count: int = 0
+    position_intents: list[str] = Field(default_factory=list)
+    directions: list[str] = Field(default_factory=list)
+    leg_actions: list[str] = Field(default_factory=list)
+    execution_modes: list[str] = Field(default_factory=list)
 
 
 class HedgeOverlayDecision(SchemaBase):
@@ -388,6 +402,7 @@ class PositionTarget(SchemaBase):
     allocation_id: str | None = None
     strategy_bundle_id: str | None = None
     strategy_execution_legs: list[StrategyLegIntent] = Field(default_factory=list)
+    family_execution_summary: StrategyExecutionSummary | None = None
     hedge_overlay_decision: HedgeOverlayDecision | None = None
     guardrail_flags: list[str] = Field(default_factory=list)
     ai_execution_parameter_suggestion: AIExecutionParameterSuggestionEnvelope | None = None

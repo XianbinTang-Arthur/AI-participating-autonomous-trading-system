@@ -12,6 +12,7 @@ from aats.schemas.decision import (
     DecisionContext,
     HedgeOverlayDecision,
     PositionTarget,
+    StrategyExecutionSummary,
 )
 from aats.schemas.exchange import ExchangeAccountSnapshot
 from aats.schemas.market import MarketSnapshot
@@ -409,6 +410,12 @@ class StrategyCoordinatorService:
             target_position_qty=target_qty,
             strategy_execution_legs=strategy_execution_legs,
         )
+        family_execution_summary = self._family_execution_summary(
+            selected_family=snapshot.selected_family,
+            family_action=selected_family_action,
+            route_action=applied_route_action,
+            strategy_execution_legs=strategy_execution_legs,
+        )
         decision_outcome = base_target.decision_outcome
         overlay_candidate = self._configured_overlay_candidate(snapshot=snapshot)
         hedge_overlay_decision = self._selected_overlay_decision(
@@ -443,6 +450,7 @@ class StrategyCoordinatorService:
                     "allocation_id": allocation_id,
                     "strategy_selection_reason_codes": list(dict.fromkeys(reason_codes)),
                     "strategy_selection_headline": snapshot.selected_headline,
+                    "family_execution_summary": family_execution_summary,
                     "final_action": final_action,
                     "final_direction": final_direction,
                     "final_target_qty": target_qty,
@@ -472,6 +480,7 @@ class StrategyCoordinatorService:
             ),
             "target_exposure_side": target_exposure_side,
             "position_intent": position_intent,
+            "family_execution_summary": family_execution_summary,
             "urgency": urgency,
             "rebalance_reason": rebalance_reason,
             "source_mix": source_mix,
@@ -1150,13 +1159,27 @@ class StrategyCoordinatorService:
     def _position_intent_from_legs(
         strategy_execution_legs: list[StrategyLegIntent],
     ) -> str | None:
+        derived = StrategyCoordinatorService._derived_leg_position_intents(strategy_execution_legs)
+        if derived is None:
+            return None
+        unique = list(dict.fromkeys(derived))
+        if len(unique) == 1:
+            return unique[0]
+        if len(derived) == 1:
+            return derived[0]
+        return None
+
+    @staticmethod
+    def _derived_leg_position_intents(
+        strategy_execution_legs: list[StrategyLegIntent],
+    ) -> list[str] | None:
         actionable_legs = [
             leg
             for leg in strategy_execution_legs
             if abs(to_decimal(leg.delta_position_qty or Decimal("0"))) > EPSILON_DECIMAL_12
         ]
         if not actionable_legs:
-            return None
+            return []
         derived: list[str] = []
         for leg in actionable_legs:
             side = str(getattr(leg, "side", "") or "").strip().lower()
@@ -1174,12 +1197,56 @@ class StrategyCoordinatorService:
             if action == "open" and abs(to_decimal(leg.current_position_qty or Decimal("0"))) > EPSILON_DECIMAL_12:
                 intent = intent.replace("open_", "scale_in_", 1)
             derived.append(intent)
-        unique = list(dict.fromkeys(derived))
-        if len(unique) == 1:
-            return unique[0]
-        if len(derived) == 1:
-            return derived[0]
-        return None
+        return derived
+
+    @staticmethod
+    def _family_execution_summary(
+        *,
+        selected_family: StrategyFamily,
+        family_action: StrategyFamilyAction,
+        route_action: StrategyRouteAction,
+        strategy_execution_legs: list[StrategyLegIntent],
+    ) -> StrategyExecutionSummary | None:
+        actionable_legs = [
+            leg
+            for leg in strategy_execution_legs
+            if abs(to_decimal(leg.delta_position_qty or Decimal("0"))) > EPSILON_DECIMAL_12
+        ]
+        if not actionable_legs:
+            return None
+        derived_intents = StrategyCoordinatorService._derived_leg_position_intents(actionable_legs) or []
+        directions = list(
+            dict.fromkeys(
+                str(getattr(leg, "pos_side", "") or "").strip().lower()
+                for leg in actionable_legs
+                if str(getattr(leg, "pos_side", "") or "").strip().lower() in {"long", "short", "flat"}
+            )
+        )
+        leg_actions = list(
+            dict.fromkeys(
+                str(getattr(leg, "action", "") or "").strip().lower()
+                for leg in actionable_legs
+                if str(getattr(leg, "action", "") or "").strip().lower()
+            )
+        )
+        execution_modes = list(
+            dict.fromkeys(
+                str(getattr(leg, "execution_mode", "") or "").strip()
+                for leg in actionable_legs
+                if str(getattr(leg, "execution_mode", "") or "").strip()
+            )
+        )
+        return StrategyExecutionSummary(
+            summary_mode="single_leg" if len(actionable_legs) == 1 and len(derived_intents) == 1 else "multi_leg",
+            family=selected_family,
+            route_action=route_action,
+            family_action=family_action,
+            leg_count=len(actionable_legs),
+            position_intents=list(dict.fromkeys(derived_intents)),
+            directions=directions,
+            leg_actions=leg_actions,
+            execution_modes=execution_modes,
+        )
 
     def _is_protective_target(self, *, current_qty: Decimal, target_qty: Decimal) -> bool:
         current_side = self._exposure_side(to_decimal(current_qty))

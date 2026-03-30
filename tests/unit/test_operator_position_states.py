@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 from datetime import datetime, timezone
 from decimal import Decimal
+from types import SimpleNamespace
 
 from aats.schemas.exchange import ExchangeAccountConfiguration, ExchangeAccountSnapshot, ExchangePosition
 from aats.schemas.portfolio import PortfolioSnapshot, Position
@@ -29,6 +30,105 @@ class TestOperatorPositionStates(unittest.TestCase):
             OperatorQueryService._abstract_action_from_position_intent("scale_in_long"),
             "scale_in",
         )
+
+    def test_decision_outcome_payload_prefers_native_outcome_and_backfills_family_summary(self) -> None:
+        query = OperatorQueryService.__new__(OperatorQueryService)
+        query.runtime = SimpleNamespace(settings=SimpleNamespace(ai_operating_mode="baseline_only"))
+        query.strategy_profile_snapshot = lambda: {"activation": {}}  # type: ignore[method-assign]
+
+        payload = query._decision_outcome_payload(
+            finalized_decision_outcome={
+                "decision_id": "dec-1",
+                "symbol": "BTC-USDT-SWAP",
+                "decision_source": "baseline",
+                "decision_authority": "reference_only",
+                "final_action": "enter",
+                "final_direction": "short",
+            },
+            decision_context=None,
+            baseline_assessment=None,
+            ai_assessment=None,
+            position_target={
+                "position_intent": "reduce_long",
+                "target_exposure_side": "long",
+                "family_execution_summary": {
+                    "summary_mode": "single_leg",
+                    "family": "protective",
+                    "route_action": "override_target",
+                    "family_action": "protect",
+                    "leg_count": 1,
+                    "position_intents": ["open_short"],
+                    "directions": ["short"],
+                    "leg_actions": ["open"],
+                    "execution_modes": ["protective_overlay"],
+                },
+            },
+            policy_decision=None,
+            risk_decision=None,
+        )
+
+        assert payload is not None
+        self.assertEqual(payload["final_action"], "enter")
+        self.assertEqual(payload["final_direction"], "short")
+        self.assertEqual(payload["family_execution_summary"]["position_intents"], ["open_short"])
+
+    def test_ai_decision_audit_prefers_native_outcome_over_target_fields(self) -> None:
+        query = OperatorQueryService.__new__(OperatorQueryService)
+        query.runtime = SimpleNamespace(settings=SimpleNamespace(ai_operating_mode="baseline_only"))
+
+        audit = query._ai_decision_audit(
+            audit=SimpleNamespace(
+                order_intent_refs=[],
+                order_state_refs=[],
+                fill_event_refs=[],
+                reconciliation_refs=[],
+                ai_shadow_decision_refs=[],
+                ai_shadow_evaluation_refs=[],
+            ),
+            decision_context=None,
+            ai_decision_brief=None,
+            baseline_assessment={"direction_bias": "long"},
+            ai_assessment=None,
+            position_target={
+                "position_intent": "reduce_long",
+                "target_exposure_side": "long",
+                "family_execution_summary": {
+                    "summary_mode": "multi_leg",
+                    "family": "independent",
+                    "route_action": "override_target",
+                    "family_action": "open_independent_book",
+                    "leg_count": 2,
+                    "position_intents": ["open_long", "open_short"],
+                    "directions": ["long", "short"],
+                    "leg_actions": ["open"],
+                    "execution_modes": ["independent_long_book", "independent_short_book"],
+                },
+            },
+            finalized_decision_outcome={
+                "decision_source": "baseline",
+                "decision_authority": "reference_only",
+                "profile_control_source": "system",
+                "final_action": "enter",
+                "final_direction": "flat",
+                "family_execution_summary": {
+                    "summary_mode": "multi_leg",
+                    "family": "independent",
+                    "route_action": "override_target",
+                    "family_action": "open_independent_book",
+                    "leg_count": 2,
+                    "position_intents": ["open_long", "open_short"],
+                    "directions": ["long", "short"],
+                    "leg_actions": ["open"],
+                    "execution_modes": ["independent_long_book", "independent_short_book"],
+                },
+            },
+            strategy_execution_health=None,
+        )
+
+        assert audit is not None
+        self.assertEqual(audit["final_action"], "enter")
+        self.assertEqual(audit["final_direction"], "flat")
+        self.assertEqual(audit["family_execution_summary"]["position_intents"], ["open_long", "open_short"])
 
     def test_aggregate_local_positions_exposes_dual_leg_state(self) -> None:
         snapshot = PortfolioSnapshot(

@@ -1967,6 +1967,7 @@ class OperatorQueryService:
                 "strategy_reason_codes": list(target_payload.get("strategy_reason_codes") or []),
                 "strategy_headline": target_payload.get("strategy_headline"),
                 "strategy_execution_legs": list(target_payload.get("strategy_execution_legs") or []),
+                "family_execution_summary": target_payload.get("family_execution_summary"),
                 "hedge_overlay_decision": target_payload.get("hedge_overlay_decision"),
                 "event_timestamp": latest_target_event.event_timestamp,
             }
@@ -4082,7 +4083,10 @@ class OperatorQueryService:
         if all(item is None for item in (baseline_assessment, ai_assessment, position_target, policy_decision, risk_decision, finalized_decision_outcome)):
             return None
         if isinstance(finalized_decision_outcome, dict):
-            return finalized_decision_outcome
+            payload = dict(finalized_decision_outcome)
+            if payload.get("family_execution_summary") is None and isinstance(position_target, dict):
+                payload["family_execution_summary"] = position_target.get("family_execution_summary")
+            return payload
         native_outcome = None if position_target is None else position_target.get("decision_outcome")
         native_profile_control = None if position_target is None else position_target.get("profile_control_decision")
         if isinstance(native_outcome, dict):
@@ -4133,6 +4137,8 @@ class OperatorQueryService:
                     if code in list(payload.get("position_management_reason_codes") or []):
                         payload["exit_attribution"] = code
                         break
+            if payload.get("family_execution_summary") is None:
+                payload["family_execution_summary"] = None if position_target is None else position_target.get("family_execution_summary")
             return payload
         mode_value = (
             None if ai_assessment is None else ai_assessment.get("operating_mode")
@@ -4232,6 +4238,7 @@ class OperatorQueryService:
             selected_strategy_route_action=str((position_target or {}).get("strategy_route_action") or "override_target"),
             strategy_selection_reason_codes=list((position_target or {}).get("strategy_reason_codes") or []),
             strategy_selection_headline=(position_target or {}).get("strategy_headline"),
+            family_execution_summary=None if position_target is None else position_target.get("family_execution_summary"),
             active_profile_id=activation.get("active_profile_id"),
             profile_control_source="system" if activation.get("active_profile_id") else "env_default",
             ai_fallback_used=bool((ai_assessment or {}).get("fallback_used")),
@@ -4261,6 +4268,13 @@ class OperatorQueryService:
         native_outcome = finalized_decision_outcome
         if not isinstance(native_outcome, dict):
             native_outcome = None if position_target is None else position_target.get("decision_outcome")
+        family_execution_summary = (
+            None
+            if native_outcome is None
+            else native_outcome.get("family_execution_summary")
+        )
+        if family_execution_summary is None and position_target is not None:
+            family_execution_summary = position_target.get("family_execution_summary")
         return {
             "configured_mode": self.runtime.settings.ai_operating_mode,
             "assessment_operating_mode": None if ai_assessment is None else ai_assessment.get("operating_mode"),
@@ -4270,7 +4284,19 @@ class OperatorQueryService:
             "degraded": None if ai_assessment is None else ai_assessment.get("degraded"),
             "baseline_direction": None if baseline_assessment is None else baseline_assessment.get("direction_bias"),
             "ai_direction": self._direction_from_edge(None if ai_assessment is None else ai_assessment.get("directional_edge")),
-            "final_direction": None if position_target is None else position_target.get("target_exposure_side"),
+            "final_direction": (
+                None
+                if native_outcome is None
+                else native_outcome.get("final_direction")
+            ) or (None if position_target is None else position_target.get("target_exposure_side")),
+            "final_action": (
+                None
+                if native_outcome is None
+                else native_outcome.get("final_action")
+            ) or self._abstract_action_from_position_intent(
+                None if position_target is None else position_target.get("position_intent")
+            ),
+            "family_execution_summary": family_execution_summary,
             "decision_source": None if not isinstance(native_outcome, dict) else native_outcome.get("decision_source"),
             "decision_authority": None if not isinstance(native_outcome, dict) else native_outcome.get("decision_authority"),
             "profile_control_source": None if not isinstance(native_outcome, dict) else native_outcome.get("profile_control_source"),
@@ -4480,6 +4506,7 @@ class OperatorQueryService:
                         if target
                         else None
                     ),
+                    "family_execution_summary": target.get("family_execution_summary") if target else None,
                     "strategy_reason_codes": [] if target is None else list(target.get("strategy_reason_codes") or []),
                     "guardrail_flags": target.get("guardrail_flags") if target else [],
                     "expected_net_edge_bps": target.get("expected_net_edge_bps") if target else None,

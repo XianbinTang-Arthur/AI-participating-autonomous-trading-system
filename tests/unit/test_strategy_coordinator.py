@@ -2857,11 +2857,17 @@ class TestStrategyCoordinator(unittest.TestCase):
         self.assertEqual(applied.position_intent, "open_short")
         self.assertTrue(applied.strategy_execution_legs)
         self.assertEqual(applied.strategy_execution_legs[0].family, "protective")
+        self.assertIsNotNone(applied.family_execution_summary)
+        self.assertEqual(applied.family_execution_summary.summary_mode, "single_leg")
+        self.assertEqual(applied.family_execution_summary.position_intents, ["open_short"])
+        self.assertEqual(applied.family_execution_summary.directions, ["short"])
         assert applied.decision_outcome is not None
         self.assertEqual(applied.decision_outcome.selected_strategy_family, "protective")
         self.assertEqual(applied.decision_outcome.selected_strategy_family_action, "protect")
         self.assertEqual(applied.decision_outcome.final_action, "enter")
         self.assertEqual(applied.decision_outcome.final_direction, "short")
+        self.assertIsNotNone(applied.decision_outcome.family_execution_summary)
+        self.assertEqual(applied.decision_outcome.family_execution_summary.position_intents, ["open_short"])
 
     def test_opportunistic_family_cutover_selects_opportunistic_and_updates_top_level_semantics(self) -> None:
         settings = AATSSettings.model_validate(
@@ -2940,11 +2946,17 @@ class TestStrategyCoordinator(unittest.TestCase):
         self.assertEqual(applied.position_intent, "open_short")
         self.assertTrue(applied.strategy_execution_legs)
         self.assertEqual(applied.strategy_execution_legs[0].family, "opportunistic")
+        self.assertIsNotNone(applied.family_execution_summary)
+        self.assertEqual(applied.family_execution_summary.summary_mode, "single_leg")
+        self.assertEqual(applied.family_execution_summary.position_intents, ["open_short"])
+        self.assertEqual(applied.family_execution_summary.directions, ["short"])
         assert applied.decision_outcome is not None
         self.assertEqual(applied.decision_outcome.selected_strategy_family, "opportunistic")
         self.assertEqual(applied.decision_outcome.selected_strategy_family_action, "open_opportunity_leg")
         self.assertEqual(applied.decision_outcome.final_action, "enter")
         self.assertEqual(applied.decision_outcome.final_direction, "short")
+        self.assertIsNotNone(applied.decision_outcome.family_execution_summary)
+        self.assertEqual(applied.decision_outcome.family_execution_summary.position_intents, ["open_short"])
 
     def test_independent_family_engine_emits_real_business_candidate_when_enabled(self) -> None:
         settings = AATSSettings.model_validate(
@@ -3123,10 +3135,67 @@ class TestStrategyCoordinator(unittest.TestCase):
         self.assertEqual(applied.position_intent, "open_long")
         self.assertTrue(applied.strategy_execution_legs)
         self.assertEqual(applied.strategy_execution_legs[0].family, "independent")
+        self.assertIsNotNone(applied.family_execution_summary)
+        self.assertEqual(applied.family_execution_summary.summary_mode, "single_leg")
+        self.assertEqual(applied.family_execution_summary.position_intents, ["open_long"])
+        self.assertEqual(applied.family_execution_summary.directions, ["long"])
         assert applied.decision_outcome is not None
         self.assertEqual(applied.decision_outcome.selected_strategy_family, "independent")
         self.assertEqual(applied.decision_outcome.selected_strategy_family_action, "open_independent_book")
         self.assertEqual(applied.decision_outcome.final_action, "enter")
+        self.assertIsNotNone(applied.decision_outcome.family_execution_summary)
+        self.assertEqual(applied.decision_outcome.family_execution_summary.position_intents, ["open_long"])
+
+    def test_family_execution_summary_preserves_multi_leg_cutover_without_forcing_single_intent(self) -> None:
+        summary = StrategyCoordinatorService._family_execution_summary(
+            selected_family="independent",
+            family_action="open_independent_book",
+            route_action="override_target",
+            strategy_execution_legs=[
+                StrategyLegIntent(
+                    symbol="BTC-USDT-SWAP",
+                    product_type="derivatives",
+                    side="buy",
+                    position_mode="long_short_mode",
+                    pos_side="long",
+                    action="open",
+                    family="independent",
+                    role="primary",
+                    strategy_sleeve_id="independent_long",
+                    allocation_id="alloc_independent",
+                    margin_mode="cross",
+                    current_position_qty=Decimal("0"),
+                    target_position_qty=Decimal("0.01"),
+                    delta_position_qty=Decimal("0.01"),
+                    execution_mode="independent_long_book",
+                ),
+                StrategyLegIntent(
+                    symbol="BTC-USDT-SWAP",
+                    product_type="derivatives",
+                    side="sell",
+                    position_mode="long_short_mode",
+                    pos_side="short",
+                    action="open",
+                    family="independent",
+                    role="primary",
+                    strategy_sleeve_id="independent_short",
+                    allocation_id="alloc_independent",
+                    margin_mode="cross",
+                    current_position_qty=Decimal("0"),
+                    target_position_qty=Decimal("-0.01"),
+                    delta_position_qty=Decimal("-0.01"),
+                    execution_mode="independent_short_book",
+                ),
+            ],
+        )
+
+        assert summary is not None
+        self.assertEqual(summary.summary_mode, "multi_leg")
+        self.assertEqual(summary.leg_count, 2)
+        self.assertEqual(summary.position_intents, ["open_long", "open_short"])
+        self.assertEqual(summary.directions, ["long", "short"])
+        self.assertEqual(summary.leg_actions, ["open"])
+        self.assertEqual(summary.execution_modes, ["independent_long_book", "independent_short_book"])
 
 
 if __name__ == "__main__":

@@ -22,8 +22,8 @@ After making code changes, run:
 1. lint
 2. unit tests
 3. the narrowest integration test affected by the change
-4. The project runtime environment is: .\.venv\Scripts\python.exe
-5. The database connection settings used by the project are located in the file: .\.env.derivatives.live, on line 19
+4. The project runtime environment is: .venv\Scripts\python.exe
+5. The database connection settings used by the project are located in the file: .env.derivatives.live, on line 19
 
 If any command fails, explain the failure clearly. Do not claim success without running the command.
 

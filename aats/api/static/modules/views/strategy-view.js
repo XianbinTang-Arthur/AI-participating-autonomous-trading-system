@@ -1,7 +1,14 @@
 ﻿import { actionButton, callout, kvList, pill, responsiveTable, statGrid, summaryStrip, surfaceCard } from "../components.js";
 import { localizeList, summarizeLocalizedList } from "../copy.js";
 import { escapeHtml, formatDuration, formatMaybeTimestamp, formatNumber, formatRelativeAge, formatSigned, middleEllipsis } from "../formatters.js";
-import { localizeError, readableState } from "../terms.js";
+import {
+  hasFamilyExecutionSummary,
+  localizeError,
+  readableFamilyExecutionDirection,
+  readableFamilyExecutionMeta,
+  readableFamilyExecutionSummary,
+  readableState,
+} from "../terms.js";
 import { decisionTableHeaders, inferTradeScene } from "../trade-display.js";
 
 export function renderStrategySections(data) {
@@ -212,7 +219,7 @@ export function renderStrategySections(data) {
           [
             "最近 Bundle / 已应用目标",
             `${readableState(latestBundle.status || strategyRuntimeSummary.latest_bundle_status || "unknown")} / ${formatSigned(strategyAppliedTarget.target_position_qty)}`,
-            `${formatNumber(recentBundles[0]?.legs?.length ?? latestBundle.legs?.length ?? 0, 0, "0")} 条腿 | ${readableState(strategyAppliedTarget.position_intent || "hold")}`,
+            `${formatNumber(recentBundles[0]?.legs?.length ?? latestBundle.legs?.length ?? 0, 0, "0")} 条腿 | ${readableFamilyExecutionSummary(strategyAppliedTarget, "保持当前仓位")}`,
           ],
         ])}
         ${renderStrategyCandidateTable(displayedStrategyCandidates, smartArbitrageConfig, { policy, risk })}
@@ -720,7 +727,7 @@ function renderDirectionalShortConfigCard(config = {}, latestDecision = {}, deci
           config?.short_reversal_alpha_min,
           config?.short_reversal_confidence_min
         ),
-        meta: `当前执行 ${escapeHtml(readableState(target?.position_intent || "hold"))}`,
+        meta: `当前执行 ${escapeHtml(readableFamilyExecutionSummary(target, "保持当前仓位"))}`,
         tone: shortBiasEnabled ? "info" : "warning",
       }
       : {
@@ -2314,7 +2321,7 @@ function readableIntent(detail) {
   if (rawIntent === "hold" && currentQty === 0 && targetQty === 0 && openOrders.length === 0) {
     return "继续观望";
   }
-  return readableState(rawIntent);
+  return readableFamilyExecutionSummary(target, readableState(rawIntent));
 }
 
 function readableRecentIntent(item) {
@@ -2324,7 +2331,7 @@ function readableRecentIntent(item) {
   if (rawIntent === "hold" && currentQty === 0 && targetQty === 0) {
     return "继续观望";
   }
-  return readableState(rawIntent);
+  return readableFamilyExecutionSummary(item, readableState(rawIntent));
 }
 
 function inferDecisionScene(latestDecision, recentDecisions) {
@@ -3158,6 +3165,9 @@ function numberMeta(label, value, fallback) {
 }
 
 function isHoldIntent(target = {}) {
+  if (hasFamilyExecutionSummary(target)) {
+    return false;
+  }
   return String(target.position_intent || target.route_action || "").trim().toLowerCase() === "hold";
 }
 
@@ -3183,8 +3193,8 @@ function targetDirectionLabel(target = {}, decisionScene) {
   if (isHoldIntent(target)) {
     return decisionScene === "derivatives" ? "保持当前净仓位" : "保持当前持仓";
   }
-  return readableState(
-    target.target_exposure_side || target.position_intent,
+  return readableFamilyExecutionDirection(
+    target,
     decisionScene === "derivatives" ? "当前没有新的方向调整" : "当前没有新的持仓方向调整",
   );
 }
@@ -3201,10 +3211,10 @@ function targetPositionValue(target = {}, decisionScene) {
 }
 
 function targetPlanMeta(target = {}, decisionScene) {
-  return `${readableState(target.position_intent || "hold")} | ${
+  return `${readableFamilyExecutionSummary(target, "保持当前仓位")} | ${
     decisionScene === "derivatives"
       ? numberMeta("目标杠杆", target.target_leverage, "当前没有目标杠杆")
-      : optionalState(target.target_exposure_side, "当前没有方向补充说明")
+      : readableFamilyExecutionMeta(target, "当前没有方向补充说明")
   }`;
 }
 
