@@ -8,6 +8,9 @@ from aats.schemas.decision import PositionTarget
 from aats.services.strategy_engines.base import StrategyEvaluationContext, StrategyFamilyRuntimeControl
 from aats.services.strategy_engines.families.independent_family import (
     IndependentBookExpectancy,
+    IndependentFamilyEvaluation,
+    IndependentBookEvaluation,
+    _independent_family_action,
     evaluate_independent_books,
     independent_candidate_from_directional_target,
 )
@@ -639,6 +642,39 @@ class TestIndependentFamily(unittest.TestCase):
             candidate.book_expectancy_summary.books[1].expected_net_edge_bps,
             candidate.metrics["short_expected_net_edge_bps"],
         )
+
+    def test_independent_family_action_reports_mixed_rebalance_when_opening_and_closing_coexist(self) -> None:
+        result = IndependentFamilyEvaluation(
+            final_target_qty=Decimal("0"),
+            legs=[],
+            overlay_decision=None,  # type: ignore[arg-type]
+            long_book=IndependentBookEvaluation(
+                leg="long",
+                expectancy=_expectancy_resolver(leg="long"),
+                score=0.72,
+                current_qty=Decimal("0.01"),
+                target_qty=Decimal("0"),
+                state="closing",
+                reason_codes=[],
+                blocked_reasons=[],
+                min_hold_remaining_seconds=0.0,
+                rebalance_cooldown_remaining_seconds=0.0,
+            ),
+            short_book=IndependentBookEvaluation(
+                leg="short",
+                expectancy=_expectancy_resolver(leg="short"),
+                score=0.78,
+                current_qty=Decimal("0"),
+                target_qty=Decimal("0.01"),
+                state="opening",
+                reason_codes=[],
+                blocked_reasons=[],
+                min_hold_remaining_seconds=0.0,
+                rebalance_cooldown_remaining_seconds=0.0,
+            ),
+        )
+
+        self.assertEqual(_independent_family_action(result=result), "rebalance_independent_books")
 
 
 if __name__ == "__main__":

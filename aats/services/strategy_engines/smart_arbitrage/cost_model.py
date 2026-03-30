@@ -5,7 +5,6 @@ from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from typing import Any
 
 from aats.bootstrap.settings import AATSSettings
-from aats.schemas.common import utc_now
 from aats.services.fee_resolver import EffectiveFeeResolver
 from aats.services.portfolio_service.decimals import to_decimal
 from aats.services.strategy_engines.smart_arbitrage.schemas import ArbitrageCostBreakdown
@@ -18,6 +17,7 @@ def build_cost_breakdown(
     settings: AATSSettings,
     basis_bps: Decimal,
     execution_mode: str | None,
+    reference_ts: datetime,
     spot_symbol: str | None = None,
     hedge_symbol: str | None = None,
     account_service: Any | None = None,
@@ -102,7 +102,6 @@ def build_cost_breakdown(
     if time_decay_cost_bps > Decimal("0"):
         source_flags.append("time_decay_configured")
 
-    funding_reference_ts = _funding_reference_ts(account_service=account_service)
     funding_schedule = _funding_schedule(
         account_service=account_service,
         hedge_symbol=hedge_symbol,
@@ -110,7 +109,7 @@ def build_cost_breakdown(
     expected_funding_events, funding_event_projection_active, funding_schedule_source_flag = _expected_funding_events(
         settings=settings,
         expected_hold_hours=expected_hold_hours,
-        reference_ts=funding_reference_ts,
+        reference_ts=reference_ts,
         funding_schedule=funding_schedule,
     )
     if funding_schedule_source_flag is not None:
@@ -288,13 +287,13 @@ def _expected_funding_events(
     *,
     settings: AATSSettings,
     expected_hold_hours: Decimal,
-    reference_ts: datetime | None,
+    reference_ts: datetime,
     funding_schedule: dict[str, Any] | None,
 ) -> tuple[int, bool, str | None]:
     explicit_events = max(int(settings.smart_arbitrage_expected_funding_events or 0), 0)
     if explicit_events > 0:
         return explicit_events, False, "funding_events_explicit_override"
-    normalized_reference_ts = _normalize_reference_ts(reference_ts or utc_now())
+    normalized_reference_ts = _normalize_reference_ts(reference_ts)
     if expected_hold_hours <= Decimal("0"):
         return 0, False, None
     if funding_schedule:
@@ -322,16 +321,6 @@ def _expected_funding_events(
         interval_hours=interval_hours,
     )
     return count, projection_active, "funding_schedule_projected_from_config"
-
-
-def _funding_reference_ts(*, account_service: Any | None) -> datetime:
-    getter = getattr(account_service, "latest_snapshot", None)
-    if callable(getter):
-        snapshot = getter()
-        fetched_at = getattr(snapshot, "fetched_at", None)
-        if isinstance(fetched_at, datetime):
-            return _normalize_reference_ts(fetched_at)
-    return utc_now()
 
 
 def _normalize_reference_ts(timestamp: datetime) -> datetime:

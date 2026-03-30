@@ -4,6 +4,7 @@ from decimal import Decimal
 
 from aats.bootstrap.settings import AATSSettings
 from aats.schemas.exchange import ExchangeAccountSnapshot
+from aats.schemas.market import MarketSnapshot
 from aats.schemas.strategy_runtime import StrategyCandidate
 from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, to_decimal
 from aats.services.strategy_engines.base import StrategyEngineInput
@@ -11,7 +12,6 @@ from aats.services.strategy_engines.smart_arbitrage.capabilities import resolve_
 from aats.services.strategy_engines.smart_arbitrage.cost_model import build_cost_breakdown
 from aats.services.strategy_engines.smart_arbitrage.discovery import basis_bps, load_market_pair
 from aats.services.strategy_engines.smart_arbitrage.leg_planner import build_legs
-from aats.services.strategy_engines.smart_arbitrage.pair_registry import load_pair_definitions
 from aats.services.strategy_engines.smart_arbitrage.schemas import ArbitrageOpportunity
 from aats.services.strategy_engines.smart_arbitrage.sizer import entry_pair_qty
 from aats.services.strategy_engines.smart_arbitrage.state_machine import resolve_pair_state
@@ -61,10 +61,7 @@ class SmartArbitrageStrategyEngine:
                 state_phase="inactive",
             )
 
-        pair_definitions = load_pair_definitions(
-            settings=self.settings,
-            primary_symbol=engine_input.context.symbol,
-        )
+        pair_definitions = tuple(engine_input.resolved_pair_definitions_by_family.get("smart_arbitrage", ()))
         if not pair_definitions:
             return StrategyCandidate(
                 family="smart_arbitrage",
@@ -73,7 +70,7 @@ class SmartArbitrageStrategyEngine:
                 selectable=False,
                 execution_compatible=False,
                 route_action="advisory_only",
-                headline="Spot and derivatives companion symbols are not configured.",
+                headline="Spot and derivatives companion symbols are not configured in the family input contract.",
                 reason_codes=["smart_arbitrage_symbol_pair_missing"],
                 state_phase="inactive",
             )
@@ -118,10 +115,27 @@ class SmartArbitrageStrategyEngine:
         }
         return selected
 
-    def _evaluate_pair(self, *, pair, engine_input: StrategyEngineInput) -> StrategyCandidate:
-        spot_snapshot, hedge_snapshot = load_market_pair(
+    def _load_market_pair(
+        self,
+        *,
+        pair,
+        engine_input: StrategyEngineInput,
+    ) -> tuple[MarketSnapshot | None, MarketSnapshot | None]:
+        family_market_snapshots = engine_input.latest_market_snapshots_by_symbol
+        if family_market_snapshots:
+            return (
+                family_market_snapshots.get(pair.spot_symbol),
+                family_market_snapshots.get(pair.hedge_symbol),
+            )
+        return load_market_pair(
             pair=pair,
             market_snapshot_loader=self.market_snapshot_loader,
+        )
+
+    def _evaluate_pair(self, *, pair, engine_input: StrategyEngineInput) -> StrategyCandidate:
+        spot_snapshot, hedge_snapshot = self._load_market_pair(
+            pair=pair,
+            engine_input=engine_input,
         )
         if spot_snapshot is None or hedge_snapshot is None:
             return StrategyCandidate(
@@ -254,6 +268,7 @@ class SmartArbitrageStrategyEngine:
                 pair_state=pair_state,
                 capability=capability,
                 spot_price=spot_price,
+                reference_ts=engine_input.context.as_of_ts,
             )
         return self._candidate_from_opportunity(
             pair=pair,
@@ -280,6 +295,7 @@ class SmartArbitrageStrategyEngine:
         pair_state,
         capability,
         spot_price: Decimal,
+        reference_ts,
     ) -> ArbitrageOpportunity:
         positive_basis_active = pair_basis_bps >= entry_threshold
         negative_basis_active = pair_basis_bps <= -entry_threshold
@@ -288,6 +304,7 @@ class SmartArbitrageStrategyEngine:
                 settings=self.settings,
                 basis_bps=pair_basis_bps,
                 execution_mode=None,
+                reference_ts=reference_ts,
                 spot_symbol=pair.spot_symbol,
                 hedge_symbol=pair.hedge_symbol,
                 account_service=self.account_service,
@@ -384,6 +401,7 @@ class SmartArbitrageStrategyEngine:
                     entry_threshold=entry_threshold,
                     exit_threshold=exit_threshold,
                     execution_mode=execution_mode,
+                    reference_ts=reference_ts,
                     direction="positive_basis",
                     reason_code="smart_arbitrage_spot_carry_not_allowed",
                 )
@@ -409,6 +427,7 @@ class SmartArbitrageStrategyEngine:
                 exit_threshold=exit_threshold,
                 capability=capability,
                 spot_price=spot_price,
+                reference_ts=reference_ts,
             )
         else:
             observation_mode = (
@@ -426,6 +445,7 @@ class SmartArbitrageStrategyEngine:
                 settings=self.settings,
                 basis_bps=pair_basis_bps,
                 execution_mode=observation_mode,
+                reference_ts=reference_ts,
                 spot_symbol=pair.spot_symbol,
                 hedge_symbol=pair.hedge_symbol,
                 account_service=self.account_service,
@@ -449,6 +469,7 @@ class SmartArbitrageStrategyEngine:
             settings=self.settings,
             basis_bps=pair_basis_bps,
             execution_mode=execution_mode,
+            reference_ts=reference_ts,
             spot_symbol=pair.spot_symbol,
             hedge_symbol=pair.hedge_symbol,
             account_service=self.account_service,
@@ -496,6 +517,7 @@ class SmartArbitrageStrategyEngine:
         exit_threshold: Decimal,
         capability,
         spot_price: Decimal,
+        reference_ts,
     ) -> ArbitrageOpportunity:
         requested_mode = self.settings.smart_arbitrage_negative_basis_mode
         if requested_mode in {"disabled", "advisory_only"}:
@@ -518,6 +540,7 @@ class SmartArbitrageStrategyEngine:
                     entry_threshold=entry_threshold,
                     exit_threshold=exit_threshold,
                     execution_mode=execution_mode,
+                    reference_ts=reference_ts,
                     direction="negative_basis",
                     reason_code="smart_arbitrage_inventory_reverse_carry_not_allowed",
                 )
@@ -559,6 +582,7 @@ class SmartArbitrageStrategyEngine:
                     entry_threshold=entry_threshold,
                     exit_threshold=exit_threshold,
                     execution_mode=execution_mode,
+                    reference_ts=reference_ts,
                     direction="negative_basis",
                     reason_code="smart_arbitrage_margin_reverse_carry_not_allowed",
                 )
@@ -597,6 +621,7 @@ class SmartArbitrageStrategyEngine:
             settings=self.settings,
             basis_bps=pair_basis_bps,
             execution_mode=execution_mode,
+            reference_ts=reference_ts,
             spot_symbol=pair.spot_symbol,
             hedge_symbol=pair.hedge_symbol,
             account_service=self.account_service,
@@ -857,6 +882,7 @@ class SmartArbitrageStrategyEngine:
         entry_threshold: Decimal,
         exit_threshold: Decimal,
         execution_mode: str,
+        reference_ts,
         direction: str,
         reason_code: str,
     ) -> ArbitrageOpportunity:
@@ -864,6 +890,7 @@ class SmartArbitrageStrategyEngine:
             settings=self.settings,
             basis_bps=pair_basis_bps,
             execution_mode=execution_mode,
+            reference_ts=reference_ts,
             spot_symbol=pair.spot_symbol,
             hedge_symbol=pair.hedge_symbol,
             account_service=self.account_service,

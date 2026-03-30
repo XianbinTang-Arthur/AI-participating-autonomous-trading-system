@@ -37,5 +37,13 @@ class ExistingCandidateFamilyAdapter:
             recent_market_snapshots=context.recent_market_snapshots,
             recent_targets_by_family=context.recent_targets_by_family,
             ai_assessment=context.ai_assessment,
+            latest_snapshots_by_family=context.latest_snapshots_by_family,
+            latest_account_snapshots_by_family=context.latest_account_snapshots_by_family,
+            resolved_pair_definitions_by_family=context.resolved_pair_definitions_by_family,
+            latest_market_snapshots_by_symbol=context.latest_market_snapshots_by_symbol,
+            latest_market_snapshots_by_symbol_by_family=context.latest_market_snapshots_by_symbol_by_family,
+            latest_market_snapshots_by_family=context.latest_market_snapshots_by_family,
+            recent_market_snapshot_windows_by_family=context.recent_market_snapshot_windows_by_family,
+            market_history_requests_by_family=context.market_history_requests_by_family,
         )
         return [self._evaluator(engine_input)]

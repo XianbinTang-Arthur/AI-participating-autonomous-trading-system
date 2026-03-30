@@ -29,6 +29,7 @@ StrategyFamilyAction = Literal[
     "close_opportunity_leg",
     "open_independent_book",
     "scale_independent_book",
+    "rebalance_independent_books",
     "close_independent_book",
 ]
 StrategyCandidateState = Literal[

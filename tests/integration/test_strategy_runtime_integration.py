@@ -1208,7 +1208,7 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
             trade_cost_derivatives_slippage_bps=0.0,
         )
         frozen_now = datetime(2026, 3, 27, 9, 0, tzinfo=timezone.utc)
-        with patch("aats.services.strategy_engines.smart_arbitrage.cost_model.utc_now", return_value=frozen_now):
+        with patch("aats.services.decision_engine.context_builder.utc_now", return_value=frozen_now):
             runtime = await build_runtime(settings)
             await runtime.market_gateway.run_local_publisher(
                 symbol="BTC-USDT",
@@ -1259,7 +1259,7 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
             trade_cost_derivatives_slippage_bps=0.0,
         )
         frozen_now = datetime(2026, 3, 27, 9, 0, tzinfo=timezone.utc)
-        with patch("aats.services.strategy_engines.smart_arbitrage.cost_model.utc_now", return_value=frozen_now):
+        with patch("aats.services.decision_engine.context_builder.utc_now", return_value=frozen_now):
             runtime = await build_runtime(settings)
             runtime.account_service.funding_schedule = lambda symbol=None: {  # type: ignore[attr-defined]
                 "available": symbol == "BTC-USDT-SWAP",

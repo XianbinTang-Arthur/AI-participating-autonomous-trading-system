@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
 
 from aats.bootstrap.settings import AATSSettings
+from aats.services.strategy_engines.smart_arbitrage.engine import SmartArbitrageStrategyEngine
 from aats.services.strategy_engines.smart_arbitrage.capabilities import resolve_execution_capability
 from aats.services.strategy_engines.smart_arbitrage.cost_model import build_cost_breakdown
 from aats.services.strategy_engines.smart_arbitrage.leg_planner import build_legs
@@ -15,6 +16,29 @@ from aats.services.strategy_engines.smart_arbitrage.state_machine import resolve
 
 
 class TestSmartArbitrageV2Components(unittest.TestCase):
+    def test_engine_prefers_family_specific_market_snapshot_bundle_over_loader(self) -> None:
+        settings = AATSSettings.model_validate({"smart_arbitrage_enabled": True})
+        engine = SmartArbitrageStrategyEngine(
+            settings=settings,
+            market_snapshot_loader=lambda symbol: (_ for _ in ()).throw(AssertionError(symbol)),
+        )
+        pair = ArbitragePairDefinition(pair_id="btc_pair", spot_symbol="BTC-USDT", hedge_symbol="BTC-USDT-SWAP")
+        spot_snapshot = object()
+        hedge_snapshot = object()
+
+        loaded_spot, loaded_hedge = engine._load_market_pair(
+            pair=pair,
+            engine_input=SimpleNamespace(
+                latest_market_snapshots_by_symbol={
+                    "BTC-USDT": spot_snapshot,
+                    "BTC-USDT-SWAP": hedge_snapshot,
+                }
+            ),
+        )
+
+        self.assertIs(loaded_spot, spot_snapshot)
+        self.assertIs(loaded_hedge, hedge_snapshot)
+
     def test_pair_registry_loads_configured_pairs_alongside_primary_fallback(self) -> None:
         settings = AATSSettings.model_validate(
             {
@@ -130,6 +154,7 @@ class TestSmartArbitrageV2Components(unittest.TestCase):
             settings=settings,
             basis_bps=Decimal("-40"),
             execution_mode="margin_reverse_carry",
+            reference_ts=datetime(2026, 3, 27, 8, 0, tzinfo=timezone.utc),
         )
 
         self.assertEqual(cost.ideal_open_fee_bps, Decimal("1"))
@@ -178,12 +203,12 @@ class TestSmartArbitrageV2Components(unittest.TestCase):
         )
 
         frozen_now = datetime(2026, 3, 27, 6, 30, tzinfo=timezone.utc)
-        with patch("aats.services.strategy_engines.smart_arbitrage.cost_model.utc_now", return_value=frozen_now):
-            cost = build_cost_breakdown(
-                settings=settings,
-                basis_bps=Decimal("-100"),
-                execution_mode="margin_reverse_carry",
-            )
+        cost = build_cost_breakdown(
+            settings=settings,
+            basis_bps=Decimal("-100"),
+            execution_mode="margin_reverse_carry",
+            reference_ts=frozen_now,
+        )
 
         self.assertEqual(cost.expected_funding_events, 2)
         self.assertEqual(cost.funding_cost_bps, Decimal("3.0"))
@@ -217,12 +242,12 @@ class TestSmartArbitrageV2Components(unittest.TestCase):
         )
 
         frozen_now = datetime(2026, 3, 27, 9, 0, tzinfo=timezone.utc)
-        with patch("aats.services.strategy_engines.smart_arbitrage.cost_model.utc_now", return_value=frozen_now):
-            cost = build_cost_breakdown(
-                settings=settings,
-                basis_bps=Decimal("40"),
-                execution_mode="spot_carry",
-            )
+        cost = build_cost_breakdown(
+            settings=settings,
+            basis_bps=Decimal("40"),
+            execution_mode="spot_carry",
+            reference_ts=frozen_now,
+        )
 
         self.assertEqual(cost.expected_funding_events, 0)
         self.assertEqual(cost.funding_cost_bps, Decimal("0"))
@@ -263,14 +288,14 @@ class TestSmartArbitrageV2Components(unittest.TestCase):
                 return Decimal("1.25") if symbol == "BTC-USDT-SWAP" else Decimal("0")
 
         frozen_now = datetime(2026, 3, 27, 8, 0, tzinfo=timezone.utc)
-        with patch("aats.services.strategy_engines.smart_arbitrage.cost_model.utc_now", return_value=frozen_now):
-            cost = build_cost_breakdown(
-                settings=settings,
-                basis_bps=Decimal("40"),
-                execution_mode="spot_carry",
-                hedge_symbol="BTC-USDT-SWAP",
-                account_service=_AccountProxy(),
-            )
+        cost = build_cost_breakdown(
+            settings=settings,
+            basis_bps=Decimal("40"),
+            execution_mode="spot_carry",
+            reference_ts=frozen_now,
+            hedge_symbol="BTC-USDT-SWAP",
+            account_service=_AccountProxy(),
+        )
 
         self.assertEqual(cost.expected_funding_events, 2)
         self.assertEqual(cost.funding_cost_bps, Decimal("2.5"))
@@ -305,14 +330,14 @@ class TestSmartArbitrageV2Components(unittest.TestCase):
                 return Decimal("2.5") if symbol == "BTC-USDT-SWAP" else Decimal("0")
 
         frozen_now = datetime(2026, 3, 27, 8, 0, tzinfo=timezone.utc)
-        with patch("aats.services.strategy_engines.smart_arbitrage.cost_model.utc_now", return_value=frozen_now):
-            cost = build_cost_breakdown(
-                settings=settings,
-                basis_bps=Decimal("40"),
-                execution_mode="spot_carry",
-                hedge_symbol="BTC-USDT-SWAP",
-                account_service=_AccountProxy(),
-            )
+        cost = build_cost_breakdown(
+            settings=settings,
+            basis_bps=Decimal("40"),
+            execution_mode="spot_carry",
+            reference_ts=frozen_now,
+            hedge_symbol="BTC-USDT-SWAP",
+            account_service=_AccountProxy(),
+        )
 
         self.assertEqual(cost.expected_funding_events, 2)
         self.assertEqual(cost.funding_cost_bps, Decimal("2.5"))
@@ -356,14 +381,14 @@ class TestSmartArbitrageV2Components(unittest.TestCase):
                 }
 
         frozen_now = datetime(2026, 3, 27, 9, 0, tzinfo=timezone.utc)
-        with patch("aats.services.strategy_engines.smart_arbitrage.cost_model.utc_now", return_value=frozen_now):
-            cost = build_cost_breakdown(
-                settings=settings,
-                basis_bps=Decimal("40"),
-                execution_mode="spot_carry",
-                hedge_symbol="BTC-USDT-SWAP",
-                account_service=_AccountSchedule(),
-            )
+        cost = build_cost_breakdown(
+            settings=settings,
+            basis_bps=Decimal("40"),
+            execution_mode="spot_carry",
+            reference_ts=frozen_now,
+            hedge_symbol="BTC-USDT-SWAP",
+            account_service=_AccountSchedule(),
+        )
 
         self.assertEqual(cost.expected_funding_events, 1)
         self.assertEqual(cost.funding_cost_bps, Decimal("2.0"))
@@ -408,14 +433,14 @@ class TestSmartArbitrageV2Components(unittest.TestCase):
                 }
 
         frozen_now = datetime(2026, 3, 27, 9, 0, tzinfo=timezone.utc)
-        with patch("aats.services.strategy_engines.smart_arbitrage.cost_model.utc_now", return_value=frozen_now):
-            cost = build_cost_breakdown(
-                settings=settings,
-                basis_bps=Decimal("40"),
-                execution_mode="spot_carry",
-                hedge_symbol="BTC-USDT-SWAP",
-                account_service=_AccountSchedule(),
-            )
+        cost = build_cost_breakdown(
+            settings=settings,
+            basis_bps=Decimal("40"),
+            execution_mode="spot_carry",
+            reference_ts=frozen_now,
+            hedge_symbol="BTC-USDT-SWAP",
+            account_service=_AccountSchedule(),
+        )
 
         self.assertEqual(cost.expected_funding_events, 1)
         self.assertEqual(cost.funding_cost_bps, Decimal("2.0"))
@@ -437,6 +462,7 @@ class TestSmartArbitrageV2Components(unittest.TestCase):
             settings=settings,
             basis_bps=Decimal("-40"),
             execution_mode="margin_reverse_carry",
+            reference_ts=datetime(2026, 3, 27, 8, 0, tzinfo=timezone.utc),
         )
 
         self.assertEqual(cost.borrow_hour_windows, 8)

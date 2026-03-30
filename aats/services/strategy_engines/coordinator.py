@@ -16,6 +16,7 @@ from aats.schemas.decision import (
 )
 from aats.schemas.exchange import ExchangeAccountSnapshot
 from aats.schemas.market import MarketSnapshot
+from aats.schemas.portfolio import PortfolioSnapshot
 from aats.schemas.strategy_runtime import (
     PortfolioAllocationDecision,
     SleeveBudgetAssignment,
@@ -38,6 +39,7 @@ from aats.services.strategy_engines.base import (
     StrategyEngineInput,
     StrategyEvaluationContext,
     StrategyFamilyRuntimeControl,
+    StrategyMarketHistoryRequest,
     StrategyTargetHistory,
 )
 from aats.services.strategy_engines.dca import DcaStrategyEngine
@@ -49,12 +51,8 @@ from aats.services.strategy_engines.families import (
     ProtectiveFamilyEngine,
     StrategyFamilyRegistry,
 )
-from aats.services.strategy_engines.smart_arbitrage import (
-    SmartArbitrageStrategyEngine,
-    _derived_derivatives_symbol,
-    _derived_spot_symbol,
-    configured_market_symbols,
-)
+from aats.services.strategy_engines.smart_arbitrage import SmartArbitrageStrategyEngine
+from aats.services.strategy_engines.smart_arbitrage.pair_registry import load_pair_definitions
 from aats.services.strategy_engines.spot_grid import SpotGridStrategyEngine
 from aats.services.strategy_engines.sleeve_identity import (
     build_strategy_sleeve_id,
@@ -217,18 +215,59 @@ class StrategyCoordinatorService:
         ai_assessment: AIMarketAssessment | None = None,
     ) -> StrategyCoordinatorSnapshot:
         self.sleeve_inventory_service.reset()
+        resolved_pair_definitions_by_family = self._resolved_pair_definitions_by_family(
+            primary_symbol=context.symbol,
+        )
+        market_history_requests_by_family = self._market_history_requests(
+            primary_symbol=context.symbol,
+            resolved_pair_definitions_by_family=resolved_pair_definitions_by_family,
+        )
+        latest_snapshot = self._latest_portfolio_snapshot()
+        latest_account_snapshot = self._latest_account_snapshot()
+        latest_snapshots_by_family = self._latest_snapshots_by_family(
+            requests=market_history_requests_by_family,
+            latest_snapshot=latest_snapshot,
+        )
+        latest_account_snapshots_by_family = self._latest_account_snapshots_by_family(
+            requests=market_history_requests_by_family,
+            latest_account_snapshot=latest_account_snapshot,
+        )
+        latest_market_snapshots_by_symbol_by_family = self._latest_market_snapshots_by_symbol_by_family(
+            requests=market_history_requests_by_family,
+        )
+        latest_market_snapshots_by_family = self._latest_market_snapshots_by_family(
+            requests=market_history_requests_by_family,
+            latest_market_snapshots_by_symbol_by_family=latest_market_snapshots_by_symbol_by_family,
+        )
+        latest_market_snapshot = self._latest_market_snapshot(context.symbol)
+        recent_market_snapshot_windows_by_family = {
+            family: max(int(request.lookback_snapshots), 1)
+            for family, request in market_history_requests_by_family.items()
+        }
         engine_input = StrategyEngineInput(
             context=context,
             baseline=baseline,
             directional_target=directional_target,
-            latest_snapshot=latest_snapshot_for_scope(self.portfolio_repo, self.state_scope),
-            latest_account_snapshot=self._latest_account_snapshot(),
-            latest_market_snapshot=self._latest_market_snapshot(context.symbol),
+            latest_snapshot=latest_snapshot,
+            latest_account_snapshot=latest_account_snapshot,
+            latest_market_snapshot=latest_market_snapshot,
+            latest_snapshots_by_family=latest_snapshots_by_family,
+            latest_account_snapshots_by_family=latest_account_snapshots_by_family,
+            resolved_pair_definitions_by_family=resolved_pair_definitions_by_family,
+            latest_market_snapshots_by_symbol=(
+                {}
+                if latest_market_snapshot is None
+                else {latest_market_snapshot.symbol: latest_market_snapshot}
+            ),
+            latest_market_snapshots_by_symbol_by_family=latest_market_snapshots_by_symbol_by_family,
+            latest_market_snapshots_by_family=latest_market_snapshots_by_family,
             recent_market_snapshots=self._recent_market_snapshots(
-                symbols=self._recent_market_symbols(context.symbol),
+                requests=market_history_requests_by_family,
             ),
             recent_targets_by_family=self._recent_targets_by_family(symbol=context.symbol),
             ai_assessment=ai_assessment,
+            recent_market_snapshot_windows_by_family=recent_market_snapshot_windows_by_family,
+            market_history_requests_by_family=market_history_requests_by_family,
         )
         evaluation_context = StrategyEvaluationContext.from_engine_input(
             engine_input,
@@ -752,6 +791,118 @@ class StrategyCoordinatorService:
             return None
         return MarketSnapshot.model_validate(latest_event.payload)
 
+    def _latest_portfolio_snapshot(self) -> PortfolioSnapshot | None:
+        return latest_snapshot_for_scope(self.portfolio_repo, self.state_scope)
+
+    def _latest_snapshots_by_family(
+        self,
+        *,
+        requests: dict[StrategyFamily, StrategyMarketHistoryRequest],
+        latest_snapshot: PortfolioSnapshot | None,
+    ) -> dict[StrategyFamily, PortfolioSnapshot | None]:
+        return {
+            family: self._resolve_latest_portfolio_snapshot_request(
+                request,
+                latest_snapshot=latest_snapshot,
+            )
+            for family, request in requests.items()
+        }
+
+    @staticmethod
+    def _resolve_latest_portfolio_snapshot_request(
+        request: StrategyMarketHistoryRequest,
+        *,
+        latest_snapshot: PortfolioSnapshot | None,
+    ) -> PortfolioSnapshot | None:
+        if request.latest_portfolio_snapshot_source != "runtime_scope_latest":
+            return None
+        return latest_snapshot
+
+    def _latest_market_snapshots_by_symbol_by_family(
+        self,
+        *,
+        requests: dict[StrategyFamily, StrategyMarketHistoryRequest],
+    ) -> dict[StrategyFamily, dict[str, MarketSnapshot]]:
+        cache: dict[tuple[str, str | None, str], MarketSnapshot | None] = {}
+        results: dict[StrategyFamily, dict[str, MarketSnapshot]] = {}
+        for family, request in requests.items():
+            resolved: dict[str, MarketSnapshot] = {}
+            symbols = self._latest_market_snapshot_symbols_for_request(request)
+            for symbol in symbols:
+                cache_key = (request.latest_snapshot_source, request.latest_snapshot_topic, symbol)
+                if cache_key not in cache:
+                    cache[cache_key] = self._resolve_latest_market_snapshot_source(
+                        source=request.latest_snapshot_source,
+                        symbol=symbol,
+                        topic=request.latest_snapshot_topic,
+                    )
+                snapshot = cache[cache_key]
+                if snapshot is not None:
+                    resolved[symbol] = snapshot
+            results[family] = resolved
+        return results
+
+    def _latest_market_snapshots_by_family(
+        self,
+        *,
+        requests: dict[StrategyFamily, StrategyMarketHistoryRequest],
+        latest_market_snapshots_by_symbol_by_family: dict[StrategyFamily, dict[str, MarketSnapshot]],
+    ) -> dict[StrategyFamily, MarketSnapshot | None]:
+        return {
+            family: self._resolve_latest_market_snapshot_request(
+                request,
+                latest_market_snapshots_by_symbol=latest_market_snapshots_by_symbol_by_family.get(family, {}),
+            )
+            for family, request in requests.items()
+        }
+
+    def _resolve_latest_market_snapshot_request(
+        self,
+        request: StrategyMarketHistoryRequest,
+        *,
+        latest_market_snapshots_by_symbol: dict[str, MarketSnapshot],
+    ) -> MarketSnapshot | None:
+        symbol = str(request.latest_snapshot_symbol or "").strip()
+        if not symbol:
+            symbols = self._latest_market_snapshot_symbols_for_request(request)
+            if not symbols:
+                return None
+            symbol = symbols[0]
+        return latest_market_snapshots_by_symbol.get(symbol)
+
+    @staticmethod
+    def _latest_market_snapshot_symbols_for_request(
+        request: StrategyMarketHistoryRequest,
+    ) -> tuple[str, ...]:
+        configured_symbols = tuple(
+            symbol
+            for symbol in request.latest_snapshot_symbols
+            if str(symbol).strip()
+        )
+        if configured_symbols:
+            return configured_symbols
+        symbol = str(request.latest_snapshot_symbol or "").strip()
+        return () if not symbol else (symbol,)
+
+    def _resolve_latest_market_snapshot_source(
+        self,
+        *,
+        source: str,
+        symbol: str,
+        topic: str | None,
+    ) -> MarketSnapshot | None:
+        if source == "not_required":
+            return None
+        if source == "market_gateway_latest":
+            return self.market_gateway.latest_snapshot(symbol)
+        latest_event = None if topic is None else self.event_store.latest(topic, key=symbol)
+        if source == "event_store_latest":
+            return None if latest_event is None else MarketSnapshot.model_validate(latest_event.payload)
+        snapshot = self.market_gateway.latest_snapshot(symbol)
+        if snapshot is not None:
+            return snapshot
+        return None if latest_event is None else MarketSnapshot.model_validate(latest_event.payload)
+
     def _latest_account_snapshot(self) -> ExchangeAccountSnapshot | None:
         if self.account_service is None:
             return None
@@ -761,9 +912,51 @@ class StrategyCoordinatorService:
         snapshot = getter()
         return snapshot if isinstance(snapshot, ExchangeAccountSnapshot) else None
 
-    def _recent_market_snapshots(self, *, symbols: set[str]) -> dict[str, list[MarketSnapshot]]:
+    def _latest_account_snapshots_by_family(
+        self,
+        *,
+        requests: dict[StrategyFamily, StrategyMarketHistoryRequest],
+        latest_account_snapshot: ExchangeAccountSnapshot | None,
+    ) -> dict[StrategyFamily, ExchangeAccountSnapshot | None]:
+        return {
+            family: self._resolve_latest_account_snapshot_request(
+                request,
+                latest_account_snapshot=latest_account_snapshot,
+            )
+            for family, request in requests.items()
+        }
+
+    @staticmethod
+    def _resolve_latest_account_snapshot_request(
+        request: StrategyMarketHistoryRequest,
+        *,
+        latest_account_snapshot: ExchangeAccountSnapshot | None,
+    ) -> ExchangeAccountSnapshot | None:
+        if request.latest_account_snapshot_source != "account_service_latest":
+            return None
+        return latest_account_snapshot
+
+    def _recent_market_snapshots(
+        self,
+        *,
+        requests: dict[StrategyFamily, StrategyMarketHistoryRequest],
+    ) -> dict[str, list[MarketSnapshot]]:
         rows: dict[str, list[MarketSnapshot]] = {}
-        limit = max(self.settings.spot_grid_anchor_lookback_snapshots, 1)
+        event_store_requests = [
+            request
+            for request in requests.values()
+            if request.sampling_source == "event_store_recent"
+            and request.topic == topics.MARKET_SNAPSHOTS
+        ]
+        symbols = {
+            symbol
+            for request in event_store_requests
+            for symbol in request.symbols
+            if str(symbol).strip()
+        }
+        if not symbols:
+            return rows
+        limit = max((max(int(request.lookback_snapshots), 1) for request in event_store_requests), default=1)
         events = self.event_store.recent_by_topic(
             topics.MARKET_SNAPSHOTS,
             limit=max(limit * max(len(symbols), 1), limit),
@@ -777,15 +970,131 @@ class StrategyCoordinatorService:
             rows[symbol] = symbol_rows[-limit:]
         return rows
 
-    def _recent_market_symbols(self, symbol: str) -> set[str]:
-        symbols = configured_market_symbols(self.settings, symbol)
-        derived_spot = _derived_spot_symbol(symbol)
-        derived_derivatives = _derived_derivatives_symbol(symbol)
-        if derived_spot:
-            symbols.add(derived_spot)
-        if derived_derivatives:
-            symbols.add(derived_derivatives)
-        return symbols
+    def _recent_market_snapshot_windows_by_family(
+        self,
+        *,
+        primary_symbol: str | None = None,
+    ) -> dict[StrategyFamily, int]:
+        resolved_pair_definitions_by_family = self._resolved_pair_definitions_by_family(
+            primary_symbol=self.settings.default_symbol if primary_symbol is None else primary_symbol
+        )
+        return {
+            family: max(int(request.lookback_snapshots), 1)
+            for family, request in self._market_history_requests(
+                primary_symbol=self.settings.default_symbol if primary_symbol is None else primary_symbol,
+                resolved_pair_definitions_by_family=resolved_pair_definitions_by_family,
+            ).items()
+        }
+
+    def _resolved_pair_definitions_by_family(
+        self,
+        *,
+        primary_symbol: str,
+    ) -> dict[StrategyFamily, tuple[object, ...]]:
+        return {
+            "smart_arbitrage": tuple(
+                load_pair_definitions(
+                    settings=self.settings,
+                    primary_symbol=primary_symbol,
+                )
+            )
+        }
+
+    def _market_history_requests(
+        self,
+        *,
+        primary_symbol: str,
+        resolved_pair_definitions_by_family: dict[StrategyFamily, tuple[object, ...]],
+    ) -> dict[StrategyFamily, StrategyMarketHistoryRequest]:
+        smart_arbitrage_pairs = tuple(resolved_pair_definitions_by_family.get("smart_arbitrage", ()))
+        smart_arbitrage_symbols = tuple(
+            sorted(
+                {
+                    str(symbol).upper()
+                    for pair in smart_arbitrage_pairs
+                    for symbol in (
+                        getattr(pair, "spot_symbol", None),
+                        getattr(pair, "hedge_symbol", None),
+                    )
+                    if str(symbol or "").strip()
+                }
+            )
+        )
+        return {
+            "directional": StrategyMarketHistoryRequest(
+                family="directional",
+                symbols=(primary_symbol,),
+                sampling_source="not_required",
+                lookback_snapshots=1,
+                latest_snapshot_source="not_required",
+                latest_portfolio_snapshot_source="not_required",
+                latest_account_snapshot_source="not_required",
+            ),
+            "smart_arbitrage": StrategyMarketHistoryRequest(
+                family="smart_arbitrage",
+                symbols=smart_arbitrage_symbols,
+                sampling_source="not_required",
+                lookback_snapshots=1,
+                latest_snapshot_symbols=smart_arbitrage_symbols,
+                latest_snapshot_topic=topics.MARKET_SNAPSHOTS,
+                latest_snapshot_source="gateway_or_event_store_latest",
+                latest_portfolio_snapshot_source="runtime_scope_latest",
+                latest_account_snapshot_source="account_service_latest",
+            ),
+            "spot_grid": StrategyMarketHistoryRequest(
+                family="spot_grid",
+                symbols=(primary_symbol,),
+                topic=topics.MARKET_SNAPSHOTS,
+                sampling_source="event_store_recent",
+                lookback_snapshots=max(int(self.settings.spot_grid_anchor_lookback_snapshots), 1),
+                latest_snapshot_symbols=(primary_symbol,),
+                latest_snapshot_symbol=primary_symbol,
+                latest_snapshot_topic=topics.MARKET_SNAPSHOTS,
+                latest_snapshot_source="gateway_or_event_store_latest",
+                latest_portfolio_snapshot_source="not_required",
+                latest_account_snapshot_source="not_required",
+            ),
+            "dca": StrategyMarketHistoryRequest(
+                family="dca",
+                symbols=(primary_symbol,),
+                topic=topics.MARKET_SNAPSHOTS if self.settings.dca_pullback_only_enabled else None,
+                sampling_source="event_store_recent" if self.settings.dca_pullback_only_enabled else "not_required",
+                lookback_snapshots=2 if self.settings.dca_pullback_only_enabled else 1,
+                latest_snapshot_symbols=(primary_symbol,),
+                latest_snapshot_symbol=primary_symbol,
+                latest_snapshot_topic=topics.MARKET_SNAPSHOTS,
+                latest_snapshot_source="gateway_or_event_store_latest",
+                latest_portfolio_snapshot_source="not_required",
+                latest_account_snapshot_source="not_required",
+            ),
+            "protective": StrategyMarketHistoryRequest(
+                family="protective",
+                symbols=(primary_symbol,),
+                sampling_source="not_required",
+                lookback_snapshots=1,
+                latest_snapshot_source="not_required",
+                latest_portfolio_snapshot_source="not_required",
+                latest_account_snapshot_source="not_required",
+            ),
+            "opportunistic": StrategyMarketHistoryRequest(
+                family="opportunistic",
+                symbols=(primary_symbol,),
+                sampling_source="not_required",
+                lookback_snapshots=1,
+                latest_snapshot_source="not_required",
+                latest_portfolio_snapshot_source="not_required",
+                latest_account_snapshot_source="not_required",
+            ),
+            "independent": StrategyMarketHistoryRequest(
+                family="independent",
+                symbols=(primary_symbol,),
+                sampling_source="not_required",
+                lookback_snapshots=1,
+                latest_snapshot_source="not_required",
+                latest_portfolio_snapshot_source="not_required",
+                latest_account_snapshot_source="not_required",
+            ),
+        }
 
     def _recent_targets_by_family(self, *, symbol: str) -> dict[str, list[StrategyTargetHistory]]:
         rows: dict[str, list[StrategyTargetHistory]] = {
@@ -1062,6 +1371,7 @@ class StrategyCoordinatorService:
             "close_opportunity_leg": "exit",
             "open_independent_book": "enter",
             "scale_independent_book": "scale_in",
+            "rebalance_independent_books": "scale_in",
             "close_independent_book": "exit",
         }
         return action_map.get(family_action, "hold")

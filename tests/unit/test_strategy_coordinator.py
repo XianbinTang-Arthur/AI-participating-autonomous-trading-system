@@ -12,10 +12,11 @@ from aats.schemas.decision import BaselineAssessment, DecisionContext, DecisionO
 from aats.schemas.execution import FillEvent
 from aats.schemas.exchange import ExchangeAccountSnapshot, ExchangeBalance, ExchangePosition
 from aats.schemas.market import MarketSnapshot
-from aats.schemas.portfolio import SleevePnLRecord
+from aats.schemas.portfolio import PortfolioSnapshot, SleevePnLRecord
 from aats.schemas.reconciliation import ReconciliationReport
 from aats.schemas.strategy_runtime import StrategyLegIntent
 from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, to_decimal
+from aats.services.strategy_engines.base import StrategyEngineInput, StrategyEvaluationContext, StrategyFamilyRuntimeControl
 from aats.services.strategy_engines.coordinator import StrategyCoordinatorService
 from aats.services.strategy_engines.sleeve_identity import build_strategy_sleeve_id
 from aats.storage.event_store import InMemoryEventStore
@@ -58,6 +59,29 @@ def _market_snapshot(symbol: str, price: str) -> MarketSnapshot:
         kline_1h={"close": price_decimal},
         recent_trades=[],
         orderbook_depth={},
+    )
+
+
+def _portfolio_snapshot(
+    *,
+    product_type: str,
+    margin_mode: str,
+    total_equity: str = "1000",
+) -> PortfolioSnapshot:
+    total_equity_decimal = Decimal(total_equity)
+    return PortfolioSnapshot(
+        snapshot_ts=utc_now(),
+        balances={"USDT": total_equity_decimal},
+        positions=[],
+        cost_basis={},
+        realized_pnl=Decimal("0"),
+        unrealized_pnl=Decimal("0"),
+        total_equity=total_equity_decimal,
+        gross_exposure=Decimal("0"),
+        net_exposure=Decimal("0"),
+        risk_budget_usage={},
+        product_type=product_type,
+        margin_mode=margin_mode,
     )
 
 
@@ -203,6 +227,253 @@ def _fill_event(
 
 
 class TestStrategyCoordinator(unittest.TestCase):
+    def test_recent_market_snapshots_are_dispatched_with_family_specific_windows(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "trading_product_type": "spot",
+                "margin_mode": "cash",
+                "default_symbol": "BTC-USDT",
+                "allowed_symbols": ("BTC-USDT",),
+                "spot_grid_enabled": True,
+                "spot_grid_anchor_lookback_snapshots": 1,
+                "dca_enabled": True,
+                "dca_pullback_only_enabled": True,
+            }
+        )
+        event_store = InMemoryEventStore()
+        for price in ("100", "99", "98"):
+            event_store.append(
+                build_envelope(
+                    topic=topics.MARKET_SNAPSHOTS,
+                    key="BTC-USDT",
+                    payload_model=_market_snapshot("BTC-USDT", price),
+                    source_component="test",
+                )
+            )
+        coordinator = StrategyCoordinatorService(
+            settings=settings,
+            event_store=event_store,
+            market_gateway=_FakeMarketGateway({"BTC-USDT": _market_snapshot("BTC-USDT", "98")}),
+            portfolio_repo=InMemoryPortfolioRepository(),
+            strategy_sleeve_repo=InMemoryStrategySleeveRepository(),
+        )
+
+        resolved_pair_definitions_by_family = coordinator._resolved_pair_definitions_by_family(
+            primary_symbol="BTC-USDT"
+        )
+        requests = coordinator._market_history_requests(
+            primary_symbol="BTC-USDT",
+            resolved_pair_definitions_by_family=resolved_pair_definitions_by_family,
+        )
+        latest_market_snapshots_by_symbol_by_family = coordinator._latest_market_snapshots_by_symbol_by_family(
+            requests=requests,
+        )
+        latest_snapshots = coordinator._latest_market_snapshots_by_family(
+            requests=requests,
+            latest_market_snapshots_by_symbol_by_family=latest_market_snapshots_by_symbol_by_family,
+        )
+        rows = coordinator._recent_market_snapshots(requests=requests)
+        windows = {
+            family: request.lookback_snapshots
+            for family, request in requests.items()
+        }
+        evaluation_context = StrategyEvaluationContext.from_engine_input(
+            StrategyEngineInput(
+                context=_decision_context(symbol="BTC-USDT", product_type="spot", current_position_qty="0"),
+                baseline=_baseline(symbol="BTC-USDT", regime="range"),
+                directional_target=_position_target(
+                    symbol="BTC-USDT",
+                    product_type="spot",
+                    margin_mode="cash",
+                    current_qty="0",
+                    target_qty="0",
+                ),
+                latest_snapshot=None,
+                latest_account_snapshot=None,
+                latest_market_snapshot=_market_snapshot("BTC-USDT", "98"),
+                resolved_pair_definitions_by_family=resolved_pair_definitions_by_family,
+                latest_market_snapshots_by_symbol_by_family=latest_market_snapshots_by_symbol_by_family,
+                latest_market_snapshots_by_family=latest_snapshots,
+                recent_market_snapshots=rows,
+                recent_targets_by_family={},
+                recent_market_snapshot_windows_by_family=windows,
+                market_history_requests_by_family=requests,
+            ),
+            family_runtime_controls={
+                "directional": StrategyFamilyRuntimeControl(enabled=True, live_execution_enabled=True),
+                "smart_arbitrage": StrategyFamilyRuntimeControl(),
+                "spot_grid": StrategyFamilyRuntimeControl(enabled=True, live_execution_enabled=True),
+                "dca": StrategyFamilyRuntimeControl(enabled=True, live_execution_enabled=True),
+                "protective": StrategyFamilyRuntimeControl(),
+                "opportunistic": StrategyFamilyRuntimeControl(),
+                "independent": StrategyFamilyRuntimeControl(),
+            },
+        )
+
+        self.assertEqual(requests["directional"].sampling_source, "not_required")
+        self.assertEqual(requests["directional"].latest_snapshot_source, "not_required")
+        self.assertEqual(requests["smart_arbitrage"].sampling_source, "not_required")
+        self.assertIn("BTC-USDT", requests["smart_arbitrage"].symbols)
+        self.assertEqual(requests["smart_arbitrage"].latest_snapshot_source, "gateway_or_event_store_latest")
+        self.assertIn("BTC-USDT", requests["smart_arbitrage"].latest_snapshot_symbols)
+        self.assertEqual(requests["spot_grid"].sampling_source, "event_store_recent")
+        self.assertEqual(requests["spot_grid"].topic, topics.MARKET_SNAPSHOTS)
+        self.assertEqual(requests["spot_grid"].symbols, ("BTC-USDT",))
+        self.assertEqual(requests["spot_grid"].latest_snapshot_symbols, ("BTC-USDT",))
+        self.assertEqual(requests["spot_grid"].latest_snapshot_symbol, "BTC-USDT")
+        self.assertEqual(requests["spot_grid"].latest_snapshot_topic, topics.MARKET_SNAPSHOTS)
+        self.assertEqual(requests["spot_grid"].latest_snapshot_source, "gateway_or_event_store_latest")
+        self.assertEqual(requests["dca"].sampling_source, "event_store_recent")
+        self.assertEqual(requests["dca"].symbols, ("BTC-USDT",))
+        self.assertEqual(requests["dca"].latest_snapshot_symbols, ("BTC-USDT",))
+        self.assertEqual(requests["dca"].latest_snapshot_symbol, "BTC-USDT")
+        self.assertEqual(requests["dca"].latest_snapshot_topic, topics.MARKET_SNAPSHOTS)
+        self.assertEqual(requests["dca"].latest_snapshot_source, "gateway_or_event_store_latest")
+        self.assertEqual(windows["spot_grid"], 1)
+        self.assertEqual(windows["dca"], 2)
+        self.assertEqual(len(rows["BTC-USDT"]), 2)
+        self.assertIsNone(latest_snapshots["directional"])
+        self.assertEqual(latest_market_snapshots_by_symbol_by_family["smart_arbitrage"]["BTC-USDT"].symbol, "BTC-USDT")
+        self.assertEqual(latest_snapshots["spot_grid"].symbol, "BTC-USDT")
+        self.assertEqual(latest_snapshots["dca"].symbol, "BTC-USDT")
+        self.assertEqual(evaluation_context.for_family("directional").recent_market_snapshots, {})
+        self.assertIsNone(evaluation_context.for_family("directional").latest_market_snapshot)
+        self.assertEqual(len(evaluation_context.for_family("spot_grid").recent_market_snapshots["BTC-USDT"]), 1)
+        self.assertEqual(evaluation_context.for_family("spot_grid").latest_market_snapshot.symbol, "BTC-USDT")
+        self.assertEqual(len(evaluation_context.for_family("dca").recent_market_snapshots["BTC-USDT"]), 2)
+        self.assertEqual(evaluation_context.for_family("dca").latest_market_snapshot.symbol, "BTC-USDT")
+
+    def test_latest_portfolio_and_account_snapshots_are_dispatched_with_family_specific_requests(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "smart_arbitrage_enabled": True,
+            }
+        )
+        portfolio_repo = InMemoryPortfolioRepository()
+        portfolio_repo.save_snapshot(
+            _portfolio_snapshot(
+                product_type="derivatives",
+                margin_mode="cross",
+                total_equity="2500",
+            )
+        )
+        account_snapshot = ExchangeAccountSnapshot(
+            account_source="okx",
+            fetched_at=utc_now(),
+            balances=[ExchangeBalance(currency="USDT", total=Decimal("2500"), available=Decimal("2400"))],
+            positions=[],
+            account_mode="cross",
+        )
+        coordinator = StrategyCoordinatorService(
+            settings=settings,
+            event_store=InMemoryEventStore(),
+            market_gateway=_FakeMarketGateway(
+                {
+                    "BTC-USDT": _market_snapshot("BTC-USDT", "99"),
+                    "BTC-USDT-SWAP": _market_snapshot("BTC-USDT-SWAP", "100"),
+                }
+            ),
+            portfolio_repo=portfolio_repo,
+            account_service=_StaticAccountService(account_snapshot),
+            strategy_sleeve_repo=InMemoryStrategySleeveRepository(),
+        )
+
+        resolved_pair_definitions_by_family = coordinator._resolved_pair_definitions_by_family(
+            primary_symbol="BTC-USDT-SWAP"
+        )
+        requests = coordinator._market_history_requests(
+            primary_symbol="BTC-USDT-SWAP",
+            resolved_pair_definitions_by_family=resolved_pair_definitions_by_family,
+        )
+        latest_snapshots = coordinator._latest_snapshots_by_family(
+            requests=requests,
+            latest_snapshot=coordinator._latest_portfolio_snapshot(),
+        )
+        latest_account_snapshots = coordinator._latest_account_snapshots_by_family(
+            requests=requests,
+            latest_account_snapshot=coordinator._latest_account_snapshot(),
+        )
+        latest_market_snapshots_by_symbol_by_family = coordinator._latest_market_snapshots_by_symbol_by_family(
+            requests=requests,
+        )
+        latest_market_snapshots = coordinator._latest_market_snapshots_by_family(
+            requests=requests,
+            latest_market_snapshots_by_symbol_by_family=latest_market_snapshots_by_symbol_by_family,
+        )
+        evaluation_context = StrategyEvaluationContext.from_engine_input(
+            StrategyEngineInput(
+                context=_decision_context(symbol="BTC-USDT-SWAP", product_type="derivatives", current_position_qty="0"),
+                baseline=_baseline(symbol="BTC-USDT-SWAP", regime="trend"),
+                directional_target=_position_target(
+                    symbol="BTC-USDT-SWAP",
+                    product_type="derivatives",
+                    margin_mode="cross",
+                    current_qty="0",
+                    target_qty="0",
+                ),
+                latest_snapshot=coordinator._latest_portfolio_snapshot(),
+                latest_account_snapshot=coordinator._latest_account_snapshot(),
+                latest_market_snapshot=_market_snapshot("BTC-USDT-SWAP", "100"),
+                recent_market_snapshots={},
+                recent_targets_by_family={},
+                latest_snapshots_by_family=latest_snapshots,
+                latest_account_snapshots_by_family=latest_account_snapshots,
+                resolved_pair_definitions_by_family=resolved_pair_definitions_by_family,
+                latest_market_snapshots_by_symbol_by_family=latest_market_snapshots_by_symbol_by_family,
+                latest_market_snapshots_by_family=latest_market_snapshots,
+                recent_market_snapshot_windows_by_family={
+                    family: request.lookback_snapshots
+                    for family, request in requests.items()
+                },
+                market_history_requests_by_family=requests,
+            ),
+            family_runtime_controls={
+                "directional": StrategyFamilyRuntimeControl(enabled=True, live_execution_enabled=True),
+                "smart_arbitrage": StrategyFamilyRuntimeControl(enabled=True, live_execution_enabled=True),
+                "spot_grid": StrategyFamilyRuntimeControl(),
+                "dca": StrategyFamilyRuntimeControl(),
+                "protective": StrategyFamilyRuntimeControl(),
+                "opportunistic": StrategyFamilyRuntimeControl(),
+                "independent": StrategyFamilyRuntimeControl(),
+            },
+        )
+
+        self.assertEqual(requests["smart_arbitrage"].latest_portfolio_snapshot_source, "runtime_scope_latest")
+        self.assertEqual(requests["smart_arbitrage"].latest_account_snapshot_source, "account_service_latest")
+        self.assertEqual(requests["smart_arbitrage"].latest_snapshot_source, "gateway_or_event_store_latest")
+        self.assertEqual(len(resolved_pair_definitions_by_family["smart_arbitrage"]), 1)
+        self.assertIn("BTC-USDT", requests["smart_arbitrage"].latest_snapshot_symbols)
+        self.assertIn("BTC-USDT-SWAP", requests["smart_arbitrage"].latest_snapshot_symbols)
+        self.assertEqual(requests["spot_grid"].latest_portfolio_snapshot_source, "not_required")
+        self.assertEqual(requests["spot_grid"].latest_account_snapshot_source, "not_required")
+        self.assertIsNotNone(latest_snapshots["smart_arbitrage"])
+        self.assertIsNotNone(latest_account_snapshots["smart_arbitrage"])
+        self.assertEqual(
+            set(latest_market_snapshots_by_symbol_by_family["smart_arbitrage"]),
+            {"BTC-USDT", "BTC-USDT-SWAP"},
+        )
+        self.assertEqual(latest_market_snapshots["smart_arbitrage"].symbol, "BTC-USDT")
+        self.assertIsNone(latest_snapshots["spot_grid"])
+        self.assertIsNone(latest_account_snapshots["spot_grid"])
+        self.assertIsNone(evaluation_context.for_family("directional").latest_snapshot)
+        self.assertIsNone(evaluation_context.for_family("directional").latest_account_snapshot)
+        self.assertEqual(
+            evaluation_context.for_family("smart_arbitrage").latest_snapshot.total_equity,
+            Decimal("2500"),
+        )
+        self.assertEqual(
+            evaluation_context.for_family("smart_arbitrage").latest_account_snapshot.account_mode,
+            "cross",
+        )
+        self.assertEqual(
+            set(evaluation_context.for_family("smart_arbitrage").latest_market_snapshots_by_symbol),
+            {"BTC-USDT", "BTC-USDT-SWAP"},
+        )
+
     def test_spot_grid_can_override_directional_target(self) -> None:
         settings = AATSSettings.model_validate(
             {

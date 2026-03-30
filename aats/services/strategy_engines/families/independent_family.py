@@ -331,6 +331,8 @@ def _independent_family_action(*, result: IndependentFamilyEvaluation) -> Strate
         for book in (result.long_book, result.short_book)
         if book.target_qty + EPSILON_DECIMAL_12 < book.current_qty
     ]
+    if opening_books and closing_books:
+        return "rebalance_independent_books"
     if opening_books:
         if any(book.current_qty > EPSILON_DECIMAL_12 for book in opening_books):
             return "scale_independent_book"

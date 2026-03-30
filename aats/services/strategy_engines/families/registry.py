@@ -24,7 +24,8 @@ class StrategyFamilyRegistry:
         results: dict[StrategyFamily, list[StrategyCandidate]] = {}
         for family in self._order:
             engine = self._engines[family]
-            candidates = list(engine.evaluate(context) or [])
+            family_context = context.for_family(family)
+            candidates = list(engine.evaluate(family_context) or [])
             normalized: list[StrategyCandidate] = []
             for candidate in candidates:
                 normalized.append(
