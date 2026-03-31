@@ -39,6 +39,3 @@ Deployment and Acceptance Criteria
 - Avoid unrelated refactors.
 - Preserve public APIs unless explicitly instructed otherwise.
 - Stop and explain if requirements conflict with the current architecture.
-
-# Validation
-Run `bash .codex/skills/feature-delivery/scripts/verify.sh`

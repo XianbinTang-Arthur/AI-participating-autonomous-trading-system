@@ -223,6 +223,59 @@ class TestIndependentFamily(unittest.TestCase):
             "independent_long_book_expectancy_resolution_failed",
             result.long_book.blocked_reasons,
         )
+        self.assertTrue(result.long_book.expectancy.resolution_failed)
+        self.assertEqual(result.long_book.expectancy.expected_signal_edge_bps, 0.0)
+        self.assertEqual(result.long_book.expectancy.expected_cost_bps, 0.0)
+        self.assertEqual(result.long_book.expectancy.expected_net_edge_bps, 0.0)
+        self.assertFalse(result.legs)
+
+    def test_evaluate_independent_books_do_not_use_directional_fallback_edges_after_expectancy_failure(self) -> None:
+        settings = make_derivatives_hedge_settings(
+            strategy_hedge_overlay_mode="independent",
+            strategy_hedge_independent_enabled=True,
+            strategy_hedge_independent_long_entry_threshold=0.60,
+            strategy_hedge_independent_long_close_threshold=0.50,
+            strategy_hedge_independent_failed_thesis_net_edge_bps=-1.0,
+        )
+        context = make_context(
+            current_position_qty=0.02,
+            current_long_position_qty=0.02,
+            product_type="derivatives",
+            current_exposure_side="long",
+            current_long_leg_opened_seconds_ago=900,
+        )
+        baseline = make_baseline(
+            direction_bias="long",
+            confidence=0.82,
+            suggested_position_scale=1.0,
+            volatility_target_scale=1.0,
+            factor_scores={
+                "momentum_alpha": 0.32,
+                "trend_alpha": 0.28,
+                "microstructure_alpha": 0.12,
+                "liquidity_scale": 0.95,
+            },
+        ).model_copy(update={"regime": "trend", "composite_alpha_score": 0.24})
+
+        result = evaluate_independent_books(
+            settings=settings,
+            context=context,
+            baseline=baseline,
+            ai_assessment=make_ai_assessment(direction=0.20, confidence=0.78),
+            directional_target_qty=Decimal("0.01"),
+            target_leverage=1.0,
+            signal_edge_bps=4.0,
+            expected_cost_bps=6.0,
+            expected_net_edge_bps=-2.0,
+            execution_leg_family="independent",
+            scorer=lambda *, leg, baseline, ai_assessment: 0.55 if leg == "long" else 0.10,
+            expectancy_resolver=lambda **_: (_ for _ in ()).throw(RuntimeError("cost_boom")),
+        )
+
+        self.assertTrue(result.long_book.expectancy.resolution_failed)
+        self.assertEqual(result.long_book.close_reason, None)
+        self.assertEqual(result.long_book.book_action, "hold")
+        self.assertEqual(result.final_target_qty, Decimal("0.02"))
         self.assertFalse(result.legs)
 
     def test_evaluate_independent_books_close_failed_thesis_when_expected_net_edge_turns_negative(self) -> None:

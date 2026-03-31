@@ -13,6 +13,7 @@ def build_legs(
     settings: AATSSettings,
     pair: ArbitragePairDefinition,
     opportunity: ArbitrageOpportunity,
+    hedge_margin_mode: str | None = None,
     account_spot_qty: Decimal,
     account_hedge_qty: Decimal,
     sleeve_spot_qty: Decimal,
@@ -39,6 +40,7 @@ def build_legs(
         "inventory_reverse_carry": "Derivatives hedge leg offsets the inventory-backed reverse carry.",
         "margin_reverse_carry": "Derivatives hedge leg offsets the borrow-backed reverse carry.",
     }.get(opportunity.execution_mode, "Arbitrage hedge leg driven by sleeve inventory truth.")
+    resolved_hedge_margin_mode = str(hedge_margin_mode or settings.margin_mode)
     hedge_target_leverage = min(
         max(float(settings.smart_arbitrage_hedge_target_leverage), 1.0),
         max(float(settings.max_target_leverage), 1.0),
@@ -67,7 +69,7 @@ def build_legs(
             product_type=pair.hedge_product_type,
             side="buy" if hedge_delta_qty >= 0 else "sell",
             role="hedge",
-            margin_mode=settings.margin_mode,
+            margin_mode=resolved_hedge_margin_mode,
             target_leverage=hedge_target_leverage,
             current_position_qty=to_decimal(account_hedge_qty),
             target_position_qty=hedge_account_target_qty,

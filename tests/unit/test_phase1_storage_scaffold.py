@@ -5,6 +5,7 @@ import unittest
 
 from sqlalchemy import inspect
 
+from aats.schemas.common import utc_now
 from aats.storage.command_outbox_repo_postgres import PostgresCommandOutboxRepositoryV2
 from aats.storage.execution_command_repo_postgres import PostgresExecutionCommandRepository
 from aats.storage.execution_fill_repo_v2_postgres import PostgresExecutionFillRepositoryV2
@@ -56,3 +57,28 @@ class TestPhase1StorageScaffold(unittest.TestCase):
             PostgresSettlementRepository(runtime.session_factory)
             PostgresExternalInboxRepository(runtime.session_factory)
             PostgresCommandOutboxRepositoryV2(runtime.session_factory)
+
+    def test_external_inbox_duplicate_dedupe_key_is_handled_idempotently(self) -> None:
+        with temporary_postgres_runtime() as (runtime, _admin_engine, _schema_name):
+            repo = PostgresExternalInboxRepository(runtime.session_factory)
+
+            first = repo.save_incoming(
+                inbox_id="inbox_idem_1",
+                source_system="okx_webhook",
+                dedupe_key="okx:bill:1",
+                payload={"bill_id": "1"},
+                received_at=utc_now(),
+            )
+            second = repo.save_incoming(
+                inbox_id="inbox_idem_2",
+                source_system="okx_webhook",
+                dedupe_key="okx:bill:1",
+                payload={"bill_id": "1"},
+                received_at=utc_now(),
+            )
+
+            self.assertTrue(first)
+            self.assertFalse(second)
+            rows = repo.unprocessed(limit=10)
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["inbox_id"], "inbox_idem_1")

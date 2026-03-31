@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 from aats.bootstrap.settings import AATSSettings
 from aats.services.strategy_engines.smart_arbitrage.engine import SmartArbitrageStrategyEngine
@@ -11,7 +12,11 @@ from aats.services.strategy_engines.smart_arbitrage.capabilities import resolve_
 from aats.services.strategy_engines.smart_arbitrage.cost_model import build_cost_breakdown
 from aats.services.strategy_engines.smart_arbitrage.leg_planner import build_legs
 from aats.services.strategy_engines.smart_arbitrage.pair_registry import load_pair_definitions
-from aats.services.strategy_engines.smart_arbitrage.schemas import ArbitrageOpportunity, ArbitragePairDefinition
+from aats.services.strategy_engines.smart_arbitrage.schemas import (
+    ArbitrageCostBreakdown,
+    ArbitrageOpportunity,
+    ArbitragePairDefinition,
+)
 from aats.services.strategy_engines.smart_arbitrage.state_machine import resolve_pair_state
 
 
@@ -469,6 +474,64 @@ class TestSmartArbitrageV2Components(unittest.TestCase):
         self.assertEqual(cost.borrow_cost_bps, Decimal("1.643835616438356164383561644"))
         self.assertEqual(cost.breakeven_basis_bps, Decimal("35.64383561643835616438356164"))
 
+    def test_cost_model_prefers_explicit_hedge_margin_mode_for_derivatives_cost_scope(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "margin_mode": "cross",
+                "smart_arbitrage_cost_model_enabled": True,
+                "trade_cost_spot_taker_fee_bps": 0.0,
+                "trade_cost_margin_taker_fee_bps": 0.0,
+                "trade_cost_derivatives_taker_fee_bps": 0.0,
+                "trade_cost_spot_spread_bps": 0.0,
+                "trade_cost_margin_spread_bps": 0.0,
+                "trade_cost_derivatives_spread_bps": 0.0,
+                "trade_cost_spot_slippage_bps": 0.0,
+                "trade_cost_margin_slippage_bps": 0.0,
+                "trade_cost_derivatives_slippage_bps": 0.0,
+                "smart_arbitrage_funding_cost_enabled": False,
+                "smart_arbitrage_borrow_cost_enabled": False,
+            }
+        )
+        observed_calls: list[tuple[str, str | None, str | None]] = []
+
+        class _RecordingTradeCostService:
+            def __init__(self, *args, **kwargs) -> None:
+                pass
+
+            def estimated_execution_fee_bps_decimal(self, *, product_type=None, margin_mode=None, **kwargs) -> Decimal:
+                observed_calls.append(("fee", product_type, margin_mode))
+                return Decimal("0")
+
+            def default_spread_bps(self, *, product_type=None, margin_mode=None, **kwargs) -> Decimal:
+                observed_calls.append(("spread", product_type, margin_mode))
+                return Decimal("0")
+
+            def default_slippage_bps(self, *, product_type=None, margin_mode=None, **kwargs) -> Decimal:
+                observed_calls.append(("slippage", product_type, margin_mode))
+                return Decimal("0")
+
+        with patch(
+            "aats.services.strategy_engines.smart_arbitrage.cost_model.TradeCostService",
+            _RecordingTradeCostService,
+        ):
+            build_cost_breakdown(
+                settings=settings,
+                basis_bps=Decimal("35"),
+                execution_mode="spot_carry",
+                reference_ts=datetime(2026, 3, 27, 8, 0, tzinfo=timezone.utc),
+                hedge_margin_mode="isolated",
+                spot_symbol="BTC-USDT",
+                hedge_symbol="BTC-USDT-SWAP",
+            )
+
+        derivative_margin_modes = [
+            margin_mode
+            for _, product_type, margin_mode in observed_calls
+            if product_type == "derivatives"
+        ]
+        self.assertTrue(derivative_margin_modes)
+        self.assertEqual(set(derivative_margin_modes), {"isolated"})
+
     def test_leg_planner_builds_margin_reverse_carry_spot_leg_in_margin_mode(self) -> None:
         settings = AATSSettings.model_validate(
             {
@@ -512,6 +575,44 @@ class TestSmartArbitrageV2Components(unittest.TestCase):
         self.assertEqual(legs[0].execution_mode, "margin_reverse_carry")
         self.assertEqual(legs[1].target_leverage, 3.0)
 
+    def test_leg_planner_prefers_explicit_hedge_margin_mode_for_derivatives_leg(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "margin_mode": "cross",
+                "max_target_leverage": 20.0,
+                "smart_arbitrage_hedge_target_leverage": 3.0,
+            }
+        )
+        pair = ArbitragePairDefinition(pair_id="btc_pair", spot_symbol="BTC-USDT", hedge_symbol="BTC-USDT-SWAP")
+        opportunity = ArbitrageOpportunity(
+            pair_id="btc_pair",
+            spot_symbol="BTC-USDT",
+            hedge_symbol="BTC-USDT-SWAP",
+            opportunity_kind="positive_basis",
+            direction="positive_basis",
+            execution_mode="spot_carry",
+            state_phase="opening",
+            desired_pair_qty=Decimal("1"),
+            target_spot_qty=Decimal("1"),
+            target_hedge_qty=Decimal("-1"),
+            route_action="override_target",
+        )
+
+        legs = build_legs(
+            settings=settings,
+            pair=pair,
+            opportunity=opportunity,
+            hedge_margin_mode="isolated",
+            account_spot_qty=Decimal("0"),
+            account_hedge_qty=Decimal("0"),
+            sleeve_spot_qty=Decimal("0"),
+            sleeve_hedge_qty=Decimal("0"),
+            spot_price=Decimal("100"),
+            hedge_price=Decimal("99"),
+        )
+
+        self.assertEqual(legs[1].margin_mode, "isolated")
+
     def test_leg_planner_clamps_smart_arbitrage_hedge_leverage_to_runtime_max(self) -> None:
         settings = AATSSettings.model_validate(
             {
@@ -550,6 +651,94 @@ class TestSmartArbitrageV2Components(unittest.TestCase):
         )
 
         self.assertEqual(legs[1].target_leverage, 2.5)
+
+    def test_engine_candidate_builder_passes_runtime_hedge_margin_mode_to_leg_planner(self) -> None:
+        engine = SmartArbitrageStrategyEngine(
+            settings=AATSSettings.model_validate({"smart_arbitrage_enabled": True}),
+            market_snapshot_loader=lambda symbol: None,
+        )
+        pair = ArbitragePairDefinition(pair_id="btc_pair", spot_symbol="BTC-USDT", hedge_symbol="BTC-USDT-SWAP")
+        opportunity = ArbitrageOpportunity(
+            pair_id="btc_pair",
+            spot_symbol="BTC-USDT",
+            hedge_symbol="BTC-USDT-SWAP",
+            opportunity_kind="positive_basis",
+            direction="positive_basis",
+            execution_mode="spot_carry",
+            state_phase="opening",
+            target_spot_qty=Decimal("1"),
+            target_hedge_qty=Decimal("-1"),
+            route_action="override_target",
+            cost_breakdown=ArbitrageCostBreakdown(),
+        )
+        observed: dict[str, str] = {}
+
+        def _fake_build_legs(*, hedge_margin_mode, **kwargs):
+            observed["hedge_margin_mode"] = hedge_margin_mode
+            return []
+
+        with patch("aats.services.strategy_engines.smart_arbitrage.engine.build_legs", side_effect=_fake_build_legs):
+            engine._candidate_from_opportunity(
+                pair=pair,
+                pair_state=SimpleNamespace(
+                    blocking_reasons=[],
+                    current_pair_qty=Decimal("0"),
+                    foreign_spot_qty=Decimal("0"),
+                    foreign_hedge_qty=Decimal("0"),
+                    current_positive_pair_qty=Decimal("0"),
+                    current_reverse_pair_qty=Decimal("0"),
+                    current_inventory_reverse_pair_qty=Decimal("0"),
+                    current_margin_reverse_pair_qty=Decimal("0"),
+                ),
+                opportunity=opportunity,
+                account_cash_spot_qty=Decimal("0"),
+                account_margin_spot_qty=Decimal("0"),
+                account_hedge_qty=Decimal("0"),
+                sleeve_cash_spot_qty=Decimal("0"),
+                sleeve_margin_spot_qty=Decimal("0"),
+                sleeve_hedge_qty=Decimal("0"),
+                spot_price=Decimal("100"),
+                hedge_price=Decimal("99"),
+                capability=SimpleNamespace(
+                    blocking_reasons=[],
+                    available_inventory_qty=Decimal("0"),
+                    margin_short_execution_ready=False,
+                    spot_margin_mode="cash",
+                ),
+                hedge_margin_mode="isolated",
+            )
+
+        self.assertEqual(observed["hedge_margin_mode"], "isolated")
+
+    def test_engine_unsupported_execution_mode_opportunity_passes_runtime_hedge_margin_mode_to_cost_model(self) -> None:
+        engine = SmartArbitrageStrategyEngine(
+            settings=AATSSettings.model_validate({"smart_arbitrage_enabled": True}),
+            market_snapshot_loader=lambda symbol: None,
+        )
+        pair = ArbitragePairDefinition(pair_id="btc_pair", spot_symbol="BTC-USDT", hedge_symbol="BTC-USDT-SWAP")
+        observed: dict[str, str] = {}
+
+        def _fake_build_cost_breakdown(*, hedge_margin_mode, **kwargs):
+            observed["hedge_margin_mode"] = hedge_margin_mode
+            return ArbitrageCostBreakdown()
+
+        with patch(
+            "aats.services.strategy_engines.smart_arbitrage.engine.build_cost_breakdown",
+            side_effect=_fake_build_cost_breakdown,
+        ):
+            engine._unsupported_execution_mode_opportunity(
+                pair=pair,
+                pair_basis_bps=Decimal("-30"),
+                entry_threshold=Decimal("10"),
+                exit_threshold=Decimal("5"),
+                execution_mode="margin_reverse_carry",
+                reference_ts=datetime(2026, 3, 27, 8, 0, tzinfo=timezone.utc),
+                hedge_margin_mode="isolated",
+                direction="negative_basis",
+                reason_code="smart_arbitrage_margin_reverse_carry_not_allowed",
+            )
+
+        self.assertEqual(observed["hedge_margin_mode"], "isolated")
 
     def test_pair_registry_defaults_execution_modes_to_all_supported_live_modes(self) -> None:
         settings = AATSSettings.model_validate(

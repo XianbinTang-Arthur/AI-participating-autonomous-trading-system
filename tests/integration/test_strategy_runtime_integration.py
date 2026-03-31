@@ -440,6 +440,11 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(smart_arbitrage_candidate["execution_mode"], "spot_carry")
         self.assertIn(smart_arbitrage_candidate["state_phase"], {"opening", "active", "unwinding", "recovery"})
         self.assertEqual(len(smart_arbitrage_candidate["legs"]), 2)
+        self.assertIn("derivatives_margin_mode", smart_arbitrage_candidate["metrics"])
+        self.assertEqual(
+            smart_arbitrage_candidate["legs"][1]["margin_mode"],
+            smart_arbitrage_candidate["metrics"]["derivatives_margin_mode"],
+        )
         self.assertIn("current_sleeve_spot_qty", smart_arbitrage_candidate["metrics"])
         self.assertIn("target_account_derivatives_qty", smart_arbitrage_candidate["metrics"])
         self.assertIn("inventory_backed_available_qty", smart_arbitrage_candidate["metrics"])

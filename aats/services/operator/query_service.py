@@ -3753,6 +3753,10 @@ class OperatorQueryService:
             "parent_lifecycle_state": payload.get("parent_lifecycle_state"),
             "parent_target_active": payload.get("parent_target_active"),
             "parent_inventory_active": payload.get("parent_inventory_active"),
+            "parent_source_of_truth": payload.get("parent_source_of_truth"),
+            "parent_target_qty": payload.get("parent_target_qty"),
+            "parent_current_qty": payload.get("parent_current_qty"),
+            "parent_effective_qty": payload.get("parent_effective_qty"),
         }
         if any(value is not None for value in direct.values()):
             return direct
@@ -3766,6 +3770,10 @@ class OperatorQueryService:
                 "parent_lifecycle_state": overlay.get("parent_lifecycle_state"),
                 "parent_target_active": overlay.get("parent_target_active"),
                 "parent_inventory_active": overlay.get("parent_inventory_active"),
+                "parent_source_of_truth": overlay.get("parent_source_of_truth"),
+                "parent_target_qty": overlay.get("parent_target_qty"),
+                "parent_current_qty": overlay.get("parent_current_qty"),
+                "parent_effective_qty": overlay.get("parent_effective_qty"),
             }
             if any(value is not None for value in nested.values()):
                 return nested
@@ -3779,6 +3787,10 @@ class OperatorQueryService:
                 "parent_lifecycle_state": family_summary.get("parent_lifecycle_state"),
                 "parent_target_active": family_summary.get("parent_target_active"),
                 "parent_inventory_active": family_summary.get("parent_inventory_active"),
+                "parent_source_of_truth": family_summary.get("parent_source_of_truth"),
+                "parent_target_qty": family_summary.get("parent_target_qty"),
+                "parent_current_qty": family_summary.get("parent_current_qty"),
+                "parent_effective_qty": family_summary.get("parent_effective_qty"),
             }
             if any(value is not None for value in nested.values()):
                 return nested
@@ -4916,6 +4928,10 @@ class OperatorQueryService:
             "parent_lifecycle_state": overlay_payload.get("parent_lifecycle_state"),
             "parent_target_active": overlay_payload.get("parent_target_active"),
             "parent_inventory_active": overlay_payload.get("parent_inventory_active"),
+            "parent_source_of_truth": overlay_payload.get("parent_source_of_truth"),
+            "parent_target_qty": overlay_payload.get("parent_target_qty"),
+            "parent_current_qty": overlay_payload.get("parent_current_qty"),
+            "parent_effective_qty": overlay_payload.get("parent_effective_qty"),
             "close_reason": overlay_payload.get("close_reason"),
             "reason_codes": list(overlay_payload.get("reason_codes") or []),
             "blocked_reasons": list(overlay_payload.get("blocked_reasons") or []),

@@ -18,6 +18,7 @@ def build_cost_breakdown(
     basis_bps: Decimal,
     execution_mode: str | None,
     reference_ts: datetime,
+    hedge_margin_mode: str | None = None,
     spot_symbol: str | None = None,
     hedge_symbol: str | None = None,
     account_service: Any | None = None,
@@ -39,6 +40,7 @@ def build_cost_breakdown(
     source_flags: list[str] = []
     drag_calculator = TradeDragCalculator()
     trade_cost_service = TradeCostService(settings=settings, fee_resolver=fee_resolver)
+    resolved_hedge_margin_mode = str(hedge_margin_mode or settings.margin_mode)
 
     if not settings.smart_arbitrage_cost_model_enabled:
         fallback_total = max(to_decimal(settings.smart_arbitrage_estimated_cost_bps), Decimal("0"))
@@ -70,6 +72,7 @@ def build_cost_breakdown(
         settings=settings,
         trade_cost_service=trade_cost_service,
         execution_mode=execution_mode,
+        hedge_margin_mode=resolved_hedge_margin_mode,
         spot_symbol=spot_symbol,
         hedge_symbol=hedge_symbol,
     )
@@ -80,6 +83,7 @@ def build_cost_breakdown(
         settings=settings,
         trade_cost_service=trade_cost_service,
         execution_mode=execution_mode,
+        hedge_margin_mode=resolved_hedge_margin_mode,
         spot_symbol=spot_symbol,
         hedge_symbol=hedge_symbol,
     )
@@ -88,6 +92,7 @@ def build_cost_breakdown(
         settings=settings,
         trade_cost_service=trade_cost_service,
         execution_mode=execution_mode,
+        hedge_margin_mode=resolved_hedge_margin_mode,
         spot_symbol=spot_symbol,
         hedge_symbol=hedge_symbol,
     )
@@ -191,6 +196,7 @@ def _fee_cost_components(
     settings: AATSSettings,
     trade_cost_service: TradeCostService,
     execution_mode: str | None,
+    hedge_margin_mode: str,
     spot_symbol: str | None,
     hedge_symbol: str | None,
 ) -> tuple[Decimal, Decimal, list[str]]:
@@ -209,7 +215,7 @@ def _fee_cost_components(
     hedge_fee_bps = trade_cost_service.estimated_execution_fee_bps_decimal(
         symbol=hedge_symbol,
         product_type="derivatives",
-        margin_mode=settings.margin_mode,
+        margin_mode=hedge_margin_mode,
         execution_style="taker",
         order_type="market",
     )
@@ -230,6 +236,7 @@ def _spread_cost_component(
     settings: AATSSettings,
     trade_cost_service: TradeCostService,
     execution_mode: str | None,
+    hedge_margin_mode: str,
     spot_symbol: str | None,
     hedge_symbol: str | None,
 ) -> tuple[Decimal, list[str]]:
@@ -246,7 +253,7 @@ def _spread_cost_component(
     hedge_spread_bps = trade_cost_service.default_spread_bps(
         symbol=hedge_symbol,
         product_type="derivatives",
-        margin_mode=settings.margin_mode,
+        margin_mode=hedge_margin_mode,
     )
     total = spot_spread_bps + hedge_spread_bps
     if total > Decimal("0"):
@@ -259,6 +266,7 @@ def _slippage_cost_component(
     settings: AATSSettings,
     trade_cost_service: TradeCostService,
     execution_mode: str | None,
+    hedge_margin_mode: str,
     spot_symbol: str | None,
     hedge_symbol: str | None,
 ) -> tuple[Decimal, list[str]]:
@@ -275,7 +283,7 @@ def _slippage_cost_component(
     hedge_slippage_bps = trade_cost_service.default_slippage_bps(
         symbol=hedge_symbol,
         product_type="derivatives",
-        margin_mode=settings.margin_mode,
+        margin_mode=hedge_margin_mode,
     )
     total = spot_slippage_bps + hedge_slippage_bps
     if total > Decimal("0"):

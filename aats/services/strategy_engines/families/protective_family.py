@@ -18,10 +18,8 @@ from aats.services.strategy_engines.base import (
 from aats.services.strategy_engines.overlay_parent_exposure import (
     OverlayMainLegContract,
     OverlayParentExposureContract,
-    context_or_settings_margin_mode as _context_or_settings_margin_mode,
-    exposure_side as _exposure_side,
     resolve_overlay_main_leg_contract as _resolve_overlay_main_leg_contract_from_parent_exposure,
-    resolve_overlay_main_leg_signal_from_inventory as _resolve_overlay_main_leg_signal_from_inventory,
+    resolve_overlay_parent_exposure_from_direct_args,
     resolve_overlay_parent_exposure_lifecycle,
 )
 
@@ -189,7 +187,11 @@ def protective_candidate_from_directional_target(
             "parent_lifecycle_state": parent_exposure.lifecycle_state,
             "parent_target_active": parent_exposure.target_active,
             "parent_inventory_active": parent_exposure.inventory_active,
+            "parent_source_of_truth": parent_exposure.source_of_truth,
             "parent_exposure_signal_source": parent_exposure.signal_source,
+            "parent_target_qty": parent_exposure.target_qty,
+            "parent_current_qty": parent_exposure.current_qty,
+            "parent_effective_qty": parent_exposure.effective_qty,
             "parent_target_signal": parent_exposure.target_signal,
             "parent_current_signal": parent_exposure.current_signal,
             "parent_effective_signal": parent_exposure.effective_signal,
@@ -270,43 +272,17 @@ def evaluate_protective_overlay_decision(
             blocked_reasons=["protective_overlay_not_enabled"],
         )
 
-    if parent_exposure is None:
-        direct_target_signal = _exposure_side(
-            to_decimal(long_target_qty or Decimal("0")) - to_decimal(short_target_qty or Decimal("0"))
-        )
-        direct_current_signal = _resolve_overlay_main_leg_signal_from_inventory(context=context)
-        direct_effective_signal = (
-            direct_current_signal if direct_target_signal == "flat" else direct_target_signal
-        )
-        direct_signal_source = (
-            "inventory"
-            if direct_target_signal == "flat" and direct_current_signal != "flat"
-            else "target_position"
-        )
-        resolved_parent_exposure = OverlayParentExposureContract(
-            symbol=context.symbol,
-            target_leverage=max(float(getattr(context, "current_target_leverage", 0.0) or 0.0), 1.0),
-            margin_mode=_context_or_settings_margin_mode(settings=settings, context=context),
-            target_long_qty=max(to_decimal(long_target_qty or Decimal("0")), Decimal("0")),
-            target_short_qty=max(to_decimal(short_target_qty or Decimal("0")), Decimal("0")),
-            current_long_qty=to_decimal(context.current_long_position_qty),
-            current_short_qty=to_decimal(context.current_short_position_qty),
-            target_signal=direct_target_signal,
-            current_signal=direct_current_signal,
-            effective_signal=direct_effective_signal,
-            signal_source=direct_signal_source,
+    resolved_parent_exposure = (
+        resolve_overlay_parent_exposure_from_direct_args(
+            settings=settings,
+            context=context,
+            long_target_qty=long_target_qty,
+            short_target_qty=short_target_qty,
             parent_family="directional",
-            lifecycle_state=(
-                "target_and_inventory"
-                if direct_target_signal != "flat" and direct_current_signal != "flat"
-                else ("target_only" if direct_target_signal != "flat" else ("inventory_only" if direct_current_signal != "flat" else "flat"))
-            ),
-            target_active=direct_target_signal != "flat",
-            inventory_active=direct_current_signal != "flat",
-            source="direct_target_args",
         )
-    else:
-        resolved_parent_exposure = parent_exposure
+        if parent_exposure is None
+        else parent_exposure
+    )
     main_leg_signal = resolved_parent_exposure.effective_signal
     main_signal_inferred_from_inventory = resolved_parent_exposure.signal_source == "inventory"
     if main_leg_signal == "flat":

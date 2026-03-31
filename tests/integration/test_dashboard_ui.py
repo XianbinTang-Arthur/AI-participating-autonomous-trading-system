@@ -4213,6 +4213,150 @@ console.log(JSON.stringify({
         self.assertIn('"tradingReview":true', result.stdout)
         self.assertIn('"recoveryReview":true', result.stdout)
 
+    def test_overlay_parent_quantity_summary_surfaces_in_views_and_drawer(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { renderHomeView } from './aats/api/static/modules/views/home-view.js';
+import { renderStrategyView } from './aats/api/static/modules/views/strategy-view.js';
+import { buildDecisionDrawer } from './aats/api/static/modules/detail-drawers.js';
+
+const familyExecutionSummary = {
+  summary_mode: 'single_leg',
+  family: 'protective',
+  route_action: 'override_target',
+  family_action: 'close_protection_leg',
+  leg_count: 1,
+  position_intents: ['close_short'],
+  directions: ['short'],
+  leg_actions: ['close'],
+  execution_modes: ['protective_overlay'],
+  parent_target_signal: 'flat',
+  parent_current_signal: 'long',
+  parent_effective_signal: 'long',
+  signal_source: 'inventory',
+  parent_lifecycle_state: 'inventory_only',
+  parent_target_active: false,
+  parent_inventory_active: true,
+  parent_source_of_truth: 'inventory',
+  parent_target_qty: 0,
+  parent_current_qty: 0.03,
+  parent_effective_qty: 0.03,
+};
+
+const overlayDecision = {
+  ...familyExecutionSummary,
+  configured_mode: 'protective',
+  effective_mode: 'protective',
+  overlay_source: 'protective',
+  active: true,
+  state: 'holding',
+  main_leg_signal: 'long',
+  hedge_leg_signal: 'short',
+};
+
+const latestDecision = {
+  decision_id: 'dec-parent-qty-ui',
+  decision_time: '2026-03-31T12:00:00Z',
+  decision_context: { as_of_ts: '2026-03-31T12:00:00Z', symbol: 'BTC-USDT-SWAP' },
+  position_target: {
+    position_intent: 'close_short',
+    target_exposure_side: 'flat',
+    current_position_qty: 0.03,
+    target_position_qty: 0,
+    delta_position_qty: -0.03,
+    family_execution_summary: familyExecutionSummary,
+    hedge_overlay_decision: overlayDecision,
+  },
+  decision_outcome: {
+    final_action: 'exit',
+    final_direction: 'short',
+    family_execution_summary: familyExecutionSummary,
+  },
+  policy_decision: { execution_allowed: true },
+  risk_decision: { approved: true },
+};
+
+const strategyHtml = renderStrategyView({
+  strategyRuntime: {
+    summary: {},
+    latest_snapshot: { candidates: [], automation_decisions: [] },
+    configured_parameters: { directional: {} },
+    latest_applied_target: latestDecision.position_target,
+    latest_bundle: {},
+    latest_allocation_decision: {},
+    recent_sleeve_intents: [],
+    recent_execution_bundles: [],
+    recent_budget_snapshots: [],
+    recent_conflict_resolutions: [],
+    recent_netting_decisions: [],
+    family_enablement: {},
+  },
+  latestDecision,
+  strategyAttribution: { summary: {}, profitability_by_strategy_sleeve: [], sleeve_inventory_summary: [] },
+  trialReviewSummary: { summary: {}, sections: {} },
+});
+
+const homeHtml = renderHomeView({
+  latestDecision,
+  executionLatest: {},
+  reconciliationLatest: {},
+  health: { halted: false },
+  mode: { execution_route: 'derivatives_live' },
+  runtime: { environment_capabilities: { exchange_submission_target: 'derivatives_live' } },
+  systemRecovery: { recovery: { safe_to_trade: true, halted: false, resume_eligible: true } },
+  blockers: { blockers: [] },
+  portfolio: { portfolio: { total_equity: 1200, unrealized_pnl: 0, gross_exposure: 0, net_exposure: 0 } },
+  accountState: { connected: true, fresh: true, ready: true, blockers: [] },
+  metrics: { current_open_order_count: 0 },
+  uiHints: {},
+});
+
+const drawer = buildDecisionDrawer({
+  decision_id: 'dec-parent-qty-ui',
+  decision_context: { symbol: 'BTC-USDT-SWAP', current_position_qty: 0.03 },
+  position_target: latestDecision.position_target,
+  decision_outcome: latestDecision.decision_outcome,
+  ai_decision_audit: {
+    final_action: 'exit',
+    final_direction: 'short',
+    family_execution_summary: familyExecutionSummary,
+  },
+  policy_decision: { execution_allowed: true },
+  risk_decision: { approved: true },
+  hedge_mode_audit: {
+    overlay: {
+      ...overlayDecision,
+      items: [],
+    },
+    position_mode: {},
+    leg_trial_guard: {},
+    leg_orders: { total_count: 0, open_count: 0, reduce_count: 0, close_count: 0, pos_sides: [], symbols: [], items: [] },
+    leg_reconciliation: { total_count: 0, missing_execution_chain_count: 0, items: [] },
+  },
+});
+
+const fragment = '判定口径 真实库存 / 目标仓位 0 / 当前仓位 +0.03 / 生效仓位 +0.03';
+
+console.log(JSON.stringify({
+  strategyShowsParentQty: strategyHtml.includes(fragment),
+  homeShowsParentQty: homeHtml.includes(fragment),
+  drawerShowsParentQty: drawer.body.includes(fragment),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        stdout = result.stdout or ""
+        self.assertIn('"strategyShowsParentQty":true', stdout)
+        self.assertIn('"homeShowsParentQty":true', stdout)
+        self.assertIn('"drawerShowsParentQty":true', stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

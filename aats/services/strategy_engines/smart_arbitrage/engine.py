@@ -167,6 +167,7 @@ class SmartArbitrageStrategyEngine:
         )
 
     def _evaluate_pair(self, *, pair, engine_input: StrategyEngineInput) -> StrategyCandidate:
+        hedge_margin_mode = self._resolved_hedge_margin_mode(engine_input)
         spot_snapshot, hedge_snapshot = self._load_market_pair(
             pair=pair,
             engine_input=engine_input,
@@ -216,7 +217,7 @@ class SmartArbitrageStrategyEngine:
             hedge_symbol=pair.hedge_symbol,
         )
         sleeve_product_scope = str(engine_input.directional_target.product_type or engine_input.context.product_type)
-        sleeve_margin_scope = str(engine_input.directional_target.margin_mode or self.settings.margin_mode)
+        sleeve_margin_scope = hedge_margin_mode
         sleeve_cash_spot_qty = self._current_sleeve_quantity(
             engine_input=engine_input,
             primary_symbol=engine_input.context.symbol,
@@ -303,6 +304,7 @@ class SmartArbitrageStrategyEngine:
                 capability=capability,
                 spot_price=spot_price,
                 reference_ts=engine_input.context.as_of_ts,
+                hedge_margin_mode=hedge_margin_mode,
             )
         return self._candidate_from_opportunity(
             pair=pair,
@@ -317,6 +319,7 @@ class SmartArbitrageStrategyEngine:
             spot_price=spot_price,
             hedge_price=hedge_price,
             capability=capability,
+            hedge_margin_mode=hedge_margin_mode,
         )
 
     def _build_opportunity(
@@ -330,6 +333,7 @@ class SmartArbitrageStrategyEngine:
         capability,
         spot_price: Decimal,
         reference_ts,
+        hedge_margin_mode: str,
     ) -> ArbitrageOpportunity:
         positive_basis_active = pair_basis_bps >= entry_threshold
         negative_basis_active = pair_basis_bps <= -entry_threshold
@@ -339,6 +343,7 @@ class SmartArbitrageStrategyEngine:
                 basis_bps=pair_basis_bps,
                 execution_mode=None,
                 reference_ts=reference_ts,
+                hedge_margin_mode=hedge_margin_mode,
                 spot_symbol=pair.spot_symbol,
                 hedge_symbol=pair.hedge_symbol,
                 account_service=self.account_service,
@@ -436,6 +441,7 @@ class SmartArbitrageStrategyEngine:
                     exit_threshold=exit_threshold,
                     execution_mode=execution_mode,
                     reference_ts=reference_ts,
+                    hedge_margin_mode=hedge_margin_mode,
                     direction="positive_basis",
                     reason_code="smart_arbitrage_spot_carry_not_allowed",
                 )
@@ -462,6 +468,7 @@ class SmartArbitrageStrategyEngine:
                 capability=capability,
                 spot_price=spot_price,
                 reference_ts=reference_ts,
+                hedge_margin_mode=hedge_margin_mode,
             )
         else:
             observation_mode = (
@@ -480,6 +487,7 @@ class SmartArbitrageStrategyEngine:
                 basis_bps=pair_basis_bps,
                 execution_mode=observation_mode,
                 reference_ts=reference_ts,
+                hedge_margin_mode=hedge_margin_mode,
                 spot_symbol=pair.spot_symbol,
                 hedge_symbol=pair.hedge_symbol,
                 account_service=self.account_service,
@@ -504,6 +512,7 @@ class SmartArbitrageStrategyEngine:
             basis_bps=pair_basis_bps,
             execution_mode=execution_mode,
             reference_ts=reference_ts,
+            hedge_margin_mode=hedge_margin_mode,
             spot_symbol=pair.spot_symbol,
             hedge_symbol=pair.hedge_symbol,
             account_service=self.account_service,
@@ -552,6 +561,7 @@ class SmartArbitrageStrategyEngine:
         capability,
         spot_price: Decimal,
         reference_ts,
+        hedge_margin_mode: str,
     ) -> ArbitrageOpportunity:
         requested_mode = self.settings.smart_arbitrage_negative_basis_mode
         if requested_mode in {"disabled", "advisory_only"}:
@@ -575,6 +585,7 @@ class SmartArbitrageStrategyEngine:
                     exit_threshold=exit_threshold,
                     execution_mode=execution_mode,
                     reference_ts=reference_ts,
+                    hedge_margin_mode=hedge_margin_mode,
                     direction="negative_basis",
                     reason_code="smart_arbitrage_inventory_reverse_carry_not_allowed",
                 )
@@ -617,6 +628,7 @@ class SmartArbitrageStrategyEngine:
                     exit_threshold=exit_threshold,
                     execution_mode=execution_mode,
                     reference_ts=reference_ts,
+                    hedge_margin_mode=hedge_margin_mode,
                     direction="negative_basis",
                     reason_code="smart_arbitrage_margin_reverse_carry_not_allowed",
                 )
@@ -656,6 +668,7 @@ class SmartArbitrageStrategyEngine:
             basis_bps=pair_basis_bps,
             execution_mode=execution_mode,
             reference_ts=reference_ts,
+            hedge_margin_mode=hedge_margin_mode,
             spot_symbol=pair.spot_symbol,
             hedge_symbol=pair.hedge_symbol,
             account_service=self.account_service,
@@ -710,6 +723,7 @@ class SmartArbitrageStrategyEngine:
         spot_price: Decimal,
         hedge_price: Decimal,
         capability,
+        hedge_margin_mode: str,
     ) -> StrategyCandidate:
         account_spot_qty, sleeve_spot_qty = self._selected_spot_quantities(
             opportunity=opportunity,
@@ -739,6 +753,7 @@ class SmartArbitrageStrategyEngine:
                     "route_action": route_action,
                 }
             ),
+            hedge_margin_mode=hedge_margin_mode,
             account_spot_qty=account_spot_qty,
             account_hedge_qty=account_hedge_qty,
             sleeve_spot_qty=sleeve_spot_qty,
@@ -787,6 +802,7 @@ class SmartArbitrageStrategyEngine:
                 "derivatives_symbol": pair.hedge_symbol,
                 "spot_price": spot_price,
                 "derivatives_price": hedge_price,
+                "derivatives_margin_mode": hedge_margin_mode,
                 "basis_bps": opportunity.basis_bps,
                 "entry_threshold_bps": opportunity.entry_threshold_bps,
                 "exit_threshold_bps": opportunity.exit_threshold_bps,
@@ -917,6 +933,7 @@ class SmartArbitrageStrategyEngine:
         exit_threshold: Decimal,
         execution_mode: str,
         reference_ts,
+        hedge_margin_mode: str,
         direction: str,
         reason_code: str,
     ) -> ArbitrageOpportunity:
@@ -925,6 +942,7 @@ class SmartArbitrageStrategyEngine:
             basis_bps=pair_basis_bps,
             execution_mode=execution_mode,
             reference_ts=reference_ts,
+            hedge_margin_mode=hedge_margin_mode,
             spot_symbol=pair.spot_symbol,
             hedge_symbol=pair.hedge_symbol,
             account_service=self.account_service,
@@ -987,6 +1005,9 @@ class SmartArbitrageStrategyEngine:
         if opening_pairs:
             return self._parallel_safe_candidates(candidates=opening_pairs, existing=[], limit=max_pairs)
         return ranked[:1]
+
+    def _resolved_hedge_margin_mode(self, engine_input: StrategyEngineInput) -> str:
+        return str(engine_input.directional_target.margin_mode or self.settings.margin_mode)
 
     def _aggregate_candidates(
         self,

@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from sqlalchemy import and_, asc, or_, select
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session, sessionmaker
 
 from aats.schemas.common import dump_payload_exact
@@ -46,13 +47,9 @@ class PostgresExecutionCommandRepository:
         payload: dict,
         created_at: datetime,
     ) -> None:
-        row = session.get(ExecutionCommandModel, command_id)
-        if row is None:
-            row = self._get_by_idempotency_key_in_session(session, idempotency_key)
-        if row is not None:
-            return
-        session.add(
-            ExecutionCommandModel(
+        inserted_command_id = session.scalar(
+            insert(ExecutionCommandModel)
+            .values(
                 command_id=command_id,
                 order_id=order_id,
                 command_type=command_type,
@@ -64,7 +61,17 @@ class PostgresExecutionCommandRepository:
                 created_at=created_at,
                 updated_at=created_at,
             )
+            .returning(ExecutionCommandModel.command_id)
+            .on_conflict_do_nothing()
         )
+        if inserted_command_id is not None:
+            return
+        row = session.get(ExecutionCommandModel, command_id)
+        if row is None:
+            row = self._get_by_idempotency_key_in_session(session, idempotency_key)
+        if row is not None:
+            return
+        raise RuntimeError("execution_command_insert_conflict_without_existing_row")
 
     def get_command(self, command_id: str) -> dict | None:
         with self.session_factory() as session:

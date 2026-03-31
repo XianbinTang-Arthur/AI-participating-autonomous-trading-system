@@ -1333,6 +1333,10 @@ class StrategyCoordinatorService:
             parent_lifecycle_state=self._optional_parent_lifecycle_state(metrics.get("parent_lifecycle_state")),
             parent_target_active=self._optional_bool_metric(metrics.get("parent_target_active")),
             parent_inventory_active=self._optional_bool_metric(metrics.get("parent_inventory_active")),
+            parent_source_of_truth=self._optional_text(metrics.get("parent_source_of_truth")),
+            parent_target_qty=self._metric_decimal(metrics, "parent_target_qty"),
+            parent_current_qty=self._metric_decimal(metrics, "parent_current_qty"),
+            parent_effective_qty=self._metric_decimal(metrics, "parent_effective_qty"),
             main_leg_current_qty=to_decimal(metrics.get("main_leg_current_qty") or Decimal("0")),
             hedge_leg_current_qty=to_decimal(metrics.get("hedge_leg_current_qty") or Decimal("0")),
             main_leg_target_qty=to_decimal(metrics.get("main_leg_target_qty") or Decimal("0")),
@@ -1437,7 +1441,7 @@ class StrategyCoordinatorService:
         *,
         family_execution_summary: StrategyExecutionSummary | None,
         hedge_overlay_decision: HedgeOverlayDecision | None,
-    ) -> dict[str, str | bool | None]:
+    ) -> dict[str, str | bool | Decimal | None]:
         return {
             "parent_target_signal": (
                 None
@@ -1493,6 +1497,43 @@ class StrategyCoordinatorService:
                 and family_execution_summary.parent_inventory_active is not None
             ) else (
                 None if hedge_overlay_decision is None else hedge_overlay_decision.parent_inventory_active
+            ),
+            "parent_source_of_truth": (
+                None
+                if family_execution_summary is None
+                else family_execution_summary.parent_source_of_truth
+            ) or (
+                None if hedge_overlay_decision is None else hedge_overlay_decision.parent_source_of_truth
+            ),
+            "parent_target_qty": (
+                None
+                if family_execution_summary is None
+                else family_execution_summary.parent_target_qty
+            ) if (
+                family_execution_summary is not None
+                and family_execution_summary.parent_target_qty is not None
+            ) else (
+                None if hedge_overlay_decision is None else hedge_overlay_decision.parent_target_qty
+            ),
+            "parent_current_qty": (
+                None
+                if family_execution_summary is None
+                else family_execution_summary.parent_current_qty
+            ) if (
+                family_execution_summary is not None
+                and family_execution_summary.parent_current_qty is not None
+            ) else (
+                None if hedge_overlay_decision is None else hedge_overlay_decision.parent_current_qty
+            ),
+            "parent_effective_qty": (
+                None
+                if family_execution_summary is None
+                else family_execution_summary.parent_effective_qty
+            ) if (
+                family_execution_summary is not None
+                and family_execution_summary.parent_effective_qty is not None
+            ) else (
+                None if hedge_overlay_decision is None else hedge_overlay_decision.parent_effective_qty
             ),
         }
 
@@ -1723,6 +1764,10 @@ class StrategyCoordinatorService:
             parent_lifecycle_state=StrategyCoordinatorService._optional_parent_lifecycle_state(metrics.get("parent_lifecycle_state")),
             parent_target_active=StrategyCoordinatorService._optional_bool_metric(metrics.get("parent_target_active")),
             parent_inventory_active=StrategyCoordinatorService._optional_bool_metric(metrics.get("parent_inventory_active")),
+            parent_source_of_truth=StrategyCoordinatorService._optional_text(metrics.get("parent_source_of_truth")),
+            parent_target_qty=StrategyCoordinatorService._metric_decimal(metrics, "parent_target_qty"),
+            parent_current_qty=StrategyCoordinatorService._metric_decimal(metrics, "parent_current_qty"),
+            parent_effective_qty=StrategyCoordinatorService._metric_decimal(metrics, "parent_effective_qty"),
             close_reason=StrategyCoordinatorService._optional_text(metrics.get("close_reason")),
             book_expectancy_summary=(
                 None

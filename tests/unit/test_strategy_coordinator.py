@@ -3842,6 +3842,10 @@ class TestStrategyCoordinator(unittest.TestCase):
                     "parent_current_signal": "long",
                     "parent_effective_signal": "long",
                     "parent_exposure_signal_source": "inventory",
+                    "parent_source_of_truth": "inventory",
+                    "parent_target_qty": Decimal("0"),
+                    "parent_current_qty": Decimal("0.02"),
+                    "parent_effective_qty": Decimal("0.02"),
                 },
             ),
         )
@@ -3851,6 +3855,10 @@ class TestStrategyCoordinator(unittest.TestCase):
         self.assertEqual(summary.parent_current_signal, "long")
         self.assertEqual(summary.parent_effective_signal, "long")
         self.assertEqual(summary.signal_source, "inventory")
+        self.assertEqual(summary.parent_source_of_truth, "inventory")
+        self.assertEqual(summary.parent_target_qty, Decimal("0"))
+        self.assertEqual(summary.parent_current_qty, Decimal("0.02"))
+        self.assertEqual(summary.parent_effective_qty, Decimal("0.02"))
 
     def test_family_execution_summary_preserves_independent_close_reason(self) -> None:
         summary = StrategyCoordinatorService._family_execution_summary(

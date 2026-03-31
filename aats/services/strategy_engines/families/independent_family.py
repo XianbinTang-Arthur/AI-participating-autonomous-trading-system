@@ -711,9 +711,6 @@ def evaluate_independent_books(
         runtime_margin_mode=resolved_margin_mode,
         leg="long",
         trade_cost_service=cost_service,
-        fallback_signal_edge_bps=signal_edge_bps,
-        fallback_expected_cost_bps=expected_cost_bps,
-        fallback_expected_net_edge_bps=expected_net_edge_bps,
         expectancy_resolver=expectancy_resolver,
     )
     short_expectancy = _resolve_independent_book_expectancy(
@@ -724,9 +721,6 @@ def evaluate_independent_books(
         runtime_margin_mode=resolved_margin_mode,
         leg="short",
         trade_cost_service=cost_service,
-        fallback_signal_edge_bps=signal_edge_bps,
-        fallback_expected_cost_bps=expected_cost_bps,
-        fallback_expected_net_edge_bps=expected_net_edge_bps,
         expectancy_resolver=expectancy_resolver,
     )
     long_book = _evaluate_independent_book(
@@ -1363,17 +1357,18 @@ def _evaluate_independent_book(
             reason_codes.append(f"independent_{leg}_book_signal_above_entry_threshold")
             if expectancy_resolution_failed:
                 blocked_reasons.append(f"independent_{leg}_book_expectancy_resolution_failed")
-            open_gate = _independent_open_gate(
-                settings=settings,
-                context=context,
-                leg=leg,
-                expected_cost_bps=expectancy.expected_cost_bps,
-                expected_net_edge_bps=expectancy.expected_net_edge_bps,
-            )
-            blocked_reasons.extend(open_gate["blocked_reasons"])
-            weak_edge_report_only = bool(open_gate["weak_edge_report_only"])
-            if weak_edge_report_only:
-                reason_codes.append(f"independent_{leg}_book_expected_net_edge_below_safe_threshold_report_only")
+            else:
+                open_gate = _independent_open_gate(
+                    settings=settings,
+                    context=context,
+                    leg=leg,
+                    expected_cost_bps=expectancy.expected_cost_bps,
+                    expected_net_edge_bps=expectancy.expected_net_edge_bps,
+                )
+                blocked_reasons.extend(open_gate["blocked_reasons"])
+                weak_edge_report_only = bool(open_gate["weak_edge_report_only"])
+                if weak_edge_report_only:
+                    reason_codes.append(f"independent_{leg}_book_expected_net_edge_below_safe_threshold_report_only")
             _, quality_blocked_reasons = _independent_entry_quality_gate(
                 side=leg,
                 score=score,
@@ -1413,7 +1408,9 @@ def _evaluate_independent_book(
             settings=settings,
             score=score,
             close_threshold=close_threshold,
-            expected_net_edge_bps=expectancy.expected_net_edge_bps,
+            expected_net_edge_bps=(
+                None if expectancy_resolution_failed else expectancy.expected_net_edge_bps
+            ),
             liquidity_quality_score=liquidity_quality_score,
             execution_health_state=execution_health_state,
             age_seconds=thesis_age_seconds,
@@ -1452,17 +1449,18 @@ def _evaluate_independent_book(
             reason_codes.append(f"independent_{leg}_book_signal_above_scale_in_threshold")
             if expectancy_resolution_failed:
                 blocked_reasons.append(f"independent_{leg}_book_expectancy_resolution_failed")
-            open_gate = _independent_open_gate(
-                settings=settings,
-                context=context,
-                leg=leg,
-                expected_cost_bps=expectancy.expected_cost_bps,
-                expected_net_edge_bps=expectancy.expected_net_edge_bps,
-            )
-            blocked_reasons.extend(open_gate["blocked_reasons"])
-            weak_edge_report_only = bool(open_gate["weak_edge_report_only"])
-            if weak_edge_report_only:
-                reason_codes.append(f"independent_{leg}_book_expected_net_edge_below_safe_threshold_report_only")
+            else:
+                open_gate = _independent_open_gate(
+                    settings=settings,
+                    context=context,
+                    leg=leg,
+                    expected_cost_bps=expectancy.expected_cost_bps,
+                    expected_net_edge_bps=expectancy.expected_net_edge_bps,
+                )
+                blocked_reasons.extend(open_gate["blocked_reasons"])
+                weak_edge_report_only = bool(open_gate["weak_edge_report_only"])
+                if weak_edge_report_only:
+                    reason_codes.append(f"independent_{leg}_book_expected_net_edge_below_safe_threshold_report_only")
             _, quality_blocked_reasons = _independent_entry_quality_gate(
                 side=leg,
                 score=score,
@@ -1684,12 +1682,15 @@ def _independent_close_reason(
     settings: AATSSettings,
     score: float,
     close_threshold: float,
-    expected_net_edge_bps: float,
+    expected_net_edge_bps: float | None,
     liquidity_quality_score: float | None,
     execution_health_state: IndependentExecutionHealthState | None,
     age_seconds: float | None,
 ) -> str | None:
-    if expected_net_edge_bps <= float(settings.strategy_hedge_independent_failed_thesis_net_edge_bps):
+    if (
+        expected_net_edge_bps is not None
+        and expected_net_edge_bps <= float(settings.strategy_hedge_independent_failed_thesis_net_edge_bps)
+    ):
         return "failed_thesis"
     if age_seconds is not None and age_seconds >= float(settings.strategy_hedge_independent_max_thesis_age_seconds):
         return "stale_thesis"
@@ -1705,7 +1706,10 @@ def _independent_close_reason(
     ):
         return "liquidity_degraded"
     if (
-        expected_net_edge_bps <= float(settings.strategy_hedge_independent_de_risk_net_edge_bps)
+        (
+            expected_net_edge_bps is not None
+            and expected_net_edge_bps <= float(settings.strategy_hedge_independent_de_risk_net_edge_bps)
+        )
         or score + 1e-9 < close_threshold
     ):
         return "weak_edge_de_risk"
@@ -1901,9 +1905,6 @@ def _resolve_independent_book_expectancy(
     runtime_margin_mode: str,
     leg: IndependentLeg,
     trade_cost_service: TradeCostService,
-    fallback_signal_edge_bps: float,
-    fallback_expected_cost_bps: float,
-    fallback_expected_net_edge_bps: float,
     expectancy_resolver: IndependentBookExpectancyResolver | None,
 ) -> IndependentBookExpectancy:
     if expectancy_resolver is not None:
@@ -1917,14 +1918,7 @@ def _resolve_independent_book_expectancy(
                 trade_cost_service=trade_cost_service,
             )
         except Exception:
-            return IndependentBookExpectancy(
-                leg=leg,
-                expected_signal_edge_bps=max(float(fallback_signal_edge_bps), 0.0),
-                expected_slippage_bps=_independent_expected_slippage_bps(settings=settings),
-                expected_cost_bps=max(float(fallback_expected_cost_bps), 0.0),
-                expected_net_edge_bps=float(fallback_expected_net_edge_bps),
-                resolution_failed=True,
-            )
+            return _failed_independent_book_expectancy(settings=settings, leg=leg)
     try:
         return _compute_independent_book_expectancy(
             settings=settings,
@@ -1936,14 +1930,22 @@ def _resolve_independent_book_expectancy(
             trade_cost_service=trade_cost_service,
         )
     except Exception:
-        return IndependentBookExpectancy(
-            leg=leg,
-            expected_signal_edge_bps=max(float(fallback_signal_edge_bps), 0.0),
-            expected_slippage_bps=_independent_expected_slippage_bps(settings=settings),
-            expected_cost_bps=max(float(fallback_expected_cost_bps), 0.0),
-            expected_net_edge_bps=float(fallback_expected_net_edge_bps),
-            resolution_failed=True,
-        )
+        return _failed_independent_book_expectancy(settings=settings, leg=leg)
+
+
+def _failed_independent_book_expectancy(
+    *,
+    settings: AATSSettings,
+    leg: IndependentLeg,
+) -> IndependentBookExpectancy:
+    return IndependentBookExpectancy(
+        leg=leg,
+        expected_signal_edge_bps=0.0,
+        expected_slippage_bps=_independent_expected_slippage_bps(settings=settings),
+        expected_cost_bps=0.0,
+        expected_net_edge_bps=0.0,
+        resolution_failed=True,
+    )
 
 
 def _compute_independent_book_expectancy(

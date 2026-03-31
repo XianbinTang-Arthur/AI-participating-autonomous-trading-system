@@ -156,6 +156,10 @@ class TestOperatorPositionStates(unittest.TestCase):
                     "parent_lifecycle_state": "inventory_only",
                     "parent_target_active": False,
                     "parent_inventory_active": True,
+                    "parent_source_of_truth": "inventory",
+                    "parent_target_qty": "0",
+                    "parent_current_qty": "0.03",
+                    "parent_effective_qty": "0.03",
                     "book_expectancy_summary": {
                         "source": "independent_book",
                         "books": [
@@ -187,6 +191,10 @@ class TestOperatorPositionStates(unittest.TestCase):
         self.assertEqual(payload["parent_lifecycle_state"], "inventory_only")
         self.assertEqual(payload["parent_target_active"], False)
         self.assertEqual(payload["parent_inventory_active"], True)
+        self.assertEqual(payload["parent_source_of_truth"], "inventory")
+        self.assertEqual(payload["parent_target_qty"], "0")
+        self.assertEqual(payload["parent_current_qty"], "0.03")
+        self.assertEqual(payload["parent_effective_qty"], "0.03")
         self.assertEqual(payload["diagnostic_metric_flags"]["emit_expected_vs_realized_metrics"], True)
         self.assertEqual(payload["book_expectancy_summary"]["source"], "independent_book")
         self.assertEqual(
@@ -1048,6 +1056,10 @@ class TestOperatorPositionStates(unittest.TestCase):
                     "parent_lifecycle_state": "inventory_only",
                     "parent_target_active": False,
                     "parent_inventory_active": True,
+                    "parent_source_of_truth": "inventory",
+                    "parent_target_qty": "0",
+                    "parent_current_qty": "0.01",
+                    "parent_effective_qty": "0.01",
                     "book_runtime_states": [
                         {
                             "leg": "long",
@@ -1085,6 +1097,10 @@ class TestOperatorPositionStates(unittest.TestCase):
         self.assertEqual(payload["parent_lifecycle_state"], "inventory_only")
         self.assertEqual(payload["parent_target_active"], False)
         self.assertEqual(payload["parent_inventory_active"], True)
+        self.assertEqual(payload["parent_source_of_truth"], "inventory")
+        self.assertEqual(payload["parent_target_qty"], "0")
+        self.assertEqual(payload["parent_current_qty"], "0.01")
+        self.assertEqual(payload["parent_effective_qty"], "0.01")
 
     def test_overlay_audit_summary_exposes_parent_exposure_signals(self) -> None:
         query = OperatorQueryService.__new__(OperatorQueryService)
@@ -1106,6 +1122,10 @@ class TestOperatorPositionStates(unittest.TestCase):
                     "parent_lifecycle_state": "inventory_only",
                     "parent_target_active": False,
                     "parent_inventory_active": True,
+                    "parent_source_of_truth": "inventory",
+                    "parent_target_qty": "0",
+                    "parent_current_qty": "0.03",
+                    "parent_effective_qty": "0.03",
                     "close_reason": "failed_thesis",
                     "long_leg_close_reason": "failed_thesis",
                 },
@@ -1120,6 +1140,10 @@ class TestOperatorPositionStates(unittest.TestCase):
         self.assertEqual(audit["parent_lifecycle_state"], "inventory_only")
         self.assertEqual(audit["parent_target_active"], False)
         self.assertEqual(audit["parent_inventory_active"], True)
+        self.assertEqual(audit["parent_source_of_truth"], "inventory")
+        self.assertEqual(audit["parent_target_qty"], "0")
+        self.assertEqual(audit["parent_current_qty"], "0.03")
+        self.assertEqual(audit["parent_effective_qty"], "0.03")
         self.assertEqual(audit["close_reason"], "failed_thesis")
         self.assertEqual(audit["long_leg_close_reason"], "failed_thesis")
 

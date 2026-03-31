@@ -92,10 +92,14 @@ class TestOpportunisticFamily(unittest.TestCase):
                 target_short_qty=Decimal("0"),
                 current_long_qty=Decimal("0.05"),
                 current_short_qty=Decimal("0"),
+                target_qty=Decimal("0.05"),
+                current_qty=Decimal("0.05"),
+                effective_qty=Decimal("0.05"),
                 target_signal="long",
                 current_signal="long",
                 effective_signal="long",
                 signal_source="target_position",
+                source_of_truth="mixed",
                 lifecycle_state="target_and_inventory",
                 target_active=True,
                 inventory_active=True,
@@ -115,6 +119,9 @@ class TestOpportunisticFamily(unittest.TestCase):
         self.assertEqual(candidate.metrics["main_leg_contract_source"], "coordinator_parent_exposure")
         self.assertEqual(candidate.metrics["parent_effective_signal"], "long")
         self.assertEqual(candidate.metrics["parent_lifecycle_state"], "target_and_inventory")
+        self.assertEqual(candidate.metrics["parent_source_of_truth"], "mixed")
+        self.assertEqual(candidate.metrics["parent_target_qty"], Decimal("0.05"))
+        self.assertEqual(candidate.metrics["parent_effective_qty"], Decimal("0.05"))
         self.assertTrue(candidate.legs)
         self.assertEqual(candidate.legs[0].margin_mode, "isolated")
         self.assertEqual(candidate.legs[0].pos_side, "short")
@@ -153,10 +160,14 @@ class TestOpportunisticFamily(unittest.TestCase):
             target_short_qty=Decimal("0"),
             current_long_qty=Decimal("0.05"),
             current_short_qty=Decimal("0"),
+            target_qty=Decimal("0"),
+            current_qty=Decimal("0.05"),
+            effective_qty=Decimal("0.05"),
             target_signal="flat",
             current_signal="long",
             effective_signal="long",
             signal_source="inventory",
+            source_of_truth="inventory",
             source="test_parent_exposure",
         )
 

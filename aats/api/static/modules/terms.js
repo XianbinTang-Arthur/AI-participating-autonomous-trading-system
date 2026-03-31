@@ -135,6 +135,7 @@
   reverse_to_short: "反手做空",
   target_position: "方向目标",
   inventory: "真实库存",
+  mixed: "目标与库存混合",
   trend: "趋势",
   regime_range: "市场处于震荡区间",
   trend_aggressive: "趋势激进",
@@ -751,6 +752,8 @@ function normalizedOverlayDecision(source = {}) {
   if (
     Object.prototype.hasOwnProperty.call(source, "main_leg_signal")
     || Object.prototype.hasOwnProperty.call(source, "parent_effective_signal")
+    || Object.prototype.hasOwnProperty.call(source, "parent_source_of_truth")
+    || Object.prototype.hasOwnProperty.call(source, "parent_effective_qty")
   ) {
     return source;
   }
@@ -767,6 +770,8 @@ function normalizedOverlayDecision(source = {}) {
       || Object.prototype.hasOwnProperty.call(familySummary, "parent_current_signal")
       || Object.prototype.hasOwnProperty.call(familySummary, "parent_effective_signal")
       || Object.prototype.hasOwnProperty.call(familySummary, "signal_source")
+      || Object.prototype.hasOwnProperty.call(familySummary, "parent_source_of_truth")
+      || Object.prototype.hasOwnProperty.call(familySummary, "parent_effective_qty")
     )
   ) {
     return familySummary;
@@ -791,6 +796,14 @@ function readablePercentRatio(value) {
   const number = Number(value);
   if (!Number.isFinite(number)) return "";
   return `${(number * 100).toFixed(1)}%`;
+}
+
+function readableSignedQuantity(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "待确认";
+  const normalized = number.toFixed(4).replace(/\.?0+$/, "");
+  if (!normalized || normalized === "-0") return "0";
+  return number > 0 ? `+${normalized}` : normalized;
 }
 
 function readableCloseReasonDistribution(items = []) {
@@ -1054,6 +1067,10 @@ export function readableOverlayParentSignalSummary(source = {}, fallback = "") {
   const lifecycleState = overlay.parent_lifecycle_state;
   const targetActive = overlay.parent_target_active;
   const inventoryActive = overlay.parent_inventory_active;
+  const sourceOfTruth = overlay.parent_source_of_truth;
+  const targetQty = overlay.parent_target_qty;
+  const currentQty = overlay.parent_current_qty;
+  const effectiveQty = overlay.parent_effective_qty;
   if (
     !targetSignal
     && !currentSignal
@@ -1062,6 +1079,10 @@ export function readableOverlayParentSignalSummary(source = {}, fallback = "") {
     && lifecycleState === undefined
     && targetActive === undefined
     && inventoryActive === undefined
+    && !sourceOfTruth
+    && targetQty === undefined
+    && currentQty === undefined
+    && effectiveQty === undefined
   ) return fallback;
   return [
     `父腿目标 ${readableState(targetSignal, "待确认")}`,
@@ -1071,6 +1092,10 @@ export function readableOverlayParentSignalSummary(source = {}, fallback = "") {
     `阶段 ${readableState(lifecycleState, "待确认")}`,
     `目标活跃 ${targetActive === undefined || targetActive === null ? "待确认" : (targetActive ? "是" : "否")}`,
     `库存活跃 ${inventoryActive === undefined || inventoryActive === null ? "待确认" : (inventoryActive ? "是" : "否")}`,
+    `判定口径 ${localizeError(sourceOfTruth, "待确认")}`,
+    `目标仓位 ${readableSignedQuantity(targetQty)}`,
+    `当前仓位 ${readableSignedQuantity(currentQty)}`,
+    `生效仓位 ${readableSignedQuantity(effectiveQty)}`,
   ].join(" / ");
 }
 

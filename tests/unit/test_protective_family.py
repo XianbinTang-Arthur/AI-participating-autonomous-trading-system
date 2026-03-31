@@ -77,6 +77,10 @@ class TestProtectiveFamily(unittest.TestCase):
         self.assertEqual(contract.current_signal, "long")
         self.assertEqual(contract.effective_signal, "long")
         self.assertEqual(contract.signal_source, "inventory")
+        self.assertEqual(contract.source_of_truth, "inventory")
+        self.assertEqual(contract.target_qty, Decimal("0"))
+        self.assertEqual(contract.current_qty, Decimal("0.05"))
+        self.assertEqual(contract.effective_qty, Decimal("0.05"))
         self.assertEqual(contract.target_long_qty, Decimal("0"))
         self.assertEqual(contract.current_long_qty, Decimal("0.05"))
 
@@ -121,6 +125,8 @@ class TestProtectiveFamily(unittest.TestCase):
         self.assertEqual(contract.margin_mode, "isolated")
         self.assertEqual(contract.target_leverage, 3.0)
         self.assertEqual(contract.source, "directional_primary_legs")
+        self.assertEqual(contract.source_of_truth, "mixed")
+        self.assertEqual(contract.target_qty, Decimal("0.08"))
 
     def test_protective_candidate_prefers_precomputed_parent_exposure_over_directional_target(self) -> None:
         settings = make_derivatives_hedge_settings(
@@ -194,10 +200,14 @@ class TestProtectiveFamily(unittest.TestCase):
                 target_short_qty=Decimal("0"),
                 current_long_qty=Decimal("0.05"),
                 current_short_qty=Decimal("0"),
+                target_qty=Decimal("0.05"),
+                current_qty=Decimal("0.05"),
+                effective_qty=Decimal("0.05"),
                 target_signal="long",
                 current_signal="long",
                 effective_signal="long",
                 signal_source="target_position",
+                source_of_truth="mixed",
                 lifecycle_state="target_and_inventory",
                 target_active=True,
                 inventory_active=True,
@@ -214,6 +224,9 @@ class TestProtectiveFamily(unittest.TestCase):
         self.assertEqual(candidate.metrics["main_leg_contract_source"], "coordinator_parent_exposure")
         self.assertEqual(candidate.metrics["parent_effective_signal"], "long")
         self.assertEqual(candidate.metrics["parent_lifecycle_state"], "target_and_inventory")
+        self.assertEqual(candidate.metrics["parent_source_of_truth"], "mixed")
+        self.assertEqual(candidate.metrics["parent_target_qty"], Decimal("0.05"))
+        self.assertEqual(candidate.metrics["parent_effective_qty"], Decimal("0.05"))
         self.assertEqual(candidate.recommended_symbol, context.symbol)
         self.assertTrue(candidate.legs)
         self.assertEqual(candidate.legs[0].margin_mode, "isolated")
