@@ -2144,22 +2144,12 @@ class OperatorQueryService:
                 item.get("family"): item.get("automation_state")
                 for item in automation_decisions
             },
-            "operator_summary": (
-                "当前还没有产生多策略协调快照。"
-                if latest_snapshot is None
-                else "当前多策略协调结果已经生成。"
+            "operator_summary": self._strategy_runtime_operator_summary(
+                latest_snapshot_present=latest_snapshot is not None,
+                route_action=None if latest_snapshot is None else latest_snapshot.get("selected_route_action"),
+                family_action=None if latest_snapshot is None else latest_snapshot.get("selected_family_action"),
             ),
         }
-        route_action = summary["latest_selected_route_action"]
-        if latest_snapshot is not None:
-            if route_action == "override_target":
-                summary["operator_summary"] = "当前选中的策略家族正在直接接管本轮目标仓位。"
-            elif route_action == "protective_fallback":
-                summary["operator_summary"] = "当前选中的策略家族没有直接接管仓位，系统保留了方向策略的保护性减仓或退出。"
-            elif route_action == "advisory_only":
-                summary["operator_summary"] = "当前选中的策略家族只提供参考，不会直接接管实盘执行。"
-            else:
-                summary["operator_summary"] = "当前选中的策略家族没有生成可执行目标，系统继续保持当前仓位。"
         (
             smart_arbitrage_pair_definitions,
             smart_arbitrage_pair_registry_warning_codes,
@@ -2196,6 +2186,27 @@ class OperatorQueryService:
             "smart_arbitrage_cost_summary": smart_arbitrage_cost_summary,
             "truth_source": "strategy_runtime_repo_plus_event_store" if strategy_runtime_repo is not None else "strategy_coordinator_snapshots",
         }
+
+    @staticmethod
+    def _strategy_runtime_operator_summary(
+        *,
+        latest_snapshot_present: bool,
+        route_action: str | None,
+        family_action: str | None,
+    ) -> str:
+        if not latest_snapshot_present:
+            return "当前还没有产生多策略协调快照。"
+        if route_action == "override_target":
+            if family_action == "close_protection_leg":
+                return "当前选中的策略家族正在收回保护腿。"
+            if family_action == "close_opportunity_leg":
+                return "当前选中的策略家族正在收回机会腿。"
+            return "当前选中的策略家族正在直接接管本轮目标仓位。"
+        if route_action == "protective_fallback":
+            return "当前选中的策略家族没有直接接管仓位，系统保留了方向策略的保护性减仓或退出。"
+        if route_action == "advisory_only":
+            return "当前选中的策略家族只提供参考，不会直接接管实盘执行。"
+        return "当前选中的策略家族没有生成可执行目标，系统继续保持当前仓位。"
 
     def _configured_strategy_runtime_parameters(
         self,
@@ -2358,6 +2369,12 @@ class OperatorQueryService:
             "hedge_opportunistic_rebalance_cooldown_seconds": self.runtime.settings.strategy_hedge_opportunistic_rebalance_cooldown_seconds,
             "hedge_opportunistic_max_fee_drag_ratio": self.runtime.settings.strategy_hedge_opportunistic_max_fee_drag_ratio,
             "hedge_opportunistic_max_churn_ratio": self.runtime.settings.strategy_hedge_opportunistic_max_churn_ratio,
+            "hedge_opportunistic_min_safe_net_edge_bps": self.runtime.settings.strategy_hedge_opportunistic_min_safe_net_edge_bps,
+            "hedge_opportunistic_expected_slippage_buffer_bps": self.runtime.settings.strategy_hedge_opportunistic_expected_slippage_buffer_bps,
+            "hedge_opportunistic_expected_execution_buffer_bps": self.runtime.settings.strategy_hedge_opportunistic_expected_execution_buffer_bps,
+            "hedge_opportunistic_weak_edge_execution_mode": self.runtime.settings.strategy_hedge_opportunistic_weak_edge_execution_mode,
+            "hedge_opportunistic_max_acceptable_cost_bps": self.runtime.settings.strategy_hedge_opportunistic_max_acceptable_cost_bps,
+            "hedge_opportunistic_passive_first_enabled": self.runtime.settings.strategy_hedge_opportunistic_passive_first_enabled,
             "hedge_independent_enabled": self.runtime.settings.strategy_hedge_independent_enabled,
             "hedge_independent_rollout_stage": self.runtime.settings.strategy_hedge_independent_rollout_stage,
             "hedge_independent_long_entry_threshold": self.runtime.settings.strategy_hedge_independent_long_entry_threshold,
@@ -3559,6 +3576,7 @@ class OperatorQueryService:
         funding_fee_summary = None
         if hasattr(self.runtime.account_service, "recent_funding_fee_summary"):
             funding_fee_summary = self.runtime.account_service.recent_funding_fee_summary(symbol=symbol)
+        target_expectancy = self._target_expectancy_metrics(position_target)
         return {
             "economically_actionable": ai_assessment.get("economically_actionable"),
             "fallback_used": ai_assessment.get("fallback_used"),
@@ -3574,9 +3592,9 @@ class OperatorQueryService:
             "min_required_net_edge_bps": self.runtime.settings.strategy_min_net_edge_bps,
             "noise_buffer_bps": self.runtime.settings.strategy_edge_noise_buffer_bps,
             "required_total_edge_bps": required_total_edge_bps,
-            "target_expected_signal_edge_bps": position_target.get("expected_signal_edge_bps") if position_target else None,
-            "target_expected_cost_bps": position_target.get("expected_cost_bps") if position_target else None,
-            "target_expected_net_edge_bps": position_target.get("expected_net_edge_bps") if position_target else None,
+            "target_expected_signal_edge_bps": target_expectancy["expected_signal_edge_bps"],
+            "target_expected_cost_bps": target_expectancy["expected_cost_bps"],
+            "target_expected_net_edge_bps": target_expectancy["expected_net_edge_bps"],
             "validation_flags": list(ai_assessment.get("validation_flags") or []),
             "rejection_flags": list(ai_assessment.get("rejection_flags") or []),
             "market_snapshot_fresh": None if ai_decision_brief is None else ai_decision_brief.get("market_snapshot_fresh"),
@@ -3629,6 +3647,29 @@ class OperatorQueryService:
         if isinstance(nested, dict):
             return dict(nested)
         return None
+
+    def _target_expectancy_metrics(self, payload: dict[str, Any] | None) -> dict[str, Any | None]:
+        if not isinstance(payload, dict):
+            return {
+                "expected_signal_edge_bps": None,
+                "expected_cost_bps": None,
+                "expected_net_edge_bps": None,
+            }
+        summary = self._book_expectancy_summary_from_payload(payload)
+        if isinstance(summary, dict):
+            books = summary.get("books")
+            if isinstance(books, list) and len(books) == 1 and isinstance(books[0], dict):
+                book = books[0]
+                return {
+                    "expected_signal_edge_bps": book.get("expected_signal_edge_bps"),
+                    "expected_cost_bps": book.get("expected_cost_bps"),
+                    "expected_net_edge_bps": book.get("expected_net_edge_bps"),
+                }
+        return {
+            "expected_signal_edge_bps": payload.get("expected_signal_edge_bps"),
+            "expected_cost_bps": payload.get("expected_cost_bps"),
+            "expected_net_edge_bps": payload.get("expected_net_edge_bps"),
+        }
 
     def _position_target_payload(self, payload: dict[str, Any] | None) -> dict[str, Any] | None:
         if not isinstance(payload, dict):

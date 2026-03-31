@@ -308,7 +308,7 @@ class PortfolioAllocatorV2Phase2:
         if conflict_resolutions and budget_state == "normal":
             budget_state = "hedge_protected"
         if execution_legs:
-            operator_summary = "当前 allocator v2 已按 sleeve 预算、组合预算和净额规则生成账户级执行目标。"
+            operator_summary = self._operator_summary_for_primary_intent(primary_intent=primary_intent)
         elif approved_families:
             operator_summary = "当前 allocator v2 识别到活跃 sleeve，但本轮没有新的可执行 delta。"
         else:
@@ -362,6 +362,18 @@ class PortfolioAllocatorV2Phase2:
             sleeve_intents=[intent.model_copy(deep=True) for intent in sleeve_intents],
             execution_legs=execution_legs,
         )
+
+    @staticmethod
+    def _operator_summary_for_primary_intent(
+        *,
+        primary_intent: StrategySleeveIntent | None,
+    ) -> str:
+        family_action = "" if primary_intent is None else str(primary_intent.family_action or "").strip().lower()
+        if family_action == "close_protection_leg":
+            return "当前 allocator v2 已批准收回保护腿的账户级执行目标。"
+        if family_action == "close_opportunity_leg":
+            return "当前 allocator v2 已批准收回机会腿的账户级执行目标。"
+        return "当前 allocator v2 已按 sleeve 预算、组合预算和净额规则生成账户级执行目标。"
 
     def _apply_budget_assignment(
         self,

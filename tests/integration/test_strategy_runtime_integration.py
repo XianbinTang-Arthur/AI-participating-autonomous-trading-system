@@ -660,6 +660,12 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
             strategy_hedge_overlay_enabled=True,
             strategy_hedge_overlay_mode="opportunistic",
             strategy_hedge_opportunistic_enabled=True,
+            strategy_hedge_opportunistic_min_safe_net_edge_bps=3.0,
+            strategy_hedge_opportunistic_expected_slippage_buffer_bps=1.0,
+            strategy_hedge_opportunistic_expected_execution_buffer_bps=2.0,
+            strategy_hedge_opportunistic_weak_edge_execution_mode="report_only",
+            strategy_hedge_opportunistic_max_acceptable_cost_bps=7.5,
+            strategy_hedge_opportunistic_passive_first_enabled=True,
             strategy_cost_guard_enabled=False,
             strategy_entry_min_signal_edge_bps=0.0,
             strategy_entry_alpha_min=0.0,
@@ -763,6 +769,12 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(payload["configured_parameters"]["directional"]["hedge_opportunistic_enabled"])
         self.assertTrue(payload["configured_parameters"]["directional"]["hedge_overlay_mode_ready"])
         self.assertTrue(payload["configured_parameters"]["directional"]["hedge_overlay_effective_enabled"])
+        self.assertEqual(payload["configured_parameters"]["directional"]["hedge_opportunistic_min_safe_net_edge_bps"], 3.0)
+        self.assertEqual(payload["configured_parameters"]["directional"]["hedge_opportunistic_expected_slippage_buffer_bps"], 1.0)
+        self.assertEqual(payload["configured_parameters"]["directional"]["hedge_opportunistic_expected_execution_buffer_bps"], 2.0)
+        self.assertEqual(payload["configured_parameters"]["directional"]["hedge_opportunistic_weak_edge_execution_mode"], "report_only")
+        self.assertEqual(payload["configured_parameters"]["directional"]["hedge_opportunistic_max_acceptable_cost_bps"], 7.5)
+        self.assertTrue(payload["configured_parameters"]["directional"]["hedge_opportunistic_passive_first_enabled"])
         applied_target = payload["latest_applied_target"]
         self.assertEqual(applied_target["hedge_overlay_decision"]["effective_mode"], "opportunistic")
         self.assertEqual(applied_target["hedge_overlay_decision"]["overlay_source"], "opportunistic")

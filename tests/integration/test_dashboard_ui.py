@@ -323,6 +323,7 @@ const html = renderStrategyView({
         hedge_overlay_enabled: true,
         hedge_overlay_mode: 'opportunistic',
         hedge_overlay_runtime_supported: true,
+        hedge_overlay_enabled_in_mode: true,
         hedge_overlay_mode_ready: true,
         hedge_overlay_effective_enabled: true,
         hedge_open_threshold: 0.58,
@@ -338,6 +339,12 @@ const html = renderStrategyView({
         hedge_opportunistic_rebalance_cooldown_seconds: 90,
         hedge_opportunistic_max_fee_drag_ratio: 0.18,
         hedge_opportunistic_max_churn_ratio: 0.22,
+        hedge_opportunistic_min_safe_net_edge_bps: 3.0,
+        hedge_opportunistic_expected_slippage_buffer_bps: 1.0,
+        hedge_opportunistic_expected_execution_buffer_bps: 2.0,
+        hedge_opportunistic_weak_edge_execution_mode: 'report_only',
+        hedge_opportunistic_max_acceptable_cost_bps: 7.5,
+        hedge_opportunistic_passive_first_enabled: true,
       },
     },
     latest_snapshot: { candidates: [], automation_decisions: [] },
@@ -367,6 +374,19 @@ const html = renderStrategyView({
       current_position_qty: 0.05,
       target_position_qty: 0.03,
       delta_position_qty: -0.02,
+      book_expectancy_summary: {
+        source: 'opportunistic_overlay',
+        books: [
+          {
+            leg: 'short',
+            expected_gross_edge_bps: 8.0,
+            expected_signal_edge_bps: 8.0,
+            expected_slippage_bps: 1.0,
+            expected_cost_bps: 4.0,
+            expected_net_edge_bps: 4.0,
+          },
+        ],
+      },
       guardrail_flags: ['opportunistic_hedge_overlay_active'],
       hedge_overlay_decision: {
         enabled: true,
@@ -402,6 +422,9 @@ const html = renderStrategyView({
 console.log(JSON.stringify({
   hasOverlayLabel: html.includes('机会型对冲'),
   hasOpportunisticThresholds: html.includes('strategy_hedge_opportunistic_open_threshold / strategy_hedge_opportunistic_close_threshold'),
+  hasExecutionDiscipline: html.includes('strategy_hedge_opportunistic_min_safe_net_edge_bps / strategy_hedge_opportunistic_expected_slippage_buffer_bps / strategy_hedge_opportunistic_expected_execution_buffer_bps')
+    && html.includes('strategy_hedge_opportunistic_weak_edge_execution_mode / strategy_hedge_opportunistic_max_acceptable_cost_bps / strategy_hedge_opportunistic_passive_first_enabled'),
+  hasOpportunisticExpectancyMeta: html.includes('safe net 3 bps / max cost 7.5 bps') && html.includes('空腿 毛/成本/净 8.00/4.00/4.00 基点'),
   hasOpportunityLeg: html.includes('机会腿'),
   hasOpportunityReason: html.includes('机会分已经超过开仓阈值'),
   hasModeCopy: html.includes('机会型对冲 有没有介入') || html.includes('机会型对冲 的腿级状态'),
@@ -418,9 +441,152 @@ console.log(JSON.stringify({
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         self.assertIn('"hasOverlayLabel":true', result.stdout)
         self.assertIn('"hasOpportunisticThresholds":true', result.stdout)
+        self.assertIn('"hasExecutionDiscipline":true', result.stdout)
+        self.assertIn('"hasOpportunisticExpectancyMeta":true', result.stdout)
         self.assertIn('"hasOpportunityLeg":true', result.stdout)
         self.assertIn('"hasOpportunityReason":true', result.stdout)
         self.assertIn('"hasModeCopy":true', result.stdout)
+
+    def test_strategy_view_surfaces_overlay_residual_close_summary_copy(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { renderStrategyView } from './aats/api/static/modules/views/strategy-view.js';
+
+const sharedPayload = {
+  strategyRuntime: {
+    configured_parameters: {
+      directional: {
+        product_type: 'derivatives',
+        hedge_overlay_enabled: true,
+        hedge_overlay_mode: 'protective',
+        hedge_overlay_runtime_supported: true,
+        hedge_overlay_mode_ready: true,
+        hedge_overlay_effective_enabled: true,
+      },
+    },
+    latest_snapshot: { candidates: [], automation_decisions: [] },
+    summary: {
+      configured_active_family: 'directional',
+      latest_selected_family: 'protective',
+      latest_selected_state: 'closing',
+      latest_selected_route_action: 'override_target',
+      latest_selected_family_action: 'close_protection_leg',
+      latest_bundle_status: 'ready',
+      latest_portfolio_requested_notional: 0,
+      latest_portfolio_approved_notional: 0,
+      latest_portfolio_budget_cut_notional: 0,
+      latest_hedge_protected_notional: 0,
+      latest_directional_reduced_notional: 0,
+      latest_selection_reason_codes: [],
+      protective_fallback_active: false,
+      operator_summary: '',
+    },
+    recent_sleeve_intents: [],
+    latest_bundle: {},
+    latest_allocation_decision: {},
+    latest_applied_target: {},
+    recent_execution_bundles: [],
+    recent_budget_snapshots: [],
+    recent_conflict_resolutions: [],
+    recent_netting_decisions: [],
+    family_enablement: {},
+    smart_arbitrage_cost_summary: {},
+  },
+  latestDecision: {
+    baseline_assessment: {},
+    ai_assessment: {},
+    position_target: {},
+    policy_decision: { execution_allowed: true, rejection_reasons: [] },
+    risk_decision: { approved: true, rejection_reasons: [], constraints_applied: [] },
+  },
+  strategyAttribution: { summary: {}, profitability_by_strategy_sleeve: [], sleeve_inventory_summary: [] },
+  trialReviewSummary: { summary: {}, sections: {} },
+};
+
+const protectiveHtml = renderStrategyView({
+  ...sharedPayload,
+  strategyRuntime: {
+    ...sharedPayload.strategyRuntime,
+    latest_snapshot: {
+      candidates: [
+        {
+          family: 'protective',
+          state: 'closing',
+          route_action: 'override_target',
+          family_action: 'close_protection_leg',
+          urgency: 'low',
+          symbol: 'BTC-USDT-SWAP',
+          reason_codes: ['protective_overlay_main_signal_inferred_from_inventory'],
+        },
+      ],
+      automation_decisions: [],
+    },
+    summary: {
+      ...sharedPayload.strategyRuntime.summary,
+      operator_summary: '当前选中的策略家族正在收回保护腿。',
+    },
+    latest_allocation_decision: {
+      operator_summary: '当前 allocator v2 已批准收回保护腿的账户级执行目标。',
+      reason_codes: [],
+    },
+  },
+});
+
+const opportunityHtml = renderStrategyView({
+  ...sharedPayload,
+  strategyRuntime: {
+    ...sharedPayload.strategyRuntime,
+    latest_snapshot: {
+      candidates: [
+        {
+          family: 'opportunistic',
+          state: 'closing',
+          route_action: 'override_target',
+          family_action: 'close_opportunity_leg',
+          urgency: 'low',
+          symbol: 'BTC-USDT-SWAP',
+          reason_codes: ['opportunistic_overlay_main_signal_inferred_from_inventory'],
+        },
+      ],
+      automation_decisions: [],
+    },
+    summary: {
+      ...sharedPayload.strategyRuntime.summary,
+      latest_selected_family: 'opportunistic',
+      latest_selected_family_action: 'close_opportunity_leg',
+      operator_summary: '当前选中的策略家族正在收回机会腿。',
+    },
+    latest_allocation_decision: {
+      operator_summary: '当前 allocator v2 已批准收回机会腿的账户级执行目标。',
+      reason_codes: [],
+    },
+  },
+});
+
+console.log(JSON.stringify({
+  hasProtectiveCloseCopy: protectiveHtml.includes('当前选中的策略家族正在收回保护腿。'),
+  hasProtectiveRouteLabel: (protectiveHtml.match(/收回保护腿/g) || []).length >= 2,
+  hasProtectiveAllocatorCopy: protectiveHtml.includes('当前 allocator v2 已批准收回保护腿的账户级执行目标。'),
+  hasOpportunityCloseCopy: opportunityHtml.includes('当前选中的策略家族正在收回机会腿。'),
+  hasOpportunityRouteLabel: (opportunityHtml.match(/收回机会腿/g) || []).length >= 2,
+  hasOpportunityAllocatorCopy: opportunityHtml.includes('当前 allocator v2 已批准收回机会腿的账户级执行目标。'),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertIn('"hasProtectiveCloseCopy":true', result.stdout)
+        self.assertIn('"hasProtectiveRouteLabel":true', result.stdout)
+        self.assertIn('"hasProtectiveAllocatorCopy":true', result.stdout)
+        self.assertIn('"hasOpportunityCloseCopy":true', result.stdout)
+        self.assertIn('"hasOpportunityRouteLabel":true', result.stdout)
+        self.assertIn('"hasOpportunityAllocatorCopy":true', result.stdout)
 
     def test_strategy_view_surfaces_independent_overlay_config_and_state(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]

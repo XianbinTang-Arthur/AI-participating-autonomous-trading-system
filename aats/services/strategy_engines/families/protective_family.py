@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from decimal import Decimal
 
 from aats.bootstrap.settings import AATSSettings
@@ -32,6 +33,16 @@ class ProtectiveFamilyEngine:
         ]
 
 
+@dataclass(frozen=True, slots=True)
+class OverlayMainLegContract:
+    symbol: str
+    target_leverage: float
+    margin_mode: str
+    long_target_qty: Decimal
+    short_target_qty: Decimal
+    source: str = "directional_target"
+
+
 def protective_candidate_from_directional_target(
     *,
     settings: AATSSettings,
@@ -50,8 +61,11 @@ def protective_candidate_from_directional_target(
 
     context = evaluation_context.context
     baseline = evaluation_context.baseline
-    directional_target = evaluation_context.directional_target
     ai_assessment = evaluation_context.ai_assessment
+    main_leg_contract = _resolve_overlay_main_leg_contract(
+        settings=settings,
+        evaluation_context=evaluation_context,
+    )
 
     runtime_supported = protective_runtime_supported(settings=settings, context=context)
     configured_mode = settings.strategy_hedge_overlay_mode
@@ -112,13 +126,13 @@ def protective_candidate_from_directional_target(
         context=context,
         baseline=baseline,
         ai_assessment=ai_assessment,
-        long_target_qty=max(to_decimal(directional_target.target_position_qty), Decimal("0")),
-        short_target_qty=max(-to_decimal(directional_target.target_position_qty), Decimal("0")),
+        long_target_qty=main_leg_contract.long_target_qty,
+        short_target_qty=main_leg_contract.short_target_qty,
     )
     hedge_leg = build_protective_candidate_leg(
-        symbol=directional_target.symbol,
-        target_leverage=float(directional_target.target_leverage),
-        margin_mode=str(directional_target.margin_mode),
+        symbol=main_leg_contract.symbol,
+        target_leverage=main_leg_contract.target_leverage,
+        margin_mode=main_leg_contract.margin_mode,
         overlay_decision=overlay_decision,
     )
     target_qty = _signed_leg_qty(
@@ -153,7 +167,7 @@ def protective_candidate_from_directional_target(
             overlay_decision=overlay_decision,
         ),
         headline=_protective_candidate_headline(overlay_decision=overlay_decision),
-        recommended_symbol=directional_target.symbol,
+        recommended_symbol=main_leg_contract.symbol,
         target_position_qty=target_qty,
         delta_position_qty=target_qty - current_qty,
         score=float(overlay_decision.pressure_score),
@@ -173,6 +187,7 @@ def protective_candidate_from_directional_target(
         metrics={
             **metrics,
             "configured_mode": configured_mode,
+            "main_leg_contract_source": main_leg_contract.source,
             "main_leg_signal": overlay_decision.main_leg_signal,
             "hedge_leg_signal": overlay_decision.hedge_leg_signal,
             "main_leg_current_qty": overlay_decision.main_leg_current_qty,
@@ -191,6 +206,44 @@ def protective_candidate_from_directional_target(
             "blocked_reasons": list(overlay_decision.blocked_reasons),
         },
         legs=[] if hedge_leg is None else [hedge_leg],
+    )
+
+
+def _resolve_overlay_main_leg_contract(
+    *,
+    settings: AATSSettings,
+    evaluation_context: StrategyEvaluationContext,
+) -> OverlayMainLegContract:
+    context = evaluation_context.context
+    directional_target = evaluation_context.directional_target
+    source = "directional_target"
+
+    target_position_qty = to_decimal(directional_target.target_position_qty)
+    symbol = str(getattr(directional_target, "symbol", "") or "").strip()
+    if not symbol:
+        symbol = context.symbol
+        source = "context_or_settings_fallback"
+
+    target_leverage = float(getattr(directional_target, "target_leverage", 0.0) or 0.0)
+    if target_leverage <= 0.0:
+        target_leverage = max(float(getattr(context, "current_target_leverage", 0.0) or 0.0), 0.0)
+        source = "context_or_settings_fallback"
+    if target_leverage <= 0.0:
+        target_leverage = max(float(settings.default_target_leverage), 1.0)
+        source = "context_or_settings_fallback"
+
+    margin_mode = str(getattr(directional_target, "margin_mode", "") or "").strip().lower()
+    if margin_mode not in {"cash", "cross", "isolated"}:
+        margin_mode = str(settings.margin_mode)
+        source = "context_or_settings_fallback"
+
+    return OverlayMainLegContract(
+        symbol=symbol,
+        target_leverage=target_leverage,
+        margin_mode=margin_mode,
+        long_target_qty=max(target_position_qty, Decimal("0")),
+        short_target_qty=max(-target_position_qty, Decimal("0")),
+        source=source,
     )
 
 

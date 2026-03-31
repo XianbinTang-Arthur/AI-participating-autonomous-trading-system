@@ -695,7 +695,10 @@ function normalizedBookExpectancySummary(source = {}) {
   return nested && typeof nested === "object" ? nested : {};
 }
 
-function readableBookLabel(leg) {
+function readableBookLabel(leg, source = "") {
+  if (source === "opportunistic_overlay" || source === "protective_overlay") {
+    return leg === "short" ? "空腿" : "多腿";
+  }
   return leg === "short" ? "空书" : "多书";
 }
 
@@ -759,9 +762,10 @@ export function readableBookExpectancySummary(source = {}, fallback = "当前没
   const summary = normalizedBookExpectancySummary(source);
   const books = Array.isArray(summary.books) ? summary.books : [];
   if (!books.length) return fallback;
+  const summarySource = String(summary?.source || "").trim().toLowerCase();
   return books
     .map((book) => {
-      const leg = readableBookLabel(String(book?.leg || "").trim().toLowerCase());
+      const leg = readableBookLabel(String(book?.leg || "").trim().toLowerCase(), summarySource);
       return `${leg} 毛/成本/净 ${readableExpectancyBps(book?.expected_gross_edge_bps)}/${readableExpectancyBps(book?.expected_cost_bps)}/${readableExpectancyBps(book?.expected_net_edge_bps)} 基点`;
     })
     .join(" | ");

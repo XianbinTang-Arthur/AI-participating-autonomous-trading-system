@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from decimal import Decimal
 
 from aats.bootstrap.settings import AATSSettings
 from aats.schemas.decision import AIMarketAssessment, BaselineAssessment, DecisionContext, HedgeOverlayDecision
 from aats.schemas.strategy_runtime import (
     StrategyCandidate,
+    StrategyBookExpectancyEntry,
+    StrategyBookExpectancySummary,
     StrategyFamily,
     StrategyFamilyAction,
     StrategyLegIntent,
@@ -17,11 +20,23 @@ from aats.services.strategy_engines.families.protective_family import (
     _candidate_state_from_overlay_state,
     _overlay_route_action,
     _placeholder_family_candidate,
+    _resolve_overlay_main_leg_contract,
     _resolve_overlay_main_leg_signal_from_inventory,
     _signed_leg_qty,
     protective_runtime_supported,
 )
 from aats.services.strategy_overlay_rollout import overlay_rollout_status
+from aats.services.trade_costs import TradeCostService
+
+
+@dataclass(frozen=True, slots=True)
+class OpportunisticExecutionDiscipline:
+    expected_signal_edge_bps: float = 0.0
+    expected_slippage_bps: float = 0.0
+    expected_cost_bps: float = 0.0
+    expected_net_edge_bps: float = 0.0
+    weak_edge_report_only: bool = False
+    blocked_reasons: tuple[str, ...] = ()
 
 
 class OpportunisticFamilyEngine:
@@ -29,12 +44,14 @@ class OpportunisticFamilyEngine:
 
     def __init__(self, *, settings: AATSSettings) -> None:
         self.settings = settings
+        self.trade_cost_service = TradeCostService(settings=settings)
 
     def evaluate(self, context: StrategyEvaluationContext) -> list[StrategyCandidate]:
         return [
             opportunistic_candidate_from_directional_target(
                 settings=self.settings,
                 evaluation_context=context,
+                trade_cost_service=self.trade_cost_service,
             )
         ]
 
@@ -43,6 +60,7 @@ def opportunistic_candidate_from_directional_target(
     *,
     settings: AATSSettings,
     evaluation_context: StrategyEvaluationContext,
+    trade_cost_service: TradeCostService | None = None,
 ) -> StrategyCandidate:
     family: StrategyFamily = "opportunistic"
     control = evaluation_context.family_runtime_controls.get(family, StrategyFamilyRuntimeControl())
@@ -57,8 +75,11 @@ def opportunistic_candidate_from_directional_target(
 
     context = evaluation_context.context
     baseline = evaluation_context.baseline
-    directional_target = evaluation_context.directional_target
     ai_assessment = evaluation_context.ai_assessment
+    main_leg_contract = _resolve_overlay_main_leg_contract(
+        settings=settings,
+        evaluation_context=evaluation_context,
+    )
     runtime_supported = protective_runtime_supported(settings=settings, context=context)
     configured_mode = settings.strategy_hedge_overlay_mode
     metrics = {
@@ -67,6 +88,12 @@ def opportunistic_candidate_from_directional_target(
         "live_execution_enabled": control.live_execution_enabled,
         "skeleton_mode": False,
         "execution_owner": family,
+        "weak_edge_execution_mode": settings.strategy_hedge_opportunistic_weak_edge_execution_mode,
+        "passive_first_enabled": settings.strategy_hedge_opportunistic_passive_first_enabled,
+        "min_safe_net_edge_bps": settings.strategy_hedge_opportunistic_min_safe_net_edge_bps,
+        "expected_slippage_buffer_bps": settings.strategy_hedge_opportunistic_expected_slippage_buffer_bps,
+        "expected_execution_buffer_bps": settings.strategy_hedge_opportunistic_expected_execution_buffer_bps,
+        "max_acceptable_cost_bps": settings.strategy_hedge_opportunistic_max_acceptable_cost_bps,
     }
     if not settings.strategy_hedge_overlay_enabled:
         return StrategyCandidate(
@@ -119,14 +146,59 @@ def opportunistic_candidate_from_directional_target(
         context=context,
         baseline=baseline,
         ai_assessment=ai_assessment,
-        long_target_qty=max(to_decimal(directional_target.target_position_qty), Decimal("0")),
-        short_target_qty=max(-to_decimal(directional_target.target_position_qty), Decimal("0")),
+        long_target_qty=main_leg_contract.long_target_qty,
+        short_target_qty=main_leg_contract.short_target_qty,
     )
-    hedge_leg = build_opportunistic_candidate_leg(
-        symbol=directional_target.symbol,
-        target_leverage=float(directional_target.target_leverage),
-        margin_mode=str(directional_target.margin_mode),
+    execution_discipline = _resolve_opportunistic_execution_discipline(
+        settings=settings,
+        context=context,
+        baseline=baseline,
+        ai_assessment=ai_assessment,
         overlay_decision=overlay_decision,
+        trade_cost_service=trade_cost_service,
+        symbol=main_leg_contract.symbol,
+        margin_mode=main_leg_contract.margin_mode,
+    )
+    if execution_discipline.weak_edge_report_only:
+        overlay_decision = overlay_decision.model_copy(
+            update={
+                "reason_codes": list(
+                    dict.fromkeys(
+                        [
+                            *overlay_decision.reason_codes,
+                            "opportunistic_overlay_expected_net_edge_below_safe_threshold_report_only",
+                        ]
+                    )
+                )
+            }
+        )
+    if execution_discipline.blocked_reasons:
+        blocked_reasons = list(dict.fromkeys([*overlay_decision.blocked_reasons, *execution_discipline.blocked_reasons]))
+        hold_current = max(to_decimal(overlay_decision.hedge_leg_current_qty), Decimal("0"))
+        overlay_decision = overlay_decision.model_copy(
+            update={
+                "active": hold_current > EPSILON_DECIMAL_12,
+                "state": "blocked",
+                "hedge_leg_target_qty": hold_current,
+                "hedge_ratio": (
+                    Decimal("0")
+                    if max(to_decimal(overlay_decision.main_leg_target_qty), Decimal("0")) <= EPSILON_DECIMAL_12
+                    else min(hold_current / max(to_decimal(overlay_decision.main_leg_target_qty), Decimal("0")), Decimal("1"))
+                ),
+                "blocked_reasons": blocked_reasons,
+            }
+        )
+    hedge_leg = build_opportunistic_candidate_leg(
+        symbol=main_leg_contract.symbol,
+        target_leverage=main_leg_contract.target_leverage,
+        margin_mode=main_leg_contract.margin_mode,
+        overlay_decision=overlay_decision,
+        weak_edge_report_only=execution_discipline.weak_edge_report_only,
+        passive_first_enabled=settings.strategy_hedge_opportunistic_passive_first_enabled,
+        limit_offset_bps=max(
+            Decimal("0.5"),
+            to_decimal(settings.strategy_hedge_opportunistic_expected_slippage_buffer_bps),
+        ),
     )
     target_qty = _signed_leg_qty(
         signal=overlay_decision.hedge_leg_signal,
@@ -135,6 +207,10 @@ def opportunistic_candidate_from_directional_target(
     current_qty = _signed_leg_qty(
         signal=overlay_decision.hedge_leg_signal,
         quantity=overlay_decision.hedge_leg_current_qty,
+    )
+    book_expectancy_summary = _opportunistic_book_expectancy_summary(
+        overlay_decision=overlay_decision,
+        execution_discipline=execution_discipline,
     )
     reason_codes = list(
         dict.fromkeys(
@@ -164,7 +240,7 @@ def opportunistic_candidate_from_directional_target(
             overlay_decision=overlay_decision,
         ),
         headline=_opportunistic_candidate_headline(overlay_decision=overlay_decision),
-        recommended_symbol=directional_target.symbol,
+        recommended_symbol=main_leg_contract.symbol,
         target_position_qty=target_qty,
         delta_position_qty=target_qty - current_qty,
         score=float(overlay_decision.pressure_score),
@@ -181,9 +257,11 @@ def opportunistic_candidate_from_directional_target(
         execution_mode="opportunistic_overlay",
         state_phase=overlay_decision.state,
         blocking_reasons=list(overlay_decision.blocked_reasons),
+        book_expectancy_summary=book_expectancy_summary,
         metrics={
             **metrics,
             "configured_mode": configured_mode,
+            "main_leg_contract_source": main_leg_contract.source,
             "main_leg_signal": overlay_decision.main_leg_signal,
             "hedge_leg_signal": overlay_decision.hedge_leg_signal,
             "main_leg_current_qty": overlay_decision.main_leg_current_qty,
@@ -204,8 +282,36 @@ def opportunistic_candidate_from_directional_target(
             "blocked_reasons": list(overlay_decision.blocked_reasons),
             "rollout_stage": overlay_decision.rollout_stage,
             "runtime_rollout_stage": overlay_decision.runtime_rollout_stage,
+            "expected_signal_edge_bps": execution_discipline.expected_signal_edge_bps,
+            "expected_slippage_bps": execution_discipline.expected_slippage_bps,
+            "expected_cost_bps": execution_discipline.expected_cost_bps,
+            "expected_net_edge_bps": execution_discipline.expected_net_edge_bps,
+            "weak_edge_report_only": execution_discipline.weak_edge_report_only,
         },
         legs=[] if hedge_leg is None else [hedge_leg],
+    )
+
+
+def _opportunistic_book_expectancy_summary(
+    *,
+    overlay_decision: HedgeOverlayDecision,
+    execution_discipline: OpportunisticExecutionDiscipline,
+) -> StrategyBookExpectancySummary | None:
+    leg = str(overlay_decision.hedge_leg_signal or "").strip().lower()
+    if leg not in {"long", "short"}:
+        return None
+    return StrategyBookExpectancySummary(
+        source="opportunistic_overlay",
+        books=[
+            StrategyBookExpectancyEntry(
+                leg=leg,
+                expected_gross_edge_bps=execution_discipline.expected_signal_edge_bps,
+                expected_signal_edge_bps=execution_discipline.expected_signal_edge_bps,
+                expected_slippage_bps=execution_discipline.expected_slippage_bps,
+                expected_cost_bps=execution_discipline.expected_cost_bps,
+                expected_net_edge_bps=execution_discipline.expected_net_edge_bps,
+            )
+        ],
     )
 
 
@@ -449,6 +555,9 @@ def build_opportunistic_candidate_leg(
     target_leverage: float,
     margin_mode: str,
     overlay_decision: HedgeOverlayDecision,
+    weak_edge_report_only: bool = False,
+    passive_first_enabled: bool = False,
+    limit_offset_bps: Decimal | None = None,
 ) -> StrategyLegIntent | None:
     pos_side = overlay_decision.hedge_leg_signal
     if pos_side not in {"long", "short"}:
@@ -468,6 +577,7 @@ def build_opportunistic_candidate_leg(
         side = "sell" if opening else "buy"
         signed_current_qty = -current_leg_qty
         signed_target_qty = -target_leg_qty
+    passive_first_required = bool(opening and weak_edge_report_only and passive_first_enabled)
     return StrategyLegIntent(
         symbol=symbol,
         product_type="derivatives",
@@ -489,6 +599,13 @@ def build_opportunistic_candidate_leg(
         hedge_ratio=overlay_decision.hedge_ratio,
         trigger_reason_codes=list(overlay_decision.reason_codes),
         note="Opportunistic family 生成的机会腿。",
+        execution_style_preference="bounded_limit_ioc" if passive_first_required else None,
+        order_type_preference="limit" if passive_first_required else None,
+        time_in_force_preference="IOC" if passive_first_required else None,
+        limit_offset_bps_preference=limit_offset_bps if passive_first_required else None,
+        execution_preference_reason_codes=(
+            ["opportunistic_weak_edge_passive_first_required"] if passive_first_required else []
+        ),
     )
 
 
@@ -582,3 +699,132 @@ def _clamp(value: float, lower: float, upper: float) -> float:
 
 def _ai_directional_edge(ai_assessment: AIMarketAssessment | None) -> float:
     return 0.0 if ai_assessment is None else ai_assessment.directional_edge
+
+
+def _resolve_opportunistic_execution_discipline(
+    *,
+    settings: AATSSettings,
+    context: DecisionContext,
+    baseline: BaselineAssessment,
+    ai_assessment: AIMarketAssessment | None,
+    overlay_decision: HedgeOverlayDecision,
+    trade_cost_service: TradeCostService | None,
+    symbol: str,
+    margin_mode: str,
+) -> OpportunisticExecutionDiscipline:
+    opening_or_expanding = (
+        to_decimal(overlay_decision.hedge_leg_target_qty)
+        > to_decimal(overlay_decision.hedge_leg_current_qty) + EPSILON_DECIMAL_12
+    )
+    if not opening_or_expanding or trade_cost_service is None:
+        return OpportunisticExecutionDiscipline()
+    return _compute_opportunistic_execution_discipline(
+        settings=settings,
+        context=context,
+        baseline=baseline,
+        ai_assessment=ai_assessment,
+        overlay_decision=overlay_decision,
+        trade_cost_service=trade_cost_service,
+        symbol=symbol,
+        margin_mode=margin_mode,
+    )
+
+
+def _compute_opportunistic_execution_discipline(
+    *,
+    settings: AATSSettings,
+    context: DecisionContext,
+    baseline: BaselineAssessment,
+    ai_assessment: AIMarketAssessment | None,
+    overlay_decision: HedgeOverlayDecision,
+    trade_cost_service: TradeCostService,
+    symbol: str,
+    margin_mode: str,
+) -> OpportunisticExecutionDiscipline:
+    expected_signal_edge_bps = _opportunistic_signal_edge_bps(
+        settings=settings,
+        baseline=baseline,
+        ai_assessment=ai_assessment,
+        main_leg_signal=overlay_decision.main_leg_signal,
+        opportunity_score=float(overlay_decision.pressure_score),
+        open_threshold=float(overlay_decision.open_threshold),
+    )
+    expected_slippage_bps = _opportunistic_expected_slippage_bps(settings=settings)
+    estimate = trade_cost_service.estimate_single_leg_entry(
+        model_name="opportunistic_overlay",
+        symbol=symbol,
+        product_type=context.product_type,
+        margin_mode=margin_mode,
+        execution_style="taker",
+        order_type="market",
+        expected_slippage_bps=expected_slippage_bps,
+        include_spread=False,
+        include_funding=context.product_type == "derivatives",
+    )
+    expected_cost_bps = float(estimate.executable_total_drag_bps)
+    expected_net_edge_bps = (
+        expected_signal_edge_bps
+        - expected_cost_bps
+        - max(float(settings.strategy_edge_noise_buffer_bps), 0.0)
+    )
+    blocked_reasons: list[str] = []
+    weak_edge_report_only = False
+    required_safe_net_edge_bps = _required_opportunistic_safe_net_edge_bps(settings=settings)
+    if expected_net_edge_bps < required_safe_net_edge_bps:
+        if settings.strategy_hedge_opportunistic_weak_edge_execution_mode == "block":
+            blocked_reasons.append("opportunistic_overlay_expected_net_edge_below_safe_threshold")
+        else:
+            weak_edge_report_only = True
+    max_acceptable_cost_bps = float(settings.strategy_hedge_opportunistic_max_acceptable_cost_bps)
+    if max_acceptable_cost_bps > 0.0 and expected_cost_bps > max_acceptable_cost_bps:
+        blocked_reasons.append("opportunistic_overlay_expected_cost_above_max_acceptable")
+    return OpportunisticExecutionDiscipline(
+        expected_signal_edge_bps=expected_signal_edge_bps,
+        expected_slippage_bps=expected_slippage_bps,
+        expected_cost_bps=expected_cost_bps,
+        expected_net_edge_bps=expected_net_edge_bps,
+        weak_edge_report_only=weak_edge_report_only,
+        blocked_reasons=tuple(blocked_reasons),
+    )
+
+
+def _opportunistic_signal_edge_bps(
+    *,
+    settings: AATSSettings,
+    baseline: BaselineAssessment,
+    ai_assessment: AIMarketAssessment | None,
+    main_leg_signal: str,
+    opportunity_score: float,
+    open_threshold: float,
+) -> float:
+    score_excess_bps = max(opportunity_score - open_threshold, 0.0) * max(
+        float(settings.strategy_alpha_edge_bps_scale),
+        0.0,
+    )
+    side_sign = 1.0 if main_leg_signal == "long" else -1.0
+    opposite_microstructure = max(0.0, -(side_sign * float(baseline.factor_scores.get("microstructure_alpha", 0.0))))
+    opposite_momentum = max(0.0, -(side_sign * float(baseline.factor_scores.get("momentum_alpha", 0.0))))
+    opposite_trend = max(0.0, -(side_sign * float(baseline.factor_scores.get("trend_alpha", 0.0))))
+    opposite_ai = max(0.0, -(side_sign * _ai_directional_edge(ai_assessment)))
+    bonus_bps = (
+        max(opposite_microstructure - 0.08, 0.0) * 22.0
+        + max(opposite_momentum - 0.08, 0.0) * 12.0
+        + max(opposite_trend - 0.08, 0.0) * 8.0
+        + max(opposite_ai - 0.10, 0.0) * 18.0
+    )
+    return score_excess_bps + bonus_bps
+
+
+def _opportunistic_expected_slippage_bps(*, settings: AATSSettings) -> float:
+    return max(float(settings.max_slippage_tolerance_bps), 0.0) * max(
+        float(settings.strategy_expected_slippage_bps_fraction),
+        0.0,
+    )
+
+
+def _required_opportunistic_safe_net_edge_bps(*, settings: AATSSettings) -> float:
+    return (
+        max(float(settings.strategy_hedge_opportunistic_min_safe_net_edge_bps), 0.0)
+        + max(float(settings.strategy_hedge_opportunistic_expected_slippage_buffer_bps), 0.0)
+        + max(float(settings.strategy_hedge_opportunistic_expected_execution_buffer_bps), 0.0)
+    )

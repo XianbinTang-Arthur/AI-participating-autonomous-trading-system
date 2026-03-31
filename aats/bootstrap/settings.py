@@ -377,6 +377,12 @@ class AATSSettings(BaseSettings):
     strategy_hedge_opportunistic_rebalance_cooldown_seconds: float = 90.0
     strategy_hedge_opportunistic_max_fee_drag_ratio: float = 0.18
     strategy_hedge_opportunistic_max_churn_ratio: float = 0.22
+    strategy_hedge_opportunistic_min_safe_net_edge_bps: float = 0.0
+    strategy_hedge_opportunistic_expected_slippage_buffer_bps: float = 0.0
+    strategy_hedge_opportunistic_expected_execution_buffer_bps: float = 0.0
+    strategy_hedge_opportunistic_weak_edge_execution_mode: IndependentWeakEdgeExecutionMode = "block"
+    strategy_hedge_opportunistic_max_acceptable_cost_bps: float = 0.0
+    strategy_hedge_opportunistic_passive_first_enabled: bool = False
     strategy_hedge_independent_enabled: bool = False
     strategy_hedge_independent_rollout_stage: StrategyHedgeOverlayRolloutStage = "dry_run"
     strategy_hedge_independent_long_entry_threshold: float = 0.66
@@ -523,6 +529,14 @@ class AATSSettings(BaseSettings):
             raise ValueError("strategy_hedge_opportunistic_max_fee_drag_ratio_must_be_between_zero_and_one")
         if not 0.0 <= float(self.strategy_hedge_opportunistic_max_churn_ratio) <= 1.0:
             raise ValueError("strategy_hedge_opportunistic_max_churn_ratio_must_be_between_zero_and_one")
+        if float(self.strategy_hedge_opportunistic_min_safe_net_edge_bps) < 0.0:
+            raise ValueError("strategy_hedge_opportunistic_min_safe_net_edge_bps_must_be_non_negative")
+        if float(self.strategy_hedge_opportunistic_expected_slippage_buffer_bps) < 0.0:
+            raise ValueError("strategy_hedge_opportunistic_expected_slippage_buffer_bps_must_be_non_negative")
+        if float(self.strategy_hedge_opportunistic_expected_execution_buffer_bps) < 0.0:
+            raise ValueError("strategy_hedge_opportunistic_expected_execution_buffer_bps_must_be_non_negative")
+        if float(self.strategy_hedge_opportunistic_max_acceptable_cost_bps) < 0.0:
+            raise ValueError("strategy_hedge_opportunistic_max_acceptable_cost_bps_must_be_non_negative")
         if not 0.0 <= float(self.strategy_hedge_independent_long_entry_threshold) <= 1.0:
             raise ValueError("strategy_hedge_independent_long_entry_threshold_must_be_between_zero_and_one")
         if not 0.0 <= float(self.strategy_hedge_independent_short_entry_threshold) <= 1.0:

@@ -331,6 +331,12 @@ def test_derivatives_managed_profiles_use_relaxed_directional_thresholds() -> No
         assert values["strategy_hedge_opportunistic_rebalance_cooldown_seconds"] == 90.0
         assert values["strategy_hedge_opportunistic_max_fee_drag_ratio"] == 0.18
         assert values["strategy_hedge_opportunistic_max_churn_ratio"] == 0.22
+        assert values["strategy_hedge_opportunistic_min_safe_net_edge_bps"] == 3.0
+        assert values["strategy_hedge_opportunistic_expected_slippage_buffer_bps"] == 1.0
+        assert values["strategy_hedge_opportunistic_expected_execution_buffer_bps"] == 2.0
+        assert values["strategy_hedge_opportunistic_weak_edge_execution_mode"] == "report_only"
+        assert values["strategy_hedge_opportunistic_max_acceptable_cost_bps"] == 7.5
+        assert values["strategy_hedge_opportunistic_passive_first_enabled"] is True
         expected_independent_enabled = profile == "derivatives_live"
         expected_independent_rollout = "live" if profile == "derivatives_live" else "dry_run"
         expected_independent_family_enabled = profile == "derivatives_live"

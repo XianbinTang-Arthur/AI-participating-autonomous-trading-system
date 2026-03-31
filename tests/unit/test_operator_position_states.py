@@ -12,6 +12,24 @@ from aats.services.operator.query_service import OperatorQueryService
 
 
 class TestOperatorPositionStates(unittest.TestCase):
+    def test_strategy_runtime_operator_summary_uses_overlay_close_copy(self) -> None:
+        self.assertEqual(
+            OperatorQueryService._strategy_runtime_operator_summary(
+                latest_snapshot_present=True,
+                route_action="override_target",
+                family_action="close_protection_leg",
+            ),
+            "当前选中的策略家族正在收回保护腿。",
+        )
+        self.assertEqual(
+            OperatorQueryService._strategy_runtime_operator_summary(
+                latest_snapshot_present=True,
+                route_action="override_target",
+                family_action="close_opportunity_leg",
+            ),
+            "当前选中的策略家族正在收回机会腿。",
+        )
+
     def test_smart_arbitrage_runtime_pair_configuration_prefers_snapshot_candidate_metrics(self) -> None:
         query = OperatorQueryService.__new__(OperatorQueryService)
         query.runtime = SimpleNamespace(settings=SimpleNamespace(default_symbol="BTC-USDT-SWAP"))
@@ -271,6 +289,57 @@ class TestOperatorPositionStates(unittest.TestCase):
         assert payload is not None
         self.assertEqual(payload["book_expectancy_summary"]["source"], "independent_book")
         self.assertEqual(payload["book_expectancy_summary"]["books"][0]["expected_net_edge_bps"], 12.0)
+
+    def test_ai_economic_actionability_prefers_single_book_expectancy_summary_over_directional_target_edge(self) -> None:
+        query = OperatorQueryService.__new__(OperatorQueryService)
+        query.runtime = SimpleNamespace(
+            settings=SimpleNamespace(
+                trading_product_type="derivatives",
+                max_slippage_tolerance_bps=20,
+                strategy_expected_slippage_bps_fraction=0.5,
+                strategy_edge_noise_buffer_bps=1.0,
+                strategy_min_net_edge_bps=2.0,
+                paper_taker_fee_bps=5.0,
+            ),
+            account_service=SimpleNamespace(),
+        )
+
+        payload = query._ai_economic_actionability(
+            ai_assessment={
+                "economically_actionable": True,
+                "estimated_edge_bps": 15.0,
+                "estimated_cost_bps": 5.0,
+                "estimated_net_edge_bps": 10.0,
+                "validation_flags": [],
+                "rejection_flags": [],
+            },
+            position_target={
+                "symbol": "BTC-USDT-SWAP",
+                "expected_signal_edge_bps": 30.0,
+                "expected_cost_bps": 9.0,
+                "expected_net_edge_bps": 21.0,
+                "book_expectancy_summary": {
+                    "source": "opportunistic_overlay",
+                    "books": [
+                        {
+                            "leg": "short",
+                            "expected_gross_edge_bps": 8.0,
+                            "expected_signal_edge_bps": 8.0,
+                            "expected_slippage_bps": 1.0,
+                            "expected_cost_bps": 4.0,
+                            "expected_net_edge_bps": 4.0,
+                        }
+                    ],
+                },
+            },
+            ai_decision_brief=None,
+            strategy_execution_health=None,
+        )
+
+        assert payload is not None
+        self.assertEqual(payload["target_expected_signal_edge_bps"], 8.0)
+        self.assertEqual(payload["target_expected_cost_bps"], 4.0)
+        self.assertEqual(payload["target_expected_net_edge_bps"], 4.0)
 
     def test_aggregate_local_positions_exposes_dual_leg_state(self) -> None:
         snapshot = PortfolioSnapshot(

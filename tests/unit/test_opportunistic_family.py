@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from decimal import Decimal
+from types import SimpleNamespace
 import unittest
 
 from aats.services.strategy_engines.families.opportunistic_family import (
+    _resolve_opportunistic_execution_discipline,
     build_opportunistic_candidate_leg,
     evaluate_opportunistic_overlay_decision,
 )
@@ -64,6 +66,125 @@ class TestOpportunisticFamily(unittest.TestCase):
         self.assertEqual(hedge_leg.action, "open")
         self.assertEqual(hedge_leg.execution_mode, "opportunistic_overlay")
         self.assertEqual(hedge_leg.overlay_mode, "opportunistic")
+
+    def test_opportunistic_execution_discipline_marks_weak_edge_for_passive_first(self) -> None:
+        settings = make_derivatives_hedge_settings(
+            strategy_hedge_overlay_mode="opportunistic",
+            strategy_hedge_opportunistic_enabled=True,
+            strategy_hedge_opportunistic_min_safe_net_edge_bps=3.0,
+            strategy_hedge_opportunistic_expected_slippage_buffer_bps=1.0,
+            strategy_hedge_opportunistic_expected_execution_buffer_bps=2.0,
+            strategy_hedge_opportunistic_weak_edge_execution_mode="report_only",
+            strategy_hedge_opportunistic_passive_first_enabled=True,
+            strategy_edge_noise_buffer_bps=0.0,
+        )
+        context = make_context(
+            current_position_qty=0.05,
+            current_long_position_qty=0.05,
+            product_type="derivatives",
+            current_exposure_side="long",
+        )
+        baseline = make_baseline(
+            direction_bias="long",
+            confidence=0.80,
+            suggested_position_scale=1.0,
+            volatility_target_scale=1.0,
+            factor_scores={
+                "momentum_alpha": 0.0,
+                "trend_alpha": 0.0,
+                "microstructure_alpha": 0.0,
+            },
+        ).model_copy(update={"regime": "range", "composite_alpha_score": 0.0})
+
+        overlay_decision = evaluate_opportunistic_overlay_decision(
+            settings=settings,
+            context=context,
+            baseline=baseline,
+            ai_assessment=make_ai_assessment(direction=0.0, confidence=0.60),
+            long_target_qty=Decimal("0.05"),
+            short_target_qty=Decimal("0"),
+            scorer=lambda **_: 0.65,
+        )
+        discipline = _resolve_opportunistic_execution_discipline(
+            settings=settings,
+            context=context,
+            baseline=baseline,
+            ai_assessment=make_ai_assessment(direction=0.0, confidence=0.60),
+            overlay_decision=overlay_decision,
+            trade_cost_service=SimpleNamespace(
+                estimate_single_leg_entry=lambda **_: SimpleNamespace(executable_total_drag_bps=Decimal("1.50"))
+            ),
+            symbol=context.symbol,
+            margin_mode=str(settings.margin_mode),
+        )
+        hedge_leg = build_opportunistic_candidate_leg(
+            symbol=context.symbol,
+            target_leverage=1.0,
+            margin_mode=str(settings.margin_mode),
+            overlay_decision=overlay_decision,
+            weak_edge_report_only=discipline.weak_edge_report_only,
+            passive_first_enabled=settings.strategy_hedge_opportunistic_passive_first_enabled,
+            limit_offset_bps=Decimal("1.0"),
+        )
+
+        self.assertTrue(discipline.weak_edge_report_only)
+        self.assertEqual(discipline.blocked_reasons, ())
+        self.assertIsNotNone(hedge_leg)
+        assert hedge_leg is not None
+        self.assertEqual(hedge_leg.execution_style_preference, "bounded_limit_ioc")
+        self.assertEqual(hedge_leg.order_type_preference, "limit")
+        self.assertEqual(hedge_leg.execution_preference_reason_codes, ["opportunistic_weak_edge_passive_first_required"])
+
+    def test_opportunistic_execution_discipline_blocks_when_expected_cost_exceeds_limit(self) -> None:
+        settings = make_derivatives_hedge_settings(
+            strategy_hedge_overlay_mode="opportunistic",
+            strategy_hedge_opportunistic_enabled=True,
+            strategy_hedge_opportunistic_min_safe_net_edge_bps=0.0,
+            strategy_hedge_opportunistic_max_acceptable_cost_bps=2.0,
+            strategy_edge_noise_buffer_bps=0.0,
+        )
+        context = make_context(
+            current_position_qty=0.05,
+            current_long_position_qty=0.05,
+            product_type="derivatives",
+            current_exposure_side="long",
+        )
+        baseline = make_baseline(
+            direction_bias="long",
+            confidence=0.82,
+            suggested_position_scale=1.0,
+            volatility_target_scale=1.0,
+            factor_scores={
+                "momentum_alpha": -0.4,
+                "trend_alpha": 0.0,
+                "microstructure_alpha": -0.3,
+            },
+        ).model_copy(update={"regime": "uncertain", "composite_alpha_score": 0.10})
+
+        overlay_decision = evaluate_opportunistic_overlay_decision(
+            settings=settings,
+            context=context,
+            baseline=baseline,
+            ai_assessment=make_ai_assessment(direction=-0.10, confidence=0.70),
+            long_target_qty=Decimal("0.05"),
+            short_target_qty=Decimal("0"),
+            scorer=lambda **_: 0.82,
+        )
+        discipline = _resolve_opportunistic_execution_discipline(
+            settings=settings,
+            context=context,
+            baseline=baseline,
+            ai_assessment=make_ai_assessment(direction=-0.10, confidence=0.70),
+            overlay_decision=overlay_decision,
+            trade_cost_service=SimpleNamespace(
+                estimate_single_leg_entry=lambda **_: SimpleNamespace(executable_total_drag_bps=Decimal("8.00"))
+            ),
+            symbol=context.symbol,
+            margin_mode=str(settings.margin_mode),
+        )
+
+        self.assertFalse(discipline.weak_edge_report_only)
+        self.assertIn("opportunistic_overlay_expected_cost_above_max_acceptable", discipline.blocked_reasons)
 
     def test_evaluate_opportunistic_overlay_blocks_new_leg_when_fee_drag_is_too_high(self) -> None:
         settings = make_derivatives_hedge_settings(

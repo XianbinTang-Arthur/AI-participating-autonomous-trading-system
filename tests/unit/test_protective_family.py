@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from decimal import Decimal
+from types import SimpleNamespace
 import unittest
 
 from aats.services.strategy_engines.families.protective_family import (
+    _resolve_overlay_main_leg_contract,
     build_protective_candidate_leg,
     evaluate_protective_overlay_decision,
 )
@@ -12,6 +14,36 @@ from tests.support.strategy_family import make_ai_assessment, make_baseline, mak
 
 
 class TestProtectiveFamily(unittest.TestCase):
+    def test_overlay_main_leg_contract_falls_back_to_context_and_settings_defaults(self) -> None:
+        settings = make_derivatives_hedge_settings(default_target_leverage=2.5, margin_mode="cross")
+        context = make_context(
+            current_position_qty=0.05,
+            current_long_position_qty=0.05,
+            product_type="derivatives",
+            current_exposure_side="long",
+        )
+        evaluation_context = SimpleNamespace(
+            context=context,
+            directional_target=SimpleNamespace(
+                symbol="",
+                target_position_qty=Decimal("0.05"),
+                target_leverage=0.0,
+                margin_mode="",
+            ),
+        )
+
+        contract = _resolve_overlay_main_leg_contract(
+            settings=settings,
+            evaluation_context=evaluation_context,
+        )
+
+        self.assertEqual(contract.symbol, context.symbol)
+        self.assertEqual(contract.target_leverage, context.current_target_leverage)
+        self.assertEqual(contract.margin_mode, "cross")
+        self.assertEqual(contract.long_target_qty, Decimal("0.05"))
+        self.assertEqual(contract.short_target_qty, Decimal("0"))
+        self.assertEqual(contract.source, "context_or_settings_fallback")
+
     def test_evaluate_protective_overlay_opens_short_hedge_leg_against_existing_long(self) -> None:
         settings = make_derivatives_hedge_settings()
         context = make_context(

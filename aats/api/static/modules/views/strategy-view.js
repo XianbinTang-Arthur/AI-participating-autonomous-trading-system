@@ -38,6 +38,7 @@ export function renderStrategySections(data) {
   const sleeveInventorySummary = strategyAttribution.sleeve_inventory_summary || [];
   const strategyFamilyEnablement = strategyRuntime.family_enablement || {};
   const baseline = latestDecision.baseline_assessment || {};
+  const targetExpectancy = resolvedTargetExpectancyMetrics(latestDecision.position_target || strategyAppliedTarget || {});
   const ai = latestDecision.ai_assessment || {};
   const target = latestDecision.position_target || {};
   const policy = latestDecision.policy_decision || {};
@@ -170,7 +171,7 @@ export function renderStrategySections(data) {
         ])}
         ${kvList([
           ["本轮结论", strategyNarrative(latestDecision), `${readableState(target.strategy_family || latestDecision.decision_outcome?.selected_strategy_family || "directional")} | ${regimeLabel}`],
-          ["执行约束", listText(target.guardrail_flags, "当前没有额外执行限制"), `预期净优势 ${formatBps(target.expected_net_edge_bps)} | 信号 ${formatBps(target.expected_signal_edge_bps)} | 成本 ${formatBps(target.expected_cost_bps)}`],
+          ["执行约束", listText(target.guardrail_flags, "当前没有额外执行限制"), `预期净优势 ${formatBps(targetExpectancy.expected_net_edge_bps)} | 信号 ${formatBps(targetExpectancy.expected_signal_edge_bps)} | 成本 ${formatBps(targetExpectancy.expected_cost_bps)}`],
           ["当前保护规则", listText(strategyHealth.guardrail_flags, "当前没有额外保护规则"), cooldownSummary(strategyHealth.cooldowns)],
           ["最近执行质量", `${formatNumber(strategyHealth.recent_closed_trade_count, 0)} 笔闭合样本 | 胜率 ${formatRatio(strategyHealth.recent_win_rate)}`, `费用拖累 ${formatRatio(strategyHealth.recent_fee_drag_ratio)} | 来回交易占比 ${formatRatio(strategyHealth.recent_churn_ratio)}`],
         ])}
@@ -210,7 +211,7 @@ export function renderStrategySections(data) {
         ])}
         ${kvList([
           ["调度结论", strategyRuntimeSummary.operator_summary || "当前还没有多策略调度快照。", reasonListText(strategyRuntimeSummary.latest_selection_reason_codes, "当前没有额外调度原因说明")],
-          ["当前路由", readableState(strategyRuntimeSummary.latest_selected_route_action || "override_target"), strategyRuntimeSummary.protective_fallback_active ? "当前保留了保护性减仓/退出路径。" : "当前没有触发保护性回退。"],
+          ["当前路由", strategyRouteActionLabel(strategyRuntimeSummary.latest_selected_route_action, strategyRuntimeSummary.latest_selected_family_action), strategyRuntimeSummary.protective_fallback_active ? "当前保留了保护性减仓/退出路径。" : "当前没有触发保护性回退。"],
           ["Allocator 结论", latestAllocationDecision.operator_summary || "当前还没有 allocator 决策。", reasonListText(latestAllocationDecision.reason_codes, "当前没有 allocator 级原因说明")],
           [
             "Hedge 保护 / 方向削减",
@@ -220,7 +221,7 @@ export function renderStrategySections(data) {
           [
             "最近 Bundle / 已应用目标",
             `${readableState(latestBundle.status || strategyRuntimeSummary.latest_bundle_status || "unknown")} / ${formatSigned(strategyAppliedTarget.target_position_qty)}`,
-            `${formatNumber(recentBundles[0]?.legs?.length ?? latestBundle.legs?.length ?? 0, 0, "0")} 条腿 | ${readableFamilyExecutionSummary(strategyAppliedTarget, "保持当前仓位")}${independentExpectancySuffix(strategyAppliedTarget)}`,
+            `${formatNumber(recentBundles[0]?.legs?.length ?? latestBundle.legs?.length ?? 0, 0, "0")} 条腿 | ${readableFamilyExecutionSummary(strategyAppliedTarget, "保持当前仓位")}${familyExpectancySuffix(strategyAppliedTarget)}`,
           ],
         ])}
         ${renderStrategyCandidateTable(displayedStrategyCandidates, smartArbitrageConfig, { policy, risk })}
@@ -1103,6 +1104,18 @@ function directionalShortConfigRows(config = {}) {
       `机会腿仍受独立比例、最小持有和冷却约束；同时还会额外受费耗上限 ${formatRatio(config?.hedge_opportunistic_max_fee_drag_ratio)} / churn 上限 ${formatRatio(config?.hedge_opportunistic_max_churn_ratio)} 约束。`,
     ],
     [
+      "strategy_hedge_opportunistic_min_safe_net_edge_bps / strategy_hedge_opportunistic_expected_slippage_buffer_bps / strategy_hedge_opportunistic_expected_execution_buffer_bps",
+      `${formatNumber(config?.hedge_opportunistic_min_safe_net_edge_bps, 2, "待确认")} / ${formatNumber(config?.hedge_opportunistic_expected_slippage_buffer_bps, 2, "待确认")} / ${formatNumber(config?.hedge_opportunistic_expected_execution_buffer_bps, 2, "待确认")}`,
+      "机会腿净边际安全垫 / 滑点缓冲 / 执行缓冲",
+      "机会腿现在也会先检查预期净边际是否覆盖安全净边际、预估滑点与执行缓冲，而不是只看机会分本身。",
+    ],
+    [
+      "strategy_hedge_opportunistic_weak_edge_execution_mode / strategy_hedge_opportunistic_max_acceptable_cost_bps / strategy_hedge_opportunistic_passive_first_enabled",
+      `${String(config?.hedge_opportunistic_weak_edge_execution_mode || "待确认")} / ${formatNumber(config?.hedge_opportunistic_max_acceptable_cost_bps, 2, "待确认")} / ${config?.hedge_opportunistic_passive_first_enabled ? "true" : "false"}`,
+      "机会腿弱边际执行 / 成本上限 / 被动优先",
+      "当机会腿边际偏弱时，系统会根据这组约束决定是直接阻止、仅保留报告，还是要求 planner 优先走更保守的被动执行。",
+    ],
+    [
       "strategy_hedge_independent_enabled",
       config?.hedge_independent_enabled ? "true" : "false",
       "独立双书总开关",
@@ -1182,6 +1195,10 @@ function directionalHedgeOverlayMeta(config = {}, target = {}, decisionScene = "
   const overlayLabel = directionalOverlayLabel(config, overlay);
   const mode = directionalOverlayMode(config, overlay);
   const enabledInMode = directionalOverlayEnabledInMode(config, overlay);
+  const overlayReasonSummary = Array.isArray(overlay?.reason_codes) && overlay.reason_codes.length
+    ? summarizeLocalizedList(overlay.reason_codes, { limit: 3, suffix: "等状态说明" })
+    : "";
+  const expectancySummary = readableBookExpectancySummary(target, "");
   if (config?.hedge_overlay_enabled !== true) {
     return "当前不会在主腿外额外生成 overlay 腿。";
   }
@@ -1197,11 +1214,14 @@ function directionalHedgeOverlayMeta(config = {}, target = {}, decisionScene = "
   if (Array.isArray(overlay?.blocked_reasons) && overlay.blocked_reasons.length) {
     return summarizeLocalizedList(overlay.blocked_reasons, { limit: 3, suffix: "等阻断原因" });
   }
-  if (Array.isArray(overlay?.reason_codes) && overlay.reason_codes.length) {
-    return summarizeLocalizedList(overlay.reason_codes, { limit: 3, suffix: "等状态说明" });
-  }
   if (mode === "independent") {
-    return `long open ${formatNumber(config?.hedge_independent_long_entry_threshold, 2, "待确认")} / short open ${formatNumber(config?.hedge_independent_short_entry_threshold, 2, "待确认")} / long close ${formatNumber(config?.hedge_independent_long_close_threshold, 2, "待确认")} / short close ${formatNumber(config?.hedge_independent_short_close_threshold, 2, "待确认")} / safe net ${formatNumber(config?.hedge_independent_min_safe_net_edge_bps, 2, "待确认")} bps / passive-first ${config?.hedge_independent_passive_first_enabled ? "true" : "false"}`;
+    return `long open ${formatNumber(config?.hedge_independent_long_entry_threshold, 2, "待确认")} / short open ${formatNumber(config?.hedge_independent_short_entry_threshold, 2, "待确认")} / long close ${formatNumber(config?.hedge_independent_long_close_threshold, 2, "待确认")} / short close ${formatNumber(config?.hedge_independent_short_close_threshold, 2, "待确认")} / safe net ${formatNumber(config?.hedge_independent_min_safe_net_edge_bps, 2, "待确认")} bps / passive-first ${config?.hedge_independent_passive_first_enabled ? "true" : "false"}${expectancySummary ? ` | ${expectancySummary}` : ""}${overlayReasonSummary ? ` | ${overlayReasonSummary}` : ""}`;
+  }
+  if (mode === "opportunistic") {
+    return `open ${formatNumber(config?.hedge_opportunistic_open_threshold, 2, "待确认")} / close ${formatNumber(config?.hedge_opportunistic_close_threshold, 2, "待确认")} / safe net ${formatNumber(config?.hedge_opportunistic_min_safe_net_edge_bps, 2, "待确认")} bps / max cost ${formatNumber(config?.hedge_opportunistic_max_acceptable_cost_bps, 2, "待确认")} bps / weak-edge ${escapeHtml(readableState(config?.hedge_opportunistic_weak_edge_execution_mode || "待确认"))} / passive-first ${config?.hedge_opportunistic_passive_first_enabled ? "true" : "false"}${expectancySummary ? ` | ${expectancySummary}` : ""}${overlayReasonSummary ? ` | ${overlayReasonSummary}` : ""}`;
+  }
+  if (overlayReasonSummary) {
+    return overlayReasonSummary;
   }
   return `open ${formatNumber(config?.hedge_open_threshold, 2, "待确认")} / close ${formatNumber(config?.hedge_close_threshold, 2, "待确认")} / max ${formatRatio(config?.hedge_max_ratio)}`;
 }
@@ -2542,12 +2562,26 @@ function strategyCandidateRouteLabel(candidate) {
   if (smartArbitrageBelowEntryThreshold(candidate)) return "本轮不入场";
   if (candidate?.route_action === "advisory_only") return "仅参考，不直接执行";
   if (candidate?.route_action === "hold_current") return "保持当前仓位";
-  if (candidate?.route_action === "override_target") return "接管本轮目标";
+  if (candidate?.route_action === "override_target") {
+    return strategyRouteActionLabel(candidate?.route_action, candidate?.family_action);
+  }
   return readableState(candidate?.route_action || "hold_current");
 }
 
 function strategyCandidateRouteMeta(candidate) {
   return `优先级 ${escapeFallbackReadableState(candidate?.urgency, "low")}`;
+}
+
+function strategyRouteActionLabel(routeAction, familyAction) {
+  const normalizedRoute = String(routeAction || "").trim().toLowerCase();
+  const normalizedFamilyAction = String(familyAction || "").trim().toLowerCase();
+  if (
+    normalizedRoute === "override_target" &&
+    ["close_protection_leg", "close_opportunity_leg"].includes(normalizedFamilyAction)
+  ) {
+    return readableState(normalizedFamilyAction);
+  }
+  return readableState(normalizedRoute || "hold_current");
 }
 
 function strategyCandidateTargetLabel(candidate) {
@@ -2755,7 +2789,7 @@ function strategyLegSummary(candidate, smartArbitrageConfig = {}) {
       return `${readableState(item.product_type)} ${readableState(item.side)} ${item.symbol || "标的待确认"}${mode}`;
     })
     .join(" | ");
-  if (candidate?.family === "independent") {
+  if (candidate?.family === "independent" || candidate?.family === "opportunistic") {
     return expectancySummary ? `${legSummary} | ${expectancySummary}` : legSummary;
   }
   if (candidate?.family !== "smart_arbitrage") return legSummary;
@@ -2763,7 +2797,35 @@ function strategyLegSummary(candidate, smartArbitrageConfig = {}) {
   return compact ? `${legSummary} | ${compact}` : legSummary;
 }
 
-function independentExpectancySuffix(source = {}) {
+function normalizedBookExpectancySummary(source = {}) {
+  if (!source || typeof source !== "object") return {};
+  if (Array.isArray(source.books)) return source;
+  const direct = source.book_expectancy_summary || source.bookExpectancySummary;
+  if (direct && typeof direct === "object") return direct;
+  const familySummary = source.family_execution_summary || source.familyExecutionSummary;
+  if (!familySummary || typeof familySummary !== "object") return {};
+  const nested = familySummary.book_expectancy_summary || familySummary.bookExpectancySummary;
+  return nested && typeof nested === "object" ? nested : {};
+}
+
+function resolvedTargetExpectancyMetrics(source = {}) {
+  const summary = normalizedBookExpectancySummary(source);
+  const books = Array.isArray(summary?.books) ? summary.books : [];
+  if (books.length === 1 && books[0] && typeof books[0] === "object") {
+    return {
+      expected_signal_edge_bps: books[0].expected_signal_edge_bps,
+      expected_cost_bps: books[0].expected_cost_bps,
+      expected_net_edge_bps: books[0].expected_net_edge_bps,
+    };
+  }
+  return {
+    expected_signal_edge_bps: source?.expected_signal_edge_bps,
+    expected_cost_bps: source?.expected_cost_bps,
+    expected_net_edge_bps: source?.expected_net_edge_bps,
+  };
+}
+
+function familyExpectancySuffix(source = {}) {
   const summary = readableBookExpectancySummary(source, "");
   return summary ? ` | ${summary}` : "";
 }
