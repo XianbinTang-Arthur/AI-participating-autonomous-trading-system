@@ -3750,6 +3750,9 @@ class OperatorQueryService:
             "parent_current_signal": payload.get("parent_current_signal"),
             "parent_effective_signal": payload.get("parent_effective_signal"),
             "signal_source": payload.get("signal_source"),
+            "parent_lifecycle_state": payload.get("parent_lifecycle_state"),
+            "parent_target_active": payload.get("parent_target_active"),
+            "parent_inventory_active": payload.get("parent_inventory_active"),
         }
         if any(value is not None for value in direct.values()):
             return direct
@@ -3760,6 +3763,9 @@ class OperatorQueryService:
                 "parent_current_signal": overlay.get("parent_current_signal"),
                 "parent_effective_signal": overlay.get("parent_effective_signal"),
                 "signal_source": overlay.get("signal_source"),
+                "parent_lifecycle_state": overlay.get("parent_lifecycle_state"),
+                "parent_target_active": overlay.get("parent_target_active"),
+                "parent_inventory_active": overlay.get("parent_inventory_active"),
             }
             if any(value is not None for value in nested.values()):
                 return nested
@@ -3770,6 +3776,9 @@ class OperatorQueryService:
                 "parent_current_signal": family_summary.get("parent_current_signal"),
                 "parent_effective_signal": family_summary.get("parent_effective_signal"),
                 "signal_source": family_summary.get("signal_source"),
+                "parent_lifecycle_state": family_summary.get("parent_lifecycle_state"),
+                "parent_target_active": family_summary.get("parent_target_active"),
+                "parent_inventory_active": family_summary.get("parent_inventory_active"),
             }
             if any(value is not None for value in nested.values()):
                 return nested
@@ -4904,6 +4913,9 @@ class OperatorQueryService:
             "parent_current_signal": overlay_payload.get("parent_current_signal"),
             "parent_effective_signal": overlay_payload.get("parent_effective_signal"),
             "signal_source": overlay_payload.get("signal_source"),
+            "parent_lifecycle_state": overlay_payload.get("parent_lifecycle_state"),
+            "parent_target_active": overlay_payload.get("parent_target_active"),
+            "parent_inventory_active": overlay_payload.get("parent_inventory_active"),
             "close_reason": overlay_payload.get("close_reason"),
             "reason_codes": list(overlay_payload.get("reason_codes") or []),
             "blocked_reasons": list(overlay_payload.get("blocked_reasons") or []),

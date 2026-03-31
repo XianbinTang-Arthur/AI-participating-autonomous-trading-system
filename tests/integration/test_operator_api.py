@@ -1677,6 +1677,9 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             "parent_current_signal": "long",
             "parent_effective_signal": "long",
             "signal_source": "inventory",
+            "parent_lifecycle_state": "inventory_only",
+            "parent_target_active": False,
+            "parent_inventory_active": True,
         }
         decision_outcome = DecisionOutcome(
             decision_id=decision_id,
@@ -1750,18 +1753,30 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(detail["position_target"]["parent_current_signal"], "long")
         self.assertEqual(detail["position_target"]["parent_effective_signal"], "long")
         self.assertEqual(detail["position_target"]["signal_source"], "inventory")
+        self.assertEqual(detail["position_target"]["parent_lifecycle_state"], "inventory_only")
+        self.assertEqual(detail["position_target"]["parent_target_active"], False)
+        self.assertEqual(detail["position_target"]["parent_inventory_active"], True)
         self.assertEqual(detail["decision_outcome"]["parent_target_signal"], "flat")
         self.assertEqual(detail["decision_outcome"]["parent_current_signal"], "long")
         self.assertEqual(detail["decision_outcome"]["parent_effective_signal"], "long")
         self.assertEqual(detail["decision_outcome"]["signal_source"], "inventory")
+        self.assertEqual(detail["decision_outcome"]["parent_lifecycle_state"], "inventory_only")
+        self.assertEqual(detail["decision_outcome"]["parent_target_active"], False)
+        self.assertEqual(detail["decision_outcome"]["parent_inventory_active"], True)
         self.assertEqual(latest["summary"]["parent_target_signal"], "flat")
         self.assertEqual(latest["summary"]["parent_current_signal"], "long")
         self.assertEqual(latest["summary"]["parent_effective_signal"], "long")
         self.assertEqual(latest["summary"]["signal_source"], "inventory")
+        self.assertEqual(latest["summary"]["parent_lifecycle_state"], "inventory_only")
+        self.assertEqual(latest["summary"]["parent_target_active"], False)
+        self.assertEqual(latest["summary"]["parent_inventory_active"], True)
         self.assertEqual(recent_row["parent_target_signal"], "flat")
         self.assertEqual(recent_row["parent_current_signal"], "long")
         self.assertEqual(recent_row["parent_effective_signal"], "long")
         self.assertEqual(recent_row["signal_source"], "inventory")
+        self.assertEqual(recent_row["parent_lifecycle_state"], "inventory_only")
+        self.assertEqual(recent_row["parent_target_active"], False)
+        self.assertEqual(recent_row["parent_inventory_active"], True)
 
     async def test_guarded_live_preflight_and_run_packet_surface_structural_and_margin_failures(self) -> None:
         FakeOperatorAccountService.SNAPSHOT = ExchangeAccountSnapshot(

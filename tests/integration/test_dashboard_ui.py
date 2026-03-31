@@ -277,6 +277,12 @@ console.log(JSON.stringify({
   hasOverlayRatio: html.includes('对冲比例'),
   hasOverlayReason: html.includes('保护性压力已经超过开仓阈值'),
   hasOverlayRuntimeCopy: html.includes('当前是合约 hedge mode'),
+  homeShowsParentSignals:
+    homeHtml.includes('父腿目标 空仓 / 当前库存 偏多 / 生效方向 偏多 / 来源 真实库存')
+    && homeHtml.includes('阶段 仅库存活跃 / 目标活跃 否 / 库存活跃 是'),
+  overviewShowsParentSignals:
+    overviewHtml.includes('父腿目标 空仓 / 当前库存 偏多 / 生效方向 偏多 / 来源 真实库存')
+    && overviewHtml.includes('阶段 仅库存活跃 / 目标活跃 否 / 库存活跃 是'),
 }));
 """
         result = subprocess.run(
@@ -3284,6 +3290,9 @@ const familyExecutionSummary = {
   parent_current_signal: 'long',
   parent_effective_signal: 'long',
   signal_source: 'inventory',
+  parent_lifecycle_state: 'inventory_only',
+  parent_target_active: false,
+  parent_inventory_active: true,
 };
 
 const latestDecision = {
@@ -3410,6 +3419,9 @@ const familyExecutionSummary = {
   parent_current_signal: 'long',
   parent_effective_signal: 'long',
   signal_source: 'inventory',
+  parent_lifecycle_state: 'inventory_only',
+  parent_target_active: false,
+  parent_inventory_active: true,
 };
 
 const latestDecision = {
@@ -3459,8 +3471,12 @@ const overviewHtml = renderOverviewView({
 });
 
 console.log(JSON.stringify({
-  homeShowsParentSignals: homeHtml.includes('父腿目标 空仓 / 当前库存 偏多 / 生效方向 偏多 / 来源 真实库存'),
-  overviewShowsParentSignals: overviewHtml.includes('父腿目标 空仓 / 当前库存 偏多 / 生效方向 偏多 / 来源 真实库存'),
+  homeShowsParentSignals:
+    homeHtml.includes('父腿目标 空仓 / 当前库存 偏多 / 生效方向 偏多 / 来源 真实库存')
+    && homeHtml.includes('阶段 仅库存活跃 / 目标活跃 否 / 库存活跃 是'),
+  overviewShowsParentSignals:
+    overviewHtml.includes('父腿目标 空仓 / 当前库存 偏多 / 生效方向 偏多 / 来源 真实库存')
+    && overviewHtml.includes('阶段 仅库存活跃 / 目标活跃 否 / 库存活跃 是'),
 }));
 """
         result = subprocess.run(
@@ -4070,6 +4086,9 @@ const overlay = {
   parent_current_signal: 'long',
   parent_effective_signal: 'long',
   signal_source: 'inventory',
+  parent_lifecycle_state: 'inventory_only',
+  parent_target_active: false,
+  parent_inventory_active: true,
   reason_codes: ['protective_overlay_main_signal_inferred_from_inventory'],
   blocked_reasons: [],
 };
@@ -4143,10 +4162,12 @@ const drawer = buildDecisionDrawer({
 
 console.log(JSON.stringify({
   strategyShowsParentSignals:
-    strategyHtml.includes('父腿目标 空仓 / 当前库存 偏多 / 生效方向 偏多 / 来源 真实库存'),
+    strategyHtml.includes('父腿目标 空仓 / 当前库存 偏多 / 生效方向 偏多 / 来源 真实库存')
+    && strategyHtml.includes('阶段 仅库存活跃 / 目标活跃 否 / 库存活跃 是'),
   drawerShowsParentSignals:
     drawer.body.includes('父腿暴露信号')
-    && drawer.body.includes('父腿目标 空仓 / 当前库存 偏多 / 生效方向 偏多 / 来源 真实库存'),
+    && drawer.body.includes('父腿目标 空仓 / 当前库存 偏多 / 生效方向 偏多 / 来源 真实库存')
+    && drawer.body.includes('阶段 仅库存活跃 / 目标活跃 否 / 库存活跃 是'),
 }));
 """
         result = subprocess.run(

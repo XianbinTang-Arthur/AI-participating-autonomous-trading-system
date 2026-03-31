@@ -89,6 +89,9 @@
   long: "偏多",
   short: "偏空",
   flat: "空仓",
+  target_only: "仅目标活跃",
+  inventory_only: "仅库存活跃",
+  target_and_inventory: "目标与库存同时活跃",
   hold: "保持当前仓位",
   enter: "建仓",
   scale_in: "加仓",
@@ -1048,12 +1051,26 @@ export function readableOverlayParentSignalSummary(source = {}, fallback = "") {
   const currentSignal = overlay.parent_current_signal;
   const effectiveSignal = overlay.parent_effective_signal;
   const signalSource = overlay.signal_source;
-  if (!targetSignal && !currentSignal && !effectiveSignal && !signalSource) return fallback;
+  const lifecycleState = overlay.parent_lifecycle_state;
+  const targetActive = overlay.parent_target_active;
+  const inventoryActive = overlay.parent_inventory_active;
+  if (
+    !targetSignal
+    && !currentSignal
+    && !effectiveSignal
+    && !signalSource
+    && lifecycleState === undefined
+    && targetActive === undefined
+    && inventoryActive === undefined
+  ) return fallback;
   return [
     `父腿目标 ${readableState(targetSignal, "待确认")}`,
     `当前库存 ${readableState(currentSignal, "待确认")}`,
     `生效方向 ${readableState(effectiveSignal, "待确认")}`,
     `来源 ${localizeError(signalSource, "待确认")}`,
+    `阶段 ${readableState(lifecycleState, "待确认")}`,
+    `目标活跃 ${targetActive === undefined || targetActive === null ? "待确认" : (targetActive ? "是" : "否")}`,
+    `库存活跃 ${inventoryActive === undefined || inventoryActive === null ? "待确认" : (inventoryActive ? "是" : "否")}`,
   ].join(" / ");
 }
 

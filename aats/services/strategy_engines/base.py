@@ -8,6 +8,7 @@ from aats.schemas.exchange import ExchangeAccountSnapshot
 from aats.schemas.market import MarketSnapshot
 from aats.schemas.portfolio import PortfolioSnapshot
 from aats.schemas.strategy_runtime import StrategyCandidate, StrategyFamily
+from aats.services.strategy_engines.overlay_parent_exposure import OverlayParentExposureLifecycle
 
 StrategyMarketHistorySamplingSource = Literal["event_store_recent", "not_required"]
 StrategyLatestMarketSnapshotSource = Literal[
@@ -58,6 +59,7 @@ class StrategyEngineInput:
     latest_market_snapshots_by_symbol: dict[str, MarketSnapshot] = field(default_factory=dict)
     latest_market_snapshots_by_symbol_by_family: dict[StrategyFamily, dict[str, MarketSnapshot]] = field(default_factory=dict)
     latest_market_snapshots_by_family: dict[StrategyFamily, MarketSnapshot | None] = field(default_factory=dict)
+    overlay_parent_exposures_by_family: dict[StrategyFamily, OverlayParentExposureLifecycle] = field(default_factory=dict)
     recent_market_snapshot_windows_by_family: dict[StrategyFamily, int] = field(default_factory=dict)
     market_history_requests_by_family: dict[StrategyFamily, StrategyMarketHistoryRequest] = field(default_factory=dict)
 
@@ -87,6 +89,8 @@ class StrategyEvaluationContext:
     latest_market_snapshots_by_symbol: dict[str, MarketSnapshot] = field(default_factory=dict)
     latest_market_snapshots_by_symbol_by_family: dict[StrategyFamily, dict[str, MarketSnapshot]] = field(default_factory=dict)
     latest_market_snapshots_by_family: dict[StrategyFamily, MarketSnapshot | None] = field(default_factory=dict)
+    overlay_parent_exposure: OverlayParentExposureLifecycle | None = None
+    overlay_parent_exposures_by_family: dict[StrategyFamily, OverlayParentExposureLifecycle] = field(default_factory=dict)
     recent_market_snapshot_windows_by_family: dict[StrategyFamily, int] = field(default_factory=dict)
     market_history_requests_by_family: dict[StrategyFamily, StrategyMarketHistoryRequest] = field(default_factory=dict)
 
@@ -110,6 +114,7 @@ class StrategyEvaluationContext:
             latest_market_snapshots_by_symbol=engine_input.latest_market_snapshots_by_symbol,
             latest_market_snapshots_by_symbol_by_family=engine_input.latest_market_snapshots_by_symbol_by_family,
             latest_market_snapshots_by_family=engine_input.latest_market_snapshots_by_family,
+            overlay_parent_exposures_by_family=engine_input.overlay_parent_exposures_by_family,
             recent_market_snapshots=engine_input.recent_market_snapshots,
             recent_targets_by_family=engine_input.recent_targets_by_family,
             ai_assessment=engine_input.ai_assessment,
@@ -161,6 +166,8 @@ class StrategyEvaluationContext:
             latest_market_snapshots_by_symbol=latest_market_snapshots_by_symbol,
             latest_market_snapshots_by_symbol_by_family=self.latest_market_snapshots_by_symbol_by_family,
             latest_market_snapshots_by_family=self.latest_market_snapshots_by_family,
+            overlay_parent_exposure=self.overlay_parent_exposures_by_family.get(family),
+            overlay_parent_exposures_by_family=self.overlay_parent_exposures_by_family,
             recent_market_snapshots=(
                 {}
                 if sampling_source != "event_store_recent"

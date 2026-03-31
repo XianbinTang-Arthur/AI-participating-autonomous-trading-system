@@ -302,6 +302,9 @@ class DecisionOutcome(SchemaBase):
     parent_current_signal: Literal["long", "short", "flat"] | None = None
     parent_effective_signal: Literal["long", "short", "flat"] | None = None
     signal_source: str | None = None
+    parent_lifecycle_state: str | None = None
+    parent_target_active: bool | None = None
+    parent_inventory_active: bool | None = None
     active_profile_id: str | None = None
     profile_control_source: ProfileControlSource | None = None
     ai_fallback_used: bool = False
@@ -327,6 +330,9 @@ class StrategyExecutionSummary(SchemaBase):
     parent_current_signal: Literal["long", "short", "flat"] | None = None
     parent_effective_signal: Literal["long", "short", "flat"] | None = None
     signal_source: str | None = None
+    parent_lifecycle_state: str | None = None
+    parent_target_active: bool | None = None
+    parent_inventory_active: bool | None = None
     close_reason: str | None = None
     book_expectancy_summary: StrategyBookExpectancySummary | None = None
     book_runtime_states: list[StrategyBookRuntimeState] = Field(default_factory=list)
@@ -347,6 +353,9 @@ class HedgeOverlayDecision(SchemaBase):
     parent_current_signal: Literal["long", "short", "flat"] | None = None
     parent_effective_signal: Literal["long", "short", "flat"] | None = None
     signal_source: str | None = None
+    parent_lifecycle_state: str | None = None
+    parent_target_active: bool | None = None
+    parent_inventory_active: bool | None = None
     close_reason: str | None = None
     main_leg_current_qty: Decimal = Decimal("0")
     hedge_leg_current_qty: Decimal = Decimal("0")
@@ -434,6 +443,9 @@ class PositionTarget(SchemaBase):
     parent_current_signal: Literal["long", "short", "flat"] | None = None
     parent_effective_signal: Literal["long", "short", "flat"] | None = None
     signal_source: str | None = None
+    parent_lifecycle_state: str | None = None
+    parent_target_active: bool | None = None
+    parent_inventory_active: bool | None = None
     hedge_overlay_decision: HedgeOverlayDecision | None = None
     guardrail_flags: list[str] = Field(default_factory=list)
     ai_execution_parameter_suggestion: AIExecutionParameterSuggestionEnvelope | None = None

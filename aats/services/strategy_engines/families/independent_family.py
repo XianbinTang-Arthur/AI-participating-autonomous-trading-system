@@ -55,6 +55,7 @@ class IndependentBookExpectancy:
     expected_slippage_bps: float
     expected_cost_bps: float
     expected_net_edge_bps: float
+    resolution_failed: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -1355,10 +1356,13 @@ def _evaluate_independent_book(
         context=context,
         leg=leg,
     )
+    expectancy_resolution_failed = bool(expectancy.resolution_failed)
 
     if current_qty <= EPSILON_DECIMAL_12:
         if score >= entry_threshold:
             reason_codes.append(f"independent_{leg}_book_signal_above_entry_threshold")
+            if expectancy_resolution_failed:
+                blocked_reasons.append(f"independent_{leg}_book_expectancy_resolution_failed")
             open_gate = _independent_open_gate(
                 settings=settings,
                 context=context,
@@ -1446,6 +1450,8 @@ def _evaluate_independent_book(
                     book_action = "hold"
         elif score >= scale_threshold and base_target_qty > current_qty + EPSILON_DECIMAL_12:
             reason_codes.append(f"independent_{leg}_book_signal_above_scale_in_threshold")
+            if expectancy_resolution_failed:
+                blocked_reasons.append(f"independent_{leg}_book_expectancy_resolution_failed")
             open_gate = _independent_open_gate(
                 settings=settings,
                 context=context,
@@ -1901,14 +1907,24 @@ def _resolve_independent_book_expectancy(
     expectancy_resolver: IndependentBookExpectancyResolver | None,
 ) -> IndependentBookExpectancy:
     if expectancy_resolver is not None:
-        return expectancy_resolver(
-            settings=settings,
-            context=context,
-            baseline=baseline,
-            ai_assessment=ai_assessment,
-            leg=leg,
-            trade_cost_service=trade_cost_service,
-        )
+        try:
+            return expectancy_resolver(
+                settings=settings,
+                context=context,
+                baseline=baseline,
+                ai_assessment=ai_assessment,
+                leg=leg,
+                trade_cost_service=trade_cost_service,
+            )
+        except Exception:
+            return IndependentBookExpectancy(
+                leg=leg,
+                expected_signal_edge_bps=max(float(fallback_signal_edge_bps), 0.0),
+                expected_slippage_bps=_independent_expected_slippage_bps(settings=settings),
+                expected_cost_bps=max(float(fallback_expected_cost_bps), 0.0),
+                expected_net_edge_bps=float(fallback_expected_net_edge_bps),
+                resolution_failed=True,
+            )
     try:
         return _compute_independent_book_expectancy(
             settings=settings,
@@ -1926,6 +1942,7 @@ def _resolve_independent_book_expectancy(
             expected_slippage_bps=_independent_expected_slippage_bps(settings=settings),
             expected_cost_bps=max(float(fallback_expected_cost_bps), 0.0),
             expected_net_edge_bps=float(fallback_expected_net_edge_bps),
+            resolution_failed=True,
         )
 
 

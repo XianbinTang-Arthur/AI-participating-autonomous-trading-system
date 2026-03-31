@@ -168,11 +168,13 @@ class TargetPositionEngine:
         operating_mode: str,
     ) -> PositionTarget:
         canonical_mode = normalize_ai_operating_mode(operating_mode)
+        resolved_margin_mode = self._resolved_margin_mode(context=context)
         signal_edge_bps = self._signal_edge_bps(baseline=baseline, ai_assessment=ai_assessment)
         expected_cost_bps = self._estimated_trade_cost_bps(
             symbol=context.symbol,
             product_type=context.product_type,
             ai_assessment=ai_assessment,
+            margin_mode=resolved_margin_mode,
         )
         expected_net_edge_bps = signal_edge_bps - expected_cost_bps - max(self.settings.strategy_edge_noise_buffer_bps, 0.0)
         guardrail_flags = list(context.strategy_guardrail_flags)
@@ -221,8 +223,9 @@ class TargetPositionEngine:
                 context=context,
                 directional_target_qty=target_qty,
                 target_leverage=target_leverage,
+                runtime_margin_mode=resolved_margin_mode,
             )
-            if self._hedge_overlay_runtime_supported(context=context)
+            if self._hedge_overlay_runtime_supported(context=context, margin_mode=resolved_margin_mode)
             else []
         )
         target_exposure_side = self._exposure_side(target_qty)
@@ -278,7 +281,7 @@ class TargetPositionEngine:
             target_exposure_side=target_exposure_side,
             position_intent=position_intent,
             target_leverage=target_leverage,
-            margin_mode=self.settings.margin_mode,
+            margin_mode=resolved_margin_mode,
             leverage_bias=self._leverage_bias(
                 baseline=baseline,
                 ai_assessment=ai_assessment,
@@ -818,6 +821,7 @@ class TargetPositionEngine:
             symbol=context.symbol,
             product_type=product_type,
             ai_assessment=ai_assessment,
+            margin_mode=self._resolved_margin_mode(context=context),
         )
         required_edge_bps = (
             estimated_cost_bps
@@ -1293,10 +1297,20 @@ class TargetPositionEngine:
                 return Decimal("0")
         return desired_target_qty
 
-    def _hedge_overlay_runtime_supported(self, *, context: DecisionContext) -> bool:
+    def _hedge_overlay_runtime_supported(
+        self,
+        *,
+        context: DecisionContext,
+        margin_mode: str | None = None,
+    ) -> bool:
+        resolved_margin_mode = (
+            self._resolved_margin_mode(context=context)
+            if margin_mode is None
+            else margin_mode
+        )
         return (
             context.product_type == "derivatives"
-            and self.settings.margin_mode != "cash"
+            and resolved_margin_mode != "cash"
             and self.settings.derivatives_position_mode == "hedge"
         )
 
@@ -1306,6 +1320,7 @@ class TargetPositionEngine:
         context: DecisionContext,
         directional_target_qty: Decimal,
         target_leverage: float,
+        runtime_margin_mode: str,
     ) -> list[StrategyLegIntent]:
         long_target_qty = max(to_decimal(directional_target_qty), Decimal("0"))
         short_target_qty = max(-to_decimal(directional_target_qty), Decimal("0"))
@@ -1318,6 +1333,7 @@ class TargetPositionEngine:
                     current_leg_qty=context.current_long_position_qty,
                     target_leg_qty=long_target_qty,
                     target_leverage=target_leverage,
+                    runtime_margin_mode=runtime_margin_mode,
                 ),
                 self._build_directional_primary_execution_leg(
                     symbol=context.symbol,
@@ -1325,6 +1341,7 @@ class TargetPositionEngine:
                     current_leg_qty=context.current_short_position_qty,
                     target_leg_qty=short_target_qty,
                     target_leverage=target_leverage,
+                    runtime_margin_mode=runtime_margin_mode,
                 ),
             )
             if leg is not None
@@ -1338,6 +1355,7 @@ class TargetPositionEngine:
         current_leg_qty: Decimal,
         target_leg_qty: Decimal,
         target_leverage: float,
+        runtime_margin_mode: str,
     ) -> StrategyLegIntent | None:
         current_leg_qty = max(to_decimal(current_leg_qty), Decimal("0"))
         target_leg_qty = max(to_decimal(target_leg_qty), Decimal("0"))
@@ -1363,7 +1381,7 @@ class TargetPositionEngine:
             action=action,
             family="directional",
             role="primary",
-            margin_mode=self.settings.margin_mode,
+            margin_mode=runtime_margin_mode,
             target_leverage=target_leverage,
             current_position_qty=signed_current_qty,
             target_position_qty=signed_target_qty,
@@ -1666,6 +1684,7 @@ class TargetPositionEngine:
         symbol: str | None = None,
         product_type: str = "spot",
         ai_assessment: AIMarketAssessment | None = None,
+        margin_mode: str | None = None,
     ) -> float:
         expected_slippage_bps = max(self.settings.max_slippage_tolerance_bps, 0) * max(
             self.settings.strategy_expected_slippage_bps_fraction,
@@ -1677,7 +1696,10 @@ class TargetPositionEngine:
             model_name="directional_target_position",
             symbol=symbol,
             product_type=product_type,
-            margin_mode=self.settings.margin_mode,
+            margin_mode=self._normalize_margin_mode(
+                margin_mode,
+                fallback="cash" if product_type == "spot" else str(self.settings.margin_mode),
+            ),
             execution_style="bounded_limit_ioc" if suggestion is not None else "taker",
             order_type="limit" if suggestion is not None else "market",
             passive_bias=None if suggestion is None else suggestion.passive_bias,
@@ -1687,6 +1709,35 @@ class TargetPositionEngine:
             include_funding=product_type == "derivatives",
         )
         return float(estimate.executable_total_drag_bps)
+
+    @staticmethod
+    def _normalize_margin_mode(value: str | None, *, fallback: str) -> str:
+        normalized = str(value or "").strip().lower()
+        if normalized in {"cash", "cross", "isolated"}:
+            return normalized
+        return fallback
+
+    def _resolved_margin_mode(self, *, context: DecisionContext) -> str:
+        fallback = "cash" if context.product_type == "spot" else str(self.settings.margin_mode)
+        current_state = context.current_position_state
+        if current_state is not None:
+            current_state_margin_mode = self._normalize_margin_mode(current_state.margin_mode, fallback=fallback)
+            if context.product_type != "derivatives":
+                return current_state_margin_mode
+            if (
+                current_state_margin_mode != "cash"
+                or abs(to_decimal(current_state.net_position_qty)) > EPSILON_DECIMAL_12
+                or int(current_state.leg_count) > 0
+            ):
+                return current_state_margin_mode
+        leg_margin_modes = {
+            self._normalize_margin_mode(getattr(leg, "margin_mode", None), fallback=fallback)
+            for leg in context.current_position_legs
+            if self._normalize_margin_mode(getattr(leg, "margin_mode", None), fallback=fallback) != "cash"
+        }
+        if len(leg_margin_modes) == 1:
+            return next(iter(leg_margin_modes))
+        return self._normalize_margin_mode(self.settings.margin_mode, fallback=fallback)
 
     def _signal_edge_bps(
         self,

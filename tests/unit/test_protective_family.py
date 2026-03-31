@@ -5,12 +5,17 @@ from decimal import Decimal
 from types import SimpleNamespace
 import unittest
 
+from aats.schemas.decision import PositionTarget
+from aats.services.strategy_engines.base import StrategyEvaluationContext, StrategyFamilyRuntimeControl
 from aats.services.strategy_engines.families.protective_family import (
+    OverlayParentExposureContract,
     _resolve_overlay_parent_exposure_contract,
     _resolve_overlay_main_leg_contract,
     build_protective_candidate_leg,
     evaluate_protective_overlay_decision,
+    protective_candidate_from_directional_target,
 )
+from aats.schemas.strategy_runtime import StrategyLegIntent
 from tests.support.strategy_family import make_ai_assessment, make_baseline, make_context, make_derivatives_hedge_settings
 
 
@@ -74,6 +79,145 @@ class TestProtectiveFamily(unittest.TestCase):
         self.assertEqual(contract.signal_source, "inventory")
         self.assertEqual(contract.target_long_qty, Decimal("0"))
         self.assertEqual(contract.current_long_qty, Decimal("0.05"))
+
+    def test_parent_exposure_contract_prefers_directional_primary_legs_over_net_target_qty(self) -> None:
+        settings = make_derivatives_hedge_settings(default_target_leverage=2.5, margin_mode="cross")
+        context = make_context(
+            current_position_qty=0.05,
+            current_long_position_qty=0.05,
+            product_type="derivatives",
+            current_exposure_side="long",
+        )
+        evaluation_context = SimpleNamespace(
+            context=context,
+            directional_target=SimpleNamespace(
+                symbol=context.symbol,
+                target_position_qty=Decimal("0.01"),
+                target_leverage=0.0,
+                margin_mode="",
+                strategy_execution_legs=[
+                    StrategyLegIntent(
+                        symbol=context.symbol,
+                        product_type="derivatives",
+                        side="buy",
+                        pos_side="long",
+                        family="directional",
+                        role="primary",
+                        margin_mode="isolated",
+                        target_leverage=3.0,
+                        target_position_qty=Decimal("0.08"),
+                    )
+                ],
+            ),
+        )
+
+        contract = _resolve_overlay_parent_exposure_contract(
+            settings=settings,
+            evaluation_context=evaluation_context,
+        )
+
+        self.assertEqual(contract.target_long_qty, Decimal("0.08"))
+        self.assertEqual(contract.target_short_qty, Decimal("0"))
+        self.assertEqual(contract.margin_mode, "isolated")
+        self.assertEqual(contract.target_leverage, 3.0)
+        self.assertEqual(contract.source, "directional_primary_legs")
+
+    def test_protective_candidate_prefers_precomputed_parent_exposure_over_directional_target(self) -> None:
+        settings = make_derivatives_hedge_settings(
+            strategy_hedge_overlay_mode="protective",
+            strategy_hedge_protective_enabled=True,
+        )
+        context = make_context(
+            current_position_qty=0.05,
+            current_long_position_qty=0.05,
+            product_type="derivatives",
+            current_exposure_side="long",
+        )
+        baseline = make_baseline(
+            direction_bias="short",
+            confidence=0.85,
+            suggested_position_scale=1.0,
+            volatility_target_scale=1.0,
+            volatility_state="high",
+            factor_scores={
+                "momentum_alpha": -0.22,
+                "trend_alpha": 0.03,
+                "microstructure_alpha": -0.21,
+                "liquidity_scale": 0.9,
+            },
+        ).model_copy(update={"regime": "range", "composite_alpha_score": -0.40})
+        directional_target = PositionTarget(
+            decision_id="decision_target_test",
+            symbol=context.symbol,
+            current_position_qty=Decimal("0.05"),
+            target_position_qty=Decimal("-0.03"),
+            delta_position_qty=Decimal("-0.08"),
+            current_notional=Decimal("0"),
+            target_notional=Decimal("0"),
+            rebalance_reason="test",
+            urgency="medium",
+            max_slippage_tolerance_bps=20,
+            source_mix={"directional": 1.0},
+            decision_expiry_ts=datetime.now(timezone.utc),
+            product_type="derivatives",
+            current_exposure_side="long",
+            target_exposure_side="short",
+            position_intent="reverse_to_short",
+            target_leverage=1.0,
+            margin_mode="cross",
+            expected_signal_edge_bps=12.0,
+            expected_cost_bps=4.0,
+            expected_net_edge_bps=8.0,
+        )
+        evaluation_context = StrategyEvaluationContext(
+            context=context,
+            baseline=baseline,
+            directional_target=directional_target,
+            latest_snapshot=None,
+            latest_account_snapshot=None,
+            latest_market_snapshot=None,
+            recent_market_snapshots={},
+            recent_targets_by_family={},
+            ai_assessment=make_ai_assessment(direction=-0.12, confidence=0.83),
+            family_runtime_controls={
+                "protective": StrategyFamilyRuntimeControl(
+                    enabled=True,
+                    live_execution_enabled=True,
+                )
+            },
+            overlay_parent_exposure=OverlayParentExposureContract(
+                parent_family="directional",
+                symbol=context.symbol,
+                target_leverage=2.0,
+                margin_mode="isolated",
+                target_long_qty=Decimal("0.05"),
+                target_short_qty=Decimal("0"),
+                current_long_qty=Decimal("0.05"),
+                current_short_qty=Decimal("0"),
+                target_signal="long",
+                current_signal="long",
+                effective_signal="long",
+                signal_source="target_position",
+                lifecycle_state="target_and_inventory",
+                target_active=True,
+                inventory_active=True,
+                source="coordinator_parent_exposure",
+            ),
+            overlay_parent_exposures_by_family={},
+        )
+
+        candidate = protective_candidate_from_directional_target(
+            settings=settings,
+            evaluation_context=evaluation_context,
+        )
+
+        self.assertEqual(candidate.metrics["main_leg_contract_source"], "coordinator_parent_exposure")
+        self.assertEqual(candidate.metrics["parent_effective_signal"], "long")
+        self.assertEqual(candidate.metrics["parent_lifecycle_state"], "target_and_inventory")
+        self.assertEqual(candidate.recommended_symbol, context.symbol)
+        self.assertTrue(candidate.legs)
+        self.assertEqual(candidate.legs[0].margin_mode, "isolated")
+        self.assertEqual(candidate.legs[0].pos_side, "short")
 
     def test_evaluate_protective_overlay_opens_short_hedge_leg_against_existing_long(self) -> None:
         settings = make_derivatives_hedge_settings()

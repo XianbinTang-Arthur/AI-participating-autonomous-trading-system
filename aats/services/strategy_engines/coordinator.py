@@ -53,6 +53,10 @@ from aats.services.strategy_engines.families import (
     StrategyFamilyRegistry,
 )
 from aats.services.strategy_engines.smart_arbitrage import SmartArbitrageStrategyEngine
+from aats.services.strategy_engines.overlay_parent_exposure import (
+    OverlayParentExposureLifecycle,
+    resolve_overlay_parent_exposure_lifecycle,
+)
 from aats.services.strategy_engines.smart_arbitrage.pair_registry import load_pair_definitions
 from aats.services.strategy_engines.spot_grid import SpotGridStrategyEngine
 from aats.services.strategy_engines.sleeve_identity import (
@@ -241,6 +245,10 @@ class StrategyCoordinatorService:
             latest_market_snapshots_by_symbol_by_family=latest_market_snapshots_by_symbol_by_family,
         )
         latest_market_snapshot = self._latest_market_snapshot(context.symbol)
+        overlay_parent_exposures_by_family = self._overlay_parent_exposures_by_family(
+            context=context,
+            directional_target=directional_target,
+        )
         recent_market_snapshot_windows_by_family = {
             family: max(int(request.lookback_snapshots), 1)
             for family, request in market_history_requests_by_family.items()
@@ -262,6 +270,7 @@ class StrategyCoordinatorService:
             ),
             latest_market_snapshots_by_symbol_by_family=latest_market_snapshots_by_symbol_by_family,
             latest_market_snapshots_by_family=latest_market_snapshots_by_family,
+            overlay_parent_exposures_by_family=overlay_parent_exposures_by_family,
             recent_market_snapshots=self._recent_market_snapshots(
                 requests=market_history_requests_by_family,
             ),
@@ -988,17 +997,15 @@ class StrategyCoordinatorService:
         if not symbols:
             return rows
         limit = max((max(int(request.lookback_snapshots), 1) for request in event_store_requests), default=1)
-        events = self.event_store.recent_by_topic(
-            topics.MARKET_SNAPSHOTS,
-            limit=max(limit * max(len(symbols), 1), limit),
-        )
         for symbol in symbols:
-            symbol_rows = [
+            rows[symbol] = [
                 MarketSnapshot.model_validate(item.payload)
-                for item in events
-                if item.key == symbol
+                for item in self.event_store.recent_by_topic_and_key(
+                    topics.MARKET_SNAPSHOTS,
+                    key=symbol,
+                    limit=limit,
+                )
             ]
-            rows[symbol] = symbol_rows[-limit:]
         return rows
 
     def _recent_market_snapshot_windows_by_family(
@@ -1029,6 +1036,23 @@ class StrategyCoordinatorService:
                     primary_symbol=primary_symbol,
                 )
             )
+        }
+
+    def _overlay_parent_exposures_by_family(
+        self,
+        *,
+        context: DecisionContext,
+        directional_target: PositionTarget,
+    ) -> dict[StrategyFamily, OverlayParentExposureLifecycle]:
+        overlay_parent_exposure = resolve_overlay_parent_exposure_lifecycle(
+            settings=self.settings,
+            context=context,
+            directional_target=directional_target,
+            parent_family="directional",
+        )
+        return {
+            "protective": overlay_parent_exposure,
+            "opportunistic": overlay_parent_exposure,
         }
 
     def _market_history_requests(
@@ -1306,6 +1330,9 @@ class StrategyCoordinatorService:
             parent_current_signal=self._optional_overlay_signal(metrics.get("parent_current_signal")),
             parent_effective_signal=self._optional_overlay_signal(metrics.get("parent_effective_signal")),
             signal_source=self._optional_text(metrics.get("parent_exposure_signal_source")),
+            parent_lifecycle_state=self._optional_parent_lifecycle_state(metrics.get("parent_lifecycle_state")),
+            parent_target_active=self._optional_bool_metric(metrics.get("parent_target_active")),
+            parent_inventory_active=self._optional_bool_metric(metrics.get("parent_inventory_active")),
             main_leg_current_qty=to_decimal(metrics.get("main_leg_current_qty") or Decimal("0")),
             hedge_leg_current_qty=to_decimal(metrics.get("hedge_leg_current_qty") or Decimal("0")),
             main_leg_target_qty=to_decimal(metrics.get("main_leg_target_qty") or Decimal("0")),
@@ -1393,11 +1420,24 @@ class StrategyCoordinatorService:
         return text or None
 
     @staticmethod
+    def _optional_parent_lifecycle_state(value: object | None) -> str | None:
+        normalized = str(value or "").strip().lower()
+        if normalized in {"flat", "target_only", "inventory_only", "target_and_inventory"}:
+            return normalized
+        return None
+
+    @staticmethod
+    def _optional_bool_metric(value: object | None) -> bool | None:
+        if value is None:
+            return None
+        return bool(value)
+
+    @staticmethod
     def _overlay_parent_signal_fields(
         *,
         family_execution_summary: StrategyExecutionSummary | None,
         hedge_overlay_decision: HedgeOverlayDecision | None,
-    ) -> dict[str, str | None]:
+    ) -> dict[str, str | bool | None]:
         return {
             "parent_target_signal": (
                 None
@@ -1426,6 +1466,33 @@ class StrategyCoordinatorService:
                 else family_execution_summary.signal_source
             ) or (
                 None if hedge_overlay_decision is None else hedge_overlay_decision.signal_source
+            ),
+            "parent_lifecycle_state": (
+                None
+                if family_execution_summary is None
+                else family_execution_summary.parent_lifecycle_state
+            ) or (
+                None if hedge_overlay_decision is None else hedge_overlay_decision.parent_lifecycle_state
+            ),
+            "parent_target_active": (
+                None
+                if family_execution_summary is None
+                else family_execution_summary.parent_target_active
+            ) if (
+                family_execution_summary is not None
+                and family_execution_summary.parent_target_active is not None
+            ) else (
+                None if hedge_overlay_decision is None else hedge_overlay_decision.parent_target_active
+            ),
+            "parent_inventory_active": (
+                None
+                if family_execution_summary is None
+                else family_execution_summary.parent_inventory_active
+            ) if (
+                family_execution_summary is not None
+                and family_execution_summary.parent_inventory_active is not None
+            ) else (
+                None if hedge_overlay_decision is None else hedge_overlay_decision.parent_inventory_active
             ),
         }
 
@@ -1653,6 +1720,9 @@ class StrategyCoordinatorService:
             parent_current_signal=StrategyCoordinatorService._optional_overlay_signal(metrics.get("parent_current_signal")),
             parent_effective_signal=StrategyCoordinatorService._optional_overlay_signal(metrics.get("parent_effective_signal")),
             signal_source=StrategyCoordinatorService._optional_text(metrics.get("parent_exposure_signal_source")),
+            parent_lifecycle_state=StrategyCoordinatorService._optional_parent_lifecycle_state(metrics.get("parent_lifecycle_state")),
+            parent_target_active=StrategyCoordinatorService._optional_bool_metric(metrics.get("parent_target_active")),
+            parent_inventory_active=StrategyCoordinatorService._optional_bool_metric(metrics.get("parent_inventory_active")),
             close_reason=StrategyCoordinatorService._optional_text(metrics.get("close_reason")),
             book_expectancy_summary=(
                 None

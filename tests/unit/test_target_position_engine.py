@@ -8,6 +8,7 @@ from unittest.mock import patch
 from aats.bootstrap.settings import AATSSettings
 from aats.schemas.common import utc_now
 from aats.schemas.decision import AIMarketAssessment, BaselineAssessment, DecisionContext, ProfileControlDecision
+from aats.schemas.portfolio import InstrumentPositionState
 from aats.services.decision_engine.target_position import TargetPositionEngine
 
 
@@ -170,6 +171,51 @@ class TestTargetPositionEngine(unittest.TestCase):
         self.assertEqual(target.product_type, "derivatives")
         self.assertGreaterEqual(target.target_leverage, 1.0)
         self.assertLessEqual(target.target_leverage, 3.0)
+
+    def test_derivatives_target_prefers_runtime_margin_mode_over_settings(self) -> None:
+        class _RecordingTradeCostService:
+            def __init__(self) -> None:
+                self.margin_modes: list[str] = []
+
+            def estimate_single_leg_entry(self, **kwargs):
+                self.margin_modes.append(str(kwargs["margin_mode"]))
+                return type("Estimate", (), {"executable_total_drag_bps": Decimal("4.0")})()
+
+        engine = TargetPositionEngine(
+            settings=AATSSettings.model_validate(
+                {
+                    "default_order_qty": 0.001,
+                    "trading_product_type": "derivatives",
+                    "margin_mode": "cross",
+                    "derivatives_position_mode": "hedge",
+                    "strategy_short_bias_enabled": True,
+                }
+            )
+        )
+        recording_cost_service = _RecordingTradeCostService()
+        engine.trade_cost_service = recording_cost_service  # type: ignore[assignment]
+        context = self._context(product_type="derivatives", current_exposure_side="flat").model_copy(
+            update={
+                "current_position_state": InstrumentPositionState(
+                    symbol="BTC-USDT",
+                    product_type="derivatives",
+                    margin_mode="isolated",
+                    target_leverage=2.0,
+                )
+            }
+        )
+
+        target = engine.build(
+            context,
+            self._baseline(volatility_target_scale=1.0, suggested_position_scale=1.0),
+            self._ai_assessment(),
+        )
+
+        self.assertEqual(target.margin_mode, "isolated")
+        self.assertTrue(target.strategy_execution_legs)
+        self.assertEqual(target.strategy_execution_legs[0].margin_mode, "isolated")
+        self.assertGreaterEqual(len(recording_cost_service.margin_modes), 1)
+        self.assertTrue(all(mode == "isolated" for mode in recording_cost_service.margin_modes))
 
     def test_derivatives_short_bias_setting_disables_short_targets(self) -> None:
         engine = TargetPositionEngine(

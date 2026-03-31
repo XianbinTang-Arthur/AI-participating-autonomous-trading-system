@@ -16,7 +16,12 @@ from aats.schemas.portfolio import PortfolioSnapshot, SleevePnLRecord
 from aats.schemas.reconciliation import ReconciliationReport
 from aats.schemas.strategy_runtime import StrategyBookRuntimeState, StrategyCandidate, StrategyLegIntent
 from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, to_decimal
-from aats.services.strategy_engines.base import StrategyEngineInput, StrategyEvaluationContext, StrategyFamilyRuntimeControl
+from aats.services.strategy_engines.base import (
+    StrategyEngineInput,
+    StrategyEvaluationContext,
+    StrategyFamilyRuntimeControl,
+    StrategyMarketHistoryRequest,
+)
 from aats.services.strategy_engines.coordinator import StrategyCoordinatorService
 from aats.services.strategy_engines.sleeve_identity import build_strategy_sleeve_id
 from aats.storage.event_store import InMemoryEventStore
@@ -227,6 +232,69 @@ def _fill_event(
 
 
 class TestStrategyCoordinator(unittest.TestCase):
+    def test_recent_market_snapshots_fetch_each_symbol_independently(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "trading_product_type": "spot",
+                "margin_mode": "cash",
+                "default_symbol": "BTC-USDT",
+                "allowed_symbols": ("BTC-USDT", "ETH-USDT"),
+                "spot_grid_enabled": True,
+                "spot_grid_anchor_lookback_snapshots": 2,
+            }
+        )
+        event_store = InMemoryEventStore()
+        for symbol, price in (
+            ("ETH-USDT", "200"),
+            ("ETH-USDT", "201"),
+            ("BTC-USDT", "100"),
+            ("BTC-USDT", "101"),
+            ("BTC-USDT", "102"),
+            ("BTC-USDT", "103"),
+            ("BTC-USDT", "104"),
+        ):
+            event_store.append(
+                build_envelope(
+                    topic=topics.MARKET_SNAPSHOTS,
+                    key=symbol,
+                    payload_model=_market_snapshot(symbol, price),
+                    source_component="test",
+                )
+            )
+        coordinator = StrategyCoordinatorService(
+            settings=settings,
+            event_store=event_store,
+            market_gateway=_FakeMarketGateway(
+                {
+                    "BTC-USDT": _market_snapshot("BTC-USDT", "104"),
+                    "ETH-USDT": _market_snapshot("ETH-USDT", "201"),
+                }
+            ),
+            portfolio_repo=InMemoryPortfolioRepository(),
+            strategy_sleeve_repo=InMemoryStrategySleeveRepository(),
+        )
+
+        rows = coordinator._recent_market_snapshots(
+            requests={
+                "spot_grid": StrategyMarketHistoryRequest(
+                    family="spot_grid",
+                    symbols=("BTC-USDT", "ETH-USDT"),
+                    topic=topics.MARKET_SNAPSHOTS,
+                    sampling_source="event_store_recent",
+                    lookback_snapshots=2,
+                )
+            }
+        )
+
+        self.assertEqual(
+            [snapshot.last_price for snapshot in rows["BTC-USDT"]],
+            [Decimal("103"), Decimal("104")],
+        )
+        self.assertEqual(
+            [snapshot.last_price for snapshot in rows["ETH-USDT"]],
+            [Decimal("200"), Decimal("201")],
+        )
+
     def test_recent_market_snapshots_are_dispatched_with_family_specific_windows(self) -> None:
         settings = AATSSettings.model_validate(
             {
@@ -273,6 +341,17 @@ class TestStrategyCoordinator(unittest.TestCase):
             latest_market_snapshots_by_symbol_by_family=latest_market_snapshots_by_symbol_by_family,
         )
         rows = coordinator._recent_market_snapshots(requests=requests)
+        directional_target = _position_target(
+            symbol="BTC-USDT",
+            product_type="spot",
+            margin_mode="cash",
+            current_qty="0",
+            target_qty="0",
+        )
+        overlay_parent_exposures_by_family = coordinator._overlay_parent_exposures_by_family(
+            context=_decision_context(symbol="BTC-USDT", product_type="spot", current_position_qty="0"),
+            directional_target=directional_target,
+        )
         windows = {
             family: request.lookback_snapshots
             for family, request in requests.items()
@@ -281,19 +360,14 @@ class TestStrategyCoordinator(unittest.TestCase):
             StrategyEngineInput(
                 context=_decision_context(symbol="BTC-USDT", product_type="spot", current_position_qty="0"),
                 baseline=_baseline(symbol="BTC-USDT", regime="range"),
-                directional_target=_position_target(
-                    symbol="BTC-USDT",
-                    product_type="spot",
-                    margin_mode="cash",
-                    current_qty="0",
-                    target_qty="0",
-                ),
+                directional_target=directional_target,
                 latest_snapshot=None,
                 latest_account_snapshot=None,
                 latest_market_snapshot=_market_snapshot("BTC-USDT", "98"),
                 resolved_pair_definitions_by_family=resolved_pair_definitions_by_family,
                 latest_market_snapshots_by_symbol_by_family=latest_market_snapshots_by_symbol_by_family,
                 latest_market_snapshots_by_family=latest_snapshots,
+                overlay_parent_exposures_by_family=overlay_parent_exposures_by_family,
                 recent_market_snapshots=rows,
                 recent_targets_by_family={},
                 recent_market_snapshot_windows_by_family=windows,
@@ -342,6 +416,20 @@ class TestStrategyCoordinator(unittest.TestCase):
         self.assertEqual(evaluation_context.for_family("spot_grid").latest_market_snapshot.symbol, "BTC-USDT")
         self.assertEqual(len(evaluation_context.for_family("dca").recent_market_snapshots["BTC-USDT"]), 2)
         self.assertEqual(evaluation_context.for_family("dca").latest_market_snapshot.symbol, "BTC-USDT")
+        self.assertIsNotNone(evaluation_context.for_family("protective").overlay_parent_exposure)
+        self.assertIsNotNone(evaluation_context.for_family("opportunistic").overlay_parent_exposure)
+        self.assertEqual(
+            evaluation_context.for_family("protective").overlay_parent_exposure.parent_family,
+            "directional",
+        )
+        self.assertEqual(
+            evaluation_context.for_family("protective").overlay_parent_exposure.symbol,
+            "BTC-USDT",
+        )
+        self.assertEqual(
+            evaluation_context.for_family("protective").overlay_parent_exposure.lifecycle_state,
+            "flat",
+        )
 
     def test_latest_portfolio_and_account_snapshots_are_dispatched_with_family_specific_requests(self) -> None:
         settings = AATSSettings.model_validate(

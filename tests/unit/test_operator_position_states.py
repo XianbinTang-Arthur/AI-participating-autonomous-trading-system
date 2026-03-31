@@ -153,6 +153,9 @@ class TestOperatorPositionStates(unittest.TestCase):
                     "parent_current_signal": "long",
                     "parent_effective_signal": "long",
                     "signal_source": "inventory",
+                    "parent_lifecycle_state": "inventory_only",
+                    "parent_target_active": False,
+                    "parent_inventory_active": True,
                     "book_expectancy_summary": {
                         "source": "independent_book",
                         "books": [
@@ -181,6 +184,9 @@ class TestOperatorPositionStates(unittest.TestCase):
         self.assertEqual(payload["parent_current_signal"], "long")
         self.assertEqual(payload["parent_effective_signal"], "long")
         self.assertEqual(payload["signal_source"], "inventory")
+        self.assertEqual(payload["parent_lifecycle_state"], "inventory_only")
+        self.assertEqual(payload["parent_target_active"], False)
+        self.assertEqual(payload["parent_inventory_active"], True)
         self.assertEqual(payload["diagnostic_metric_flags"]["emit_expected_vs_realized_metrics"], True)
         self.assertEqual(payload["book_expectancy_summary"]["source"], "independent_book")
         self.assertEqual(
@@ -1039,6 +1045,9 @@ class TestOperatorPositionStates(unittest.TestCase):
                     "parent_current_signal": "long",
                     "parent_effective_signal": "long",
                     "signal_source": "inventory",
+                    "parent_lifecycle_state": "inventory_only",
+                    "parent_target_active": False,
+                    "parent_inventory_active": True,
                     "book_runtime_states": [
                         {
                             "leg": "long",
@@ -1073,6 +1082,9 @@ class TestOperatorPositionStates(unittest.TestCase):
         self.assertEqual(payload["parent_current_signal"], "long")
         self.assertEqual(payload["parent_effective_signal"], "long")
         self.assertEqual(payload["signal_source"], "inventory")
+        self.assertEqual(payload["parent_lifecycle_state"], "inventory_only")
+        self.assertEqual(payload["parent_target_active"], False)
+        self.assertEqual(payload["parent_inventory_active"], True)
 
     def test_overlay_audit_summary_exposes_parent_exposure_signals(self) -> None:
         query = OperatorQueryService.__new__(OperatorQueryService)
@@ -1091,6 +1103,9 @@ class TestOperatorPositionStates(unittest.TestCase):
                     "parent_current_signal": "long",
                     "parent_effective_signal": "long",
                     "signal_source": "inventory",
+                    "parent_lifecycle_state": "inventory_only",
+                    "parent_target_active": False,
+                    "parent_inventory_active": True,
                     "close_reason": "failed_thesis",
                     "long_leg_close_reason": "failed_thesis",
                 },
@@ -1102,6 +1117,9 @@ class TestOperatorPositionStates(unittest.TestCase):
         self.assertEqual(audit["parent_current_signal"], "long")
         self.assertEqual(audit["parent_effective_signal"], "long")
         self.assertEqual(audit["signal_source"], "inventory")
+        self.assertEqual(audit["parent_lifecycle_state"], "inventory_only")
+        self.assertEqual(audit["parent_target_active"], False)
+        self.assertEqual(audit["parent_inventory_active"], True)
         self.assertEqual(audit["close_reason"], "failed_thesis")
         self.assertEqual(audit["long_leg_close_reason"], "failed_thesis")
 

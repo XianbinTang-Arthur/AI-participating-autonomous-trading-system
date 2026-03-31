@@ -19,6 +19,7 @@ from aats.services.strategy_engines.base import StrategyEvaluationContext, Strat
 from aats.services.strategy_engines.families.protective_family import (
     OverlayParentExposureContract,
     _candidate_state_from_overlay_state,
+    _context_or_settings_margin_mode,
     _overlay_route_action,
     _placeholder_family_candidate,
     _resolve_overlay_parent_exposure_contract,
@@ -266,6 +267,10 @@ def opportunistic_candidate_from_directional_target(
             **metrics,
             "configured_mode": configured_mode,
             "main_leg_contract_source": parent_exposure.source,
+            "parent_family": parent_exposure.parent_family,
+            "parent_lifecycle_state": parent_exposure.lifecycle_state,
+            "parent_target_active": parent_exposure.target_active,
+            "parent_inventory_active": parent_exposure.inventory_active,
             "parent_exposure_signal_source": parent_exposure.signal_source,
             "parent_target_signal": parent_exposure.target_signal,
             "parent_current_signal": parent_exposure.current_signal,
@@ -363,27 +368,43 @@ def evaluate_opportunistic_overlay_decision(
             runtime_rollout_stage=rollout["runtime_stage"],
         )
 
-    resolved_parent_exposure = parent_exposure or OverlayParentExposureContract(
-        symbol=context.symbol,
-        target_leverage=max(float(getattr(context, "current_target_leverage", 0.0) or 0.0), 1.0),
-        margin_mode=str(settings.margin_mode),
-        target_long_qty=max(to_decimal(long_target_qty or Decimal("0")), Decimal("0")),
-        target_short_qty=max(to_decimal(short_target_qty or Decimal("0")), Decimal("0")),
-        current_long_qty=to_decimal(context.current_long_position_qty),
-        current_short_qty=to_decimal(context.current_short_position_qty),
-        target_signal=_exposure_side(to_decimal(long_target_qty or Decimal("0")) - to_decimal(short_target_qty or Decimal("0"))),
-        current_signal=_resolve_overlay_main_leg_signal_from_inventory(context=context),
-        effective_signal=_resolve_overlay_main_leg_signal_from_inventory(context=context)
-        if _exposure_side(to_decimal(long_target_qty or Decimal("0")) - to_decimal(short_target_qty or Decimal("0"))) == "flat"
-        else _exposure_side(to_decimal(long_target_qty or Decimal("0")) - to_decimal(short_target_qty or Decimal("0"))),
-        signal_source=(
+    if parent_exposure is None:
+        direct_target_signal = _exposure_side(
+            to_decimal(long_target_qty or Decimal("0")) - to_decimal(short_target_qty or Decimal("0"))
+        )
+        direct_current_signal = _resolve_overlay_main_leg_signal_from_inventory(context=context)
+        direct_effective_signal = (
+            direct_current_signal if direct_target_signal == "flat" else direct_target_signal
+        )
+        direct_signal_source = (
             "inventory"
-            if _exposure_side(to_decimal(long_target_qty or Decimal("0")) - to_decimal(short_target_qty or Decimal("0"))) == "flat"
-            and _resolve_overlay_main_leg_signal_from_inventory(context=context) != "flat"
+            if direct_target_signal == "flat" and direct_current_signal != "flat"
             else "target_position"
-        ),
-        source="direct_target_args",
-    )
+        )
+        resolved_parent_exposure = OverlayParentExposureContract(
+            symbol=context.symbol,
+            target_leverage=max(float(getattr(context, "current_target_leverage", 0.0) or 0.0), 1.0),
+            margin_mode=_context_or_settings_margin_mode(settings=settings, context=context),
+            target_long_qty=max(to_decimal(long_target_qty or Decimal("0")), Decimal("0")),
+            target_short_qty=max(to_decimal(short_target_qty or Decimal("0")), Decimal("0")),
+            current_long_qty=to_decimal(context.current_long_position_qty),
+            current_short_qty=to_decimal(context.current_short_position_qty),
+            target_signal=direct_target_signal,
+            current_signal=direct_current_signal,
+            effective_signal=direct_effective_signal,
+            signal_source=direct_signal_source,
+            parent_family="directional",
+            lifecycle_state=(
+                "target_and_inventory"
+                if direct_target_signal != "flat" and direct_current_signal != "flat"
+                else ("target_only" if direct_target_signal != "flat" else ("inventory_only" if direct_current_signal != "flat" else "flat"))
+            ),
+            target_active=direct_target_signal != "flat",
+            inventory_active=direct_current_signal != "flat",
+            source="direct_target_args",
+        )
+    else:
+        resolved_parent_exposure = parent_exposure
     main_leg_signal = resolved_parent_exposure.effective_signal
     main_signal_inferred_from_inventory = resolved_parent_exposure.signal_source == "inventory"
     if main_leg_signal == "flat":
