@@ -361,6 +361,27 @@ def test_derivatives_managed_profiles_use_relaxed_directional_thresholds() -> No
         assert values["strategy_hedge_independent_short_min_hold_seconds"] == 300.0
         assert values["strategy_hedge_independent_rebalance_cooldown_seconds"] == 120.0
         assert values["strategy_hedge_independent_trial_guard_enabled"] is True
+        assert values["strategy_hedge_independent_min_confirm_ticks"] == 2
+        assert values["strategy_hedge_independent_min_score_stability_bps"] == 2.0
+        assert values["strategy_hedge_independent_min_liquidity_quality"] == 0.55
+        assert values["strategy_hedge_independent_require_execution_health_ok"] is True
+        assert values["strategy_hedge_independent_max_thesis_age_seconds"] == 1800
+        assert values["strategy_hedge_independent_de_risk_net_edge_bps"] == 2.0
+        assert values["strategy_hedge_independent_failed_thesis_net_edge_bps"] == -1.0
+        assert values["strategy_hedge_independent_execution_health_de_risk_enabled"] is True
+        assert values["strategy_hedge_independent_liquidity_de_risk_enabled"] is True
+        assert values["strategy_hedge_independent_entry_execution_mode"] == "passive_first"
+        assert values["strategy_hedge_independent_scale_in_execution_mode"] == "bounded_limit"
+        assert values["strategy_hedge_independent_de_risk_execution_mode"] == "bounded_taker"
+        assert values["strategy_hedge_independent_close_failed_thesis_execution_mode"] == "aggressive_bounded_taker"
+        assert values["strategy_hedge_independent_close_stale_execution_mode"] == "bounded_limit"
+        assert values["strategy_hedge_independent_limit_offset_bps_entry"] == 1.5
+        assert values["strategy_hedge_independent_limit_offset_bps_scale_in"] == 1.0
+        assert values["strategy_hedge_independent_limit_offset_bps_stale_close"] == 0.8
+        assert values["strategy_hedge_independent_emit_book_level_metrics"] is True
+        assert values["strategy_hedge_independent_emit_expected_vs_realized_metrics"] is True
+        assert values["strategy_hedge_independent_emit_close_reason_metrics"] is True
+        assert values["strategy_hedge_independent_emit_execution_policy_metrics"] is True
         if profile == "derivatives_live":
             assert values["strategy_hedge_independent_long_close_threshold"] == 0.24
             assert values["strategy_hedge_independent_short_close_threshold"] == 0.24
@@ -392,6 +413,27 @@ def test_derivatives_live_managed_profile_is_pinned_for_independent_live() -> No
     assert values["strategy_hedge_overlay_mode"] == "independent"
     assert values["strategy_hedge_independent_long_close_threshold"] == 0.24
     assert values["strategy_hedge_independent_short_close_threshold"] == 0.24
+    assert values["strategy_hedge_independent_min_confirm_ticks"] == 2
+    assert values["strategy_hedge_independent_min_score_stability_bps"] == 2.0
+    assert values["strategy_hedge_independent_min_liquidity_quality"] == 0.55
+    assert values["strategy_hedge_independent_require_execution_health_ok"] is True
+    assert values["strategy_hedge_independent_max_thesis_age_seconds"] == 1800
+    assert values["strategy_hedge_independent_de_risk_net_edge_bps"] == 2.0
+    assert values["strategy_hedge_independent_failed_thesis_net_edge_bps"] == -1.0
+    assert values["strategy_hedge_independent_execution_health_de_risk_enabled"] is True
+    assert values["strategy_hedge_independent_liquidity_de_risk_enabled"] is True
+    assert values["strategy_hedge_independent_entry_execution_mode"] == "passive_first"
+    assert values["strategy_hedge_independent_scale_in_execution_mode"] == "bounded_limit"
+    assert values["strategy_hedge_independent_de_risk_execution_mode"] == "bounded_taker"
+    assert values["strategy_hedge_independent_close_failed_thesis_execution_mode"] == "aggressive_bounded_taker"
+    assert values["strategy_hedge_independent_close_stale_execution_mode"] == "bounded_limit"
+    assert values["strategy_hedge_independent_limit_offset_bps_entry"] == 1.5
+    assert values["strategy_hedge_independent_limit_offset_bps_scale_in"] == 1.0
+    assert values["strategy_hedge_independent_limit_offset_bps_stale_close"] == 0.8
+    assert values["strategy_hedge_independent_emit_book_level_metrics"] is True
+    assert values["strategy_hedge_independent_emit_expected_vs_realized_metrics"] is True
+    assert values["strategy_hedge_independent_emit_close_reason_metrics"] is True
+    assert values["strategy_hedge_independent_emit_execution_policy_metrics"] is True
     assert values["strategy_hedge_independent_min_safe_net_edge_bps"] == 3.0
     assert values["strategy_hedge_independent_expected_slippage_buffer_bps"] == 1.0
     assert values["strategy_hedge_independent_expected_execution_buffer_bps"] == 2.0

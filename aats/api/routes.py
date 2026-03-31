@@ -636,6 +636,15 @@ async def execution_quality_report(
     return _query(request).execution_quality_report(limit=limit, offset=offset)
 
 
+@router.get("/reports/execution-attempts")
+async def execution_attempt_report(
+    request: Request,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0, le=5000),
+) -> dict[str, Any]:
+    return _query(request).execution_attempt_report(limit=limit, offset=offset)
+
+
 @router.get("/reports/profitability-overview")
 async def profitability_overview(
     request: Request,

@@ -196,6 +196,8 @@ class Phase1ExecutionShadowService:
     def intent_from_order_state(order_state: OrderState) -> OrderIntent:
         return OrderIntent(
             intent_id=order_state.intent_id,
+            execution_chain_id=order_state.execution_chain_id,
+            execution_attempt_id=order_state.execution_attempt_id,
             leg_intent_id=order_state.leg_intent_id,
             decision_id=order_state.decision_id,
             symbol=order_state.symbol,
@@ -228,6 +230,8 @@ class Phase1ExecutionShadowService:
     def intent_from_fill(fill: FillEvent) -> OrderIntent:
         return OrderIntent(
             intent_id=fill.intent_id,
+            execution_chain_id=fill.execution_chain_id,
+            execution_attempt_id=fill.execution_attempt_id,
             leg_intent_id=fill.leg_intent_id,
             decision_id=fill.decision_id,
             symbol=fill.symbol,

@@ -316,9 +316,11 @@ class ConvergedPostgresExecutionRepository(ExecutionRepository):
         payload = dict(row.get("raw_payload") or {})
         order_payload = payload.get("order_state")
         if isinstance(order_payload, dict):
+            order_payload.setdefault("execution_attempt_id", row.get("execution_attempt_id"))
             return OrderState.model_validate(order_payload)
         return OrderState(
             decision_id=str(row.get("decision_id") or ""),
+            execution_attempt_id=row.get("execution_attempt_id"),
             intent_id=str(row.get("intent_id") or ""),
             symbol=str(row.get("symbol") or ""),
             client_order_id=str(row.get("client_order_id") or row.get("order_id") or ""),
@@ -397,6 +399,7 @@ class ConvergedPostgresExecutionRepository(ExecutionRepository):
         status = last_fill.order_status_after_fill or ("FILLED" if remaining_qty <= Decimal("0") else "PARTIALLY_FILLED")
         order_state = OrderState(
             decision_id=str(row.decision_id or last_fill.decision_id or ""),
+            execution_attempt_id=row.execution_attempt_id or last_fill.execution_attempt_id,
             intent_id=str(row.intent_id or last_fill.intent_id or ""),
             symbol=str(row.symbol or last_fill.symbol),
             client_order_id=str(row.client_order_id or row.order_id),
@@ -451,10 +454,12 @@ class ConvergedPostgresExecutionRepository(ExecutionRepository):
         payload = dict(row.get("raw_payload") or {})
         fill_payload = payload.get("fill_event")
         if isinstance(fill_payload, dict):
+            fill_payload.setdefault("execution_attempt_id", row.get("execution_attempt_id"))
             return FillEvent.model_validate(fill_payload)
         return FillEvent(
             fill_id=str(row["fill_id"]),
             decision_id=str(row.get("decision_id") or ""),
+            execution_attempt_id=row.get("execution_attempt_id"),
             intent_id=str(row.get("intent_id") or ""),
             client_order_id=str(row.get("client_order_id") or row.get("order_id") or ""),
             exchange_order_id=str(row.get("venue_order_id") or ""),
@@ -493,6 +498,7 @@ class ConvergedPostgresExecutionRepository(ExecutionRepository):
         side = side_from_position_intent(order_state.position_intent) or "buy"
         return OrderIntent(
             intent_id=order_state.intent_id,
+            execution_attempt_id=order_state.execution_attempt_id,
             decision_id=order_state.decision_id,
             symbol=order_state.symbol,
             side=side,
@@ -534,6 +540,7 @@ def _order_model_to_dict(row: ExecutionOrderModel) -> dict:
         "order_id": row.order_id,
         "intent_id": row.intent_id,
         "decision_id": row.decision_id,
+        "execution_attempt_id": row.execution_attempt_id,
         "client_order_id": row.client_order_id,
         "venue_order_id": row.venue_order_id,
         "symbol": row.symbol,
@@ -575,6 +582,7 @@ def _fill_model_to_dict(row: ExecutionFillModelV2) -> dict:
         "fill_id": row.fill_id,
         "venue_fill_id": row.venue_fill_id,
         "order_id": row.order_id,
+        "execution_attempt_id": row.execution_attempt_id,
         "venue_order_id": row.venue_order_id,
         "client_order_id": row.client_order_id,
         "decision_id": row.decision_id,

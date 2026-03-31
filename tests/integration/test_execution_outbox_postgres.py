@@ -15,6 +15,7 @@ from aats.schemas.common import utc_now
 from aats.schemas.execution import FillEvent, OrderIntent, OrderObligation, OrderState
 from aats.services.execution_engine.outbox import PostgresExecutionOutboxPublisher
 from aats.storage.execution_command_repo_postgres import PostgresExecutionCommandRepository
+from aats.storage.execution_fill_repo_v2_postgres import PostgresExecutionFillRepositoryV2
 from aats.storage.execution_order_repo_postgres import (
     PostgresExecutionOrderHistoryRepository,
     PostgresExecutionOrderRepository,
@@ -33,6 +34,7 @@ class TestExecutionOutboxPostgres(unittest.IsolatedAsyncioTestCase):
         try:
             event_store = PostgresEventStore(runtime.session_factory)
             execution_repo = PostgresExecutionRepository(runtime.session_factory)
+            order_repo = PostgresExecutionOrderRepository(runtime.session_factory)
             obligation_repo = PostgresExecutionObligationRepository(runtime.session_factory)
             outbox_repo = PostgresOutboxRepository(runtime.session_factory)
             bus = InMemoryEventBus()
@@ -49,6 +51,7 @@ class TestExecutionOutboxPostgres(unittest.IsolatedAsyncioTestCase):
                 obligation_repo=obligation_repo,
                 outbox_repo=outbox_repo,
                 bus=bus,
+                execution_order_repo=order_repo,
             )
             state = self._order_state(client_order_id="clord_outbox_ok", status="SUBMITTED")
 
@@ -62,6 +65,9 @@ class TestExecutionOutboxPostgres(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(stored.position_mode, "long_short_mode")
             self.assertEqual(stored.pos_side, "long")
             self.assertTrue(stored.reduce_only)
+            stored_row = order_repo.get_order(state.client_order_id)
+            self.assertIsNotNone(stored_row)
+            self.assertEqual(stored_row["execution_attempt_id"], "execution_attempt:clord_outbox_ok")
             self.assertEqual(event_store.count(topic=topics.ORDER_UPDATES), 1)
             self.assertEqual(outbox_repo.counts(), {"pending": 0, "published": 1, "failed": 0})
             self.assertEqual(len(received), 1)
@@ -260,6 +266,8 @@ class TestExecutionOutboxPostgres(unittest.IsolatedAsyncioTestCase):
         try:
             event_store = PostgresEventStore(runtime.session_factory)
             execution_repo = PostgresExecutionRepository(runtime.session_factory)
+            order_repo = PostgresExecutionOrderRepository(runtime.session_factory)
+            fill_repo = PostgresExecutionFillRepositoryV2(runtime.session_factory)
             obligation_repo = PostgresExecutionObligationRepository(runtime.session_factory)
             outbox_repo = PostgresOutboxRepository(runtime.session_factory)
             bus = InMemoryEventBus()
@@ -270,6 +278,8 @@ class TestExecutionOutboxPostgres(unittest.IsolatedAsyncioTestCase):
                 obligation_repo=obligation_repo,
                 outbox_repo=outbox_repo,
                 bus=bus,
+                execution_order_repo=order_repo,
+                execution_fill_repo=fill_repo,
             )
             base_obligation = OrderObligation(
                 client_order_id="clord_fill_atomic",
@@ -289,6 +299,7 @@ class TestExecutionOutboxPostgres(unittest.IsolatedAsyncioTestCase):
             fill = FillEvent(
                 fill_id="fill_atomic_1",
                 decision_id="decision_fill_atomic",
+                execution_attempt_id="execution_attempt:clord_fill_atomic",
                 intent_id="intent_fill_atomic",
                 client_order_id="clord_fill_atomic",
                 exchange_order_id="ord_fill_atomic",
@@ -332,6 +343,9 @@ class TestExecutionOutboxPostgres(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(stored_fills[0].td_mode, "cross")
             self.assertEqual(stored_fills[0].instrument_family, "BTC-USDT")
             self.assertTrue(stored_fills[0].close_only)
+            stored_fill_row = fill_repo.get_fill("fill_atomic_1")
+            self.assertIsNotNone(stored_fill_row)
+            self.assertEqual(stored_fill_row["execution_attempt_id"], "execution_attempt:clord_fill_atomic")
             stored_obligation = obligation_repo.get_obligation("clord_fill_atomic")
             self.assertIsNotNone(stored_obligation)
             self.assertEqual(stored_obligation.consumed_amount, Decimal("60.0"))
@@ -415,6 +429,7 @@ class TestExecutionOutboxPostgres(unittest.IsolatedAsyncioTestCase):
             product_type="derivatives",
             margin_mode="cross",
             position_intent="close_long",
+            execution_attempt_id=f"execution_attempt:{client_order_id}",
             submission_payload={"instId": "BTC-USDT-SWAP", "tdMode": "cross", "posSide": "long"},
         )
 

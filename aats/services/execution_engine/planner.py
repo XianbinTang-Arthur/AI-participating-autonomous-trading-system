@@ -42,6 +42,7 @@ class ExecutionPlanner:
         self,
         *,
         decision_id: str,
+        execution_chain_id: str | None = None,
         symbol: str,
         current_position_qty: Decimal | float,
         target_position_qty: Decimal | float,
@@ -146,6 +147,7 @@ class ExecutionPlanner:
             )
         return ExecutionPlan(
             plan_id=new_id("plan"),
+            execution_chain_id=execution_chain_id,
             decision_id=decision_id,
             symbol=symbol,
             current_position_qty=normalized_current_position_qty,
@@ -250,6 +252,8 @@ class ExecutionPlanner:
         intent_id = new_id("intent")
         return OrderIntent(
             intent_id=intent_id,
+            execution_chain_id=plan.execution_chain_id or intent_id,
+            execution_attempt_id=plan.execution_attempt_id,
             decision_id=plan.decision_id,
             symbol=plan.symbol,
             side=plan.side,
@@ -304,6 +308,7 @@ class ExecutionPlanner:
         self,
         *,
         decision_id: str,
+        execution_chain_id: str | None = None,
         symbol: str,
         side: Literal["buy", "sell"],
         pos_side: Literal["long", "short"],
@@ -413,6 +418,8 @@ class ExecutionPlanner:
         )
         return LegExecutionPlan(
             plan_id=new_id("leg_plan"),
+            execution_chain_id=execution_chain_id,
+            execution_attempt_id=None,
             leg_intent_id=new_id("leg_intent"),
             decision_id=decision_id,
             symbol=symbol,
@@ -497,6 +504,13 @@ class ExecutionPlanner:
         limit_offset_bps_preference: Decimal | float | None,
     ) -> tuple[str, Literal["market", "limit"], str, Decimal | None]:
         preferred_order_type = None if order_type_preference is None else str(order_type_preference).strip().lower()
+        if preferred_order_type == "market":
+            return (
+                execution_style_preference or "taker",
+                "market",
+                time_in_force_preference or time_in_force,
+                None,
+            )
         if preferred_order_type != "limit":
             return execution_style, order_type, time_in_force, limit_price
         limit_offset_bps = to_decimal(limit_offset_bps_preference or Decimal("0"))
@@ -528,6 +542,8 @@ class ExecutionPlanner:
             return None
         return LegOrderIntent(
             leg_intent_id=plan.leg_intent_id,
+            execution_chain_id=plan.execution_chain_id or plan.leg_intent_id,
+            execution_attempt_id=plan.execution_attempt_id,
             decision_id=plan.decision_id,
             symbol=plan.symbol,
             side=plan.side,

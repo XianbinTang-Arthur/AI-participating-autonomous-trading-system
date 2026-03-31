@@ -341,6 +341,48 @@ strategy_hedge_independent_weak_edge_execution_mode: report_only
 strategy_hedge_independent_max_acceptable_cost_bps: 7.5
 # [进阶可调] strategy_hedge_independent_passive_first_enabled：弱边际开仓是否优先走 bounded-limit IOC。可选值：true / false；推荐值：true。
 strategy_hedge_independent_passive_first_enabled: true
+# [进阶可调] strategy_hedge_independent_min_confirm_ticks：独立双书开仓前要求的最少确认次数。可选值：>= 1；推荐值：2。
+strategy_hedge_independent_min_confirm_ticks: 2
+# [进阶可调] strategy_hedge_independent_min_score_stability_bps：独立双书允许的最大短期分数回撤。可选值：>= 0；推荐值：2.0。
+strategy_hedge_independent_min_score_stability_bps: 2.0
+# [进阶可调] strategy_hedge_independent_min_liquidity_quality：独立双书开仓要求的最低流动性质量分。可选值：0.0 ~ 1.0；推荐值：0.55。
+strategy_hedge_independent_min_liquidity_quality: 0.55
+# [进阶可调] strategy_hedge_independent_require_execution_health_ok：独立双书开仓是否要求执行健康度保持正常。可选值：true / false；推荐值：true。
+strategy_hedge_independent_require_execution_health_ok: true
+# [进阶可调] strategy_hedge_independent_max_thesis_age_seconds：独立双书 thesis 最长持有秒数，超过后允许按 stale thesis 退出。可选值：>= 1；推荐值：1800。
+strategy_hedge_independent_max_thesis_age_seconds: 1800
+# [进阶可调] strategy_hedge_independent_de_risk_net_edge_bps：净边际变薄时触发 de-risk 的阈值。可选值：>= 0；推荐值：2.0。
+strategy_hedge_independent_de_risk_net_edge_bps: 2.0
+# [进阶可调] strategy_hedge_independent_failed_thesis_net_edge_bps：净边际低于该值时视为 thesis 失效并直接收口。可选值：<= de-risk threshold；推荐值：-1.0。
+strategy_hedge_independent_failed_thesis_net_edge_bps: -1.0
+# [进阶可调] strategy_hedge_independent_execution_health_de_risk_enabled：执行健康度退化时是否优先降风险。可选值：true / false；推荐值：true。
+strategy_hedge_independent_execution_health_de_risk_enabled: true
+# [进阶可调] strategy_hedge_independent_liquidity_de_risk_enabled：流动性质量恶化时是否优先降风险。可选值：true / false；推荐值：true。
+strategy_hedge_independent_liquidity_de_risk_enabled: true
+# [进阶可调] strategy_hedge_independent_entry_execution_mode：independent 开仓动作采用的执行策略矩阵模式。可选值：adaptive / passive_first / bounded_limit / bounded_taker / aggressive_bounded_taker；推荐值：passive_first。
+strategy_hedge_independent_entry_execution_mode: passive_first
+# [进阶可调] strategy_hedge_independent_scale_in_execution_mode：independent 加仓动作采用的执行策略矩阵模式。可选值：adaptive / passive_first / bounded_limit / bounded_taker / aggressive_bounded_taker；推荐值：bounded_limit。
+strategy_hedge_independent_scale_in_execution_mode: bounded_limit
+# [进阶可调] strategy_hedge_independent_de_risk_execution_mode：independent 降风险动作采用的执行策略矩阵模式。可选值：adaptive / passive_first / bounded_limit / bounded_taker / aggressive_bounded_taker；推荐值：bounded_taker。
+strategy_hedge_independent_de_risk_execution_mode: bounded_taker
+# [进阶可调] strategy_hedge_independent_close_failed_thesis_execution_mode：independent thesis 失效退出采用的执行策略矩阵模式。可选值：adaptive / passive_first / bounded_limit / bounded_taker / aggressive_bounded_taker；推荐值：aggressive_bounded_taker。
+strategy_hedge_independent_close_failed_thesis_execution_mode: aggressive_bounded_taker
+# [进阶可调] strategy_hedge_independent_close_stale_execution_mode：independent thesis 过期退出采用的执行策略矩阵模式。可选值：adaptive / passive_first / bounded_limit / bounded_taker / aggressive_bounded_taker；推荐值：bounded_limit。
+strategy_hedge_independent_close_stale_execution_mode: bounded_limit
+# [进阶可调] strategy_hedge_independent_limit_offset_bps_entry：independent 开仓走 bounded-limit IOC 时使用的限价偏移。可选值：>= 0；推荐值：1.5。
+strategy_hedge_independent_limit_offset_bps_entry: 1.5
+# [进阶可调] strategy_hedge_independent_limit_offset_bps_scale_in：independent 加仓走 bounded-limit IOC 时使用的限价偏移。可选值：>= 0；推荐值：1.0。
+strategy_hedge_independent_limit_offset_bps_scale_in: 1.0
+# [进阶可调] strategy_hedge_independent_limit_offset_bps_stale_close：independent stale thesis 收口走 bounded-limit IOC 时使用的限价偏移。可选值：>= 0；推荐值：0.8。
+strategy_hedge_independent_limit_offset_bps_stale_close: 0.8
+# [进阶可调] strategy_hedge_independent_emit_book_level_metrics：是否输出独立双书的 book 级诊断指标。可选值：true / false；推荐值：true。
+strategy_hedge_independent_emit_book_level_metrics: true
+# [进阶可调] strategy_hedge_independent_emit_expected_vs_realized_metrics：是否输出预期 vs 已实现诊断。可选值：true / false；推荐值：true。
+strategy_hedge_independent_emit_expected_vs_realized_metrics: true
+# [进阶可调] strategy_hedge_independent_emit_close_reason_metrics：是否输出退出原因分布诊断。可选值：true / false；推荐值：true。
+strategy_hedge_independent_emit_close_reason_metrics: true
+# [进阶可调] strategy_hedge_independent_emit_execution_policy_metrics：是否输出执行策略与被动优先使用诊断。可选值：true / false；推荐值：true。
+strategy_hedge_independent_emit_execution_policy_metrics: true
 # [常用可调] strategy_min_hold_seconds：最短持仓秒数。可选值：0 ~ 86400；推荐值：900.0。
 strategy_min_hold_seconds: 720.0
 # [常用可调] strategy_post_close_cooldown_seconds：平仓后冷却秒数。可选值：0 ~ 86400；推荐值：300.0。

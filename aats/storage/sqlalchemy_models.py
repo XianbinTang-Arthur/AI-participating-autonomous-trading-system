@@ -436,10 +436,12 @@ class FillOutcomeModel(Base):
     __table_args__ = (
         Index("ix_fill_outcomes_scope_symbol_ts", "product_type", "margin_mode", "symbol", "created_at"),
         Index("ix_fill_outcomes_order_id", "order_id", "created_at"),
+        Index("ix_fill_outcomes_execution_attempt_id", "execution_attempt_id"),
     )
 
     fill_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     decision_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    execution_attempt_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     intent_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     order_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     symbol: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
@@ -588,11 +590,13 @@ class ExecutionOrderModel(Base):
     __table_args__ = (
         Index("ix_execution_orders_symbol_state", "symbol", "state"),
         Index("ix_execution_orders_decision_created", "decision_id", "created_at"),
+        Index("ix_execution_orders_execution_attempt_id", "execution_attempt_id"),
     )
 
     order_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     intent_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
     decision_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    execution_attempt_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     client_order_id: Mapped[str | None] = mapped_column(String(64), nullable=True, unique=True, index=True)
     venue_order_id: Mapped[str | None] = mapped_column(String(64), nullable=True, unique=True, index=True)
     symbol: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
@@ -669,11 +673,13 @@ class ExecutionFillModelV2(Base):
         Index("ix_execution_fills_order_ts", "order_id", "ingestion_ts"),
         Index("ix_execution_fills_symbol_ts", "symbol", "ingestion_ts"),
         Index("ix_execution_fills_source_venue_fill", "source_system", "venue_fill_id", unique=True),
+        Index("ix_execution_fills_execution_attempt_id", "execution_attempt_id"),
     )
 
     fill_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     venue_fill_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     order_id: Mapped[str] = mapped_column(String(64), ForeignKey("execution_orders.order_id"), nullable=False, index=True)
+    execution_attempt_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     venue_order_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     client_order_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     decision_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)

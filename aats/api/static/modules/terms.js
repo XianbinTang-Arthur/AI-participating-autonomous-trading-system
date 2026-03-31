@@ -62,6 +62,7 @@
   canceled: "已撤单",
   failed: "失败",
   blocked_order: "已阻断",
+  block: "直接阻止",
   rejected_order: "已拒绝",
   local: "本地",
   exchange: "交易所",
@@ -105,10 +106,19 @@
   close_protection_leg: "收回保护腿",
   open_opportunity_leg: "建立机会腿",
   close_opportunity_leg: "收回机会腿",
+  report_only: "仅报告",
   open_independent_book: "打开独立书",
   scale_independent_book: "放大独立书",
   rebalance_independent_books: "重配独立双书",
+  de_risk_independent_book: "降低独立双书风险",
+  close_failed_thesis_independent_book: "按 thesis 失效关闭独立双书",
+  close_stale_thesis_independent_book: "按 thesis 过期关闭独立双书",
   close_independent_book: "关闭独立书",
+  failed_thesis: "thesis失效",
+  stale_thesis: "thesis过期",
+  weak_edge_de_risk: "边际变薄先降风险",
+  execution_health_degraded: "执行健康度退化",
+  liquidity_degraded: "流动性恶化",
   executed: "已执行",
   open_long: "开多",
   scale_in_long: "加多",
@@ -120,6 +130,8 @@
   close_short: "平空",
   reverse_to_long: "反手做多",
   reverse_to_short: "反手做空",
+  target_position: "方向目标",
+  inventory: "真实库存",
   trend: "趋势",
   regime_range: "市场处于震荡区间",
   trend_aggressive: "趋势激进",
@@ -437,6 +449,17 @@
   taker_bias: "偏主动",
   bounded_limit_ioc: "受限限价成交",
   bounded_taker_cap: "受限主动成交",
+  independent_entry_strong_edge_aggressive: "强边际直接开仓",
+  independent_entry_guarded_passive_first: "守纪律开仓，优先被动",
+  independent_entry_guarded_aggressive_fallback: "守纪律开仓，但当前回退主动成交",
+  independent_scale_strong_edge_aggressive: "强边际加仓",
+  independent_scale_guarded_passive_first: "守纪律加仓，优先被动",
+  independent_scale_guarded_aggressive_fallback: "守纪律加仓，但当前回退主动成交",
+  independent_weak_edge_guarded_reduce: "弱边际先降风险",
+  independent_liquidity_degraded_guarded_reduce: "流动性转差，先守纪律降风险",
+  independent_execution_health_urgent_exit: "执行健康恶化，优先快速退出",
+  independent_failed_thesis_force_exit: "交易 thesis 失效，立即退出",
+  independent_stale_thesis_guarded_exit: "交易 thesis 变陈旧，守纪律退出",
   not_requested: "未请求",
 };
 
@@ -695,6 +718,59 @@ function normalizedBookExpectancySummary(source = {}) {
   return nested && typeof nested === "object" ? nested : {};
 }
 
+function normalizedExpectedVsRealizedSummary(source = {}) {
+  if (!source || typeof source !== "object") return {};
+  if (
+    Object.prototype.hasOwnProperty.call(source, "sample_count")
+    || Object.prototype.hasOwnProperty.call(source, "avg_expected_net_edge_bps")
+    || Object.prototype.hasOwnProperty.call(source, "avg_realized_net_bps")
+    || Object.prototype.hasOwnProperty.call(source, "close_reason_distribution")
+    || Object.prototype.hasOwnProperty.call(source, "book_breakdown")
+  ) {
+    return source;
+  }
+  const direct = source.independent_expected_vs_realized_summary || source.independentExpectedVsRealizedSummary;
+  if (direct && typeof direct === "object") {
+    return direct;
+  }
+  const audit = source.ai_decision_audit || source.aiDecisionAudit;
+  if (audit && typeof audit === "object") {
+    const nested = audit.independent_expected_vs_realized_summary || audit.independentExpectedVsRealizedSummary;
+    if (nested && typeof nested === "object") {
+      return nested;
+    }
+  }
+  return {};
+}
+
+function normalizedOverlayDecision(source = {}) {
+  if (!source || typeof source !== "object") return {};
+  if (
+    Object.prototype.hasOwnProperty.call(source, "main_leg_signal")
+    || Object.prototype.hasOwnProperty.call(source, "parent_effective_signal")
+  ) {
+    return source;
+  }
+  const direct = source.hedge_overlay_decision || source.hedgeOverlayDecision;
+  if (direct && typeof direct === "object") {
+    return direct;
+  }
+  const familySummary = normalizedFamilyExecutionSummary(source);
+  if (
+    familySummary
+    && typeof familySummary === "object"
+    && (
+      Object.prototype.hasOwnProperty.call(familySummary, "parent_target_signal")
+      || Object.prototype.hasOwnProperty.call(familySummary, "parent_current_signal")
+      || Object.prototype.hasOwnProperty.call(familySummary, "parent_effective_signal")
+      || Object.prototype.hasOwnProperty.call(familySummary, "signal_source")
+    )
+  ) {
+    return familySummary;
+  }
+  return {};
+}
+
 function readableBookLabel(leg, source = "") {
   if (source === "opportunistic_overlay" || source === "protective_overlay") {
     return leg === "short" ? "空腿" : "多腿";
@@ -706,6 +782,31 @@ function readableExpectancyBps(value) {
   const number = Number(value);
   if (!Number.isFinite(number)) return "0.00";
   return number.toFixed(2);
+}
+
+function readablePercentRatio(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "";
+  return `${(number * 100).toFixed(1)}%`;
+}
+
+function readableCloseReasonDistribution(items = []) {
+  if (!Array.isArray(items) || !items.length) return "";
+  return items
+    .slice(0, 3)
+    .map((item) => `${localizeError(item?.reason, item?.reason || "待确认")} ${Number(item?.count || 0)} 次`)
+    .join("、");
+}
+
+function readableExpectedVsRealizedBookBreakdown(summary = {}) {
+  const items = Array.isArray(summary?.book_breakdown) ? summary.book_breakdown : [];
+  if (!items.length) return "";
+  return items
+    .map((item) => {
+      const leg = readableBookLabel(String(item?.leg || "").trim().toLowerCase(), "independent_book");
+      return `${leg} 样本 ${Number(item?.sample_count || 0)} / 预期 ${readableExpectancyBps(item?.avg_expected_net_edge_bps)} / 已实现 ${readableExpectancyBps(item?.avg_realized_net_bps)} 基点`;
+    })
+    .join(" | ");
 }
 
 export function hasFamilyExecutionSummary(source = {}) {
@@ -766,9 +867,194 @@ export function readableBookExpectancySummary(source = {}, fallback = "当前没
   return books
     .map((book) => {
       const leg = readableBookLabel(String(book?.leg || "").trim().toLowerCase(), summarySource);
-      return `${leg} 毛/成本/净 ${readableExpectancyBps(book?.expected_gross_edge_bps)}/${readableExpectancyBps(book?.expected_cost_bps)}/${readableExpectancyBps(book?.expected_net_edge_bps)} 基点`;
+      const discipline = [];
+      if (book?.required_safe_net_edge_bps !== undefined && book?.required_safe_net_edge_bps !== null) {
+        discipline.push(`安全净边际 ${readableExpectancyBps(book.required_safe_net_edge_bps)} 基点`);
+      }
+      if (
+        book?.max_acceptable_cost_bps !== undefined
+        && book?.max_acceptable_cost_bps !== null
+        && Number(book.max_acceptable_cost_bps) > 0
+      ) {
+        discipline.push(`成本上限 ${readableExpectancyBps(book.max_acceptable_cost_bps)} 基点`);
+      }
+      if (book?.weak_edge_execution_mode) {
+        discipline.push(`弱边际 ${readableState(book.weak_edge_execution_mode, book.weak_edge_execution_mode)}`);
+      }
+      if (book?.weak_edge_report_only === true) {
+        discipline.push("本轮只保留报告");
+      }
+      if (book?.passive_first_required === true) {
+        discipline.push("要求被动优先");
+      }
+      if (book?.book_action) {
+        discipline.push(`腿动作 ${readableState(book.book_action, book.book_action)}`);
+      }
+      if (book?.close_reason) {
+        discipline.push(`退出原因 ${localizeError(book.close_reason, book.close_reason)}`);
+      }
+      if (book?.policy_reason) {
+        discipline.push(`执行策略 ${readableState(book.policy_reason, book.policy_reason)}`);
+      }
+      if (book?.execution_policy_urgency) {
+        discipline.push(`优先级 ${readableState(book.execution_policy_urgency, book.execution_policy_urgency)}`);
+      }
+      if (book?.execution_style_preference || book?.order_type_preference || book?.time_in_force_preference) {
+        const executionParts = [
+          book?.execution_style_preference ? readableState(book.execution_style_preference, book.execution_style_preference) : null,
+          book?.order_type_preference ? readableState(book.order_type_preference, book.order_type_preference) : null,
+          book?.time_in_force_preference ? readableState(book.time_in_force_preference, book.time_in_force_preference) : null,
+        ].filter(Boolean);
+        if (executionParts.length) {
+          discipline.push(`执行偏好 ${executionParts.join(" / ")}`);
+        }
+      }
+      if (book?.liquidity_quality_score !== undefined && book?.liquidity_quality_score !== null) {
+        discipline.push(`流动性质量 ${readableExpectancyBps(book.liquidity_quality_score)}`);
+      }
+      if (book?.execution_health_state) {
+        discipline.push(`执行健康 ${readableState(book.execution_health_state, book.execution_health_state)}`);
+      }
+      const suffix = discipline.length ? `（${discipline.join(" / ")}）` : "";
+      return `${leg} 毛/成本/净 ${readableExpectancyBps(book?.expected_gross_edge_bps)}/${readableExpectancyBps(book?.expected_cost_bps)}/${readableExpectancyBps(book?.expected_net_edge_bps)} 基点${suffix}`;
     })
     .join(" | ");
+}
+
+export function readableExpectedVsRealizedSummary(source = {}, fallback = "当前还没有预期与已实现诊断") {
+  const summary = normalizedExpectedVsRealizedSummary(source);
+  if (!summary || typeof summary !== "object" || !Object.keys(summary).length) return fallback;
+  const parts = [];
+  const sampleCount = Number(summary?.sample_count || 0);
+  const expectedSampleCount = Number(summary?.expected_sample_count || 0);
+  const realizedSampleCount = Number(summary?.realized_sample_count || 0);
+  const overlapSampleCount = Number(summary?.overlap_sample_count || 0);
+  if (sampleCount > 0 || expectedSampleCount > 0 || realizedSampleCount > 0) {
+    parts.push(
+      `样本 ${sampleCount}（预期 ${expectedSampleCount} / 已实现 ${realizedSampleCount} / 重合 ${overlapSampleCount}）`
+    );
+  }
+  if (
+    Number(summary?.entry_count || 0) > 0
+    || Number(summary?.scale_in_count || 0) > 0
+    || Number(summary?.close_count || 0) > 0
+    || Number(summary?.de_risk_count || 0) > 0
+  ) {
+    parts.push(
+      `开/加/收/降 ${Number(summary?.entry_count || 0)}/${Number(summary?.scale_in_count || 0)}/${Number(summary?.close_count || 0)}/${Number(summary?.de_risk_count || 0)}`
+    );
+  }
+  if (summary?.avg_expected_net_edge_bps !== undefined && summary?.avg_expected_net_edge_bps !== null) {
+    parts.push(`预期净边际 ${readableExpectancyBps(summary.avg_expected_net_edge_bps)} 基点`);
+  }
+  if (summary?.avg_realized_net_bps !== undefined && summary?.avg_realized_net_bps !== null) {
+    parts.push(`已实现净收益 ${readableExpectancyBps(summary.avg_realized_net_bps)} 基点`);
+  }
+  return parts.length ? parts.join(" | ") : fallback;
+}
+
+export function readableExpectedVsRealizedMeta(source = {}, fallback = "当前没有额外诊断说明") {
+  const summary = normalizedExpectedVsRealizedSummary(source);
+  if (!summary || typeof summary !== "object" || !Object.keys(summary).length) return fallback;
+  const parts = [];
+  if (
+    summary?.avg_realized_gross_bps !== undefined
+    && summary?.avg_realized_gross_bps !== null
+    && summary?.avg_realized_fee_bps !== undefined
+    && summary?.avg_realized_fee_bps !== null
+  ) {
+    parts.push(
+      `毛收益/费用 ${readableExpectancyBps(summary.avg_realized_gross_bps)}/${readableExpectancyBps(summary.avg_realized_fee_bps)} 基点`
+    );
+  }
+  if (summary?.avg_realized_slippage_bps !== undefined && summary?.avg_realized_slippage_bps !== null) {
+    parts.push(`滑点 ${readableExpectancyBps(summary.avg_realized_slippage_bps)} 基点`);
+  }
+  if (summary?.expected_realized_net_gap_bps !== undefined && summary?.expected_realized_net_gap_bps !== null) {
+    parts.push(`预期偏差 ${readableExpectancyBps(summary.expected_realized_net_gap_bps)} 基点`);
+  }
+  if (summary?.expected_realized_correlation !== undefined && summary?.expected_realized_correlation !== null) {
+    parts.push(`相关性 ${Number(summary.expected_realized_correlation).toFixed(2)}`);
+  }
+  if (summary?.fee_drag_ratio !== undefined && summary?.fee_drag_ratio !== null) {
+    parts.push(`费用拖累 ${readablePercentRatio(summary.fee_drag_ratio)}`);
+  }
+  if (summary?.churn_ratio !== undefined && summary?.churn_ratio !== null) {
+    parts.push(`来回交易占比 ${readablePercentRatio(summary.churn_ratio)}`);
+  }
+  if (summary?.passive_first_usage_ratio !== undefined && summary?.passive_first_usage_ratio !== null) {
+    parts.push(`被动优先 ${readablePercentRatio(summary.passive_first_usage_ratio)}`);
+  }
+  if (Number(summary?.weak_edge_entry_count || 0) > 0) {
+    parts.push(`弱边际入场 ${Number(summary.weak_edge_entry_count)} 次`);
+  }
+  const closeReasonSummary = readableCloseReasonDistribution(summary?.close_reason_distribution);
+  if (closeReasonSummary) {
+    parts.push(`退出原因 ${closeReasonSummary}`);
+  }
+  const breakdown = readableExpectedVsRealizedBookBreakdown(summary);
+  if (breakdown) {
+    parts.push(`分腿 ${breakdown}`);
+  }
+  return parts.length ? parts.join(" | ") : fallback;
+}
+
+function normalizedBookRuntimeStates(source = {}) {
+  if (!source || typeof source !== "object") return [];
+  if (Array.isArray(source.book_runtime_states)) return source.book_runtime_states;
+  if (Array.isArray(source.bookRuntimeStates)) return source.bookRuntimeStates;
+  const summary = source.family_execution_summary || source.familyExecutionSummary;
+  if (summary && typeof summary === "object") {
+    if (Array.isArray(summary.book_runtime_states)) return summary.book_runtime_states;
+    if (Array.isArray(summary.bookRuntimeStates)) return summary.bookRuntimeStates;
+  }
+  return [];
+}
+
+export function readableBookRuntimeStateSummary(source = {}, fallback = "当前没有每条书的原生状态") {
+  const states = normalizedBookRuntimeStates(source);
+  if (!states.length) return fallback;
+  return states
+    .map((item) => {
+      const leg = readableBookLabel(String(item?.leg || "").trim().toLowerCase(), "independent_book");
+      const parts = [`${leg}${readableState(item?.state || "inactive", item?.state || "inactive")}`];
+      if (item?.book_action) {
+        parts.push(`动作 ${readableState(item.book_action, item.book_action)}`);
+      }
+      if (item?.close_reason) {
+        parts.push(`退出原因 ${localizeError(item.close_reason, item.close_reason)}`);
+      }
+      if (item?.policy_reason) {
+        parts.push(`执行策略 ${readableState(item.policy_reason, item.policy_reason)}`);
+      }
+      if (item?.execution_policy_urgency) {
+        parts.push(`优先级 ${readableState(item.execution_policy_urgency, item.execution_policy_urgency)}`);
+      }
+      if (item?.thesis_age_seconds !== undefined && item?.thesis_age_seconds !== null) {
+        parts.push(`thesis 已持续 ${readableExpectancyBps(item.thesis_age_seconds)} 秒`);
+      }
+      if (item?.cooldown_until) {
+        parts.push(`冷却到 ${String(item.cooldown_until)}`);
+      }
+      return parts.join(" / ");
+    })
+    .join(" | ");
+}
+
+export function readableOverlayParentSignalSummary(source = {}, fallback = "") {
+  const overlay = normalizedOverlayDecision(source);
+  if (!overlay || typeof overlay !== "object" || !Object.keys(overlay).length) return fallback;
+  const targetSignal = overlay.parent_target_signal;
+  const currentSignal = overlay.parent_current_signal;
+  const effectiveSignal = overlay.parent_effective_signal;
+  const signalSource = overlay.signal_source;
+  if (!targetSignal && !currentSignal && !effectiveSignal && !signalSource) return fallback;
+  return [
+    `父腿目标 ${readableState(targetSignal, "待确认")}`,
+    `当前库存 ${readableState(currentSignal, "待确认")}`,
+    `生效方向 ${readableState(effectiveSignal, "待确认")}`,
+    `来源 ${localizeError(signalSource, "待确认")}`,
+  ].join(" / ");
 }
 
 export function localizeError(value, fallback = "当前没有额外说明") {

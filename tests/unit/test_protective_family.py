@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import unittest
 
 from aats.services.strategy_engines.families.protective_family import (
+    _resolve_overlay_parent_exposure_contract,
     _resolve_overlay_main_leg_contract,
     build_protective_candidate_leg,
     evaluate_protective_overlay_decision,
@@ -43,6 +44,36 @@ class TestProtectiveFamily(unittest.TestCase):
         self.assertEqual(contract.long_target_qty, Decimal("0.05"))
         self.assertEqual(contract.short_target_qty, Decimal("0"))
         self.assertEqual(contract.source, "context_or_settings_fallback")
+
+    def test_parent_exposure_contract_prefers_inventory_signal_when_target_turns_flat(self) -> None:
+        settings = make_derivatives_hedge_settings(default_target_leverage=2.5, margin_mode="cross")
+        context = make_context(
+            current_position_qty=0.05,
+            current_long_position_qty=0.05,
+            product_type="derivatives",
+            current_exposure_side="long",
+        )
+        evaluation_context = SimpleNamespace(
+            context=context,
+            directional_target=SimpleNamespace(
+                symbol=context.symbol,
+                target_position_qty=Decimal("0"),
+                target_leverage=1.0,
+                margin_mode="cross",
+            ),
+        )
+
+        contract = _resolve_overlay_parent_exposure_contract(
+            settings=settings,
+            evaluation_context=evaluation_context,
+        )
+
+        self.assertEqual(contract.target_signal, "flat")
+        self.assertEqual(contract.current_signal, "long")
+        self.assertEqual(contract.effective_signal, "long")
+        self.assertEqual(contract.signal_source, "inventory")
+        self.assertEqual(contract.target_long_qty, Decimal("0"))
+        self.assertEqual(contract.current_long_qty, Decimal("0.05"))
 
     def test_evaluate_protective_overlay_opens_short_hedge_leg_against_existing_long(self) -> None:
         settings = make_derivatives_hedge_settings()

@@ -19,6 +19,7 @@ from aats.schemas.execution import (
     default_reduce_only_reason,
     execution_action_from_leg_action,
     execution_action_from_position_intent,
+    execution_attempt_id_from_components,
     order_intent_from_leg_order_intent,
     pos_side_from_position_intent,
     position_intent_from_leg_intent,
@@ -991,8 +992,16 @@ class OKXExecutionAdapter(ExchangeAdapter):
     def _blocked_state(self, *, intent: OrderIntent, payload: dict[str, str], reason: str) -> OrderState:
         now = utc_now()
         status = "DRY_RUN" if reason == "guarded_execution_dry_run" else "BLOCKED"
+        execution_attempt_id = execution_attempt_id_from_components(
+            execution_attempt_id=intent.execution_attempt_id,
+            client_order_id=payload.get("clOrdId"),
+            execution_chain_id=intent.execution_chain_id,
+            intent_id=intent.intent_id,
+        )
         return OrderState(
             decision_id=intent.decision_id,
+            execution_chain_id=intent.execution_chain_id,
+            execution_attempt_id=execution_attempt_id,
             intent_id=intent.intent_id,
             symbol=intent.symbol,
             client_order_id=payload["clOrdId"],
@@ -1050,8 +1059,16 @@ class OKXExecutionAdapter(ExchangeAdapter):
         client_order_id: str,
         order_id: str | None,
     ) -> OrderState:
+        execution_attempt_id = execution_attempt_id_from_components(
+            execution_attempt_id=intent.execution_attempt_id,
+            client_order_id=client_order_id,
+            execution_chain_id=intent.execution_chain_id,
+            intent_id=intent.intent_id,
+        )
         return OrderState(
             decision_id=intent.decision_id,
+            execution_chain_id=intent.execution_chain_id,
+            execution_attempt_id=execution_attempt_id,
             intent_id=intent.intent_id,
             symbol=intent.symbol,
             client_order_id=client_order_id,
@@ -1108,8 +1125,16 @@ class OKXExecutionAdapter(ExchangeAdapter):
         submitted_ts: datetime,
         error: str,
     ) -> OrderState:
+        execution_attempt_id = execution_attempt_id_from_components(
+            execution_attempt_id=intent.execution_attempt_id,
+            client_order_id=payload.get("clOrdId"),
+            execution_chain_id=intent.execution_chain_id,
+            intent_id=intent.intent_id,
+        )
         return OrderState(
             decision_id=intent.decision_id,
+            execution_chain_id=intent.execution_chain_id,
+            execution_attempt_id=execution_attempt_id,
             intent_id=intent.intent_id,
             symbol=intent.symbol,
             client_order_id=payload["clOrdId"],
@@ -1166,8 +1191,16 @@ class OKXExecutionAdapter(ExchangeAdapter):
         submitted_ts: datetime,
         error: str,
     ) -> OrderState:
+        execution_attempt_id = execution_attempt_id_from_components(
+            execution_attempt_id=intent.execution_attempt_id,
+            client_order_id=payload.get("clOrdId"),
+            execution_chain_id=intent.execution_chain_id,
+            intent_id=intent.intent_id,
+        )
         return OrderState(
             decision_id=intent.decision_id,
+            execution_chain_id=intent.execution_chain_id,
+            execution_attempt_id=execution_attempt_id,
             intent_id=intent.intent_id,
             symbol=intent.symbol,
             client_order_id=payload["clOrdId"],
@@ -1308,8 +1341,16 @@ class OKXExecutionAdapter(ExchangeAdapter):
         remaining_qty = max(requested_qty - filled_qty, Decimal("0"))
         fees = abs(to_decimal(order_row.get("fee", "0")))
         canceled_ts = last_update_ts if status in {"CANCELED", "EXPIRED"} else None
+        execution_attempt_id = execution_attempt_id_from_components(
+            execution_attempt_id=intent.execution_attempt_id,
+            client_order_id=str(order_row.get("clOrdId") or payload.get("clOrdId") or intent.idempotency_key),
+            execution_chain_id=intent.execution_chain_id,
+            intent_id=intent.intent_id,
+        )
         return OrderState(
             decision_id=intent.decision_id,
+            execution_chain_id=intent.execution_chain_id,
+            execution_attempt_id=execution_attempt_id,
             intent_id=intent.intent_id,
             symbol=intent.symbol,
             client_order_id=str(order_row.get("clOrdId") or payload.get("clOrdId") or intent.idempotency_key),
@@ -1377,6 +1418,12 @@ class OKXExecutionAdapter(ExchangeAdapter):
     ) -> list[FillEvent]:
         fills: list[FillEvent] = []
         cumulative_qty = Decimal("0")
+        execution_attempt_id = execution_attempt_id_from_components(
+            execution_attempt_id=intent.execution_attempt_id,
+            client_order_id=client_order_id,
+            execution_chain_id=intent.execution_chain_id,
+            intent_id=intent.intent_id,
+        )
         sorted_fills = sorted(
             exchange_fills,
             key=lambda item: (item.fill_ts or datetime.fromtimestamp(0, timezone.utc), item.fill_id or ""),
@@ -1389,6 +1436,8 @@ class OKXExecutionAdapter(ExchangeAdapter):
                 FillEvent(
                     fill_id=fill.fill_id or new_id("okxfill"),
                     decision_id=intent.decision_id,
+                    execution_chain_id=intent.execution_chain_id,
+                    execution_attempt_id=execution_attempt_id,
                     intent_id=intent.intent_id,
                     client_order_id=client_order_id,
                     exchange_order_id=fill.exchange_order_id,
@@ -1447,6 +1496,8 @@ class OKXExecutionAdapter(ExchangeAdapter):
         if intent.execution_action is not None:
             state_payload.setdefault("executionAction", intent.execution_action)
         state_payload.setdefault("legAction", intent.leg_action or "")
+        state_payload.setdefault("executionChainId", intent.execution_chain_id or "")
+        state_payload.setdefault("executionAttemptId", intent.execution_attempt_id or "")
         state_payload.setdefault("legIntentId", intent.leg_intent_id or "")
         state_payload.setdefault("positionIntent", intent.position_intent)
         state_payload.setdefault("positionMode", intent.position_mode or "")
@@ -1639,6 +1690,13 @@ class OKXExecutionAdapter(ExchangeAdapter):
         )
         return OrderIntent(
             intent_id=state.intent_id,
+            execution_chain_id=state.execution_chain_id,
+            execution_attempt_id=execution_attempt_id_from_components(
+                execution_attempt_id=state.execution_attempt_id,
+                client_order_id=state.client_order_id,
+                execution_chain_id=state.execution_chain_id,
+                intent_id=state.intent_id,
+            ),
             decision_id=state.decision_id,
             symbol=state.symbol,
             side="buy" if side == "buy" else "sell",

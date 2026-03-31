@@ -14,7 +14,7 @@ from aats.schemas.exchange import ExchangeAccountSnapshot, ExchangeBalance, Exch
 from aats.schemas.market import MarketSnapshot
 from aats.schemas.portfolio import PortfolioSnapshot, SleevePnLRecord
 from aats.schemas.reconciliation import ReconciliationReport
-from aats.schemas.strategy_runtime import StrategyLegIntent
+from aats.schemas.strategy_runtime import StrategyBookRuntimeState, StrategyCandidate, StrategyLegIntent
 from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, to_decimal
 from aats.services.strategy_engines.base import StrategyEngineInput, StrategyEvaluationContext, StrategyFamilyRuntimeControl
 from aats.services.strategy_engines.coordinator import StrategyCoordinatorService
@@ -3357,6 +3357,11 @@ class TestStrategyCoordinator(unittest.TestCase):
         self.assertEqual(applied.decision_outcome.family_execution_summary.position_intents, ["open_short"])
         self.assertIsNotNone(applied.decision_outcome.book_expectancy_summary)
         self.assertEqual(applied.decision_outcome.book_expectancy_summary.source, "opportunistic_overlay")
+        self.assertEqual(applied.book_expectancy_summary.books[0].required_safe_net_edge_bps, 0.0)
+        self.assertEqual(
+            applied.book_expectancy_summary.books[0].weak_edge_execution_mode,
+            settings.strategy_hedge_opportunistic_weak_edge_execution_mode,
+        )
 
     def test_opportunistic_family_cutover_preserves_close_semantics_for_residual_inventory(self) -> None:
         settings = AATSSettings.model_validate(
@@ -3627,14 +3632,23 @@ class TestStrategyCoordinator(unittest.TestCase):
         self.assertEqual(applied.position_intent, "open_long")
         self.assertTrue(applied.strategy_execution_legs)
         self.assertEqual(applied.strategy_execution_legs[0].family, "independent")
+        self.assertTrue(applied.strategy_execution_legs[0].execution_chain_id)
         self.assertIsNotNone(applied.family_execution_summary)
         self.assertEqual(applied.family_execution_summary.summary_mode, "single_leg")
         self.assertEqual(applied.family_execution_summary.position_intents, ["open_long"])
         self.assertEqual(applied.family_execution_summary.directions, ["long"])
         self.assertIsNotNone(applied.family_execution_summary.book_expectancy_summary)
         self.assertEqual(applied.family_execution_summary.book_expectancy_summary.source, "independent_book")
+        self.assertTrue(applied.family_execution_summary.diagnostic_metric_flags["emit_expected_vs_realized_metrics"])
+        self.assertEqual(
+            [item.leg for item in applied.family_execution_summary.book_runtime_states],
+            ["long", "short"],
+        )
         self.assertIsNotNone(applied.book_expectancy_summary)
         self.assertEqual(applied.book_expectancy_summary.source, "independent_book")
+        self.assertEqual([item.leg for item in applied.book_runtime_states], ["long", "short"])
+        self.assertTrue(applied.book_runtime_states[0].execution_chain_id)
+        self.assertTrue(applied.diagnostic_metric_flags["emit_expected_vs_realized_metrics"])
         assert applied.decision_outcome is not None
         self.assertEqual(applied.decision_outcome.selected_strategy_family, "independent")
         self.assertEqual(applied.decision_outcome.selected_strategy_family_action, "open_independent_book")
@@ -3644,6 +3658,12 @@ class TestStrategyCoordinator(unittest.TestCase):
         self.assertIsNotNone(applied.decision_outcome.family_execution_summary.book_expectancy_summary)
         self.assertIsNotNone(applied.decision_outcome.book_expectancy_summary)
         self.assertEqual(applied.decision_outcome.book_expectancy_summary.source, "independent_book")
+        self.assertTrue(applied.decision_outcome.diagnostic_metric_flags["emit_expected_vs_realized_metrics"])
+        self.assertEqual(
+            [item.leg for item in applied.decision_outcome.book_runtime_states],
+            ["long", "short"],
+        )
+        self.assertTrue(applied.decision_outcome.book_runtime_states[0].execution_chain_id)
 
     def test_family_execution_summary_preserves_multi_leg_cutover_without_forcing_single_intent(self) -> None:
         summary = StrategyCoordinatorService._family_execution_summary(
@@ -3695,6 +3715,175 @@ class TestStrategyCoordinator(unittest.TestCase):
         self.assertEqual(summary.directions, ["long", "short"])
         self.assertEqual(summary.leg_actions, ["open"])
         self.assertEqual(summary.execution_modes, ["independent_long_book", "independent_short_book"])
+
+    def test_family_execution_summary_preserves_overlay_parent_signal_fields(self) -> None:
+        summary = StrategyCoordinatorService._family_execution_summary(
+            selected_family="protective",
+            family_action="protect",
+            route_action="override_target",
+            strategy_execution_legs=[
+                StrategyLegIntent(
+                    symbol="BTC-USDT-SWAP",
+                    product_type="derivatives",
+                    side="sell",
+                    position_mode="long_short_mode",
+                    pos_side="short",
+                    action="open",
+                    family="protective",
+                    role="hedge",
+                    strategy_sleeve_id="protective_short",
+                    allocation_id="alloc_protective",
+                    margin_mode="cross",
+                    current_position_qty=Decimal("0"),
+                    target_position_qty=Decimal("-0.02"),
+                    delta_position_qty=Decimal("-0.02"),
+                    execution_mode="protective_overlay",
+                ),
+            ],
+            selected_candidate=StrategyCandidate(
+                family="protective",
+                state="ready",
+                enabled=True,
+                selectable=True,
+                execution_compatible=True,
+                route_action="override_target",
+                family_action="protect",
+                headline="protective",
+                metrics={
+                    "parent_target_signal": "flat",
+                    "parent_current_signal": "long",
+                    "parent_effective_signal": "long",
+                    "parent_exposure_signal_source": "inventory",
+                },
+            ),
+        )
+
+        assert summary is not None
+        self.assertEqual(summary.parent_target_signal, "flat")
+        self.assertEqual(summary.parent_current_signal, "long")
+        self.assertEqual(summary.parent_effective_signal, "long")
+        self.assertEqual(summary.signal_source, "inventory")
+
+    def test_family_execution_summary_preserves_independent_close_reason(self) -> None:
+        summary = StrategyCoordinatorService._family_execution_summary(
+            selected_family="independent",
+            family_action="close_failed_thesis_independent_book",
+            route_action="override_target",
+            strategy_execution_legs=[
+                StrategyLegIntent(
+                    symbol="BTC-USDT-SWAP",
+                    product_type="derivatives",
+                    side="sell",
+                    position_mode="long_short_mode",
+                    pos_side="long",
+                    action="close",
+                    family="independent",
+                    role="primary",
+                    strategy_sleeve_id="independent_long",
+                    allocation_id="alloc_independent",
+                    margin_mode="cross",
+                    current_position_qty=Decimal("0.02"),
+                    target_position_qty=Decimal("0"),
+                    delta_position_qty=Decimal("-0.02"),
+                    execution_mode="independent_long_book",
+                ),
+            ],
+            selected_candidate=StrategyCandidate(
+                family="independent",
+                state="unwinding",
+                enabled=True,
+                selectable=True,
+                execution_compatible=True,
+                route_action="override_target",
+                family_action="close_failed_thesis_independent_book",
+                headline="independent close",
+                metrics={"close_reason": "failed_thesis"},
+            ),
+        )
+
+        assert summary is not None
+        self.assertEqual(summary.close_reason, "failed_thesis")
+
+    def test_family_execution_summary_preserves_independent_book_runtime_states(self) -> None:
+        summary = StrategyCoordinatorService._family_execution_summary(
+            selected_family="independent",
+            family_action="open_independent_book",
+            route_action="override_target",
+            strategy_execution_legs=[
+                StrategyLegIntent(
+                    symbol="BTC-USDT-SWAP",
+                    product_type="derivatives",
+                    side="buy",
+                    position_mode="long_short_mode",
+                    pos_side="long",
+                    action="open",
+                    family="independent",
+                    role="primary",
+                    strategy_sleeve_id="independent_long",
+                    allocation_id="alloc_independent",
+                    margin_mode="cross",
+                    current_position_qty=Decimal("0"),
+                    target_position_qty=Decimal("0.01"),
+                    delta_position_qty=Decimal("0.01"),
+                    execution_mode="independent_long_book",
+                ),
+            ],
+            selected_candidate=StrategyCandidate(
+                family="independent",
+                state="opening",
+                enabled=True,
+                selectable=True,
+                execution_compatible=True,
+                route_action="override_target",
+                family_action="open_independent_book",
+                headline="independent open",
+                book_runtime_states=[
+                    StrategyBookRuntimeState(
+                        leg="long",
+                        current_qty=Decimal("0"),
+                        target_qty=Decimal("0.01"),
+                        state="opening",
+                        book_action="open",
+                    ),
+                    StrategyBookRuntimeState(
+                        leg="short",
+                        current_qty=Decimal("0.01"),
+                        target_qty=Decimal("0"),
+                        state="holding",
+                        book_action="hold",
+                    ),
+                ],
+            ),
+        )
+
+        assert summary is not None
+        self.assertEqual([item.leg for item in summary.book_runtime_states], ["long", "short"])
+
+    def test_final_action_for_selected_family_maps_independent_thesis_actions(self) -> None:
+        self.assertEqual(
+            StrategyCoordinatorService._final_action_for_selected_family(
+                family_action="de_risk_independent_book",
+                route_action="override_target",
+                strategy_execution_legs=[],
+            ),
+            "reduce",
+        )
+        self.assertEqual(
+            StrategyCoordinatorService._final_action_for_selected_family(
+                family_action="close_failed_thesis_independent_book",
+                route_action="override_target",
+                strategy_execution_legs=[],
+            ),
+            "exit",
+        )
+        self.assertEqual(
+            StrategyCoordinatorService._final_action_for_selected_family(
+                family_action="close_stale_thesis_independent_book",
+                route_action="override_target",
+                strategy_execution_legs=[],
+            ),
+            "exit",
+        )
 
 
 if __name__ == "__main__":

@@ -1352,12 +1352,13 @@ def _build_position_target_handler(
         ):
             provisional_plan = execution_planner.build_leg_plan(
                 decision_id=base_target.decision_id,
+                execution_chain_id=getattr(leg, "execution_chain_id", None),
                 symbol=leg.symbol,
                 side=semantics["side"],
                 pos_side=semantics["pos_side"],
                 action=semantics["action"],
                 quantity=semantics["quantity"],
-                urgency=base_target.urgency,
+                urgency=getattr(leg, "execution_policy_urgency", None) or base_target.urgency,
                 max_slippage_tolerance_bps=base_target.max_slippage_tolerance_bps,
                 reference_price=reference_price,
                 product_type=str(getattr(leg, "product_type", "derivatives") or "derivatives"),
@@ -2556,6 +2557,7 @@ async def build_runtime(
             ),
             execution_order_repo=storage.execution_order_repo,
             execution_order_history_repo=storage.execution_order_history_repo,
+            execution_fill_repo=storage.execution_fill_repo_v2,
         )
     if (
         storage.database_runtime is not None

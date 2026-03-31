@@ -23,6 +23,7 @@ import {
   localizeError,
   operationalStatusCopy,
   operationalStatusHeadline,
+  readableOverlayParentSignalSummary,
   readableState,
   reviewStatusLabel,
   toneForOrderStatus,
@@ -350,7 +351,17 @@ function renderStatusRibbon() {
         pill(`人工复核 ${reviewStatusLabel(recovery.review_required)}`, recovery.review_required ? "warning" : "outline"),
       ],
       metrics: [
-        { label: "最近决策", value: latestDecision.decision_id ? readableFamilyExecutionSummary(latestDecision.position_target || {}, "保持当前仓位") : "暂无", meta: formatMaybeTimestamp(latestDecision.decision_time || latestDecision.decision_context?.as_of_ts), tone: latestDecision.decision_id ? "info" : "neutral" },
+        {
+          label: "最近决策",
+          value: latestDecision.decision_id ? readableFamilyExecutionSummary(latestDecision.position_target || {}, "保持当前仓位") : "暂无",
+          meta: latestDecision.decision_id
+            ? [
+                formatMaybeTimestamp(latestDecision.decision_time || latestDecision.decision_context?.as_of_ts),
+                readableOverlayParentSignalSummary(latestDecision.position_target || {}, ""),
+              ].filter(Boolean).join(" | ")
+            : formatMaybeTimestamp(latestDecision.decision_time || latestDecision.decision_context?.as_of_ts),
+          tone: latestDecision.decision_id ? "info" : "neutral",
+        },
         { label: "最新委托", value: readableState(latestOrder?.status || "unknown"), meta: middleEllipsis(latestOrder?.client_order_id, 10, 6, "暂未生成委托"), tone: toneForOrderStatus(latestOrder?.status) },
         { label: "恢复限制", value: isPausedAwaitingResume(recovery) ? "当前可手动恢复" : primaryBlocker ? (primaryBlocker.title || localizeError(primaryBlocker.blocker)) : recovery.safe_to_trade ? "当前无硬阻断" : localizedRecoveryReasons(), meta: middleEllipsis(reconciliation?.reconciliation_id, 10, 6, "恢复与对账共同决定交易资格"), tone: isPausedAwaitingResume(recovery) ? "warning" : blockers.length > 0 || reconciliation?.halt_required ? "danger" : recovery.safe_to_trade ? "positive" : "warning" },
         { label: "账户权益", value: formatNumber(portfolio.total_equity), meta: `活动委托 ${formatNumber(metrics.current_open_order_count)}`, tone: "info" },

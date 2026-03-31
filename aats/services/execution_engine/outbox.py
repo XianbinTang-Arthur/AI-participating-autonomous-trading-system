@@ -13,9 +13,11 @@ from aats.schemas.common import EventEnvelope
 from aats.schemas.execution import FillEvent, OrderIntent, OrderObligation, OrderState
 from aats.schemas.operator import ExecutionErrorSummary
 from aats.services.execution_control.order_service import ExecutionOrderService
+from aats.services.execution_control.shadow import Phase1ExecutionShadowService
 from aats.storage.event_store_postgres import PostgresEventStore
 from aats.storage.base import ExecutionRepository
 from aats.storage.execution_command_repo_postgres import PostgresExecutionCommandRepository
+from aats.storage.execution_fill_repo_v2_postgres import PostgresExecutionFillRepositoryV2
 from aats.storage.execution_order_repo_postgres import (
     PostgresExecutionOrderHistoryRepository,
     PostgresExecutionOrderRepository,
@@ -36,6 +38,7 @@ class PostgresExecutionOutboxPublisher:
     execution_command_repo: PostgresExecutionCommandRepository | None = None
     execution_order_repo: PostgresExecutionOrderRepository | None = None
     execution_order_history_repo: PostgresExecutionOrderHistoryRepository | None = None
+    execution_fill_repo: PostgresExecutionFillRepositoryV2 | None = None
     logger: Any = field(init=False)
 
     def __post_init__(self) -> None:
@@ -50,6 +53,7 @@ class PostgresExecutionOutboxPublisher:
     ) -> OrderState:
         with self.session_factory() as session:
             persisted, previous = self.execution_repo.save_order_state_in_session(session, order_state)  # type: ignore[attr-defined]
+            self._ensure_execution_order_row(session, order_state=persisted)
             if obligation is not None:
                 self.obligation_repo.save_obligation_in_session(session, obligation)
             envelopes = [self._order_update_envelope(key=key, persisted=persisted)]
@@ -155,6 +159,49 @@ class PostgresExecutionOutboxPublisher:
                 created_at=created_at,
             )
 
+    def _ensure_execution_fill_row(
+        self,
+        session: Session,
+        *,
+        fill: FillEvent,
+    ) -> None:
+        if self.execution_fill_repo is None:
+            return
+        order_id = fill.client_order_id
+        if self.execution_order_repo is not None:
+            existing = self.execution_order_repo.get_order_by_client_order_id_in_session(
+                session,
+                fill.client_order_id,
+                for_update=True,
+            )
+            if existing is None:
+                intent = Phase1ExecutionShadowService.intent_from_fill(fill)
+                self.execution_order_repo.create_order_in_session(
+                    session,
+                    order_id=fill.client_order_id,
+                    intent=intent,
+                    initial_state=fill.order_status_after_fill or "FILLED",
+                    created_at=fill.created_at,
+                    raw_payload={
+                        "client_order_id": fill.client_order_id,
+                        "venue_order_id": fill.exchange_order_id,
+                        "source_system": "execution_outbox_fill_backfill",
+                        "fill_event": fill.model_dump(mode="python"),
+                    },
+                )
+            else:
+                order_id = str(existing["order_id"])
+        self.execution_fill_repo.save_fill_in_session(
+            session,
+            fill=fill,
+            order_id=order_id,
+            source=fill.venue.lower(),
+            raw_payload={
+                "venue_fill_id": fill.fill_id,
+                "fill_event": fill.model_dump(mode="python"),
+            },
+        )
+
     async def persist_fill(
         self,
         *,
@@ -166,6 +213,7 @@ class PostgresExecutionOutboxPublisher:
             if not saved:
                 session.rollback()
                 return False
+            self._ensure_execution_fill_row(session, fill=fill)
             if obligation is not None:
                 self.obligation_repo.save_obligation_in_session(session, obligation)
             envelope = build_envelope(

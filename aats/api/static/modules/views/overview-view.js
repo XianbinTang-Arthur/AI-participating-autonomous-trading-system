@@ -5,6 +5,7 @@ import {
   hasFamilyExecutionSummary,
   readableFamilyExecutionDirection,
   readableFamilyExecutionSummary,
+  readableOverlayParentSignalSummary,
   localizeError,
   operationalStatusCopy,
   operationalStatusHeadline,
@@ -355,7 +356,9 @@ function buildTimeline({ latestDecision, latestOrder, latestFill, reconciliation
 function overviewIntentLabel(detail) {
   const target = detail.position_target || {};
   if (hasFamilyExecutionSummary(target)) {
-    return readableFamilyExecutionSummary(target, readableState(target.position_intent || "hold"));
+    const summary = readableFamilyExecutionSummary(target, readableState(target.position_intent || "hold"));
+    const parentSignalSummary = readableOverlayParentSignalSummary(target, "");
+    return parentSignalSummary ? `${summary} | ${parentSignalSummary}` : summary;
   }
   const rawIntent = String(target.position_intent || "hold").toLowerCase();
   const currentQty = Number(target.current_position_qty ?? detail.decision_context?.current_position_qty ?? 0);

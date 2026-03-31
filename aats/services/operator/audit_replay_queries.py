@@ -95,6 +95,7 @@ class AuditReplayQueryFacade:
             symbol=context.get("symbol"),
             regime=baseline.get("regime"),
             active_profile_id=profile_state.get("active_profile_id"),
+            margin_mode=(detail.get("position_target") or {}).get("margin_mode"),
         )
         self.owner._append_event(
             topic=topics.REPLAY_VALIDATIONS,
@@ -120,6 +121,7 @@ class AuditReplayQueryFacade:
         symbol: str | None = None,
         regime: str | None = None,
         active_profile_id: str | None = None,
+        margin_mode: str | None = None,
     ) -> dict[str, Any]:
         replayed_event_count = max(result.replayed_event_count, 1)
         portfolio_issue_count = len(result.portfolio_issues)
@@ -127,6 +129,10 @@ class AuditReplayQueryFacade:
         execution_chain_issue_count = len(result.execution_chain_issues)
         audit_issue_count = len(result.audit_issues)
         baseline_switch_issue_count = len(result.baseline_switch_issues)
+        independent_expected_vs_realized_summary = self.owner._independent_expected_vs_realized_summary(
+            decision_ids={result.selected_decision_id} if result.selected_decision_id else None,
+            limit=1,
+        )
         total_issues = (
             portfolio_issue_count
             + decision_chain_issue_count
@@ -141,7 +147,7 @@ class AuditReplayQueryFacade:
             "regime": regime,
             "active_profile_id": active_profile_id,
             "product_type": self.owner.runtime.settings.trading_product_type,
-            "margin_mode": self.owner.runtime.settings.margin_mode,
+            "margin_mode": margin_mode or self.owner.runtime.settings.margin_mode,
             "allowed_symbols": tuple(self.owner.runtime.settings.allowed_symbols),
             "replayed_event_count": result.replayed_event_count,
             "stored_snapshot_count": result.stored_snapshot_count,
@@ -164,6 +170,7 @@ class AuditReplayQueryFacade:
             "divergence_density": round(result.divergence_count / replayed_event_count, 6),
             "chain_health_score": round(max(0.0, 1.0 - (total_issues / replayed_event_count)), 6),
             "healthy": result.divergence_count == 0,
+            "independent_expected_vs_realized_summary": independent_expected_vs_realized_summary,
         }
 
     def _baseline_switch_history(

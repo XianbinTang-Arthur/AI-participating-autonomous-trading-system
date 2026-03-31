@@ -14,6 +14,7 @@ from aats.schemas.strategy_runtime import (
     StrategyFamily,
     StrategyFamilyAction,
     StrategyBookExpectancySummary,
+    StrategyBookRuntimeState,
     StrategyLegIntent,
     StrategyRouteAction,
 )
@@ -295,6 +296,12 @@ class DecisionOutcome(SchemaBase):
     strategy_selection_headline: str | None = None
     family_execution_summary: StrategyExecutionSummary | None = None
     book_expectancy_summary: StrategyBookExpectancySummary | None = None
+    book_runtime_states: list[StrategyBookRuntimeState] = Field(default_factory=list)
+    diagnostic_metric_flags: dict[str, bool] = Field(default_factory=dict)
+    parent_target_signal: Literal["long", "short", "flat"] | None = None
+    parent_current_signal: Literal["long", "short", "flat"] | None = None
+    parent_effective_signal: Literal["long", "short", "flat"] | None = None
+    signal_source: str | None = None
     active_profile_id: str | None = None
     profile_control_source: ProfileControlSource | None = None
     ai_fallback_used: bool = False
@@ -316,7 +323,14 @@ class StrategyExecutionSummary(SchemaBase):
     directions: list[str] = Field(default_factory=list)
     leg_actions: list[str] = Field(default_factory=list)
     execution_modes: list[str] = Field(default_factory=list)
+    parent_target_signal: Literal["long", "short", "flat"] | None = None
+    parent_current_signal: Literal["long", "short", "flat"] | None = None
+    parent_effective_signal: Literal["long", "short", "flat"] | None = None
+    signal_source: str | None = None
+    close_reason: str | None = None
     book_expectancy_summary: StrategyBookExpectancySummary | None = None
+    book_runtime_states: list[StrategyBookRuntimeState] = Field(default_factory=list)
+    diagnostic_metric_flags: dict[str, bool] = Field(default_factory=dict)
 
 
 class HedgeOverlayDecision(SchemaBase):
@@ -329,6 +343,11 @@ class HedgeOverlayDecision(SchemaBase):
     state: HedgeOverlayState = "disabled"
     main_leg_signal: Literal["long", "short", "flat"] = "flat"
     hedge_leg_signal: Literal["long", "short", "flat"] = "flat"
+    parent_target_signal: Literal["long", "short", "flat"] | None = None
+    parent_current_signal: Literal["long", "short", "flat"] | None = None
+    parent_effective_signal: Literal["long", "short", "flat"] | None = None
+    signal_source: str | None = None
+    close_reason: str | None = None
     main_leg_current_qty: Decimal = Decimal("0")
     hedge_leg_current_qty: Decimal = Decimal("0")
     main_leg_target_qty: Decimal = Decimal("0")
@@ -346,6 +365,8 @@ class HedgeOverlayDecision(SchemaBase):
     short_leg_score: float = 0.0
     long_leg_reason_codes: list[str] = Field(default_factory=list)
     short_leg_reason_codes: list[str] = Field(default_factory=list)
+    long_leg_close_reason: str | None = None
+    short_leg_close_reason: str | None = None
     long_leg_blocked_reasons: list[str] = Field(default_factory=list)
     short_leg_blocked_reasons: list[str] = Field(default_factory=list)
     reason_codes: list[str] = Field(default_factory=list)
@@ -407,6 +428,12 @@ class PositionTarget(SchemaBase):
     strategy_execution_legs: list[StrategyLegIntent] = Field(default_factory=list)
     family_execution_summary: StrategyExecutionSummary | None = None
     book_expectancy_summary: StrategyBookExpectancySummary | None = None
+    book_runtime_states: list[StrategyBookRuntimeState] = Field(default_factory=list)
+    diagnostic_metric_flags: dict[str, bool] = Field(default_factory=dict)
+    parent_target_signal: Literal["long", "short", "flat"] | None = None
+    parent_current_signal: Literal["long", "short", "flat"] | None = None
+    parent_effective_signal: Literal["long", "short", "flat"] | None = None
+    signal_source: str | None = None
     hedge_overlay_decision: HedgeOverlayDecision | None = None
     guardrail_flags: list[str] = Field(default_factory=list)
     ai_execution_parameter_suggestion: AIExecutionParameterSuggestionEnvelope | None = None

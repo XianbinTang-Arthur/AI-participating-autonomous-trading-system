@@ -5,9 +5,13 @@ import {
   hasFamilyExecutionSummary,
   localizeError,
   readableBookExpectancySummary,
+  readableBookRuntimeStateSummary,
+  readableExpectedVsRealizedMeta,
+  readableExpectedVsRealizedSummary,
   readableFamilyExecutionDirection,
   readableFamilyExecutionMeta,
   readableFamilyExecutionSummary,
+  readableOverlayParentSignalSummary,
   readableState,
 } from "../terms.js";
 import { decisionTableHeaders, inferTradeScene } from "../trade-display.js";
@@ -83,6 +87,7 @@ export function renderStrategySections(data) {
   const displayedTrialReviewActions = trialReviewRecentActions.slice(0, 5);
   const tradeCostConfig = strategyRuntime.configured_parameters?.trade_costs || {};
   const directionalConfig = strategyRuntime.configured_parameters?.directional || {};
+  const independentExpectedVsRealized = strategyRuntime.independent_expected_vs_realized_summary || {};
 
   return {
     strategyHero: surfaceCard({
@@ -171,7 +176,7 @@ export function renderStrategySections(data) {
         ])}
         ${kvList([
           ["本轮结论", strategyNarrative(latestDecision), `${readableState(target.strategy_family || latestDecision.decision_outcome?.selected_strategy_family || "directional")} | ${regimeLabel}`],
-          ["执行约束", listText(target.guardrail_flags, "当前没有额外执行限制"), `预期净优势 ${formatBps(targetExpectancy.expected_net_edge_bps)} | 信号 ${formatBps(targetExpectancy.expected_signal_edge_bps)} | 成本 ${formatBps(targetExpectancy.expected_cost_bps)}`],
+          ["执行约束", listText(target.guardrail_flags, "当前没有额外执行限制"), targetExpectancySummary(targetExpectancy)],
           ["当前保护规则", listText(strategyHealth.guardrail_flags, "当前没有额外保护规则"), cooldownSummary(strategyHealth.cooldowns)],
           ["最近执行质量", `${formatNumber(strategyHealth.recent_closed_trade_count, 0)} 笔闭合样本 | 胜率 ${formatRatio(strategyHealth.recent_win_rate)}`, `费用拖累 ${formatRatio(strategyHealth.recent_fee_drag_ratio)} | 来回交易占比 ${formatRatio(strategyHealth.recent_churn_ratio)}`],
         ])}
@@ -223,6 +228,13 @@ export function renderStrategySections(data) {
             `${readableState(latestBundle.status || strategyRuntimeSummary.latest_bundle_status || "unknown")} / ${formatSigned(strategyAppliedTarget.target_position_qty)}`,
             `${formatNumber(recentBundles[0]?.legs?.length ?? latestBundle.legs?.length ?? 0, 0, "0")} 条腿 | ${readableFamilyExecutionSummary(strategyAppliedTarget, "保持当前仓位")}${familyExpectancySuffix(strategyAppliedTarget)}`,
           ],
+          ...(
+            readableExpectedVsRealizedSummary(independentExpectedVsRealized, "") ? [[
+              "独立双书预期 vs 已实现",
+              readableExpectedVsRealizedSummary(independentExpectedVsRealized, "当前还没有独立双书诊断"),
+              readableExpectedVsRealizedMeta(independentExpectedVsRealized, "当前没有额外诊断说明"),
+            ]] : []
+          ),
         ])}
         ${renderStrategyCandidateTable(displayedStrategyCandidates, smartArbitrageConfig, { policy, risk })}
         ${renderRecentSleeveIntentTable(recentSleeveIntents.slice(0, 5), { policy, risk })}
@@ -1152,6 +1164,30 @@ function directionalShortConfigRows(config = {}) {
       "独立双书会按 long / short 两条腿分别评估样本、胜率和近期净收益，不再把一条腿的坏表现直接扩散到另一条腿。",
     ],
     [
+      "strategy_hedge_independent_min_confirm_ticks / strategy_hedge_independent_min_score_stability_bps / strategy_hedge_independent_min_liquidity_quality",
+      `${formatNumber(config?.hedge_independent_min_confirm_ticks, 0, "待确认")} / ${formatNumber(config?.hedge_independent_min_score_stability_bps, 2, "待确认")} / ${formatNumber(config?.hedge_independent_min_liquidity_quality, 2, "待确认")}`,
+      "确认次数 / 稳定性 / 流动性门槛",
+      "独立双书开仓前，会要求当前机会具备足够确认次数、分数稳定性和流动性质量，避免只凭刚过线的一跳噪声直接入场。",
+    ],
+    [
+      "strategy_hedge_independent_require_execution_health_ok",
+      config?.hedge_independent_require_execution_health_ok ? "true" : "false",
+      "执行健康度必须正常",
+      "打开后，long / short 任一腿如果近期执行健康度已经退化，本轮就不会继续新增独立风险暴露。",
+    ],
+    [
+      "strategy_hedge_independent_max_thesis_age_seconds / strategy_hedge_independent_de_risk_net_edge_bps / strategy_hedge_independent_failed_thesis_net_edge_bps",
+      `${formatDuration(config?.hedge_independent_max_thesis_age_seconds, "待确认")} / ${formatNumber(config?.hedge_independent_de_risk_net_edge_bps, 2, "待确认")} / ${formatNumber(config?.hedge_independent_failed_thesis_net_edge_bps, 2, "待确认")}`,
+      "thesis 时效 / 降风险边际 / 失败边际",
+      "独立双书退出已升级成 thesis-aware state machine，会按 thesis 时效、边际变薄和 thesis 失效三类路径决定 hold、de-risk 或 close。",
+    ],
+    [
+      "strategy_hedge_independent_execution_health_de_risk_enabled / strategy_hedge_independent_liquidity_de_risk_enabled",
+      `${config?.hedge_independent_execution_health_de_risk_enabled ? "true" : "false"} / ${config?.hedge_independent_liquidity_de_risk_enabled ? "true" : "false"}`,
+      "执行健康 / 流动性降风险开关",
+      "打开后，执行健康度或流动性一旦恶化，独立双书会优先降风险，而不是继续维持原始风险暴露。",
+    ],
+    [
       "strategy_hedge_independent_min_safe_net_edge_bps / strategy_hedge_independent_expected_slippage_buffer_bps / strategy_hedge_independent_expected_execution_buffer_bps",
       `${formatNumber(config?.hedge_independent_min_safe_net_edge_bps, 2, "待确认")} / ${formatNumber(config?.hedge_independent_expected_slippage_buffer_bps, 2, "待确认")} / ${formatNumber(config?.hedge_independent_expected_execution_buffer_bps, 2, "待确认")}`,
       "净边际安全垫 / 滑点缓冲 / 执行缓冲",
@@ -1162,6 +1198,24 @@ function directionalShortConfigRows(config = {}) {
       `${String(config?.hedge_independent_weak_edge_execution_mode || "待确认")} / ${formatNumber(config?.hedge_independent_max_acceptable_cost_bps, 2, "待确认")} / ${config?.hedge_independent_passive_first_enabled ? "true" : "false"}`,
       "弱边际执行 / 成本上限 / 被动优先",
       "当双书边际偏弱时，系统会根据这组约束决定是否只做报告、限制可接受成本，并优先尝试更保守的被动执行。",
+    ],
+    [
+      "strategy_hedge_independent_entry_execution_mode / strategy_hedge_independent_scale_in_execution_mode / strategy_hedge_independent_de_risk_execution_mode / strategy_hedge_independent_close_failed_thesis_execution_mode / strategy_hedge_independent_close_stale_execution_mode",
+      `${String(config?.hedge_independent_entry_execution_mode || "待确认")} / ${String(config?.hedge_independent_scale_in_execution_mode || "待确认")} / ${String(config?.hedge_independent_de_risk_execution_mode || "待确认")} / ${String(config?.hedge_independent_close_failed_thesis_execution_mode || "待确认")} / ${String(config?.hedge_independent_close_stale_execution_mode || "待确认")}`,
+      "开仓 / 加仓 / 降风险 / thesis失效 / thesis过期",
+      "这组 execution mode 决定 independent 在不同 book_action 下采用哪一类执行风格，而不是继续共用单一的弱边际分支。",
+    ],
+    [
+      "strategy_hedge_independent_limit_offset_bps_entry / strategy_hedge_independent_limit_offset_bps_scale_in / strategy_hedge_independent_limit_offset_bps_stale_close",
+      `${formatNumber(config?.hedge_independent_limit_offset_bps_entry, 2, "待确认")} / ${formatNumber(config?.hedge_independent_limit_offset_bps_scale_in, 2, "待确认")} / ${formatNumber(config?.hedge_independent_limit_offset_bps_stale_close, 2, "待确认")}`,
+      "开仓 / 加仓 / stale close 限价偏移",
+      "当 independent 使用 bounded-limit IOC 路径时，会按这三组偏移值分别约束 entry、scale-in 和 stale thesis close 的限价保护。",
+    ],
+    [
+      "strategy_hedge_independent_emit_book_level_metrics / strategy_hedge_independent_emit_expected_vs_realized_metrics / strategy_hedge_independent_emit_close_reason_metrics / strategy_hedge_independent_emit_execution_policy_metrics",
+      `${config?.hedge_independent_emit_book_level_metrics ? "true" : "false"} / ${config?.hedge_independent_emit_expected_vs_realized_metrics ? "true" : "false"} / ${config?.hedge_independent_emit_close_reason_metrics ? "true" : "false"} / ${config?.hedge_independent_emit_execution_policy_metrics ? "true" : "false"}`,
+      "book级 / 预期对比 / 退出原因 / 执行策略诊断",
+      "打开后，runtime、决策详情和 replay 校验会持续输出独立双书的预期与已实现对比、退出原因分布和执行策略使用情况。",
     ],
   ];
 }
@@ -1215,7 +1269,8 @@ function directionalHedgeOverlayMeta(config = {}, target = {}, decisionScene = "
     return summarizeLocalizedList(overlay.blocked_reasons, { limit: 3, suffix: "等阻断原因" });
   }
   if (mode === "independent") {
-    return `long open ${formatNumber(config?.hedge_independent_long_entry_threshold, 2, "待确认")} / short open ${formatNumber(config?.hedge_independent_short_entry_threshold, 2, "待确认")} / long close ${formatNumber(config?.hedge_independent_long_close_threshold, 2, "待确认")} / short close ${formatNumber(config?.hedge_independent_short_close_threshold, 2, "待确认")} / safe net ${formatNumber(config?.hedge_independent_min_safe_net_edge_bps, 2, "待确认")} bps / passive-first ${config?.hedge_independent_passive_first_enabled ? "true" : "false"}${expectancySummary ? ` | ${expectancySummary}` : ""}${overlayReasonSummary ? ` | ${overlayReasonSummary}` : ""}`;
+    const closeReasonLabel = overlay?.close_reason ? readableState(overlay.close_reason) : "";
+    return `long open ${formatNumber(config?.hedge_independent_long_entry_threshold, 2, "待确认")} / short open ${formatNumber(config?.hedge_independent_short_entry_threshold, 2, "待确认")} / long close ${formatNumber(config?.hedge_independent_long_close_threshold, 2, "待确认")} / short close ${formatNumber(config?.hedge_independent_short_close_threshold, 2, "待确认")} / stale ${formatDuration(config?.hedge_independent_max_thesis_age_seconds, "待确认")} / de-risk ${formatNumber(config?.hedge_independent_de_risk_net_edge_bps, 2, "待确认")} bps / failed ${formatNumber(config?.hedge_independent_failed_thesis_net_edge_bps, 2, "待确认")} bps / passive-first ${config?.hedge_independent_passive_first_enabled ? "true" : "false"}${closeReasonLabel ? ` | ${closeReasonLabel}` : ""}${expectancySummary ? ` | ${expectancySummary}` : ""}${overlayReasonSummary ? ` | ${overlayReasonSummary}` : ""}`;
   }
   if (mode === "opportunistic") {
     return `open ${formatNumber(config?.hedge_opportunistic_open_threshold, 2, "待确认")} / close ${formatNumber(config?.hedge_opportunistic_close_threshold, 2, "待确认")} / safe net ${formatNumber(config?.hedge_opportunistic_min_safe_net_edge_bps, 2, "待确认")} bps / max cost ${formatNumber(config?.hedge_opportunistic_max_acceptable_cost_bps, 2, "待确认")} bps / weak-edge ${escapeHtml(readableState(config?.hedge_opportunistic_weak_edge_execution_mode || "待确认"))} / passive-first ${config?.hedge_opportunistic_passive_first_enabled ? "true" : "false"}${expectancySummary ? ` | ${expectancySummary}` : ""}${overlayReasonSummary ? ` | ${overlayReasonSummary}` : ""}`;
@@ -1269,11 +1324,13 @@ function directionalHedgeOverlayDetail(overlay = {}, config = {}, decisionScene 
   }
   if (mode === "independent") {
     const books = directionalIndependentOverlayBooks(target, overlay);
+    const runtimeStateSummary = readableBookRuntimeStateSummary(target, "");
     return [
       `long book ${formatSigned(books.long?.current_position_qty, 4, "0")}/${formatSigned(books.long?.target_position_qty, 4, "0")}`,
       `short book ${formatSigned(books.short?.current_position_qty, 4, "0")}/${formatSigned(books.short?.target_position_qty, 4, "0")}`,
       `状态 ${escapeHtml(readableState(overlay?.state || "disabled"))}`,
-    ].join(" | ");
+      runtimeStateSummary || null,
+    ].filter(Boolean).join(" | ");
   }
   return [
     `主腿 ${readableState(overlay?.main_leg_signal || "flat")} ${formatSigned(overlay?.main_leg_current_qty)}/${formatSigned(overlay?.main_leg_target_qty)}`,
@@ -1328,6 +1385,10 @@ function directionalHedgeOverlayDetailMeta(overlay = {}, config = {}, target = {
     );
   } else if (overlay?.pressure_score !== undefined && overlay?.pressure_score !== null) {
     reasons.push(`${scoreLabel} ${formatNumber(overlay.pressure_score, 2, "0.00")} | open ${formatNumber(overlay.open_threshold, 2, "0.00")} / close ${formatNumber(overlay.close_threshold, 2, "0.00")}`);
+  }
+  const parentSignalSummary = readableOverlayParentSignalSummary(overlay, "");
+  if (parentSignalSummary) {
+    reasons.push(parentSignalSummary);
   }
   return [...timing, ...reasons].join(" | ") || "当前没有额外的 overlay 状态说明。";
 }
@@ -2459,7 +2520,7 @@ function renderRecentSleeveIntentTable(items, context = {}) {
     ["最近 Sleeve 意图", "当前状态", "本轮目标", "自动预算", "原因说明"],
     items.map((item) => [
       `<div><strong>${escapeHtml(item.strategy_sleeve_id || "未归属")}</strong><div class="table-meta">${escapeHtml(readableState(item.family || "unknown"))} | ${escapeHtml(item.symbol || "标的待确认")}</div></div>`,
-      `<div><strong>${escapeHtml(readableState(item.state || "unknown"))}</strong><div class="table-meta">${escapeHtml(readableState(item.route_action || "hold_current"))}</div></div>`,
+      `<div><strong>${escapeHtml(readableState(item.state || "unknown"))}</strong><div class="table-meta">${escapeHtml(strategyRouteActionLabel(item.route_action, item.family_action))}</div></div>`,
       `<div><strong>${escapeHtml(strategySleeveIntentTargetLabel(item))}</strong><div class="table-meta">${escapeHtml(strategySleeveIntentTargetMeta(item, context))}</div></div>`,
       `<div><strong>${item.automatic_enabled ? "自动管理" : "人工冻结"}</strong><div class="table-meta">倍率 ${formatNumber(item.budget_multiplier, 2, "0")} | 权重 ${formatNumber(item.allocator_weight, 2, "0")}</div></div>`,
       `<div><strong>${escapeHtml(strategySleeveIntentReason(item, context))}</strong><div class="table-meta">${escapeHtml(reasonListText(item.control_reason_codes?.length ? item.control_reason_codes : item.reason_codes, "当前没有额外原因"))}</div></div>`,
@@ -2577,7 +2638,13 @@ function strategyRouteActionLabel(routeAction, familyAction) {
   const normalizedFamilyAction = String(familyAction || "").trim().toLowerCase();
   if (
     normalizedRoute === "override_target" &&
-    ["close_protection_leg", "close_opportunity_leg"].includes(normalizedFamilyAction)
+    [
+      "close_protection_leg",
+      "close_opportunity_leg",
+      "de_risk_independent_book",
+      "close_failed_thesis_independent_book",
+      "close_stale_thesis_independent_book",
+    ].includes(normalizedFamilyAction)
   ) {
     return readableState(normalizedFamilyAction);
   }
@@ -2816,13 +2883,51 @@ function resolvedTargetExpectancyMetrics(source = {}) {
       expected_signal_edge_bps: books[0].expected_signal_edge_bps,
       expected_cost_bps: books[0].expected_cost_bps,
       expected_net_edge_bps: books[0].expected_net_edge_bps,
+      required_safe_net_edge_bps: books[0].required_safe_net_edge_bps,
+      max_acceptable_cost_bps: books[0].max_acceptable_cost_bps,
+      weak_edge_execution_mode: books[0].weak_edge_execution_mode,
+      weak_edge_report_only: books[0].weak_edge_report_only,
+      passive_first_required: books[0].passive_first_required,
     };
   }
   return {
     expected_signal_edge_bps: source?.expected_signal_edge_bps,
     expected_cost_bps: source?.expected_cost_bps,
     expected_net_edge_bps: source?.expected_net_edge_bps,
+    required_safe_net_edge_bps: null,
+    max_acceptable_cost_bps: null,
+    weak_edge_execution_mode: null,
+    weak_edge_report_only: null,
+    passive_first_required: null,
   };
+}
+
+function targetExpectancySummary(targetExpectancy = {}) {
+  const parts = [
+    `预期净优势 ${formatBps(targetExpectancy.expected_net_edge_bps)}`,
+    `信号 ${formatBps(targetExpectancy.expected_signal_edge_bps)}`,
+    `成本 ${formatBps(targetExpectancy.expected_cost_bps)}`,
+  ];
+  if (targetExpectancy.required_safe_net_edge_bps !== undefined && targetExpectancy.required_safe_net_edge_bps !== null) {
+    parts.push(`安全净边际 ${formatBps(targetExpectancy.required_safe_net_edge_bps)}`);
+  }
+  if (
+    targetExpectancy.max_acceptable_cost_bps !== undefined
+    && targetExpectancy.max_acceptable_cost_bps !== null
+    && Number(targetExpectancy.max_acceptable_cost_bps) > 0
+  ) {
+    parts.push(`成本上限 ${formatBps(targetExpectancy.max_acceptable_cost_bps)}`);
+  }
+  if (targetExpectancy.weak_edge_execution_mode) {
+    parts.push(`弱边际 ${readableState(targetExpectancy.weak_edge_execution_mode, targetExpectancy.weak_edge_execution_mode)}`);
+  }
+  if (targetExpectancy.weak_edge_report_only === true) {
+    parts.push("本轮只保留报告");
+  }
+  if (targetExpectancy.passive_first_required === true) {
+    parts.push("要求被动优先");
+  }
+  return parts.join(" | ");
 }
 
 function familyExpectancySuffix(source = {}) {

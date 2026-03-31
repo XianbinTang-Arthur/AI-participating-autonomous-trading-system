@@ -178,6 +178,25 @@ class TestAATSSettings(unittest.TestCase):
         self.assertEqual(settings.derivatives_hedge_transition_mode, "close_then_open")
         self.assertTrue(settings.derivatives_require_exchange_pos_mode_match)
 
+    def test_independent_execution_policy_settings_default_to_adaptive_modes(self) -> None:
+        settings = AATSSettings.model_validate({})
+
+        self.assertEqual(settings.strategy_hedge_independent_entry_execution_mode, "adaptive")
+        self.assertEqual(settings.strategy_hedge_independent_scale_in_execution_mode, "adaptive")
+        self.assertEqual(settings.strategy_hedge_independent_de_risk_execution_mode, "adaptive")
+        self.assertEqual(settings.strategy_hedge_independent_close_failed_thesis_execution_mode, "adaptive")
+        self.assertEqual(settings.strategy_hedge_independent_close_stale_execution_mode, "adaptive")
+        self.assertEqual(settings.strategy_hedge_independent_limit_offset_bps_entry, 1.5)
+        self.assertEqual(settings.strategy_hedge_independent_limit_offset_bps_scale_in, 1.0)
+        self.assertEqual(settings.strategy_hedge_independent_limit_offset_bps_stale_close, 0.8)
+
+    def test_independent_execution_policy_offsets_reject_negative_values(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "strategy_hedge_independent_limit_offset_bps_entry_must_be_non_negative",
+        ):
+            AATSSettings.model_validate({"strategy_hedge_independent_limit_offset_bps_entry": -0.1})
+
     def test_load_settings_ignores_deprecated_runtime_derivations_from_managed_env(self) -> None:
         with patch.object(AATSSettings, "model_config", {**AATSSettings.model_config, "env_file": None}):
             with patch.dict(
@@ -305,6 +324,63 @@ class TestAATSSettings(unittest.TestCase):
                 }
             )
 
+    def test_independent_entry_quality_gate_settings_validate_ranges(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "strategy_hedge_independent_min_confirm_ticks_must_be_positive",
+        ):
+            AATSSettings.model_validate(
+                {
+                    "strategy_hedge_independent_min_confirm_ticks": 0,
+                }
+            )
+        with self.assertRaisesRegex(
+            ValueError,
+            "strategy_hedge_independent_min_liquidity_quality_must_be_between_zero_and_one",
+        ):
+            AATSSettings.model_validate(
+                {
+                    "strategy_hedge_independent_min_liquidity_quality": 1.2,
+                }
+            )
+        with self.assertRaisesRegex(
+            ValueError,
+            "strategy_hedge_independent_min_score_stability_bps_must_be_non_negative",
+        ):
+            AATSSettings.model_validate(
+                {
+                    "strategy_hedge_independent_min_score_stability_bps": -1.0,
+                }
+            )
+        with self.assertRaisesRegex(
+            ValueError,
+            "strategy_hedge_independent_max_thesis_age_seconds_must_be_positive",
+        ):
+            AATSSettings.model_validate(
+                {
+                    "strategy_hedge_independent_max_thesis_age_seconds": 0,
+                }
+            )
+        with self.assertRaisesRegex(
+            ValueError,
+            "strategy_hedge_independent_de_risk_net_edge_bps_must_be_non_negative",
+        ):
+            AATSSettings.model_validate(
+                {
+                    "strategy_hedge_independent_de_risk_net_edge_bps": -0.5,
+                }
+            )
+        with self.assertRaisesRegex(
+            ValueError,
+            "strategy_hedge_independent_failed_thesis_net_edge_bps_must_not_exceed_de_risk_threshold",
+        ):
+            AATSSettings.model_validate(
+                {
+                    "strategy_hedge_independent_de_risk_net_edge_bps": 1.0,
+                    "strategy_hedge_independent_failed_thesis_net_edge_bps": 2.0,
+                }
+            )
+
     def test_independent_overlay_rollout_can_be_set_to_live_after_task106_enablement(self) -> None:
         settings = AATSSettings.model_validate(
             {
@@ -321,6 +397,14 @@ class TestAATSSettings(unittest.TestCase):
         settings = AATSSettings.model_validate({})
 
         self.assertTrue(settings.strategy_hedge_protective_enabled)
+
+    def test_independent_diagnostics_emit_flags_default_to_true(self) -> None:
+        settings = AATSSettings.model_validate({})
+
+        self.assertTrue(settings.strategy_hedge_independent_emit_book_level_metrics)
+        self.assertTrue(settings.strategy_hedge_independent_emit_expected_vs_realized_metrics)
+        self.assertTrue(settings.strategy_hedge_independent_emit_close_reason_metrics)
+        self.assertTrue(settings.strategy_hedge_independent_emit_execution_policy_metrics)
 
 
 if __name__ == "__main__":

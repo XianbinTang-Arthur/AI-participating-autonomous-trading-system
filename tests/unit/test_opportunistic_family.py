@@ -10,10 +10,65 @@ from aats.services.strategy_engines.families.opportunistic_family import (
     build_opportunistic_candidate_leg,
     evaluate_opportunistic_overlay_decision,
 )
+from aats.services.strategy_engines.families.protective_family import OverlayParentExposureContract
 from tests.support.strategy_family import make_ai_assessment, make_baseline, make_context, make_derivatives_hedge_settings
 
 
 class TestOpportunisticFamily(unittest.TestCase):
+    def test_evaluate_opportunistic_overlay_consumes_parent_exposure_contract(self) -> None:
+        settings = make_derivatives_hedge_settings(
+            strategy_hedge_overlay_mode="opportunistic",
+            strategy_hedge_opportunistic_enabled=True,
+            strategy_hedge_opportunistic_open_threshold=0.62,
+            strategy_hedge_opportunistic_close_threshold=0.46,
+        )
+        context = make_context(
+            current_position_qty=0.05,
+            current_long_position_qty=0.05,
+            product_type="derivatives",
+            current_exposure_side="long",
+        )
+        baseline = make_baseline(
+            direction_bias="long",
+            confidence=0.84,
+            suggested_position_scale=1.0,
+            volatility_target_scale=1.0,
+            volatility_state="high",
+            factor_scores={
+                "momentum_alpha": -0.75,
+                "trend_alpha": 0.05,
+                "microstructure_alpha": -0.95,
+                "liquidity_scale": 0.88,
+            },
+        ).model_copy(update={"regime": "uncertain", "composite_alpha_score": 0.28})
+        parent_exposure = OverlayParentExposureContract(
+            symbol=context.symbol,
+            target_leverage=1.0,
+            margin_mode=str(settings.margin_mode),
+            target_long_qty=Decimal("0"),
+            target_short_qty=Decimal("0"),
+            current_long_qty=Decimal("0.05"),
+            current_short_qty=Decimal("0"),
+            target_signal="flat",
+            current_signal="long",
+            effective_signal="long",
+            signal_source="inventory",
+            source="test_parent_exposure",
+        )
+
+        overlay_decision = evaluate_opportunistic_overlay_decision(
+            settings=settings,
+            context=context,
+            baseline=baseline,
+            ai_assessment=make_ai_assessment(direction=-0.25, confidence=0.80),
+            parent_exposure=parent_exposure,
+            scorer=lambda **_: 0.82,
+        )
+
+        self.assertEqual(overlay_decision.main_leg_signal, "long")
+        self.assertIn("opportunistic_overlay_main_signal_inferred_from_inventory", overlay_decision.reason_codes)
+        self.assertEqual(overlay_decision.main_leg_target_qty, Decimal("0"))
+
     def test_evaluate_opportunistic_overlay_opens_short_opportunity_leg_against_existing_long(self) -> None:
         settings = make_derivatives_hedge_settings(
             strategy_hedge_overlay_mode="opportunistic",
@@ -128,6 +183,10 @@ class TestOpportunisticFamily(unittest.TestCase):
         )
 
         self.assertTrue(discipline.weak_edge_report_only)
+        self.assertEqual(discipline.required_safe_net_edge_bps, 6.0)
+        self.assertEqual(discipline.max_acceptable_cost_bps, 0.0)
+        self.assertEqual(discipline.weak_edge_execution_mode, "report_only")
+        self.assertTrue(discipline.passive_first_required)
         self.assertEqual(discipline.blocked_reasons, ())
         self.assertIsNotNone(hedge_leg)
         assert hedge_leg is not None

@@ -28,6 +28,7 @@ class PostgresFillOutcomeRepository:
             row = FillOutcomeModel(
                 fill_id=outcome.fill_id,
                 decision_id=outcome.decision_id,
+                execution_attempt_id=outcome.execution_attempt_id,
                 intent_id=outcome.intent_id,
                 order_id=outcome.order_id,
                 symbol=outcome.symbol,
@@ -65,6 +66,7 @@ class PostgresFillOutcomeRepository:
             session.add(row)
         else:
             row.decision_id = outcome.decision_id
+            row.execution_attempt_id = outcome.execution_attempt_id
             row.intent_id = outcome.intent_id
             row.order_id = outcome.order_id
             row.symbol = outcome.symbol
@@ -157,6 +159,7 @@ class PostgresFillOutcomeRepository:
     @staticmethod
     def _to_outcome(row: FillOutcomeModel) -> FillOutcomeRecord:
         payload = dict(row.payload)
+        payload.setdefault("execution_attempt_id", row.execution_attempt_id)
         payload.setdefault("strategy_family", row.strategy_family)
         payload.setdefault("strategy_sleeve_id", row.strategy_sleeve_id)
         payload.setdefault("allocation_id", row.allocation_id)

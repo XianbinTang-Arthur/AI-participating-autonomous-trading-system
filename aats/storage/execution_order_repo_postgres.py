@@ -58,6 +58,7 @@ class PostgresExecutionOrderRepository:
                 order_id=order_id,
                 intent_id=intent.intent_id,
                 decision_id=intent.decision_id,
+                execution_attempt_id=intent.execution_attempt_id,
                 client_order_id=str(raw_payload.get("client_order_id") or order_id),
                 venue_order_id=raw_payload.get("venue_order_id"),
                 symbol=intent.symbol,
@@ -176,6 +177,11 @@ class PostgresExecutionOrderRepository:
         row.updated_at = updated_at
         order_payload = raw_payload.get("order_state") if isinstance(raw_payload, dict) else None
         if isinstance(order_payload, dict):
+            row.execution_attempt_id = (
+                str(order_payload.get("execution_attempt_id"))
+                if order_payload.get("execution_attempt_id") not in {None, ""}
+                else row.execution_attempt_id
+            )
             row.reduce_only = bool(order_payload.get("reduce_only", row.reduce_only))
             row.close_only = bool(order_payload.get("close_only", row.close_only))
             row.td_mode = str(order_payload.get("td_mode")) if order_payload.get("td_mode") not in {None, ""} else row.td_mode
@@ -338,6 +344,7 @@ def _order_row_to_dict(row: ExecutionOrderModel) -> dict:
         "order_id": row.order_id,
         "intent_id": row.intent_id,
         "decision_id": row.decision_id,
+        "execution_attempt_id": row.execution_attempt_id,
         "client_order_id": row.client_order_id,
         "venue_order_id": row.venue_order_id,
         "symbol": row.symbol,

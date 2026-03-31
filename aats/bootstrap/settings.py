@@ -21,6 +21,13 @@ DerivativesHedgeTransitionMode = Literal["close_then_open", "overlap_then_reduce
 StrategyHedgeOverlayMode = Literal["protective", "opportunistic", "independent"]
 StrategyHedgeOverlayRolloutStage = Literal["replay_only", "dry_run", "live"]
 IndependentWeakEdgeExecutionMode = Literal["block", "report_only"]
+IndependentExecutionPolicyMode = Literal[
+    "adaptive",
+    "passive_first",
+    "bounded_limit",
+    "bounded_taker",
+    "aggressive_bounded_taker",
+]
 ConfigProfile = Literal[
     "local_demo",
     "real_market_paper",
@@ -401,6 +408,27 @@ class AATSSettings(BaseSettings):
     strategy_hedge_independent_weak_edge_execution_mode: IndependentWeakEdgeExecutionMode = "block"
     strategy_hedge_independent_max_acceptable_cost_bps: float = 0.0
     strategy_hedge_independent_passive_first_enabled: bool = False
+    strategy_hedge_independent_min_confirm_ticks: int = 2
+    strategy_hedge_independent_min_score_stability_bps: float = 2.0
+    strategy_hedge_independent_min_liquidity_quality: float = 0.55
+    strategy_hedge_independent_require_execution_health_ok: bool = True
+    strategy_hedge_independent_max_thesis_age_seconds: int = 1_800
+    strategy_hedge_independent_de_risk_net_edge_bps: float = 2.0
+    strategy_hedge_independent_failed_thesis_net_edge_bps: float = -1.0
+    strategy_hedge_independent_execution_health_de_risk_enabled: bool = True
+    strategy_hedge_independent_liquidity_de_risk_enabled: bool = True
+    strategy_hedge_independent_entry_execution_mode: IndependentExecutionPolicyMode = "adaptive"
+    strategy_hedge_independent_scale_in_execution_mode: IndependentExecutionPolicyMode = "adaptive"
+    strategy_hedge_independent_de_risk_execution_mode: IndependentExecutionPolicyMode = "adaptive"
+    strategy_hedge_independent_close_failed_thesis_execution_mode: IndependentExecutionPolicyMode = "adaptive"
+    strategy_hedge_independent_close_stale_execution_mode: IndependentExecutionPolicyMode = "adaptive"
+    strategy_hedge_independent_limit_offset_bps_entry: float = 1.5
+    strategy_hedge_independent_limit_offset_bps_scale_in: float = 1.0
+    strategy_hedge_independent_limit_offset_bps_stale_close: float = 0.8
+    strategy_hedge_independent_emit_book_level_metrics: bool = True
+    strategy_hedge_independent_emit_expected_vs_realized_metrics: bool = True
+    strategy_hedge_independent_emit_close_reason_metrics: bool = True
+    strategy_hedge_independent_emit_execution_policy_metrics: bool = True
     strategy_min_hold_seconds: float = 720.0
     strategy_post_close_cooldown_seconds: float = 300.0
     strategy_health_lookback_trades: int = 12
@@ -581,6 +609,30 @@ class AATSSettings(BaseSettings):
             raise ValueError("strategy_hedge_independent_expected_execution_buffer_bps_must_be_non_negative")
         if float(self.strategy_hedge_independent_max_acceptable_cost_bps) < 0.0:
             raise ValueError("strategy_hedge_independent_max_acceptable_cost_bps_must_be_non_negative")
+        if int(self.strategy_hedge_independent_min_confirm_ticks) < 1:
+            raise ValueError("strategy_hedge_independent_min_confirm_ticks_must_be_positive")
+        if float(self.strategy_hedge_independent_min_score_stability_bps) < 0.0:
+            raise ValueError("strategy_hedge_independent_min_score_stability_bps_must_be_non_negative")
+        if not 0.0 <= float(self.strategy_hedge_independent_min_liquidity_quality) <= 1.0:
+            raise ValueError("strategy_hedge_independent_min_liquidity_quality_must_be_between_zero_and_one")
+        if int(self.strategy_hedge_independent_max_thesis_age_seconds) < 1:
+            raise ValueError("strategy_hedge_independent_max_thesis_age_seconds_must_be_positive")
+        if float(self.strategy_hedge_independent_de_risk_net_edge_bps) < 0.0:
+            raise ValueError("strategy_hedge_independent_de_risk_net_edge_bps_must_be_non_negative")
+        if (
+            float(self.strategy_hedge_independent_failed_thesis_net_edge_bps)
+            - float(self.strategy_hedge_independent_de_risk_net_edge_bps)
+            > 1e-9
+        ):
+            raise ValueError(
+                "strategy_hedge_independent_failed_thesis_net_edge_bps_must_not_exceed_de_risk_threshold"
+            )
+        if float(self.strategy_hedge_independent_limit_offset_bps_entry) < 0.0:
+            raise ValueError("strategy_hedge_independent_limit_offset_bps_entry_must_be_non_negative")
+        if float(self.strategy_hedge_independent_limit_offset_bps_scale_in) < 0.0:
+            raise ValueError("strategy_hedge_independent_limit_offset_bps_scale_in_must_be_non_negative")
+        if float(self.strategy_hedge_independent_limit_offset_bps_stale_close) < 0.0:
+            raise ValueError("strategy_hedge_independent_limit_offset_bps_stale_close_must_be_non_negative")
         if self.trading_product_type == "spot" and self.margin_mode == "cash":
             if float(self.max_target_leverage) != 1.0 or float(self.default_target_leverage) != 1.0:
                 raise ValueError("spot_cash_runtime_requires_unit_leverage")

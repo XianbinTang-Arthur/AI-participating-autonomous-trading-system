@@ -21,6 +21,7 @@ from aats.schemas.strategy_runtime import (
     PortfolioAllocationDecision,
     SleeveBudgetAssignment,
     SleeveBudgetProfile,
+    StrategyBookRuntimeState,
     StrategyCandidate,
     StrategyCoordinatorSnapshot,
     StrategyFamily,
@@ -461,6 +462,26 @@ class StrategyCoordinatorService:
             if family_execution_summary is None or family_execution_summary.book_expectancy_summary is None
             else family_execution_summary.book_expectancy_summary.model_copy(deep=True)
         )
+        book_runtime_states = (
+            self._book_runtime_states_for_summary(selected_candidate=selected)
+            if family_execution_summary is None or not family_execution_summary.book_runtime_states
+            else [
+                state.model_copy(deep=True)
+                for state in family_execution_summary.book_runtime_states
+            ]
+        )
+        diagnostic_metric_flags = (
+            {}
+            if family_execution_summary is None
+            else dict(family_execution_summary.diagnostic_metric_flags or {})
+        )
+        if not book_runtime_states and base_target.book_runtime_states:
+            book_runtime_states = [
+                state.model_copy(deep=True)
+                for state in base_target.book_runtime_states
+            ]
+        if not diagnostic_metric_flags and base_target.diagnostic_metric_flags:
+            diagnostic_metric_flags = dict(base_target.diagnostic_metric_flags)
         decision_outcome = base_target.decision_outcome
         overlay_candidate = self._configured_overlay_candidate(snapshot=snapshot)
         hedge_overlay_decision = self._selected_overlay_decision(
@@ -470,6 +491,10 @@ class StrategyCoordinatorService:
             applied_route_action=applied_route_action,
             strategy_execution_legs=strategy_execution_legs,
             overlay_candidate=overlay_candidate,
+        )
+        parent_signal_fields = self._overlay_parent_signal_fields(
+            family_execution_summary=family_execution_summary,
+            hedge_overlay_decision=hedge_overlay_decision,
         )
         if decision_outcome is not None:
             final_action = decision_outcome.final_action
@@ -497,6 +522,9 @@ class StrategyCoordinatorService:
                     "strategy_selection_headline": snapshot.selected_headline,
                     "family_execution_summary": family_execution_summary,
                     "book_expectancy_summary": book_expectancy_summary,
+                    "book_runtime_states": book_runtime_states,
+                    "diagnostic_metric_flags": diagnostic_metric_flags,
+                    **parent_signal_fields,
                     "final_action": final_action,
                     "final_direction": final_direction,
                     "final_target_qty": target_qty,
@@ -528,6 +556,9 @@ class StrategyCoordinatorService:
             "position_intent": position_intent,
             "family_execution_summary": family_execution_summary,
             "book_expectancy_summary": book_expectancy_summary,
+            "book_runtime_states": book_runtime_states,
+            "diagnostic_metric_flags": diagnostic_metric_flags,
+            **parent_signal_fields,
             "urgency": urgency,
             "rebalance_reason": rebalance_reason,
             "source_mix": source_mix,
@@ -1271,6 +1302,10 @@ class StrategyCoordinatorService:
                 metrics.get("hedge_leg_signal"),
                 strategy_execution_legs=overlay_legs,
             ),
+            parent_target_signal=self._optional_overlay_signal(metrics.get("parent_target_signal")),
+            parent_current_signal=self._optional_overlay_signal(metrics.get("parent_current_signal")),
+            parent_effective_signal=self._optional_overlay_signal(metrics.get("parent_effective_signal")),
+            signal_source=self._optional_text(metrics.get("parent_exposure_signal_source")),
             main_leg_current_qty=to_decimal(metrics.get("main_leg_current_qty") or Decimal("0")),
             hedge_leg_current_qty=to_decimal(metrics.get("hedge_leg_current_qty") or Decimal("0")),
             main_leg_target_qty=to_decimal(metrics.get("main_leg_target_qty") or Decimal("0")),
@@ -1346,9 +1381,53 @@ class StrategyCoordinatorService:
         return "flat"
 
     @staticmethod
+    def _optional_overlay_signal(value: object | None) -> str | None:
+        normalized = str(value or "").strip().lower()
+        if normalized in {"long", "short", "flat"}:
+            return normalized
+        return None
+
+    @staticmethod
     def _optional_text(value: object | None) -> str | None:
         text = str(value or "").strip()
         return text or None
+
+    @staticmethod
+    def _overlay_parent_signal_fields(
+        *,
+        family_execution_summary: StrategyExecutionSummary | None,
+        hedge_overlay_decision: HedgeOverlayDecision | None,
+    ) -> dict[str, str | None]:
+        return {
+            "parent_target_signal": (
+                None
+                if family_execution_summary is None
+                else family_execution_summary.parent_target_signal
+            ) or (
+                None if hedge_overlay_decision is None else hedge_overlay_decision.parent_target_signal
+            ),
+            "parent_current_signal": (
+                None
+                if family_execution_summary is None
+                else family_execution_summary.parent_current_signal
+            ) or (
+                None if hedge_overlay_decision is None else hedge_overlay_decision.parent_current_signal
+            ),
+            "parent_effective_signal": (
+                None
+                if family_execution_summary is None
+                else family_execution_summary.parent_effective_signal
+            ) or (
+                None if hedge_overlay_decision is None else hedge_overlay_decision.parent_effective_signal
+            ),
+            "signal_source": (
+                None
+                if family_execution_summary is None
+                else family_execution_summary.signal_source
+            ) or (
+                None if hedge_overlay_decision is None else hedge_overlay_decision.signal_source
+            ),
+        }
 
     @staticmethod
     def _final_action_for_selected_family(
@@ -1373,6 +1452,9 @@ class StrategyCoordinatorService:
             "open_independent_book": "enter",
             "scale_independent_book": "scale_in",
             "rebalance_independent_books": "scale_in",
+            "de_risk_independent_book": "reduce",
+            "close_failed_thesis_independent_book": "exit",
+            "close_stale_thesis_independent_book": "exit",
             "close_independent_book": "exit",
         }
         return action_map.get(family_action, "hold")
@@ -1556,6 +1638,7 @@ class StrategyCoordinatorService:
                 if str(getattr(leg, "execution_mode", "") or "").strip()
             )
         )
+        metrics = dict(selected_candidate.metrics or {}) if selected_candidate is not None else {}
         return StrategyExecutionSummary(
             summary_mode="single_leg" if len(actionable_legs) == 1 and len(derived_intents) == 1 else "multi_leg",
             family=selected_family,
@@ -1566,12 +1649,61 @@ class StrategyCoordinatorService:
             directions=directions,
             leg_actions=leg_actions,
             execution_modes=execution_modes,
+            parent_target_signal=StrategyCoordinatorService._optional_overlay_signal(metrics.get("parent_target_signal")),
+            parent_current_signal=StrategyCoordinatorService._optional_overlay_signal(metrics.get("parent_current_signal")),
+            parent_effective_signal=StrategyCoordinatorService._optional_overlay_signal(metrics.get("parent_effective_signal")),
+            signal_source=StrategyCoordinatorService._optional_text(metrics.get("parent_exposure_signal_source")),
+            close_reason=StrategyCoordinatorService._optional_text(metrics.get("close_reason")),
             book_expectancy_summary=(
                 None
                 if selected_candidate is None or selected_candidate.book_expectancy_summary is None
                 else selected_candidate.book_expectancy_summary.model_copy(deep=True)
             ),
+            book_runtime_states=StrategyCoordinatorService._book_runtime_states_for_summary(
+                selected_candidate=selected_candidate,
+                metrics=metrics,
+            ),
+            diagnostic_metric_flags=StrategyCoordinatorService._diagnostic_metric_flags_from_metrics(metrics),
         )
+
+    @staticmethod
+    def _diagnostic_metric_flags_from_metrics(metrics: dict[str, object] | None) -> dict[str, bool]:
+        if not metrics:
+            return {}
+        normalized: dict[str, bool] = {}
+        for key in (
+            "emit_book_level_metrics",
+            "emit_expected_vs_realized_metrics",
+            "emit_close_reason_metrics",
+            "emit_execution_policy_metrics",
+        ):
+            value = metrics.get(key)
+            if value is None:
+                continue
+            normalized[key] = bool(value)
+        return normalized
+
+    @staticmethod
+    def _book_runtime_states_for_summary(
+        *,
+        selected_candidate: StrategyCandidate | None,
+        metrics: dict[str, object] | None = None,
+    ) -> list[StrategyBookRuntimeState]:
+        if selected_candidate is not None and selected_candidate.book_runtime_states:
+            return [
+                state.model_copy(deep=True)
+                for state in selected_candidate.book_runtime_states
+            ]
+        raw_states = []
+        if metrics is not None:
+            raw_states = list(metrics.get("book_runtime_states") or [])
+        normalized: list[StrategyBookRuntimeState] = []
+        for item in raw_states:
+            if isinstance(item, StrategyBookRuntimeState):
+                normalized.append(item.model_copy(deep=True))
+            elif isinstance(item, dict):
+                normalized.append(StrategyBookRuntimeState.model_validate(item))
+        return normalized
 
     def _is_protective_target(self, *, current_qty: Decimal, target_qty: Decimal) -> bool:
         current_side = self._exposure_side(to_decimal(current_qty))

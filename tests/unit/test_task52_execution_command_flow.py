@@ -334,6 +334,7 @@ class TestTask52ExecutionCommandFlow(unittest.IsolatedAsyncioTestCase):
         state = manager.execution_repo.get_order_state("clphase2_submit")
         self.assertIsNotNone(state)
         self.assertEqual(state.status, "FILLED")
+        self.assertEqual(state.execution_attempt_id, "execution_attempt:clphase2_submit")
         self.assertEqual(len(manager.execution_repo.fills()), 1)
 
     async def test_phase2_command_processor_reapplies_leg_risk_for_independent_submit(self) -> None:
@@ -407,6 +408,7 @@ class TestTask52ExecutionCommandFlow(unittest.IsolatedAsyncioTestCase):
         state = manager.execution_repo.get_order_state("clphase2_independent_leg_risk")
         self.assertIsNotNone(state)
         self.assertEqual(state.status, "BLOCKED")
+        self.assertEqual(state.execution_attempt_id, "execution_attempt:clphase2_independent_leg_risk")
         self.assertEqual(state.submission_mode, "leg_risk_blocked")
         self.assertIn("risk_max_long_notional_exceeded", state.execution_error)
 

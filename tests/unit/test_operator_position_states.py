@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from aats.schemas.exchange import ExchangeAccountConfiguration, ExchangeAccountSnapshot, ExchangePosition
-from aats.schemas.portfolio import PortfolioSnapshot, Position
+from aats.schemas.portfolio import FillOutcomeRecord, PortfolioSnapshot, Position
 from aats.services.operator.query_service import OperatorQueryService
 
 
@@ -28,6 +28,30 @@ class TestOperatorPositionStates(unittest.TestCase):
                 family_action="close_opportunity_leg",
             ),
             "当前选中的策略家族正在收回机会腿。",
+        )
+        self.assertEqual(
+            OperatorQueryService._strategy_runtime_operator_summary(
+                latest_snapshot_present=True,
+                route_action="override_target",
+                family_action="de_risk_independent_book",
+            ),
+            "当前选中的策略家族正在降低独立双书风险暴露。",
+        )
+        self.assertEqual(
+            OperatorQueryService._strategy_runtime_operator_summary(
+                latest_snapshot_present=True,
+                route_action="override_target",
+                family_action="close_failed_thesis_independent_book",
+            ),
+            "当前选中的策略家族正在按 thesis 失效关闭独立双书。",
+        )
+        self.assertEqual(
+            OperatorQueryService._strategy_runtime_operator_summary(
+                latest_snapshot_present=True,
+                route_action="override_target",
+                family_action="close_stale_thesis_independent_book",
+            ),
+            "当前选中的策略家族正在按 thesis 过期关闭独立双书。",
         )
 
     def test_smart_arbitrage_runtime_pair_configuration_prefers_snapshot_candidate_metrics(self) -> None:
@@ -122,6 +146,13 @@ class TestOperatorPositionStates(unittest.TestCase):
                     "directions": ["short"],
                     "leg_actions": ["open"],
                     "execution_modes": ["protective_overlay"],
+                    "diagnostic_metric_flags": {
+                        "emit_expected_vs_realized_metrics": True,
+                    },
+                    "parent_target_signal": "flat",
+                    "parent_current_signal": "long",
+                    "parent_effective_signal": "long",
+                    "signal_source": "inventory",
                     "book_expectancy_summary": {
                         "source": "independent_book",
                         "books": [
@@ -146,12 +177,714 @@ class TestOperatorPositionStates(unittest.TestCase):
         self.assertEqual(payload["final_action"], "enter")
         self.assertEqual(payload["final_direction"], "short")
         self.assertEqual(payload["family_execution_summary"]["position_intents"], ["open_short"])
+        self.assertEqual(payload["parent_target_signal"], "flat")
+        self.assertEqual(payload["parent_current_signal"], "long")
+        self.assertEqual(payload["parent_effective_signal"], "long")
+        self.assertEqual(payload["signal_source"], "inventory")
+        self.assertEqual(payload["diagnostic_metric_flags"]["emit_expected_vs_realized_metrics"], True)
         self.assertEqual(payload["book_expectancy_summary"]["source"], "independent_book")
         self.assertEqual(
             payload["family_execution_summary"]["book_expectancy_summary"]["books"][0]["expected_net_edge_bps"],
             12.0,
         )
         self.assertEqual(payload["book_expectancy_summary"]["books"][0]["expected_net_edge_bps"], 12.0)
+        self.assertEqual(payload["book_runtime_states"], [])
+
+    def test_independent_diagnostics_flags_prefer_persisted_payload_flags(self) -> None:
+        query = OperatorQueryService.__new__(OperatorQueryService)
+        query.runtime = SimpleNamespace(
+            settings=SimpleNamespace(
+                strategy_hedge_independent_emit_book_level_metrics=False,
+                strategy_hedge_independent_emit_expected_vs_realized_metrics=False,
+                strategy_hedge_independent_emit_close_reason_metrics=False,
+                strategy_hedge_independent_emit_execution_policy_metrics=False,
+            )
+        )
+
+        payload = {
+            "strategy_family": "independent",
+            "family_execution_summary": {
+                "family": "independent",
+                "diagnostic_metric_flags": {
+                    "emit_book_level_metrics": True,
+                    "emit_expected_vs_realized_metrics": True,
+                    "emit_close_reason_metrics": True,
+                    "emit_execution_policy_metrics": True,
+                },
+            },
+        }
+
+        metric_flags = query._independent_diagnostics_flags(payloads=[payload])
+        normalized = query._position_target_payload(payload)
+
+        self.assertEqual(
+            metric_flags,
+            {
+                "emit_book_level_metrics": True,
+                "emit_expected_vs_realized_metrics": True,
+                "emit_close_reason_metrics": True,
+                "emit_execution_policy_metrics": True,
+            },
+        )
+        self.assertEqual(normalized["diagnostic_metric_flags"], metric_flags)
+
+    def test_independent_expected_vs_realized_summary_respects_payload_specific_metric_flags(self) -> None:
+        query = OperatorQueryService.__new__(OperatorQueryService)
+        query.runtime = SimpleNamespace(
+            settings=SimpleNamespace(
+                strategy_hedge_independent_emit_book_level_metrics=False,
+                strategy_hedge_independent_emit_expected_vs_realized_metrics=False,
+                strategy_hedge_independent_emit_close_reason_metrics=False,
+                strategy_hedge_independent_emit_execution_policy_metrics=False,
+            )
+        )
+        query._recent_independent_target_payloads = lambda **_: [  # type: ignore[method-assign]
+            {
+                "decision_id": "decision_emit",
+                "strategy_family": "independent",
+                "family_execution_summary": {
+                    "family": "independent",
+                    "diagnostic_metric_flags": {
+                        "emit_book_level_metrics": False,
+                        "emit_expected_vs_realized_metrics": True,
+                        "emit_close_reason_metrics": False,
+                        "emit_execution_policy_metrics": True,
+                    },
+                    "book_runtime_states": [
+                        {
+                            "leg": "long",
+                            "book_action": "open",
+                            "close_reason": None,
+                        }
+                    ],
+                    "book_expectancy_summary": {
+                        "source": "independent_book",
+                        "books": [
+                            {
+                                "leg": "long",
+                                "expected_net_edge_bps": 8.0,
+                                "weak_edge_report_only": True,
+                                "passive_first_required": True,
+                            }
+                        ],
+                    },
+                },
+            },
+            {
+                "decision_id": "decision_close_reason_only",
+                "strategy_family": "independent",
+                "family_execution_summary": {
+                    "family": "independent",
+                    "diagnostic_metric_flags": {
+                        "emit_book_level_metrics": False,
+                        "emit_expected_vs_realized_metrics": False,
+                        "emit_close_reason_metrics": True,
+                        "emit_execution_policy_metrics": False,
+                    },
+                    "book_runtime_states": [
+                        {
+                            "leg": "short",
+                            "book_action": "close_stale_thesis",
+                            "close_reason": "stale_thesis",
+                        }
+                    ],
+                    "book_expectancy_summary": {
+                        "source": "independent_book",
+                        "books": [
+                            {
+                                "leg": "short",
+                                "expected_net_edge_bps": -3.0,
+                                "close_reason": "stale_thesis",
+                            }
+                        ],
+                    },
+                },
+            },
+            {
+                "decision_id": "decision_book_only",
+                "strategy_family": "independent",
+                "family_execution_summary": {
+                    "family": "independent",
+                    "diagnostic_metric_flags": {
+                        "emit_book_level_metrics": True,
+                        "emit_expected_vs_realized_metrics": False,
+                        "emit_close_reason_metrics": False,
+                        "emit_execution_policy_metrics": False,
+                    },
+                    "book_runtime_states": [
+                        {
+                            "leg": "short",
+                            "book_action": "close_stale_thesis",
+                            "close_reason": "stale_thesis",
+                        }
+                    ],
+                    "book_expectancy_summary": {
+                        "source": "independent_book",
+                        "books": [
+                            {
+                                "leg": "short",
+                                "expected_net_edge_bps": -3.0,
+                                "close_reason": "stale_thesis",
+                            }
+                        ],
+                    },
+                },
+            },
+        ]
+        query._scoped_fill_outcomes = lambda: []  # type: ignore[method-assign]
+
+        summary = query._independent_expected_vs_realized_summary()
+
+        assert summary is not None
+        self.assertEqual(summary["sample_count"], 1)
+        self.assertEqual(summary["entry_count"], 1)
+        self.assertEqual(summary["close_count"], 0)
+        self.assertEqual(summary["avg_expected_net_edge_bps"], 8.0)
+        self.assertEqual(summary["weak_edge_entry_count"], 1)
+        self.assertEqual(summary["passive_first_usage_ratio"], 1.0)
+        self.assertEqual(summary["close_reason_distribution"], [{"reason": "stale_thesis", "count": 1}])
+        self.assertEqual(len(summary["book_breakdown"]), 2)
+        short_row = next(item for item in summary["book_breakdown"] if item["leg"] == "short")
+        self.assertEqual(short_row["sample_count"], 1)
+        self.assertEqual(short_row["close_count"], 1)
+        self.assertEqual(short_row["avg_expected_net_edge_bps"], -3.0)
+        self.assertIsNone(short_row["avg_realized_net_bps"])
+
+    def test_independent_expected_vs_realized_summary_counts_partial_fills_as_single_realized_sample(self) -> None:
+        query = OperatorQueryService.__new__(OperatorQueryService)
+        query.runtime = SimpleNamespace(
+            settings=SimpleNamespace(
+                strategy_hedge_independent_emit_book_level_metrics=True,
+                strategy_hedge_independent_emit_expected_vs_realized_metrics=True,
+                strategy_hedge_independent_emit_close_reason_metrics=True,
+                strategy_hedge_independent_emit_execution_policy_metrics=True,
+            )
+        )
+        query._recent_independent_target_payloads = lambda **_: [  # type: ignore[method-assign]
+            {
+                "decision_id": "decision_partial_fill",
+                "strategy_family": "independent",
+                "family_execution_summary": {
+                    "family": "independent",
+                    "diagnostic_metric_flags": {
+                        "emit_book_level_metrics": True,
+                        "emit_expected_vs_realized_metrics": True,
+                        "emit_close_reason_metrics": True,
+                        "emit_execution_policy_metrics": True,
+                    },
+                    "book_runtime_states": [
+                        {
+                            "leg": "long",
+                            "book_action": "open",
+                            "close_reason": None,
+                        }
+                    ],
+                    "book_expectancy_summary": {
+                        "source": "independent_book",
+                        "books": [
+                            {
+                                "leg": "long",
+                                "expected_net_edge_bps": 9.0,
+                                "weak_edge_report_only": False,
+                                "passive_first_required": False,
+                            }
+                        ],
+                    },
+                },
+            }
+        ]
+        query._scoped_fill_outcomes = lambda: [  # type: ignore[method-assign]
+            FillOutcomeRecord(
+                fill_id="fill_partial_1",
+                decision_id="decision_partial_fill",
+                symbol="BTC-USDT-SWAP",
+                strategy_family="independent",
+            ),
+            FillOutcomeRecord(
+                fill_id="fill_partial_2",
+                decision_id="decision_partial_fill",
+                symbol="BTC-USDT-SWAP",
+                strategy_family="independent",
+            ),
+        ]
+        query._execution_quality_row = lambda outcome: {  # type: ignore[method-assign]
+            "decision_id": outcome.decision_id,
+            "fill_notional": Decimal("100") if outcome.fill_id == "fill_partial_1" else Decimal("900"),
+            "realized_pnl_delta": Decimal("1") if outcome.fill_id == "fill_partial_1" else Decimal("9"),
+            "gross_realized_pnl": Decimal("0.9") if outcome.fill_id == "fill_partial_1" else Decimal("8.1"),
+            "adverse_slippage_bps": Decimal("10") if outcome.fill_id == "fill_partial_1" else Decimal("1"),
+            "pos_side": "long",
+            "position_intent": "open_long",
+        }
+
+        summary = query._independent_expected_vs_realized_summary()
+
+        assert summary is not None
+        self.assertEqual(summary["expected_sample_count"], 1)
+        self.assertEqual(summary["realized_sample_count"], 1)
+        self.assertEqual(summary["overlap_sample_count"], 1)
+        self.assertAlmostEqual(summary["avg_realized_net_bps"], 100.0)
+        self.assertAlmostEqual(summary["avg_realized_slippage_bps"], 1.9)
+        long_row = next(item for item in summary["book_breakdown"] if item["leg"] == "long")
+        self.assertEqual(long_row["sample_count"], 1)
+
+    def test_independent_expected_vs_realized_gap_uses_overlap_samples_only(self) -> None:
+        query = OperatorQueryService.__new__(OperatorQueryService)
+        query.runtime = SimpleNamespace(
+            settings=SimpleNamespace(
+                strategy_hedge_independent_emit_book_level_metrics=True,
+                strategy_hedge_independent_emit_expected_vs_realized_metrics=True,
+                strategy_hedge_independent_emit_close_reason_metrics=True,
+                strategy_hedge_independent_emit_execution_policy_metrics=True,
+            )
+        )
+        query._recent_independent_target_payloads = lambda **_: [  # type: ignore[method-assign]
+            {
+                "decision_id": "decision_overlap_gap",
+                "strategy_family": "independent",
+                "family_execution_summary": {
+                    "family": "independent",
+                    "diagnostic_metric_flags": {
+                        "emit_book_level_metrics": True,
+                        "emit_expected_vs_realized_metrics": True,
+                        "emit_close_reason_metrics": True,
+                        "emit_execution_policy_metrics": True,
+                    },
+                    "book_runtime_states": [
+                        {"leg": "long", "book_action": "open", "close_reason": None},
+                        {"leg": "short", "book_action": "close_stale_thesis", "close_reason": "stale_thesis"},
+                    ],
+                    "book_expectancy_summary": {
+                        "source": "independent_book",
+                        "books": [
+                            {"leg": "long", "expected_net_edge_bps": 10.0},
+                            {"leg": "short", "expected_net_edge_bps": -2.0, "close_reason": "stale_thesis"},
+                        ],
+                    },
+                },
+            }
+        ]
+        query._scoped_fill_outcomes = lambda: [  # type: ignore[method-assign]
+            FillOutcomeRecord(
+                fill_id="fill_overlap_long",
+                decision_id="decision_overlap_gap",
+                symbol="BTC-USDT-SWAP",
+                strategy_family="independent",
+            )
+        ]
+        query._execution_quality_row = lambda outcome: {  # type: ignore[method-assign]
+            "decision_id": outcome.decision_id,
+            "fill_notional": Decimal("100"),
+            "realized_pnl_delta": Decimal("6"),
+            "gross_realized_pnl": Decimal("5.5"),
+            "adverse_slippage_bps": Decimal("1.0"),
+            "pos_side": "long",
+            "position_intent": "open_long",
+        }
+
+        summary = query._independent_expected_vs_realized_summary()
+
+        assert summary is not None
+        self.assertEqual(summary["expected_sample_count"], 2)
+        self.assertEqual(summary["realized_sample_count"], 1)
+        self.assertEqual(summary["overlap_sample_count"], 1)
+        self.assertAlmostEqual(summary["avg_expected_net_edge_bps"], 4.0)
+        self.assertAlmostEqual(summary["avg_realized_net_bps"], 600.0)
+        self.assertAlmostEqual(summary["expected_realized_net_gap_bps"], 590.0)
+
+    def test_independent_book_breakdown_ignores_unmatched_realized_leg_rows(self) -> None:
+        query = OperatorQueryService.__new__(OperatorQueryService)
+        query.runtime = SimpleNamespace(
+            settings=SimpleNamespace(
+                strategy_hedge_independent_emit_book_level_metrics=True,
+                strategy_hedge_independent_emit_expected_vs_realized_metrics=True,
+                strategy_hedge_independent_emit_close_reason_metrics=True,
+                strategy_hedge_independent_emit_execution_policy_metrics=True,
+            )
+        )
+        query._recent_independent_target_payloads = lambda **_: [  # type: ignore[method-assign]
+            {
+                "decision_id": "decision_book_alignment",
+                "strategy_family": "independent",
+                "family_execution_summary": {
+                    "family": "independent",
+                    "diagnostic_metric_flags": {
+                        "emit_book_level_metrics": True,
+                        "emit_expected_vs_realized_metrics": True,
+                        "emit_close_reason_metrics": True,
+                        "emit_execution_policy_metrics": True,
+                    },
+                    "book_runtime_states": [
+                        {"leg": "long", "book_action": "open", "close_reason": None},
+                    ],
+                    "book_expectancy_summary": {
+                        "source": "independent_book",
+                        "books": [
+                            {"leg": "long", "expected_net_edge_bps": 7.0},
+                        ],
+                    },
+                },
+            }
+        ]
+        query._scoped_fill_outcomes = lambda: [  # type: ignore[method-assign]
+            FillOutcomeRecord(
+                fill_id="fill_book_alignment_long",
+                decision_id="decision_book_alignment",
+                symbol="BTC-USDT-SWAP",
+                strategy_family="independent",
+            ),
+            FillOutcomeRecord(
+                fill_id="fill_book_alignment_short",
+                decision_id="decision_book_alignment",
+                symbol="BTC-USDT-SWAP",
+                strategy_family="independent",
+            ),
+        ]
+        query._execution_quality_row = lambda outcome: {  # type: ignore[method-assign]
+            "decision_id": outcome.decision_id,
+            "fill_notional": Decimal("100"),
+            "realized_pnl_delta": Decimal("5"),
+            "gross_realized_pnl": Decimal("4.5"),
+            "adverse_slippage_bps": Decimal("1.0"),
+            "pos_side": "long" if outcome.fill_id.endswith("_long") else "short",
+            "position_intent": "open_long" if outcome.fill_id.endswith("_long") else "close_short",
+        }
+
+        summary = query._independent_expected_vs_realized_summary()
+
+        assert summary is not None
+        long_row = next(item for item in summary["book_breakdown"] if item["leg"] == "long")
+        short_row = next(item for item in summary["book_breakdown"] if item["leg"] == "short")
+        self.assertEqual(long_row["sample_count"], 1)
+        self.assertAlmostEqual(long_row["avg_realized_net_bps"], 500.0)
+        self.assertEqual(short_row["sample_count"], 0)
+        self.assertIsNone(short_row["avg_realized_net_bps"])
+
+    def test_independent_realized_summary_ignores_unmatched_realized_leg_rows(self) -> None:
+        query = OperatorQueryService.__new__(OperatorQueryService)
+        query.runtime = SimpleNamespace(
+            settings=SimpleNamespace(
+                strategy_hedge_independent_emit_book_level_metrics=True,
+                strategy_hedge_independent_emit_expected_vs_realized_metrics=True,
+                strategy_hedge_independent_emit_close_reason_metrics=True,
+                strategy_hedge_independent_emit_execution_policy_metrics=True,
+            )
+        )
+        query._recent_independent_target_payloads = lambda **_: [  # type: ignore[method-assign]
+            {
+                "decision_id": "decision_realized_alignment",
+                "strategy_family": "independent",
+                "family_execution_summary": {
+                    "family": "independent",
+                    "diagnostic_metric_flags": {
+                        "emit_book_level_metrics": True,
+                        "emit_expected_vs_realized_metrics": True,
+                        "emit_close_reason_metrics": True,
+                        "emit_execution_policy_metrics": True,
+                    },
+                    "book_runtime_states": [
+                        {"leg": "long", "book_action": "open", "close_reason": None},
+                    ],
+                    "book_expectancy_summary": {
+                        "source": "independent_book",
+                        "books": [
+                            {"leg": "long", "expected_net_edge_bps": 7.0},
+                        ],
+                    },
+                },
+            }
+        ]
+        query._scoped_fill_outcomes = lambda: [  # type: ignore[method-assign]
+            FillOutcomeRecord(
+                fill_id="fill_realized_alignment_long",
+                decision_id="decision_realized_alignment",
+                symbol="BTC-USDT-SWAP",
+                strategy_family="independent",
+            ),
+            FillOutcomeRecord(
+                fill_id="fill_realized_alignment_short",
+                decision_id="decision_realized_alignment",
+                symbol="BTC-USDT-SWAP",
+                strategy_family="independent",
+            ),
+        ]
+        query._execution_quality_row = lambda outcome: {  # type: ignore[method-assign]
+            "decision_id": outcome.decision_id,
+            "fill_notional": Decimal("100") if outcome.fill_id.endswith("_long") else Decimal("900"),
+            "realized_pnl_delta": Decimal("5") if outcome.fill_id.endswith("_long") else Decimal("-45"),
+            "gross_realized_pnl": Decimal("4.5") if outcome.fill_id.endswith("_long") else Decimal("-40"),
+            "adverse_slippage_bps": Decimal("1.0") if outcome.fill_id.endswith("_long") else Decimal("9.0"),
+            "pos_side": "long" if outcome.fill_id.endswith("_long") else "short",
+            "position_intent": "open_long" if outcome.fill_id.endswith("_long") else "close_short",
+        }
+
+        summary = query._independent_expected_vs_realized_summary()
+
+        assert summary is not None
+        self.assertEqual(summary["expected_sample_count"], 1)
+        self.assertEqual(summary["realized_sample_count"], 1)
+        self.assertEqual(summary["overlap_sample_count"], 1)
+        self.assertAlmostEqual(summary["avg_realized_net_bps"], 500.0)
+        self.assertAlmostEqual(summary["avg_realized_slippage_bps"], 1.0)
+        self.assertAlmostEqual(summary["expected_realized_net_gap_bps"], 493.0)
+
+    def test_independent_realized_summary_prefers_execution_chain_id_over_decision_leg(self) -> None:
+        query = OperatorQueryService.__new__(OperatorQueryService)
+        query.runtime = SimpleNamespace(
+            settings=SimpleNamespace(
+                strategy_hedge_independent_emit_book_level_metrics=True,
+                strategy_hedge_independent_emit_expected_vs_realized_metrics=True,
+                strategy_hedge_independent_emit_close_reason_metrics=True,
+                strategy_hedge_independent_emit_execution_policy_metrics=True,
+            )
+        )
+        query._recent_independent_target_payloads = lambda **_: [  # type: ignore[method-assign]
+            {
+                "decision_id": "decision_chain_alignment",
+                "strategy_family": "independent",
+                "family_execution_summary": {
+                    "family": "independent",
+                    "diagnostic_metric_flags": {
+                        "emit_book_level_metrics": True,
+                        "emit_expected_vs_realized_metrics": True,
+                        "emit_close_reason_metrics": True,
+                        "emit_execution_policy_metrics": True,
+                    },
+                    "book_runtime_states": [
+                        {
+                            "leg": "long",
+                            "execution_chain_id": "independent:decision_chain_alignment:long:open",
+                            "book_action": "open",
+                            "close_reason": None,
+                        },
+                    ],
+                    "book_expectancy_summary": {
+                        "source": "independent_book",
+                        "books": [
+                            {
+                                "leg": "long",
+                                "expected_net_edge_bps": 7.0,
+                            },
+                        ],
+                    },
+                },
+            }
+        ]
+        query._scoped_fill_outcomes = lambda: [  # type: ignore[method-assign]
+            FillOutcomeRecord(
+                fill_id="fill_chain_match",
+                decision_id="decision_chain_alignment",
+                execution_chain_id="independent:decision_chain_alignment:long:open",
+                symbol="BTC-USDT-SWAP",
+                strategy_family="independent",
+            ),
+            FillOutcomeRecord(
+                fill_id="fill_chain_stray",
+                decision_id="decision_chain_alignment",
+                execution_chain_id="independent:decision_chain_alignment:long:scale_in",
+                symbol="BTC-USDT-SWAP",
+                strategy_family="independent",
+            ),
+        ]
+        query._execution_quality_row = lambda outcome: {  # type: ignore[method-assign]
+            "decision_id": outcome.decision_id,
+            "execution_chain_id": outcome.execution_chain_id,
+            "fill_notional": Decimal("100") if outcome.fill_id == "fill_chain_match" else Decimal("900"),
+            "realized_pnl_delta": Decimal("5") if outcome.fill_id == "fill_chain_match" else Decimal("-45"),
+            "gross_realized_pnl": Decimal("4.5") if outcome.fill_id == "fill_chain_match" else Decimal("-40"),
+            "adverse_slippage_bps": Decimal("1.0") if outcome.fill_id == "fill_chain_match" else Decimal("9.0"),
+            "pos_side": "long",
+            "position_intent": "open_long",
+        }
+
+        summary = query._independent_expected_vs_realized_summary()
+
+        assert summary is not None
+        self.assertEqual(summary["expected_sample_count"], 1)
+        self.assertEqual(summary["realized_sample_count"], 1)
+        self.assertEqual(summary["overlap_sample_count"], 1)
+        self.assertAlmostEqual(summary["avg_realized_net_bps"], 500.0)
+        self.assertAlmostEqual(summary["avg_realized_slippage_bps"], 1.0)
+        self.assertAlmostEqual(summary["expected_realized_net_gap_bps"], 493.0)
+
+    def test_independent_attempt_diagnostics_split_multi_attempt_chain_from_chain_level_evr(self) -> None:
+        query = OperatorQueryService.__new__(OperatorQueryService)
+        query.runtime = SimpleNamespace(
+            settings=SimpleNamespace(
+                strategy_hedge_independent_emit_book_level_metrics=True,
+                strategy_hedge_independent_emit_expected_vs_realized_metrics=True,
+                strategy_hedge_independent_emit_close_reason_metrics=True,
+                strategy_hedge_independent_emit_execution_policy_metrics=True,
+            )
+        )
+        query._recent_independent_target_payloads = lambda **_: [  # type: ignore[method-assign]
+            {
+                "decision_id": "decision_multi_attempt",
+                "strategy_family": "independent",
+                "family_execution_summary": {
+                    "family": "independent",
+                    "diagnostic_metric_flags": {
+                        "emit_book_level_metrics": True,
+                        "emit_expected_vs_realized_metrics": True,
+                        "emit_close_reason_metrics": True,
+                        "emit_execution_policy_metrics": True,
+                    },
+                    "book_runtime_states": [
+                        {
+                            "leg": "long",
+                            "execution_chain_id": "independent:decision_multi_attempt:long:open",
+                            "book_action": "open",
+                            "close_reason": None,
+                        },
+                    ],
+                    "book_expectancy_summary": {
+                        "source": "independent_book",
+                        "books": [
+                            {
+                                "leg": "long",
+                                "expected_net_edge_bps": 8.0,
+                            },
+                        ],
+                    },
+                },
+            }
+        ]
+        query._scoped_fill_outcomes = lambda: [  # type: ignore[method-assign]
+            FillOutcomeRecord(
+                fill_id="fill_attempt_one",
+                decision_id="decision_multi_attempt",
+                execution_chain_id="independent:decision_multi_attempt:long:open",
+                execution_attempt_id="execution_attempt:clord_attempt_one",
+                symbol="BTC-USDT-SWAP",
+                strategy_family="independent",
+            ),
+            FillOutcomeRecord(
+                fill_id="fill_attempt_two",
+                decision_id="decision_multi_attempt",
+                execution_chain_id="independent:decision_multi_attempt:long:open",
+                execution_attempt_id="execution_attempt:clord_attempt_two",
+                symbol="BTC-USDT-SWAP",
+                strategy_family="independent",
+            ),
+        ]
+        query._execution_quality_row = lambda outcome: {  # type: ignore[method-assign]
+            "decision_id": outcome.decision_id,
+            "execution_chain_id": outcome.execution_chain_id,
+            "execution_attempt_id": outcome.execution_attempt_id,
+            "client_order_id": (
+                "clord_attempt_one" if outcome.fill_id == "fill_attempt_one" else "clord_attempt_two"
+            ),
+            "fill_notional": Decimal("100"),
+            "realized_pnl_delta": Decimal("4") if outcome.fill_id == "fill_attempt_one" else Decimal("6"),
+            "gross_realized_pnl": Decimal("4.3") if outcome.fill_id == "fill_attempt_one" else Decimal("6.5"),
+            "adverse_slippage_bps": Decimal("1.0") if outcome.fill_id == "fill_attempt_one" else Decimal("2.0"),
+            "pos_side": "long",
+            "position_intent": "open_long",
+        }
+
+        summary = query._independent_expected_vs_realized_summary()
+
+        assert summary is not None
+        self.assertEqual(summary["expected_sample_count"], 1)
+        self.assertEqual(summary["realized_sample_count"], 1)
+        self.assertEqual(summary["overlap_sample_count"], 1)
+        self.assertIsNotNone(summary["attempt_diagnostics"])
+        diagnostics = summary["attempt_diagnostics"]
+        self.assertEqual(diagnostics["attempt_count"], 2)
+        self.assertEqual(diagnostics["matched_attempt_count"], 2)
+        self.assertEqual(diagnostics["unmatched_attempt_count"], 0)
+        self.assertEqual(diagnostics["filled_attempt_count"], 2)
+        self.assertEqual(diagnostics["multi_attempt_chain_count"], 1)
+        self.assertEqual(diagnostics["avg_attempts_per_chain"], 2.0)
+        self.assertAlmostEqual(diagnostics["avg_realized_net_bps_per_attempt"], 500.0)
+        self.assertAlmostEqual(diagnostics["avg_realized_slippage_bps_per_attempt"], 1.5)
+
+    def test_independent_attempt_diagnostics_include_unmatched_filled_attempts_in_attempt_averages(self) -> None:
+        query = OperatorQueryService.__new__(OperatorQueryService)
+        query.runtime = SimpleNamespace(
+            settings=SimpleNamespace(
+                strategy_hedge_independent_emit_book_level_metrics=True,
+                strategy_hedge_independent_emit_expected_vs_realized_metrics=True,
+                strategy_hedge_independent_emit_close_reason_metrics=True,
+                strategy_hedge_independent_emit_execution_policy_metrics=True,
+            )
+        )
+        query._recent_independent_target_payloads = lambda **_: [  # type: ignore[method-assign]
+            {
+                "decision_id": "decision_attempt_unmatched",
+                "strategy_family": "independent",
+                "family_execution_summary": {
+                    "family": "independent",
+                    "diagnostic_metric_flags": {
+                        "emit_book_level_metrics": True,
+                        "emit_expected_vs_realized_metrics": True,
+                        "emit_close_reason_metrics": True,
+                        "emit_execution_policy_metrics": True,
+                    },
+                    "book_runtime_states": [
+                        {
+                            "leg": "long",
+                            "execution_chain_id": "independent:decision_attempt_unmatched:long:open",
+                            "book_action": "open",
+                            "close_reason": None,
+                        },
+                    ],
+                    "book_expectancy_summary": {
+                        "source": "independent_book",
+                        "books": [
+                            {
+                                "leg": "long",
+                                "expected_net_edge_bps": 8.0,
+                            },
+                        ],
+                    },
+                },
+            }
+        ]
+        query._scoped_fill_outcomes = lambda: [  # type: ignore[method-assign]
+            FillOutcomeRecord(
+                fill_id="fill_attempt_match",
+                decision_id="decision_attempt_unmatched",
+                execution_chain_id="independent:decision_attempt_unmatched:long:open",
+                execution_attempt_id="execution_attempt:clord_attempt_match",
+                symbol="BTC-USDT-SWAP",
+                strategy_family="independent",
+            ),
+            FillOutcomeRecord(
+                fill_id="fill_attempt_stray",
+                decision_id="decision_attempt_unmatched",
+                execution_chain_id="independent:decision_attempt_unmatched:stray",
+                execution_attempt_id="execution_attempt:clord_attempt_stray",
+                symbol="BTC-USDT-SWAP",
+                strategy_family="independent",
+            ),
+        ]
+        query._execution_quality_row = lambda outcome: {  # type: ignore[method-assign]
+            "decision_id": outcome.decision_id,
+            "execution_chain_id": outcome.execution_chain_id,
+            "execution_attempt_id": outcome.execution_attempt_id,
+            "client_order_id": (
+                "clord_attempt_match" if outcome.fill_id == "fill_attempt_match" else "clord_attempt_stray"
+            ),
+            "fill_notional": Decimal("100"),
+            "realized_pnl_delta": Decimal("4") if outcome.fill_id == "fill_attempt_match" else Decimal("-2"),
+            "gross_realized_pnl": Decimal("4.5") if outcome.fill_id == "fill_attempt_match" else Decimal("-1.5"),
+            "adverse_slippage_bps": Decimal("1.0") if outcome.fill_id == "fill_attempt_match" else Decimal("3.0"),
+            "pos_side": "long",
+            "position_intent": "open_long",
+        }
+
+        summary = query._independent_expected_vs_realized_summary()
+
+        assert summary is not None
+        self.assertIsNotNone(summary["attempt_diagnostics"])
+        diagnostics = summary["attempt_diagnostics"]
+        self.assertEqual(diagnostics["attempt_count"], 2)
+        self.assertEqual(diagnostics["matched_attempt_count"], 1)
+        self.assertEqual(diagnostics["unmatched_attempt_count"], 1)
+        self.assertEqual(diagnostics["filled_attempt_count"], 2)
+        self.assertAlmostEqual(diagnostics["avg_realized_net_bps_per_attempt"], 100.0)
+        self.assertAlmostEqual(diagnostics["avg_realized_slippage_bps_per_attempt"], 2.0)
 
     def test_ai_decision_audit_prefers_native_outcome_over_target_fields(self) -> None:
         query = OperatorQueryService.__new__(OperatorQueryService)
@@ -183,6 +916,22 @@ class TestOperatorPositionStates(unittest.TestCase):
                     "directions": ["long", "short"],
                     "leg_actions": ["open"],
                     "execution_modes": ["independent_long_book", "independent_short_book"],
+                    "book_runtime_states": [
+                        {
+                            "leg": "long",
+                            "current_qty": "0",
+                            "target_qty": "0.01",
+                            "state": "opening",
+                            "book_action": "open",
+                        },
+                        {
+                            "leg": "short",
+                            "current_qty": "0.01",
+                            "target_qty": "0",
+                            "state": "holding",
+                            "book_action": "hold",
+                        },
+                    ],
                     "book_expectancy_summary": {
                         "source": "independent_book",
                         "books": [
@@ -222,6 +971,22 @@ class TestOperatorPositionStates(unittest.TestCase):
                     "directions": ["long", "short"],
                     "leg_actions": ["open"],
                     "execution_modes": ["independent_long_book", "independent_short_book"],
+                    "book_runtime_states": [
+                        {
+                            "leg": "long",
+                            "current_qty": "0",
+                            "target_qty": "0.01",
+                            "state": "opening",
+                            "book_action": "open",
+                        },
+                        {
+                            "leg": "short",
+                            "current_qty": "0.01",
+                            "target_qty": "0",
+                            "state": "holding",
+                            "book_action": "hold",
+                        },
+                    ],
                     "book_expectancy_summary": {
                         "source": "independent_book",
                         "books": [
@@ -259,6 +1024,7 @@ class TestOperatorPositionStates(unittest.TestCase):
             -2.0,
         )
         self.assertEqual(audit["book_expectancy_summary"]["books"][1]["expected_net_edge_bps"], -2.0)
+        self.assertEqual([item["leg"] for item in audit["book_runtime_states"]], ["long", "short"])
 
     def test_position_target_payload_backfills_top_level_book_expectancy_summary(self) -> None:
         query = OperatorQueryService.__new__(OperatorQueryService)
@@ -269,6 +1035,19 @@ class TestOperatorPositionStates(unittest.TestCase):
                 "family_execution_summary": {
                     "summary_mode": "multi_leg",
                     "family": "independent",
+                    "parent_target_signal": "flat",
+                    "parent_current_signal": "long",
+                    "parent_effective_signal": "long",
+                    "signal_source": "inventory",
+                    "book_runtime_states": [
+                        {
+                            "leg": "long",
+                            "current_qty": "0.01",
+                            "target_qty": "0.01",
+                            "state": "holding",
+                            "book_action": "hold",
+                        }
+                    ],
                     "book_expectancy_summary": {
                         "source": "independent_book",
                         "books": [
@@ -289,6 +1068,42 @@ class TestOperatorPositionStates(unittest.TestCase):
         assert payload is not None
         self.assertEqual(payload["book_expectancy_summary"]["source"], "independent_book")
         self.assertEqual(payload["book_expectancy_summary"]["books"][0]["expected_net_edge_bps"], 12.0)
+        self.assertEqual([item["leg"] for item in payload["book_runtime_states"]], ["long"])
+        self.assertEqual(payload["parent_target_signal"], "flat")
+        self.assertEqual(payload["parent_current_signal"], "long")
+        self.assertEqual(payload["parent_effective_signal"], "long")
+        self.assertEqual(payload["signal_source"], "inventory")
+
+    def test_overlay_audit_summary_exposes_parent_exposure_signals(self) -> None:
+        query = OperatorQueryService.__new__(OperatorQueryService)
+
+        audit = query._overlay_audit_summary(
+            position_target={
+                "hedge_overlay_decision": {
+                    "configured_mode": "protective",
+                    "effective_mode": "protective",
+                    "overlay_source": "protective",
+                    "active": True,
+                    "state": "holding",
+                    "main_leg_signal": "long",
+                    "hedge_leg_signal": "short",
+                    "parent_target_signal": "flat",
+                    "parent_current_signal": "long",
+                    "parent_effective_signal": "long",
+                    "signal_source": "inventory",
+                    "close_reason": "failed_thesis",
+                    "long_leg_close_reason": "failed_thesis",
+                },
+                "strategy_execution_legs": [],
+            }
+        )
+
+        self.assertEqual(audit["parent_target_signal"], "flat")
+        self.assertEqual(audit["parent_current_signal"], "long")
+        self.assertEqual(audit["parent_effective_signal"], "long")
+        self.assertEqual(audit["signal_source"], "inventory")
+        self.assertEqual(audit["close_reason"], "failed_thesis")
+        self.assertEqual(audit["long_leg_close_reason"], "failed_thesis")
 
     def test_ai_economic_actionability_prefers_single_book_expectancy_summary_over_directional_target_edge(self) -> None:
         query = OperatorQueryService.__new__(OperatorQueryService)
@@ -328,6 +1143,21 @@ class TestOperatorPositionStates(unittest.TestCase):
                             "expected_slippage_bps": 1.0,
                             "expected_cost_bps": 4.0,
                             "expected_net_edge_bps": 4.0,
+                            "required_safe_net_edge_bps": 6.0,
+                            "max_acceptable_cost_bps": 7.5,
+                            "weak_edge_execution_mode": "report_only",
+                            "weak_edge_report_only": True,
+                            "passive_first_required": True,
+                            "book_action": "open",
+                            "policy_reason": "independent_weak_edge_passive_first_required",
+                            "execution_policy_urgency": "low",
+                            "execution_style_preference": "bounded_limit_ioc",
+                            "order_type_preference": "limit",
+                            "time_in_force_preference": "IOC",
+                            "limit_offset_bps_preference": 1.0,
+                            "liquidity_quality_score": 0.72,
+                            "execution_health_state": "ok",
+                            "edge_strength": "weak",
                         }
                     ],
                 },
@@ -340,6 +1170,15 @@ class TestOperatorPositionStates(unittest.TestCase):
         self.assertEqual(payload["target_expected_signal_edge_bps"], 8.0)
         self.assertEqual(payload["target_expected_cost_bps"], 4.0)
         self.assertEqual(payload["target_expected_net_edge_bps"], 4.0)
+        self.assertEqual(payload["target_required_safe_net_edge_bps"], 6.0)
+        self.assertEqual(payload["target_max_acceptable_cost_bps"], 7.5)
+        self.assertEqual(payload["target_weak_edge_execution_mode"], "report_only")
+        self.assertTrue(payload["target_weak_edge_report_only"])
+        self.assertTrue(payload["target_passive_first_required"])
+        self.assertEqual(payload["target_book_action"], "open")
+        self.assertEqual(payload["target_policy_reason"], "independent_weak_edge_passive_first_required")
+        self.assertEqual(payload["target_execution_policy_urgency"], "low")
+        self.assertEqual(payload["target_execution_style_preference"], "bounded_limit_ioc")
 
     def test_aggregate_local_positions_exposes_dual_leg_state(self) -> None:
         snapshot = PortfolioSnapshot(

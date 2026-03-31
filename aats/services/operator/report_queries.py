@@ -100,6 +100,25 @@ class ReportQueryFacade:
             "summary": self.owner._execution_quality_summary(rows),
         }
 
+    def execution_attempt_report(self, *, limit: int = 50, offset: int = 0) -> dict[str, Any]:
+        source_rows = (
+            self.owner._phase5_fill_rows(limit=None)
+            if self.owner._phase5_control_plane_enabled()
+            else list(reversed(self.owner._scoped_fills()))
+        )
+        rows = [self.owner._execution_quality_row(fill) for fill in source_rows]
+        attempt_rows = self.owner._execution_attempt_rows(rows)
+        paged = attempt_rows[offset : offset + limit]
+        return {
+            "rows": paged,
+            "limit": limit,
+            "offset": offset,
+            "total_available": len(attempt_rows),
+            "has_more": offset + len(paged) < len(attempt_rows),
+            "truth_source": "execution_fill_repo_v2" if self.owner._phase5_control_plane_enabled() else "execution_repo",
+            "summary": self.owner._execution_attempt_summary(rows),
+        }
+
     def forward_validation_report(self, *, window_days: int = 7, period_count: int = 4) -> dict[str, Any]:
         normalized_window_days = max(int(window_days), 1)
         normalized_period_count = max(int(period_count), 1)

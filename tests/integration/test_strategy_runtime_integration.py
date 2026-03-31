@@ -14,10 +14,11 @@ from aats.bootstrap.managed_profiles import load_managed_profile_values
 from aats.bootstrap.settings import AATSSettings
 from aats.events import topics
 from aats.events.envelopes import build_envelope, publish_model
-from aats.schemas.decision import HedgeOverlayDecision, PositionTarget
+from aats.schemas.audit import DecisionAuditRecord
+from aats.schemas.decision import DecisionContext, DecisionOutcome, HedgeOverlayDecision, PositionTarget
 from aats.schemas.features import FeatureSnapshot
 from aats.schemas.market import MarketSnapshot
-from aats.schemas.portfolio import PortfolioSnapshot
+from aats.schemas.portfolio import FillOutcomeRecord, PortfolioSnapshot
 from aats.schemas.strategy_runtime import StrategyExecutionBundle, StrategyLegIntent
 
 
@@ -833,6 +834,14 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(settings.strategy_hedge_independent_weak_edge_execution_mode, "report_only")
         self.assertEqual(settings.strategy_hedge_independent_max_acceptable_cost_bps, 7.5)
         self.assertTrue(settings.strategy_hedge_independent_passive_first_enabled)
+        self.assertEqual(settings.strategy_hedge_independent_entry_execution_mode, "passive_first")
+        self.assertEqual(settings.strategy_hedge_independent_scale_in_execution_mode, "bounded_limit")
+        self.assertEqual(settings.strategy_hedge_independent_de_risk_execution_mode, "bounded_taker")
+        self.assertEqual(settings.strategy_hedge_independent_close_failed_thesis_execution_mode, "aggressive_bounded_taker")
+        self.assertEqual(settings.strategy_hedge_independent_close_stale_execution_mode, "bounded_limit")
+        self.assertEqual(settings.strategy_hedge_independent_limit_offset_bps_entry, 1.5)
+        self.assertEqual(settings.strategy_hedge_independent_limit_offset_bps_scale_in, 1.0)
+        self.assertEqual(settings.strategy_hedge_independent_limit_offset_bps_stale_close, 0.8)
         self.assertEqual(target.strategy_family, "independent")
 
     async def test_derivatives_independent_overlay_runtime_exposes_leg_scoped_thresholds_and_books(self) -> None:
@@ -856,12 +865,29 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
             strategy_hedge_independent_short_min_hold_seconds=420.0,
             strategy_hedge_independent_rebalance_cooldown_seconds=120.0,
             strategy_hedge_independent_trial_guard_enabled=True,
+            strategy_hedge_independent_min_confirm_ticks=2,
+            strategy_hedge_independent_min_score_stability_bps=2.0,
+            strategy_hedge_independent_min_liquidity_quality=0.55,
+            strategy_hedge_independent_require_execution_health_ok=True,
+            strategy_hedge_independent_max_thesis_age_seconds=1800,
+            strategy_hedge_independent_de_risk_net_edge_bps=2.0,
+            strategy_hedge_independent_failed_thesis_net_edge_bps=-1.0,
+            strategy_hedge_independent_execution_health_de_risk_enabled=True,
+            strategy_hedge_independent_liquidity_de_risk_enabled=True,
             strategy_hedge_independent_min_safe_net_edge_bps=3.0,
             strategy_hedge_independent_expected_slippage_buffer_bps=1.0,
             strategy_hedge_independent_expected_execution_buffer_bps=2.0,
             strategy_hedge_independent_weak_edge_execution_mode="report_only",
             strategy_hedge_independent_max_acceptable_cost_bps=7.5,
             strategy_hedge_independent_passive_first_enabled=True,
+            strategy_hedge_independent_entry_execution_mode="passive_first",
+            strategy_hedge_independent_scale_in_execution_mode="bounded_limit",
+            strategy_hedge_independent_de_risk_execution_mode="bounded_taker",
+            strategy_hedge_independent_close_failed_thesis_execution_mode="aggressive_bounded_taker",
+            strategy_hedge_independent_close_stale_execution_mode="bounded_limit",
+            strategy_hedge_independent_limit_offset_bps_entry=1.5,
+            strategy_hedge_independent_limit_offset_bps_scale_in=1.0,
+            strategy_hedge_independent_limit_offset_bps_stale_close=0.8,
         )
         runtime = await build_runtime(settings)
         runtime.event_store.append(
@@ -1022,11 +1048,28 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(directional["hedge_independent_short_scale_in_threshold"], 0.68)
         self.assertEqual(directional["hedge_independent_short_min_hold_seconds"], 420.0)
         self.assertEqual(directional["hedge_independent_min_safe_net_edge_bps"], 3.0)
+        self.assertEqual(directional["hedge_independent_min_confirm_ticks"], 2)
+        self.assertEqual(directional["hedge_independent_min_score_stability_bps"], 2.0)
+        self.assertEqual(directional["hedge_independent_min_liquidity_quality"], 0.55)
+        self.assertTrue(directional["hedge_independent_require_execution_health_ok"])
+        self.assertEqual(directional["hedge_independent_max_thesis_age_seconds"], 1800)
+        self.assertEqual(directional["hedge_independent_de_risk_net_edge_bps"], 2.0)
+        self.assertEqual(directional["hedge_independent_failed_thesis_net_edge_bps"], -1.0)
+        self.assertTrue(directional["hedge_independent_execution_health_de_risk_enabled"])
+        self.assertTrue(directional["hedge_independent_liquidity_de_risk_enabled"])
         self.assertEqual(directional["hedge_independent_expected_slippage_buffer_bps"], 1.0)
         self.assertEqual(directional["hedge_independent_expected_execution_buffer_bps"], 2.0)
         self.assertEqual(directional["hedge_independent_weak_edge_execution_mode"], "report_only")
         self.assertEqual(directional["hedge_independent_max_acceptable_cost_bps"], 7.5)
         self.assertTrue(directional["hedge_independent_passive_first_enabled"])
+        self.assertEqual(directional["hedge_independent_entry_execution_mode"], "passive_first")
+        self.assertEqual(directional["hedge_independent_scale_in_execution_mode"], "bounded_limit")
+        self.assertEqual(directional["hedge_independent_de_risk_execution_mode"], "bounded_taker")
+        self.assertEqual(directional["hedge_independent_close_failed_thesis_execution_mode"], "aggressive_bounded_taker")
+        self.assertEqual(directional["hedge_independent_close_stale_execution_mode"], "bounded_limit")
+        self.assertEqual(directional["hedge_independent_limit_offset_bps_entry"], 1.5)
+        self.assertEqual(directional["hedge_independent_limit_offset_bps_scale_in"], 1.0)
+        self.assertEqual(directional["hedge_independent_limit_offset_bps_stale_close"], 0.8)
         applied_target = payload["latest_applied_target"]
         self.assertEqual(applied_target["hedge_overlay_decision"]["effective_mode"], "independent")
         self.assertEqual(applied_target["hedge_overlay_decision"]["overlay_source"], "independent_books")
@@ -1483,6 +1526,285 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [item["leg"] for item in candidate["book_expectancy_summary"]["books"]],
             ["long", "short"],
+        )
+        self.assertEqual(
+            candidate["book_expectancy_summary"]["books"][0]["policy_reason"],
+            candidate["metrics"].get("long_execution_policy_reason"),
+        )
+        self.assertEqual(
+            candidate["book_expectancy_summary"]["books"][0]["execution_policy_urgency"],
+            candidate["metrics"].get("long_execution_policy_urgency"),
+        )
+        self.assertEqual(
+            [item["leg"] for item in candidate["book_runtime_states"]],
+            ["long", "short"],
+        )
+        self.assertEqual(
+            candidate["book_runtime_states"][0]["book_action"],
+            candidate["metrics"].get("long_book_action"),
+        )
+        for state in candidate["book_runtime_states"]:
+            if state["book_action"] in {"inactive", "hold", "blocked"}:
+                self.assertIsNone(state["execution_chain_id"])
+            else:
+                self.assertTrue(state["execution_chain_id"])
+
+    async def test_independent_runtime_exposes_expected_vs_realized_diagnostics_summary(self) -> None:
+        settings = self._settings(
+            trading_product_type="derivatives",
+            margin_mode="cross",
+            default_symbol="BTC-USDT-SWAP",
+            allowed_symbols=("BTC-USDT-SWAP",),
+        )
+        runtime = await build_runtime(settings)
+        now = datetime.now(timezone.utc)
+        decision_id = "decision_independent_expected_vs_realized_runtime"
+        decision_context = DecisionContext(
+            decision_id=decision_id,
+            symbol="BTC-USDT-SWAP",
+            timeframe="15m",
+            as_of_ts=now,
+            market_snapshot_ref="evt_market_snapshot_independent_runtime_diagnostics",
+            feature_snapshot_ref="evt_feature_snapshot_independent_runtime_diagnostics",
+            portfolio_snapshot_ref="evt_portfolio_snapshot_independent_runtime_diagnostics",
+            health_snapshot_ref="evt_health_snapshot_independent_runtime_diagnostics",
+            mode="paper_live",
+            current_position_qty=Decimal("0.01"),
+            product_type="derivatives",
+            margin_mode="cross",
+            current_exposure_side="flat",
+        )
+        family_execution_summary = {
+            "summary_mode": "multi_leg",
+            "family": "independent",
+            "route_action": "override_target",
+            "family_action": "rebalance_independent_books",
+            "leg_count": 2,
+            "position_intents": ["open_long", "close_short"],
+            "directions": ["long", "short"],
+            "leg_actions": ["open", "close"],
+            "execution_modes": ["independent_long_book", "independent_short_book"],
+            "book_runtime_states": [
+                {
+                    "leg": "long",
+                    "current_qty": "0",
+                    "target_qty": "0.01",
+                    "state": "opening",
+                    "book_action": "open",
+                    "policy_reason": "independent_entry_strong_edge_aggressive",
+                },
+                {
+                    "leg": "short",
+                    "current_qty": "0.01",
+                    "target_qty": "0",
+                    "state": "closing",
+                    "book_action": "close_stale_thesis",
+                    "close_reason": "stale_thesis",
+                    "policy_reason": "independent_stale_thesis_passive_exit",
+                },
+            ],
+            "book_expectancy_summary": {
+                "source": "independent_book",
+                "books": [
+                    {
+                        "leg": "long",
+                        "expected_gross_edge_bps": 12.0,
+                        "expected_signal_edge_bps": 12.0,
+                        "expected_slippage_bps": 1.0,
+                        "expected_cost_bps": 4.0,
+                        "expected_net_edge_bps": 8.0,
+                        "passive_first_required": True,
+                        "weak_edge_report_only": False,
+                    },
+                    {
+                        "leg": "short",
+                        "expected_gross_edge_bps": 3.0,
+                        "expected_signal_edge_bps": 3.0,
+                        "expected_slippage_bps": 1.0,
+                        "expected_cost_bps": 2.0,
+                        "expected_net_edge_bps": 1.0,
+                        "close_reason": "stale_thesis",
+                    },
+                ],
+            },
+        }
+        decision_outcome = DecisionOutcome(
+            decision_id=decision_id,
+            symbol="BTC-USDT-SWAP",
+            decision_source="baseline",
+            decision_authority="reference_only",
+            finalized=True,
+            final_direction="flat",
+            final_action="exit",
+            final_target_qty=Decimal("0"),
+            selected_strategy_family="independent",
+            selected_strategy_family_action="rebalance_independent_books",
+            selected_strategy_route_action="override_target",
+            family_execution_summary=family_execution_summary,
+        )
+        position_target = PositionTarget(
+            decision_id=decision_id,
+            symbol="BTC-USDT-SWAP",
+            current_position_qty=Decimal("0.01"),
+            target_position_qty=Decimal("0.01"),
+            delta_position_qty=Decimal("0"),
+            current_notional=Decimal("100"),
+            target_notional=Decimal("100"),
+            rebalance_reason="independent_expected_vs_realized_runtime_surface",
+            urgency="medium",
+            max_slippage_tolerance_bps=25,
+            source_mix={"independent": 1.0},
+            decision_expiry_ts=now + timedelta(minutes=5),
+            product_type="derivatives",
+            current_exposure_side="flat",
+            target_exposure_side="flat",
+            position_intent="hold",
+            target_leverage=2.0,
+            margin_mode="cross",
+            strategy_family="independent",
+            strategy_family_action="rebalance_independent_books",
+            strategy_route_action="override_target",
+            family_execution_summary=family_execution_summary,
+            decision_outcome=decision_outcome,
+        )
+        context_event = build_envelope(
+            topic=topics.DECISION_CONTEXTS,
+            key="BTC-USDT-SWAP",
+            payload_model=decision_context,
+            source_component="test",
+        )
+        target_event = build_envelope(
+            topic=topics.POSITION_TARGETS,
+            key="BTC-USDT-SWAP",
+            payload_model=position_target,
+            source_component="test",
+        )
+        runtime.event_store.append(context_event)
+        runtime.event_store.append(target_event)
+        runtime.audit_repo.upsert(
+            DecisionAuditRecord(
+                decision_id=decision_id,
+                decision_context_ref=context_event.event_id,
+                position_target_ref=target_event.event_id,
+            )
+        )
+        runtime.fill_outcome_repo.save_outcome(
+            FillOutcomeRecord(
+                fill_id="fill_independent_runtime_long",
+                decision_id=decision_id,
+                order_id="order_independent_runtime_long",
+                symbol="BTC-USDT-SWAP",
+                venue="PAPER",
+                side="buy",
+                fill_qty=Decimal("1"),
+                fill_price=Decimal("100"),
+                fill_notional=Decimal("100"),
+                fee_amount=Decimal("0.10"),
+                fee_currency="USDT",
+                liquidity_role="maker",
+                exchange_timestamp=now,
+                ingestion_timestamp=now,
+                order_status_after_fill="FILLED",
+                strategy_family="independent",
+                strategy_sleeve_id="sleeve_independent",
+                allocation_id="alloc_independent",
+                strategy_bundle_id="bundle_independent",
+                strategy_leg_role="primary",
+                target_leverage=2.0,
+                exposure_side="long",
+                execution_action="open_long",
+                position_intent="open_long",
+                position_mode="long_short_mode",
+                pos_side="long",
+                instrument_family="BTC-USDT",
+                settle_currency="USDT",
+                starting_position_qty=Decimal("0"),
+                ending_position_qty=Decimal("1"),
+                realized_pnl_delta=Decimal("1.90"),
+                fee_delta=Decimal("-0.10"),
+                product_type="derivatives",
+                margin_mode="cross",
+                created_at=now,
+            )
+        )
+        runtime.fill_outcome_repo.save_outcome(
+            FillOutcomeRecord(
+                fill_id="fill_independent_runtime_short",
+                decision_id=decision_id,
+                order_id="order_independent_runtime_short",
+                symbol="BTC-USDT-SWAP",
+                venue="PAPER",
+                side="buy",
+                fill_qty=Decimal("1"),
+                fill_price=Decimal("100"),
+                fill_notional=Decimal("100"),
+                fee_amount=Decimal("0.05"),
+                fee_currency="USDT",
+                liquidity_role="taker",
+                exchange_timestamp=now + timedelta(seconds=5),
+                ingestion_timestamp=now + timedelta(seconds=5),
+                order_status_after_fill="FILLED",
+                strategy_family="independent",
+                strategy_sleeve_id="sleeve_independent",
+                allocation_id="alloc_independent",
+                strategy_bundle_id="bundle_independent",
+                strategy_leg_role="hedge",
+                target_leverage=2.0,
+                exposure_side="short",
+                execution_action="close_short",
+                position_intent="close_short",
+                position_mode="long_short_mode",
+                pos_side="short",
+                instrument_family="BTC-USDT",
+                settle_currency="USDT",
+                starting_position_qty=Decimal("1"),
+                ending_position_qty=Decimal("0"),
+                realized_pnl_delta=Decimal("0.45"),
+                fee_delta=Decimal("-0.05"),
+                product_type="derivatives",
+                margin_mode="cross",
+                created_at=now + timedelta(seconds=5),
+            )
+        )
+
+        app = self._app(runtime)
+        with TestClient(app) as client:
+            strategy_runtime = client.get("/strategy/runtime")
+
+        self.assertEqual(strategy_runtime.status_code, 200)
+        payload = strategy_runtime.json()
+        directional = payload["configured_parameters"]["directional"]
+        self.assertTrue(directional["hedge_independent_emit_book_level_metrics"])
+        self.assertTrue(directional["hedge_independent_emit_expected_vs_realized_metrics"])
+        self.assertTrue(directional["hedge_independent_emit_close_reason_metrics"])
+        self.assertTrue(directional["hedge_independent_emit_execution_policy_metrics"])
+        diagnostics = payload["independent_expected_vs_realized_summary"]
+        self.assertIsNotNone(diagnostics)
+        self.assertEqual(diagnostics["family"], "independent")
+        self.assertEqual(diagnostics["sample_count"], 2)
+        self.assertEqual(diagnostics["entry_count"], 1)
+        self.assertEqual(diagnostics["close_count"], 1)
+        self.assertEqual(diagnostics["weak_edge_entry_count"], 0)
+        self.assertEqual(diagnostics["close_reason_distribution"][0]["reason"], "stale_thesis")
+        self.assertEqual(len(diagnostics["book_breakdown"]), 2)
+        self.assertIsNotNone(diagnostics["attempt_diagnostics"])
+        self.assertIn("attempt_count", diagnostics["attempt_diagnostics"])
+        self.assertEqual(diagnostics["book_breakdown"][0]["leg"], "long")
+        self.assertIsNotNone(diagnostics["avg_expected_net_edge_bps"])
+        self.assertIsNotNone(diagnostics["avg_realized_net_bps"])
+        self.assertIsNotNone(diagnostics["passive_first_usage_ratio"])
+        self.assertEqual(payload["summary"]["latest_independent_expected_vs_realized_sample_count"], 2)
+        self.assertIsNotNone(payload["summary"]["latest_independent_expected_vs_realized_net_bps"])
+        self.assertIsNotNone(payload["latest_applied_target"]["independent_expected_vs_realized_summary"])
+        self.assertEqual(payload["latest_applied_target"]["book_expectancy_summary"]["source"], "independent_book")
+        self.assertEqual(
+            [item["leg"] for item in payload["latest_applied_target"]["book_runtime_states"]],
+            ["long", "short"],
+        )
+        self.assertTrue(payload["latest_applied_target"]["diagnostic_metric_flags"]["emit_expected_vs_realized_metrics"])
+        self.assertEqual(
+            payload["latest_applied_target"]["independent_expected_vs_realized_summary"]["close_reason_distribution"][0]["reason"],
+            "stale_thesis",
         )
 
     @staticmethod

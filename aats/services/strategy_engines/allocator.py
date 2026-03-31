@@ -373,6 +373,12 @@ class PortfolioAllocatorV2Phase2:
             return "当前 allocator v2 已批准收回保护腿的账户级执行目标。"
         if family_action == "close_opportunity_leg":
             return "当前 allocator v2 已批准收回机会腿的账户级执行目标。"
+        if family_action == "de_risk_independent_book":
+            return "当前 allocator v2 已批准降低独立双书风险暴露的账户级执行目标。"
+        if family_action == "close_failed_thesis_independent_book":
+            return "当前 allocator v2 已批准按 thesis 失效关闭独立双书的账户级执行目标。"
+        if family_action == "close_stale_thesis_independent_book":
+            return "当前 allocator v2 已批准按 thesis 过期关闭独立双书的账户级执行目标。"
         return "当前 allocator v2 已按 sleeve 预算、组合预算和净额规则生成账户级执行目标。"
 
     def _apply_budget_assignment(

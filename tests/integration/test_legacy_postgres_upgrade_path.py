@@ -130,9 +130,23 @@ class TestLegacyPostgresUpgradePath(unittest.IsolatedAsyncioTestCase):
             second_applied = self._apply_current_migrations(runtime)
             versions = applied_migrations(runtime)
 
-            self.assertEqual(first_applied, ["0001_postgres_latest_schema.sql", "0002_postgres_legacy_upgrade.sql"])
+            self.assertEqual(
+                first_applied,
+                [
+                    "0001_postgres_latest_schema.sql",
+                    "0002_postgres_legacy_upgrade.sql",
+                    "0003_postgres_execution_attempt_id_columns.sql",
+                ],
+            )
             self.assertEqual(second_applied, [])
-            self.assertEqual(versions, ["0001_postgres_latest_schema.sql", "0002_postgres_legacy_upgrade.sql"])
+            self.assertEqual(
+                versions,
+                [
+                    "0001_postgres_latest_schema.sql",
+                    "0002_postgres_legacy_upgrade.sql",
+                    "0003_postgres_execution_attempt_id_columns.sql",
+                ],
+            )
         finally:
             runtime.dispose()
             self._drop_schema(admin_engine, schema_name)
@@ -196,16 +210,30 @@ class TestLegacyPostgresUpgradePath(unittest.IsolatedAsyncioTestCase):
                 columns = connection.execute(
                     text(
                         """
-                        SELECT column_name
+                        SELECT table_name, column_name
                         FROM information_schema.columns
                         WHERE table_schema = current_schema()
-                          AND table_name = 'fill_events'
-                          AND column_name IN ('strategy_family', 'strategy_sleeve_id', 'allocation_id')
-                        ORDER BY column_name
+                          AND (
+                                (table_name = 'fill_events' AND column_name IN ('strategy_family', 'strategy_sleeve_id', 'allocation_id'))
+                             OR (table_name = 'execution_orders' AND column_name = 'execution_attempt_id')
+                             OR (table_name = 'execution_fills' AND column_name = 'execution_attempt_id')
+                             OR (table_name = 'fill_outcomes' AND column_name = 'execution_attempt_id')
+                          )
+                        ORDER BY table_name, column_name
                         """
                     )
-                ).scalars().all()
-            self.assertEqual(columns, ["allocation_id", "strategy_family", "strategy_sleeve_id"])
+                ).mappings().all()
+            self.assertEqual(
+                [(row["table_name"], row["column_name"]) for row in columns],
+                [
+                    ("execution_fills", "execution_attempt_id"),
+                    ("execution_orders", "execution_attempt_id"),
+                    ("fill_events", "allocation_id"),
+                    ("fill_events", "strategy_family"),
+                    ("fill_events", "strategy_sleeve_id"),
+                    ("fill_outcomes", "execution_attempt_id"),
+                ],
+            )
         finally:
             if app_runtime is not None and app_runtime.database_runtime is not None:
                 app_runtime.database_runtime.dispose()

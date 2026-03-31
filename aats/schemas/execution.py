@@ -211,6 +211,28 @@ def position_intent_from_leg_intent(
     return mapping[normalized_action]  # type: ignore[return-value]
 
 
+def execution_attempt_id_from_components(
+    *,
+    execution_attempt_id: str | None = None,
+    client_order_id: str | None = None,
+    execution_chain_id: str | None = None,
+    intent_id: str | None = None,
+) -> str | None:
+    normalized_attempt_id = str(execution_attempt_id or "").strip()
+    if normalized_attempt_id:
+        return normalized_attempt_id
+    normalized_client_order_id = str(client_order_id or "").strip()
+    if normalized_client_order_id:
+        return f"execution_attempt:{normalized_client_order_id}"
+    normalized_chain_id = str(execution_chain_id or "").strip()
+    if normalized_chain_id:
+        return f"execution_attempt:{normalized_chain_id}"
+    normalized_intent_id = str(intent_id or "").strip()
+    if normalized_intent_id:
+        return f"execution_attempt:{normalized_intent_id}"
+    return None
+
+
 class ExecutionParameterSuggestion(SchemaBase):
     passive_bias: Decimal | None = None
     maker_taker_bias: Decimal | None = None
@@ -250,6 +272,8 @@ class AIExecutionParameterSuggestionEnvelope(SchemaBase):
 
 class OrderIntent(SchemaBase):
     intent_id: str
+    execution_chain_id: str | None = None
+    execution_attempt_id: str | None = None
     leg_intent_id: str | None = None
     decision_id: str
     symbol: str
@@ -314,6 +338,8 @@ class OrderIntent(SchemaBase):
 
 class LegOrderIntent(SchemaBase):
     leg_intent_id: str
+    execution_chain_id: str | None = None
+    execution_attempt_id: str | None = None
     decision_id: str
     symbol: str
     side: Literal["buy", "sell"]
@@ -376,6 +402,8 @@ class LegOrderIntent(SchemaBase):
 
 class ExecutionPlan(SchemaBase):
     plan_id: str
+    execution_chain_id: str | None = None
+    execution_attempt_id: str | None = None
     decision_id: str
     symbol: str
     current_position_qty: Decimal
@@ -441,6 +469,8 @@ class ExecutionPlan(SchemaBase):
 
 class LegExecutionPlan(SchemaBase):
     plan_id: str
+    execution_chain_id: str | None = None
+    execution_attempt_id: str | None = None
     leg_intent_id: str
     decision_id: str
     symbol: str
@@ -502,6 +532,8 @@ class LegExecutionPlan(SchemaBase):
 
 class OrderState(SchemaBase):
     decision_id: str
+    execution_chain_id: str | None = None
+    execution_attempt_id: str | None = None
     intent_id: str
     leg_intent_id: str | None = None
     symbol: str
@@ -566,6 +598,8 @@ class OrderState(SchemaBase):
 class FillEvent(SchemaBase):
     fill_id: str
     decision_id: str
+    execution_chain_id: str | None = None
+    execution_attempt_id: str | None = None
     intent_id: str
     leg_intent_id: str | None = None
     client_order_id: str
@@ -656,6 +690,8 @@ def leg_intent_from_order_intent(intent: OrderIntent) -> LegOrderIntent | None:
         return None
     return LegOrderIntent(
         leg_intent_id=intent.leg_intent_id or intent.intent_id,
+        execution_chain_id=intent.execution_chain_id or intent.leg_intent_id or intent.intent_id,
+        execution_attempt_id=intent.execution_attempt_id,
         decision_id=intent.decision_id,
         symbol=intent.symbol,
         side=intent.side,
@@ -717,6 +753,8 @@ def order_intent_from_leg_order_intent(leg_intent: LegOrderIntent) -> OrderInten
     close_only = bool(leg_intent.close_only or close_only_from_leg_action(leg_intent.action))
     return OrderIntent(
         intent_id=leg_intent.leg_intent_id,
+        execution_chain_id=leg_intent.execution_chain_id or leg_intent.leg_intent_id,
+        execution_attempt_id=leg_intent.execution_attempt_id,
         leg_intent_id=leg_intent.leg_intent_id,
         decision_id=leg_intent.decision_id,
         symbol=leg_intent.symbol,

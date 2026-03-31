@@ -17,10 +17,11 @@ from aats.schemas.strategy_runtime import (
 from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, to_decimal
 from aats.services.strategy_engines.base import StrategyEvaluationContext, StrategyFamilyRuntimeControl
 from aats.services.strategy_engines.families.protective_family import (
+    OverlayParentExposureContract,
     _candidate_state_from_overlay_state,
     _overlay_route_action,
     _placeholder_family_candidate,
-    _resolve_overlay_main_leg_contract,
+    _resolve_overlay_parent_exposure_contract,
     _resolve_overlay_main_leg_signal_from_inventory,
     _signed_leg_qty,
     protective_runtime_supported,
@@ -35,7 +36,11 @@ class OpportunisticExecutionDiscipline:
     expected_slippage_bps: float = 0.0
     expected_cost_bps: float = 0.0
     expected_net_edge_bps: float = 0.0
+    required_safe_net_edge_bps: float = 0.0
+    max_acceptable_cost_bps: float = 0.0
+    weak_edge_execution_mode: str = "block"
     weak_edge_report_only: bool = False
+    passive_first_required: bool = False
     blocked_reasons: tuple[str, ...] = ()
 
 
@@ -76,7 +81,7 @@ def opportunistic_candidate_from_directional_target(
     context = evaluation_context.context
     baseline = evaluation_context.baseline
     ai_assessment = evaluation_context.ai_assessment
-    main_leg_contract = _resolve_overlay_main_leg_contract(
+    parent_exposure = _resolve_overlay_parent_exposure_contract(
         settings=settings,
         evaluation_context=evaluation_context,
     )
@@ -146,8 +151,7 @@ def opportunistic_candidate_from_directional_target(
         context=context,
         baseline=baseline,
         ai_assessment=ai_assessment,
-        long_target_qty=main_leg_contract.long_target_qty,
-        short_target_qty=main_leg_contract.short_target_qty,
+        parent_exposure=parent_exposure,
     )
     execution_discipline = _resolve_opportunistic_execution_discipline(
         settings=settings,
@@ -156,8 +160,8 @@ def opportunistic_candidate_from_directional_target(
         ai_assessment=ai_assessment,
         overlay_decision=overlay_decision,
         trade_cost_service=trade_cost_service,
-        symbol=main_leg_contract.symbol,
-        margin_mode=main_leg_contract.margin_mode,
+        symbol=parent_exposure.symbol,
+        margin_mode=parent_exposure.margin_mode,
     )
     if execution_discipline.weak_edge_report_only:
         overlay_decision = overlay_decision.model_copy(
@@ -189,9 +193,9 @@ def opportunistic_candidate_from_directional_target(
             }
         )
     hedge_leg = build_opportunistic_candidate_leg(
-        symbol=main_leg_contract.symbol,
-        target_leverage=main_leg_contract.target_leverage,
-        margin_mode=main_leg_contract.margin_mode,
+        symbol=parent_exposure.symbol,
+        target_leverage=parent_exposure.target_leverage,
+        margin_mode=parent_exposure.margin_mode,
         overlay_decision=overlay_decision,
         weak_edge_report_only=execution_discipline.weak_edge_report_only,
         passive_first_enabled=settings.strategy_hedge_opportunistic_passive_first_enabled,
@@ -240,7 +244,7 @@ def opportunistic_candidate_from_directional_target(
             overlay_decision=overlay_decision,
         ),
         headline=_opportunistic_candidate_headline(overlay_decision=overlay_decision),
-        recommended_symbol=main_leg_contract.symbol,
+        recommended_symbol=parent_exposure.symbol,
         target_position_qty=target_qty,
         delta_position_qty=target_qty - current_qty,
         score=float(overlay_decision.pressure_score),
@@ -261,7 +265,11 @@ def opportunistic_candidate_from_directional_target(
         metrics={
             **metrics,
             "configured_mode": configured_mode,
-            "main_leg_contract_source": main_leg_contract.source,
+            "main_leg_contract_source": parent_exposure.source,
+            "parent_exposure_signal_source": parent_exposure.signal_source,
+            "parent_target_signal": parent_exposure.target_signal,
+            "parent_current_signal": parent_exposure.current_signal,
+            "parent_effective_signal": parent_exposure.effective_signal,
             "main_leg_signal": overlay_decision.main_leg_signal,
             "hedge_leg_signal": overlay_decision.hedge_leg_signal,
             "main_leg_current_qty": overlay_decision.main_leg_current_qty,
@@ -310,6 +318,11 @@ def _opportunistic_book_expectancy_summary(
                 expected_slippage_bps=execution_discipline.expected_slippage_bps,
                 expected_cost_bps=execution_discipline.expected_cost_bps,
                 expected_net_edge_bps=execution_discipline.expected_net_edge_bps,
+                required_safe_net_edge_bps=execution_discipline.required_safe_net_edge_bps,
+                max_acceptable_cost_bps=execution_discipline.max_acceptable_cost_bps,
+                weak_edge_execution_mode=execution_discipline.weak_edge_execution_mode,
+                weak_edge_report_only=execution_discipline.weak_edge_report_only,
+                passive_first_required=execution_discipline.passive_first_required,
             )
         ],
     )
@@ -321,8 +334,9 @@ def evaluate_opportunistic_overlay_decision(
     context: DecisionContext,
     baseline: BaselineAssessment,
     ai_assessment: AIMarketAssessment | None,
-    long_target_qty: Decimal,
-    short_target_qty: Decimal,
+    parent_exposure: OverlayParentExposureContract | None = None,
+    long_target_qty: Decimal | None = None,
+    short_target_qty: Decimal | None = None,
     scorer: Callable[..., float] | None = None,
 ) -> HedgeOverlayDecision:
     configured_mode = settings.strategy_hedge_overlay_mode
@@ -349,11 +363,29 @@ def evaluate_opportunistic_overlay_decision(
             runtime_rollout_stage=rollout["runtime_stage"],
         )
 
-    main_leg_signal = _exposure_side(long_target_qty - short_target_qty)
-    main_signal_inferred_from_inventory = False
-    if main_leg_signal == "flat":
-        main_leg_signal = _resolve_overlay_main_leg_signal_from_inventory(context=context)
-        main_signal_inferred_from_inventory = main_leg_signal != "flat"
+    resolved_parent_exposure = parent_exposure or OverlayParentExposureContract(
+        symbol=context.symbol,
+        target_leverage=max(float(getattr(context, "current_target_leverage", 0.0) or 0.0), 1.0),
+        margin_mode=str(settings.margin_mode),
+        target_long_qty=max(to_decimal(long_target_qty or Decimal("0")), Decimal("0")),
+        target_short_qty=max(to_decimal(short_target_qty or Decimal("0")), Decimal("0")),
+        current_long_qty=to_decimal(context.current_long_position_qty),
+        current_short_qty=to_decimal(context.current_short_position_qty),
+        target_signal=_exposure_side(to_decimal(long_target_qty or Decimal("0")) - to_decimal(short_target_qty or Decimal("0"))),
+        current_signal=_resolve_overlay_main_leg_signal_from_inventory(context=context),
+        effective_signal=_resolve_overlay_main_leg_signal_from_inventory(context=context)
+        if _exposure_side(to_decimal(long_target_qty or Decimal("0")) - to_decimal(short_target_qty or Decimal("0"))) == "flat"
+        else _exposure_side(to_decimal(long_target_qty or Decimal("0")) - to_decimal(short_target_qty or Decimal("0"))),
+        signal_source=(
+            "inventory"
+            if _exposure_side(to_decimal(long_target_qty or Decimal("0")) - to_decimal(short_target_qty or Decimal("0"))) == "flat"
+            and _resolve_overlay_main_leg_signal_from_inventory(context=context) != "flat"
+            else "target_position"
+        ),
+        source="direct_target_args",
+    )
+    main_leg_signal = resolved_parent_exposure.effective_signal
+    main_signal_inferred_from_inventory = resolved_parent_exposure.signal_source == "inventory"
     if main_leg_signal == "flat":
         return HedgeOverlayDecision(
             enabled=True,
@@ -375,17 +407,17 @@ def evaluate_opportunistic_overlay_decision(
         )
 
     if main_leg_signal == "long":
-        main_leg_current_qty = to_decimal(context.current_long_position_qty)
-        hedge_leg_current_qty = to_decimal(context.current_short_position_qty)
-        main_leg_target_qty = to_decimal(long_target_qty)
+        main_leg_current_qty = resolved_parent_exposure.current_long_qty
+        hedge_leg_current_qty = resolved_parent_exposure.current_short_qty
+        main_leg_target_qty = resolved_parent_exposure.target_long_qty
         hedge_leg_signal = "short"
         current_leg_opened_at = context.current_short_leg_opened_at
         last_leg_closed_at = context.last_short_leg_closed_at
         latest_leg_fill_timestamp = context.latest_short_leg_fill_timestamp
     else:
-        main_leg_current_qty = to_decimal(context.current_short_position_qty)
-        hedge_leg_current_qty = to_decimal(context.current_long_position_qty)
-        main_leg_target_qty = to_decimal(short_target_qty)
+        main_leg_current_qty = resolved_parent_exposure.current_short_qty
+        hedge_leg_current_qty = resolved_parent_exposure.current_long_qty
+        main_leg_target_qty = resolved_parent_exposure.target_short_qty
         hedge_leg_signal = "long"
         current_leg_opened_at = context.current_long_leg_opened_at
         last_leg_closed_at = context.last_long_leg_closed_at
@@ -778,12 +810,21 @@ def _compute_opportunistic_execution_discipline(
     max_acceptable_cost_bps = float(settings.strategy_hedge_opportunistic_max_acceptable_cost_bps)
     if max_acceptable_cost_bps > 0.0 and expected_cost_bps > max_acceptable_cost_bps:
         blocked_reasons.append("opportunistic_overlay_expected_cost_above_max_acceptable")
+    passive_first_required = bool(
+        overlay_decision.state == "opening"
+        and weak_edge_report_only
+        and settings.strategy_hedge_opportunistic_passive_first_enabled
+    )
     return OpportunisticExecutionDiscipline(
         expected_signal_edge_bps=expected_signal_edge_bps,
         expected_slippage_bps=expected_slippage_bps,
         expected_cost_bps=expected_cost_bps,
         expected_net_edge_bps=expected_net_edge_bps,
+        required_safe_net_edge_bps=required_safe_net_edge_bps,
+        max_acceptable_cost_bps=max_acceptable_cost_bps,
+        weak_edge_execution_mode=settings.strategy_hedge_opportunistic_weak_edge_execution_mode,
         weak_edge_report_only=weak_edge_report_only,
+        passive_first_required=passive_first_required,
         blocked_reasons=tuple(blocked_reasons),
     )
 

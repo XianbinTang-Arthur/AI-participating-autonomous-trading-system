@@ -26,6 +26,7 @@ from aats.services.portfolio_service.pnl import PortfolioPnLCalculator
 from aats.services.portfolio_service.positions import PortfolioState
 from aats.services.portfolio_service.reconstruction import PortfolioReconstructionService
 from aats.services.portfolio_service.snapshots import PortfolioSnapshotBuilder
+from aats.services.operator.query_service import OperatorQueryService
 from aats.services.reconciliation_service.replay import ReplayEngine
 from aats.services.runtime_scope import runtime_state_scope
 from aats.storage.audit_repo import InMemoryAuditRepository
@@ -610,6 +611,12 @@ class TestPersistenceAndReplay(unittest.IsolatedAsyncioTestCase):
                         settings.default_symbol,
                         settings.primary_timeframe,
                     )
+                self.assertEqual([item.leg for item in target.book_runtime_states], ["long", "short"])
+                self.assertIsNotNone(target.decision_outcome)
+                self.assertEqual(
+                    [item.leg for item in target.decision_outcome.book_runtime_states],
+                    ["long", "short"],
+                )
 
                 storage = build_storage_backends(settings)
                 replay = ReplayEngine(
@@ -639,6 +646,18 @@ class TestPersistenceAndReplay(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(
                     {str(leg.execution_mode) for leg in latest_bundle.legs},
                     {"independent_long_book", "independent_short_book"},
+                )
+                replay_summary = OperatorQueryService(runtime).audit_replay_queries._replay_summary(
+                    replay,
+                    symbol=settings.default_symbol,
+                    regime=None,
+                    active_profile_id=None,
+                )
+                self.assertIn("independent_expected_vs_realized_summary", replay_summary)
+                self.assertIsNotNone(replay_summary["independent_expected_vs_realized_summary"])
+                self.assertEqual(
+                    replay_summary["independent_expected_vs_realized_summary"]["family"],
+                    "independent",
                 )
             finally:
                 if runtime.database_runtime is not None:
@@ -1142,6 +1161,261 @@ class TestPersistenceAndReplay(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(
             any(
                 "execution_chain_order_state_semantic_mismatch" in issue and "field=td_mode" in issue
+                for issue in replay.execution_chain_issues
+            )
+        )
+
+    async def test_replay_detects_execution_chain_id_mismatch(self) -> None:
+        event_store = InMemoryEventStore()
+        audit_repo = InMemoryAuditRepository()
+        intent = OrderIntent(
+            intent_id="intent_chain_mismatch",
+            execution_chain_id="independent:decision_chain_mismatch:long:open",
+            decision_id="decision_chain_mismatch",
+            symbol="BTC-USDT-SWAP",
+            side="buy",
+            quantity=Decimal("0.01"),
+            execution_style="exchange",
+            order_type="market",
+            urgency="medium",
+            time_in_force="IOC",
+            reduce_only=False,
+            close_only=False,
+            td_mode="cross",
+            position_mode="long_short_mode",
+            pos_side="long",
+            idempotency_key="intent_chain_mismatch",
+            product_type="derivatives",
+            margin_mode="cross",
+            exposure_side="long",
+            execution_action="enter",
+            position_intent="open_long",
+        )
+        order_state = OrderState(
+            decision_id="decision_chain_mismatch",
+            execution_chain_id="independent:decision_chain_mismatch:long:scale_in",
+            intent_id="intent_chain_mismatch",
+            symbol="BTC-USDT-SWAP",
+            client_order_id="clord_chain_mismatch",
+            venue="OKX",
+            exchange_order_id="ord_chain_mismatch",
+            status="SUBMITTED",
+            submission_mode="guarded_simulated_submit",
+            submitted_ts=utc_now(),
+            last_update_ts=utc_now(),
+            requested_qty=Decimal("0.01"),
+            filled_qty=Decimal("0"),
+            remaining_qty=Decimal("0.01"),
+            average_fill_price=None,
+            fees=Decimal("0"),
+            reduce_only=False,
+            close_only=False,
+            td_mode="cross",
+            position_mode="long_short_mode",
+            pos_side="long",
+            product_type="derivatives",
+            margin_mode="cross",
+            exposure_side="long",
+            execution_action="enter",
+            position_intent="open_long",
+            submission_payload={"tdMode": "cross", "posSide": "long"},
+        )
+        fill = FillEvent(
+            fill_id="fill_chain_mismatch",
+            decision_id="decision_chain_mismatch",
+            execution_chain_id="independent:decision_chain_mismatch:long:scale_in",
+            intent_id="intent_chain_mismatch",
+            client_order_id="clord_chain_mismatch",
+            exchange_order_id="ord_chain_mismatch",
+            symbol="BTC-USDT-SWAP",
+            venue="OKX",
+            side="buy",
+            fill_qty=Decimal("0.01"),
+            fill_price=Decimal("100"),
+            fee_amount=Decimal("0.1"),
+            fee_currency="USDT",
+            td_mode="cross",
+            position_mode="long_short_mode",
+            pos_side="long",
+            product_type="derivatives",
+            margin_mode="cross",
+            exposure_side="long",
+            execution_action="enter",
+            position_intent="open_long",
+            liquidity_role="taker",
+            exchange_timestamp=utc_now(),
+            ingestion_timestamp=utc_now(),
+            order_status_after_fill="FILLED",
+        )
+        event_store.append(
+            build_envelope(
+                topic=topics.ORDER_INTENTS,
+                key=intent.symbol,
+                payload_model=intent,
+                source_component="test",
+            )
+        )
+        event_store.append(
+            build_envelope(
+                topic=topics.ORDER_UPDATES,
+                key=order_state.symbol,
+                payload_model=order_state,
+                source_component="test",
+            )
+        )
+        event_store.append(
+            build_envelope(
+                topic=topics.FILL_EVENTS,
+                key=fill.symbol,
+                payload_model=fill,
+                source_component="test",
+            )
+        )
+
+        replay = ReplayEngine(
+            event_store=event_store,
+            reconstruction_service=PortfolioReconstructionService(
+                initial_usdt_balance=10_000.0,
+                snapshot_builder=PortfolioSnapshotBuilder(pnl_calculator=PortfolioPnLCalculator()),
+            ),
+            audit_repo=audit_repo,
+        ).replay()
+
+        self.assertTrue(
+            any(
+                "execution_chain_order_state_execution_chain_mismatch" in issue
+                for issue in replay.execution_chain_issues
+            )
+        )
+        self.assertTrue(
+            any(
+                "execution_chain_fill_execution_chain_mismatch" in issue
+                for issue in replay.execution_chain_issues
+            )
+        )
+
+    async def test_replay_detects_execution_attempt_id_mismatch(self) -> None:
+        event_store = InMemoryEventStore()
+        audit_repo = InMemoryAuditRepository()
+        intent = OrderIntent(
+            intent_id="intent_attempt_mismatch",
+            execution_chain_id="independent:decision_attempt_mismatch:long:open",
+            execution_attempt_id="execution_attempt:clord_attempt_match",
+            decision_id="decision_attempt_mismatch",
+            symbol="BTC-USDT-SWAP",
+            side="buy",
+            quantity=Decimal("0.01"),
+            execution_style="exchange",
+            order_type="market",
+            urgency="medium",
+            time_in_force="IOC",
+            reduce_only=False,
+            close_only=False,
+            td_mode="cross",
+            position_mode="long_short_mode",
+            pos_side="long",
+            idempotency_key="intent_attempt_mismatch",
+            product_type="derivatives",
+            margin_mode="cross",
+            exposure_side="long",
+            execution_action="enter",
+            position_intent="open_long",
+        )
+        order_state = OrderState(
+            decision_id="decision_attempt_mismatch",
+            execution_chain_id="independent:decision_attempt_mismatch:long:open",
+            execution_attempt_id="execution_attempt:clord_attempt_stray",
+            intent_id="intent_attempt_mismatch",
+            symbol="BTC-USDT-SWAP",
+            client_order_id="clord_attempt_match",
+            venue="OKX",
+            exchange_order_id="ord_attempt_match",
+            status="SUBMITTED",
+            submission_mode="guarded_simulated_submit",
+            submitted_ts=utc_now(),
+            last_update_ts=utc_now(),
+            requested_qty=Decimal("0.01"),
+            filled_qty=Decimal("0"),
+            remaining_qty=Decimal("0.01"),
+            average_fill_price=None,
+            fees=Decimal("0"),
+            reduce_only=False,
+            close_only=False,
+            td_mode="cross",
+            position_mode="long_short_mode",
+            pos_side="long",
+            product_type="derivatives",
+            margin_mode="cross",
+            exposure_side="long",
+            execution_action="enter",
+            position_intent="open_long",
+            submission_payload={"tdMode": "cross", "posSide": "long"},
+        )
+        fill = FillEvent(
+            fill_id="fill_attempt_mismatch",
+            decision_id="decision_attempt_mismatch",
+            execution_chain_id="independent:decision_attempt_mismatch:long:open",
+            execution_attempt_id="execution_attempt:clord_attempt_match",
+            intent_id="intent_attempt_mismatch",
+            client_order_id="clord_attempt_match",
+            exchange_order_id="ord_attempt_match",
+            symbol="BTC-USDT-SWAP",
+            venue="OKX",
+            side="buy",
+            fill_qty=Decimal("0.01"),
+            fill_price=Decimal("100"),
+            fee_amount=Decimal("0.1"),
+            fee_currency="USDT",
+            td_mode="cross",
+            position_mode="long_short_mode",
+            pos_side="long",
+            product_type="derivatives",
+            margin_mode="cross",
+            exposure_side="long",
+            execution_action="enter",
+            position_intent="open_long",
+            liquidity_role="taker",
+            exchange_timestamp=utc_now(),
+            ingestion_timestamp=utc_now(),
+            order_status_after_fill="FILLED",
+        )
+        event_store.append(
+            build_envelope(
+                topic=topics.ORDER_INTENTS,
+                key=intent.symbol,
+                payload_model=intent,
+                source_component="test",
+            )
+        )
+        event_store.append(
+            build_envelope(
+                topic=topics.ORDER_UPDATES,
+                key=order_state.symbol,
+                payload_model=order_state,
+                source_component="test",
+            )
+        )
+        event_store.append(
+            build_envelope(
+                topic=topics.FILL_EVENTS,
+                key=fill.symbol,
+                payload_model=fill,
+                source_component="test",
+            )
+        )
+
+        replay = ReplayEngine(
+            event_store=event_store,
+            reconstruction_service=PortfolioReconstructionService(
+                initial_usdt_balance=10_000.0,
+                snapshot_builder=PortfolioSnapshotBuilder(pnl_calculator=PortfolioPnLCalculator()),
+            ),
+            audit_repo=audit_repo,
+        ).replay()
+
+        self.assertTrue(
+            any(
+                "execution_chain_order_state_execution_attempt_mismatch" in issue
                 for issue in replay.execution_chain_issues
             )
         )
@@ -2040,6 +2314,36 @@ class TestPersistenceAndReplay(unittest.IsolatedAsyncioTestCase):
     def _independent_overlay_target(context) -> PositionTarget:
         symbol = context.symbol
         decision_id = context.decision_id
+        book_runtime_states = [
+            {
+                "leg": "long",
+                "current_qty": Decimal("0"),
+                "target_qty": Decimal("0.02"),
+                "state": "opening",
+                "book_action": "open",
+                "policy_reason": "independent_entry_strong_edge_aggressive",
+            },
+            {
+                "leg": "short",
+                "current_qty": Decimal("0"),
+                "target_qty": Decimal("-0.01"),
+                "state": "opening",
+                "book_action": "open",
+                "policy_reason": "independent_entry_guarded_passive_first",
+            },
+        ]
+        family_execution_summary = {
+            "summary_mode": "multi_leg",
+            "family": "independent",
+            "route_action": "override_target",
+            "family_action": "rebalance_independent_books",
+            "leg_count": 2,
+            "position_intents": ["open_long", "open_short"],
+            "directions": ["long", "short"],
+            "leg_actions": ["open", "open"],
+            "execution_modes": ["independent_long_book", "independent_short_book"],
+            "book_runtime_states": book_runtime_states,
+        }
         return PositionTarget(
             decision_id=decision_id,
             symbol=symbol,
@@ -2068,6 +2372,8 @@ class TestPersistenceAndReplay(unittest.IsolatedAsyncioTestCase):
             strategy_headline="独立双书回放测试。",
             allocation_id=f"alloc_{decision_id}",
             strategy_bundle_id=f"bundle_{decision_id}",
+            family_execution_summary=family_execution_summary,
+            book_runtime_states=book_runtime_states,
             strategy_execution_legs=[
                 StrategyLegIntent(
                     symbol=symbol,
@@ -2137,6 +2443,21 @@ class TestPersistenceAndReplay(unittest.IsolatedAsyncioTestCase):
                 rollout_stage="live",
                 runtime_rollout_stage="live",
             ),
+            decision_outcome={
+                "decision_id": decision_id,
+                "symbol": symbol,
+                "decision_source": "baseline",
+                "decision_authority": "reference_only",
+                "finalized": True,
+                "final_direction": "long",
+                "final_action": "enter",
+                "final_target_qty": Decimal("0.01"),
+                "selected_strategy_family": "independent",
+                "selected_strategy_route_action": "override_target",
+                "selected_strategy_family_action": "rebalance_independent_books",
+                "family_execution_summary": family_execution_summary,
+                "book_runtime_states": book_runtime_states,
+            },
         )
 
     @staticmethod
