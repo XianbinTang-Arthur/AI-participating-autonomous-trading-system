@@ -442,6 +442,10 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertIn("current_sleeve_spot_qty", smart_arbitrage_candidate["metrics"])
         self.assertIn("target_account_derivatives_qty", smart_arbitrage_candidate["metrics"])
         self.assertIn("inventory_backed_available_qty", smart_arbitrage_candidate["metrics"])
+        self.assertIn("pair_definitions", smart_arbitrage_candidate["metrics"])
+        self.assertIn("pair_registry_warning_codes", smart_arbitrage_candidate["metrics"])
+        self.assertIn("pair_registry_error_codes", smart_arbitrage_candidate["metrics"])
+        self.assertEqual(smart_arbitrage_candidate["metrics"]["pair_registry_source"], "coordinator_resolved")
         self.assertEqual(smart_arbitrage_control["automation_state"], "active")
         self.assertIsNotNone(payload["summary"]["latest_hedge_protected_notional"])
         self.assertTrue(payload["recent_budget_profiles"])
@@ -460,6 +464,23 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertIn("pair_definitions", payload["configured_parameters"]["smart_arbitrage"])
         self.assertIn("pair_registry_warning_codes", payload["configured_parameters"]["smart_arbitrage"])
         self.assertIn("pair_registry_error_codes", payload["configured_parameters"]["smart_arbitrage"])
+        self.assertEqual(payload["configured_parameters"]["smart_arbitrage"]["pair_registry_source"], "coordinator_resolved")
+        self.assertEqual(
+            payload["configured_parameters"]["smart_arbitrage"]["pair_definitions"],
+            smart_arbitrage_candidate["metrics"]["pair_definitions"],
+        )
+        self.assertEqual(
+            payload["configured_parameters"]["smart_arbitrage"]["pair_registry_warning_codes"],
+            smart_arbitrage_candidate["metrics"]["pair_registry_warning_codes"],
+        )
+        self.assertEqual(
+            payload["configured_parameters"]["smart_arbitrage"]["pair_registry_error_codes"],
+            smart_arbitrage_candidate["metrics"]["pair_registry_error_codes"],
+        )
+        self.assertEqual(
+            payload["configured_parameters"]["smart_arbitrage"]["pair_registry_source"],
+            smart_arbitrage_candidate["metrics"]["pair_registry_source"],
+        )
         self.assertNotIn("v2_enabled", payload["configured_parameters"]["smart_arbitrage"])
         self.assertNotIn("companion_spot_symbol", payload["configured_parameters"]["smart_arbitrage"])
         self.assertNotIn("companion_derivatives_symbol", payload["configured_parameters"]["smart_arbitrage"])
@@ -781,14 +802,25 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(settings.derivatives_position_mode, "hedge")
         self.assertFalse(settings.strategy_family_auto_selection_enabled)
         self.assertTrue(settings.strategy_family_independent_enabled)
+        self.assertFalse(settings.strategy_family_independent_shadow_mode_enabled)
         self.assertTrue(settings.strategy_family_independent_live_execution_enabled)
+        self.assertFalse(settings.strategy_family_protective_shadow_mode_enabled)
+        self.assertFalse(settings.strategy_family_opportunistic_shadow_mode_enabled)
         self.assertFalse(settings.smart_arbitrage_enabled)
         self.assertEqual(settings.strategy_hedge_overlay_mode, "independent")
         self.assertFalse(settings.strategy_hedge_protective_enabled)
         self.assertEqual(settings.strategy_hedge_independent_long_entry_threshold, 0.30)
         self.assertEqual(settings.strategy_hedge_independent_short_entry_threshold, 0.30)
+        self.assertEqual(settings.strategy_hedge_independent_long_close_threshold, 0.24)
+        self.assertEqual(settings.strategy_hedge_independent_short_close_threshold, 0.24)
         self.assertEqual(settings.strategy_hedge_independent_long_scale_in_threshold, 0.40)
         self.assertEqual(settings.strategy_hedge_independent_short_scale_in_threshold, 0.40)
+        self.assertEqual(settings.strategy_hedge_independent_min_safe_net_edge_bps, 3.0)
+        self.assertEqual(settings.strategy_hedge_independent_expected_slippage_buffer_bps, 1.0)
+        self.assertEqual(settings.strategy_hedge_independent_expected_execution_buffer_bps, 2.0)
+        self.assertEqual(settings.strategy_hedge_independent_weak_edge_execution_mode, "report_only")
+        self.assertEqual(settings.strategy_hedge_independent_max_acceptable_cost_bps, 7.5)
+        self.assertTrue(settings.strategy_hedge_independent_passive_first_enabled)
         self.assertEqual(target.strategy_family, "independent")
 
     async def test_derivatives_independent_overlay_runtime_exposes_leg_scoped_thresholds_and_books(self) -> None:

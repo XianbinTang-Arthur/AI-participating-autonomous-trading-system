@@ -4,6 +4,7 @@ import unittest
 from datetime import datetime, timezone
 from decimal import Decimal
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from aats.schemas.exchange import ExchangeAccountConfiguration, ExchangeAccountSnapshot, ExchangePosition
 from aats.schemas.portfolio import PortfolioSnapshot, Position
@@ -11,6 +12,48 @@ from aats.services.operator.query_service import OperatorQueryService
 
 
 class TestOperatorPositionStates(unittest.TestCase):
+    def test_smart_arbitrage_runtime_pair_configuration_prefers_snapshot_candidate_metrics(self) -> None:
+        query = OperatorQueryService.__new__(OperatorQueryService)
+        query.runtime = SimpleNamespace(settings=SimpleNamespace(default_symbol="BTC-USDT-SWAP"))
+
+        latest_snapshot = {
+            "candidates": [
+                {
+                    "family": "smart_arbitrage",
+                    "metrics": {
+                        "pair_definitions": [
+                            {
+                                "pair_id": "btc_usdt_swap",
+                                "spot_symbol": "BTC-USDT",
+                                "hedge_symbol": "BTC-USDT-SWAP",
+                                "metadata": {
+                                    "configuration_warning_codes": ["pair_warn"],
+                                    "configuration_error_codes": ["pair_err"],
+                                },
+                            }
+                        ],
+                        "pair_registry_warning_codes": ["pair_warn"],
+                        "pair_registry_error_codes": ["pair_err"],
+                        "pair_registry_source": "coordinator_resolved",
+                    },
+                }
+            ]
+        }
+
+        with patch(
+            "aats.services.operator.query_service.load_pair_definitions",
+            side_effect=AssertionError("query_service should reuse coordinator-resolved pair definitions"),
+        ):
+            pair_definitions, warning_codes, error_codes, source = query._smart_arbitrage_runtime_pair_configuration(
+                latest_snapshot=latest_snapshot
+            )
+
+        self.assertEqual(len(pair_definitions), 1)
+        self.assertEqual(pair_definitions[0]["pair_id"], "btc_usdt_swap")
+        self.assertEqual(warning_codes, ["pair_warn"])
+        self.assertEqual(error_codes, ["pair_err"])
+        self.assertEqual(source, "coordinator_resolved")
+
     def test_execution_action_summary_prefers_directional_position_intent(self) -> None:
         query = OperatorQueryService.__new__(OperatorQueryService)
 

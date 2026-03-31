@@ -335,12 +335,15 @@ def test_derivatives_managed_profiles_use_relaxed_directional_thresholds() -> No
         expected_independent_rollout = "live" if profile == "derivatives_live" else "dry_run"
         expected_independent_family_enabled = profile == "derivatives_live"
         assert values["strategy_family_protective_enabled"] is False
+        assert values["strategy_family_protective_shadow_mode_enabled"] is False
         assert values["strategy_family_protective_live_execution_enabled"] is False
         assert values["strategy_family_opportunistic_enabled"] is False
+        assert values["strategy_family_opportunistic_shadow_mode_enabled"] is False
         assert values["strategy_family_opportunistic_live_execution_enabled"] is False
         assert values["strategy_hedge_independent_enabled"] is expected_independent_enabled
         assert values["strategy_hedge_independent_rollout_stage"] == expected_independent_rollout
         assert values["strategy_family_independent_enabled"] is expected_independent_family_enabled
+        assert values["strategy_family_independent_shadow_mode_enabled"] is False
         assert values["strategy_family_independent_live_execution_enabled"] is expected_independent_family_enabled
         expected_independent_entry = 0.30 if profile == "derivatives_live" else 0.66
         expected_independent_scale_in = 0.40 if profile == "derivatives_live" else 0.70
@@ -352,6 +355,15 @@ def test_derivatives_managed_profiles_use_relaxed_directional_thresholds() -> No
         assert values["strategy_hedge_independent_short_min_hold_seconds"] == 300.0
         assert values["strategy_hedge_independent_rebalance_cooldown_seconds"] == 120.0
         assert values["strategy_hedge_independent_trial_guard_enabled"] is True
+        if profile == "derivatives_live":
+            assert values["strategy_hedge_independent_long_close_threshold"] == 0.24
+            assert values["strategy_hedge_independent_short_close_threshold"] == 0.24
+            assert values["strategy_hedge_independent_min_safe_net_edge_bps"] == 3.0
+            assert values["strategy_hedge_independent_expected_slippage_buffer_bps"] == 1.0
+            assert values["strategy_hedge_independent_expected_execution_buffer_bps"] == 2.0
+            assert values["strategy_hedge_independent_weak_edge_execution_mode"] == "report_only"
+            assert values["strategy_hedge_independent_max_acceptable_cost_bps"] == 7.5
+            assert values["strategy_hedge_independent_passive_first_enabled"] is True
 
 
 def test_derivatives_live_managed_profile_is_pinned_for_independent_live() -> None:
@@ -362,13 +374,24 @@ def test_derivatives_live_managed_profile_is_pinned_for_independent_live() -> No
     assert values["strategy_family_active"] == "directional"
     assert values["strategy_family_auto_selection_enabled"] is False
     assert values["strategy_family_independent_enabled"] is True
+    assert values["strategy_family_independent_shadow_mode_enabled"] is False
     assert values["strategy_family_independent_live_execution_enabled"] is True
     assert values["strategy_family_protective_enabled"] is False
+    assert values["strategy_family_protective_shadow_mode_enabled"] is False
     assert values["strategy_family_protective_live_execution_enabled"] is False
     assert values["strategy_family_opportunistic_enabled"] is False
+    assert values["strategy_family_opportunistic_shadow_mode_enabled"] is False
     assert values["strategy_family_opportunistic_live_execution_enabled"] is False
     assert values["smart_arbitrage_enabled"] is False
     assert values["strategy_hedge_overlay_mode"] == "independent"
+    assert values["strategy_hedge_independent_long_close_threshold"] == 0.24
+    assert values["strategy_hedge_independent_short_close_threshold"] == 0.24
+    assert values["strategy_hedge_independent_min_safe_net_edge_bps"] == 3.0
+    assert values["strategy_hedge_independent_expected_slippage_buffer_bps"] == 1.0
+    assert values["strategy_hedge_independent_expected_execution_buffer_bps"] == 2.0
+    assert values["strategy_hedge_independent_weak_edge_execution_mode"] == "report_only"
+    assert values["strategy_hedge_independent_max_acceptable_cost_bps"] == 7.5
+    assert values["strategy_hedge_independent_passive_first_enabled"] is True
 
 
 def test_managed_profiles_drop_legacy_cross_runtime_strategy_tuning() -> None:

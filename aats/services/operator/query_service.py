@@ -2160,25 +2160,13 @@ class OperatorQueryService:
                 summary["operator_summary"] = "当前选中的策略家族只提供参考，不会直接接管实盘执行。"
             else:
                 summary["operator_summary"] = "当前选中的策略家族没有生成可执行目标，系统继续保持当前仓位。"
-        smart_arbitrage_pairs = load_pair_definitions(
-            settings=self.runtime.settings,
-            primary_symbol=self.runtime.settings.default_symbol,
-        )
-        smart_arbitrage_pair_registry_warning_codes = list(
-            dict.fromkeys(
-                code
-                for pair in smart_arbitrage_pairs
-                for code in pair.metadata.get("configuration_warning_codes", [])
-                if str(code).strip()
-            )
-        )
-        smart_arbitrage_pair_registry_error_codes = list(
-            dict.fromkeys(
-                code
-                for pair in smart_arbitrage_pairs
-                for code in pair.metadata.get("configuration_error_codes", [])
-                if str(code).strip()
-            )
+        (
+            smart_arbitrage_pair_definitions,
+            smart_arbitrage_pair_registry_warning_codes,
+            smart_arbitrage_pair_registry_error_codes,
+            smart_arbitrage_pair_registry_source,
+        ) = self._smart_arbitrage_runtime_pair_configuration(
+            latest_snapshot=latest_snapshot,
         )
         smart_arbitrage_cost_summary = self._smart_arbitrage_cost_summary(latest_snapshot=latest_snapshot)
         return {
@@ -2187,9 +2175,10 @@ class OperatorQueryService:
             "family_enablement": family_enablement,
             "configured_parameters": self._configured_strategy_runtime_parameters(
                 configured_family=configured_family,
-                smart_arbitrage_pairs=smart_arbitrage_pairs,
+                smart_arbitrage_pair_definitions=smart_arbitrage_pair_definitions,
                 smart_arbitrage_pair_registry_warning_codes=smart_arbitrage_pair_registry_warning_codes,
                 smart_arbitrage_pair_registry_error_codes=smart_arbitrage_pair_registry_error_codes,
+                smart_arbitrage_pair_registry_source=smart_arbitrage_pair_registry_source,
             ),
             "latest_snapshot": latest_snapshot,
             "latest_allocation_decision": latest_allocation_decision,
@@ -2212,9 +2201,10 @@ class OperatorQueryService:
         self,
         *,
         configured_family: str,
-        smart_arbitrage_pairs: list[Any],
+        smart_arbitrage_pair_definitions: list[dict[str, Any]],
         smart_arbitrage_pair_registry_warning_codes: list[str],
         smart_arbitrage_pair_registry_error_codes: list[str],
+        smart_arbitrage_pair_registry_source: str,
     ) -> dict[str, Any]:
         configured_parameters: dict[str, Any] = {
             "strategy_family_active": configured_family,
@@ -2231,9 +2221,10 @@ class OperatorQueryService:
         }
         if self.runtime.settings.trading_product_type == "derivatives":
             configured_parameters["smart_arbitrage"] = self._smart_arbitrage_configured_parameters(
-                smart_arbitrage_pairs=smart_arbitrage_pairs,
+                smart_arbitrage_pair_definitions=smart_arbitrage_pair_definitions,
                 smart_arbitrage_pair_registry_warning_codes=smart_arbitrage_pair_registry_warning_codes,
                 smart_arbitrage_pair_registry_error_codes=smart_arbitrage_pair_registry_error_codes,
+                smart_arbitrage_pair_registry_source=smart_arbitrage_pair_registry_source,
             )
         if self.runtime.settings.trading_product_type == "spot":
             configured_parameters["spot_grid"] = {
@@ -2418,18 +2409,17 @@ class OperatorQueryService:
     def _smart_arbitrage_configured_parameters(
         self,
         *,
-        smart_arbitrage_pairs: list[Any],
+        smart_arbitrage_pair_definitions: list[dict[str, Any]],
         smart_arbitrage_pair_registry_warning_codes: list[str],
         smart_arbitrage_pair_registry_error_codes: list[str],
+        smart_arbitrage_pair_registry_source: str,
     ) -> dict[str, Any]:
         return {
             "enabled": self.runtime.settings.smart_arbitrage_enabled,
-            "pair_definitions": [
-                pair.model_dump(mode="json")
-                for pair in smart_arbitrage_pairs
-            ],
+            "pair_definitions": [dict(item) for item in smart_arbitrage_pair_definitions],
             "pair_registry_warning_codes": smart_arbitrage_pair_registry_warning_codes,
             "pair_registry_error_codes": smart_arbitrage_pair_registry_error_codes,
+            "pair_registry_source": smart_arbitrage_pair_registry_source,
             "basis_entry_bps": self.runtime.settings.smart_arbitrage_basis_entry_bps,
             "basis_exit_bps": self.runtime.settings.smart_arbitrage_basis_exit_bps,
             "estimated_cost_bps": self.runtime.settings.smart_arbitrage_estimated_cost_bps,
@@ -2463,6 +2453,85 @@ class OperatorQueryService:
             "estimated_funding_bps": self.runtime.settings.smart_arbitrage_estimated_funding_bps,
             "estimated_borrow_bps": self.runtime.settings.smart_arbitrage_estimated_borrow_bps,
         }
+
+    @staticmethod
+    def _smart_arbitrage_runtime_pair_configuration_from_snapshot(
+        latest_snapshot: dict[str, Any] | None,
+    ) -> tuple[list[dict[str, Any]], list[str], list[str], str] | None:
+        if latest_snapshot is None:
+            return None
+        smart_candidate = next(
+            (
+                candidate
+                for candidate in (latest_snapshot.get("candidates") or [])
+                if candidate.get("family") == "smart_arbitrage"
+            ),
+            None,
+        )
+        if smart_candidate is None:
+            return None
+        metrics = dict(smart_candidate.get("metrics") or {})
+        pair_definitions = [
+            dict(item)
+            for item in (metrics.get("pair_definitions") or [])
+            if isinstance(item, dict)
+        ]
+        if not pair_definitions:
+            return None
+        warning_codes = list(
+            dict.fromkeys(
+                str(code)
+                for code in (metrics.get("pair_registry_warning_codes") or [])
+                if str(code).strip()
+            )
+        )
+        error_codes = list(
+            dict.fromkeys(
+                str(code)
+                for code in (metrics.get("pair_registry_error_codes") or [])
+                if str(code).strip()
+            )
+        )
+        return (
+            pair_definitions,
+            warning_codes,
+            error_codes,
+            str(metrics.get("pair_registry_source") or "coordinator_resolved"),
+        )
+
+    def _smart_arbitrage_runtime_pair_configuration(
+        self,
+        *,
+        latest_snapshot: dict[str, Any] | None,
+    ) -> tuple[list[dict[str, Any]], list[str], list[str], str]:
+        from_snapshot = self._smart_arbitrage_runtime_pair_configuration_from_snapshot(latest_snapshot)
+        if from_snapshot is not None:
+            return from_snapshot
+        smart_arbitrage_pairs = load_pair_definitions(
+            settings=self.runtime.settings,
+            primary_symbol=self.runtime.settings.default_symbol,
+        )
+        pair_definitions = [
+            pair.model_dump(mode="json")
+            for pair in smart_arbitrage_pairs
+        ]
+        warning_codes = list(
+            dict.fromkeys(
+                code
+                for pair in smart_arbitrage_pairs
+                for code in pair.metadata.get("configuration_warning_codes", [])
+                if str(code).strip()
+            )
+        )
+        error_codes = list(
+            dict.fromkeys(
+                code
+                for pair in smart_arbitrage_pairs
+                for code in pair.metadata.get("configuration_error_codes", [])
+                if str(code).strip()
+            )
+        )
+        return pair_definitions, warning_codes, error_codes, "settings_fallback"
 
     def _smart_arbitrage_cost_summary(self, *, latest_snapshot: dict[str, Any] | None) -> dict[str, Any]:
         smart_candidate = None

@@ -34,6 +34,8 @@ class SmartArbitrageStrategyEngine:
         self.account_service = account_service
 
     def evaluate(self, engine_input: StrategyEngineInput) -> StrategyCandidate:
+        pair_definitions = tuple(engine_input.resolved_pair_definitions_by_family.get("smart_arbitrage", ()))
+        resolved_pair_metrics = self._resolved_pair_configuration_metrics(pair_definitions)
         if not self.settings.smart_arbitrage_enabled:
             return StrategyCandidate(
                 family="smart_arbitrage",
@@ -46,6 +48,7 @@ class SmartArbitrageStrategyEngine:
                 recommended_symbol=engine_input.context.symbol,
                 reason_codes=["smart_arbitrage_disabled"],
                 state_phase="inactive",
+                metrics=resolved_pair_metrics,
             )
         if engine_input.context.product_type != "derivatives":
             return StrategyCandidate(
@@ -59,9 +62,9 @@ class SmartArbitrageStrategyEngine:
                 recommended_symbol=engine_input.context.symbol,
                 reason_codes=["smart_arbitrage_derivatives_runtime_required"],
                 state_phase="inactive",
+                metrics=resolved_pair_metrics,
             )
 
-        pair_definitions = tuple(engine_input.resolved_pair_definitions_by_family.get("smart_arbitrage", ()))
         if not pair_definitions:
             return StrategyCandidate(
                 family="smart_arbitrage",
@@ -73,6 +76,7 @@ class SmartArbitrageStrategyEngine:
                 headline="Spot and derivatives companion symbols are not configured in the family input contract.",
                 reason_codes=["smart_arbitrage_symbol_pair_missing"],
                 state_phase="inactive",
+                metrics=resolved_pair_metrics,
             )
 
         candidates = [self._evaluate_pair(pair=pair, engine_input=engine_input) for pair in pair_definitions]
@@ -80,6 +84,7 @@ class SmartArbitrageStrategyEngine:
         selected = self._aggregate_candidates(candidates=candidates, selected_pairs=selected_pairs)
         selected.metrics = {
             **selected.metrics,
+            **resolved_pair_metrics,
             "evaluated_pairs": [
                 {
                     "pair_id": item.pair_id,
@@ -114,6 +119,35 @@ class SmartArbitrageStrategyEngine:
             "pair_count_selected": len(selected_pairs),
         }
         return selected
+
+    @staticmethod
+    def _resolved_pair_configuration_metrics(pair_definitions) -> dict[str, object]:
+        serialized_pairs = [
+            pair.model_dump(mode="json")
+            for pair in pair_definitions
+        ]
+        warning_codes = list(
+            dict.fromkeys(
+                code
+                for pair in pair_definitions
+                for code in pair.metadata.get("configuration_warning_codes", [])
+                if str(code).strip()
+            )
+        )
+        error_codes = list(
+            dict.fromkeys(
+                code
+                for pair in pair_definitions
+                for code in pair.metadata.get("configuration_error_codes", [])
+                if str(code).strip()
+            )
+        )
+        return {
+            "pair_definitions": serialized_pairs,
+            "pair_registry_warning_codes": warning_codes,
+            "pair_registry_error_codes": error_codes,
+            "pair_registry_source": "coordinator_resolved",
+        }
 
     def _load_market_pair(
         self,

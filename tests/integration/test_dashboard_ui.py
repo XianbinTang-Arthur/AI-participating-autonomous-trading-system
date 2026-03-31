@@ -456,12 +456,20 @@ const html = renderStrategyView({
         hedge_independent_enabled: true,
         hedge_independent_long_entry_threshold: 0.66,
         hedge_independent_short_entry_threshold: 0.64,
+        hedge_independent_long_close_threshold: 0.52,
+        hedge_independent_short_close_threshold: 0.50,
         hedge_independent_long_scale_in_threshold: 0.70,
         hedge_independent_short_scale_in_threshold: 0.68,
         hedge_independent_long_min_hold_seconds: 300,
         hedge_independent_short_min_hold_seconds: 420,
         hedge_independent_rebalance_cooldown_seconds: 120,
         hedge_independent_trial_guard_enabled: true,
+        hedge_independent_min_safe_net_edge_bps: 3.0,
+        hedge_independent_expected_slippage_buffer_bps: 1.0,
+        hedge_independent_expected_execution_buffer_bps: 2.0,
+        hedge_independent_weak_edge_execution_mode: 'report_only',
+        hedge_independent_max_acceptable_cost_bps: 7.5,
+        hedge_independent_passive_first_enabled: true,
       },
     },
     latest_snapshot: { candidates: [], automation_decisions: [] },
@@ -535,6 +543,9 @@ const html = renderStrategyView({
 console.log(JSON.stringify({
   hasIndependentLabel: html.includes('独立双书'),
   hasIndependentThresholds: html.includes('strategy_hedge_independent_long_entry_threshold / strategy_hedge_independent_short_entry_threshold'),
+  hasIndependentCloseThresholds: html.includes('strategy_hedge_independent_long_close_threshold / strategy_hedge_independent_short_close_threshold'),
+  hasIndependentSafetyBuffers: html.includes('strategy_hedge_independent_min_safe_net_edge_bps / strategy_hedge_independent_expected_slippage_buffer_bps / strategy_hedge_independent_expected_execution_buffer_bps'),
+  hasIndependentExecutionDiscipline: html.includes('strategy_hedge_independent_weak_edge_execution_mode / strategy_hedge_independent_max_acceptable_cost_bps / strategy_hedge_independent_passive_first_enabled'),
   hasIndependentBooks: html.includes('双书分 long 0.74 / short 0.68 | 目标 +0.03 / -0.01'),
   hasIndependentReasons: html.includes('long book 的双书分已经超过开仓阈值') && html.includes('long book 的试盘守护已经触发'),
 }));
@@ -550,6 +561,9 @@ console.log(JSON.stringify({
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         self.assertIn('"hasIndependentLabel":true', result.stdout)
         self.assertIn('"hasIndependentThresholds":true', result.stdout)
+        self.assertIn('"hasIndependentCloseThresholds":true', result.stdout)
+        self.assertIn('"hasIndependentSafetyBuffers":true', result.stdout)
+        self.assertIn('"hasIndependentExecutionDiscipline":true', result.stdout)
         self.assertIn('"hasIndependentBooks":true', result.stdout)
         self.assertIn('"hasIndependentReasons":true', result.stdout)
 
@@ -1590,6 +1604,7 @@ const html = renderStrategyView({
           },
         ],
         pair_registry_error_codes: ['smart_arbitrage_pair_execution_modes_invalid'],
+        pair_registry_source: 'coordinator_resolved',
         basis_entry_bps: 40,
         basis_exit_bps: 6,
         estimated_cost_bps: 34,
@@ -1663,6 +1678,103 @@ console.log(JSON.stringify({
         self.assertIn('"hidesBlockedReadyHeadline":true', result.stdout)
         self.assertIn('"showsBlockedReasonCopy":true', result.stdout)
         self.assertIn('"showsPairConfigRisk":true', result.stdout)
+
+    def test_strategy_view_surfaces_pair_registry_source_labels_for_smart_arbitrage(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { renderStrategyView } from './aats/api/static/modules/views/strategy-view.js';
+
+const coordinatorHtml = renderStrategyView({
+  strategyRuntime: {
+    summary: {},
+    latest_snapshot: { candidates: [], automation_decisions: [] },
+    configured_parameters: {
+      smart_arbitrage: {
+        enabled: true,
+        pair_definitions: [{ pair_id: 'btc_usdt_swap', spot_symbol: 'BTC-USDT', hedge_symbol: 'BTC-USDT-SWAP' }],
+        pair_registry_error_codes: ['smart_arbitrage_pair_execution_modes_invalid'],
+        pair_registry_source: 'coordinator_resolved',
+        basis_entry_bps: 40,
+        basis_exit_bps: 6,
+        estimated_cost_bps: 20,
+        quote_budget_per_trade: 200,
+        max_pair_notional: 2000,
+        cost_model_enabled: true,
+        funding_cost_enabled: false,
+        borrow_cost_enabled: false,
+        negative_basis_mode: 'advisory_only',
+      },
+      directional: {},
+      trade_costs: {},
+    },
+    smart_arbitrage_cost_summary: {},
+    latest_bundle: {},
+    latest_allocation_decision: {},
+    latest_applied_target: {},
+    recent_execution_bundles: [],
+    recent_sleeve_intents: [],
+    recent_budget_snapshots: [],
+    recent_conflict_resolutions: [],
+    recent_netting_decisions: [],
+    family_enablement: { smart_arbitrage: { enabled: true, runtime_supported: true, execution_compatible: true } },
+  },
+  strategyAttribution: { summary: {} },
+  trialReviewSummary: { summary: {}, sections: {} },
+});
+
+const fallbackHtml = renderStrategyView({
+  strategyRuntime: {
+    summary: {},
+    latest_snapshot: { candidates: [], automation_decisions: [] },
+    configured_parameters: {
+      smart_arbitrage: {
+        enabled: true,
+        pair_definitions: [],
+        pair_registry_error_codes: ['smart_arbitrage_pair_execution_modes_invalid'],
+        pair_registry_source: 'settings_fallback',
+        basis_entry_bps: 40,
+        basis_exit_bps: 6,
+        estimated_cost_bps: 20,
+        quote_budget_per_trade: 200,
+        max_pair_notional: 2000,
+        cost_model_enabled: true,
+        funding_cost_enabled: false,
+        borrow_cost_enabled: false,
+        negative_basis_mode: 'advisory_only',
+      },
+      directional: {},
+      trade_costs: {},
+    },
+    smart_arbitrage_cost_summary: {},
+    latest_bundle: {},
+    latest_allocation_decision: {},
+    latest_applied_target: {},
+    recent_execution_bundles: [],
+    recent_sleeve_intents: [],
+    recent_budget_snapshots: [],
+    recent_conflict_resolutions: [],
+    recent_netting_decisions: [],
+    family_enablement: { smart_arbitrage: { enabled: true, runtime_supported: true, execution_compatible: true } },
+  },
+  strategyAttribution: { summary: {} },
+  trialReviewSummary: { summary: {}, sections: {} },
+});
+
+console.log(JSON.stringify({
+  showsCoordinatorSource: coordinatorHtml.includes('协调器已解析结果'),
+  showsFallbackSource: fallbackHtml.includes('环境文件默认策略'),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertIn('"showsCoordinatorSource":true', result.stdout)
+        self.assertIn('"showsFallbackSource":true', result.stdout)
 
     def test_strategy_view_localizes_negative_basis_reason_copy_across_advisory_opening_and_blocked_states(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]

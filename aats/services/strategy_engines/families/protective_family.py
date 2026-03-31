@@ -222,6 +222,10 @@ def evaluate_protective_overlay_decision(
         )
 
     main_leg_signal = _exposure_side(long_target_qty - short_target_qty)
+    main_signal_inferred_from_inventory = False
+    if main_leg_signal == "flat":
+        main_leg_signal = _resolve_overlay_main_leg_signal_from_inventory(context=context)
+        main_signal_inferred_from_inventory = main_leg_signal != "flat"
     if main_leg_signal == "flat":
         return HedgeOverlayDecision(
             enabled=True,
@@ -304,6 +308,8 @@ def evaluate_protective_overlay_decision(
         reason_codes.append("protective_overlay_hold_above_close_threshold")
     else:
         reason_codes.append("protective_overlay_pressure_below_open_threshold")
+    if main_signal_inferred_from_inventory:
+        reason_codes.append("protective_overlay_main_signal_inferred_from_inventory")
 
     hedge_leg_target_qty = main_leg_target_qty * target_ratio
     now = context.as_of_ts
@@ -555,6 +561,25 @@ def _exposure_side(quantity: Decimal) -> str:
     return "flat"
 
 
+def _resolve_overlay_main_leg_signal_from_inventory(*, context: DecisionContext) -> str:
+    current_long_qty = to_decimal(context.current_long_position_qty)
+    current_short_qty = to_decimal(context.current_short_position_qty)
+    current_exposure_side = str(context.current_exposure_side or "").strip().lower()
+    if current_exposure_side == "long" and current_long_qty > EPSILON_DECIMAL_12:
+        return "long"
+    if current_exposure_side == "short" and current_short_qty > EPSILON_DECIMAL_12:
+        return "short"
+    if current_long_qty > current_short_qty + EPSILON_DECIMAL_12:
+        return "long"
+    if current_short_qty > current_long_qty + EPSILON_DECIMAL_12:
+        return "short"
+    if current_long_qty > EPSILON_DECIMAL_12:
+        return "long"
+    if current_short_qty > EPSILON_DECIMAL_12:
+        return "short"
+    return "flat"
+
+
 def _sign(value: Decimal) -> Decimal:
     if value > EPSILON_DECIMAL_12:
         return Decimal("1")
@@ -628,6 +653,8 @@ def _protective_family_action(
     overlay_decision: HedgeOverlayDecision,
 ) -> StrategyFamilyAction:
     if hedge_leg is not None:
+        if str(hedge_leg.action).lower() == "close":
+            return "close_protection_leg"
         current_qty = abs(to_decimal(hedge_leg.current_position_qty or Decimal("0")))
         if current_qty <= EPSILON_DECIMAL_12 and hedge_leg.action == "open":
             return "protect"

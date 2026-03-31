@@ -1430,10 +1430,14 @@ class TestMainlineTradingChain(unittest.IsolatedAsyncioTestCase):
         if legs:
             if family == "protective":
                 family_action = (
-                    "protect"
-                    if abs(to_decimal(legs[0].current_position_qty or Decimal("0"))) <= EPSILON_DECIMAL_12
-                    and str(legs[0].action or "").lower() == "open"
-                    else "rebalance_protection"
+                    "close_protection_leg"
+                    if any(str(getattr(leg, "action", "") or "").lower() == "close" for leg in legs)
+                    else (
+                        "protect"
+                        if abs(to_decimal(legs[0].current_position_qty or Decimal("0"))) <= EPSILON_DECIMAL_12
+                        and str(legs[0].action or "").lower() == "open"
+                        else "rebalance_protection"
+                    )
                 )
             else:
                 family_action = (

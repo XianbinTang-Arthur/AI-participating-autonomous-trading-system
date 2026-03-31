@@ -3171,6 +3171,89 @@ class TestStrategyCoordinator(unittest.TestCase):
         self.assertIsNotNone(applied.decision_outcome.family_execution_summary)
         self.assertEqual(applied.decision_outcome.family_execution_summary.position_intents, ["open_short"])
 
+    def test_protective_family_cutover_preserves_close_semantics_for_residual_inventory(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "derivatives_position_mode": "hedge",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "strategy_family_active": "directional",
+                "strategy_family_auto_selection_enabled": False,
+                "strategy_hedge_overlay_enabled": True,
+                "strategy_hedge_overlay_mode": "protective",
+                "strategy_hedge_protective_enabled": True,
+                "strategy_family_protective_enabled": True,
+                "strategy_family_protective_live_execution_enabled": True,
+            }
+        )
+        coordinator = StrategyCoordinatorService(
+            settings=settings,
+            event_store=InMemoryEventStore(),
+            market_gateway=_FakeMarketGateway({"BTC-USDT-SWAP": _market_snapshot("BTC-USDT-SWAP", "65000")}),
+            portfolio_repo=InMemoryPortfolioRepository(),
+            strategy_sleeve_repo=InMemoryStrategySleeveRepository(),
+        )
+        context = _decision_context(
+            symbol="BTC-USDT-SWAP",
+            product_type="derivatives",
+            current_position_qty="0.03",
+        ).model_copy(
+            update={
+                "current_long_position_qty": Decimal("0.05"),
+                "current_short_position_qty": Decimal("0.02"),
+                "current_net_position_qty": Decimal("0.03"),
+                "current_gross_position_qty": Decimal("0.07"),
+                "current_exposure_side": "long",
+                "current_long_leg_opened_at": utc_now() - timedelta(minutes=20),
+                "current_short_leg_opened_at": utc_now() - timedelta(minutes=20),
+            }
+        )
+        baseline = _baseline(symbol="BTC-USDT-SWAP", regime="range", confidence=0.90).model_copy(
+            update={
+                "direction_bias": "long",
+                "volatility_state": "medium",
+                "composite_alpha_score": Decimal("0.10"),
+                "factor_scores": {
+                    "microstructure_alpha": Decimal("0.10"),
+                    "momentum_alpha": Decimal("0.10"),
+                    "trend_alpha": Decimal("0.10"),
+                },
+            }
+        )
+        base_target = _position_target(
+            symbol="BTC-USDT-SWAP",
+            product_type="derivatives",
+            margin_mode="cross",
+            current_qty="0.03",
+            target_qty="0",
+            position_intent="reduce_long",
+        )
+
+        snapshot = coordinator.evaluate(
+            context=context,
+            baseline=baseline,
+            directional_target=base_target,
+        )
+        applied = coordinator.apply_selected_target(base_target=base_target, snapshot=snapshot)
+
+        self.assertEqual(snapshot.selected_family, "protective")
+        self.assertEqual(snapshot.selected_family_action, "close_protection_leg")
+        self.assertEqual(applied.strategy_family, "protective")
+        self.assertEqual(applied.strategy_family_action, "close_protection_leg")
+        self.assertEqual(applied.strategy_route_action, "override_target")
+        self.assertEqual(applied.position_intent, "close_short")
+        self.assertTrue(applied.strategy_execution_legs)
+        self.assertEqual(applied.strategy_execution_legs[0].family, "protective")
+        self.assertEqual(applied.strategy_execution_legs[0].action, "close")
+        assert applied.decision_outcome is not None
+        self.assertEqual(applied.decision_outcome.selected_strategy_family_action, "close_protection_leg")
+        self.assertEqual(applied.decision_outcome.final_action, "exit")
+        self.assertEqual(applied.decision_outcome.final_direction, "short")
+        self.assertIsNotNone(applied.family_execution_summary)
+        self.assertEqual(applied.family_execution_summary.position_intents, ["close_short"])
+
     def test_opportunistic_family_cutover_selects_opportunistic_and_updates_top_level_semantics(self) -> None:
         settings = AATSSettings.model_validate(
             {

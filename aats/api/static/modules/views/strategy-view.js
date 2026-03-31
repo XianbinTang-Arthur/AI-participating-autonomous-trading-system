@@ -1121,6 +1121,12 @@ function directionalShortConfigRows(config = {}) {
       "只有当某一边自己的双书分继续抬高时，系统才会独立放大该腿。",
     ],
     [
+      "strategy_hedge_independent_long_close_threshold / strategy_hedge_independent_short_close_threshold",
+      `${formatNumber(config?.hedge_independent_long_close_threshold, 2, "待确认")} / ${formatNumber(config?.hedge_independent_short_close_threshold, 2, "待确认")}`,
+      "双书收回阈值",
+      "只有当对应 book 的双书分回落到 close 阈值下方后，系统才会考虑独立收回该腿。",
+    ],
+    [
       "strategy_hedge_independent_long_min_hold_seconds / strategy_hedge_independent_short_min_hold_seconds / strategy_hedge_independent_rebalance_cooldown_seconds",
       `${formatDuration(config?.hedge_independent_long_min_hold_seconds, "待确认")} / ${formatDuration(config?.hedge_independent_short_min_hold_seconds, "待确认")} / ${formatDuration(config?.hedge_independent_rebalance_cooldown_seconds, "待确认")}`,
       "双书最小持有 / 重平衡冷却",
@@ -1131,6 +1137,18 @@ function directionalShortConfigRows(config = {}) {
       config?.hedge_independent_trial_guard_enabled ? "true" : "false",
       "腿级试盘守护",
       "独立双书会按 long / short 两条腿分别评估样本、胜率和近期净收益，不再把一条腿的坏表现直接扩散到另一条腿。",
+    ],
+    [
+      "strategy_hedge_independent_min_safe_net_edge_bps / strategy_hedge_independent_expected_slippage_buffer_bps / strategy_hedge_independent_expected_execution_buffer_bps",
+      `${formatNumber(config?.hedge_independent_min_safe_net_edge_bps, 2, "待确认")} / ${formatNumber(config?.hedge_independent_expected_slippage_buffer_bps, 2, "待确认")} / ${formatNumber(config?.hedge_independent_expected_execution_buffer_bps, 2, "待确认")}`,
+      "净边际安全垫 / 滑点缓冲 / 执行缓冲",
+      "独立双书会先要求预期净边际覆盖安全净边际、预估滑点和执行缓冲，再决定是否允许开腿。",
+    ],
+    [
+      "strategy_hedge_independent_weak_edge_execution_mode / strategy_hedge_independent_max_acceptable_cost_bps / strategy_hedge_independent_passive_first_enabled",
+      `${String(config?.hedge_independent_weak_edge_execution_mode || "待确认")} / ${formatNumber(config?.hedge_independent_max_acceptable_cost_bps, 2, "待确认")} / ${config?.hedge_independent_passive_first_enabled ? "true" : "false"}`,
+      "弱边际执行 / 成本上限 / 被动优先",
+      "当双书边际偏弱时，系统会根据这组约束决定是否只做报告、限制可接受成本，并优先尝试更保守的被动执行。",
     ],
   ];
 }
@@ -1183,7 +1201,7 @@ function directionalHedgeOverlayMeta(config = {}, target = {}, decisionScene = "
     return summarizeLocalizedList(overlay.reason_codes, { limit: 3, suffix: "等状态说明" });
   }
   if (mode === "independent") {
-    return `long entry ${formatNumber(config?.hedge_independent_long_entry_threshold, 2, "待确认")} / short entry ${formatNumber(config?.hedge_independent_short_entry_threshold, 2, "待确认")} / rebalance ${formatDuration(config?.hedge_independent_rebalance_cooldown_seconds, "待确认")}`;
+    return `long open ${formatNumber(config?.hedge_independent_long_entry_threshold, 2, "待确认")} / short open ${formatNumber(config?.hedge_independent_short_entry_threshold, 2, "待确认")} / long close ${formatNumber(config?.hedge_independent_long_close_threshold, 2, "待确认")} / short close ${formatNumber(config?.hedge_independent_short_close_threshold, 2, "待确认")} / safe net ${formatNumber(config?.hedge_independent_min_safe_net_edge_bps, 2, "待确认")} bps / passive-first ${config?.hedge_independent_passive_first_enabled ? "true" : "false"}`;
   }
   return `open ${formatNumber(config?.hedge_open_threshold, 2, "待确认")} / close ${formatNumber(config?.hedge_close_threshold, 2, "待确认")} / max ${formatRatio(config?.hedge_max_ratio)}`;
 }
@@ -1450,6 +1468,10 @@ function smartArbitrageConfigPairs(config = {}) {
   return Array.isArray(config?.pair_definitions) ? config.pair_definitions : [];
 }
 
+function smartArbitragePairRegistrySourceLabel(config = {}) {
+  return readableState(config?.pair_registry_source || "settings_fallback");
+}
+
 function smartArbitragePairConfigIssues(pairDefinitions = []) {
   return pairDefinitions.flatMap((item) => {
     const metadata = item?.metadata || {};
@@ -1615,7 +1637,7 @@ function smartArbitrageCommonConfigRows(config = {}, tradeCosts = {}) {
       "smart_arbitrage_pair_definitions",
       "可交易配对定义",
       `${formatNumber(pairDefinitions.length, 0, "0")} 组`,
-      smartArbitragePairSummaryMeta(pairDefinitions),
+      `${smartArbitragePairSummaryMeta(pairDefinitions)} | 配对来源 ${smartArbitragePairRegistrySourceLabel(config)}`,
       pairIssues.length
         ? `当前有 ${formatNumber(pairIssues.length, 0, "0")} 组配对带配置告警，建议先处理完再放量。`
         : derivedPairs.length
@@ -2071,7 +2093,7 @@ function smartArbitrageConfigRisks(config = {}, tradeCosts = {}, familyStatus = 
     risks.push("至少有一组配对与其它 pair 使用相同现货/合约 scope；后续重复定义当前会被忽略。");
   }
   if (Array.isArray(config?.pair_registry_error_codes) && config.pair_registry_error_codes.length) {
-    risks.push(`pair registry 当前还有 ${formatNumber(config.pair_registry_error_codes.length, 0, "0")} 条配置级错误。`);
+    risks.push(`pair registry 当前还有 ${formatNumber(config.pair_registry_error_codes.length, 0, "0")} 条配置级错误；来源：${smartArbitragePairRegistrySourceLabel(config)}。`);
   }
   return risks;
 }

@@ -41,14 +41,20 @@ strategy_family_active: directional
 strategy_family_auto_selection_enabled: true
 # [常用可调] strategy_family_independent_enabled：是否启用 independent family 骨架。开发/回放环境默认关闭，避免误切主路径。可选值：true / false；推荐值：false。
 strategy_family_independent_enabled: false
+# [进阶可调] strategy_family_independent_shadow_mode_enabled：是否仅让 independent family 以 shadow 方式评估。开发/回放环境默认关闭。可选值：true / false；推荐值：false。
+strategy_family_independent_shadow_mode_enabled: false
 # [常用可调] strategy_family_independent_live_execution_enabled：是否允许 independent family 直接接管 allocator / apply 主路径。开发/回放环境默认关闭。可选值：true / false；推荐值：false。
 strategy_family_independent_live_execution_enabled: false
 # [常用可调] strategy_family_protective_enabled：是否启用 protective family cutover 骨架。开发/回放环境默认关闭；不影响 legacy directional overlay。可选值：true / false；推荐值：false。
 strategy_family_protective_enabled: false
+# [进阶可调] strategy_family_protective_shadow_mode_enabled：是否仅让 protective family 以 shadow 方式评估。开发/回放环境默认关闭。可选值：true / false；推荐值：false。
+strategy_family_protective_shadow_mode_enabled: false
 # [常用可调] strategy_family_protective_live_execution_enabled：是否允许 protective family 直接接管 allocator / apply 主路径。开发/回放环境默认关闭。可选值：true / false；推荐值：false。
 strategy_family_protective_live_execution_enabled: false
 # [常用可调] strategy_family_opportunistic_enabled：是否启用 opportunistic family cutover 骨架。开发/回放环境默认关闭；不影响 legacy directional overlay。可选值：true / false；推荐值：false。
 strategy_family_opportunistic_enabled: false
+# [进阶可调] strategy_family_opportunistic_shadow_mode_enabled：是否仅让 opportunistic family 以 shadow 方式评估。开发/回放环境默认关闭。可选值：true / false；推荐值：false。
+strategy_family_opportunistic_shadow_mode_enabled: false
 # [常用可调] strategy_family_opportunistic_live_execution_enabled：是否允许 opportunistic family 直接接管 allocator / apply 主路径。开发/回放环境默认关闭。可选值：true / false；推荐值：false。
 strategy_family_opportunistic_live_execution_enabled: false
 # [常用可调] strategy_profile_auto_control_enabled：是否启用策略档位自动换档。这是唯一主开关；true 时系统会自动评估并默认启用自动激活规则，false 时只允许手动切档。可选值：true / false；推荐值：true。

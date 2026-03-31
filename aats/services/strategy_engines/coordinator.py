@@ -1367,6 +1367,7 @@ class StrategyCoordinatorService:
             "blocked": "hold",
             "protect": "enter",
             "rebalance_protection": "scale_in",
+            "close_protection_leg": "exit",
             "open_opportunity_leg": "enter",
             "close_opportunity_leg": "exit",
             "open_independent_book": "enter",

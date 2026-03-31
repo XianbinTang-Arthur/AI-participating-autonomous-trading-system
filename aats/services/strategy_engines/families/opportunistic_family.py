@@ -17,6 +17,7 @@ from aats.services.strategy_engines.families.protective_family import (
     _candidate_state_from_overlay_state,
     _overlay_route_action,
     _placeholder_family_candidate,
+    _resolve_overlay_main_leg_signal_from_inventory,
     _signed_leg_qty,
     protective_runtime_supported,
 )
@@ -243,6 +244,10 @@ def evaluate_opportunistic_overlay_decision(
         )
 
     main_leg_signal = _exposure_side(long_target_qty - short_target_qty)
+    main_signal_inferred_from_inventory = False
+    if main_leg_signal == "flat":
+        main_leg_signal = _resolve_overlay_main_leg_signal_from_inventory(context=context)
+        main_signal_inferred_from_inventory = main_leg_signal != "flat"
     if main_leg_signal == "flat":
         return HedgeOverlayDecision(
             enabled=True,
@@ -336,6 +341,8 @@ def evaluate_opportunistic_overlay_decision(
         reason_codes.append("opportunistic_overlay_hold_above_close_threshold")
     else:
         reason_codes.append("opportunistic_overlay_signal_below_open_threshold")
+    if main_signal_inferred_from_inventory:
+        reason_codes.append("opportunistic_overlay_main_signal_inferred_from_inventory")
 
     hedge_leg_target_qty = main_leg_target_qty * target_ratio
     opening_or_expanding = hedge_leg_target_qty > hedge_leg_current_qty + EPSILON_DECIMAL_12

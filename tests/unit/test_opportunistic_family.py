@@ -290,6 +290,63 @@ class TestOpportunisticFamily(unittest.TestCase):
             )
         )
 
+    def test_evaluate_opportunistic_overlay_preserves_residual_inventory_when_target_turns_flat(self) -> None:
+        settings = make_derivatives_hedge_settings(
+            strategy_hedge_overlay_mode="opportunistic",
+            strategy_hedge_opportunistic_enabled=True,
+            strategy_hedge_opportunistic_min_hold_seconds=0.0,
+            strategy_hedge_opportunistic_rebalance_cooldown_seconds=0.0,
+        )
+        context = make_context(
+            current_position_qty=0.03,
+            current_long_position_qty=0.05,
+            current_short_position_qty=0.02,
+            product_type="derivatives",
+            current_exposure_side="long",
+        )
+        baseline = make_baseline(
+            direction_bias="long",
+            confidence=0.70,
+            suggested_position_scale=0.0,
+            volatility_target_scale=1.0,
+            factor_scores={
+                "momentum_alpha": 0.12,
+                "trend_alpha": 0.10,
+                "microstructure_alpha": 0.10,
+                "liquidity_scale": 0.90,
+            },
+        ).model_copy(update={"regime": "range", "composite_alpha_score": 0.10})
+
+        overlay_decision = evaluate_opportunistic_overlay_decision(
+            settings=settings,
+            context=context,
+            baseline=baseline,
+            ai_assessment=make_ai_assessment(direction=0.05, confidence=0.60),
+            long_target_qty=Decimal("0"),
+            short_target_qty=Decimal("0"),
+            scorer=lambda **_: 0.10,
+        )
+        hedge_leg = build_opportunistic_candidate_leg(
+            symbol=context.symbol,
+            target_leverage=1.0,
+            margin_mode=str(settings.margin_mode),
+            overlay_decision=overlay_decision,
+        )
+
+        self.assertTrue(overlay_decision.active)
+        self.assertEqual(overlay_decision.state, "closing")
+        self.assertEqual(overlay_decision.main_leg_signal, "long")
+        self.assertEqual(overlay_decision.hedge_leg_signal, "short")
+        self.assertEqual(overlay_decision.main_leg_current_qty, Decimal("0.05"))
+        self.assertEqual(overlay_decision.hedge_leg_current_qty, Decimal("0.02"))
+        self.assertEqual(overlay_decision.main_leg_target_qty, Decimal("0"))
+        self.assertEqual(overlay_decision.hedge_leg_target_qty, Decimal("0"))
+        self.assertIn("opportunistic_overlay_main_signal_inferred_from_inventory", overlay_decision.reason_codes)
+        self.assertIsNotNone(hedge_leg)
+        assert hedge_leg is not None
+        self.assertEqual(hedge_leg.pos_side, "short")
+        self.assertEqual(hedge_leg.action, "close")
+
     def test_evaluate_opportunistic_overlay_blocks_live_runtime_before_rollout_stage_is_live(self) -> None:
         settings = make_derivatives_hedge_settings(
             strategy_hedge_overlay_mode="opportunistic",

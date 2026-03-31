@@ -25,6 +25,7 @@ StrategyFamilyAction = Literal[
     "blocked",
     "protect",
     "rebalance_protection",
+    "close_protection_leg",
     "open_opportunity_leg",
     "close_opportunity_leg",
     "open_independent_book",

@@ -213,6 +213,60 @@ class TestProtectiveFamily(unittest.TestCase):
         self.assertIn("protective_overlay_rebalance_cooldown_active", overlay_decision.blocked_reasons)
         self.assertGreater(overlay_decision.rebalance_cooldown_remaining_seconds, 0.0)
 
+    def test_evaluate_protective_overlay_preserves_residual_inventory_when_target_turns_flat(self) -> None:
+        settings = make_derivatives_hedge_settings(
+            strategy_hedge_min_hold_seconds=0.0,
+            strategy_hedge_rebalance_cooldown_seconds=0.0,
+        )
+        context = make_context(
+            current_position_qty=0.03,
+            current_long_position_qty=0.05,
+            current_short_position_qty=0.02,
+            product_type="derivatives",
+            current_exposure_side="long",
+        )
+        baseline = make_baseline(
+            direction_bias="long",
+            confidence=0.60,
+            suggested_position_scale=0.0,
+            volatility_target_scale=1.0,
+            factor_scores={
+                "momentum_alpha": 0.08,
+                "trend_alpha": 0.06,
+                "microstructure_alpha": 0.02,
+                "liquidity_scale": 0.90,
+            },
+        ).model_copy(update={"composite_alpha_score": 0.12})
+
+        overlay_decision = evaluate_protective_overlay_decision(
+            settings=settings,
+            context=context,
+            baseline=baseline,
+            ai_assessment=make_ai_assessment(direction=0.05, confidence=0.60),
+            long_target_qty=Decimal("0"),
+            short_target_qty=Decimal("0"),
+        )
+        hedge_leg = build_protective_candidate_leg(
+            symbol=context.symbol,
+            target_leverage=1.0,
+            margin_mode=str(settings.margin_mode),
+            overlay_decision=overlay_decision,
+        )
+
+        self.assertTrue(overlay_decision.active)
+        self.assertEqual(overlay_decision.state, "closing")
+        self.assertEqual(overlay_decision.main_leg_signal, "long")
+        self.assertEqual(overlay_decision.hedge_leg_signal, "short")
+        self.assertEqual(overlay_decision.main_leg_current_qty, Decimal("0.05"))
+        self.assertEqual(overlay_decision.hedge_leg_current_qty, Decimal("0.02"))
+        self.assertEqual(overlay_decision.main_leg_target_qty, Decimal("0"))
+        self.assertEqual(overlay_decision.hedge_leg_target_qty, Decimal("0"))
+        self.assertIn("protective_overlay_main_signal_inferred_from_inventory", overlay_decision.reason_codes)
+        self.assertIsNotNone(hedge_leg)
+        assert hedge_leg is not None
+        self.assertEqual(hedge_leg.pos_side, "short")
+        self.assertEqual(hedge_leg.action, "close")
+
 
 if __name__ == "__main__":
     unittest.main()
