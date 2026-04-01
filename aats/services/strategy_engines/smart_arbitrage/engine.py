@@ -168,6 +168,27 @@ class SmartArbitrageStrategyEngine:
 
     def _evaluate_pair(self, *, pair, engine_input: StrategyEngineInput) -> StrategyCandidate:
         hedge_margin_mode = self._resolved_hedge_margin_mode(engine_input)
+        if hedge_margin_mode is None:
+            return StrategyCandidate(
+                family="smart_arbitrage",
+                state="blocked",
+                enabled=True,
+                selectable=False,
+                execution_compatible=False,
+                route_action="advisory_only",
+                headline="Smart arbitrage 缺少运行时对冲保证金模式，当前不会生成执行腿。",
+                recommended_symbol=pair.spot_symbol,
+                pair_id=pair.pair_id,
+                opportunity_kind="configuration_missing",
+                state_phase="blocked",
+                reason_codes=["smart_arbitrage_runtime_margin_mode_missing"],
+                blocking_reasons=["smart_arbitrage_runtime_margin_mode_missing"],
+                metrics={
+                    "pair_id": pair.pair_id,
+                    "spot_symbol": pair.spot_symbol,
+                    "derivatives_symbol": pair.hedge_symbol,
+                },
+            )
         spot_snapshot, hedge_snapshot = self._load_market_pair(
             pair=pair,
             engine_input=engine_input,
@@ -344,6 +365,7 @@ class SmartArbitrageStrategyEngine:
                 execution_mode=None,
                 reference_ts=reference_ts,
                 hedge_margin_mode=hedge_margin_mode,
+                require_explicit_hedge_margin_mode=True,
                 spot_symbol=pair.spot_symbol,
                 hedge_symbol=pair.hedge_symbol,
                 account_service=self.account_service,
@@ -488,6 +510,7 @@ class SmartArbitrageStrategyEngine:
                 execution_mode=observation_mode,
                 reference_ts=reference_ts,
                 hedge_margin_mode=hedge_margin_mode,
+                require_explicit_hedge_margin_mode=True,
                 spot_symbol=pair.spot_symbol,
                 hedge_symbol=pair.hedge_symbol,
                 account_service=self.account_service,
@@ -513,6 +536,7 @@ class SmartArbitrageStrategyEngine:
             execution_mode=execution_mode,
             reference_ts=reference_ts,
             hedge_margin_mode=hedge_margin_mode,
+            require_explicit_hedge_margin_mode=True,
             spot_symbol=pair.spot_symbol,
             hedge_symbol=pair.hedge_symbol,
             account_service=self.account_service,
@@ -669,6 +693,7 @@ class SmartArbitrageStrategyEngine:
             execution_mode=execution_mode,
             reference_ts=reference_ts,
             hedge_margin_mode=hedge_margin_mode,
+            require_explicit_hedge_margin_mode=True,
             spot_symbol=pair.spot_symbol,
             hedge_symbol=pair.hedge_symbol,
             account_service=self.account_service,
@@ -754,6 +779,7 @@ class SmartArbitrageStrategyEngine:
                 }
             ),
             hedge_margin_mode=hedge_margin_mode,
+            require_explicit_hedge_margin_mode=True,
             account_spot_qty=account_spot_qty,
             account_hedge_qty=account_hedge_qty,
             sleeve_spot_qty=sleeve_spot_qty,
@@ -943,6 +969,7 @@ class SmartArbitrageStrategyEngine:
             execution_mode=execution_mode,
             reference_ts=reference_ts,
             hedge_margin_mode=hedge_margin_mode,
+            require_explicit_hedge_margin_mode=True,
             spot_symbol=pair.spot_symbol,
             hedge_symbol=pair.hedge_symbol,
             account_service=self.account_service,
@@ -1006,8 +1033,9 @@ class SmartArbitrageStrategyEngine:
             return self._parallel_safe_candidates(candidates=opening_pairs, existing=[], limit=max_pairs)
         return ranked[:1]
 
-    def _resolved_hedge_margin_mode(self, engine_input: StrategyEngineInput) -> str:
-        return str(engine_input.directional_target.margin_mode or self.settings.margin_mode)
+    def _resolved_hedge_margin_mode(self, engine_input: StrategyEngineInput) -> str | None:
+        normalized = str(getattr(engine_input.directional_target, "margin_mode", "") or "").strip()
+        return normalized or None
 
     def _aggregate_candidates(
         self,

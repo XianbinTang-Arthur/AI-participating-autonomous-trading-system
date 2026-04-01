@@ -266,6 +266,29 @@ class ProfileControlDecision(SchemaBase):
     activation_record_ref: str | None = None
 
 
+class OverlayParentExposureAudit(SchemaBase):
+    parent_family: StrategyFamily | None = None
+    symbol: str | None = None
+    target_leverage: float | None = None
+    margin_mode: MarginModelType | None = None
+    target_long_qty: Decimal | None = None
+    target_short_qty: Decimal | None = None
+    current_long_qty: Decimal | None = None
+    current_short_qty: Decimal | None = None
+    target_qty: Decimal | None = None
+    current_qty: Decimal | None = None
+    effective_qty: Decimal | None = None
+    target_signal: Literal["long", "short", "flat"] | None = None
+    current_signal: Literal["long", "short", "flat"] | None = None
+    effective_signal: Literal["long", "short", "flat"] | None = None
+    signal_source: str | None = None
+    source_of_truth: str | None = None
+    lifecycle_state: str | None = None
+    target_active: bool | None = None
+    inventory_active: bool | None = None
+    source: str | None = None
+
+
 class DecisionOutcome(SchemaBase):
     decision_id: str
     symbol: str
@@ -298,6 +321,7 @@ class DecisionOutcome(SchemaBase):
     book_expectancy_summary: StrategyBookExpectancySummary | None = None
     book_runtime_states: list[StrategyBookRuntimeState] = Field(default_factory=list)
     diagnostic_metric_flags: dict[str, bool] = Field(default_factory=dict)
+    overlay_parent_exposure: OverlayParentExposureAudit | None = None
     parent_target_signal: Literal["long", "short", "flat"] | None = None
     parent_current_signal: Literal["long", "short", "flat"] | None = None
     parent_effective_signal: Literal["long", "short", "flat"] | None = None
@@ -330,6 +354,7 @@ class StrategyExecutionSummary(SchemaBase):
     directions: list[str] = Field(default_factory=list)
     leg_actions: list[str] = Field(default_factory=list)
     execution_modes: list[str] = Field(default_factory=list)
+    overlay_parent_exposure: OverlayParentExposureAudit | None = None
     parent_target_signal: Literal["long", "short", "flat"] | None = None
     parent_current_signal: Literal["long", "short", "flat"] | None = None
     parent_effective_signal: Literal["long", "short", "flat"] | None = None
@@ -357,6 +382,7 @@ class HedgeOverlayDecision(SchemaBase):
     state: HedgeOverlayState = "disabled"
     main_leg_signal: Literal["long", "short", "flat"] = "flat"
     hedge_leg_signal: Literal["long", "short", "flat"] = "flat"
+    overlay_parent_exposure: OverlayParentExposureAudit | None = None
     parent_target_signal: Literal["long", "short", "flat"] | None = None
     parent_current_signal: Literal["long", "short", "flat"] | None = None
     parent_effective_signal: Literal["long", "short", "flat"] | None = None
@@ -451,6 +477,7 @@ class PositionTarget(SchemaBase):
     book_expectancy_summary: StrategyBookExpectancySummary | None = None
     book_runtime_states: list[StrategyBookRuntimeState] = Field(default_factory=list)
     diagnostic_metric_flags: dict[str, bool] = Field(default_factory=dict)
+    overlay_parent_exposure: OverlayParentExposureAudit | None = None
     parent_target_signal: Literal["long", "short", "flat"] | None = None
     parent_current_signal: Literal["long", "short", "flat"] | None = None
     parent_effective_signal: Literal["long", "short", "flat"] | None = None

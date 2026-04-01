@@ -45,7 +45,7 @@ IndependentBookAction = Literal[
     "blocked",
 ]
 IndependentBookScorer = Callable[..., float]
-IndependentBookExpectancyResolver = Callable[..., "IndependentBookExpectancy"]
+IndependentBookExpectancyResolver = Callable[..., "IndependentBookExpectancy | None"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,7 +83,7 @@ class IndependentExecutionPolicy:
 @dataclass(frozen=True, slots=True)
 class IndependentBookEvaluation:
     leg: IndependentLeg
-    expectancy: IndependentBookExpectancy
+    expectancy: IndependentBookExpectancy | None
     score: float
     current_qty: Decimal
     target_qty: Decimal
@@ -335,10 +335,13 @@ def independent_candidate_from_directional_target(
             "rollout_stage": overlay_decision.rollout_stage,
             "runtime_rollout_stage": overlay_decision.runtime_rollout_stage,
             "expectancy_source": "independent_book",
-            "long_expected_signal_edge_bps": result.long_book.expectancy.expected_signal_edge_bps,
-            "long_expected_slippage_bps": result.long_book.expectancy.expected_slippage_bps,
-            "long_expected_cost_bps": result.long_book.expectancy.expected_cost_bps,
-            "long_expected_net_edge_bps": result.long_book.expectancy.expected_net_edge_bps,
+            "long_expected_signal_edge_bps": _expectancy_signal_edge_bps(result.long_book.expectancy),
+            "long_expected_slippage_bps": _expectancy_slippage_bps(
+                result.long_book.expectancy,
+                settings=settings,
+            ),
+            "long_expected_cost_bps": _expectancy_cost_bps(result.long_book.expectancy),
+            "long_expected_net_edge_bps": _expectancy_net_edge_bps(result.long_book.expectancy),
             "long_liquidity_quality_score": result.long_book.liquidity_quality_score,
             "long_score_support_count": (
                 None
@@ -394,10 +397,13 @@ def independent_candidate_from_directional_target(
                 if result.long_book.execution_policy is None
                 else result.long_book.execution_policy.limit_offset_bps_preference
             ),
-            "short_expected_signal_edge_bps": result.short_book.expectancy.expected_signal_edge_bps,
-            "short_expected_slippage_bps": result.short_book.expectancy.expected_slippage_bps,
-            "short_expected_cost_bps": result.short_book.expectancy.expected_cost_bps,
-            "short_expected_net_edge_bps": result.short_book.expectancy.expected_net_edge_bps,
+            "short_expected_signal_edge_bps": _expectancy_signal_edge_bps(result.short_book.expectancy),
+            "short_expected_slippage_bps": _expectancy_slippage_bps(
+                result.short_book.expectancy,
+                settings=settings,
+            ),
+            "short_expected_cost_bps": _expectancy_cost_bps(result.short_book.expectancy),
+            "short_expected_net_edge_bps": _expectancy_net_edge_bps(result.short_book.expectancy),
             "short_liquidity_quality_score": result.short_book.liquidity_quality_score,
             "short_score_support_count": (
                 None
@@ -458,16 +464,16 @@ def independent_candidate_from_directional_target(
                 short_book=result.short_book,
             ),
             "expected_signal_edge_bps": max(
-                result.long_book.expectancy.expected_signal_edge_bps,
-                result.short_book.expectancy.expected_signal_edge_bps,
+                _expectancy_signal_edge_bps(result.long_book.expectancy),
+                _expectancy_signal_edge_bps(result.short_book.expectancy),
             ),
             "expected_cost_bps": max(
-                result.long_book.expectancy.expected_cost_bps,
-                result.short_book.expectancy.expected_cost_bps,
+                _expectancy_cost_bps(result.long_book.expectancy),
+                _expectancy_cost_bps(result.short_book.expectancy),
             ),
             "expected_net_edge_bps": max(
-                result.long_book.expectancy.expected_net_edge_bps,
-                result.short_book.expectancy.expected_net_edge_bps,
+                _expectancy_net_edge_bps(result.long_book.expectancy),
+                _expectancy_net_edge_bps(result.short_book.expectancy),
             ),
             "book_runtime_states": [
                 state.model_dump(mode="json")
@@ -518,11 +524,11 @@ def _independent_book_expectancy_summary(
         books=[
             StrategyBookExpectancyEntry(
                 leg=book.leg,
-                expected_gross_edge_bps=book.expectancy.expected_signal_edge_bps,
-                expected_signal_edge_bps=book.expectancy.expected_signal_edge_bps,
-                expected_slippage_bps=book.expectancy.expected_slippage_bps,
-                expected_cost_bps=book.expectancy.expected_cost_bps,
-                expected_net_edge_bps=book.expectancy.expected_net_edge_bps,
+                expected_gross_edge_bps=_expectancy_signal_edge_bps(book.expectancy),
+                expected_signal_edge_bps=_expectancy_signal_edge_bps(book.expectancy),
+                expected_slippage_bps=_expectancy_slippage_bps(book.expectancy, settings=settings),
+                expected_cost_bps=_expectancy_cost_bps(book.expectancy),
+                expected_net_edge_bps=_expectancy_net_edge_bps(book.expectancy),
                 required_safe_net_edge_bps=required_safe_net_edge_bps,
                 max_acceptable_cost_bps=max_acceptable_cost_bps,
                 weak_edge_execution_mode=settings.strategy_hedge_independent_weak_edge_execution_mode,
@@ -549,7 +555,7 @@ def _independent_book_expectancy_summary(
                 limit_offset_bps_preference=(
                     None if book.execution_policy is None else book.execution_policy.limit_offset_bps_preference
                 ),
-                expected_leg_cost_bps=book.expectancy.expected_cost_bps,
+                expected_leg_cost_bps=_expectancy_cost_bps(book.expectancy),
                 liquidity_quality_score=book.liquidity_quality_score,
                 execution_health_state=book.execution_health_state,
                 edge_strength=(
@@ -596,6 +602,26 @@ def _independent_book_runtime_state_summary(
         )
         for state in result.book_runtime_states
     ]
+
+
+def _expectancy_signal_edge_bps(expectancy: IndependentBookExpectancy | None) -> float:
+    return 0.0 if expectancy is None else expectancy.expected_signal_edge_bps
+
+
+def _expectancy_slippage_bps(
+    expectancy: IndependentBookExpectancy | None,
+    *,
+    settings: AATSSettings,
+) -> float:
+    return _independent_expected_slippage_bps(settings=settings) if expectancy is None else expectancy.expected_slippage_bps
+
+
+def _expectancy_cost_bps(expectancy: IndependentBookExpectancy | None) -> float:
+    return 0.0 if expectancy is None else expectancy.expected_cost_bps
+
+
+def _expectancy_net_edge_bps(expectancy: IndependentBookExpectancy | None) -> float:
+    return 0.0 if expectancy is None else expectancy.expected_net_edge_bps
 
 
 def _independent_route_action(
@@ -1004,8 +1030,8 @@ def build_independent_leg(
         close_reason=book.close_reason,
         policy_reason=policy.policy_reason,
         execution_policy_urgency=policy.urgency,
-        expected_leg_cost_bps=book.expectancy.expected_cost_bps,
-        expected_net_edge_bps=book.expectancy.expected_net_edge_bps,
+        expected_leg_cost_bps=_expectancy_cost_bps(book.expectancy),
+        expected_net_edge_bps=_expectancy_net_edge_bps(book.expectancy),
         liquidity_quality_score=book.liquidity_quality_score,
         execution_health_state=book.execution_health_state,
         max_acceptable_cost_bps=policy.max_acceptable_cost_bps,
@@ -1039,7 +1065,7 @@ def _independent_execution_policy(
         return None
     edge_strength = _independent_edge_strength(
         settings=settings,
-        expected_net_edge_bps=book.expectancy.expected_net_edge_bps,
+        expected_net_edge_bps=_expectancy_net_edge_bps(book.expectancy),
         weak_edge_report_only=book.weak_edge_report_only,
     )
     min_liquidity_quality = float(settings.strategy_hedge_independent_min_liquidity_quality)
@@ -1050,7 +1076,7 @@ def _independent_execution_policy(
     execution_degraded = book.execution_health_state in {"degraded", "blocked"}
     passive_limit_offset_bps = max(
         Decimal("0.5"),
-        to_decimal(book.expectancy.expected_slippage_bps),
+        to_decimal(_expectancy_slippage_bps(book.expectancy, settings=settings)),
         to_decimal(settings.strategy_hedge_independent_expected_slippage_buffer_bps),
     )
     max_acceptable_cost_bps = float(settings.strategy_hedge_independent_max_acceptable_cost_bps)
@@ -1279,7 +1305,7 @@ def _evaluate_independent_book(
     baseline: BaselineAssessment,
     ai_assessment: AIMarketAssessment | None,
     leg: IndependentLeg,
-    expectancy: IndependentBookExpectancy,
+    expectancy: IndependentBookExpectancy | None,
     directional_leg_target_qty: Decimal,
     scorer: IndependentBookScorer | None,
     recent_score_history: Sequence[float] = (),
@@ -1334,7 +1360,7 @@ def _evaluate_independent_book(
         context=context,
         baseline=baseline,
         leg=leg,
-        expected_slippage_bps=expectancy.expected_slippage_bps,
+        expected_slippage_bps=_expectancy_slippage_bps(expectancy, settings=settings),
     )
     score_stability_metrics = _score_stability_metrics(
         settings=settings,
@@ -1350,7 +1376,7 @@ def _evaluate_independent_book(
         context=context,
         leg=leg,
     )
-    expectancy_resolution_failed = bool(expectancy.resolution_failed)
+    expectancy_resolution_failed = expectancy is None
 
     if current_qty <= EPSILON_DECIMAL_12:
         if score >= entry_threshold:
@@ -1362,8 +1388,8 @@ def _evaluate_independent_book(
                     settings=settings,
                     context=context,
                     leg=leg,
-                    expected_cost_bps=expectancy.expected_cost_bps,
-                    expected_net_edge_bps=expectancy.expected_net_edge_bps,
+                    expected_cost_bps=_expectancy_cost_bps(expectancy),
+                    expected_net_edge_bps=_expectancy_net_edge_bps(expectancy),
                 )
                 blocked_reasons.extend(open_gate["blocked_reasons"])
                 weak_edge_report_only = bool(open_gate["weak_edge_report_only"])
@@ -1409,7 +1435,7 @@ def _evaluate_independent_book(
             score=score,
             close_threshold=close_threshold,
             expected_net_edge_bps=(
-                None if expectancy_resolution_failed else expectancy.expected_net_edge_bps
+                None if expectancy_resolution_failed else _expectancy_net_edge_bps(expectancy)
             ),
             liquidity_quality_score=liquidity_quality_score,
             execution_health_state=execution_health_state,
@@ -1454,8 +1480,8 @@ def _evaluate_independent_book(
                     settings=settings,
                     context=context,
                     leg=leg,
-                    expected_cost_bps=expectancy.expected_cost_bps,
-                    expected_net_edge_bps=expectancy.expected_net_edge_bps,
+                    expected_cost_bps=_expectancy_cost_bps(expectancy),
+                    expected_net_edge_bps=_expectancy_net_edge_bps(expectancy),
                 )
                 blocked_reasons.extend(open_gate["blocked_reasons"])
                 weak_edge_report_only = bool(open_gate["weak_edge_report_only"])
@@ -1603,9 +1629,9 @@ def _independent_book_runtime_state(
         thesis_age_seconds=book.thesis_age_seconds,
         last_transition_at=last_transition_at,
         last_transition_reason=last_transition_reason,
-        expected_signal_edge_bps=book.expectancy.expected_signal_edge_bps,
-        expected_cost_bps=book.expectancy.expected_cost_bps,
-        expected_net_edge_bps=book.expectancy.expected_net_edge_bps,
+        expected_signal_edge_bps=_expectancy_signal_edge_bps(book.expectancy),
+        expected_cost_bps=_expectancy_cost_bps(book.expectancy),
+        expected_net_edge_bps=_expectancy_net_edge_bps(book.expectancy),
         liquidity_quality_score=book.liquidity_quality_score,
         execution_health_state=book.execution_health_state,
         cooldown_until=cooldown_until,
@@ -1906,7 +1932,7 @@ def _resolve_independent_book_expectancy(
     leg: IndependentLeg,
     trade_cost_service: TradeCostService,
     expectancy_resolver: IndependentBookExpectancyResolver | None,
-) -> IndependentBookExpectancy:
+) -> IndependentBookExpectancy | None:
     if expectancy_resolver is not None:
         try:
             return expectancy_resolver(
@@ -1918,7 +1944,7 @@ def _resolve_independent_book_expectancy(
                 trade_cost_service=trade_cost_service,
             )
         except Exception:
-            return _failed_independent_book_expectancy(settings=settings, leg=leg)
+            return None
     try:
         return _compute_independent_book_expectancy(
             settings=settings,
@@ -1930,22 +1956,7 @@ def _resolve_independent_book_expectancy(
             trade_cost_service=trade_cost_service,
         )
     except Exception:
-        return _failed_independent_book_expectancy(settings=settings, leg=leg)
-
-
-def _failed_independent_book_expectancy(
-    *,
-    settings: AATSSettings,
-    leg: IndependentLeg,
-) -> IndependentBookExpectancy:
-    return IndependentBookExpectancy(
-        leg=leg,
-        expected_signal_edge_bps=0.0,
-        expected_slippage_bps=_independent_expected_slippage_bps(settings=settings),
-        expected_cost_bps=0.0,
-        expected_net_edge_bps=0.0,
-        resolution_failed=True,
-    )
+        return None
 
 
 def _compute_independent_book_expectancy(

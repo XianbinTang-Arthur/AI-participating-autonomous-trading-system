@@ -184,7 +184,7 @@ class TestPhase4RecoveryReconciliationRuntime(unittest.IsolatedAsyncioTestCase):
             await recovered_runtime.start_background_tasks()
             await asyncio.sleep(0.25)
 
-            command = recovered_runtime.execution_command_repo.get_by_idempotency_key("submit:intent_phase4_pending_hold")
+            command = recovered_runtime.execution_command_repo.get_by_idempotency_key("submit:clphase4_pending_hold")
             self.assertIsNotNone(command)
             self.assertEqual(command["state"], "PENDING")
             order_state = recovered_runtime.execution_repo.get_order_state("clphase4_pending_hold")

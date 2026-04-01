@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 
 from aats.schemas.exchange import AccountBaselineSnapshot
 from aats.schemas.system import RecoveryStatus
+from aats.services.execution_control.order_service import ExecutionOrderService
 from aats.services.execution_engine.recovery import ExecutionRecoveryService, RecoveryArtifacts
 from aats.services.governance_engine.kill_switch import KillSwitch
 from aats.services.recovery_control.reconciliation_classifier import RecoveryReconciliationClassifier
@@ -189,10 +190,13 @@ class ExecutionLedgerRecoveryService:
                 continue
             if row.get("venue_order_id"):
                 continue
-            intent_id = str(row.get("intent_id") or "")
-            if not intent_id:
+            lookup_keys = ExecutionOrderService.submit_command_lookup_keys(
+                client_order_id=str(row.get("client_order_id") or row.get("order_id") or ""),
+                intent_id=str(row.get("intent_id") or ""),
+            )
+            if not lookup_keys:
                 stranded += 1
                 continue
-            if get_by_idempotency_key(f"submit:{intent_id}") is None:
+            if all(get_by_idempotency_key(key) is None for key in lookup_keys):
                 stranded += 1
         return stranded

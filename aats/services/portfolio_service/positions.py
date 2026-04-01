@@ -286,6 +286,29 @@ class PortfolioState:
                 fee_delta=Decimal("0"),
             )
 
+        existing_record = self.positions.get(position_key)
+        product_type = getattr(fill, "product_type", "spot") or self.default_product_type
+        fill_qty = to_decimal(fill.fill_qty)
+        fill_price = to_decimal(fill.fill_price)
+        fee_amount = to_decimal(fill.fee_amount)
+        signed_qty = fill_qty if fill.side == "buy" else -fill_qty
+        starting_qty = Decimal("0") if existing_record is None else to_decimal(existing_record.quantity)
+        starting_avg_entry_price = (
+            Decimal("0")
+            if existing_record is None
+            else to_decimal(existing_record.avg_entry_price)
+        )
+        base_currency, quote_currency = resolve_symbol_currencies(fill.symbol)
+        notional = fill_qty * fill_price
+        fee_currency = resolved_fee_currency(fill=fill, base_currency=base_currency, quote_currency=quote_currency)
+        fee_quote_delta = fill_fee_delta_in_quote(
+            fill=fill,
+            base_currency=base_currency,
+            quote_currency=quote_currency,
+        )
+        fee_quote_delta = to_decimal(fee_quote_delta)
+        fee_delta = fee_quote_delta
+        trading_pnl_delta = Decimal("0")
         record = self.positions.setdefault(
             position_key,
             PositionRecord(
@@ -295,7 +318,7 @@ class PortfolioState:
         )
         record.symbol = fill.symbol
         record.position_key = position_key
-        record.product_type = getattr(fill, "product_type", "spot")
+        record.product_type = product_type
         record.target_leverage = getattr(fill, "target_leverage", 1.0)
         record.margin_mode = getattr(fill, "margin_mode", "cash")
         record.position_mode = normalize_position_mode(getattr(fill, "position_mode", None))
@@ -308,24 +331,6 @@ class PortfolioState:
         record.liquidation_price = None
         record.margin_source = "estimated"
         record.exposure_side = exposure_side_from_quantity(record.quantity)
-        product_type = record.product_type or self.default_product_type
-        fill_qty = to_decimal(fill.fill_qty)
-        fill_price = to_decimal(fill.fill_price)
-        fee_amount = to_decimal(fill.fee_amount)
-        signed_qty = fill_qty if fill.side == "buy" else -fill_qty
-        starting_qty = to_decimal(record.quantity)
-        base_currency, quote_currency = resolve_symbol_currencies(fill.symbol)
-        notional = fill_qty * fill_price
-        fee_currency = resolved_fee_currency(fill=fill, base_currency=base_currency, quote_currency=quote_currency)
-        fee_quote_delta = fill_fee_delta_in_quote(
-            fill=fill,
-            base_currency=base_currency,
-            quote_currency=quote_currency,
-        )
-        fee_quote_delta = to_decimal(fee_quote_delta)
-        fee_delta = fee_quote_delta
-        trading_pnl_delta = Decimal("0")
-        starting_avg_entry_price = to_decimal(record.avg_entry_price)
 
         if product_type != "derivatives":
             if quote_currency is not None:
@@ -502,7 +507,17 @@ class PortfolioService:
         fill = parse_payload(message, FillEvent)
         checkpoint = self.state.checkpoint()
         balances_before = dict(checkpoint.balances)
-        result = self.state.apply_fill(fill)
+        try:
+            result = self.state.apply_fill(fill)
+        except Exception as exc:
+            self.state.restore(checkpoint)
+            await self._emit_processing_failure(
+                stage="fill_apply",
+                message=str(exc),
+                fill=fill,
+                retriable=False,
+            )
+            raise
         if not result.applied:
             return
         try:

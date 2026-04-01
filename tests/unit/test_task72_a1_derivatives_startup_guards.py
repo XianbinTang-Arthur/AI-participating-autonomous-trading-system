@@ -184,6 +184,36 @@ class TestTask72A1DerivativesStartupGuards(unittest.IsolatedAsyncioTestCase):
                 )
             )
 
+    async def test_derivatives_exchange_runtime_requires_secure_operator_session_cookie(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "derivatives_exchange_runtime_requires_secure_operator_session_cookie",
+        ):
+            await build_runtime(
+                AATSSettings.model_validate(
+                    {
+                        "startup_profile": "derivatives",
+                        "config_profile": "guarded_derivatives_enabled",
+                        "mode": "guarded_live",
+                        "market_data_backend": "okx",
+                        "execution_backend": "okx",
+                        "account_backend": "okx",
+                        "account_read_enabled": True,
+                        "okx_simulated_trading": True,
+                        "trading_product_type": "derivatives",
+                        "margin_mode": "cross",
+                        "storage_mode": "postgres",
+                        "database_url": "postgresql+psycopg://aats:aats@localhost:5432/aats",
+                        "okx_api_key": "key",
+                        "okx_api_secret": "secret",
+                        "okx_api_passphrase": "passphrase",
+                        "operator_auth_enabled": True,
+                        "operator_session_secret": "session-secret",
+                        "operator_session_cookie_secure": False,
+                    }
+                )
+            )
+
     async def test_derivatives_exchange_runtime_fails_fast_when_exchange_position_mode_mismatches_configured_mode(self) -> None:
         _FakePositionModeAccountService.SNAPSHOT = ExchangeAccountSnapshot(
             account_source="okx",

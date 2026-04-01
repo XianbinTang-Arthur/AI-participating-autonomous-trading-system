@@ -4,6 +4,7 @@ export const DEFAULT_PAGE_LIMITS = {
   recentDecisions: 8,
   recentOrders: 8,
   recentFills: 8,
+  recentReplayValidations: 8,
   recentAIAssessments: 8,
   recentAIShadowDecisions: 8,
   recentAIShadowEvaluations: 8,
@@ -29,6 +30,9 @@ export function createState() {
       aiConfig: {
         modeManualEditing: false,
         profileManualEditing: false,
+      },
+      replay: {
+        parentFilter: "all",
       },
     },
   };
@@ -95,6 +99,11 @@ export function viewSpecs(view, state = null) {
       ["reconciliationLatest", "/reconciliation/latest"],
       ["replayStatus", "/replay/status"],
     ],
+    replay: [
+      ["replayStatus", "/replay/status"],
+      ["replayRecentValidations", `/replay/recent-validations?limit=${limits.recentReplayValidations}&offset=0`],
+      ["reconciliationLatest", "/reconciliation/latest"],
+    ],
     aiAnalysis: [
       ["aiOverview", "/ai/overview"],
       ["aiRuntime", "/ai/runtime"],
@@ -135,6 +144,7 @@ export function buildDashboardBundlePath(view, state = null) {
     recentDecisions: String(limits.recentDecisions),
     recentOrders: String(limits.recentOrders),
     recentFills: String(limits.recentFills),
+    recentReplayValidations: String(limits.recentReplayValidations),
     recentAIAssessments: String(limits.recentAIAssessments),
     recentAIShadowDecisions: String(limits.recentAIShadowDecisions),
     recentAIShadowEvaluations: String(limits.recentAIShadowEvaluations),

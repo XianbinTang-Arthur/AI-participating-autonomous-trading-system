@@ -93,14 +93,23 @@ class LedgerBackedPortfolioService:
         if self.fill_outcome_repo.get_outcome(fill.fill_id) is not None:
             return
         self._ensure_opening_balance()
-        before_balances = self._current_balances(fill=fill)
-        before_state = self._rebuild_projection_state(
-            exclude_fill_id=fill.fill_id,
-            balances_override=before_balances,
-        )
-        projected_after_state = self._rebuild_projection_state(
-            balances_override=before_balances,
-        )
+        try:
+            before_balances = self._current_balances(fill=fill)
+            before_state = self._rebuild_projection_state(
+                exclude_fill_id=fill.fill_id,
+                balances_override=before_balances,
+            )
+            projected_after_state = self._rebuild_projection_state(
+                balances_override=before_balances,
+            )
+        except Exception as exc:
+            await self._emit_processing_failure(
+                stage="ledger_projection_prepare",
+                message=str(exc),
+                fill=fill,
+                retriable=False,
+            )
+            raise
         if fill.fill_id not in projected_after_state._applied_fill_ids:
             return
         starting_position = before_state.position_for_fill(fill)

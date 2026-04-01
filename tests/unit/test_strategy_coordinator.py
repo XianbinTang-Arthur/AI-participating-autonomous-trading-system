@@ -3255,6 +3255,13 @@ class TestStrategyCoordinator(unittest.TestCase):
         self.assertEqual(applied.family_execution_summary.summary_mode, "single_leg")
         self.assertEqual(applied.family_execution_summary.position_intents, ["open_short"])
         self.assertEqual(applied.family_execution_summary.directions, ["short"])
+        self.assertIsNotNone(applied.overlay_parent_exposure)
+        self.assertEqual(applied.overlay_parent_exposure.parent_family, "directional")
+        self.assertEqual(applied.overlay_parent_exposure.source_of_truth, "mixed")
+        self.assertEqual(applied.overlay_parent_exposure.lifecycle_state, "target_and_inventory")
+        self.assertEqual(applied.overlay_parent_exposure.target_signal, "long")
+        self.assertEqual(applied.overlay_parent_exposure.current_signal, "long")
+        self.assertEqual(applied.family_execution_summary.overlay_parent_exposure.source_of_truth, "mixed")
         assert applied.decision_outcome is not None
         self.assertEqual(applied.decision_outcome.selected_strategy_family, "protective")
         self.assertEqual(applied.decision_outcome.selected_strategy_family_action, "protect")
@@ -3262,6 +3269,8 @@ class TestStrategyCoordinator(unittest.TestCase):
         self.assertEqual(applied.decision_outcome.final_direction, "short")
         self.assertIsNotNone(applied.decision_outcome.family_execution_summary)
         self.assertEqual(applied.decision_outcome.family_execution_summary.position_intents, ["open_short"])
+        self.assertIsNotNone(applied.decision_outcome.overlay_parent_exposure)
+        self.assertEqual(applied.decision_outcome.overlay_parent_exposure.source_of_truth, "mixed")
 
     def test_protective_family_cutover_preserves_close_semantics_for_residual_inventory(self) -> None:
         settings = AATSSettings.model_validate(
@@ -3434,6 +3443,11 @@ class TestStrategyCoordinator(unittest.TestCase):
         self.assertEqual(applied.family_execution_summary.directions, ["short"])
         self.assertIsNotNone(applied.family_execution_summary.book_expectancy_summary)
         self.assertEqual(applied.family_execution_summary.book_expectancy_summary.source, "opportunistic_overlay")
+        self.assertIsNotNone(applied.overlay_parent_exposure)
+        self.assertEqual(applied.overlay_parent_exposure.parent_family, "directional")
+        self.assertEqual(applied.overlay_parent_exposure.source_of_truth, "mixed")
+        self.assertEqual(applied.overlay_parent_exposure.lifecycle_state, "target_and_inventory")
+        self.assertEqual(applied.family_execution_summary.overlay_parent_exposure.source_of_truth, "mixed")
         self.assertIsNotNone(applied.book_expectancy_summary)
         self.assertEqual(applied.book_expectancy_summary.source, "opportunistic_overlay")
         assert applied.decision_outcome is not None
@@ -3445,6 +3459,8 @@ class TestStrategyCoordinator(unittest.TestCase):
         self.assertEqual(applied.decision_outcome.family_execution_summary.position_intents, ["open_short"])
         self.assertIsNotNone(applied.decision_outcome.book_expectancy_summary)
         self.assertEqual(applied.decision_outcome.book_expectancy_summary.source, "opportunistic_overlay")
+        self.assertIsNotNone(applied.decision_outcome.overlay_parent_exposure)
+        self.assertEqual(applied.decision_outcome.overlay_parent_exposure.source_of_truth, "mixed")
         self.assertEqual(applied.book_expectancy_summary.books[0].required_safe_net_edge_bps, 0.0)
         self.assertEqual(
             applied.book_expectancy_summary.books[0].weak_edge_execution_mode,
@@ -3838,6 +3854,28 @@ class TestStrategyCoordinator(unittest.TestCase):
                 family_action="protect",
                 headline="protective",
                 metrics={
+                    "overlay_parent_exposure": {
+                        "parent_family": "directional",
+                        "symbol": "BTC-USDT-SWAP",
+                        "target_leverage": 2.0,
+                        "margin_mode": "cross",
+                        "target_long_qty": Decimal("0"),
+                        "target_short_qty": Decimal("0"),
+                        "current_long_qty": Decimal("0.02"),
+                        "current_short_qty": Decimal("0"),
+                        "target_qty": Decimal("0"),
+                        "current_qty": Decimal("0.02"),
+                        "effective_qty": Decimal("0.02"),
+                        "target_signal": "flat",
+                        "current_signal": "long",
+                        "effective_signal": "long",
+                        "signal_source": "inventory",
+                        "source_of_truth": "inventory",
+                        "lifecycle_state": "inventory_only",
+                        "target_active": False,
+                        "inventory_active": True,
+                        "source": "directional_target_with_inventory_continuity",
+                    },
                     "parent_target_signal": "flat",
                     "parent_current_signal": "long",
                     "parent_effective_signal": "long",
@@ -3851,6 +3889,7 @@ class TestStrategyCoordinator(unittest.TestCase):
         )
 
         assert summary is not None
+        self.assertIsNotNone(summary.overlay_parent_exposure)
         self.assertEqual(summary.parent_target_signal, "flat")
         self.assertEqual(summary.parent_current_signal, "long")
         self.assertEqual(summary.parent_effective_signal, "long")
@@ -3859,6 +3898,17 @@ class TestStrategyCoordinator(unittest.TestCase):
         self.assertEqual(summary.parent_target_qty, Decimal("0"))
         self.assertEqual(summary.parent_current_qty, Decimal("0.02"))
         self.assertEqual(summary.parent_effective_qty, Decimal("0.02"))
+        self.assertEqual(summary.overlay_parent_exposure.target_signal, "flat")
+        self.assertEqual(summary.overlay_parent_exposure.current_signal, "long")
+        self.assertEqual(summary.overlay_parent_exposure.effective_signal, "long")
+        self.assertEqual(summary.overlay_parent_exposure.parent_family, "directional")
+        self.assertEqual(summary.overlay_parent_exposure.symbol, "BTC-USDT-SWAP")
+        self.assertEqual(summary.overlay_parent_exposure.target_leverage, 2.0)
+        self.assertEqual(summary.overlay_parent_exposure.margin_mode, "cross")
+        self.assertEqual(summary.overlay_parent_exposure.source_of_truth, "inventory")
+        self.assertEqual(summary.overlay_parent_exposure.target_qty, Decimal("0"))
+        self.assertEqual(summary.overlay_parent_exposure.current_qty, Decimal("0.02"))
+        self.assertEqual(summary.overlay_parent_exposure.effective_qty, Decimal("0.02"))
 
     def test_family_execution_summary_preserves_independent_close_reason(self) -> None:
         summary = StrategyCoordinatorService._family_execution_summary(

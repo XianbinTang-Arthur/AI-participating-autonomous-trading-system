@@ -11,6 +11,7 @@ from aats.schemas.decision import (
     BaselineAssessment,
     DecisionContext,
     HedgeOverlayDecision,
+    OverlayParentExposureAudit,
     PositionTarget,
     StrategyExecutionSummary,
 )
@@ -501,6 +502,10 @@ class StrategyCoordinatorService:
             strategy_execution_legs=strategy_execution_legs,
             overlay_candidate=overlay_candidate,
         )
+        overlay_parent_exposure = self._overlay_parent_exposure_audit(
+            family_execution_summary=family_execution_summary,
+            hedge_overlay_decision=hedge_overlay_decision,
+        )
         parent_signal_fields = self._overlay_parent_signal_fields(
             family_execution_summary=family_execution_summary,
             hedge_overlay_decision=hedge_overlay_decision,
@@ -533,6 +538,11 @@ class StrategyCoordinatorService:
                     "book_expectancy_summary": book_expectancy_summary,
                     "book_runtime_states": book_runtime_states,
                     "diagnostic_metric_flags": diagnostic_metric_flags,
+                    "overlay_parent_exposure": (
+                        None
+                        if overlay_parent_exposure is None
+                        else overlay_parent_exposure.model_copy(deep=True)
+                    ),
                     **parent_signal_fields,
                     "final_action": final_action,
                     "final_direction": final_direction,
@@ -567,6 +577,11 @@ class StrategyCoordinatorService:
             "book_expectancy_summary": book_expectancy_summary,
             "book_runtime_states": book_runtime_states,
             "diagnostic_metric_flags": diagnostic_metric_flags,
+            "overlay_parent_exposure": (
+                None
+                if overlay_parent_exposure is None
+                else overlay_parent_exposure.model_copy(deep=True)
+            ),
             **parent_signal_fields,
             "urgency": urgency,
             "rebalance_reason": rebalance_reason,
@@ -1313,6 +1328,7 @@ class StrategyCoordinatorService:
         active = applied_route_action in {"override_target", "hold_current"} and (
             bool(overlay_legs) or self._overlay_candidate_has_inventory_or_target(overlay_candidate)
         )
+        overlay_parent_audit = self._overlay_parent_exposure_audit_from_metrics(metrics)
         return HedgeOverlayDecision(
             enabled=True,
             runtime_supported=True,
@@ -1325,6 +1341,9 @@ class StrategyCoordinatorService:
             hedge_leg_signal=self._overlay_leg_signal(
                 metrics.get("hedge_leg_signal"),
                 strategy_execution_legs=overlay_legs,
+            ),
+            overlay_parent_exposure=(
+                None if overlay_parent_audit is None else overlay_parent_audit.model_copy(deep=True)
             ),
             parent_target_signal=self._optional_overlay_signal(metrics.get("parent_target_signal")),
             parent_current_signal=self._optional_overlay_signal(metrics.get("parent_current_signal")),
@@ -1437,48 +1456,162 @@ class StrategyCoordinatorService:
         return bool(value)
 
     @staticmethod
+    def _overlay_parent_exposure_audit_from_metrics(
+        metrics: dict[str, object] | None,
+    ) -> OverlayParentExposureAudit | None:
+        if not metrics:
+            return None
+        raw_audit = metrics.get("overlay_parent_exposure")
+        if isinstance(raw_audit, OverlayParentExposureAudit):
+            return raw_audit.model_copy(deep=True)
+        if isinstance(raw_audit, dict):
+            return OverlayParentExposureAudit.model_validate(raw_audit)
+        fallback = {
+            "parent_family": StrategyCoordinatorService._optional_text(metrics.get("parent_family")),
+            "target_signal": StrategyCoordinatorService._optional_overlay_signal(metrics.get("parent_target_signal")),
+            "current_signal": StrategyCoordinatorService._optional_overlay_signal(metrics.get("parent_current_signal")),
+            "effective_signal": StrategyCoordinatorService._optional_overlay_signal(metrics.get("parent_effective_signal")),
+            "signal_source": StrategyCoordinatorService._optional_text(metrics.get("parent_exposure_signal_source")),
+            "lifecycle_state": StrategyCoordinatorService._optional_parent_lifecycle_state(metrics.get("parent_lifecycle_state")),
+            "target_active": StrategyCoordinatorService._optional_bool_metric(metrics.get("parent_target_active")),
+            "inventory_active": StrategyCoordinatorService._optional_bool_metric(metrics.get("parent_inventory_active")),
+            "source_of_truth": StrategyCoordinatorService._optional_text(metrics.get("parent_source_of_truth")),
+            "target_qty": StrategyCoordinatorService._metric_decimal(metrics, "parent_target_qty"),
+            "current_qty": StrategyCoordinatorService._metric_decimal(metrics, "parent_current_qty"),
+            "effective_qty": StrategyCoordinatorService._metric_decimal(metrics, "parent_effective_qty"),
+            "source": StrategyCoordinatorService._optional_text(metrics.get("main_leg_contract_source")),
+        }
+        if not any(value is not None for value in fallback.values()):
+            return None
+        return OverlayParentExposureAudit.model_validate(fallback)
+
+    @staticmethod
+    def _overlay_parent_exposure_audit(
+        *,
+        family_execution_summary: StrategyExecutionSummary | None,
+        hedge_overlay_decision: HedgeOverlayDecision | None,
+    ) -> OverlayParentExposureAudit | None:
+        if (
+            family_execution_summary is not None
+            and family_execution_summary.overlay_parent_exposure is not None
+        ):
+            return family_execution_summary.overlay_parent_exposure.model_copy(deep=True)
+        if (
+            hedge_overlay_decision is not None
+            and hedge_overlay_decision.overlay_parent_exposure is not None
+        ):
+            return hedge_overlay_decision.overlay_parent_exposure.model_copy(deep=True)
+        parent_signal_fields = StrategyCoordinatorService._overlay_parent_signal_fields(
+            family_execution_summary=family_execution_summary,
+            hedge_overlay_decision=hedge_overlay_decision,
+        )
+        fallback = {
+            "target_signal": parent_signal_fields.get("parent_target_signal"),
+            "current_signal": parent_signal_fields.get("parent_current_signal"),
+            "effective_signal": parent_signal_fields.get("parent_effective_signal"),
+            "signal_source": parent_signal_fields.get("signal_source"),
+            "lifecycle_state": parent_signal_fields.get("parent_lifecycle_state"),
+            "target_active": parent_signal_fields.get("parent_target_active"),
+            "inventory_active": parent_signal_fields.get("parent_inventory_active"),
+            "source_of_truth": parent_signal_fields.get("parent_source_of_truth"),
+            "target_qty": parent_signal_fields.get("parent_target_qty"),
+            "current_qty": parent_signal_fields.get("parent_current_qty"),
+            "effective_qty": parent_signal_fields.get("parent_effective_qty"),
+        }
+        if not any(value is not None for value in fallback.values()):
+            return None
+        return OverlayParentExposureAudit.model_validate(fallback)
+
+    @staticmethod
     def _overlay_parent_signal_fields(
         *,
         family_execution_summary: StrategyExecutionSummary | None,
         hedge_overlay_decision: HedgeOverlayDecision | None,
     ) -> dict[str, str | bool | Decimal | None]:
+        summary_parent = (
+            None
+            if family_execution_summary is None
+            else family_execution_summary.overlay_parent_exposure
+        )
+        overlay_parent = (
+            None
+            if hedge_overlay_decision is None
+            else hedge_overlay_decision.overlay_parent_exposure
+        )
         return {
             "parent_target_signal": (
                 None
+                if summary_parent is None
+                else summary_parent.target_signal
+            ) or (
+                None
                 if family_execution_summary is None
                 else family_execution_summary.parent_target_signal
+            ) or (
+                None if overlay_parent is None else overlay_parent.target_signal
             ) or (
                 None if hedge_overlay_decision is None else hedge_overlay_decision.parent_target_signal
             ),
             "parent_current_signal": (
                 None
+                if summary_parent is None
+                else summary_parent.current_signal
+            ) or (
+                None
                 if family_execution_summary is None
                 else family_execution_summary.parent_current_signal
+            ) or (
+                None if overlay_parent is None else overlay_parent.current_signal
             ) or (
                 None if hedge_overlay_decision is None else hedge_overlay_decision.parent_current_signal
             ),
             "parent_effective_signal": (
                 None
+                if summary_parent is None
+                else summary_parent.effective_signal
+            ) or (
+                None
                 if family_execution_summary is None
                 else family_execution_summary.parent_effective_signal
+            ) or (
+                None if overlay_parent is None else overlay_parent.effective_signal
             ) or (
                 None if hedge_overlay_decision is None else hedge_overlay_decision.parent_effective_signal
             ),
             "signal_source": (
                 None
+                if summary_parent is None
+                else summary_parent.signal_source
+            ) or (
+                None
                 if family_execution_summary is None
                 else family_execution_summary.signal_source
+            ) or (
+                None if overlay_parent is None else overlay_parent.signal_source
             ) or (
                 None if hedge_overlay_decision is None else hedge_overlay_decision.signal_source
             ),
             "parent_lifecycle_state": (
                 None
+                if summary_parent is None
+                else summary_parent.lifecycle_state
+            ) or (
+                None
                 if family_execution_summary is None
                 else family_execution_summary.parent_lifecycle_state
+            ) or (
+                None if overlay_parent is None else overlay_parent.lifecycle_state
             ) or (
                 None if hedge_overlay_decision is None else hedge_overlay_decision.parent_lifecycle_state
             ),
             "parent_target_active": (
+                None
+                if summary_parent is None
+                else summary_parent.target_active
+            ) if (
+                summary_parent is not None
+                and summary_parent.target_active is not None
+            ) else (
                 None
                 if family_execution_summary is None
                 else family_execution_summary.parent_target_active
@@ -1486,9 +1619,21 @@ class StrategyCoordinatorService:
                 family_execution_summary is not None
                 and family_execution_summary.parent_target_active is not None
             ) else (
+                None if overlay_parent is None else overlay_parent.target_active
+            ) if (
+                overlay_parent is not None
+                and overlay_parent.target_active is not None
+            ) else (
                 None if hedge_overlay_decision is None else hedge_overlay_decision.parent_target_active
             ),
             "parent_inventory_active": (
+                None
+                if summary_parent is None
+                else summary_parent.inventory_active
+            ) if (
+                summary_parent is not None
+                and summary_parent.inventory_active is not None
+            ) else (
                 None
                 if family_execution_summary is None
                 else family_execution_summary.parent_inventory_active
@@ -1496,16 +1641,34 @@ class StrategyCoordinatorService:
                 family_execution_summary is not None
                 and family_execution_summary.parent_inventory_active is not None
             ) else (
+                None if overlay_parent is None else overlay_parent.inventory_active
+            ) if (
+                overlay_parent is not None
+                and overlay_parent.inventory_active is not None
+            ) else (
                 None if hedge_overlay_decision is None else hedge_overlay_decision.parent_inventory_active
             ),
             "parent_source_of_truth": (
                 None
+                if summary_parent is None
+                else summary_parent.source_of_truth
+            ) or (
+                None
                 if family_execution_summary is None
                 else family_execution_summary.parent_source_of_truth
+            ) or (
+                None if overlay_parent is None else overlay_parent.source_of_truth
             ) or (
                 None if hedge_overlay_decision is None else hedge_overlay_decision.parent_source_of_truth
             ),
             "parent_target_qty": (
+                None
+                if summary_parent is None
+                else summary_parent.target_qty
+            ) if (
+                summary_parent is not None
+                and summary_parent.target_qty is not None
+            ) else (
                 None
                 if family_execution_summary is None
                 else family_execution_summary.parent_target_qty
@@ -1513,9 +1676,21 @@ class StrategyCoordinatorService:
                 family_execution_summary is not None
                 and family_execution_summary.parent_target_qty is not None
             ) else (
+                None if overlay_parent is None else overlay_parent.target_qty
+            ) if (
+                overlay_parent is not None
+                and overlay_parent.target_qty is not None
+            ) else (
                 None if hedge_overlay_decision is None else hedge_overlay_decision.parent_target_qty
             ),
             "parent_current_qty": (
+                None
+                if summary_parent is None
+                else summary_parent.current_qty
+            ) if (
+                summary_parent is not None
+                and summary_parent.current_qty is not None
+            ) else (
                 None
                 if family_execution_summary is None
                 else family_execution_summary.parent_current_qty
@@ -1523,15 +1698,32 @@ class StrategyCoordinatorService:
                 family_execution_summary is not None
                 and family_execution_summary.parent_current_qty is not None
             ) else (
+                None if overlay_parent is None else overlay_parent.current_qty
+            ) if (
+                overlay_parent is not None
+                and overlay_parent.current_qty is not None
+            ) else (
                 None if hedge_overlay_decision is None else hedge_overlay_decision.parent_current_qty
             ),
             "parent_effective_qty": (
+                None
+                if summary_parent is None
+                else summary_parent.effective_qty
+            ) if (
+                summary_parent is not None
+                and summary_parent.effective_qty is not None
+            ) else (
                 None
                 if family_execution_summary is None
                 else family_execution_summary.parent_effective_qty
             ) if (
                 family_execution_summary is not None
                 and family_execution_summary.parent_effective_qty is not None
+            ) else (
+                None if overlay_parent is None else overlay_parent.effective_qty
+            ) if (
+                overlay_parent is not None
+                and overlay_parent.effective_qty is not None
             ) else (
                 None if hedge_overlay_decision is None else hedge_overlay_decision.parent_effective_qty
             ),
@@ -1747,6 +1939,7 @@ class StrategyCoordinatorService:
             )
         )
         metrics = dict(selected_candidate.metrics or {}) if selected_candidate is not None else {}
+        overlay_parent_audit = StrategyCoordinatorService._overlay_parent_exposure_audit_from_metrics(metrics)
         return StrategyExecutionSummary(
             summary_mode="single_leg" if len(actionable_legs) == 1 and len(derived_intents) == 1 else "multi_leg",
             family=selected_family,
@@ -1757,6 +1950,9 @@ class StrategyCoordinatorService:
             directions=directions,
             leg_actions=leg_actions,
             execution_modes=execution_modes,
+            overlay_parent_exposure=(
+                None if overlay_parent_audit is None else overlay_parent_audit.model_copy(deep=True)
+            ),
             parent_target_signal=StrategyCoordinatorService._optional_overlay_signal(metrics.get("parent_target_signal")),
             parent_current_signal=StrategyCoordinatorService._optional_overlay_signal(metrics.get("parent_current_signal")),
             parent_effective_signal=StrategyCoordinatorService._optional_overlay_signal(metrics.get("parent_effective_signal")),

@@ -14,6 +14,7 @@ def build_legs(
     pair: ArbitragePairDefinition,
     opportunity: ArbitrageOpportunity,
     hedge_margin_mode: str | None = None,
+    require_explicit_hedge_margin_mode: bool = False,
     account_spot_qty: Decimal,
     account_hedge_qty: Decimal,
     sleeve_spot_qty: Decimal,
@@ -40,6 +41,8 @@ def build_legs(
         "inventory_reverse_carry": "Derivatives hedge leg offsets the inventory-backed reverse carry.",
         "margin_reverse_carry": "Derivatives hedge leg offsets the borrow-backed reverse carry.",
     }.get(opportunity.execution_mode, "Arbitrage hedge leg driven by sleeve inventory truth.")
+    if require_explicit_hedge_margin_mode and not str(hedge_margin_mode or "").strip():
+        raise ValueError("smart_arbitrage_hedge_margin_mode_required")
     resolved_hedge_margin_mode = str(hedge_margin_mode or settings.margin_mode)
     hedge_target_leverage = min(
         max(float(settings.smart_arbitrage_hedge_target_leverage), 1.0),

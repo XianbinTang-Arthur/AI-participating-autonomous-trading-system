@@ -6,6 +6,9 @@ import {
   localizeError,
   operationalStatusCopy,
   operationalStatusHeadline,
+  readableOverlayParentLegQuantitySummary,
+  readableOverlayParentPostmortemMeta,
+  readableOverlayParentSignalSummary,
   readableState,
   recoveryStatusLabel,
   reviewStatusLabel,
@@ -43,6 +46,8 @@ export function renderRiskSections(data) {
   const positionModeContract = account.position_mode_contract || {};
   const derivativesLiveGuard = account.derivatives_live_guard || {};
   const currentDerivativesExposure = derivativesLiveGuard.current_derivatives_exposure || {};
+  const replayParentPostmortem = replay.last_validation?.overlay_parent_exposure_summary || null;
+  const replayRecentValidations = Array.isArray(replay.recent_validations) ? replay.recent_validations : [];
 
   return {
     riskHero: primaryStatusPanel({
@@ -149,6 +154,23 @@ export function renderRiskSections(data) {
         { label: "最近回放时间", value: formatMaybeTimestamp(replay.last_validation?.validated_at), meta: formatRelativeAge(replay.last_validation?.validated_at), tone: replay.last_validation?.validated_at ? "info" : "neutral" },
       ]),
     }),
+    riskReplayPostmortem: replayParentPostmortem
+      ? surfaceCard({
+          title: "回放父腿复盘",
+          kicker: "Replay Postmortem",
+          copy: "把最近一次回放里的父腿暴露阶段单独收口，便于核对 residual inventory、target-only 和 mixed source。",
+          content: kvList(replayOverlayParentPostmortemRows(replayParentPostmortem)),
+        })
+      : "",
+    riskReplayHistory: replayRecentValidations.length
+      ? surfaceCard({
+          title: "回放父腿历史",
+          kicker: "Replay History",
+          copy: "把最近几次 replay 里的父腿暴露阶段并排展开，方便比较 residual inventory、mixed source 和目标切换场景。",
+          actions: `<div class="stack-actions table-actions--compact">${actionButton("查看 Replay 工作区", "navigate-view", "replay", "ghost")}</div>`,
+          content: renderReplayOverlayParentHistory(replayRecentValidations),
+        })
+      : "",
     riskMarginBuffer: surfaceCard({
       title: "保证金缓冲",
       kicker: "强平风险",
@@ -448,6 +470,8 @@ export function renderRiskView(data) {
       <div class="span-3">${sections.riskMarginBuffer}</div>
       <div class="span-3">${sections.riskReconciliation}</div>
       <div class="span-6">${sections.riskRecovery}</div>
+      ${sections.riskReplayPostmortem ? `<div class="span-6">${sections.riskReplayPostmortem}</div>` : ""}
+      ${sections.riskReplayHistory ? `<div class="span-12">${sections.riskReplayHistory}</div>` : ""}
       <div class="span-6">${sections.riskExposure}</div>
       <div class="span-6">${sections.riskPreflight}</div>
       <div class="span-6">${sections.riskRunPacket}</div>
@@ -458,6 +482,60 @@ export function renderRiskView(data) {
       <div class="span-6">${sections.riskMetrics}</div>
     </div>
   `;
+}
+
+function replayOverlayParentPostmortemRows(summary = {}) {
+  return [
+    [
+      "父腿阶段",
+      readableOverlayParentSignalSummary(summary, "当前没有额外父腿阶段说明"),
+      readableOverlayParentPostmortemMeta(summary, "当前没有额外父腿契约说明"),
+    ],
+    [
+      "双腿数量拆解",
+      readableOverlayParentLegQuantitySummary(summary, "当前没有父腿多空数量拆解"),
+      `来源 ${textOrFallback(localizeError(summary.signal_source), "当前没有额外来源说明")}`,
+    ],
+  ];
+}
+
+function renderReplayOverlayParentHistory(validations = []) {
+  const headers = ["回放时间 / 决策", "父腿阶段", "契约口径", "双腿数量拆解"];
+  const rows = validations.map((validation) => {
+    const summary = validation?.overlay_parent_exposure_summary || {};
+    return [
+      `<strong>${escapeHtml(formatMaybeTimestamp(validation?.validated_at))}</strong><div class="table-meta">${escapeHtml(textOrFallback(validation?.decision_id, "当前没有决策编号"))}</div>`,
+      escapeHtml(readableOverlayParentSignalSummary(summary, "当前没有父腿阶段说明")),
+      escapeHtml(readableOverlayParentPostmortemMeta(summary, "当前没有额外父腿契约说明")),
+      escapeHtml(readableOverlayParentLegQuantitySummary(summary, "当前没有父腿多空数量拆解")),
+    ];
+  });
+  const cards = validations.map((validation) => {
+    const summary = validation?.overlay_parent_exposure_summary || {};
+    return {
+      kicker: formatMaybeTimestamp(validation?.validated_at),
+      title: textOrFallback(validation?.decision_id, "当前没有决策编号"),
+      meta: readableOverlayParentPostmortemMeta(summary, "当前没有额外父腿契约说明"),
+      fields: [
+        {
+          label: "父腿阶段",
+          value: readableOverlayParentSignalSummary(summary, "当前没有父腿阶段说明"),
+        },
+        {
+          label: "双腿数量拆解",
+          value: readableOverlayParentLegQuantitySummary(summary, "当前没有父腿多空数量拆解"),
+        },
+      ],
+      details: [
+        {
+          label: "健康度",
+          value: booleanWord(validation?.healthy),
+          meta: `偏差 ${formatNumber(validation?.divergence_count ?? 0, 0)} / 链路分数 ${formatNumber(validation?.chain_health_score ?? 0, 3)}`,
+        },
+      ],
+    };
+  });
+  return responsiveTable(headers, rows, "当前没有回放父腿历史。", cards);
 }
 
 function trialGuardStatusLabel(status) {

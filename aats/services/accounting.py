@@ -7,6 +7,10 @@ from aats.schemas.execution import FillEvent, OrderObligation
 from aats.services.portfolio_service.decimals import to_decimal
 
 
+class UnsupportedFeeCurrencyError(ValueError):
+    pass
+
+
 def resolve_symbol_currencies(
     symbol: str,
     *,
@@ -133,8 +137,14 @@ def fill_fee_delta_in_quote(
         base_currency=resolved_base,
         quote_currency=resolved_quote,
     )
-    if fee_currency == resolved_quote or fee_currency is None:
+    if fee_currency == resolved_quote and fee_currency is not None:
         return fee_amount
     if fee_currency == resolved_base:
         return fee_amount * to_decimal(fill.fill_price)
-    return Decimal("0")
+    raise UnsupportedFeeCurrencyError(
+        "unsupported_fill_fee_currency:"
+        f"{fee_currency or 'UNRESOLVED'}:"
+        f"{fill.symbol}:"
+        f"{resolved_base or 'UNKNOWN'}:"
+        f"{resolved_quote or 'UNKNOWN'}"
+    )

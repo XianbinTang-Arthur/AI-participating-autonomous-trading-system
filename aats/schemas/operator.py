@@ -6,6 +6,7 @@ from typing import Any, Literal
 from pydantic import Field
 
 from aats.schemas.common import SchemaBase, new_id, utc_now
+from aats.schemas.decision import OverlayParentExposureAudit
 from aats.schemas.strategy_runtime import StrategyExpectedVsRealizedSummary
 from aats.schemas.system import MarginModelType, OperatingState, ProductType
 
@@ -90,6 +91,7 @@ class ReplayValidationSummary(SchemaBase):
     chain_health_score: float = 0.0
     healthy: bool
     independent_expected_vs_realized_summary: StrategyExpectedVsRealizedSummary | None = None
+    overlay_parent_exposure_summary: OverlayParentExposureAudit | None = None
 
 
 class ReconciliationValidationSummary(SchemaBase):

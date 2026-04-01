@@ -750,6 +750,8 @@ def _validate_startup_profile_settings(settings: AATSSettings, runtime_layering:
         raise ValueError(f"{error_prefix}_requires_operator_auth")
     if settings.operator_unsafe_write_without_auth:
         raise ValueError(f"{error_prefix}_disallows_unsafe_operator_write_without_auth")
+    if settings.operator_session_configured and not settings.operator_session_cookie_secure:
+        raise ValueError(f"{error_prefix}_requires_secure_operator_session_cookie")
 
 
 def _exchange_runtime_hardening_kind(

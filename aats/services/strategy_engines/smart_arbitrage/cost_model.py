@@ -19,6 +19,7 @@ def build_cost_breakdown(
     execution_mode: str | None,
     reference_ts: datetime,
     hedge_margin_mode: str | None = None,
+    require_explicit_hedge_margin_mode: bool = False,
     spot_symbol: str | None = None,
     hedge_symbol: str | None = None,
     account_service: Any | None = None,
@@ -40,6 +41,8 @@ def build_cost_breakdown(
     source_flags: list[str] = []
     drag_calculator = TradeDragCalculator()
     trade_cost_service = TradeCostService(settings=settings, fee_resolver=fee_resolver)
+    if require_explicit_hedge_margin_mode and not str(hedge_margin_mode or "").strip():
+        raise ValueError("smart_arbitrage_hedge_margin_mode_required")
     resolved_hedge_margin_mode = str(hedge_margin_mode or settings.margin_mode)
 
     if not settings.smart_arbitrage_cost_model_enabled:

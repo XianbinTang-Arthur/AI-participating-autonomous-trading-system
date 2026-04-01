@@ -1968,6 +1968,7 @@ class OperatorQueryService:
             book_runtime_states = list(target_payload.get("book_runtime_states") or [])
             diagnostic_metric_flags = self._effective_diagnostic_metric_flags(target_payload)
             target_family = str(target_payload.get("strategy_family") or "directional")
+            overlay_parent_exposure = self._overlay_parent_exposure_from_payload(target_payload)
             parent_signal_fields = self._overlay_parent_signal_fields_from_payload(target_payload) or {}
             latest_target_payload = {
                 "decision_id": target_payload.get("decision_id"),
@@ -1986,6 +1987,7 @@ class OperatorQueryService:
                 "book_expectancy_summary": book_expectancy_summary,
                 "book_runtime_states": book_runtime_states,
                 "diagnostic_metric_flags": diagnostic_metric_flags,
+                "overlay_parent_exposure": overlay_parent_exposure,
                 "hedge_overlay_decision": target_payload.get("hedge_overlay_decision"),
                 "event_timestamp": latest_target_event.event_timestamp,
                 **parent_signal_fields,
@@ -3742,59 +3744,134 @@ class OperatorQueryService:
         return []
 
     @staticmethod
-    def _overlay_parent_signal_fields_from_payload(payload: dict[str, Any] | None) -> dict[str, Any] | None:
+    def _overlay_parent_exposure_from_payload(payload: dict[str, Any] | None) -> dict[str, Any] | None:
         if not isinstance(payload, dict):
             return None
+        direct_object = payload.get("overlay_parent_exposure")
+        if isinstance(direct_object, dict) and any(value is not None for value in direct_object.values()):
+            return dict(direct_object)
         direct = {
-            "parent_target_signal": payload.get("parent_target_signal"),
-            "parent_current_signal": payload.get("parent_current_signal"),
-            "parent_effective_signal": payload.get("parent_effective_signal"),
+            "parent_family": payload.get("parent_family"),
+            "symbol": payload.get("symbol"),
+            "target_leverage": payload.get("target_leverage"),
+            "margin_mode": payload.get("margin_mode"),
+            "target_long_qty": payload.get("target_long_qty"),
+            "target_short_qty": payload.get("target_short_qty"),
+            "current_long_qty": payload.get("current_long_qty"),
+            "current_short_qty": payload.get("current_short_qty"),
+            "target_qty": payload.get("parent_target_qty"),
+            "current_qty": payload.get("parent_current_qty"),
+            "effective_qty": payload.get("parent_effective_qty"),
+            "target_signal": payload.get("parent_target_signal"),
+            "current_signal": payload.get("parent_current_signal"),
+            "effective_signal": payload.get("parent_effective_signal"),
             "signal_source": payload.get("signal_source"),
-            "parent_lifecycle_state": payload.get("parent_lifecycle_state"),
-            "parent_target_active": payload.get("parent_target_active"),
-            "parent_inventory_active": payload.get("parent_inventory_active"),
-            "parent_source_of_truth": payload.get("parent_source_of_truth"),
-            "parent_target_qty": payload.get("parent_target_qty"),
-            "parent_current_qty": payload.get("parent_current_qty"),
-            "parent_effective_qty": payload.get("parent_effective_qty"),
+            "source_of_truth": payload.get("parent_source_of_truth"),
+            "lifecycle_state": payload.get("parent_lifecycle_state"),
+            "target_active": payload.get("parent_target_active"),
+            "inventory_active": payload.get("parent_inventory_active"),
+            "source": payload.get("main_leg_contract_source"),
         }
-        if any(value is not None for value in direct.values()):
+        overlay_specific_values = (
+            direct["parent_family"],
+            direct["target_long_qty"],
+            direct["target_short_qty"],
+            direct["current_long_qty"],
+            direct["current_short_qty"],
+            direct["target_qty"],
+            direct["current_qty"],
+            direct["effective_qty"],
+            direct["target_signal"],
+            direct["current_signal"],
+            direct["effective_signal"],
+            direct["signal_source"],
+            direct["source_of_truth"],
+            direct["lifecycle_state"],
+            direct["target_active"],
+            direct["inventory_active"],
+            direct["source"],
+        )
+        if any(value is not None for value in overlay_specific_values):
             return direct
-        overlay = payload.get("hedge_overlay_decision")
-        if isinstance(overlay, dict):
+        for nested_key in ("hedge_overlay_decision", "family_execution_summary"):
+            nested_payload = payload.get(nested_key)
+            if not isinstance(nested_payload, dict):
+                continue
+            nested_object = nested_payload.get("overlay_parent_exposure")
+            if isinstance(nested_object, dict) and any(value is not None for value in nested_object.values()):
+                return dict(nested_object)
             nested = {
-                "parent_target_signal": overlay.get("parent_target_signal"),
-                "parent_current_signal": overlay.get("parent_current_signal"),
-                "parent_effective_signal": overlay.get("parent_effective_signal"),
-                "signal_source": overlay.get("signal_source"),
-                "parent_lifecycle_state": overlay.get("parent_lifecycle_state"),
-                "parent_target_active": overlay.get("parent_target_active"),
-                "parent_inventory_active": overlay.get("parent_inventory_active"),
-                "parent_source_of_truth": overlay.get("parent_source_of_truth"),
-                "parent_target_qty": overlay.get("parent_target_qty"),
-                "parent_current_qty": overlay.get("parent_current_qty"),
-                "parent_effective_qty": overlay.get("parent_effective_qty"),
-            }
-            if any(value is not None for value in nested.values()):
-                return nested
-        family_summary = payload.get("family_execution_summary")
-        if isinstance(family_summary, dict):
-            nested = {
-                "parent_target_signal": family_summary.get("parent_target_signal"),
-                "parent_current_signal": family_summary.get("parent_current_signal"),
-                "parent_effective_signal": family_summary.get("parent_effective_signal"),
-                "signal_source": family_summary.get("signal_source"),
-                "parent_lifecycle_state": family_summary.get("parent_lifecycle_state"),
-                "parent_target_active": family_summary.get("parent_target_active"),
-                "parent_inventory_active": family_summary.get("parent_inventory_active"),
-                "parent_source_of_truth": family_summary.get("parent_source_of_truth"),
-                "parent_target_qty": family_summary.get("parent_target_qty"),
-                "parent_current_qty": family_summary.get("parent_current_qty"),
-                "parent_effective_qty": family_summary.get("parent_effective_qty"),
+                "parent_family": nested_payload.get("parent_family"),
+                "symbol": nested_payload.get("symbol"),
+                "target_leverage": nested_payload.get("target_leverage"),
+                "margin_mode": nested_payload.get("margin_mode"),
+                "target_long_qty": nested_payload.get("target_long_qty"),
+                "target_short_qty": nested_payload.get("target_short_qty"),
+                "current_long_qty": nested_payload.get("current_long_qty"),
+                "current_short_qty": nested_payload.get("current_short_qty"),
+                "target_qty": nested_payload.get("parent_target_qty") if "parent_target_qty" in nested_payload else nested_payload.get("target_qty"),
+                "current_qty": nested_payload.get("parent_current_qty") if "parent_current_qty" in nested_payload else nested_payload.get("current_qty"),
+                "effective_qty": nested_payload.get("parent_effective_qty") if "parent_effective_qty" in nested_payload else nested_payload.get("effective_qty"),
+                "target_signal": nested_payload.get("parent_target_signal") if "parent_target_signal" in nested_payload else nested_payload.get("target_signal"),
+                "current_signal": nested_payload.get("parent_current_signal") if "parent_current_signal" in nested_payload else nested_payload.get("current_signal"),
+                "effective_signal": nested_payload.get("parent_effective_signal") if "parent_effective_signal" in nested_payload else nested_payload.get("effective_signal"),
+                "signal_source": nested_payload.get("signal_source"),
+                "source_of_truth": nested_payload.get("parent_source_of_truth") if "parent_source_of_truth" in nested_payload else nested_payload.get("source_of_truth"),
+                "lifecycle_state": nested_payload.get("parent_lifecycle_state") if "parent_lifecycle_state" in nested_payload else nested_payload.get("lifecycle_state"),
+                "target_active": nested_payload.get("parent_target_active") if "parent_target_active" in nested_payload else nested_payload.get("target_active"),
+                "inventory_active": nested_payload.get("parent_inventory_active") if "parent_inventory_active" in nested_payload else nested_payload.get("inventory_active"),
+                "source": nested_payload.get("main_leg_contract_source") if "main_leg_contract_source" in nested_payload else nested_payload.get("source"),
             }
             if any(value is not None for value in nested.values()):
                 return nested
         return None
+
+    @staticmethod
+    def _overlay_parent_exposure_summary_from_payload(payload: dict[str, Any] | None) -> dict[str, Any] | None:
+        overlay_parent_exposure = OperatorQueryService._overlay_parent_exposure_from_payload(payload)
+        if overlay_parent_exposure is None:
+            return None
+        return {
+            "parent_family": overlay_parent_exposure.get("parent_family"),
+            "symbol": overlay_parent_exposure.get("symbol"),
+            "target_leverage": overlay_parent_exposure.get("target_leverage"),
+            "margin_mode": overlay_parent_exposure.get("margin_mode"),
+            "target_long_qty": overlay_parent_exposure.get("target_long_qty"),
+            "target_short_qty": overlay_parent_exposure.get("target_short_qty"),
+            "current_long_qty": overlay_parent_exposure.get("current_long_qty"),
+            "current_short_qty": overlay_parent_exposure.get("current_short_qty"),
+            "target_qty": overlay_parent_exposure.get("target_qty"),
+            "current_qty": overlay_parent_exposure.get("current_qty"),
+            "effective_qty": overlay_parent_exposure.get("effective_qty"),
+            "target_signal": overlay_parent_exposure.get("target_signal"),
+            "current_signal": overlay_parent_exposure.get("current_signal"),
+            "effective_signal": overlay_parent_exposure.get("effective_signal"),
+            "signal_source": overlay_parent_exposure.get("signal_source"),
+            "source_of_truth": overlay_parent_exposure.get("source_of_truth"),
+            "lifecycle_state": overlay_parent_exposure.get("lifecycle_state"),
+            "target_active": overlay_parent_exposure.get("target_active"),
+            "inventory_active": overlay_parent_exposure.get("inventory_active"),
+            "source": overlay_parent_exposure.get("source"),
+        }
+
+    @staticmethod
+    def _overlay_parent_signal_fields_from_payload(payload: dict[str, Any] | None) -> dict[str, Any] | None:
+        overlay_parent_exposure = OperatorQueryService._overlay_parent_exposure_from_payload(payload)
+        if overlay_parent_exposure is None:
+            return None
+        return {
+            "parent_target_signal": overlay_parent_exposure.get("target_signal"),
+            "parent_current_signal": overlay_parent_exposure.get("current_signal"),
+            "parent_effective_signal": overlay_parent_exposure.get("effective_signal"),
+            "signal_source": overlay_parent_exposure.get("signal_source"),
+            "parent_lifecycle_state": overlay_parent_exposure.get("lifecycle_state"),
+            "parent_target_active": overlay_parent_exposure.get("target_active"),
+            "parent_inventory_active": overlay_parent_exposure.get("inventory_active"),
+            "parent_source_of_truth": overlay_parent_exposure.get("source_of_truth"),
+            "parent_target_qty": overlay_parent_exposure.get("target_qty"),
+            "parent_current_qty": overlay_parent_exposure.get("current_qty"),
+            "parent_effective_qty": overlay_parent_exposure.get("effective_qty"),
+        }
 
     def _independent_diagnostics_flags(self, *, payloads: list[dict[str, Any]] | None = None) -> dict[str, bool]:
         defaults = {
@@ -4528,6 +4605,20 @@ class OperatorQueryService:
             normalized["book_runtime_states"] = self._book_runtime_states_from_payload(normalized)
         if not normalized.get("diagnostic_metric_flags"):
             normalized["diagnostic_metric_flags"] = self._effective_diagnostic_metric_flags(normalized)
+        overlay_parent_exposure = self._overlay_parent_exposure_from_payload(normalized)
+        if overlay_parent_exposure is not None:
+            if normalized.get("overlay_parent_exposure") is None:
+                normalized["overlay_parent_exposure"] = overlay_parent_exposure
+            family_execution_summary = normalized.get("family_execution_summary")
+            if isinstance(family_execution_summary, dict) and family_execution_summary.get("overlay_parent_exposure") is None:
+                family_execution_summary = dict(family_execution_summary)
+                family_execution_summary["overlay_parent_exposure"] = overlay_parent_exposure
+                normalized["family_execution_summary"] = family_execution_summary
+            hedge_overlay_decision = normalized.get("hedge_overlay_decision")
+            if isinstance(hedge_overlay_decision, dict) and hedge_overlay_decision.get("overlay_parent_exposure") is None:
+                hedge_overlay_decision = dict(hedge_overlay_decision)
+                hedge_overlay_decision["overlay_parent_exposure"] = overlay_parent_exposure
+                normalized["hedge_overlay_decision"] = hedge_overlay_decision
         parent_signal_fields = self._overlay_parent_signal_fields_from_payload(normalized)
         if parent_signal_fields is not None:
             for key, value in parent_signal_fields.items():
@@ -4921,6 +5012,12 @@ class OperatorQueryService:
             "active": bool(overlay_payload.get("active")),
             "main_leg_signal": overlay_payload.get("main_leg_signal"),
             "hedge_leg_signal": overlay_payload.get("hedge_leg_signal"),
+            "overlay_parent_exposure": self._overlay_parent_exposure_from_payload(
+                {"hedge_overlay_decision": overlay_payload}
+            ),
+            "overlay_parent_exposure_summary": self._overlay_parent_exposure_summary_from_payload(
+                {"hedge_overlay_decision": overlay_payload}
+            ),
             "parent_target_signal": overlay_payload.get("parent_target_signal"),
             "parent_current_signal": overlay_payload.get("parent_current_signal"),
             "parent_effective_signal": overlay_payload.get("parent_effective_signal"),
@@ -5120,6 +5217,15 @@ class OperatorQueryService:
                 payload["book_runtime_states"] = self._book_runtime_states_from_payload(payload) or self._book_runtime_states_from_payload(position_target)
             if not payload.get("diagnostic_metric_flags"):
                 payload["diagnostic_metric_flags"] = self._effective_diagnostic_metric_flags(payload, position_target)
+            overlay_parent_exposure = self._overlay_parent_exposure_from_payload(payload) or self._overlay_parent_exposure_from_payload(position_target)
+            if overlay_parent_exposure is not None:
+                if payload.get("overlay_parent_exposure") is None:
+                    payload["overlay_parent_exposure"] = overlay_parent_exposure
+                family_execution_summary = payload.get("family_execution_summary")
+                if isinstance(family_execution_summary, dict) and family_execution_summary.get("overlay_parent_exposure") is None:
+                    family_execution_summary = dict(family_execution_summary)
+                    family_execution_summary["overlay_parent_exposure"] = overlay_parent_exposure
+                    payload["family_execution_summary"] = family_execution_summary
             parent_signal_fields = self._overlay_parent_signal_fields_from_payload(payload) or self._overlay_parent_signal_fields_from_payload(position_target)
             if parent_signal_fields is not None:
                 for key, value in parent_signal_fields.items():
@@ -5184,6 +5290,15 @@ class OperatorQueryService:
                 payload["book_runtime_states"] = self._book_runtime_states_from_payload(payload) or self._book_runtime_states_from_payload(position_target)
             if not payload.get("diagnostic_metric_flags"):
                 payload["diagnostic_metric_flags"] = self._effective_diagnostic_metric_flags(payload, position_target)
+            overlay_parent_exposure = self._overlay_parent_exposure_from_payload(payload) or self._overlay_parent_exposure_from_payload(position_target)
+            if overlay_parent_exposure is not None:
+                if payload.get("overlay_parent_exposure") is None:
+                    payload["overlay_parent_exposure"] = overlay_parent_exposure
+                family_execution_summary = payload.get("family_execution_summary")
+                if isinstance(family_execution_summary, dict) and family_execution_summary.get("overlay_parent_exposure") is None:
+                    family_execution_summary = dict(family_execution_summary)
+                    family_execution_summary["overlay_parent_exposure"] = overlay_parent_exposure
+                    payload["family_execution_summary"] = family_execution_summary
             parent_signal_fields = self._overlay_parent_signal_fields_from_payload(payload) or self._overlay_parent_signal_fields_from_payload(position_target)
             if parent_signal_fields is not None:
                 for key, value in parent_signal_fields.items():
@@ -5352,6 +5467,8 @@ class OperatorQueryService:
             family_execution_summary = position_target.get("family_execution_summary")
         book_expectancy_summary = self._book_expectancy_summary_from_payload(native_outcome) or self._book_expectancy_summary_from_payload(position_target)
         book_runtime_states = self._book_runtime_states_from_payload(native_outcome) or self._book_runtime_states_from_payload(position_target)
+        overlay_parent_exposure = self._overlay_parent_exposure_from_payload(native_outcome) or self._overlay_parent_exposure_from_payload(position_target)
+        overlay_parent_exposure_summary = self._overlay_parent_exposure_summary_from_payload(native_outcome) or self._overlay_parent_exposure_summary_from_payload(position_target)
         parent_signal_fields = self._overlay_parent_signal_fields_from_payload(native_outcome) or self._overlay_parent_signal_fields_from_payload(position_target) or {}
         return {
             "configured_mode": self.runtime.settings.ai_operating_mode,
@@ -5361,6 +5478,8 @@ class OperatorQueryService:
             "fallback_used": None if ai_assessment is None else ai_assessment.get("fallback_used"),
             "degraded": None if ai_assessment is None else ai_assessment.get("degraded"),
             "finalized": True if native_outcome is None else bool(native_outcome.get("finalized", True)),
+            "overlay_parent_exposure": overlay_parent_exposure,
+            "overlay_parent_exposure_summary": overlay_parent_exposure_summary,
             "baseline_direction": None if baseline_assessment is None else baseline_assessment.get("direction_bias"),
             "ai_direction": self._direction_from_edge(None if ai_assessment is None else ai_assessment.get("directional_edge")),
             "final_direction": (
@@ -5607,6 +5726,7 @@ class OperatorQueryService:
                     "book_expectancy_summary": target.get("book_expectancy_summary") if target else None,
                     "book_runtime_states": self._book_runtime_states_from_payload(target),
                     "diagnostic_metric_flags": self._effective_diagnostic_metric_flags(target),
+                    "overlay_parent_exposure": self._overlay_parent_exposure_from_payload(target),
                     **(self._overlay_parent_signal_fields_from_payload(target) or {}),
                     "independent_expected_vs_realized_summary": independent_expected_vs_realized_summary,
                     "strategy_reason_codes": [] if target is None else list(target.get("strategy_reason_codes") or []),

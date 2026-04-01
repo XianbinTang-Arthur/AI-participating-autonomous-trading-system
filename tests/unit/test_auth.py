@@ -82,22 +82,36 @@ class TestAuth(unittest.TestCase):
             settings=SimpleNamespace(
                 operator_write_api_key="write-key",
                 environment="prod",
+                storage_mode="postgres",
             ),
-            environment_capabilities=SimpleNamespace(exchange_coupled=True),
+            environment_capabilities=SimpleNamespace(exchange_coupled=True, local_only=False),
         )
 
         self.assertFalse(_write_api_key_compatibility_enabled(runtime))
 
-    def test_write_api_key_compatibility_retained_for_non_exchange_dev_runtime(self) -> None:
+    def test_write_api_key_compatibility_retained_for_local_runtime(self) -> None:
         runtime = SimpleNamespace(
             settings=SimpleNamespace(
                 operator_write_api_key="write-key",
                 environment="dev",
+                storage_mode="postgres",
             ),
-            environment_capabilities=SimpleNamespace(exchange_coupled=False),
+            environment_capabilities=SimpleNamespace(exchange_coupled=False, local_only=True),
         )
 
         self.assertTrue(_write_api_key_compatibility_enabled(runtime))
+
+    def test_write_api_key_compatibility_disabled_for_non_local_persistent_runtime(self) -> None:
+        runtime = SimpleNamespace(
+            settings=SimpleNamespace(
+                operator_write_api_key="write-key",
+                environment="dev",
+                storage_mode="postgres",
+            ),
+            environment_capabilities=SimpleNamespace(exchange_coupled=False, local_only=False),
+        )
+
+        self.assertFalse(_write_api_key_compatibility_enabled(runtime))
 
 
 if __name__ == "__main__":

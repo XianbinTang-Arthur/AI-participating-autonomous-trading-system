@@ -18,6 +18,8 @@ import {
   readableExpectedVsRealizedSummary,
   readableFamilyExecutionDirection,
   readableFamilyExecutionSummary,
+  readableOverlayParentLegQuantitySummary,
+  readableOverlayParentPostmortemMeta,
   readableOverlayParentSignalSummary,
   readableState,
 } from "./terms.js";
@@ -45,6 +47,12 @@ export function buildDecisionDrawer(detail) {
   const aiExecutionSuggestion = detail.ai_execution_suggestion || null;
   const decisionOutcome = detail.decision_outcome || null;
   const hedgeModeAudit = detail.hedge_mode_audit || null;
+  const overlayParentPostmortem =
+    aiDecisionAudit?.overlay_parent_exposure_summary
+    || hedgeModeAudit?.overlay?.overlay_parent_exposure_summary
+    || aiDecisionAudit?.overlay_parent_exposure
+    || hedgeModeAudit?.overlay?.overlay_parent_exposure
+    || null;
 
   return {
     eyebrow: "决策链详情",
@@ -87,6 +95,12 @@ export function buildDecisionDrawer(detail) {
         ? surfaceCard({
             title: "Overlay 审计",
             content: kvList(decisionOverlayAuditRows(hedgeModeAudit.overlay)),
+          })
+        : "",
+      overlayParentPostmortem && Object.keys(overlayParentPostmortem).length
+        ? surfaceCard({
+            title: "父腿暴露复盘",
+            content: kvList(decisionOverlayParentPostmortemRows(overlayParentPostmortem)),
           })
         : "",
       hedgeModeAudit?.leg_orders?.total_count
@@ -385,6 +399,21 @@ function decisionOverlayAuditRows(overlay) {
           .map((item) => `目标 ${drawerText(item.target_position_qty, "0")} / Δ ${drawerText(item.delta_position_qty, "0")} / 原因 ${drawerListText((item.trigger_reason_codes || []).map(localizeError), "当前没有触发原因")}`)
           .join(" / ")
         : "当前没有额外腿级触发说明",
+    ],
+  ];
+}
+
+function decisionOverlayParentPostmortemRows(summary) {
+  return [
+    [
+      "父腿阶段",
+      readableOverlayParentSignalSummary(summary, "当前没有额外父腿阶段说明"),
+      readableOverlayParentPostmortemMeta(summary, "当前没有额外父腿契约说明"),
+    ],
+    [
+      "双腿数量拆解",
+      readableOverlayParentLegQuantitySummary(summary, "当前没有父腿多空数量拆解"),
+      `来源 ${drawerText(localizeError(summary?.signal_source), "当前没有额外来源说明")}`,
     ],
   ];
 }

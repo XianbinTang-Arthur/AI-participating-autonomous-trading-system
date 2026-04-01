@@ -195,6 +195,18 @@ class TestOperatorPositionStates(unittest.TestCase):
         self.assertEqual(payload["parent_target_qty"], "0")
         self.assertEqual(payload["parent_current_qty"], "0.03")
         self.assertEqual(payload["parent_effective_qty"], "0.03")
+        self.assertIsNotNone(payload["overlay_parent_exposure"])
+        self.assertEqual(payload["overlay_parent_exposure"]["target_signal"], "flat")
+        self.assertEqual(payload["overlay_parent_exposure"]["current_signal"], "long")
+        self.assertEqual(payload["overlay_parent_exposure"]["effective_signal"], "long")
+        self.assertEqual(payload["overlay_parent_exposure"]["source_of_truth"], "inventory")
+        self.assertEqual(payload["overlay_parent_exposure"]["target_qty"], "0")
+        self.assertEqual(payload["overlay_parent_exposure"]["current_qty"], "0.03")
+        self.assertEqual(payload["overlay_parent_exposure"]["effective_qty"], "0.03")
+        self.assertEqual(
+            payload["family_execution_summary"]["overlay_parent_exposure"]["source_of_truth"],
+            "inventory",
+        )
         self.assertEqual(payload["diagnostic_metric_flags"]["emit_expected_vs_realized_metrics"], True)
         self.assertEqual(payload["book_expectancy_summary"]["source"], "independent_book")
         self.assertEqual(
@@ -241,6 +253,17 @@ class TestOperatorPositionStates(unittest.TestCase):
             },
         )
         self.assertEqual(normalized["diagnostic_metric_flags"], metric_flags)
+
+    def test_overlay_parent_exposure_backfill_does_not_treat_plain_target_fields_as_overlay_object(self) -> None:
+        payload = OperatorQueryService._overlay_parent_exposure_from_payload(
+            {
+                "symbol": "BTC-USDT-SWAP",
+                "margin_mode": "cross",
+                "target_leverage": 2.0,
+            }
+        )
+
+        self.assertIsNone(payload)
 
     def test_independent_expected_vs_realized_summary_respects_payload_specific_metric_flags(self) -> None:
         query = OperatorQueryService.__new__(OperatorQueryService)
@@ -1144,8 +1167,86 @@ class TestOperatorPositionStates(unittest.TestCase):
         self.assertEqual(audit["parent_target_qty"], "0")
         self.assertEqual(audit["parent_current_qty"], "0.03")
         self.assertEqual(audit["parent_effective_qty"], "0.03")
+        self.assertIsNotNone(audit["overlay_parent_exposure"])
+        self.assertEqual(audit["overlay_parent_exposure"]["target_signal"], "flat")
+        self.assertEqual(audit["overlay_parent_exposure"]["current_signal"], "long")
+        self.assertEqual(audit["overlay_parent_exposure"]["effective_signal"], "long")
+        self.assertEqual(audit["overlay_parent_exposure"]["source_of_truth"], "inventory")
+        self.assertEqual(audit["overlay_parent_exposure"]["target_qty"], "0")
+        self.assertEqual(audit["overlay_parent_exposure"]["current_qty"], "0.03")
+        self.assertEqual(audit["overlay_parent_exposure"]["effective_qty"], "0.03")
+        self.assertIsNotNone(audit["overlay_parent_exposure_summary"])
+        self.assertEqual(audit["overlay_parent_exposure_summary"]["source_of_truth"], "inventory")
+        self.assertEqual(audit["overlay_parent_exposure_summary"]["effective_signal"], "long")
         self.assertEqual(audit["close_reason"], "failed_thesis")
         self.assertEqual(audit["long_leg_close_reason"], "failed_thesis")
+
+    def test_ai_decision_audit_surfaces_overlay_parent_exposure_summary(self) -> None:
+        query = OperatorQueryService.__new__(OperatorQueryService)
+        query.runtime = SimpleNamespace(settings=SimpleNamespace(ai_operating_mode="baseline_only"))
+
+        audit = query._ai_decision_audit(
+            audit=SimpleNamespace(
+                order_intent_refs=[],
+                order_state_refs=[],
+                fill_event_refs=[],
+                reconciliation_refs=[],
+                ai_shadow_decision_refs=[],
+                ai_shadow_evaluation_refs=[],
+            ),
+            decision_context=None,
+            ai_decision_brief=None,
+            baseline_assessment={"direction_bias": "long"},
+            ai_assessment=None,
+            position_target={
+                "position_intent": "close_short",
+                "target_exposure_side": "flat",
+                "overlay_parent_exposure": {
+                    "parent_family": "directional",
+                    "symbol": "BTC-USDT-SWAP",
+                    "margin_mode": "cross",
+                    "source_of_truth": "inventory",
+                    "lifecycle_state": "inventory_only",
+                    "target_signal": "flat",
+                    "current_signal": "long",
+                    "effective_signal": "long",
+                    "target_qty": "0",
+                    "current_qty": "0.03",
+                    "effective_qty": "0.03",
+                    "target_active": False,
+                    "inventory_active": True,
+                },
+            },
+            finalized_decision_outcome={
+                "decision_source": "baseline",
+                "decision_authority": "reference_only",
+                "profile_control_source": "system",
+                "final_action": "exit",
+                "final_direction": "flat",
+                "overlay_parent_exposure": {
+                    "parent_family": "directional",
+                    "symbol": "BTC-USDT-SWAP",
+                    "margin_mode": "cross",
+                    "source_of_truth": "inventory",
+                    "lifecycle_state": "inventory_only",
+                    "target_signal": "flat",
+                    "current_signal": "long",
+                    "effective_signal": "long",
+                    "target_qty": "0",
+                    "current_qty": "0.03",
+                    "effective_qty": "0.03",
+                    "target_active": False,
+                    "inventory_active": True,
+                },
+            },
+            strategy_execution_health=None,
+        )
+
+        assert audit is not None
+        self.assertIsNotNone(audit["overlay_parent_exposure_summary"])
+        self.assertEqual(audit["overlay_parent_exposure_summary"]["source_of_truth"], "inventory")
+        self.assertEqual(audit["overlay_parent_exposure_summary"]["lifecycle_state"], "inventory_only")
+        self.assertEqual(audit["overlay_parent_exposure_summary"]["effective_qty"], "0.03")
 
     def test_ai_economic_actionability_prefers_single_book_expectancy_summary_over_directional_target_edge(self) -> None:
         query = OperatorQueryService.__new__(OperatorQueryService)

@@ -749,6 +749,47 @@ function normalizedExpectedVsRealizedSummary(source = {}) {
 
 function normalizedOverlayDecision(source = {}) {
   if (!source || typeof source !== "object") return {};
+  const directAudit = source.overlay_parent_exposure
+    || source.overlayParentExposure
+    || source.overlay_parent_exposure_summary
+    || source.overlayParentExposureSummary;
+  if (directAudit && typeof directAudit === "object") {
+    return {
+      ...source,
+      ...directAudit,
+      parent_target_signal: directAudit.target_signal,
+      parent_current_signal: directAudit.current_signal,
+      parent_effective_signal: directAudit.effective_signal,
+      parent_lifecycle_state: directAudit.lifecycle_state,
+      parent_target_active: directAudit.target_active,
+      parent_inventory_active: directAudit.inventory_active,
+      parent_source_of_truth: directAudit.source_of_truth,
+      parent_target_qty: directAudit.target_qty,
+      parent_current_qty: directAudit.current_qty,
+      parent_effective_qty: directAudit.effective_qty,
+    };
+  }
+  if (
+    Object.prototype.hasOwnProperty.call(source, "target_signal")
+    || Object.prototype.hasOwnProperty.call(source, "current_signal")
+    || Object.prototype.hasOwnProperty.call(source, "effective_signal")
+    || Object.prototype.hasOwnProperty.call(source, "source_of_truth")
+    || Object.prototype.hasOwnProperty.call(source, "effective_qty")
+  ) {
+    return {
+      ...source,
+      parent_target_signal: source.target_signal,
+      parent_current_signal: source.current_signal,
+      parent_effective_signal: source.effective_signal,
+      parent_lifecycle_state: source.lifecycle_state,
+      parent_target_active: source.target_active,
+      parent_inventory_active: source.inventory_active,
+      parent_source_of_truth: source.source_of_truth,
+      parent_target_qty: source.target_qty,
+      parent_current_qty: source.current_qty,
+      parent_effective_qty: source.effective_qty,
+    };
+  }
   if (
     Object.prototype.hasOwnProperty.call(source, "main_leg_signal")
     || Object.prototype.hasOwnProperty.call(source, "parent_effective_signal")
@@ -759,6 +800,23 @@ function normalizedOverlayDecision(source = {}) {
   }
   const direct = source.hedge_overlay_decision || source.hedgeOverlayDecision;
   if (direct && typeof direct === "object") {
+    const nestedAudit = direct.overlay_parent_exposure || direct.overlayParentExposure;
+    if (nestedAudit && typeof nestedAudit === "object") {
+      return {
+        ...direct,
+        ...nestedAudit,
+        parent_target_signal: nestedAudit.target_signal,
+        parent_current_signal: nestedAudit.current_signal,
+        parent_effective_signal: nestedAudit.effective_signal,
+        parent_lifecycle_state: nestedAudit.lifecycle_state,
+        parent_target_active: nestedAudit.target_active,
+        parent_inventory_active: nestedAudit.inventory_active,
+        parent_source_of_truth: nestedAudit.source_of_truth,
+        parent_target_qty: nestedAudit.target_qty,
+        parent_current_qty: nestedAudit.current_qty,
+        parent_effective_qty: nestedAudit.effective_qty,
+      };
+    }
     return direct;
   }
   const familySummary = normalizedFamilyExecutionSummary(source);
@@ -775,6 +833,25 @@ function normalizedOverlayDecision(source = {}) {
     )
   ) {
     return familySummary;
+  }
+  if (familySummary && typeof familySummary === "object") {
+    const nestedAudit = familySummary.overlay_parent_exposure || familySummary.overlayParentExposure;
+    if (nestedAudit && typeof nestedAudit === "object") {
+      return {
+        ...familySummary,
+        ...nestedAudit,
+        parent_target_signal: nestedAudit.target_signal,
+        parent_current_signal: nestedAudit.current_signal,
+        parent_effective_signal: nestedAudit.effective_signal,
+        parent_lifecycle_state: nestedAudit.lifecycle_state,
+        parent_target_active: nestedAudit.target_active,
+        parent_inventory_active: nestedAudit.inventory_active,
+        parent_source_of_truth: nestedAudit.source_of_truth,
+        parent_target_qty: nestedAudit.target_qty,
+        parent_current_qty: nestedAudit.current_qty,
+        parent_effective_qty: nestedAudit.effective_qty,
+      };
+    }
   }
   return {};
 }
@@ -1096,6 +1173,47 @@ export function readableOverlayParentSignalSummary(source = {}, fallback = "") {
     `目标仓位 ${readableSignedQuantity(targetQty)}`,
     `当前仓位 ${readableSignedQuantity(currentQty)}`,
     `生效仓位 ${readableSignedQuantity(effectiveQty)}`,
+  ].join(" / ");
+}
+
+export function readableOverlayParentPostmortemMeta(source = {}, fallback = "") {
+  const overlay = normalizedOverlayDecision(source);
+  if (!overlay || typeof overlay !== "object" || !Object.keys(overlay).length) return fallback;
+  const parts = [];
+  if (overlay.parent_family) {
+    parts.push(`父腿 ${readableState(overlay.parent_family, overlay.parent_family)}`);
+  }
+  if (overlay.symbol) {
+    parts.push(`标的 ${overlay.symbol}`);
+  }
+  if (overlay.margin_mode) {
+    parts.push(`保证金 ${readableState(overlay.margin_mode, overlay.margin_mode)}`);
+  }
+  const leverage = Number(overlay.target_leverage);
+  if (Number.isFinite(leverage) && leverage > 0) {
+    parts.push(`杠杆 ${leverage.toFixed(2).replace(/\.?0+$/, "")}`);
+  }
+  if (overlay.source_of_truth) {
+    parts.push(`判定口径 ${localizeError(overlay.source_of_truth, "待确认")}`);
+  }
+  return parts.length ? parts.join(" / ") : fallback;
+}
+
+export function readableOverlayParentLegQuantitySummary(source = {}, fallback = "") {
+  const overlay = normalizedOverlayDecision(source);
+  if (!overlay || typeof overlay !== "object" || !Object.keys(overlay).length) return fallback;
+  const hasLegQuantities = [
+    overlay.target_long_qty,
+    overlay.target_short_qty,
+    overlay.current_long_qty,
+    overlay.current_short_qty,
+  ].some((value) => value !== undefined && value !== null);
+  if (!hasLegQuantities) return fallback;
+  return [
+    `目标多头 ${readableSignedQuantity(overlay.target_long_qty)}`,
+    `目标空头 ${readableSignedQuantity(overlay.target_short_qty)}`,
+    `当前多头 ${readableSignedQuantity(overlay.current_long_qty)}`,
+    `当前空头 ${readableSignedQuantity(overlay.current_short_qty)}`,
   ].join(" / ");
 }
 

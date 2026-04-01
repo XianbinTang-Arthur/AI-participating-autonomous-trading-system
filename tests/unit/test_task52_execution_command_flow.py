@@ -302,6 +302,7 @@ class TestTask52ExecutionCommandFlow(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state.status, "CREATED")
         command = command_repo.first()
         self.assertEqual(command["command_type"], "submit")
+        self.assertEqual(command["idempotency_key"], "submit:clphase2_enqueue")
         self.assertEqual(command["state"], "PENDING")
         self.assertEqual(command["command_payload"]["client_order_id"], "clphase2_enqueue")
 
@@ -623,12 +624,12 @@ class TestTask52ExecutionCommandFlow(unittest.IsolatedAsyncioTestCase):
         pending = await manager.cancel_order("clphase2_cancel_before_submit")
 
         self.assertEqual(pending.status, "CANCELED")
-        self.assertEqual(command_repo.get_by_idempotency_key("submit:intent_phase2_cancel_before_submit")["state"], "ABANDONED")
+        self.assertEqual(command_repo.get_by_idempotency_key("submit:clphase2_cancel_before_submit")["state"], "ABANDONED")
         self.assertIsNone(command_repo.get_by_idempotency_key("cancel:clphase2_cancel_before_submit"))
 
         await processor.process_pending()
 
-        submit_command = command_repo.get_by_idempotency_key("submit:intent_phase2_cancel_before_submit")
+        submit_command = command_repo.get_by_idempotency_key("submit:clphase2_cancel_before_submit")
         final_state = manager.execution_repo.get_order_state("clphase2_cancel_before_submit")
         self.assertIsNotNone(submit_command)
         self.assertEqual(submit_command["state"], "ABANDONED")
@@ -636,6 +637,33 @@ class TestTask52ExecutionCommandFlow(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(final_state.status, "CANCELED")
         self.assertEqual(adapter.submit_count, 0)
         self.assertEqual(adapter.cancel_count, 0)
+
+    async def test_phase2_cancel_before_submit_still_abandons_legacy_submit_command_key(self) -> None:
+        command_repo = _InMemoryExecutionCommandRepository()
+        adapter = _QueueOnlyAdapter()
+        manager = OrderManager(
+            settings=AATSSettings.model_validate({"execution_command_flow_enabled": True}),
+            bus=InMemoryEventBus(event_store=InMemoryEventStore(), persistence_mode="strict"),
+            adapter=adapter,
+            execution_repo=InMemoryExecutionRepository(),
+            persistent_order_service=ExecutionOrderService(execution_command_repo=command_repo),
+            kill_switch=KillSwitch(),
+        )
+        intent = _intent(suffix="phase2_legacy_cancel_before_submit")
+
+        await manager.handle_order_intent(_intent_message(intent))
+        seeded = command_repo.get_by_idempotency_key("submit:clphase2_legacy_cancel_before_submit")
+        self.assertIsNotNone(seeded)
+        assert seeded is not None
+        command_repo.rows[str(seeded["command_id"])]["idempotency_key"] = "submit:intent_phase2_legacy_cancel_before_submit"
+
+        pending = await manager.cancel_order("clphase2_legacy_cancel_before_submit")
+
+        self.assertEqual(pending.status, "CANCELED")
+        legacy_command = command_repo.get_by_idempotency_key("submit:intent_phase2_legacy_cancel_before_submit")
+        self.assertIsNotNone(legacy_command)
+        assert legacy_command is not None
+        self.assertEqual(legacy_command["state"], "ABANDONED")
 
     async def test_phase2_cancel_can_hydrate_order_from_execution_repo_when_legacy_state_is_missing(self) -> None:
         command_repo = _InMemoryExecutionCommandRepository()

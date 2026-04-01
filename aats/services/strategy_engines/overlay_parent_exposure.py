@@ -5,7 +5,7 @@ from decimal import Decimal
 from typing import Literal
 
 from aats.bootstrap.settings import AATSSettings
-from aats.schemas.decision import DecisionContext, PositionTarget
+from aats.schemas.decision import DecisionContext, OverlayParentExposureAudit, PositionTarget
 from aats.schemas.strategy_runtime import StrategyFamily
 from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, to_decimal
 
@@ -58,6 +58,35 @@ class OverlayParentExposureLifecycle:
 
 
 OverlayParentExposureContract = OverlayParentExposureLifecycle
+
+
+def overlay_parent_exposure_audit(
+    parent_exposure: OverlayParentExposureLifecycle | None,
+) -> OverlayParentExposureAudit | None:
+    if parent_exposure is None:
+        return None
+    return OverlayParentExposureAudit(
+        parent_family=parent_exposure.parent_family,
+        symbol=parent_exposure.symbol,
+        target_leverage=parent_exposure.target_leverage,
+        margin_mode=parent_exposure.margin_mode,
+        target_long_qty=parent_exposure.target_long_qty,
+        target_short_qty=parent_exposure.target_short_qty,
+        current_long_qty=parent_exposure.current_long_qty,
+        current_short_qty=parent_exposure.current_short_qty,
+        target_qty=parent_exposure.target_qty,
+        current_qty=parent_exposure.current_qty,
+        effective_qty=parent_exposure.effective_qty,
+        target_signal=parent_exposure.target_signal,
+        current_signal=parent_exposure.current_signal,
+        effective_signal=parent_exposure.effective_signal,
+        signal_source=parent_exposure.signal_source,
+        source_of_truth=parent_exposure.source_of_truth,
+        lifecycle_state=parent_exposure.lifecycle_state,
+        target_active=parent_exposure.target_active,
+        inventory_active=parent_exposure.inventory_active,
+        source=parent_exposure.source,
+    )
 
 
 def context_or_settings_margin_mode(*, settings: AATSSettings, context: DecisionContext) -> str:

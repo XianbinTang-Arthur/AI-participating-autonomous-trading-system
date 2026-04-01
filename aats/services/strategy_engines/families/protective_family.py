@@ -18,6 +18,7 @@ from aats.services.strategy_engines.base import (
 from aats.services.strategy_engines.overlay_parent_exposure import (
     OverlayMainLegContract,
     OverlayParentExposureContract,
+    overlay_parent_exposure_audit,
     resolve_overlay_main_leg_contract as _resolve_overlay_main_leg_contract_from_parent_exposure,
     resolve_overlay_parent_exposure_from_direct_args,
     resolve_overlay_parent_exposure_lifecycle,
@@ -146,6 +147,7 @@ def protective_candidate_from_directional_target(
             else ["protective_family_candidate_inactive"]
         ),
     ]))
+    parent_exposure_audit = overlay_parent_exposure_audit(parent_exposure)
     return StrategyCandidate(
         family=family,
         state=_candidate_state_from_overlay_state(overlay_decision.state),
@@ -182,6 +184,9 @@ def protective_candidate_from_directional_target(
         metrics={
             **metrics,
             "configured_mode": configured_mode,
+            "overlay_parent_exposure": (
+                None if parent_exposure_audit is None else parent_exposure_audit.model_dump(mode="python")
+            ),
             "main_leg_contract_source": parent_exposure.source,
             "parent_family": parent_exposure.parent_family,
             "parent_lifecycle_state": parent_exposure.lifecycle_state,

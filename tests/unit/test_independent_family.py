@@ -223,10 +223,7 @@ class TestIndependentFamily(unittest.TestCase):
             "independent_long_book_expectancy_resolution_failed",
             result.long_book.blocked_reasons,
         )
-        self.assertTrue(result.long_book.expectancy.resolution_failed)
-        self.assertEqual(result.long_book.expectancy.expected_signal_edge_bps, 0.0)
-        self.assertEqual(result.long_book.expectancy.expected_cost_bps, 0.0)
-        self.assertEqual(result.long_book.expectancy.expected_net_edge_bps, 0.0)
+        self.assertIsNone(result.long_book.expectancy)
         self.assertFalse(result.legs)
 
     def test_evaluate_independent_books_do_not_use_directional_fallback_edges_after_expectancy_failure(self) -> None:
@@ -272,7 +269,7 @@ class TestIndependentFamily(unittest.TestCase):
             expectancy_resolver=lambda **_: (_ for _ in ()).throw(RuntimeError("cost_boom")),
         )
 
-        self.assertTrue(result.long_book.expectancy.resolution_failed)
+        self.assertIsNone(result.long_book.expectancy)
         self.assertEqual(result.long_book.close_reason, None)
         self.assertEqual(result.long_book.book_action, "hold")
         self.assertEqual(result.final_target_qty, Decimal("0.02"))

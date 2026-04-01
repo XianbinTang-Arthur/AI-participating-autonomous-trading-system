@@ -290,7 +290,9 @@ class OrderManager:
                 submit_command = {
                     "command_id": new_id("cmd"),
                     "command_type": "submit",
-                    "idempotency_key": self.persistent_order_service.submit_command_idempotency_key(intent.intent_id),
+                    "idempotency_key": self.persistent_order_service.submit_command_idempotency_key(
+                        created_state.client_order_id
+                    ),
                     "payload": self.persistent_order_service.submit_command_payload(
                         intent=intent,
                         client_order_id=created_state.client_order_id,
@@ -1079,8 +1081,9 @@ class OrderManager:
             return None
         if order_state.status not in {"CREATED", "SUBMITTING", "CANCEL_PENDING"}:
             return None
-        submit_command = self.persistent_order_service.execution_command_repo.get_by_idempotency_key(
-            f"submit:{order_state.intent_id}"
+        submit_command = self._lookup_submit_command(
+            client_order_id=order_state.client_order_id,
+            intent_id=order_state.intent_id,
         )
         command_state = str(submit_command.get("state") or "").upper() if submit_command is not None else None
         if submit_command is not None and command_state not in {"PENDING", "ACKED", "FAILED"}:
@@ -1108,6 +1111,24 @@ class OrderManager:
         )
         self._finalize_obligation(order_state=persisted)
         return persisted
+
+    def _lookup_submit_command(
+        self,
+        *,
+        client_order_id: str | None,
+        intent_id: str | None,
+    ) -> dict | None:
+        if self.persistent_order_service is None:
+            return None
+        repo = self.persistent_order_service.execution_command_repo
+        for key in self.persistent_order_service.submit_command_lookup_keys(
+            client_order_id=client_order_id,
+            intent_id=intent_id,
+        ):
+            command = repo.get_by_idempotency_key(key)
+            if command is not None:
+                return command
+        return None
 
     @staticmethod
     def _apply_execution_attempt_id(

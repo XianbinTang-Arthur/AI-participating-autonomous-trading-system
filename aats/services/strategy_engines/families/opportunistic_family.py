@@ -18,6 +18,7 @@ from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, to_deci
 from aats.services.strategy_engines.base import StrategyEvaluationContext, StrategyFamilyRuntimeControl
 from aats.services.strategy_engines.overlay_parent_exposure import (
     OverlayParentExposureContract,
+    overlay_parent_exposure_audit,
     resolve_overlay_parent_exposure_from_direct_args,
 )
 from aats.services.strategy_engines.families.protective_family import (
@@ -230,6 +231,7 @@ def opportunistic_candidate_from_directional_target(
             ]
         )
     )
+    parent_exposure_audit = overlay_parent_exposure_audit(parent_exposure)
     return StrategyCandidate(
         family=family,
         state=_candidate_state_from_overlay_state(overlay_decision.state),
@@ -267,6 +269,9 @@ def opportunistic_candidate_from_directional_target(
         metrics={
             **metrics,
             "configured_mode": configured_mode,
+            "overlay_parent_exposure": (
+                None if parent_exposure_audit is None else parent_exposure_audit.model_dump(mode="python")
+            ),
             "main_leg_contract_source": parent_exposure.source,
             "parent_family": parent_exposure.parent_family,
             "parent_lifecycle_state": parent_exposure.lifecycle_state,

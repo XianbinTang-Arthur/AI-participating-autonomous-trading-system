@@ -38,7 +38,7 @@ class ExecutionOrderService:
         command = self._enqueue_command(
             order_id=client_order_id,
             command_type="submit",
-            idempotency_key=self.submit_command_idempotency_key(intent.intent_id),
+            idempotency_key=self.submit_command_idempotency_key(client_order_id),
             payload=payload,
         )
         log_event(
@@ -82,8 +82,30 @@ class ExecutionOrderService:
         return command
 
     @staticmethod
-    def submit_command_idempotency_key(intent_id: str) -> str:
+    def submit_command_idempotency_key(stable_order_key: str) -> str:
+        return f"submit:{stable_order_key}"
+
+    @staticmethod
+    def legacy_submit_command_idempotency_key(intent_id: str) -> str:
         return f"submit:{intent_id}"
+
+    @classmethod
+    def submit_command_lookup_keys(
+        cls,
+        *,
+        client_order_id: str | None,
+        intent_id: str | None,
+    ) -> tuple[str, ...]:
+        keys: list[str] = []
+        normalized_client_order_id = str(client_order_id or "").strip()
+        normalized_intent_id = str(intent_id or "").strip()
+        if normalized_client_order_id:
+            keys.append(cls.submit_command_idempotency_key(normalized_client_order_id))
+        if normalized_intent_id:
+            legacy_key = cls.legacy_submit_command_idempotency_key(normalized_intent_id)
+            if legacy_key not in keys:
+                keys.append(legacy_key)
+        return tuple(keys)
 
     @staticmethod
     def cancel_command_idempotency_key(client_order_id: str) -> str:

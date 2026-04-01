@@ -15,6 +15,7 @@ from aats.schemas.operator import ProcessingFailureRecord
 from aats.services.ai_service.inference import AIInferenceService
 from aats.services.ai_service.prompt_builder import PromptBuilder
 from aats.services.ai_service.validator import AssessmentValidator
+from aats.services.accounting import UnsupportedFeeCurrencyError
 from aats.services.execution_engine.order_manager import OrderManager
 from aats.services.execution_engine.paper_adapter import PaperExecutionAdapter
 from aats.services.governance_engine.kill_switch import KillSwitch
@@ -297,6 +298,62 @@ class TestRound2SafetyRegressions(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(delta_event.payload["fill_id"], "fill_balance_delta_round2")
         self.assertEqual(str(delta_event.payload["balance_deltas"]["USDT"]), "-100.50")
         self.assertEqual(str(delta_event.payload["balance_deltas"]["BTC"]), "1.0")
+
+    async def test_fill_apply_failure_emits_processing_failure_and_restores_portfolio_state(self) -> None:
+        event_store = InMemoryEventStore()
+        bus = InMemoryEventBus(event_store=event_store, persistence_mode="strict")
+        service = PortfolioService(
+            bus=bus,
+            state=PortfolioState(initial_usdt_balance=1_000.0),
+            snapshot_builder=PortfolioSnapshotBuilder(pnl_calculator=PortfolioPnLCalculator()),
+            portfolio_repo=InMemoryPortfolioRepository(),
+            fill_outcome_repo=InMemoryFillOutcomeRepository(),
+            price_provider=lambda _symbol: 100.0,
+        )
+        fill = FillEvent(
+            fill_id="fill_unknown_fee_round2",
+            decision_id="decision_unknown_fee_round2",
+            intent_id="intent_unknown_fee_round2",
+            client_order_id="clord_unknown_fee_round2",
+            exchange_order_id="ord_unknown_fee_round2",
+            symbol="BTC-USDT",
+            venue="OKX",
+            side="buy",
+            fill_qty=1.0,
+            fill_price=100.0,
+            fee_amount=0.5,
+            fee_currency="ETH",
+            liquidity_role="taker",
+            exchange_timestamp=utc_now(),
+            ingestion_timestamp=utc_now(),
+            order_status_after_fill="FILLED",
+        )
+
+        with self.assertRaisesRegex(
+            UnsupportedFeeCurrencyError,
+            "unsupported_fill_fee_currency:ETH:BTC-USDT:BTC:USDT",
+        ):
+            await service.handle_fill_event(
+                {
+                    "topic": topics.FILL_EVENTS,
+                    "key": fill.symbol,
+                    "payload": build_envelope(
+                        topic=topics.FILL_EVENTS,
+                        key=fill.symbol,
+                        payload_model=fill,
+                        source_component="test",
+                    ).model_dump(mode="json"),
+                }
+            )
+
+        processing_failure = event_store.latest(topics.PROCESSING_FAILURES, key="BTC-USDT")
+        self.assertIsNotNone(processing_failure)
+        assert processing_failure is not None
+        self.assertEqual(processing_failure.payload["stage"], "fill_apply")
+        self.assertEqual(processing_failure.payload["message"], "unsupported_fill_fee_currency:ETH:BTC-USDT:BTC:USDT")
+        self.assertEqual(service.state.positions, {})
+        self.assertEqual(service.state.balances["USDT"], Decimal("1000.0"))
+        self.assertIsNone(event_store.latest(topics.PORTFOLIO_SNAPSHOTS, key="portfolio"))
 
 
 if __name__ == "__main__":

@@ -37,6 +37,7 @@ import { renderAdminView } from "./modules/views/admin-view.js";
 import { renderExecutionSections, renderExecutionView } from "./modules/views/execution-view.js";
 import { renderHomeView } from "./modules/views/home-view.js";
 import { renderOverviewView } from "./modules/views/overview-view.js";
+import { renderReplaySections, renderReplayView } from "./modules/views/replay-view.js";
 import { renderRiskSections, renderRiskView } from "./modules/views/risk-view.js";
 import { renderStrategySections, renderStrategyView } from "./modules/views/strategy-view.js";
 
@@ -46,6 +47,7 @@ const VIEW_ROUTES = {
   strategy: "/ui/strategy",
   execution: "/ui/execution",
   risk: "/ui/risk",
+  replay: "/ui/replay",
   aiAnalysis: "/ui/ai-analysis",
   aiConfig: "/ui/ai-config",
   admin: "/ui/settings",
@@ -87,6 +89,13 @@ const VIEW_META = {
     copy: "关注阻断原因、对账结论、恢复状态、账户快照和是否需要人工确认。",
     hidePageHead: false,
   },
+  replay: {
+    docTitle: "AATS 自动交易监控台 | 回放与复盘",
+    eyebrow: "回放与复盘",
+    heading: "Replay 工作区",
+    copy: "这里专门对读 replay 父腿复盘、历史校验和腿级对账异常。",
+    hidePageHead: false,
+  },
   aiAnalysis: {
     docTitle: "AATS 自动交易监控台 | AI 分析",
     eyebrow: "AI 分析",
@@ -116,6 +125,7 @@ const VIEW_LABELS = {
   strategy: "策略判断",
   execution: "委托与成交",
   risk: "风险与恢复",
+  replay: "回放与复盘",
   aiAnalysis: "AI 分析",
   aiConfig: "AI 配置",
   admin: "账户与权限",
@@ -151,6 +161,7 @@ const nodes = {
   strategyContent: document.getElementById("strategyContent"),
   executionContent: document.getElementById("executionContent"),
   riskContent: document.getElementById("riskContent"),
+  replayContent: document.getElementById("replayContent"),
   aiAnalysisContent: document.getElementById("aiAnalysisContent"),
   aiConfigContent: document.getElementById("aiConfigContent"),
   adminContent: document.getElementById("adminContent"),
@@ -493,6 +504,20 @@ function renderActiveView() {
   }
   if (state.activeView === "risk") {
     patchRenderedSections(renderRiskSections(viewData), () => nodes.riskContent, () => renderRiskView(viewData));
+    return;
+  }
+  if (state.activeView === "replay") {
+    patchRenderedSections(
+      renderReplaySections(viewData, state.ui.replay, {
+        recentReplayValidationsLimit: state.pageLimits.recentReplayValidations,
+        defaultReplayValidationsLimit: DEFAULT_PAGE_LIMITS.recentReplayValidations,
+      }),
+      () => nodes.replayContent,
+      () => renderReplayView(viewData, state.ui.replay, {
+        recentReplayValidationsLimit: state.pageLimits.recentReplayValidations,
+        defaultReplayValidationsLimit: DEFAULT_PAGE_LIMITS.recentReplayValidations,
+      }),
+    );
     return;
   }
   if (state.activeView === "aiAnalysis" && nodes.aiAnalysisContent) {
@@ -882,6 +907,9 @@ async function dispatchAction(action, value, target = null) {
   if (action === "collapse-ai-shadow-decisions") return resetPageLimit("recentAIShadowDecisions");
   if (action === "load-more-ai-shadow-evaluations") return adjustPageLimit("recentAIShadowEvaluations", PAGE_LOAD_STEP);
   if (action === "collapse-ai-shadow-evaluations") return resetPageLimit("recentAIShadowEvaluations");
+  if (action === "load-more-replay-validations") return adjustPageLimit("recentReplayValidations", PAGE_LOAD_STEP);
+  if (action === "collapse-replay-validations") return resetPageLimit("recentReplayValidations");
+  if (action === "set-replay-parent-filter") return setReplayParentFilter(value);
   if (action === "toggle-user") return toggleOperatorUser(value);
   if (action === "change-user-role") return updateOperatorUserRole(value);
   if (action === "reset-user-password") return resetOperatorPassword(value);
@@ -1005,6 +1033,13 @@ async function adjustPageLimit(key, delta) {
 async function resetPageLimit(key) {
   state.pageLimits[key] = DEFAULT_PAGE_LIMITS[key] || state.pageLimits[key];
   await refreshDashboard();
+}
+
+const VIEW_REPLAY_FILTERS = new Set(["all", "inventory_only", "target_only", "target_and_inventory"]);
+
+function setReplayParentFilter(value) {
+  state.ui.replay.parentFilter = VIEW_REPLAY_FILTERS.has(value) ? value : "all";
+  renderShell();
 }
 
 function setActionPending(target, pendingLabel) {
@@ -1278,6 +1313,10 @@ function renderLoadingView() {
     patchHtml(nodes.riskContent, html);
     return;
   }
+  if (state.activeView === "replay" && nodes.replayContent) {
+    patchHtml(nodes.replayContent, html);
+    return;
+  }
   if (state.activeView === "aiAnalysis" && nodes.aiAnalysisContent) {
     patchHtml(nodes.aiAnalysisContent, html);
     return;
@@ -1298,6 +1337,7 @@ function renderRefreshIndicators() {
     ["strategy", nodes.strategyContent],
     ["execution", nodes.executionContent],
     ["risk", nodes.riskContent],
+    ["replay", nodes.replayContent],
     ["aiAnalysis", nodes.aiAnalysisContent],
     ["aiConfig", nodes.aiConfigContent],
     ["admin", nodes.adminContent],
@@ -1355,7 +1395,7 @@ function loadingMarkupForView(view) {
     `;
   }
 
-  if (view === "strategy" || view === "execution" || view === "risk" || view === "aiAnalysis" || view === "aiConfig" || view === "admin") {
+  if (view === "strategy" || view === "execution" || view === "risk" || view === "replay" || view === "aiAnalysis" || view === "aiConfig" || view === "admin") {
     return `
       <div class="panel-grid skeleton-grid" aria-hidden="true">
         <section class="surface-card hero-card skeleton-surface skeleton-card span-7">

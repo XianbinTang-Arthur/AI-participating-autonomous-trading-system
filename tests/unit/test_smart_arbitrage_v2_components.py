@@ -613,6 +613,43 @@ class TestSmartArbitrageV2Components(unittest.TestCase):
 
         self.assertEqual(legs[1].margin_mode, "isolated")
 
+    def test_leg_planner_can_require_explicit_hedge_margin_mode(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "margin_mode": "cross",
+                "max_target_leverage": 20.0,
+                "smart_arbitrage_hedge_target_leverage": 3.0,
+            }
+        )
+        pair = ArbitragePairDefinition(pair_id="btc_pair", spot_symbol="BTC-USDT", hedge_symbol="BTC-USDT-SWAP")
+        opportunity = ArbitrageOpportunity(
+            pair_id="btc_pair",
+            spot_symbol="BTC-USDT",
+            hedge_symbol="BTC-USDT-SWAP",
+            opportunity_kind="positive_basis",
+            direction="positive_basis",
+            execution_mode="spot_carry",
+            state_phase="opening",
+            desired_pair_qty=Decimal("1"),
+            target_spot_qty=Decimal("1"),
+            target_hedge_qty=Decimal("-1"),
+            route_action="override_target",
+        )
+
+        with self.assertRaisesRegex(ValueError, "smart_arbitrage_hedge_margin_mode_required"):
+            build_legs(
+                settings=settings,
+                pair=pair,
+                opportunity=opportunity,
+                require_explicit_hedge_margin_mode=True,
+                account_spot_qty=Decimal("0"),
+                account_hedge_qty=Decimal("0"),
+                sleeve_spot_qty=Decimal("0"),
+                sleeve_hedge_qty=Decimal("0"),
+                spot_price=Decimal("100"),
+                hedge_price=Decimal("99"),
+            )
+
     def test_leg_planner_clamps_smart_arbitrage_hedge_leverage_to_runtime_max(self) -> None:
         settings = AATSSettings.model_validate(
             {
@@ -710,6 +747,23 @@ class TestSmartArbitrageV2Components(unittest.TestCase):
 
         self.assertEqual(observed["hedge_margin_mode"], "isolated")
 
+    def test_engine_blocks_pair_when_runtime_hedge_margin_mode_is_missing(self) -> None:
+        engine = SmartArbitrageStrategyEngine(
+            settings=AATSSettings.model_validate({"smart_arbitrage_enabled": True}),
+            market_snapshot_loader=lambda symbol: (_ for _ in ()).throw(AssertionError(symbol)),
+        )
+        pair = ArbitragePairDefinition(pair_id="btc_pair", spot_symbol="BTC-USDT", hedge_symbol="BTC-USDT-SWAP")
+
+        candidate = engine._evaluate_pair(
+            pair=pair,
+            engine_input=SimpleNamespace(
+                directional_target=SimpleNamespace(margin_mode=None),
+            ),
+        )
+
+        self.assertEqual(candidate.state, "blocked")
+        self.assertIn("smart_arbitrage_runtime_margin_mode_missing", candidate.reason_codes)
+
     def test_engine_unsupported_execution_mode_opportunity_passes_runtime_hedge_margin_mode_to_cost_model(self) -> None:
         engine = SmartArbitrageStrategyEngine(
             settings=AATSSettings.model_validate({"smart_arbitrage_enabled": True}),
@@ -739,6 +793,25 @@ class TestSmartArbitrageV2Components(unittest.TestCase):
             )
 
         self.assertEqual(observed["hedge_margin_mode"], "isolated")
+
+    def test_cost_model_can_require_explicit_hedge_margin_mode(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "margin_mode": "cross",
+                "smart_arbitrage_cost_model_enabled": True,
+            }
+        )
+
+        with self.assertRaisesRegex(ValueError, "smart_arbitrage_hedge_margin_mode_required"):
+            build_cost_breakdown(
+                settings=settings,
+                basis_bps=Decimal("12"),
+                execution_mode="spot_carry",
+                reference_ts=datetime(2026, 3, 27, 8, 0, tzinfo=timezone.utc),
+                require_explicit_hedge_margin_mode=True,
+                spot_symbol="BTC-USDT",
+                hedge_symbol="BTC-USDT-SWAP",
+            )
 
     def test_pair_registry_defaults_execution_modes_to_all_supported_live_modes(self) -> None:
         settings = AATSSettings.model_validate(

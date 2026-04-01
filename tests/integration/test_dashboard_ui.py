@@ -4183,6 +4183,250 @@ console.log(JSON.stringify({
         self.assertIn('"strategyShowsParentSignals":true', stdout)
         self.assertIn('"drawerShowsParentSignals":true', stdout)
 
+    def test_overlay_parent_postmortem_summary_surfaces_in_decision_drawer_and_risk_view(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { buildDecisionDrawer } from './aats/api/static/modules/detail-drawers.js';
+import { renderRiskView } from './aats/api/static/modules/views/risk-view.js';
+
+const overlayParentSummary = {
+  parent_family: 'directional',
+  symbol: 'BTC-USDT-SWAP',
+  target_leverage: 2,
+  margin_mode: 'cross',
+  target_long_qty: 0,
+  target_short_qty: 0,
+  current_long_qty: 0.03,
+  current_short_qty: 0,
+  target_qty: 0,
+  current_qty: 0.03,
+  effective_qty: 0.03,
+  target_signal: 'flat',
+  current_signal: 'long',
+  effective_signal: 'long',
+  signal_source: 'inventory',
+  source_of_truth: 'inventory',
+  lifecycle_state: 'inventory_only',
+  target_active: false,
+  inventory_active: true,
+};
+
+const drawer = buildDecisionDrawer({
+  decision_id: 'dec-overlay-parent-postmortem',
+  decision_outcome: {
+    final_action: 'exit',
+    final_direction: 'flat',
+  },
+  ai_decision_audit: {
+    configured_mode: 'baseline_only',
+    assessment_operating_mode: 'baseline_only',
+    final_action: 'exit',
+    final_direction: 'flat',
+    overlay_parent_exposure_summary: overlayParentSummary,
+    market_snapshot_fresh: true,
+    account_snapshot_fresh: true,
+    safe_to_trade: true,
+    recent_fee_drag_ratio: 0,
+    recent_churn_ratio: 0,
+    recent_low_edge_trade_streak: 0,
+    current_open_order_count: 0,
+  },
+});
+
+const riskHtml = renderRiskView({
+  blockerControl: { blockers: [], secondary_blockers: [], next_step_summary: '' },
+  systemRecovery: {
+    recovery: {
+      safe_to_trade: true,
+      review_required: false,
+      resume_eligible: true,
+      halted: false,
+      rebaseline_available: false,
+      resume_blocked_reasons: [],
+    },
+  },
+  reconciliationLatest: {
+    reconciliation: {
+      reconciliation_id: 'recon-clean',
+      severity: 'CLEAN',
+      halt_required: false,
+      review_required: false,
+      observational_only: false,
+      recommended_operator_action: null,
+    },
+  },
+  accountState: { fresh: true, last_refresh_timestamp: '2026-03-31T16:00:00Z', ready: true, blockers: [] },
+  portfolio: { portfolio: { total_equity: 200, realized_pnl: 0, unrealized_pnl: 0, margin_usage: 0, gross_exposure: 0 } },
+  replayStatus: {
+    healthy: true,
+    last_validation: {
+      decision_id: 'dec-overlay-parent-postmortem',
+      validated_at: '2026-03-31T16:00:00Z',
+      overlay_parent_exposure_summary: overlayParentSummary,
+    },
+  },
+  metrics: {},
+  health: { runtime_state: 'healthy' },
+  uiHints: { recoveryReasonsText: '', controlPermissionMessage: '' },
+});
+
+console.log(JSON.stringify({
+  drawerShowsPostmortem:
+    drawer.body.includes('父腿暴露复盘')
+    && drawer.body.includes('父腿 方向策略 / 标的 BTC-USDT-SWAP / 保证金 全仓 / 杠杆 2 / 判定口径 真实库存')
+    && drawer.body.includes('目标多头 0 / 目标空头 0 / 当前多头 +0.03 / 当前空头 0'),
+  riskShowsReplayPostmortem:
+    riskHtml.includes('回放父腿复盘')
+    && riskHtml.includes('父腿 方向策略 / 标的 BTC-USDT-SWAP / 保证金 全仓 / 杠杆 2 / 判定口径 真实库存')
+    && riskHtml.includes('目标多头 0 / 目标空头 0 / 当前多头 +0.03 / 当前空头 0'),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        stdout = result.stdout or ""
+        self.assertIn('"drawerShowsPostmortem":true', stdout)
+        self.assertIn('"riskShowsReplayPostmortem":true', stdout)
+
+    def test_risk_view_surfaces_replay_overlay_parent_history_table(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { renderRiskView } from './aats/api/static/modules/views/risk-view.js';
+
+const inventorySummary = {
+  parent_family: 'directional',
+  symbol: 'BTC-USDT-SWAP',
+  target_leverage: 2,
+  margin_mode: 'cross',
+  target_long_qty: 0,
+  target_short_qty: 0,
+  current_long_qty: 0.03,
+  current_short_qty: 0,
+  target_qty: 0,
+  current_qty: 0.03,
+  effective_qty: 0.03,
+  target_signal: 'flat',
+  current_signal: 'long',
+  effective_signal: 'long',
+  signal_source: 'inventory',
+  source_of_truth: 'inventory',
+  lifecycle_state: 'inventory_only',
+  target_active: false,
+  inventory_active: true,
+};
+
+const mixedSummary = {
+  parent_family: 'directional',
+  symbol: 'BTC-USDT-SWAP',
+  target_leverage: 3,
+  margin_mode: 'cross',
+  target_long_qty: 0.02,
+  target_short_qty: 0,
+  current_long_qty: 0.03,
+  current_short_qty: 0,
+  target_qty: 0.02,
+  current_qty: 0.03,
+  effective_qty: 0.03,
+  target_signal: 'long',
+  current_signal: 'long',
+  effective_signal: 'long',
+  signal_source: 'mixed',
+  source_of_truth: 'mixed',
+  lifecycle_state: 'target_and_inventory',
+  target_active: true,
+  inventory_active: true,
+};
+
+const html = renderRiskView({
+  blockerControl: { blockers: [], secondary_blockers: [], next_step_summary: '' },
+  systemRecovery: {
+    recovery: {
+      safe_to_trade: true,
+      review_required: false,
+      resume_eligible: true,
+      halted: false,
+      rebaseline_available: false,
+      resume_blocked_reasons: [],
+    },
+  },
+  reconciliationLatest: {
+    reconciliation: {
+      reconciliation_id: 'recon-clean',
+      severity: 'CLEAN',
+      halt_required: false,
+      review_required: false,
+      observational_only: false,
+      recommended_operator_action: null,
+    },
+  },
+  accountState: { fresh: true, last_refresh_timestamp: '2026-03-31T16:00:00Z', ready: true, blockers: [] },
+  portfolio: { portfolio: { total_equity: 200, realized_pnl: 0, unrealized_pnl: 0, margin_usage: 0, gross_exposure: 0 } },
+  replayStatus: {
+    healthy: true,
+    last_validation: {
+      decision_id: 'dec-overlay-parent-postmortem',
+      validated_at: '2026-03-31T16:00:00Z',
+      overlay_parent_exposure_summary: inventorySummary,
+    },
+    recent_validations: [
+      {
+        decision_id: 'dec-overlay-parent-postmortem',
+        validated_at: '2026-03-31T16:00:00Z',
+        healthy: true,
+        divergence_count: 0,
+        chain_health_score: 0.98,
+        overlay_parent_exposure_summary: inventorySummary,
+      },
+      {
+        decision_id: 'dec-overlay-parent-mixed',
+        validated_at: '2026-03-31T15:00:00Z',
+        healthy: true,
+        divergence_count: 1,
+        chain_health_score: 0.9,
+        overlay_parent_exposure_summary: mixedSummary,
+      },
+    ],
+  },
+  metrics: {},
+  health: { runtime_state: 'healthy' },
+  uiHints: { recoveryReasonsText: '', controlPermissionMessage: '' },
+});
+
+console.log(JSON.stringify({
+  hasReplayHistoryCard:
+    html.includes('回放父腿历史')
+    && html.includes('回放时间 / 决策')
+    && html.includes('父腿阶段')
+    && html.includes('契约口径')
+    && html.includes('双腿数量拆解'),
+  hasInventoryHistoryRow:
+    html.includes('父腿 方向策略 / 标的 BTC-USDT-SWAP / 保证金 全仓 / 杠杆 2 / 判定口径 真实库存')
+    && html.includes('目标多头 0 / 目标空头 0 / 当前多头 +0.03 / 当前空头 0'),
+  hasMixedHistoryRow:
+    html.includes('父腿 方向策略 / 标的 BTC-USDT-SWAP / 保证金 全仓 / 杠杆 3 / 判定口径 目标与库存混合')
+    && html.includes('目标多头 +0.02 / 目标空头 0 / 当前多头 +0.03 / 当前空头 0'),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        stdout = result.stdout or ""
+        self.assertIn('"hasReplayHistoryCard":true', stdout)
+        self.assertIn('"hasInventoryHistoryRow":true', stdout)
+        self.assertIn('"hasMixedHistoryRow":true', stdout)
+
     def test_terms_prioritize_manual_review_over_only_reduce_labels(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
         script = """
@@ -4356,6 +4600,165 @@ console.log(JSON.stringify({
         self.assertIn('"strategyShowsParentQty":true', stdout)
         self.assertIn('"homeShowsParentQty":true', stdout)
         self.assertIn('"drawerShowsParentQty":true', stdout)
+
+
+class TestReplayWorkspaceUI(unittest.TestCase):
+    def test_replay_workspace_route_and_module_are_available(self) -> None:
+        app = FastAPI()
+        app.include_router(auth_router)
+        app.include_router(ui_router)
+        app.state.runtime = SimpleNamespace(settings=AATSSettings.model_validate({}))
+
+        with TestClient(app) as client:
+            replay = client.get("/ui/replay")
+            replay_js = client.get("/ui/modules/views/replay-view.js")
+
+        self.assertEqual(replay.status_code, 200)
+        self.assertEqual(replay_js.status_code, 200)
+        self.assertIn("/ui/replay", replay.text)
+        self.assertIn('data-view="replay"', replay.text)
+        self.assertIn("renderReplayView", replay_js.text)
+        self.assertIn("回放父腿历史", replay_js.text)
+        self.assertIn("父腿复盘与腿级对账联读", replay_js.text)
+
+    def test_replay_view_surfaces_filter_collapse_and_linked_reconciliation(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { renderReplayView } from './aats/api/static/modules/views/replay-view.js';
+
+const inventorySummary = {
+  parent_family: 'directional',
+  symbol: 'BTC-USDT-SWAP',
+  target_leverage: 2,
+  margin_mode: 'cross',
+  target_long_qty: 0,
+  target_short_qty: 0,
+  current_long_qty: 0.03,
+  current_short_qty: 0,
+  target_qty: 0,
+  current_qty: 0.03,
+  effective_qty: 0.03,
+  target_signal: 'flat',
+  current_signal: 'long',
+  effective_signal: 'long',
+  signal_source: 'inventory',
+  source_of_truth: 'inventory',
+  lifecycle_state: 'inventory_only',
+  target_active: false,
+  inventory_active: true,
+};
+
+const targetSummary = {
+  parent_family: 'directional',
+  symbol: 'BTC-USDT-SWAP',
+  target_leverage: 3,
+  margin_mode: 'cross',
+  target_long_qty: 0.02,
+  target_short_qty: 0,
+  current_long_qty: 0,
+  current_short_qty: 0,
+  target_qty: 0.02,
+  current_qty: 0,
+  effective_qty: 0.02,
+  target_signal: 'long',
+  current_signal: 'flat',
+  effective_signal: 'long',
+  signal_source: 'target_position',
+  source_of_truth: 'target_position',
+  lifecycle_state: 'target_only',
+  target_active: true,
+  inventory_active: false,
+};
+
+const html = renderReplayView({
+  replayStatus: {
+    healthy: false,
+    last_validation: {
+      decision_id: 'dec-inventory',
+      validated_at: '2026-03-31T16:00:00Z',
+      healthy: false,
+      divergence_count: 2,
+      replayed_event_count: 15,
+      chain_health_score: 0.87,
+      overlay_parent_exposure_summary: inventorySummary,
+    },
+  },
+  replayRecentValidations: {
+    validations: [
+      {
+        decision_id: 'dec-inventory',
+        validated_at: '2026-03-31T16:00:00Z',
+        healthy: false,
+        divergence_count: 2,
+        chain_health_score: 0.87,
+        overlay_parent_exposure_summary: inventorySummary,
+      },
+      {
+        decision_id: 'dec-target',
+        validated_at: '2026-03-31T15:00:00Z',
+        healthy: true,
+        divergence_count: 0,
+        chain_health_score: 0.98,
+        overlay_parent_exposure_summary: targetSummary,
+      },
+    ],
+    has_more: true,
+    total_available: 14,
+    limit: 20,
+  },
+  reconciliationLatest: {
+    reconciliation: {
+      severity: 'SOFT_MISMATCH',
+      halt_required: false,
+    },
+    mismatch_summary: {
+      leg_mismatch_summary: {
+        total_count: 2,
+        missing_execution_chain_count: 1,
+        items: [
+          {
+            symbol: 'BTC-USDT-SWAP',
+            leg_side: 'short',
+            stored_qty: 0,
+            exchange_qty: 0.01,
+          },
+        ],
+      },
+    },
+  },
+}, { parentFilter: 'inventory_only' }, { recentReplayValidationsLimit: 20, defaultReplayValidationsLimit: 8 });
+
+console.log(JSON.stringify({
+  hasReplayWorkspace: html.includes('父腿复盘与腿级对账联读') && html.includes('回放父腿历史'),
+  hasFilterButtons:
+    html.includes('全部阶段')
+    && html.includes('仅库存活跃')
+    && html.includes('仅目标活跃')
+    && html.includes('目标与库存'),
+  hasPagingButtons: html.includes('查看更多') && html.includes('收起历史'),
+  hasLinkedRead:
+    html.includes('父腿仍靠真实库存维持，同时最新对账还有腿级差异')
+    && html.includes('缺少执行链 1 条'),
+  inventoryRowRetained: html.includes('dec-inventory'),
+  targetRowFilteredOut: !html.includes('dec-target'),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        stdout = result.stdout or ""
+        self.assertIn('"hasReplayWorkspace":true', stdout)
+        self.assertIn('"hasFilterButtons":true', stdout)
+        self.assertIn('"hasPagingButtons":true', stdout)
+        self.assertIn('"hasLinkedRead":true', stdout)
+        self.assertIn('"inventoryRowRetained":true', stdout)
+        self.assertIn('"targetRowFilteredOut":true', stdout)
 
 
 if __name__ == "__main__":
