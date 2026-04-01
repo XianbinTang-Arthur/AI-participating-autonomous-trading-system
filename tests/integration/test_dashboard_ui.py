@@ -3302,6 +3302,142 @@ console.log(JSON.stringify({
         self.assertIn('"scaleInShortFillTitle":"加空"', stdout)
         self.assertIn('"scaleInShortFillDrawer":"加空"', stdout)
 
+    def test_execution_view_shows_fee_as_negative_cost_and_positive_rebate(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { renderExecutionSections } from './aats/api/static/modules/views/execution-view.js';
+
+const sections = renderExecutionSections({
+  executionLatest: {},
+  recentOrders: { orders: [] },
+  recentFills: {
+    fills: [
+      {
+        product_type: 'derivatives',
+        symbol: 'BTC-USDT-SWAP',
+        execution_action: 'enter',
+        position_intent: 'open_long',
+        margin_mode: 'cross',
+        exposure_side: 'long',
+        side: 'buy',
+        liquidity_role: 'taker',
+        fill_id: 'fill_cost',
+        fill_qty: 0.01,
+        fill_price: 68494,
+        fee_amount: 0.3425,
+        realized_pnl: -0.3425,
+        ingestion_timestamp: '2026-04-01T10:49:08Z',
+      },
+      {
+        product_type: 'derivatives',
+        symbol: 'BTC-USDT-SWAP',
+        execution_action: 'enter',
+        position_intent: 'open_long',
+        margin_mode: 'cross',
+        exposure_side: 'long',
+        side: 'buy',
+        liquidity_role: 'maker',
+        fill_id: 'fill_rebate',
+        fill_qty: 0.01,
+        fill_price: 68494,
+        fee_amount: -0.125,
+        realized_pnl: 0.125,
+        ingestion_timestamp: '2026-04-01T10:50:08Z',
+      },
+    ],
+    total_available: 2,
+    has_more: false,
+    limit: 8,
+  },
+  executionErrors: { errors: [] },
+  metrics: { current_open_order_count: 0 },
+});
+
+const html = sections.executionFills;
+console.log(JSON.stringify({
+  showsNegativeFeeCost: html.includes('手续费 -0.3425'),
+  showsPositiveFeeRebate: html.includes('手续费 +0.125'),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        stdout = result.stdout or ""
+        self.assertIn('"showsNegativeFeeCost":true', stdout)
+        self.assertIn('"showsPositiveFeeRebate":true', stdout)
+
+    def test_trade_display_and_order_drawer_show_fee_cost_as_negative_and_rebate_as_positive(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { buildOrderDrawer } from './aats/api/static/modules/detail-drawers.js';
+import { fillDrawerRows, fillImpactMeta } from './aats/api/static/modules/trade-display.js';
+
+const feeCostFill = {
+  product_type: 'derivatives',
+  symbol: 'BTC-USDT-SWAP',
+  execution_action: 'enter',
+  position_intent: 'open_long',
+  margin_mode: 'cross',
+  exposure_side: 'long',
+  side: 'buy',
+  liquidity_role: 'taker',
+  fill_id: 'fill_cost',
+  fill_qty: 0.01,
+  fill_price: 68494,
+  fee_amount: 0.3425,
+  fee_currency: 'USDT',
+  realized_pnl: -0.3425,
+};
+
+const feeRebateFill = {
+  ...feeCostFill,
+  fill_id: 'fill_rebate',
+  liquidity_role: 'maker',
+  fee_amount: -0.125,
+  realized_pnl: 0.125,
+};
+
+const fillDrawer = fillDrawerRows(feeCostFill);
+const orderDrawerHtml = buildOrderDrawer({
+  order: {
+    client_order_id: 'ord-1',
+    product_type: 'derivatives',
+    symbol: 'BTC-USDT-SWAP',
+    margin_mode: 'cross',
+    exposure_side: 'long',
+    status: 'FILLED',
+  },
+  fills: [feeCostFill, feeRebateFill],
+}).body;
+
+console.log(JSON.stringify({
+  impactMetaShowsNegativeFeeCost: fillImpactMeta(feeCostFill).includes('手续费 -0.3425 USDT'),
+  fillDrawerShowsNegativeFeeCost: fillDrawer[5][2] === '手续费 -0.3425 USDT',
+  orderDrawerShowsNegativeFeeCost: orderDrawerHtml.includes('手续费 -0.3425 USDT'),
+  orderDrawerShowsPositiveFeeRebate: orderDrawerHtml.includes('手续费 +0.125 USDT'),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        stdout = result.stdout or ""
+        self.assertIn('"impactMetaShowsNegativeFeeCost":true', stdout)
+        self.assertIn('"fillDrawerShowsNegativeFeeCost":true', stdout)
+        self.assertIn('"orderDrawerShowsNegativeFeeCost":true', stdout)
+        self.assertIn('"orderDrawerShowsPositiveFeeRebate":true', stdout)
+
     def test_family_cutover_ui_prefers_family_execution_summary_over_net_position_fields(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
         script = """

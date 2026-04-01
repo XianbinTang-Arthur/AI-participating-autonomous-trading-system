@@ -27,6 +27,7 @@ import {
 } from "./terms.js";
 import {
   decisionDrawerRows,
+  fillFeeText,
   fillDrawerRows,
   fillSceneSummary,
   orderDrawerRows,
@@ -153,7 +154,7 @@ export function buildOrderDrawer(detail) {
               fills.map((fill) => [
                 fill.fill_id || "成交编号待同步",
                 `${formatNumber(fill.fill_qty)} @ ${formatNumber(fill.fill_price)}`,
-                `${readableState(fill.side)} | 手续费 ${formatNumber(fill.fee_amount)} ${fill.fee_currency || ""}`,
+                `${readableState(fill.side)} | ${fillFeeText(fill)}`,
               ]),
             )
           : emptyState("这笔委托暂时还没有对应成交。"),

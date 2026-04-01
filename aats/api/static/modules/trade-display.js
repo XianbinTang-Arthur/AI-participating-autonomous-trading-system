@@ -75,11 +75,32 @@ export function fillRowMeta(fill = {}) {
 }
 
 export function fillImpactMeta(fill = {}) {
-  const fee = `手续费 ${formatNumber(fill.fee_amount, 4, "待同步")} ${fill.fee_currency || ""}`.trim();
+  const fee = fillFeeText(fill);
   if (inferTradeScene(fill) === "derivatives") {
     return fee || "手续费待同步";
   }
   return `成交额 ${formatQuoteNotional(fill.symbol, fill.fill_qty, fill.fill_price)} | ${fee || "手续费待同步"}`;
+}
+
+export function normalizedFillFeeImpact(fill = {}) {
+  const feeAmount = Number(fill?.fee ?? fill?.fee_amount);
+  if (Number.isFinite(feeAmount)) return feeAmount === 0 ? 0 : -feeAmount;
+
+  const feeQuoteAmount = Number(fill?.fee_quote_amount);
+  if (Number.isFinite(feeQuoteAmount)) return feeQuoteAmount === 0 ? 0 : -feeQuoteAmount;
+
+  const feeDelta = Number(fill?.fee_delta);
+  if (Number.isFinite(feeDelta)) return feeDelta === 0 ? 0 : -feeDelta;
+
+  return null;
+}
+
+export function fillFeeText(fill = {}, { includeCurrency = true, fallback = "手续费待同步" } = {}) {
+  const feeImpact = normalizedFillFeeImpact(fill);
+  if (!Number.isFinite(feeImpact)) return fallback;
+  const amountText = formatSigned(feeImpact, 4, "待同步");
+  const feeCurrency = includeCurrency ? String(fill?.fee_currency || "").trim() : "";
+  return `手续费 ${amountText}${feeCurrency ? ` ${feeCurrency}` : ""}`;
 }
 
 export function orderDrawerRows(order = {}) {
@@ -108,14 +129,14 @@ export function fillDrawerRows(fill = {}) {
       ["成交仓位", formatNumber(fill.fill_qty), `成交均价 ${formatQuotePrice(fill.symbol, fill.fill_price)}`],
       ["成交名义价值", formatQuoteNotional(fill.symbol, fill.fill_qty, fill.fill_price), `交易所时间 ${fill.exchange_timestamp || "待同步"}`],
       ["仓位前后", `${formatSigned(fill.starting_position_qty)} -> ${formatSigned(fill.ending_position_qty)}`, `均价 ${formatNumber(fill.starting_avg_entry_price, 4, "待同步")} -> ${formatNumber(fill.ending_avg_entry_price, 4, "待同步")}`],
-      ["已实现盈亏", formatSigned(fill.realized_pnl), `手续费 ${formatNumber(fill.fee_amount, 4, "待同步")} ${fill.fee_currency || ""}`.trim()],
+      ["已实现盈亏", formatSigned(fill.realized_pnl), fillFeeText(fill)],
     ];
   }
 
   return [
     ["现货标的", fill.symbol || "标的待确认", `${readableState(fill.side, "买卖方向待确认")} | ${readableState(fill.execution_action || fill.position_intent, "成交意图待确认")}`],
     ["成交数量", formatAssetAmount(fill.symbol, fill.fill_qty), `成交单价 ${formatQuotePrice(fill.symbol, fill.fill_price)}`],
-    ["成交金额", formatQuoteNotional(fill.symbol, fill.fill_qty, fill.fill_price), `手续费 ${formatNumber(fill.fee_amount, 4, "待同步")} ${fill.fee_currency || ""}`.trim()],
+    ["成交金额", formatQuoteNotional(fill.symbol, fill.fill_qty, fill.fill_price), fillFeeText(fill)],
     ["盈亏影响", formatSigned(fill.realized_pnl), readableState(fill.liquidity_role, "流动性角色待确认")],
   ];
 }
