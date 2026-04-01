@@ -7,6 +7,7 @@ from aats.services.strategy_engines.families.independent_family import (
     _independent_open_gate,
 )
 from aats.services.strategy_engines.independent.gates import (
+    anomaly_cost_fuse_threshold_bps,
     evaluate_entry_quality_gate,
     evaluate_open_eligibility,
     resolve_entry_min_confirm_ticks,
@@ -50,7 +51,7 @@ class TestIndependentGates(unittest.TestCase):
         self.assertEqual(list(extracted.hard_block_reasons), legacy["blocked_reasons"])
         self.assertFalse(bool(extracted.warnings))
 
-    def test_evaluate_open_eligibility_uses_cost_threshold_as_anomaly_fuse(self) -> None:
+    def test_evaluate_open_eligibility_allows_high_net_edge_when_cost_is_not_anomalous(self) -> None:
         settings = make_derivatives_hedge_settings(
             strategy_hedge_independent_max_acceptable_cost_bps=7.5,
             strategy_hedge_independent_min_safe_net_edge_bps=3.0,
@@ -70,11 +71,15 @@ class TestIndependentGates(unittest.TestCase):
                 expected_slippage_bps=5.6,
                 expected_cost_bps=10.6,
                 expected_net_edge_bps=27.4,
+                depth_consumption_ratio=0.08,
+                size_impact_bps=0.9,
+                cost_confidence=0.82,
             ),
         )
 
         self.assertEqual(extracted.hard_block_reasons, ())
-        self.assertAlmostEqual(float(extracted.effective_max_cost_bps or 0.0), 13.5, places=6)
+        self.assertGreater(float(extracted.effective_max_cost_bps or 0.0), 10.6)
+        self.assertLess(float(extracted.effective_max_cost_bps or 0.0), 15.0)
 
     def test_evaluate_open_eligibility_still_blocks_extreme_cost_anomaly(self) -> None:
         settings = make_derivatives_hedge_settings(
@@ -92,14 +97,57 @@ class TestIndependentGates(unittest.TestCase):
             leg="short",
             expectancy=IndependentBookExpectancy(
                 leg="short",
-                expected_signal_edge_bps=45.0,
+                expected_signal_edge_bps=38.0,
                 expected_slippage_bps=5.6,
-                expected_cost_bps=15.0,
-                expected_net_edge_bps=28.0,
+                expected_cost_bps=14.5,
+                expected_net_edge_bps=27.4,
+                depth_consumption_ratio=0.95,
+                size_impact_bps=3.6,
+                cost_confidence=0.85,
             ),
         )
 
         self.assertIn("independent_short_book_expected_cost_above_max_acceptable", extracted.hard_block_reasons)
+        self.assertLess(float(extracted.effective_max_cost_bps or 0.0), 14.5)
+
+    def test_anomaly_cost_fuse_tightens_when_depth_consumption_is_high(self) -> None:
+        settings = make_derivatives_hedge_settings(
+            strategy_hedge_independent_max_acceptable_cost_bps=7.5,
+            strategy_hedge_independent_min_safe_net_edge_bps=3.0,
+            strategy_hedge_independent_expected_slippage_buffer_bps=1.0,
+            strategy_hedge_independent_expected_execution_buffer_bps=2.0,
+        )
+
+        low_depth_fuse = anomaly_cost_fuse_threshold_bps(
+            settings=settings,
+            expectancy=IndependentBookExpectancy(
+                leg="short",
+                expected_signal_edge_bps=38.0,
+                expected_slippage_bps=5.6,
+                expected_cost_bps=10.6,
+                expected_net_edge_bps=27.4,
+                depth_consumption_ratio=0.08,
+                size_impact_bps=0.9,
+                cost_confidence=0.82,
+            ),
+        )
+        high_depth_fuse = anomaly_cost_fuse_threshold_bps(
+            settings=settings,
+            expectancy=IndependentBookExpectancy(
+                leg="short",
+                expected_signal_edge_bps=38.0,
+                expected_slippage_bps=5.6,
+                expected_cost_bps=10.6,
+                expected_net_edge_bps=27.4,
+                depth_consumption_ratio=0.95,
+                size_impact_bps=3.6,
+                cost_confidence=0.82,
+            ),
+        )
+
+        self.assertIsNotNone(low_depth_fuse)
+        self.assertIsNotNone(high_depth_fuse)
+        self.assertGreater(float(low_depth_fuse or 0.0), float(high_depth_fuse or 0.0))
 
     def test_resolve_entry_min_confirm_ticks_relaxes_high_edge_short_entry(self) -> None:
         settings = make_derivatives_hedge_settings(

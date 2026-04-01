@@ -136,6 +136,40 @@ class TestTradeDragCalculator(unittest.TestCase):
         self.assertEqual(estimate.executable_total_drag_bps, Decimal("-5"))
         self.assertNotIn("legacy_estimated_cost_fallback", estimate.cost_source_flags)
 
+    def test_market_snapshot_price_flag_alone_does_not_raise_size_aware_confidence(self) -> None:
+        price_only = self.calculator.estimate(
+            profile=TradeDragProfile(
+                model_name="price_only_size_context",
+                cost_model_enabled=True,
+                ideal_open_fee_bps=Decimal("5"),
+                executable_slippage_bps=Decimal("1.5"),
+                cost_source_flags=[
+                    "trade_cost_service_single_leg",
+                    "fee_trade_cost_service",
+                    "slippage_trade_cost_service",
+                    "size_aware_market_snapshot_price",
+                ],
+            )
+        )
+        with_depth = self.calculator.estimate(
+            profile=TradeDragProfile(
+                model_name="depth_backed_size_context",
+                cost_model_enabled=True,
+                ideal_open_fee_bps=Decimal("5"),
+                executable_slippage_bps=Decimal("1.5"),
+                execution_drag_components_bps={"size_impact_bps": Decimal("0.8")},
+                cost_source_flags=[
+                    "trade_cost_service_single_leg",
+                    "fee_trade_cost_service",
+                    "slippage_trade_cost_service",
+                    "size_aware_market_depth",
+                    "size_aware_market_impact",
+                ],
+            )
+        )
+
+        self.assertLess(price_only.cost_confidence, with_depth.cost_confidence)
+
 
 if __name__ == "__main__":
     unittest.main()

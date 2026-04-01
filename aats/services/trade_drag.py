@@ -23,6 +23,7 @@ class TradeDragProfile(BaseModel):
     time_decay_cost_bps: Decimal = Decimal("0")
     explicit_cost_components_bps: dict[str, Decimal] = Field(default_factory=dict)
     execution_drag_components_bps: dict[str, Decimal] = Field(default_factory=dict)
+    execution_context: dict[str, Decimal] = Field(default_factory=dict)
     legacy_total_cost_bps: Decimal = Decimal("0")
     cost_source_flags: list[str] = Field(default_factory=list)
 
@@ -42,6 +43,7 @@ class TradeDragEstimate(BaseModel):
     time_decay_cost_bps: Decimal = Decimal("0")
     explicit_cost_components_bps: dict[str, Decimal] = Field(default_factory=dict)
     execution_drag_components_bps: dict[str, Decimal] = Field(default_factory=dict)
+    execution_context: dict[str, Decimal] = Field(default_factory=dict)
     ideal_total_cost_bps: Decimal = Decimal("0")
     executable_total_drag_bps: Decimal = Decimal("0")
     ideal_edge_bps: Decimal = Decimal("0")
@@ -94,6 +96,7 @@ class TradeDragCalculator:
         execution_drag_components_bps = _normalized_cost_components(profile.execution_drag_components_bps)
         explicit_component_total = sum(explicit_cost_components_bps.values(), start=Decimal("0"))
         execution_drag_component_total = sum(execution_drag_components_bps.values(), start=Decimal("0"))
+        execution_context = _normalized_context_components(profile.execution_context)
 
         ideal_total_cost_bps = (
             ideal_total_fee_bps
@@ -146,6 +149,7 @@ class TradeDragCalculator:
             time_decay_cost_bps=time_decay_cost_bps,
             explicit_cost_components_bps=explicit_cost_components_bps,
             execution_drag_components_bps=execution_drag_components_bps,
+            execution_context=execution_context,
             ideal_total_cost_bps=ideal_total_cost_bps,
             executable_total_drag_bps=executable_total_drag_bps,
             ideal_edge_bps=ideal_edge_bps,
@@ -173,6 +177,16 @@ def _normalized_cost_components(raw_components: dict[str, Decimal]) -> dict[str,
     return normalized
 
 
+def _normalized_context_components(raw_components: dict[str, Decimal]) -> dict[str, Decimal]:
+    normalized: dict[str, Decimal] = {}
+    for name, value in raw_components.items():
+        component_name = str(name or "").strip()
+        if not component_name:
+            continue
+        normalized[component_name] = Decimal(str(value))
+    return normalized
+
+
 def _cost_confidence(
     *,
     source_flags: list[str],
@@ -192,6 +206,8 @@ def _cost_confidence(
         confidence += 0.10
     if has_execution_drag:
         confidence += 0.15
+    if any(flag in {"size_aware_market_impact", "size_aware_market_depth", "size_aware_top_of_book"} for flag in source_flags):
+        confidence += 0.10
     if any(flag.startswith("funding_account_proxy") for flag in source_flags):
         confidence += 0.12
     elif has_funding:

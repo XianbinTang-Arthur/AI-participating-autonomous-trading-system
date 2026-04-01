@@ -38,7 +38,10 @@ def evaluate_open_eligibility(
             reasons.append(f"independent_{leg}_book_expected_net_edge_below_safe_threshold")
         else:
             warnings.append(f"independent_{leg}_book_expected_net_edge_below_safe_threshold_report_only")
-    max_acceptable_cost_bps = anomaly_cost_fuse_threshold_bps(settings=settings)
+    max_acceptable_cost_bps = anomaly_cost_fuse_threshold_bps(
+        settings=settings,
+        expectancy=expectancy,
+    )
     if max_acceptable_cost_bps is not None and expected_cost_bps > max_acceptable_cost_bps:
         reasons.append(f"independent_{leg}_book_expected_cost_above_max_acceptable")
     if post_close_cooldown_active(settings=settings, context=context, leg=leg):
@@ -63,17 +66,53 @@ def evaluate_open_eligibility(
     )
 
 
-def anomaly_cost_fuse_threshold_bps(*, settings: AATSSettings) -> float | None:
+def anomaly_cost_fuse_threshold_bps(
+    *,
+    settings: AATSSettings,
+    expectancy: IndependentBookExpectancy | None,
+) -> float | None:
     nominal_max_cost_bps = float(settings.strategy_hedge_independent_max_acceptable_cost_bps)
     if nominal_max_cost_bps <= 0.0:
         return None
-    # Keep the configured cost threshold as a nominal discipline target, but only
-    # fail closed once cost meaningfully exceeds both the nominal budget and the
-    # required safe-edge buffer.
-    return nominal_max_cost_bps + max(
-        required_safe_net_edge_bps(settings=settings),
-        nominal_max_cost_bps * 0.5,
+    safe_edge_bps = required_safe_net_edge_bps(settings=settings)
+    base_slack_bps = max(1.0, safe_edge_bps * 0.2)
+    if expectancy is None:
+        return nominal_max_cost_bps + base_slack_bps
+
+    expected_signal_edge_bps = max(float(expectancy.expected_signal_edge_bps), 0.0)
+    expected_net_edge_bps = max(float(expectancy.expected_net_edge_bps), 0.0)
+    edge_headroom_bps = max(expected_net_edge_bps - safe_edge_bps, 0.0)
+    depth_consumption_ratio = max(float(expectancy.depth_consumption_ratio or 0.0), 0.0)
+    size_impact_bps = max(float(expectancy.size_impact_bps or 0.0), 0.0)
+    cost_confidence = _clamp(float(expectancy.cost_confidence or 0.45), 0.25, 0.95)
+
+    # Let strong, well-priced signals absorb moderate cost overruns, but tighten
+    # the anomaly fuse when the order would consume a large share of visible depth
+    # or when the cost estimate itself is low confidence.
+    edge_allowance_bps = (edge_headroom_bps * 0.15) + min(
+        expected_signal_edge_bps * 0.03,
+        max(nominal_max_cost_bps * 0.2, 1.0),
     )
+    depth_penalty_bps = max(depth_consumption_ratio - 0.25, 0.0) * max(nominal_max_cost_bps * 1.25, 2.0)
+    size_penalty_bps = min(size_impact_bps * 0.35, nominal_max_cost_bps)
+    confidence_penalty_bps = max(0.60 - cost_confidence, 0.0) * nominal_max_cost_bps * 0.75
+
+    dynamic_fuse_bps = (
+        nominal_max_cost_bps
+        + base_slack_bps
+        + edge_allowance_bps
+        - depth_penalty_bps
+        - size_penalty_bps
+        - confidence_penalty_bps
+    )
+    fuse_floor_bps = nominal_max_cost_bps + max(0.75, safe_edge_bps * 0.1)
+    fuse_ceiling_bps = nominal_max_cost_bps + base_slack_bps + max(
+        edge_headroom_bps * 0.25,
+        expected_signal_edge_bps * 0.08,
+        safe_edge_bps * 0.5,
+        1.5,
+    )
+    return _clamp(dynamic_fuse_bps, fuse_floor_bps, fuse_ceiling_bps)
 
 
 def resolve_entry_min_confirm_ticks(
@@ -208,3 +247,7 @@ def _leg_health_value(context: DecisionContext, leg: IndependentLeg, key: str) -
 def _leg_health_datetime(context: DecisionContext, leg: IndependentLeg, key: str):
     value = _leg_health_value(context, leg, key)
     return value if hasattr(value, "isoformat") else None
+
+
+def _clamp(value: float, lower: float, upper: float) -> float:
+    return max(lower, min(value, upper))

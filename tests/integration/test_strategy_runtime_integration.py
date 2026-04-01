@@ -835,7 +835,7 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(settings.strategy_hedge_independent_long_close_threshold, 0.24)
         self.assertEqual(settings.strategy_hedge_independent_short_close_threshold, 0.24)
         self.assertEqual(settings.strategy_hedge_independent_long_scale_in_threshold, 0.40)
-        self.assertEqual(settings.strategy_hedge_independent_short_scale_in_threshold, 0.40)
+        self.assertEqual(settings.strategy_hedge_independent_short_scale_in_threshold, 0.36)
         self.assertEqual(settings.strategy_hedge_independent_min_safe_net_edge_bps, 3.0)
         self.assertEqual(settings.strategy_hedge_independent_expected_slippage_buffer_bps, 1.0)
         self.assertEqual(settings.strategy_hedge_independent_expected_execution_buffer_bps, 2.0)

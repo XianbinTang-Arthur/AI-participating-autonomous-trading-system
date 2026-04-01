@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from math import sqrt
 
+from aats.schemas.market import MarketSnapshot
 from aats.bootstrap.settings import AATSSettings
 from aats.services.fee_resolver import EffectiveFeeResolver
 from aats.services.portfolio_service.decimals import to_decimal
@@ -116,6 +118,11 @@ class TradeCostService:
         order_type: str = "market",
         passive_bias: Decimal | float | int | str | None = None,
         maker_taker_bias: Decimal | float | int | str | None = None,
+        side: str | None = None,
+        quantity: Decimal | float | int | str | None = None,
+        projected_notional: Decimal | float | int | str | None = None,
+        reference_price: Decimal | float | int | str | None = None,
+        market_snapshot: MarketSnapshot | None = None,
         expected_slippage_bps: Decimal | float | int | str | None = None,
         include_spread: bool = False,
         expected_spread_bps: Decimal | float | int | str | None = None,
@@ -176,6 +183,39 @@ class TradeCostService:
                 explicit_components["delivery_settlement_fee_bps"] = settlement_bps
                 source_flags.append("settlement_fee_trade_cost_service")
 
+        execution_drag_components = dict(additional_execution_drag_components_bps or {})
+        size_aware_context = _size_aware_execution_drag_context(
+            market_snapshot=market_snapshot,
+            side=side,
+            expected_slippage_bps=slippage_bps,
+            quantity=quantity,
+            projected_notional=projected_notional,
+            reference_price=reference_price,
+        )
+        if size_aware_context["size_impact_bps"] > Decimal("0"):
+            execution_drag_components["size_impact_bps"] = size_aware_context["size_impact_bps"]
+            source_flags.append("size_aware_market_impact")
+        if size_aware_context["depth_source"] == "orderbook":
+            source_flags.append("size_aware_market_depth")
+        elif size_aware_context["depth_source"] == "top_of_book":
+            source_flags.append("size_aware_top_of_book")
+        if size_aware_context["reference_price_source"] == "market_snapshot":
+            source_flags.append("size_aware_market_snapshot_price")
+        elif size_aware_context["reference_price_source"] == "explicit":
+            source_flags.append("size_aware_explicit_price")
+
+        execution_context = {
+            name: value
+            for name, value in (
+                ("size_impact_bps", size_aware_context["size_impact_bps"]),
+                ("projected_notional", size_aware_context["projected_notional"]),
+                ("reference_price", size_aware_context["reference_price"]),
+                ("quoted_depth_notional", size_aware_context["quoted_depth_notional"]),
+                ("depth_consumption_ratio", size_aware_context["depth_consumption_ratio"]),
+            )
+            if isinstance(value, Decimal)
+        }
+
         return self.drag_calculator.estimate(
             profile=TradeDragProfile(
                 model_name=model_name,
@@ -187,7 +227,205 @@ class TradeCostService:
                 executable_slippage_bps=slippage_bps,
                 funding_cost_bps=funding_bps,
                 explicit_cost_components_bps=explicit_components,
-                execution_drag_components_bps=dict(additional_execution_drag_components_bps or {}),
+                execution_drag_components_bps=execution_drag_components,
+                execution_context=execution_context,
                 cost_source_flags=source_flags,
             )
         )
+
+
+def _size_aware_execution_drag_context(
+    *,
+    market_snapshot: MarketSnapshot | None,
+    side: str | None,
+    expected_slippage_bps: Decimal,
+    quantity: Decimal | float | int | str | None,
+    projected_notional: Decimal | float | int | str | None,
+    reference_price: Decimal | float | int | str | None,
+) -> dict[str, Decimal | str | None]:
+    empty = {
+        "size_impact_bps": Decimal("0"),
+        "projected_notional": None,
+        "reference_price": None,
+        "quoted_depth_notional": None,
+        "depth_consumption_ratio": None,
+        "reference_price_source": None,
+        "depth_source": None,
+    }
+    if market_snapshot is None:
+        return empty
+    normalized_side = str(side or "").lower()
+
+    resolved_price, price_source = _resolve_reference_price(
+        market_snapshot=market_snapshot,
+        reference_price=reference_price,
+    )
+    if resolved_price <= Decimal("0"):
+        return empty
+
+    resolved_notional = _resolve_projected_notional(
+        quantity=quantity,
+        projected_notional=projected_notional,
+        reference_price=resolved_price,
+    )
+    if resolved_notional <= Decimal("0"):
+        return {
+            **empty,
+            "projected_notional": resolved_notional,
+            "reference_price": resolved_price,
+            "reference_price_source": price_source,
+        }
+    if normalized_side not in {"buy", "sell"}:
+        return {
+            **empty,
+            "projected_notional": resolved_notional,
+            "reference_price": resolved_price,
+            "reference_price_source": price_source,
+        }
+
+    quoted_depth_notional, depth_source = _resolve_quoted_depth_notional(
+        market_snapshot=market_snapshot,
+        side=normalized_side,
+        reference_price=resolved_price,
+    )
+    if quoted_depth_notional is None or quoted_depth_notional <= Decimal("0"):
+        return {
+            **empty,
+            "projected_notional": resolved_notional,
+            "reference_price": resolved_price,
+            "reference_price_source": price_source,
+        }
+
+    depth_consumption_ratio = max(float(resolved_notional / quoted_depth_notional), 0.0)
+    if depth_consumption_ratio <= 0.0:
+        return {
+            **empty,
+            "projected_notional": resolved_notional,
+            "reference_price": resolved_price,
+            "quoted_depth_notional": quoted_depth_notional,
+            "reference_price_source": price_source,
+            "depth_source": depth_source,
+        }
+
+    spread_bps = _market_spread_bps(market_snapshot=market_snapshot, reference_price=resolved_price)
+    dynamic_slippage_bps = max(
+        float(expected_slippage_bps),
+        spread_bps * (0.55 + min(depth_consumption_ratio, 1.5)),
+        float(expected_slippage_bps) * (1.0 + (sqrt(depth_consumption_ratio) * 0.75)),
+    )
+    size_impact_bps = max(dynamic_slippage_bps - float(expected_slippage_bps), 0.0)
+    return {
+        "size_impact_bps": to_decimal(round(size_impact_bps, 6)),
+        "projected_notional": resolved_notional,
+        "reference_price": resolved_price,
+        "quoted_depth_notional": quoted_depth_notional,
+        "depth_consumption_ratio": to_decimal(round(depth_consumption_ratio, 6)),
+        "reference_price_source": price_source,
+        "depth_source": depth_source,
+    }
+
+
+def _resolve_reference_price(
+    *,
+    market_snapshot: MarketSnapshot,
+    reference_price: Decimal | float | int | str | None,
+) -> tuple[Decimal, str | None]:
+    explicit = Decimal("0") if reference_price is None else max(to_decimal(reference_price), Decimal("0"))
+    if explicit > Decimal("0"):
+        return explicit, "explicit"
+    bid = max(to_decimal(market_snapshot.best_bid), Decimal("0"))
+    ask = max(to_decimal(market_snapshot.best_ask), Decimal("0"))
+    if bid > Decimal("0") and ask > Decimal("0"):
+        return (bid + ask) / Decimal("2"), "market_snapshot"
+    last_price = max(to_decimal(market_snapshot.last_price), Decimal("0"))
+    if last_price > Decimal("0"):
+        return last_price, "market_snapshot"
+    return Decimal("0"), None
+
+
+def _resolve_projected_notional(
+    *,
+    quantity: Decimal | float | int | str | None,
+    projected_notional: Decimal | float | int | str | None,
+    reference_price: Decimal,
+) -> Decimal:
+    if projected_notional is not None:
+        explicit = max(to_decimal(projected_notional), Decimal("0"))
+        if explicit > Decimal("0"):
+            return explicit
+    if quantity is None:
+        return Decimal("0")
+    return max(abs(to_decimal(quantity)) * max(reference_price, Decimal("0")), Decimal("0"))
+
+
+def _resolve_quoted_depth_notional(
+    *,
+    market_snapshot: MarketSnapshot,
+    side: str | None,
+    reference_price: Decimal,
+) -> tuple[Decimal | None, str | None]:
+    normalized_side = str(side or "").lower()
+    depth_side = "asks" if normalized_side == "buy" else "bids"
+    top_price = (
+        max(to_decimal(market_snapshot.best_ask), Decimal("0"))
+        if normalized_side == "buy"
+        else max(to_decimal(market_snapshot.best_bid), Decimal("0"))
+    )
+    top_notional = (
+        max(to_decimal(market_snapshot.ask_size), Decimal("0")) * max(top_price, Decimal("0"))
+        if normalized_side == "buy"
+        else max(to_decimal(market_snapshot.bid_size), Decimal("0")) * max(top_price, Decimal("0"))
+    )
+    depth_levels = market_snapshot.orderbook_depth.get(depth_side)
+    depth_notional = _depth_notional_total(depth_levels, fallback_price=reference_price)
+    if depth_notional > Decimal("0"):
+        return depth_notional, "orderbook"
+    if top_notional > Decimal("0"):
+        return top_notional, "top_of_book"
+    return None, None
+
+
+def _depth_notional_total(levels: object, *, fallback_price: Decimal) -> Decimal:
+    if not isinstance(levels, list):
+        return Decimal("0")
+    total = Decimal("0")
+    for level in levels:
+        level_notional = _level_notional(level, fallback_price=fallback_price)
+        if level_notional is None:
+            continue
+        total += max(level_notional, Decimal("0"))
+    return total
+
+
+def _level_notional(level: object, *, fallback_price: Decimal) -> Decimal | None:
+    if isinstance(level, dict):
+        price = level.get("price") or level.get("px")
+        size = level.get("size") or level.get("qty") or level.get("quantity")
+    elif isinstance(level, (list, tuple)) and len(level) >= 2:
+        price = level[0]
+        size = level[1]
+    else:
+        return None
+    try:
+        resolved_size = max(to_decimal(size), Decimal("0"))
+        resolved_price = max(to_decimal(price), Decimal("0")) if price is not None else Decimal("0")
+    except Exception:
+        return None
+    if resolved_size <= Decimal("0"):
+        return None
+    if resolved_price <= Decimal("0"):
+        resolved_price = max(fallback_price, Decimal("0"))
+    if resolved_price <= Decimal("0"):
+        return None
+    return resolved_size * resolved_price
+
+
+def _market_spread_bps(*, market_snapshot: MarketSnapshot, reference_price: Decimal) -> float:
+    if reference_price <= Decimal("0"):
+        return 0.0
+    best_bid = max(to_decimal(market_snapshot.best_bid), Decimal("0"))
+    best_ask = max(to_decimal(market_snapshot.best_ask), Decimal("0"))
+    if best_bid <= Decimal("0") or best_ask <= Decimal("0"):
+        return 0.0
+    spread = max(best_ask - best_bid, Decimal("0"))
+    return float((spread / reference_price) * Decimal("10000"))

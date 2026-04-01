@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import unittest
 
 from aats.schemas.decision import PositionTarget
+from aats.schemas.market import MarketSnapshot
 from aats.services.strategy_engines.base import StrategyEvaluationContext, StrategyFamilyRuntimeControl
 from aats.services.strategy_engines.families.independent_family import (
     IndependentBookExpectancy,
@@ -794,7 +795,7 @@ class TestIndependentFamily(unittest.TestCase):
         self.assertEqual(long_leg.execution_policy_urgency, "low")
         self.assertEqual(long_leg.expected_leg_cost_bps, 7.5)
 
-    def test_evaluate_independent_books_block_open_when_expected_cost_is_too_high(self) -> None:
+    def test_evaluate_independent_books_block_open_when_expected_cost_is_extreme_cost_anomaly(self) -> None:
         settings = make_derivatives_hedge_settings(
             strategy_hedge_overlay_mode="independent",
             strategy_hedge_independent_enabled=True,
@@ -827,7 +828,7 @@ class TestIndependentFamily(unittest.TestCase):
             directional_target_qty=Decimal("0.01"),
             target_leverage=1.0,
             signal_edge_bps=18.0,
-            expected_cost_bps=7.0,
+            expected_cost_bps=12.5,
             expected_net_edge_bps=10.0,
             execution_leg_family="independent",
             scorer=lambda *, leg, baseline, ai_assessment: 0.78 if leg == "long" else 0.08,
@@ -835,8 +836,11 @@ class TestIndependentFamily(unittest.TestCase):
                 leg=leg,
                 expected_signal_edge_bps=18.0,
                 expected_slippage_bps=1.0,
-                expected_cost_bps=7.0,
+                expected_cost_bps=12.5,
                 expected_net_edge_bps=10.0 if leg == "long" else 1.0,
+                depth_consumption_ratio=0.95 if leg == "long" else 0.05,
+                size_impact_bps=3.8 if leg == "long" else 0.4,
+                cost_confidence=0.85,
             ),
         )
 
@@ -1509,6 +1513,97 @@ class TestIndependentFamily(unittest.TestCase):
 
         self.assertTrue(result.legs)
         self.assertTrue(all(leg.margin_mode == "isolated" for leg in result.legs))
+
+    def test_evaluate_independent_books_propagates_size_aware_cost_diagnostics(self) -> None:
+        settings = make_derivatives_hedge_settings(
+            strategy_hedge_overlay_mode="independent",
+            strategy_hedge_independent_enabled=True,
+            strategy_hedge_independent_adaptive_rollout_enabled=False,
+        )
+        context = make_context(
+            current_position_qty=0.0,
+            current_long_position_qty=0.0,
+            product_type="derivatives",
+            current_exposure_side="flat",
+        )
+        baseline = make_baseline(
+            direction_bias="long",
+            confidence=0.86,
+            suggested_position_scale=1.0,
+            volatility_target_scale=1.0,
+            factor_scores={
+                "momentum_alpha": 0.44,
+                "trend_alpha": 0.40,
+                "microstructure_alpha": 0.18,
+                "liquidity_scale": 0.95,
+            },
+        ).model_copy(update={"regime": "trend", "composite_alpha_score": 0.32})
+        market_snapshot = MarketSnapshot(
+            symbol="BTC-USDT-SWAP",
+            exchange="OKX",
+            snapshot_ts=datetime.now(timezone.utc),
+            best_bid=Decimal("100"),
+            best_ask=Decimal("101"),
+            last_price=Decimal("100.5"),
+            bid_size=Decimal("1.0"),
+            ask_size=Decimal("1.0"),
+            volume_24h=Decimal("1000000"),
+            kline_15m={"open": Decimal("99"), "high": Decimal("102"), "low": Decimal("98"), "close": Decimal("100.5")},
+            kline_1h={"open": Decimal("97"), "high": Decimal("103"), "low": Decimal("96"), "close": Decimal("100.5")},
+            orderbook_depth={
+                "bids": [{"price": Decimal("100"), "size": Decimal("1.0")}],
+                "asks": [{"price": Decimal("101"), "size": Decimal("1.0")}],
+            },
+        )
+
+        class FakeTradeCostService:
+            def __init__(self) -> None:
+                self.calls: list[dict[str, object]] = []
+
+            def estimate_single_leg_entry(self, **kwargs: object) -> object:
+                self.calls.append(dict(kwargs))
+                return SimpleNamespace(
+                    executable_total_drag_bps=Decimal("8.6"),
+                    executable_slippage_bps=Decimal("7.0"),
+                    execution_context={
+                        "size_impact_bps": Decimal("1.4"),
+                        "projected_notional": kwargs["projected_notional"],
+                        "reference_price": kwargs["reference_price"],
+                        "quoted_depth_notional": Decimal("400"),
+                        "depth_consumption_ratio": Decimal("0.3"),
+                    },
+                    execution_drag_components_bps={"size_impact_bps": Decimal("1.4")},
+                    cost_confidence=0.82,
+                )
+
+        trade_cost_service = FakeTradeCostService()
+        result = evaluate_independent_books(
+            settings=settings,
+            context=context,
+            baseline=baseline,
+            ai_assessment=make_ai_assessment(direction=0.24, confidence=0.82),
+            latest_market_snapshot=market_snapshot,
+            directional_target_qty=Decimal("0.01"),
+            target_leverage=1.0,
+            signal_edge_bps=18.0,
+            expected_cost_bps=6.0,
+            expected_net_edge_bps=12.0,
+            execution_leg_family="independent",
+            trade_cost_service=trade_cost_service,  # type: ignore[arg-type]
+            scorer=lambda *, leg, baseline, ai_assessment: 0.78 if leg == "long" else 0.08,
+            expectancy_resolver=None,
+        )
+
+        self.assertEqual(len(trade_cost_service.calls), 2)
+        self.assertIs(trade_cost_service.calls[0]["market_snapshot"], market_snapshot)
+        self.assertGreater(Decimal(str(trade_cost_service.calls[0]["quantity"])), Decimal("0"))
+        self.assertGreater(Decimal(str(trade_cost_service.calls[0]["projected_notional"])), Decimal("0"))
+        self.assertIsNotNone(result.long_book.expectancy)
+        self.assertAlmostEqual(result.long_book.expectancy.expected_slippage_bps, 8.4, places=6)
+        self.assertAlmostEqual(float(result.long_book.expectancy.depth_consumption_ratio or 0.0), 0.3, places=6)
+        self.assertAlmostEqual(result.long_book.expectancy.size_impact_bps, 1.4, places=6)
+        self.assertAlmostEqual(float(result.long_book.expectancy.cost_confidence or 0.0), 0.82, places=6)
+        self.assertEqual(result.long_book.expectancy.reference_price, Decimal("100.5"))
 
     def test_independent_family_action_reports_mixed_rebalance_when_opening_and_closing_coexist(self) -> None:
         result = IndependentFamilyEvaluation(

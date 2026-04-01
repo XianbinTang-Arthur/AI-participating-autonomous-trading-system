@@ -7,6 +7,7 @@ from typing import Literal
 
 from aats.bootstrap.settings import AATSSettings
 from aats.schemas.decision import AIMarketAssessment, BaselineAssessment, DecisionContext, HedgeOverlayDecision
+from aats.schemas.market import MarketSnapshot
 from aats.schemas.strategy_runtime import (
     StrategyCandidate,
     StrategyBookExpectancyEntry,
@@ -217,6 +218,7 @@ def independent_candidate_from_directional_target(
         expected_net_edge_bps=float(directional_target.expected_net_edge_bps),
         execution_leg_family="independent",
         trade_cost_service=trade_cost_service,
+        latest_market_snapshot=evaluation_context.latest_market_snapshot,
         recent_score_history_by_leg=_independent_recent_score_history_by_leg(
             recent_targets_by_family=evaluation_context.recent_targets_by_family,
             max_points=max(int(settings.strategy_hedge_independent_min_confirm_ticks), 3),
@@ -707,6 +709,7 @@ def evaluate_independent_books(
     scorer: IndependentBookScorer | None = None,
     trade_cost_service: TradeCostService | None = None,
     expectancy_resolver: IndependentBookExpectancyResolver | None = None,
+    latest_market_snapshot: MarketSnapshot | None = None,
     recent_score_history_by_leg: dict[IndependentLeg, tuple[float, ...]] | None = None,
     prior_runtime_states_by_leg: dict[IndependentLeg, StrategyBookRuntimeState] | None = None,
 ) -> IndependentFamilyEvaluation:
@@ -767,6 +770,17 @@ def evaluate_independent_books(
         leg="long",
         trade_cost_service=cost_service,
         expectancy_resolver=expectancy_resolver,
+        latest_market_snapshot=latest_market_snapshot,
+        planned_delta_qty=_planned_leg_delta_qty(
+            current_qty=to_decimal(context.current_long_position_qty),
+            target_qty=directional_long_target_qty,
+        ),
+        projected_notional=_planned_leg_notional(
+            current_qty=to_decimal(context.current_long_position_qty),
+            current_notional=to_decimal(context.current_long_position_notional),
+            target_qty=directional_long_target_qty,
+            latest_market_snapshot=latest_market_snapshot,
+        ),
     )
     short_expectancy = _resolve_independent_book_expectancy(
         settings=settings,
@@ -777,6 +791,17 @@ def evaluate_independent_books(
         leg="short",
         trade_cost_service=cost_service,
         expectancy_resolver=expectancy_resolver,
+        latest_market_snapshot=latest_market_snapshot,
+        planned_delta_qty=_planned_leg_delta_qty(
+            current_qty=to_decimal(context.current_short_position_qty),
+            target_qty=directional_short_target_qty,
+        ),
+        projected_notional=_planned_leg_notional(
+            current_qty=to_decimal(context.current_short_position_qty),
+            current_notional=to_decimal(context.current_short_position_notional),
+            target_qty=directional_short_target_qty,
+            latest_market_snapshot=latest_market_snapshot,
+        ),
     )
     long_book = _evaluate_independent_book(
         settings=settings,
@@ -1385,6 +1410,9 @@ def _resolve_independent_book_expectancy(
     leg: IndependentLeg,
     trade_cost_service: TradeCostService,
     expectancy_resolver: IndependentBookExpectancyResolver | None,
+    latest_market_snapshot: MarketSnapshot | None = None,
+    planned_delta_qty: Decimal = Decimal("0"),
+    projected_notional: Decimal | None = None,
 ) -> IndependentBookExpectancy | None:
     if expectancy_resolver is not None:
         try:
@@ -1395,6 +1423,9 @@ def _resolve_independent_book_expectancy(
                 ai_assessment=ai_assessment,
                 leg=leg,
                 trade_cost_service=trade_cost_service,
+                latest_market_snapshot=latest_market_snapshot,
+                planned_delta_qty=planned_delta_qty,
+                projected_notional=projected_notional,
             )
             if expectancy is None:
                 return None
@@ -1414,6 +1445,9 @@ def _resolve_independent_book_expectancy(
             runtime_margin_mode=runtime_margin_mode,
             leg=leg,
             trade_cost_service=trade_cost_service,
+            latest_market_snapshot=latest_market_snapshot,
+            planned_delta_qty=planned_delta_qty,
+            projected_notional=projected_notional,
         )
     except Exception:
         return None
@@ -1428,6 +1462,9 @@ def _compute_independent_book_expectancy(
     runtime_margin_mode: str,
     leg: IndependentLeg,
     trade_cost_service: TradeCostService,
+    latest_market_snapshot: MarketSnapshot | None,
+    planned_delta_qty: Decimal,
+    projected_notional: Decimal | None,
 ) -> IndependentBookExpectancy:
     expected_signal_edge_bps = _independent_signal_edge_bps(
         settings=settings,
@@ -1435,7 +1472,8 @@ def _compute_independent_book_expectancy(
         ai_assessment=ai_assessment,
         leg=leg,
     )
-    expected_slippage_bps = _independent_expected_slippage_bps(settings=settings)
+    configured_slippage_bps = _independent_expected_slippage_bps(settings=settings)
+    reference_price = _market_reference_price(latest_market_snapshot=latest_market_snapshot)
     estimate = trade_cost_service.estimate_single_leg_entry(
         model_name=f"independent_{leg}_book",
         symbol=context.symbol,
@@ -1443,9 +1481,29 @@ def _compute_independent_book_expectancy(
         margin_mode=runtime_margin_mode,
         execution_style="taker",
         order_type="market",
-        expected_slippage_bps=expected_slippage_bps,
+        side="buy" if leg == "long" else "sell",
+        quantity=planned_delta_qty,
+        projected_notional=projected_notional,
+        reference_price=reference_price,
+        market_snapshot=latest_market_snapshot,
+        expected_slippage_bps=configured_slippage_bps,
         include_spread=False,
         include_funding=context.product_type == "derivatives",
+    )
+    size_impact_bps = _estimate_component_float(
+        estimate=estimate,
+        component_name="size_impact_bps",
+    ) or 0.0
+    expected_slippage_bps = float(
+        getattr(estimate, "executable_slippage_bps", configured_slippage_bps) or configured_slippage_bps
+    ) + size_impact_bps
+    resolved_projected_notional = _estimate_component_decimal(
+        estimate=estimate,
+        component_name="projected_notional",
+    )
+    resolved_reference_price = _estimate_component_decimal(
+        estimate=estimate,
+        component_name="reference_price",
     )
     expected_cost_bps = float(estimate.executable_total_drag_bps)
     expected_net_edge_bps = (
@@ -1460,6 +1518,19 @@ def _compute_independent_book_expectancy(
         expected_cost_bps=expected_cost_bps,
         expected_net_edge_bps=expected_net_edge_bps,
         expected_alpha_bps=expected_signal_edge_bps,
+        planned_delta_qty=planned_delta_qty,
+        projected_notional=resolved_projected_notional or projected_notional,
+        reference_price=resolved_reference_price or reference_price,
+        quoted_depth_notional=_estimate_component_decimal(
+            estimate=estimate,
+            component_name="quoted_depth_notional",
+        ),
+        depth_consumption_ratio=_estimate_component_float(
+            estimate=estimate,
+            component_name="depth_consumption_ratio",
+        ),
+        size_impact_bps=size_impact_bps,
+        cost_confidence=float(getattr(estimate, "cost_confidence", 0.0) or 0.0),
     )
 
 
@@ -1485,6 +1556,63 @@ def _independent_expected_slippage_bps(*, settings: AATSSettings) -> float:
     )
 
 
+def _planned_leg_delta_qty(*, current_qty: Decimal, target_qty: Decimal) -> Decimal:
+    return max(
+        abs(max(to_decimal(target_qty), Decimal("0")) - max(to_decimal(current_qty), Decimal("0"))),
+        Decimal("0"),
+    )
+
+
+def _planned_leg_notional(
+    *,
+    current_qty: Decimal,
+    current_notional: Decimal,
+    target_qty: Decimal,
+    latest_market_snapshot: MarketSnapshot | None,
+) -> Decimal | None:
+    planned_delta_qty = _planned_leg_delta_qty(current_qty=current_qty, target_qty=target_qty)
+    if planned_delta_qty <= EPSILON_DECIMAL_12:
+        return Decimal("0")
+    reference_price = _market_reference_price(latest_market_snapshot=latest_market_snapshot)
+    if reference_price is not None and reference_price > Decimal("0"):
+        return planned_delta_qty * reference_price
+    normalized_current_qty = max(to_decimal(current_qty), Decimal("0"))
+    normalized_current_notional = max(to_decimal(current_notional), Decimal("0"))
+    if normalized_current_qty > EPSILON_DECIMAL_12 and normalized_current_notional > Decimal("0"):
+        return planned_delta_qty * (normalized_current_notional / normalized_current_qty)
+    return None
+
+
+def _market_reference_price(*, latest_market_snapshot: MarketSnapshot | None) -> Decimal | None:
+    if latest_market_snapshot is None:
+        return None
+    best_bid = max(to_decimal(latest_market_snapshot.best_bid), Decimal("0"))
+    best_ask = max(to_decimal(latest_market_snapshot.best_ask), Decimal("0"))
+    if best_bid > Decimal("0") and best_ask > Decimal("0"):
+        return (best_bid + best_ask) / Decimal("2")
+    last_price = max(to_decimal(latest_market_snapshot.last_price), Decimal("0"))
+    return None if last_price <= Decimal("0") else last_price
+
+
+def _estimate_component_decimal(*, estimate: object, component_name: str) -> Decimal | None:
+    components = getattr(estimate, "execution_context", None)
+    value = components.get(component_name) if isinstance(components, dict) else None
+    if value is None:
+        drag_components = getattr(estimate, "execution_drag_components_bps", None)
+        value = drag_components.get(component_name) if isinstance(drag_components, dict) else None
+    if value is None:
+        return None
+    try:
+        return to_decimal(value)
+    except Exception:
+        return None
+
+
+def _estimate_component_float(*, estimate: object, component_name: str) -> float | None:
+    value = _estimate_component_decimal(estimate=estimate, component_name=component_name)
+    return None if value is None else float(value)
+
+
 def _independent_open_gate(
     *,
     settings: AATSSettings,
@@ -1499,11 +1627,11 @@ def _independent_open_gate(
         leg=leg,
         expectancy=IndependentBookExpectancy(
             leg=leg,
-            expected_signal_edge_bps=0.0,
+            expected_signal_edge_bps=max(expected_net_edge_bps + expected_cost_bps, 0.0),
             expected_slippage_bps=_independent_expected_slippage_bps(settings=settings),
             expected_cost_bps=expected_cost_bps,
             expected_net_edge_bps=expected_net_edge_bps,
-            expected_alpha_bps=0.0,
+            expected_alpha_bps=max(expected_net_edge_bps + expected_cost_bps, 0.0),
         ),
     )
     return {

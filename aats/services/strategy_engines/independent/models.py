@@ -38,6 +38,13 @@ class IndependentBookExpectancy:
     expected_cost_bps: float
     expected_net_edge_bps: float
     expected_alpha_bps: float | None = None
+    planned_delta_qty: Decimal | None = None
+    projected_notional: Decimal | None = None
+    reference_price: Decimal | None = None
+    quoted_depth_notional: Decimal | None = None
+    depth_consumption_ratio: float | None = None
+    size_impact_bps: float = 0.0
+    cost_confidence: float | None = None
 
 
 IndependentBookExpectancyResolver = Callable[..., "IndependentBookExpectancy | None"]
