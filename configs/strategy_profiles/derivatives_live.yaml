@@ -430,7 +430,7 @@ strategy_transient_close_retry_cooldown_seconds: 90.0
 
 # 试盘守护
 # [常用可调] trial_guard_enabled：是否启用试盘守护。可选值：true / false；推荐值：true。
-trial_guard_enabled: false
+trial_guard_enabled: true
 # [常用可调] trial_guard_poll_interval_seconds：试盘守护轮询间隔。可选值：1.0 ~ 300.0；推荐值：15.0。
 trial_guard_poll_interval_seconds: 15.0
 # [常用可调] trial_guard_lookback_fills：回看成交数量。可选值：1 ~ 500；推荐值：30。
