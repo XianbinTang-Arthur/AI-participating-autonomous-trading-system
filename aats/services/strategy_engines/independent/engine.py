@@ -39,7 +39,7 @@ from .sizing import (
     resolve_entry_size_multiplier,
 )
 from .scoring import compute_raw_book_score, compute_score_stability
-from .state_machine import derive_book_state, derive_holding_phase, snapshot_from_decision, transition_book_state
+from .state_machine import advance_state_snapshot, derive_book_state, derive_holding_phase, snapshot_from_decision
 
 
 def evaluate_independent_book(
@@ -517,42 +517,25 @@ def _complete_decision(
         snapshot=initial_state_snapshot,
         book_state=derived_book_state,
     )
-    prior_book_state = _replay_prior_book_state(decision=decision)
-    transition = (
-        None
-        if prior_book_state is None
-        else transition_book_state(
-            prior_state=prior_book_state,
-            snapshot=initial_state_snapshot,
-        )
+    advanced_state_snapshot = advance_state_snapshot(
+        decision=decision,
+        as_of_ts=context.as_of_ts,
+        book_state=derived_book_state,
+        holding_phase=derived_holding_phase,
     )
-    next_scale_in_count = int(decision.current_scale_in_count or 0) + (
-        1 if decision.book_action == "scale_in" else 0
-    )
-    next_de_risk_count = int(decision.current_de_risk_count or 0) + (
-        1 if decision.book_action == "de_risk" else 0
-    )
-    transition_changed = (
-        prior_book_state is not None
-        and prior_book_state != derived_book_state
-    ) or decision.book_action in {"open", "scale_in", "de_risk", "close_failed_thesis", "close_stale_thesis", "blocked"}
-    next_state_version = max(int(decision.state_version or 1), 1) + (1 if transition_changed else 0)
-    next_transition_reason = (
-        decision.close_reason
-        or decision.book_action
-        if transition_changed
-        else decision.last_transition_reason
-    )
+    prior_book_state = advanced_state_snapshot.prior_book_state
     stateful_decision = replace(
         decision,
         book_state=derived_book_state,
         holding_phase=derived_holding_phase,
         prior_book_state=prior_book_state,
-        current_scale_in_count=next_scale_in_count,
-        current_de_risk_count=next_de_risk_count,
-        last_transition_reason=next_transition_reason,
-        last_transition_at=(context.as_of_ts if transition_changed else decision.last_transition_at),
-        state_version=next_state_version,
+        current_scale_in_count=advanced_state_snapshot.current_scale_in_count,
+        current_de_risk_count=advanced_state_snapshot.current_de_risk_count,
+        last_transition_reason=advanced_state_snapshot.last_transition_reason,
+        last_transition_at=advanced_state_snapshot.last_transition_at,
+        suspended_until=advanced_state_snapshot.suspended_until,
+        cooldown_until=advanced_state_snapshot.cooldown_until,
+        state_version=advanced_state_snapshot.state_version,
     )
     health_snapshot = evaluate_leg_health(decision=stateful_decision)
     final_decision = replace(
@@ -577,28 +560,20 @@ def _complete_decision(
         health_snapshot=health_snapshot,
         live_applied=live_applied,
     )
-    decided_state_snapshot = snapshot_from_decision(decision=final_decision)
-    if transition is not None:
-        decided_state_snapshot = replace(
-            decided_state_snapshot,
-            prior_book_state=transition.prior_state,
-            transition_valid=transition.valid_transition,
-            transition_violation_reason=transition.violation_reason,
-            last_transition_reason=transition.transition_reason or decided_state_snapshot.last_transition_reason,
-        )
+    decided_state_snapshot = replace(
+        advanced_state_snapshot,
+        health_state=final_decision.health_state,  # type: ignore[arg-type]
+        execution_health_state=final_decision.execution_health_state,
+        blocked_reasons=tuple(final_decision.blocked_reasons),
+        close_reason=final_decision.close_reason,
+    )
     replay_snapshot = replay_snapshot_from_decision(
         decision=final_decision,
         threshold_snapshot=threshold,
         state_snapshot=decided_state_snapshot,
         health_snapshot=health_snapshot,
         prior_book_state=prior_book_state,
-        prior_state_source=(
-            None
-            if prior_book_state is None
-            else "runtime_state"
-            if decision.prior_book_state is not None
-            else "heuristic_inference"
-        ),
+        prior_state_source=None if prior_book_state is None else "runtime_state",
     )
     return replace(
         final_decision,
@@ -790,27 +765,11 @@ def _clamp(value: float, lower: float, upper: float) -> float:
 
 
 def _replay_prior_book_state(*, decision: IndependentBookDecision) -> str | None:
+    if decision.state_snapshot is not None and decision.state_snapshot.prior_book_state is not None:
+        return decision.state_snapshot.prior_book_state
     if decision.prior_book_state is not None:
         return decision.prior_book_state
-    if decision.book_action == "open":
-        return "flat"
-    if decision.book_action == "scale_in":
-        return "holding" if decision.current_qty > EPSILON_DECIMAL_12 else "probing"
-    if decision.book_action == "de_risk":
-        return "holding"
-    if decision.book_action in {"close_failed_thesis", "close_stale_thesis"}:
-        return "holding" if decision.current_qty > EPSILON_DECIMAL_12 else "probing"
-    if decision.book_action == "blocked":
-        if any("trial_guard" in reason for reason in decision.blocked_reasons):
-            return "suspended"
-        if decision.current_qty > EPSILON_DECIMAL_12:
-            return "holding"
-        return "cooldown"
-    if decision.book_state is not None:
-        return decision.book_state
-    if decision.current_qty > EPSILON_DECIMAL_12:
-        return "holding"
-    return "flat"
+    return None
 
 
 def _runtime_prior_book_state(*, prior_runtime_state: StrategyBookRuntimeState | None) -> str | None:

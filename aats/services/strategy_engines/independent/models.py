@@ -148,9 +148,13 @@ IndependentBookEvaluation = IndependentBookDecision
 @dataclass(frozen=True, slots=True)
 class IndependentFamilyEvaluation:
     final_target_qty: Decimal
-    legs: list[StrategyLegIntent]
+    legs: tuple[StrategyLegIntent, ...]
     overlay_decision: HedgeOverlayDecision
     long_book: IndependentBookDecision
     short_book: IndependentBookDecision
     book_runtime_states: tuple["IndependentBookRuntimeState", ...] = ()
     family_health: "IndependentFamilyHealthSnapshot | None" = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "legs", tuple(self.legs))
+        object.__setattr__(self, "book_runtime_states", tuple(self.book_runtime_states))

@@ -85,7 +85,7 @@ from aats.services.operator.strategy_profiles import StrategyProfileControlServi
 from aats.services.projections.ledger_portfolio import LedgerBackedPortfolioService
 from aats.services.recovery_control import ExecutionLedgerRecoveryService, RecoveryReconciliationClassifier
 from aats.services.runtime_scope import latest_matching_snapshot, runtime_state_scope, scoped_portfolio_event
-from aats.services.strategy_engines import StrategyCoordinatorService
+from aats.services.strategy_engines.coordinator import StrategyCoordinatorService
 from aats.services.strategy_engines.sleeve_pnl_projection import SleevePnLProjectionService
 from aats.schemas.portfolio import FillOutcomeRecord, PortfolioBalanceDelta
 from aats.services.portfolio_service.decimals import to_decimal

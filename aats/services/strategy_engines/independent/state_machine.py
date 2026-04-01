@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from decimal import Decimal
 from typing import Literal
@@ -206,4 +206,72 @@ def snapshot_from_decision(*, decision: IndependentBookDecision) -> IndependentS
             if existing_snapshot is None
             else existing_snapshot.transition_violation_reason
         ),
+    )
+
+
+def advance_state_snapshot(
+    *,
+    decision: IndependentBookDecision,
+    as_of_ts: datetime,
+    book_state: IndependentBookState,
+    holding_phase: IndependentHoldingPhase,
+) -> IndependentStateSnapshot:
+    seed_snapshot = snapshot_from_decision(decision=decision)
+    prior_book_state = (
+        decision.prior_book_state
+        if decision.prior_book_state is not None
+        else seed_snapshot.prior_book_state
+    )
+    transition = (
+        None
+        if prior_book_state is None
+        else transition_book_state(
+            prior_state=prior_book_state,
+            snapshot=replace(
+                seed_snapshot,
+                book_state=book_state,
+                holding_phase=holding_phase,
+            ),
+        )
+    )
+    transition_changed = (
+        prior_book_state is not None
+        and prior_book_state != book_state
+    ) or decision.book_action in {
+        "open",
+        "scale_in",
+        "de_risk",
+        "close_failed_thesis",
+        "close_stale_thesis",
+        "blocked",
+    }
+    next_scale_in_count = int(seed_snapshot.current_scale_in_count or 0) + (
+        1 if decision.book_action == "scale_in" else 0
+    )
+    next_de_risk_count = int(seed_snapshot.current_de_risk_count or 0) + (
+        1 if decision.book_action == "de_risk" else 0
+    )
+    next_state_version = max(int(seed_snapshot.state_version or 1), 1) + (1 if transition_changed else 0)
+    next_transition_reason = (
+        None
+        if transition is None
+        else transition.transition_reason
+    ) or (
+        decision.close_reason
+        or decision.book_action
+        if transition_changed
+        else seed_snapshot.last_transition_reason
+    )
+    return replace(
+        seed_snapshot,
+        book_state=book_state,
+        holding_phase=holding_phase,
+        prior_book_state=prior_book_state,
+        current_scale_in_count=next_scale_in_count,
+        current_de_risk_count=next_de_risk_count,
+        last_transition_at=(as_of_ts if transition_changed else seed_snapshot.last_transition_at),
+        last_transition_reason=next_transition_reason,
+        state_version=next_state_version,
+        transition_valid=True if transition is None else transition.valid_transition,
+        transition_violation_reason=None if transition is None else transition.violation_reason,
     )

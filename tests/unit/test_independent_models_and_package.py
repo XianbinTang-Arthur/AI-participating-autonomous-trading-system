@@ -36,8 +36,8 @@ class TestIndependentModelsAndPackage(unittest.TestCase):
         package = importlib.import_module("aats.services.strategy_engines")
 
         self.assertNotIn("aats.services.strategy_engines.coordinator", sys.modules)
-        self.assertTrue(hasattr(package, "StrategyCoordinatorService"))
-        self.assertIn("aats.services.strategy_engines.coordinator", sys.modules)
+        self.assertFalse(hasattr(package, "StrategyCoordinatorService"))
+        self.assertNotIn("aats.services.strategy_engines.coordinator", sys.modules)
 
 
 if __name__ == "__main__":
