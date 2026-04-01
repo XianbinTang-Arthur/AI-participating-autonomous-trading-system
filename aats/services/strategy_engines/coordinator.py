@@ -433,6 +433,8 @@ class StrategyCoordinatorService:
                 ]
             else:
                 urgency = selected.urgency if allocation.approved_families else "low"
+                strategy_bundle_id = None
+                strategy_execution_legs = []
             source_mix = self._source_mix_for_allocation(allocation)
         elif self._is_protective_target(
             current_qty=base_target.current_position_qty,
@@ -1230,6 +1232,23 @@ class StrategyCoordinatorService:
                     candidate,
                     [f"legacy_configured_strategy_family_{selected_family}", *candidate.reason_codes],
                 )
+            if self._preserve_fixed_family_without_directional_fallback(
+                selected_family=selected_family,
+                candidate=candidate,
+            ):
+                return (
+                    selected_family,
+                    candidate,
+                    list(
+                        dict.fromkeys(
+                            [
+                                f"legacy_configured_strategy_family_{selected_family}_unavailable",
+                                *candidate.reason_codes,
+                                f"legacy_configured_strategy_family_{selected_family}_hold_only",
+                            ]
+                        )
+                    ),
+                )
             return (
                 "directional",
                 directional,
@@ -1279,6 +1298,22 @@ class StrategyCoordinatorService:
             directional,
             ["automatic_strategy_family_directional", "automatic_strategy_directional_fallback"],
         )
+
+    def _preserve_fixed_family_without_directional_fallback(
+        self,
+        *,
+        selected_family: StrategyFamily,
+        candidate: StrategyCandidate,
+    ) -> bool:
+        if self.settings.strategy_family_auto_selection_enabled:
+            return False
+        if self.settings.trading_product_type != "derivatives":
+            return False
+        if selected_family != "independent":
+            return False
+        if not candidate.enabled:
+            return False
+        return candidate.state not in {"disabled", "incompatible"}
 
     def _overlay_cutover_candidate(
         self,

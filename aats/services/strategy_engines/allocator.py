@@ -58,6 +58,11 @@ class PortfolioAllocatorV2Phase2:
         approved: list[StrategySleeveIntent] = []
         blocked_reason_codes: list[str] = []
         conflict_resolutions: list[AllocatorConflictResolution] = []
+        preserve_selected_family = self._preserve_selected_family_without_directional_fallback(
+            base_target=base_target,
+            selected_family=selected_family,
+            selected_intent=intents_by_family.get(selected_family),
+        )
 
         if base_target.product_type == "derivatives":
             smart_arbitrage_intent = intents_by_family.get("smart_arbitrage")
@@ -167,7 +172,7 @@ class PortfolioAllocatorV2Phase2:
                             ],
                         )
                     )
-            elif directional_intent is not None:
+            elif directional_intent is not None and not preserve_selected_family:
                 approved.append(directional_intent)
         else:
             spot_inventory_intents = [
@@ -291,11 +296,17 @@ class PortfolioAllocatorV2Phase2:
             (snapshot.portfolio_budget_cut_notional for snapshot in budget_snapshots),
             start=Decimal("0"),
         )
+        resolved_primary_family = (
+            selected_family
+            if primary_intent is None and preserve_selected_family
+            else ("directional" if primary_intent is None else primary_intent.family)
+        )
+        fallback_primary_intent = None if not preserve_selected_family else intents_by_family.get(selected_family)
         reason_codes = list(
             dict.fromkeys(
                 [
                     "allocator_v2_phase2_applied",
-                    f"allocator_primary_family_{primary_intent.family if primary_intent is not None else 'directional'}",
+                    f"allocator_primary_family_{resolved_primary_family}",
                     *selection_reason_codes,
                     *blocked_reason_codes,
                     *budget_cut_reason_codes,
@@ -323,8 +334,16 @@ class PortfolioAllocatorV2Phase2:
             margin_mode=base_target.margin_mode,
             allocator_version="task74_allocator_v2_phase2",
             route_action=route_action,
-            primary_family="directional" if primary_intent is None else primary_intent.family,
-            primary_strategy_sleeve_id=None if primary_intent is None else primary_intent.strategy_sleeve_id,
+            primary_family=resolved_primary_family,
+            primary_strategy_sleeve_id=(
+                None
+                if primary_intent is None and fallback_primary_intent is None
+                else (
+                    primary_intent.strategy_sleeve_id
+                    if primary_intent is not None
+                    else fallback_primary_intent.strategy_sleeve_id
+                )
+            ),
             active_families=active_families,
             approved_families=approved_families,
             blocked_reason_codes=blocked_reason_codes,
@@ -362,6 +381,25 @@ class PortfolioAllocatorV2Phase2:
             sleeve_intents=[intent.model_copy(deep=True) for intent in sleeve_intents],
             execution_legs=execution_legs,
         )
+
+    def _preserve_selected_family_without_directional_fallback(
+        self,
+        *,
+        base_target: PositionTarget,
+        selected_family: StrategyFamily,
+        selected_intent: StrategySleeveIntent | None,
+    ) -> bool:
+        if self.settings is None:
+            return False
+        if base_target.product_type != "derivatives":
+            return False
+        if self.settings.strategy_family_auto_selection_enabled:
+            return False
+        if selected_family != "independent":
+            return False
+        if selected_intent is None:
+            return False
+        return selected_intent.state not in {"disabled", "incompatible"}
 
     @staticmethod
     def _operator_summary_for_primary_intent(

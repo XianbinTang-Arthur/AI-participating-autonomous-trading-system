@@ -14,8 +14,15 @@ from aats.schemas.exchange import ExchangeAccountSnapshot, ExchangeBalance, Exch
 from aats.schemas.market import MarketSnapshot
 from aats.schemas.portfolio import PortfolioSnapshot, SleevePnLRecord
 from aats.schemas.reconciliation import ReconciliationReport
-from aats.schemas.strategy_runtime import StrategyBookRuntimeState, StrategyCandidate, StrategyLegIntent
+from aats.schemas.strategy_runtime import (
+    StrategyBookRuntimeState,
+    StrategyCandidate,
+    StrategyCoordinatorSnapshot,
+    StrategyLegIntent,
+    StrategySleeveIntent,
+)
 from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, to_decimal
+from aats.services.strategy_engines.allocator import PortfolioAllocatorV2Phase2
 from aats.services.strategy_engines.base import (
     StrategyEngineInput,
     StrategyEvaluationContext,
@@ -1058,6 +1065,281 @@ class TestStrategyCoordinator(unittest.TestCase):
         self.assertIn("legacy_configured_strategy_directional_fallback", snapshot.selection_reason_codes)
         self.assertIn("smart_arbitrage_derivatives_runtime_required", snapshot.selection_reason_codes)
         self.assertNotIn("legacy_configured_strategy_family_smart_arbitrage", snapshot.selection_reason_codes)
+
+    def test_derivatives_fixed_independent_blocked_keeps_independent_selection(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "strategy_family_active": "independent",
+                "strategy_family_auto_selection_enabled": False,
+                "strategy_family_independent_enabled": True,
+                "strategy_family_independent_live_execution_enabled": True,
+            }
+        )
+        coordinator = StrategyCoordinatorService(
+            settings=settings,
+            event_store=InMemoryEventStore(),
+            market_gateway=_FakeMarketGateway({"BTC-USDT-SWAP": _market_snapshot("BTC-USDT-SWAP", "100")}),
+            portfolio_repo=InMemoryPortfolioRepository(),
+            strategy_sleeve_repo=InMemoryStrategySleeveRepository(),
+        )
+        selected_family, candidate, reason_codes = coordinator._select_candidate(
+            candidates_by_family={
+                "directional": StrategyCandidate(
+                    family="directional",
+                    state="ready",
+                    enabled=True,
+                    selectable=True,
+                    execution_compatible=True,
+                    route_action="override_target",
+                    family_action="hold_family",
+                    headline="directional ready",
+                ),
+                "independent": StrategyCandidate(
+                    family="independent",
+                    state="blocked",
+                    enabled=True,
+                    selectable=False,
+                    execution_compatible=False,
+                    route_action="advisory_only",
+                    family_action="blocked",
+                    headline="independent blocked",
+                    reason_codes=["independent_family_candidate_inactive"],
+                    blocking_reasons=["independent_long_book_expected_cost_above_max_acceptable"],
+                ),
+            },
+        )
+
+        self.assertEqual(selected_family, "independent")
+        self.assertEqual(candidate.family, "independent")
+        self.assertIn("legacy_configured_strategy_family_independent_unavailable", reason_codes)
+        self.assertIn("legacy_configured_strategy_family_independent_hold_only", reason_codes)
+        self.assertNotIn("legacy_configured_strategy_directional_fallback", reason_codes)
+
+    def test_derivatives_fixed_independent_incompatible_falls_back_to_directional_selection(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "strategy_family_active": "independent",
+                "strategy_family_auto_selection_enabled": False,
+                "strategy_family_independent_enabled": True,
+                "strategy_family_independent_live_execution_enabled": True,
+            }
+        )
+        coordinator = StrategyCoordinatorService(
+            settings=settings,
+            event_store=InMemoryEventStore(),
+            market_gateway=_FakeMarketGateway({"BTC-USDT-SWAP": _market_snapshot("BTC-USDT-SWAP", "100")}),
+            portfolio_repo=InMemoryPortfolioRepository(),
+            strategy_sleeve_repo=InMemoryStrategySleeveRepository(),
+        )
+        selected_family, candidate, reason_codes = coordinator._select_candidate(
+            candidates_by_family={
+                "directional": StrategyCandidate(
+                    family="directional",
+                    state="ready",
+                    enabled=True,
+                    selectable=True,
+                    execution_compatible=True,
+                    route_action="override_target",
+                    family_action="hold_family",
+                    headline="directional ready",
+                ),
+                "independent": StrategyCandidate(
+                    family="independent",
+                    state="incompatible",
+                    enabled=True,
+                    selectable=False,
+                    execution_compatible=False,
+                    route_action="advisory_only",
+                    family_action="blocked",
+                    headline="independent incompatible",
+                    reason_codes=["hedge_overlay_runtime_not_supported"],
+                    blocking_reasons=["hedge_overlay_runtime_not_supported"],
+                ),
+            },
+        )
+
+        self.assertEqual(selected_family, "directional")
+        self.assertEqual(candidate.family, "directional")
+        self.assertIn("legacy_configured_strategy_family_independent_unavailable", reason_codes)
+        self.assertIn("legacy_configured_strategy_directional_fallback", reason_codes)
+        self.assertNotIn("legacy_configured_strategy_family_independent_hold_only", reason_codes)
+
+    def test_derivatives_fixed_independent_unavailable_does_not_approve_directional_or_retain_legs(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "strategy_family_active": "independent",
+                "strategy_family_auto_selection_enabled": False,
+                "strategy_family_independent_enabled": True,
+                "strategy_family_independent_live_execution_enabled": True,
+            }
+        )
+        allocator = PortfolioAllocatorV2Phase2(settings=settings)
+        directional_leg = StrategyLegIntent(
+            symbol="BTC-USDT-SWAP",
+            product_type="derivatives",
+            side="buy",
+            position_mode="long_short_mode",
+            pos_side="long",
+            action="open",
+            family="directional",
+            role="primary",
+            margin_mode="cross",
+            current_position_qty=Decimal("0"),
+            target_position_qty=Decimal("0.01"),
+            delta_position_qty=Decimal("0.01"),
+        )
+        base_target = _position_target(
+            symbol="BTC-USDT-SWAP",
+            product_type="derivatives",
+            margin_mode="cross",
+            current_qty="0",
+            target_qty="0.01",
+            position_intent="open_long",
+        ).model_copy(
+            update={
+                "strategy_family": "directional",
+                "strategy_execution_legs": [directional_leg],
+            }
+        )
+        independent_sleeve_id = build_strategy_sleeve_id(
+            family="independent",
+            primary_symbol="BTC-USDT-SWAP",
+            product_scope="derivatives",
+            margin_scope="cross",
+            symbol_scope=("BTC-USDT-SWAP",),
+        )
+        directional_sleeve_id = build_strategy_sleeve_id(
+            family="directional",
+            primary_symbol="BTC-USDT-SWAP",
+            product_scope="derivatives",
+            margin_scope="cross",
+            symbol_scope=("BTC-USDT-SWAP",),
+        )
+        sleeve_intents = [
+            StrategySleeveIntent(
+                decision_id=base_target.decision_id,
+                family="independent",
+                strategy_sleeve_id=independent_sleeve_id,
+                state="blocked",
+                symbol="BTC-USDT-SWAP",
+                product_type="derivatives",
+                margin_mode="cross",
+                inventory_policy="inventory_accumulation",
+                route_action="advisory_only",
+                family_action="blocked",
+                headline="independent blocked",
+                selectable=False,
+                execution_compatible=False,
+                current_position_qty=Decimal("0"),
+                target_position_qty=Decimal("0"),
+                delta_position_qty=Decimal("0"),
+                reason_codes=["independent_family_candidate_inactive"],
+                blocking_reasons=["independent_long_book_expected_cost_above_max_acceptable"],
+            ).model_copy(update={"allocation_id": "alloc_fixed_independent"}),
+            StrategySleeveIntent(
+                decision_id=base_target.decision_id,
+                family="directional",
+                strategy_sleeve_id=directional_sleeve_id,
+                state="ready",
+                symbol="BTC-USDT-SWAP",
+                product_type="derivatives",
+                margin_mode="cross",
+                inventory_policy="account_net_inventory",
+                route_action="override_target",
+                family_action="hold_family",
+                headline="directional ready",
+                selectable=True,
+                execution_compatible=True,
+                current_position_qty=Decimal("0"),
+                target_position_qty=Decimal("0.01"),
+                delta_position_qty=Decimal("0.01"),
+                reason_codes=["directional_strategy_target"],
+                legs=[directional_leg],
+            ).model_copy(update={"allocation_id": "alloc_fixed_directional"}),
+        ]
+
+        allocation = allocator.allocate(
+            base_target=base_target,
+            selected_family="independent",
+            selection_reason_codes=["legacy_configured_strategy_family_independent_unavailable"],
+            sleeve_intents=sleeve_intents,
+        )
+
+        self.assertEqual(allocation.primary_family, "independent")
+        self.assertEqual(allocation.route_action, "advisory_only")
+        self.assertEqual(allocation.approved_families, [])
+        self.assertEqual(allocation.execution_legs, [])
+        self.assertIn("allocator_primary_family_independent", allocation.reason_codes)
+
+        coordinator = StrategyCoordinatorService(
+            settings=settings,
+            event_store=InMemoryEventStore(),
+            market_gateway=_FakeMarketGateway({"BTC-USDT-SWAP": _market_snapshot("BTC-USDT-SWAP", "100")}),
+            portfolio_repo=InMemoryPortfolioRepository(),
+            strategy_sleeve_repo=InMemoryStrategySleeveRepository(),
+        )
+        snapshot = StrategyCoordinatorSnapshot(
+            decision_id=base_target.decision_id,
+            symbol="BTC-USDT-SWAP",
+            timeframe="15m",
+            product_type="derivatives",
+            margin_mode="cross",
+            allowed_symbols=("BTC-USDT-SWAP",),
+            active_family="independent",
+            selected_family="independent",
+            selected_state="blocked",
+            selected_route_action="advisory_only",
+            selected_family_action="blocked",
+            selected_headline="independent blocked",
+            selection_reason_codes=allocation.reason_codes,
+            active_families=["directional", "independent"],
+            approved_families=[],
+            candidates=[
+                StrategyCandidate(
+                    family="independent",
+                    state="blocked",
+                    enabled=True,
+                    selectable=False,
+                    execution_compatible=False,
+                    route_action="advisory_only",
+                    family_action="blocked",
+                    headline="independent blocked",
+                    reason_codes=["independent_family_candidate_inactive"],
+                    blocking_reasons=["independent_long_book_expected_cost_above_max_acceptable"],
+                ),
+                StrategyCandidate(
+                    family="directional",
+                    state="ready",
+                    enabled=True,
+                    selectable=True,
+                    execution_compatible=True,
+                    route_action="override_target",
+                    family_action="hold_family",
+                    headline="directional ready",
+                ),
+            ],
+            sleeve_intents=sleeve_intents,
+            allocation_decision=allocation,
+        )
+        applied = coordinator.apply_selected_target(base_target=base_target, snapshot=snapshot)
+
+        self.assertEqual(applied.strategy_family, "independent")
+        self.assertEqual(applied.strategy_route_action, "advisory_only")
+        self.assertEqual(applied.target_position_qty, Decimal("0"))
+        self.assertEqual(applied.strategy_execution_legs, [])
+        self.assertNotIn("directional_strategy_execution_legs_retained", applied.strategy_reason_codes)
 
     def test_dca_interval_uses_last_real_dca_target_instead_of_hold_cycles(self) -> None:
         settings = AATSSettings.model_validate(
