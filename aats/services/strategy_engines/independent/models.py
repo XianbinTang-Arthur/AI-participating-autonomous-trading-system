@@ -2,14 +2,15 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Literal
 
 from aats.schemas.decision import HedgeOverlayDecision
 from aats.schemas.strategy_runtime import StrategyLegIntent
-from aats.services.strategy_engines.families.independent_models import IndependentBookRuntimeState
 
 if TYPE_CHECKING:
+    from aats.services.strategy_engines.families.independent_models import IndependentBookRuntimeState
     from .adaptive import IndependentAdaptiveSnapshot
     from .health import IndependentFamilyHealthSnapshot, IndependentLegHealthSnapshot
     from .replay import IndependentReplayDecisionSnapshot
@@ -103,8 +104,8 @@ class IndependentBookDecision:
     current_qty: Decimal
     target_qty: Decimal
     state: str
-    reason_codes: list[str]
-    blocked_reasons: list[str]
+    reason_codes: tuple[str, ...]
+    blocked_reasons: tuple[str, ...]
     min_hold_remaining_seconds: float
     rebalance_cooldown_remaining_seconds: float
     book_action: IndependentBookAction = "inactive"
@@ -123,10 +124,22 @@ class IndependentBookDecision:
     book_state: str | None = None
     holding_phase: str | None = None
     health_state: str | None = None
+    prior_book_state: str | None = None
+    current_scale_in_count: int = 0
+    current_de_risk_count: int = 0
+    last_transition_reason: str | None = None
+    last_transition_at: datetime | None = None
+    suspended_until: datetime | None = None
+    cooldown_until: datetime | None = None
+    state_version: int = 1
     threshold_snapshot: "IndependentAdaptiveSnapshot | None" = None
     state_snapshot: "IndependentStateSnapshot | None" = None
     health_snapshot: "IndependentLegHealthSnapshot | None" = None
     replay_snapshot: "IndependentReplayDecisionSnapshot | None" = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "reason_codes", tuple(str(item) for item in self.reason_codes))
+        object.__setattr__(self, "blocked_reasons", tuple(str(item) for item in self.blocked_reasons))
 
 
 IndependentBookEvaluation = IndependentBookDecision
@@ -139,5 +152,5 @@ class IndependentFamilyEvaluation:
     overlay_decision: HedgeOverlayDecision
     long_book: IndependentBookDecision
     short_book: IndependentBookDecision
-    book_runtime_states: tuple[IndependentBookRuntimeState, ...] = ()
+    book_runtime_states: tuple["IndependentBookRuntimeState", ...] = ()
     family_health: "IndependentFamilyHealthSnapshot | None" = None

@@ -221,6 +221,9 @@ def independent_candidate_from_directional_target(
             recent_targets_by_family=evaluation_context.recent_targets_by_family,
             max_points=max(int(settings.strategy_hedge_independent_min_confirm_ticks), 3),
         ),
+        prior_runtime_states_by_leg=_independent_prior_runtime_states_by_leg(
+            recent_targets_by_family=evaluation_context.recent_targets_by_family,
+        ),
     )
     overlay_decision = result.overlay_decision
     book_expectancy_summary = _independent_book_expectancy_summary(result=result, settings=settings)
@@ -523,6 +526,30 @@ def _independent_recent_score_history_by_leg(
     }
 
 
+def _independent_prior_runtime_states_by_leg(
+    *,
+    recent_targets_by_family: dict[str, list[StrategyTargetHistory]],
+) -> dict[IndependentLeg, StrategyBookRuntimeState]:
+    rows = recent_targets_by_family.get("independent", [])
+    for row in reversed(rows):
+        raw_states = list(getattr(row.target, "book_runtime_states", []) or [])
+        parsed: dict[IndependentLeg, StrategyBookRuntimeState] = {}
+        for item in raw_states:
+            try:
+                runtime_state = (
+                    item
+                    if isinstance(item, StrategyBookRuntimeState)
+                    else StrategyBookRuntimeState.model_validate(item)
+                )
+            except Exception:
+                continue
+            if runtime_state.leg in {"long", "short"}:
+                parsed[runtime_state.leg] = runtime_state
+        if parsed:
+            return parsed
+    return {}
+
+
 def _independent_book_expectancy_summary(
     *,
     result: IndependentFamilyEvaluation,
@@ -681,6 +708,7 @@ def evaluate_independent_books(
     trade_cost_service: TradeCostService | None = None,
     expectancy_resolver: IndependentBookExpectancyResolver | None = None,
     recent_score_history_by_leg: dict[IndependentLeg, tuple[float, ...]] | None = None,
+    prior_runtime_states_by_leg: dict[IndependentLeg, StrategyBookRuntimeState] | None = None,
 ) -> IndependentFamilyEvaluation:
     resolved_margin_mode = str(runtime_margin_mode or settings.margin_mode)
     configured_mode = settings.strategy_hedge_overlay_mode
@@ -759,6 +787,11 @@ def evaluate_independent_books(
         expectancy=long_expectancy,
         directional_leg_target_qty=directional_long_target_qty,
         scorer=scorer,
+        prior_runtime_state=(
+            None
+            if prior_runtime_states_by_leg is None
+            else prior_runtime_states_by_leg.get("long")
+        ),
         recent_score_history=(
             ()
             if recent_score_history_by_leg is None
@@ -774,6 +807,11 @@ def evaluate_independent_books(
         expectancy=short_expectancy,
         directional_leg_target_qty=directional_short_target_qty,
         scorer=scorer,
+        prior_runtime_state=(
+            None
+            if prior_runtime_states_by_leg is None
+            else prior_runtime_states_by_leg.get("short")
+        ),
         recent_score_history=(
             ()
             if recent_score_history_by_leg is None
@@ -1076,6 +1114,7 @@ def _evaluate_independent_book(
     expectancy: IndependentBookExpectancy | None,
     directional_leg_target_qty: Decimal,
     scorer: IndependentBookScorer | None,
+    prior_runtime_state: StrategyBookRuntimeState | None = None,
     recent_score_history: Sequence[float] = (),
 ) -> IndependentBookEvaluation:
     return _evaluate_independent_book_v2(
@@ -1087,6 +1126,7 @@ def _evaluate_independent_book(
         expectancy=expectancy,
         directional_leg_target_qty=directional_leg_target_qty,
         scorer=scorer,
+        prior_runtime_state=prior_runtime_state,
         recent_score_history=recent_score_history,
     )
 

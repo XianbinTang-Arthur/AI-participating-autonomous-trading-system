@@ -28,7 +28,8 @@ def runtime_state_from_decision(
     )
     transition_at = last_transition_at(context=context, leg=decision.leg)
     transition_reason = (
-        decision.close_reason
+        decision.last_transition_reason
+        or decision.close_reason
         or (None if decision.execution_policy is None else decision.execution_policy.policy_reason)
         or decision.book_action
     )
@@ -37,6 +38,7 @@ def runtime_state_from_decision(
         min_hold_remaining_seconds=decision.min_hold_remaining_seconds,
         rebalance_cooldown_remaining_seconds=decision.rebalance_cooldown_remaining_seconds,
     )
+    effective_cooldown = decision.cooldown_until or cooldown
     return StrategyBookRuntimeState(
         leg=decision.leg,
         execution_chain_id=_execution_chain_id(
@@ -73,24 +75,31 @@ def runtime_state_from_decision(
         thesis_started_at=thesis_started_at,
         thesis_age_seconds=decision.thesis_age_seconds,
         current_scale_in_count=(
-            0
+            int(decision.current_scale_in_count)
             if decision.state_snapshot is None
             else int(decision.state_snapshot.current_scale_in_count)
         ),
         current_de_risk_count=(
-            0
+            int(decision.current_de_risk_count)
             if decision.state_snapshot is None
             else int(decision.state_snapshot.current_de_risk_count)
         ),
-        last_transition_at=transition_at,
+        prior_book_state=(
+            decision.prior_book_state
+            if decision.state_snapshot is None
+            else decision.state_snapshot.prior_book_state
+        ),
+        last_transition_at=decision.last_transition_at or transition_at,
         last_transition_reason=transition_reason,
         suspended_until=(
-            cooldown
+            decision.suspended_until
+            if decision.suspended_until is not None
+            else effective_cooldown
             if health_snapshot is not None and bool(health_snapshot.suspended)
             else None
         ),
         state_version=(
-            1
+            max(int(decision.state_version or 1), 1)
             if decision.state_snapshot is None
             else int(decision.state_snapshot.state_version)
         ),
@@ -105,7 +114,7 @@ def runtime_state_from_decision(
         ),
         liquidity_quality_score=decision.liquidity_quality_score,
         execution_health_state=decision.execution_health_state,
-        cooldown_until=cooldown,
+        cooldown_until=effective_cooldown,
         min_hold_remaining_seconds=decision.min_hold_remaining_seconds,
         rebalance_cooldown_remaining_seconds=decision.rebalance_cooldown_remaining_seconds,
         execution_policy_urgency=(
@@ -113,6 +122,16 @@ def runtime_state_from_decision(
         ),
         edge_strength=(
             None if decision.execution_policy is None else decision.execution_policy.edge_strength
+        ),
+        transition_valid=(
+            True
+            if decision.state_snapshot is None
+            else bool(decision.state_snapshot.transition_valid)
+        ),
+        transition_violation_reason=(
+            None
+            if decision.state_snapshot is None
+            else decision.state_snapshot.transition_violation_reason
         ),
         threshold_snapshot=(
             None
@@ -192,6 +211,7 @@ def legacy_runtime_state_snapshot(
         thesis_age_seconds=runtime_state.thesis_age_seconds,
         current_scale_in_count=runtime_state.current_scale_in_count,
         current_de_risk_count=runtime_state.current_de_risk_count,
+        prior_book_state=runtime_state.prior_book_state,
         last_transition_at=runtime_state.last_transition_at,
         last_transition_reason=runtime_state.last_transition_reason,
         suspended_until=runtime_state.suspended_until,
@@ -213,6 +233,8 @@ def legacy_runtime_state_snapshot(
         policy_reason=runtime_state.policy_reason,
         execution_policy_urgency=runtime_state.execution_policy_urgency,
         edge_strength=runtime_state.edge_strength,
+        transition_valid=runtime_state.transition_valid,
+        transition_violation_reason=runtime_state.transition_violation_reason,
     )
 
 

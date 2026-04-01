@@ -35,6 +35,7 @@ class IndependentBookStateSnapshot:
     eligibility_state: str | None = None
     current_scale_in_count: int = 0
     current_de_risk_count: int = 0
+    prior_book_state: IndependentBookState | None = None
     thesis_started_at: datetime | None = None
     thesis_age_seconds: float | None = None
     last_transition_at: datetime | None = None
@@ -45,6 +46,8 @@ class IndependentBookStateSnapshot:
     close_reason: str | None = None
     blocked_reasons: tuple[str, ...] = ()
     execution_health_state: IndependentExecutionHealthState | None = None
+    transition_valid: bool = True
+    transition_violation_reason: str | None = None
 
 
 IndependentStateSnapshot = IndependentBookStateSnapshot
@@ -56,6 +59,20 @@ class IndependentStateTransition:
     next_state: IndependentBookState
     holding_phase: IndependentHoldingPhase
     transition_reason: str | None = None
+    valid_transition: bool = True
+    violation_reason: str | None = None
+
+
+_ALLOWED_TRANSITIONS: dict[IndependentBookState, frozenset[IndependentBookState]] = {
+    "flat": frozenset({"flat", "probing", "cooldown", "suspended"}),
+    "probing": frozenset({"probing", "building", "holding", "flat", "forced_exit", "cooldown", "suspended"}),
+    "building": frozenset({"building", "holding", "flat", "forced_exit", "cooldown", "suspended"}),
+    "holding": frozenset({"holding", "building", "de_risking", "forced_exit", "flat", "cooldown", "suspended"}),
+    "de_risking": frozenset({"de_risking", "holding", "flat", "forced_exit", "cooldown", "suspended"}),
+    "forced_exit": frozenset({"forced_exit", "flat", "cooldown", "suspended"}),
+    "cooldown": frozenset({"cooldown", "flat", "suspended"}),
+    "suspended": frozenset({"suspended", "cooldown", "flat"}),
+}
 
 
 def derive_book_state(*, snapshot: IndependentStateSnapshot) -> IndependentBookState:
@@ -102,18 +119,23 @@ def transition_book_state(
     next_state = derive_book_state(snapshot=snapshot)
     holding_phase = derive_holding_phase(snapshot=snapshot, book_state=next_state)
     transition_reason = snapshot.close_reason or snapshot.book_action
+    allowed_next_states = _ALLOWED_TRANSITIONS.get(prior_state, frozenset())
+    valid_transition = next_state in allowed_next_states
+    violation_reason = None
+    if not valid_transition:
+        violation_reason = f"independent_transition_invalid:{prior_state}->{next_state}"
     return IndependentStateTransition(
         prior_state=prior_state,
         next_state=next_state,
         holding_phase=holding_phase,
         transition_reason=transition_reason,
+        valid_transition=valid_transition,
+        violation_reason=violation_reason,
     )
 
 
 def snapshot_from_decision(*, decision: IndependentBookDecision) -> IndependentStateSnapshot:
-    scale_in_count = 1 if decision.book_action == "scale_in" else 0
-    de_risk_count = 1 if decision.book_action == "de_risk" else 0
-    state_version = 1 + scale_in_count + de_risk_count
+    existing_snapshot = decision.state_snapshot
     return IndependentStateSnapshot(
         leg=decision.leg,
         current_qty=decision.current_qty,
@@ -130,12 +152,58 @@ def snapshot_from_decision(*, decision: IndependentBookDecision) -> IndependentS
             if decision.eligibility.eligible
             else "blocked"
         ),
-        current_scale_in_count=scale_in_count,
-        current_de_risk_count=de_risk_count,
+        current_scale_in_count=(
+            decision.current_scale_in_count
+            if existing_snapshot is None
+            else int(existing_snapshot.current_scale_in_count)
+        ),
+        current_de_risk_count=(
+            decision.current_de_risk_count
+            if existing_snapshot is None
+            else int(existing_snapshot.current_de_risk_count)
+        ),
+        prior_book_state=(
+            decision.prior_book_state
+            if existing_snapshot is None
+            else existing_snapshot.prior_book_state
+        ),
         thesis_age_seconds=decision.thesis_age_seconds,
-        last_transition_reason=decision.close_reason or decision.book_action,
-        state_version=state_version,
+        last_transition_at=(
+            decision.last_transition_at
+            if existing_snapshot is None
+            else existing_snapshot.last_transition_at
+        ),
+        last_transition_reason=(
+            decision.last_transition_reason or decision.close_reason or decision.book_action
+            if existing_snapshot is None
+            else existing_snapshot.last_transition_reason
+        ),
+        suspended_until=(
+            decision.suspended_until
+            if existing_snapshot is None
+            else existing_snapshot.suspended_until
+        ),
+        cooldown_until=(
+            decision.cooldown_until
+            if existing_snapshot is None
+            else existing_snapshot.cooldown_until
+        ),
+        state_version=(
+            max(int(decision.state_version or 1), 1)
+            if existing_snapshot is None
+            else max(int(existing_snapshot.state_version or 1), 1)
+        ),
         close_reason=decision.close_reason,
         blocked_reasons=tuple(decision.blocked_reasons),
         execution_health_state=decision.execution_health_state,
+        transition_valid=(
+            True
+            if existing_snapshot is None
+            else bool(existing_snapshot.transition_valid)
+        ),
+        transition_violation_reason=(
+            None
+            if existing_snapshot is None
+            else existing_snapshot.transition_violation_reason
+        ),
     )

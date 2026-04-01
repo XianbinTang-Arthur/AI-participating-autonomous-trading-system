@@ -57,12 +57,17 @@ class TestIndependentRecoveryIntegration(unittest.IsolatedAsyncioTestCase):
             health_state="ok",
             eligibility_state="eligible",
             book_action="open",
+            prior_book_state="flat",
             reason_codes=["independent_long_book_signal_above_entry_threshold"],
             blocked_reasons=[],
             size_multiplier=Decimal("0.73"),
             capital_multiplier=Decimal("0.73"),
             execution_chain_id="independent:decision_independent_recovery:long:open",
             execution_attempt_id="attempt_independent_recovery_1",
+            current_scale_in_count=0,
+            current_de_risk_count=0,
+            state_version=2,
+            transition_valid=True,
             threshold_snapshot={
                 "leg": "long",
                 "shadow_only": False,
@@ -286,7 +291,10 @@ class TestIndependentRecoveryIntegration(unittest.IsolatedAsyncioTestCase):
         snapshot = recovery["recovery"]["independent_recovery_snapshots"][0]
         self.assertEqual(snapshot["recovery_posture"], "pending_execution_attempts")
         self.assertEqual(snapshot["book_state"], "probing")
+        self.assertEqual(snapshot["prior_book_state"], "flat")
+        self.assertTrue(snapshot["transition_valid"])
         self.assertEqual(snapshot["decision_snapshot"]["sizing_outcome"]["capital_multiplier"], 0.73)
+        self.assertEqual(snapshot["decision_snapshot"]["prior_book_state"], "flat")
         self.assertTrue(snapshot["threshold_snapshot"]["live_applied"])
         self.assertEqual(snapshot["threshold_snapshot"]["effective_entry_threshold"], 0.66)
         self.assertEqual(

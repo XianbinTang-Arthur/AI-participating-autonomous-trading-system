@@ -36,6 +36,8 @@ class IndependentReplayDecisionSnapshot:
     transition_reconstructed: bool = False
     transition_source: str | None = None
     transition_reason: str | None = None
+    transition_valid: bool = True
+    transition_violation_reason: str | None = None
     threshold_snapshot: IndependentAdaptiveSnapshot | None = None
     state_snapshot: IndependentStateSnapshot | None = None
     health_snapshot: IndependentLegHealthSnapshot | None = None
@@ -52,6 +54,7 @@ class IndependentDecisionSnapshot:
     eligibility_state: str | None = None
     current_qty: Decimal | None = None
     target_qty: Decimal | None = None
+    prior_book_state: str | None = None
     current_scale_in_count: int = 0
     current_de_risk_count: int = 0
     thesis_started_at: datetime | None = None
@@ -69,6 +72,8 @@ class IndependentDecisionSnapshot:
     sizing_outcome: dict[str, Any] | None = None
     book_action: str | None = None
     close_reason: str | None = None
+    transition_valid: bool = True
+    transition_violation_reason: str | None = None
     execution_policy: dict[str, Any] | None = None
     threshold_snapshot: dict[str, Any] | None = None
     health_snapshot: dict[str, Any] | None = None
@@ -93,6 +98,7 @@ class IndependentRecoverySnapshot:
     active_execution_chain_ids: tuple[str, ...]
     unresolved_attempt_ids: tuple[str, ...]
     recovery_posture: str
+    prior_book_state: str | None = None
     current_scale_in_count: int = 0
     current_de_risk_count: int = 0
     recovery_blockers: tuple[str, ...] = ()
@@ -105,6 +111,8 @@ class IndependentRecoverySnapshot:
     health_snapshot: dict[str, Any] | None = None
     replay_snapshot: dict[str, Any] | None = None
     decision_snapshot: IndependentDecisionSnapshot | None = None
+    transition_valid: bool = True
+    transition_violation_reason: str | None = None
 
 
 def replay_snapshot_from_decision(
@@ -132,7 +140,13 @@ def replay_snapshot_from_decision(
         prior_book_state=prior_book_state,
         transition_reconstructed=transition is not None,
         transition_source=prior_state_source,
-        transition_reason=decision.close_reason or decision.book_action,
+        transition_reason=(
+            None
+            if transition is None
+            else transition.transition_reason
+        ) or decision.last_transition_reason or decision.close_reason or decision.book_action,
+        transition_valid=True if transition is None else transition.valid_transition,
+        transition_violation_reason=None if transition is None else transition.violation_reason,
         threshold_snapshot=threshold_snapshot,
         state_snapshot=state_snapshot,
         health_snapshot=health_snapshot,
@@ -281,6 +295,7 @@ def _build_recovery_snapshot(
         health_state=None if runtime_state is None else runtime_state.health_state,
         current_qty=current_qty,
         target_qty=target_qty,
+        prior_book_state=None if runtime_state is None else runtime_state.prior_book_state,
         current_scale_in_count=0 if runtime_state is None else int(runtime_state.current_scale_in_count or 0),
         current_de_risk_count=0 if runtime_state is None else int(runtime_state.current_de_risk_count or 0),
         expected_chain_ids=tuple(expected_chain_ids),
@@ -307,6 +322,8 @@ def _build_recovery_snapshot(
             leg=leg,
             runtime_state=runtime_state,
         ),
+        transition_valid=True if runtime_state is None else bool(runtime_state.transition_valid),
+        transition_violation_reason=None if runtime_state is None else runtime_state.transition_violation_reason,
     )
 
 
@@ -330,6 +347,7 @@ def _decision_snapshot_from_sources(
         eligibility_state=None if runtime_state is None else runtime_state.eligibility_state,
         current_qty=None if runtime_state is None else runtime_state.current_qty,
         target_qty=None if runtime_state is None else runtime_state.target_qty,
+        prior_book_state=None if runtime_state is None else runtime_state.prior_book_state,
         current_scale_in_count=0 if runtime_state is None else int(runtime_state.current_scale_in_count or 0),
         current_de_risk_count=0 if runtime_state is None else int(runtime_state.current_de_risk_count or 0),
         thesis_started_at=None if runtime_state is None else runtime_state.thesis_started_at,
@@ -374,6 +392,8 @@ def _decision_snapshot_from_sources(
         ),
         book_action=None if runtime_state is None else runtime_state.book_action,
         close_reason=None if runtime_state is None else runtime_state.close_reason,
+        transition_valid=True if runtime_state is None else bool(runtime_state.transition_valid),
+        transition_violation_reason=None if runtime_state is None else runtime_state.transition_violation_reason,
         execution_policy=_compact_dict(
             {
                 "policy_reason": None if runtime_state is None else runtime_state.policy_reason,

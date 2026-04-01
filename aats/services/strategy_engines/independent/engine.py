@@ -6,7 +6,7 @@ from typing import Sequence
 
 from aats.bootstrap.settings import AATSSettings
 from aats.schemas.decision import AIMarketAssessment, BaselineAssessment, DecisionContext, HedgeOverlayDecision
-from aats.schemas.strategy_runtime import StrategyLegIntent
+from aats.schemas.strategy_runtime import StrategyBookRuntimeState, StrategyLegIntent
 from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, to_decimal
 
 from .adaptive import threshold_snapshot
@@ -39,7 +39,7 @@ from .sizing import (
     resolve_entry_size_multiplier,
 )
 from .scoring import compute_raw_book_score, compute_score_stability
-from .state_machine import derive_book_state, derive_holding_phase, snapshot_from_decision
+from .state_machine import derive_book_state, derive_holding_phase, snapshot_from_decision, transition_book_state
 
 
 def evaluate_independent_book(
@@ -52,6 +52,7 @@ def evaluate_independent_book(
     expectancy: IndependentBookExpectancy | None,
     directional_leg_target_qty: Decimal,
     scorer: IndependentBookScorer | None,
+    prior_runtime_state: StrategyBookRuntimeState | None = None,
     recent_score_history: Sequence[float] = (),
 ) -> IndependentBookDecision:
     current_qty = (
@@ -79,6 +80,7 @@ def evaluate_independent_book(
         directional_leg_target_qty=directional_leg_target_qty,
         score=score,
         current_qty=current_qty,
+        prior_runtime_state=prior_runtime_state,
         entry_threshold=_entry_threshold(settings=settings, leg=leg),
         close_threshold=_close_threshold(settings=settings, leg=leg),
         scale_threshold=_scale_in_threshold(settings=settings, leg=leg),
@@ -121,6 +123,7 @@ def evaluate_independent_book(
         directional_leg_target_qty=directional_leg_target_qty,
         score=score,
         current_qty=current_qty,
+        prior_runtime_state=prior_runtime_state,
         entry_threshold=_effective_threshold_value(
             live_seed_threshold.effective_entry_threshold,
             _entry_threshold(settings=settings, leg=leg),
@@ -168,6 +171,7 @@ def _evaluate_book_core(
     directional_leg_target_qty: Decimal,
     score: float,
     current_qty: Decimal,
+    prior_runtime_state: StrategyBookRuntimeState | None,
     entry_threshold: float,
     close_threshold: float,
     scale_threshold: float,
@@ -221,6 +225,14 @@ def _evaluate_book_core(
         leg=leg,
     )
     eligibility: IndependentEligibilityOutcome | None = None
+    prior_book_state = _runtime_prior_book_state(prior_runtime_state=prior_runtime_state)
+    prior_scale_in_count = _runtime_counter(prior_runtime_state=prior_runtime_state, field_name="current_scale_in_count")
+    prior_de_risk_count = _runtime_counter(prior_runtime_state=prior_runtime_state, field_name="current_de_risk_count")
+    prior_state_version = _runtime_state_version(prior_runtime_state=prior_runtime_state)
+    prior_last_transition_reason = _runtime_text(prior_runtime_state=prior_runtime_state, field_name="last_transition_reason")
+    prior_last_transition_at = None if prior_runtime_state is None else prior_runtime_state.last_transition_at
+    prior_suspended_until = None if prior_runtime_state is None else prior_runtime_state.suspended_until
+    prior_cooldown_until = None if prior_runtime_state is None else prior_runtime_state.cooldown_until
 
     if current_qty <= EPSILON_DECIMAL_12:
         if score >= entry_threshold:
@@ -386,7 +398,7 @@ def _evaluate_book_core(
         current_qty=current_qty,
         target_qty=target_qty,
         state=state,
-        book_state=state,
+        book_state=None,
         holding_phase=None,
         health_state=execution_health_state,
         reason_codes=reason_codes,
@@ -409,6 +421,14 @@ def _evaluate_book_core(
             base_target_qty=raw_base_target_qty,
             sizing_reason_codes=tuple(reason_codes),
         ),
+        prior_book_state=prior_book_state,
+        current_scale_in_count=prior_scale_in_count,
+        current_de_risk_count=prior_de_risk_count,
+        last_transition_reason=prior_last_transition_reason,
+        last_transition_at=prior_last_transition_at,
+        suspended_until=prior_suspended_until,
+        cooldown_until=prior_cooldown_until,
+        state_version=prior_state_version,
     )
 
 
@@ -497,10 +517,42 @@ def _complete_decision(
         snapshot=initial_state_snapshot,
         book_state=derived_book_state,
     )
+    prior_book_state = _replay_prior_book_state(decision=decision)
+    transition = (
+        None
+        if prior_book_state is None
+        else transition_book_state(
+            prior_state=prior_book_state,
+            snapshot=initial_state_snapshot,
+        )
+    )
+    next_scale_in_count = int(decision.current_scale_in_count or 0) + (
+        1 if decision.book_action == "scale_in" else 0
+    )
+    next_de_risk_count = int(decision.current_de_risk_count or 0) + (
+        1 if decision.book_action == "de_risk" else 0
+    )
+    transition_changed = (
+        prior_book_state is not None
+        and prior_book_state != derived_book_state
+    ) or decision.book_action in {"open", "scale_in", "de_risk", "close_failed_thesis", "close_stale_thesis", "blocked"}
+    next_state_version = max(int(decision.state_version or 1), 1) + (1 if transition_changed else 0)
+    next_transition_reason = (
+        decision.close_reason
+        or decision.book_action
+        if transition_changed
+        else decision.last_transition_reason
+    )
     stateful_decision = replace(
         decision,
         book_state=derived_book_state,
         holding_phase=derived_holding_phase,
+        prior_book_state=prior_book_state,
+        current_scale_in_count=next_scale_in_count,
+        current_de_risk_count=next_de_risk_count,
+        last_transition_reason=next_transition_reason,
+        last_transition_at=(context.as_of_ts if transition_changed else decision.last_transition_at),
+        state_version=next_state_version,
     )
     health_snapshot = evaluate_leg_health(decision=stateful_decision)
     final_decision = replace(
@@ -526,13 +578,27 @@ def _complete_decision(
         live_applied=live_applied,
     )
     decided_state_snapshot = snapshot_from_decision(decision=final_decision)
+    if transition is not None:
+        decided_state_snapshot = replace(
+            decided_state_snapshot,
+            prior_book_state=transition.prior_state,
+            transition_valid=transition.valid_transition,
+            transition_violation_reason=transition.violation_reason,
+            last_transition_reason=transition.transition_reason or decided_state_snapshot.last_transition_reason,
+        )
     replay_snapshot = replay_snapshot_from_decision(
         decision=final_decision,
         threshold_snapshot=threshold,
         state_snapshot=decided_state_snapshot,
         health_snapshot=health_snapshot,
-        prior_book_state=_replay_prior_book_state(decision=final_decision),
-        prior_state_source="current_qty_inference",
+        prior_book_state=prior_book_state,
+        prior_state_source=(
+            None
+            if prior_book_state is None
+            else "runtime_state"
+            if decision.prior_book_state is not None
+            else "heuristic_inference"
+        ),
     )
     return replace(
         final_decision,
@@ -724,6 +790,51 @@ def _clamp(value: float, lower: float, upper: float) -> float:
 
 
 def _replay_prior_book_state(*, decision: IndependentBookDecision) -> str | None:
+    if decision.prior_book_state is not None:
+        return decision.prior_book_state
+    if decision.book_action == "open":
+        return "flat"
+    if decision.book_action == "scale_in":
+        return "holding" if decision.current_qty > EPSILON_DECIMAL_12 else "probing"
+    if decision.book_action == "de_risk":
+        return "holding"
+    if decision.book_action in {"close_failed_thesis", "close_stale_thesis"}:
+        return "holding" if decision.current_qty > EPSILON_DECIMAL_12 else "probing"
+    if decision.book_action == "blocked":
+        if any("trial_guard" in reason for reason in decision.blocked_reasons):
+            return "suspended"
+        if decision.current_qty > EPSILON_DECIMAL_12:
+            return "holding"
+        return "cooldown"
+    if decision.book_state is not None:
+        return decision.book_state
     if decision.current_qty > EPSILON_DECIMAL_12:
         return "holding"
     return "flat"
+
+
+def _runtime_prior_book_state(*, prior_runtime_state: StrategyBookRuntimeState | None) -> str | None:
+    if prior_runtime_state is None:
+        return None
+    value = str(prior_runtime_state.book_state or "").strip()
+    return None if not value else value
+
+
+def _runtime_counter(*, prior_runtime_state: StrategyBookRuntimeState | None, field_name: str) -> int:
+    if prior_runtime_state is None:
+        return 0
+    value = getattr(prior_runtime_state, field_name, 0)
+    return max(int(value or 0), 0)
+
+
+def _runtime_state_version(*, prior_runtime_state: StrategyBookRuntimeState | None) -> int:
+    if prior_runtime_state is None:
+        return 1
+    return max(int(prior_runtime_state.state_version or 1), 1)
+
+
+def _runtime_text(*, prior_runtime_state: StrategyBookRuntimeState | None, field_name: str) -> str | None:
+    if prior_runtime_state is None:
+        return None
+    value = str(getattr(prior_runtime_state, field_name, "") or "").strip()
+    return None if not value else value

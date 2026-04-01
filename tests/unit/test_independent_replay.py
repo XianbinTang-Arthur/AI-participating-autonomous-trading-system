@@ -76,6 +76,36 @@ class TestIndependentReplay(unittest.TestCase):
         self.assertFalse(snapshot.transition_reconstructed)
         self.assertIsNone(snapshot.transition_source)
 
+    def test_replay_snapshot_surfaces_transition_violation(self) -> None:
+        decision = IndependentBookDecision(
+            leg="long",
+            expectancy=None,
+            score=0.92,
+            current_qty=Decimal("0.01"),
+            target_qty=Decimal("0.03"),
+            state="opening",
+            reason_codes=[],
+            blocked_reasons=[],
+            min_hold_remaining_seconds=0.0,
+            rebalance_cooldown_remaining_seconds=0.0,
+            book_action="scale_in",
+            prior_book_state="cooldown",
+            current_scale_in_count=2,
+            state_version=4,
+        )
+
+        snapshot = replay_snapshot_from_decision(
+            decision=decision,
+            state_snapshot=snapshot_from_decision(decision=decision),
+            health_snapshot=evaluate_leg_health(decision=decision),
+            prior_book_state="cooldown",
+            prior_state_source="runtime_state",
+        )
+
+        self.assertTrue(snapshot.transition_reconstructed)
+        self.assertFalse(snapshot.transition_valid)
+        self.assertEqual(snapshot.transition_violation_reason, "independent_transition_invalid:cooldown->building")
+
 
 if __name__ == "__main__":
     unittest.main()

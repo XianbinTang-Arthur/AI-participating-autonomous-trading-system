@@ -208,6 +208,7 @@ class IndependentRecoverySnapshot(SchemaBase):
     health_state: str | None = None
     current_qty: Decimal = Decimal("0")
     target_qty: Decimal = Decimal("0")
+    prior_book_state: str | None = None
     current_scale_in_count: int = 0
     current_de_risk_count: int = 0
     expected_chain_ids: list[str] = Field(default_factory=list)
@@ -224,6 +225,8 @@ class IndependentRecoverySnapshot(SchemaBase):
     health_snapshot: dict[str, Any] | None = None
     replay_snapshot: dict[str, Any] | None = None
     decision_snapshot: dict[str, Any] | None = None
+    transition_valid: bool = True
+    transition_violation_reason: str | None = None
 
 
 class RecoveryStatus(SchemaBase):

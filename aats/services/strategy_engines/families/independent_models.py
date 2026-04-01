@@ -17,6 +17,7 @@ class IndependentBookRuntimeState:
     thesis_age_seconds: float | None = None
     current_scale_in_count: int = 0
     current_de_risk_count: int = 0
+    prior_book_state: str | None = None
     last_transition_at: datetime | None = None
     last_transition_reason: str | None = None
     suspended_until: datetime | None = None
@@ -38,3 +39,5 @@ class IndependentBookRuntimeState:
     policy_reason: str | None = None
     execution_policy_urgency: Literal["low", "medium", "high"] | None = None
     edge_strength: Literal["weak", "medium", "strong"] | None = None
+    transition_valid: bool = True
+    transition_violation_reason: str | None = None

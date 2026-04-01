@@ -27,8 +27,22 @@ class IndependentFamilyHealthSnapshot:
 
 def evaluate_leg_health(*, decision: IndependentBookDecision) -> IndependentLegHealthSnapshot:
     state = decision.execution_health_state or "ok"
-    blockers = tuple(reason for reason in decision.blocked_reasons if "execution_health" in reason or "trial_guard" in reason)
-    warnings = tuple(reason for reason in decision.reason_codes if "guard" in reason and reason not in blockers)
+    blocker_items = [
+        reason
+        for reason in decision.blocked_reasons
+        if "execution_health" in reason or "trial_guard" in reason
+    ]
+    warning_items = [
+        reason
+        for reason in decision.reason_codes
+        if "guard" in reason and reason not in blocker_items
+    ]
+    if decision.weak_edge_report_only:
+        warning_items.append("independent_weak_edge_report_only")
+    if decision.liquidity_quality_score is not None and float(decision.liquidity_quality_score) < 0.5:
+        warning_items.append("independent_liquidity_quality_degraded")
+    blockers = tuple(dict.fromkeys(blocker_items))
+    warnings = tuple(dict.fromkeys(warning_items))
     suspended = any("trial_guard" in reason for reason in decision.blocked_reasons)
     halt_openings = state == "blocked"
     only_reduce = state in {"degraded", "blocked"} and decision.current_qty > 0

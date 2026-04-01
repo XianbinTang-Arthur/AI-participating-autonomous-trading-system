@@ -1,13 +1,6 @@
 from __future__ import annotations
 
-from aats.services.strategy_engines.families.independent_family import IndependentFamilyEngine
-from aats.services.strategy_engines.families.legacy_adapters import (
-    DirectionalFamilyAdapter,
-    ExistingCandidateFamilyAdapter,
-)
-from aats.services.strategy_engines.families.opportunistic_family import OpportunisticFamilyEngine
-from aats.services.strategy_engines.families.protective_family import ProtectiveFamilyEngine
-from aats.services.strategy_engines.families.registry import StrategyFamilyRegistry
+from importlib import import_module
 
 __all__ = [
     "DirectionalFamilyAdapter",
@@ -17,3 +10,19 @@ __all__ = [
     "ProtectiveFamilyEngine",
     "StrategyFamilyRegistry",
 ]
+
+
+def __getattr__(name: str) -> object:
+    if name == "IndependentFamilyEngine":
+        return getattr(import_module(".independent_family", __name__), name)
+    if name == "DirectionalFamilyAdapter":
+        return getattr(import_module(".legacy_adapters", __name__), name)
+    if name == "ExistingCandidateFamilyAdapter":
+        return getattr(import_module(".legacy_adapters", __name__), name)
+    if name == "OpportunisticFamilyEngine":
+        return getattr(import_module(".opportunistic_family", __name__), name)
+    if name == "ProtectiveFamilyEngine":
+        return getattr(import_module(".protective_family", __name__), name)
+    if name == "StrategyFamilyRegistry":
+        return getattr(import_module(".registry", __name__), name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

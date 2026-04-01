@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 from decimal import Decimal
 
+from aats.schemas.strategy_runtime import StrategyBookRuntimeState
 from aats.services.strategy_engines.families.independent_family import _evaluate_independent_book
 from aats.services.strategy_engines.independent.diagnostics import runtime_state_from_decision
 from aats.services.strategy_engines.independent.engine import evaluate_independent_book
@@ -86,6 +87,72 @@ class TestIndependentEngine(unittest.TestCase):
         self.assertIsNotNone(runtime_state.threshold_snapshot.adaptive_entry_threshold)
         self.assertIsNotNone(runtime_state.threshold_snapshot.capital_multiplier)
         self.assertTrue(runtime_state.threshold_snapshot.reason_codes)
+
+    def test_evaluate_independent_book_inherits_prior_runtime_state_for_counts_and_transition(self) -> None:
+        settings = make_derivatives_hedge_settings(
+            strategy_hedge_independent_enabled=True,
+            strategy_hedge_independent_adaptive_rollout_enabled=False,
+            strategy_hedge_independent_rebalance_cooldown_seconds=0,
+            strategy_hedge_independent_min_score_stability_bps=0.0,
+        )
+        context = make_context(
+            product_type="derivatives",
+            current_exposure_side="long",
+            current_long_position_qty=Decimal("0.01"),
+        )
+        baseline = make_baseline(
+            direction_bias="long",
+            confidence=0.92,
+            suggested_position_scale=1.0,
+            volatility_target_scale=1.0,
+            factor_scores={
+                "momentum_alpha": 0.58,
+                "trend_alpha": 0.44,
+                "microstructure_alpha": 0.22,
+                "liquidity_scale": 0.97,
+            },
+        ).model_copy(update={"regime": "trend", "composite_alpha_score": 0.41})
+        expectancy = IndependentBookExpectancy(
+            leg="long",
+            expected_signal_edge_bps=19.0,
+            expected_slippage_bps=1.2,
+            expected_cost_bps=5.5,
+            expected_net_edge_bps=13.5,
+        )
+        prior_runtime_state = StrategyBookRuntimeState(
+            leg="long",
+            current_qty=Decimal("0.01"),
+            target_qty=Decimal("0.01"),
+            state="holding",
+            book_state="holding",
+            holding_phase="steady",
+            current_scale_in_count=2,
+            current_de_risk_count=1,
+            prior_book_state="building",
+            last_transition_reason="independent_scale_in",
+            state_version=6,
+        )
+
+        decision = evaluate_independent_book(
+            settings=settings,
+            context=context,
+            baseline=baseline,
+            ai_assessment=None,
+            leg="long",
+            expectancy=expectancy,
+            directional_leg_target_qty=Decimal("0.03"),
+            scorer=lambda **_: 0.98,
+            prior_runtime_state=prior_runtime_state,
+            recent_score_history=(0.98, 0.98, 0.98),
+        )
+
+        self.assertEqual(decision.prior_book_state, "holding")
+        self.assertEqual(decision.current_scale_in_count, 3)
+        self.assertEqual(decision.current_de_risk_count, 1)
+        self.assertEqual(decision.state_version, 7)
+        self.assertIsNotNone(decision.state_snapshot)
+        self.assertEqual(decision.state_snapshot.prior_book_state, "holding")
+        self.assertTrue(decision.state_snapshot.transition_valid)
 
 
 if __name__ == "__main__":
