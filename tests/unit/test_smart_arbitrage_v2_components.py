@@ -160,6 +160,7 @@ class TestSmartArbitrageV2Components(unittest.TestCase):
             basis_bps=Decimal("-40"),
             execution_mode="margin_reverse_carry",
             reference_ts=datetime(2026, 3, 27, 8, 0, tzinfo=timezone.utc),
+            hedge_margin_mode="cross",
         )
 
         self.assertEqual(cost.ideal_open_fee_bps, Decimal("1"))
@@ -213,6 +214,7 @@ class TestSmartArbitrageV2Components(unittest.TestCase):
             basis_bps=Decimal("-100"),
             execution_mode="margin_reverse_carry",
             reference_ts=frozen_now,
+            hedge_margin_mode="cross",
         )
 
         self.assertEqual(cost.expected_funding_events, 2)
@@ -252,6 +254,7 @@ class TestSmartArbitrageV2Components(unittest.TestCase):
             basis_bps=Decimal("40"),
             execution_mode="spot_carry",
             reference_ts=frozen_now,
+            hedge_margin_mode="cross",
         )
 
         self.assertEqual(cost.expected_funding_events, 0)
@@ -298,6 +301,7 @@ class TestSmartArbitrageV2Components(unittest.TestCase):
             basis_bps=Decimal("40"),
             execution_mode="spot_carry",
             reference_ts=frozen_now,
+            hedge_margin_mode="cross",
             hedge_symbol="BTC-USDT-SWAP",
             account_service=_AccountProxy(),
         )
@@ -340,6 +344,7 @@ class TestSmartArbitrageV2Components(unittest.TestCase):
             basis_bps=Decimal("40"),
             execution_mode="spot_carry",
             reference_ts=frozen_now,
+            hedge_margin_mode="cross",
             hedge_symbol="BTC-USDT-SWAP",
             account_service=_AccountProxy(),
         )
@@ -391,6 +396,7 @@ class TestSmartArbitrageV2Components(unittest.TestCase):
             basis_bps=Decimal("40"),
             execution_mode="spot_carry",
             reference_ts=frozen_now,
+            hedge_margin_mode="cross",
             hedge_symbol="BTC-USDT-SWAP",
             account_service=_AccountSchedule(),
         )
@@ -443,6 +449,7 @@ class TestSmartArbitrageV2Components(unittest.TestCase):
             basis_bps=Decimal("40"),
             execution_mode="spot_carry",
             reference_ts=frozen_now,
+            hedge_margin_mode="cross",
             hedge_symbol="BTC-USDT-SWAP",
             account_service=_AccountSchedule(),
         )
@@ -468,6 +475,7 @@ class TestSmartArbitrageV2Components(unittest.TestCase):
             basis_bps=Decimal("-40"),
             execution_mode="margin_reverse_carry",
             reference_ts=datetime(2026, 3, 27, 8, 0, tzinfo=timezone.utc),
+            hedge_margin_mode="cross",
         )
 
         self.assertEqual(cost.borrow_hour_windows, 8)
@@ -561,6 +569,7 @@ class TestSmartArbitrageV2Components(unittest.TestCase):
             settings=settings,
             pair=pair,
             opportunity=opportunity,
+            hedge_margin_mode="cross",
             account_spot_qty=Decimal("0"),
             account_hedge_qty=Decimal("0"),
             sleeve_spot_qty=Decimal("0"),
@@ -613,7 +622,7 @@ class TestSmartArbitrageV2Components(unittest.TestCase):
 
         self.assertEqual(legs[1].margin_mode, "isolated")
 
-    def test_leg_planner_can_require_explicit_hedge_margin_mode(self) -> None:
+    def test_leg_planner_requires_explicit_hedge_margin_mode_by_default(self) -> None:
         settings = AATSSettings.model_validate(
             {
                 "margin_mode": "cross",
@@ -641,7 +650,7 @@ class TestSmartArbitrageV2Components(unittest.TestCase):
                 settings=settings,
                 pair=pair,
                 opportunity=opportunity,
-                require_explicit_hedge_margin_mode=True,
+                require_explicit_hedge_margin_mode=False,
                 account_spot_qty=Decimal("0"),
                 account_hedge_qty=Decimal("0"),
                 sleeve_spot_qty=Decimal("0"),
@@ -679,6 +688,7 @@ class TestSmartArbitrageV2Components(unittest.TestCase):
             settings=settings,
             pair=pair,
             opportunity=opportunity,
+            hedge_margin_mode="cross",
             account_spot_qty=Decimal("0"),
             account_hedge_qty=Decimal("0"),
             sleeve_spot_qty=Decimal("0"),
@@ -794,7 +804,7 @@ class TestSmartArbitrageV2Components(unittest.TestCase):
 
         self.assertEqual(observed["hedge_margin_mode"], "isolated")
 
-    def test_cost_model_can_require_explicit_hedge_margin_mode(self) -> None:
+    def test_cost_model_requires_explicit_hedge_margin_mode_by_default(self) -> None:
         settings = AATSSettings.model_validate(
             {
                 "margin_mode": "cross",
@@ -808,7 +818,7 @@ class TestSmartArbitrageV2Components(unittest.TestCase):
                 basis_bps=Decimal("12"),
                 execution_mode="spot_carry",
                 reference_ts=datetime(2026, 3, 27, 8, 0, tzinfo=timezone.utc),
-                require_explicit_hedge_margin_mode=True,
+                require_explicit_hedge_margin_mode=False,
                 spot_symbol="BTC-USDT",
                 hedge_symbol="BTC-USDT-SWAP",
             )

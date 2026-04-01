@@ -19,7 +19,7 @@ def build_cost_breakdown(
     execution_mode: str | None,
     reference_ts: datetime,
     hedge_margin_mode: str | None = None,
-    require_explicit_hedge_margin_mode: bool = False,
+    require_explicit_hedge_margin_mode: bool = True,
     spot_symbol: str | None = None,
     hedge_symbol: str | None = None,
     account_service: Any | None = None,
@@ -41,9 +41,10 @@ def build_cost_breakdown(
     source_flags: list[str] = []
     drag_calculator = TradeDragCalculator()
     trade_cost_service = TradeCostService(settings=settings, fee_resolver=fee_resolver)
-    if require_explicit_hedge_margin_mode and not str(hedge_margin_mode or "").strip():
-        raise ValueError("smart_arbitrage_hedge_margin_mode_required")
-    resolved_hedge_margin_mode = str(hedge_margin_mode or settings.margin_mode)
+    resolved_hedge_margin_mode = _resolve_required_hedge_margin_mode(
+        hedge_margin_mode=hedge_margin_mode,
+        require_explicit_hedge_margin_mode=require_explicit_hedge_margin_mode,
+    )
 
     if not settings.smart_arbitrage_cost_model_enabled:
         fallback_total = max(to_decimal(settings.smart_arbitrage_estimated_cost_bps), Decimal("0"))
@@ -491,3 +492,18 @@ def _borrow_cost_component(
 
     source_flags.append("borrow_absent")
     return Decimal("0"), borrow_hour_windows, source_flags
+
+
+def _resolve_required_hedge_margin_mode(
+    *,
+    hedge_margin_mode: str | None,
+    require_explicit_hedge_margin_mode: bool,
+) -> str:
+    normalized = str(hedge_margin_mode or "").strip().lower()
+    if normalized:
+        return normalized
+    # The derivatives hedge margin scope is now a required runtime input.
+    # `require_explicit_hedge_margin_mode` is retained only for call-site compatibility.
+    if require_explicit_hedge_margin_mode or not normalized:
+        raise ValueError("smart_arbitrage_hedge_margin_mode_required")
+    raise ValueError("smart_arbitrage_hedge_margin_mode_required")

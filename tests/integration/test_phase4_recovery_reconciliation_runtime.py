@@ -269,15 +269,13 @@ class TestPhase4RecoveryReconciliationRuntime(unittest.IsolatedAsyncioTestCase):
                 recovered_runtime.recovery_status.recovery_action,
                 "halted_stuck_sent_submit_commands",
             )
+            self.assertEqual(recovered_runtime.recovery_status.pending_command_count, 0)
             self.assertEqual(recovered_runtime.recovery_status.stuck_sent_submit_order_count, 1)
             self.assertIn(
                 "stuck_sent_submit_commands",
                 recovered_runtime.recovery_status.resume_blocked_reasons,
             )
-            self.assertIn(
-                "pending_execution_commands",
-                recovered_runtime.recovery_status.resume_blocked_reasons,
-            )
+            self.assertEqual(recovered_runtime.recovery_status.sent_stale_command_count, 0)
         if runtime is not None and runtime.database_runtime is not None:
             runtime.database_runtime.dispose()
         if recovered_runtime is not None and recovered_runtime.database_runtime is not None:

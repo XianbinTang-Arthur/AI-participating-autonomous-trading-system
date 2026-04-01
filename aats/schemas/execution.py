@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from typing import Any
 from decimal import Decimal
 from datetime import datetime
 from typing import Literal
@@ -665,6 +666,7 @@ class OrderObligation(SchemaBase):
     consumed_amount: Decimal = Decimal("0")
     released_amount: Decimal = Decimal("0")
     consumed_fill_ids: list[str] = Field(default_factory=list)
+    blocked_fill_ids: list[str] = Field(default_factory=list)
     status: ObligationStatus = "ACTIVE"
     product_type: ProductType = "spot"
     margin_mode: MarginModelType = "cash"
@@ -678,6 +680,8 @@ class OrderObligation(SchemaBase):
     strategy_execution_mode: str | None = None
     strategy_state_phase: str | None = None
     reference_price: Decimal | None = None
+    processing_failure_reason: str | None = None
+    processing_failure_details: dict[str, Any] = Field(default_factory=dict)
     last_update_ts: datetime | None = None
 
 

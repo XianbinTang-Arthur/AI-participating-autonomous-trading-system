@@ -243,6 +243,11 @@ class RecoveryStatus(SchemaBase):
     reconciliation_classification: str | None = None
     open_order_count: int = 0
     pending_command_count: int = 0
+    pending_submit_command_count: int = 0
+    pending_cancel_command_count: int = 0
+    sent_stale_command_count: int = 0
+    sent_stale_submit_command_count: int = 0
+    sent_stale_cancel_command_count: int = 0
     stuck_sent_submit_order_count: int = 0
     divergence_count: int = 0
     safe_startup: bool = True

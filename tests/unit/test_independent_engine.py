@@ -154,6 +154,70 @@ class TestIndependentEngine(unittest.TestCase):
         self.assertEqual(decision.state_snapshot.prior_book_state, "holding")
         self.assertTrue(decision.state_snapshot.transition_valid)
 
+    def test_evaluate_independent_book_fail_closes_invalid_transition_into_blocked_safe_state(self) -> None:
+        settings = make_derivatives_hedge_settings(
+            strategy_hedge_independent_enabled=True,
+            strategy_hedge_independent_adaptive_rollout_enabled=False,
+            strategy_hedge_independent_rebalance_cooldown_seconds=0,
+            strategy_hedge_independent_min_score_stability_bps=0.0,
+        )
+        context = make_context(product_type="derivatives", current_exposure_side="flat")
+        baseline = make_baseline(
+            direction_bias="long",
+            confidence=0.9,
+            suggested_position_scale=1.0,
+            volatility_target_scale=1.0,
+            factor_scores={
+                "momentum_alpha": 0.55,
+                "trend_alpha": 0.41,
+                "microstructure_alpha": 0.2,
+                "liquidity_scale": 0.95,
+            },
+        ).model_copy(update={"regime": "trend", "composite_alpha_score": 0.4})
+        expectancy = IndependentBookExpectancy(
+            leg="long",
+            expected_signal_edge_bps=18.0,
+            expected_slippage_bps=1.2,
+            expected_cost_bps=5.0,
+            expected_net_edge_bps=13.0,
+        )
+        prior_runtime_state = StrategyBookRuntimeState(
+            leg="long",
+            current_qty=Decimal("0"),
+            target_qty=Decimal("0"),
+            state="blocked",
+            book_state="cooldown",
+            holding_phase=None,
+            prior_book_state="holding",
+            state_version=3,
+        )
+
+        decision = evaluate_independent_book(
+            settings=settings,
+            context=context,
+            baseline=baseline,
+            ai_assessment=None,
+            leg="long",
+            expectancy=expectancy,
+            directional_leg_target_qty=Decimal("0.01"),
+            scorer=lambda **_: 0.99,
+            prior_runtime_state=prior_runtime_state,
+            recent_score_history=(0.99, 0.99, 0.99),
+        )
+
+        self.assertEqual(decision.state, "blocked")
+        self.assertEqual(decision.book_action, "blocked")
+        self.assertEqual(decision.target_qty, Decimal("0"))
+        self.assertIn("independent_state_transition_invalid", decision.reason_codes)
+        self.assertIn("independent_transition_invalid:cooldown->probing", decision.blocked_reasons)
+        self.assertIsNotNone(decision.state_snapshot)
+        self.assertEqual(decision.state_snapshot.book_state, "cooldown")
+        self.assertFalse(decision.state_snapshot.transition_valid)
+        self.assertEqual(
+            decision.state_snapshot.transition_violation_reason,
+            "independent_transition_invalid:cooldown->probing",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

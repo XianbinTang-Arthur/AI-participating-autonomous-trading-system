@@ -818,6 +818,7 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
         target = await runtime.decision_engine.run_cycle(settings.default_symbol, settings.primary_timeframe)
 
         self.assertEqual(settings.derivatives_position_mode, "hedge")
+        self.assertEqual(settings.strategy_family_active, "independent")
         self.assertFalse(settings.strategy_family_auto_selection_enabled)
         self.assertTrue(settings.strategy_family_independent_enabled)
         self.assertFalse(settings.strategy_family_independent_shadow_mode_enabled)
@@ -827,6 +828,8 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(settings.smart_arbitrage_enabled)
         self.assertEqual(settings.strategy_hedge_overlay_mode, "independent")
         self.assertFalse(settings.strategy_hedge_protective_enabled)
+        self.assertFalse(settings.strategy_hedge_opportunistic_enabled)
+        self.assertEqual(settings.strategy_hedge_opportunistic_rollout_stage, "dry_run")
         self.assertEqual(settings.strategy_hedge_independent_long_entry_threshold, 0.30)
         self.assertEqual(settings.strategy_hedge_independent_short_entry_threshold, 0.30)
         self.assertEqual(settings.strategy_hedge_independent_long_close_threshold, 0.24)
@@ -847,6 +850,12 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(settings.strategy_hedge_independent_limit_offset_bps_entry, 1.5)
         self.assertEqual(settings.strategy_hedge_independent_limit_offset_bps_scale_in, 1.0)
         self.assertEqual(settings.strategy_hedge_independent_limit_offset_bps_stale_close, 0.8)
+        self.assertFalse(settings.strategy_hedge_independent_adaptive_rollout_enabled)
+        self.assertFalse(settings.strategy_hedge_independent_health_enforcement_enabled)
+        self.assertFalse(settings.strategy_hedge_independent_size_down_entry_enabled)
+        self.assertFalse(settings.strategy_hedge_independent_long_short_asymmetry_enabled)
+        self.assertEqual(settings.strategy_hedge_independent_short_asymmetry_penalty_multiplier, 0.85)
+        self.assertEqual(settings.strategy_hedge_independent_entry_size_down_floor, 0.50)
         self.assertEqual(target.strategy_family, "independent")
 
     async def test_derivatives_independent_overlay_runtime_exposes_leg_scoped_thresholds_and_books(self) -> None:

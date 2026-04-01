@@ -79,6 +79,36 @@ class _InMemoryExecutionCommandRepository:
                 claimable.append(row)
         return [deepcopy(row) for row in claimable[:limit]]
 
+    def command_counts(self, *, sent_stale_before: datetime | None = None) -> dict[str, int]:
+        counts = {
+            "pending_total": 0,
+            "pending_submit": 0,
+            "pending_cancel": 0,
+            "sent_stale_total": 0,
+            "sent_stale_submit": 0,
+            "sent_stale_cancel": 0,
+        }
+        for row in self.rows.values():
+            state = str(row["state"]).upper()
+            command_type = str(row["command_type"]).strip().lower()
+            if state == "PENDING":
+                counts["pending_total"] += 1
+                if command_type == "submit":
+                    counts["pending_submit"] += 1
+                elif command_type == "cancel":
+                    counts["pending_cancel"] += 1
+                continue
+            if state != "SENT":
+                continue
+            if sent_stale_before is not None and row["updated_at"] > sent_stale_before:
+                continue
+            counts["sent_stale_total"] += 1
+            if command_type == "submit":
+                counts["sent_stale_submit"] += 1
+            elif command_type == "cancel":
+                counts["sent_stale_cancel"] += 1
+        return counts
+
     def claim_command(
         self,
         *,
@@ -108,21 +138,18 @@ class _InMemoryExecutionCommandRepository:
     def mark_acked(self, command_id: str, updated_at: datetime) -> None:
         row = self.rows[command_id]
         row["state"] = "ACKED"
-        row["attempt_count"] += 1
         row["updated_at"] = updated_at
         row["last_error"] = None
 
     def mark_failed(self, command_id: str, error: str, updated_at: datetime) -> None:
         row = self.rows[command_id]
         row["state"] = "FAILED"
-        row["attempt_count"] += 1
         row["updated_at"] = updated_at
         row["last_error"] = error
 
     def mark_abandoned(self, command_id: str, reason: str, updated_at: datetime) -> None:
         row = self.rows[command_id]
         row["state"] = "ABANDONED"
-        row["attempt_count"] += 1
         row["updated_at"] = updated_at
         row["last_error"] = reason
 
@@ -332,6 +359,7 @@ class TestTask52ExecutionCommandFlow(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(processed, 1)
         command = command_repo.first()
         self.assertEqual(command["state"], "ACKED")
+        self.assertEqual(command["attempt_count"], 1)
         state = manager.execution_repo.get_order_state("clphase2_submit")
         self.assertIsNotNone(state)
         self.assertEqual(state.status, "FILLED")
@@ -523,6 +551,7 @@ class TestTask52ExecutionCommandFlow(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(processed, 0)
         self.assertEqual(adapter.submit_count, 0)
         self.assertEqual(command_repo.get_command("cmd_phase2_replay")["state"], "SENT")
+        self.assertEqual(command_repo.get_command("cmd_phase2_replay")["attempt_count"], 1)
 
     async def test_phase2_sent_cancel_command_can_be_retried(self) -> None:
         command_repo = _InMemoryExecutionCommandRepository()

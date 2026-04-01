@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import timedelta
 
 from aats.schemas.exchange import AccountBaselineSnapshot
+from aats.schemas.common import utc_now
 from aats.schemas.system import RecoveryStatus
 from aats.services.execution_control.order_service import ExecutionOrderService
 from aats.services.execution_engine.recovery import ExecutionRecoveryService, RecoveryArtifacts
@@ -59,6 +61,11 @@ class ExecutionLedgerRecoveryService:
         recovered_order_count = base_status.recovered_order_count
         open_order_count = base_status.open_order_count
         pending_command_count = 0
+        pending_submit_command_count = 0
+        pending_cancel_command_count = 0
+        sent_stale_command_count = 0
+        sent_stale_submit_command_count = 0
+        sent_stale_cancel_command_count = 0
         stranded_submit_order_count = 0
         stuck_sent_submit_order_count = 0
         if self.execution_order_repo is not None:
@@ -73,9 +80,38 @@ class ExecutionLedgerRecoveryService:
                     scoped_open_orders
                 )
         if self.execution_command_repo is not None:
-            pending_commands = getattr(self.execution_command_repo, "pending_commands", None)
-            if callable(pending_commands):
-                pending_command_count = len(pending_commands(limit=1000))
+            sent_stale_before = utc_now() - timedelta(
+                seconds=max(float(getattr(self.settings, "execution_command_sent_retry_after_seconds", 0.0) or 0.0), 0.0)
+            )
+            command_counts = getattr(self.execution_command_repo, "command_counts", None)
+            if callable(command_counts):
+                counts = command_counts(sent_stale_before=sent_stale_before)
+                pending_command_count = int(counts.get("pending_total", 0))
+                pending_submit_command_count = int(counts.get("pending_submit", 0))
+                pending_cancel_command_count = int(counts.get("pending_cancel", 0))
+                sent_stale_command_count = int(counts.get("sent_stale_total", 0))
+                sent_stale_submit_command_count = int(counts.get("sent_stale_submit", 0))
+                sent_stale_cancel_command_count = int(counts.get("sent_stale_cancel", 0))
+            else:
+                pending_commands = getattr(self.execution_command_repo, "pending_commands", None)
+                if callable(pending_commands):
+                    commands = pending_commands(limit=1000, sent_stale_before=sent_stale_before)
+                    pending_rows = [row for row in commands if str(row.get("state") or "").upper() == "PENDING"]
+                    stale_sent_rows = [row for row in commands if str(row.get("state") or "").upper() == "SENT"]
+                    pending_command_count = len(pending_rows)
+                    pending_submit_command_count = sum(
+                        1 for row in pending_rows if str(row.get("command_type") or "").strip().lower() == "submit"
+                    )
+                    pending_cancel_command_count = sum(
+                        1 for row in pending_rows if str(row.get("command_type") or "").strip().lower() == "cancel"
+                    )
+                    sent_stale_command_count = len(stale_sent_rows)
+                    sent_stale_submit_command_count = sum(
+                        1 for row in stale_sent_rows if str(row.get("command_type") or "").strip().lower() == "submit"
+                    )
+                    sent_stale_cancel_command_count = sum(
+                        1 for row in stale_sent_rows if str(row.get("command_type") or "").strip().lower() == "cancel"
+                    )
 
         notes = list(base_status.notes)
         notes.append("phase4_execution_ledger_recovery_enabled")
@@ -144,6 +180,13 @@ class ExecutionLedgerRecoveryService:
                 resume_blocked_reasons.append("stuck_sent_submit_commands")
             notes.append(f"stuck_sent_submit_commands:{stuck_sent_submit_order_count}")
 
+        if sent_stale_command_count:
+            notes.append(f"sent_stale_execution_commands:{sent_stale_command_count}")
+        if sent_stale_submit_command_count:
+            notes.append(f"sent_stale_submit_commands:{sent_stale_submit_command_count}")
+        if sent_stale_cancel_command_count:
+            notes.append(f"sent_stale_cancel_commands:{sent_stale_cancel_command_count}")
+
         if pending_command_count:
             self.kill_switch.halt(reason="phase4_pending_execution_commands")
             safe_startup = False
@@ -177,6 +220,11 @@ class ExecutionLedgerRecoveryService:
                 "recovered_order_count": recovered_order_count,
                 "open_order_count": open_order_count,
                 "pending_command_count": pending_command_count,
+                "pending_submit_command_count": pending_submit_command_count,
+                "pending_cancel_command_count": pending_cancel_command_count,
+                "sent_stale_command_count": sent_stale_command_count,
+                "sent_stale_submit_command_count": sent_stale_submit_command_count,
+                "sent_stale_cancel_command_count": sent_stale_cancel_command_count,
                 "stuck_sent_submit_order_count": stuck_sent_submit_order_count,
                 "recovered_snapshot_available": latest_snapshot is not None,
                 "latest_reconciliation_id": latest_reconciliation.reconciliation_id if latest_reconciliation is not None else base_status.latest_reconciliation_id,

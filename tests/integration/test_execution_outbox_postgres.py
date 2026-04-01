@@ -324,6 +324,72 @@ class TestExecutionOutboxPostgres(unittest.IsolatedAsyncioTestCase):
             runtime.dispose()
             self._drop_schema(admin_engine, schema_name)
 
+    async def test_command_attempt_count_tracks_claims_without_double_counting_terminal_updates(self) -> None:
+        runtime, admin_engine, schema_name = self._schema_runtime()
+        try:
+            command_repo = PostgresExecutionCommandRepository(runtime.session_factory)
+            order_repo = PostgresExecutionOrderRepository(runtime.session_factory)
+            created_at = utc_now()
+            state = self._order_state(client_order_id="clord_attempt_count_1", status="CREATED")
+            order_repo.create_order(
+                order_id=state.client_order_id,
+                intent=OrderIntent(
+                    intent_id=state.intent_id,
+                    decision_id=state.decision_id,
+                    symbol=state.symbol,
+                    side="sell",
+                    quantity=Decimal("0.001"),
+                    execution_style="taker",
+                    order_type="market",
+                    reference_price=Decimal("60000"),
+                    urgency="medium",
+                    time_in_force="IOC",
+                    reduce_only=True,
+                    close_only=True,
+                    td_mode="cross",
+                    position_mode="long_short_mode",
+                    pos_side="long",
+                    instrument_family="BTC-USDT",
+                    settle_currency="USDT",
+                    idempotency_key="submit:intent_attempt_count_1",
+                    product_type="derivatives",
+                    margin_mode="cross",
+                    execution_attempt_id="execution_attempt:clord_attempt_count_1",
+                    position_intent="close_long",
+                ),
+                initial_state="CREATED",
+                created_at=created_at,
+                raw_payload={"client_order_id": state.client_order_id},
+            )
+            command_repo.enqueue_command(
+                command_id="cmd_attempt_count_1",
+                order_id="clord_attempt_count_1",
+                command_type="submit",
+                idempotency_key="submit:intent_attempt_count_1",
+                payload={"client_order_id": "clord_attempt_count_1"},
+                created_at=created_at,
+            )
+            pending = command_repo.pending_commands(limit=10)
+            self.assertEqual(len(pending), 1)
+            claimed = command_repo.claim_command(
+                command_id="cmd_attempt_count_1",
+                expected_state="PENDING",
+                expected_updated_at=pending[0]["updated_at"],
+                updated_at=utc_now(),
+            )
+            self.assertTrue(claimed)
+            command_repo.mark_acked("cmd_attempt_count_1", updated_at=utc_now())
+
+            stored = command_repo.get_command("cmd_attempt_count_1")
+
+            self.assertIsNotNone(stored)
+            assert stored is not None
+            self.assertEqual(stored["state"], "ACKED")
+            self.assertEqual(stored["attempt_count"], 1)
+        finally:
+            runtime.dispose()
+            self._drop_schema(admin_engine, schema_name)
+
     async def test_persist_fill_updates_obligation_in_same_commit(self) -> None:
         runtime, admin_engine, schema_name = self._schema_runtime()
         try:

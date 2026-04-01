@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import and_, asc, or_, select
+from sqlalchemy import and_, asc, func, or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -108,6 +108,50 @@ class PostgresExecutionCommandRepository:
             ).all()
         return [_command_row_to_dict(row) for row in rows]
 
+    def command_counts(self, *, sent_stale_before: datetime | None = None) -> dict[str, int]:
+        with self.session_factory() as session:
+            filters = [ExecutionCommandModel.state == "PENDING"]
+            if sent_stale_before is not None:
+                filters.append(
+                    and_(
+                        ExecutionCommandModel.state == "SENT",
+                        ExecutionCommandModel.updated_at <= sent_stale_before,
+                    )
+                )
+            rows = session.execute(
+                select(
+                    ExecutionCommandModel.state,
+                    ExecutionCommandModel.command_type,
+                    func.count(),
+                )
+                .where(or_(*filters))
+                .group_by(ExecutionCommandModel.state, ExecutionCommandModel.command_type)
+            ).all()
+        counts = {
+            "pending_total": 0,
+            "pending_submit": 0,
+            "pending_cancel": 0,
+            "sent_stale_total": 0,
+            "sent_stale_submit": 0,
+            "sent_stale_cancel": 0,
+        }
+        for state, command_type, count in rows:
+            normalized_state = str(state or "").upper()
+            normalized_type = str(command_type or "").strip().lower()
+            if normalized_state == "PENDING":
+                counts["pending_total"] += int(count)
+                if normalized_type == "submit":
+                    counts["pending_submit"] += int(count)
+                elif normalized_type == "cancel":
+                    counts["pending_cancel"] += int(count)
+            elif normalized_state == "SENT":
+                counts["sent_stale_total"] += int(count)
+                if normalized_type == "submit":
+                    counts["sent_stale_submit"] += int(count)
+                elif normalized_type == "cancel":
+                    counts["sent_stale_cancel"] += int(count)
+        return counts
+
     def claim_command(
         self,
         *,
@@ -137,7 +181,13 @@ class PostgresExecutionCommandRepository:
             return True
 
     def mark_sent(self, command_id: str, updated_at: datetime) -> None:
-        self._update_state(command_id=command_id, state="SENT", updated_at=updated_at, last_error=None)
+        self._update_state(
+            command_id=command_id,
+            state="SENT",
+            updated_at=updated_at,
+            last_error=None,
+            increment_attempt_count=True,
+        )
 
     def mark_acked(self, command_id: str, updated_at: datetime) -> None:
         self._update_state(command_id=command_id, state="ACKED", updated_at=updated_at, last_error=None)
@@ -155,13 +205,15 @@ class PostgresExecutionCommandRepository:
         state: str,
         updated_at: datetime,
         last_error: str | None,
+        increment_attempt_count: bool = False,
     ) -> None:
         with self.session_factory() as session:
             row = session.get(ExecutionCommandModel, command_id)
             if row is None:
                 return
             row.state = state
-            row.attempt_count += 1
+            if increment_attempt_count:
+                row.attempt_count += 1
             row.last_error = None if last_error is None else last_error[:1024]
             row.updated_at = updated_at
             session.commit()

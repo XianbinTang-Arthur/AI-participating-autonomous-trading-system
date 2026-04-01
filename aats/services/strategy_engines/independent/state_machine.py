@@ -89,6 +89,8 @@ def derive_book_state(*, snapshot: IndependentStateSnapshot) -> IndependentBookS
     if snapshot.book_action == "blocked":
         if any("trial_guard" in reason for reason in snapshot.blocked_reasons):
             return "suspended"
+        if any("independent_transition_invalid:" in reason for reason in snapshot.blocked_reasons):
+            return "suspended" if current_qty > EPSILON_DECIMAL_12 else "cooldown"
         if current_qty > EPSILON_DECIMAL_12:
             return "holding"
         return "cooldown"

@@ -277,7 +277,8 @@ def test_generated_managed_config_artifacts_exist_and_match_profile_layout() -> 
         assert strategy_path.exists(), strategy_path
         data = yaml.safe_load(strategy_path.read_text(encoding="utf-8"))
         assert isinstance(data, dict)
-        assert data["strategy_family_active"] == "directional"
+        expected_active_family = "independent" if profile == "derivatives_live" else "directional"
+        assert data["strategy_family_active"] == expected_active_family
         assert "ai_operating_mode" in data
         assert "max_decisions_per_minute" in data
         example_env = repo_root / "configs" / "templates" / f".env.{profile}.example"
@@ -321,7 +322,7 @@ def test_derivatives_managed_profiles_use_relaxed_directional_thresholds() -> No
         expected_protective_enabled = profile != "derivatives_live"
         assert values["strategy_hedge_protective_enabled"] is expected_protective_enabled
         expected_opportunistic_enabled = False
-        expected_opportunistic_rollout = "live" if profile == "derivatives_live" else "dry_run"
+        expected_opportunistic_rollout = "dry_run"
         assert values["strategy_hedge_opportunistic_enabled"] is expected_opportunistic_enabled
         assert values["strategy_hedge_opportunistic_rollout_stage"] == expected_opportunistic_rollout
         assert values["strategy_hedge_opportunistic_open_threshold"] == 0.62
@@ -398,7 +399,7 @@ def test_derivatives_live_managed_profile_is_pinned_for_independent_live() -> No
     values = load_managed_profile_values("derivatives_live", project_root=repo_root)
 
     assert values["derivatives_position_mode"] == "hedge"
-    assert values["strategy_family_active"] == "directional"
+    assert values["strategy_family_active"] == "independent"
     assert values["strategy_family_auto_selection_enabled"] is False
     assert values["strategy_family_independent_enabled"] is True
     assert values["strategy_family_independent_shadow_mode_enabled"] is False
@@ -434,6 +435,12 @@ def test_derivatives_live_managed_profile_is_pinned_for_independent_live() -> No
     assert values["strategy_hedge_independent_emit_expected_vs_realized_metrics"] is True
     assert values["strategy_hedge_independent_emit_close_reason_metrics"] is True
     assert values["strategy_hedge_independent_emit_execution_policy_metrics"] is True
+    assert values["strategy_hedge_independent_adaptive_rollout_enabled"] is False
+    assert values["strategy_hedge_independent_health_enforcement_enabled"] is False
+    assert values["strategy_hedge_independent_size_down_entry_enabled"] is False
+    assert values["strategy_hedge_independent_long_short_asymmetry_enabled"] is False
+    assert values["strategy_hedge_independent_short_asymmetry_penalty_multiplier"] == 0.85
+    assert values["strategy_hedge_independent_entry_size_down_floor"] == 0.50
     assert values["strategy_hedge_independent_min_safe_net_edge_bps"] == 3.0
     assert values["strategy_hedge_independent_expected_slippage_buffer_bps"] == 1.0
     assert values["strategy_hedge_independent_expected_execution_buffer_bps"] == 2.0

@@ -8,7 +8,7 @@ from aats.events import topics
 from aats.events.envelopes import build_envelope
 from aats.bootstrap.settings import AATSSettings
 from aats.schemas.common import utc_now
-from aats.schemas.execution import FillEvent, OrderIntent, OrderState
+from aats.schemas.execution import FillEvent, OrderIntent, OrderObligation, OrderState
 from aats.schemas.exchange import ExchangeAccountSnapshot, ExchangeBalance
 from aats.services.accounting import derivatives_initial_margin_requirement
 from aats.services.execution_engine.obligations import ExecutionObligationService
@@ -271,6 +271,62 @@ class TestExecutionObligations(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(obligation.status, "RELEASED")
         self.assertEqual(obligation.consumed_amount, Decimal("60.0"))
         self.assertEqual(obligation.released_amount, Decimal("0.06"))
+
+    async def test_unknown_fee_currency_is_quarantined_without_crashing_obligation_consumption(self) -> None:
+        obligation_repo = InMemoryExecutionObligationRepository()
+        service = ExecutionObligationService(
+            settings=AATSSettings.model_validate({"account_backend": "okx", "account_read_enabled": True}),
+            obligation_repo=obligation_repo,
+        )
+        now = utc_now()
+        obligation = OrderObligation(
+            obligation_id="obl_bad_fee",
+            client_order_id="cl_bad_fee",
+            decision_id="decision_bad_fee",
+            intent_id="intent_bad_fee",
+            symbol="BTC-USDT",
+            side="buy",
+            reserve_currency="USDT",
+            reserved_amount=Decimal("100.5"),
+            consumed_amount=Decimal("0"),
+            released_amount=Decimal("0"),
+            status="ACTIVE",
+            product_type="spot",
+            margin_mode="cash",
+            reference_price=Decimal("100"),
+            last_update_ts=now,
+            created_at=now,
+        )
+        obligation_repo.save_obligation(obligation)
+        fill = FillEvent(
+            fill_id="fill_bad_fee",
+            decision_id=obligation.decision_id,
+            intent_id=obligation.intent_id,
+            client_order_id=obligation.client_order_id,
+            exchange_order_id="ord_bad_fee",
+            symbol=obligation.symbol,
+            venue="TEST",
+            side="buy",
+            fill_qty=Decimal("1"),
+            fill_price=Decimal("100"),
+            fee_amount=Decimal("0.01"),
+            fee_currency="ETH",
+            product_type="spot",
+            margin_mode="cash",
+            liquidity_role="taker",
+            exchange_timestamp=now,
+            ingestion_timestamp=now,
+        )
+
+        updated = service.preview_obligation_for_fill(fill)
+
+        self.assertIsNotNone(updated)
+        assert updated is not None
+        self.assertEqual(updated.status, "ACTIVE")
+        self.assertEqual(updated.consumed_amount, Decimal("0"))
+        self.assertEqual(updated.blocked_fill_ids, [fill.fill_id])
+        self.assertEqual(updated.processing_failure_reason, "unsupported_fee_currency")
+        self.assertEqual(updated.processing_failure_details["fee_currency"], "ETH")
 
     async def test_spot_buy_reservation_prefers_dynamic_fee_resolver(self) -> None:
         snapshot = ExchangeAccountSnapshot(

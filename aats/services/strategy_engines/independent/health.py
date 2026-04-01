@@ -30,7 +30,7 @@ def evaluate_leg_health(*, decision: IndependentBookDecision) -> IndependentLegH
     blocker_items = [
         reason
         for reason in decision.blocked_reasons
-        if "execution_health" in reason or "trial_guard" in reason
+        if "execution_health" in reason or "trial_guard" in reason or "independent_transition_invalid:" in reason
     ]
     warning_items = [
         reason

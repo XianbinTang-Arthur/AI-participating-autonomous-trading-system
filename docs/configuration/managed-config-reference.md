@@ -40,6 +40,8 @@
 - 默认产品类型：`derivatives`
 - 默认保证金模式：`cross`
 - 默认 OKX 模式：`实盘`
+- 当前托管主策略：`independent`
+- 当前托管 overlay 模式：`independent`
 
 ## `.env` 里应该保留什么
 
@@ -47,6 +49,15 @@
 - 数据库、端口、日志目录
 - 交易所与 OpenAI 凭证
 - 账户级仓位/杠杆/风控上限
+
+## 数据库清空后能不能删 `migrations`
+
+- 不能删。
+- 空库初始化、启动自迁移、升级路径测试都依赖 `migrations/*.sql`。
+- 当前仓库至少需要保留：
+  - `0001_postgres_latest_schema.sql`
+  - `0002_postgres_legacy_upgrade.sql`
+  - `0003_postgres_execution_attempt_id_columns.sql`
 
 ## 按字段分组的修改指南
 

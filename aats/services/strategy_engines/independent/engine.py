@@ -523,6 +523,29 @@ def _complete_decision(
         book_state=derived_book_state,
         holding_phase=derived_holding_phase,
     )
+    if not advanced_state_snapshot.transition_valid and advanced_state_snapshot.transition_violation_reason is not None:
+        decision = _fail_closed_for_transition_violation(
+            decision=decision,
+            violation_reason=advanced_state_snapshot.transition_violation_reason,
+        )
+        initial_state_snapshot = snapshot_from_decision(decision=decision)
+        derived_book_state = derive_book_state(snapshot=initial_state_snapshot)
+        derived_holding_phase = derive_holding_phase(
+            snapshot=initial_state_snapshot,
+            book_state=derived_book_state,
+        )
+        advanced_state_snapshot = advance_state_snapshot(
+            decision=decision,
+            as_of_ts=context.as_of_ts,
+            book_state=derived_book_state,
+            holding_phase=derived_holding_phase,
+        )
+        advanced_state_snapshot = replace(
+            advanced_state_snapshot,
+            transition_valid=False,
+            transition_violation_reason=advanced_state_snapshot.transition_violation_reason
+            or decision.blocked_reasons[-1],
+        )
     prior_book_state = advanced_state_snapshot.prior_book_state
     stateful_decision = replace(
         decision,
@@ -583,6 +606,37 @@ def _complete_decision(
         state_snapshot=decided_state_snapshot,
         health_snapshot=health_snapshot,
         replay_snapshot=replay_snapshot,
+    )
+
+
+def _fail_closed_for_transition_violation(
+    *,
+    decision: IndependentBookDecision,
+    violation_reason: str,
+) -> IndependentBookDecision:
+    blocked_reasons = tuple(dict.fromkeys([*decision.blocked_reasons, violation_reason]))
+    reason_codes = tuple(dict.fromkeys([*decision.reason_codes, "independent_state_transition_invalid"]))
+    current_qty = max(to_decimal(decision.current_qty), Decimal("0"))
+    return replace(
+        decision,
+        target_qty=current_qty,
+        state="blocked",
+        book_action="blocked",
+        close_reason=None,
+        blocked_reasons=blocked_reasons,
+        reason_codes=reason_codes,
+        execution_health_state="blocked",
+        sizing=build_sizing_outcome(
+            book_action="blocked",
+            current_qty=current_qty,
+            target_qty=current_qty,
+            base_target_qty=(
+                decision.sizing.base_target_qty
+                if decision.sizing is not None
+                else current_qty
+            ),
+            sizing_reason_codes=reason_codes,
+        ),
     )
 
 
