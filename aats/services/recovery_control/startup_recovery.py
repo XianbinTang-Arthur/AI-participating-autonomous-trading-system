@@ -60,6 +60,7 @@ class ExecutionLedgerRecoveryService:
         open_order_count = base_status.open_order_count
         pending_command_count = 0
         stranded_submit_order_count = 0
+        stuck_sent_submit_order_count = 0
         if self.execution_order_repo is not None:
             count_orders = getattr(self.execution_order_repo, "count_orders", None)
             open_orders = getattr(self.execution_order_repo, "open_orders", None)
@@ -68,7 +69,9 @@ class ExecutionLedgerRecoveryService:
             if callable(open_orders):
                 scoped_open_orders = list(open_orders())
                 open_order_count = max(open_order_count, len(scoped_open_orders))
-                stranded_submit_order_count = self._stranded_submit_order_count(scoped_open_orders)
+                stranded_submit_order_count, stuck_sent_submit_order_count = self._submit_command_order_recovery_counts(
+                    scoped_open_orders
+                )
         if self.execution_command_repo is not None:
             pending_commands = getattr(self.execution_command_repo, "pending_commands", None)
             if callable(pending_commands):
@@ -76,6 +79,14 @@ class ExecutionLedgerRecoveryService:
 
         notes = list(base_status.notes)
         notes.append("phase4_execution_ledger_recovery_enabled")
+        independent_recovery_snapshots = list(base_status.independent_recovery_snapshots)
+        if independent_recovery_snapshots:
+            notes.append(f"independent_recovery_snapshots:{len(independent_recovery_snapshots)}")
+            blocked_snapshot_count = sum(
+                1 for item in independent_recovery_snapshots if item.recovery_blockers
+            )
+            if blocked_snapshot_count:
+                notes.append(f"independent_recovery_blocked_books:{blocked_snapshot_count}")
         resume_blocked_reasons = list(base_status.resume_blocked_reasons)
         recovery_state = base_status.recovery_state
         recovery_action = base_status.recovery_action
@@ -121,6 +132,18 @@ class ExecutionLedgerRecoveryService:
                 elif "operator_rebaseline_required" not in resume_blocked_reasons:
                     resume_blocked_reasons.append("operator_rebaseline_required")
 
+        if stuck_sent_submit_order_count:
+            self.kill_switch.halt(reason="phase4_stuck_sent_submit_commands")
+            safe_startup = False
+            safe_to_trade = False
+            resume_eligible = False
+            rebaseline_available = True
+            recovery_state = "resume_blocked"
+            recovery_action = "halted_stuck_sent_submit_commands"
+            if "stuck_sent_submit_commands" not in resume_blocked_reasons:
+                resume_blocked_reasons.append("stuck_sent_submit_commands")
+            notes.append(f"stuck_sent_submit_commands:{stuck_sent_submit_order_count}")
+
         if pending_command_count:
             self.kill_switch.halt(reason="phase4_pending_execution_commands")
             safe_startup = False
@@ -128,7 +151,8 @@ class ExecutionLedgerRecoveryService:
             resume_eligible = False
             rebaseline_available = True
             recovery_state = "resume_blocked"
-            recovery_action = "halted_pending_execution_commands"
+            if recovery_action != "halted_stuck_sent_submit_commands":
+                recovery_action = "halted_pending_execution_commands"
             if "pending_execution_commands" not in resume_blocked_reasons:
                 resume_blocked_reasons.append("pending_execution_commands")
             notes.append(f"pending_execution_commands:{pending_command_count}")
@@ -153,6 +177,7 @@ class ExecutionLedgerRecoveryService:
                 "recovered_order_count": recovered_order_count,
                 "open_order_count": open_order_count,
                 "pending_command_count": pending_command_count,
+                "stuck_sent_submit_order_count": stuck_sent_submit_order_count,
                 "recovered_snapshot_available": latest_snapshot is not None,
                 "latest_reconciliation_id": latest_reconciliation.reconciliation_id if latest_reconciliation is not None else base_status.latest_reconciliation_id,
                 "latest_reconciliation_severity": latest_reconciliation.severity if latest_reconciliation is not None else base_status.latest_reconciliation_severity,
@@ -172,18 +197,20 @@ class ExecutionLedgerRecoveryService:
                 "rebaseline_available": rebaseline_available,
                 "halted": self.kill_switch.halted,
                 "recovery_action": recovery_action,
+                "independent_recovery_snapshots": independent_recovery_snapshots,
                 "resume_blocked_reasons": list(dict.fromkeys(resume_blocked_reasons)),
                 "notes": list(dict.fromkeys(notes)),
             }
         )
 
-    def _stranded_submit_order_count(self, open_orders: list[dict]) -> int:
+    def _submit_command_order_recovery_counts(self, open_orders: list[dict]) -> tuple[int, int]:
         if self.execution_command_repo is None:
-            return 0
+            return 0, 0
         get_by_idempotency_key = getattr(self.execution_command_repo, "get_by_idempotency_key", None)
         if not callable(get_by_idempotency_key):
-            return 0
+            return 0, 0
         stranded = 0
+        stuck_sent = 0
         for row in open_orders:
             state = str(row.get("state") or "").upper()
             if state not in {"CREATED", "SUBMITTING"}:
@@ -197,6 +224,14 @@ class ExecutionLedgerRecoveryService:
             if not lookup_keys:
                 stranded += 1
                 continue
-            if all(get_by_idempotency_key(key) is None for key in lookup_keys):
+            matched_commands = [
+                command
+                for key in lookup_keys
+                if (command := get_by_idempotency_key(key)) is not None
+            ]
+            if not matched_commands:
                 stranded += 1
-        return stranded
+                continue
+            if any(str(command.get("state") or "").upper() == "SENT" for command in matched_commands):
+                stuck_sent += 1
+        return stranded, stuck_sent

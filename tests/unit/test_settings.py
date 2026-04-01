@@ -66,6 +66,11 @@ class TestAATSSettings(unittest.TestCase):
         self.assertFalse(settings.live_submit_enabled)
         self.assertEqual(settings.execution_backend, "paper")
 
+    def test_operator_session_cookie_secure_defaults_to_true(self) -> None:
+        settings = AATSSettings.model_validate({})
+
+        self.assertTrue(settings.operator_session_cookie_secure)
+
     def test_load_settings_preserves_yaml_profile_values_when_env_does_not_override(self) -> None:
         with patch.object(AATSSettings, "model_config", {**AATSSettings.model_config, "env_file": None}):
             with patch.dict(

@@ -37,7 +37,10 @@ from aats.schemas.operator import (
 )
 from aats.services.blocker_control import BlockerControlService
 from aats.services.blocker_control.actions import BlockerActionService
-from aats.services.accounting import fill_fee_cost_in_quote, fill_fee_delta_in_quote
+from aats.services.accounting import (
+    try_fill_fee_cost_in_quote,
+    try_fill_fee_delta_in_quote,
+)
 from aats.services.execution_engine.okx_account import derivatives_position_mode_contract
 from aats.services.execution_engine.fill_ordering import fill_processing_sort_key
 from aats.services.governance_engine.recovery_posture import RecoveryPostureEvaluator
@@ -1357,21 +1360,17 @@ class OperatorQueryService:
         fill_price = self._record_value(record, "fill_price")
         if symbol in {None, ""} or side in {None, ""} or fill_price in {None, ""}:
             return abs(fee_amount)
-        return abs(
-            self._to_decimal(
-                fill_fee_cost_in_quote(
-                    SimpleNamespace(
-                        symbol=symbol,
-                        fee_amount=fee_amount,
-                        fee_currency=self._record_value(record, "fee_currency"),
-                        venue=self._record_value(record, "venue") or "OKX",
-                        side=side,
-                        fill_price=fill_price,
-                    )
-                )
+        fee_cost, _fee_error = try_fill_fee_cost_in_quote(
+            SimpleNamespace(
+                symbol=symbol,
+                fee_amount=fee_amount,
+                fee_currency=self._record_value(record, "fee_currency"),
+                venue=self._record_value(record, "venue") or "OKX",
+                side=side,
+                fill_price=fill_price,
             )
-            or Decimal("0")
         )
+        return None if fee_cost is None else abs(self._to_decimal(fee_cost) or Decimal("0"))
 
     def _signed_fee_delta_in_quote(self, record: Any) -> Decimal | None:
         fee_amount = self._to_decimal(self._record_value(record, "fee_amount"))
@@ -1381,18 +1380,17 @@ class OperatorQueryService:
         if fee_amount is not None:
             if symbol in {None, ""} or side in {None, ""} or fill_price in {None, ""}:
                 return fee_amount
-            return self._to_decimal(
-                fill_fee_delta_in_quote(
-                    SimpleNamespace(
-                        symbol=symbol,
-                        fee_amount=fee_amount,
-                        fee_currency=self._record_value(record, "fee_currency"),
-                        venue=self._record_value(record, "venue") or "OKX",
-                        side=side,
-                        fill_price=fill_price,
-                    )
+            fee_delta, _fee_error = try_fill_fee_delta_in_quote(
+                SimpleNamespace(
+                    symbol=symbol,
+                    fee_amount=fee_amount,
+                    fee_currency=self._record_value(record, "fee_currency"),
+                    venue=self._record_value(record, "venue") or "OKX",
+                    side=side,
+                    fill_price=fill_price,
                 )
             )
+            return self._to_decimal(fee_delta)
         fee_delta = self._to_decimal(self._record_value(record, "fee_delta"))
         fee_quote_amount = self._to_decimal(self._record_value(record, "fee_quote_amount"))
         if fee_delta is not None:
@@ -1966,6 +1964,7 @@ class OperatorQueryService:
             target_payload = self._position_target_payload(dict(latest_target_event.payload)) or {}
             book_expectancy_summary = target_payload.get("book_expectancy_summary")
             book_runtime_states = list(target_payload.get("book_runtime_states") or [])
+            independent_adaptive_summary = target_payload.get("independent_adaptive_summary")
             diagnostic_metric_flags = self._effective_diagnostic_metric_flags(target_payload)
             target_family = str(target_payload.get("strategy_family") or "directional")
             overlay_parent_exposure = self._overlay_parent_exposure_from_payload(target_payload)
@@ -1986,6 +1985,7 @@ class OperatorQueryService:
                 "family_execution_summary": target_payload.get("family_execution_summary"),
                 "book_expectancy_summary": book_expectancy_summary,
                 "book_runtime_states": book_runtime_states,
+                "independent_adaptive_summary": independent_adaptive_summary,
                 "diagnostic_metric_flags": diagnostic_metric_flags,
                 "overlay_parent_exposure": overlay_parent_exposure,
                 "hedge_overlay_decision": target_payload.get("hedge_overlay_decision"),
@@ -2179,6 +2179,7 @@ class OperatorQueryService:
             ),
         }
         independent_expected_vs_realized_summary = self._independent_expected_vs_realized_summary()
+        independent_adaptive_summary = self._independent_adaptive_summary_from_payload(latest_target_payload)
         if independent_expected_vs_realized_summary is not None:
             summary["latest_independent_expected_vs_realized_sample_count"] = (
                 independent_expected_vs_realized_summary.get("sample_count")
@@ -2186,6 +2187,9 @@ class OperatorQueryService:
             summary["latest_independent_expected_vs_realized_net_bps"] = (
                 independent_expected_vs_realized_summary.get("avg_realized_net_bps")
             )
+        if isinstance(independent_adaptive_summary, dict):
+            summary["latest_independent_adaptive_live_applied"] = bool(independent_adaptive_summary.get("live_applied"))
+            summary["latest_independent_adaptive_shadow_only"] = bool(independent_adaptive_summary.get("shadow_only"))
         (
             smart_arbitrage_pair_definitions,
             smart_arbitrage_pair_registry_warning_codes,
@@ -2210,6 +2214,7 @@ class OperatorQueryService:
             "latest_allocation_decision": latest_allocation_decision,
             "latest_bundle": latest_bundle,
             "latest_applied_target": latest_target_payload,
+            "independent_adaptive_summary": independent_adaptive_summary,
             "independent_expected_vs_realized_summary": independent_expected_vs_realized_summary,
             "strategy_sleeves": sleeve_records,
             "recent_sleeve_intents": recent_sleeve_intents,
@@ -2457,6 +2462,12 @@ class OperatorQueryService:
             "hedge_independent_emit_expected_vs_realized_metrics": self.runtime.settings.strategy_hedge_independent_emit_expected_vs_realized_metrics,
             "hedge_independent_emit_close_reason_metrics": self.runtime.settings.strategy_hedge_independent_emit_close_reason_metrics,
             "hedge_independent_emit_execution_policy_metrics": self.runtime.settings.strategy_hedge_independent_emit_execution_policy_metrics,
+            "hedge_independent_adaptive_rollout_enabled": self.runtime.settings.strategy_hedge_independent_adaptive_rollout_enabled,
+            "hedge_independent_health_enforcement_enabled": self.runtime.settings.strategy_hedge_independent_health_enforcement_enabled,
+            "hedge_independent_size_down_entry_enabled": self.runtime.settings.strategy_hedge_independent_size_down_entry_enabled,
+            "hedge_independent_long_short_asymmetry_enabled": self.runtime.settings.strategy_hedge_independent_long_short_asymmetry_enabled,
+            "hedge_independent_short_asymmetry_penalty_multiplier": self.runtime.settings.strategy_hedge_independent_short_asymmetry_penalty_multiplier,
+            "hedge_independent_entry_size_down_floor": self.runtime.settings.strategy_hedge_independent_entry_size_down_floor,
             "hedge_rollout": {
                 "runtime_stage": overlay_runtime_stage(self.runtime.settings),
                 "current_mode": overlay_mode,
@@ -3744,6 +3755,86 @@ class OperatorQueryService:
         return []
 
     @staticmethod
+    def _independent_adaptive_summary_from_payload(payload: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not isinstance(payload, dict):
+            return None
+        direct = payload.get("independent_adaptive_summary")
+        if isinstance(direct, dict) and direct:
+            return dict(direct)
+        runtime_states = OperatorQueryService._book_runtime_states_from_payload(payload)
+        if not runtime_states:
+            return None
+        legs: dict[str, dict[str, Any]] = {}
+        reason_codes: list[str] = []
+        for state in runtime_states:
+            leg = str(state.get("leg") or "").strip().lower()
+            if leg not in {"long", "short"}:
+                continue
+            threshold = state.get("threshold_snapshot")
+            if not isinstance(threshold, dict) or not threshold:
+                continue
+            leg_summary = {
+                "leg": leg,
+                "shadow_only": bool(threshold.get("shadow_only", True)),
+                "rollout_enabled": bool(threshold.get("rollout_enabled", False)),
+                "live_applied": bool(threshold.get("live_applied", False)),
+                "health_enforcement_enabled": bool(threshold.get("health_enforcement_enabled", False)),
+                "size_down_entry_enabled": bool(threshold.get("size_down_entry_enabled", False)),
+                "long_short_asymmetry_enabled": bool(threshold.get("long_short_asymmetry_enabled", False)),
+                "entry_threshold": threshold.get("entry_threshold"),
+                "adaptive_entry_threshold": threshold.get("adaptive_entry_threshold"),
+                "effective_entry_threshold": threshold.get("effective_entry_threshold"),
+                "close_threshold": threshold.get("close_threshold"),
+                "adaptive_close_threshold": threshold.get("adaptive_close_threshold"),
+                "effective_close_threshold": threshold.get("effective_close_threshold"),
+                "scale_in_threshold": threshold.get("scale_in_threshold"),
+                "adaptive_scale_in_threshold": threshold.get("adaptive_scale_in_threshold"),
+                "effective_scale_in_threshold": threshold.get("effective_scale_in_threshold"),
+                "thesis_age_seconds": threshold.get("thesis_age_seconds"),
+                "adaptive_thesis_age_seconds": threshold.get("adaptive_thesis_age_seconds"),
+                "effective_thesis_age_seconds": threshold.get("effective_thesis_age_seconds"),
+                "de_risk_net_edge_bps": threshold.get("de_risk_net_edge_bps"),
+                "adaptive_de_risk_net_edge_bps": threshold.get("adaptive_de_risk_net_edge_bps"),
+                "effective_de_risk_net_edge_bps": threshold.get("effective_de_risk_net_edge_bps"),
+                "capital_multiplier": threshold.get("capital_multiplier"),
+                "confidence_multiplier": threshold.get("confidence_multiplier"),
+                "volatility_multiplier": threshold.get("volatility_multiplier"),
+                "liquidity_multiplier": threshold.get("liquidity_multiplier"),
+                "health_multiplier": threshold.get("health_multiplier"),
+                "direction_bias_multiplier": threshold.get("direction_bias_multiplier"),
+                "book_state": state.get("book_state"),
+                "holding_phase": state.get("holding_phase"),
+                "health_state": state.get("health_state"),
+                "eligibility_state": state.get("eligibility_state"),
+                "current_qty": state.get("current_qty"),
+                "target_qty": state.get("target_qty"),
+                "size_multiplier": state.get("size_multiplier"),
+                "reason_codes": list(threshold.get("reason_codes") or []),
+            }
+            legs[leg] = leg_summary
+            reason_codes.extend(leg_summary["reason_codes"])
+        if not legs:
+            return None
+        ordered_reasons = list(dict.fromkeys(code for code in reason_codes if str(code or "").strip()))
+        live_applied = any(bool(item.get("live_applied")) for item in legs.values())
+        rollout_enabled = any(bool(item.get("rollout_enabled")) for item in legs.values())
+        health_enforcement_enabled = any(bool(item.get("health_enforcement_enabled")) for item in legs.values())
+        size_down_entry_enabled = any(bool(item.get("size_down_entry_enabled")) for item in legs.values())
+        long_short_asymmetry_enabled = any(bool(item.get("long_short_asymmetry_enabled")) for item in legs.values())
+        return {
+            "family": "independent",
+            "shadow_only": not live_applied,
+            "rollout_enabled": rollout_enabled,
+            "live_applied": live_applied,
+            "health_enforcement_enabled": health_enforcement_enabled,
+            "size_down_entry_enabled": size_down_entry_enabled,
+            "long_short_asymmetry_enabled": long_short_asymmetry_enabled,
+            "reason_codes": ordered_reasons,
+            "long_leg": legs.get("long"),
+            "short_leg": legs.get("short"),
+        }
+
+    @staticmethod
     def _overlay_parent_exposure_from_payload(payload: dict[str, Any] | None) -> dict[str, Any] | None:
         if not isinstance(payload, dict):
             return None
@@ -4603,6 +4694,8 @@ class OperatorQueryService:
             normalized["book_expectancy_summary"] = self._book_expectancy_summary_from_payload(normalized)
         if not normalized.get("book_runtime_states"):
             normalized["book_runtime_states"] = self._book_runtime_states_from_payload(normalized)
+        if normalized.get("independent_adaptive_summary") is None:
+            normalized["independent_adaptive_summary"] = self._independent_adaptive_summary_from_payload(normalized)
         if not normalized.get("diagnostic_metric_flags"):
             normalized["diagnostic_metric_flags"] = self._effective_diagnostic_metric_flags(normalized)
         overlay_parent_exposure = self._overlay_parent_exposure_from_payload(normalized)
@@ -5215,6 +5308,8 @@ class OperatorQueryService:
                 payload["book_expectancy_summary"] = self._book_expectancy_summary_from_payload(payload) or self._book_expectancy_summary_from_payload(position_target)
             if not payload.get("book_runtime_states"):
                 payload["book_runtime_states"] = self._book_runtime_states_from_payload(payload) or self._book_runtime_states_from_payload(position_target)
+            if payload.get("independent_adaptive_summary") is None:
+                payload["independent_adaptive_summary"] = self._independent_adaptive_summary_from_payload(payload) or self._independent_adaptive_summary_from_payload(position_target)
             if not payload.get("diagnostic_metric_flags"):
                 payload["diagnostic_metric_flags"] = self._effective_diagnostic_metric_flags(payload, position_target)
             overlay_parent_exposure = self._overlay_parent_exposure_from_payload(payload) or self._overlay_parent_exposure_from_payload(position_target)
@@ -5288,6 +5383,8 @@ class OperatorQueryService:
                 payload["book_expectancy_summary"] = self._book_expectancy_summary_from_payload(payload) or self._book_expectancy_summary_from_payload(position_target)
             if not payload.get("book_runtime_states"):
                 payload["book_runtime_states"] = self._book_runtime_states_from_payload(payload) or self._book_runtime_states_from_payload(position_target)
+            if payload.get("independent_adaptive_summary") is None:
+                payload["independent_adaptive_summary"] = self._independent_adaptive_summary_from_payload(payload) or self._independent_adaptive_summary_from_payload(position_target)
             if not payload.get("diagnostic_metric_flags"):
                 payload["diagnostic_metric_flags"] = self._effective_diagnostic_metric_flags(payload, position_target)
             overlay_parent_exposure = self._overlay_parent_exposure_from_payload(payload) or self._overlay_parent_exposure_from_payload(position_target)
@@ -5467,6 +5564,7 @@ class OperatorQueryService:
             family_execution_summary = position_target.get("family_execution_summary")
         book_expectancy_summary = self._book_expectancy_summary_from_payload(native_outcome) or self._book_expectancy_summary_from_payload(position_target)
         book_runtime_states = self._book_runtime_states_from_payload(native_outcome) or self._book_runtime_states_from_payload(position_target)
+        independent_adaptive_summary = self._independent_adaptive_summary_from_payload(native_outcome) or self._independent_adaptive_summary_from_payload(position_target)
         overlay_parent_exposure = self._overlay_parent_exposure_from_payload(native_outcome) or self._overlay_parent_exposure_from_payload(position_target)
         overlay_parent_exposure_summary = self._overlay_parent_exposure_summary_from_payload(native_outcome) or self._overlay_parent_exposure_summary_from_payload(position_target)
         parent_signal_fields = self._overlay_parent_signal_fields_from_payload(native_outcome) or self._overlay_parent_signal_fields_from_payload(position_target) or {}
@@ -5497,6 +5595,7 @@ class OperatorQueryService:
             "family_execution_summary": family_execution_summary,
             "book_expectancy_summary": book_expectancy_summary,
             "book_runtime_states": book_runtime_states,
+            "independent_adaptive_summary": independent_adaptive_summary,
             "independent_expected_vs_realized_summary": independent_expected_vs_realized_summary,
             **parent_signal_fields,
             "decision_source": None if not isinstance(native_outcome, dict) else native_outcome.get("decision_source"),
@@ -5725,6 +5824,7 @@ class OperatorQueryService:
                     "family_execution_summary": target.get("family_execution_summary") if target else None,
                     "book_expectancy_summary": target.get("book_expectancy_summary") if target else None,
                     "book_runtime_states": self._book_runtime_states_from_payload(target),
+                    "independent_adaptive_summary": self._independent_adaptive_summary_from_payload(target),
                     "diagnostic_metric_flags": self._effective_diagnostic_metric_flags(target),
                     "overlay_parent_exposure": self._overlay_parent_exposure_from_payload(target),
                     **(self._overlay_parent_signal_fields_from_payload(target) or {}),

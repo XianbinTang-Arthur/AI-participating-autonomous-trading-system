@@ -6,6 +6,8 @@ import {
   localizeError,
   readableBookExpectancySummary,
   readableBookRuntimeStateSummary,
+  readableIndependentAdaptiveMeta,
+  readableIndependentAdaptiveSummary,
   readableExpectedVsRealizedMeta,
   readableExpectedVsRealizedSummary,
   readableFamilyExecutionDirection,
@@ -88,6 +90,7 @@ export function renderStrategySections(data) {
   const tradeCostConfig = strategyRuntime.configured_parameters?.trade_costs || {};
   const directionalConfig = strategyRuntime.configured_parameters?.directional || {};
   const independentExpectedVsRealized = strategyRuntime.independent_expected_vs_realized_summary || {};
+  const independentAdaptiveSummary = strategyRuntime.independent_adaptive_summary || {};
 
   return {
     strategyHero: surfaceCard({
@@ -228,6 +231,13 @@ export function renderStrategySections(data) {
             `${readableState(latestBundle.status || strategyRuntimeSummary.latest_bundle_status || "unknown")} / ${formatSigned(strategyAppliedTarget.target_position_qty)}`,
             `${formatNumber(recentBundles[0]?.legs?.length ?? latestBundle.legs?.length ?? 0, 0, "0")} 条腿 | ${readableFamilyExecutionSummary(strategyAppliedTarget, "保持当前仓位")}${familyExpectancySuffix(strategyAppliedTarget)}`,
           ],
+          ...(
+            readableIndependentAdaptiveSummary(independentAdaptiveSummary, "") ? [[
+              "独立双书自适应阈值",
+              readableIndependentAdaptiveSummary(independentAdaptiveSummary, "当前还没有独立双书自适应摘要"),
+              readableIndependentAdaptiveMeta(independentAdaptiveSummary, "当前没有额外自适应说明"),
+            ]] : []
+          ),
           ...(
             readableExpectedVsRealizedSummary(independentExpectedVsRealized, "") ? [[
               "独立双书预期 vs 已实现",

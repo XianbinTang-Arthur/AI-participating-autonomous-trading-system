@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass, replace
-from datetime import timedelta
+from collections.abc import Sequence
+from dataclasses import asdict
 from decimal import Decimal
 from typing import Literal
 
@@ -23,94 +22,64 @@ from aats.services.strategy_engines.base import (
     StrategyFamilyRuntimeControl,
     StrategyTargetHistory,
 )
+from aats.services.strategy_engines.independent.diagnostics import (
+    legacy_runtime_state_snapshot as _legacy_runtime_state_snapshot,
+    runtime_state_from_decision as _runtime_state_from_decision,
+)
+from aats.services.strategy_engines.independent.engine import (
+    build_independent_family_candidate as _build_independent_family_candidate,
+    evaluate_independent_book as _evaluate_independent_book_v2,
+)
+from aats.services.strategy_engines.independent.execution_policy import (
+    resolve_execution_policy as _resolve_execution_policy,
+    resolve_execution_policy_from_mode as _resolve_execution_policy_from_mode,
+)
+from aats.services.strategy_engines.independent.gates import (
+    evaluate_entry_quality_gate as _evaluate_entry_quality_gate,
+    evaluate_open_eligibility as _evaluate_open_eligibility,
+    low_edge_cooldown_active as _independent_low_edge_cooldown_active_v2,
+    performance_degraded as _independent_performance_degraded_v2,
+    post_close_cooldown_active as _independent_post_close_cooldown_active_v2,
+    required_safe_net_edge_bps as _required_safe_net_edge_bps_v2,
+    trial_guard_active as _independent_trial_guard_active_v2,
+)
 from aats.services.strategy_engines.families.protective_family import (
     _candidate_state_from_overlay_state,
     _placeholder_family_candidate,
     protective_runtime_supported,
 )
 from aats.services.strategy_engines.families.independent_models import IndependentBookRuntimeState
+from aats.services.strategy_engines.independent.lifecycle import (
+    close_reason_code as _independent_close_reason_code_v2,
+    close_reason_summary as _independent_close_reason_summary_v2,
+    compute_de_risk_target_qty as _independent_de_risk_target_qty_v2,
+    compute_thesis_age_seconds as _independent_thesis_age_seconds_v2,
+    cooldown_until as _independent_cooldown_until_v2,
+    determine_close_reason as _independent_close_reason_v2,
+    last_transition_at as _independent_last_transition_at_v2,
+    min_hold_remaining_seconds as _independent_min_hold_remaining_seconds_v2,
+    rebalance_remaining_seconds as _independent_rebalance_remaining_seconds_v2,
+)
+from aats.services.strategy_engines.independent.models import (
+    IndependentBookAction,
+    IndependentBookDecision as IndependentBookEvaluation,
+    IndependentBookExpectancy,
+    IndependentBookExpectancyResolver,
+    IndependentBookScorer,
+    IndependentExecutionHealthState,
+    IndependentExecutionPolicy,
+    IndependentFamilyEvaluation,
+    IndependentLeg,
+    ScoreStabilityMetrics,
+)
+from aats.services.strategy_engines.independent.scoring import (
+    compute_candidate_confidence as _candidate_confidence_v2,
+    compute_raw_book_score as _independent_book_score_v2,
+    compute_score_stability as _score_stability_metrics_v2,
+    compute_signal_edge_bps as _independent_signal_edge_bps_v2,
+)
 from aats.services.strategy_overlay_rollout import overlay_rollout_status
 from aats.services.trade_costs import TradeCostService
-
-IndependentLeg = Literal["long", "short"]
-IndependentExecutionHealthState = Literal["ok", "degraded", "blocked"]
-IndependentBookAction = Literal[
-    "inactive",
-    "open",
-    "hold",
-    "scale_in",
-    "de_risk",
-    "close_failed_thesis",
-    "close_stale_thesis",
-    "blocked",
-]
-IndependentBookScorer = Callable[..., float]
-IndependentBookExpectancyResolver = Callable[..., "IndependentBookExpectancy | None"]
-
-
-@dataclass(frozen=True, slots=True)
-class IndependentBookExpectancy:
-    leg: IndependentLeg
-    expected_signal_edge_bps: float
-    expected_slippage_bps: float
-    expected_cost_bps: float
-    expected_net_edge_bps: float
-    resolution_failed: bool = False
-
-
-@dataclass(frozen=True, slots=True)
-class ScoreStabilityMetrics:
-    support_count: int
-    min_score: float
-    mean_score: float
-    max_drawdown_bps: float
-    stable: bool
-    source: Literal["recent_target_history", "current_signal_confirmation"]
-
-
-@dataclass(frozen=True, slots=True)
-class IndependentExecutionPolicy:
-    edge_strength: Literal["weak", "medium", "strong"]
-    urgency: Literal["low", "medium", "high"]
-    execution_style_preference: str | None
-    order_type_preference: Literal["market", "limit"] | None
-    time_in_force_preference: str | None
-    limit_offset_bps_preference: Decimal | None
-    max_acceptable_cost_bps: float | None
-    policy_reason: str
-
-
-@dataclass(frozen=True, slots=True)
-class IndependentBookEvaluation:
-    leg: IndependentLeg
-    expectancy: IndependentBookExpectancy | None
-    score: float
-    current_qty: Decimal
-    target_qty: Decimal
-    state: str
-    reason_codes: list[str]
-    blocked_reasons: list[str]
-    min_hold_remaining_seconds: float
-    rebalance_cooldown_remaining_seconds: float
-    book_action: IndependentBookAction = "inactive"
-    close_reason: str | None = None
-    thesis_age_seconds: float | None = None
-    weak_edge_report_only: bool = False
-    liquidity_quality_score: float | None = None
-    score_stability_metrics: ScoreStabilityMetrics | None = None
-    execution_health_state: IndependentExecutionHealthState | None = None
-    execution_policy: IndependentExecutionPolicy | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class IndependentFamilyEvaluation:
-    final_target_qty: Decimal
-    legs: list[StrategyLegIntent]
-    overlay_decision: HedgeOverlayDecision
-    long_book: IndependentBookEvaluation
-    short_book: IndependentBookEvaluation
-    book_runtime_states: tuple[IndependentBookRuntimeState, ...] = ()
-
 
 class IndependentFamilyEngine:
     family_name: StrategyFamily = "independent"
@@ -364,6 +333,9 @@ def independent_candidate_from_directional_target(
                 else result.long_book.score_stability_metrics.source
             ),
             "long_execution_health_state": result.long_book.execution_health_state,
+            "long_health_state": result.long_book.health_state,
+            "long_book_state": result.long_book.book_state,
+            "long_holding_phase": result.long_book.holding_phase,
             "long_book_action": result.long_book.book_action,
             "long_close_reason": result.long_book.close_reason,
             "long_thesis_age_seconds": result.long_book.thesis_age_seconds,
@@ -397,6 +369,21 @@ def independent_candidate_from_directional_target(
                 if result.long_book.execution_policy is None
                 else result.long_book.execution_policy.limit_offset_bps_preference
             ),
+            "long_threshold_snapshot": (
+                None
+                if result.long_book.threshold_snapshot is None
+                else asdict(result.long_book.threshold_snapshot)
+            ),
+            "long_health_snapshot": (
+                None
+                if result.long_book.health_snapshot is None
+                else asdict(result.long_book.health_snapshot)
+            ),
+            "long_replay_snapshot": (
+                None
+                if result.long_book.replay_snapshot is None
+                else asdict(result.long_book.replay_snapshot)
+            ),
             "short_expected_signal_edge_bps": _expectancy_signal_edge_bps(result.short_book.expectancy),
             "short_expected_slippage_bps": _expectancy_slippage_bps(
                 result.short_book.expectancy,
@@ -426,6 +413,9 @@ def independent_candidate_from_directional_target(
                 else result.short_book.score_stability_metrics.source
             ),
             "short_execution_health_state": result.short_book.execution_health_state,
+            "short_health_state": result.short_book.health_state,
+            "short_book_state": result.short_book.book_state,
+            "short_holding_phase": result.short_book.holding_phase,
             "short_book_action": result.short_book.book_action,
             "short_close_reason": result.short_book.close_reason,
             "short_thesis_age_seconds": result.short_book.thesis_age_seconds,
@@ -458,6 +448,27 @@ def independent_candidate_from_directional_target(
                 None
                 if result.short_book.execution_policy is None
                 else result.short_book.execution_policy.limit_offset_bps_preference
+            ),
+            "short_threshold_snapshot": (
+                None
+                if result.short_book.threshold_snapshot is None
+                else asdict(result.short_book.threshold_snapshot)
+            ),
+            "short_health_snapshot": (
+                None
+                if result.short_book.health_snapshot is None
+                else asdict(result.short_book.health_snapshot)
+            ),
+            "short_replay_snapshot": (
+                None
+                if result.short_book.replay_snapshot is None
+                else asdict(result.short_book.replay_snapshot)
+            ),
+            "family_health_overall_state": (
+                None if result.family_health is None else result.family_health.overall_state
+            ),
+            "family_health_blockers": (
+                [] if result.family_health is None else list(result.family_health.family_blockers)
             ),
             "close_reason": _independent_close_reason_summary(
                 long_book=result.long_book,
@@ -558,6 +569,17 @@ def _independent_book_expectancy_summary(
                 expected_leg_cost_bps=_expectancy_cost_bps(book.expectancy),
                 liquidity_quality_score=book.liquidity_quality_score,
                 execution_health_state=book.execution_health_state,
+                score_raw=book.score_raw,
+                score_adjusted=book.score_adjusted,
+                size_multiplier=(
+                    None if book.sizing is None else float(book.sizing.size_multiplier)
+                ),
+                capital_multiplier=(
+                    None if book.sizing is None else float(book.sizing.capital_multiplier)
+                ),
+                health_state=book.health_state,
+                book_state=book.book_state,
+                holding_phase=book.holding_phase,
                 edge_strength=(
                     None if book.execution_policy is None else book.execution_policy.edge_strength
                 ),
@@ -573,34 +595,13 @@ def _independent_book_runtime_state_summary(
     result: IndependentFamilyEvaluation,
 ) -> list[StrategyBookRuntimeState]:
     return [
-        StrategyBookRuntimeState(
-            leg=state.side,
-            execution_chain_id=state.execution_chain_id,
-            current_qty=state.current_qty,
-            target_qty=state.target_qty,
-            state=state.state,
-            score=state.score,
-            book_action=state.book_action,
-            close_reason=state.close_reason,
-            policy_reason=state.policy_reason,
-            thesis_started_at=state.thesis_started_at,
-            thesis_age_seconds=state.thesis_age_seconds,
-            last_transition_at=state.last_transition_at,
-            last_transition_reason=state.last_transition_reason,
-            expected_signal_edge_bps=state.expected_signal_edge_bps,
-            expected_cost_bps=state.expected_cost_bps,
-            expected_net_edge_bps=state.expected_net_edge_bps,
-            liquidity_quality_score=state.liquidity_quality_score,
-            execution_health_state=state.execution_health_state,
-            cooldown_until=state.cooldown_until,
-            min_hold_remaining_seconds=state.min_hold_remaining_seconds,
-            rebalance_cooldown_remaining_seconds=state.rebalance_cooldown_remaining_seconds,
-            execution_policy_urgency=state.execution_policy_urgency,
-            edge_strength=state.edge_strength,
-            reason_codes=list(state.reason_codes),
-            blocked_reasons=list(state.blocked_reasons),
+        _runtime_state_from_decision(
+            context=context,
+            decision=book,
+            threshold_snapshot=book.threshold_snapshot,
+            health_snapshot=book.health_snapshot,
         )
-        for state in result.book_runtime_states
+        for book in (result.long_book, result.short_book)
     ]
 
 
@@ -909,17 +910,13 @@ def evaluate_independent_books(
         rollout_stage=rollout["configured_rollout_stage"],
         runtime_rollout_stage=rollout["runtime_stage"],
     )
-    book_runtime_states = (
-        _independent_book_runtime_state(context=context, book=long_book),
-        _independent_book_runtime_state(context=context, book=short_book),
-    )
-    return IndependentFamilyEvaluation(
+    return _build_independent_family_candidate(
         final_target_qty=final_target_qty,
         legs=legs,
         overlay_decision=overlay_decision,
         long_book=long_book,
         short_book=short_book,
-        book_runtime_states=book_runtime_states,
+        context=context,
     )
 
 
@@ -930,33 +927,12 @@ def independent_book_score(
     baseline: BaselineAssessment,
     ai_assessment: AIMarketAssessment | None,
 ) -> float:
-    if leg == "short" and not bool(settings.strategy_short_bias_enabled):
-        return 0.0
-    side_sign = 1.0 if leg == "long" else -1.0
-    momentum_alpha = float(baseline.factor_scores.get("momentum_alpha", 0.0))
-    trend_alpha = float(baseline.factor_scores.get("trend_alpha", 0.0))
-    microstructure_alpha = float(baseline.factor_scores.get("microstructure_alpha", 0.0))
-    alpha_component = _clamp(max(0.0, side_sign * float(baseline.composite_alpha_score)), 0.0, 1.0)
-    ai_component = _clamp(max(0.0, side_sign * _ai_directional_edge(ai_assessment)), 0.0, 1.0)
-    momentum_component = _clamp(max(0.0, side_sign * momentum_alpha), 0.0, 1.0)
-    trend_component = _clamp(max(0.0, side_sign * trend_alpha), 0.0, 1.0)
-    microstructure_component = _clamp(max(0.0, side_sign * microstructure_alpha), 0.0, 1.0)
-    confidence = _clamp(float(baseline.confidence), 0.0, 1.0)
-    score = (
-        (alpha_component * 0.28)
-        + (ai_component * 0.26)
-        + (momentum_component * 0.16)
-        + (trend_component * 0.12)
-        + (microstructure_component * 0.08)
-        + (confidence * 0.10)
+    return _independent_book_score_v2(
+        settings=settings,
+        leg=leg,
+        baseline=baseline,
+        ai_assessment=ai_assessment,
     )
-    if baseline.regime in {"range", "uncertain"}:
-        score += 0.04
-    if baseline.direction_bias == leg:
-        score += 0.06
-    if baseline.volatility_state == "high":
-        score += 0.03
-    return _clamp(score, 0.0, 1.0)
 
 
 def build_independent_leg(
@@ -1061,206 +1037,14 @@ def _independent_execution_policy(
     settings: AATSSettings,
     book: IndependentBookEvaluation,
 ) -> IndependentExecutionPolicy | None:
-    if book.book_action in {"inactive", "hold", "blocked"}:
-        return None
-    edge_strength = _independent_edge_strength(
+    return _resolve_execution_policy(
         settings=settings,
-        expected_net_edge_bps=_expectancy_net_edge_bps(book.expectancy),
-        weak_edge_report_only=book.weak_edge_report_only,
+        book=book,
+        expectancy_cost_bps=_expectancy_cost_bps(book.expectancy),
+        expectancy_net_edge_bps=_expectancy_net_edge_bps(book.expectancy),
+        expectancy_slippage_bps=_expectancy_slippage_bps(book.expectancy, settings=settings),
+        required_safe_net_edge_bps=_required_safe_net_edge_bps(settings=settings),
     )
-    min_liquidity_quality = float(settings.strategy_hedge_independent_min_liquidity_quality)
-    liquidity_degraded = (
-        book.liquidity_quality_score is not None
-        and book.liquidity_quality_score + 1e-9 < min_liquidity_quality
-    )
-    execution_degraded = book.execution_health_state in {"degraded", "blocked"}
-    passive_limit_offset_bps = max(
-        Decimal("0.5"),
-        to_decimal(_expectancy_slippage_bps(book.expectancy, settings=settings)),
-        to_decimal(settings.strategy_hedge_independent_expected_slippage_buffer_bps),
-    )
-    max_acceptable_cost_bps = float(settings.strategy_hedge_independent_max_acceptable_cost_bps)
-    max_cost = max_acceptable_cost_bps if max_acceptable_cost_bps > 0.0 else None
-
-    if book.book_action == "close_failed_thesis":
-        configured_mode = settings.strategy_hedge_independent_close_failed_thesis_execution_mode
-        if configured_mode != "adaptive":
-            return _independent_execution_policy_from_mode(
-                mode=configured_mode,
-                edge_strength=edge_strength,
-                urgency="high",
-                limit_offset_bps=None,
-                max_acceptable_cost_bps=max_cost,
-                policy_reason=f"independent_failed_thesis_configured_{configured_mode}",
-            )
-        return IndependentExecutionPolicy(
-            edge_strength=edge_strength,
-            urgency="high",
-            execution_style_preference="taker",
-            order_type_preference="market",
-            time_in_force_preference="IOC",
-            limit_offset_bps_preference=None,
-            max_acceptable_cost_bps=max_cost,
-            policy_reason="independent_failed_thesis_force_exit",
-        )
-    if book.book_action == "close_stale_thesis":
-        configured_mode = settings.strategy_hedge_independent_close_stale_execution_mode
-        if configured_mode != "adaptive":
-            return _independent_execution_policy_from_mode(
-                mode=configured_mode,
-                edge_strength=edge_strength,
-                urgency="medium",
-                limit_offset_bps=to_decimal(settings.strategy_hedge_independent_limit_offset_bps_stale_close),
-                max_acceptable_cost_bps=max_cost,
-                policy_reason=f"independent_stale_thesis_configured_{configured_mode}",
-            )
-        return IndependentExecutionPolicy(
-            edge_strength=edge_strength,
-            urgency="medium",
-            execution_style_preference="bounded_limit_ioc",
-            order_type_preference="limit",
-            time_in_force_preference="IOC",
-            limit_offset_bps_preference=passive_limit_offset_bps,
-            max_acceptable_cost_bps=max_cost,
-            policy_reason="independent_stale_thesis_guarded_exit",
-        )
-    if book.book_action == "de_risk":
-        configured_mode = settings.strategy_hedge_independent_de_risk_execution_mode
-        de_risk_urgency: Literal["low", "medium", "high"] = (
-            "high" if book.close_reason == "execution_health_degraded" else "medium"
-        )
-        if configured_mode != "adaptive":
-            return _independent_execution_policy_from_mode(
-                mode=configured_mode,
-                edge_strength=edge_strength,
-                urgency=de_risk_urgency,
-                limit_offset_bps=passive_limit_offset_bps,
-                max_acceptable_cost_bps=max_cost,
-                policy_reason=f"independent_de_risk_configured_{configured_mode}",
-            )
-        if book.close_reason == "execution_health_degraded":
-            return IndependentExecutionPolicy(
-                edge_strength=edge_strength,
-                urgency="high",
-                execution_style_preference="taker",
-                order_type_preference="market",
-                time_in_force_preference="IOC",
-                limit_offset_bps_preference=None,
-                max_acceptable_cost_bps=max_cost,
-                policy_reason="independent_execution_health_urgent_exit",
-            )
-        if book.close_reason == "liquidity_degraded":
-            return IndependentExecutionPolicy(
-                edge_strength=edge_strength,
-                urgency="medium",
-                execution_style_preference="bounded_limit_ioc",
-                order_type_preference="limit",
-                time_in_force_preference="IOC",
-                limit_offset_bps_preference=passive_limit_offset_bps,
-                max_acceptable_cost_bps=max_cost,
-                policy_reason="independent_liquidity_degraded_guarded_reduce",
-            )
-        return IndependentExecutionPolicy(
-            edge_strength=edge_strength,
-            urgency="medium",
-            execution_style_preference="bounded_limit_ioc",
-            order_type_preference="limit",
-            time_in_force_preference="IOC",
-            limit_offset_bps_preference=passive_limit_offset_bps,
-            max_acceptable_cost_bps=max_cost,
-            policy_reason="independent_weak_edge_guarded_reduce",
-        )
-    if book.book_action == "scale_in":
-        configured_mode = settings.strategy_hedge_independent_scale_in_execution_mode
-        if configured_mode != "adaptive":
-            return _independent_execution_policy_from_mode(
-                mode=configured_mode,
-                edge_strength=edge_strength,
-                urgency="low" if configured_mode in {"passive_first", "bounded_limit"} else "medium",
-                limit_offset_bps=to_decimal(settings.strategy_hedge_independent_limit_offset_bps_scale_in),
-                max_acceptable_cost_bps=max_cost,
-                policy_reason=f"independent_scale_in_configured_{configured_mode}",
-            )
-        if edge_strength == "strong" and not liquidity_degraded and not execution_degraded:
-            return IndependentExecutionPolicy(
-                edge_strength=edge_strength,
-                urgency="medium",
-                execution_style_preference="taker",
-                order_type_preference="market",
-                time_in_force_preference="IOC",
-                limit_offset_bps_preference=None,
-                max_acceptable_cost_bps=max_cost,
-                policy_reason="independent_scale_strong_edge_aggressive",
-            )
-        if bool(settings.strategy_hedge_independent_passive_first_enabled):
-            return IndependentExecutionPolicy(
-                edge_strength=edge_strength,
-                urgency="low",
-                execution_style_preference="bounded_limit_ioc",
-                order_type_preference="limit",
-                time_in_force_preference="IOC",
-                limit_offset_bps_preference=passive_limit_offset_bps,
-                max_acceptable_cost_bps=max_cost,
-                policy_reason="independent_scale_guarded_passive_first",
-            )
-        return IndependentExecutionPolicy(
-            edge_strength=edge_strength,
-            urgency="medium",
-            execution_style_preference="taker",
-            order_type_preference="market",
-            time_in_force_preference="IOC",
-            limit_offset_bps_preference=None,
-            max_acceptable_cost_bps=max_cost,
-            policy_reason="independent_scale_guarded_aggressive_fallback",
-        )
-    if book.book_action == "open":
-        configured_mode = settings.strategy_hedge_independent_entry_execution_mode
-        if configured_mode != "adaptive":
-            return _independent_execution_policy_from_mode(
-                mode=configured_mode,
-                edge_strength=edge_strength,
-                urgency="low" if configured_mode in {"passive_first", "bounded_limit"} else "medium",
-                limit_offset_bps=to_decimal(settings.strategy_hedge_independent_limit_offset_bps_entry),
-                max_acceptable_cost_bps=max_cost,
-                policy_reason=f"independent_entry_configured_{configured_mode}",
-            )
-        if edge_strength == "strong" and not liquidity_degraded and not execution_degraded:
-            return IndependentExecutionPolicy(
-                edge_strength=edge_strength,
-                urgency="medium",
-                execution_style_preference="taker",
-                order_type_preference="market",
-                time_in_force_preference="IOC",
-                limit_offset_bps_preference=None,
-                max_acceptable_cost_bps=max_cost,
-                policy_reason="independent_entry_strong_edge_aggressive",
-            )
-        if bool(settings.strategy_hedge_independent_passive_first_enabled):
-            return IndependentExecutionPolicy(
-                edge_strength=edge_strength,
-                urgency="low",
-                execution_style_preference="bounded_limit_ioc",
-                order_type_preference="limit",
-                time_in_force_preference="IOC",
-                limit_offset_bps_preference=passive_limit_offset_bps,
-                max_acceptable_cost_bps=max_cost,
-                policy_reason=(
-                    "independent_weak_edge_passive_first_required"
-                    if book.weak_edge_report_only
-                    else "independent_entry_guarded_passive_first"
-                ),
-            )
-        return IndependentExecutionPolicy(
-            edge_strength=edge_strength,
-            urgency="medium",
-            execution_style_preference="taker",
-            order_type_preference="market",
-            time_in_force_preference="IOC",
-            limit_offset_bps_preference=None,
-            max_acceptable_cost_bps=max_cost,
-            policy_reason="independent_entry_guarded_aggressive_fallback",
-        )
-    return None
 
 
 def _independent_execution_policy_from_mode(
@@ -1272,27 +1056,11 @@ def _independent_execution_policy_from_mode(
     max_acceptable_cost_bps: float | None,
     policy_reason: str,
 ) -> IndependentExecutionPolicy:
-    if mode in {"passive_first", "bounded_limit"}:
-        return IndependentExecutionPolicy(
-            edge_strength=edge_strength,
-            urgency=urgency,
-            execution_style_preference="bounded_limit_ioc",
-            order_type_preference="limit",
-            time_in_force_preference="IOC",
-            limit_offset_bps_preference=limit_offset_bps,
-            max_acceptable_cost_bps=max_acceptable_cost_bps,
-            policy_reason=policy_reason,
-        )
-    execution_style = "bounded_taker_cap"
-    if mode == "aggressive_bounded_taker":
-        execution_style = "aggressive_bounded_taker_cap"
-    return IndependentExecutionPolicy(
+    return _resolve_execution_policy_from_mode(
+        mode=mode,
         edge_strength=edge_strength,
         urgency=urgency,
-        execution_style_preference=execution_style,
-        order_type_preference="market",
-        time_in_force_preference="IOC",
-        limit_offset_bps_preference=None,
+        limit_offset_bps=limit_offset_bps,
         max_acceptable_cost_bps=max_acceptable_cost_bps,
         policy_reason=policy_reason,
     )
@@ -1310,245 +1078,16 @@ def _evaluate_independent_book(
     scorer: IndependentBookScorer | None,
     recent_score_history: Sequence[float] = (),
 ) -> IndependentBookEvaluation:
-    current_qty = (
-        to_decimal(context.current_long_position_qty)
-        if leg == "long"
-        else to_decimal(context.current_short_position_qty)
-    )
-    score = (
-        scorer(leg=leg, baseline=baseline, ai_assessment=ai_assessment)
-        if scorer is not None
-        else independent_book_score(
-            settings=settings,
-            leg=leg,
-            baseline=baseline,
-            ai_assessment=ai_assessment,
-        )
-    )
-    entry_threshold = (
-        float(settings.strategy_hedge_independent_long_entry_threshold)
-        if leg == "long"
-        else float(settings.strategy_hedge_independent_short_entry_threshold)
-    )
-    close_threshold = (
-        float(settings.strategy_hedge_independent_long_close_threshold)
-        if leg == "long"
-        else float(settings.strategy_hedge_independent_short_close_threshold)
-    )
-    scale_threshold = (
-        float(settings.strategy_hedge_independent_long_scale_in_threshold)
-        if leg == "long"
-        else float(settings.strategy_hedge_independent_short_scale_in_threshold)
-    )
-    target_qty = current_qty
-    base_target_qty = max(to_decimal(settings.default_order_qty), directional_leg_target_qty)
-    reason_codes: list[str] = []
-    blocked_reasons: list[str] = []
-    state = "inactive"
-    min_hold_remaining_seconds = 0.0
-    rebalance_cooldown_remaining_seconds = 0.0
-    book_action: IndependentBookAction = "inactive"
-    close_reason: str | None = None
-    thesis_age_seconds = _independent_thesis_age_seconds(
-        context=context,
-        leg=leg,
-        current_qty=current_qty,
-    )
-    weak_edge_report_only = False
-    liquidity_quality_score = _compute_liquidity_quality_score(
+    return _evaluate_independent_book_v2(
         settings=settings,
         context=context,
-        baseline=baseline,
-        leg=leg,
-        expected_slippage_bps=_expectancy_slippage_bps(expectancy, settings=settings),
-    )
-    score_stability_metrics = _score_stability_metrics(
-        settings=settings,
-        leg=leg,
-        score=score,
-        entry_threshold=entry_threshold,
         baseline=baseline,
         ai_assessment=ai_assessment,
-        recent_score_history=recent_score_history,
-    )
-    execution_health_state = _independent_execution_health_state(
-        settings=settings,
-        context=context,
-        leg=leg,
-    )
-    expectancy_resolution_failed = expectancy is None
-
-    if current_qty <= EPSILON_DECIMAL_12:
-        if score >= entry_threshold:
-            reason_codes.append(f"independent_{leg}_book_signal_above_entry_threshold")
-            if expectancy_resolution_failed:
-                blocked_reasons.append(f"independent_{leg}_book_expectancy_resolution_failed")
-            else:
-                open_gate = _independent_open_gate(
-                    settings=settings,
-                    context=context,
-                    leg=leg,
-                    expected_cost_bps=_expectancy_cost_bps(expectancy),
-                    expected_net_edge_bps=_expectancy_net_edge_bps(expectancy),
-                )
-                blocked_reasons.extend(open_gate["blocked_reasons"])
-                weak_edge_report_only = bool(open_gate["weak_edge_report_only"])
-                if weak_edge_report_only:
-                    reason_codes.append(f"independent_{leg}_book_expected_net_edge_below_safe_threshold_report_only")
-            _, quality_blocked_reasons = _independent_entry_quality_gate(
-                side=leg,
-                score=score,
-                entry_threshold=entry_threshold,
-                liquidity_quality_score=liquidity_quality_score,
-                score_stability_metrics=score_stability_metrics,
-                execution_health_state=execution_health_state,
-                min_confirm_ticks=int(settings.strategy_hedge_independent_min_confirm_ticks),
-                min_liquidity_quality=float(settings.strategy_hedge_independent_min_liquidity_quality),
-                require_execution_health_ok=bool(settings.strategy_hedge_independent_require_execution_health_ok),
-            )
-            blocked_reasons.extend(quality_blocked_reasons)
-            rebalance_cooldown_remaining_seconds = _independent_rebalance_remaining_seconds(
-                settings=settings,
-                context=context,
-                leg=leg,
-                opening_or_expanding=True,
-                desired_target_qty=base_target_qty,
-                current_qty=current_qty,
-            )
-            if rebalance_cooldown_remaining_seconds > 0:
-                blocked_reasons.append(f"independent_{leg}_book_rebalance_cooldown_active")
-            if blocked_reasons:
-                state = "blocked"
-                book_action = "blocked"
-                target_qty = Decimal("0")
-            else:
-                target_qty = base_target_qty
-                state = "opening"
-                book_action = "open"
-        else:
-            reason_codes.append(f"independent_{leg}_book_signal_below_entry_threshold")
-    else:
-        state = "holding"
-        book_action = "hold"
-        close_reason = _independent_close_reason(
-            settings=settings,
-            score=score,
-            close_threshold=close_threshold,
-            expected_net_edge_bps=(
-                None if expectancy_resolution_failed else _expectancy_net_edge_bps(expectancy)
-            ),
-            liquidity_quality_score=liquidity_quality_score,
-            execution_health_state=execution_health_state,
-            age_seconds=thesis_age_seconds,
-        )
-        if close_reason is not None:
-            reason_codes.append(_independent_close_reason_code(leg=leg, close_reason=close_reason))
-            min_hold_remaining_seconds = _independent_min_hold_remaining_seconds(
-                settings=settings,
-                context=context,
-                leg=leg,
-            )
-            if min_hold_remaining_seconds > 0:
-                blocked_reasons.append(f"independent_{leg}_book_min_hold_active")
-                state = "blocked"
-                book_action = "blocked"
-            elif close_reason == "failed_thesis":
-                target_qty = Decimal("0")
-                state = "closing"
-                book_action = "close_failed_thesis"
-            elif close_reason == "stale_thesis":
-                target_qty = Decimal("0")
-                state = "closing"
-                book_action = "close_stale_thesis"
-            else:
-                target_qty = _independent_de_risk_target_qty(
-                    current_qty=current_qty,
-                    directional_leg_target_qty=directional_leg_target_qty,
-                )
-                if target_qty + EPSILON_DECIMAL_12 < current_qty:
-                    state = "closing"
-                    book_action = "de_risk"
-                else:
-                    state = "holding"
-                    book_action = "hold"
-        elif score >= scale_threshold and base_target_qty > current_qty + EPSILON_DECIMAL_12:
-            reason_codes.append(f"independent_{leg}_book_signal_above_scale_in_threshold")
-            if expectancy_resolution_failed:
-                blocked_reasons.append(f"independent_{leg}_book_expectancy_resolution_failed")
-            else:
-                open_gate = _independent_open_gate(
-                    settings=settings,
-                    context=context,
-                    leg=leg,
-                    expected_cost_bps=_expectancy_cost_bps(expectancy),
-                    expected_net_edge_bps=_expectancy_net_edge_bps(expectancy),
-                )
-                blocked_reasons.extend(open_gate["blocked_reasons"])
-                weak_edge_report_only = bool(open_gate["weak_edge_report_only"])
-                if weak_edge_report_only:
-                    reason_codes.append(f"independent_{leg}_book_expected_net_edge_below_safe_threshold_report_only")
-            _, quality_blocked_reasons = _independent_entry_quality_gate(
-                side=leg,
-                score=score,
-                entry_threshold=entry_threshold,
-                liquidity_quality_score=liquidity_quality_score,
-                score_stability_metrics=score_stability_metrics,
-                execution_health_state=execution_health_state,
-                min_confirm_ticks=int(settings.strategy_hedge_independent_min_confirm_ticks),
-                min_liquidity_quality=float(settings.strategy_hedge_independent_min_liquidity_quality),
-                require_execution_health_ok=bool(settings.strategy_hedge_independent_require_execution_health_ok),
-            )
-            blocked_reasons.extend(quality_blocked_reasons)
-            rebalance_cooldown_remaining_seconds = _independent_rebalance_remaining_seconds(
-                settings=settings,
-                context=context,
-                leg=leg,
-                opening_or_expanding=True,
-                desired_target_qty=base_target_qty,
-                current_qty=current_qty,
-            )
-            if rebalance_cooldown_remaining_seconds > 0:
-                blocked_reasons.append(f"independent_{leg}_book_rebalance_cooldown_active")
-            if blocked_reasons:
-                target_qty = current_qty
-                state = "blocked"
-                book_action = "blocked"
-            else:
-                target_qty = base_target_qty
-                state = "opening"
-                book_action = "scale_in"
-        elif score >= entry_threshold:
-            reason_codes.append(f"independent_{leg}_book_hold_above_entry_threshold")
-        elif score >= close_threshold:
-            reason_codes.append(f"independent_{leg}_book_hold_above_close_threshold")
-        else:
-            reason_codes.append(f"independent_{leg}_book_hold_without_thesis_break")
-
-    preview_book = IndependentBookEvaluation(
         leg=leg,
         expectancy=expectancy,
-        score=score,
-        current_qty=current_qty,
-        target_qty=target_qty,
-        state=state,
-        reason_codes=reason_codes,
-        blocked_reasons=blocked_reasons,
-        min_hold_remaining_seconds=min_hold_remaining_seconds,
-        rebalance_cooldown_remaining_seconds=rebalance_cooldown_remaining_seconds,
-        book_action=book_action,
-        close_reason=close_reason,
-        thesis_age_seconds=thesis_age_seconds,
-        weak_edge_report_only=weak_edge_report_only,
-        liquidity_quality_score=liquidity_quality_score,
-        score_stability_metrics=score_stability_metrics,
-        execution_health_state=execution_health_state,
-    )
-    return replace(
-        preview_book,
-        execution_policy=_independent_execution_policy(
-            settings=settings,
-            book=preview_book,
-        ),
+        directional_leg_target_qty=directional_leg_target_qty,
+        scorer=scorer,
+        recent_score_history=recent_score_history,
     )
 
 
@@ -1564,19 +1103,17 @@ def _independent_entry_quality_gate(
     min_liquidity_quality: float,
     require_execution_health_ok: bool,
 ) -> tuple[bool, list[str]]:
-    blocked_reasons: list[str] = []
-    if score + 1e-9 < entry_threshold:
-        blocked_reasons.append(f"independent_{side}_book_signal_below_entry_threshold")
-    if liquidity_quality_score is not None and liquidity_quality_score + 1e-9 < min_liquidity_quality:
-        blocked_reasons.append(f"independent_{side}_book_liquidity_quality_below_minimum")
-    if score_stability_metrics is not None:
-        if score_stability_metrics.support_count < min_confirm_ticks:
-            blocked_reasons.append(f"independent_{side}_book_score_support_below_min_confirm_ticks")
-        elif not score_stability_metrics.stable:
-            blocked_reasons.append(f"independent_{side}_book_score_stability_below_threshold")
-    if require_execution_health_ok and execution_health_state not in {None, "ok"}:
-        blocked_reasons.append(f"independent_{side}_book_execution_health_not_ok")
-    return (not blocked_reasons, blocked_reasons)
+    return _evaluate_entry_quality_gate(
+        side=side,
+        score=score,
+        entry_threshold=entry_threshold,
+        liquidity_quality_score=liquidity_quality_score,
+        score_stability_metrics=score_stability_metrics,
+        execution_health_state=execution_health_state,
+        min_confirm_ticks=min_confirm_ticks,
+        min_liquidity_quality=min_liquidity_quality,
+        require_execution_health_ok=require_execution_health_ok,
+    )
 
 
 def _independent_thesis_age_seconds(
@@ -1585,12 +1122,11 @@ def _independent_thesis_age_seconds(
     leg: IndependentLeg,
     current_qty: Decimal,
 ) -> float | None:
-    if current_qty <= EPSILON_DECIMAL_12:
-        return None
-    opened_at = context.current_long_leg_opened_at if leg == "long" else context.current_short_leg_opened_at
-    if opened_at is None:
-        return None
-    return max((context.as_of_ts - opened_at).total_seconds(), 0.0)
+    return _independent_thesis_age_seconds_v2(
+        context=context,
+        leg=leg,
+        current_qty=current_qty,
+    )
 
 
 def _independent_book_runtime_state(
@@ -1598,58 +1134,7 @@ def _independent_book_runtime_state(
     context: DecisionContext,
     book: IndependentBookEvaluation,
 ) -> IndependentBookRuntimeState:
-    thesis_started_at = (
-        context.current_long_leg_opened_at
-        if book.leg == "long"
-        else context.current_short_leg_opened_at
-    )
-    last_transition_at = _independent_last_transition_at(context=context, leg=book.leg)
-    last_transition_reason = (
-        book.close_reason
-        or (None if book.execution_policy is None else book.execution_policy.policy_reason)
-        or book.book_action
-    )
-    cooldown_until = _independent_cooldown_until(
-        context=context,
-        min_hold_remaining_seconds=book.min_hold_remaining_seconds,
-        rebalance_cooldown_remaining_seconds=book.rebalance_cooldown_remaining_seconds,
-    )
-    return IndependentBookRuntimeState(
-        side=book.leg,
-        current_qty=book.current_qty,
-        target_qty=book.target_qty,
-        state=book.state,
-        execution_chain_id=_independent_execution_chain_id(
-            decision_id=context.decision_id,
-            leg=book.leg,
-            book_action=book.book_action,
-            close_reason=book.close_reason,
-        ),
-        thesis_started_at=thesis_started_at,
-        thesis_age_seconds=book.thesis_age_seconds,
-        last_transition_at=last_transition_at,
-        last_transition_reason=last_transition_reason,
-        expected_signal_edge_bps=_expectancy_signal_edge_bps(book.expectancy),
-        expected_cost_bps=_expectancy_cost_bps(book.expectancy),
-        expected_net_edge_bps=_expectancy_net_edge_bps(book.expectancy),
-        liquidity_quality_score=book.liquidity_quality_score,
-        execution_health_state=book.execution_health_state,
-        cooldown_until=cooldown_until,
-        min_hold_remaining_seconds=book.min_hold_remaining_seconds,
-        rebalance_cooldown_remaining_seconds=book.rebalance_cooldown_remaining_seconds,
-        score=book.score,
-        reason_codes=tuple(book.reason_codes),
-        blocked_reasons=tuple(book.blocked_reasons),
-        book_action=book.book_action,
-        close_reason=book.close_reason,
-        policy_reason=None if book.execution_policy is None else book.execution_policy.policy_reason,
-        execution_policy_urgency=(
-            None if book.execution_policy is None else book.execution_policy.urgency
-        ),
-        edge_strength=(
-            None if book.execution_policy is None else book.execution_policy.edge_strength
-        ),
-    )
+    return _legacy_runtime_state_snapshot(context=context, decision=book)
 
 
 def _independent_execution_chain_id(
@@ -1679,13 +1164,7 @@ def _independent_last_transition_at(
     context: DecisionContext,
     leg: IndependentLeg,
 ):
-    latest_fill = context.latest_long_leg_fill_timestamp if leg == "long" else context.latest_short_leg_fill_timestamp
-    opened_at = context.current_long_leg_opened_at if leg == "long" else context.current_short_leg_opened_at
-    closed_at = context.last_long_leg_closed_at if leg == "long" else context.last_short_leg_closed_at
-    for candidate in (latest_fill, opened_at, closed_at):
-        if candidate is not None:
-            return candidate
-    return None
+    return _independent_last_transition_at_v2(context=context, leg=leg)
 
 
 def _independent_cooldown_until(
@@ -1694,13 +1173,11 @@ def _independent_cooldown_until(
     min_hold_remaining_seconds: float,
     rebalance_cooldown_remaining_seconds: float,
 ):
-    remaining_seconds = max(
-        float(min_hold_remaining_seconds or 0.0),
-        float(rebalance_cooldown_remaining_seconds or 0.0),
+    return _independent_cooldown_until_v2(
+        context=context,
+        min_hold_remaining_seconds=min_hold_remaining_seconds,
+        rebalance_cooldown_remaining_seconds=rebalance_cooldown_remaining_seconds,
     )
-    if remaining_seconds <= 0.0:
-        return None
-    return context.as_of_ts + timedelta(seconds=remaining_seconds)
 
 
 def _independent_close_reason(
@@ -1713,43 +1190,19 @@ def _independent_close_reason(
     execution_health_state: IndependentExecutionHealthState | None,
     age_seconds: float | None,
 ) -> str | None:
-    if (
-        expected_net_edge_bps is not None
-        and expected_net_edge_bps <= float(settings.strategy_hedge_independent_failed_thesis_net_edge_bps)
-    ):
-        return "failed_thesis"
-    if age_seconds is not None and age_seconds >= float(settings.strategy_hedge_independent_max_thesis_age_seconds):
-        return "stale_thesis"
-    if (
-        bool(settings.strategy_hedge_independent_execution_health_de_risk_enabled)
-        and execution_health_state in {"degraded", "blocked"}
-    ):
-        return "execution_health_degraded"
-    if (
-        bool(settings.strategy_hedge_independent_liquidity_de_risk_enabled)
-        and liquidity_quality_score is not None
-        and liquidity_quality_score + 1e-9 < float(settings.strategy_hedge_independent_min_liquidity_quality)
-    ):
-        return "liquidity_degraded"
-    if (
-        (
-            expected_net_edge_bps is not None
-            and expected_net_edge_bps <= float(settings.strategy_hedge_independent_de_risk_net_edge_bps)
-        )
-        or score + 1e-9 < close_threshold
-    ):
-        return "weak_edge_de_risk"
-    return None
+    return _independent_close_reason_v2(
+        settings=settings,
+        score=score,
+        close_threshold=close_threshold,
+        expected_net_edge_bps=expected_net_edge_bps,
+        liquidity_quality_score=liquidity_quality_score,
+        execution_health_state=execution_health_state,
+        age_seconds=age_seconds,
+    )
 
 
 def _independent_close_reason_code(*, leg: IndependentLeg, close_reason: str) -> str:
-    return {
-        "failed_thesis": f"independent_{leg}_book_close_failed_thesis",
-        "stale_thesis": f"independent_{leg}_book_close_stale_thesis",
-        "execution_health_degraded": f"independent_{leg}_book_de_risk_execution_health_degraded",
-        "liquidity_degraded": f"independent_{leg}_book_de_risk_liquidity_degraded",
-        "weak_edge_de_risk": f"independent_{leg}_book_de_risk_weak_edge",
-    }.get(close_reason, f"independent_{leg}_book_de_risk")
+    return _independent_close_reason_code_v2(leg=leg, close_reason=close_reason)
 
 
 def _independent_de_risk_target_qty(
@@ -1757,14 +1210,10 @@ def _independent_de_risk_target_qty(
     current_qty: Decimal,
     directional_leg_target_qty: Decimal,
 ) -> Decimal:
-    current_qty = max(to_decimal(current_qty), Decimal("0"))
-    if current_qty <= EPSILON_DECIMAL_12:
-        return Decimal("0")
-    half_qty = current_qty / Decimal("2")
-    directional_target_qty = max(to_decimal(directional_leg_target_qty), Decimal("0"))
-    if directional_target_qty > EPSILON_DECIMAL_12:
-        return min(half_qty, directional_target_qty)
-    return half_qty
+    return _independent_de_risk_target_qty_v2(
+        current_qty=current_qty,
+        directional_leg_target_qty=directional_leg_target_qty,
+    )
 
 
 def _independent_close_reason_summary(
@@ -1772,17 +1221,10 @@ def _independent_close_reason_summary(
     long_book: IndependentBookEvaluation,
     short_book: IndependentBookEvaluation,
 ) -> str | None:
-    reasons = [
-        book.close_reason
-        for book in (long_book, short_book)
-        if book.close_reason is not None
-    ]
-    unique = list(dict.fromkeys(reasons))
-    if not unique:
-        return None
-    if len(unique) == 1:
-        return unique[0]
-    return "mixed"
+    return _independent_close_reason_summary_v2(
+        long_book=long_book,
+        short_book=short_book,
+    )
 
 
 def _score_stability_metrics(
@@ -1795,43 +1237,14 @@ def _score_stability_metrics(
     ai_assessment: AIMarketAssessment | None,
     recent_score_history: Sequence[float],
 ) -> ScoreStabilityMetrics:
-    history = [
-        float(item)
-        for item in recent_score_history
-        if item is not None
-    ]
-    min_confirm_ticks = max(int(settings.strategy_hedge_independent_min_confirm_ticks), 1)
-    if history:
-        window_size = max(min_confirm_ticks, 2)
-        window = [*history[-window_size:], float(score)]
-        support_count = sum(1 for item in window if item + 1e-9 >= entry_threshold)
-        min_score = min(window)
-        mean_score = sum(window) / max(len(window), 1)
-        max_drawdown_bps = max(float(score) - min_score, 0.0) * 100.0
-        stable = (
-            support_count >= min_confirm_ticks
-            and max_drawdown_bps <= float(settings.strategy_hedge_independent_min_score_stability_bps) + 1e-9
-        )
-        return ScoreStabilityMetrics(
-            support_count=support_count,
-            min_score=min_score,
-            mean_score=mean_score,
-            max_drawdown_bps=max_drawdown_bps,
-            stable=stable,
-            source="recent_target_history",
-        )
-    support_count = _independent_signal_confirmation_count(
+    return _score_stability_metrics_v2(
+        settings=settings,
         leg=leg,
+        score=score,
+        entry_threshold=entry_threshold,
         baseline=baseline,
         ai_assessment=ai_assessment,
-    )
-    return ScoreStabilityMetrics(
-        support_count=support_count,
-        min_score=float(score),
-        mean_score=float(score),
-        max_drawdown_bps=0.0,
-        stable=support_count >= min_confirm_ticks,
-        source="current_signal_confirmation",
+        recent_score_history=recent_score_history,
     )
 
 
@@ -1935,7 +1348,7 @@ def _resolve_independent_book_expectancy(
 ) -> IndependentBookExpectancy | None:
     if expectancy_resolver is not None:
         try:
-            return expectancy_resolver(
+            expectancy = expectancy_resolver(
                 settings=settings,
                 context=context,
                 baseline=baseline,
@@ -1943,6 +1356,13 @@ def _resolve_independent_book_expectancy(
                 leg=leg,
                 trade_cost_service=trade_cost_service,
             )
+            if expectancy is None:
+                return None
+            if not isinstance(expectancy, IndependentBookExpectancy):
+                return None
+            if expectancy.leg != leg:
+                return None
+            return expectancy
         except Exception:
             return None
     try:
@@ -1999,6 +1419,7 @@ def _compute_independent_book_expectancy(
         expected_slippage_bps=expected_slippage_bps,
         expected_cost_bps=expected_cost_bps,
         expected_net_edge_bps=expected_net_edge_bps,
+        expected_alpha_bps=expected_signal_edge_bps,
     )
 
 
@@ -2009,18 +1430,12 @@ def _independent_signal_edge_bps(
     ai_assessment: AIMarketAssessment | None,
     leg: IndependentLeg,
 ) -> float:
-    side_sign = 1.0 if leg == "long" else -1.0
-    directional_alpha = max(0.0, side_sign * float(baseline.composite_alpha_score))
-    directional_microstructure = max(0.0, side_sign * float(baseline.factor_scores.get("microstructure_alpha", 0.0)))
-    directional_momentum = max(0.0, side_sign * float(baseline.factor_scores.get("momentum_alpha", 0.0)))
-    directional_trend = max(0.0, side_sign * float(baseline.factor_scores.get("trend_alpha", 0.0)))
-    directional_ai = max(0.0, side_sign * _ai_directional_edge(ai_assessment))
-    alpha_edge = directional_alpha * max(float(settings.strategy_alpha_edge_bps_scale), 0.0)
-    microstructure_bonus = max(directional_microstructure - 0.08, 0.0) * 25.0
-    momentum_bonus = max(directional_momentum - 0.08, 0.0) * 15.0
-    trend_bonus = max(directional_trend - 0.08, 0.0) * 12.0
-    ai_bonus = max(directional_ai - 0.1, 0.0) * 20.0
-    return alpha_edge + microstructure_bonus + momentum_bonus + trend_bonus + ai_bonus
+    return _independent_signal_edge_bps_v2(
+        settings=settings,
+        baseline=baseline,
+        ai_assessment=ai_assessment,
+        leg=leg,
+    )
 
 
 def _independent_expected_slippage_bps(*, settings: AATSSettings) -> float:
@@ -2038,33 +1453,22 @@ def _independent_open_gate(
     expected_cost_bps: float,
     expected_net_edge_bps: float,
 ) -> dict[str, object]:
-    blocked_reasons: list[str] = []
-    required_safe_net_edge_bps = _required_safe_net_edge_bps(settings=settings)
-    weak_edge_report_only = False
-    if expected_net_edge_bps < required_safe_net_edge_bps:
-        if settings.strategy_hedge_independent_weak_edge_execution_mode == "block":
-            blocked_reasons.append(f"independent_{leg}_book_expected_net_edge_below_safe_threshold")
-        else:
-            weak_edge_report_only = True
-    max_acceptable_cost_bps = float(settings.strategy_hedge_independent_max_acceptable_cost_bps)
-    if max_acceptable_cost_bps > 0.0 and expected_cost_bps > max_acceptable_cost_bps:
-        blocked_reasons.append(f"independent_{leg}_book_expected_cost_above_max_acceptable")
-    if _independent_post_close_cooldown_active(settings=settings, context=context, leg=leg):
-        blocked_reasons.append(f"independent_{leg}_book_post_close_cooldown_active")
-    if _independent_low_edge_cooldown_active(settings=settings, context=context, leg=leg):
-        blocked_reasons.append(f"independent_{leg}_book_low_edge_cooldown_active")
-    if _independent_performance_degraded(settings=settings, context=context, leg=leg):
-        fee_drag_ratio = float(_leg_health_value(context, leg, "recent_fee_drag_ratio") or 0.0)
-        churn_ratio = float(_leg_health_value(context, leg, "recent_churn_ratio") or 0.0)
-        if fee_drag_ratio > settings.strategy_max_fee_drag_ratio:
-            blocked_reasons.append(f"independent_{leg}_book_fee_drag_guard_active")
-        if churn_ratio > settings.strategy_max_churn_ratio:
-            blocked_reasons.append(f"independent_{leg}_book_churn_guard_active")
-    if _independent_trial_guard_active(settings=settings, context=context, leg=leg):
-        blocked_reasons.append(f"independent_{leg}_book_trial_guard_active")
+    eligibility = _evaluate_open_eligibility(
+        settings=settings,
+        context=context,
+        leg=leg,
+        expectancy=IndependentBookExpectancy(
+            leg=leg,
+            expected_signal_edge_bps=0.0,
+            expected_slippage_bps=_independent_expected_slippage_bps(settings=settings),
+            expected_cost_bps=expected_cost_bps,
+            expected_net_edge_bps=expected_net_edge_bps,
+            expected_alpha_bps=0.0,
+        ),
+    )
     return {
-        "blocked_reasons": blocked_reasons,
-        "weak_edge_report_only": weak_edge_report_only,
+        "blocked_reasons": list(eligibility.hard_block_reasons),
+        "weak_edge_report_only": bool(eligibility.warnings),
     }
 
 
@@ -2074,21 +1478,11 @@ def _independent_min_hold_remaining_seconds(
     context: DecisionContext,
     leg: IndependentLeg,
 ) -> float:
-    opened_at = context.current_long_leg_opened_at if leg == "long" else context.current_short_leg_opened_at
-    min_hold_seconds = (
-        settings.strategy_hedge_independent_long_min_hold_seconds
-        if leg == "long"
-        else settings.strategy_hedge_independent_short_min_hold_seconds
+    return _independent_min_hold_remaining_seconds_v2(
+        settings=settings,
+        context=context,
+        leg=leg,
     )
-    current_qty = (
-        to_decimal(context.current_long_position_qty)
-        if leg == "long"
-        else to_decimal(context.current_short_position_qty)
-    )
-    if opened_at is None or min_hold_seconds <= 0 or current_qty <= EPSILON_DECIMAL_12:
-        return 0.0
-    held_for = max((context.as_of_ts - opened_at).total_seconds(), 0.0)
-    return max(float(min_hold_seconds) - held_for, 0.0)
 
 
 def _independent_rebalance_remaining_seconds(
@@ -2100,18 +1494,14 @@ def _independent_rebalance_remaining_seconds(
     desired_target_qty: Decimal,
     current_qty: Decimal,
 ) -> float:
-    if (
-        settings.strategy_hedge_independent_rebalance_cooldown_seconds <= 0
-        or abs(desired_target_qty - current_qty) <= EPSILON_DECIMAL_12
-    ):
-        return 0.0
-    anchor = context.latest_long_leg_fill_timestamp if leg == "long" else context.latest_short_leg_fill_timestamp
-    if opening_or_expanding and current_qty <= EPSILON_DECIMAL_12 and anchor is None:
-        anchor = context.last_long_leg_closed_at if leg == "long" else context.last_short_leg_closed_at
-    if anchor is None:
-        return 0.0
-    since_anchor = max((context.as_of_ts - anchor).total_seconds(), 0.0)
-    return max(settings.strategy_hedge_independent_rebalance_cooldown_seconds - since_anchor, 0.0)
+    return _independent_rebalance_remaining_seconds_v2(
+        settings=settings,
+        context=context,
+        leg=leg,
+        opening_or_expanding=opening_or_expanding,
+        desired_target_qty=desired_target_qty,
+        current_qty=current_qty,
+    )
 
 
 def _independent_post_close_cooldown_active(
@@ -2120,12 +1510,11 @@ def _independent_post_close_cooldown_active(
     context: DecisionContext,
     leg: IndependentLeg,
 ) -> bool:
-    if settings.strategy_post_close_cooldown_seconds <= 0:
-        return False
-    closed_at = context.last_long_leg_closed_at if leg == "long" else context.last_short_leg_closed_at
-    if closed_at is None:
-        return False
-    return max((context.as_of_ts - closed_at).total_seconds(), 0.0) < settings.strategy_post_close_cooldown_seconds
+    return _independent_post_close_cooldown_active_v2(
+        settings=settings,
+        context=context,
+        leg=leg,
+    )
 
 
 def _independent_low_edge_cooldown_active(
@@ -2134,15 +1523,11 @@ def _independent_low_edge_cooldown_active(
     context: DecisionContext,
     leg: IndependentLeg,
 ) -> bool:
-    if settings.strategy_low_edge_cooldown_seconds <= 0:
-        return False
-    streak = int(_leg_health_value(context, leg, "recent_low_edge_trade_streak") or 0)
-    if streak < settings.strategy_low_edge_streak_limit:
-        return False
-    recent_at = _leg_health_datetime(context, leg, "recent_low_edge_trade_at")
-    if recent_at is None:
-        return False
-    return max((context.as_of_ts - recent_at).total_seconds(), 0.0) < settings.strategy_low_edge_cooldown_seconds
+    return _independent_low_edge_cooldown_active_v2(
+        settings=settings,
+        context=context,
+        leg=leg,
+    )
 
 
 def _independent_performance_degraded(
@@ -2151,12 +1536,10 @@ def _independent_performance_degraded(
     context: DecisionContext,
     leg: IndependentLeg,
 ) -> bool:
-    closed_trade_count = int(_leg_health_value(context, leg, "recent_closed_trade_count") or 0)
-    if closed_trade_count < settings.strategy_performance_guard_min_closed_trades:
-        return False
-    return (
-        float(_leg_health_value(context, leg, "recent_fee_drag_ratio") or 0.0) > settings.strategy_max_fee_drag_ratio
-        or float(_leg_health_value(context, leg, "recent_churn_ratio") or 0.0) > settings.strategy_max_churn_ratio
+    return _independent_performance_degraded_v2(
+        settings=settings,
+        context=context,
+        leg=leg,
     )
 
 
@@ -2166,14 +1549,11 @@ def _independent_trial_guard_active(
     context: DecisionContext,
     leg: IndependentLeg,
 ) -> bool:
-    if not settings.strategy_hedge_independent_trial_guard_enabled:
-        return False
-    closed_trade_count = int(_leg_health_value(context, leg, "recent_closed_trade_count") or 0)
-    if closed_trade_count < settings.strategy_performance_guard_min_closed_trades:
-        return False
-    recent_net_realized_pnl = to_decimal(_leg_health_value(context, leg, "recent_net_realized_pnl") or Decimal("0"))
-    recent_win_rate = float(_leg_health_value(context, leg, "recent_win_rate") or 0.0)
-    return recent_net_realized_pnl < -EPSILON_DECIMAL_12 and recent_win_rate < 0.5
+    return _independent_trial_guard_active_v2(
+        settings=settings,
+        context=context,
+        leg=leg,
+    )
 
 
 def _leg_health_value(context: DecisionContext, leg: IndependentLeg, key: str) -> object | None:
@@ -2189,15 +1569,11 @@ def _leg_health_datetime(context: DecisionContext, leg: IndependentLeg, key: str
 
 
 def _required_safe_net_edge_bps(*, settings: AATSSettings) -> float:
-    return (
-        max(float(settings.strategy_hedge_independent_min_safe_net_edge_bps), 0.0)
-        + max(float(settings.strategy_hedge_independent_expected_slippage_buffer_bps), 0.0)
-        + max(float(settings.strategy_hedge_independent_expected_execution_buffer_bps), 0.0)
-    )
+    return _required_safe_net_edge_bps_v2(settings=settings)
 
 
 def _candidate_confidence(score: float) -> float:
-    return min(0.95, 0.30 + max(score, 0.0) * 0.55)
+    return _candidate_confidence_v2(score)
 
 
 def _candidate_urgency(*, overlay_decision: HedgeOverlayDecision) -> Literal["low", "medium", "high"]:
@@ -2278,6 +1654,7 @@ def _inactive_book(leg: IndependentLeg) -> IndependentBookEvaluation:
             expected_slippage_bps=0.0,
             expected_cost_bps=0.0,
             expected_net_edge_bps=0.0,
+            expected_alpha_bps=0.0,
         ),
         score=0.0,
         current_qty=Decimal("0"),

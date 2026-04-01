@@ -1548,6 +1548,18 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
             candidate["book_runtime_states"][0]["book_action"],
             candidate["metrics"].get("long_book_action"),
         )
+        self.assertEqual(
+            candidate["book_runtime_states"][0]["leg_health_summary"]["health_state"],
+            candidate["metrics"].get("long_execution_health_state"),
+        )
+        self.assertEqual(
+            candidate["book_runtime_states"][0]["threshold_snapshot"]["entry_threshold"],
+            candidate["metrics"]["long_threshold_snapshot"]["entry_threshold"],
+        )
+        self.assertIn("adaptive_entry_threshold", candidate["book_runtime_states"][0]["threshold_snapshot"])
+        self.assertIn("capital_multiplier", candidate["book_runtime_states"][0]["threshold_snapshot"])
+        self.assertIn("reason_codes", candidate["book_runtime_states"][0]["threshold_snapshot"])
+        self.assertIn(candidate["metrics"]["family_health_overall_state"], {"ok", "degraded", "blocked"})
         for state in candidate["book_runtime_states"]:
             if state["book_action"] in {"inactive", "hold", "blocked"}:
                 self.assertIsNone(state["execution_chain_id"])

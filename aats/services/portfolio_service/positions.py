@@ -19,6 +19,8 @@ from aats.services.accounting import (
     fill_fee_delta_in_quote,
     resolve_symbol_currencies,
     resolved_fee_currency,
+    unsupported_fee_currency_details,
+    UnsupportedFeeCurrencyError,
 )
 from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, is_effectively_zero, to_decimal
 from aats.services.portfolio_service.outbox import PostgresPortfolioOutboxPublisher
@@ -511,11 +513,15 @@ class PortfolioService:
             result = self.state.apply_fill(fill)
         except Exception as exc:
             self.state.restore(checkpoint)
+            failure_details = None
+            if isinstance(exc, UnsupportedFeeCurrencyError):
+                failure_details = unsupported_fee_currency_details(fill, error=exc)
             await self._emit_processing_failure(
                 stage="fill_apply",
                 message=str(exc),
                 fill=fill,
                 retriable=False,
+                details=failure_details,
             )
             raise
         if not result.applied:
@@ -700,6 +706,7 @@ class PortfolioService:
         message: str,
         fill: FillEvent,
         retriable: bool,
+        details: dict[str, Any] | None = None,
     ) -> None:
         if self.metrics is not None:
             self.metrics.increment("processing_failures")
@@ -722,6 +729,7 @@ class PortfolioService:
                     margin_mode=fill.margin_mode,
                     retriable=retriable,
                     observed_at=utc_now(),
+                    details=dict(details or {}),
                 ),
                 source_component="portfolio_service",
             )

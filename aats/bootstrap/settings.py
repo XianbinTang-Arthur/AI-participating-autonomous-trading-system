@@ -429,6 +429,12 @@ class AATSSettings(BaseSettings):
     strategy_hedge_independent_emit_expected_vs_realized_metrics: bool = True
     strategy_hedge_independent_emit_close_reason_metrics: bool = True
     strategy_hedge_independent_emit_execution_policy_metrics: bool = True
+    strategy_hedge_independent_adaptive_rollout_enabled: bool = False
+    strategy_hedge_independent_health_enforcement_enabled: bool = False
+    strategy_hedge_independent_size_down_entry_enabled: bool = False
+    strategy_hedge_independent_long_short_asymmetry_enabled: bool = False
+    strategy_hedge_independent_short_asymmetry_penalty_multiplier: float = 0.85
+    strategy_hedge_independent_entry_size_down_floor: float = 0.50
     strategy_min_hold_seconds: float = 720.0
     strategy_post_close_cooldown_seconds: float = 300.0
     strategy_health_lookback_trades: int = 12
@@ -483,7 +489,7 @@ class AATSSettings(BaseSettings):
     operator_session_secret: str | None = None
     operator_session_cookie_name: str = "aats_operator_session"
     operator_session_max_age_seconds: int = 43_200
-    operator_session_cookie_secure: bool = False
+    operator_session_cookie_secure: bool = True
     log_level: str = "INFO"
     log_dir: str = "logs"
     log_rotate_max_bytes: int = 5_242_880

@@ -226,6 +226,54 @@ class TestIndependentFamily(unittest.TestCase):
         self.assertIsNone(result.long_book.expectancy)
         self.assertFalse(result.legs)
 
+    def test_evaluate_independent_books_blocks_new_open_when_expectancy_resolver_returns_invalid_shape(self) -> None:
+        settings = make_derivatives_hedge_settings(
+            strategy_hedge_overlay_mode="independent",
+            strategy_hedge_independent_enabled=True,
+        )
+        context = make_context(product_type="derivatives", current_exposure_side="flat")
+        baseline = make_baseline(
+            direction_bias="long",
+            confidence=0.84,
+            suggested_position_scale=1.0,
+            volatility_target_scale=1.0,
+            factor_scores={
+                "momentum_alpha": 0.48,
+                "trend_alpha": 0.42,
+                "microstructure_alpha": 0.18,
+                "liquidity_scale": 0.95,
+            },
+        ).model_copy(update={"regime": "trend", "composite_alpha_score": 0.32})
+
+        result = evaluate_independent_books(
+            settings=settings,
+            context=context,
+            baseline=baseline,
+            ai_assessment=make_ai_assessment(direction=0.25, confidence=0.82),
+            directional_target_qty=Decimal("0.01"),
+            target_leverage=1.0,
+            signal_edge_bps=12.0,
+            expected_cost_bps=4.0,
+            expected_net_edge_bps=8.0,
+            execution_leg_family="independent",
+            scorer=lambda *, leg, baseline, ai_assessment: 0.78 if leg == "long" else 0.10,
+            expectancy_resolver=lambda **_: SimpleNamespace(
+                leg="long",
+                expected_signal_edge_bps=18.0,
+                expected_slippage_bps=1.5,
+                expected_cost_bps=6.0,
+                expected_net_edge_bps=12.0,
+            ),
+        )
+
+        self.assertEqual(result.long_book.book_action, "blocked")
+        self.assertIn(
+            "independent_long_book_expectancy_resolution_failed",
+            result.long_book.blocked_reasons,
+        )
+        self.assertIsNone(result.long_book.expectancy)
+        self.assertFalse(result.legs)
+
     def test_evaluate_independent_books_do_not_use_directional_fallback_edges_after_expectancy_failure(self) -> None:
         settings = make_derivatives_hedge_settings(
             strategy_hedge_overlay_mode="independent",
@@ -1284,6 +1332,11 @@ class TestIndependentFamily(unittest.TestCase):
         self.assertIn("short_score_support_count", candidate.metrics)
         self.assertIn("long_execution_health_state", candidate.metrics)
         self.assertIn("short_execution_health_state", candidate.metrics)
+        self.assertIn("family_health_overall_state", candidate.metrics)
+        self.assertIn("long_threshold_snapshot", candidate.metrics)
+        self.assertIn("short_threshold_snapshot", candidate.metrics)
+        self.assertIn("long_replay_snapshot", candidate.metrics)
+        self.assertIn("short_replay_snapshot", candidate.metrics)
         self.assertIn("max_thesis_age_seconds", candidate.metrics)
         self.assertIn("de_risk_net_edge_bps", candidate.metrics)
         self.assertIn("failed_thesis_net_edge_bps", candidate.metrics)
@@ -1347,6 +1400,14 @@ class TestIndependentFamily(unittest.TestCase):
         self.assertEqual(
             candidate.book_runtime_states[1].expected_net_edge_bps,
             candidate.metrics["short_expected_net_edge_bps"],
+        )
+        self.assertEqual(
+            candidate.book_runtime_states[0].leg_health_summary.health_state,
+            candidate.metrics["long_execution_health_state"],
+        )
+        self.assertEqual(
+            candidate.book_runtime_states[0].threshold_snapshot.entry_threshold,
+            candidate.metrics["long_threshold_snapshot"]["entry_threshold"],
         )
         for state in candidate.book_runtime_states:
             if state.book_action in {"inactive", "hold", "blocked"}:

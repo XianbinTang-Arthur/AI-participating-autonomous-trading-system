@@ -4760,6 +4760,143 @@ console.log(JSON.stringify({
         self.assertIn('"inventoryRowRetained":true', stdout)
         self.assertIn('"targetRowFilteredOut":true', stdout)
 
+    def test_independent_adaptive_summary_surfaces_in_strategy_drawer_and_replay_view(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { renderStrategyView } from './aats/api/static/modules/views/strategy-view.js';
+import { renderReplayView } from './aats/api/static/modules/views/replay-view.js';
+import { buildDecisionDrawer } from './aats/api/static/modules/detail-drawers.js';
+
+const adaptiveSummary = {
+  family: 'independent',
+  shadow_only: false,
+  rollout_enabled: true,
+  live_applied: true,
+  health_enforcement_enabled: true,
+  size_down_entry_enabled: true,
+  long_short_asymmetry_enabled: true,
+  reason_codes: ['adaptive_shadow_confidence_adjusted', 'independent_short_book_asymmetry_penalty_applied'],
+  long_leg: {
+    leg: 'long',
+    live_applied: true,
+    entry_threshold: 0.60,
+    adaptive_entry_threshold: 0.66,
+    effective_entry_threshold: 0.66,
+    close_threshold: 0.48,
+    adaptive_close_threshold: 0.50,
+    effective_close_threshold: 0.50,
+    scale_in_threshold: 0.90,
+    adaptive_scale_in_threshold: 0.96,
+    effective_scale_in_threshold: 0.96,
+    thesis_age_seconds: 1800,
+    adaptive_thesis_age_seconds: 1500,
+    de_risk_net_edge_bps: 2.0,
+    adaptive_de_risk_net_edge_bps: 2.6,
+  },
+  short_leg: {
+    leg: 'short',
+    live_applied: true,
+    entry_threshold: 0.60,
+    adaptive_entry_threshold: 0.68,
+    effective_entry_threshold: 0.68,
+    close_threshold: 0.48,
+    adaptive_close_threshold: 0.50,
+    effective_close_threshold: 0.50,
+    scale_in_threshold: 0.90,
+    adaptive_scale_in_threshold: 0.97,
+    effective_scale_in_threshold: 0.97,
+    thesis_age_seconds: 1800,
+    adaptive_thesis_age_seconds: 1500,
+    de_risk_net_edge_bps: 2.0,
+    adaptive_de_risk_net_edge_bps: 2.7,
+  },
+};
+
+const strategyHtml = renderStrategyView({
+  strategyRuntime: {
+    configured_parameters: {
+      directional: { product_type: 'derivatives' },
+      independent: {
+        adaptive_rollout_enabled: true,
+        health_enforcement_enabled: true,
+        size_down_entry_enabled: true,
+        long_short_asymmetry_enabled: true,
+      },
+    },
+    independent_adaptive_summary: adaptiveSummary,
+    latest_snapshot: { candidates: [], automation_decisions: [] },
+    summary: {},
+    recent_sleeve_intents: [],
+    latest_bundle: {},
+    latest_allocation_decision: {},
+    latest_applied_target: {},
+    recent_execution_bundles: [],
+    recent_budget_snapshots: [],
+    recent_conflict_resolutions: [],
+    recent_netting_decisions: [],
+    family_enablement: {},
+  },
+  latestDecision: {
+    position_target: {},
+    policy_decision: { execution_allowed: true, rejection_reasons: [] },
+    risk_decision: { approved: true, rejection_reasons: [], constraints_applied: [] },
+  },
+  strategyAttribution: { summary: {}, profitability_by_strategy_sleeve: [], sleeve_inventory_summary: [] },
+  trialReviewSummary: { summary: {}, sections: {} },
+});
+
+const drawer = buildDecisionDrawer({
+  decision_id: 'decision_adaptive_ui',
+  decision_context: { symbol: 'BTC-USDT-SWAP', current_position_qty: 0 },
+  position_target: { position_intent: 'open_long', current_position_qty: 0, target_position_qty: 0.02 },
+  policy_decision: { execution_allowed: true },
+  risk_decision: { approved: true },
+  decision_outcome: {
+    decision_source: 'baseline',
+    decision_authority: 'reference_only',
+  },
+  ai_decision_audit: {
+    independent_adaptive_summary: adaptiveSummary,
+  },
+});
+
+const replayHtml = renderReplayView({
+  replayStatus: {
+    healthy: true,
+    last_validation: {
+      decision_id: 'decision_adaptive_ui',
+      validated_at: '2026-04-01T12:00:00Z',
+      healthy: true,
+      divergence_count: 0,
+      replayed_event_count: 12,
+      chain_health_score: 1,
+      independent_adaptive_summary: adaptiveSummary,
+    },
+  },
+  replayRecentValidations: { validations: [] },
+  reconciliationLatest: { mismatch_summary: { leg_mismatch_summary: { total_count: 0, missing_execution_chain_count: 0, items: [] } } },
+});
+
+console.log(JSON.stringify({
+  strategyShowsAdaptiveCard: strategyHtml.includes('独立双书自适应阈值') && strategyHtml.includes('当前已按动态阈值重评估'),
+  drawerShowsAdaptiveSummary: drawer.body.includes('自适应阈值与仓位因子') && drawer.body.includes('当前已按动态阈值重评估'),
+  replayShowsAdaptivePostmortem: replayHtml.includes('最新自适应复盘') && replayHtml.includes('当前已按动态阈值重评估'),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        stdout = result.stdout or ""
+        self.assertIn('"strategyShowsAdaptiveCard":true', stdout)
+        self.assertIn('"drawerShowsAdaptiveSummary":true', stdout)
+        self.assertIn('"replayShowsAdaptivePostmortem":true', stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

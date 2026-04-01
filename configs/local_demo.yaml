@@ -16,6 +16,9 @@ account_backend: disabled
 # 指定 local demo 关闭账户状态读取。
 account_read_enabled: false
 
+# 指定 local demo 允许 HTTP 下测试会话 cookie。
+operator_session_cookie_secure: false
+
 # 指定 local demo 不允许真实提交。
 live_submit_enabled: false
 

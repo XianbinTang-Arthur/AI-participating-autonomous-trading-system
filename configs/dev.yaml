@@ -3,3 +3,6 @@ environment: dev
 
 # 指定开发环境默认运行在 paper_live。
 mode: paper_live
+
+# 指定开发环境允许 HTTP 下测试会话 cookie。
+operator_session_cookie_secure: false

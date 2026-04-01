@@ -11,7 +11,7 @@ from aats.events import topics
 from aats.events.envelopes import build_envelope
 from aats.schemas.common import utc_now
 from aats.schemas.operator import ExecutionErrorSummary, ProcessingFailureRecord
-from aats.services.accounting import fill_fee_cost_in_quote
+from aats.services.accounting import try_fill_fee_cost_in_quote
 from aats.services.governance_engine.kill_switch import KillSwitch
 from aats.services.runtime_scope import event_matches_scope, runtime_state_scope
 
@@ -325,18 +325,17 @@ class ForwardTrialGuardService:
         fill_price = row.get("fill_price")
         if symbol in {None, ""} or side in {None, ""} or fill_price in {None, ""}:
             return abs(fee_amount)
-        return abs(
-            fill_fee_cost_in_quote(
-                SimpleNamespace(
-                    symbol=symbol,
-                    fee_amount=fee_amount,
-                    fee_currency=row.get("fee_currency"),
-                    venue=row.get("venue") or "OKX",
-                    side=side,
-                    fill_price=fill_price,
-                )
+        fee_cost, _fee_error = try_fill_fee_cost_in_quote(
+            SimpleNamespace(
+                symbol=symbol,
+                fee_amount=fee_amount,
+                fee_currency=row.get("fee_currency"),
+                venue=row.get("venue") or "OKX",
+                side=side,
+                fill_price=fill_price,
             )
         )
+        return None if fee_cost is None else abs(fee_cost)
 
     def _trial_observation_active(self) -> bool:
         mode = str(getattr(self.settings, "mode", "") or "").lower()

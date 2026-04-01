@@ -244,6 +244,8 @@ def _build_bundle_summary(
             RecoveryBundleLegStatus(
                 client_order_id=order.client_order_id,
                 exchange_order_id=order.exchange_order_id,
+                execution_chain_id=order.execution_chain_id,
+                execution_attempt_id=order.execution_attempt_id,
                 symbol=order.symbol,
                 product_type=order.product_type,
                 margin_mode=order.margin_mode,
@@ -304,6 +306,8 @@ def _apply_strategy_bundle_status(
             RecoveryBundleLegStatus(
                 client_order_id=f"{strategy_bundle.bundle_id}:{index}",
                 exchange_order_id=None,
+                execution_chain_id=leg.execution_chain_id,
+                execution_attempt_id=None,
                 symbol=leg.symbol,
                 product_type=leg.product_type,
                 margin_mode=leg.margin_mode,

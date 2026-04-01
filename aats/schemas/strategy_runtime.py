@@ -332,12 +332,61 @@ class StrategyBookExpectancyEntry(SchemaBase):
     expected_leg_cost_bps: float | None = None
     liquidity_quality_score: float | None = None
     execution_health_state: str | None = None
+    score_raw: float | None = None
+    score_adjusted: float | None = None
+    size_multiplier: float | None = None
+    capital_multiplier: float | None = None
+    health_state: str | None = None
+    book_state: str | None = None
+    holding_phase: str | None = None
     edge_strength: Literal["weak", "medium", "strong"] | None = None
 
 
 class StrategyBookExpectancySummary(SchemaBase):
     source: str = "independent_book"
     books: list[StrategyBookExpectancyEntry] = Field(default_factory=list)
+
+
+class StrategyAdaptiveThresholdSnapshot(SchemaBase):
+    leg: Literal["long", "short"]
+    shadow_only: bool = True
+    rollout_enabled: bool = False
+    live_applied: bool = False
+    health_enforcement_enabled: bool = False
+    size_down_entry_enabled: bool = False
+    long_short_asymmetry_enabled: bool = False
+    entry_threshold: float | None = None
+    close_threshold: float | None = None
+    scale_in_threshold: float | None = None
+    thesis_age_seconds: float | None = None
+    de_risk_net_edge_bps: float | None = None
+    adaptive_entry_threshold: float | None = None
+    adaptive_close_threshold: float | None = None
+    adaptive_scale_in_threshold: float | None = None
+    adaptive_thesis_age_seconds: float | None = None
+    adaptive_de_risk_net_edge_bps: float | None = None
+    effective_entry_threshold: float | None = None
+    effective_close_threshold: float | None = None
+    effective_scale_in_threshold: float | None = None
+    effective_thesis_age_seconds: float | None = None
+    effective_de_risk_net_edge_bps: float | None = None
+    capital_multiplier: float | None = None
+    confidence_multiplier: float | None = None
+    volatility_multiplier: float | None = None
+    liquidity_multiplier: float | None = None
+    health_multiplier: float | None = None
+    direction_bias_multiplier: float | None = None
+    reason_codes: list[str] = Field(default_factory=list)
+
+
+class StrategyIndependentLegHealthSummary(SchemaBase):
+    leg: Literal["long", "short"]
+    health_state: str | None = None
+    halt_openings: bool = False
+    only_reduce: bool = False
+    suspended: bool = False
+    warnings: list[str] = Field(default_factory=list)
+    blockers: list[str] = Field(default_factory=list)
 
 
 class StrategyBookRuntimeState(SchemaBase):
@@ -347,13 +396,25 @@ class StrategyBookRuntimeState(SchemaBase):
     target_qty: Decimal = Decimal("0")
     state: str = "inactive"
     score: float | None = None
+    score_raw: float | None = None
+    score_adjusted: float | None = None
+    size_multiplier: float | None = None
+    capital_multiplier: float | None = None
+    book_state: str | None = None
+    holding_phase: str | None = None
+    health_state: str | None = None
+    eligibility_state: str | None = None
     book_action: str | None = None
     close_reason: str | None = None
     policy_reason: str | None = None
     thesis_started_at: datetime | None = None
     thesis_age_seconds: float | None = None
+    current_scale_in_count: int = 0
+    current_de_risk_count: int = 0
     last_transition_at: datetime | None = None
     last_transition_reason: str | None = None
+    suspended_until: datetime | None = None
+    state_version: int = 1
     expected_signal_edge_bps: float | None = None
     expected_cost_bps: float | None = None
     expected_net_edge_bps: float | None = None
@@ -364,6 +425,8 @@ class StrategyBookRuntimeState(SchemaBase):
     rebalance_cooldown_remaining_seconds: float | None = None
     execution_policy_urgency: Literal["low", "medium", "high"] | None = None
     edge_strength: Literal["weak", "medium", "strong"] | None = None
+    threshold_snapshot: StrategyAdaptiveThresholdSnapshot | None = None
+    leg_health_summary: StrategyIndependentLegHealthSummary | None = None
     reason_codes: list[str] = Field(default_factory=list)
     blocked_reasons: list[str] = Field(default_factory=list)
 

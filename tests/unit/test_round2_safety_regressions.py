@@ -351,6 +351,9 @@ class TestRound2SafetyRegressions(unittest.IsolatedAsyncioTestCase):
         assert processing_failure is not None
         self.assertEqual(processing_failure.payload["stage"], "fill_apply")
         self.assertEqual(processing_failure.payload["message"], "unsupported_fill_fee_currency:ETH:BTC-USDT:BTC:USDT")
+        self.assertEqual(processing_failure.payload["details"]["fee_currency"], "ETH")
+        self.assertEqual(processing_failure.payload["details"]["base_currency"], "BTC")
+        self.assertEqual(processing_failure.payload["details"]["quote_currency"], "USDT")
         self.assertEqual(service.state.positions, {})
         self.assertEqual(service.state.balances["USDT"], Decimal("1000.0"))
         self.assertIsNone(event_store.latest(topics.PORTFOLIO_SNAPSHOTS, key="portfolio"))

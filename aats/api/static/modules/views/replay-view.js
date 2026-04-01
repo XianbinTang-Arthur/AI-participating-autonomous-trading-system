@@ -2,6 +2,8 @@ import { actionButton, kvList, primaryStatusPanel, responsiveTable, summaryStrip
 import { textOrFallback } from "../copy.js";
 import { booleanWord, escapeHtml, formatMaybeTimestamp, formatNumber, formatRelativeAge } from "../formatters.js";
 import {
+  readableIndependentAdaptiveMeta,
+  readableIndependentAdaptiveSummary,
   readableOverlayParentLegQuantitySummary,
   readableOverlayParentPostmortemMeta,
   readableOverlayParentSignalSummary,
@@ -28,6 +30,7 @@ export function renderReplaySections(data, uiState = {}, paging = {}) {
       : [];
   const latestValidation = replay.last_validation || recentValidations[0] || null;
   const latestSummary = latestValidation?.overlay_parent_exposure_summary || null;
+  const latestAdaptiveSummary = latestValidation?.independent_adaptive_summary || null;
   const replayFilter = textOrFallback(uiState.parentFilter, DEFAULT_REPLAY_PARENT_FILTER);
   const filteredValidations = filterReplayValidations(recentValidations, replayFilter);
   const reconciliation = data.reconciliationLatest?.reconciliation || null;
@@ -88,6 +91,20 @@ export function renderReplaySections(data, uiState = {}, paging = {}) {
           content: kvList(replayOverlayParentPostmortemRows(latestSummary)),
         })
       : "",
+    replayAdaptivePostmortem: latestAdaptiveSummary
+      ? surfaceCard({
+          title: "最新自适应复盘",
+          kicker: "Adaptive Postmortem",
+          copy: "这里单独收口独立双书在 replay 里的动态阈值、size-down 和 health enforcement 影子/生效结果。",
+          content: kvList([
+            [
+              "自适应阈值",
+              readableIndependentAdaptiveSummary(latestAdaptiveSummary, "当前还没有独立双书自适应摘要"),
+              readableIndependentAdaptiveMeta(latestAdaptiveSummary, "当前没有额外自适应说明"),
+            ],
+          ]),
+        })
+      : "",
     replayLinkedRead: surfaceCard({
       title: "父腿复盘与腿级对账联读",
       kicker: "Replay x Reconciliation",
@@ -115,7 +132,8 @@ export function renderReplayView(data, uiState = {}, paging = {}) {
     <div class="panel-grid">
       <div class="span-12">${sections.replayHero}</div>
       ${sections.replayLatestPostmortem ? `<div class="span-5">${sections.replayLatestPostmortem}</div>` : ""}
-      <div class="${sections.replayLatestPostmortem ? "span-7" : "span-12"}">${sections.replayLinkedRead}</div>
+      ${sections.replayAdaptivePostmortem ? `<div class="${sections.replayLatestPostmortem ? "span-7" : "span-12"}">${sections.replayAdaptivePostmortem}</div>` : ""}
+      <div class="span-12">${sections.replayLinkedRead}</div>
       <div class="span-12">${sections.replayHistory}</div>
     </div>
   `;

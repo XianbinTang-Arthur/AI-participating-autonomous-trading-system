@@ -10,7 +10,7 @@ from aats.schemas.strategy_profiles import (
     strategy_profile_axes_from_payload,
     summarize_strategy_profile_payload,
 )
-from aats.services.accounting import fill_fee_cost_in_quote
+from aats.services.accounting import try_fill_fee_cost_in_quote
 from aats.services.governance_engine.recovery_posture import RecoveryPostureEvaluator
 from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12
 from aats.services.runtime_scope import fills_for_scope, latest_reconciliation_for_scope, runtime_state_scope, snapshots_for_scope
@@ -122,7 +122,14 @@ class StrategyProfileContextFacade:
             self.owner.runtime_state_scope,
             limit=self.owner.evaluation_window_limit,
         )
-        fee_total = sum((fill_fee_cost_in_quote(item) for item in fills), start=Decimal("0"))
+        fee_total = Decimal("0")
+        unsupported_fee_fill_count = 0
+        for item in fills:
+            fee_cost, fee_error = try_fill_fee_cost_in_quote(item)
+            if fee_error is not None:
+                unsupported_fee_fill_count += 1
+                continue
+            fee_total += fee_cost or Decimal("0")
         latest_snapshot = snapshots[-1] if snapshots else None
         earliest_snapshot = snapshots[0] if len(snapshots) > 1 else None
         latest_realized = latest_snapshot.realized_pnl if latest_snapshot is not None else Decimal("0")
@@ -159,6 +166,7 @@ class StrategyProfileContextFacade:
             "gross_realized_pnl": float(gross_realized),
             "net_realized_pnl": float(net_realized),
             "fee_total": float(fee_total),
+            "unsupported_fee_fill_count": unsupported_fee_fill_count,
             "fee_to_gross_pnl_ratio": float(fee_ratio),
             "win_rate": float(win_rate),
             "small_pnl_churn_ratio": float(small_pnl_churn_ratio),

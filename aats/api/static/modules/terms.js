@@ -258,6 +258,15 @@
   independent_overlay_rollout_replay_only: "独立双书当前只允许回放验证，运行线不会真正放开",
   independent_overlay_rollout_stage_blocks_live_runtime: "独立双书当前只放开到 dry-run，这条实盘运行线不会启用",
   strategy_hedge_independent_rollout_stage_live_not_allowed_in_phase_d: "当前阶段还不允许把独立双书直接放开到实盘",
+  independent_long_book_size_down_entry_enabled: "多书开仓按动态资本因子缩量",
+  independent_short_book_size_down_entry_enabled: "空书开仓按动态资本因子缩量",
+  independent_short_book_asymmetry_penalty_applied: "空书按 long/short 非对称规则额外收缩",
+  independent_long_book_de_risk_execution_health_degraded: "多书因执行健康恶化转为降风险",
+  independent_short_book_de_risk_execution_health_degraded: "空书因执行健康恶化转为降风险",
+  independent_long_book_de_risk_liquidity_degraded: "多书因流动性恶化转为降风险",
+  independent_short_book_de_risk_liquidity_degraded: "空书因流动性恶化转为降风险",
+  independent_long_book_de_risk_weak_edge: "多书因边际转弱转为降风险",
+  independent_short_book_de_risk_weak_edge: "空书因边际转弱转为降风险",
   directional_strategy_target: "沿用方向策略目标",
   smart_arbitrage_disabled: "智能套利未启用",
   smart_arbitrage_derivatives_runtime_required: "智能套利自动执行当前仅支持合约运行域",
@@ -747,6 +756,30 @@ function normalizedExpectedVsRealizedSummary(source = {}) {
   return {};
 }
 
+function normalizedIndependentAdaptiveSummary(source = {}) {
+  if (!source || typeof source !== "object") return {};
+  if (
+    Object.prototype.hasOwnProperty.call(source, "long_leg")
+    || Object.prototype.hasOwnProperty.call(source, "short_leg")
+    || Object.prototype.hasOwnProperty.call(source, "rollout_enabled")
+    || Object.prototype.hasOwnProperty.call(source, "live_applied")
+  ) {
+    return source;
+  }
+  const direct = source.independent_adaptive_summary || source.independentAdaptiveSummary;
+  if (direct && typeof direct === "object") {
+    return direct;
+  }
+  const audit = source.ai_decision_audit || source.aiDecisionAudit;
+  if (audit && typeof audit === "object") {
+    const nested = audit.independent_adaptive_summary || audit.independentAdaptiveSummary;
+    if (nested && typeof nested === "object") {
+      return nested;
+    }
+  }
+  return {};
+}
+
 function normalizedOverlayDecision(source = {}) {
   if (!source || typeof source !== "object") return {};
   const directAudit = source.overlay_parent_exposure
@@ -1090,6 +1123,46 @@ export function readableExpectedVsRealizedMeta(source = {}, fallback = "当前�
     parts.push(`分腿 ${breakdown}`);
   }
   return parts.length ? parts.join(" | ") : fallback;
+}
+
+function readableIndependentAdaptiveLegSummary(legSummary = {}) {
+  if (!legSummary || typeof legSummary !== "object" || !Object.keys(legSummary).length) return "";
+  const leg = readableBookLabel(String(legSummary.leg || "").trim().toLowerCase(), "independent_book");
+  const mode = legSummary.live_applied ? "已生效" : "影子评估";
+  return [
+    `${leg}${mode}`,
+    `开 ${readableExpectancyBps(legSummary.entry_threshold)}→${readableExpectancyBps(legSummary.adaptive_entry_threshold)} / 生效 ${readableExpectancyBps(legSummary.effective_entry_threshold)}`,
+    `收 ${readableExpectancyBps(legSummary.close_threshold)}→${readableExpectancyBps(legSummary.adaptive_close_threshold)} / 生效 ${readableExpectancyBps(legSummary.effective_close_threshold)}`,
+    `加 ${readableExpectancyBps(legSummary.scale_in_threshold)}→${readableExpectancyBps(legSummary.adaptive_scale_in_threshold)} / 生效 ${readableExpectancyBps(legSummary.effective_scale_in_threshold)}`,
+    `thesis ${readableExpectancyBps(legSummary.thesis_age_seconds)}→${readableExpectancyBps(legSummary.adaptive_thesis_age_seconds)} 秒`,
+    `de-risk ${readableExpectancyBps(legSummary.de_risk_net_edge_bps)}→${readableExpectancyBps(legSummary.adaptive_de_risk_net_edge_bps)} 基点`,
+  ].join(" / ");
+}
+
+export function readableIndependentAdaptiveSummary(source = {}, fallback = "当前还没有独立双书自适应摘要") {
+  const summary = normalizedIndependentAdaptiveSummary(source);
+  if (!summary || typeof summary !== "object" || !Object.keys(summary).length) return fallback;
+  const parts = [
+    readableIndependentAdaptiveLegSummary(summary.long_leg),
+    readableIndependentAdaptiveLegSummary(summary.short_leg),
+  ].filter(Boolean);
+  return parts.length ? parts.join(" | ") : fallback;
+}
+
+export function readableIndependentAdaptiveMeta(source = {}, fallback = "当前没有额外自适应说明") {
+  const summary = normalizedIndependentAdaptiveSummary(source);
+  if (!summary || typeof summary !== "object" || !Object.keys(summary).length) return fallback;
+  const parts = [
+    summary.live_applied ? "当前已按动态阈值重评估" : summary.rollout_enabled ? "当前只输出 shadow 动态阈值" : "当前没有启用动态 rollout",
+    `health enforcement ${summary.health_enforcement_enabled ? "已启用" : "未启用"}`,
+    `size-down ${summary.size_down_entry_enabled ? "已启用" : "未启用"}`,
+    `long/short asymmetry ${summary.long_short_asymmetry_enabled ? "已启用" : "未启用"}`,
+  ];
+  const codes = Array.isArray(summary.reason_codes) ? summary.reason_codes : [];
+  if (codes.length) {
+    parts.push(codes.slice(0, 3).map((item) => localizeError(item, item)).join(" / "));
+  }
+  return parts.join(" | ");
 }
 
 function normalizedBookRuntimeStates(source = {}) {

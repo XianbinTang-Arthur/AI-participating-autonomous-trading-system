@@ -15,8 +15,13 @@ class IndependentBookRuntimeState:
     execution_chain_id: str | None = None
     thesis_started_at: datetime | None = None
     thesis_age_seconds: float | None = None
+    current_scale_in_count: int = 0
+    current_de_risk_count: int = 0
     last_transition_at: datetime | None = None
     last_transition_reason: str | None = None
+    suspended_until: datetime | None = None
+    eligibility_state: str | None = None
+    state_version: int = 1
     expected_signal_edge_bps: float | None = None
     expected_cost_bps: float | None = None
     expected_net_edge_bps: float | None = None

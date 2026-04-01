@@ -7294,6 +7294,67 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(recovery["latest_account_baseline"]["allowed_symbols"], ["BTC-USDT"])
 
+    async def test_recovery_view_surfaces_independent_recovery_snapshots(self) -> None:
+        from aats.schemas.system import IndependentRecoverySnapshot
+
+        runtime = await self._runtime()
+        runtime.recovery_status = runtime.recovery_status.model_copy(
+            update={
+                "independent_recovery_snapshots": [
+                    IndependentRecoverySnapshot.model_validate(
+                        {
+                            "decision_id": "decision_independent_1",
+                            "allocation_id": "alloc_independent_1",
+                            "symbol": "BTC-USDT",
+                        "strategy_sleeve_id": "sleeve_independent_long_short",
+                        "leg": "long",
+                        "book_state": "probing",
+                        "holding_phase": "entry",
+                        "health_state": "ok",
+                        "current_qty": "0",
+                        "target_qty": "0.02",
+                        "expected_chain_ids": ["independent:decision_independent_1:long:open"],
+                        "active_execution_chain_ids": ["independent:decision_independent_1:long:open"],
+                        "unresolved_attempt_ids": ["attempt_independent_1"],
+                            "recovery_posture": "pending_execution_attempts",
+                            "recovery_blockers": [],
+                            "threshold_snapshot": {
+                                "leg": "long",
+                                "shadow_only": True,
+                                "entry_threshold": 0.66,
+                                "adaptive_entry_threshold": 0.71,
+                                "capital_multiplier": 0.93,
+                                "reason_codes": ["adaptive_shadow_confidence_adjusted"],
+                            },
+                            "decision_snapshot": {
+                                "decision_id": "decision_independent_1",
+                                "symbol": "BTC-USDT",
+                                "leg": "long",
+                                "execution_policy": {
+                                    "policy_reason": "independent_entry_guarded_passive_first",
+                                    "order_type_preference": "limit",
+                                },
+                            },
+                        }
+                    )
+                ]
+            }
+        )
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            recovery = client.get("/system/recovery").json()
+
+        self.assertTrue(recovery["recovery"]["independent_recovery_snapshots"])
+        snapshot = recovery["recovery"]["independent_recovery_snapshots"][0]
+        self.assertEqual(snapshot["leg"], "long")
+        self.assertEqual(snapshot["recovery_posture"], "pending_execution_attempts")
+        self.assertEqual(
+            snapshot["active_execution_chain_ids"],
+            ["independent:decision_independent_1:long:open"],
+        )
+        self.assertEqual(snapshot["threshold_snapshot"]["adaptive_entry_threshold"], 0.71)
+
     async def test_rebaseline_uses_previous_baseline_from_current_scope(self) -> None:
         settings = AATSSettings.model_validate(
             {
@@ -7485,6 +7546,12 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         return f"/dashboard/bundle?{query}"
 
     async def _runtime(self, operator_users: list[tuple[str, str]] | None = None, **overrides):
+        normalized_overrides = dict(overrides)
+        if (
+            "operator_session_secret" in normalized_overrides
+            and "operator_session_cookie_secure" not in normalized_overrides
+        ):
+            normalized_overrides["operator_session_cookie_secure"] = False
         settings = AATSSettings.model_validate(
             {
                 "config_profile": "local_demo",
@@ -7497,7 +7564,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
                 "event_persistence_mode": "strict",
                 "enabled_decision_timeframes": ("15m",),
                 "operator_unsafe_write_without_auth": True,
-                **overrides,
+                **normalized_overrides,
             }
         )
         runtime = await build_runtime(settings)
