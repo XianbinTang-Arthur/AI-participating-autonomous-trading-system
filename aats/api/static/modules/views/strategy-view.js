@@ -91,6 +91,29 @@ export function renderStrategySections(data) {
   const directionalConfig = strategyRuntime.configured_parameters?.directional || {};
   const independentExpectedVsRealized = strategyRuntime.independent_expected_vs_realized_summary || {};
   const independentAdaptiveSummary = strategyRuntime.independent_adaptive_summary || {};
+  const independentAdaptiveCopy = readableIndependentAdaptiveSummary(independentAdaptiveSummary, "");
+  const independentAdaptiveMeta = independentAdaptiveCopy
+    ? readableIndependentAdaptiveMeta(independentAdaptiveSummary, "当前没有额外自适应说明")
+    : "";
+  const expectedVsRealizedCopy = readableExpectedVsRealizedSummary(independentExpectedVsRealized, "");
+  const expectedVsRealizedMeta = expectedVsRealizedCopy
+    ? readableExpectedVsRealizedMeta(independentExpectedVsRealized, "当前没有额外诊断说明")
+    : "";
+  const coordinatorDiagnostics = [];
+  if (independentAdaptiveCopy) {
+    coordinatorDiagnostics.push([
+      "独立双书自适应阈值",
+      independentAdaptiveCopy,
+      independentAdaptiveMeta,
+    ]);
+  }
+  if (expectedVsRealizedCopy) {
+    coordinatorDiagnostics.push([
+      "独立双书预期 vs 已实现",
+      expectedVsRealizedCopy,
+      expectedVsRealizedMeta,
+    ]);
+  }
 
   return {
     strategyHero: surfaceCard({
@@ -205,9 +228,9 @@ export function renderStrategySections(data) {
             tone: "info",
           },
           {
-            label: "最近执行 Bundle",
+            label: "最近执行包",
             value: readableState(strategyRuntimeSummary.latest_bundle_status || "unknown"),
-            meta: latestBundle.bundle_id ? middleEllipsis(latestBundle.bundle_id, 10, 8, "当前没有策略执行 bundle") : "当前没有策略执行 bundle",
+            meta: latestBundle.bundle_id ? middleEllipsis(latestBundle.bundle_id, 10, 8, "当前没有策略执行包") : "当前没有策略执行包",
             tone: strategyRuntimeSummary.latest_bundle_status === "blocked" ? "warning" : "info",
           },
           {
@@ -220,42 +243,34 @@ export function renderStrategySections(data) {
         ${kvList([
           ["调度结论", strategyRuntimeSummary.operator_summary || "当前还没有多策略调度快照。", reasonListText(strategyRuntimeSummary.latest_selection_reason_codes, "当前没有额外调度原因说明")],
           ["当前路由", strategyRouteActionLabel(strategyRuntimeSummary.latest_selected_route_action, strategyRuntimeSummary.latest_selected_family_action), strategyRuntimeSummary.protective_fallback_active ? "当前保留了保护性减仓/退出路径。" : "当前没有触发保护性回退。"],
-          ["Allocator 结论", latestAllocationDecision.operator_summary || "当前还没有 allocator 决策。", reasonListText(latestAllocationDecision.reason_codes, "当前没有 allocator 级原因说明")],
+          ["组合分配结论", latestAllocationDecision.operator_summary || "当前还没有组合分配决策。", reasonListText(latestAllocationDecision.reason_codes, "当前没有额外分配原因说明")],
           [
             "Hedge 保护 / 方向削减",
             `${formatSigned(strategyRuntimeSummary.latest_hedge_protected_notional)} / ${formatSigned(strategyRuntimeSummary.latest_directional_reduced_notional)}`,
-            "前者表示为保护 hedge 结构而保留的名义金额，后者表示 allocator 主动削减的方向暴露。",
+            "前者表示为保护 hedge 结构而保留的名义金额，后者表示组合分配器主动削减的方向暴露。",
           ],
           [
-            "最近 Bundle / 已应用目标",
+            "最近执行包 / 已应用目标",
             `${readableState(latestBundle.status || strategyRuntimeSummary.latest_bundle_status || "unknown")} / ${formatSigned(strategyAppliedTarget.target_position_qty)}`,
             `${formatNumber(recentBundles[0]?.legs?.length ?? latestBundle.legs?.length ?? 0, 0, "0")} 条腿 | ${readableFamilyExecutionSummary(strategyAppliedTarget, "保持当前仓位")}${familyExpectancySuffix(strategyAppliedTarget)}`,
           ],
-          ...(
-            readableIndependentAdaptiveSummary(independentAdaptiveSummary, "") ? [[
-              "独立双书自适应阈值",
-              readableIndependentAdaptiveSummary(independentAdaptiveSummary, "当前还没有独立双书自适应摘要"),
-              readableIndependentAdaptiveMeta(independentAdaptiveSummary, "当前没有额外自适应说明"),
-            ]] : []
-          ),
-          ...(
-            readableExpectedVsRealizedSummary(independentExpectedVsRealized, "") ? [[
-              "独立双书预期 vs 已实现",
-              readableExpectedVsRealizedSummary(independentExpectedVsRealized, "当前还没有独立双书诊断"),
-              readableExpectedVsRealizedMeta(independentExpectedVsRealized, "当前没有额外诊断说明"),
-            ]] : []
-          ),
         ])}
         ${renderStrategyCandidateTable(displayedStrategyCandidates, smartArbitrageConfig, { policy, risk })}
         ${renderRecentSleeveIntentTable(recentSleeveIntents.slice(0, 5), { policy, risk })}
+        ${coordinatorDiagnostics.length ? renderExpandableSection("高级诊断：独立双书", kvList(coordinatorDiagnostics), {
+          meta: "默认收起，只在核对阈值和预期偏差时查看",
+        }) : ""}
         ${renderExpandableSection("预算快照", renderAllocatorBudgetSnapshotTable(recentBudgetSnapshots), {
           meta: `${formatNumber(strategyRuntimeSummary.latest_budget_snapshot_count, 0, "0")} 条`,
+          open: true,
         })}
         ${renderExpandableSection("冲突解算", renderAllocatorConflictResolutionTable(recentConflictResolutions), {
           meta: `${formatNumber(strategyRuntimeSummary.latest_conflict_resolution_count, 0, "0")} 条`,
+          open: true,
         })}
         ${renderExpandableSection("净额决策", renderAllocatorNettingDecisionTable(recentNettingDecisions), {
           meta: `${formatNumber(strategyRuntimeSummary.latest_netting_decision_count, 0, "0")} 条`,
+          open: true,
         })}
       `,
     }),
@@ -281,19 +296,19 @@ export function renderStrategySections(data) {
             tone: strategyRuntimeSummary.auto_parallel_enabled ? "positive" : "warning",
           },
           {
-            label: "活跃 Sleeve",
+            label: "活跃子策略",
             value: formatNumber(strategyRuntimeSummary.automation_active_count, 0, "0"),
             meta: "当前在自动预算内正常运行",
             tone: "positive",
           },
           {
-            label: "收缩中的 Sleeve",
+            label: "收缩中的子策略",
             value: formatNumber(strategyRuntimeSummary.automation_contracted_count, 0, "0"),
             meta: "预算已收缩或只保留保护性管理",
             tone: strategyRuntimeSummary.automation_contracted_count ? "warning" : "info",
           },
           {
-            label: "暂停中的 Sleeve",
+            label: "暂停中的子策略",
             value: formatNumber(strategyRuntimeSummary.automation_paused_count, 0, "0"),
             meta: "当前已被系统自动暂停",
             tone: strategyRuntimeSummary.automation_paused_count ? "danger" : "info",
@@ -302,7 +317,7 @@ export function renderStrategySections(data) {
         ${kvList([
           [
             "最新预算权重",
-            Object.keys(strategyRuntimeSummary.latest_approved_sleeve_weights || {}).length ? "allocator 已生成权重" : "当前没有新的预算权重",
+            Object.keys(strategyRuntimeSummary.latest_approved_sleeve_weights || {}).length ? "已生成预算权重" : "当前没有新的预算权重",
             Object.entries(strategyRuntimeSummary.latest_approved_sleeve_weights || {})
               .map(([sleeveId, weight]) => `${sleeveId}: ${formatNumber(weight, 2, "0")}`)
               .join(" | ") || "本轮没有批准新的 sleeve 预算。",
@@ -318,7 +333,7 @@ export function renderStrategySections(data) {
           ],
         ])}
         ${responsiveTable(
-          ["Sleeve", "自动状态", "预算倍率", "权重", "最近净收益"],
+          ["子策略", "自动状态", "预算倍率", "权重", "最近净收益"],
           displayedAutomationDecisions.map((item) => [
             `<div><strong>${escapeHtml(item.strategy_sleeve_id || "未归属")}</strong><div class="table-meta">${escapeHtml(readableState(item.family || "unknown"))}</div></div>`,
             `<div><strong>${escapeHtml(readableState(item.automation_state || "unknown"))}</strong><div class="table-meta">${escapeHtml(item.operator_summary || "当前没有额外说明")}</div></div>`,
@@ -350,7 +365,7 @@ export function renderStrategySections(data) {
             tone: Number(attributionSummary.combined_net_realized_pnl || 0) >= 0 ? "positive" : "warning",
           },
           {
-            label: "库存最大 Sleeve",
+            label: "库存最大子策略",
             value: attributionSummary.top_inventory_sleeve_id || "当前没有库存",
             meta: attributionSummary.top_inventory_notional == null ? "当前没有库存名义金额" : `名义金额 ${formatSigned(attributionSummary.top_inventory_notional)}`,
             tone: "info",
@@ -364,23 +379,23 @@ export function renderStrategySections(data) {
         ])}
         ${kvList([
           [
-            "主要 Sleeve 收益",
-            sleeveProfitability[0]?.strategy_sleeve_id || "当前没有 sleeve 级收益记录",
+            "主要子策略收益",
+            sleeveProfitability[0]?.strategy_sleeve_id || "当前没有子策略收益记录",
             sleeveProfitability[0] ? `净收益 ${formatSigned(sleeveProfitability[0].combined_net_realized_pnl)} | 记录 ${formatNumber(sleeveProfitability[0].record_count, 0, "0")} 条` : "等第一批 fill / funding fee 归因记录落地后，这里会自动出现。",
           ],
           [
             "库存归属概览",
-            sleeveInventorySummary[0]?.strategy_sleeve_id || "当前没有 open lot",
-            sleeveInventorySummary[0] ? `库存名义金额 ${formatSigned(sleeveInventorySummary[0].inventory_notional)} | ${formatNumber(sleeveInventorySummary[0].open_lot_count, 0, "0")} 个 lot` : "当前没有需要追踪的 sleeve 库存。",
+            sleeveInventorySummary[0]?.strategy_sleeve_id || "当前没有持仓批次",
+            sleeveInventorySummary[0] ? `库存名义金额 ${formatSigned(sleeveInventorySummary[0].inventory_notional)} | ${formatNumber(sleeveInventorySummary[0].open_lot_count, 0, "0")} 个持仓批次` : "当前没有需要追踪的子策略库存。",
           ],
           [
-            "Bundle 归因",
+            "执行包归因",
             formatNumber((strategyAttribution.profitability_by_strategy_bundle || []).length, 0, "0"),
-            "按 allocation / bundle 的收益归因已经进入组合报表，可用于排查多腿执行后的收益归属。",
+            "按 allocation / 执行包 的收益归因已经进入组合报表，可用于排查多腿执行后的收益归属。",
           ],
         ])}
         ${responsiveTable(
-          ["Sleeve", "净收益", "资金费", "库存变化", "库存名义金额"],
+          ["子策略", "净收益", "资金费", "库存变化", "库存名义金额"],
           displayedSleeveProfitability.map((item) => {
             const inventory = sleeveInventorySummary.find((row) => row.strategy_sleeve_id === item.strategy_sleeve_id) || {};
             return [
@@ -388,7 +403,7 @@ export function renderStrategySections(data) {
               `<div><strong>${formatSigned(item.combined_net_realized_pnl)}</strong><div class="table-meta">实现 ${formatSigned(item.realized_pnl)}</div></div>`,
               `<div><strong>${formatSigned(item.funding_fee_amount)}</strong><div class="table-meta">费用 ${formatSigned(item.fee_amount)}</div></div>`,
               `<div><strong>${formatSigned(item.inventory_move_qty)}</strong><div class="table-meta">${formatNumber(item.record_count, 0, "0")} 条记录</div></div>`,
-              `<div><strong>${formatSigned(inventory.inventory_notional)}</strong><div class="table-meta">${formatNumber(inventory.open_lot_count, 0, "0")} 个 open lot</div></div>`,
+              `<div><strong>${formatSigned(inventory.inventory_notional)}</strong><div class="table-meta">${formatNumber(inventory.open_lot_count, 0, "0")} 个持仓批次</div></div>`,
             ];
           }),
           "当前还没有可展示的 sleeve 归因记录。"
@@ -481,9 +496,11 @@ export function renderStrategySections(data) {
         ])}
         ${renderExpandableSection("最近观察周期", renderForwardValidationPeriods(displayedForwardPeriods), {
           meta: `${formatNumber(displayedForwardPeriods.length, 0, "0")} 个周期`,
+          open: true,
         })}
         ${renderExpandableSection("最近处理记录", renderTrialReviewHistory(displayedTrialReviewActions), {
           meta: `${formatNumber(displayedTrialReviewActions.length, 0, "0")} 条`,
+          open: true,
         })}
       `,
     }),
@@ -536,13 +553,13 @@ export function renderStrategyView(data) {
     data?.strategyRuntime?.configured_parameters?.smart_arbitrage || {}
   ).length > 0;
   const referenceCards = [
-    `<div class="span-6">${sections.strategyTradeCosts}</div>`,
-    `<div class="span-6">${sections.strategyDirectionalConfig}</div>`,
+    `<div class="span-12">${sections.strategyTradeCosts}</div>`,
+    `<div class="span-12">${sections.strategyDirectionalConfig}</div>`,
   ];
   if (hasSmartArbitrageReference) {
     referenceCards.push(
-      `<div class="span-7">${sections.strategySmartArbitrageConfig}</div>`,
-      `<div class="span-5">${sections.strategySmartArbitrageCost}</div>`
+      `<div class="span-12">${sections.strategySmartArbitrageConfig}</div>`,
+      `<div class="span-12">${sections.strategySmartArbitrageCost}</div>`
     );
   }
   return `
@@ -2524,10 +2541,10 @@ function renderStrategyCandidateTable(candidates, smartArbitrageConfig = {}, con
 
 function renderRecentSleeveIntentTable(items, context = {}) {
   if (!Array.isArray(items) || !items.length) {
-    return `<p class="meta-copy">当前还没有新的 sleeve 意图记录。</p>`;
+    return `<p class="meta-copy">当前还没有新的子策略意图记录。</p>`;
   }
   return responsiveTable(
-    ["最近 Sleeve 意图", "当前状态", "本轮目标", "自动预算", "原因说明"],
+    ["最近子策略意图", "当前状态", "本轮目标", "自动预算", "原因说明"],
     items.map((item) => [
       `<div><strong>${escapeHtml(item.strategy_sleeve_id || "未归属")}</strong><div class="table-meta">${escapeHtml(readableState(item.family || "unknown"))} | ${escapeHtml(item.symbol || "标的待确认")}</div></div>`,
       `<div><strong>${escapeHtml(readableState(item.state || "unknown"))}</strong><div class="table-meta">${escapeHtml(strategyRouteActionLabel(item.route_action, item.family_action))}</div></div>`,
@@ -2721,13 +2738,13 @@ function strategyCandidateTargetMeta(candidate, context = {}) {
 
 function renderAllocatorBudgetSnapshotTable(items) {
   if (!Array.isArray(items) || !items.length) {
-    return `<p class="meta-copy">当前还没有 allocator 预算快照。</p>`;
+    return `<p class="meta-copy">当前还没有组合预算快照。</p>`;
   }
   return `
     <div class="section-block">
       <h4>预算快照</h4>
       ${responsiveTable(
-        ["Sleeve", "优先级", "请求名义 / 批准名义", "组合预算变化", "原因"],
+        ["子策略", "优先级", "请求名义 / 批准名义", "组合预算变化", "原因"],
         items.map((item) => [
           `<div><strong>${escapeHtml(item.strategy_sleeve_id || "未归属")}</strong><div class="table-meta">${escapeHtml(readableState(item.family || "unknown"))}</div></div>`,
           `<div><strong>${escapeHtml(readableState(item.hedge_priority_class || "standard"))}</strong><div class="table-meta">rank ${escapeHtml(String(item.priority_rank ?? 0))}</div></div>`,
@@ -2735,7 +2752,7 @@ function renderAllocatorBudgetSnapshotTable(items) {
           `<div><strong>${formatSigned(item.portfolio_requested_notional)} -> ${formatSigned(item.portfolio_approved_notional)}</strong><div class="table-meta">削减 ${formatSigned(item.portfolio_budget_cut_notional)}</div></div>`,
           `<div><strong>${escapeHtml(item.clamped ? "已裁剪" : "未裁剪")}</strong><div class="table-meta">${escapeHtml(reasonListText(item.reason_codes, "当前没有额外原因"))}</div></div>`,
         ]),
-        "当前没有 allocator 预算快照。"
+        "当前没有组合预算快照。"
       )}
     </div>
   `;
@@ -2749,10 +2766,10 @@ function renderAllocatorConflictResolutionTable(items) {
     <div class="section-block">
       <h4>冲突解算</h4>
       ${responsiveTable(
-        ["类型", "参与 Sleeve", "请求 / 批准 / 阻断", "保护 / 削减", "原因"],
+        ["类型", "参与子策略", "请求 / 批准 / 阻断", "保护 / 削减", "原因"],
         items.map((item) => [
           `<div><strong>${escapeHtml(readableState(item.conflict_type || "unknown"))}</strong><div class="table-meta">${escapeHtml(readableState(item.resolution_action || "unknown"))}</div></div>`,
-          `<div><strong>${escapeHtml((item.input_sleeve_ids || []).join(" | ") || "当前没有输入 sleeve")}</strong><div class="table-meta">批准 ${escapeHtml((item.approved_sleeve_ids || []).join(" | ") || "无")}</div></div>`,
+          `<div><strong>${escapeHtml((item.input_sleeve_ids || []).join(" | ") || "当前没有输入子策略")}</strong><div class="table-meta">批准 ${escapeHtml((item.approved_sleeve_ids || []).join(" | ") || "无")}</div></div>`,
           `<div><strong>${formatSigned(item.gross_requested_qty)} / ${formatSigned(item.net_approved_qty)}</strong><div class="table-meta">阻断 ${formatSigned(item.blocked_qty)}</div></div>`,
           `<div><strong>${formatSigned(item.protected_notional)}</strong><div class="table-meta">方向削减 ${formatSigned(item.reduced_notional)}</div></div>`,
           `<div><strong>${escapeHtml(reasonListText(item.reason_codes, "当前没有额外原因"))}</strong></div>`,
@@ -2771,10 +2788,10 @@ function renderAllocatorNettingDecisionTable(items) {
     <div class="section-block">
       <h4>净额决策</h4>
       ${responsiveTable(
-        ["标的", "参与 Sleeve", "总买 / 总卖", "净批准数量", "原因"],
+        ["标的", "参与子策略", "总买 / 总卖", "净批准数量", "原因"],
         items.map((item) => [
           `<div><strong>${escapeHtml(item.symbol || "标的待确认")}</strong><div class="table-meta">${escapeHtml(readableState(item.product_type || "unknown"))} | ${escapeHtml(readableState(item.margin_mode || "unknown"))}</div></div>`,
-          `<div><strong>${escapeHtml((item.participating_sleeve_ids || []).join(" | ") || "当前没有参与 sleeve")}</strong></div>`,
+          `<div><strong>${escapeHtml((item.participating_sleeve_ids || []).join(" | ") || "当前没有参与子策略")}</strong></div>`,
           `<div><strong>${formatSigned(item.gross_buy_qty)} / ${formatSigned(item.gross_sell_qty)}</strong></div>`,
           `<div><strong>${formatSigned(item.net_approved_qty)}</strong></div>`,
           `<div><strong>${escapeHtml(reasonListText(item.reason_codes, "当前没有额外原因"))}</strong></div>`,

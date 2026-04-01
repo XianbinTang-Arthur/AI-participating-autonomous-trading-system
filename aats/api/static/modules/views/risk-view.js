@@ -2,13 +2,11 @@
 import { kvList } from "../components.js";
 import { localizeList, textOrFallback } from "../copy.js";
 import { booleanWord, escapeHtml, formatMaybeTimestamp, formatNumber, formatRelativeAge, middleEllipsis } from "../formatters.js";
+import { overlayParentPostmortemRows, renderOverlayParentHistoryTable } from "../overlay-parent-renderers.js";
 import {
   localizeError,
   operationalStatusCopy,
   operationalStatusHeadline,
-  readableOverlayParentLegQuantitySummary,
-  readableOverlayParentPostmortemMeta,
-  readableOverlayParentSignalSummary,
   readableState,
   recoveryStatusLabel,
   reviewStatusLabel,
@@ -157,18 +155,18 @@ export function renderRiskSections(data) {
     riskReplayPostmortem: replayParentPostmortem
       ? surfaceCard({
           title: "回放父腿复盘",
-          kicker: "Replay Postmortem",
-          copy: "把最近一次回放里的父腿暴露阶段单独收口，便于核对 residual inventory、target-only 和 mixed source。",
-          content: kvList(replayOverlayParentPostmortemRows(replayParentPostmortem)),
+          kicker: "最近一次回放",
+          copy: "把最近一次回放里的父腿暴露阶段单独收口，方便核对库存延续、目标主导和混合来源。",
+          content: kvList(overlayParentPostmortemRows(replayParentPostmortem)),
         })
       : "",
     riskReplayHistory: replayRecentValidations.length
       ? surfaceCard({
           title: "回放父腿历史",
-          kicker: "Replay History",
-          copy: "把最近几次 replay 里的父腿暴露阶段并排展开，方便比较 residual inventory、mixed source 和目标切换场景。",
-          actions: `<div class="stack-actions table-actions--compact">${actionButton("查看 Replay 工作区", "navigate-view", "replay", "ghost")}</div>`,
-          content: renderReplayOverlayParentHistory(replayRecentValidations),
+          kicker: "历史对比",
+          copy: "把最近几次回放里的父腿暴露阶段并排展开，方便比较库存延续、混合来源和目标切换场景。",
+          actions: `<div class="stack-actions table-actions--compact">${actionButton("查看回放工作区", "navigate-view", "replay", "ghost")}</div>`,
+          content: renderOverlayParentHistoryTable(replayRecentValidations),
         })
       : "",
     riskMarginBuffer: surfaceCard({
@@ -185,13 +183,13 @@ export function renderRiskSections(data) {
         {
           label: "当前保证金占用",
           value: trialRatioText(marginBuffer.current?.initial_margin_usage_fraction),
-          meta: `距离 only-reduce ${trialRatioText(marginBuffer.current?.buffer_to_only_reduce)}，距离硬上限 ${trialRatioText(marginBuffer.current?.buffer_to_hard_limit)}`,
+          meta: `距离仅减仓线 ${trialRatioText(marginBuffer.current?.buffer_to_only_reduce)}，距离硬上限 ${trialRatioText(marginBuffer.current?.buffer_to_hard_limit)}`,
           tone: marginBufferTone(marginBuffer.status),
         },
         {
           label: "下一笔投影占用",
           value: trialRatioText(marginBuffer.projected?.projected_margin_usage),
-          meta: `投影后距离 only-reduce ${trialRatioText(marginBuffer.projected?.buffer_to_only_reduce)}，距离硬上限 ${trialRatioText(marginBuffer.projected?.buffer_to_hard_limit)}`,
+          meta: `投影后距离仅减仓线 ${trialRatioText(marginBuffer.projected?.buffer_to_only_reduce)}，距离硬上限 ${trialRatioText(marginBuffer.projected?.buffer_to_hard_limit)}`,
           tone: marginBufferTone(marginBuffer.status),
         },
         {
@@ -460,82 +458,98 @@ export function renderRiskSections(data) {
 
 export function renderRiskView(data) {
   const sections = renderRiskSections(data);
+  const replaySectionMarkup = sections.riskReplayPostmortem || sections.riskReplayHistory
+    ? `
+      <div class="panel-grid strategy-page-grid">
+        ${sections.riskReplayPostmortem ? `<div class="span-5">${sections.riskReplayPostmortem}</div>` : ""}
+        <div class="${sections.riskReplayPostmortem ? "span-7" : "span-12"}">${sections.riskBlockers}</div>
+        ${sections.riskReplayHistory ? `<div class="span-12">${sections.riskReplayHistory}</div>` : ""}
+        <div class="span-6">${sections.riskBills}</div>
+        <div class="span-6">${sections.riskMetrics}</div>
+      </div>
+    `
+    : `
+      <div class="panel-grid strategy-page-grid">
+        <div class="span-7">${sections.riskBlockers}</div>
+        <div class="span-5">${sections.riskMetrics}</div>
+        <div class="span-12">${sections.riskBills}</div>
+      </div>
+    `;
   return `
-    <div class="panel-grid">
-      <div class="span-12">${sections.riskHero}</div>
-      <div class="span-12">${sections.riskActions}</div>
-      <div class="span-12">${sections.riskEvidence}</div>
-      <div class="span-3">${sections.riskAccount}</div>
-      <div class="span-3">${sections.riskPositionMode}</div>
-      <div class="span-3">${sections.riskMarginBuffer}</div>
-      <div class="span-3">${sections.riskReconciliation}</div>
-      <div class="span-6">${sections.riskRecovery}</div>
-      ${sections.riskReplayPostmortem ? `<div class="span-6">${sections.riskReplayPostmortem}</div>` : ""}
-      ${sections.riskReplayHistory ? `<div class="span-12">${sections.riskReplayHistory}</div>` : ""}
-      <div class="span-6">${sections.riskExposure}</div>
-      <div class="span-6">${sections.riskPreflight}</div>
-      <div class="span-6">${sections.riskRunPacket}</div>
-      <div class="span-12">${sections.riskShadow}</div>
-      <div class="span-12">${sections.riskTrialGuard}</div>
-      <div class="span-12">${sections.riskBills}</div>
-      <div class="span-6">${sections.riskBlockers}</div>
-      <div class="span-6">${sections.riskMetrics}</div>
+    <div class="workspace-stack strategy-workspace">
+      <nav class="section-nav strategy-section-nav" aria-label="风险与恢复分区导航">
+        <a class="section-nav__link" href="#risk-overview">当前任务</a>
+        <a class="section-nav__link" href="#risk-recovery">恢复条件</a>
+        <a class="section-nav__link" href="#risk-review">阻断与复盘</a>
+        <a class="section-nav__link" href="#risk-diagnostics">辅助诊断</a>
+      </nav>
+      ${renderRiskWorkspaceSection(
+        "risk-overview",
+        "当前任务",
+        "现在先处理什么",
+        "先看主阻断、主任务和判断依据。这里优先回答“为什么现在不能动”以及“先做哪一步”。",
+        `
+          <div class="panel-grid strategy-page-grid">
+            <div class="span-12">${sections.riskHero}</div>
+            <div class="span-7">${sections.riskActions}</div>
+            <div class="span-5">${sections.riskEvidence}</div>
+          </div>
+        `
+      )}
+      ${renderRiskWorkspaceSection(
+        "risk-recovery",
+        "恢复条件",
+        "恢复前必须确认的条件",
+        "把恢复资格、对账、保证金、账户状态和持仓模式放到同一层，避免在多个小卡片里来回跳读。",
+        `
+          <div class="panel-grid strategy-page-grid">
+            <div class="span-4">${sections.riskRecovery}</div>
+            <div class="span-4">${sections.riskReconciliation}</div>
+            <div class="span-4">${sections.riskMarginBuffer}</div>
+            <div class="span-4">${sections.riskAccount}</div>
+            <div class="span-4">${sections.riskExposure}</div>
+            <div class="span-4">${sections.riskPositionMode}</div>
+          </div>
+        `
+      )}
+      ${renderRiskWorkspaceSection(
+        "risk-review",
+        "阻断与复盘",
+        "阻断明细与回放复盘",
+        "先确认阻断项，再结合最近回放判断这次差异究竟来自库存残留、目标切换，还是执行链条没有闭环。",
+        replaySectionMarkup
+      )}
+      ${renderRiskWorkspaceSection(
+        "risk-diagnostics",
+        "辅助诊断",
+        "运行诊断与守护状态",
+        "这些卡片主要用于值班排障，不应抢占主判断；放到最后一组集中查看。",
+        `
+          <div class="panel-grid strategy-page-grid">
+            <div class="span-6">${sections.riskPreflight}</div>
+            <div class="span-6">${sections.riskRunPacket}</div>
+            <div class="span-6">${sections.riskShadow}</div>
+            <div class="span-6">${sections.riskTrialGuard}</div>
+          </div>
+        `
+      )}
     </div>
   `;
 }
 
-function replayOverlayParentPostmortemRows(summary = {}) {
-  return [
-    [
-      "父腿阶段",
-      readableOverlayParentSignalSummary(summary, "当前没有额外父腿阶段说明"),
-      readableOverlayParentPostmortemMeta(summary, "当前没有额外父腿契约说明"),
-    ],
-    [
-      "双腿数量拆解",
-      readableOverlayParentLegQuantitySummary(summary, "当前没有父腿多空数量拆解"),
-      `来源 ${textOrFallback(localizeError(summary.signal_source), "当前没有额外来源说明")}`,
-    ],
-  ];
-}
-
-function renderReplayOverlayParentHistory(validations = []) {
-  const headers = ["回放时间 / 决策", "父腿阶段", "契约口径", "双腿数量拆解"];
-  const rows = validations.map((validation) => {
-    const summary = validation?.overlay_parent_exposure_summary || {};
-    return [
-      `<strong>${escapeHtml(formatMaybeTimestamp(validation?.validated_at))}</strong><div class="table-meta">${escapeHtml(textOrFallback(validation?.decision_id, "当前没有决策编号"))}</div>`,
-      escapeHtml(readableOverlayParentSignalSummary(summary, "当前没有父腿阶段说明")),
-      escapeHtml(readableOverlayParentPostmortemMeta(summary, "当前没有额外父腿契约说明")),
-      escapeHtml(readableOverlayParentLegQuantitySummary(summary, "当前没有父腿多空数量拆解")),
-    ];
-  });
-  const cards = validations.map((validation) => {
-    const summary = validation?.overlay_parent_exposure_summary || {};
-    return {
-      kicker: formatMaybeTimestamp(validation?.validated_at),
-      title: textOrFallback(validation?.decision_id, "当前没有决策编号"),
-      meta: readableOverlayParentPostmortemMeta(summary, "当前没有额外父腿契约说明"),
-      fields: [
-        {
-          label: "父腿阶段",
-          value: readableOverlayParentSignalSummary(summary, "当前没有父腿阶段说明"),
-        },
-        {
-          label: "双腿数量拆解",
-          value: readableOverlayParentLegQuantitySummary(summary, "当前没有父腿多空数量拆解"),
-        },
-      ],
-      details: [
-        {
-          label: "健康度",
-          value: booleanWord(validation?.healthy),
-          meta: `偏差 ${formatNumber(validation?.divergence_count ?? 0, 0)} / 链路分数 ${formatNumber(validation?.chain_health_score ?? 0, 3)}`,
-        },
-      ],
-    };
-  });
-  return responsiveTable(headers, rows, "当前没有回放父腿历史。", cards);
+function renderRiskWorkspaceSection(id, kicker, title, copy, content) {
+  return `
+    <section class="workspace-section strategy-workspace-section" id="${escapeHtml(id)}">
+      <header class="strategy-workspace-section__head">
+        <div class="strategy-workspace-section__copy">
+          <p class="panel-kicker">${escapeHtml(kicker)}</p>
+          <h2>${escapeHtml(title)}</h2>
+          <p class="meta-copy">${escapeHtml(copy)}</p>
+        </div>
+      </header>
+      ${content}
+    </section>
+  `;
 }
 
 function trialGuardStatusLabel(status) {

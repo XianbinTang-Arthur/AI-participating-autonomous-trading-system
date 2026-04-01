@@ -156,6 +156,59 @@ class TestForwardTrialGuardService(unittest.TestCase):
         self.assertEqual(snapshot["daily_combined_net_realized"], Decimal("-32"))
         self.assertTrue(any(item["code"] == "trial_guard_daily_loss_limit" for item in snapshot["breaches"]))
 
+    def test_trial_guard_prefers_closed_fill_anomaly_counts_from_profitability_summary(self) -> None:
+        now = utc_now()
+        settings = AATSSettings.model_validate(
+            {
+                "trial_guard_enabled": True,
+                "mode": "guarded_live",
+                "trial_guard_min_closed_fills": 1,
+                "trial_guard_lookback_fills": 10,
+                "trial_guard_max_high_slippage_ratio": 0.5,
+                "trial_guard_max_slow_submit_to_fill_ratio": 0.5,
+            }
+        )
+        service = ForwardTrialGuardService(
+            settings=settings,
+            kill_switch=KillSwitch(),
+            event_store=InMemoryEventStore(),
+            metrics=MetricsRegistry(),
+            profitability_provider=lambda _limit: {
+                "summary": {
+                    "closed_fill_count": 1,
+                    "fee_to_notional_ratio": Decimal("0.0005"),
+                    "high_slippage_count": 0,
+                    "slow_submit_to_fill_count": 0,
+                },
+                "recent_closed_fills": [
+                    {
+                        "fill_id": "close_fill_1",
+                        "realized_pnl_delta": Decimal("2"),
+                        "ingestion_timestamp": now - timedelta(minutes=1),
+                    },
+                ],
+            },
+            anomaly_provider=lambda _limit: {
+                "summary": {
+                    "high_slippage_count": 1,
+                    "slow_submit_to_fill_count": 1,
+                },
+                "rows": [
+                    {
+                        "fill_id": "open_fill_1",
+                        "ingestion_timestamp": now - timedelta(minutes=2),
+                        "anomaly_flags": ["high_adverse_slippage", "slow_submit_to_fill"],
+                    }
+                ],
+            },
+        )
+
+        snapshot = service.evaluate_now()
+
+        self.assertEqual(snapshot["status"], "monitoring")
+        self.assertFalse(any(item["code"] == "trial_guard_high_slippage_ratio" for item in snapshot["breaches"]))
+        self.assertFalse(any(item["code"] == "trial_guard_slow_fill_ratio" for item in snapshot["breaches"]))
+
     def test_trial_guard_marks_recovered_after_breach_is_cleared(self) -> None:
         now = utc_now()
         kill_switch = KillSwitch()

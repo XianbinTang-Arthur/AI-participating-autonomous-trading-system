@@ -1,11 +1,10 @@
-import { actionButton, kvList, primaryStatusPanel, responsiveTable, summaryStrip, surfaceCard } from "../components.js";
+import { actionButton, kvList, primaryStatusPanel, summaryStrip, surfaceCard } from "../components.js";
 import { textOrFallback } from "../copy.js";
 import { booleanWord, escapeHtml, formatMaybeTimestamp, formatNumber, formatRelativeAge } from "../formatters.js";
+import { overlayParentPostmortemMeta, overlayParentPostmortemRows, renderOverlayParentHistoryTable } from "../overlay-parent-renderers.js";
 import {
   readableIndependentAdaptiveMeta,
   readableIndependentAdaptiveSummary,
-  readableOverlayParentLegQuantitySummary,
-  readableOverlayParentPostmortemMeta,
   readableOverlayParentSignalSummary,
   readableState,
   toneForReconciliationSeverity,
@@ -45,7 +44,7 @@ export function renderReplaySections(data, uiState = {}, paging = {}) {
       headline: replay.healthy ? "回放链路目前健康" : "回放链路仍有差异",
       summary: latestValidation
         ? `最近一次回放在 ${formatMaybeTimestamp(latestValidation.validated_at)} 完成，当前可以直接对读父腿阶段、链路分数和腿级对账。`
-        : "当前还没有 replay 校验记录，先手动触发一次回放，才能开始复盘。",
+        : "当前还没有回放校验记录，先手动触发一次回放，才能开始复盘。",
       tone: replay.healthy ? "positive" : "warning",
       pills: [
         replayHeroPill("回放健康度", booleanWord(replay.healthy), replay.healthy ? "positive" : "warning"),
@@ -86,16 +85,16 @@ export function renderReplaySections(data, uiState = {}, paging = {}) {
     replayLatestPostmortem: latestSummary
       ? surfaceCard({
           title: "最新父腿复盘",
-          kicker: "Latest Postmortem",
-          copy: "把最近一次 replay 的父腿阶段和数量拆解单独收口，先看目标、库存和生效信号到底是谁在主导。",
-          content: kvList(replayOverlayParentPostmortemRows(latestSummary)),
+          kicker: "最近一次回放",
+          copy: "把最近一次回放的父腿阶段和数量拆解单独收口，先看目标、库存和最终生效信号到底是谁在主导。",
+          content: kvList(overlayParentPostmortemRows(latestSummary)),
         })
       : "",
     replayAdaptivePostmortem: latestAdaptiveSummary
       ? surfaceCard({
           title: "最新自适应复盘",
-          kicker: "Adaptive Postmortem",
-          copy: "这里单独收口独立双书在 replay 里的动态阈值、size-down 和 health enforcement 影子/生效结果。",
+          kicker: "阈值回放",
+          copy: "这里单独收口独立双书在回放里的动态阈值、缩量入场和健康约束结果。",
           content: kvList([
             [
               "自适应阈值",
@@ -107,21 +106,24 @@ export function renderReplaySections(data, uiState = {}, paging = {}) {
       : "",
     replayLinkedRead: surfaceCard({
       title: "父腿复盘与腿级对账联读",
-      kicker: "Replay x Reconciliation",
-      copy: "把 replay 里的父腿阶段和最新腿级对账异常放在一起读，减少 residual inventory、target 切换和执行链残留的解释成本。",
+      kicker: "回放与对账联读",
+      copy: "把回放里的父腿阶段和最新腿级对账异常放在一起读，减少库存残留、目标切换和执行链残留的解释成本。",
       actions: `<div class="stack-actions table-actions--compact">${actionButton("查看风险页", "navigate-view", "risk", "ghost")}</div>`,
       content: renderReplayReconciliationLinkedRead(latestSummary, legMismatchSummary, reconciliation),
     }),
     replayHistory: surfaceCard({
       title: "回放父腿历史",
-      kicker: "Replay History",
-      copy: "这里专门做 replay 历史筛选、折叠和横向比较。风险页只保留摘要，这里才是详细工作区。",
+      kicker: "历史对比",
+      copy: "这里专门做回放历史筛选、折叠和横向比较。风险页只保留摘要，这里才是详细工作区。",
       actions: renderReplayHistoryActions({
         replayFilter,
         hasMore: Boolean(recentPayload.has_more),
         canCollapse: currentLimit > defaultLimit,
       }),
-      content: renderReplayOverlayParentHistory(filteredValidations),
+      content: renderOverlayParentHistoryTable(filteredValidations, {
+        emptyMessage: "当前没有可供筛选的回放父腿历史。",
+        includeHealthColumn: true,
+      }),
     }),
   };
 }
@@ -169,31 +171,16 @@ function filterReplayValidations(validations, replayFilter) {
   });
 }
 
-function replayOverlayParentPostmortemRows(summary = {}) {
-  return [
-    [
-      "父腿阶段",
-      readableOverlayParentSignalSummary(summary, "当前没有额外父腿阶段说明"),
-      readableOverlayParentPostmortemMeta(summary, "当前没有额外父腿契约说明"),
-    ],
-    [
-      "双腿数量拆解",
-      readableOverlayParentLegQuantitySummary(summary, "当前没有父腿多空数量拆解"),
-      `判定口径 ${textOrFallback(readableState(summary.source_of_truth), "当前没有额外判定口径")}`,
-    ],
-  ];
-}
-
 function renderReplayReconciliationLinkedRead(replaySummary = null, legMismatchSummary = {}, reconciliation = null) {
   return summaryStrip([
     {
       label: "最新父腿阶段",
       value: replaySummary
         ? readableOverlayParentSignalSummary(replaySummary, "当前没有额外父腿阶段说明")
-        : "当前没有 replay 父腿复盘",
+        : "当前没有回放父腿复盘",
       meta: replaySummary
-        ? readableOverlayParentPostmortemMeta(replaySummary, "当前没有额外父腿契约说明")
-        : "先手动触发一次 replay，才能开始复盘父腿阶段",
+        ? overlayParentPostmortemMeta(replaySummary)
+        : "先手动触发一次回放，才能开始复盘父腿阶段",
       tone: replaySummary ? replayLifecycleTone(replaySummary.lifecycle_state) : "neutral",
     },
     {
@@ -207,61 +194,22 @@ function renderReplayReconciliationLinkedRead(replaySummary = null, legMismatchS
       value: replayReconciliationNarrative(replaySummary, legMismatchSummary),
       meta: reconciliation?.halt_required
         ? "最新对账已要求先暂停自动交易。"
-        : "当前可以继续用 replay 父腿复盘解释腿级差异。",
+        : "当前可以继续用回放父腿复盘解释腿级差异。",
       tone: reconciliation?.halt_required ? "danger" : Number(legMismatchSummary.total_count || 0) > 0 ? "warning" : "info",
     },
   ]);
 }
 
-function renderReplayOverlayParentHistory(validations = []) {
-  const headers = ["回放时间 / 决策", "父腿阶段", "契约口径", "双腿数量拆解", "回放健康"];
-  const rows = validations.map((validation) => {
-    const summary = validation?.overlay_parent_exposure_summary || {};
-    return [
-      `<strong>${escapeHtml(formatMaybeTimestamp(validation?.validated_at))}</strong><div class="table-meta">${escapeHtml(textOrFallback(validation?.decision_id, "当前没有决策编号"))}</div>`,
-      escapeHtml(readableOverlayParentSignalSummary(summary, "当前没有父腿阶段说明")),
-      escapeHtml(readableOverlayParentPostmortemMeta(summary, "当前没有额外父腿契约说明")),
-      escapeHtml(readableOverlayParentLegQuantitySummary(summary, "当前没有父腿多空数量拆解")),
-      escapeHtml(replayHealthSummary(validation)),
-    ];
-  });
-  const cards = validations.map((validation) => {
-    const summary = validation?.overlay_parent_exposure_summary || {};
-    return {
-      kicker: formatMaybeTimestamp(validation?.validated_at),
-      title: textOrFallback(validation?.decision_id, "当前没有决策编号"),
-      meta: readableOverlayParentPostmortemMeta(summary, "当前没有额外父腿契约说明"),
-      fields: [
-        { label: "父腿阶段", value: readableOverlayParentSignalSummary(summary, "当前没有父腿阶段说明") },
-        { label: "双腿数量拆解", value: readableOverlayParentLegQuantitySummary(summary, "当前没有父腿多空数量拆解") },
-        { label: "回放健康", value: replayHealthSummary(validation) },
-      ],
-      details: [
-        {
-          label: "判定口径",
-          value: textOrFallback(readableState(summary.source_of_truth), "待确认"),
-          meta: `链路分数 ${formatNumber(validation?.chain_health_score, 3)}`,
-        },
-      ],
-    };
-  });
-  return responsiveTable(headers, rows, "当前没有可供筛选的回放父腿历史。", cards);
-}
-
-function replayHealthSummary(validation = {}) {
-  return `${booleanWord(validation?.healthy)} / 偏差 ${formatNumber(validation?.divergence_count || 0, 0)} / 分数 ${formatNumber(validation?.chain_health_score, 3)}`;
-}
-
 function replayReconciliationNarrative(replaySummary = null, legMismatchSummary = {}) {
   const mismatchCount = Number(legMismatchSummary.total_count || 0);
   if (!replaySummary && mismatchCount === 0) {
-    return "当前既没有 replay 父腿复盘，也没有腿级异常。";
+    return "当前既没有回放父腿复盘，也没有腿级异常。";
   }
   if (!replaySummary) {
-    return "最新对账已经发现腿级异常，但还缺 replay 父腿复盘，先补一次回放再解释。";
+    return "最新对账已经发现腿级异常，但还缺回放父腿复盘，先补一次回放再解释。";
   }
   if (replaySummary.lifecycle_state === "inventory_only" && mismatchCount > 0) {
-    return "父腿仍靠真实库存维持，同时最新对账还有腿级差异，优先核对 residual inventory 和执行链残留。";
+    return "父腿仍靠真实库存维持，同时最新对账还有腿级差异，优先核对库存残留和执行链残留。";
   }
   if (replaySummary.lifecycle_state === "target_only" && mismatchCount > 0) {
     return "父腿只剩目标驱动，但腿级对账还有差异，优先检查未完成的目标切换或迟到成交。";
@@ -270,9 +218,9 @@ function replayReconciliationNarrative(replaySummary = null, legMismatchSummary 
     return "父腿同时受目标和库存影响，腿级异常也还在，先按 mixed 场景核对主腿与 overlay 是否同步。";
   }
   if (mismatchCount === 0) {
-    return "当前 replay 父腿阶段和最新腿级对账没有明显冲突，可以把它当作 postmortem 基线。";
+    return "当前回放父腿阶段和最新腿级对账没有明显冲突，可以把它当作复盘基线。";
   }
-  return "当前已经有 replay 父腿复盘，也有腿级差异，建议继续联读主腿阶段、目标切换和执行链残留。";
+  return "当前已经有回放父腿复盘，也有腿级差异，建议继续联读主腿阶段、目标切换和执行链残留。";
 }
 
 function replayLegMismatchMeta(summary = {}) {

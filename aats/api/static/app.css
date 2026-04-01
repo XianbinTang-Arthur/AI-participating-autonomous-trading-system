@@ -98,13 +98,13 @@ h3 {
 }
 
 .console-shell {
-  max-width: 1540px;
+  max-width: 1680px;
   margin: 0 auto;
-  padding: 28px 24px 40px;
+  padding: 24px 28px 48px;
 }
 
 .console-shell--compact {
-  max-width: 1480px;
+  max-width: 1620px;
 }
 
 .masthead,
@@ -893,7 +893,8 @@ h3 {
 }
 
 .page-head {
-  margin-bottom: 16px;
+  margin-bottom: 20px;
+  padding: 0 4px;
 }
 
 .page-head h2 {
@@ -903,12 +904,12 @@ h3 {
 .panel-grid {
   display: grid;
   grid-template-columns: repeat(12, minmax(0, 1fr));
-  gap: 16px;
+  gap: 18px;
 }
 
 .surface-card {
   display: grid;
-  gap: 14px;
+  gap: 16px;
 }
 
 .strategy-page-grid {
@@ -1205,12 +1206,14 @@ h3 {
   overflow: auto;
   border-radius: var(--radius-md);
   border: 1px solid var(--line);
+  background: rgba(6, 14, 22, 0.56);
 }
 
 .data-table {
   width: 100%;
   border-collapse: collapse;
-  min-width: 760px;
+  min-width: 100%;
+  table-layout: fixed;
 }
 
 .data-table th,
@@ -1230,6 +1233,16 @@ h3 {
   letter-spacing: 0.08em;
   text-transform: uppercase;
   background: rgba(255, 255, 255, 0.02);
+}
+
+.data-table th:first-child,
+.data-table td:first-child {
+  width: 18%;
+}
+
+.data-table th:nth-child(2),
+.data-table td:nth-child(2) {
+  width: 20%;
 }
 
 .data-table tbody tr:hover {
@@ -1431,16 +1444,27 @@ h3 {
   justify-content: space-between;
   align-items: center;
   gap: 12px;
-  padding: 12px 14px;
+  padding: 14px 16px;
   cursor: pointer;
   list-style: none;
   color: var(--text);
   font-size: 14px;
   font-weight: 800;
+  background: rgba(255, 255, 255, 0.02);
+  transition: background 140ms ease, border-color 140ms ease;
 }
 
 .strategy-details summary::-webkit-details-marker {
   display: none;
+}
+
+.strategy-details summary:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.strategy-details[open] summary {
+  border-bottom: 1px solid var(--line);
+  background: rgba(96, 165, 250, 0.08);
 }
 
 .strategy-details summary::after {
@@ -1463,10 +1487,10 @@ h3 {
 }
 
 .strategy-details__body {
-  padding: 0 14px 14px;
+  padding: 14px 16px 16px;
   display: grid;
   gap: 12px;
-  border-top: 1px solid var(--line);
+  background: rgba(6, 14, 22, 0.38);
 }
 
 .section-nav {

@@ -2172,6 +2172,101 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(Decimal(str(payload["summary"]["gross_realized_pnl"])), Decimal("5.0"))
         self.assertEqual(Decimal(str(payload["summary"]["net_realized_pnl"])), Decimal("4.5"))
 
+    async def test_closed_fill_reports_and_trial_guard_ignore_pure_opening_fill_outcomes(self) -> None:
+        runtime = await self._runtime(
+            config_profile="guarded_simulated_submit_dry_run",
+            mode="guarded_live",
+            trial_guard_enabled=True,
+            trial_guard_min_closed_fills=2,
+        )
+        now = utc_now()
+        runtime.fill_outcome_repo.save_outcome(
+            FillOutcomeRecord(
+                fill_id="fill_open_only",
+                order_id="order_open_only",
+                symbol="BTC-USDT",
+                position_key="BTC-USDT",
+                venue="PAPER",
+                side="buy",
+                fill_qty=Decimal("1"),
+                fill_price=Decimal("100"),
+                fill_notional=Decimal("100"),
+                fee_amount=Decimal("0.10"),
+                fee_currency="USDT",
+                liquidity_role="maker",
+                exchange_timestamp=now - timedelta(minutes=10),
+                ingestion_timestamp=now - timedelta(minutes=10),
+                order_status_after_fill="FILLED",
+                exposure_side="long",
+                execution_action="open_long",
+                position_intent="open_long",
+                starting_position_qty=Decimal("0"),
+                starting_avg_entry_price=Decimal("0"),
+                ending_position_qty=Decimal("1"),
+                ending_avg_entry_price=Decimal("100"),
+                realized_pnl_delta=Decimal("0"),
+                fee_delta=Decimal("-0.10"),
+                product_type="spot",
+                margin_mode="cash",
+                created_at=now - timedelta(minutes=10),
+            )
+        )
+        runtime.fill_outcome_repo.save_outcome(
+            FillOutcomeRecord(
+                fill_id="fill_close_only",
+                order_id="order_close_only",
+                symbol="BTC-USDT",
+                position_key="BTC-USDT",
+                venue="PAPER",
+                side="sell",
+                fill_qty=Decimal("1"),
+                fill_price=Decimal("103"),
+                fill_notional=Decimal("103"),
+                fee_amount=Decimal("0.10"),
+                fee_currency="USDT",
+                liquidity_role="taker",
+                exchange_timestamp=now - timedelta(minutes=2),
+                ingestion_timestamp=now - timedelta(minutes=2),
+                order_status_after_fill="FILLED",
+                exposure_side="flat",
+                execution_action="close_long",
+                position_intent="close_long",
+                starting_position_qty=Decimal("1"),
+                starting_avg_entry_price=Decimal("100"),
+                ending_position_qty=Decimal("0"),
+                ending_avg_entry_price=Decimal("0"),
+                realized_pnl_delta=Decimal("2.80"),
+                fee_delta=Decimal("-0.10"),
+                product_type="spot",
+                margin_mode="cash",
+                created_at=now - timedelta(minutes=2),
+            )
+        )
+        runtime.trial_guard_service.evaluate_now()
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            profitability = client.get("/reports/profitability-overview?limit=10")
+            forward_validation = client.get("/reports/forward-validation?window_days=1&period_count=1")
+            trial_guard = client.get("/system/trial-guard")
+
+        self.assertEqual(profitability.status_code, 200, profitability.text)
+        profitability_payload = profitability.json()
+        self.assertEqual(profitability_payload["summary"]["closed_fill_count"], 1)
+        self.assertEqual(
+            [item["fill_id"] for item in profitability_payload["recent_closed_fills"]],
+            ["fill_close_only"],
+        )
+
+        self.assertEqual(forward_validation.status_code, 200, forward_validation.text)
+        latest_period = forward_validation.json()["periods"][0]
+        self.assertEqual(latest_period["closed_fill_count"], 1)
+
+        self.assertEqual(trial_guard.status_code, 200, trial_guard.text)
+        trial_guard_payload = trial_guard.json()
+        self.assertEqual(trial_guard_payload["fill_count"], 1)
+        self.assertEqual(trial_guard_payload["status"], "warming_up")
+
     async def test_strategy_attribution_report_groups_regime_profile_exit_and_risk_protection(self) -> None:
         runtime = await self._runtime(
             trading_product_type="derivatives",

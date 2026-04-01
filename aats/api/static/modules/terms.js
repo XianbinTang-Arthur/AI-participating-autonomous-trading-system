@@ -1128,15 +1128,15 @@ export function readableExpectedVsRealizedMeta(source = {}, fallback = "当前�
 function readableIndependentAdaptiveLegSummary(legSummary = {}) {
   if (!legSummary || typeof legSummary !== "object" || !Object.keys(legSummary).length) return "";
   const leg = readableBookLabel(String(legSummary.leg || "").trim().toLowerCase(), "independent_book");
-  const mode = legSummary.live_applied ? "已生效" : "影子评估";
+  const mode = legSummary.live_applied ? "已生效" : "影子阈值";
   return [
     `${leg}${mode}`,
-    `开 ${readableExpectancyBps(legSummary.entry_threshold)}→${readableExpectancyBps(legSummary.adaptive_entry_threshold)} / 生效 ${readableExpectancyBps(legSummary.effective_entry_threshold)}`,
-    `收 ${readableExpectancyBps(legSummary.close_threshold)}→${readableExpectancyBps(legSummary.adaptive_close_threshold)} / 生效 ${readableExpectancyBps(legSummary.effective_close_threshold)}`,
-    `加 ${readableExpectancyBps(legSummary.scale_in_threshold)}→${readableExpectancyBps(legSummary.adaptive_scale_in_threshold)} / 生效 ${readableExpectancyBps(legSummary.effective_scale_in_threshold)}`,
-    `thesis ${readableExpectancyBps(legSummary.thesis_age_seconds)}→${readableExpectancyBps(legSummary.adaptive_thesis_age_seconds)} 秒`,
-    `de-risk ${readableExpectancyBps(legSummary.de_risk_net_edge_bps)}→${readableExpectancyBps(legSummary.adaptive_de_risk_net_edge_bps)} 基点`,
-  ].join(" / ");
+    `开 ${readableExpectancyBps(legSummary.entry_threshold)}→${readableExpectancyBps(legSummary.adaptive_entry_threshold)}（生效 ${readableExpectancyBps(legSummary.effective_entry_threshold)}）`,
+    `收 ${readableExpectancyBps(legSummary.close_threshold)}→${readableExpectancyBps(legSummary.adaptive_close_threshold)}（生效 ${readableExpectancyBps(legSummary.effective_close_threshold)}）`,
+    `加 ${readableExpectancyBps(legSummary.scale_in_threshold)}→${readableExpectancyBps(legSummary.adaptive_scale_in_threshold)}（生效 ${readableExpectancyBps(legSummary.effective_scale_in_threshold)}）`,
+    `持有时长 ${readableExpectancyBps(legSummary.thesis_age_seconds)}→${readableExpectancyBps(legSummary.adaptive_thesis_age_seconds)} 秒`,
+    `降风险阈值 ${readableExpectancyBps(legSummary.de_risk_net_edge_bps)}→${readableExpectancyBps(legSummary.adaptive_de_risk_net_edge_bps)} 基点`,
+  ].join("，");
 }
 
 export function readableIndependentAdaptiveSummary(source = {}, fallback = "当前还没有独立双书自适应摘要") {
@@ -1153,10 +1153,10 @@ export function readableIndependentAdaptiveMeta(source = {}, fallback = "当前�
   const summary = normalizedIndependentAdaptiveSummary(source);
   if (!summary || typeof summary !== "object" || !Object.keys(summary).length) return fallback;
   const parts = [
-    summary.live_applied ? "当前已按动态阈值重评估" : summary.rollout_enabled ? "当前只输出 shadow 动态阈值" : "当前没有启用动态 rollout",
-    `health enforcement ${summary.health_enforcement_enabled ? "已启用" : "未启用"}`,
-    `size-down ${summary.size_down_entry_enabled ? "已启用" : "未启用"}`,
-    `long/short asymmetry ${summary.long_short_asymmetry_enabled ? "已启用" : "未启用"}`,
+    summary.live_applied ? "当前已按动态阈值重评估" : summary.rollout_enabled ? "当前只输出影子阈值" : "当前没有启用动态阈值",
+    `健康约束 ${summary.health_enforcement_enabled ? "已启用" : "未启用"}`,
+    `缩量入场 ${summary.size_down_entry_enabled ? "已启用" : "未启用"}`,
+    `多空非对称 ${summary.long_short_asymmetry_enabled ? "已启用" : "未启用"}`,
   ];
   const codes = Array.isArray(summary.reason_codes) ? summary.reason_codes : [];
   if (codes.length) {
@@ -1207,6 +1207,23 @@ export function readableBookRuntimeStateSummary(source = {}, fallback = "当前�
     .join(" | ");
 }
 
+function overlayDriverLabel(signalSource, sourceOfTruth) {
+  const normalized = String(signalSource || sourceOfTruth || "").trim().toLowerCase();
+  if (!normalized) return "当前驱动来源待确认";
+  if (normalized === "inventory" || normalized === "inventory_only") return "真实库存";
+  if (normalized === "target_position" || normalized === "target_only" || normalized === "target") return "目标仓位";
+  if (normalized === "mixed" || normalized === "target_and_inventory") return "目标与库存";
+  return localizeError(normalized, normalized);
+}
+
+function overlayLifecycleLabel(lifecycleState, targetActive, inventoryActive) {
+  const normalized = String(lifecycleState || "").trim().toLowerCase();
+  if (normalized === "target_only" || (targetActive === true && inventoryActive === false)) return "目标主导";
+  if (normalized === "inventory_only" || (targetActive === false && inventoryActive === true)) return "库存延续";
+  if (normalized === "target_and_inventory" || (targetActive === true && inventoryActive === true)) return "目标与库存共同生效";
+  return lifecycleState ? readableState(lifecycleState, lifecycleState) : "";
+}
+
 export function readableOverlayParentSignalSummary(source = {}, fallback = "") {
   const overlay = normalizedOverlayDecision(source);
   if (!overlay || typeof overlay !== "object" || !Object.keys(overlay).length) return fallback;
@@ -1234,19 +1251,18 @@ export function readableOverlayParentSignalSummary(source = {}, fallback = "") {
     && currentQty === undefined
     && effectiveQty === undefined
   ) return fallback;
-  return [
-    `父腿目标 ${readableState(targetSignal, "待确认")}`,
-    `当前库存 ${readableState(currentSignal, "待确认")}`,
-    `生效方向 ${readableState(effectiveSignal, "待确认")}`,
-    `来源 ${localizeError(signalSource, "待确认")}`,
-    `阶段 ${readableState(lifecycleState, "待确认")}`,
-    `目标活跃 ${targetActive === undefined || targetActive === null ? "待确认" : (targetActive ? "是" : "否")}`,
-    `库存活跃 ${inventoryActive === undefined || inventoryActive === null ? "待确认" : (inventoryActive ? "是" : "否")}`,
-    `判定口径 ${localizeError(sourceOfTruth, "待确认")}`,
-    `目标仓位 ${readableSignedQuantity(targetQty)}`,
-    `当前仓位 ${readableSignedQuantity(currentQty)}`,
-    `生效仓位 ${readableSignedQuantity(effectiveQty)}`,
-  ].join(" / ");
+  const parts = [
+    `这次判断主要由${overlayDriverLabel(signalSource, sourceOfTruth)}驱动`,
+    `${overlayLifecycleLabel(lifecycleState, targetActive, inventoryActive) || "阶段待确认"}`,
+    `最终按${readableState(effectiveSignal || targetSignal || currentSignal, "待确认")}方向生效`,
+  ];
+  if (effectiveQty !== undefined && effectiveQty !== null) {
+    parts.push(`生效仓位 ${readableSignedQuantity(effectiveQty)}`);
+  }
+  if (targetQty !== undefined && targetQty !== null && currentQty !== undefined && currentQty !== null) {
+    parts.push(`目标 / 当前 ${readableSignedQuantity(targetQty)} / ${readableSignedQuantity(currentQty)}`);
+  }
+  return parts.join("，");
 }
 
 export function readableOverlayParentPostmortemMeta(source = {}, fallback = "") {
@@ -1254,20 +1270,21 @@ export function readableOverlayParentPostmortemMeta(source = {}, fallback = "") 
   if (!overlay || typeof overlay !== "object" || !Object.keys(overlay).length) return fallback;
   const parts = [];
   if (overlay.parent_family) {
-    parts.push(`父腿 ${readableState(overlay.parent_family, overlay.parent_family)}`);
+    parts.push(readableState(overlay.parent_family, overlay.parent_family));
   }
   if (overlay.symbol) {
-    parts.push(`标的 ${overlay.symbol}`);
+    parts.push(overlay.symbol);
   }
   if (overlay.margin_mode) {
-    parts.push(`保证金 ${readableState(overlay.margin_mode, overlay.margin_mode)}`);
+    parts.push(readableState(overlay.margin_mode, overlay.margin_mode));
   }
   const leverage = Number(overlay.target_leverage);
   if (Number.isFinite(leverage) && leverage > 0) {
-    parts.push(`杠杆 ${leverage.toFixed(2).replace(/\.?0+$/, "")}`);
+    parts.push(`${leverage.toFixed(2).replace(/\.?0+$/, "")}x`);
   }
-  if (overlay.source_of_truth) {
-    parts.push(`判定口径 ${localizeError(overlay.source_of_truth, "待确认")}`);
+  const sourceOfTruth = overlay.source_of_truth || overlay.parent_source_of_truth;
+  if (sourceOfTruth) {
+    parts.push(`按${overlayDriverLabel("", sourceOfTruth)}判定`);
   }
   return parts.length ? parts.join(" / ") : fallback;
 }

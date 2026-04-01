@@ -167,6 +167,12 @@ class OperatorQueryService:
             lambda: fill_outcomes_for_scope(self.runtime.fill_outcome_repo, self.state_scope),
         )
 
+    def _scoped_closed_fill_outcomes(self):
+        return self._cached(
+            "scoped_closed_fill_outcomes",
+            lambda: [item for item in self._scoped_fill_outcomes() if self._is_closed_fill_outcome(item)],
+        )
+
     def _refresh_sleeve_pnl_projection(self) -> list[SleevePnLRecord]:
         service = getattr(self.runtime, "sleeve_pnl_projection_service", None)
         if service is None:
@@ -6639,6 +6645,37 @@ class OperatorQueryService:
     def _fill_outcome_event_timestamp(record: Any) -> datetime | None:
         return getattr(record, "ingestion_timestamp", None) or getattr(record, "exchange_timestamp", None) or getattr(record, "created_at", None)
 
+    @classmethod
+    def _same_position_direction(cls, left: Decimal, right: Decimal) -> bool:
+        if abs(left) <= cls._DECIMAL_EPSILON or abs(right) <= cls._DECIMAL_EPSILON:
+            return True
+        return (left > 0 and right > 0) or (left < 0 and right < 0)
+
+    def _is_closed_fill_outcome(self, outcome: Any) -> bool:
+        starting_qty = self._to_decimal(getattr(outcome, "starting_position_qty", None))
+        ending_qty = self._to_decimal(getattr(outcome, "ending_position_qty", None))
+        if starting_qty is not None and ending_qty is not None:
+            if abs(starting_qty) <= self._DECIMAL_EPSILON:
+                return False
+            if abs(ending_qty) + self._DECIMAL_EPSILON < abs(starting_qty):
+                return True
+            if not self._same_position_direction(starting_qty, ending_qty):
+                return True
+            return False
+
+        realized_pnl_delta = self._to_decimal(getattr(outcome, "realized_pnl_delta", None))
+        if realized_pnl_delta is not None and abs(realized_pnl_delta) > self._DECIMAL_EPSILON:
+            return True
+
+        action_tokens = " ".join(
+            str(value or "").lower()
+            for value in (
+                getattr(outcome, "execution_action", None),
+                getattr(outcome, "position_intent", None),
+            )
+        )
+        return any(token in action_tokens for token in ("close", "reduce", "exit", "reverse"))
+
     def _fill_outcome_position_key(self, outcome: Any) -> str:
         if getattr(outcome, "position_key", None):
             return str(outcome.position_key)
@@ -6944,7 +6981,7 @@ class OperatorQueryService:
     def _build_forward_validation_report(self, *, window_days: int, period_count: int) -> dict[str, Any]:
         normalized_window_days = max(int(window_days), 1)
         normalized_period_count = max(int(period_count), 1)
-        all_rows = [self._execution_quality_row(item) for item in self._scoped_fill_outcomes()]
+        all_rows = [self._profitability_fill_row(item) for item in self._scoped_closed_fill_outcomes()]
         all_rows.sort(
             key=lambda item: item.get("ingestion_timestamp") or item.get("exchange_fill_timestamp") or datetime.min,
             reverse=True,

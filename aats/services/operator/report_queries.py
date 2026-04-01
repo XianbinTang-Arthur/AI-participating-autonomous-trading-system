@@ -14,11 +14,10 @@ class ReportQueryFacade:
 
     def profitability_overview(self, *, limit: int = 100) -> dict[str, Any]:
         normalized_limit = max(int(limit), 1)
-        outcomes = list(self.owner._scoped_fill_outcomes())
+        outcomes = list(self.owner._scoped_closed_fill_outcomes())
         outcomes.sort(key=lambda item: item.ingestion_timestamp or item.created_at, reverse=True)
-        closed_rows = [self.owner._execution_quality_row(item) for item in outcomes[:normalized_limit]]
-        execution_quality = self.execution_quality_report(limit=normalized_limit, offset=0)
-        execution_quality_summary = dict(execution_quality.get("summary") or {})
+        closed_rows = [self.owner._profitability_fill_row(item) for item in outcomes[:normalized_limit]]
+        execution_quality_summary = self.owner._execution_quality_summary(closed_rows)
 
         funding_records = list(self.owner._scoped_funding_fee_records())
         funding_records.sort(
@@ -77,7 +76,15 @@ class ReportQueryFacade:
             },
             "recent_closed_fills": closed_rows,
             "recent_realized_events": realized_events,
-            "execution_quality": execution_quality,
+            "execution_quality": {
+                "rows": closed_rows,
+                "limit": normalized_limit,
+                "offset": 0,
+                "total_available": len(outcomes),
+                "has_more": len(outcomes) > normalized_limit,
+                "truth_source": "fill_outcomes_closed_only",
+                "summary": execution_quality_summary,
+            },
             "funding_fee_summary": funding_fee_summary,
             "truth_source": "fill_outcomes_plus_funding_fee_records",
         }

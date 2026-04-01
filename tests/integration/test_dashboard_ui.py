@@ -277,12 +277,6 @@ console.log(JSON.stringify({
   hasOverlayRatio: html.includes('对冲比例'),
   hasOverlayReason: html.includes('保护性压力已经超过开仓阈值'),
   hasOverlayRuntimeCopy: html.includes('当前是合约 hedge mode'),
-  homeShowsParentSignals:
-    homeHtml.includes('父腿目标 空仓 / 当前库存 偏多 / 生效方向 偏多 / 来源 真实库存')
-    && homeHtml.includes('阶段 仅库存活跃 / 目标活跃 否 / 库存活跃 是'),
-  overviewShowsParentSignals:
-    overviewHtml.includes('父腿目标 空仓 / 当前库存 偏多 / 生效方向 偏多 / 来源 真实库存')
-    && overviewHtml.includes('阶段 仅库存活跃 / 目标活跃 否 / 库存活跃 是'),
 }));
 """
         result = subprocess.run(
@@ -290,6 +284,7 @@ console.log(JSON.stringify({
             cwd=repo_root,
             capture_output=True,
             text=True,
+            encoding="utf-8",
             check=False,
         )
         self.assertEqual(result.returncode, 0, msg=result.stderr)
@@ -2391,7 +2386,7 @@ console.log(JSON.stringify({
             check=False,
         )
         self.assertEqual(result.returncode, 0, msg=result.stderr)
-        self.assertIn('"thresholdCopyCount":1', result.stdout)
+        self.assertIn('"thresholdCopyCount":2', result.stdout)
         self.assertIn('"hasObserveRoute":true', result.stdout)
         self.assertIn('"hasObserveTarget":true', result.stdout)
         self.assertIn('"hasNoLegPlanCopy":true', result.stdout)
@@ -3008,6 +3003,45 @@ console.log(JSON.stringify({
         self.assertIn('"scaleInLong":"加多"', stdout)
         self.assertIn('"scaleInShort":"加空"', stdout)
 
+    def test_responsive_table_generates_mobile_cards_when_explicit_cards_are_missing(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { responsiveTable } from './aats/api/static/modules/components.js';
+
+const html = responsiveTable(
+  ['状态', '说明', '附加信息'],
+  [[
+    '<div><strong>已就绪</strong><div class="table-meta">最新一轮</div></div>',
+    '<div>这里是说明</div>',
+    '<span class="signal-pill tone-positive">正常</span>',
+  ]],
+  '当前没有记录'
+);
+
+console.log(JSON.stringify({
+  hasTable: html.includes('data-table'),
+  hasMobileList: html.includes('mobile-record-list'),
+  hasFallbackCard: html.includes('mobile-record-card'),
+  keepsFirstColumnAsDetail: html.includes('查看首列信息') && html.includes('状态') && html.includes('已就绪') && html.includes('最新一轮'),
+  keepsOtherColumnsAsFields: html.includes('说明') && html.includes('这里是说明') && html.includes('附加信息') && html.includes('正常'),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        stdout = result.stdout or ""
+        self.assertIn('"hasTable":true', stdout)
+        self.assertIn('"hasMobileList":true', stdout)
+        self.assertIn('"hasFallbackCard":true', stdout)
+        self.assertIn('"keepsFirstColumnAsDetail":true', stdout)
+        self.assertIn('"keepsOtherColumnsAsFields":true', stdout)
+
     def test_trade_display_preserves_reverse_to_direction_specific_labels(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
         script = """
@@ -3472,11 +3506,9 @@ const overviewHtml = renderOverviewView({
 
 console.log(JSON.stringify({
   homeShowsParentSignals:
-    homeHtml.includes('父腿目标 空仓 / 当前库存 偏多 / 生效方向 偏多 / 来源 真实库存')
-    && homeHtml.includes('阶段 仅库存活跃 / 目标活跃 否 / 库存活跃 是'),
+    homeHtml.includes('这次判断主要由真实库存驱动，库存延续，最终按偏多方向生效'),
   overviewShowsParentSignals:
-    overviewHtml.includes('父腿目标 空仓 / 当前库存 偏多 / 生效方向 偏多 / 来源 真实库存')
-    && overviewHtml.includes('阶段 仅库存活跃 / 目标活跃 否 / 库存活跃 是'),
+    overviewHtml.includes('这次判断主要由真实库存驱动，库存延续，最终按偏多方向生效'),
 }));
 """
         result = subprocess.run(
@@ -4162,12 +4194,10 @@ const drawer = buildDecisionDrawer({
 
 console.log(JSON.stringify({
   strategyShowsParentSignals:
-    strategyHtml.includes('父腿目标 空仓 / 当前库存 偏多 / 生效方向 偏多 / 来源 真实库存')
-    && strategyHtml.includes('阶段 仅库存活跃 / 目标活跃 否 / 库存活跃 是'),
+    strategyHtml.includes('这次判断主要由真实库存驱动，库存延续，最终按偏多方向生效'),
   drawerShowsParentSignals:
     drawer.body.includes('父腿暴露信号')
-    && drawer.body.includes('父腿目标 空仓 / 当前库存 偏多 / 生效方向 偏多 / 来源 真实库存')
-    && drawer.body.includes('阶段 仅库存活跃 / 目标活跃 否 / 库存活跃 是'),
+    && drawer.body.includes('这次判断主要由真实库存驱动，库存延续，最终按偏多方向生效'),
 }));
 """
         result = subprocess.run(
@@ -4273,11 +4303,11 @@ const riskHtml = renderRiskView({
 console.log(JSON.stringify({
   drawerShowsPostmortem:
     drawer.body.includes('父腿暴露复盘')
-    && drawer.body.includes('父腿 方向策略 / 标的 BTC-USDT-SWAP / 保证金 全仓 / 杠杆 2 / 判定口径 真实库存')
+    && drawer.body.includes('方向策略 / BTC-USDT-SWAP / 全仓 / 2x / 按真实库存判定')
     && drawer.body.includes('目标多头 0 / 目标空头 0 / 当前多头 +0.03 / 当前空头 0'),
   riskShowsReplayPostmortem:
     riskHtml.includes('回放父腿复盘')
-    && riskHtml.includes('父腿 方向策略 / 标的 BTC-USDT-SWAP / 保证金 全仓 / 杠杆 2 / 判定口径 真实库存')
+    && riskHtml.includes('方向策略 / BTC-USDT-SWAP / 全仓 / 2x / 按真实库存判定')
     && riskHtml.includes('目标多头 0 / 目标空头 0 / 当前多头 +0.03 / 当前空头 0'),
 }));
 """
@@ -4406,10 +4436,10 @@ console.log(JSON.stringify({
     && html.includes('契约口径')
     && html.includes('双腿数量拆解'),
   hasInventoryHistoryRow:
-    html.includes('父腿 方向策略 / 标的 BTC-USDT-SWAP / 保证金 全仓 / 杠杆 2 / 判定口径 真实库存')
+    html.includes('方向策略 / BTC-USDT-SWAP / 全仓 / 2x / 按真实库存判定')
     && html.includes('目标多头 0 / 目标空头 0 / 当前多头 +0.03 / 当前空头 0'),
   hasMixedHistoryRow:
-    html.includes('父腿 方向策略 / 标的 BTC-USDT-SWAP / 保证金 全仓 / 杠杆 3 / 判定口径 目标与库存混合')
+    html.includes('方向策略 / BTC-USDT-SWAP / 全仓 / 3x / 按目标与库存判定')
     && html.includes('目标多头 +0.02 / 目标空头 0 / 当前多头 +0.03 / 当前空头 0'),
 }));
 """
@@ -4579,7 +4609,7 @@ const drawer = buildDecisionDrawer({
   },
 });
 
-const fragment = '判定口径 真实库存 / 目标仓位 0 / 当前仓位 +0.03 / 生效仓位 +0.03';
+const fragment = '这次判断主要由真实库存驱动，库存延续，最终按偏多方向生效，生效仓位 +0.03，目标 / 当前 0 / +0.03';
 
 console.log(JSON.stringify({
   strategyShowsParentQty: strategyHtml.includes(fragment),

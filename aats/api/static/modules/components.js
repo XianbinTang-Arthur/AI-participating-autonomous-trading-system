@@ -179,9 +179,10 @@ export function table(headers, rows, emptyText) {
 
 export function responsiveTable(headers, rows, emptyText, cards = []) {
   if (!rows.length) return emptyState(emptyText);
+  const mobileCards = cards.length ? cards : buildFallbackMobileCards(headers, rows);
   return `
     ${table(headers, rows, emptyText)}
-    ${cards.length ? `<div class="mobile-record-list">${cards.map((card) => mobileRecordCard(card)).join("")}</div>` : ""}
+    ${mobileCards.length ? `<div class="mobile-record-list">${mobileCards.map((card) => mobileRecordCard(card)).join("")}</div>` : ""}
   `;
 }
 
@@ -225,6 +226,73 @@ function buttonClass(tone) {
   if (tone === "warning") return "warning-button";
   if (tone === "danger") return "danger-button";
   return "table-button";
+}
+
+function buildFallbackMobileCards(headers = [], rows = []) {
+  return rows.map((row, index) => {
+    const cells = Array.isArray(row)
+      ? row.map((cell) => parseTableCell(cell))
+      : [];
+    const title = cells[0]?.value || `记录 ${index + 1}`;
+    return {
+      title,
+      meta: cells[0]?.meta || "",
+      fields: headers.slice(1).map((label, fieldIndex) => ({
+        label,
+        value: cells[fieldIndex + 1]?.value || "待确认",
+        meta: cells[fieldIndex + 1]?.meta || "",
+      })),
+      details: headers[0]
+        ? [{
+          label: headers[0],
+          value: title,
+          meta: cells[0]?.meta || "",
+        }]
+        : [],
+      detailLabel: "查看首列信息",
+    };
+  });
+}
+
+function parseTableCell(value) {
+  const html = String(value ?? "");
+  const text = htmlCellToText(html);
+  const primary = html.match(/<strong\b[^>]*>([\s\S]*?)<\/strong>/iu);
+  const metaParts = Array.from(
+    html.matchAll(/<[^>]*class="[^"]*table-meta[^"]*"[^>]*>([\s\S]*?)<\/[^>]+>/giu),
+    (match) => htmlCellToText(match[1])
+  ).filter(Boolean);
+  const primaryText = primary ? htmlCellToText(primary[1]) : text;
+  let metaText = metaParts.join(" | ");
+  if (!metaText && primaryText && text && text !== primaryText) {
+    metaText = text.startsWith(primaryText)
+      ? text.slice(primaryText.length).trim()
+      : text.replace(primaryText, "").trim();
+  }
+  return {
+    value: primaryText || text || "待确认",
+    meta: metaText,
+  };
+}
+
+function htmlCellToText(value) {
+  if (value === null || value === undefined || value === "") return "";
+  return decodeHtmlEntities(
+    String(value)
+      .replace(/<br\s*\/?>/giu, "\n")
+      .replace(/<\/(div|p|li|article|section|tr|td|th|strong|span|h[1-6])>/giu, " ")
+      .replace(/<[^>]+>/gu, " ")
+  ).replace(/\s+/gu, " ").trim();
+}
+
+function decodeHtmlEntities(value) {
+  return String(value)
+    .replace(/&nbsp;/giu, " ")
+    .replace(/&amp;/giu, "&")
+    .replace(/&lt;/giu, "<")
+    .replace(/&gt;/giu, ">")
+    .replace(/&quot;/giu, '"')
+    .replace(/&#39;/giu, "'");
 }
 
 function mobileRecordCard(card) {
