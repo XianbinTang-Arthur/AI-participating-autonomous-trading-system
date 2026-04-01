@@ -38,8 +38,8 @@ def evaluate_open_eligibility(
             reasons.append(f"independent_{leg}_book_expected_net_edge_below_safe_threshold")
         else:
             warnings.append(f"independent_{leg}_book_expected_net_edge_below_safe_threshold_report_only")
-    max_acceptable_cost_bps = float(settings.strategy_hedge_independent_max_acceptable_cost_bps)
-    if max_acceptable_cost_bps > 0.0 and expected_cost_bps > max_acceptable_cost_bps:
+    max_acceptable_cost_bps = anomaly_cost_fuse_threshold_bps(settings=settings)
+    if max_acceptable_cost_bps is not None and expected_cost_bps > max_acceptable_cost_bps:
         reasons.append(f"independent_{leg}_book_expected_cost_above_max_acceptable")
     if post_close_cooldown_active(settings=settings, context=context, leg=leg):
         reasons.append(f"independent_{leg}_book_post_close_cooldown_active")
@@ -59,8 +59,54 @@ def evaluate_open_eligibility(
         hard_block_reasons=tuple(reasons),
         warnings=tuple(warnings),
         effective_safe_net_edge_bps=safe_edge_bps,
-        effective_max_cost_bps=max_acceptable_cost_bps if max_acceptable_cost_bps > 0.0 else None,
+        effective_max_cost_bps=max_acceptable_cost_bps,
     )
+
+
+def anomaly_cost_fuse_threshold_bps(*, settings: AATSSettings) -> float | None:
+    nominal_max_cost_bps = float(settings.strategy_hedge_independent_max_acceptable_cost_bps)
+    if nominal_max_cost_bps <= 0.0:
+        return None
+    # Keep the configured cost threshold as a nominal discipline target, but only
+    # fail closed once cost meaningfully exceeds both the nominal budget and the
+    # required safe-edge buffer.
+    return nominal_max_cost_bps + max(
+        required_safe_net_edge_bps(settings=settings),
+        nominal_max_cost_bps * 0.5,
+    )
+
+
+def resolve_entry_min_confirm_ticks(
+    *,
+    settings: AATSSettings,
+    side: IndependentLeg,
+    score: float,
+    entry_threshold: float,
+    scale_threshold: float | None = None,
+    expected_net_edge_bps: float | None = None,
+) -> int:
+    configured_min_confirm_ticks = max(int(settings.strategy_hedge_independent_min_confirm_ticks), 1)
+    if configured_min_confirm_ticks <= 1 or side != "short":
+        return configured_min_confirm_ticks
+    strong_signal_threshold = (
+        float(scale_threshold)
+        if scale_threshold is not None and float(scale_threshold) > float(entry_threshold)
+        else min(float(entry_threshold) + 0.05, 1.0)
+    )
+    strong_signal = score + 1e-9 >= strong_signal_threshold
+    nominal_cost_bps = max(float(settings.strategy_hedge_independent_max_acceptable_cost_bps), 0.0)
+    high_net_edge_threshold = required_safe_net_edge_bps(settings=settings) + max(
+        float(settings.strategy_hedge_independent_expected_execution_buffer_bps),
+        nominal_cost_bps,
+        1.0,
+    )
+    high_net_edge = (
+        expected_net_edge_bps is not None
+        and float(expected_net_edge_bps) + 1e-9 >= high_net_edge_threshold
+    )
+    if strong_signal or high_net_edge:
+        return max(configured_min_confirm_ticks - 1, 1)
+    return configured_min_confirm_ticks
 
 
 def evaluate_entry_quality_gate(

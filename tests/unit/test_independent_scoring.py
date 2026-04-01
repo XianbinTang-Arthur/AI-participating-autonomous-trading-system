@@ -84,6 +84,49 @@ class TestIndependentScoring(unittest.TestCase):
         self.assertEqual(extracted.source, "recent_target_history")
         self.assertTrue(extracted.stable)
 
+    def test_compute_score_stability_honors_effective_min_confirm_ticks_override(self) -> None:
+        settings = make_derivatives_hedge_settings(
+            strategy_hedge_independent_min_confirm_ticks=2,
+            strategy_hedge_independent_min_score_stability_bps=2.0,
+        )
+        baseline = make_baseline(
+            direction_bias="short",
+            confidence=0.78,
+            suggested_position_scale=1.0,
+            volatility_target_scale=1.0,
+            factor_scores={
+                "momentum_alpha": -0.35,
+                "trend_alpha": -0.24,
+                "microstructure_alpha": -0.12,
+            },
+        ).model_copy(update={"regime": "trend", "composite_alpha_score": -0.26})
+
+        default_metrics = compute_score_stability(
+            settings=settings,
+            leg="short",
+            score=0.304,
+            entry_threshold=0.30,
+            baseline=baseline,
+            ai_assessment=None,
+            recent_score_history=(0.286,),
+        )
+        relaxed_metrics = compute_score_stability(
+            settings=settings,
+            leg="short",
+            score=0.304,
+            entry_threshold=0.30,
+            baseline=baseline,
+            ai_assessment=None,
+            recent_score_history=(0.286,),
+            min_confirm_ticks=1,
+        )
+
+        self.assertEqual(default_metrics.support_count, 1)
+        self.assertFalse(default_metrics.stable)
+        self.assertEqual(relaxed_metrics.support_count, 1)
+        self.assertTrue(relaxed_metrics.stable)
+        self.assertEqual(relaxed_metrics.source, "recent_target_history")
+
 
 if __name__ == "__main__":
     unittest.main()

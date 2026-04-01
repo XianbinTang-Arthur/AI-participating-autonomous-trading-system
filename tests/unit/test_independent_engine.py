@@ -218,6 +218,114 @@ class TestIndependentEngine(unittest.TestCase):
             "independent_transition_invalid:cooldown->probing",
         )
 
+    def test_evaluate_independent_book_opens_short_on_high_net_edge_single_tick_confirmation(self) -> None:
+        settings = make_derivatives_hedge_settings(
+            strategy_hedge_independent_enabled=True,
+            strategy_hedge_independent_adaptive_rollout_enabled=False,
+            strategy_hedge_independent_short_entry_threshold=0.30,
+            strategy_hedge_independent_short_scale_in_threshold=0.55,
+            strategy_hedge_independent_min_confirm_ticks=2,
+            strategy_hedge_independent_min_score_stability_bps=2.0,
+            strategy_hedge_independent_max_acceptable_cost_bps=7.5,
+            strategy_hedge_independent_min_safe_net_edge_bps=3.0,
+            strategy_hedge_independent_expected_slippage_buffer_bps=1.0,
+            strategy_hedge_independent_expected_execution_buffer_bps=2.0,
+        )
+        context = make_context(product_type="derivatives", current_exposure_side="flat")
+        baseline = make_baseline(
+            direction_bias="short",
+            confidence=0.82,
+            suggested_position_scale=1.0,
+            volatility_target_scale=1.0,
+            factor_scores={
+                "momentum_alpha": -0.48,
+                "trend_alpha": -0.42,
+                "microstructure_alpha": -0.18,
+                "liquidity_scale": 0.95,
+            },
+        ).model_copy(update={"regime": "trend", "composite_alpha_score": -0.32})
+        expectancy = IndependentBookExpectancy(
+            leg="short",
+            expected_signal_edge_bps=38.0,
+            expected_slippage_bps=5.6,
+            expected_cost_bps=10.6,
+            expected_net_edge_bps=27.4,
+        )
+
+        decision = evaluate_independent_book(
+            settings=settings,
+            context=context,
+            baseline=baseline,
+            ai_assessment=None,
+            leg="short",
+            expectancy=expectancy,
+            directional_leg_target_qty=Decimal("0.01"),
+            scorer=lambda **_: 0.304,
+            recent_score_history=(0.286,),
+        )
+
+        self.assertEqual(decision.state, "opening")
+        self.assertEqual(decision.book_action, "open")
+        self.assertEqual(decision.blocked_reasons, ())
+        self.assertEqual(decision.score_stability_metrics.support_count, 1)
+        self.assertTrue(bool(decision.score_stability_metrics and decision.score_stability_metrics.stable))
+        self.assertEqual(decision.execution_health_state, "ok")
+        self.assertIsNotNone(decision.eligibility)
+        self.assertAlmostEqual(float(decision.eligibility.effective_max_cost_bps or 0.0), 13.5, places=6)
+
+    def test_evaluate_independent_book_keeps_long_two_tick_confirmation_requirement(self) -> None:
+        settings = make_derivatives_hedge_settings(
+            strategy_hedge_independent_enabled=True,
+            strategy_hedge_independent_adaptive_rollout_enabled=False,
+            strategy_hedge_independent_long_entry_threshold=0.30,
+            strategy_hedge_independent_long_scale_in_threshold=0.55,
+            strategy_hedge_independent_min_confirm_ticks=2,
+            strategy_hedge_independent_min_score_stability_bps=2.0,
+            strategy_hedge_independent_max_acceptable_cost_bps=7.5,
+            strategy_hedge_independent_min_safe_net_edge_bps=3.0,
+            strategy_hedge_independent_expected_slippage_buffer_bps=1.0,
+            strategy_hedge_independent_expected_execution_buffer_bps=2.0,
+        )
+        context = make_context(product_type="derivatives", current_exposure_side="flat")
+        baseline = make_baseline(
+            direction_bias="long",
+            confidence=0.82,
+            suggested_position_scale=1.0,
+            volatility_target_scale=1.0,
+            factor_scores={
+                "momentum_alpha": 0.48,
+                "trend_alpha": 0.42,
+                "microstructure_alpha": 0.18,
+                "liquidity_scale": 0.95,
+            },
+        ).model_copy(update={"regime": "trend", "composite_alpha_score": 0.32})
+        expectancy = IndependentBookExpectancy(
+            leg="long",
+            expected_signal_edge_bps=38.0,
+            expected_slippage_bps=5.6,
+            expected_cost_bps=10.6,
+            expected_net_edge_bps=27.4,
+        )
+
+        decision = evaluate_independent_book(
+            settings=settings,
+            context=context,
+            baseline=baseline,
+            ai_assessment=None,
+            leg="long",
+            expectancy=expectancy,
+            directional_leg_target_qty=Decimal("0.01"),
+            scorer=lambda **_: 0.304,
+            recent_score_history=(0.286,),
+        )
+
+        self.assertEqual(decision.state, "blocked")
+        self.assertEqual(decision.book_action, "blocked")
+        self.assertIn("independent_long_book_score_support_below_min_confirm_ticks", decision.blocked_reasons)
+        self.assertNotIn("independent_long_book_expected_cost_above_max_acceptable", decision.blocked_reasons)
+        self.assertEqual(decision.score_stability_metrics.support_count, 1)
+        self.assertFalse(bool(decision.score_stability_metrics and decision.score_stability_metrics.stable))
+
 
 if __name__ == "__main__":
     unittest.main()

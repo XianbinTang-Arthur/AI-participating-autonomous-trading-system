@@ -74,11 +74,17 @@ def compute_score_stability(
     baseline: BaselineAssessment,
     ai_assessment: AIMarketAssessment | None,
     recent_score_history: Sequence[float],
+    min_confirm_ticks: int | None = None,
 ) -> ScoreStabilityMetrics:
     history = [float(item) for item in recent_score_history if item is not None]
-    min_confirm_ticks = max(int(settings.strategy_hedge_independent_min_confirm_ticks), 1)
+    effective_min_confirm_ticks = max(
+        int(settings.strategy_hedge_independent_min_confirm_ticks)
+        if min_confirm_ticks is None
+        else int(min_confirm_ticks),
+        1,
+    )
     if history:
-        window_size = max(min_confirm_ticks, 2)
+        window_size = max(effective_min_confirm_ticks, 2)
         window = [*history[-window_size:], float(score)]
         support_count = sum(1 for item in window if item + 1e-9 >= entry_threshold)
         min_score = min(window)
@@ -89,7 +95,7 @@ def compute_score_stability(
         score_volatility_bps = (variance**0.5) * 100.0
         max_drawdown_bps = max(float(score) - min_score, 0.0) * 100.0
         stable = (
-            support_count >= min_confirm_ticks
+            support_count >= effective_min_confirm_ticks
             and max_drawdown_bps <= float(settings.strategy_hedge_independent_min_score_stability_bps) + 1e-9
         )
         return ScoreStabilityMetrics(
@@ -114,7 +120,7 @@ def compute_score_stability(
         max_score=float(score),
         mean_score=float(score),
         max_drawdown_bps=0.0,
-        stable=support_count >= min_confirm_ticks,
+        stable=support_count >= effective_min_confirm_ticks,
         source="current_signal_confirmation",
         score_slope=0.0,
         score_volatility_bps=0.0,

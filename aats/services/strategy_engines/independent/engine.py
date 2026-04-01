@@ -12,7 +12,12 @@ from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, to_deci
 from .adaptive import threshold_snapshot
 from .diagnostics import legacy_runtime_state_snapshot
 from .execution_policy import resolve_execution_policy
-from .gates import evaluate_entry_quality_gate, evaluate_open_eligibility, required_safe_net_edge_bps
+from .gates import (
+    evaluate_entry_quality_gate,
+    evaluate_open_eligibility,
+    required_safe_net_edge_bps,
+    resolve_entry_min_confirm_ticks,
+)
 from .health import aggregate_family_health, evaluate_leg_health
 from .lifecycle import (
     close_reason_code,
@@ -210,6 +215,14 @@ def _evaluate_book_core(
         leg=leg,
         expected_slippage_bps=_expectancy_slippage_bps(expectancy, settings=settings),
     )
+    effective_min_confirm_ticks = resolve_entry_min_confirm_ticks(
+        settings=settings,
+        side=leg,
+        score=score,
+        entry_threshold=entry_threshold,
+        scale_threshold=scale_threshold,
+        expected_net_edge_bps=(None if expectancy is None else expectancy.expected_net_edge_bps),
+    )
     score_stability_metrics = compute_score_stability(
         settings=settings,
         leg=leg,
@@ -218,6 +231,7 @@ def _evaluate_book_core(
         baseline=baseline,
         ai_assessment=ai_assessment,
         recent_score_history=recent_score_history,
+        min_confirm_ticks=effective_min_confirm_ticks,
     )
     execution_health_state = _execution_health_state(
         settings=settings,
@@ -260,7 +274,7 @@ def _evaluate_book_core(
                 liquidity_quality_score=liquidity_quality_score,
                 score_stability_metrics=score_stability_metrics,
                 execution_health_state=execution_health_state,
-                min_confirm_ticks=int(settings.strategy_hedge_independent_min_confirm_ticks),
+                min_confirm_ticks=effective_min_confirm_ticks,
                 min_liquidity_quality=float(settings.strategy_hedge_independent_min_liquidity_quality),
                 require_execution_health_ok=bool(settings.strategy_hedge_independent_require_execution_health_ok),
             )
@@ -355,7 +369,7 @@ def _evaluate_book_core(
                 liquidity_quality_score=liquidity_quality_score,
                 score_stability_metrics=score_stability_metrics,
                 execution_health_state=execution_health_state,
-                min_confirm_ticks=int(settings.strategy_hedge_independent_min_confirm_ticks),
+                min_confirm_ticks=effective_min_confirm_ticks,
                 min_liquidity_quality=float(settings.strategy_hedge_independent_min_liquidity_quality),
                 require_execution_health_ok=bool(settings.strategy_hedge_independent_require_execution_health_ok),
             )

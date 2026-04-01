@@ -324,7 +324,7 @@ strategy_hedge_independent_short_close_threshold: 0.24
 # [进阶可调] strategy_hedge_independent_long_scale_in_threshold：独立 long book 的加仓阈值。可选值：0.0 ~ 1.0；当前实盘钉住值：0.40。
 strategy_hedge_independent_long_scale_in_threshold: 0.40
 # [进阶可调] strategy_hedge_independent_short_scale_in_threshold：独立 short book 的加仓阈值。可选值：0.0 ~ 1.0；当前实盘钉住值：0.40。
-strategy_hedge_independent_short_scale_in_threshold: 0.40
+strategy_hedge_independent_short_scale_in_threshold: 0.36
 # [进阶可调] strategy_hedge_independent_long_min_hold_seconds：独立 long book 最小持有秒数。可选值：0 ~ 86400；推荐值：300.0。
 strategy_hedge_independent_long_min_hold_seconds: 300.0
 # [进阶可调] strategy_hedge_independent_short_min_hold_seconds：独立 short book 最小持有秒数。可选值：0 ~ 86400；推荐值：300.0。
@@ -438,7 +438,7 @@ trial_guard_lookback_fills: 30
 # [常用可调] trial_guard_min_closed_fills：开始评估前要求的最少已平仓成交数。可选值：1 ~ 100；推荐值：5。
 trial_guard_min_closed_fills: 5
 # [常用可调] trial_guard_max_daily_loss_usdt：当日最大亏损阈值。可选值：正数；推荐值：20.0。
-trial_guard_max_daily_loss_usdt: 20.0
+trial_guard_max_daily_loss_usdt: 30.0
 # [常用可调] trial_guard_max_consecutive_losses：最大连续亏损次数。可选值：1 ~ 20；推荐值：4。
 trial_guard_max_consecutive_losses: 6
 # [常用可调] trial_guard_max_fee_to_notional_ratio：最大费耗/名义金额比。可选值：0.0 ~ 1.0；推荐值：0.0012。
