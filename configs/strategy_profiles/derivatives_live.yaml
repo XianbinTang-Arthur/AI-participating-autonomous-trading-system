@@ -37,9 +37,9 @@ ai_execution_suggestion_mode: diagnostic_only
 # 策略家族路由
 # [常用可调] strategy_family_active：默认主策略家族。当前这条实盘线显式固定为 independent，避免控制面继续显示 directional 兼容主语义。可选值：directional / smart_arbitrage / spot_grid / dca / protective / opportunistic / independent；推荐值：independent。
 strategy_family_active: independent
-# [常用可调] strategy_family_auto_selection_enabled：是否允许系统自动选择策略家族。当前这条实盘线固定由 independent family 接管，不启用自动家族切换。可选值：true / false；推荐值：false。
+# [常用可调] strategy_family_auto_selection_enabled：是否允许系统自动选择策略家族。可选值：true / false；推荐值：false。
 strategy_family_auto_selection_enabled: false
-# [常用可调] strategy_family_independent_enabled：是否启用 independent family。当前这条实盘线已切到独立家族主线。可选值：true / false；推荐值：true。
+# [常用可调] strategy_family_independent_enabled：是否启用 independent family。可选值：true / false；推荐值：true。
 strategy_family_independent_enabled: true
 # [进阶可调] strategy_family_independent_shadow_mode_enabled：是否仅让 independent family 以 shadow 方式评估。当前这条实盘线已直接接管执行主路径，需关闭 shadow-only。可选值：true / false；推荐值：false。
 strategy_family_independent_shadow_mode_enabled: false
@@ -174,8 +174,6 @@ smart_arbitrage_estimated_funding_bps: 0.0
 # [进阶可调] smart_arbitrage_estimated_borrow_bps：细分借币费预估。可选值：0.0 以上；推荐值：0.0。
 smart_arbitrage_estimated_borrow_bps: 0.0
 
-# 现货专属的 spot_grid / dca 参数统一维护在 spot*.yaml；合约 profile 不再重复保留这些历史遗留项。
-
 # 决策节奏
 # [常用可调] max_decisions_per_minute：每分钟最多允许多少次决策。可选值：1 ~ 20；推荐值：5。
 max_decisions_per_minute: 5
@@ -263,7 +261,7 @@ strategy_hedge_overlay_enabled: true
 # [进阶可调] strategy_hedge_overlay_mode：directional 对冲 overlay 模式。当前已开放 protective / opportunistic / independent；当前主模式按独立双书运行，推荐值：independent。
 strategy_hedge_overlay_mode: independent
 
-# protective（保留兜底参数）
+# protective
 # [进阶可调] strategy_hedge_protective_enabled：是否开启 protective 的独立开关。可选值：true / false；推荐值：true。
 strategy_hedge_protective_enabled: false
 # [进阶可调] strategy_hedge_open_threshold：保护性对冲开启阈值。可选值：0.0 ~ 1.0；推荐值：0.58。
@@ -277,7 +275,7 @@ strategy_hedge_min_hold_seconds: 300.0
 # [进阶可调] strategy_hedge_rebalance_cooldown_seconds：保护腿再平衡冷却秒数。可选值：0 ~ 86400；推荐值：120.0。
 strategy_hedge_rebalance_cooldown_seconds: 120.0
 
-# opportunistic（当前不参与实盘）
+# opportunistic
 # [进阶可调] strategy_hedge_opportunistic_enabled：是否开启机会型 overlay 的独立开关。可选值：true / false；推荐值：true。
 strategy_hedge_opportunistic_enabled: false
 # [进阶可调] strategy_hedge_opportunistic_rollout_stage：机会型 overlay 的灰度阶段。当前实盘主策略已切到 independent，机会腿保持 dry_run 以免配置面出现“已关闭但仍是 live 阶段”的旧语义。可选值：replay_only / dry_run / live；推荐值：dry_run。
@@ -309,7 +307,7 @@ strategy_hedge_opportunistic_max_acceptable_cost_bps: 7.5
 # [进阶可调] strategy_hedge_opportunistic_passive_first_enabled：弱边际机会腿是否优先走被动执行。可选值：true / false；推荐值：true。
 strategy_hedge_opportunistic_passive_first_enabled: true
 
-# independent（当前实盘主策略）
+# independent
 # 开仓与持有阈值
 # [进阶可调] strategy_hedge_independent_enabled：是否开启独立双书模式。可选值：true / false；推荐值：true。
 strategy_hedge_independent_enabled: true
@@ -432,7 +430,7 @@ strategy_transient_close_retry_cooldown_seconds: 90.0
 
 # 试盘守护
 # [常用可调] trial_guard_enabled：是否启用试盘守护。可选值：true / false；推荐值：true。
-trial_guard_enabled: true
+trial_guard_enabled: false
 # [常用可调] trial_guard_poll_interval_seconds：试盘守护轮询间隔。可选值：1.0 ~ 300.0；推荐值：15.0。
 trial_guard_poll_interval_seconds: 15.0
 # [常用可调] trial_guard_lookback_fills：回看成交数量。可选值：1 ~ 500；推荐值：30。
