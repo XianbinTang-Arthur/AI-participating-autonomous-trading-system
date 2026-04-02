@@ -31,7 +31,13 @@ from aats.schemas.execution import (
 from aats.schemas.exchange import ExchangeAccountSnapshot, ExchangeFill, ExchangePosition, InstrumentMetadata
 from aats.services.execution_engine.exchange_adapter import ExchangeAdapter
 from aats.services.execution_engine.okx_account import OKXAccountService, datetime_from_ms
-from aats.services.execution_engine.quantity_rules import exchange_quantity_from_internal, round_down_to_step
+from aats.services.execution_engine.quantity_rules import (
+    exchange_quantity_from_internal,
+    internal_quantity_from_exchange,
+    minimum_internal_order_quantity,
+    quantized_internal_quantity,
+    round_down_to_step,
+)
 from aats.services.execution_engine.okx_rest import OKXRESTClient, OKXRequestError, infer_okx_derivatives_inst_type
 from aats.services.governance_engine.health import SystemHealthService
 from aats.services.governance_engine.mode import RuntimeModeController
@@ -185,10 +191,71 @@ class OKXExecutionAdapter(ExchangeAdapter):
         self.payload_builder = payload_builder or OKXOrderPayloadBuilder()
         self._last_error: str | None = None
         self._last_submission_payload: dict[str, str] | None = None
+        self._preloaded_max_order_quantity: dict[tuple[str, str, str, str, str], tuple[dict[str, Any] | None, Exception | None]] = {}
         self.logger = get_logger("aats.okx_execution_adapter")
 
     def preview_client_order_id(self, intent: OrderIntent) -> str | None:
         return self.payload_builder._client_order_id(intent)
+
+    async def risk_reducing_max_order_quantity_limit(self, *, intent: OrderIntent) -> Decimal | None:
+        if not self.settings.okx_max_order_quantity_precheck_enabled:
+            return None
+        if not self._is_risk_reducing_intent(intent):
+            return None
+        snapshot = await self.account_service.refresh()
+        instrument = self.account_service.instrument_metadata(intent.symbol)
+        if snapshot is None or instrument is None:
+            return None
+        normalized_intent = self._normalize_intent_for_account_snapshot(
+            intent=intent,
+            snapshot=snapshot,
+        )
+        td_mode = normalized_intent.td_mode or (
+            "cash" if normalized_intent.product_type == "spot" else normalized_intent.margin_mode
+        )
+        if td_mode in {None, ""}:
+            return None
+        reference_price = self._reference_price_for_notional_gate(intent=normalized_intent)
+        if reference_price <= Decimal("0"):
+            reference_price = None
+        try:
+            response = await self._max_order_quantity_response(
+                symbol=normalized_intent.symbol,
+                td_mode=str(td_mode),
+                side=normalized_intent.side,
+                leverage=(
+                    normalized_intent.target_leverage
+                    if normalized_intent.product_type == "derivatives"
+                    else None
+                ),
+                price=reference_price,
+                preload=True,
+            )
+        except Exception:
+            return None
+        row = self._first_row(response)
+        max_allowed = self._max_size_from_row(row=row, side=normalized_intent.side)
+        if max_allowed is None or max_allowed <= Decimal("0"):
+            return None
+        internal_limit = internal_quantity_from_exchange(
+            symbol=normalized_intent.symbol,
+            quantity=max_allowed,
+            instrument=instrument,
+        )
+        internal_limit = quantized_internal_quantity(
+            symbol=normalized_intent.symbol,
+            quantity=internal_limit,
+            instrument=instrument,
+        )
+        if internal_limit <= Decimal("0"):
+            return None
+        minimum_internal = minimum_internal_order_quantity(
+            symbol=normalized_intent.symbol,
+            instrument=instrument,
+        )
+        if internal_limit + EPSILON_DECIMAL_12 < minimum_internal:
+            return None
+        return internal_limit
 
     async def submit_leg_order(self, leg_intent: LegOrderIntent) -> tuple[OrderState, list[FillEvent]]:
         return await self.submit(order_intent_from_leg_order_intent(leg_intent))
@@ -1041,11 +1108,13 @@ class OKXExecutionAdapter(ExchangeAdapter):
         if reference_price <= Decimal("0"):
             reference_price = None
         try:
-            response = await self.client.get_max_order_quantity(
+            response = await self._max_order_quantity_response(
                 symbol=intent.symbol,
                 td_mode=str(td_mode),
+                side=intent.side,
                 leverage=intent.target_leverage if intent.product_type == "derivatives" else None,
                 price=reference_price,
+                use_preloaded=True,
             )
         except Exception as exc:
             if self._is_risk_reducing_intent(intent):
@@ -1063,6 +1132,64 @@ class OKXExecutionAdapter(ExchangeAdapter):
     @staticmethod
     def _write_unknown_error_label(*, operation: str, exc: Exception) -> str:
         return f"{operation}_unknown_check_exchange:{type(exc).__name__}"
+
+    async def _max_order_quantity_response(
+        self,
+        *,
+        symbol: str,
+        td_mode: str,
+        side: str,
+        leverage: float | None,
+        price: Decimal | None,
+        preload: bool = False,
+        use_preloaded: bool = False,
+    ) -> dict[str, Any]:
+        key = self._max_order_quantity_cache_key(
+            symbol=symbol,
+            td_mode=td_mode,
+            side=side,
+            leverage=leverage,
+            price=price,
+        )
+        if use_preloaded:
+            cached = self._preloaded_max_order_quantity.pop(key, None)
+            if cached is not None:
+                response, error = cached
+                if error is not None:
+                    raise error
+                if response is not None:
+                    return response
+        try:
+            response = await self.client.get_max_order_quantity(
+                symbol=symbol,
+                td_mode=td_mode,
+                leverage=leverage,
+                price=price,
+            )
+        except Exception as exc:
+            if preload:
+                self._preloaded_max_order_quantity[key] = (None, exc)
+            raise
+        if preload:
+            self._preloaded_max_order_quantity[key] = (response, None)
+        return response
+
+    @staticmethod
+    def _max_order_quantity_cache_key(
+        *,
+        symbol: str,
+        td_mode: str,
+        side: str,
+        leverage: float | None,
+        price: Decimal | None,
+    ) -> tuple[str, str, str, str, str]:
+        return (
+            str(symbol),
+            str(td_mode),
+            str(side),
+            "" if leverage is None else str(leverage),
+            "" if price is None else str(price),
+        )
 
     @staticmethod
     def _should_confirm_unknown_write_failure(exc: Exception) -> bool:

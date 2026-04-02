@@ -31,6 +31,13 @@ export function createState() {
         modeManualEditing: false,
         profileManualEditing: false,
       },
+      risk: {
+        exitExecutionHistory: {
+          action: "all",
+          parent: "",
+          actor: "",
+        },
+      },
       replay: {
         parentFilter: "all",
       },

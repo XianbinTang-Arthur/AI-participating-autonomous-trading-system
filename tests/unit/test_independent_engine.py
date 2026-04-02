@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import timedelta
 import unittest
 from decimal import Decimal
 
@@ -81,10 +82,13 @@ class TestIndependentEngine(unittest.TestCase):
         self.assertEqual(runtime_state.score_raw, extracted.score)
         self.assertEqual(runtime_state.score_adjusted, extracted.score)
         self.assertEqual(runtime_state.book_state, "flat")
+        self.assertIsNone(runtime_state.guard_state)
         self.assertIsNone(runtime_state.holding_phase)
         self.assertIsNotNone(runtime_state.threshold_snapshot)
         self.assertIsNotNone(runtime_state.leg_health_summary)
         self.assertIsNotNone(runtime_state.threshold_snapshot.adaptive_entry_threshold)
+        self.assertIsNotNone(runtime_state.threshold_snapshot.score_drawdown_bps)
+        self.assertIsNotNone(runtime_state.threshold_snapshot.effective_score_drawdown_bps)
         self.assertIsNotNone(runtime_state.threshold_snapshot.capital_multiplier)
         self.assertTrue(runtime_state.threshold_snapshot.reason_codes)
 
@@ -154,7 +158,7 @@ class TestIndependentEngine(unittest.TestCase):
         self.assertEqual(decision.state_snapshot.prior_book_state, "holding")
         self.assertTrue(decision.state_snapshot.transition_valid)
 
-    def test_evaluate_independent_book_fail_closes_invalid_transition_into_blocked_safe_state(self) -> None:
+    def test_evaluate_independent_book_reopens_when_stale_guard_state_has_no_active_marker(self) -> None:
         settings = make_derivatives_hedge_settings(
             strategy_hedge_independent_enabled=True,
             strategy_hedge_independent_adaptive_rollout_enabled=False,
@@ -181,15 +185,260 @@ class TestIndependentEngine(unittest.TestCase):
             expected_cost_bps=5.0,
             expected_net_edge_bps=13.0,
         )
-        prior_runtime_state = StrategyBookRuntimeState(
+        for representation in ("legacy", "separated"):
+            for prior_guard_state in ("cooldown", "suspended"):
+                with self.subTest(representation=representation, prior_guard_state=prior_guard_state):
+                    prior_runtime_state = StrategyBookRuntimeState(
+                        leg="long",
+                        current_qty=Decimal("0"),
+                        target_qty=Decimal("0"),
+                        state="blocked",
+                        book_state="flat" if representation == "separated" else prior_guard_state,
+                        guard_state=None if representation == "legacy" else prior_guard_state,
+                        holding_phase=None,
+                        prior_book_state="holding",
+                        state_version=3,
+                    )
+
+                    decision = evaluate_independent_book(
+                        settings=settings,
+                        context=context,
+                        baseline=baseline,
+                        ai_assessment=None,
+                        leg="long",
+                        expectancy=expectancy,
+                        directional_leg_target_qty=Decimal("0.01"),
+                        scorer=lambda **_: 0.99,
+                        prior_runtime_state=prior_runtime_state,
+                        recent_score_history=(0.99, 0.99, 0.99),
+                    )
+
+                    runtime_state = runtime_state_from_decision(
+                        context=context,
+                        decision=decision,
+                        threshold_snapshot=decision.threshold_snapshot,
+                        health_snapshot=decision.health_snapshot,
+                    )
+
+                    self.assertEqual(decision.state, "opening")
+                    self.assertEqual(decision.book_action, "open")
+                    self.assertEqual(decision.target_qty, Decimal("0.01"))
+                    self.assertNotIn("independent_state_transition_invalid", decision.reason_codes)
+                    self.assertNotIn(f"independent_transition_invalid:{prior_guard_state}->probing", decision.blocked_reasons)
+                    self.assertIsNotNone(decision.state_snapshot)
+                    self.assertEqual(decision.state_snapshot.book_state, "probing")
+                    self.assertIsNone(decision.state_snapshot.guard_state)
+                    self.assertEqual(decision.state_snapshot.prior_book_state, "flat")
+                    self.assertEqual(decision.state_snapshot.prior_guard_state, prior_guard_state)
+                    self.assertTrue(decision.state_snapshot.transition_valid)
+                    self.assertIsNone(decision.state_snapshot.transition_violation_reason)
+                    self.assertEqual(runtime_state.book_state, "probing")
+                    self.assertIsNone(runtime_state.guard_state)
+                    self.assertEqual(runtime_state.prior_book_state, "flat")
+                    self.assertEqual(runtime_state.prior_guard_state, prior_guard_state)
+
+    def test_evaluate_independent_book_scale_in_recovers_from_stale_guard_state_with_inventory(self) -> None:
+        settings = make_derivatives_hedge_settings(
+            strategy_hedge_independent_enabled=True,
+            strategy_hedge_independent_adaptive_rollout_enabled=False,
+            strategy_hedge_independent_rebalance_cooldown_seconds=0,
+            strategy_hedge_independent_min_score_stability_bps=0.0,
+        )
+        context = make_context(
+            product_type="derivatives",
+            current_exposure_side="long",
+            current_long_position_qty=Decimal("0.01"),
+        )
+        baseline = make_baseline(
+            direction_bias="long",
+            confidence=0.92,
+            suggested_position_scale=1.0,
+            volatility_target_scale=1.0,
+            factor_scores={
+                "momentum_alpha": 0.58,
+                "trend_alpha": 0.44,
+                "microstructure_alpha": 0.22,
+                "liquidity_scale": 0.97,
+            },
+        ).model_copy(update={"regime": "trend", "composite_alpha_score": 0.41})
+        expectancy = IndependentBookExpectancy(
             leg="long",
-            current_qty=Decimal("0"),
-            target_qty=Decimal("0"),
-            state="blocked",
-            book_state="cooldown",
-            holding_phase=None,
-            prior_book_state="holding",
-            state_version=3,
+            expected_signal_edge_bps=19.0,
+            expected_slippage_bps=1.2,
+            expected_cost_bps=5.5,
+            expected_net_edge_bps=13.5,
+        )
+        for representation in ("legacy", "separated"):
+            for prior_guard_state in ("cooldown", "suspended"):
+                with self.subTest(representation=representation, prior_guard_state=prior_guard_state):
+                    prior_runtime_state = StrategyBookRuntimeState(
+                        leg="long",
+                        current_qty=Decimal("0.01"),
+                        target_qty=Decimal("0.01"),
+                        state="blocked",
+                        book_state="holding" if representation == "separated" else prior_guard_state,
+                        guard_state=None if representation == "legacy" else prior_guard_state,
+                        holding_phase=None,
+                        prior_book_state="holding",
+                        state_version=6,
+                    )
+
+                    decision = evaluate_independent_book(
+                        settings=settings,
+                        context=context,
+                        baseline=baseline,
+                        ai_assessment=None,
+                        leg="long",
+                        expectancy=expectancy,
+                        directional_leg_target_qty=Decimal("0.03"),
+                        scorer=lambda **_: 0.98,
+                        prior_runtime_state=prior_runtime_state,
+                        recent_score_history=(0.98, 0.98, 0.98),
+                    )
+
+                    runtime_state = runtime_state_from_decision(
+                        context=context,
+                        decision=decision,
+                        threshold_snapshot=decision.threshold_snapshot,
+                        health_snapshot=decision.health_snapshot,
+                    )
+
+                    self.assertEqual(decision.state, "opening")
+                    self.assertEqual(decision.book_action, "scale_in")
+                    self.assertGreater(decision.target_qty, Decimal("0.01"))
+                    self.assertNotIn("independent_state_transition_invalid", decision.reason_codes)
+                    self.assertNotIn(f"independent_transition_invalid:{prior_guard_state}->building", decision.blocked_reasons)
+                    self.assertIsNotNone(decision.state_snapshot)
+                    self.assertEqual(decision.state_snapshot.book_state, "building")
+                    self.assertIsNone(decision.state_snapshot.guard_state)
+                    self.assertEqual(decision.state_snapshot.prior_book_state, "holding")
+                    self.assertEqual(decision.state_snapshot.prior_guard_state, prior_guard_state)
+                    self.assertTrue(decision.state_snapshot.transition_valid)
+                    self.assertEqual(runtime_state.book_state, "building")
+                    self.assertIsNone(runtime_state.guard_state)
+
+    def test_evaluate_independent_book_fail_closes_when_prior_guard_state_still_active(self) -> None:
+        settings = make_derivatives_hedge_settings(
+            strategy_hedge_independent_enabled=True,
+            strategy_hedge_independent_adaptive_rollout_enabled=False,
+            strategy_hedge_independent_rebalance_cooldown_seconds=0,
+            strategy_hedge_independent_min_score_stability_bps=0.0,
+        )
+        context = make_context(product_type="derivatives", current_exposure_side="flat")
+        baseline = make_baseline(
+            direction_bias="long",
+            confidence=0.9,
+            suggested_position_scale=1.0,
+            volatility_target_scale=1.0,
+            factor_scores={
+                "momentum_alpha": 0.55,
+                "trend_alpha": 0.41,
+                "microstructure_alpha": 0.2,
+                "liquidity_scale": 0.95,
+            },
+        ).model_copy(update={"regime": "trend", "composite_alpha_score": 0.4})
+        expectancy = IndependentBookExpectancy(
+            leg="long",
+            expected_signal_edge_bps=18.0,
+            expected_slippage_bps=1.2,
+            expected_cost_bps=5.0,
+            expected_net_edge_bps=13.0,
+        )
+        for representation in ("legacy", "separated"):
+            for prior_guard_state, horizon_field in (
+                ("cooldown", "cooldown_until"),
+                ("suspended", "suspended_until"),
+            ):
+                with self.subTest(representation=representation, prior_guard_state=prior_guard_state):
+                    prior_runtime_state = StrategyBookRuntimeState(
+                        leg="long",
+                        current_qty=Decimal("0"),
+                        target_qty=Decimal("0"),
+                        state="blocked",
+                        book_state="flat" if representation == "separated" else prior_guard_state,
+                        guard_state=None if representation == "legacy" else prior_guard_state,
+                        holding_phase=None,
+                        prior_book_state="holding",
+                        state_version=3,
+                        **{horizon_field: context.as_of_ts + timedelta(seconds=30)},
+                    )
+
+                    decision = evaluate_independent_book(
+                        settings=settings,
+                        context=context,
+                        baseline=baseline,
+                        ai_assessment=None,
+                        leg="long",
+                        expectancy=expectancy,
+                        directional_leg_target_qty=Decimal("0.01"),
+                        scorer=lambda **_: 0.99,
+                        prior_runtime_state=prior_runtime_state,
+                        recent_score_history=(0.99, 0.99, 0.99),
+                    )
+
+                    runtime_state = runtime_state_from_decision(
+                        context=context,
+                        decision=decision,
+                        threshold_snapshot=decision.threshold_snapshot,
+                        health_snapshot=decision.health_snapshot,
+                    )
+
+                    self.assertEqual(decision.state, "blocked")
+                    self.assertEqual(decision.book_action, "blocked")
+                    self.assertEqual(decision.target_qty, Decimal("0"))
+                    self.assertIn("independent_state_transition_invalid", decision.reason_codes)
+                    self.assertIn(
+                        f"independent_transition_invalid:{prior_guard_state}->probing",
+                        decision.blocked_reasons,
+                    )
+                    self.assertIsNotNone(decision.state_snapshot)
+                    self.assertEqual(decision.state_snapshot.book_state, "flat")
+                    self.assertEqual(decision.state_snapshot.guard_state, prior_guard_state)
+                    self.assertEqual(decision.state_snapshot.prior_book_state, "flat")
+                    self.assertEqual(decision.state_snapshot.prior_guard_state, prior_guard_state)
+                    self.assertFalse(decision.state_snapshot.transition_valid)
+                    self.assertEqual(
+                        decision.state_snapshot.transition_violation_reason,
+                        f"independent_transition_invalid:{prior_guard_state}->probing",
+                    )
+                    self.assertEqual(runtime_state.book_state, "flat")
+                    self.assertEqual(runtime_state.guard_state, prior_guard_state)
+                    self.assertEqual(runtime_state.prior_guard_state, prior_guard_state)
+
+    def test_runtime_state_does_not_reuse_cooldown_horizon_as_suspension_horizon(self) -> None:
+        settings = make_derivatives_hedge_settings(
+            strategy_hedge_independent_enabled=True,
+            strategy_hedge_independent_trial_guard_enabled=True,
+            strategy_performance_guard_min_closed_trades=1,
+        )
+        context = make_context(
+            product_type="derivatives",
+            current_exposure_side="flat",
+            leg_strategy_health={
+                "long": {
+                    "recent_closed_trade_count": 2,
+                    "recent_win_rate": 0.2,
+                    "recent_fee_drag_ratio": 0.0,
+                    "recent_churn_ratio": 0.0,
+                    "recent_low_edge_trade_streak": 0,
+                    "recent_low_edge_trade_at": None,
+                    "recent_net_realized_pnl": Decimal("-12"),
+                }
+            },
+        )
+        baseline = make_baseline(
+            direction_bias="long",
+            confidence=0.88,
+            suggested_position_scale=1.0,
+            volatility_target_scale=1.0,
+            factor_scores={"momentum_alpha": 0.5, "trend_alpha": 0.45, "microstructure_alpha": 0.18, "liquidity_scale": 0.95},
+        ).model_copy(update={"regime": "trend", "composite_alpha_score": 0.36})
+        expectancy = IndependentBookExpectancy(
+            leg="long",
+            expected_signal_edge_bps=18.0,
+            expected_slippage_bps=1.0,
+            expected_cost_bps=5.0,
+            expected_net_edge_bps=13.0,
         )
 
         decision = evaluate_independent_book(
@@ -199,24 +448,21 @@ class TestIndependentEngine(unittest.TestCase):
             ai_assessment=None,
             leg="long",
             expectancy=expectancy,
-            directional_leg_target_qty=Decimal("0.01"),
-            scorer=lambda **_: 0.99,
-            prior_runtime_state=prior_runtime_state,
-            recent_score_history=(0.99, 0.99, 0.99),
+            directional_leg_target_qty=Decimal("0.02"),
+            scorer=lambda **_: 0.82,
+        )
+        runtime_state = runtime_state_from_decision(
+            context=context,
+            decision=decision,
+            threshold_snapshot=decision.threshold_snapshot,
+            health_snapshot=decision.health_snapshot,
         )
 
-        self.assertEqual(decision.state, "blocked")
-        self.assertEqual(decision.book_action, "blocked")
-        self.assertEqual(decision.target_qty, Decimal("0"))
-        self.assertIn("independent_state_transition_invalid", decision.reason_codes)
-        self.assertIn("independent_transition_invalid:cooldown->probing", decision.blocked_reasons)
-        self.assertIsNotNone(decision.state_snapshot)
-        self.assertEqual(decision.state_snapshot.book_state, "cooldown")
-        self.assertFalse(decision.state_snapshot.transition_valid)
-        self.assertEqual(
-            decision.state_snapshot.transition_violation_reason,
-            "independent_transition_invalid:cooldown->probing",
-        )
+        self.assertEqual(decision.book_state, "flat")
+        self.assertEqual(decision.guard_state, "suspended")
+        self.assertEqual(runtime_state.book_state, "flat")
+        self.assertEqual(runtime_state.guard_state, "suspended")
+        self.assertIsNone(runtime_state.suspended_until)
 
     def test_evaluate_independent_book_opens_short_on_high_net_edge_single_tick_confirmation(self) -> None:
         settings = make_derivatives_hedge_settings(
@@ -326,6 +572,62 @@ class TestIndependentEngine(unittest.TestCase):
         self.assertNotIn("independent_long_book_expected_cost_above_max_acceptable", decision.blocked_reasons)
         self.assertEqual(decision.score_stability_metrics.support_count, 1)
         self.assertFalse(bool(decision.score_stability_metrics and decision.score_stability_metrics.stable))
+
+    def test_evaluate_independent_book_allows_short_when_signal_strengthens_without_drawdown(self) -> None:
+        settings = make_derivatives_hedge_settings(
+            strategy_hedge_independent_enabled=True,
+            strategy_hedge_independent_adaptive_rollout_enabled=False,
+            strategy_hedge_independent_short_entry_threshold=0.30,
+            strategy_hedge_independent_short_scale_in_threshold=0.55,
+            strategy_hedge_independent_min_confirm_ticks=2,
+            strategy_hedge_independent_min_score_stability_bps=2.0,
+            strategy_hedge_independent_max_acceptable_cost_bps=7.5,
+            strategy_hedge_independent_min_safe_net_edge_bps=3.0,
+            strategy_hedge_independent_expected_slippage_buffer_bps=1.0,
+            strategy_hedge_independent_expected_execution_buffer_bps=2.0,
+        )
+        context = make_context(product_type="derivatives", current_exposure_side="flat")
+        baseline = make_baseline(
+            direction_bias="short",
+            confidence=0.82,
+            suggested_position_scale=1.0,
+            volatility_target_scale=1.0,
+            factor_scores={
+                "momentum_alpha": -0.48,
+                "trend_alpha": -0.42,
+                "microstructure_alpha": -0.18,
+                "liquidity_scale": 0.95,
+            },
+        ).model_copy(update={"regime": "trend", "composite_alpha_score": -0.32})
+        expectancy = IndependentBookExpectancy(
+            leg="short",
+            expected_signal_edge_bps=38.0,
+            expected_slippage_bps=5.6,
+            expected_cost_bps=10.6,
+            expected_net_edge_bps=27.4,
+        )
+
+        decision = evaluate_independent_book(
+            settings=settings,
+            context=context,
+            baseline=baseline,
+            ai_assessment=None,
+            leg="short",
+            expectancy=expectancy,
+            directional_leg_target_qty=Decimal("0.01"),
+            scorer=lambda **_: 0.42,
+            recent_score_history=(0.34, 0.37),
+        )
+
+        self.assertEqual(decision.state, "opening")
+        self.assertEqual(decision.book_action, "open")
+        self.assertEqual(decision.blocked_reasons, ())
+        assert decision.score_stability_metrics is not None
+        self.assertEqual(decision.score_stability_metrics.support_count, 3)
+        self.assertAlmostEqual(decision.score_stability_metrics.max_drawdown_bps, 8.0)
+        self.assertAlmostEqual(decision.score_stability_metrics.upward_excursion_bps or 0.0, 8.0)
+        self.assertAlmostEqual(decision.score_stability_metrics.downward_drawdown_bps or 0.0, 0.0)
+        self.assertTrue(decision.score_stability_metrics.stable)
 
     def test_evaluate_independent_book_blocks_short_when_dynamic_cost_fuse_detects_anomaly(self) -> None:
         settings = make_derivatives_hedge_settings(

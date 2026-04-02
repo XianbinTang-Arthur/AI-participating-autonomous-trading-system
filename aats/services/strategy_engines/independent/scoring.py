@@ -8,6 +8,13 @@ from aats.schemas.decision import AIMarketAssessment, BaselineAssessment
 from .models import IndependentLeg, ScoreStabilityMetrics
 
 
+def effective_score_drawdown_threshold_bps(*, settings: AATSSettings) -> float:
+    configured = settings.strategy_hedge_independent_min_score_drawdown_bps
+    if configured is not None:
+        return float(configured)
+    return float(settings.strategy_hedge_independent_min_score_stability_bps)
+
+
 def compute_raw_book_score(
     *,
     settings: AATSSettings,
@@ -93,21 +100,24 @@ def compute_score_stability(
         score_slope = 0.0 if len(window) < 2 else (window[-1] - window[0]) / max(len(window) - 1, 1)
         variance = sum((item - mean_score) ** 2 for item in window) / max(len(window), 1)
         score_volatility_bps = (variance**0.5) * 100.0
-        max_drawdown_bps = max(float(score) - min_score, 0.0) * 100.0
+        upward_excursion_bps = max(float(score) - min_score, 0.0) * 100.0
+        downward_drawdown_bps = max(max_score - float(score), 0.0) * 100.0
         stable = (
             support_count >= effective_min_confirm_ticks
-            and max_drawdown_bps <= float(settings.strategy_hedge_independent_min_score_stability_bps) + 1e-9
+            and downward_drawdown_bps <= effective_score_drawdown_threshold_bps(settings=settings) + 1e-9
         )
         return ScoreStabilityMetrics(
             support_count=support_count,
             min_score=min_score,
             max_score=max_score,
             mean_score=mean_score,
-            max_drawdown_bps=max_drawdown_bps,
+            max_drawdown_bps=upward_excursion_bps,
             stable=stable,
             source="recent_target_history",
             score_slope=score_slope,
             score_volatility_bps=score_volatility_bps,
+            upward_excursion_bps=upward_excursion_bps,
+            downward_drawdown_bps=downward_drawdown_bps,
         )
     support_count = _signal_confirmation_count(
         leg=leg,
@@ -124,6 +134,8 @@ def compute_score_stability(
         source="current_signal_confirmation",
         score_slope=0.0,
         score_volatility_bps=0.0,
+        upward_excursion_bps=0.0,
+        downward_drawdown_bps=0.0,
     )
 
 

@@ -359,6 +359,15 @@ class TestAATSSettings(unittest.TestCase):
             )
         with self.assertRaisesRegex(
             ValueError,
+            "strategy_hedge_independent_min_score_drawdown_bps_must_be_non_negative",
+        ):
+            AATSSettings.model_validate(
+                {
+                    "strategy_hedge_independent_min_score_drawdown_bps": -1.0,
+                }
+            )
+        with self.assertRaisesRegex(
+            ValueError,
             "strategy_hedge_independent_max_thesis_age_seconds_must_be_positive",
         ):
             AATSSettings.model_validate(

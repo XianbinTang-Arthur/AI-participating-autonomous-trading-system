@@ -63,7 +63,9 @@ class IndependentTransitionExceptionItem(SchemaBase):
     leg: Literal["long", "short"] | None = None
     state: str | None = None
     book_state: str | None = None
+    guard_state: str | None = None
     prior_book_state: str | None = None
+    prior_guard_state: str | None = None
     book_action: str | None = None
     last_transition_reason: str | None = None
     execution_chain_id: str | None = None
@@ -194,6 +196,8 @@ class OperatorActionRecord(SchemaBase):
         "ai_review_degrade_to_baseline",
         "phase1_shadow_review",
         "refresh_exchange_state",
+        "retry_limit_lookup",
+        "safe_cancel",
         "capital_scale_review",
         "trial_review_snapshot",
         "trial_guard_manual_reset",

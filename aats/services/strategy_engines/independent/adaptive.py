@@ -7,6 +7,7 @@ from aats.schemas.decision import AIMarketAssessment, BaselineAssessment, Decisi
 
 from .health import IndependentLegHealthSnapshot
 from .models import IndependentBookDecision, IndependentLeg
+from .scoring import effective_score_drawdown_threshold_bps
 
 
 @dataclass(frozen=True, slots=True)
@@ -23,6 +24,7 @@ class IndependentAdaptiveSnapshot:
     scale_in_threshold: float | None = None
     thesis_age_seconds: float | None = None
     de_risk_net_edge_bps: float | None = None
+    score_drawdown_bps: float | None = None
     adaptive_entry_threshold: float | None = None
     adaptive_close_threshold: float | None = None
     adaptive_scale_in_threshold: float | None = None
@@ -33,6 +35,7 @@ class IndependentAdaptiveSnapshot:
     effective_scale_in_threshold: float | None = None
     effective_thesis_age_seconds: float | None = None
     effective_de_risk_net_edge_bps: float | None = None
+    effective_score_drawdown_bps: float | None = None
     capital_multiplier: float | None = None
     confidence_multiplier: float | None = None
     volatility_multiplier: float | None = None
@@ -58,6 +61,7 @@ def threshold_snapshot(
     base_scale = _base_scale_in_threshold(settings=settings, leg=leg)
     base_thesis_age = float(settings.strategy_hedge_independent_max_thesis_age_seconds)
     base_de_risk = float(settings.strategy_hedge_independent_de_risk_net_edge_bps)
+    base_score_drawdown = effective_score_drawdown_threshold_bps(settings=settings)
 
     confidence_multiplier, confidence_reason = _confidence_multiplier(
         baseline=baseline,
@@ -128,6 +132,7 @@ def threshold_snapshot(
         scale_in_threshold=base_scale,
         thesis_age_seconds=base_thesis_age,
         de_risk_net_edge_bps=base_de_risk,
+        score_drawdown_bps=base_score_drawdown,
         adaptive_entry_threshold=adaptive_entry,
         adaptive_close_threshold=adaptive_close,
         adaptive_scale_in_threshold=adaptive_scale,
@@ -138,6 +143,7 @@ def threshold_snapshot(
         effective_scale_in_threshold=adaptive_scale if live_applied else base_scale,
         effective_thesis_age_seconds=adaptive_thesis_age if live_applied else base_thesis_age,
         effective_de_risk_net_edge_bps=adaptive_de_risk if live_applied else base_de_risk,
+        effective_score_drawdown_bps=base_score_drawdown,
         capital_multiplier=capital_multiplier,
         confidence_multiplier=confidence_multiplier,
         volatility_multiplier=volatility_multiplier,

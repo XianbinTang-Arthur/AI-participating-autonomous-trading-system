@@ -12,6 +12,7 @@ from aats.events import topics
 from aats.events.envelopes import parse_envelope, publish_model
 from aats.schemas.execution import FillEvent
 from aats.schemas.exchange import AccountBaselineSnapshot, ExchangeAccountSnapshot
+from aats.schemas.exit_execution import ExitExecutionIntent
 from aats.schemas.operator import ProcessingFailureRecord
 from aats.schemas.portfolio import PortfolioSnapshot, is_baseline_snapshot
 from aats.schemas.reconciliation import ReconciliationReport
@@ -25,6 +26,10 @@ from aats.services.recovery_control.reconciliation_classifier import RecoveryRec
 from aats.storage.base import EventStore
 from aats.storage.base import ExecutionRepository, ReconciliationRepository
 from aats.schemas.common import utc_now
+from aats.services.execution_engine.exit_intent_aggregator import (
+    augment_reconciliation_report_with_exit_execution,
+    refresh_exit_execution_intents,
+)
 from aats.services.runtime_scope import (
     fills_for_scope,
     latest_snapshot_for_scope,
@@ -33,28 +38,34 @@ from aats.services.runtime_scope import (
     snapshots_for_scope,
     runtime_state_scope,
 )
-from aats.storage.base import PortfolioRepository
+from aats.storage.base import ExitExecutionRepository, PortfolioRepository
 
 
 @dataclass(slots=True)
 class ReconciliationRepairService:
     portfolio_repo: PortfolioRepository | None = None
     execution_repo: ExecutionRepository | None = None
+    exit_execution_repo: ExitExecutionRepository | None = None
     reconstruction_service: PortfolioReconstructionService | None = None
     price_provider: Callable[[str], Decimal] | None = None
     runtime_scope: object | None = None
+    settings: AATSSettings | None = None
 
     def configure(
         self,
         *,
+        settings: AATSSettings,
         portfolio_repo: PortfolioRepository,
         execution_repo: ExecutionRepository,
+        exit_execution_repo: ExitExecutionRepository | None,
         reconstruction_service: PortfolioReconstructionService,
         price_provider: Callable[[str], Decimal],
         runtime_scope,
     ) -> None:
+        self.settings = settings
         self.portfolio_repo = portfolio_repo
         self.execution_repo = execution_repo
+        self.exit_execution_repo = exit_execution_repo
         self.reconstruction_service = reconstruction_service
         self.price_provider = price_provider
         self.runtime_scope = runtime_scope
@@ -96,6 +107,20 @@ class ReconciliationRepairService:
         self.portfolio_repo.save_snapshot(rebuilt_snapshot)
         return rebuilt_snapshot
 
+    def refresh_exit_execution_truth(self) -> list[ExitExecutionIntent]:
+        if (
+            self.execution_repo is None
+            or self.exit_execution_repo is None
+            or self.settings is None
+        ):
+            return []
+        return refresh_exit_execution_intents(
+            execution_repo=self.execution_repo,
+            exit_execution_repo=self.exit_execution_repo,
+            settings=self.settings,
+            scope=self.runtime_scope,
+        )
+
 
 class ReconciliationService:
     def __init__(
@@ -112,6 +137,7 @@ class ReconciliationService:
         event_store: EventStore,
         reconstruction_service: PortfolioReconstructionService,
         price_provider: Callable[[str], Decimal],
+        exit_execution_repo: ExitExecutionRepository | None = None,
         bootstrap_portfolio_from_exchange: bool = False,
         recovery_policy: RecoveryPolicy | None = None,
         metrics: MetricsRegistry | None = None,
@@ -133,11 +159,16 @@ class ReconciliationService:
         self.metrics = metrics
         self.reconciliation_classifier = reconciliation_classifier
         self.runtime_scope = runtime_state_scope(settings)
+        configure_comparator = getattr(self.comparator, "configure", None)
+        if callable(configure_comparator):
+            configure_comparator(settings=self.settings)
         configure = getattr(self.repair_service, "configure", None)
         if callable(configure):
             configure(
+                settings=self.settings,
                 portfolio_repo=self.portfolio_repo,
                 execution_repo=self.execution_repo,
+                exit_execution_repo=exit_execution_repo,
                 reconstruction_service=self.reconstruction_service,
                 price_provider=self.price_provider,
                 runtime_scope=self.runtime_scope,
@@ -257,7 +288,7 @@ class ReconciliationService:
             ),
             stored_snapshot=latest_snapshot,
         )
-        await self._persist_report(report)
+        report = await self._persist_report(report)
         return report
 
     def _build_report(
@@ -523,19 +554,29 @@ class ReconciliationService:
             for report in self.reconciliation_repo.history_for_scope(scope=self.runtime_scope)
         )
 
-    async def _persist_report(self, report: ReconciliationReport) -> None:
+    async def _persist_report(self, report: ReconciliationReport) -> ReconciliationReport:
         try:
-            self.reconciliation_repo.save_report(report)
+            refresh_exit_execution_truth = getattr(self.repair_service, "refresh_exit_execution_truth", None)
+            refreshed_exit_execution: list[ExitExecutionIntent] = []
+            if callable(refresh_exit_execution_truth):
+                refreshed_exit_execution = list(refresh_exit_execution_truth())
+            report_to_save = augment_reconciliation_report_with_exit_execution(
+                report=report,
+                parent_intents=refreshed_exit_execution,
+            )
+            if self.reconciliation_classifier is not None:
+                report_to_save = self.reconciliation_classifier.annotate(report_to_save)
+            self.reconciliation_repo.save_report(report_to_save)
             repaired_snapshot: PortfolioSnapshot | None = None
-            if report.severity != "CLEAN":
+            if report_to_save.severity != "CLEAN":
                 if self.metrics is not None:
                     self.metrics.increment("reconciliation_mismatches")
-                repaired_snapshot = self.repair_service.repair(report)
+                repaired_snapshot = self.repair_service.repair(report_to_save)
             await publish_model(
                 bus=self.bus,
                 topic=topics.RECONCILIATION_REPORTS,
                 key="portfolio",
-                payload_model=report,
+                payload_model=report_to_save,
                 source_component="reconciliation_service",
             )
             if repaired_snapshot is not None:
@@ -546,6 +587,7 @@ class ReconciliationService:
                     payload_model=repaired_snapshot,
                     source_component="reconciliation_service",
                 )
+            return report_to_save
         except Exception as exc:
             await self._emit_processing_failure(report=report, stage="reconciliation_persist", message=str(exc))
             raise

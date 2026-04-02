@@ -5,6 +5,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any, Sequence
 
+from aats.schemas.common import utc_now
 from aats.schemas.execution import OrderState
 from aats.schemas.strategy_runtime import (
     PortfolioAllocationDecision,
@@ -18,6 +19,10 @@ from aats.services.portfolio_service.decimals import to_decimal
 from .adaptive import IndependentAdaptiveSnapshot
 from .health import IndependentLegHealthSnapshot
 from .models import IndependentBookDecision
+from .payload_normalization import (
+    normalize_independent_replay_snapshot_payload,
+    normalize_independent_runtime_state,
+)
 from .state_machine import IndependentStateSnapshot, transition_book_state
 
 
@@ -32,7 +37,9 @@ class IndependentReplayDecisionSnapshot:
     book_action: str | None
     close_reason: str | None
     policy_reason: str | None
+    guard_state: str | None = None
     prior_book_state: str | None = None
+    prior_guard_state: str | None = None
     transition_reconstructed: bool = False
     transition_source: str | None = None
     transition_reason: str | None = None
@@ -49,12 +56,14 @@ class IndependentDecisionSnapshot:
     symbol: str
     leg: str
     book_state: str | None = None
+    guard_state: str | None = None
     holding_phase: str | None = None
     health_state: str | None = None
     eligibility_state: str | None = None
     current_qty: Decimal | None = None
     target_qty: Decimal | None = None
     prior_book_state: str | None = None
+    prior_guard_state: str | None = None
     current_scale_in_count: int = 0
     current_de_risk_count: int = 0
     thesis_started_at: datetime | None = None
@@ -90,6 +99,7 @@ class IndependentRecoverySnapshot:
     strategy_sleeve_id: str | None
     leg: str
     book_state: str | None
+    guard_state: str | None
     holding_phase: str | None
     health_state: str | None
     current_qty: Decimal
@@ -99,6 +109,7 @@ class IndependentRecoverySnapshot:
     unresolved_attempt_ids: tuple[str, ...]
     recovery_posture: str
     prior_book_state: str | None = None
+    prior_guard_state: str | None = None
     current_scale_in_count: int = 0
     current_de_risk_count: int = 0
     recovery_blockers: tuple[str, ...] = ()
@@ -122,22 +133,29 @@ def replay_snapshot_from_decision(
     state_snapshot: IndependentStateSnapshot | None = None,
     health_snapshot: IndependentLegHealthSnapshot | None = None,
     prior_book_state: str | None = None,
+    prior_guard_state: str | None = None,
     prior_state_source: str | None = None,
 ) -> IndependentReplayDecisionSnapshot:
     transition = None
     if state_snapshot is not None and prior_book_state is not None:
-        transition = transition_book_state(prior_state=prior_book_state, snapshot=state_snapshot)
+        transition = transition_book_state(
+            prior_state=prior_book_state,
+            prior_guard_state=prior_guard_state,
+            snapshot=state_snapshot,
+        )
     return IndependentReplayDecisionSnapshot(
         leg=decision.leg,
         score=decision.score,
         state=decision.state,
         book_state=decision.book_state if decision.book_state is not None else (None if transition is None else transition.next_state),
+        guard_state=decision.guard_state if decision.guard_state is not None else (None if transition is None else transition.next_guard_state),
         holding_phase=decision.holding_phase if decision.holding_phase is not None else (None if transition is None else transition.holding_phase),
         health_state=decision.health_state,
         book_action=decision.book_action,
         close_reason=decision.close_reason,
         policy_reason=decision.policy_reason,
         prior_book_state=prior_book_state,
+        prior_guard_state=prior_guard_state,
         transition_reconstructed=transition is not None,
         transition_source=prior_state_source,
         transition_reason=(
@@ -203,11 +221,16 @@ def _build_recovery_snapshot(
     recent_bundles: Sequence[StrategyExecutionBundle],
     family_blockers: tuple[str, ...],
 ) -> IndependentRecoverySnapshot:
+    as_of_ts = utc_now()
+    normalized_runtime_state = normalize_independent_runtime_state(
+        runtime_state=runtime_state,
+        as_of_ts=as_of_ts,
+    )
     expected_chain_ids = _ordered_unique(
         [
             *(
-                [runtime_state.execution_chain_id]
-                if runtime_state is not None and str(runtime_state.execution_chain_id or "").strip()
+                [normalized_runtime_state.execution_chain_id]
+                if normalized_runtime_state is not None and str(normalized_runtime_state.execution_chain_id or "").strip()
                 else []
             ),
             *[
@@ -263,7 +286,7 @@ def _build_recovery_snapshot(
     blockers = list(
         dict.fromkeys(
             [
-                *([] if runtime_state is None else list(runtime_state.blocked_reasons)),
+                *([] if normalized_runtime_state is None else list(normalized_runtime_state.blocked_reasons)),
                 *family_blockers,
                 *(["independent_unexpected_execution_chain"] if unexpected_chain_ids else []),
             ]
@@ -273,7 +296,7 @@ def _build_recovery_snapshot(
         active_chain_ids=active_chain_ids,
         unresolved_attempt_ids=unresolved_attempt_ids,
         unexpected_chain_ids=unexpected_chain_ids,
-        runtime_state=runtime_state,
+        runtime_state=normalized_runtime_state,
     )
     last_recovery_incident_at = _last_recovery_incident_at(
         active_orders=active_orders,
@@ -282,48 +305,54 @@ def _build_recovery_snapshot(
         strategy_sleeve_id=sleeve_intent.strategy_sleeve_id,
         leg=leg,
     )
-    current_qty = Decimal("0") if runtime_state is None else to_decimal(runtime_state.current_qty)
-    target_qty = Decimal("0") if runtime_state is None else to_decimal(runtime_state.target_qty)
+    current_qty = Decimal("0") if normalized_runtime_state is None else to_decimal(normalized_runtime_state.current_qty)
+    target_qty = Decimal("0") if normalized_runtime_state is None else to_decimal(normalized_runtime_state.target_qty)
     return IndependentRecoverySnapshot(
         decision_id=decision.decision_id,
         allocation_id=decision.allocation_id,
         symbol=sleeve_intent.symbol,
         strategy_sleeve_id=sleeve_intent.strategy_sleeve_id,
         leg=leg,
-        book_state=None if runtime_state is None else runtime_state.book_state,
-        holding_phase=None if runtime_state is None else runtime_state.holding_phase,
-        health_state=None if runtime_state is None else runtime_state.health_state,
+        book_state=None if normalized_runtime_state is None else normalized_runtime_state.book_state,
+        guard_state=None if normalized_runtime_state is None else normalized_runtime_state.guard_state,
+        holding_phase=None if normalized_runtime_state is None else normalized_runtime_state.holding_phase,
+        health_state=None if normalized_runtime_state is None else normalized_runtime_state.health_state,
         current_qty=current_qty,
         target_qty=target_qty,
-        prior_book_state=None if runtime_state is None else runtime_state.prior_book_state,
-        current_scale_in_count=0 if runtime_state is None else int(runtime_state.current_scale_in_count or 0),
-        current_de_risk_count=0 if runtime_state is None else int(runtime_state.current_de_risk_count or 0),
+        prior_book_state=None if normalized_runtime_state is None else normalized_runtime_state.prior_book_state,
+        prior_guard_state=None if normalized_runtime_state is None else normalized_runtime_state.prior_guard_state,
+        current_scale_in_count=0 if normalized_runtime_state is None else int(normalized_runtime_state.current_scale_in_count or 0),
+        current_de_risk_count=0 if normalized_runtime_state is None else int(normalized_runtime_state.current_de_risk_count or 0),
         expected_chain_ids=tuple(expected_chain_ids),
         active_execution_chain_ids=tuple(active_chain_ids),
         unresolved_attempt_ids=tuple(unresolved_attempt_ids),
         recovery_posture=posture,
         recovery_blockers=tuple(blockers),
         last_recovery_incident_at=last_recovery_incident_at,
-        suspended_until=None if runtime_state is None else runtime_state.suspended_until,
-        cooldown_until=None if runtime_state is None else runtime_state.cooldown_until,
-        state_version=1 if runtime_state is None else int(runtime_state.state_version or 1),
-        threshold_snapshot=(
-            _leg_metrics_value(sleeve_intent, leg, "threshold_snapshot")
-            or _runtime_state_snapshot_value(runtime_state, "threshold_snapshot")
+        suspended_until=None if normalized_runtime_state is None else normalized_runtime_state.suspended_until,
+        cooldown_until=None if normalized_runtime_state is None else normalized_runtime_state.cooldown_until,
+        state_version=1 if normalized_runtime_state is None else int(normalized_runtime_state.state_version or 1),
+        threshold_snapshot=_normalized_threshold_snapshot_value(
+            sleeve_intent=sleeve_intent,
+            leg=leg,
+            runtime_state=normalized_runtime_state,
         ),
         health_snapshot=(
             _leg_metrics_value(sleeve_intent, leg, "health_snapshot")
-            or _runtime_state_snapshot_value(runtime_state, "leg_health_summary")
+            or _runtime_state_snapshot_value(normalized_runtime_state, "leg_health_summary")
         ),
-        replay_snapshot=_leg_metrics_value(sleeve_intent, leg, "replay_snapshot"),
+        replay_snapshot=_normalized_replay_snapshot_value(
+            replay_snapshot=_leg_metrics_value(sleeve_intent, leg, "replay_snapshot"),
+            runtime_state=normalized_runtime_state,
+        ),
         decision_snapshot=_decision_snapshot_from_sources(
             decision=decision,
             sleeve_intent=sleeve_intent,
             leg=leg,
-            runtime_state=runtime_state,
+            runtime_state=normalized_runtime_state,
         ),
-        transition_valid=True if runtime_state is None else bool(runtime_state.transition_valid),
-        transition_violation_reason=None if runtime_state is None else runtime_state.transition_violation_reason,
+        transition_valid=True if normalized_runtime_state is None else bool(normalized_runtime_state.transition_valid),
+        transition_violation_reason=None if normalized_runtime_state is None else normalized_runtime_state.transition_violation_reason,
     )
 
 
@@ -342,12 +371,14 @@ def _decision_snapshot_from_sources(
         symbol=sleeve_intent.symbol,
         leg=leg,
         book_state=None if runtime_state is None else runtime_state.book_state,
+        guard_state=None if runtime_state is None else runtime_state.guard_state,
         holding_phase=None if runtime_state is None else runtime_state.holding_phase,
         health_state=None if runtime_state is None else runtime_state.health_state,
         eligibility_state=None if runtime_state is None else runtime_state.eligibility_state,
         current_qty=None if runtime_state is None else runtime_state.current_qty,
         target_qty=None if runtime_state is None else runtime_state.target_qty,
         prior_book_state=None if runtime_state is None else runtime_state.prior_book_state,
+        prior_guard_state=None if runtime_state is None else runtime_state.prior_guard_state,
         current_scale_in_count=0 if runtime_state is None else int(runtime_state.current_scale_in_count or 0),
         current_de_risk_count=0 if runtime_state is None else int(runtime_state.current_de_risk_count or 0),
         thesis_started_at=None if runtime_state is None else runtime_state.thesis_started_at,
@@ -364,6 +395,8 @@ def _decision_snapshot_from_sources(
                 "support_count": metrics.get(f"{leg}_score_support_count"),
                 "stable": metrics.get(f"{leg}_score_stable"),
                 "max_drawdown_bps": metrics.get(f"{leg}_score_stability_max_drawdown_bps"),
+                "upward_excursion_bps": metrics.get(f"{leg}_score_stability_upward_excursion_bps"),
+                "downward_drawdown_bps": metrics.get(f"{leg}_score_stability_downward_drawdown_bps"),
                 "source": metrics.get(f"{leg}_score_stability_source"),
             }
         ),
@@ -405,15 +438,19 @@ def _decision_snapshot_from_sources(
                 "limit_offset_bps_preference": metrics.get(f"{leg}_limit_offset_bps_preference"),
             }
         ),
-        threshold_snapshot=(
-            _leg_metrics_value(sleeve_intent, leg, "threshold_snapshot")
-            or _runtime_state_snapshot_value(runtime_state, "threshold_snapshot")
+        threshold_snapshot=_normalized_threshold_snapshot_value(
+            sleeve_intent=sleeve_intent,
+            leg=leg,
+            runtime_state=runtime_state,
         ),
         health_snapshot=(
             _leg_metrics_value(sleeve_intent, leg, "health_snapshot")
             or _runtime_state_snapshot_value(runtime_state, "leg_health_summary")
         ),
-        replay_snapshot=_leg_metrics_value(sleeve_intent, leg, "replay_snapshot"),
+        replay_snapshot=_normalized_replay_snapshot_value(
+            replay_snapshot=_leg_metrics_value(sleeve_intent, leg, "replay_snapshot"),
+            runtime_state=runtime_state,
+        ),
         reason_codes=() if runtime_state is None else tuple(runtime_state.reason_codes),
         blocked_reasons=() if runtime_state is None else tuple(runtime_state.blocked_reasons),
     )
@@ -434,6 +471,53 @@ def _runtime_states_by_leg(sleeve_intent: StrategySleeveIntent) -> dict[str, Str
             continue
         parsed[runtime_state.leg] = runtime_state
     return parsed
+
+
+def _normalized_replay_snapshot_value(
+    *,
+    replay_snapshot: dict[str, Any] | None,
+    runtime_state: StrategyBookRuntimeState | None,
+) -> dict[str, Any] | None:
+    return normalize_independent_replay_snapshot_payload(
+        replay_snapshot=replay_snapshot,
+        runtime_state=runtime_state,
+    )
+
+
+def _normalized_threshold_snapshot_value(
+    *,
+    sleeve_intent: StrategySleeveIntent,
+    leg: str,
+    runtime_state: StrategyBookRuntimeState | None,
+) -> dict[str, Any] | None:
+    threshold_snapshot = (
+        _leg_metrics_value(sleeve_intent, leg, "threshold_snapshot")
+        or _runtime_state_snapshot_value(runtime_state, "threshold_snapshot")
+    )
+    if not isinstance(threshold_snapshot, dict):
+        return None
+    normalized = dict(threshold_snapshot)
+    metrics = sleeve_intent.metrics or {}
+    configured_drawdown_bps = metrics.get("min_score_drawdown_bps")
+    effective_drawdown_bps = metrics.get("effective_score_drawdown_threshold_bps")
+    legacy_drawdown_bps = metrics.get("min_score_stability_bps")
+    if normalized.get("score_drawdown_bps") is None:
+        normalized["score_drawdown_bps"] = (
+            configured_drawdown_bps
+            if configured_drawdown_bps is not None
+            else effective_drawdown_bps
+            if effective_drawdown_bps is not None
+            else legacy_drawdown_bps
+        )
+    if normalized.get("effective_score_drawdown_bps") is None:
+        normalized["effective_score_drawdown_bps"] = (
+            effective_drawdown_bps
+            if effective_drawdown_bps is not None
+            else normalized.get("score_drawdown_bps")
+            if normalized.get("score_drawdown_bps") is not None
+            else legacy_drawdown_bps
+        )
+    return normalized
 
 
 def _has_leg_specific_metrics(*, sleeve_intent: StrategySleeveIntent, leg: str) -> bool:

@@ -338,6 +338,7 @@ class StrategyBookExpectancyEntry(SchemaBase):
     capital_multiplier: float | None = None
     health_state: str | None = None
     book_state: str | None = None
+    guard_state: str | None = None
     holding_phase: str | None = None
     edge_strength: Literal["weak", "medium", "strong"] | None = None
 
@@ -360,6 +361,7 @@ class StrategyAdaptiveThresholdSnapshot(SchemaBase):
     scale_in_threshold: float | None = None
     thesis_age_seconds: float | None = None
     de_risk_net_edge_bps: float | None = None
+    score_drawdown_bps: float | None = None
     adaptive_entry_threshold: float | None = None
     adaptive_close_threshold: float | None = None
     adaptive_scale_in_threshold: float | None = None
@@ -370,6 +372,7 @@ class StrategyAdaptiveThresholdSnapshot(SchemaBase):
     effective_scale_in_threshold: float | None = None
     effective_thesis_age_seconds: float | None = None
     effective_de_risk_net_edge_bps: float | None = None
+    effective_score_drawdown_bps: float | None = None
     capital_multiplier: float | None = None
     confidence_multiplier: float | None = None
     volatility_multiplier: float | None = None
@@ -401,6 +404,7 @@ class StrategyBookRuntimeState(SchemaBase):
     size_multiplier: float | None = None
     capital_multiplier: float | None = None
     book_state: str | None = None
+    guard_state: str | None = None
     holding_phase: str | None = None
     health_state: str | None = None
     eligibility_state: str | None = None
@@ -412,6 +416,7 @@ class StrategyBookRuntimeState(SchemaBase):
     current_scale_in_count: int = 0
     current_de_risk_count: int = 0
     prior_book_state: str | None = None
+    prior_guard_state: str | None = None
     last_transition_at: datetime | None = None
     last_transition_reason: str | None = None
     suspended_until: datetime | None = None

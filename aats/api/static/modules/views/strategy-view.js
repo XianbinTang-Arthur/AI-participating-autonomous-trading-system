@@ -6,15 +6,9 @@ import {
   localizeError,
   readableBookExpectancySummary,
   readableBookRuntimeStateSummary,
-  readableIndependentAdaptiveMeta,
-  readableIndependentAdaptiveSummary,
-  readableExpectedVsRealizedMeta,
-  readableExpectedVsRealizedSummary,
   readableFamilyExecutionDirection,
   readableFamilyExecutionMeta,
   readableFamilyExecutionSummary,
-  readableIndependentTransitionExceptionMeta,
-  readableIndependentTransitionExceptionSummary,
   readableOverlayParentSignalSummary,
   readableState,
 } from "../terms.js";
@@ -28,18 +22,9 @@ export function renderStrategySections(data) {
   const strategyRuntime = data.strategyRuntime || {};
   const strategyRuntimeSummary = strategyRuntime.summary || {};
   const strategyRuntimeSnapshot = strategyRuntime.latest_snapshot || {};
-  const strategyCandidates = strategyRuntimeSnapshot.candidates || [];
   const latestBundle = strategyRuntime.latest_bundle || {};
-  const recentBundles = strategyRuntime.recent_execution_bundles || [];
-  const latestAllocationDecision = strategyRuntime.latest_allocation_decision || {};
-  const recentSleeveIntents = strategyRuntime.recent_sleeve_intents || [];
-  const recentBudgetSnapshots = strategyRuntime.recent_budget_snapshots || [];
-  const recentConflictResolutions = strategyRuntime.recent_conflict_resolutions || [];
-  const recentNettingDecisions = strategyRuntime.recent_netting_decisions || [];
   const strategyAppliedTarget = strategyRuntime.latest_applied_target || {};
   const automationDecisions = strategyRuntimeSnapshot.automation_decisions || [];
-  const smartArbitrageConfig = strategyRuntime.configured_parameters?.smart_arbitrage || {};
-  const smartArbitrageCostSummary = strategyRuntime.smart_arbitrage_cost_summary || {};
   const strategyAttribution = data.strategyAttribution || {};
   const attributionSummary = strategyAttribution.summary || {};
   const sleeveProfitability = strategyAttribution.profitability_by_strategy_sleeve || [];
@@ -84,53 +69,10 @@ export function renderStrategySections(data) {
     forwardSummary.reasons,
     trialReviewRecommendation.reasons,
   );
-  const displayedStrategyCandidates = strategyCandidates.slice(0, 4);
   const displayedAutomationDecisions = automationDecisions.slice(0, 5);
   const displayedSleeveProfitability = sleeveProfitability.slice(0, 6);
   const displayedForwardPeriods = forwardPeriods.slice(0, 4);
   const displayedTrialReviewActions = trialReviewRecentActions.slice(0, 5);
-  const tradeCostConfig = strategyRuntime.configured_parameters?.trade_costs || {};
-  const directionalConfig = strategyRuntime.configured_parameters?.directional || {};
-  const independentExpectedVsRealized = strategyRuntime.independent_expected_vs_realized_summary || {};
-  const independentAdaptiveSummary = strategyRuntime.independent_adaptive_summary || {};
-  const independentTransitionExceptionSummary = strategyRuntime.independent_transition_exception_summary || {};
-  const independentAdaptiveCopy = readableIndependentAdaptiveSummary(independentAdaptiveSummary, "");
-  const independentAdaptiveMeta = independentAdaptiveCopy
-    ? readableIndependentAdaptiveMeta(independentAdaptiveSummary, "当前没有额外自适应说明")
-    : "";
-  const independentTransitionExceptionCopy = readableIndependentTransitionExceptionSummary(
-    independentTransitionExceptionSummary,
-    "",
-  );
-  const independentTransitionExceptionMeta = independentTransitionExceptionCopy
-    ? readableIndependentTransitionExceptionMeta(independentTransitionExceptionSummary, "当前没有额外迁移异常说明")
-    : "";
-  const expectedVsRealizedCopy = readableExpectedVsRealizedSummary(independentExpectedVsRealized, "");
-  const expectedVsRealizedMeta = expectedVsRealizedCopy
-    ? readableExpectedVsRealizedMeta(independentExpectedVsRealized, "当前没有额外诊断说明")
-    : "";
-  const coordinatorDiagnostics = [];
-  if (independentAdaptiveCopy) {
-    coordinatorDiagnostics.push([
-      "独立双书自适应阈值",
-      independentAdaptiveCopy,
-      independentAdaptiveMeta,
-    ]);
-  }
-  if (expectedVsRealizedCopy) {
-    coordinatorDiagnostics.push([
-      "独立双书预期 vs 已实现",
-      expectedVsRealizedCopy,
-      expectedVsRealizedMeta,
-    ]);
-  }
-  if (independentTransitionExceptionCopy) {
-    coordinatorDiagnostics.push([
-      "独立双书迁移异常",
-      independentTransitionExceptionCopy,
-      independentTransitionExceptionMeta,
-    ]);
-  }
 
   return {
     strategyHero: surfaceCard({
@@ -228,7 +170,7 @@ export function renderStrategySections(data) {
     strategyCoordinator: surfaceCard({
       title: "多策略调度",
       kicker: "并行策略",
-      copy: "默认只保留当前调度结论和候选概览；预算快照、冲突解算和净额决策收进展开区，避免这一块占满整页。",
+      copy: "这里只保留当前自动调度的摘要状态，不再展开候选、预算和冲突明细。",
       classes: "strategy-compact-card",
       content: `
         ${summaryStrip([
@@ -257,48 +199,8 @@ export function renderStrategySections(data) {
             tone: "info",
           },
         ])}
-        ${kvList([
-          ["调度结论", strategyRuntimeSummary.operator_summary || "当前还没有多策略调度快照。", reasonListText(strategyRuntimeSummary.latest_selection_reason_codes, "当前没有额外调度原因说明")],
-          ["当前路由", strategyRouteActionLabel(strategyRuntimeSummary.latest_selected_route_action, strategyRuntimeSummary.latest_selected_family_action), strategyRuntimeSummary.protective_fallback_active ? "当前保留了保护性减仓/退出路径。" : "当前没有触发保护性回退。"],
-          ["组合分配结论", latestAllocationDecision.operator_summary || "当前还没有组合分配决策。", reasonListText(latestAllocationDecision.reason_codes, "当前没有额外分配原因说明")],
-          [
-            "Hedge 保护 / 方向削减",
-            `${formatSigned(strategyRuntimeSummary.latest_hedge_protected_notional)} / ${formatSigned(strategyRuntimeSummary.latest_directional_reduced_notional)}`,
-            "前者表示为保护 hedge 结构而保留的名义金额，后者表示组合分配器主动削减的方向暴露。",
-          ],
-          [
-            "最近执行包 / 已应用目标",
-            `${readableState(latestBundle.status || strategyRuntimeSummary.latest_bundle_status || "unknown")} / ${formatSigned(strategyAppliedTarget.target_position_qty)}`,
-            `${formatNumber(recentBundles[0]?.legs?.length ?? latestBundle.legs?.length ?? 0, 0, "0")} 条腿 | ${readableFamilyExecutionSummary(strategyAppliedTarget, "保持当前仓位")}${familyExpectancySuffix(strategyAppliedTarget)}`,
-          ],
-        ])}
-        ${renderStrategyCandidateTable(displayedStrategyCandidates, smartArbitrageConfig, { policy, risk })}
-        ${renderRecentSleeveIntentTable(recentSleeveIntents.slice(0, 5), { policy, risk })}
-        ${coordinatorDiagnostics.length ? renderExpandableSection("高级诊断：独立双书", kvList(coordinatorDiagnostics), {
-          meta: "默认收起，只在核对阈值和预期偏差时查看",
-        }) : ""}
-        ${renderExpandableSection("预算快照", renderAllocatorBudgetSnapshotTable(recentBudgetSnapshots), {
-          meta: `${formatNumber(strategyRuntimeSummary.latest_budget_snapshot_count, 0, "0")} 条`,
-          open: true,
-        })}
-        ${renderExpandableSection("冲突解算", renderAllocatorConflictResolutionTable(recentConflictResolutions), {
-          meta: `${formatNumber(strategyRuntimeSummary.latest_conflict_resolution_count, 0, "0")} 条`,
-          open: true,
-        })}
-        ${renderExpandableSection("净额决策", renderAllocatorNettingDecisionTable(recentNettingDecisions), {
-          meta: `${formatNumber(strategyRuntimeSummary.latest_netting_decision_count, 0, "0")} 条`,
-          open: true,
-        })}
       `,
     }),
-    strategyTradeCosts: renderTradeCostConfigCard(tradeCostConfig),
-    strategyDirectionalConfig: renderDirectionalShortConfigCard(directionalConfig, latestDecision, decisionScene),
-    strategySmartArbitrageConfig: renderSmartArbitrageConfigCard(
-      smartArbitrageConfig,
-      tradeCostConfig,
-      strategyFamilyEnablement?.smart_arbitrage || {}
-    ),
-    strategySmartArbitrageCost: renderSmartArbitrageCostCard(smartArbitrageCostSummary),
     strategyAutomation: surfaceCard({
       title: "自动预算与启停",
       kicker: "全自动并行运行",
@@ -566,26 +468,12 @@ export function renderStrategySections(data) {
 
 export function renderStrategyView(data) {
   const sections = renderStrategySections(data);
-  const hasSmartArbitrageReference = Object.keys(
-    data?.strategyRuntime?.configured_parameters?.smart_arbitrage || {}
-  ).length > 0;
-  const referenceCards = [
-    `<div class="span-12">${sections.strategyTradeCosts}</div>`,
-    `<div class="span-12">${sections.strategyDirectionalConfig}</div>`,
-  ];
-  if (hasSmartArbitrageReference) {
-    referenceCards.push(
-      `<div class="span-12">${sections.strategySmartArbitrageConfig}</div>`,
-      `<div class="span-12">${sections.strategySmartArbitrageCost}</div>`
-    );
-  }
   return `
     <div class="workspace-stack strategy-workspace">
       <nav class="section-nav strategy-section-nav" aria-label="策略判断分区导航">
         <a class="section-nav__link" href="#strategy-overview">本轮结论</a>
         <a class="section-nav__link" href="#strategy-opportunities">当前机会</a>
         <a class="section-nav__link" href="#strategy-health">运行质量</a>
-        <a class="section-nav__link" href="#strategy-reference">配置参考</a>
         <a class="section-nav__link" href="#strategy-history">历史归因</a>
       </nav>
       ${renderStrategyWorkspaceSection(
@@ -622,21 +510,6 @@ export function renderStrategyView(data) {
             <div class="span-5">${sections.strategyAutomation}</div>
           </div>
         `
-      )}
-      ${renderStrategyWorkspaceSection(
-        "strategy-reference",
-        "配置参考",
-        "配置与成本参考",
-        "默认折叠。只有在你需要调阈值、解释为什么不做、或者核对成本假设时，再展开这一层。",
-        renderExpandableSection(
-          "展开配置与成本参考",
-          `
-            <div class="panel-grid strategy-page-grid">
-              ${referenceCards.join("")}
-            </div>
-          `,
-          { meta: "默认折叠，避免配置卡占满主工作区" }
-        )
       )}
       ${renderStrategyWorkspaceSection(
         "strategy-history",
@@ -1208,10 +1081,10 @@ function directionalShortConfigRows(config = {}) {
       "独立双书会按 long / short 两条腿分别评估样本、胜率和近期净收益，不再把一条腿的坏表现直接扩散到另一条腿。",
     ],
     [
-      "strategy_hedge_independent_min_confirm_ticks / strategy_hedge_independent_min_score_stability_bps / strategy_hedge_independent_min_liquidity_quality",
-      `${formatNumber(config?.hedge_independent_min_confirm_ticks, 0, "待确认")} / ${formatNumber(config?.hedge_independent_min_score_stability_bps, 2, "待确认")} / ${formatNumber(config?.hedge_independent_min_liquidity_quality, 2, "待确认")}`,
-      "确认次数 / 稳定性 / 流动性门槛",
-      "独立双书开仓前，会要求当前机会具备足够确认次数、分数稳定性和流动性质量，避免只凭刚过线的一跳噪声直接入场。",
+      "strategy_hedge_independent_min_confirm_ticks / strategy_hedge_independent_effective_score_drawdown_bps / strategy_hedge_independent_min_liquidity_quality",
+      `${formatNumber(config?.hedge_independent_min_confirm_ticks, 0, "待确认")} / ${formatNumber(config?.hedge_independent_effective_score_drawdown_bps, 2, "待确认")} / ${formatNumber(config?.hedge_independent_min_liquidity_quality, 2, "待确认")}`,
+      "确认次数 / 回撤阈值 / 流动性门槛",
+      "独立双书开仓前，会要求当前机会具备足够确认次数、分数回撤仍受控且流动性质量达标；这里展示的是当前真正生效的回撤阈值。",
     ],
     [
       "strategy_hedge_independent_require_execution_health_ok",
@@ -2545,286 +2418,6 @@ function renderForwardValidationPeriods(periods) {
   );
 }
 
-function renderStrategyCandidateTable(candidates, smartArbitrageConfig = {}, context = {}) {
-  if (!Array.isArray(candidates) || !candidates.length) {
-    return `<p class="meta-copy">当前还没有候选策略快照。</p>`;
-  }
-  return responsiveTable(
-    ["策略家族", "当前状态", "如何处理", "本轮目标", "原因说明"],
-    candidates.map((candidate) => [
-      `<div><strong>${escapeHtml(readableState(candidate.family || "unknown"))}</strong><div class="table-meta">${escapeHtml(strategyCandidateSymbolMeta(candidate))}</div></div>`,
-      `<div><strong>${escapeHtml(strategyCandidateStateLabel(candidate))}</strong><div class="table-meta">${escapeHtml(strategyCandidateStateMeta(candidate, smartArbitrageConfig))}</div></div>`,
-      `<div><strong>${escapeHtml(strategyCandidateRouteLabel(candidate))}</strong><div class="table-meta">${escapeHtml(strategyCandidateRouteMeta(candidate))}</div></div>`,
-      `<div><strong>${escapeHtml(strategyCandidateTargetLabel(candidate))}</strong><div class="table-meta">${escapeHtml(strategyCandidateTargetMeta(candidate, context))}</div></div>`,
-      `<div><strong>${escapeHtml(strategyCandidateReason(candidate, smartArbitrageConfig, context))}</strong><div class="table-meta">${escapeHtml(strategyLegSummary(candidate, smartArbitrageConfig))}</div></div>`,
-    ]),
-    "当前没有候选策略快照。"
-  );
-}
-
-function renderRecentSleeveIntentTable(items, context = {}) {
-  if (!Array.isArray(items) || !items.length) {
-    return `<p class="meta-copy">当前还没有新的子策略意图记录。</p>`;
-  }
-  return responsiveTable(
-    ["最近子策略意图", "当前状态", "本轮目标", "自动预算", "原因说明"],
-    items.map((item) => [
-      `<div><strong>${escapeHtml(item.strategy_sleeve_id || "未归属")}</strong><div class="table-meta">${escapeHtml(readableState(item.family || "unknown"))} | ${escapeHtml(item.symbol || "标的待确认")}</div></div>`,
-      `<div><strong>${escapeHtml(readableState(item.state || "unknown"))}</strong><div class="table-meta">${escapeHtml(strategyRouteActionLabel(item.route_action, item.family_action))}</div></div>`,
-      `<div><strong>${escapeHtml(strategySleeveIntentTargetLabel(item))}</strong><div class="table-meta">${escapeHtml(strategySleeveIntentTargetMeta(item, context))}</div></div>`,
-      `<div><strong>${item.automatic_enabled ? "自动管理" : "人工冻结"}</strong><div class="table-meta">倍率 ${formatNumber(item.budget_multiplier, 2, "0")} | 权重 ${formatNumber(item.allocator_weight, 2, "0")}</div></div>`,
-      `<div><strong>${escapeHtml(strategySleeveIntentReason(item, context))}</strong><div class="table-meta">${escapeHtml(reasonListText(item.control_reason_codes?.length ? item.control_reason_codes : item.reason_codes, "当前没有额外原因"))}</div></div>`,
-    ]),
-    "当前还没有新的 sleeve 意图记录。"
-  );
-}
-
-function strategyCandidateSymbolMeta(candidate) {
-  if (candidate?.family === "smart_arbitrage") {
-    if (candidate?.pair_id === "multi_pair" || candidate?.metrics?.aggregate_candidate === true) {
-      const pairs = Array.isArray(candidate?.metrics?.selected_pair_summaries) ? candidate.metrics.selected_pair_summaries : [];
-      if (pairs.length) {
-        const preview = pairs.slice(0, 2).map((item) => `${item.spot_symbol || "现货腿"} <-> ${item.derivatives_symbol || "合约腿"}`).join(" | ");
-        return `${formatNumber(pairs.length, 0, "0")} 组套利对 | ${preview}`;
-      }
-      return "多组套利对聚合候选";
-    }
-    const spotSymbol = candidate?.metrics?.spot_symbol;
-    const derivativesSymbol = candidate?.metrics?.derivatives_symbol;
-    if (spotSymbol || derivativesSymbol) {
-      return `${spotSymbol || "现货腿"} <-> ${derivativesSymbol || "合约腿"}`;
-    }
-  }
-  return candidate?.recommended_symbol || "当前没有推荐标的";
-}
-
-function smartArbitrageBelowEntryThreshold(candidate) {
-  if (candidate?.family !== "smart_arbitrage") return false;
-  const reasonCodes = Array.isArray(candidate?.reason_codes) ? candidate.reason_codes : [];
-  return reasonCodes.includes("smart_arbitrage_basis_below_entry_threshold");
-}
-
-function smartArbitragePairLabel(candidate) {
-  const spotSymbol = candidate?.metrics?.spot_symbol;
-  const derivativesSymbol = candidate?.metrics?.derivatives_symbol;
-  if (spotSymbol || derivativesSymbol) {
-    return `${spotSymbol || "现货腿"} <-> ${derivativesSymbol || "合约腿"}`;
-  }
-  return candidate?.recommended_symbol || "套利对待确认";
-}
-
-function smartArbitrageInactiveStateMeta(candidate, smartArbitrageConfig = {}) {
-  if (smartArbitrageBelowEntryThreshold(candidate)) {
-    const basisBps = formatBps(candidate?.metrics?.basis_bps);
-    const entryThreshold = formatBps(smartArbitrageEntryThreshold(candidate, smartArbitrageConfig));
-    return `${smartArbitragePairLabel(candidate)} | 基差 ${basisBps} | 入场阈值 ${entryThreshold}`;
-  }
-  return smartArbitrageMarketAvailability(candidate, smartArbitrageConfig);
-}
-
-function smartArbitrageEntryThreshold(candidate, smartArbitrageConfig = {}) {
-  const candidateThreshold = candidate?.metrics?.entry_threshold_bps;
-  if (candidateThreshold !== undefined && candidateThreshold !== null) {
-    return candidateThreshold;
-  }
-  return smartArbitrageConfig?.basis_entry_bps;
-}
-
-function strategyCandidateStateLabel(candidate) {
-  if (smartArbitrageBelowEntryThreshold(candidate)) {
-    return "当前继续观察";
-  }
-  if (candidate?.family === "smart_arbitrage" && candidate?.state === "inactive") {
-    return "当前不参与执行";
-  }
-  if (candidate?.family === "smart_arbitrage" && candidate?.state === "advisory_only") {
-    return "当前只给建议";
-  }
-  if (candidate?.family === "smart_arbitrage" && candidate?.state === "blocked") {
-    return "当前机会被阻断";
-  }
-  if (candidate?.family === "smart_arbitrage" && candidate?.state === "opening") {
-    return "当前准备开仓";
-  }
-  if (candidate?.family === "smart_arbitrage" && candidate?.state === "recovery") {
-    return "当前正在补齐双腿";
-  }
-  if (candidate?.family === "smart_arbitrage" && candidate?.state === "unwinding") {
-    return "当前准备退出套利对";
-  }
-  return readableState(candidate?.state || "unknown");
-}
-
-function strategyCandidateStateMeta(candidate, smartArbitrageConfig = {}) {
-  if (candidate?.family === "smart_arbitrage" && candidate?.state === "inactive") {
-    return smartArbitrageInactiveStateMeta(candidate, smartArbitrageConfig);
-  }
-  if (candidate?.family === "smart_arbitrage") {
-    return smartArbitrageStateMeta(candidate);
-  }
-  const confidence = Number(candidate?.confidence);
-  if (Number.isFinite(confidence) && confidence > 0) {
-    return `置信度 ${formatNumber(confidence, 2, "0")}`;
-  }
-  return "当前没有额外状态量化信息";
-}
-
-function strategyCandidateRouteLabel(candidate) {
-  if (smartArbitrageBelowEntryThreshold(candidate)) return "本轮不入场";
-  if (candidate?.route_action === "advisory_only") return "仅参考，不直接执行";
-  if (candidate?.route_action === "hold_current") return "保持当前仓位";
-  if (candidate?.route_action === "override_target") {
-    return strategyRouteActionLabel(candidate?.route_action, candidate?.family_action);
-  }
-  return readableState(candidate?.route_action || "hold_current");
-}
-
-function strategyCandidateRouteMeta(candidate) {
-  return `优先级 ${escapeFallbackReadableState(candidate?.urgency, "low")}`;
-}
-
-function strategyRouteActionLabel(routeAction, familyAction) {
-  const normalizedRoute = String(routeAction || "").trim().toLowerCase();
-  const normalizedFamilyAction = String(familyAction || "").trim().toLowerCase();
-  if (
-    normalizedRoute === "override_target" &&
-    [
-      "close_protection_leg",
-      "close_opportunity_leg",
-      "de_risk_independent_book",
-      "close_failed_thesis_independent_book",
-      "close_stale_thesis_independent_book",
-    ].includes(normalizedFamilyAction)
-  ) {
-    return readableState(normalizedFamilyAction);
-  }
-  return readableState(normalizedRoute || "hold_current");
-}
-
-function strategyCandidateTargetLabel(candidate) {
-  if (smartArbitrageBelowEntryThreshold(candidate)) {
-    return "暂不生成套利双腿";
-  }
-  if (smartArbitrageNegativeBasisAdvisory(candidate)) {
-    return "当前负基差不自动下单";
-  }
-  if (candidate?.family === "smart_arbitrage" && (candidate?.pair_id === "multi_pair" || candidate?.metrics?.aggregate_candidate === true)) {
-    return "按多组套利对分别执行";
-  }
-  if (candidate?.family === "smart_arbitrage" && candidate?.state === "blocked") {
-    return "当前机会被阻断";
-  }
-  const target = Number(candidate?.target_position_qty ?? 0);
-  const delta = Number(candidate?.delta_position_qty ?? 0);
-  if (!Number.isFinite(target) || !Number.isFinite(delta)) {
-    return "当前没有可用目标";
-  }
-  if (Math.abs(target) < 1e-12 && Math.abs(delta) < 1e-12) {
-    return "当前不生成执行量";
-  }
-  return formatSigned(candidate?.target_position_qty);
-}
-
-function strategyCandidateTargetMeta(candidate, context = {}) {
-  if (smartArbitrageBelowEntryThreshold(candidate)) {
-    const breakeven = candidate?.metrics?.breakeven_basis_bps;
-    return breakeven !== undefined && breakeven !== null
-      ? `当前盈亏平衡基差约 ${formatBps(breakeven)}；达到阈值后再计算双腿执行量。`
-      : "等基差达到入场阈值后，再计算双腿执行量。";
-  }
-  if (smartArbitrageNegativeBasisAdvisory(candidate)) {
-    return "自动执行当前只支持正基差双腿，现货现金模式不会为负基差生成执行量";
-  }
-  if (candidate?.family === "smart_arbitrage" && (candidate?.pair_id === "multi_pair" || candidate?.metrics?.aggregate_candidate === true)) {
-    const pairCount = Number(candidate?.metrics?.pair_count_selected || candidate?.metrics?.selected_pair_summaries?.length || 0);
-    return `当前按 ${formatNumber(pairCount, 0, "0")} 组套利对分别生成双腿；不再用单一目标数量表示。`;
-  }
-  if (candidate?.family === "smart_arbitrage" && candidate?.state === "blocked") {
-    return smartArbitrageBlockingSummary(candidate);
-  }
-  if (smartArbitrageExitBlockedByKillSwitch(candidate, context)) {
-    return "当前已经进入退出阶段，但平仓提交被 kill switch 阻断，交易所里并没有新的退出挂单。";
-  }
-  if (smartArbitrageWaitingExit(candidate, context)) {
-    return "当前双腿已经建好，系统正在等待基差回到退出阈值；这不是挂单未成。";
-  }
-  const target = Number(candidate?.target_position_qty ?? 0);
-  const delta = Number(candidate?.delta_position_qty ?? 0);
-  if (!Number.isFinite(target) || !Number.isFinite(delta)) {
-    return "当前没有数量信息";
-  }
-  if (Math.abs(target) < 1e-12 && Math.abs(delta) < 1e-12) {
-    return "当前没有需要执行的增减仓";
-  }
-  return `本轮变化 ${formatSigned(candidate?.delta_position_qty)}`;
-}
-
-function renderAllocatorBudgetSnapshotTable(items) {
-  if (!Array.isArray(items) || !items.length) {
-    return `<p class="meta-copy">当前还没有组合预算快照。</p>`;
-  }
-  return `
-    <div class="section-block">
-      <h4>预算快照</h4>
-      ${responsiveTable(
-        ["子策略", "优先级", "请求名义 / 批准名义", "组合预算变化", "原因"],
-        items.map((item) => [
-          `<div><strong>${escapeHtml(item.strategy_sleeve_id || "未归属")}</strong><div class="table-meta">${escapeHtml(readableState(item.family || "unknown"))}</div></div>`,
-          `<div><strong>${escapeHtml(readableState(item.hedge_priority_class || "standard"))}</strong><div class="table-meta">rank ${escapeHtml(String(item.priority_rank ?? 0))}</div></div>`,
-          `<div><strong>${formatSigned(item.requested_notional)} -> ${formatSigned(item.approved_notional)}</strong><div class="table-meta">${formatSigned(item.requested_delta_qty)} -> ${formatSigned(item.approved_delta_qty)}</div></div>`,
-          `<div><strong>${formatSigned(item.portfolio_requested_notional)} -> ${formatSigned(item.portfolio_approved_notional)}</strong><div class="table-meta">削减 ${formatSigned(item.portfolio_budget_cut_notional)}</div></div>`,
-          `<div><strong>${escapeHtml(item.clamped ? "已裁剪" : "未裁剪")}</strong><div class="table-meta">${escapeHtml(reasonListText(item.reason_codes, "当前没有额外原因"))}</div></div>`,
-        ]),
-        "当前没有组合预算快照。"
-      )}
-    </div>
-  `;
-}
-
-function renderAllocatorConflictResolutionTable(items) {
-  if (!Array.isArray(items) || !items.length) {
-    return `<p class="meta-copy">当前没有新的冲突解算记录。</p>`;
-  }
-  return `
-    <div class="section-block">
-      <h4>冲突解算</h4>
-      ${responsiveTable(
-        ["类型", "参与子策略", "请求 / 批准 / 阻断", "保护 / 削减", "原因"],
-        items.map((item) => [
-          `<div><strong>${escapeHtml(readableState(item.conflict_type || "unknown"))}</strong><div class="table-meta">${escapeHtml(readableState(item.resolution_action || "unknown"))}</div></div>`,
-          `<div><strong>${escapeHtml((item.input_sleeve_ids || []).join(" | ") || "当前没有输入子策略")}</strong><div class="table-meta">批准 ${escapeHtml((item.approved_sleeve_ids || []).join(" | ") || "无")}</div></div>`,
-          `<div><strong>${formatSigned(item.gross_requested_qty)} / ${formatSigned(item.net_approved_qty)}</strong><div class="table-meta">阻断 ${formatSigned(item.blocked_qty)}</div></div>`,
-          `<div><strong>${formatSigned(item.protected_notional)}</strong><div class="table-meta">方向削减 ${formatSigned(item.reduced_notional)}</div></div>`,
-          `<div><strong>${escapeHtml(reasonListText(item.reason_codes, "当前没有额外原因"))}</strong></div>`,
-        ]),
-        "当前没有新的冲突解算记录。"
-      )}
-    </div>
-  `;
-}
-
-function renderAllocatorNettingDecisionTable(items) {
-  if (!Array.isArray(items) || !items.length) {
-    return `<p class="meta-copy">当前没有新的净额决策记录。</p>`;
-  }
-  return `
-    <div class="section-block">
-      <h4>净额决策</h4>
-      ${responsiveTable(
-        ["标的", "参与子策略", "总买 / 总卖", "净批准数量", "原因"],
-        items.map((item) => [
-          `<div><strong>${escapeHtml(item.symbol || "标的待确认")}</strong><div class="table-meta">${escapeHtml(readableState(item.product_type || "unknown"))} | ${escapeHtml(readableState(item.margin_mode || "unknown"))}</div></div>`,
-          `<div><strong>${escapeHtml((item.participating_sleeve_ids || []).join(" | ") || "当前没有参与子策略")}</strong></div>`,
-          `<div><strong>${formatSigned(item.gross_buy_qty)} / ${formatSigned(item.gross_sell_qty)}</strong></div>`,
-          `<div><strong>${formatSigned(item.net_approved_qty)}</strong></div>`,
-          `<div><strong>${escapeHtml(reasonListText(item.reason_codes, "当前没有额外原因"))}</strong></div>`,
-        ]),
-        "当前没有新的净额决策记录。"
-      )}
-    </div>
-  `;
-}
-
 function familyEnablementSummary(payload) {
   if (!payload || typeof payload !== "object") return "当前没有多策略运行能力摘要";
   return Object.entries(payload)
@@ -2833,85 +2426,6 @@ function familyEnablementSummary(payload) {
       return `${readableState(family)} ${status}`;
     })
     .join(" | ");
-}
-
-function strategyCandidateReason(candidate, smartArbitrageConfig = {}, context = {}) {
-  const smartArbitrageReason = smartArbitrageReasonText(candidate, smartArbitrageConfig, context);
-  if (smartArbitrageReason) return smartArbitrageReason;
-  if (candidate?.family === "smart_arbitrage") {
-    const summary = smartArbitrageLocalizedReasonSummary(candidate, context);
-    if (summary) return summary;
-  }
-  if (candidate?.headline) return candidate.headline;
-  const summary = reasonListText(candidate?.reason_codes, "");
-  if (summary) return summary;
-  return "当前没有额外说明";
-}
-
-function strategySleeveIntentReason(item, context = {}) {
-  if (item?.family === "smart_arbitrage") {
-    const reason = smartArbitrageReasonText(item, {}, context);
-    if (reason) return reason;
-    const summary = smartArbitrageLocalizedReasonSummary(item, context);
-    if (summary) return summary;
-  }
-  return item?.control_summary || item?.headline || "当前没有额外说明";
-}
-
-function strategySleeveIntentTargetLabel(item) {
-  if (smartArbitrageBelowEntryThreshold(item)) {
-    return "继续观察";
-  }
-  if (item?.family === "smart_arbitrage" && item?.pair_id === "multi_pair") {
-    return "按多组套利对分别执行";
-  }
-  return formatSigned(item?.target_position_qty);
-}
-
-function strategySleeveIntentTargetMeta(item, context = {}) {
-  if (smartArbitrageBelowEntryThreshold(item)) {
-    return "当前还没有生成套利双腿。";
-  }
-  if (item?.family === "smart_arbitrage" && item?.pair_id === "multi_pair") {
-    const legCount = Array.isArray(item?.legs) ? item.legs.length : 0;
-    return `当前以 ${formatNumber(legCount, 0, "0")} 条执行腿表达，不再展示单一聚合数量。`;
-  }
-  if (smartArbitrageExitBlockedByKillSwitch(item, context)) {
-    return "当前已经进入退出阶段，但平仓提交被 kill switch 阻断，交易所里并没有新的退出挂单。";
-  }
-  if (smartArbitrageWaitingExit(item, context)) {
-    return "当前双腿已经建好，系统正在等待基差回到退出阈值；这不是挂单未成。";
-  }
-  return `变化 ${formatSigned(item?.delta_position_qty)}`;
-}
-
-function strategyLegSummary(candidate, smartArbitrageConfig = {}) {
-  const legs = candidate?.legs;
-  const expectancySummary = readableBookExpectancySummary(candidate, "");
-  if (!Array.isArray(legs) || !legs.length) {
-    if (candidate?.family === "smart_arbitrage") {
-      if (smartArbitrageBelowEntryThreshold(candidate)) {
-        const compact = smartArbitrageCostCompact(candidate);
-        return compact ? `当前还没有生成套利双腿。 | ${compact}` : "当前还没有生成套利双腿。";
-      }
-      const marketAvailability = smartArbitrageMarketAvailability(candidate, smartArbitrageConfig);
-      const compact = smartArbitrageCostCompact(candidate);
-      return compact ? `${marketAvailability} | ${compact}` : marketAvailability;
-    }
-    return expectancySummary ? `当前没有附带腿说明。 | ${expectancySummary}` : "当前没有附带腿说明";
-  }
-  const legSummary = legs
-    .map((item) => {
-      const mode = item?.execution_mode ? ` (${readableState(item.execution_mode)})` : "";
-      return `${readableState(item.product_type)} ${readableState(item.side)} ${item.symbol || "标的待确认"}${mode}`;
-    })
-    .join(" | ");
-  if (candidate?.family === "independent" || candidate?.family === "opportunistic") {
-    return expectancySummary ? `${legSummary} | ${expectancySummary}` : legSummary;
-  }
-  if (candidate?.family !== "smart_arbitrage") return legSummary;
-  const compact = smartArbitrageCostCompact(candidate);
-  return compact ? `${legSummary} | ${compact}` : legSummary;
 }
 
 function normalizedBookExpectancySummary(source = {}) {

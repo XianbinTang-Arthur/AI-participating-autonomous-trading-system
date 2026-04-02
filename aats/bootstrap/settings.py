@@ -203,6 +203,8 @@ class AATSSettings(BaseSettings):
     okx_market_rest_fallback_poll_interval_seconds: float = 5.0
     okx_account_refresh_interval_seconds: float = 15.0
     okx_execution_sync_interval_seconds: float = 5.0
+    execution_unknown_submit_review_after_seconds: float = 30.0
+    execution_unknown_cancel_review_after_seconds: float = 300.0
     execution_command_flow_enabled: bool = False
     execution_command_poll_interval_seconds: float = 1.0
     execution_command_sent_retry_after_seconds: float = 30.0
@@ -410,6 +412,7 @@ class AATSSettings(BaseSettings):
     strategy_hedge_independent_passive_first_enabled: bool = False
     strategy_hedge_independent_min_confirm_ticks: int = 2
     strategy_hedge_independent_min_score_stability_bps: float = 2.0
+    strategy_hedge_independent_min_score_drawdown_bps: float | None = None
     strategy_hedge_independent_min_liquidity_quality: float = 0.55
     strategy_hedge_independent_require_execution_health_ok: bool = True
     strategy_hedge_independent_max_thesis_age_seconds: int = 1_800
@@ -619,6 +622,11 @@ class AATSSettings(BaseSettings):
             raise ValueError("strategy_hedge_independent_min_confirm_ticks_must_be_positive")
         if float(self.strategy_hedge_independent_min_score_stability_bps) < 0.0:
             raise ValueError("strategy_hedge_independent_min_score_stability_bps_must_be_non_negative")
+        if (
+            self.strategy_hedge_independent_min_score_drawdown_bps is not None
+            and float(self.strategy_hedge_independent_min_score_drawdown_bps) < 0.0
+        ):
+            raise ValueError("strategy_hedge_independent_min_score_drawdown_bps_must_be_non_negative")
         if not 0.0 <= float(self.strategy_hedge_independent_min_liquidity_quality) <= 1.0:
             raise ValueError("strategy_hedge_independent_min_liquidity_quality_must_be_between_zero_and_one")
         if int(self.strategy_hedge_independent_max_thesis_age_seconds) < 1:

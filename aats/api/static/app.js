@@ -233,6 +233,9 @@ function bindEvents() {
       void createOperatorUser();
     }
   });
+
+  document.addEventListener("input", handleExitExecutionHistoryFilterEvent);
+  document.addEventListener("change", handleExitExecutionHistoryFilterEvent);
 }
 
 async function refreshDashboard({ manual = false } = {}) {
@@ -503,7 +506,11 @@ function renderActiveView() {
     return;
   }
   if (state.activeView === "risk") {
-    patchRenderedSections(renderRiskSections(viewData), () => nodes.riskContent, () => renderRiskView(viewData));
+    patchRenderedSections(
+      renderRiskSections(viewData, state.ui.risk),
+      () => nodes.riskContent,
+      () => renderRiskView(viewData, state.ui.risk),
+    );
     return;
   }
   if (state.activeView === "replay") {
@@ -854,6 +861,92 @@ async function recordTrialReviewAction(actionType, target = null) {
   );
 }
 
+function normalizeExitExecutionParentIntentId(value) {
+  const normalized = String(value || "").trim();
+  return normalized || null;
+}
+
+async function triggerExitExecutionRefresh(value, target = null) {
+  const parentIntentId = normalizeExitExecutionParentIntentId(value);
+  await runExitExecutionAction({
+    path: "/system/exit-execution/refresh",
+    body: {
+      reason: "ui_refresh_exit_execution_state",
+      parent_intent_id: parentIntentId,
+    },
+    successMessage: "已提交退出任务状态刷新请求。",
+    target,
+    pendingLabel: "正在刷新退出任务状态…",
+  });
+}
+
+async function triggerExitExecutionRetryLimitLookup(value, target = null) {
+  const parentIntentId = normalizeExitExecutionParentIntentId(value);
+  await runExitExecutionAction({
+    path: "/system/exit-execution/retry-limit-lookup",
+    body: {
+      reason: "ui_retry_exit_execution_limit_lookup",
+      parent_intent_id: parentIntentId,
+    },
+    successMessage: "已提交退出任务拆单上限重试请求。",
+    target,
+    pendingLabel: "正在重试拆单上限查询…",
+  });
+}
+
+async function triggerExitExecutionSafeCancel(value, target = null) {
+  const parentIntentId = normalizeExitExecutionParentIntentId(value);
+  await runExitExecutionAction({
+    path: "/system/exit-execution/safe-cancel",
+    body: {
+      reason: "ui_safe_cancel_exit_execution",
+      parent_intent_id: parentIntentId,
+    },
+    successMessage: "已提交退出任务安全取消请求。",
+    target,
+    pendingLabel: "正在安全取消退出任务…",
+    confirmMessage: "确认停止这条退出任务，并撤销当前仍可取消的子订单吗？",
+  });
+}
+
+async function runExitExecutionAction({
+  path,
+  body,
+  successMessage,
+  target = null,
+  pendingLabel = "正在提交请求…",
+  confirmMessage = "",
+} = {}) {
+  const clearPending = setActionPending(target, pendingLabel);
+  try {
+    if (confirmMessage && !window.confirm(confirmMessage)) return;
+    const result = await requestJson(path, { method: "POST", body });
+    state.flash = {
+      tone: "info",
+      message: exitExecutionActionFlashMessage(result, successMessage),
+    };
+    await refreshDashboard({ manual: true });
+  } catch (error) {
+    state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
+    renderBanners();
+  } finally {
+    clearPending();
+  }
+}
+
+function exitExecutionActionFlashMessage(result, fallback = "操作已提交。") {
+  const base = textOrFallback(result?.message, fallback);
+  const blocker = result?.details?.current_blocker_after_action;
+  if (!blocker || typeof blocker !== "object") {
+    return base;
+  }
+  const summary = textOrFallback(
+    blocker.summary,
+    localizeError(blocker.code, "当前还有未解除的退出任务阻断。")
+  );
+  return `${base} 当前仍卡在：${summary}`;
+}
+
 async function logoutOperator() {
   try {
     await requestJson("/auth/logout", { method: "POST" });
@@ -885,6 +978,9 @@ async function dispatchAction(action, value, target = null) {
   if (action === "trigger-rebaseline") return triggerRebaseline(target);
   if (action === "trigger-resume") return triggerResume(target);
   if (action === "trigger-halt") return triggerHalt(target);
+  if (action === "trigger-exit-execution-refresh") return triggerExitExecutionRefresh(value, target);
+  if (action === "trigger-exit-execution-retry-limit-lookup") return triggerExitExecutionRetryLimitLookup(value, target);
+  if (action === "trigger-exit-execution-safe-cancel") return triggerExitExecutionSafeCancel(value, target);
   if (action === "record-scaling-review") return recordScalingReview(value, target);
   if (action === "record-trial-review") return recordTrialReview(target);
   if (action === "record-trial-review-action") return recordTrialReviewAction(value, target);
@@ -1040,6 +1136,81 @@ const VIEW_REPLAY_FILTERS = new Set(["all", "inventory_only", "target_only", "ta
 function setReplayParentFilter(value) {
   state.ui.replay.parentFilter = VIEW_REPLAY_FILTERS.has(value) ? value : "all";
   renderShell();
+}
+
+const EXIT_EXECUTION_HISTORY_ACTION_FILTERS = new Set(["all", "refresh_exchange_state", "retry_limit_lookup", "safe_cancel"]);
+
+function handleExitExecutionHistoryFilterEvent(event) {
+  const target = event.target;
+  if (!(target instanceof HTMLInputElement) && !(target instanceof HTMLSelectElement)) {
+    return;
+  }
+  const filterKey = target.dataset.exitHistoryFilter;
+  if (!filterKey) return;
+  if (!state.ui.risk) {
+    state.ui.risk = {
+      exitExecutionHistory: {
+        action: "all",
+        parent: "",
+        actor: "",
+      },
+    };
+  }
+  const filters = state.ui.risk.exitExecutionHistory || {
+    action: "all",
+    parent: "",
+    actor: "",
+  };
+  if (filterKey === "action") {
+    filters.action = EXIT_EXECUTION_HISTORY_ACTION_FILTERS.has(target.value) ? target.value : "all";
+  } else if (filterKey === "parent") {
+    filters.parent = target.value || "";
+  } else if (filterKey === "actor") {
+    filters.actor = target.value || "";
+  } else {
+    return;
+  }
+  state.ui.risk.exitExecutionHistory = filters;
+  const root = target.closest("[data-exit-history-root]");
+  if (root instanceof HTMLElement) {
+    applyExitExecutionHistoryFilters(root);
+  }
+}
+
+function applyExitExecutionHistoryFilters(root) {
+  const actionFilter = normalizeExitExecutionHistoryFilterValue(
+    root.querySelector('[data-exit-history-filter="action"]')?.value,
+  );
+  const parentFilter = normalizeExitExecutionHistoryFilterValue(
+    root.querySelector('[data-exit-history-filter="parent"]')?.value,
+  );
+  const actorFilter = normalizeExitExecutionHistoryFilterValue(
+    root.querySelector('[data-exit-history-filter="actor"]')?.value,
+  );
+  const entries = Array.from(root.querySelectorAll("[data-exit-history-entry]"));
+  let visibleCount = 0;
+  entries.forEach((entry) => {
+    if (!(entry instanceof HTMLElement)) return;
+    const matchesAction = !actionFilter || actionFilter === "all"
+      || normalizeExitExecutionHistoryFilterValue(entry.dataset.actionKind) === actionFilter;
+    const matchesParent = !parentFilter
+      || normalizeExitExecutionHistoryFilterValue(entry.dataset.parentIntentId).includes(parentFilter);
+    const matchesActor = !actorFilter
+      || normalizeExitExecutionHistoryFilterValue(entry.dataset.actorSearch).includes(actorFilter);
+    const visible = matchesAction && matchesParent && matchesActor;
+    entry.hidden = !visible;
+    if (visible) {
+      visibleCount += 1;
+    }
+  });
+  const emptyState = root.querySelector("[data-exit-history-empty]");
+  if (emptyState instanceof HTMLElement) {
+    emptyState.hidden = visibleCount > 0;
+  }
+}
+
+function normalizeExitExecutionHistoryFilterValue(value) {
+  return String(value || "").trim().toLowerCase();
 }
 
 function setActionPending(target, pendingLabel) {

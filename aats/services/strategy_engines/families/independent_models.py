@@ -15,9 +15,13 @@ class IndependentBookRuntimeState:
     execution_chain_id: str | None = None
     thesis_started_at: datetime | None = None
     thesis_age_seconds: float | None = None
+    book_state: str | None = None
+    guard_state: str | None = None
+    holding_phase: str | None = None
     current_scale_in_count: int = 0
     current_de_risk_count: int = 0
     prior_book_state: str | None = None
+    prior_guard_state: str | None = None
     last_transition_at: datetime | None = None
     last_transition_reason: str | None = None
     suspended_until: datetime | None = None

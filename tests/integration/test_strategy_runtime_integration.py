@@ -881,6 +881,7 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
             strategy_hedge_independent_trial_guard_enabled=True,
             strategy_hedge_independent_min_confirm_ticks=2,
             strategy_hedge_independent_min_score_stability_bps=2.0,
+            strategy_hedge_independent_min_score_drawdown_bps=6.0,
             strategy_hedge_independent_min_liquidity_quality=0.55,
             strategy_hedge_independent_require_execution_health_ok=True,
             strategy_hedge_independent_max_thesis_age_seconds=1800,
@@ -1064,6 +1065,8 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(directional["hedge_independent_min_safe_net_edge_bps"], 3.0)
         self.assertEqual(directional["hedge_independent_min_confirm_ticks"], 2)
         self.assertEqual(directional["hedge_independent_min_score_stability_bps"], 2.0)
+        self.assertEqual(directional["hedge_independent_min_score_drawdown_bps"], 6.0)
+        self.assertEqual(directional["hedge_independent_effective_score_drawdown_bps"], 6.0)
         self.assertEqual(directional["hedge_independent_min_liquidity_quality"], 0.55)
         self.assertTrue(directional["hedge_independent_require_execution_health_ok"])
         self.assertEqual(directional["hedge_independent_max_thesis_age_seconds"], 1800)
@@ -1565,7 +1568,16 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
             candidate["book_runtime_states"][0]["threshold_snapshot"]["entry_threshold"],
             candidate["metrics"]["long_threshold_snapshot"]["entry_threshold"],
         )
+        self.assertEqual(
+            candidate["book_runtime_states"][0]["threshold_snapshot"]["effective_score_drawdown_bps"],
+            candidate["metrics"]["long_threshold_snapshot"]["effective_score_drawdown_bps"],
+        )
+        self.assertIn("guard_state", candidate["book_runtime_states"][0])
+        self.assertIn("prior_guard_state", candidate["book_runtime_states"][0])
+        self.assertIsNone(candidate["book_runtime_states"][0]["guard_state"])
         self.assertIn("adaptive_entry_threshold", candidate["book_runtime_states"][0]["threshold_snapshot"])
+        self.assertIn("score_drawdown_bps", candidate["book_runtime_states"][0]["threshold_snapshot"])
+        self.assertIn("effective_score_drawdown_bps", candidate["book_runtime_states"][0]["threshold_snapshot"])
         self.assertIn("capital_multiplier", candidate["book_runtime_states"][0]["threshold_snapshot"])
         self.assertIn("reason_codes", candidate["book_runtime_states"][0]["threshold_snapshot"])
         self.assertIn(candidate["metrics"]["family_health_overall_state"], {"ok", "degraded", "blocked"})

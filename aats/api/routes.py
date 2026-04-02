@@ -44,6 +44,7 @@ class RebaselineRequest(BaseModel):
 class BlockerActionRequest(BaseModel):
     panel_version: str | None = None
     blocker: str | None = None
+    parent_intent_id: str | None = None
     reason: str | None = None
 
 
@@ -71,6 +72,11 @@ class TrialReviewActionRequest(BaseModel):
         "approve_scale_up",
     ]
     reason: str = "ui_trial_review_action"
+
+
+class ExitExecutionActionRequest(BaseModel):
+    reason: str
+    parent_intent_id: str | None = None
 
 
 def _runtime(request: Request) -> ApplicationRuntime:
@@ -294,6 +300,7 @@ async def system_blocker_action(
             action_id=action_id,
             panel_version=body.panel_version,
             blocker=body.blocker,
+            parent_intent_id=body.parent_intent_id,
             reason=body.reason or default_reason_map.get(action_id, f"blocker_action:{action_id}"),
             actor_role=principal.role,
             actor_identity=principal.identity,
@@ -303,6 +310,68 @@ async def system_blocker_action(
         detail = str(exc)
         status = 409 if detail in {"blocker_control_state_changed"} or detail.startswith("blocker_not_active:") else 400
         raise HTTPException(status_code=status, detail=detail) from exc
+
+
+@router.post("/system/exit-execution/retry-limit-lookup")
+async def retry_exit_execution_limit_lookup(
+    request: Request,
+    payload: ExitExecutionActionRequest | None = None,
+    principal: OperatorPrincipal = Depends(require_admin_access),
+) -> dict[str, Any]:
+    body = payload or ExitExecutionActionRequest(reason="operator_retry_limit_lookup")
+    try:
+        return await _query(request).retry_limit_lookup(
+            parent_intent_id=body.parent_intent_id,
+            reason=body.reason,
+            actor_role=principal.role,
+            actor_identity=principal.identity,
+            auth_source=principal.auth_source,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/system/exit-execution/refresh")
+async def refresh_exit_execution_state(
+    request: Request,
+    payload: ExitExecutionActionRequest | None = None,
+    principal: OperatorPrincipal = Depends(require_write_access),
+) -> dict[str, Any]:
+    body = payload or ExitExecutionActionRequest(reason="operator_refresh_exit_execution_state")
+    try:
+        return await _query(request).refresh_exchange_state(
+            blocker=None,
+            parent_intent_id=body.parent_intent_id,
+            reason=body.reason,
+            actor_role=principal.role,
+            actor_identity=principal.identity,
+            auth_source=principal.auth_source,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/system/exit-execution/safe-cancel")
+async def safe_cancel_exit_execution(
+    request: Request,
+    payload: ExitExecutionActionRequest | None = None,
+    principal: OperatorPrincipal = Depends(require_write_access),
+) -> dict[str, Any]:
+    body = payload or ExitExecutionActionRequest(reason="operator_safe_cancel_exit_execution")
+    try:
+        return await _query(request).safe_cancel_exit_execution(
+            parent_intent_id=body.parent_intent_id,
+            reason=body.reason,
+            actor_role=principal.role,
+            actor_identity=principal.identity,
+            auth_source=principal.auth_source,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/decision/latest")

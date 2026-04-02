@@ -304,3 +304,13 @@
 - 仍保留给非托管/manual `config_profile` 路径与测试使用
 - 托管 profile（`spot/derivatives/spot_live/derivatives_live`）不再叠加这些 YAML
 - 新的策略调参统一走 `configs/strategy_profiles/*.yaml`
+
+## unknown write 复核阈值
+
+- 放根目录对应 profile 的 `.env.*`
+- 主要字段：
+  - `AATS_EXECUTION_UNKNOWN_SUBMIT_REVIEW_AFTER_SECONDS`
+  - `AATS_EXECUTION_UNKNOWN_CANCEL_REVIEW_AFTER_SECONDS`
+- 语义：
+  - `submit` 写结果未知超过阈值后，系统会把这笔单升级为 `review_required`
+  - `cancel` 写结果未知超过阈值后，系统会把这笔单升级为 `review_required`

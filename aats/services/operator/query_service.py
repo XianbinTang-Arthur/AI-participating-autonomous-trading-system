@@ -42,6 +42,7 @@ from aats.services.accounting import (
     try_fill_fee_delta_in_quote,
 )
 from aats.services.execution_engine.okx_account import derivatives_position_mode_contract
+from aats.services.execution_engine.exit_intent_aggregator import exit_execution_review_items
 from aats.services.execution_engine.fill_ordering import fill_processing_sort_key
 from aats.services.governance_engine.recovery_posture import RecoveryPostureEvaluator
 from aats.services.operator.account_queries import AccountQueryFacade
@@ -68,6 +69,11 @@ from aats.services.portfolio_service.instrument_states import (
     instrument_position_states_from_snapshot_positions,
 )
 from aats.services.portfolio_service.position_keys import build_position_key
+from aats.services.strategy_engines.independent.payload_normalization import (
+    normalize_independent_family_execution_summary,
+    normalize_independent_payload,
+    normalize_independent_runtime_state_payloads,
+)
 from aats.services.strategy_overlay_rollout import (
     overlay_global_rollback_sequence,
     overlay_rollout_status,
@@ -176,6 +182,579 @@ class OperatorQueryService:
             "scoped_closed_fill_outcomes",
             lambda: [item for item in self._scoped_fill_outcomes() if self._is_closed_fill_outcome(item)],
         )
+
+    def _scoped_exit_execution_intents(self):
+        repo = getattr(self.runtime, "exit_execution_repo", None)
+        if repo is None:
+            return []
+        return self._cached(
+            "scoped_exit_execution_intents",
+            lambda: [
+                parent
+                for parent in repo.list_exit_execution_intents()
+                if self._exit_execution_parent_in_scope(parent)
+            ],
+        )
+
+    def _exit_execution_parent_in_scope(self, parent) -> bool:
+        allowed_symbols = set(self.state_scope.allowed_symbols)
+        if allowed_symbols and parent.symbol not in allowed_symbols:
+            return False
+        instrument_type = str(getattr(parent, "instrument_type", "") or "").strip().lower()
+        if instrument_type and instrument_type != str(self.state_scope.product_type).strip().lower():
+            return False
+        metadata = getattr(parent, "metadata", None)
+        dispatch_template = metadata.get("dispatch_template") if isinstance(metadata, dict) else None
+        if isinstance(dispatch_template, dict):
+            template_margin_mode = str(dispatch_template.get("margin_mode") or "").strip().lower()
+            if template_margin_mode and template_margin_mode != str(self.state_scope.margin_mode).strip().lower():
+                return False
+        return True
+
+    def _exit_execution_review_items(self) -> list[dict[str, Any]]:
+        return self._cached(
+            "exit_execution_review_items",
+            lambda: self._enrich_exit_execution_review_items(
+                exit_execution_review_items(self._scoped_exit_execution_intents())
+            ),
+        )
+
+    def _enrich_exit_execution_review_items(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [
+            self._enrich_exit_execution_review_item(item)
+            for item in items
+            if isinstance(item, dict)
+        ]
+
+    def _enrich_exit_execution_review_item(self, item: dict[str, Any]) -> dict[str, Any]:
+        enriched = dict(item)
+        current_blocker = self._exit_execution_current_blocker(enriched)
+        if current_blocker is not None:
+            enriched["current_blocker"] = current_blocker
+        parent_intent_id = str(enriched.get("parent_intent_id") or "").strip()
+        if not parent_intent_id:
+            return enriched
+        symbol = str(enriched.get("symbol") or "").strip() or None
+        latest_action = self._latest_exit_execution_operator_action(
+            parent_intent_id=parent_intent_id,
+            symbol=symbol,
+        )
+        if latest_action is not None:
+            enriched["latest_operator_action"] = dict(latest_action)
+        recent_actions = self._recent_exit_execution_operator_actions(
+            parent_intent_id=parent_intent_id,
+            symbol=symbol,
+            limit=3,
+        )
+        if recent_actions:
+            enriched["recent_operator_actions"] = recent_actions
+        return enriched
+
+    def _exit_execution_action_history(self, *, limit: int = 12) -> list[dict[str, Any]]:
+        actions = self._cached(
+            "operator_action_events",
+            lambda: self.runtime.event_store.by_topic(topics.OPERATOR_ACTIONS),
+        )
+        rows: list[tuple[datetime, dict[str, Any]]] = []
+        normalized_limit = max(int(limit), 1)
+        for envelope in actions:
+            payload = self.payload(envelope)
+            if payload is None:
+                continue
+            action = str(payload.get("action") or "").strip()
+            if action not in {"refresh_exchange_state", "retry_limit_lookup", "safe_cancel"}:
+                continue
+            context = self._exit_execution_operator_action_context(payload)
+            if context is None or not self._exit_execution_action_context_in_scope(context):
+                continue
+            rows.append(
+                (
+                    self._exit_execution_operator_action_timestamp(payload=payload, envelope=envelope),
+                    self._exit_execution_operator_action_view(payload, context=context, envelope=envelope),
+                )
+            )
+        rows.sort(key=lambda item: item[0], reverse=True)
+        return [row for _, row in rows[:normalized_limit]]
+
+    def _exit_execution_current_blocker(self, item: dict[str, Any]) -> dict[str, Any] | None:
+        candidates: list[tuple[str, str]] = []
+        resume_block_reason = str(item.get("resume_block_reason") or "").strip()
+        operator_review_reason = str(item.get("operator_review_reason") or "").strip()
+        resume_issue_kind = str(item.get("resume_issue_kind") or "").strip()
+        if resume_block_reason and resume_block_reason != "review_required":
+            candidates.append((resume_block_reason, "resume_block_reason"))
+        if operator_review_reason:
+            candidates.append((operator_review_reason, "operator_review_reason"))
+        if resume_issue_kind:
+            candidates.append((resume_issue_kind, "resume_issue_kind"))
+        if resume_block_reason:
+            candidates.append((resume_block_reason, "resume_block_reason"))
+        if bool(item.get("cancel_requested")):
+            candidates.append(("cancel_requested", "cancel_requested"))
+        seen: set[str] = set()
+        for code, source in candidates:
+            if code in seen:
+                continue
+            seen.add(code)
+            return {
+                "code": code,
+                "source": source,
+                "summary": self._exit_execution_current_blocker_summary(code=code),
+            }
+        return None
+
+    @staticmethod
+    def _exit_execution_current_blocker_summary(*, code: str) -> str:
+        messages = {
+            "resume_limit_lookup_failed": "交易所单笔上限查询仍未恢复，当前不能继续续派。",
+            "review_required": "退出任务当前仍需人工确认，系统不会继续自动续派。",
+            "child_unknown_truth_requires_review": "仍有子订单真相未确认，需要先人工复核。",
+            "child_risk_reducing_invariant_breached": "子订单已经破坏减风险不变式，必须先人工复核。",
+            "unknown_child_truth_pending": "仍有子订单状态未确认，系统暂不继续续派。",
+            "working_child_outstanding": "仍有子订单在途，系统会等当前子订单先收敛。",
+            "dispatch_template_missing": "退出任务缺少续派模板，当前不能自动继续派发。",
+            "cancel_requested": "父退出任务已经请求安全取消，系统不会继续续派。",
+            "no_remaining_dispatchable_quantity": "当前没有可继续续派的剩余数量。",
+            "parent_terminal": "父退出任务已经进入终态，不会继续续派。",
+            "exit_execution_resume_limit_lookup_failed": "交易所单笔上限查询仍未恢复，当前不能继续续派。",
+            "exit_execution_parent_review_required": "退出任务仍有未自动收敛的子订单状态，需要人工确认。",
+            "exit_execution_resume_template_missing": "退出任务缺少续派模板，当前不能自动继续派发。",
+        }
+        return messages.get(code, code)
+
+    def _latest_exit_execution_operator_action(
+        self,
+        *,
+        parent_intent_id: str,
+        symbol: str | None = None,
+    ) -> dict[str, Any] | None:
+        recent = self._recent_exit_execution_operator_actions(
+            parent_intent_id=parent_intent_id,
+            symbol=symbol,
+            limit=1,
+        )
+        return None if not recent else dict(recent[0])
+
+    def _recent_exit_execution_operator_actions(
+        self,
+        *,
+        parent_intent_id: str,
+        symbol: str | None = None,
+        limit: int = 3,
+    ) -> list[dict[str, Any]]:
+        actions = self._cached(
+            "operator_action_events",
+            lambda: self.runtime.event_store.by_topic(topics.OPERATOR_ACTIONS),
+        )
+        rows: list[tuple[datetime, dict[str, Any]]] = []
+        normalized_limit = max(int(limit), 1)
+        for envelope in actions:
+            payload = self.payload(envelope)
+            if payload is None:
+                continue
+            action = str(payload.get("action") or "").strip()
+            if action not in {"refresh_exchange_state", "retry_limit_lookup", "safe_cancel"}:
+                continue
+            if not self._operator_action_matches_exit_execution_parent(
+                payload=payload,
+                parent_intent_id=parent_intent_id,
+                symbol=symbol,
+            ):
+                continue
+            rows.append(
+                (
+                    self._exit_execution_operator_action_timestamp(payload=payload, envelope=envelope),
+                    self._exit_execution_operator_action_view(payload, envelope=envelope),
+                )
+            )
+        rows.sort(key=lambda item: item[0], reverse=True)
+        return [row for _, row in rows[:normalized_limit]]
+
+    def _exit_execution_operator_action_view(
+        self,
+        payload: dict[str, Any],
+        *,
+        context: dict[str, Any] | None = None,
+        envelope: EventEnvelope | None = None,
+    ) -> dict[str, Any]:
+        normalized_context = context or self._exit_execution_operator_action_context(payload)
+        created_at = payload.get("created_at")
+        if created_at in (None, "") and envelope is not None:
+            created_at = dump_payload_exact(envelope.event_timestamp)
+        row = {
+            "action": str(payload.get("action") or "").strip() or "unknown",
+            "status": str(payload.get("status") or "").strip() or "unknown",
+            "reason": str(payload.get("reason") or "").strip() or None,
+            "created_at": created_at,
+            "actor_role": payload.get("actor_role"),
+            "actor_identity": payload.get("actor_identity"),
+            "summary": self._exit_execution_operator_action_summary(payload),
+            "remaining_blocker": self._exit_execution_action_remaining_blocker(payload),
+        }
+        if isinstance(normalized_context, dict):
+            parent_intent_id = str(normalized_context.get("parent_intent_id") or "").strip()
+            symbol = str(normalized_context.get("symbol") or "").strip()
+            if parent_intent_id:
+                row["parent_intent_id"] = parent_intent_id
+            if symbol:
+                row["symbol"] = symbol
+            aggregate_status = str(normalized_context.get("aggregate_status") or "").strip()
+            if aggregate_status:
+                row["aggregate_status"] = aggregate_status
+            review_kind = str(normalized_context.get("review_kind") or "").strip()
+            if review_kind:
+                row["review_kind"] = review_kind
+        return row
+
+    def _exit_execution_operator_action_context(self, payload: dict[str, Any]) -> dict[str, Any] | None:
+        details = payload.get("details")
+        if not isinstance(details, dict):
+            return None
+        candidate_parent_ids: list[str] = []
+        candidate_symbols: list[str] = []
+        direct_parent_id = str(details.get("parent_intent_id") or "").strip()
+        if direct_parent_id:
+            candidate_parent_ids.append(direct_parent_id)
+        startup_snapshot_context = details.get("startup_snapshot_context")
+        matched_review_item = None
+        if isinstance(startup_snapshot_context, dict):
+            selected_parent_id = str(startup_snapshot_context.get("selected_parent_intent_id") or "").strip()
+            if selected_parent_id:
+                candidate_parent_ids.append(selected_parent_id)
+            matched_review_item = startup_snapshot_context.get("matched_review_item")
+            if isinstance(matched_review_item, dict):
+                matched_parent_id = str(matched_review_item.get("parent_intent_id") or "").strip()
+                matched_symbol = str(matched_review_item.get("symbol") or "").strip()
+                if matched_parent_id:
+                    candidate_parent_ids.append(matched_parent_id)
+                if matched_symbol:
+                    candidate_symbols.append(matched_symbol)
+        parent_before = details.get("parent_before")
+        parent_after = details.get("parent_after")
+        for candidate_parent in (parent_before, parent_after):
+            if not isinstance(candidate_parent, dict):
+                continue
+            nested_parent_id = str(candidate_parent.get("parent_intent_id") or "").strip()
+            nested_symbol = str(candidate_parent.get("symbol") or "").strip()
+            if nested_parent_id:
+                candidate_parent_ids.append(nested_parent_id)
+            if nested_symbol:
+                candidate_symbols.append(nested_symbol)
+        parent_intent_id = next((value for value in candidate_parent_ids if value), "")
+        symbol = next((value for value in candidate_symbols if value), "")
+        if not parent_intent_id and not symbol:
+            return None
+        aggregate_status = ""
+        parent_review_after = details.get("parent_review_after")
+        for candidate_parent in (parent_review_after, parent_after):
+            if not isinstance(candidate_parent, dict):
+                continue
+            candidate_status = str(candidate_parent.get("aggregate_status") or "").strip()
+            if candidate_status:
+                aggregate_status = candidate_status
+                break
+        review_kind = ""
+        if isinstance(matched_review_item, dict):
+            review_kind = str(matched_review_item.get("kind") or "").strip()
+        return {
+            "parent_intent_id": parent_intent_id or None,
+            "symbol": symbol or None,
+            "aggregate_status": aggregate_status or None,
+            "review_kind": review_kind or None,
+        }
+
+    @staticmethod
+    def _exit_execution_operator_action_timestamp(
+        *,
+        payload: dict[str, Any],
+        envelope: EventEnvelope,
+    ) -> datetime:
+        payload_timestamp = OperatorQueryService._parse_operator_action_timestamp(payload.get("created_at"))
+        if payload_timestamp is not None:
+            return payload_timestamp
+        return envelope.event_timestamp
+
+    @staticmethod
+    def _parse_operator_action_timestamp(value: Any) -> datetime | None:
+        if isinstance(value, datetime):
+            return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+        if not isinstance(value, str):
+            return None
+        candidate = value.strip()
+        if not candidate:
+            return None
+        normalized = candidate[:-1] + "+00:00" if candidate.endswith("Z") else candidate
+        try:
+            parsed = datetime.fromisoformat(normalized)
+        except ValueError:
+            return None
+        return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+
+    def _exit_execution_action_context_in_scope(self, context: dict[str, Any]) -> bool:
+        parent_intent_id = str(context.get("parent_intent_id") or "").strip()
+        if parent_intent_id:
+            repo = getattr(self.runtime, "exit_execution_repo", None)
+            if repo is not None:
+                parent = repo.get_exit_execution_intent(parent_intent_id)
+                if parent is not None:
+                    return self._exit_execution_parent_in_scope(parent)
+        allowed_symbols = set(self.state_scope.allowed_symbols)
+        symbol = str(context.get("symbol") or "").strip()
+        return not allowed_symbols or not symbol or symbol in allowed_symbols
+
+    def _exit_execution_action_remaining_blocker(self, payload: dict[str, Any]) -> dict[str, Any] | None:
+        details = payload.get("details")
+        if not isinstance(details, dict):
+            return None
+        direct = self._normalize_exit_execution_blocker_payload(details.get("current_blocker_after_action"))
+        if direct is not None:
+            return direct
+        parent_review_after = details.get("parent_review_after")
+        if isinstance(parent_review_after, dict):
+            return self._normalize_exit_execution_blocker_payload(parent_review_after.get("current_blocker"))
+        return None
+
+    def _exit_execution_review_item_for_parent(
+        self,
+        *,
+        parent_intent_id: str | None,
+    ) -> dict[str, Any] | None:
+        normalized_parent_intent_id = str(parent_intent_id or "").strip()
+        if not normalized_parent_intent_id:
+            return None
+        for item in self._exit_execution_review_items():
+            if str(item.get("parent_intent_id") or "").strip() == normalized_parent_intent_id:
+                return dict(item)
+        return None
+
+    @staticmethod
+    def _normalize_exit_execution_blocker_payload(value: Any) -> dict[str, Any] | None:
+        if not isinstance(value, dict):
+            return None
+        code = str(value.get("code") or "").strip()
+        if not code:
+            return None
+        normalized = {
+            "code": code,
+            "source": str(value.get("source") or "").strip() or None,
+            "summary": str(value.get("summary") or "").strip() or None,
+        }
+        return normalized
+
+    def _operator_action_matches_exit_execution_parent(
+        self,
+        *,
+        payload: dict[str, Any],
+        parent_intent_id: str,
+        symbol: str | None,
+    ) -> bool:
+        details = payload.get("details")
+        if not isinstance(details, dict):
+            return False
+        candidate_parent_ids: list[str] = []
+        direct_parent_id = str(details.get("parent_intent_id") or "").strip()
+        if direct_parent_id:
+            candidate_parent_ids.append(direct_parent_id)
+        startup_snapshot_context = details.get("startup_snapshot_context")
+        if isinstance(startup_snapshot_context, dict):
+            selected_parent_id = str(startup_snapshot_context.get("selected_parent_intent_id") or "").strip()
+            if selected_parent_id:
+                candidate_parent_ids.append(selected_parent_id)
+            matched_review_item = startup_snapshot_context.get("matched_review_item")
+            if isinstance(matched_review_item, dict):
+                matched_parent_id = str(matched_review_item.get("parent_intent_id") or "").strip()
+                if matched_parent_id:
+                    candidate_parent_ids.append(matched_parent_id)
+        parent_before = details.get("parent_before")
+        parent_after = details.get("parent_after")
+        for candidate_parent in (parent_before, parent_after):
+            if isinstance(candidate_parent, dict):
+                nested_parent_id = str(candidate_parent.get("parent_intent_id") or "").strip()
+                if nested_parent_id:
+                    candidate_parent_ids.append(nested_parent_id)
+        if parent_intent_id not in candidate_parent_ids:
+            return False
+        if not symbol:
+            return True
+        candidate_symbols: list[str] = []
+        for candidate_parent in (parent_before, parent_after):
+            if isinstance(candidate_parent, dict):
+                nested_symbol = str(candidate_parent.get("symbol") or "").strip()
+                if nested_symbol:
+                    candidate_symbols.append(nested_symbol)
+        if isinstance(startup_snapshot_context, dict):
+            matched_review_item = startup_snapshot_context.get("matched_review_item")
+            if isinstance(matched_review_item, dict):
+                matched_symbol = str(matched_review_item.get("symbol") or "").strip()
+                if matched_symbol:
+                    candidate_symbols.append(matched_symbol)
+        return not candidate_symbols or symbol in candidate_symbols
+
+    def _exit_execution_operator_action_summary(self, payload: dict[str, Any]) -> str | None:
+        action = str(payload.get("action") or "").strip()
+        details = payload.get("details")
+        if not isinstance(details, dict):
+            return None
+        if action == "refresh_exchange_state":
+            blocker_cleared = details.get("blocker_cleared")
+            if blocker_cleared is True:
+                return "已刷新交易所状态，并清掉当前阻断。"
+            if blocker_cleared is False:
+                return "已刷新交易所状态，但当前阻断仍未解除。"
+            return "已刷新交易所状态。"
+        if action == "retry_limit_lookup":
+            dispatched_order = details.get("dispatched_order")
+            if isinstance(dispatched_order, dict) and dispatched_order:
+                return "已重试拆单上限查询，并继续派发子订单。"
+            resume_issue_after = details.get("resume_issue_after")
+            if isinstance(resume_issue_after, dict) and str(resume_issue_after.get("kind") or "").strip() == "resume_limit_lookup_failed":
+                return "已重试拆单上限查询，但上限仍不可用。"
+            return "已重试拆单上限查询。"
+        if action == "safe_cancel":
+            canceled_children = details.get("canceled_children")
+            skipped_children = details.get("skipped_children")
+            canceled_count = len(canceled_children) if isinstance(canceled_children, list) else 0
+            skipped_count = len(skipped_children) if isinstance(skipped_children, list) else 0
+            if canceled_count > 0 and skipped_count > 0:
+                return f"已发起安全取消，撤掉 {canceled_count} 笔子订单，另有 {skipped_count} 笔跳过。"
+            if canceled_count > 0:
+                return f"已发起安全取消，撤掉 {canceled_count} 笔子订单。"
+            if skipped_count > 0:
+                return f"已发起安全取消，但有 {skipped_count} 笔子订单未被处理。"
+            return "已发起安全取消。"
+        return None
+
+    def _latest_startup_exit_execution_snapshot(self):
+        return self._cached(
+            "latest_startup_exit_execution_snapshot",
+            self._build_latest_startup_exit_execution_snapshot,
+        )
+
+    def _build_latest_startup_exit_execution_snapshot(self):
+        latest_state_snapshot_getter = getattr(
+            self.runtime.reconciliation_repo,
+            "latest_state_snapshot_for_scope",
+            None,
+        )
+        snapshot = (
+            latest_state_snapshot_getter(scope=self.state_scope)
+            if callable(latest_state_snapshot_getter)
+            else None
+        )
+        if snapshot is None:
+            return None
+        details = dict(getattr(snapshot, "details_json", {}) or {})
+        if str(details.get("source") or "").strip() != "startup_exit_execution_review":
+            return None
+        return snapshot
+
+    def _startup_exit_execution_snapshot_review_items(self) -> list[dict[str, Any]]:
+        snapshot = self._latest_startup_exit_execution_snapshot()
+        if snapshot is None:
+            return []
+        raw_items = dict(getattr(snapshot, "details_json", {}) or {}).get("review_items")
+        if not isinstance(raw_items, list):
+            return []
+        return [dict(item) for item in raw_items if isinstance(item, dict)]
+
+    def _startup_exit_execution_snapshot_context(
+        self,
+        *,
+        parent_intent_id: str | None = None,
+        require_snapshot: bool = False,
+        require_parent_selection: bool = False,
+    ) -> dict[str, Any] | None:
+        snapshot = self._latest_startup_exit_execution_snapshot()
+        snapshot_id: str | None = None
+        reconciliation_id: str | None = None
+        details_json: dict[str, Any] | None = None
+        if snapshot is not None:
+            snapshot_id = snapshot.snapshot_id
+            reconciliation_id = snapshot.reconciliation_id
+            details_json = dict(snapshot.details_json)
+        else:
+            cached_recovery_view = self._cache.get("recovery_view") if hasattr(self, "_cache") else None
+            if isinstance(cached_recovery_view, dict):
+                latest_state_snapshot = cached_recovery_view.get("latest_state_snapshot")
+                if isinstance(latest_state_snapshot, dict):
+                    candidate_details = latest_state_snapshot.get("details_json")
+                    if isinstance(candidate_details, dict):
+                        details_json = dict(candidate_details)
+                        snapshot_id = str(latest_state_snapshot.get("snapshot_id") or "").strip() or None
+                        reconciliation_id = (
+                            str(latest_state_snapshot.get("reconciliation_id") or "").strip() or None
+                        )
+        if details_json is None or str(details_json.get("source") or "").strip() != "startup_exit_execution_review":
+            if require_snapshot:
+                raise ValueError("startup_exit_execution_review_snapshot_not_available")
+            return None
+        raw_review_items = details_json.get("review_items")
+        review_items = [dict(item) for item in raw_review_items if isinstance(item, dict)] if isinstance(raw_review_items, list) else []
+        selected_parent_intent_id = str(parent_intent_id or "").strip() or None
+        unique_parent_intent_ids: list[str] = []
+        seen_parent_intent_ids: set[str] = set()
+        for item in review_items:
+            candidate = str(item.get("parent_intent_id") or "").strip()
+            if not candidate or candidate in seen_parent_intent_ids:
+                continue
+            seen_parent_intent_ids.add(candidate)
+            unique_parent_intent_ids.append(candidate)
+        if selected_parent_intent_id is None and len(unique_parent_intent_ids) == 1:
+            selected_parent_intent_id = unique_parent_intent_ids[0]
+        elif selected_parent_intent_id is None and require_parent_selection:
+            if not review_items:
+                raise ValueError("startup_exit_execution_review_snapshot_empty")
+            raise ValueError("startup_exit_execution_parent_selection_required")
+        matched_review_item = None
+        if selected_parent_intent_id is not None:
+            matched_review_item = next(
+                (
+                    dict(item)
+                    for item in review_items
+                    if str(item.get("parent_intent_id") or "").strip() == selected_parent_intent_id
+                ),
+                None,
+            )
+            if require_parent_selection and matched_review_item is None:
+                raise ValueError(f"startup_exit_execution_parent_not_in_snapshot:{selected_parent_intent_id}")
+        return {
+            "snapshot_id": snapshot_id,
+            "reconciliation_id": reconciliation_id,
+            "source": details_json.get("source"),
+            "selected_parent_intent_id": selected_parent_intent_id,
+            "review_item_count": len(review_items),
+            "matched_review_item": matched_review_item,
+            "details_json": details_json,
+        }
+
+    def _resolve_exit_execution_parent_for_operator_action(
+        self,
+        *,
+        parent_intent_id: str | None,
+    ):
+        repo = getattr(self.runtime, "exit_execution_repo", None)
+        if repo is None:
+            raise ValueError("exit_execution_repo_not_configured")
+        normalized_parent_intent_id = str(parent_intent_id or "").strip() or None
+        snapshot_context = self._startup_exit_execution_snapshot_context(
+            parent_intent_id=normalized_parent_intent_id,
+            require_snapshot=normalized_parent_intent_id is None,
+            require_parent_selection=normalized_parent_intent_id is None,
+        )
+        resolved_parent_intent_id = normalized_parent_intent_id or (
+            None if snapshot_context is None else snapshot_context.get("selected_parent_intent_id")
+        )
+        if not resolved_parent_intent_id:
+            raise ValueError("startup_exit_execution_parent_selection_required")
+        parent = repo.get_exit_execution_intent(resolved_parent_intent_id)
+        if parent is None:
+            raise KeyError(f"exit_execution_intent_not_found parent_intent_id={resolved_parent_intent_id}")
+        if snapshot_context is not None and snapshot_context.get("selected_parent_intent_id") is None:
+            snapshot_context = {
+                **snapshot_context,
+                "selected_parent_intent_id": resolved_parent_intent_id,
+            }
+        return parent, snapshot_context
 
     def _refresh_sleeve_pnl_projection(self) -> list[SleevePnLRecord]:
         service = getattr(self.runtime, "sleeve_pnl_projection_service", None)
@@ -2464,6 +3043,12 @@ class OperatorQueryService:
             "hedge_independent_passive_first_enabled": self.runtime.settings.strategy_hedge_independent_passive_first_enabled,
             "hedge_independent_min_confirm_ticks": self.runtime.settings.strategy_hedge_independent_min_confirm_ticks,
             "hedge_independent_min_score_stability_bps": self.runtime.settings.strategy_hedge_independent_min_score_stability_bps,
+            "hedge_independent_min_score_drawdown_bps": self.runtime.settings.strategy_hedge_independent_min_score_drawdown_bps,
+            "hedge_independent_effective_score_drawdown_bps": (
+                self.runtime.settings.strategy_hedge_independent_min_score_drawdown_bps
+                if self.runtime.settings.strategy_hedge_independent_min_score_drawdown_bps is not None
+                else self.runtime.settings.strategy_hedge_independent_min_score_stability_bps
+            ),
             "hedge_independent_min_liquidity_quality": self.runtime.settings.strategy_hedge_independent_min_liquidity_quality,
             "hedge_independent_require_execution_health_ok": self.runtime.settings.strategy_hedge_independent_require_execution_health_ok,
             "hedge_independent_max_thesis_age_seconds": self.runtime.settings.strategy_hedge_independent_max_thesis_age_seconds,
@@ -2566,85 +3151,6 @@ class OperatorQueryService:
             "estimated_funding_bps": self.runtime.settings.smart_arbitrage_estimated_funding_bps,
             "estimated_borrow_bps": self.runtime.settings.smart_arbitrage_estimated_borrow_bps,
         }
-
-    @staticmethod
-    def _smart_arbitrage_runtime_pair_configuration_from_snapshot(
-        latest_snapshot: dict[str, Any] | None,
-    ) -> tuple[list[dict[str, Any]], list[str], list[str], str] | None:
-        if latest_snapshot is None:
-            return None
-        smart_candidate = next(
-            (
-                candidate
-                for candidate in (latest_snapshot.get("candidates") or [])
-                if candidate.get("family") == "smart_arbitrage"
-            ),
-            None,
-        )
-        if smart_candidate is None:
-            return None
-        metrics = dict(smart_candidate.get("metrics") or {})
-        pair_definitions = [
-            dict(item)
-            for item in (metrics.get("pair_definitions") or [])
-            if isinstance(item, dict)
-        ]
-        if not pair_definitions:
-            return None
-        warning_codes = list(
-            dict.fromkeys(
-                str(code)
-                for code in (metrics.get("pair_registry_warning_codes") or [])
-                if str(code).strip()
-            )
-        )
-        error_codes = list(
-            dict.fromkeys(
-                str(code)
-                for code in (metrics.get("pair_registry_error_codes") or [])
-                if str(code).strip()
-            )
-        )
-        return (
-            pair_definitions,
-            warning_codes,
-            error_codes,
-            str(metrics.get("pair_registry_source") or "coordinator_resolved"),
-        )
-
-    def _smart_arbitrage_runtime_pair_configuration(
-        self,
-        *,
-        latest_snapshot: dict[str, Any] | None,
-    ) -> tuple[list[dict[str, Any]], list[str], list[str], str]:
-        from_snapshot = self._smart_arbitrage_runtime_pair_configuration_from_snapshot(latest_snapshot)
-        if from_snapshot is not None:
-            return from_snapshot
-        smart_arbitrage_pairs = load_pair_definitions(
-            settings=self.runtime.settings,
-            primary_symbol=self.runtime.settings.default_symbol,
-        )
-        pair_definitions = [
-            pair.model_dump(mode="json")
-            for pair in smart_arbitrage_pairs
-        ]
-        warning_codes = list(
-            dict.fromkeys(
-                code
-                for pair in smart_arbitrage_pairs
-                for code in pair.metadata.get("configuration_warning_codes", [])
-                if str(code).strip()
-            )
-        )
-        error_codes = list(
-            dict.fromkeys(
-                code
-                for pair in smart_arbitrage_pairs
-                for code in pair.metadata.get("configuration_error_codes", [])
-                if str(code).strip()
-            )
-        )
-        return pair_definitions, warning_codes, error_codes, "settings_fallback"
 
     def _smart_arbitrage_cost_summary(self, *, latest_snapshot: dict[str, Any] | None) -> dict[str, Any]:
         smart_candidate = None
@@ -2783,6 +3289,85 @@ class OperatorQueryService:
                 ],
             },
         }
+
+    @staticmethod
+    def _smart_arbitrage_runtime_pair_configuration_from_snapshot(
+        latest_snapshot: dict[str, Any] | None,
+    ) -> tuple[list[dict[str, Any]], list[str], list[str], str] | None:
+        if latest_snapshot is None:
+            return None
+        smart_candidate = next(
+            (
+                candidate
+                for candidate in (latest_snapshot.get("candidates") or [])
+                if candidate.get("family") == "smart_arbitrage"
+            ),
+            None,
+        )
+        if smart_candidate is None:
+            return None
+        metrics = dict(smart_candidate.get("metrics") or {})
+        pair_definitions = [
+            dict(item)
+            for item in (metrics.get("pair_definitions") or [])
+            if isinstance(item, dict)
+        ]
+        if not pair_definitions:
+            return None
+        warning_codes = list(
+            dict.fromkeys(
+                str(code)
+                for code in (metrics.get("pair_registry_warning_codes") or [])
+                if str(code).strip()
+            )
+        )
+        error_codes = list(
+            dict.fromkeys(
+                str(code)
+                for code in (metrics.get("pair_registry_error_codes") or [])
+                if str(code).strip()
+            )
+        )
+        return (
+            pair_definitions,
+            warning_codes,
+            error_codes,
+            str(metrics.get("pair_registry_source") or "coordinator_resolved"),
+        )
+
+    def _smart_arbitrage_runtime_pair_configuration(
+        self,
+        *,
+        latest_snapshot: dict[str, Any] | None,
+    ) -> tuple[list[dict[str, Any]], list[str], list[str], str]:
+        from_snapshot = self._smart_arbitrage_runtime_pair_configuration_from_snapshot(latest_snapshot)
+        if from_snapshot is not None:
+            return from_snapshot
+        smart_arbitrage_pairs = load_pair_definitions(
+            settings=self.runtime.settings,
+            primary_symbol=self.runtime.settings.default_symbol,
+        )
+        pair_definitions = [
+            pair.model_dump(mode="json")
+            for pair in smart_arbitrage_pairs
+        ]
+        warning_codes = list(
+            dict.fromkeys(
+                code
+                for pair in smart_arbitrage_pairs
+                for code in pair.metadata.get("configuration_warning_codes", [])
+                if str(code).strip()
+            )
+        )
+        error_codes = list(
+            dict.fromkeys(
+                code
+                for pair in smart_arbitrage_pairs
+                for code in pair.metadata.get("configuration_error_codes", [])
+                if str(code).strip()
+            )
+        )
+        return pair_definitions, warning_codes, error_codes, "settings_fallback"
 
     def recent_fills(self, *, limit: int = 50):
         return sorted(
@@ -3527,6 +4112,7 @@ class OperatorQueryService:
         action_id: str,
         panel_version: str | None,
         blocker: str | None,
+        parent_intent_id: str | None = None,
         reason: str,
         actor_role: OperatorRole,
         actor_identity: str | None = None,
@@ -3537,6 +4123,7 @@ class OperatorQueryService:
                 action_id=action_id,
                 panel_version=panel_version,
                 blocker=blocker,
+                parent_intent_id=parent_intent_id,
                 reason=reason,
                 actor_role=actor_role,
                 actor_identity=actor_identity,
@@ -3766,13 +4353,13 @@ class OperatorQueryService:
             return []
         direct = payload.get("book_runtime_states")
         if isinstance(direct, list) and direct:
-            return [dict(item) for item in direct if isinstance(item, dict)]
+            return normalize_independent_runtime_state_payloads(runtime_states=direct)
         family_summary = payload.get("family_execution_summary")
         if not isinstance(family_summary, dict):
             return []
         nested = family_summary.get("book_runtime_states")
         if isinstance(nested, list):
-            return [dict(item) for item in nested if isinstance(item, dict)]
+            return normalize_independent_runtime_state_payloads(runtime_states=nested)
         return []
 
     @staticmethod
@@ -3881,7 +4468,9 @@ class OperatorQueryService:
                     "leg": normalized_leg,
                     "state": state.get("state"),
                     "book_state": state.get("book_state"),
+                    "guard_state": state.get("guard_state"),
                     "prior_book_state": state.get("prior_book_state"),
+                    "prior_guard_state": state.get("prior_guard_state"),
                     "book_action": state.get("book_action"),
                     "last_transition_reason": state.get("last_transition_reason"),
                     "execution_chain_id": state.get("execution_chain_id"),
@@ -4884,7 +5473,7 @@ class OperatorQueryService:
     def _position_target_payload(self, payload: dict[str, Any] | None) -> dict[str, Any] | None:
         if not isinstance(payload, dict):
             return payload
-        normalized = dict(payload)
+        normalized = normalize_independent_payload(payload=payload) or dict(payload)
         if normalized.get("book_expectancy_summary") is None:
             normalized["book_expectancy_summary"] = self._book_expectancy_summary_from_payload(normalized)
         if not normalized.get("book_runtime_states"):
@@ -5501,7 +6090,7 @@ class OperatorQueryService:
         if all(item is None for item in (baseline_assessment, ai_assessment, position_target, policy_decision, risk_decision, finalized_decision_outcome)):
             return None
         if isinstance(finalized_decision_outcome, dict):
-            payload = dict(finalized_decision_outcome)
+            payload = normalize_independent_payload(payload=finalized_decision_outcome) or dict(finalized_decision_outcome)
             payload["finalized"] = bool(payload.get("finalized", True))
             if payload.get("family_execution_summary") is None and isinstance(position_target, dict):
                 payload["family_execution_summary"] = position_target.get("family_execution_summary")
@@ -5541,7 +6130,7 @@ class OperatorQueryService:
         native_outcome = None if position_target is None else position_target.get("decision_outcome")
         native_profile_control = None if position_target is None else position_target.get("profile_control_decision")
         if isinstance(native_outcome, dict):
-            payload = dict(native_outcome)
+            payload = normalize_independent_payload(payload=native_outcome) or dict(native_outcome)
             blocked_reasons = list(payload.get("decision_blocked_reasons") or [])
             blocked_reasons.extend(list((policy_decision or {}).get("rejection_reasons") or []))
             blocked_reasons.extend(list((risk_decision or {}).get("rejection_reasons") or []))
@@ -5776,6 +6365,7 @@ class OperatorQueryService:
         native_outcome = finalized_decision_outcome
         if not isinstance(native_outcome, dict):
             native_outcome = None if position_target is None else position_target.get("decision_outcome")
+        native_outcome = normalize_independent_payload(payload=native_outcome) if isinstance(native_outcome, dict) else native_outcome
         family_execution_summary = (
             None
             if native_outcome is None
@@ -5783,6 +6373,9 @@ class OperatorQueryService:
         )
         if family_execution_summary is None and position_target is not None:
             family_execution_summary = position_target.get("family_execution_summary")
+        family_execution_summary = normalize_independent_family_execution_summary(
+            family_execution_summary=family_execution_summary,
+        ) if isinstance(family_execution_summary, dict) else family_execution_summary
         book_expectancy_summary = self._book_expectancy_summary_from_payload(native_outcome) or self._book_expectancy_summary_from_payload(position_target)
         book_runtime_states = self._book_runtime_states_from_payload(native_outcome) or self._book_runtime_states_from_payload(position_target)
         independent_adaptive_summary = self._independent_adaptive_summary_from_payload(native_outcome) or self._independent_adaptive_summary_from_payload(position_target)
@@ -8605,12 +9198,27 @@ class OperatorQueryService:
         self,
         *,
         blocker: str | None,
+        parent_intent_id: str | None = None,
         reason: str,
         actor_role: OperatorRole,
         actor_identity: str | None = None,
         auth_source: AuthSource = "anonymous",
     ) -> dict[str, Any]:
         recovery_before = self.recovery_view()["recovery_state"]
+        startup_snapshot_context_before = self._startup_exit_execution_snapshot_context(parent_intent_id=parent_intent_id)
+        normalized_parent_intent_id = str(parent_intent_id or "").strip()
+        effective_parent_before_id = normalized_parent_intent_id or (
+            str(startup_snapshot_context_before.get("selected_parent_intent_id") or "").strip()
+            if isinstance(startup_snapshot_context_before, dict)
+            else ""
+        )
+        parent_before_payload = None
+        if effective_parent_before_id:
+            repo = getattr(self.runtime, "exit_execution_repo", None)
+            if repo is not None:
+                parent_before = repo.get_exit_execution_intent(effective_parent_before_id)
+                if parent_before is not None:
+                    parent_before_payload = parent_before.model_dump(mode="json")
         blockers_before = self.blockers()
         market_before = self.runtime.market_gateway.status()
         account_before = self.runtime.account_service.status()
@@ -8659,10 +9267,32 @@ class OperatorQueryService:
             raise ValueError("exchange_state_refresh_failed")
 
         self._invalidate_cache()
+        startup_snapshot_context = self._startup_exit_execution_snapshot_context(parent_intent_id=parent_intent_id)
+        if startup_snapshot_context is None:
+            startup_snapshot_context = startup_snapshot_context_before
+        effective_parent_intent_id = (
+            str(parent_intent_id or "").strip()
+            or str(startup_snapshot_context.get("selected_parent_intent_id") or "").strip()
+            if isinstance(startup_snapshot_context, dict)
+            else str(parent_intent_id or "").strip()
+        )
+        parent_after_payload = None
+        if effective_parent_intent_id:
+            repo = getattr(self.runtime, "exit_execution_repo", None)
+            if repo is not None:
+                parent_after = repo.get_exit_execution_intent(effective_parent_intent_id)
+                if parent_after is not None:
+                    parent_after_payload = parent_after.model_dump(mode="json")
         recovery_after = self.recovery_view()["recovery_state"]
         blockers_after = self.blockers()
         market_after = self.runtime.market_gateway.status()
         account_after = self.runtime.account_service.status()
+        parent_review_after = self._exit_execution_review_item_for_parent(
+            parent_intent_id=effective_parent_intent_id,
+        )
+        current_blocker_after_action = self._normalize_exit_execution_blocker_payload(
+            None if parent_review_after is None else parent_review_after.get("current_blocker")
+        )
         blocker_cleared = False if blocker is None else not self.blocker_control_service.has_active_blocker(blocker)
         auto_resume: dict[str, Any] | None = None
         if (
@@ -8682,6 +9312,12 @@ class OperatorQueryService:
             blockers_after = self.blockers()
             market_after = self.runtime.market_gateway.status()
             account_after = self.runtime.account_service.status()
+            parent_review_after = self._exit_execution_review_item_for_parent(
+                parent_intent_id=effective_parent_intent_id,
+            )
+            current_blocker_after_action = self._normalize_exit_execution_blocker_payload(
+                None if parent_review_after is None else parent_review_after.get("current_blocker")
+            )
             blocker_cleared = not self.blocker_control_service.has_active_blocker(blocker)
         if blocker and blocker_cleared:
             if auto_resume is not None and auto_resume.get("status") in {"resumed", "already_resumed"}:
@@ -8708,6 +9344,7 @@ class OperatorQueryService:
                 recovery_state_before=recovery_before,
                 recovery_state_after=recovery_after,
                 details={
+                    "parent_intent_id": effective_parent_intent_id or None,
                     "target_blocker": blocker,
                     "attempts_executed": attempts_executed,
                     "max_attempts": max_attempts,
@@ -8722,7 +9359,12 @@ class OperatorQueryService:
                     "account_after": account_after,
                     "blockers_before": blockers_before,
                     "blockers_after": blockers_after,
+                    "parent_before": parent_before_payload,
+                    "parent_after": parent_after_payload,
                     "auto_resume": auto_resume,
+                    "startup_snapshot_context": startup_snapshot_context,
+                    "parent_review_after": parent_review_after,
+                    "current_blocker_after_action": current_blocker_after_action,
                 },
             ),
         )
@@ -8732,12 +9374,14 @@ class OperatorQueryService:
             mode_snapshot=self.system_mode(),
             blockers=self.blockers(),
         )
+        self._invalidate_cache()
         return {
             "status": "completed",
             "message": message,
             "recovery": self.recovery_view(),
             "blockers": blockers_after,
             "details": {
+                "parent_intent_id": effective_parent_intent_id or None,
                 "target_blocker": blocker,
                 "attempts_executed": attempts_executed,
                 "max_attempts": max_attempts,
@@ -8750,8 +9394,160 @@ class OperatorQueryService:
                 "market_after": market_after,
                 "account_before": account_before,
                 "account_after": account_after,
+                "parent_before": parent_before_payload,
+                "parent_after": parent_after_payload,
                 "auto_resume": auto_resume,
+                "startup_snapshot_context": startup_snapshot_context,
+                "parent_review_after": parent_review_after,
+                "current_blocker_after_action": current_blocker_after_action,
             },
+        }
+
+    async def retry_limit_lookup(
+        self,
+        *,
+        parent_intent_id: str | None,
+        reason: str,
+        actor_role: OperatorRole,
+        actor_identity: str | None = None,
+        auth_source: AuthSource = "anonymous",
+    ) -> dict[str, Any]:
+        recovery_before = self.recovery_view()["recovery_state"]
+        parent_before, startup_snapshot_context = self._resolve_exit_execution_parent_for_operator_action(
+            parent_intent_id=parent_intent_id,
+        )
+        parent_before_payload = parent_before.model_dump(mode="json")
+        parent_after, dispatched_state = await self.runtime.order_manager.retry_exit_execution_limit_lookup(
+            parent_before.parent_intent_id
+        )
+        self._invalidate_cache()
+        recovery_after = self.recovery_view()["recovery_state"]
+        parent_after_payload = parent_after.model_dump(mode="json")
+        parent_review_after = self._exit_execution_review_item_for_parent(
+            parent_intent_id=parent_after.parent_intent_id,
+        )
+        current_blocker_after_action = self._normalize_exit_execution_blocker_payload(
+            None if parent_review_after is None else parent_review_after.get("current_blocker")
+        )
+        dispatched_payload = None if dispatched_state is None else dispatched_state.model_dump(mode="json")
+        resume_issue_after = None
+        if isinstance(parent_after.metadata, dict):
+            issue = parent_after.metadata.get("resume_issue")
+            if isinstance(issue, dict):
+                resume_issue_after = dict(issue)
+        if dispatched_payload is not None:
+            message = "已重试退出拆单上限查询，并继续派发子订单。"
+        elif isinstance(resume_issue_after, dict) and str(resume_issue_after.get("kind") or "") == "resume_limit_lookup_failed":
+            message = "已重试退出拆单上限查询，但上限仍不可用。"
+        else:
+            message = "已重试退出拆单上限查询。"
+        details = {
+            "parent_intent_id": parent_after.parent_intent_id,
+            "startup_snapshot_context": startup_snapshot_context,
+            "parent_before": parent_before_payload,
+            "parent_after": parent_after_payload,
+            "dispatched_order": dispatched_payload,
+            "resume_issue_after": resume_issue_after,
+            "parent_review_after": parent_review_after,
+            "current_blocker_after_action": current_blocker_after_action,
+        }
+        self._append_event(
+            topic=topics.OPERATOR_ACTIONS,
+            key="system",
+            payload_model=OperatorActionRecord(
+                action="retry_limit_lookup",
+                actor_role=actor_role,
+                actor_identity=actor_identity,
+                auth_source=auth_source,
+                reason=reason,
+                status="completed",
+                recovery_state_before=recovery_before,
+                recovery_state_after=recovery_after,
+                details=details,
+            ),
+        )
+        self._persist_blocker_snapshot(
+            source="retry_limit_lookup",
+            runtime_state=self.system_health()["runtime_state"],
+            mode_snapshot=self.system_mode(),
+            blockers=self.blockers(),
+        )
+        self._invalidate_cache()
+        return {
+            "status": "completed",
+            "message": message,
+            "recovery": self.recovery_view(),
+            "parent_exit_intent": parent_after_payload,
+            "order": dispatched_payload,
+            "details": details,
+        }
+
+    async def safe_cancel_exit_execution(
+        self,
+        *,
+        parent_intent_id: str | None,
+        reason: str,
+        actor_role: OperatorRole,
+        actor_identity: str | None = None,
+        auth_source: AuthSource = "anonymous",
+    ) -> dict[str, Any]:
+        recovery_before = self.recovery_view()["recovery_state"]
+        parent_before, startup_snapshot_context = self._resolve_exit_execution_parent_for_operator_action(
+            parent_intent_id=parent_intent_id,
+        )
+        parent_before_payload = parent_before.model_dump(mode="json")
+        parent_after, child_states, skipped_children = await self.runtime.order_manager.safe_cancel_exit_intent(
+            parent_before.parent_intent_id
+        )
+        self._invalidate_cache()
+        recovery_after = self.recovery_view()["recovery_state"]
+        parent_after_payload = parent_after.model_dump(mode="json")
+        parent_review_after = self._exit_execution_review_item_for_parent(
+            parent_intent_id=parent_after.parent_intent_id,
+        )
+        current_blocker_after_action = self._normalize_exit_execution_blocker_payload(
+            None if parent_review_after is None else parent_review_after.get("current_blocker")
+        )
+        child_payloads = [state.model_dump(mode="json") for state in child_states]
+        details = {
+            "parent_intent_id": parent_after.parent_intent_id,
+            "startup_snapshot_context": startup_snapshot_context,
+            "parent_before": parent_before_payload,
+            "parent_after": parent_after_payload,
+            "canceled_children": child_payloads,
+            "skipped_children": skipped_children,
+            "parent_review_after": parent_review_after,
+            "current_blocker_after_action": current_blocker_after_action,
+        }
+        self._append_event(
+            topic=topics.OPERATOR_ACTIONS,
+            key="system",
+            payload_model=OperatorActionRecord(
+                action="safe_cancel",
+                actor_role=actor_role,
+                actor_identity=actor_identity,
+                auth_source=auth_source,
+                reason=reason,
+                status="completed",
+                recovery_state_before=recovery_before,
+                recovery_state_after=recovery_after,
+                details=details,
+            ),
+        )
+        self._persist_blocker_snapshot(
+            source="safe_cancel",
+            runtime_state=self.system_health()["runtime_state"],
+            mode_snapshot=self.system_mode(),
+            blockers=self.blockers(),
+        )
+        self._invalidate_cache()
+        return {
+            "status": "completed",
+            "message": "已对退出父任务发起安全取消。",
+            "recovery": self.recovery_view(),
+            "parent_exit_intent": parent_after_payload,
+            "orders": child_payloads,
+            "details": details,
         }
 
     def ai_review_restore(

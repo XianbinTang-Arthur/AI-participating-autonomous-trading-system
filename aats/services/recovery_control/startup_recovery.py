@@ -5,12 +5,161 @@ from datetime import timedelta
 
 from aats.schemas.exchange import AccountBaselineSnapshot
 from aats.schemas.common import utc_now
+from aats.schemas.exit_execution import ExitExecutionIntent
+from aats.schemas.reconciliation import ReconciliationStateSnapshot
 from aats.schemas.system import RecoveryStatus
+from aats.services.execution_engine.exit_intent_aggregator import (
+    exit_execution_review_items,
+    refresh_exit_execution_intents,
+)
 from aats.services.execution_control.order_service import ExecutionOrderService
 from aats.services.execution_engine.recovery import ExecutionRecoveryService, RecoveryArtifacts
 from aats.services.governance_engine.kill_switch import KillSwitch
 from aats.services.recovery_control.reconciliation_classifier import RecoveryReconciliationClassifier
 from aats.services.runtime_scope import latest_reconciliation_for_scope, latest_snapshot_for_scope, runtime_state_scope
+
+
+def startup_refresh_exit_execution_truth(
+    *,
+    settings: object,
+    execution_repo: object | None,
+    exit_execution_repo: object | None,
+    scope: object | None,
+) -> tuple[list[ExitExecutionIntent], list[str]]:
+    if execution_repo is None or exit_execution_repo is None:
+        return [], []
+    try:
+        refreshed = refresh_exit_execution_intents(
+            execution_repo=execution_repo,
+            exit_execution_repo=exit_execution_repo,
+            settings=settings,
+            scope=scope,
+        )
+    except Exception as exc:  # pragma: no cover - guarded by dedicated unit test via fake repo
+        return [], [f"startup_exit_execution_parent_refresh_failed:{type(exc).__name__}"]
+    if not refreshed:
+        return [], []
+    return list(refreshed), [f"startup_exit_execution_parent_refresh_count:{len(refreshed)}"]
+
+
+def apply_startup_exit_execution_review_overlay(
+    *,
+    base_status: RecoveryStatus,
+    parent_intents: list[ExitExecutionIntent],
+) -> RecoveryStatus:
+    review_items = exit_execution_review_items(parent_intents)
+    if not review_items:
+        return base_status
+    blocker_kinds = [
+        str(item.get("kind") or "").strip()
+        for item in review_items
+        if str(item.get("kind") or "").strip()
+    ]
+    notes = list(base_status.notes)
+    notes.append(f"startup_exit_execution_review_required_count:{len(review_items)}")
+    resume_blocked_reasons = list(base_status.resume_blocked_reasons)
+    resume_blocked_reasons.extend(
+        blocker for blocker in blocker_kinds if blocker not in resume_blocked_reasons
+    )
+    recovery_state = (
+        base_status.recovery_state
+        if base_status.recovery_state == "resume_blocked"
+        else "review_required"
+    )
+    return base_status.model_copy(
+        update={
+            "recovery_state": recovery_state,
+            "review_required": True,
+            "safe_startup": False,
+            "safe_to_trade": False,
+            "resume_eligible": False,
+            "rebaseline_available": True,
+            "resume_blocked_reasons": list(dict.fromkeys(resume_blocked_reasons)),
+            "unknown_state_details": [
+                *base_status.unknown_state_details,
+                *review_items,
+            ],
+            "notes": list(dict.fromkeys(notes)),
+        }
+    )
+
+
+def persist_startup_exit_execution_state_snapshot(
+    *,
+    reconciliation_repo: object,
+    scope: object,
+    status: RecoveryStatus,
+    parent_intents: list[ExitExecutionIntent],
+) -> list[str]:
+    review_items = exit_execution_review_items(parent_intents)
+    if not review_items:
+        return []
+    latest_reconciliation = latest_reconciliation_for_scope(reconciliation_repo, scope)
+    if latest_reconciliation is None:
+        return ["startup_exit_execution_review_snapshot_skipped_missing_reconciliation_context"]
+    save_snapshot = getattr(reconciliation_repo, "save_state_snapshot", None)
+    latest_state_snapshot_getter = getattr(reconciliation_repo, "latest_state_snapshot_for_scope", None)
+    if not callable(save_snapshot) or not callable(latest_state_snapshot_getter):
+        return []
+    latest_state_snapshot = latest_state_snapshot_getter(scope=scope)
+    latest_generation_getter = getattr(reconciliation_repo, "latest_baseline_generation_for_scope", None)
+    latest_baseline_generation = (
+        latest_generation_getter(scope=scope)
+        if callable(latest_generation_getter)
+        else None
+    )
+    latest_ack_getter = getattr(reconciliation_repo, "latest_exchange_ack_watermark_for_scope", None)
+    latest_exchange_ack_watermark = (
+        latest_ack_getter(scope=scope)
+        if callable(latest_ack_getter)
+        else None
+    )
+    details = {
+        "source": "startup_exit_execution_review",
+        "review_item_count": len(review_items),
+        "review_items": review_items,
+        "reconciliation_severity": latest_reconciliation.severity,
+        "recovery_classification": latest_reconciliation.recovery_classification,
+    }
+    snapshot = ReconciliationStateSnapshot(
+        reconciliation_id=latest_reconciliation.reconciliation_id,
+        product_type=latest_reconciliation.product_type,
+        margin_mode=latest_reconciliation.margin_mode,
+        primary_symbol=(latest_reconciliation.allowed_symbols or [None])[0],
+        recovery_state=status.recovery_state,
+        resume_eligible=status.resume_eligible,
+        safe_to_trade=status.safe_to_trade,
+        review_required=status.review_required,
+        only_reduce_required=status.only_reduce_required,
+        halt_required=bool(latest_reconciliation.halt_required),
+        bundle_recovery_required=status.bundle_recovery_required,
+        resume_blocked_reasons_json=list(status.resume_blocked_reasons),
+        derived_from_generation_id=(
+            None if latest_baseline_generation is None else latest_baseline_generation.generation_id
+        ),
+        exchange_ack_watermark_id=(
+            None if latest_exchange_ack_watermark is None else latest_exchange_ack_watermark.watermark_id
+        ),
+        details_json=details,
+    )
+    should_persist = latest_state_snapshot is None or any(
+        (
+            latest_state_snapshot.reconciliation_id != snapshot.reconciliation_id,
+            latest_state_snapshot.recovery_state != snapshot.recovery_state,
+            latest_state_snapshot.resume_eligible != snapshot.resume_eligible,
+            latest_state_snapshot.safe_to_trade != snapshot.safe_to_trade,
+            latest_state_snapshot.review_required != snapshot.review_required,
+            latest_state_snapshot.only_reduce_required != snapshot.only_reduce_required,
+            latest_state_snapshot.halt_required != snapshot.halt_required,
+            latest_state_snapshot.bundle_recovery_required != snapshot.bundle_recovery_required,
+            list(latest_state_snapshot.resume_blocked_reasons_json) != list(snapshot.resume_blocked_reasons_json),
+            dict(latest_state_snapshot.details_json) != dict(snapshot.details_json),
+        )
+    )
+    if not should_persist:
+        return []
+    save_snapshot(snapshot)
+    return ["startup_exit_execution_review_snapshot_saved"]
 
 
 @dataclass(slots=True)

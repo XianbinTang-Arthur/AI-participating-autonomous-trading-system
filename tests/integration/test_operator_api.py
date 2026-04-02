@@ -45,9 +45,9 @@ from aats.schemas.exchange import (
 from aats.schemas.governance import PolicyDecision, RiskDecision
 from aats.events import topics
 from aats.schemas.operator import ExecutionErrorSummary, ReplayValidationSummary
-from aats.schemas.operator import OperatorUserRecord
+from aats.schemas.operator import OperatorActionRecord, OperatorUserRecord
 from aats.schemas.portfolio import FillOutcomeRecord, FundingFeeRecord, PortfolioSnapshot, Position
-from aats.schemas.reconciliation import ReconciliationReport
+from aats.schemas.reconciliation import ReconciliationReport, ReconciliationStateSnapshot
 from aats.schemas.strategy_profiles import (
     StrategyProfileMarketRegimeAssessment,
     StrategyProfileRecommendation,
@@ -55,6 +55,11 @@ from aats.schemas.strategy_profiles import (
 )
 from aats.schemas.strategy_runtime import StrategyLegIntent
 from aats.services.ai_service.provider import AIProviderResponse
+from aats.services.execution_engine.exit_intent_aggregator import (
+    child_exit_order_ref_from_order_state,
+    create_exit_execution_intent_from_order_state,
+    exit_execution_review_items,
+)
 from aats.services.operator.query_service import OperatorQueryService
 from aats.services.operator.strategy_profiles import StrategyProfileControlService
 from aats.services.operator.strategy_profile_seed import _seed_revisions, seed_strategy_profiles
@@ -358,6 +363,137 @@ class RefreshTestRuntimeGuard:
         return dict(self._status)
 
 
+class _OperatorRetryLimitLookupAdapter:
+    def __init__(self) -> None:
+        self.submit_quantities: list[Decimal] = []
+
+    def preview_client_order_id(self, intent: OrderIntent) -> str | None:
+        return intent.idempotency_key
+
+    async def risk_reducing_max_order_quantity_limit(self, *, intent: OrderIntent):
+        _ = intent
+        return Decimal("2")
+
+    async def submit(self, intent: OrderIntent):
+        self.submit_quantities.append(Decimal(intent.quantity))
+        submitted_ts = utc_now()
+        return (
+            OrderState(
+                decision_id=intent.decision_id,
+                execution_chain_id=intent.execution_chain_id,
+                execution_attempt_id=intent.execution_attempt_id,
+                intent_id=intent.intent_id,
+                symbol=intent.symbol,
+                client_order_id=intent.idempotency_key,
+                venue="OKX",
+                exchange_order_id=f"ord_{intent.idempotency_key}",
+                status="FILLED",
+                submission_mode="guarded_simulated_submit",
+                exchange_status="filled",
+                submitted_ts=submitted_ts,
+                last_update_ts=submitted_ts,
+                requested_qty=intent.quantity,
+                filled_qty=intent.quantity,
+                remaining_qty=Decimal("0"),
+                average_fill_price=Decimal("80000"),
+                fees=Decimal("0"),
+                reduce_only=intent.reduce_only,
+                close_only=intent.close_only,
+                position_mode=intent.position_mode,
+                pos_side=intent.pos_side,
+                product_type=intent.product_type,
+                margin_mode=intent.margin_mode,
+                exposure_side=intent.exposure_side,
+                execution_action=intent.execution_action,
+                leg_action=intent.leg_action,
+                position_intent=intent.position_intent,
+                submission_payload={},
+            ),
+            [],
+        )
+
+    async def sync(self, open_order_states):
+        _ = open_order_states
+        return [], []
+
+    async def cancel(self, order_state: OrderState):
+        return order_state, []
+
+    def readiness(self):
+        return {"backend": "okx", "exchange_submit_allowed": True, "submit_blocked_reasons": []}
+
+
+class _OperatorSafeCancelAdapter(_OperatorRetryLimitLookupAdapter):
+    def __init__(self) -> None:
+        super().__init__()
+        self.canceled_order_ids: list[str] = []
+
+    async def cancel(self, order_state: OrderState):
+        self.canceled_order_ids.append(order_state.client_order_id)
+        canceled = order_state.model_copy(
+            update={
+                "status": "CANCELED",
+                "exchange_status": "canceled",
+                "remaining_qty": Decimal("0"),
+                "last_update_ts": utc_now(),
+            }
+        )
+        return canceled, []
+
+
+def _save_startup_exit_execution_snapshot(runtime, parent) -> ReconciliationStateSnapshot:
+    report = ReconciliationReport(
+        reconciliation_id=f"recon_{parent.parent_intent_id}",
+        as_of_ts=utc_now(),
+        product_type=runtime.settings.trading_product_type,
+        margin_mode=runtime.settings.margin_mode,
+        allowed_symbols=[parent.symbol],
+        exchange_comparison_enabled=True,
+        order_diff={"reconstructed": {}, "exchange": {}},
+        fill_diff={"replayed": {}, "exchange": {}},
+        balance_diff={"reconstructed": {}, "exchange": {}},
+        position_diff={
+            "stored": {},
+            "reconstructed": {},
+            "reconstructed_mismatches": {},
+            "exchange": {},
+            "exchange_mismatches": {},
+        },
+        mismatch_categories=["exit_execution_parent_review_required"],
+        mismatch_reasons=["exit_execution_parent_review_required"],
+        safety_impacts=["operator_review_required_before_resuming_exit_execution"],
+        severity="REVIEW_REQUIRED",
+        recovery_classification="review_required",
+        review_required=True,
+        recommended_operator_action="review_exit_execution_parent_and_refresh_exchange_state",
+    )
+    runtime.reconciliation_repo.save_report(report)
+    review_items = exit_execution_review_items([parent])
+    snapshot = ReconciliationStateSnapshot(
+        reconciliation_id=report.reconciliation_id,
+        product_type=report.product_type,
+        margin_mode=report.margin_mode,
+        primary_symbol=parent.symbol,
+        recovery_state="review_required",
+        resume_eligible=False,
+        safe_to_trade=False,
+        review_required=True,
+        halt_required=False,
+        only_reduce_required=False,
+        bundle_recovery_required=False,
+        resume_blocked_reasons_json=[str(item.get("kind") or "") for item in review_items if item.get("kind")],
+        details_json={
+            "source": "startup_exit_execution_review",
+            "review_item_count": len(review_items),
+            "review_items": review_items,
+            "reconciliation_severity": report.severity,
+            "recovery_classification": report.recovery_classification,
+        },
+    )
+    runtime.reconciliation_repo.save_state_snapshot(snapshot)
+    return snapshot
+
+
 class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
     async def test_system_status_and_mode_endpoints_are_operator_readable(self) -> None:
         runtime = await self._runtime()
@@ -490,6 +626,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
                 "accountState",
             }.issubset(panel_keys)
         )
+
         self.assertIsNone(payload["panels"]["session"]["error"])
         self.assertIsNone(payload["panels"]["health"]["error"])
         self.assertIn("runtime_state", payload["panels"]["health"]["data"])
@@ -1381,6 +1518,9 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(detail["decision_outcome"]["book_expectancy_summary"]["books"][1]["expected_net_edge_bps"], -2.0)
         self.assertEqual([item["leg"] for item in detail["position_target"]["book_runtime_states"]], ["long", "short"])
         self.assertEqual([item["leg"] for item in detail["decision_outcome"]["book_runtime_states"]], ["long", "short"])
+        self.assertIn("guard_state", detail["position_target"]["book_runtime_states"][0])
+        self.assertIn("prior_guard_state", detail["position_target"]["book_runtime_states"][0])
+        self.assertIsNone(detail["position_target"]["book_runtime_states"][0]["guard_state"])
         self.assertTrue(detail["position_target"]["diagnostic_metric_flags"]["emit_expected_vs_realized_metrics"])
         self.assertTrue(detail["decision_outcome"]["diagnostic_metric_flags"]["emit_expected_vs_realized_metrics"])
         self.assertEqual(latest["summary"]["book_runtime_states"][0]["book_action"], "open")
@@ -4591,6 +4731,591 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             stale_health = client.get("/system/health").json()
         stale_blockers = [item["blocker"] for item in stale_health["blockers"]]
         self.assertIn("market_data_stale", stale_blockers)
+
+    async def test_refresh_exchange_state_action_includes_startup_exit_snapshot_context(self) -> None:
+        runtime = await self._runtime(
+            trading_product_type="derivatives",
+            margin_mode="cross",
+            default_symbol="BTC-USDT-SWAP",
+            allowed_symbols=("BTC-USDT-SWAP",),
+        )
+        now = utc_now()
+        child_state = OrderState(
+            decision_id="decision_operator_refresh_startup_snapshot",
+            execution_chain_id="chain_operator_refresh_startup_snapshot",
+            intent_id="intent_operator_refresh_startup_snapshot",
+            symbol="BTC-USDT-SWAP",
+            client_order_id="clord_operator_refresh_startup_snapshot",
+            venue="OKX",
+            exchange_order_id="ord_operator_refresh_startup_snapshot",
+            status="SUBMITTED",
+            submission_mode="guarded_simulated_submit",
+            exchange_status="live",
+            submitted_ts=now,
+            last_update_ts=now,
+            requested_qty=Decimal("2"),
+            filled_qty=Decimal("0"),
+            remaining_qty=Decimal("2"),
+            average_fill_price=None,
+            fees=Decimal("0"),
+            reduce_only=True,
+            close_only=True,
+            product_type="derivatives",
+            margin_mode="cross",
+            position_mode="long_short_mode",
+            pos_side="long",
+            exposure_side="long",
+            execution_action="exit",
+            leg_action="close",
+            position_intent="close_long",
+            execution_error="submission_unknown_check_exchange:timeout",
+            submission_payload={},
+        )
+        runtime.execution_repo.save_order_state(child_state)
+        parent = create_exit_execution_intent_from_order_state(child_state).model_copy(
+            update={
+                "aggregate_status": "REVIEW_REQUIRED",
+                "operator_review_required": True,
+                "operator_review_reason": "child_unknown_truth_requires_review",
+                "metadata": {
+                    "dispatch_template": {
+                        "intent_id": "intent_operator_refresh_startup_snapshot",
+                        "execution_chain_id": "chain_operator_refresh_startup_snapshot",
+                        "decision_id": "decision_operator_refresh_startup_snapshot",
+                        "symbol": "BTC-USDT-SWAP",
+                        "side": "sell",
+                        "quantity": "2",
+                        "execution_style": "exchange",
+                        "order_type": "market",
+                        "urgency": "medium",
+                        "time_in_force": "IOC",
+                        "reduce_only": True,
+                        "close_only": True,
+                        "position_mode": "long_short_mode",
+                        "pos_side": "long",
+                        "execution_action": "exit",
+                        "leg_action": "close",
+                        "position_intent": "close_long",
+                        "product_type": "derivatives",
+                        "margin_mode": "cross",
+                        "exposure_side": "long",
+                        "idempotency_key": "operator_refresh_startup_snapshot",
+                    }
+                },
+            }
+        )
+        runtime.exit_execution_repo.save_exit_execution_intent(parent)
+        runtime.exit_execution_repo.save_child_exit_order_ref(
+            child_exit_order_ref_from_order_state(
+                parent_intent_id=parent.parent_intent_id,
+                order_state=child_state,
+                settings=runtime.settings,
+            )
+        )
+        snapshot = _save_startup_exit_execution_snapshot(runtime, parent)
+        runtime.market_gateway.refresh_snapshot = AsyncMock(return_value=object())
+        runtime.account_service.refresh = AsyncMock(return_value=None)
+
+        app = self._app(runtime)
+        with TestClient(app) as client:
+            response = client.post(
+                "/system/exit-execution/refresh",
+                json={
+                    "parent_intent_id": parent.parent_intent_id,
+                    "reason": "ui_refresh_startup_snapshot",
+                },
+            )
+            recovery = client.get("/system/recovery")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(recovery.status_code, 200, recovery.text)
+        actions = [item.payload for item in runtime.event_store.by_topic(topics.OPERATOR_ACTIONS)]
+        refresh_action = next(item for item in reversed(actions) if item["action"] == "refresh_exchange_state")
+        self.assertEqual(
+            refresh_action["details"]["startup_snapshot_context"]["snapshot_id"],
+            snapshot.snapshot_id,
+        )
+        self.assertEqual(
+            refresh_action["details"]["startup_snapshot_context"]["selected_parent_intent_id"],
+            parent.parent_intent_id,
+        )
+        self.assertEqual(
+            refresh_action["details"]["startup_snapshot_context"]["matched_review_item"]["kind"],
+            "exit_execution_parent_review_required",
+        )
+        self.assertEqual(refresh_action["details"]["parent_intent_id"], parent.parent_intent_id)
+        self.assertEqual(refresh_action["details"]["parent_before"]["parent_intent_id"], parent.parent_intent_id)
+        self.assertEqual(refresh_action["details"]["parent_after"]["parent_intent_id"], parent.parent_intent_id)
+        response_recovery_payload = response.json()["recovery"]
+        response_review_item = next(
+            item
+            for item in response_recovery_payload["exit_execution_review_items"]
+            if item["parent_intent_id"] == parent.parent_intent_id
+        )
+        self.assertEqual(response_review_item["latest_operator_action"]["action"], "refresh_exchange_state")
+        self.assertEqual(response_review_item["recent_operator_actions"][0]["action"], "refresh_exchange_state")
+        response_history_item = response_recovery_payload["exit_execution_action_history"][0]
+        self.assertEqual(response_history_item["action"], "refresh_exchange_state")
+        self.assertEqual(response_history_item["parent_intent_id"], parent.parent_intent_id)
+        self.assertEqual(response_history_item["aggregate_status"], "REVIEW_REQUIRED")
+        recovery_payload = recovery.json()["recovery"]
+        review_item = next(
+            item
+            for item in recovery_payload["exit_execution_review_items"]
+            if item["parent_intent_id"] == parent.parent_intent_id
+        )
+        self.assertEqual(review_item["latest_operator_action"]["action"], "refresh_exchange_state")
+        self.assertEqual(review_item["latest_operator_action"]["status"], "completed")
+        self.assertEqual(review_item["current_blocker"]["code"], "child_unknown_truth_requires_review")
+        self.assertEqual(
+            review_item["current_blocker"]["summary"],
+            "仍有子订单真相未确认，需要先人工复核。",
+        )
+        self.assertEqual(
+            review_item["latest_operator_action"]["remaining_blocker"]["code"],
+            "child_unknown_truth_requires_review",
+        )
+        self.assertEqual(recovery_payload["exit_execution_action_history"][0]["action"], "refresh_exchange_state")
+        self.assertEqual(
+            recovery_payload["exit_execution_action_history"][0]["parent_intent_id"],
+            parent.parent_intent_id,
+        )
+        self.assertEqual(
+            recovery_payload["exit_execution_action_history"][0]["aggregate_status"],
+            "REVIEW_REQUIRED",
+        )
+        self.assertEqual(
+            response.json()["details"]["current_blocker_after_action"]["code"],
+            "child_unknown_truth_requires_review",
+        )
+
+    async def test_exit_execution_action_history_excludes_out_of_scope_parent(self) -> None:
+        runtime = await self._runtime(
+            trading_product_type="derivatives",
+            margin_mode="cross",
+            default_symbol="BTC-USDT-SWAP",
+            allowed_symbols=("BTC-USDT-SWAP",),
+        )
+        now = utc_now()
+        child_state = OrderState(
+            decision_id="decision_operator_out_of_scope_history",
+            execution_chain_id="chain_operator_out_of_scope_history",
+            intent_id="intent_operator_out_of_scope_history",
+            symbol="BTC-USDT-SWAP",
+            client_order_id="clord_operator_out_of_scope_history",
+            venue="OKX",
+            exchange_order_id="ord_operator_out_of_scope_history",
+            status="SUBMITTED",
+            submission_mode="guarded_simulated_submit",
+            exchange_status="live",
+            submitted_ts=now,
+            last_update_ts=now,
+            requested_qty=Decimal("1"),
+            filled_qty=Decimal("0"),
+            remaining_qty=Decimal("1"),
+            average_fill_price=None,
+            fees=Decimal("0"),
+            reduce_only=True,
+            close_only=True,
+            product_type="derivatives",
+            margin_mode="cross",
+            position_mode="long_short_mode",
+            pos_side="long",
+            exposure_side="long",
+            execution_action="exit",
+            leg_action="close",
+            position_intent="close_long",
+            submission_payload={},
+        )
+        parent = create_exit_execution_intent_from_order_state(child_state).model_copy(
+            update={
+                "aggregate_status": "REVIEW_REQUIRED",
+                "operator_review_required": True,
+                "operator_review_reason": "exit_execution_parent_review_required",
+                "metadata": {
+                    "dispatch_template": {
+                        "symbol": "BTC-USDT-SWAP",
+                        "product_type": "derivatives",
+                        "margin_mode": "isolated",
+                    }
+                },
+            }
+        )
+        runtime.exit_execution_repo.save_exit_execution_intent(parent)
+        runtime.event_store.append(
+            build_envelope(
+                topic=topics.OPERATOR_ACTIONS,
+                key="system",
+                payload_model=OperatorActionRecord(
+                    action="refresh_exchange_state",
+                    actor_role="admin",
+                    actor_identity="scope-admin",
+                    auth_source="session",
+                    reason="scope_check",
+                    status="completed",
+                    recovery_state_before="review_required",
+                    recovery_state_after="review_required",
+                    details={
+                        "parent_intent_id": parent.parent_intent_id,
+                        "parent_after": parent.model_dump(mode="json"),
+                        "parent_review_after": {
+                            "parent_intent_id": parent.parent_intent_id,
+                            "symbol": parent.symbol,
+                            "aggregate_status": "REVIEW_REQUIRED",
+                            "current_blocker": {
+                                "code": "exit_execution_parent_review_required",
+                                "source": "operator_review_reason",
+                                "summary": "退出任务仍有未自动收敛的子订单状态，需要人工确认。",
+                            },
+                        },
+                    },
+                ),
+                source_component="test",
+            )
+        )
+
+        app = self._app(runtime)
+        with TestClient(app) as client:
+            response = client.get("/system/recovery")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        recovery_payload = response.json()["recovery"]
+        self.assertEqual(recovery_payload["exit_execution_action_history"], [])
+
+    async def test_exit_execution_action_history_sorts_by_created_at_descending(self) -> None:
+        runtime = await self._runtime(
+            trading_product_type="derivatives",
+            margin_mode="cross",
+            default_symbol="BTC-USDT-SWAP",
+            allowed_symbols=("BTC-USDT-SWAP",),
+        )
+        now = utc_now()
+        child_state = OrderState(
+            decision_id="decision_operator_history_sort",
+            execution_chain_id="chain_operator_history_sort",
+            intent_id="intent_operator_history_sort",
+            symbol="BTC-USDT-SWAP",
+            client_order_id="clord_operator_history_sort",
+            venue="OKX",
+            exchange_order_id="ord_operator_history_sort",
+            status="SUBMITTED",
+            submission_mode="guarded_simulated_submit",
+            exchange_status="live",
+            submitted_ts=now,
+            last_update_ts=now,
+            requested_qty=Decimal("1"),
+            filled_qty=Decimal("0"),
+            remaining_qty=Decimal("1"),
+            average_fill_price=None,
+            fees=Decimal("0"),
+            reduce_only=True,
+            close_only=True,
+            product_type="derivatives",
+            margin_mode="cross",
+            position_mode="long_short_mode",
+            pos_side="long",
+            exposure_side="long",
+            execution_action="exit",
+            leg_action="close",
+            position_intent="close_long",
+            submission_payload={},
+        )
+        parent = create_exit_execution_intent_from_order_state(child_state).model_copy(
+            update={
+                "aggregate_status": "REVIEW_REQUIRED",
+                "operator_review_required": True,
+                "operator_review_reason": "exit_execution_parent_review_required",
+            }
+        )
+        runtime.exit_execution_repo.save_exit_execution_intent(parent)
+        later_created_at = now + timedelta(minutes=10)
+        earlier_created_at = now + timedelta(minutes=2)
+        runtime.event_store.append(
+            build_envelope(
+                topic=topics.OPERATOR_ACTIONS,
+                key="system",
+                payload_model=OperatorActionRecord(
+                    created_at=later_created_at,
+                    action="safe_cancel",
+                    actor_role="admin",
+                    actor_identity="later-admin",
+                    auth_source="session",
+                    reason="history_sort_later",
+                    status="completed",
+                    recovery_state_before="review_required",
+                    recovery_state_after="review_required",
+                    details={
+                        "parent_intent_id": parent.parent_intent_id,
+                        "parent_after": parent.model_dump(mode="json"),
+                    },
+                ),
+                source_component="test",
+            )
+        )
+        runtime.event_store.append(
+            build_envelope(
+                topic=topics.OPERATOR_ACTIONS,
+                key="system",
+                payload_model=OperatorActionRecord(
+                    created_at=earlier_created_at,
+                    action="refresh_exchange_state",
+                    actor_role="admin",
+                    actor_identity="earlier-admin",
+                    auth_source="session",
+                    reason="history_sort_earlier",
+                    status="completed",
+                    recovery_state_before="review_required",
+                    recovery_state_after="review_required",
+                    details={
+                        "parent_intent_id": parent.parent_intent_id,
+                        "parent_after": parent.model_dump(mode="json"),
+                    },
+                ),
+                source_component="test",
+            )
+        )
+
+        app = self._app(runtime)
+        with TestClient(app) as client:
+            response = client.get("/system/recovery")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        recovery_payload = response.json()["recovery"]
+        self.assertEqual(recovery_payload["exit_execution_action_history"][0]["action"], "safe_cancel")
+        self.assertEqual(recovery_payload["exit_execution_action_history"][0]["actor_identity"], "later-admin")
+        review_item = next(
+            item
+            for item in recovery_payload["exit_execution_review_items"]
+            if item["parent_intent_id"] == parent.parent_intent_id
+        )
+        self.assertEqual(review_item["latest_operator_action"]["action"], "safe_cancel")
+        self.assertEqual(review_item["latest_operator_action"]["actor_identity"], "later-admin")
+
+    async def test_retry_limit_lookup_can_resolve_parent_from_startup_snapshot(self) -> None:
+        runtime = await self._runtime(
+            trading_product_type="derivatives",
+            margin_mode="cross",
+            default_symbol="BTC-USDT-SWAP",
+            allowed_symbols=("BTC-USDT-SWAP",),
+        )
+        adapter = _OperatorRetryLimitLookupAdapter()
+        runtime.order_manager.adapter = adapter
+        now = utc_now()
+        filled_state = OrderState(
+            decision_id="decision_operator_retry_limit_lookup",
+            execution_chain_id="chain_operator_retry_limit_lookup",
+            intent_id="intent_operator_retry_limit_lookup",
+            symbol="BTC-USDT-SWAP",
+            client_order_id="clord_operator_retry_limit_lookup",
+            venue="OKX",
+            exchange_order_id="ord_operator_retry_limit_lookup",
+            status="FILLED",
+            submission_mode="guarded_simulated_submit",
+            exchange_status="filled",
+            submitted_ts=now,
+            last_update_ts=now,
+            requested_qty=Decimal("2"),
+            filled_qty=Decimal("2"),
+            remaining_qty=Decimal("0"),
+            average_fill_price=Decimal("80000"),
+            fees=Decimal("0"),
+            reduce_only=True,
+            close_only=True,
+            product_type="derivatives",
+            margin_mode="cross",
+            position_mode="long_short_mode",
+            pos_side="long",
+            exposure_side="long",
+            execution_action="exit",
+            leg_action="close",
+            position_intent="close_long",
+            submission_payload={},
+        )
+        runtime.execution_repo.save_order_state(filled_state)
+        parent = create_exit_execution_intent_from_order_state(filled_state).model_copy(
+            update={
+                "target_exit_quantity": Decimal("5"),
+                "aggregate_status": "PARTIALLY_FILLED",
+                "aggregated_filled_quantity": Decimal("2"),
+                "remaining_dispatchable_quantity": Decimal("3"),
+                "remaining_unresolved_quantity": Decimal("3"),
+                "child_order_ids": [filled_state.client_order_id],
+                "metadata": {
+                    "dispatch_template": {
+                        "intent_id": "intent_operator_retry_limit_lookup",
+                        "execution_chain_id": "chain_operator_retry_limit_lookup",
+                        "decision_id": "decision_operator_retry_limit_lookup",
+                        "symbol": "BTC-USDT-SWAP",
+                        "side": "sell",
+                        "quantity": "5",
+                        "execution_style": "exchange",
+                        "order_type": "market",
+                        "urgency": "medium",
+                        "time_in_force": "IOC",
+                        "reduce_only": True,
+                        "close_only": True,
+                        "position_mode": "long_short_mode",
+                        "pos_side": "long",
+                        "execution_action": "exit",
+                        "leg_action": "close",
+                        "position_intent": "close_long",
+                        "product_type": "derivatives",
+                        "margin_mode": "cross",
+                        "exposure_side": "long",
+                        "idempotency_key": "operator_retry_limit_lookup",
+                    },
+                    "resume_issue": {
+                        "kind": "resume_limit_lookup_failed",
+                        "operator_review_required": True,
+                        "updated_at": now.isoformat(),
+                        "error": "max_size_limit_unavailable",
+                    },
+                },
+            }
+        )
+        runtime.exit_execution_repo.save_exit_execution_intent(parent)
+        runtime.exit_execution_repo.save_child_exit_order_ref(
+            child_exit_order_ref_from_order_state(
+                parent_intent_id=parent.parent_intent_id,
+                order_state=filled_state,
+                settings=runtime.settings,
+            )
+        )
+        _save_startup_exit_execution_snapshot(runtime, parent)
+
+        app = self._app(runtime)
+        with TestClient(app) as client:
+            response = client.post(
+                "/system/exit-execution/retry-limit-lookup",
+                json={"reason": "ui_retry_limit_lookup"},
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["status"], "completed")
+        self.assertEqual(
+            response.json()["details"]["startup_snapshot_context"]["selected_parent_intent_id"],
+            parent.parent_intent_id,
+        )
+        self.assertIsNone(response.json()["details"]["current_blocker_after_action"])
+        self.assertEqual(adapter.submit_quantities, [Decimal("2"), Decimal("1")])
+        updated_parent = runtime.exit_execution_repo.get_exit_execution_intent(parent.parent_intent_id)
+        self.assertIsNotNone(updated_parent)
+        self.assertEqual(updated_parent.aggregate_status, "COMPLETED")
+        actions = [item.payload for item in runtime.event_store.by_topic(topics.OPERATOR_ACTIONS)]
+        retry_action = next(item for item in reversed(actions) if item["action"] == "retry_limit_lookup")
+        self.assertEqual(
+            retry_action["details"]["startup_snapshot_context"]["matched_review_item"]["kind"],
+            "exit_execution_resume_limit_lookup_failed",
+        )
+
+    async def test_safe_cancel_exit_execution_can_resolve_parent_from_startup_snapshot(self) -> None:
+        runtime = await self._runtime(
+            trading_product_type="derivatives",
+            margin_mode="cross",
+            default_symbol="BTC-USDT-SWAP",
+            allowed_symbols=("BTC-USDT-SWAP",),
+        )
+        adapter = _OperatorSafeCancelAdapter()
+        runtime.order_manager.adapter = adapter
+        now = utc_now()
+        child_state = OrderState(
+            decision_id="decision_operator_safe_cancel",
+            execution_chain_id="chain_operator_safe_cancel",
+            intent_id="intent_operator_safe_cancel",
+            symbol="BTC-USDT-SWAP",
+            client_order_id="clord_operator_safe_cancel",
+            venue="OKX",
+            exchange_order_id="ord_operator_safe_cancel",
+            status="SUBMITTED",
+            submission_mode="guarded_simulated_submit",
+            exchange_status="live",
+            submitted_ts=now,
+            last_update_ts=now,
+            requested_qty=Decimal("2"),
+            filled_qty=Decimal("0"),
+            remaining_qty=Decimal("2"),
+            average_fill_price=None,
+            fees=Decimal("0"),
+            reduce_only=True,
+            close_only=True,
+            product_type="derivatives",
+            margin_mode="cross",
+            position_mode="long_short_mode",
+            pos_side="long",
+            exposure_side="long",
+            execution_action="exit",
+            leg_action="close",
+            position_intent="close_long",
+            submission_payload={},
+        )
+        runtime.execution_repo.save_order_state(child_state)
+        parent = create_exit_execution_intent_from_order_state(child_state).model_copy(
+            update={
+                "aggregate_status": "REVIEW_REQUIRED",
+                "operator_review_required": True,
+                "operator_review_reason": "child_unknown_truth_requires_review",
+                "metadata": {
+                    "dispatch_template": {
+                        "intent_id": "intent_operator_safe_cancel",
+                        "execution_chain_id": "chain_operator_safe_cancel",
+                        "decision_id": "decision_operator_safe_cancel",
+                        "symbol": "BTC-USDT-SWAP",
+                        "side": "sell",
+                        "quantity": "2",
+                        "execution_style": "exchange",
+                        "order_type": "market",
+                        "urgency": "medium",
+                        "time_in_force": "IOC",
+                        "reduce_only": True,
+                        "close_only": True,
+                        "position_mode": "long_short_mode",
+                        "pos_side": "long",
+                        "execution_action": "exit",
+                        "leg_action": "close",
+                        "position_intent": "close_long",
+                        "product_type": "derivatives",
+                        "margin_mode": "cross",
+                        "exposure_side": "long",
+                        "idempotency_key": "operator_safe_cancel",
+                    }
+                },
+            }
+        )
+        runtime.exit_execution_repo.save_exit_execution_intent(parent)
+        runtime.exit_execution_repo.save_child_exit_order_ref(
+            child_exit_order_ref_from_order_state(
+                parent_intent_id=parent.parent_intent_id,
+                order_state=child_state,
+                settings=runtime.settings,
+            )
+        )
+        _save_startup_exit_execution_snapshot(runtime, parent)
+
+        app = self._app(runtime)
+        with TestClient(app) as client:
+            response = client.post(
+                "/system/exit-execution/safe-cancel",
+                json={"reason": "ui_safe_cancel_exit_execution"},
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["status"], "completed")
+        self.assertEqual(
+            response.json()["details"]["startup_snapshot_context"]["selected_parent_intent_id"],
+            parent.parent_intent_id,
+        )
+        self.assertIsNone(response.json()["details"]["current_blocker_after_action"])
+        self.assertEqual(adapter.canceled_order_ids, [child_state.client_order_id])
+        updated_parent = runtime.exit_execution_repo.get_exit_execution_intent(parent.parent_intent_id)
+        self.assertIsNotNone(updated_parent)
+        self.assertTrue(updated_parent.cancel_requested)
+        self.assertEqual(response.json()["orders"][0]["status"], "CANCELED")
+        actions = [item.payload for item in runtime.event_store.by_topic(topics.OPERATOR_ACTIONS)]
+        safe_cancel_action = next(item for item in reversed(actions) if item["action"] == "safe_cancel")
+        self.assertEqual(
+            safe_cancel_action["details"]["startup_snapshot_context"]["matched_review_item"]["kind"],
+            "exit_execution_parent_review_required",
+        )
 
     async def test_manual_halt_marks_recovery_as_manually_halted_and_resume_eligible(self) -> None:
         runtime = await self._runtime()

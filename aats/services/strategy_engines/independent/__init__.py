@@ -15,13 +15,18 @@ __all__ = [
     "IndependentLeg",
     "IndependentSizingOutcome",
     "ScoreStabilityMetrics",
+    "IndependentScoreDrawdownSweepSample",
+    "IndependentScoreDrawdownSweepSummary",
     "aggregate_family_health",
     "build_independent_family_candidate",
     "derive_book_state",
+    "derive_guard_state",
     "derive_holding_phase",
     "evaluate_leg_health",
     "evaluate_independent_book",
     "replay_snapshot_from_decision",
+    "score_drawdown_sample_from_decision_snapshot",
+    "summarize_score_drawdown_threshold_sweep",
     "runtime_state_from_decision",
     "transition_book_state",
     "threshold_snapshot",
@@ -53,6 +58,13 @@ def __getattr__(name: str) -> object:
         return getattr(import_module(".diagnostics", __name__), name)
     if name in {"replay_snapshot_from_decision"}:
         return getattr(import_module(".replay", __name__), name)
-    if name in {"derive_book_state", "derive_holding_phase", "transition_book_state"}:
+    if name in {
+        "IndependentScoreDrawdownSweepSample",
+        "IndependentScoreDrawdownSweepSummary",
+        "score_drawdown_sample_from_decision_snapshot",
+        "summarize_score_drawdown_threshold_sweep",
+    }:
+        return getattr(import_module(".tuning", __name__), name)
+    if name in {"derive_book_state", "derive_guard_state", "derive_holding_phase", "transition_book_state"}:
         return getattr(import_module(".state_machine", __name__), name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

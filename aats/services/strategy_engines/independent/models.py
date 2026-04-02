@@ -62,6 +62,8 @@ class ScoreStabilityMetrics:
     max_score: float | None = None
     score_slope: float | None = None
     score_volatility_bps: float | None = None
+    upward_excursion_bps: float | None = None
+    downward_drawdown_bps: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,9 +131,11 @@ class IndependentBookDecision:
     eligibility: IndependentEligibilityOutcome | None = None
     sizing: IndependentSizingOutcome | None = None
     book_state: str | None = None
+    guard_state: str | None = None
     holding_phase: str | None = None
     health_state: str | None = None
     prior_book_state: str | None = None
+    prior_guard_state: str | None = None
     current_scale_in_count: int = 0
     current_de_risk_count: int = 0
     last_transition_reason: str | None = None

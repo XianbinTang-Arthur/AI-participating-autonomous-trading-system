@@ -235,6 +235,35 @@ def _protected_dashboard_panel_payload(
     raise KeyError(f"dashboard_bundle_panel_not_found:{panel_key}")
 
 
+def _strategy_view_strategy_runtime_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    latest_snapshot = payload.get("latest_snapshot") if isinstance(payload, dict) else {}
+    configured_parameters = payload.get("configured_parameters") if isinstance(payload, dict) else {}
+    latest_snapshot = latest_snapshot if isinstance(latest_snapshot, dict) else {}
+    configured_parameters = configured_parameters if isinstance(configured_parameters, dict) else {}
+    return {
+        "generated_at": payload.get("generated_at"),
+        "summary": payload.get("summary") or {},
+        "family_enablement": payload.get("family_enablement") or {},
+        "configured_parameters": {
+            "strategy_family_active": configured_parameters.get("strategy_family_active"),
+            "strategy_family_auto_selection_enabled": configured_parameters.get("strategy_family_auto_selection_enabled"),
+            "strategy_sleeve_auto_parallel_enabled": configured_parameters.get("strategy_sleeve_auto_parallel_enabled"),
+            "strategy_sleeve_auto_min_budget_multiplier": configured_parameters.get("strategy_sleeve_auto_min_budget_multiplier"),
+            "strategy_sleeve_auto_reconciliation_contraction_multiplier": configured_parameters.get("strategy_sleeve_auto_reconciliation_contraction_multiplier"),
+            "strategy_sleeve_auto_soft_loss_usdt": configured_parameters.get("strategy_sleeve_auto_soft_loss_usdt"),
+            "strategy_sleeve_auto_hard_loss_usdt": configured_parameters.get("strategy_sleeve_auto_hard_loss_usdt"),
+            "strategy_sleeve_auto_volatility_cap_enabled": configured_parameters.get("strategy_sleeve_auto_volatility_cap_enabled"),
+            "env_template_profile": configured_parameters.get("env_template_profile"),
+        },
+        "latest_snapshot": {
+            "automation_decisions": list(latest_snapshot.get("automation_decisions") or []),
+        },
+        "latest_bundle": payload.get("latest_bundle") or {},
+        "latest_applied_target": payload.get("latest_applied_target") or {},
+        "truth_source": payload.get("truth_source"),
+    }
+
+
 @auth_router.get("/auth/session")
 async def auth_session(request: Request) -> dict[str, Any]:
     return _session_payload(request)
@@ -373,6 +402,8 @@ async def dashboard_bundle(
                     recent_ai_shadow_decisions_limit=recent_ai_shadow_decisions,
                     recent_ai_shadow_evaluations_limit=recent_ai_shadow_evaluations,
                 )
+                if panel_key == "strategyRuntime" and view == "strategy" and isinstance(payload, dict):
+                    payload = _strategy_view_strategy_runtime_payload(payload)
             panels[panel_key] = {"data": payload, "error": None}
         except Exception as exc:
             panels[panel_key] = {"data": None, "error": _dashboard_panel_error(exc)}

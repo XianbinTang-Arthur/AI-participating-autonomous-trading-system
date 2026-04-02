@@ -1334,6 +1334,12 @@ class TestIndependentFamily(unittest.TestCase):
         self.assertIn("short_liquidity_quality_score", candidate.metrics)
         self.assertIn("long_score_support_count", candidate.metrics)
         self.assertIn("short_score_support_count", candidate.metrics)
+        self.assertIn("min_score_drawdown_bps", candidate.metrics)
+        self.assertIn("effective_score_drawdown_threshold_bps", candidate.metrics)
+        self.assertIn("long_score_stability_upward_excursion_bps", candidate.metrics)
+        self.assertIn("long_score_stability_downward_drawdown_bps", candidate.metrics)
+        self.assertIn("short_score_stability_upward_excursion_bps", candidate.metrics)
+        self.assertIn("short_score_stability_downward_drawdown_bps", candidate.metrics)
         self.assertIn("long_execution_health_state", candidate.metrics)
         self.assertIn("short_execution_health_state", candidate.metrics)
         self.assertIn("family_health_overall_state", candidate.metrics)
@@ -1341,6 +1347,8 @@ class TestIndependentFamily(unittest.TestCase):
         self.assertIn("short_threshold_snapshot", candidate.metrics)
         self.assertIn("long_replay_snapshot", candidate.metrics)
         self.assertIn("short_replay_snapshot", candidate.metrics)
+        self.assertIn("score_drawdown_bps", candidate.metrics["long_threshold_snapshot"])
+        self.assertIn("effective_score_drawdown_bps", candidate.metrics["long_threshold_snapshot"])
         self.assertIn("max_thesis_age_seconds", candidate.metrics)
         self.assertIn("de_risk_net_edge_bps", candidate.metrics)
         self.assertIn("failed_thesis_net_edge_bps", candidate.metrics)
@@ -1412,6 +1420,10 @@ class TestIndependentFamily(unittest.TestCase):
         self.assertEqual(
             candidate.book_runtime_states[0].threshold_snapshot.entry_threshold,
             candidate.metrics["long_threshold_snapshot"]["entry_threshold"],
+        )
+        self.assertEqual(
+            candidate.book_runtime_states[0].threshold_snapshot.effective_score_drawdown_bps,
+            candidate.metrics["long_threshold_snapshot"]["effective_score_drawdown_bps"],
         )
         for state in candidate.book_runtime_states:
             if state.book_action in {"inactive", "hold", "blocked"}:

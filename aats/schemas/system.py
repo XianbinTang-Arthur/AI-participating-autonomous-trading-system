@@ -204,11 +204,13 @@ class IndependentRecoverySnapshot(SchemaBase):
     strategy_sleeve_id: str | None = None
     leg: Literal["long", "short"]
     book_state: str | None = None
+    guard_state: str | None = None
     holding_phase: str | None = None
     health_state: str | None = None
     current_qty: Decimal = Decimal("0")
     target_qty: Decimal = Decimal("0")
     prior_book_state: str | None = None
+    prior_guard_state: str | None = None
     current_scale_in_count: int = 0
     current_de_risk_count: int = 0
     expected_chain_ids: list[str] = Field(default_factory=list)

@@ -9,6 +9,7 @@ from aats.services.strategy_engines.families.independent_family import (
 from aats.services.strategy_engines.independent.scoring import (
     compute_raw_book_score,
     compute_score_stability,
+    effective_score_drawdown_threshold_bps,
 )
 from tests.support.strategy_family import make_ai_assessment, make_baseline, make_derivatives_hedge_settings
 
@@ -83,6 +84,8 @@ class TestIndependentScoring(unittest.TestCase):
         self.assertEqual(extracted.support_count, 3)
         self.assertEqual(extracted.source, "recent_target_history")
         self.assertTrue(extracted.stable)
+        self.assertEqual(extracted.upward_excursion_bps, extracted.max_drawdown_bps)
+        self.assertEqual(extracted.downward_drawdown_bps, 0.0)
 
     def test_compute_score_stability_honors_effective_min_confirm_ticks_override(self) -> None:
         settings = make_derivatives_hedge_settings(
@@ -126,6 +129,114 @@ class TestIndependentScoring(unittest.TestCase):
         self.assertEqual(relaxed_metrics.support_count, 1)
         self.assertTrue(relaxed_metrics.stable)
         self.assertEqual(relaxed_metrics.source, "recent_target_history")
+
+    def test_compute_score_stability_does_not_treat_strengthening_trend_as_drawdown(self) -> None:
+        settings = make_derivatives_hedge_settings(
+            strategy_hedge_independent_min_confirm_ticks=2,
+            strategy_hedge_independent_min_score_stability_bps=2.0,
+        )
+        baseline = make_baseline(
+            direction_bias="short",
+            confidence=0.82,
+            suggested_position_scale=1.0,
+            volatility_target_scale=1.0,
+            factor_scores={
+                "momentum_alpha": -0.48,
+                "trend_alpha": -0.42,
+                "microstructure_alpha": -0.18,
+            },
+        ).model_copy(update={"regime": "trend", "composite_alpha_score": -0.32})
+
+        metrics = compute_score_stability(
+            settings=settings,
+            leg="short",
+            score=0.42,
+            entry_threshold=0.30,
+            baseline=baseline,
+            ai_assessment=None,
+            recent_score_history=(0.34, 0.37),
+            min_confirm_ticks=2,
+        )
+
+        self.assertEqual(metrics.support_count, 3)
+        self.assertAlmostEqual(metrics.max_drawdown_bps, 8.0)
+        self.assertAlmostEqual(metrics.upward_excursion_bps or 0.0, 8.0)
+        self.assertAlmostEqual(metrics.downward_drawdown_bps or 0.0, 0.0)
+        self.assertTrue(metrics.stable)
+
+    def test_compute_score_stability_blocks_true_drawdown_from_recent_peak(self) -> None:
+        settings = make_derivatives_hedge_settings(
+            strategy_hedge_independent_min_confirm_ticks=2,
+            strategy_hedge_independent_min_score_stability_bps=2.0,
+        )
+        baseline = make_baseline(
+            direction_bias="short",
+            confidence=0.82,
+            suggested_position_scale=1.0,
+            volatility_target_scale=1.0,
+            factor_scores={
+                "momentum_alpha": -0.48,
+                "trend_alpha": -0.42,
+                "microstructure_alpha": -0.18,
+            },
+        ).model_copy(update={"regime": "trend", "composite_alpha_score": -0.32})
+
+        metrics = compute_score_stability(
+            settings=settings,
+            leg="short",
+            score=0.34,
+            entry_threshold=0.30,
+            baseline=baseline,
+            ai_assessment=None,
+            recent_score_history=(0.42, 0.40),
+            min_confirm_ticks=2,
+        )
+
+        self.assertEqual(metrics.support_count, 3)
+        self.assertAlmostEqual(metrics.max_drawdown_bps, 0.0)
+        self.assertAlmostEqual(metrics.upward_excursion_bps or 0.0, 0.0)
+        self.assertAlmostEqual(metrics.downward_drawdown_bps or 0.0, 8.0)
+        self.assertFalse(metrics.stable)
+
+    def test_effective_score_drawdown_threshold_prefers_new_setting_when_present(self) -> None:
+        settings = make_derivatives_hedge_settings(
+            strategy_hedge_independent_min_score_stability_bps=2.0,
+            strategy_hedge_independent_min_score_drawdown_bps=6.0,
+        )
+
+        self.assertEqual(effective_score_drawdown_threshold_bps(settings=settings), 6.0)
+
+    def test_compute_score_stability_uses_new_drawdown_threshold_override(self) -> None:
+        settings = make_derivatives_hedge_settings(
+            strategy_hedge_independent_min_confirm_ticks=2,
+            strategy_hedge_independent_min_score_stability_bps=2.0,
+            strategy_hedge_independent_min_score_drawdown_bps=10.0,
+        )
+        baseline = make_baseline(
+            direction_bias="short",
+            confidence=0.82,
+            suggested_position_scale=1.0,
+            volatility_target_scale=1.0,
+            factor_scores={
+                "momentum_alpha": -0.48,
+                "trend_alpha": -0.42,
+                "microstructure_alpha": -0.18,
+            },
+        ).model_copy(update={"regime": "trend", "composite_alpha_score": -0.32})
+
+        metrics = compute_score_stability(
+            settings=settings,
+            leg="short",
+            score=0.34,
+            entry_threshold=0.30,
+            baseline=baseline,
+            ai_assessment=None,
+            recent_score_history=(0.42, 0.40),
+            min_confirm_ticks=2,
+        )
+
+        self.assertAlmostEqual(metrics.downward_drawdown_bps or 0.0, 8.0)
+        self.assertTrue(metrics.stable)
 
 
 if __name__ == "__main__":

@@ -20,7 +20,12 @@ from aats.schemas.market import MarketSnapshot
 from aats.schemas.operator import OperatorActionRecord
 from aats.schemas.portfolio import FillOutcomeRecord, FundingFeeRecord, PortfolioSnapshot
 from aats.schemas.reconciliation import ReconciliationReport
-from aats.schemas.strategy_runtime import StrategyLegIntent, StrategySleeveRecord
+from aats.schemas.strategy_runtime import (
+    PortfolioAllocationDecision,
+    StrategyLegIntent,
+    StrategySleeveIntent,
+    StrategySleeveRecord,
+)
 from aats.schemas.system import HealthSnapshot
 from aats.services.portfolio_service.pnl import PortfolioPnLCalculator
 from aats.services.portfolio_service.positions import PortfolioState
@@ -29,6 +34,7 @@ from aats.services.portfolio_service.snapshots import PortfolioSnapshotBuilder
 from aats.services.operator.query_service import OperatorQueryService
 from aats.services.reconciliation_service.replay import ReplayEngine
 from aats.services.runtime_scope import runtime_state_scope
+from aats.services.strategy_engines.independent.replay import recovery_snapshots_from_allocation_decisions
 from aats.storage.audit_repo import InMemoryAuditRepository
 from aats.storage.event_store import InMemoryEventStore
 from tests.support.postgres import temporary_postgres_url
@@ -659,6 +665,79 @@ class TestPersistenceAndReplay(unittest.IsolatedAsyncioTestCase):
                     replay_summary["independent_expected_vs_realized_summary"]["family"],
                     "independent",
                 )
+            finally:
+                if runtime.database_runtime is not None:
+                    runtime.database_runtime.dispose()
+                if storage is not None and storage.database_runtime is not None:
+                    storage.database_runtime.dispose()
+
+    async def test_postgres_recovery_normalizes_legacy_independent_guard_payloads_after_persistence_round_trip(self) -> None:
+        with temporary_postgres_url() as (database_url, _admin_engine, _schema_name):
+            settings = self._postgres_settings(
+                database_url,
+                trading_product_type="derivatives",
+                margin_mode="cross",
+                default_symbol="BTC-USDT-SWAP",
+                allowed_symbols=("BTC-USDT-SWAP",),
+                account_backend="disabled",
+                account_read_enabled=False,
+                execution_backend="paper",
+                market_data_backend="demo",
+            )
+            runtime = await build_runtime(settings)
+            storage = None
+            try:
+                now = utc_now()
+                scenarios = (
+                    ("cooldown", False, Decimal("0"), "flat", None),
+                    ("cooldown", True, Decimal("0"), "flat", "cooldown"),
+                    ("suspended", False, Decimal("0.01"), "holding", None),
+                    ("suspended", True, Decimal("0.01"), "holding", "suspended"),
+                )
+                for legacy_guard, active_guard, current_qty, expected_book_state, expected_guard_state in scenarios:
+                    with self.subTest(
+                        legacy_guard=legacy_guard,
+                        active_guard=active_guard,
+                        current_qty=str(current_qty),
+                    ):
+                        allocation_id = (
+                            f"alloc_legacy_{legacy_guard}_{'active' if active_guard else 'stale'}_"
+                            f"{str(current_qty).replace('.', '_')}"
+                        )
+                        runtime.strategy_runtime_repo.save_allocation_decision(
+                            self._legacy_independent_allocation_decision(
+                                allocation_id=allocation_id,
+                                decision_id=f"decision_{allocation_id}",
+                                symbol="BTC-USDT-SWAP",
+                                legacy_guard=legacy_guard,
+                                active_guard=active_guard,
+                                current_qty=current_qty,
+                                as_of_ts=now,
+                            )
+                        )
+
+                        storage = build_storage_backends(settings)
+                        persisted = storage.strategy_runtime_repo.get_allocation_decision(allocation_id)
+                        self.assertIsNotNone(persisted)
+
+                        snapshots = recovery_snapshots_from_allocation_decisions(
+                            decisions=[persisted],
+                            open_orders=[],
+                            recent_bundles=[],
+                        )
+
+                        self.assertTrue(snapshots)
+                        snapshot = snapshots[0]
+                        self.assertEqual(snapshot.book_state, expected_book_state)
+                        self.assertEqual(snapshot.guard_state, expected_guard_state)
+                        self.assertEqual(snapshot.prior_book_state, expected_book_state)
+                        self.assertEqual(snapshot.prior_guard_state, expected_guard_state)
+                        self.assertEqual(snapshot.decision_snapshot.book_state, expected_book_state)
+                        self.assertEqual(snapshot.decision_snapshot.guard_state, expected_guard_state)
+                        self.assertEqual(snapshot.replay_snapshot["book_state"], expected_book_state)
+                        self.assertEqual(snapshot.replay_snapshot["guard_state"], expected_guard_state)
+                        storage.database_runtime.dispose()
+                        storage = None
             finally:
                 if runtime.database_runtime is not None:
                     runtime.database_runtime.dispose()
@@ -2210,6 +2289,73 @@ class TestPersistenceAndReplay(unittest.IsolatedAsyncioTestCase):
             ),
             gross_exposure=sum((abs(position.position_notional) for position in positions), start=Decimal("0")),
             net_exposure=sum((position.position_notional for position in positions), start=Decimal("0")),
+        )
+
+    @staticmethod
+    def _legacy_independent_allocation_decision(
+        *,
+        allocation_id: str,
+        decision_id: str,
+        symbol: str,
+        legacy_guard: str,
+        active_guard: bool,
+        current_qty: Decimal,
+        as_of_ts: datetime,
+    ) -> PortfolioAllocationDecision:
+        runtime_state = {
+            "leg": "long",
+            "current_qty": format(current_qty, "f"),
+            "target_qty": format(current_qty, "f"),
+            "state": "blocked",
+            "book_state": legacy_guard,
+            "book_action": "blocked",
+            "prior_book_state": legacy_guard,
+            "blocked_reasons": ["independent_long_book_score_stability_below_threshold"],
+            "cooldown_until": (
+                None
+                if legacy_guard != "cooldown" or not active_guard
+                else (as_of_ts + timedelta(seconds=30)).isoformat().replace("+00:00", "Z")
+            ),
+            "suspended_until": (
+                None
+                if legacy_guard != "suspended" or not active_guard
+                else (as_of_ts + timedelta(seconds=30)).isoformat().replace("+00:00", "Z")
+            ),
+        }
+        return PortfolioAllocationDecision(
+            allocation_id=allocation_id,
+            decision_id=decision_id,
+            symbol=symbol,
+            product_type="derivatives",
+            margin_mode="cross",
+            primary_family="independent",
+            approved_families=["independent"],
+            sleeve_intents=[
+                StrategySleeveIntent(
+                    decision_id=decision_id,
+                    family="independent",
+                    strategy_sleeve_id=f"sleeve_{allocation_id}",
+                    state="candidate",
+                    symbol=symbol,
+                    product_type="derivatives",
+                    margin_mode="cross",
+                    inventory_policy="paired_inventory",
+                    route_action="override_target",
+                    family_action="open_independent_book",
+                    selectable=True,
+                    execution_compatible=True,
+                    metrics={
+                        "book_runtime_states": [runtime_state],
+                        "long_replay_snapshot": {
+                            "leg": "long",
+                            "state": "blocked",
+                            "book_state": legacy_guard,
+                            "book_action": "blocked",
+                            "prior_book_state": legacy_guard,
+                        },
+                    },
+                )
+            ],
         )
 
     @staticmethod

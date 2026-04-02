@@ -1029,6 +1029,61 @@ class ReconciliationStateSnapshotModel(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class ExitExecutionIntentModel(Base):
+    __tablename__ = "exit_execution_intents"
+    __table_args__ = (
+        Index("ix_exit_execution_intents_chain", "execution_chain_id"),
+        Index("ix_exit_execution_intents_symbol_updated", "symbol", "updated_at"),
+        Index("ix_exit_execution_intents_status_updated", "aggregate_status", "updated_at"),
+    )
+
+    parent_intent_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    execution_chain_id: Mapped[str] = mapped_column(String(128), nullable=False, unique=True, index=True)
+    symbol: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    aggregate_status: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    reconciliation_state: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    target_exit_quantity: Mapped[Decimal] = mapped_column(DECIMAL_36_18, nullable=False)
+    aggregated_filled_quantity: Mapped[Decimal] = mapped_column(DECIMAL_36_18, nullable=False, default=Decimal("0"))
+    open_child_working_quantity: Mapped[Decimal] = mapped_column(DECIMAL_36_18, nullable=False, default=Decimal("0"))
+    open_child_unknown_quantity: Mapped[Decimal] = mapped_column(DECIMAL_36_18, nullable=False, default=Decimal("0"))
+    remaining_dispatchable_quantity: Mapped[Decimal] = mapped_column(DECIMAL_36_18, nullable=False, default=Decimal("0"))
+    remaining_unresolved_quantity: Mapped[Decimal] = mapped_column(DECIMAL_36_18, nullable=False, default=Decimal("0"))
+    operator_review_required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+
+
+class ExitExecutionChildRefModel(Base):
+    __tablename__ = "exit_execution_child_refs"
+    __table_args__ = (
+        Index("ix_exit_execution_child_refs_parent_updated", "parent_intent_id", "updated_at"),
+        Index("ix_exit_execution_child_refs_chain", "execution_chain_id"),
+    )
+
+    client_order_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    parent_intent_id: Mapped[str] = mapped_column(
+        String(128), ForeignKey("exit_execution_intents.parent_intent_id"), nullable=False, index=True
+    )
+    child_order_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    exchange_order_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    execution_chain_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    intent_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    symbol: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    planned_quantity: Mapped[Decimal] = mapped_column(DECIMAL_36_18, nullable=False)
+    known_filled_quantity: Mapped[Decimal] = mapped_column(DECIMAL_36_18, nullable=False, default=Decimal("0"))
+    remaining_quantity_estimate: Mapped[Decimal] = mapped_column(DECIMAL_36_18, nullable=False, default=Decimal("0"))
+    child_status: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    aggregate_category: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    exchange_truth_pending: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    operator_review_required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    risk_reducing_invariant: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+
+
 class DecisionAuditRecordModel(Base):
     __tablename__ = "decision_audit_records"
 

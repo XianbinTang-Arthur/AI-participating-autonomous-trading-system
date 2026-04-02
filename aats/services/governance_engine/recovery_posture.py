@@ -42,6 +42,9 @@ class RecoveryPostureEvaluator:
         "account_snapshot_refresh_failed",
         "strategy_bundle_recovery_in_progress",
         "strategy_bundle_recovery_requires_review",
+        "exit_execution_parent_review_required",
+        "exit_execution_resume_template_missing",
+        "exit_execution_resume_limit_lookup_failed",
     }
 
     def __init__(self, runtime: ApplicationRuntime) -> None:
@@ -96,10 +99,12 @@ class RecoveryPostureEvaluator:
             return False
         if status.baseline_requires_operator_review or ai_requires_manual_review or trial_guard_breached:
             return False
+        if status.resume_blocked_reasons or status.only_reduce_required:
+            return False
         if bundle_recovery.bundle_recovery_required or bundle_recovery.recovery_blocking:
             return False
         if report is None:
-            return not status.resume_blocked_reasons and not status.only_reduce_required
+            return True
         return not (
             report.halt_required
             or report.review_required
