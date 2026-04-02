@@ -80,8 +80,13 @@ class RecoveryQueryFacade:
                     )
                     latest_state_snapshot_payload["details_json"] = details_json
 
+        base_payload = base.model_dump(mode="json")
+        base_payload["independent_recovery_snapshots"] = self.owner._independent_recovery_snapshots_view(
+            base_payload.get("independent_recovery_snapshots") or []
+        )
+
         return {
-            **base.model_dump(mode="json"),
+            **base_payload,
             "last_rebaseline_action": latest_rebaseline_action,
             "last_resume_action": latest_resume_action,
             "latest_account_baseline": latest_baseline,

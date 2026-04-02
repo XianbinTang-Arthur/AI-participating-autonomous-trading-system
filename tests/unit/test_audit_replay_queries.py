@@ -10,6 +10,83 @@ from aats.services.reconciliation_service.replay import ReplayResult
 
 
 class TestAuditReplayQueries(TestCase):
+    def test_replay_summary_includes_independent_version_diagnostics(self) -> None:
+        owner = SimpleNamespace(
+            runtime=SimpleNamespace(
+                settings=SimpleNamespace(
+                    trading_product_type="derivatives",
+                    margin_mode="cross",
+                    allowed_symbols=("BTC-USDT-SWAP",),
+                )
+            ),
+            _independent_expected_vs_realized_summary=lambda **_: None,
+            _independent_version_summary=lambda **_: {
+                "state_version": 2,
+                "score_stability_semantics_version": 2,
+            },
+        )
+
+        facade = AuditReplayQueryFacade(owner)
+        summary = facade._replay_summary(
+            ReplayResult(
+                replayed_event_count=1,
+                stored_snapshot_count=1,
+                divergence_count=0,
+                selected_decision_id="decision_replay_versions",
+            ),
+            symbol="BTC-USDT-SWAP",
+            regime="trend",
+            active_profile_id="derivatives_live",
+            margin_mode="cross",
+        )
+
+        self.assertEqual(summary["independent_state_version"], 2)
+        self.assertEqual(summary["independent_score_stability_semantics_version"], 2)
+
+    def test_replay_status_enriches_legacy_validation_rows_with_independent_versions(self) -> None:
+        validation = {
+            "validated_at": utc_now(),
+            "decision_id": "decision_replay_versions",
+            "symbol": "BTC-USDT-SWAP",
+            "replayed_event_count": 1,
+            "stored_snapshot_count": 1,
+            "divergence_count": 0,
+            "healthy": True,
+        }
+        event_store = SimpleNamespace(
+            recent_by_topic=lambda topic, limit=10: [],
+            by_topic=lambda topic: [],
+            latest_replay_offset=lambda **_: None,
+            archive_summary=lambda: {},
+        )
+        owner = SimpleNamespace(
+            runtime=SimpleNamespace(
+                settings=SimpleNamespace(
+                    trading_product_type="derivatives",
+                    margin_mode="cross",
+                    allowed_symbols=("BTC-USDT-SWAP",),
+                ),
+                replay_validation_history=[validation],
+                event_store=event_store,
+            ),
+            state_scope=None,
+            _independent_expected_vs_realized_summary=lambda **_: None,
+            _independent_version_summary=lambda **_: {
+                "state_version": 2,
+                "score_stability_semantics_version": 2,
+            },
+        )
+
+        facade = AuditReplayQueryFacade(owner)
+        status = facade.replay_status()
+
+        latest = status["last_validation"]
+        assert latest is not None
+        self.assertEqual(latest["independent_state_version"], 2)
+        self.assertEqual(latest["independent_score_stability_semantics_version"], 2)
+        self.assertEqual(status["recent_validations"][0]["independent_state_version"], 2)
+        self.assertEqual(status["recent_validations"][0]["independent_score_stability_semantics_version"], 2)
+
     def test_replay_summary_prefers_replayed_target_margin_mode(self) -> None:
         owner = SimpleNamespace(
             runtime=SimpleNamespace(
@@ -20,6 +97,7 @@ class TestAuditReplayQueries(TestCase):
                 )
             ),
             _independent_expected_vs_realized_summary=lambda **_: None,
+            _independent_version_summary=lambda **_: None,
         )
 
         facade = AuditReplayQueryFacade(owner)
@@ -48,6 +126,7 @@ class TestAuditReplayQueries(TestCase):
                 )
             ),
             _independent_expected_vs_realized_summary=lambda **_: None,
+            _independent_version_summary=lambda **_: None,
         )
 
         facade = AuditReplayQueryFacade(owner)
@@ -131,6 +210,7 @@ class TestAuditReplayQueries(TestCase):
                 )
             ),
             _independent_expected_vs_realized_summary=lambda **_: None,
+            _independent_version_summary=lambda **_: None,
         )
 
         facade = AuditReplayQueryFacade(owner)

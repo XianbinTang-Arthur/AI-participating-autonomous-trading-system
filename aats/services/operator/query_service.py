@@ -250,6 +250,87 @@ class OperatorQueryService:
             enriched["recent_operator_actions"] = recent_actions
         return enriched
 
+    def _independent_recovery_snapshots_view(self, snapshots: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for item in snapshots or []:
+            if not isinstance(item, dict):
+                continue
+            row = dict(item)
+            semantics_version = self._independent_score_stability_semantics_version_from_snapshot(row)
+            if semantics_version is not None:
+                row["score_stability_semantics_version"] = semantics_version
+            rows.append(row)
+        return rows
+
+    def _independent_version_summary(
+        self,
+        *,
+        decision_ids: set[str] | None = None,
+        limit: int = 20,
+    ) -> dict[str, int] | None:
+        normalized_decision_ids = sorted(
+            {
+                str(item).strip()
+                for item in (decision_ids or set())
+                if str(item).strip()
+            }
+        )
+        cache_key = f"independent_version_summary:{'|'.join(normalized_decision_ids) or '*'}:{int(limit)}"
+
+        def _load() -> dict[str, int] | None:
+            payloads = self._recent_independent_target_payloads(
+                decision_ids=set(normalized_decision_ids) if normalized_decision_ids else None,
+                limit=limit,
+            )
+            state_versions: list[int] = []
+            semantics_versions: list[int] = []
+            for payload in payloads:
+                for state in self._book_runtime_states_from_payload(payload):
+                    value = state.get("state_version")
+                    try:
+                        if value is not None:
+                            state_versions.append(int(value))
+                    except (TypeError, ValueError):
+                        continue
+                family_summary = payload.get("family_execution_summary")
+                for leg in ("long", "short"):
+                    value = payload.get(f"{leg}_score_stability_semantics_version")
+                    if value is None and isinstance(family_summary, dict):
+                        value = family_summary.get(f"{leg}_score_stability_semantics_version")
+                    try:
+                        if value is not None:
+                            semantics_versions.append(int(value))
+                    except (TypeError, ValueError):
+                        continue
+            if not state_versions and not semantics_versions:
+                return None
+            summary: dict[str, int] = {}
+            if state_versions:
+                summary["state_version"] = max(state_versions)
+            if semantics_versions:
+                summary["score_stability_semantics_version"] = max(semantics_versions)
+            return summary or None
+
+        return self._cached(cache_key, _load)
+
+    @staticmethod
+    def _independent_score_stability_semantics_version_from_snapshot(snapshot: dict[str, Any]) -> int | None:
+        for container_name in ("decision_snapshot", "replay_snapshot"):
+            container = snapshot.get(container_name)
+            if not isinstance(container, dict):
+                continue
+            score_metrics = container.get("score_stability_metrics")
+            if not isinstance(score_metrics, dict):
+                continue
+            value = score_metrics.get("semantics_version")
+            if value is None:
+                continue
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                continue
+        return None
+
     def _exit_execution_action_history(self, *, limit: int = 12) -> list[dict[str, Any]]:
         return self._exit_execution_action_history_rows()[: max(int(limit), 1)]
 

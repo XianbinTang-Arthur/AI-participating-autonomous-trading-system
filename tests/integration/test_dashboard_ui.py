@@ -3720,6 +3720,58 @@ console.log(JSON.stringify({
         self.assertIn('"hasRetryButton":true', stdout)
         self.assertIn('"hasRetryDisabled":true', stdout)
 
+    def test_risk_view_surfaces_independent_recovery_snapshot_versions(self) -> None:
+        script = """
+import { renderRiskView } from './aats/api/static/modules/views/risk-view.js';
+
+const html = renderRiskView({
+  blockerControl: { blockers: [], secondary_blockers: [], next_step_summary: '' },
+  systemRecovery: {
+    recovery: {
+      safe_to_trade: false,
+      review_required: true,
+      resume_eligible: false,
+      halted: false,
+      rebaseline_available: false,
+      resume_blocked_reasons: ['independent_transition_invalid'],
+      independent_recovery_snapshots: [
+        {
+          symbol: 'BTC-USDT',
+          leg: 'long',
+          strategy_sleeve_id: 'sleeve_independent_long_short',
+          recovery_posture: 'pending_execution_attempts',
+          state_version: 2,
+          score_stability_semantics_version: 2,
+          active_execution_chain_ids: ['independent:decision_independent_1:long:open'],
+          unresolved_attempt_ids: ['attempt_independent_1'],
+          recovery_blockers: [],
+        },
+      ],
+      exit_execution_review_items: [],
+    },
+  },
+  reconciliationLatest: { reconciliation: null },
+  accountState: { fresh: true, last_refresh_timestamp: '2026-04-02T10:00:00Z', ready: true, blockers: [] },
+  portfolio: { portfolio: { total_equity: 200, realized_pnl: 0, unrealized_pnl: 0, margin_usage: 0, gross_exposure: 0 } },
+  replayStatus: {},
+  metrics: {},
+  health: { runtime_state: 'warning', halted: false },
+  uiHints: { recoveryReasonsText: '', controlPermissionMessage: '' },
+});
+
+console.log(JSON.stringify({
+  hasIndependentRecoveryCard: html.includes('独立双书恢复快照'),
+  showsStateVersion: html.includes('状态机版本') && html.includes('>2<'),
+  showsSemanticsVersion: html.includes('稳定性语义版本') && html.includes('independent:decision_independent_1:long:open'),
+}));
+"""
+        result = _run_node_module(script, encoding="utf-8")
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        stdout = result.stdout or ""
+        self.assertIn('"hasIndependentRecoveryCard":true', stdout)
+        self.assertIn('"showsStateVersion":true', stdout)
+        self.assertIn('"showsSemanticsVersion":true', stdout)
+
     def test_risk_view_surfaces_leg_level_reconciliation_summary(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
         script = """
@@ -6403,6 +6455,41 @@ console.log(JSON.stringify({
         self.assertIn('"hasLinkedRead":true', stdout)
         self.assertIn('"inventoryRowRetained":true', stdout)
         self.assertIn('"targetRowFilteredOut":true', stdout)
+
+    def test_replay_view_surfaces_independent_version_diagnostics(self) -> None:
+        script = """
+import { renderReplayView } from './aats/api/static/modules/views/replay-view.js';
+
+const html = renderReplayView({
+  replayStatus: {
+    healthy: true,
+    last_validation: {
+      decision_id: 'decision_replay_versions',
+      validated_at: '2026-04-01T12:00:00Z',
+      healthy: true,
+      divergence_count: 0,
+      replayed_event_count: 12,
+      chain_health_score: 1,
+      independent_state_version: 2,
+      independent_score_stability_semantics_version: 2,
+    },
+  },
+  replayRecentValidations: { validations: [] },
+  reconciliationLatest: { mismatch_summary: { leg_mismatch_summary: { total_count: 0, missing_execution_chain_count: 0, items: [] } } },
+});
+
+console.log(JSON.stringify({
+  hasVersionCard: html.includes('独立双书回放代际'),
+  showsStateVersion: html.includes('状态机版本') && html.includes('>2<'),
+  showsSemanticsVersion: html.includes('稳定性语义版本') && html.includes('decision_replay_versions'),
+}));
+"""
+        result = _run_node_module(script, encoding="utf-8")
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        stdout = result.stdout or ""
+        self.assertIn('"hasVersionCard":true', stdout)
+        self.assertIn('"showsStateVersion":true', stdout)
+        self.assertIn('"showsSemanticsVersion":true', stdout)
 
     def _obsolete_test_independent_adaptive_summary_surfaces_in_strategy_drawer_and_replay_view(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]

@@ -125,6 +125,8 @@ class ReplayValidationSummary(SchemaBase):
     divergence_density: float = 0.0
     chain_health_score: float = 0.0
     healthy: bool
+    independent_state_version: int | None = None
+    independent_score_stability_semantics_version: int | None = None
     independent_expected_vs_realized_summary: StrategyExpectedVsRealizedSummary | None = None
     independent_adaptive_summary: dict[str, Any] | None = None
     independent_transition_exception_summary: IndependentTransitionExceptionSummary | None = None

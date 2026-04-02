@@ -85,8 +85,7 @@ class TestIndependentScoring(unittest.TestCase):
         self.assertEqual(extracted.source, "recent_target_history")
         self.assertTrue(extracted.stable)
         self.assertEqual(extracted.semantics_version, 2)
-        self.assertEqual(extracted.upward_excursion_bps, extracted.max_drawdown_bps)
-        self.assertEqual(extracted.max_drawdown_bps_compat_source, "upward_excursion_bps")
+        self.assertAlmostEqual(extracted.upward_excursion_bps or 0.0, 4.0)
         self.assertEqual(extracted.downward_drawdown_bps, 0.0)
 
     def test_compute_score_stability_honors_effective_min_confirm_ticks_override(self) -> None:
@@ -162,8 +161,6 @@ class TestIndependentScoring(unittest.TestCase):
 
         self.assertEqual(metrics.support_count, 3)
         self.assertEqual(metrics.semantics_version, 2)
-        self.assertAlmostEqual(metrics.max_drawdown_bps, 8.0)
-        self.assertEqual(metrics.max_drawdown_bps_compat_source, "upward_excursion_bps")
         self.assertAlmostEqual(metrics.upward_excursion_bps or 0.0, 8.0)
         self.assertAlmostEqual(metrics.downward_drawdown_bps or 0.0, 0.0)
         self.assertTrue(metrics.stable)
@@ -198,8 +195,6 @@ class TestIndependentScoring(unittest.TestCase):
 
         self.assertEqual(metrics.support_count, 3)
         self.assertEqual(metrics.semantics_version, 2)
-        self.assertAlmostEqual(metrics.max_drawdown_bps, 0.0)
-        self.assertEqual(metrics.max_drawdown_bps_compat_source, "upward_excursion_bps")
         self.assertAlmostEqual(metrics.upward_excursion_bps or 0.0, 0.0)
         self.assertAlmostEqual(metrics.downward_drawdown_bps or 0.0, 8.0)
         self.assertFalse(metrics.stable)

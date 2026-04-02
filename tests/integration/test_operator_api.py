@@ -8379,6 +8379,13 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
                                 "decision_id": "decision_independent_1",
                                 "symbol": "BTC-USDT",
                                 "leg": "long",
+                                "score_stability_metrics": {
+                                    "support_count": 3,
+                                    "stable": True,
+                                    "upward_excursion_bps": 8.0,
+                                    "downward_drawdown_bps": 0.0,
+                                    "semantics_version": 2,
+                                },
                                 "execution_policy": {
                                     "policy_reason": "independent_entry_guarded_passive_first",
                                     "order_type_preference": "limit",
@@ -8398,6 +8405,8 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         snapshot = recovery["recovery"]["independent_recovery_snapshots"][0]
         self.assertEqual(snapshot["leg"], "long")
         self.assertEqual(snapshot["recovery_posture"], "pending_execution_attempts")
+        self.assertEqual(snapshot["state_version"], 2)
+        self.assertEqual(snapshot["score_stability_semantics_version"], 2)
         self.assertEqual(
             snapshot["active_execution_chain_ids"],
             ["independent:decision_independent_1:long:open"],

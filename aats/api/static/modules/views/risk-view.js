@@ -47,6 +47,9 @@ export function renderRiskSections(data, uiState = data.uiState || {}) {
   const positionModeContract = account.position_mode_contract || {};
   const derivativesLiveGuard = account.derivatives_live_guard || {};
   const currentDerivativesExposure = derivativesLiveGuard.current_derivatives_exposure || {};
+  const independentRecoverySnapshots = Array.isArray(recovery.independent_recovery_snapshots)
+    ? recovery.independent_recovery_snapshots.filter((item) => item && typeof item === "object")
+    : [];
   const replayParentPostmortem = replay.last_validation?.overlay_parent_exposure_summary || null;
   const replayTransitionPostmortem = replay.last_validation?.independent_transition_exception_summary || null;
   const replayRecentValidations = Array.isArray(replay.recent_validations) ? replay.recent_validations : [];
@@ -180,6 +183,14 @@ export function renderRiskSections(data, uiState = data.uiState || {}) {
         },
       ]),
     }),
+    riskIndependentRecoverySnapshots: independentRecoverySnapshots.length
+      ? surfaceCard({
+          title: "独立双书恢复快照",
+          kicker: "generation / semantics",
+          copy: "这里明确显示独立双书恢复快照的状态机版本和稳定性语义版本，避免排障时再靠代码语义猜当前快照解释口径。",
+          content: renderIndependentRecoverySnapshots(independentRecoverySnapshots),
+        })
+      : "",
     riskExitExecutionReview: exitExecutionItems.length
       ? surfaceCard({
           title: "退出任务人工处理",
@@ -592,6 +603,7 @@ export function renderRiskView(data, uiState = data.uiState || {}) {
             <div class="span-4">${sections.riskRecovery}</div>
             <div class="span-4">${sections.riskReconciliation}</div>
             <div class="span-4">${sections.riskMarginBuffer}</div>
+            ${sections.riskIndependentRecoverySnapshots ? `<div class="span-12">${sections.riskIndependentRecoverySnapshots}</div>` : ""}
             <div class="span-4">${sections.riskAccount}</div>
             <div class="span-4">${sections.riskExposure}</div>
             <div class="span-4">${sections.riskPositionMode}</div>
@@ -662,6 +674,31 @@ function renderDeferredPanelNotice(title, detail) {
       tone: "info",
     },
   ]);
+}
+
+function renderIndependentRecoverySnapshots(items = []) {
+  return responsiveTable(
+    ["腿 / 标的", "恢复姿态", "状态机版本", "稳定性语义版本", "执行链 / 阻断"],
+    items.map((item) => {
+      const activeChains = Array.isArray(item.active_execution_chain_ids) ? item.active_execution_chain_ids : [];
+      const unresolvedAttempts = Array.isArray(item.unresolved_attempt_ids) ? item.unresolved_attempt_ids : [];
+      const blockers = Array.isArray(item.recovery_blockers) ? item.recovery_blockers : [];
+      return [
+        `<div><strong>${escapeHtml(textOrFallback(item.symbol, "未知标的"))}</strong><div class="table-meta">${escapeHtml(readableState(item.leg || "unknown"))}</div></div>`,
+        `<div><strong>${escapeHtml(readableState(item.recovery_posture || "unknown"))}</strong><div class="table-meta">${escapeHtml(textOrFallback(item.strategy_sleeve_id, "当前没有 sleeve 标识"))}</div></div>`,
+        `<div><strong>${escapeHtml(formatNumber(item.state_version, 0, "待确认"))}</strong><div class="table-meta">状态机版本</div></div>`,
+        `<div><strong>${escapeHtml(formatNumber(item.score_stability_semantics_version, 0, "待确认"))}</strong><div class="table-meta">稳定性语义版本</div></div>`,
+        `<div><strong>${escapeHtml(activeChains[0] || "当前没有活跃执行链")}</strong><div class="table-meta">${escapeHtml(
+          blockers.length
+            ? `阻断 ${localizeList(blockers, "、")}`
+            : unresolvedAttempts.length
+            ? `待确认尝试 ${unresolvedAttempts.join(" / ")}`
+            : "当前没有额外恢复阻断"
+        )}</div></div>`,
+      ];
+    }),
+    "当前没有独立双书恢复快照。"
+  );
 }
 
 export function mergedExitExecutionReviewItems(recovery = {}) {

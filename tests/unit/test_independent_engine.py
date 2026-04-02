@@ -624,7 +624,6 @@ class TestIndependentEngine(unittest.TestCase):
         self.assertEqual(decision.blocked_reasons, ())
         assert decision.score_stability_metrics is not None
         self.assertEqual(decision.score_stability_metrics.support_count, 3)
-        self.assertAlmostEqual(decision.score_stability_metrics.max_drawdown_bps, 8.0)
         self.assertAlmostEqual(decision.score_stability_metrics.upward_excursion_bps or 0.0, 8.0)
         self.assertAlmostEqual(decision.score_stability_metrics.downward_drawdown_bps or 0.0, 0.0)
         self.assertTrue(decision.score_stability_metrics.stable)

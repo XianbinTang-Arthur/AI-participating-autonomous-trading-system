@@ -55,7 +55,9 @@ class AuditReplayQueryFacade:
         latest = persisted[-1].payload if persisted else (
             self.owner.runtime.replay_validation_history[-1] if self.owner.runtime.replay_validation_history else None
         )
+        latest = self._replay_validation_with_versions(latest)
         recent = [item.payload for item in persisted] if persisted else list(self.owner.runtime.replay_validation_history[-10:])
+        recent = [self._replay_validation_with_versions(item) for item in recent]
         latest_offset = self.owner.runtime.event_store.latest_replay_offset(
             projection_key="portfolio_replay",
             scope=self.owner.state_scope,
@@ -129,6 +131,7 @@ class AuditReplayQueryFacade:
             rows = [item.payload for item in reversed(persisted)]
         else:
             rows = list(reversed(self.owner.runtime.replay_validation_history))
+        rows = [self._replay_validation_with_versions(item) for item in rows]
         return self.owner._paginate_rows(rows, limit=limit, offset=offset, key="validations")
 
     def _replay_summary(
@@ -153,6 +156,10 @@ class AuditReplayQueryFacade:
             decision_ids={result.selected_decision_id} if result.selected_decision_id else None,
             limit=1,
         )
+        independent_version_summary = self.owner._independent_version_summary(
+            decision_ids={result.selected_decision_id} if result.selected_decision_id else None,
+            limit=1,
+        ) or {}
         total_issues = (
             portfolio_issue_count
             + decision_chain_issue_count
@@ -190,11 +197,34 @@ class AuditReplayQueryFacade:
             "divergence_density": round(result.divergence_count / replayed_event_count, 6),
             "chain_health_score": round(max(0.0, 1.0 - (total_issues / replayed_event_count)), 6),
             "healthy": result.divergence_count == 0,
+            "independent_state_version": independent_version_summary.get("state_version"),
+            "independent_score_stability_semantics_version": (
+                independent_version_summary.get("score_stability_semantics_version")
+            ),
             "independent_expected_vs_realized_summary": independent_expected_vs_realized_summary,
             "independent_adaptive_summary": independent_adaptive_summary,
             "independent_transition_exception_summary": independent_transition_exception_summary,
             "overlay_parent_exposure_summary": overlay_parent_exposure_summary,
         }
+
+    def _replay_validation_with_versions(self, payload: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not isinstance(payload, dict):
+            return None
+        row = dict(payload)
+        if row.get("independent_state_version") is not None and row.get("independent_score_stability_semantics_version") is not None:
+            return row
+        decision_id = str(row.get("decision_id") or "").strip()
+        if not decision_id:
+            return row
+        summary = self.owner._independent_version_summary(decision_ids={decision_id}, limit=1) or {}
+        if row.get("independent_state_version") is None and summary.get("state_version") is not None:
+            row["independent_state_version"] = int(summary["state_version"])
+        if (
+            row.get("independent_score_stability_semantics_version") is None
+            and summary.get("score_stability_semantics_version") is not None
+        ):
+            row["independent_score_stability_semantics_version"] = int(summary["score_stability_semantics_version"])
+        return row
 
     def _baseline_switch_history(
         self,
