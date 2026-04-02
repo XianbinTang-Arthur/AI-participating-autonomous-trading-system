@@ -38,6 +38,7 @@ export function renderRiskSections(data, uiState = data.uiState || {}) {
   const metrics = data.metrics || {};
   const health = data.health || {};
   const uiHints = data.uiHints || {};
+  const pendingPanels = uiHints.pendingPanels || {};
   const phase1Shadow = data.phase1Shadow || metrics.phase1_shadow || {};
   const trialGuard = data.trialGuard || data.runtime?.trial_guard || {};
   const marginBuffer = account.margin_buffer_overview || data.runtime?.margin_buffer_overview || {};
@@ -53,6 +54,9 @@ export function renderRiskSections(data, uiState = data.uiState || {}) {
   const exitExecutionActionHistory = Array.isArray(recovery.exit_execution_action_history)
     ? recovery.exit_execution_action_history.filter((item) => item && typeof item === "object")
     : [];
+  const exitExecutionActionHistoryPage = data.exitExecutionActionHistoryPage || {};
+  const replayPending = Boolean(pendingPanels.replayStatus) && !hasPanelPayload(replay);
+  const exitExecutionHistoryPending = Boolean(pendingPanels.exitExecutionActionHistoryPage) && !hasPanelPayload(exitExecutionActionHistoryPage);
   const exitExecutionHistoryFilters = normalizedExitExecutionHistoryFilters(uiState.exitExecutionHistory);
   const exitExecutionActionContext = {
     session: data.session || {},
@@ -162,8 +166,18 @@ export function renderRiskSections(data, uiState = data.uiState || {}) {
       content: summaryStrip([
         { label: "恢复状态", value: recoveryStatusLabel(recovery), meta: recovery.safe_to_trade ? "当前允许继续自动运行" : recovery.halted && recovery.resume_eligible ? "当前处于手动暂停，可在确认后恢复自动运行" : "当前不允许继续自动运行", tone: recovery.safe_to_trade ? "positive" : recovery.resume_eligible ? "warning" : recovery.review_required ? "warning" : "danger" },
         { label: "人工复核", value: reviewStatusLabel(recovery.review_required), meta: recovery.rebaseline_available ? "允许重新确认基线" : "当前不允许重建基线", tone: recovery.review_required ? "warning" : "positive" },
-        { label: "回放健康度", value: booleanWord(replay.healthy), meta: textOrFallback(replay.last_validation?.decision_id, "最近没有回放验证"), tone: replay.healthy ? "positive" : "warning" },
-        { label: "最近回放时间", value: formatMaybeTimestamp(replay.last_validation?.validated_at), meta: formatRelativeAge(replay.last_validation?.validated_at), tone: replay.last_validation?.validated_at ? "info" : "neutral" },
+        {
+          label: "回放健康度",
+          value: replayPending ? "正在载入" : booleanWord(replay.healthy),
+          meta: replayPending ? "最近一次回放验证会在首屏后补载。" : textOrFallback(replay.last_validation?.decision_id, "最近没有回放验证"),
+          tone: replayPending ? "info" : replay.healthy ? "positive" : "warning",
+        },
+        {
+          label: "最近回放时间",
+          value: replayPending ? "正在载入" : formatMaybeTimestamp(replay.last_validation?.validated_at),
+          meta: replayPending ? "先保证当前主任务、恢复状态和对账结论尽快可见。" : formatRelativeAge(replay.last_validation?.validated_at),
+          tone: replayPending ? "info" : replay.last_validation?.validated_at ? "info" : "neutral",
+        },
       ]),
     }),
     riskExitExecutionReview: exitExecutionItems.length
@@ -180,6 +194,27 @@ export function renderRiskSections(data, uiState = data.uiState || {}) {
           kicker: "operator action timeline",
           copy: "这里按时间顺序收口最近几次退出任务人工动作，方便直接回看每次处理后系统还卡在哪。",
           content: renderExitExecutionActionHistoryList(exitExecutionActionHistory, exitExecutionHistoryFilters),
+        })
+      : "",
+    riskExitExecutionWorkspace: surfaceCard({
+      title: "退出任务工作区",
+      kicker: "parent exit operator workspace",
+      copy: "这里承接 parent-exit 的长历史查询、分页和人工动作回看。先在这里收敛筛选条件，再决定是否继续 refresh、重试上限查询或安全取消。",
+      actions: `<div class="stack-actions table-actions--compact">${actionButton("进入独立工作台", "navigate-view", "exitExecution", "ghost")}</div>`,
+      content: exitExecutionHistoryPending
+        ? renderDeferredPanelNotice("退出任务长历史正在补充", "先显示当前裁决和恢复上下文，完整 parent-exit 历史会在首屏后自动补载。")
+        : renderExitExecutionWorkspace({
+            page: exitExecutionActionHistoryPage,
+            filters: exitExecutionHistoryFilters,
+          }),
+    }),
+    riskReplayLoading: replayPending
+      ? surfaceCard({
+          title: "回放与复盘",
+          kicker: "补充诊断",
+          copy: "最近回放验证会在首屏后继续补载，不阻塞当前任务、恢复资格和对账结论。",
+          classes: "is-muted",
+          content: renderDeferredPanelNotice("回放状态正在补充", "如果这块长期不返回，再继续排查 replay 校验或 event store 读取是否过慢。"),
         })
       : "",
     riskReplayPostmortem: replayParentPostmortem
@@ -502,11 +537,12 @@ export function renderRiskSections(data, uiState = data.uiState || {}) {
 
 export function renderRiskView(data, uiState = data.uiState || {}) {
   const sections = renderRiskSections(data, uiState);
-  const replaySectionMarkup = sections.riskReplayPostmortem || sections.riskReplayTransitionPostmortem || sections.riskReplayHistory
+  const replaySectionMarkup = sections.riskReplayLoading || sections.riskReplayPostmortem || sections.riskReplayTransitionPostmortem || sections.riskReplayHistory
     ? `
       <div class="panel-grid strategy-page-grid">
         ${sections.riskExitExecutionReview ? `<div class="span-12">${sections.riskExitExecutionReview}</div>` : ""}
         ${sections.riskExitExecutionTimeline ? `<div class="span-12">${sections.riskExitExecutionTimeline}</div>` : ""}
+        ${sections.riskReplayLoading ? `<div class="span-12">${sections.riskReplayLoading}</div>` : ""}
         ${sections.riskReplayPostmortem ? `<div class="${sections.riskReplayTransitionPostmortem ? "span-4" : "span-5"}">${sections.riskReplayPostmortem}</div>` : ""}
         ${sections.riskReplayTransitionPostmortem ? `<div class="${sections.riskReplayPostmortem ? "span-4" : "span-5"}">${sections.riskReplayTransitionPostmortem}</div>` : ""}
         <div class="${sections.riskReplayPostmortem || sections.riskReplayTransitionPostmortem ? sections.riskReplayPostmortem && sections.riskReplayTransitionPostmortem ? "span-4" : "span-7" : "span-12"}">${sections.riskBlockers}</div>
@@ -530,6 +566,7 @@ export function renderRiskView(data, uiState = data.uiState || {}) {
         <a class="section-nav__link" href="#risk-overview">当前任务</a>
         <a class="section-nav__link" href="#risk-recovery">恢复条件</a>
         <a class="section-nav__link" href="#risk-review">阻断与复盘</a>
+        <a class="section-nav__link" href="#risk-exit-workspace">退出任务工作区</a>
         <a class="section-nav__link" href="#risk-diagnostics">辅助诊断</a>
       </nav>
       ${renderRiskWorkspaceSection(
@@ -569,6 +606,17 @@ export function renderRiskView(data, uiState = data.uiState || {}) {
         replaySectionMarkup
       )}
       ${renderRiskWorkspaceSection(
+        "risk-exit-workspace",
+        "退出任务工作区",
+        "退出任务长历史与人工动作工作台",
+        "这里单独承接 parent-exit 的长历史、分页和精确筛选。卡片上的筛选条件会同步到这里，方便继续下钻和翻页查看。",
+        `
+          <div class="panel-grid strategy-page-grid">
+            <div class="span-12">${sections.riskExitExecutionWorkspace}</div>
+          </div>
+        `
+      )}
+      ${renderRiskWorkspaceSection(
         "risk-diagnostics",
         "辅助诊断",
         "运行诊断与守护状态",
@@ -601,7 +649,22 @@ function renderRiskWorkspaceSection(id, kicker, title, copy, content) {
   `;
 }
 
-function mergedExitExecutionReviewItems(recovery = {}) {
+function hasPanelPayload(payload) {
+  return Boolean(payload && typeof payload === "object" && Object.keys(payload).length);
+}
+
+function renderDeferredPanelNotice(title, detail) {
+  return summaryStrip([
+    {
+      label: "当前状态",
+      value: title,
+      meta: detail,
+      tone: "info",
+    },
+  ]);
+}
+
+export function mergedExitExecutionReviewItems(recovery = {}) {
   const merged = [];
   const mergedByKey = new Map();
   const append = (items, source) => {
@@ -716,36 +779,53 @@ function renderExitExecutionReviewActions(item, actionContext = {}) {
   return `<div class="stack-actions">${buttons.join("")}</div>`;
 }
 
-function renderExitExecutionActionHistoryList(items = [], filters = {}) {
+export function renderExitExecutionActionHistoryList(items = [], filters = {}) {
   const normalizedFilters = normalizedExitExecutionHistoryFilters(filters);
   const filteredCount = filterExitExecutionActionHistory(items, normalizedFilters).length;
   return `
     <div data-exit-history-root>
-      <div class="stack-actions table-actions--compact">
-        <label>
-          <span class="meta-copy">动作</span>
-          <select data-exit-history-filter="action">
-            ${renderExitExecutionActionFilterOptions(normalizedFilters.action)}
-          </select>
-        </label>
-        <label>
-          <span class="meta-copy">父任务</span>
-          <input
-            type="text"
-            data-exit-history-filter="parent"
-            value="${escapeHtml(normalizedFilters.parent)}"
-            placeholder="例如 exit_parent:btc_close"
-          />
-        </label>
-        <label>
-          <span class="meta-copy">操作人</span>
-          <input
-            type="text"
-            data-exit-history-filter="actor"
-            value="${escapeHtml(normalizedFilters.actor)}"
-            placeholder="例如 risk-admin"
-          />
-        </label>
+      ${renderExitExecutionActionHistoryFilters(normalizedFilters, { mode: "card" })}
+      ${items.length ? `
+        <div class="alert-list">
+          ${items.map((item) => renderExitExecutionActionHistoryItem(item, normalizedFilters)).join("")}
+        </div>
+      ` : ""}
+      <p class="meta-copy" data-exit-history-empty ${filteredCount > 0 ? "hidden" : ""}>当前筛选条件下没有退出任务处理记录。</p>
+    </div>
+  `;
+}
+
+export function renderExitExecutionWorkspace({ page = {}, filters = {} } = {}) {
+  const normalizedFilters = normalizedExitExecutionHistoryFilters(filters);
+  const items = Array.isArray(page.actions)
+    ? page.actions.filter((item) => item && typeof item === "object")
+    : [];
+  const limit = Number(page.limit || normalizedFilters.limit || 20);
+  const offset = Number(page.offset || normalizedFilters.offset || 0);
+  const totalAvailable = Number(page.total_available || 0);
+  const pageStart = totalAvailable > 0 ? offset + 1 : 0;
+  const pageEnd = totalAvailable > 0 ? offset + items.length : 0;
+  const hasMore = Boolean(page.has_more);
+  const hasPrev = offset > 0;
+  const filteredCount = filterExitExecutionActionHistory(items, normalizedFilters).length;
+  return `
+    <div data-exit-history-root data-exit-history-workspace>
+      ${renderExitExecutionActionHistoryFilters(normalizedFilters, { mode: "workspace" })}
+      <div class="panel-head">
+        <div>
+          <strong>完整时间线</strong>
+          <p class="meta-copy">当前显示 ${formatNumber(pageStart, 0)} - ${formatNumber(pageEnd, 0)} / ${formatNumber(totalAvailable, 0)} 条。</p>
+        </div>
+        <div class="stack-actions table-actions--compact">
+          ${actionButton("上一页", "paginate-exit-execution-history", "prev", "ghost", {
+            disabled: !hasPrev,
+            title: hasPrev ? "查看更早一页退出任务处理记录。" : "当前已经是第一页。",
+          })}
+          ${actionButton("下一页", "paginate-exit-execution-history", "next", "ghost", {
+            disabled: !hasMore,
+            title: hasMore ? "查看更晚一页退出任务处理记录。" : "当前没有更多记录。",
+          })}
+        </div>
       </div>
       ${items.length ? `
         <div class="alert-list">
@@ -753,6 +833,8 @@ function renderExitExecutionActionHistoryList(items = [], filters = {}) {
         </div>
       ` : ""}
       <p class="meta-copy" data-exit-history-empty ${filteredCount > 0 ? "hidden" : ""}>当前筛选条件下没有退出任务处理记录。</p>
+      ${!items.length ? `<p class="meta-copy">当前工作区还没有命中的退出任务处理记录。你可以放宽筛选条件，或翻页查看更多历史。</p>` : ""}
+      <p class="meta-copy">这里展示的是独立 operator 工作区列表；卡片上的筛选条件会同步到这里，点击“应用到完整列表”后会按当前条件重新拉取长历史。</p>
     </div>
   `;
 }
@@ -780,6 +862,7 @@ function renderExitExecutionActionHistoryItem(item, filters = {}) {
       data-parent-intent-id="${escapeHtml(textOrFallback(item.parent_intent_id, ""))}"
       data-actor-search="${escapeHtml(exitExecutionActionActorSearch(item))}"
       data-action-kind="${escapeHtml(textOrFallback(item.action, ""))}"
+      data-created-at-ms="${escapeHtml(String(exitExecutionActionCreatedAtMs(item)))}"
       ${visible ? "" : "hidden"}
     >
       <div class="panel-head">
@@ -795,6 +878,66 @@ function renderExitExecutionActionHistoryItem(item, filters = {}) {
   `;
 }
 
+function renderExitExecutionActionHistoryFilters(filters = {}, { mode = "card" } = {}) {
+  const normalizedFilters = normalizedExitExecutionHistoryFilters(filters);
+  const applyButton = actionButton(
+    mode === "workspace" ? "应用筛选" : "应用到完整列表",
+    "apply-exit-execution-history-workspace",
+    "",
+    "secondary",
+    {
+      title: mode === "workspace"
+        ? "按当前筛选条件重新拉取 parent-exit 长历史。"
+        : "把当前筛选条件同步到下方工作区列表，并按这些条件重新拉取完整历史。",
+    },
+  );
+  const resetButton = actionButton(
+    "重置筛选",
+    "reset-exit-execution-history-workspace",
+    "",
+    "ghost",
+    {
+      title: "清空 parent-exit 时间线筛选条件并回到第一页。",
+    },
+  );
+  return `
+    <div class="stack-actions table-actions--compact">
+      <label>
+        <span class="meta-copy">动作</span>
+        <select data-exit-history-filter="action">
+          ${renderExitExecutionActionFilterOptions(normalizedFilters.action)}
+        </select>
+      </label>
+      <label>
+        <span class="meta-copy">父任务</span>
+        <input
+          type="text"
+          data-exit-history-filter="parent"
+          value="${escapeHtml(normalizedFilters.parent)}"
+          placeholder="例如 exit_parent:btc_close"
+        />
+      </label>
+      <label>
+        <span class="meta-copy">操作人</span>
+        <input
+          type="text"
+          data-exit-history-filter="actor"
+          value="${escapeHtml(normalizedFilters.actor)}"
+          placeholder="例如 risk-admin"
+        />
+      </label>
+      <label>
+        <span class="meta-copy">时间窗口</span>
+        <select data-exit-history-filter="windowHours">
+          ${renderExitExecutionActionWindowOptions(normalizedFilters.windowHours)}
+        </select>
+      </label>
+      ${applyButton}
+      ${resetButton}
+    </div>
+  `;
+}
+
 function renderExitExecutionActionFilterOptions(selectedAction = "all") {
   return [
     ["all", "全部动作"],
@@ -806,32 +949,72 @@ function renderExitExecutionActionFilterOptions(selectedAction = "all") {
   )).join("");
 }
 
-function normalizedExitExecutionHistoryFilters(filters = {}) {
+function renderExitExecutionActionWindowOptions(selectedWindow = "all") {
+  return [
+    ["all", "全部时间"],
+    ["1", "最近 1 小时"],
+    ["6", "最近 6 小时"],
+    ["24", "最近 24 小时"],
+    ["168", "最近 7 天"],
+    ["720", "最近 30 天"],
+  ].map(([value, label]) => (
+    `<option value="${escapeHtml(value)}"${value === selectedWindow ? " selected" : ""}>${escapeHtml(label)}</option>`
+  )).join("");
+}
+
+export function normalizedExitExecutionHistoryFilters(filters = {}) {
   const action = String(filters?.action || "all").trim();
   const normalizedAction = ["all", "refresh_exchange_state", "retry_limit_lookup", "safe_cancel"].includes(action)
     ? action
+    : "all";
+  const windowHours = String(filters?.windowHours || "all").trim();
+  const normalizedWindowHours = ["all", "1", "6", "24", "168", "720"].includes(windowHours)
+    ? windowHours
     : "all";
   return {
     action: normalizedAction,
     parent: String(filters?.parent || "").trim(),
     actor: String(filters?.actor || "").trim(),
+    windowHours: normalizedWindowHours,
+    offset: Math.max(Number(filters?.offset || 0), 0),
+    limit: Math.max(Number(filters?.limit || 20), 1),
   };
 }
 
 function filterExitExecutionActionHistory(items = [], filters = {}) {
   const normalized = normalizedExitExecutionHistoryFilters(filters);
+  const thresholdMs = exitExecutionHistoryWindowThresholdMs(normalized.windowHours);
   return items.filter((item) => {
     const actionMatches = normalized.action === "all" || String(item?.action || "").trim() === normalized.action;
     const parentMatches = !normalized.parent
       || String(item?.parent_intent_id || "").toLowerCase().includes(normalized.parent.toLowerCase());
     const actorMatches = !normalized.actor
       || exitExecutionActionActorSearch(item).includes(normalized.actor.toLowerCase());
-    return actionMatches && parentMatches && actorMatches;
+    const createdAtMs = exitExecutionActionCreatedAtMs(item);
+    const windowMatches = thresholdMs === null || createdAtMs >= thresholdMs;
+    return actionMatches && parentMatches && actorMatches && windowMatches;
   });
 }
 
 function exitExecutionActionActorSearch(item) {
   return `${String(item?.actor_identity || "").trim()} ${String(item?.actor_role || "").trim()}`.trim().toLowerCase();
+}
+
+function exitExecutionActionCreatedAtMs(item) {
+  const parsed = Date.parse(String(item?.created_at || ""));
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function exitExecutionHistoryWindowThresholdMs(windowHours) {
+  const normalized = String(windowHours || "all").trim();
+  if (!normalized || normalized === "all") {
+    return null;
+  }
+  const hours = Number(normalized);
+  if (!Number.isFinite(hours) || hours <= 0) {
+    return null;
+  }
+  return Date.now() - (hours * 60 * 60 * 1000);
 }
 
 function exitExecutionActionDisabledReason(actionKind, actionContext = {}) {
@@ -902,6 +1085,12 @@ function exitExecutionReviewSummary(item) {
 
 function exitExecutionReviewReasonLabel(item) {
   const kind = String(item.kind || "").trim();
+  if (kind === "exit_execution_truth_pending") {
+    return "退出任务仍有未确认的子订单真相，当前不能继续续派";
+  }
+  if (kind === "exit_execution_missing_child_refs_for_parent") {
+    return "退出任务缺少可重建的子订单引用，需要人工确认后再继续处理";
+  }
   if (kind === "exit_execution_resume_limit_lookup_failed") {
     return "退出任务续派被交易所单笔上限查询阻断";
   }

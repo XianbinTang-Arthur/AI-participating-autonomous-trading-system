@@ -171,6 +171,52 @@ class TestStartupRecovery(unittest.TestCase):
             "exit_execution_resume_limit_lookup_failed",
         )
 
+    def test_startup_review_overlay_marks_truth_pending_parent_as_resume_blocked(self) -> None:
+        parent = create_exit_execution_intent_from_order_state(
+            _risk_reducing_filled_state(
+                client_order_id="startup_overlay_truth_pending_parent_1",
+                execution_chain_id="chain_startup_overlay_truth_pending_parent_1",
+            )
+        ).model_copy(
+            update={
+                "target_exit_quantity": Decimal("5"),
+                "aggregate_status": "WORKING",
+                "aggregated_filled_quantity": Decimal("2"),
+                "open_child_unknown_quantity": Decimal("1"),
+                "remaining_dispatchable_quantity": Decimal("2"),
+                "remaining_unresolved_quantity": Decimal("3"),
+                "reconciliation_state": "truth_pending",
+                "metadata": {
+                    "dispatch_template": {
+                        "execution_chain_id": "chain_startup_overlay_truth_pending_parent_1",
+                        "symbol": "BTC-USDT-SWAP",
+                    }
+                },
+            }
+        )
+        base_status = RecoveryStatus(status="recovered", recovery_state="normal_operation", safe_startup=True)
+
+        overlaid = apply_startup_exit_execution_review_overlay(
+            base_status=base_status,
+            parent_intents=[parent],
+        )
+
+        self.assertEqual(overlaid.recovery_state, "resume_blocked")
+        self.assertFalse(overlaid.review_required)
+        self.assertFalse(overlaid.safe_startup)
+        self.assertFalse(overlaid.safe_to_trade)
+        self.assertFalse(overlaid.resume_eligible)
+        self.assertFalse(overlaid.rebaseline_available)
+        self.assertIn("exit_execution_truth_pending", overlaid.resume_blocked_reasons)
+        self.assertIn(
+            "startup_exit_execution_overlay_count:1",
+            overlaid.notes,
+        )
+        self.assertEqual(
+            overlaid.unknown_state_details[0]["kind"],
+            "exit_execution_truth_pending",
+        )
+
     def test_startup_review_snapshot_persists_auditable_state_snapshot(self) -> None:
         settings = AATSSettings.model_validate(
             {

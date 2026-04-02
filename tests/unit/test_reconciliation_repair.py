@@ -301,6 +301,89 @@ class TestReconciliationRepair(unittest.IsolatedAsyncioTestCase):
             [str(detail.get("kind")) for detail in report.unknown_state_details],
         )
 
+    async def test_reconciliation_surfaces_truth_pending_parent_before_review_threshold(self) -> None:
+        now = datetime.now(timezone.utc)
+        initial_settings = AATSSettings.model_validate(
+            {
+                "execution_unknown_submit_review_after_seconds": 300.0,
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+            }
+        )
+        event_store = InMemoryEventStore()
+        execution_repo = InMemoryExecutionRepository()
+        exit_repo = InMemoryExitExecutionRepository()
+        unknown_state = OrderState(
+            decision_id="decision_recon_truth_pending_parent",
+            execution_chain_id="chain_recon_truth_pending_parent",
+            intent_id="intent_recon_truth_pending_parent",
+            symbol="BTC-USDT-SWAP",
+            client_order_id="clord_recon_truth_pending_parent",
+            venue="OKX",
+            exchange_order_id=None,
+            status="SUBMITTED",
+            exchange_status="live",
+            submitted_ts=now,
+            last_update_ts=now,
+            requested_qty=Decimal("2"),
+            filled_qty=Decimal("0"),
+            remaining_qty=Decimal("2"),
+            average_fill_price=None,
+            fees=Decimal("0"),
+            reduce_only=True,
+            close_only=True,
+            product_type="derivatives",
+            margin_mode="cross",
+            position_mode="long_short_mode",
+            pos_side="long",
+            exposure_side="long",
+            execution_action="exit",
+            leg_action="close",
+            position_intent="close_long",
+            execution_error="submission_unknown_check_exchange:OKXRequestError",
+        )
+        execution_repo.save_order_state(unknown_state)
+        parent = create_exit_execution_intent_from_order_state(unknown_state)
+        exit_repo.save_exit_execution_intent(parent)
+        exit_repo.save_child_exit_order_ref(
+            child_exit_order_ref_from_order_state(
+                parent_intent_id=parent.parent_intent_id,
+                order_state=unknown_state,
+                settings=initial_settings,
+            )
+        )
+
+        service = ReconciliationService(
+            settings=initial_settings,
+            bus=InMemoryEventBus(event_store=event_store, persistence_mode="strict"),
+            fetcher=ExchangeStateFetcher(account_service=None),
+            comparator=StateComparator(),
+            repair_service=ReconciliationRepairService(),
+            reconciliation_repo=InMemoryReconciliationRepository(),
+            execution_repo=execution_repo,
+            portfolio_repo=InMemoryPortfolioRepository(),
+            event_store=event_store,
+            reconstruction_service=PortfolioReconstructionService(
+                initial_usdt_balance=10_000.0,
+                snapshot_builder=PortfolioSnapshotBuilder(pnl_calculator=PortfolioPnLCalculator()),
+            ),
+            price_provider=lambda _symbol: 0.0,
+            exit_execution_repo=exit_repo,
+            bootstrap_portfolio_from_exchange=False,
+            metrics=None,
+        )
+
+        report = await service.validate_now(reason="truth_pending_parent_visible")
+
+        self.assertFalse(report.review_required)
+        self.assertIn(
+            "exit_execution_truth_pending",
+            [str(detail.get("kind")) for detail in report.unknown_state_details],
+        )
+        self.assertIn("exit_execution_truth_pending", report.mismatch_categories)
+
     async def test_reconciliation_surfaces_parent_resume_template_missing_for_partial_exit(self) -> None:
         now = datetime.now(timezone.utc)
         settings = AATSSettings.model_validate(
@@ -499,6 +582,102 @@ class TestReconciliationRepair(unittest.IsolatedAsyncioTestCase):
             [str(detail.get("kind")) for detail in report.unknown_state_details],
         )
         self.assertIn("exit_execution_resume_limit_lookup_failed", report.mismatch_categories)
+
+    async def test_reconciliation_surfaces_childless_parent_issue(self) -> None:
+        now = datetime.now(timezone.utc)
+        settings = AATSSettings.model_validate(
+            {
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+            }
+        )
+        event_store = InMemoryEventStore()
+        execution_repo = InMemoryExecutionRepository()
+        exit_repo = InMemoryExitExecutionRepository()
+        partial_state = OrderState(
+            decision_id="decision_childless_parent_issue",
+            execution_chain_id="chain_childless_parent_issue",
+            intent_id="intent_childless_parent_issue",
+            symbol="BTC-USDT-SWAP",
+            client_order_id="clord_childless_parent_issue",
+            venue="OKX",
+            exchange_order_id="ord_childless_parent_issue",
+            status="FILLED",
+            exchange_status="filled",
+            submitted_ts=now,
+            last_update_ts=now,
+            requested_qty=Decimal("2"),
+            filled_qty=Decimal("2"),
+            remaining_qty=Decimal("0"),
+            average_fill_price=Decimal("80000"),
+            fees=Decimal("0"),
+            reduce_only=True,
+            close_only=True,
+            product_type="derivatives",
+            margin_mode="cross",
+            position_mode="long_short_mode",
+            pos_side="long",
+            exposure_side="long",
+            execution_action="exit",
+            leg_action="close",
+            position_intent="close_long",
+        )
+        parent = create_exit_execution_intent_from_order_state(partial_state).model_copy(
+            update={
+                "target_exit_quantity": Decimal("5"),
+                "aggregate_status": "PARTIALLY_FILLED",
+                "aggregated_filled_quantity": Decimal("2"),
+                "remaining_dispatchable_quantity": Decimal("3"),
+                "remaining_unresolved_quantity": Decimal("3"),
+                "metadata": {
+                    "dispatch_template": {
+                        "intent_id": "intent_childless_parent_issue",
+                        "execution_chain_id": "chain_childless_parent_issue",
+                        "decision_id": "decision_childless_parent_issue",
+                        "symbol": "BTC-USDT-SWAP",
+                    }
+                },
+            }
+        )
+        exit_repo.save_exit_execution_intent(parent)
+
+        service = ReconciliationService(
+            settings=settings,
+            bus=InMemoryEventBus(event_store=event_store, persistence_mode="strict"),
+            fetcher=ExchangeStateFetcher(account_service=None),
+            comparator=StateComparator(),
+            repair_service=ReconciliationRepairService(),
+            reconciliation_repo=InMemoryReconciliationRepository(),
+            execution_repo=execution_repo,
+            portfolio_repo=InMemoryPortfolioRepository(),
+            event_store=event_store,
+            reconstruction_service=PortfolioReconstructionService(
+                initial_usdt_balance=10_000.0,
+                snapshot_builder=PortfolioSnapshotBuilder(pnl_calculator=PortfolioPnLCalculator()),
+            ),
+            price_provider=lambda _symbol: 0.0,
+            exit_execution_repo=exit_repo,
+            bootstrap_portfolio_from_exchange=False,
+            metrics=None,
+        )
+
+        report = await service.validate_now(reason="childless_parent_visible")
+
+        refreshed_parent = exit_repo.get_exit_execution_intent(parent.parent_intent_id)
+        self.assertIsNotNone(refreshed_parent)
+        assert refreshed_parent is not None
+        self.assertEqual(
+            refreshed_parent.metadata["resume_issue"]["kind"],
+            "missing_child_refs_for_parent",
+        )
+        self.assertTrue(report.review_required)
+        self.assertIn(
+            "exit_execution_missing_child_refs_for_parent",
+            [str(detail.get("kind")) for detail in report.unknown_state_details],
+        )
+        self.assertIn("exit_execution_missing_child_refs_for_parent", report.mismatch_categories)
 
 
 if __name__ == "__main__":

@@ -1083,8 +1083,8 @@ function directionalShortConfigRows(config = {}) {
     [
       "strategy_hedge_independent_min_confirm_ticks / strategy_hedge_independent_effective_score_drawdown_bps / strategy_hedge_independent_min_liquidity_quality",
       `${formatNumber(config?.hedge_independent_min_confirm_ticks, 0, "待确认")} / ${formatNumber(config?.hedge_independent_effective_score_drawdown_bps, 2, "待确认")} / ${formatNumber(config?.hedge_independent_min_liquidity_quality, 2, "待确认")}`,
-      "确认次数 / 回撤阈值 / 流动性门槛",
-      "独立双书开仓前，会要求当前机会具备足够确认次数、分数回撤仍受控且流动性质量达标；这里展示的是当前真正生效的回撤阈值。",
+      "确认次数 / 向下回撤幅度 / 流动性门槛",
+      "独立双书会同时观察分数相对近期低点的上行抬升幅度，以及相对近期高点的向下回撤幅度；当前真正参与稳定性门控的是向下回撤幅度阈值。",
     ],
     [
       "strategy_hedge_independent_require_execution_health_ok",

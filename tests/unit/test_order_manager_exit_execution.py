@@ -228,6 +228,19 @@ class _SplitFillAdapter(_SubmittedExitAdapter):
         )
 
 
+class _FallbackSplitManager(OrderManager):
+    async def _execute_serial_exit_split(  # type: ignore[override]
+        self,
+        *,
+        intent: OrderIntent,
+        client_order_id: str,
+        leg_intent,
+        split_limit: Decimal,
+        start_slice_index: int = 1,
+    ):
+        return None
+
+
 class TestOrderManagerExitExecution(unittest.IsolatedAsyncioTestCase):
     async def test_risk_reducing_submit_creates_parent_exit_intent(self) -> None:
         execution_repo = InMemoryExecutionRepository()
@@ -280,6 +293,46 @@ class TestOrderManagerExitExecution(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(parent.aggregate_status, "WORKING")
         self.assertEqual(parent.remaining_dispatchable_quantity, Decimal("0"))
         self.assertEqual(parent.child_order_ids, ["clord_exit_parent_create"])
+
+    async def test_execute_submit_intent_falls_back_to_persisted_state_when_serial_split_returns_none(self) -> None:
+        execution_repo = InMemoryExecutionRepository()
+        exit_repo = InMemoryExitExecutionRepository()
+        manager = _FallbackSplitManager(
+            settings=AATSSettings.model_validate({}),
+            bus=InMemoryEventBus(event_store=InMemoryEventStore(), persistence_mode="strict"),
+            adapter=_SplitFillAdapter(),
+            execution_repo=execution_repo,
+            exit_execution_repo=exit_repo,
+            kill_switch=KillSwitch(),
+        )
+        intent = OrderIntent(
+            intent_id="intent_exit_split_fallback",
+            execution_chain_id="chain_exit_split_fallback",
+            decision_id="decision_exit_split_fallback",
+            symbol="BTC-USDT-SWAP",
+            side="sell",
+            quantity=Decimal("5"),
+            execution_style="exchange",
+            order_type="market",
+            urgency="medium",
+            time_in_force="IOC",
+            reduce_only=True,
+            close_only=True,
+            position_mode="long_short_mode",
+            pos_side="long",
+            execution_action="exit",
+            leg_action="close",
+            position_intent="close_long",
+            product_type="derivatives",
+            margin_mode="cross",
+            exposure_side="long",
+            idempotency_key="clord_exit_split_fallback",
+        )
+
+        state = await manager.process_submit_command(intent=intent)
+
+        self.assertEqual(state.client_order_id, "clord_exit_split_fallback")
+        self.assertEqual(state.status, "SUBMITTING")
 
     async def test_sync_recomputes_parent_exit_intent_after_child_fill(self) -> None:
         execution_repo = InMemoryExecutionRepository()

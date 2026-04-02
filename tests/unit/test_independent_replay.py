@@ -4,11 +4,12 @@ from datetime import datetime, timedelta, timezone
 import unittest
 from decimal import Decimal
 
-from aats.schemas.strategy_runtime import StrategyBookRuntimeState, StrategySleeveIntent
+from aats.schemas.strategy_runtime import PortfolioAllocationDecision, StrategyBookRuntimeState, StrategySleeveIntent
 from aats.services.strategy_engines.independent.adaptive import threshold_snapshot
 from aats.services.strategy_engines.independent.health import evaluate_leg_health
 from aats.services.strategy_engines.independent.models import IndependentBookDecision
 from aats.services.strategy_engines.independent.replay import (
+    _decision_snapshot_from_sources,
     _normalized_threshold_snapshot_value,
     replay_snapshot_from_decision,
 )
@@ -154,6 +155,55 @@ class TestIndependentReplay(unittest.TestCase):
         assert normalized is not None
         self.assertEqual(normalized["score_drawdown_bps"], 6.0)
         self.assertEqual(normalized["effective_score_drawdown_bps"], 6.0)
+
+    def test_decision_snapshot_prefers_upward_and_downward_drawdown_fields(self) -> None:
+        decision = PortfolioAllocationDecision(
+            decision_id="decision_replay_score_metrics",
+            symbol="BTC-USDT-SWAP",
+            product_type="derivatives",
+            margin_mode="cross",
+        )
+        sleeve_intent = StrategySleeveIntent(
+            decision_id=decision.decision_id,
+            family="independent",
+            strategy_sleeve_id="sleeve_replay_score_metrics",
+            state="candidate",
+            symbol="BTC-USDT-SWAP",
+            product_type="derivatives",
+            margin_mode="cross",
+            inventory_policy="paired_inventory",
+            route_action="override_target",
+            family_action="hold_family",
+            metrics={
+                "long_score_support_count": 3,
+                "long_score_stable": True,
+                "long_score_stability_max_drawdown_bps": 8.0,
+                "long_score_stability_max_drawdown_bps_compat_source": "upward_excursion_bps",
+                "long_score_stability_upward_excursion_bps": 8.0,
+                "long_score_stability_downward_drawdown_bps": 0.0,
+                "long_score_stability_source": "recent_target_history",
+            },
+        )
+        runtime_state = StrategyBookRuntimeState(
+            leg="long",
+            current_qty=Decimal("0"),
+            target_qty=Decimal("0.01"),
+        )
+
+        snapshot = _decision_snapshot_from_sources(
+            decision=decision,
+            sleeve_intent=sleeve_intent,
+            leg="long",
+            runtime_state=runtime_state,
+        )
+
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        assert snapshot.score_stability_metrics is not None
+        self.assertEqual(snapshot.score_stability_metrics["upward_excursion_bps"], 8.0)
+        self.assertEqual(snapshot.score_stability_metrics["downward_drawdown_bps"], 0.0)
+        self.assertNotIn("max_drawdown_bps", snapshot.score_stability_metrics)
+        self.assertNotIn("max_drawdown_bps_compat_source", snapshot.score_stability_metrics)
 
 
 if __name__ == "__main__":

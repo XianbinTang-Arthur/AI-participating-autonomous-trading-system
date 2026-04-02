@@ -339,8 +339,11 @@ def record_resume_issue(
     return parent.model_copy(update={"metadata": metadata, "updated_at": utc_now()})
 
 
-def clear_resume_issue(parent: ExitExecutionIntent) -> ExitExecutionIntent:
+def clear_resume_issue(parent: ExitExecutionIntent, *, kind: str | None = None) -> ExitExecutionIntent:
+    issue_kind = resume_issue_kind(parent)
     if "resume_issue" not in parent.metadata:
+        return parent
+    if kind is not None and issue_kind != kind:
         return parent
     metadata = dict(parent.metadata)
     metadata.pop("resume_issue", None)
@@ -354,12 +357,14 @@ def resume_block_reason(parent: ExitExecutionIntent) -> str | None:
         return "cancel_requested"
     if parent.operator_review_required or parent.aggregate_status == "REVIEW_REQUIRED":
         return "review_required"
-    if Decimal(parent.remaining_dispatchable_quantity) <= _EPSILON:
-        return "no_remaining_dispatchable_quantity"
+    if resume_issue_kind(parent) == "missing_child_refs_for_parent":
+        return "missing_child_refs_for_parent"
     if Decimal(parent.open_child_unknown_quantity) > _EPSILON:
         return "unknown_child_truth_pending"
     if Decimal(parent.open_child_working_quantity) > _EPSILON:
         return "working_child_outstanding"
+    if Decimal(parent.remaining_dispatchable_quantity) <= _EPSILON:
+        return "no_remaining_dispatchable_quantity"
     if not has_dispatch_template(parent):
         return "dispatch_template_missing"
     return None
@@ -382,6 +387,25 @@ def exit_execution_review_items(parent_intents: list[ExitExecutionIntent]) -> li
                     kind="exit_execution_parent_review_required",
                     resume_block_reason=block_reason or "review_required",
                     review_required=True,
+                )
+            )
+            continue
+        if block_reason == "unknown_child_truth_pending" or parent.reconciliation_state == "truth_pending":
+            items.append(
+                _parent_review_detail(
+                    parent=parent,
+                    kind="exit_execution_truth_pending",
+                    resume_block_reason=block_reason or "unknown_child_truth_pending",
+                    review_required=False,
+                )
+            )
+            continue
+        if resume_issue_kind(parent) == "missing_child_refs_for_parent":
+            items.append(
+                _parent_resume_issue_detail(
+                    parent=parent,
+                    kind="exit_execution_missing_child_refs_for_parent",
+                    resume_block_reason="missing_child_refs_for_parent",
                 )
             )
             continue
@@ -448,6 +472,69 @@ def augment_reconciliation_report_with_exit_execution(
             )
             overlay_mismatch_categories.append("exit_execution_parent_review_required")
             overlay_mismatch_reasons.append(str(parent.operator_review_reason or "exit_execution_parent_review_required"))
+            overlay_safety_impacts.append("operator_review_required_before_resuming_exit_execution")
+            if recommended_operator_action in {None, "", "review_unknown_write_and_refresh_exchange_state"}:
+                recommended_operator_action = "review_exit_execution_parent_and_refresh_exchange_state"
+            continue
+        if block_reason == "unknown_child_truth_pending" or parent.reconciliation_state == "truth_pending":
+            detail = _parent_review_detail(
+                parent=parent,
+                kind="exit_execution_truth_pending",
+                resume_block_reason=block_reason or "unknown_child_truth_pending",
+                review_required=False,
+            )
+            overlay_details.append(detail)
+            overlay_findings.append(
+                ReconciliationFinding(
+                    reconciliation_id=report.reconciliation_id,
+                    scope_kind="order",
+                    scope_ref=parent.parent_intent_id,
+                    product_type=report.product_type,
+                    margin_mode=report.margin_mode,
+                    primary_symbol=parent.symbol,
+                    layer="structural",
+                    finding_type="exit_execution_truth_pending",
+                    severity_class="soft",
+                    structural=True,
+                    review_required=False,
+                    blocks_resume=True,
+                    reason_code=block_reason or "unknown_child_truth_pending",
+                    details_json=detail,
+                )
+            )
+            overlay_mismatch_categories.append("exit_execution_truth_pending")
+            overlay_mismatch_reasons.append(block_reason or "unknown_child_truth_pending")
+            overlay_safety_impacts.append("resume_blocked_until_exit_execution_truth_converges")
+            if recommended_operator_action in {None, "", "review_unknown_write_and_refresh_exchange_state"}:
+                recommended_operator_action = "review_exit_execution_parent_and_refresh_exchange_state"
+            continue
+        if resume_issue_kind(parent) == "missing_child_refs_for_parent":
+            detail = _parent_resume_issue_detail(
+                parent=parent,
+                kind="exit_execution_missing_child_refs_for_parent",
+                resume_block_reason="missing_child_refs_for_parent",
+            )
+            overlay_details.append(detail)
+            overlay_findings.append(
+                ReconciliationFinding(
+                    reconciliation_id=report.reconciliation_id,
+                    scope_kind="order",
+                    scope_ref=parent.parent_intent_id,
+                    product_type=report.product_type,
+                    margin_mode=report.margin_mode,
+                    primary_symbol=parent.symbol,
+                    layer="structural",
+                    finding_type="exit_execution_missing_child_refs_for_parent",
+                    severity_class="review",
+                    structural=True,
+                    review_required=True,
+                    blocks_resume=True,
+                    reason_code="exit_execution_missing_child_refs_for_parent",
+                    details_json=detail,
+                )
+            )
+            overlay_mismatch_categories.append("exit_execution_missing_child_refs_for_parent")
+            overlay_mismatch_reasons.append("exit_execution_missing_child_refs_for_parent")
             overlay_safety_impacts.append("operator_review_required_before_resuming_exit_execution")
             if recommended_operator_action in {None, "", "review_unknown_write_and_refresh_exchange_state"}:
                 recommended_operator_action = "review_exit_execution_parent_and_refresh_exchange_state"
@@ -594,9 +681,21 @@ def refresh_exit_execution_intents(
             exit_execution_repo=exit_execution_repo,
         )
         if not child_refs:
+            if parent.aggregate_status in _TERMINAL_PARENT_STATUSES:
+                continue
+            childless_parent = (
+                parent
+                if resume_issue_kind(parent) == "missing_child_refs_for_parent"
+                else record_resume_issue(
+                    parent,
+                    kind="missing_child_refs_for_parent",
+                    error="child_refs_not_reconstructable",
+                )
+            )
+            refreshed.append(exit_execution_repo.save_exit_execution_intent(childless_parent))
             continue
         recomputed = recompute_exit_execution_intent(
-            parent_intent=parent,
+            parent_intent=clear_resume_issue(parent, kind="missing_child_refs_for_parent"),
             child_refs=child_refs,
         )
         refreshed.append(exit_execution_repo.save_exit_execution_intent(recomputed))
@@ -728,6 +827,7 @@ def _parent_review_detail(
         "open_child_unknown_quantity": parent.open_child_unknown_quantity,
         "remaining_dispatchable_quantity": parent.remaining_dispatchable_quantity,
         "remaining_unresolved_quantity": parent.remaining_unresolved_quantity,
+        "blocks_resume": True,
         "operator_review_required": review_required,
         "operator_review_reason": parent.operator_review_reason,
         "cancel_requested": parent.cancel_requested,

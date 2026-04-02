@@ -42,7 +42,9 @@ class RecoveryPostureEvaluator:
         "account_snapshot_refresh_failed",
         "strategy_bundle_recovery_in_progress",
         "strategy_bundle_recovery_requires_review",
+        "exit_execution_truth_pending",
         "exit_execution_parent_review_required",
+        "exit_execution_missing_child_refs_for_parent",
         "exit_execution_resume_template_missing",
         "exit_execution_resume_limit_lookup_failed",
     }

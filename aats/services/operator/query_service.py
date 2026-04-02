@@ -251,30 +251,83 @@ class OperatorQueryService:
         return enriched
 
     def _exit_execution_action_history(self, *, limit: int = 12) -> list[dict[str, Any]]:
+        return self._exit_execution_action_history_rows()[: max(int(limit), 1)]
+
+    def _exit_execution_action_history_rows(
+        self,
+        *,
+        parent_intent_id: str | None = None,
+        action: str | None = None,
+        actor: str | None = None,
+        window_hours: int | None = None,
+    ) -> list[dict[str, Any]]:
         actions = self._cached(
             "operator_action_events",
             lambda: self.runtime.event_store.by_topic(topics.OPERATOR_ACTIONS),
         )
         rows: list[tuple[datetime, dict[str, Any]]] = []
-        normalized_limit = max(int(limit), 1)
+        normalized_parent_intent_id = str(parent_intent_id or "").strip().lower()
+        normalized_action = self._normalize_exit_execution_action_name(action)
+        normalized_actor = str(actor or "").strip().lower()
+        cutoff = None
+        if window_hours is not None:
+            normalized_window_hours = max(int(window_hours), 1)
+            cutoff = utc_now() - timedelta(hours=normalized_window_hours)
         for envelope in actions:
             payload = self.payload(envelope)
             if payload is None:
                 continue
-            action = str(payload.get("action") or "").strip()
-            if action not in {"refresh_exchange_state", "retry_limit_lookup", "safe_cancel"}:
+            payload_action = self._normalize_exit_execution_action_name(payload.get("action"))
+            if payload_action is None:
+                continue
+            if normalized_action is not None and payload_action != normalized_action:
                 continue
             context = self._exit_execution_operator_action_context(payload)
             if context is None or not self._exit_execution_action_context_in_scope(context):
                 continue
-            rows.append(
-                (
-                    self._exit_execution_operator_action_timestamp(payload=payload, envelope=envelope),
-                    self._exit_execution_operator_action_view(payload, context=context, envelope=envelope),
-                )
-            )
+            timestamp = self._exit_execution_operator_action_timestamp(payload=payload, envelope=envelope)
+            if cutoff is not None and timestamp < cutoff:
+                continue
+            row = self._exit_execution_operator_action_view(payload, context=context, envelope=envelope)
+            row_parent_intent_id = str(row.get("parent_intent_id") or "").strip().lower()
+            if normalized_parent_intent_id and normalized_parent_intent_id not in row_parent_intent_id:
+                continue
+            actor_search = self._exit_execution_operator_action_actor_search(row)
+            if normalized_actor and normalized_actor not in actor_search:
+                continue
+            rows.append((timestamp, row))
         rows.sort(key=lambda item: item[0], reverse=True)
-        return [row for _, row in rows[:normalized_limit]]
+        return [row for _, row in rows]
+
+    def exit_execution_action_history(
+        self,
+        *,
+        limit: int,
+        offset: int,
+        parent_intent_id: str | None = None,
+        action: str | None = None,
+        actor: str | None = None,
+        window_hours: int | None = None,
+    ) -> dict[str, Any]:
+        rows = self._exit_execution_action_history_rows(
+            parent_intent_id=parent_intent_id,
+            action=action,
+            actor=actor,
+            window_hours=window_hours,
+        )
+        payload = self._paginate_rows(
+            rows,
+            limit=max(int(limit), 1),
+            offset=max(int(offset), 0),
+            key="actions",
+        )
+        payload["filters"] = {
+            "parent_intent_id": str(parent_intent_id or "").strip() or None,
+            "action": self._normalize_exit_execution_action_name(action),
+            "actor": str(actor or "").strip() or None,
+            "window_hours": None if window_hours is None else max(int(window_hours), 1),
+        }
+        return payload
 
     def _exit_execution_current_blocker(self, item: dict[str, Any]) -> dict[str, Any] | None:
         candidates: list[tuple[str, str]] = []
@@ -311,11 +364,14 @@ class OperatorQueryService:
             "child_unknown_truth_requires_review": "仍有子订单真相未确认，需要先人工复核。",
             "child_risk_reducing_invariant_breached": "子订单已经破坏减风险不变式，必须先人工复核。",
             "unknown_child_truth_pending": "仍有子订单状态未确认，系统暂不继续续派。",
+            "missing_child_refs_for_parent": "父退出任务缺少可重建的子订单引用，当前不能自动继续续派。",
             "working_child_outstanding": "仍有子订单在途，系统会等当前子订单先收敛。",
             "dispatch_template_missing": "退出任务缺少续派模板，当前不能自动继续派发。",
             "cancel_requested": "父退出任务已经请求安全取消，系统不会继续续派。",
             "no_remaining_dispatchable_quantity": "当前没有可继续续派的剩余数量。",
             "parent_terminal": "父退出任务已经进入终态，不会继续续派。",
+            "exit_execution_truth_pending": "退出任务仍有未确认的子订单真相，当前不能继续续派。",
+            "exit_execution_missing_child_refs_for_parent": "退出任务缺少可重建的子订单引用，需要人工确认后再继续处理。",
             "exit_execution_resume_limit_lookup_failed": "交易所单笔上限查询仍未恢复，当前不能继续续派。",
             "exit_execution_parent_review_required": "退出任务仍有未自动收敛的子订单状态，需要人工确认。",
             "exit_execution_resume_template_missing": "退出任务缺少续派模板，当前不能自动继续派发。",
@@ -342,33 +398,15 @@ class OperatorQueryService:
         symbol: str | None = None,
         limit: int = 3,
     ) -> list[dict[str, Any]]:
-        actions = self._cached(
-            "operator_action_events",
-            lambda: self.runtime.event_store.by_topic(topics.OPERATOR_ACTIONS),
-        )
-        rows: list[tuple[datetime, dict[str, Any]]] = []
-        normalized_limit = max(int(limit), 1)
-        for envelope in actions:
-            payload = self.payload(envelope)
-            if payload is None:
-                continue
-            action = str(payload.get("action") or "").strip()
-            if action not in {"refresh_exchange_state", "retry_limit_lookup", "safe_cancel"}:
-                continue
-            if not self._operator_action_matches_exit_execution_parent(
-                payload=payload,
-                parent_intent_id=parent_intent_id,
-                symbol=symbol,
-            ):
-                continue
-            rows.append(
-                (
-                    self._exit_execution_operator_action_timestamp(payload=payload, envelope=envelope),
-                    self._exit_execution_operator_action_view(payload, envelope=envelope),
-                )
-            )
-        rows.sort(key=lambda item: item[0], reverse=True)
-        return [row for _, row in rows[:normalized_limit]]
+        rows = self._exit_execution_action_history_rows(parent_intent_id=parent_intent_id)
+        if symbol:
+            normalized_symbol = str(symbol).strip().lower()
+            rows = [
+                row
+                for row in rows
+                if str(row.get("symbol") or "").strip().lower() == normalized_symbol
+            ]
+        return rows[: max(int(limit), 1)]
 
     def _exit_execution_operator_action_view(
         self,
@@ -513,6 +551,20 @@ class OperatorQueryService:
         if isinstance(parent_review_after, dict):
             return self._normalize_exit_execution_blocker_payload(parent_review_after.get("current_blocker"))
         return None
+
+    @staticmethod
+    def _normalize_exit_execution_action_name(value: Any) -> str | None:
+        normalized = str(value or "").strip()
+        if normalized in {"refresh_exchange_state", "retry_limit_lookup", "safe_cancel"}:
+            return normalized
+        return None
+
+    @staticmethod
+    def _exit_execution_operator_action_actor_search(row: dict[str, Any]) -> str:
+        return (
+            f"{str(row.get('actor_identity') or '').strip()} "
+            f"{str(row.get('actor_role') or '').strip()}"
+        ).strip().lower()
 
     def _exit_execution_review_item_for_parent(
         self,

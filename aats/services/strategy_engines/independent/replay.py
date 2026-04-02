@@ -394,7 +394,6 @@ def _decision_snapshot_from_sources(
             {
                 "support_count": metrics.get(f"{leg}_score_support_count"),
                 "stable": metrics.get(f"{leg}_score_stable"),
-                "max_drawdown_bps": metrics.get(f"{leg}_score_stability_max_drawdown_bps"),
                 "upward_excursion_bps": metrics.get(f"{leg}_score_stability_upward_excursion_bps"),
                 "downward_drawdown_bps": metrics.get(f"{leg}_score_stability_downward_drawdown_bps"),
                 "source": metrics.get(f"{leg}_score_stability_source"),

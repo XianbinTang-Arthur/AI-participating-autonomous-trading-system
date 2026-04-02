@@ -374,6 +374,26 @@ async def safe_cancel_exit_execution(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@router.get("/system/exit-execution/action-history")
+async def exit_execution_action_history(
+    request: Request,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0, le=5000),
+    parent_intent_id: str | None = Query(default=None),
+    action: Literal["refresh_exchange_state", "retry_limit_lookup", "safe_cancel"] | None = Query(default=None),
+    actor: str | None = Query(default=None),
+    window_hours: int | None = Query(default=None, ge=1, le=24 * 30),
+) -> dict[str, Any]:
+    return _query(request).exit_execution_action_history(
+        limit=limit,
+        offset=offset,
+        parent_intent_id=parent_intent_id,
+        action=action,
+        actor=actor,
+        window_hours=window_hours,
+    )
+
+
 @router.get("/decision/latest")
 async def latest_decision(request: Request) -> dict[str, Any]:
     return _query(request).latest_decision()

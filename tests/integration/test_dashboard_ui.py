@@ -103,6 +103,7 @@ class TestDashboardUI(unittest.TestCase):
                 "root": client.get("/"),
                 "overview": client.get("/ui"),
                 "strategy": client.get("/ui/strategy"),
+                "exit_execution": client.get("/ui/exit-execution"),
                 "ai_redirect": client.get("/ui/ai", follow_redirects=False),
                 "ai_analysis": client.get("/ui/ai-analysis"),
                 "ai_config": client.get("/ui/ai-config"),
@@ -113,6 +114,7 @@ class TestDashboardUI(unittest.TestCase):
                 "ai_view_js": client.get("/ui/modules/views/ai-view.js"),
                 "ai_analysis_js": client.get("/ui/modules/views/ai-analysis-view.js"),
                 "ai_config_js": client.get("/ui/modules/views/ai-config-view.js"),
+                "exit_execution_js": client.get("/ui/modules/views/exit-execution-view.js"),
                 "strategy_js": client.get("/ui/modules/views/strategy-view.js"),
                 "risk_js": client.get("/ui/modules/views/risk-view.js"),
             }
@@ -130,19 +132,28 @@ class TestDashboardUI(unittest.TestCase):
 
         root_text = responses["root"].text
         self.assertNotIn("AI 工作台", root_text)
+        self.assertIn("/ui/exit-execution", root_text)
         self.assertIn("/ui/ai-analysis", root_text)
         self.assertIn("/ui/ai-config", root_text)
         self.assertIn('data-view="aiAnalysis"', root_text)
+        self.assertIn('data-view="exitExecution"', root_text)
 
         js_text = responses["js"].text
         self.assertIn("renderAIAnalysisView", js_text)
+        self.assertIn("renderExitExecutionView", js_text)
         self.assertIn('aiAnalysis: "/ui/ai-analysis"', js_text)
+        self.assertIn('exitExecution: "/ui/exit-execution"', js_text)
         self.assertIn("fetchDashboardBundle", js_text)
         self.assertIn("readableFamilyExecutionSummary", js_text)
-        self.assertIn("buildDashboardBundlePath", js_text)
+        self.assertIn("buildDashboardBundleRequestPlan", js_text)
+        self.assertIn("hydrateViewStateFromLocation", js_text)
+        self.assertIn("buildExitExecutionViewPath", js_text)
+        self.assertIn("syncActiveViewLocationState", js_text)
         self.assertIn("syncRefreshDisabledButtons", js_text)
         self.assertIn("currentRefreshInteractivityRoots", js_text)
-        self.assertIn("fetchDashboardBundle(buildDashboardBundlePath(refreshingView, state))", js_text)
+        self.assertIn("const refreshPlan = buildDashboardBundleRequestPlan(refreshingView, state);", js_text)
+        self.assertIn("void refreshDeferredPanels({", js_text)
+        self.assertIn("setPendingPanels(refreshPlan.deferredPanels, Boolean(refreshPlan.deferredPath));", js_text)
         self.assertIn("当前正在刷新，已排队一次新的刷新请求。", js_text)
         self.assertIn("当前已在${VIEW_LABELS[nextView] || \"当前页面\"}，已刷新当前状态。", js_text)
         self.assertNotIn("refreshBackgroundPanels", js_text)
@@ -162,12 +173,15 @@ class TestDashboardUI(unittest.TestCase):
         self.assertIn('["aiShadowRecent", `/ai/shadow/recent?limit=${limits.recentAIShadowDecisions}&offset=0`]', store_text)
         self.assertIn('["aiShadowEvaluations", `/ai/shadow/evaluations?limit=${limits.recentAIShadowEvaluations}&offset=0`]', store_text)
         self.assertNotIn("viewBackgroundSpecs", store_text)
-        self.assertIn('["guardedLivePreflight", "/system/guarded-live-preflight"]', store_text)
-        self.assertIn('["guardedLiveRunPacket", "/reports/guarded-live-run-packet"]', store_text)
         self.assertIn('["positions", "/positions"]', store_text)
         self.assertIn('["strategyRuntime", "/strategy/runtime"]', store_text)
         self.assertIn('["strategyAttribution", "/reports/strategy-attribution?limit=200"]', store_text)
+        self.assertIn('["exitExecutionActionHistoryPage", riskExitExecutionHistoryPath]', store_text)
+        self.assertIn('["exitExecutionActionHistoryPage", exitExecutionWorkspaceHistoryPath]', store_text)
+        self.assertIn("DEFAULT_EXIT_EXECUTION_HISTORY_PAGING", store_text)
+        self.assertIn("DEFERRED_VIEW_PANELS", store_text)
         self.assertIn("dashboardBundlePanelKeys", store_text)
+        self.assertIn("buildDashboardBundleRequestPlan", store_text)
         self.assertIn('params.append("panel", key);', store_text)
         self.assertIn('recentAIAssessments: String(limits.recentAIAssessments)', store_text)
         self.assertIn('recentAIShadowDecisions: String(limits.recentAIShadowDecisions)', store_text)
@@ -240,7 +254,14 @@ class TestDashboardUI(unittest.TestCase):
         self.assertIn("轻度差异，建议观察", risk_text)
         self.assertIn("系统仍处于人工确认流程", risk_text)
         self.assertIn('action.client_action === "navigate-view" && action.value === "risk"', risk_text)
+        self.assertIn("进入独立工作台", risk_text)
         self.assertNotIn("继续保持暂停", risk_text)
+
+        exit_execution_text = responses["exit_execution_js"].text
+        self.assertIn("renderExitExecutionView", exit_execution_text)
+        self.assertIn("退出任务独立工作台", exit_execution_text)
+        self.assertIn("完整处理列表", exit_execution_text)
+        self.assertIn("renderExitExecutionWorkspace", exit_execution_text)
 
         refresh_interactivity_text = responses["refresh_interactivity_js"].text
         self.assertIn("syncRefreshDisabledButtons", refresh_interactivity_text)
@@ -255,9 +276,11 @@ class TestDashboardUI(unittest.TestCase):
         with TestClient(app) as client:
             app_js = client.get("/ui/app.js")
             risk_js = client.get("/ui/modules/views/risk-view.js")
+            exit_execution_js = client.get("/ui/modules/views/exit-execution-view.js")
 
         self.assertEqual(app_js.status_code, 200)
         self.assertEqual(risk_js.status_code, 200)
+        self.assertEqual(exit_execution_js.status_code, 200)
 
         app_js_text = app_js.text
         self.assertIn("trigger-exit-execution-refresh", app_js_text)
@@ -268,6 +291,11 @@ class TestDashboardUI(unittest.TestCase):
         self.assertIn("/system/exit-execution/safe-cancel", app_js_text)
         self.assertIn("handleExitExecutionHistoryFilterEvent", app_js_text)
         self.assertIn("applyExitExecutionHistoryFilters", app_js_text)
+        self.assertIn("apply-exit-execution-history-workspace", app_js_text)
+        self.assertIn("paginate-exit-execution-history", app_js_text)
+        self.assertIn("buildExitExecutionViewPath", app_js_text)
+        self.assertIn("hydrateViewStateFromLocation", app_js_text)
+        self.assertIn("syncActiveViewLocationState", app_js_text)
 
         risk_js_text = risk_js.text
         self.assertIn("退出任务人工处理", risk_js_text)
@@ -277,6 +305,14 @@ class TestDashboardUI(unittest.TestCase):
         self.assertIn("trigger-exit-execution-safe-cancel", risk_js_text)
         self.assertIn('data-exit-history-filter="action"', risk_js_text)
         self.assertIn("renderExitExecutionActionFilterOptions", risk_js_text)
+        self.assertIn("risk-exit-workspace", risk_js_text)
+        self.assertIn("renderExitExecutionWorkspace", risk_js_text)
+        self.assertIn("进入独立工作台", risk_js_text)
+
+        exit_execution_js_text = exit_execution_js.text
+        self.assertIn("renderExitExecutionView", exit_execution_js_text)
+        self.assertIn("退出任务独立工作台", exit_execution_js_text)
+        self.assertIn("renderExitExecutionWorkspace", exit_execution_js_text)
 
     def test_strategy_view_surfaces_protective_overlay_config_and_state(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
@@ -980,6 +1016,21 @@ console.log(JSON.stringify({
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         self.assertIn('"hidesIndependentReference":true', result.stdout)
 
+    def test_strategy_view_module_uses_updated_score_stability_copy(self) -> None:
+        app = FastAPI()
+        app.include_router(auth_router)
+        app.include_router(ui_router)
+        app.state.runtime = SimpleNamespace(settings=AATSSettings.model_validate({}))
+
+        with TestClient(app) as client:
+            response = client.get("/ui/modules/views/strategy-view.js")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("上行抬升幅度", response.text)
+        self.assertIn("向下回撤幅度", response.text)
+        self.assertNotIn("确认次数 / 回撤阈值 / 流动性门槛", response.text)
+        self.assertNotIn("分数回撤仍受控", response.text)
+
     def test_strategy_view_surfaces_overlay_rollout_stage_and_rollback_order(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
         script = """
@@ -1183,6 +1234,122 @@ console.log(JSON.stringify({
                 "trialReviewHistory",
             ],
         )
+
+    def test_risk_view_dashboard_bundle_request_plan_defers_replay_and_exit_history(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { buildDashboardBundleRequestPlan, buildDashboardBundlePath } from './aats/api/static/modules/store.js';
+
+const plan = buildDashboardBundleRequestPlan('risk', {
+  ui: {
+    risk: {
+      exitExecutionHistory: {
+        action: 'all',
+        parent: '',
+        actor: '',
+        windowHours: 'all',
+        offset: 0,
+        limit: 20,
+      },
+    },
+  },
+});
+const full = new URL(buildDashboardBundlePath('risk'), 'http://localhost');
+const primary = new URL(plan.primaryPath, 'http://localhost');
+const deferred = new URL(plan.deferredPath, 'http://localhost');
+console.log(JSON.stringify({
+  fullPanels: full.searchParams.getAll('panel'),
+  primaryPanels: primary.searchParams.getAll('panel'),
+  deferredPanels: deferred.searchParams.getAll('panel'),
+  deferredPlanPanels: plan.deferredPanels,
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        payload = json.loads(result.stdout)
+        self.assertIn("replayStatus", payload["fullPanels"])
+        self.assertIn("exitExecutionActionHistoryPage", payload["fullPanels"])
+        self.assertNotIn("replayStatus", payload["primaryPanels"])
+        self.assertNotIn("exitExecutionActionHistoryPage", payload["primaryPanels"])
+        self.assertNotIn("trialGuard", payload["fullPanels"])
+        self.assertNotIn("guardedLivePreflight", payload["fullPanels"])
+        self.assertNotIn("guardedLiveRunPacket", payload["fullPanels"])
+        self.assertNotIn("phase1Shadow", payload["fullPanels"])
+        self.assertEqual(payload["deferredPanels"], ["replayStatus", "exitExecutionActionHistoryPage"])
+        self.assertEqual(payload["deferredPlanPanels"], ["replayStatus", "exitExecutionActionHistoryPage"])
+
+    def test_risk_view_shows_deferred_loading_notice_before_replay_and_exit_history_arrive(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { renderRiskView } from './aats/api/static/modules/views/risk-view.js';
+
+const html = renderRiskView({
+  blockerControl: { blockers: [], secondary_blockers: [], next_step_summary: '' },
+  systemRecovery: {
+    recovery: {
+      safe_to_trade: true,
+      review_required: false,
+      resume_eligible: true,
+      halted: false,
+      rebaseline_available: false,
+      resume_blocked_reasons: [],
+      exit_execution_action_history: [],
+    },
+  },
+  reconciliationLatest: {
+    reconciliation: {
+      reconciliation_id: 'recon-clean',
+      severity: 'CLEAN',
+      halt_required: false,
+      review_required: false,
+    },
+    mismatch_summary: {},
+    exchange_bills_summary: {},
+  },
+  runtime: {
+    trial_guard: { status: 'monitoring', summary: 'ok', fill_count: 6, min_closed_fills: 5, breaches: [] },
+    guarded_live_preflight: { status: 'ready', summary: 'ok', counts: { pass: 1, warn: 0, fail: 0 }, operator_actions: [], checks: [] },
+    guarded_live_run_packet_summary: { status: 'ready', summary: 'ok', summary_metrics: {}, operator_actions: [] },
+  },
+  metrics: { phase1_shadow: { status: 'healthy', summary: 'ok', lag: {}, execution_shadow: {}, ledger_shadow: {} } },
+  health: { runtime_state: 'healthy' },
+  accountState: { fresh: true, ready: true, blockers: [], margin_buffer_overview: {}, position_mode_contract: {}, derivatives_live_guard: { current_derivatives_exposure: {} } },
+  positions: { local_instrument_positions: [] },
+  portfolio: { portfolio: { total_equity: 100, realized_pnl: 0, unrealized_pnl: 0, margin_usage: 0, gross_exposure: 0 } },
+  uiHints: {
+    recoveryReasonsText: '',
+    controlPermissionMessage: '',
+    pendingPanels: {
+      replayStatus: true,
+      exitExecutionActionHistoryPage: true,
+    },
+  },
+});
+
+console.log(JSON.stringify({
+  showsReplayPending: html.includes('回放状态正在补充'),
+  showsExitHistoryPending: html.includes('退出任务长历史正在补充'),
+  showsDeferredReason: html.includes('完整 parent-exit 历史会在首屏后自动补载'),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        stdout = result.stdout or ""
+        self.assertIn('"showsReplayPending":true', stdout)
+        self.assertIn('"showsExitHistoryPending":true', stdout)
+        self.assertIn('"showsDeferredReason":true', stdout)
 
     def test_strategy_view_dashboard_bundle_trims_removed_runtime_details(self) -> None:
         payload = {
@@ -3197,6 +3364,179 @@ console.log(JSON.stringify({
         self.assertIn('"hasActorFilterValue":true', stdout)
         self.assertIn('"marksFilteredRowHidden":true', stdout)
         self.assertIn('"keepsMatchingRowVisible":true', stdout)
+
+    def test_risk_view_surfaces_exit_execution_workspace_with_paging_and_synced_filters(self) -> None:
+        script = """
+import { renderRiskView } from './aats/api/static/modules/views/risk-view.js';
+
+const html = renderRiskView({
+  blockerControl: { blockers: [], secondary_blockers: [], next_step_summary: '' },
+  session: { role: 'admin', authenticated: true },
+  authProviders: { auth_enabled: true },
+      systemRecovery: {
+        recovery: {
+          safe_to_trade: false,
+          review_required: true,
+          resume_eligible: false,
+          halted: true,
+          rebaseline_available: false,
+          resume_blocked_reasons: ['exit_execution_parent_review_required'],
+          exit_execution_review_items: [],
+          exit_execution_action_history: [
+            {
+              parent_intent_id: 'exit_parent:btc_close',
+              symbol: 'BTC-USDT-SWAP',
+              action: 'safe_cancel',
+              status: 'completed',
+              aggregate_status: 'CANCELED',
+              created_at: '2026-04-02T10:20:00Z',
+              actor_role: 'admin',
+              actor_identity: 'ops-two',
+              summary: '安全取消已完成。',
+              remaining_blocker: null,
+            },
+          ],
+          latest_state_snapshot: null,
+        },
+      },
+  exitExecutionActionHistoryPage: {
+    actions: [
+      {
+        parent_intent_id: 'exit_parent:btc_close',
+        symbol: 'BTC-USDT-SWAP',
+        action: 'safe_cancel',
+        status: 'completed',
+        aggregate_status: 'CANCELED',
+        created_at: '2026-04-02T10:20:00Z',
+        actor_role: 'admin',
+        actor_identity: 'ops-two',
+        summary: '安全取消已完成。',
+        remaining_blocker: null,
+      },
+    ],
+    limit: 20,
+    offset: 20,
+    total_available: 41,
+    has_more: true,
+  },
+  reconciliationLatest: {
+    reconciliation: {
+      reconciliation_id: 'recon-exit-workspace',
+      severity: 'REVIEW_REQUIRED',
+      halt_required: false,
+      review_required: true,
+      observational_only: false,
+      recommended_operator_action: 'review_exit_execution_parent_and_refresh_exchange_state',
+    },
+  },
+  accountState: { fresh: true, last_refresh_timestamp: '2026-04-02T10:00:00Z', ready: true, blockers: [] },
+  portfolio: { portfolio: { total_equity: 200, realized_pnl: 0, unrealized_pnl: 0, margin_usage: 0, gross_exposure: 0 } },
+  replayStatus: {},
+  metrics: {},
+  health: { runtime_state: 'halted', halted: true },
+  runtime: { operator_auth: { unsafe_write_without_auth: false } },
+  uiHints: { recoveryReasonsText: '', controlPermissionMessage: '' },
+}, {
+  exitExecutionHistory: {
+    action: 'safe_cancel',
+    parent: 'btc_close',
+    actor: 'ops-two',
+    windowHours: '24',
+    offset: 20,
+    limit: 20,
+  },
+});
+
+console.log(JSON.stringify({
+  hasWorkspaceSection: html.includes('退出任务工作区'),
+  hasWorkspaceAnchor: html.includes('id="risk-exit-workspace"'),
+  hasApplyButton: html.includes('apply-exit-execution-history-workspace'),
+  hasPagingButton: html.includes('paginate-exit-execution-history'),
+  showsSyncedParentFilter: (html.match(/data-exit-history-filter="parent"/g) || []).length >= 2 && html.includes('value="btc_close"'),
+  showsWindowFilter: html.includes('data-exit-history-filter="windowHours"') && html.includes('最近 24 小时'),
+  showsPagingSummary: html.includes('当前显示 21 - 21 / 41 条'),
+}));
+"""
+        result = _run_node_module(script, encoding="utf-8")
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        stdout = result.stdout or ""
+        self.assertIn('"hasWorkspaceSection":true', stdout)
+        self.assertIn('"hasWorkspaceAnchor":true', stdout)
+        self.assertIn('"hasApplyButton":true', stdout)
+        self.assertIn('"hasPagingButton":true', stdout)
+        self.assertIn('"showsSyncedParentFilter":true', stdout)
+        self.assertIn('"showsWindowFilter":true', stdout)
+        self.assertIn('"showsPagingSummary":true', stdout)
+
+    def test_exit_execution_view_surfaces_workspace_filters_and_paging(self) -> None:
+        script = """
+import { renderExitExecutionView } from './aats/api/static/modules/views/exit-execution-view.js';
+
+const html = renderExitExecutionView({
+  systemRecovery: {
+    recovery: {
+      review_required: true,
+      exit_execution_review_items: [
+        {
+          symbol: 'BTC-USDT-SWAP',
+          parent_intent_id: 'exit_parent:btc_close',
+          review_summary: 'child truth 仍待确认',
+          remaining_dispatchable_quantity: '0',
+          open_child_unknown_quantity: '1',
+          review_source: 'runtime',
+        },
+      ],
+    },
+  },
+  exitExecutionActionHistoryPage: {
+    actions: [
+      {
+        parent_intent_id: 'exit_parent:btc_close',
+        symbol: 'BTC-USDT-SWAP',
+        action: 'safe_cancel',
+        status: 'completed',
+        actor_identity: 'ops-two',
+        created_at: '2026-04-02T10:00:00Z',
+        remaining_blocker: {
+          code: 'exit_execution_parent_review_required',
+          summary: '仍需继续确认 child 的真实状态',
+        },
+      },
+    ],
+    limit: 50,
+    offset: 100,
+    total_available: 240,
+    has_more: true,
+  },
+}, {
+  exitExecutionHistory: {
+    action: 'safe_cancel',
+    parent: 'exit_parent:btc_close',
+    actor: 'ops-two',
+    windowHours: '24',
+    offset: 100,
+    limit: 50,
+  },
+});
+
+console.log(JSON.stringify({
+  hasStandaloneHeading: html.includes('退出任务独立工作台'),
+  hasWorkspaceAnchor: html.includes('id="exit-execution-workspace"'),
+  showsParentFilter: html.includes('value="exit_parent:btc_close"'),
+  showsActorFilter: html.includes('value="ops-two"'),
+  showsPagingSummary: html.includes('当前显示 101 - 101 / 240 条'),
+  mentionsShareableUrl: html.includes('当前筛选会写入地址栏'),
+}));
+"""
+        result = _run_node_module(script, encoding="utf-8")
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        stdout = result.stdout or ""
+        self.assertIn('"hasStandaloneHeading":true', stdout)
+        self.assertIn('"hasWorkspaceAnchor":true', stdout)
+        self.assertIn('"showsParentFilter":true', stdout)
+        self.assertIn('"showsActorFilter":true', stdout)
+        self.assertIn('"showsPagingSummary":true', stdout)
+        self.assertIn('"mentionsShareableUrl":true', stdout)
 
     def test_risk_view_prefers_runtime_parent_review_and_disables_admin_only_retry_for_operator(self) -> None:
         script = """

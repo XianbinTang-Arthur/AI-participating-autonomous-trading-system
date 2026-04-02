@@ -12,6 +12,24 @@ export const DEFAULT_PAGE_LIMITS = {
 
 export const PAGE_LOAD_STEP = 12;
 
+export const DEFAULT_EXIT_EXECUTION_HISTORY_FILTERS = Object.freeze({
+  action: "all",
+  parent: "",
+  actor: "",
+  windowHours: "all",
+});
+
+export const DEFAULT_EXIT_EXECUTION_HISTORY_PAGING = Object.freeze({
+  risk: {
+    offset: 0,
+    limit: 20,
+  },
+  exitExecution: {
+    offset: 0,
+    limit: 50,
+  },
+});
+
 export function createState() {
   return {
     activeView: "home",
@@ -20,11 +38,13 @@ export function createState() {
     pendingRefresh: false,
     loadingView: null,
     readyViews: {},
+    refreshGeneration: 0,
     refreshTimer: null,
     lastRefreshAt: null,
     flash: null,
     data: {},
     errors: {},
+    pendingPanels: {},
     pageLimits: { ...DEFAULT_PAGE_LIMITS },
     ui: {
       aiConfig: {
@@ -33,9 +53,14 @@ export function createState() {
       },
       risk: {
         exitExecutionHistory: {
-          action: "all",
-          parent: "",
-          actor: "",
+          ...DEFAULT_EXIT_EXECUTION_HISTORY_FILTERS,
+          ...DEFAULT_EXIT_EXECUTION_HISTORY_PAGING.risk,
+        },
+      },
+      exitExecution: {
+        exitExecutionHistory: {
+          ...DEFAULT_EXIT_EXECUTION_HISTORY_FILTERS,
+          ...DEFAULT_EXIT_EXECUTION_HISTORY_PAGING.exitExecution,
         },
       },
       replay: {
@@ -55,8 +80,16 @@ export const CORE_SPECS = [
   ["blockerControl", "/system/blocker-control"],
 ];
 
+const DEFERRED_VIEW_PANELS = {
+  risk: new Set(["replayStatus", "exitExecutionActionHistoryPage"]),
+};
+
 export function viewSpecs(view, state = null) {
   const limits = { ...DEFAULT_PAGE_LIMITS, ...(state?.pageLimits || {}) };
+  const riskExitExecutionHistory = state?.ui?.risk?.exitExecutionHistory || {};
+  const exitExecutionWorkspaceHistory = state?.ui?.exitExecution?.exitExecutionHistory || {};
+  const riskExitExecutionHistoryPath = buildExitExecutionActionHistoryPath(riskExitExecutionHistory);
+  const exitExecutionWorkspaceHistoryPath = buildExitExecutionActionHistoryPath(exitExecutionWorkspaceHistory);
   const specs = {
     home: [
       ["blockers", "/system/blockers"],
@@ -96,15 +129,15 @@ export function viewSpecs(view, state = null) {
     ],
     risk: [
       ["metrics", "/system/metrics"],
-      ["phase1Shadow", "/system/shadow"],
-      ["trialGuard", "/system/trial-guard"],
-      ["guardedLivePreflight", "/system/guarded-live-preflight"],
-      ["guardedLiveRunPacket", "/reports/guarded-live-run-packet"],
       ["portfolio", "/portfolio/latest"],
       ["positions", "/positions"],
       ["accountState", "/account/state"],
       ["reconciliationLatest", "/reconciliation/latest"],
       ["replayStatus", "/replay/status"],
+      ["exitExecutionActionHistoryPage", riskExitExecutionHistoryPath],
+    ],
+    exitExecution: [
+      ["exitExecutionActionHistoryPage", exitExecutionWorkspaceHistoryPath],
     ],
     replay: [
       ["replayStatus", "/replay/status"],
@@ -132,19 +165,53 @@ export function viewSpecs(view, state = null) {
   return specs[view] || [];
 }
 
-export function dashboardBundlePanelKeys(view, state = null) {
+function deferredPanelSetForView(view) {
+  return DEFERRED_VIEW_PANELS[view] || null;
+}
+
+export function buildExitExecutionActionHistoryPath(state = {}) {
+  const params = new URLSearchParams({
+    limit: String(Math.max(Number(state.limit) || 20, 1)),
+    offset: String(Math.max(Number(state.offset) || 0, 0)),
+  });
+  const action = String(state.action || "").trim();
+  const parent = String(state.parent || "").trim();
+  const actor = String(state.actor || "").trim();
+  const windowHours = String(state.windowHours || "").trim();
+  if (action && action !== "all") {
+    params.set("action", action);
+  }
+  if (parent) {
+    params.set("parent_intent_id", parent);
+  }
+  if (actor) {
+    params.set("actor", actor);
+  }
+  if (windowHours && windowHours !== "all") {
+    params.set("window_hours", windowHours);
+  }
+  return `/system/exit-execution/action-history?${params.toString()}`;
+}
+
+export function dashboardBundlePanelKeys(view, state = null, options = {}) {
+  const includeDeferred = options.includeDeferred !== false;
+  const deferredOnly = options.deferredOnly === true;
+  const deferredPanels = deferredPanelSetForView(view);
   const seen = new Set();
   const specs = [...CORE_SPECS, ...viewSpecs(view, state)];
   return specs
     .filter(([key]) => {
       if (seen.has(key)) return false;
       seen.add(key);
+      const isDeferred = Boolean(deferredPanels?.has(key));
+      if (deferredOnly) return isDeferred;
+      if (!includeDeferred && isDeferred) return false;
       return true;
     })
     .map(([key]) => key);
 }
 
-export function buildDashboardBundlePath(view, state = null) {
+export function buildDashboardBundlePath(view, state = null, options = {}) {
   const limits = { ...DEFAULT_PAGE_LIMITS, ...(state?.pageLimits || {}) };
   const params = new URLSearchParams({
     view: String(view || "home"),
@@ -156,8 +223,17 @@ export function buildDashboardBundlePath(view, state = null) {
     recentAIShadowDecisions: String(limits.recentAIShadowDecisions),
     recentAIShadowEvaluations: String(limits.recentAIShadowEvaluations),
   });
-  dashboardBundlePanelKeys(view, state).forEach((key) => {
+  dashboardBundlePanelKeys(view, state, options).forEach((key) => {
     params.append("panel", key);
   });
   return `/dashboard/bundle?${params.toString()}`;
+}
+
+export function buildDashboardBundleRequestPlan(view, state = null) {
+  const deferredPanels = dashboardBundlePanelKeys(view, state, { deferredOnly: true });
+  return {
+    primaryPath: buildDashboardBundlePath(view, state, { includeDeferred: false }),
+    deferredPath: deferredPanels.length ? buildDashboardBundlePath(view, state, { deferredOnly: true }) : null,
+    deferredPanels,
+  };
 }

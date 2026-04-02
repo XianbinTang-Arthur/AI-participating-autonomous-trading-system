@@ -50,13 +50,21 @@ def apply_startup_exit_execution_review_overlay(
     review_items = exit_execution_review_items(parent_intents)
     if not review_items:
         return base_status
+    review_required_count = sum(
+        1
+        for item in review_items
+        if bool(item.get("operator_review_required"))
+    )
+    blocks_resume = any(bool(item.get("blocks_resume", True)) for item in review_items)
     blocker_kinds = [
         str(item.get("kind") or "").strip()
         for item in review_items
         if str(item.get("kind") or "").strip()
     ]
     notes = list(base_status.notes)
-    notes.append(f"startup_exit_execution_review_required_count:{len(review_items)}")
+    notes.append(f"startup_exit_execution_overlay_count:{len(review_items)}")
+    if review_required_count:
+        notes.append(f"startup_exit_execution_review_required_count:{review_required_count}")
     resume_blocked_reasons = list(base_status.resume_blocked_reasons)
     resume_blocked_reasons.extend(
         blocker for blocker in blocker_kinds if blocker not in resume_blocked_reasons
@@ -65,15 +73,17 @@ def apply_startup_exit_execution_review_overlay(
         base_status.recovery_state
         if base_status.recovery_state == "resume_blocked"
         else "review_required"
+        if review_required_count
+        else "resume_blocked"
     )
     return base_status.model_copy(
         update={
             "recovery_state": recovery_state,
-            "review_required": True,
-            "safe_startup": False,
-            "safe_to_trade": False,
-            "resume_eligible": False,
-            "rebaseline_available": True,
+            "review_required": bool(base_status.review_required or review_required_count),
+            "safe_startup": False if blocks_resume or review_required_count else base_status.safe_startup,
+            "safe_to_trade": False if blocks_resume or review_required_count else base_status.safe_to_trade,
+            "resume_eligible": False if blocks_resume or review_required_count else base_status.resume_eligible,
+            "rebaseline_available": bool(base_status.rebaseline_available or review_required_count),
             "resume_blocked_reasons": list(dict.fromkeys(resume_blocked_reasons)),
             "unknown_state_details": [
                 *base_status.unknown_state_details,

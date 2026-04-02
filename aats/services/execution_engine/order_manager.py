@@ -437,12 +437,18 @@ class OrderManager:
         )
         split_limit = await self._serial_exit_split_limit(intent=intent)
         if split_limit is not None:
-            return await self._execute_serial_exit_split(
+            split_state = await self._execute_serial_exit_split(
                 intent=intent,
                 client_order_id=resolved_client_order_id,
                 leg_intent=leg_intent,
                 split_limit=split_limit,
             )
+            if split_state is not None:
+                return split_state
+            fallback_state = self.execution_repo.get_order_state(resolved_client_order_id)
+            if fallback_state is not None:
+                return fallback_state
+            raise RuntimeError("serial_exit_split_missing_anchor_state")
         return await self._submit_single_order_intent(
             intent=intent,
             client_order_id=resolved_client_order_id,
@@ -680,17 +686,17 @@ class OrderManager:
         leg_intent: LegOrderIntent | None,
         split_limit: Decimal,
         start_slice_index: int = 1,
-    ) -> OrderState:
+    ) -> OrderState | None:
         last_state = self.execution_repo.get_order_state(client_order_id)
         if split_limit <= self._OBLIGATION_ATOMIC_FINALIZE_EPSILON:
-            return last_state or self.execution_repo.get_order_state(client_order_id)  # type: ignore[return-value]
+            return last_state or self.execution_repo.get_order_state(client_order_id)
         for slice_index in range(start_slice_index, self._EXIT_SPLIT_MAX_CHILDREN + 1):
             parent = self._parent_exit_execution_intent(intent=intent)
             if parent is not None and (
                 parent.operator_review_required
                 or parent.aggregate_status in {"CANCEL_PENDING", "COMPLETED", "CANCELED", "FAILED_SAFE", "REVIEW_REQUIRED"}
             ):
-                return last_state or self.execution_repo.get_order_state(client_order_id)  # type: ignore[return-value]
+                return last_state or self.execution_repo.get_order_state(client_order_id)
             remaining_quantity = (
                 max(Decimal(intent.quantity), Decimal("0"))
                 if slice_index == start_slice_index and start_slice_index <= 1
@@ -701,10 +707,10 @@ class OrderManager:
                 )
             )
             if remaining_quantity <= self._OBLIGATION_ATOMIC_FINALIZE_EPSILON:
-                return last_state or self.execution_repo.get_order_state(client_order_id)  # type: ignore[return-value]
+                return last_state or self.execution_repo.get_order_state(client_order_id)
             child_quantity = min(split_limit, remaining_quantity)
             if child_quantity <= self._OBLIGATION_ATOMIC_FINALIZE_EPSILON:
-                return last_state or self.execution_repo.get_order_state(client_order_id)  # type: ignore[return-value]
+                return last_state or self.execution_repo.get_order_state(client_order_id)
             child_intent, child_leg_intent = self._split_child_intent(
                 intent=intent,
                 leg_intent=leg_intent,
@@ -753,7 +759,7 @@ class OrderManager:
                 slice_index=slice_index,
             ):
                 return last_state
-        return last_state or self.execution_repo.get_order_state(client_order_id)  # type: ignore[return-value]
+        return last_state or self.execution_repo.get_order_state(client_order_id)
 
     def _should_continue_serial_exit_split(
         self,

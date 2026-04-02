@@ -10,9 +10,13 @@ from aats.schemas.execution import OrderIntent, OrderState
 from aats.services.execution_engine.exit_intent_aggregator import (
     child_exit_order_ref_from_order_state,
     create_exit_execution_intent_from_order_intent,
+    exit_execution_review_items,
+    refresh_exit_execution_intents,
     recompute_exit_execution_intent,
     request_cancel_exit_execution_intent,
 )
+from aats.storage.execution_repo import InMemoryExecutionRepository
+from aats.storage.exit_execution_repo import InMemoryExitExecutionRepository
 
 
 def _make_parent(*, quantity: str = "5") -> object:
@@ -199,6 +203,67 @@ class TestExitExecutionAggregator(unittest.TestCase):
         self.assertEqual(aggregate.aggregate_status, "REVIEW_REQUIRED")
         self.assertTrue(aggregate.operator_review_required)
         self.assertFalse(aggregate.risk_reducing_invariant)
+
+    def test_truth_pending_parent_surfaces_structural_review_item(self) -> None:
+        parent = _make_parent(quantity="5").model_copy(
+            update={
+                "aggregate_status": "WORKING",
+                "reconciliation_state": "truth_pending",
+                "open_child_unknown_quantity": Decimal("2"),
+                "remaining_dispatchable_quantity": Decimal("3"),
+                "remaining_unresolved_quantity": Decimal("5"),
+                "metadata": {
+                    "dispatch_template": {
+                        "intent_id": "intent_exit_parent",
+                        "execution_chain_id": "chain_exit_parent",
+                        "symbol": "BTC-USDT-SWAP",
+                    }
+                },
+            }
+        )
+
+        items = exit_execution_review_items([parent])
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["kind"], "exit_execution_truth_pending")
+        self.assertFalse(items[0]["operator_review_required"])
+        self.assertTrue(items[0]["blocks_resume"])
+        self.assertEqual(items[0]["resume_block_reason"], "unknown_child_truth_pending")
+
+    def test_refresh_exit_execution_intents_marks_childless_parent_with_resume_issue(self) -> None:
+        settings = AATSSettings.model_validate({})
+        execution_repo = InMemoryExecutionRepository()
+        exit_repo = InMemoryExitExecutionRepository()
+        parent = _make_parent(quantity="5").model_copy(
+            update={
+                "aggregate_status": "WORKING",
+                "remaining_dispatchable_quantity": Decimal("5"),
+                "remaining_unresolved_quantity": Decimal("5"),
+                "metadata": {
+                    "dispatch_template": {
+                        "intent_id": "intent_exit_parent",
+                        "execution_chain_id": "chain_exit_parent",
+                        "symbol": "BTC-USDT-SWAP",
+                    }
+                },
+            }
+        )
+        exit_repo.save_exit_execution_intent(parent)
+
+        refreshed = refresh_exit_execution_intents(
+            execution_repo=execution_repo,
+            exit_execution_repo=exit_repo,
+            settings=settings,
+        )
+
+        self.assertEqual(len(refreshed), 1)
+        updated_parent = exit_repo.get_exit_execution_intent(parent.parent_intent_id)
+        self.assertIsNotNone(updated_parent)
+        assert updated_parent is not None
+        self.assertEqual(updated_parent.metadata["resume_issue"]["kind"], "missing_child_refs_for_parent")
+        items = exit_execution_review_items([updated_parent])
+        self.assertEqual(items[0]["kind"], "exit_execution_missing_child_refs_for_parent")
+        self.assertEqual(items[0]["resume_block_reason"], "missing_child_refs_for_parent")
 
 
 if __name__ == "__main__":

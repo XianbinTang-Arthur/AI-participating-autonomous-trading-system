@@ -64,6 +64,7 @@ class ScoreStabilityMetrics:
     score_volatility_bps: float | None = None
     upward_excursion_bps: float | None = None
     downward_drawdown_bps: float | None = None
+    max_drawdown_bps_compat_source: Literal["upward_excursion_bps"] = "upward_excursion_bps"
 
 
 @dataclass(frozen=True, slots=True)
