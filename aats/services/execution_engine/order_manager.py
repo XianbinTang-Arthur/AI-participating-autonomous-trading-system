@@ -557,9 +557,14 @@ class OrderManager:
             self._finalize_obligation(order_state=order_state)
 
     def _sync_candidates(self) -> list[OrderState]:
+        open_states = self.execution_repo.open_order_states()
+        prioritized_open_states = [
+            *[state for state in open_states if self._is_unknown_write_state(state)],
+            *[state for state in open_states if not self._is_unknown_write_state(state)],
+        ]
         candidates: dict[str, OrderState] = {
             state.client_order_id: state
-            for state in self.execution_repo.open_order_states()
+            for state in prioritized_open_states
         }
         for state in self.execution_repo.recent_order_states(
             limit=self._FILL_BACKFILL_RECENT_LIMIT,
@@ -571,6 +576,13 @@ class OrderManager:
                 continue
             candidates.setdefault(state.client_order_id, state)
         return list(candidates.values())
+
+    @staticmethod
+    def _is_unknown_write_state(state: OrderState) -> bool:
+        error = str(state.execution_error or "")
+        return error.startswith("submission_unknown_check_exchange:") or error.startswith(
+            "cancel_unknown_check_exchange:"
+        )
 
     async def cancel_order(self, client_order_id: str) -> OrderState:
         current = self.resolve_order_state_for_control(client_order_id)

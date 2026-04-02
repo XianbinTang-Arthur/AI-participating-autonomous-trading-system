@@ -134,6 +134,7 @@ class ReviewRequiredReconciliationRepo:
 class FakeOKXClient:
     def __init__(self) -> None:
         self.place_order_calls: list[dict] = []
+        self.cancel_order_calls: list[dict] = []
         self.order_queries: list[dict] = []
         self.fill_queries: list[dict] = []
 
@@ -181,7 +182,11 @@ class FakeOKXClient:
         }
 
     async def cancel_order(self, payload):
-        return {"code": "0", "data": [{"ordId": payload["ordId"], "clOrdId": payload["clOrdId"], "sCode": "0"}]}
+        self.cancel_order_calls.append(dict(payload))
+        return {
+            "code": "0",
+            "data": [{"ordId": payload.get("ordId") or "ord_1", "clOrdId": payload["clOrdId"], "sCode": "0"}],
+        }
 
     async def get_max_order_quantity(self, *, symbol: str, td_mode: str, leverage=None, price=None):
         _ = symbol
@@ -504,6 +509,56 @@ class FakeUnknownSubmitNoOrderOKXClient(FakeOKXClient):
             status_code=200,
             payload={"code": "51603", "msg": "Order does not exist", "data": []},
         )
+
+
+class FakeUnknownSubmitResolvableOnCancelOKXClient(FakeOKXClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.order_lookup_count = 0
+
+    async def place_order(self, payload):
+        self.place_order_calls.append(dict(payload))
+        raise OKXRequestError(
+            path="/api/v5/trade/order",
+            msg="temporary_submit_timeout",
+            status_code=500,
+            payload={},
+            classification="server_error",
+            retryable=True,
+        )
+
+    async def get_order(self, *, symbol: str, order_id: str | None = None, client_order_id: str | None = None):
+        self.order_lookup_count += 1
+        self.order_queries.append({"symbol": symbol, "order_id": order_id, "client_order_id": client_order_id})
+        if self.order_lookup_count == 1:
+            raise OKXRequestError(
+                path="/api/v5/trade/order",
+                code="51603",
+                msg="Order does not exist",
+                status_code=200,
+                payload={"code": "51603", "msg": "Order does not exist", "data": []},
+            )
+        state = "live" if self.order_lookup_count == 2 else "canceled"
+        return {
+            "code": "0",
+            "data": [
+                {
+                    "instId": symbol,
+                    "ordId": order_id or "ord_resolved_on_cancel_1",
+                    "clOrdId": client_order_id or self.place_order_calls[-1]["clOrdId"],
+                    "state": state,
+                    "sz": self.place_order_calls[-1]["sz"] if self.place_order_calls else "0.001",
+                    "accFillSz": "0",
+                    "avgPx": "",
+                    "cTime": "1700000000000",
+                    "uTime": "1700000001000",
+                }
+            ],
+        }
+
+    async def get_fills(self, *, symbol: str | None = None, order_id: str | None = None, limit: int | None = None):
+        self.fill_queries.append({"symbol": symbol, "order_id": order_id, "limit": limit})
+        return {"code": "0", "data": []}
 
 
 class FakeAcceptedOpenOrderOKXClient(FakeOKXClient):
@@ -1258,6 +1313,71 @@ class TestGuardedSimulatedExecution(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state.execution_error, "submission_unknown_check_exchange:OKXRequestError")
         self.assertEqual(fills, [])
         self.assertEqual(len(client.order_queries), 0)
+
+    async def test_unknown_submit_state_can_be_canceled_after_order_is_resolved_by_client_order_id(self) -> None:
+        settings = make_settings(
+            {
+                "live_submit_enabled": True,
+                "guarded_execution_dry_run": False,
+                "max_notional_per_symbol": 1_000.0,
+            }
+        )
+        mode_controller = RuntimeModeController(settings=settings, kill_switch=KillSwitch())
+        client = FakeUnknownSubmitResolvableOnCancelOKXClient()
+        adapter = OKXExecutionAdapter(
+            settings=settings,
+            client=client,  # type: ignore[arg-type]
+            account_service=FakeAccountService(),  # type: ignore[arg-type]
+            mode_controller=mode_controller,
+            health_service=FakeHealthService(),
+            price_provider=lambda _symbol: 68_000.0,
+        )
+
+        state, _fills = await adapter.submit(make_intent())
+        self.assertEqual(state.status, "SUBMITTED")
+        self.assertIsNone(state.exchange_order_id)
+        self.assertEqual(state.execution_error, "submission_unknown_check_exchange:OKXRequestError")
+
+        canceled, fills = await adapter.cancel(state)
+
+        self.assertEqual(canceled.status, "CANCELED")
+        self.assertEqual(canceled.exchange_order_id, "ord_resolved_on_cancel_1")
+        self.assertIsNone(canceled.execution_error)
+        self.assertEqual(fills, [])
+        self.assertEqual(client.cancel_order_calls[0]["ordId"], "ord_resolved_on_cancel_1")
+
+    async def test_unknown_submit_state_without_exchange_order_id_can_enter_cancel_pending_by_client_order_id(self) -> None:
+        settings = make_settings(
+            {
+                "live_submit_enabled": True,
+                "guarded_execution_dry_run": False,
+                "max_notional_per_symbol": 1_000.0,
+            }
+        )
+        mode_controller = RuntimeModeController(settings=settings, kill_switch=KillSwitch())
+        client = FakeUnknownSubmitNoOrderOKXClient()
+        adapter = OKXExecutionAdapter(
+            settings=settings,
+            client=client,  # type: ignore[arg-type]
+            account_service=FakeAccountService(),  # type: ignore[arg-type]
+            mode_controller=mode_controller,
+            health_service=FakeHealthService(),
+            price_provider=lambda _symbol: 68_000.0,
+        )
+
+        state, _fills = await adapter.submit(make_intent())
+        self.assertEqual(state.status, "SUBMITTED")
+        self.assertIsNone(state.exchange_order_id)
+        self.assertEqual(state.execution_error, "submission_unknown_check_exchange:OKXRequestError")
+
+        canceled, fills = await adapter.cancel(state)
+
+        self.assertEqual(canceled.status, "CANCEL_PENDING")
+        self.assertNotEqual(canceled.status, "FAILED")
+        self.assertEqual(canceled.execution_error, "submission_unknown_check_exchange:OKXRequestError")
+        self.assertIsNotNone(canceled.cancellation_requested_ts)
+        self.assertEqual(fills, [])
+        self.assertNotIn("ordId", client.cancel_order_calls[0])
 
     async def test_cancel_recovers_unknown_cancel_by_refreshing_exchange_state(self) -> None:
         settings = make_settings(

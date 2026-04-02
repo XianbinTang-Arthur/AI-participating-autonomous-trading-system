@@ -331,6 +331,67 @@ class TestOrderManagerExecutionErrorHistory(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(fills), 1)
         self.assertEqual(fills[0].fill_id, "fill_backfill_1")
 
+    def test_sync_candidates_prioritize_unknown_write_states(self) -> None:
+        repo = InMemoryExecutionRepository()
+        manager = OrderManager(
+            settings=AATSSettings.model_validate({}),
+            bus=InMemoryEventBus(event_store=InMemoryEventStore(), persistence_mode="strict"),
+            adapter=_FailingAdapter(),
+            execution_repo=repo,
+            kill_switch=KillSwitch(),
+        )
+        now = utc_now()
+        normal_state = OrderState(
+            decision_id="decision_sync_normal",
+            intent_id="intent_sync_normal",
+            symbol="BTC-USDT",
+            client_order_id="clord_sync_normal",
+            venue="OKX",
+            exchange_order_id="ord_sync_normal",
+            status="SUBMITTED",
+            exchange_status="live",
+            submitted_ts=now,
+            last_update_ts=now,
+            last_exchange_update_ts=now,
+            requested_qty=0.001,
+            filled_qty=0.0,
+            remaining_qty=0.001,
+            average_fill_price=None,
+            fees=0.0,
+        )
+        unknown_state = normal_state.model_copy(
+            update={
+                "decision_id": "decision_sync_unknown",
+                "intent_id": "intent_sync_unknown",
+                "client_order_id": "clord_sync_unknown",
+                "exchange_order_id": None,
+                "execution_error": "submission_unknown_check_exchange:OKXRequestError",
+            }
+        )
+        terminal_filled = normal_state.model_copy(
+            update={
+                "decision_id": "decision_sync_filled",
+                "intent_id": "intent_sync_filled",
+                "client_order_id": "clord_sync_filled",
+                "exchange_order_id": "ord_sync_filled",
+                "status": "FILLED",
+                "exchange_status": "filled",
+                "filled_qty": 0.001,
+                "remaining_qty": 0.0,
+                "average_fill_price": 100.0,
+                "fees": 0.1,
+            }
+        )
+        repo.save_order_state(normal_state)
+        repo.save_order_state(unknown_state)
+        repo.save_order_state(terminal_filled)
+
+        candidates = manager._sync_candidates()
+
+        self.assertEqual(candidates[0].client_order_id, "clord_sync_unknown")
+        self.assertIn("clord_sync_normal", [state.client_order_id for state in candidates])
+        self.assertIn("clord_sync_filled", [state.client_order_id for state in candidates])
+
     async def test_transient_close_failures_enter_retry_cooldown(self) -> None:
         repo = InMemoryExecutionRepository()
         settings = AATSSettings.model_validate({"strategy_transient_close_retry_cooldown_seconds": 90.0})
