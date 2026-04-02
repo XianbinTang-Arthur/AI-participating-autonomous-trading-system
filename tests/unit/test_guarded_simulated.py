@@ -449,6 +449,201 @@ class FakeMaxSizeLookupFailureOKXClient(FakeRoundedDerivativeOKXClient):
         )
 
 
+class FakeUnknownSubmitOrderExistsOKXClient(FakeOKXClient):
+    async def place_order(self, payload):
+        self.place_order_calls.append(dict(payload))
+        raise OKXRequestError(
+            path="/api/v5/trade/order",
+            msg="temporary_submit_timeout",
+            status_code=500,
+            payload={},
+            classification="server_error",
+            retryable=True,
+        )
+
+    async def get_order(self, *, symbol: str, order_id: str | None = None, client_order_id: str | None = None):
+        self.order_queries.append({"symbol": symbol, "order_id": order_id, "client_order_id": client_order_id})
+        return {
+            "code": "0",
+            "data": [
+                {
+                    "instId": symbol,
+                    "ordId": "ord_unknown_submit_1",
+                    "clOrdId": client_order_id or self.place_order_calls[-1]["clOrdId"],
+                    "state": "live",
+                    "sz": self.place_order_calls[-1]["sz"] if self.place_order_calls else "0.001",
+                    "accFillSz": "0",
+                    "avgPx": "",
+                    "cTime": "1700000000000",
+                    "uTime": "1700000001000",
+                }
+            ],
+        }
+
+
+class FakeUnknownSubmitNoOrderOKXClient(FakeOKXClient):
+    async def place_order(self, payload):
+        self.place_order_calls.append(dict(payload))
+        raise OKXRequestError(
+            path="/api/v5/trade/order",
+            msg="temporary_submit_timeout",
+            status_code=500,
+            payload={},
+            classification="server_error",
+            retryable=True,
+        )
+
+    async def get_order(self, *, symbol: str, order_id: str | None = None, client_order_id: str | None = None):
+        _ = symbol
+        _ = order_id
+        _ = client_order_id
+        raise OKXRequestError(
+            path="/api/v5/trade/order",
+            code="51603",
+            msg="Order does not exist",
+            status_code=200,
+            payload={"code": "51603", "msg": "Order does not exist", "data": []},
+        )
+
+
+class FakeAcceptedOpenOrderOKXClient(FakeOKXClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.order_lookup_count = 0
+
+    async def get_order(self, *, symbol: str, order_id: str | None = None, client_order_id: str | None = None):
+        self.order_lookup_count += 1
+        self.order_queries.append({"symbol": symbol, "order_id": order_id, "client_order_id": client_order_id})
+        return {
+            "code": "0",
+            "data": [
+                {
+                    "instId": symbol,
+                    "ordId": order_id or "ord_open_1",
+                    "clOrdId": client_order_id or "clord_open_1",
+                    "state": "live",
+                    "sz": "0.001",
+                    "accFillSz": "0",
+                    "avgPx": "",
+                    "cTime": "1700000000000",
+                    "uTime": "1700000001000",
+                }
+            ],
+        }
+
+    async def get_fills(self, *, symbol: str | None = None, order_id: str | None = None, limit: int | None = None):
+        self.fill_queries.append({"symbol": symbol, "order_id": order_id, "limit": limit})
+        return {"code": "0", "data": []}
+
+
+class FakeUnknownCancelOrderCanceledOKXClient(FakeAcceptedOpenOrderOKXClient):
+    async def cancel_order(self, payload):
+        _ = payload
+        raise OKXRequestError(
+            path="/api/v5/trade/cancel-order",
+            msg="temporary_cancel_timeout",
+            status_code=500,
+            payload={},
+            classification="server_error",
+            retryable=True,
+        )
+
+    async def get_order(self, *, symbol: str, order_id: str | None = None, client_order_id: str | None = None):
+        self.order_lookup_count += 1
+        self.order_queries.append({"symbol": symbol, "order_id": order_id, "client_order_id": client_order_id})
+        state = "live" if self.order_lookup_count == 1 else "canceled"
+        return {
+            "code": "0",
+            "data": [
+                {
+                    "instId": symbol,
+                    "ordId": order_id or "ord_open_1",
+                    "clOrdId": client_order_id or "clord_open_1",
+                    "state": state,
+                    "sz": "0.001",
+                    "accFillSz": "0",
+                    "avgPx": "",
+                    "cTime": "1700000000000",
+                    "uTime": "1700000001000",
+                }
+            ],
+        }
+
+
+class FakeUnknownCancelOrderStillLiveOKXClient(FakeAcceptedOpenOrderOKXClient):
+    async def cancel_order(self, payload):
+        _ = payload
+        raise OKXRequestError(
+            path="/api/v5/trade/cancel-order",
+            msg="temporary_cancel_timeout",
+            status_code=500,
+            payload={},
+            classification="server_error",
+            retryable=True,
+        )
+
+    async def get_order(self, *, symbol: str, order_id: str | None = None, client_order_id: str | None = None):
+        self.order_lookup_count += 1
+        self.order_queries.append({"symbol": symbol, "order_id": order_id, "client_order_id": client_order_id})
+        return {
+            "code": "0",
+            "data": [
+                {
+                    "instId": symbol,
+                    "ordId": order_id or "ord_open_1",
+                    "clOrdId": client_order_id or "clord_open_1",
+                    "state": "live",
+                    "sz": "0.001",
+                    "accFillSz": "0",
+                    "avgPx": "",
+                    "cTime": "1700000000000",
+                    "uTime": "1700000001000",
+                }
+            ],
+        }
+
+
+class FakeUnknownCancelNoOrderOKXClient(FakeAcceptedOpenOrderOKXClient):
+    async def cancel_order(self, payload):
+        _ = payload
+        raise OKXRequestError(
+            path="/api/v5/trade/cancel-order",
+            msg="temporary_cancel_timeout",
+            status_code=500,
+            payload={},
+            classification="server_error",
+            retryable=True,
+        )
+
+    async def get_order(self, *, symbol: str, order_id: str | None = None, client_order_id: str | None = None):
+        self.order_lookup_count += 1
+        self.order_queries.append({"symbol": symbol, "order_id": order_id, "client_order_id": client_order_id})
+        if self.order_lookup_count == 1:
+            return {
+                "code": "0",
+                "data": [
+                    {
+                        "instId": symbol,
+                        "ordId": order_id or "ord_open_1",
+                        "clOrdId": client_order_id or "clord_open_1",
+                        "state": "live",
+                        "sz": "0.001",
+                        "accFillSz": "0",
+                        "avgPx": "",
+                        "cTime": "1700000000000",
+                        "uTime": "1700000001000",
+                    }
+                ],
+            }
+        raise OKXRequestError(
+            path="/api/v5/trade/order",
+            code="51603",
+            msg="Order does not exist",
+            status_code=200,
+            payload={"code": "51603", "msg": "Order does not exist", "data": []},
+        )
+
+
 def make_settings(overrides: dict | None = None) -> AATSSettings:
     payload = {
         "mode": "guarded_live",
@@ -478,6 +673,27 @@ def make_intent() -> OrderIntent:
         time_in_force="IOC",
         idempotency_key="intent_1",
     )
+
+
+def make_derivatives_intent(**updates) -> OrderIntent:
+    base = OrderIntent(
+        intent_id="intent_derivatives_gate",
+        decision_id="decision_derivatives_gate",
+        symbol="BTC-USDT-SWAP",
+        side="buy",
+        quantity=Decimal("0.02"),
+        execution_style="taker",
+        order_type="market",
+        urgency="medium",
+        time_in_force="IOC",
+        idempotency_key="intent_derivatives_gate",
+        product_type="derivatives",
+        target_leverage=2.0,
+        margin_mode="cross",
+        exposure_side="long",
+        position_intent="open_long",
+    )
+    return base.model_copy(update=updates)
 
 
 def make_derivatives_account_service(
@@ -534,6 +750,68 @@ def make_derivatives_account_service(
         lambda requested_symbol: account_service._snapshot.instruments[0] if requested_symbol == symbol else None
     )
     return account_service
+
+
+def make_risk_reducing_derivatives_intent(case_name: str, **updates) -> OrderIntent:
+    payload = {
+        "intent_id": f"intent_{case_name}",
+        "decision_id": f"decision_{case_name}",
+        "idempotency_key": f"intent_{case_name}",
+        "side": "sell",
+        "exposure_side": "flat",
+        "position_intent": None,
+        "execution_action": None,
+        "leg_action": None,
+        "reduce_only": False,
+        "close_only": False,
+    }
+    payload.update(updates)
+    return make_derivatives_intent(**payload)
+
+
+def make_risk_reducing_source_cases() -> list[tuple[str, OrderIntent]]:
+    return [
+        (
+            "position_close_long",
+            make_risk_reducing_derivatives_intent("position_close_long", position_intent="close_long", side="sell"),
+        ),
+        (
+            "position_close_short",
+            make_risk_reducing_derivatives_intent("position_close_short", position_intent="close_short", side="buy"),
+        ),
+        (
+            "position_reduce_long",
+            make_risk_reducing_derivatives_intent("position_reduce_long", position_intent="reduce_long", side="sell"),
+        ),
+        (
+            "position_reduce_short",
+            make_risk_reducing_derivatives_intent("position_reduce_short", position_intent="reduce_short", side="buy"),
+        ),
+        (
+            "flag_reduce_only",
+            make_risk_reducing_derivatives_intent("flag_reduce_only", reduce_only=True),
+        ),
+        (
+            "flag_close_only",
+            make_risk_reducing_derivatives_intent("flag_close_only", close_only=True),
+        ),
+        (
+            "leg_reduce",
+            make_risk_reducing_derivatives_intent("leg_reduce", leg_action="reduce"),
+        ),
+        (
+            "leg_close",
+            make_risk_reducing_derivatives_intent("leg_close", leg_action="close"),
+        ),
+        (
+            "action_reduce",
+            make_risk_reducing_derivatives_intent("action_reduce", execution_action="reduce"),
+        ),
+        (
+            "action_exit",
+            make_risk_reducing_derivatives_intent("action_exit", execution_action="exit"),
+        ),
+    ]
 
 
 class TestGuardedSimulatedExecution(unittest.IsolatedAsyncioTestCase):
@@ -841,6 +1119,226 @@ class TestGuardedSimulatedExecution(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state.execution_error, "okx_max_order_quantity_precheck_failed:OKXRequestError")
         self.assertEqual(fills, [])
         self.assertEqual(client.place_order_calls, [])
+
+    def test_risk_reducing_source_matrix_bypasses_submission_gate(self) -> None:
+        settings = make_settings(
+            {
+                "live_submit_enabled": True,
+                "guarded_execution_dry_run": False,
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "max_notional_per_symbol": 10.0,
+                "max_open_orders": 1,
+            }
+        )
+        mode_controller = RuntimeModeController(settings=settings, kill_switch=KillSwitch())
+        adapter = OKXExecutionAdapter(
+            settings=settings,
+            client=FakeRoundedDerivativeOKXClient(),  # type: ignore[arg-type]
+            account_service=make_derivatives_account_service(open_order_count=1),  # type: ignore[arg-type]
+            mode_controller=mode_controller,
+            health_service=FakeHealthService(),
+            price_provider=lambda _symbol: Decimal("68000"),
+        )
+
+        for case_name, intent in make_risk_reducing_source_cases():
+            with self.subTest(case=case_name):
+                self.assertTrue(adapter._is_risk_reducing_intent(intent))
+                self.assertIsNone(adapter._submission_gate_error(intent=intent))
+
+    async def test_risk_reducing_source_matrix_bypasses_max_size_precheck_failure(self) -> None:
+        settings = make_settings(
+            {
+                "live_submit_enabled": True,
+                "guarded_execution_dry_run": False,
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "max_notional_per_symbol": 10_000.0,
+            }
+        )
+        mode_controller = RuntimeModeController(settings=settings, kill_switch=KillSwitch())
+        account_service = make_derivatives_account_service()
+        adapter = OKXExecutionAdapter(
+            settings=settings,
+            client=FakeMaxSizeLookupFailureOKXClient(),  # type: ignore[arg-type]
+            account_service=account_service,  # type: ignore[arg-type]
+            mode_controller=mode_controller,
+            health_service=FakeHealthService(),
+            price_provider=lambda _symbol: Decimal("68000"),
+        )
+        snapshot = account_service.latest_snapshot()
+        instrument = account_service.instrument_metadata("BTC-USDT-SWAP")
+        self.assertIsNotNone(instrument)
+
+        for case_name, raw_intent in make_risk_reducing_source_cases():
+            with self.subTest(case=case_name):
+                intent = adapter._normalize_intent_for_account_snapshot(intent=raw_intent, snapshot=snapshot)
+                payload = adapter.payload_builder.build(intent=intent, instrument=instrument)  # type: ignore[arg-type]
+                self.assertIsNone(await adapter._max_size_gate_error(intent=intent, payload=payload))
+
+    async def test_opening_submit_blocks_when_notional_gate_has_no_reference_price(self) -> None:
+        settings = make_settings(
+            {
+                "live_submit_enabled": True,
+                "guarded_execution_dry_run": False,
+                "max_notional_per_symbol": 10.0,
+            }
+        )
+        mode_controller = RuntimeModeController(settings=settings, kill_switch=KillSwitch())
+        client = FakeOKXClient()
+        adapter = OKXExecutionAdapter(
+            settings=settings,
+            client=client,  # type: ignore[arg-type]
+            account_service=FakeAccountService(),  # type: ignore[arg-type]
+            mode_controller=mode_controller,
+            health_service=FakeHealthService(),
+        )
+
+        state, fills = await adapter.submit(make_intent())
+
+        self.assertEqual(state.status, "BLOCKED")
+        self.assertEqual(state.execution_error, "missing_reference_price_for_notional_gate")
+        self.assertEqual(fills, [])
+        self.assertEqual(client.place_order_calls, [])
+
+    async def test_submit_recovers_unknown_write_by_client_order_id_when_exchange_has_order(self) -> None:
+        settings = make_settings(
+            {
+                "live_submit_enabled": True,
+                "guarded_execution_dry_run": False,
+                "max_notional_per_symbol": 1_000.0,
+            }
+        )
+        mode_controller = RuntimeModeController(settings=settings, kill_switch=KillSwitch())
+        client = FakeUnknownSubmitOrderExistsOKXClient()
+        adapter = OKXExecutionAdapter(
+            settings=settings,
+            client=client,  # type: ignore[arg-type]
+            account_service=FakeAccountService(),  # type: ignore[arg-type]
+            mode_controller=mode_controller,
+            health_service=FakeHealthService(),
+            price_provider=lambda _symbol: 68_000.0,
+        )
+
+        state, fills = await adapter.submit(make_intent())
+
+        self.assertEqual(state.status, "SUBMITTED")
+        self.assertEqual(state.exchange_order_id, "ord_unknown_submit_1")
+        self.assertIsNone(state.execution_error)
+        self.assertEqual(fills, [])
+        self.assertEqual(len(client.order_queries), 1)
+
+    async def test_submit_returns_trackable_unknown_state_when_write_result_is_unknown(self) -> None:
+        settings = make_settings(
+            {
+                "live_submit_enabled": True,
+                "guarded_execution_dry_run": False,
+                "max_notional_per_symbol": 1_000.0,
+            }
+        )
+        mode_controller = RuntimeModeController(settings=settings, kill_switch=KillSwitch())
+        client = FakeUnknownSubmitNoOrderOKXClient()
+        adapter = OKXExecutionAdapter(
+            settings=settings,
+            client=client,  # type: ignore[arg-type]
+            account_service=FakeAccountService(),  # type: ignore[arg-type]
+            mode_controller=mode_controller,
+            health_service=FakeHealthService(),
+            price_provider=lambda _symbol: 68_000.0,
+        )
+
+        state, fills = await adapter.submit(make_intent())
+
+        self.assertEqual(state.status, "SUBMITTED")
+        self.assertIsNone(state.exchange_order_id)
+        self.assertEqual(state.execution_error, "submission_unknown_check_exchange:OKXRequestError")
+        self.assertEqual(fills, [])
+        self.assertEqual(len(client.order_queries), 0)
+
+    async def test_cancel_recovers_unknown_cancel_by_refreshing_exchange_state(self) -> None:
+        settings = make_settings(
+            {
+                "live_submit_enabled": True,
+                "guarded_execution_dry_run": False,
+                "max_notional_per_symbol": 1_000.0,
+            }
+        )
+        mode_controller = RuntimeModeController(settings=settings, kill_switch=KillSwitch())
+        client = FakeUnknownCancelOrderCanceledOKXClient()
+        adapter = OKXExecutionAdapter(
+            settings=settings,
+            client=client,  # type: ignore[arg-type]
+            account_service=FakeAccountService(),  # type: ignore[arg-type]
+            mode_controller=mode_controller,
+            health_service=FakeHealthService(),
+            price_provider=lambda _symbol: 68_000.0,
+        )
+        state, _fills = await adapter.submit(make_intent())
+
+        canceled, fills = await adapter.cancel(state)
+
+        self.assertEqual(canceled.status, "CANCELED")
+        self.assertIsNotNone(canceled.cancellation_requested_ts)
+        self.assertIsNone(canceled.execution_error)
+        self.assertEqual(fills, [])
+
+    async def test_cancel_returns_trackable_unknown_state_when_cancel_result_is_unknown(self) -> None:
+        settings = make_settings(
+            {
+                "live_submit_enabled": True,
+                "guarded_execution_dry_run": False,
+                "max_notional_per_symbol": 1_000.0,
+            }
+        )
+        mode_controller = RuntimeModeController(settings=settings, kill_switch=KillSwitch())
+        client = FakeUnknownCancelNoOrderOKXClient()
+        adapter = OKXExecutionAdapter(
+            settings=settings,
+            client=client,  # type: ignore[arg-type]
+            account_service=FakeAccountService(),  # type: ignore[arg-type]
+            mode_controller=mode_controller,
+            health_service=FakeHealthService(),
+            price_provider=lambda _symbol: 68_000.0,
+        )
+        state, _fills = await adapter.submit(make_intent())
+
+        canceled, fills = await adapter.cancel(state)
+
+        self.assertEqual(canceled.status, "CANCEL_PENDING")
+        self.assertEqual(canceled.execution_error, "cancel_unknown_check_exchange:OKXRequestError")
+        self.assertIsNotNone(canceled.cancellation_requested_ts)
+        self.assertEqual(fills, [])
+
+    async def test_cancel_keeps_cancel_pending_when_timeout_check_still_shows_live_order(self) -> None:
+        settings = make_settings(
+            {
+                "live_submit_enabled": True,
+                "guarded_execution_dry_run": False,
+                "max_notional_per_symbol": 1_000.0,
+            }
+        )
+        mode_controller = RuntimeModeController(settings=settings, kill_switch=KillSwitch())
+        client = FakeUnknownCancelOrderStillLiveOKXClient()
+        adapter = OKXExecutionAdapter(
+            settings=settings,
+            client=client,  # type: ignore[arg-type]
+            account_service=FakeAccountService(),  # type: ignore[arg-type]
+            mode_controller=mode_controller,
+            health_service=FakeHealthService(),
+            price_provider=lambda _symbol: 68_000.0,
+        )
+        state, _fills = await adapter.submit(make_intent())
+
+        canceled, fills = await adapter.cancel(state)
+
+        self.assertEqual(canceled.status, "CANCEL_PENDING")
+        self.assertEqual(canceled.execution_error, "cancel_unknown_check_exchange:OKXRequestError")
+        self.assertIsNotNone(canceled.cancellation_requested_ts)
+        self.assertEqual(fills, [])
 
     def test_readiness_does_not_recurse_through_health_service(self) -> None:
         settings = make_settings()

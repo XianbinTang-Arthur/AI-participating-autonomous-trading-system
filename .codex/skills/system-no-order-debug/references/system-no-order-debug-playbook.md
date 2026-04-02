@@ -1,4 +1,23 @@
-# Skill: 排查“系统一直不下单”的标准流程
+# 系统一直不下单排查手册
+
+## 目录
+- 0. 目标
+- 1. 排查原则
+- 2. 先判断是不是“看错库 / 没跑主循环 / 没持久化”
+- 3. 第一层：查一轮 decision 到底有没有走到 target / allocation / execution
+- 4. 第二层：查 allocator 最终批准了谁
+- 5. 第三层：查 family 自己是不是 blocked
+- 6. 第四层：查是否形成 execution bundle / execution plan
+- 7. 第五层：查 execution command 有没有生成并真正 enqueue
+- 8. 第六层：查是否真的建了订单
+- 9. 第七层：查是不是其实下单了，但没成交 / 被拒单
+- 10. 最常见的不下单原因及其对应定位点
+- 11. 必查日志关键词
+- 12. 结合当前系统最可能的排查路径
+- 13. 给 Codex 的输出要求
+- 14. 最后一句原则
+
+---
 
 ## 适用对象
 本技能适用于基于策略家族（directional / independent / protective / opportunistic / smart_arbitrage）、allocator、execution planner、order service、ledger / settlement / outbox / inbox 架构的自动交易系统。

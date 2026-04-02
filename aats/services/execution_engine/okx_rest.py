@@ -150,17 +150,16 @@ class OKXRESTClient:
         require_auth: bool = False,
     ) -> dict[str, Any]:
         request_path = self._request_path(path=path, params=params)
-        headers = {"Content-Type": "application/json"}
         body_text = self._serialize_json_body(json_body) if json_body is not None else ""
-        if require_auth:
-            headers.update(self._auth_headers(method=method, request_path=request_path, body=body_text))
-        if self.settings.okx_simulated_trading:
-            headers["x-simulated-trading"] = "1"
-
         client = await self._client_handle()
         normalized_method = method.upper()
         attempt = 0
         while True:
+            headers = {"Content-Type": "application/json"}
+            if require_auth:
+                headers.update(self._auth_headers(method=normalized_method, request_path=request_path, body=body_text))
+            if self.settings.okx_simulated_trading:
+                headers["x-simulated-trading"] = "1"
             try:
                 response = await client.request(
                     method=normalized_method,

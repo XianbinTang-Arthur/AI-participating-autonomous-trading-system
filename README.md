@@ -149,8 +149,8 @@ psql postgresql://aats:aats@localhost:5432/aats -f migrations/0007_execution_out
 
 详细说明见：
 
-- [配置目录职责](D:/文件/project/AIParticipatingAutonomousTradingSystem/configs/README.md)
-- [Managed Profile 配置说明](D:/文件/project/AIParticipatingAutonomousTradingSystem/docs/configuration/managed-config-reference.md)
+- [配置目录职责](configs/README.md)
+- [Managed Profile 配置说明](docs/configuration/managed-config-reference.md)
 
 ### 4. 启动 API 与 UI
 
