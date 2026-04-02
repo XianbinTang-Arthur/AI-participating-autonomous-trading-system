@@ -55,6 +55,25 @@ class TestIndependentStateMachine(unittest.TestCase):
         self.assertEqual(derive_book_state(snapshot=snapshot), "flat")
         self.assertEqual(derive_guard_state(snapshot=snapshot), "suspended")
 
+    def test_snapshot_from_decision_uses_current_state_machine_generation_by_default(self) -> None:
+        decision = IndependentBookDecision(
+            leg="long",
+            expectancy=None,
+            score=0.8,
+            current_qty=Decimal("0"),
+            target_qty=Decimal("0.01"),
+            state="opening",
+            reason_codes=[],
+            blocked_reasons=[],
+            min_hold_remaining_seconds=0.0,
+            rebalance_cooldown_remaining_seconds=0.0,
+            book_action="open",
+        )
+
+        snapshot = snapshot_from_decision(decision=decision)
+
+        self.assertEqual(snapshot.state_version, 2)
+
     def test_derive_book_state_marks_flat_block_without_cooldown_as_flat(self) -> None:
         decision = IndependentBookDecision(
             leg="short",

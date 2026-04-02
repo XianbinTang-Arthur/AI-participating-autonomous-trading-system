@@ -111,9 +111,6 @@ def compute_score_stability(
             min_score=min_score,
             max_score=max_score,
             mean_score=mean_score,
-            # Backward-compatible alias retained for downstream readers that still expect
-            # the old metric name; new consumers should prefer upward/downward fields.
-            max_drawdown_bps=upward_excursion_bps,
             stable=stable,
             source="recent_target_history",
             score_slope=score_slope,
@@ -131,7 +128,6 @@ def compute_score_stability(
         min_score=float(score),
         max_score=float(score),
         mean_score=float(score),
-        max_drawdown_bps=0.0,
         stable=support_count >= effective_min_confirm_ticks,
         source="current_signal_confirmation",
         score_slope=0.0,

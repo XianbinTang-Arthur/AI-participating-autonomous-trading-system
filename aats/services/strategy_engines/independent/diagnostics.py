@@ -12,6 +12,7 @@ from .lifecycle import cooldown_until, last_transition_at
 from .adaptive import IndependentAdaptiveSnapshot
 from .health import IndependentLegHealthSnapshot
 from .models import IndependentBookDecision, IndependentLeg
+from .versioning import INDEPENDENT_STATE_MACHINE_VERSION
 
 
 def runtime_state_from_decision(
@@ -107,7 +108,7 @@ def runtime_state_from_decision(
         last_transition_reason=transition_reason,
         suspended_until=decision.suspended_until,
         state_version=(
-            max(int(decision.state_version or 1), 1)
+            max(int(decision.state_version or INDEPENDENT_STATE_MACHINE_VERSION), INDEPENDENT_STATE_MACHINE_VERSION)
             if decision.state_snapshot is None
             else int(decision.state_snapshot.state_version)
         ),

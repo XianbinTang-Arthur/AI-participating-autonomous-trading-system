@@ -42,12 +42,36 @@ def startup_refresh_exit_execution_truth(
     return list(refreshed), [f"startup_exit_execution_parent_refresh_count:{len(refreshed)}"]
 
 
+def _startup_exit_execution_refresh_failure_items(*, refresh_notes: list[str] | None) -> list[dict[str, object]]:
+    items: list[dict[str, object]] = []
+    for note in refresh_notes or []:
+        if not str(note or "").startswith("startup_exit_execution_parent_refresh_failed:"):
+            continue
+        _, _, exception_type = str(note).partition(":")
+        exception_label = exception_type or "UnknownError"
+        items.append(
+            {
+                "kind": "startup_exit_execution_parent_refresh_failed",
+                "summary": f"启动期退出任务真相刷新失败：{exception_label}",
+                "detail": f"启动恢复阶段没有成功重建退出任务聚合真相，恢复视图可能不完整。原始记录：{note}",
+                "blocks_resume": True,
+                "operator_review_required": True,
+                "exception_type": exception_label,
+            }
+        )
+    return items
+
+
 def apply_startup_exit_execution_review_overlay(
     *,
     base_status: RecoveryStatus,
     parent_intents: list[ExitExecutionIntent],
+    refresh_notes: list[str] | None = None,
 ) -> RecoveryStatus:
-    review_items = exit_execution_review_items(parent_intents)
+    review_items = [
+        *exit_execution_review_items(parent_intents),
+        *_startup_exit_execution_refresh_failure_items(refresh_notes=refresh_notes),
+    ]
     if not review_items:
         return base_status
     review_required_count = sum(
@@ -100,8 +124,12 @@ def persist_startup_exit_execution_state_snapshot(
     scope: object,
     status: RecoveryStatus,
     parent_intents: list[ExitExecutionIntent],
+    refresh_notes: list[str] | None = None,
 ) -> list[str]:
-    review_items = exit_execution_review_items(parent_intents)
+    review_items = [
+        *exit_execution_review_items(parent_intents),
+        *_startup_exit_execution_refresh_failure_items(refresh_notes=refresh_notes),
+    ]
     if not review_items:
         return []
     latest_reconciliation = latest_reconciliation_for_scope(reconciliation_repo, scope)

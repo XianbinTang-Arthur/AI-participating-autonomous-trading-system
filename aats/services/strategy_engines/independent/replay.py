@@ -24,6 +24,10 @@ from .payload_normalization import (
     normalize_independent_runtime_state,
 )
 from .state_machine import IndependentStateSnapshot, transition_book_state
+from .versioning import (
+    INDEPENDENT_SCORE_STABILITY_SEMANTICS_VERSION,
+    INDEPENDENT_STATE_MACHINE_VERSION,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,7 +76,7 @@ class IndependentDecisionSnapshot:
     last_transition_reason: str | None = None
     suspended_until: datetime | None = None
     cooldown_until: datetime | None = None
-    state_version: int = 1
+    state_version: int = INDEPENDENT_STATE_MACHINE_VERSION
     raw_score: float | None = None
     adjusted_score: float | None = None
     score_stability_metrics: dict[str, Any] | None = None
@@ -117,7 +121,7 @@ class IndependentRecoverySnapshot:
     recovery_version: str = "independent_phase6_additive_v1"
     suspended_until: datetime | None = None
     cooldown_until: datetime | None = None
-    state_version: int = 1
+    state_version: int = INDEPENDENT_STATE_MACHINE_VERSION
     threshold_snapshot: dict[str, Any] | None = None
     health_snapshot: dict[str, Any] | None = None
     replay_snapshot: dict[str, Any] | None = None
@@ -331,7 +335,14 @@ def _build_recovery_snapshot(
         last_recovery_incident_at=last_recovery_incident_at,
         suspended_until=None if normalized_runtime_state is None else normalized_runtime_state.suspended_until,
         cooldown_until=None if normalized_runtime_state is None else normalized_runtime_state.cooldown_until,
-        state_version=1 if normalized_runtime_state is None else int(normalized_runtime_state.state_version or 1),
+        state_version=(
+            INDEPENDENT_STATE_MACHINE_VERSION
+            if normalized_runtime_state is None
+            else max(
+                int(normalized_runtime_state.state_version or INDEPENDENT_STATE_MACHINE_VERSION),
+                INDEPENDENT_STATE_MACHINE_VERSION,
+            )
+        ),
         threshold_snapshot=_normalized_threshold_snapshot_value(
             sleeve_intent=sleeve_intent,
             leg=leg,
@@ -387,7 +398,14 @@ def _decision_snapshot_from_sources(
         last_transition_reason=None if runtime_state is None else runtime_state.last_transition_reason,
         suspended_until=None if runtime_state is None else runtime_state.suspended_until,
         cooldown_until=None if runtime_state is None else runtime_state.cooldown_until,
-        state_version=1 if runtime_state is None else int(runtime_state.state_version or 1),
+        state_version=(
+            INDEPENDENT_STATE_MACHINE_VERSION
+            if runtime_state is None
+            else max(
+                int(runtime_state.state_version or INDEPENDENT_STATE_MACHINE_VERSION),
+                INDEPENDENT_STATE_MACHINE_VERSION,
+            )
+        ),
         raw_score=None if runtime_state is None else runtime_state.score_raw,
         adjusted_score=None if runtime_state is None else runtime_state.score_adjusted,
         score_stability_metrics=_compact_dict(
@@ -397,6 +415,10 @@ def _decision_snapshot_from_sources(
                 "upward_excursion_bps": metrics.get(f"{leg}_score_stability_upward_excursion_bps"),
                 "downward_drawdown_bps": metrics.get(f"{leg}_score_stability_downward_drawdown_bps"),
                 "source": metrics.get(f"{leg}_score_stability_source"),
+                "semantics_version": metrics.get(
+                    f"{leg}_score_stability_semantics_version",
+                    INDEPENDENT_SCORE_STABILITY_SEMANTICS_VERSION,
+                ),
             }
         ),
         expectancy_snapshot=_compact_dict(

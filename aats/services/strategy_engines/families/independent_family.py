@@ -340,6 +340,11 @@ def independent_candidate_from_directional_target(
                 if result.long_book.score_stability_metrics is None
                 else result.long_book.score_stability_metrics.downward_drawdown_bps
             ),
+            "long_score_stability_semantics_version": (
+                None
+                if result.long_book.score_stability_metrics is None
+                else result.long_book.score_stability_metrics.semantics_version
+            ),
             "long_score_stability_source": (
                 None
                 if result.long_book.score_stability_metrics is None
@@ -425,6 +430,11 @@ def independent_candidate_from_directional_target(
                 None
                 if result.short_book.score_stability_metrics is None
                 else result.short_book.score_stability_metrics.downward_drawdown_bps
+            ),
+            "short_score_stability_semantics_version": (
+                None
+                if result.short_book.score_stability_metrics is None
+                else result.short_book.score_stability_metrics.semantics_version
             ),
             "short_score_stability_source": (
                 None

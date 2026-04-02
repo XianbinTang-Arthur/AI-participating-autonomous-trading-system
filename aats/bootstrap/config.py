@@ -2914,6 +2914,7 @@ async def build_runtime(
         recovery_status = apply_startup_exit_execution_review_overlay(
             base_status=recovery_status,
             parent_intents=refreshed_exit_execution,
+            refresh_notes=startup_refresh_notes,
         )
         if startup_refresh_notes:
             recovery_status = recovery_status.model_copy(
@@ -2924,6 +2925,7 @@ async def build_runtime(
             scope=state_scope,
             status=recovery_status,
             parent_intents=refreshed_exit_execution,
+            refresh_notes=startup_refresh_notes,
         )
         if startup_snapshot_notes:
             recovery_status = recovery_status.model_copy(

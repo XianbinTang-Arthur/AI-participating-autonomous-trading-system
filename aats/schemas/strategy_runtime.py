@@ -420,7 +420,7 @@ class StrategyBookRuntimeState(SchemaBase):
     last_transition_at: datetime | None = None
     last_transition_reason: str | None = None
     suspended_until: datetime | None = None
-    state_version: int = 1
+    state_version: int = 2
     expected_signal_edge_bps: float | None = None
     expected_cost_bps: float | None = None
     expected_net_edge_bps: float | None = None

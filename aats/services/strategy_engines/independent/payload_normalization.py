@@ -14,6 +14,7 @@ from .state_machine import (
     derive_guard_state,
     transition_book_state,
 )
+from .versioning import INDEPENDENT_STATE_MACHINE_VERSION
 
 _LIFECYCLE_BOOK_STATES = frozenset({"flat", "probing", "building", "holding", "de_risking", "forced_exit"})
 
@@ -243,7 +244,10 @@ def _runtime_state_machine_snapshot(*, runtime_state: StrategyBookRuntimeState) 
         last_transition_reason=runtime_state.last_transition_reason,
         suspended_until=runtime_state.suspended_until,
         cooldown_until=runtime_state.cooldown_until,
-        state_version=max(int(runtime_state.state_version or 1), 1),
+        state_version=max(
+            int(runtime_state.state_version or INDEPENDENT_STATE_MACHINE_VERSION),
+            INDEPENDENT_STATE_MACHINE_VERSION,
+        ),
         close_reason=runtime_state.close_reason,
         blocked_reasons=tuple(
             str(item)

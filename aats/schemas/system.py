@@ -222,7 +222,7 @@ class IndependentRecoverySnapshot(SchemaBase):
     recovery_version: str = "independent_phase6_additive_v1"
     suspended_until: datetime | None = None
     cooldown_until: datetime | None = None
-    state_version: int = 1
+    state_version: int = 2
     threshold_snapshot: dict[str, Any] | None = None
     health_snapshot: dict[str, Any] | None = None
     replay_snapshot: dict[str, Any] | None = None

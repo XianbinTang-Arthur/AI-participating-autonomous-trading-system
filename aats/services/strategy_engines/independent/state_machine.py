@@ -8,6 +8,7 @@ from typing import Literal
 from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, to_decimal
 
 from .models import IndependentBookAction, IndependentBookDecision, IndependentExecutionHealthState, IndependentLeg
+from .versioning import INDEPENDENT_STATE_MACHINE_VERSION
 
 IndependentBookState = Literal[
     "flat",
@@ -43,7 +44,7 @@ class IndependentBookStateSnapshot:
     last_transition_reason: str | None = None
     suspended_until: datetime | None = None
     cooldown_until: datetime | None = None
-    state_version: int = 1
+    state_version: int = INDEPENDENT_STATE_MACHINE_VERSION
     close_reason: str | None = None
     blocked_reasons: tuple[str, ...] = ()
     execution_health_state: IndependentExecutionHealthState | None = None
@@ -298,9 +299,9 @@ def snapshot_from_decision(*, decision: IndependentBookDecision) -> IndependentS
             else existing_snapshot.cooldown_until
         ),
         state_version=(
-            max(int(decision.state_version or 1), 1)
+            max(int(decision.state_version or INDEPENDENT_STATE_MACHINE_VERSION), INDEPENDENT_STATE_MACHINE_VERSION)
             if existing_snapshot is None
-            else max(int(existing_snapshot.state_version or 1), 1)
+            else max(int(existing_snapshot.state_version or INDEPENDENT_STATE_MACHINE_VERSION), INDEPENDENT_STATE_MACHINE_VERSION)
         ),
         close_reason=decision.close_reason,
         blocked_reasons=tuple(decision.blocked_reasons),
@@ -378,7 +379,10 @@ def advance_state_snapshot(
     next_de_risk_count = int(seed_snapshot.current_de_risk_count or 0) + (
         1 if decision.book_action == "de_risk" else 0
     )
-    next_state_version = max(int(seed_snapshot.state_version or 1), 1) + (1 if transition_changed else 0)
+    next_state_version = max(
+        int(seed_snapshot.state_version or INDEPENDENT_STATE_MACHINE_VERSION),
+        INDEPENDENT_STATE_MACHINE_VERSION,
+    ) + (1 if transition_changed else 0)
     next_transition_reason = (
         None
         if transition is None

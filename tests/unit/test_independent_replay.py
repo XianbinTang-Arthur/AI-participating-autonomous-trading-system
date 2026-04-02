@@ -181,6 +181,7 @@ class TestIndependentReplay(unittest.TestCase):
                 "long_score_stability_max_drawdown_bps_compat_source": "upward_excursion_bps",
                 "long_score_stability_upward_excursion_bps": 8.0,
                 "long_score_stability_downward_drawdown_bps": 0.0,
+                "long_score_stability_semantics_version": 2,
                 "long_score_stability_source": "recent_target_history",
             },
         )
@@ -200,6 +201,7 @@ class TestIndependentReplay(unittest.TestCase):
         self.assertIsNotNone(snapshot)
         assert snapshot is not None
         assert snapshot.score_stability_metrics is not None
+        self.assertEqual(snapshot.score_stability_metrics["semantics_version"], 2)
         self.assertEqual(snapshot.score_stability_metrics["upward_excursion_bps"], 8.0)
         self.assertEqual(snapshot.score_stability_metrics["downward_drawdown_bps"], 0.0)
         self.assertNotIn("max_drawdown_bps", snapshot.score_stability_metrics)

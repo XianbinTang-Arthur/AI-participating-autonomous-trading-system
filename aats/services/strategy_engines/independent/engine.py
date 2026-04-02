@@ -45,6 +45,7 @@ from .sizing import (
 )
 from .scoring import compute_raw_book_score, compute_score_stability
 from .state_machine import advance_state_snapshot, derive_book_state, derive_holding_phase, snapshot_from_decision
+from .versioning import INDEPENDENT_STATE_MACHINE_VERSION
 
 
 def evaluate_independent_book(
@@ -894,8 +895,11 @@ def _runtime_counter(*, prior_runtime_state: StrategyBookRuntimeState | None, fi
 
 def _runtime_state_version(*, prior_runtime_state: StrategyBookRuntimeState | None) -> int:
     if prior_runtime_state is None:
-        return 1
-    return max(int(prior_runtime_state.state_version or 1), 1)
+        return INDEPENDENT_STATE_MACHINE_VERSION
+    return max(
+        int(prior_runtime_state.state_version or INDEPENDENT_STATE_MACHINE_VERSION),
+        INDEPENDENT_STATE_MACHINE_VERSION,
+    )
 
 
 def _runtime_active_timestamp(

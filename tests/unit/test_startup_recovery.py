@@ -121,6 +121,28 @@ class TestStartupRecovery(unittest.TestCase):
         self.assertEqual(refreshed, [])
         self.assertEqual(notes, ["startup_exit_execution_parent_refresh_failed:RuntimeError"])
 
+    def test_startup_review_overlay_promotes_parent_refresh_failure_into_resume_block(self) -> None:
+        overlaid = apply_startup_exit_execution_review_overlay(
+            base_status=RecoveryStatus(status="recovered", recovery_state="normal_operation", safe_startup=True),
+            parent_intents=[],
+            refresh_notes=["startup_exit_execution_parent_refresh_failed:RuntimeError"],
+        )
+
+        self.assertEqual(overlaid.recovery_state, "review_required")
+        self.assertTrue(overlaid.review_required)
+        self.assertFalse(overlaid.safe_startup)
+        self.assertFalse(overlaid.safe_to_trade)
+        self.assertFalse(overlaid.resume_eligible)
+        self.assertIn("startup_exit_execution_parent_refresh_failed", overlaid.resume_blocked_reasons)
+        self.assertEqual(
+            overlaid.unknown_state_details[0]["kind"],
+            "startup_exit_execution_parent_refresh_failed",
+        )
+        self.assertIn(
+            "startup_exit_execution_overlay_count:1",
+            overlaid.notes,
+        )
+
     def test_startup_review_overlay_marks_recovery_status_review_required(self) -> None:
         now = utc_now()
         parent = create_exit_execution_intent_from_order_state(
@@ -303,3 +325,59 @@ class TestStartupRecovery(unittest.TestCase):
             snapshot.details_json["review_items"][0]["kind"],
             "exit_execution_resume_limit_lookup_failed",
         )
+
+    def test_startup_review_snapshot_persists_refresh_failure_overlay_without_parent_intents(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+            }
+        )
+        scope = runtime_state_scope(settings)
+        now = utc_now()
+        reconciliation_repo = InMemoryReconciliationRepository()
+        reconciliation_repo.save_report(
+            ReconciliationReport(
+                reconciliation_id="recon_startup_snapshot_parent_refresh_failure",
+                as_of_ts=now,
+                product_type="derivatives",
+                margin_mode="cross",
+                allowed_symbols=["BTC-USDT-SWAP"],
+                exchange_comparison_enabled=False,
+                order_diff={"reconstructed": {}, "exchange": {}},
+                fill_diff={"replayed": {}, "exchange": {}},
+                balance_diff={"reconstructed": {}, "exchange": {}},
+                position_diff={
+                    "stored": {},
+                    "reconstructed": {},
+                    "reconstructed_mismatches": {},
+                    "exchange": {},
+                    "exchange_mismatches": {},
+                },
+                severity="REVIEW_REQUIRED",
+                mismatch_categories=[],
+                mismatch_reasons=[],
+            )
+        )
+        status = apply_startup_exit_execution_review_overlay(
+            base_status=RecoveryStatus(status="recovered", recovery_state="normal_operation", safe_startup=True),
+            parent_intents=[],
+            refresh_notes=["startup_exit_execution_parent_refresh_failed:RuntimeError"],
+        )
+
+        notes = persist_startup_exit_execution_state_snapshot(
+            reconciliation_repo=reconciliation_repo,
+            scope=scope,
+            status=status,
+            parent_intents=[],
+            refresh_notes=["startup_exit_execution_parent_refresh_failed:RuntimeError"],
+        )
+
+        self.assertEqual(notes, ["startup_exit_execution_review_snapshot_saved"])
+        snapshot = reconciliation_repo.latest_state_snapshot_for_scope(scope=scope)
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot.details_json["source"], "startup_exit_execution_review")
+        self.assertEqual(snapshot.details_json["review_items"][0]["kind"], "startup_exit_execution_parent_refresh_failed")
